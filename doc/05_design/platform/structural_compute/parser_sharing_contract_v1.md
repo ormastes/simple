@@ -120,12 +120,22 @@ itself while Tree-sitter is blocked. Cheapest candidate: the raw-brace
 extraction lane the agent-task doc already assigns to CoreLexer, whose adapters
 are new files by construction.
 
-### Seam 3 — publish the code-vs-text fact and give it a real consumer — **LANDED**
+### Seam 3 — publish the lexical facts and give them a real consumer — **LANDED**
 
 | Lane | Owner | Deliverable | Acceptance gate |
 |---|---|---|---|
 | Simple source lexical facts | CoreLexer | `simple_code_lines(source)` — per-line code with string CONTENT blanked and comments removed, columns preserved | 16/16 module spec; a no-op implementation must turn it red |
 | First consumer | sspec_maintain | `_mask_strings_and_comment` deleted; `_is_pending` reads the shared fact | consumer suite equals its HEAD baseline example-for-example |
+| String state | sspec_maintain | `in_triple_string` parity tracker deleted; replaced by `simple_string_continuation_lines` | new spec red against the old tracker, green after; corpus arm checked against an independent `it "` count |
+
+**The parity tracker was losing 2,182 lines.** Replaying it over every
+`*_spec.spl`: 32 files start a swallow at a comment line containing one triple
+quote — worst `test/01_unit/test_runner/tag_parsing_spec.spl` at 181 of 182
+lines, from line 1, so the scorer reported ZERO scenarios for a real spec.
+This was deferred in the first pass as "a behavior change beyond this seam";
+the measurement is what justified doing it. `cache_gc_quota`/`cache_gc_safety`
+carry the construct but recover at the next triple quote — an earlier draft
+named them as total losses, which was wrong.
 
 `spipe_docgen/parser.spl` was the original candidate and is **deferred**: it is
 in Codex's dirty set, so this lane cannot touch it. `sspec_maintain/source_facts.spl`
@@ -158,11 +168,16 @@ caught within minutes of wiring a real consumer (`pending_detection_spec`
 against Seam 2's status quo: a foundation with no consumer has nothing pressing
 on it.
 
-**Explicitly NOT migrated.** The `in_triple_string` tracker in
-`extract_sspec_source_facts` still runs. Replacing it changes which lines reach
-fact extraction at all — docstring lines currently `continue` past everything,
-including `# @req` scanning — and that is a behavior change beyond this seam.
-It is the next reviewed step, not an oversight.
+**Now migrated.** The `in_triple_string` tracker is gone. The concern that
+motivated deferring it — that changing it alters which lines reach fact
+extraction — was addressed by preserving the `continue` structure exactly and
+changing only the source of the boolean, so the set of skipped lines is the
+same except where the parity count was wrong.
+
+**Not re-entrant.** Both shared functions call `lex_init` and reset the global
+CoreLexer. They are for tools that own their process; never for the compiler's
+own parse path. That is a direct consequence of the 8 global-source sites
+Seam 1 froze, and it disappears when Seam 1's debt is paid.
 
 **Boundary that must stay.** Comments are DROPPED by the shared fact. Any
 consumer whose fact lives in a comment (`# @req REQ-1`, `# @step: ...`) keeps
@@ -199,7 +214,8 @@ uses. Findings therefore describe the seed, not a self-hosted compiler.
 
 | spec | wired | HEAD baseline |
 |---|---|---|
-| `core_source_facts_spec.spl` | 16/16 | n/a (new) |
+| `core_source_facts_spec.spl` | 21/21 | n/a (new) |
+| `sspec_maintain/shared_lexer_string_state_spec.spl` | 6/6 | 3/6 against the old tracker |
 | `sspec_maintain/pending_detection_spec.spl` | 5/5 | 5/5 |
 | `sspec_maintain/scoring_spec.spl` | 18/20 | 18/20 |
 | `sspec_maintain/rule_coverage_spec.spl` | 3/5 | 3/5 |
@@ -209,9 +225,14 @@ uses. Findings therefore describe the seed, not a self-hosted compiler.
 Four examples are red. All four are red at HEAD without this change, with
 identical names; none is touched by this lane and none is hidden.
 
-Sabotage (`simple_code_lines` replaced by a no-op passthrough):
-**14/14 green → 8/14 sabotaged → 14/14 reverted**, before the two later
-regression examples were added.
+Sabotage (`simple_code_lines` replaced by a no-op passthrough), re-run against
+the final spec: **21/21 green → 15/21 sabotaged → 21/21 reverted**. (An earlier
+run of the same arm read 14/14 → 8/14, before five examples for the second
+shared fact were added; the current numbers supersede it.)
+
+Reproduce-first for the string-state fix: the consumer spec was run against the
+OLD parity tracker first and went **3/6, with all three bug arms red**, then
+6/6 with the fix.
 
 **Dependency cost of the new `app -> compiler.frontend` edge, measured with
 `bin/simple deps fast src/app/sspec_maintain/main.spl` at the pre-wiring
