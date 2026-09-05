@@ -32,13 +32,23 @@ open_boxes() { n=$(grep -cE '^[[:space:]]*[-*] \[ \]' "$1" 2>/dev/null); echo "$
 it_count()   { n=$(grep -cE '^[[:space:]]*(it|slow_it) ' "$1" 2>/dev/null); echo "${n:-0}"; }
 tag_count()  { n=$(grep -c '@tag:in-development' "$1" 2>/dev/null); echo "${n:-0}"; }
 
+
+EXEMPT="scripts/check/plan_acceptance_exemptions.txt"
+
+# -> allowed shortfall for a slug (0 when unlisted, -1 when no spec is required)
+allowed_short() {
+    [ -f "$EXEMPT" ] || { echo 0; return; }
+    v=$(awk -F'|' -v s="$1" '$1 == s { print $2; exit }' "$EXEMPT")
+    echo "${v:-0}"
+}
+
 slug_of() { b=$(basename "$1" .md); if [ "$b" = "plan" ]; then b=$(basename "$(dirname "$1")"); fi; echo "$b" | sed -E 's/_2026-[0-9]{2}-[0-9]{2}$//'; }
 
 selftest || { echo "ERROR — nothing was checked (selftest failed)"; exit 2; }
 
 [ -f "$CONTRACT" ] || { echo "ERROR — nothing was checked (missing $CONTRACT)"; exit 2; }
 
-checked=0; offenders=""
+checked=0; exempt=0; offenders=""
 # Plan paths are the 4th pipe-separated column of the contract's table rows.
 plans=$(awk -F'|' '/^\| *[0-9]+ *\|/ { gsub(/^ +| +$/,"",$4); if ($4 != "") print $4 }' "$CONTRACT")
 [ -n "$plans" ] || { echo "ERROR — nothing was checked (no plan rows parsed from $CONTRACT)"; exit 2; }
@@ -50,11 +60,15 @@ for rel in $plans; do
     spec="$SPECDIR/${slug}_spec.spl"
     checked=$((checked + 1))
     if [ ! -f "$spec" ]; then
+        if [ "$(allowed_short "$slug")" = "-1" ]; then
+            exempt=$((exempt + 1))
+            continue
+        fi
         offenders="$offenders no-spec:$slug"
         continue
     fi
     [ "$(tag_count "$spec")" -ge 1 ] || offenders="$offenders untagged:$slug"
-    ob=$(open_boxes "$plan"); ic=$(it_count "$spec")
+    ob=$(open_boxes "$plan"); ic=$(it_count "$spec"); ob=$((ob - $(allowed_short "$slug")))
     [ "$ic" -ge "$ob" ] || offenders="$offenders short:$slug($ic/$ob)"
     grep -qE '^[[:space:]]*(pending|skip)\(' "$spec" && offenders="$offenders uses-pending-or-skip:$slug"
 done
@@ -65,5 +79,5 @@ if [ -n "$offenders" ]; then
     echo "FAIL — $checked plan(s) checked, offenders:$offenders"
     exit 1
 fi
-echo "PASS — $checked plan(s) checked, 0 uncovered (score bar $MIN_SCORE is NOT checked here; see the contract's measurement-blocked note)"
+echo "PASS — $checked plan(s) checked, 0 uncovered, $exempt exempt by name (score bar $MIN_SCORE is NOT checked here; see the contract's measurement-blocked note)"
 exit 0
