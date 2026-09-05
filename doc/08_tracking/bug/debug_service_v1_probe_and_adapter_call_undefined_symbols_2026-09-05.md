@@ -1,7 +1,78 @@
 # Bug: probe executor and interpreter adapter call undefined central-debug-service symbols
 
+## RESOLVED 2026-09-06 (items 1-4); item 5 STILL OPEN
+
+Both named modules now compile and are covered by running specs. Defined:
+
+- `DebugRootOperationV1.Probe` (`contracts_v1.spl`) — no `match` in the tree is
+  exhaustive over this enum (`grep -rn "case DebugRootOperationV1" src test` is
+  empty), so the variant broke nothing. **Stated contract, previously unchosen:
+  Probe is gated by `DebugPolicyV1.allow_control`** — applying or removing a
+  probe modifies the debuggee, so a policy denying Control denies Probe.
+- `DebugProbeKindV1` with a single `Stop` variant — the only kind any caller
+  applies through the central service.
+- `DebugProbeV1` (`probe_id`, session, kind, target, anchor, perturbation,
+  expiry) and `central_debug_service_v1_apply_probe(...) -> Result<DebugProbeV1, text>`.
+  The service still never contacts a target: `probe_executor_v1.spl` already
+  sends `break` through its own transport *before* calling this, so the service's
+  job is validate-and-mint — session open, target registered, then a session-bound
+  `probe-<session>-<n>`. It fails closed on an unknown session or unregistered
+  target; it does not claim the probe is live.
+- `central_debug_service_v1_authorize_at` / `_record_at` — the real
+  implementations, carrying the caller's `now_ns` onto a new
+  `DebugReceiptV1.captured_at_ns` field. `_authorize`/`_record` keep their exact
+  signatures and delegate with `-1`, meaning "caller supplied no clock" — never a
+  synthesised timestamp.
+
+Caller edits (each unreconcilable with any sane definition, stated per the rule):
+
+- `interpreter_service_adapter_v1.spl:116` called
+  `central_debug_service_v1_update_target_capability_at(..., now_ns)`, a symbol
+  this record never listed. `DebugCapabilityV1` carries no timestamp field and is
+  constructed positionally at ~8 sites, so an `_at` form would have accepted the
+  clock and dropped it — the unbacked-wrapper failure mode this record forbids.
+  Defined `central_debug_service_v1_update_target_capability(session_id, capability)`
+  (replaces an already-registered target's capability; Err on unknown session or
+  unregistered target) and dropped `_at`/`now_ns` at the call site.
+- Both modules imported `debug_policy_development_v1` from `contracts_v1`, which
+  does not provide it (`[use-warning]` at run time); the import moved to
+  `service_v1`.
+
+Specs: `test/01_unit/app/cli_debug/probe_executor_v1_spec.spl` (5/5) and the new
+`test/01_unit/app/debug/interpreter_service_adapter_v1_spec.spl` (3/3).
+Regression cover unchanged: `evidence_inspect_v1_spec` 5/5,
+`debug_evidence_bundle_contract_v1_spec` 7/7,
+`central_debug_service_v1_lifecycle_spec` 6/6.
+
+### STILL OPEN
+
+- **Item 5, `central_debug_service_v1_receipts`** — not implemented. The service
+  still retains no receipts (`_DebugSessionRecordV1` has no `receipts` field), and
+  the module its legacy spec imports,
+  `src/lib/nogc_async_mut/debug/legacy_service_adapter_v1.spl`, does not exist. It
+  was deliberately NOT created and the spec was NOT deleted. ~20 further specs
+  across `test/` import `central_debug_service_v1_receipts` (and
+  `_graph` / `_session`), so retention is a deliberate memory-lifetime decision for
+  the lane that owns it, not a side effect of this fix.
+- `src/app/debug_adapter_host_v1.spl:17,118` still imports and calls
+  `central_debug_service_v1_update_target_capability_at`; it needs the same
+  one-line call-site change (out of this lane's file scope).
+- `InterpreterDebugServiceAdapterV1.set_semantic_breakpoint` and `.close()` are
+  unrunnable under the seed interpreter: `rt_debug_add_breakpoint` and
+  `rt_debug_remove_all_breakpoints` fail with "unknown extern function"
+  (observed 2026-09-06). The adapter compiles and `launch` works; the new spec
+  therefore closes the session through the service instead of through the
+  adapter. This is a runtime-backing gap, not a spec-scoping choice.
+- `DebugRootOperationV1.Profile` (referenced by
+  `test/01_unit/lib/debug/remote/protocol/t32_debug_service_adapter_v1_spec.spl`)
+  and `DebugProbeKindV1.Log/Watch/Trace` (referenced by specs calling a
+  `service.apply_probe` OBJECT api that does not exist) were NOT added — no
+  compiling caller needs them.
+
+---
+
 - **Filed:** 2026-09-05
-- **Status:** OPEN (recorded, not fixed)
+- **Status:** RESOLVED 2026-09-06 for items 1-4; item 5 OPEN
 - **Area:** `src/lib/common/debug/`, `src/app/cli_debug/`, `src/app/debug/`
 - **Severity:** blocker for the affected modules — they cannot compile
 
