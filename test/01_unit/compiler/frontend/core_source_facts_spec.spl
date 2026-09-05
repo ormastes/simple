@@ -14,7 +14,7 @@
 
 use std.spec.*
 use compiler.frontend.core.source_facts.{simple_code_lines, source_facts_line_count}
-use compiler.frontend.core.source_facts.{simple_string_continuation_lines}
+use compiler.frontend.core.source_facts.{simple_string_continuation_lines, simple_string_byte_ranges}
 use app.io.mod.{file_read_text}
 
 val FIXTURES: text = "test/fixtures/source_facts/"
@@ -319,6 +319,61 @@ describe "Which lines continue a string opened earlier":
         val src = "fn f():\n    " + triple_quote() + "one line" + triple_quote() + "\n    1\n"
         for flag in simple_string_continuation_lines(src):
             expect(flag).to_equal(false)
+
+describe "Which bytes of each line are string payload":
+
+    it "states the unit contract it relies on":
+        """`text.len()` and `byte_at` are byte-based while the lexer reports
+        character offsets. This example pins that so a future change to either
+        fails loudly here rather than silently shifting every range."""
+        step("A two-byte character has byte length 2")
+        expect("é".len()).to_equal(2)
+        expect("a".len()).to_equal(1)
+
+    it "reports the quoted span of an ordinary string as line-relative bytes":
+        step("One double-quoted string on one line")
+        val r = simple_string_byte_ranges("val s = \"ab\"\n")
+        expect(r.len()).to_equal(2)
+        expect(r[0]).to_equal([8, 12])
+        expect(r[1]).to_equal([])
+
+    it "reports a single-quoted string, which byte scanners cannot see":
+        step("A '...' string holding a hash and a triple quote")
+        val tq = "\"" + "\"" + "\""
+        val r = simple_string_byte_ranges("if x == '# " + tq + "':\n    return 1\n")
+        expect(r[0]).to_equal([8, 15])
+        expect(r[1]).to_equal([])
+
+    it "converts character offsets to bytes after a multibyte character":
+        """A 2-byte `é` inside the first string must shift the SECOND string's
+        byte range by one relative to its character offset."""
+        step("Two strings, the first containing é")
+        val r = simple_string_byte_ranges("a = \"é\" + \"z\"\n")
+        expect(r[0]).to_equal([4, 8, 11, 14])
+
+    it "covers every line of a multi-line string, quotes included":
+        step("A docstring spanning three lines")
+        val tq = "\"" + "\"" + "\""
+        val src = "x = " + tq + "ab\ncd\nef" + tq + "\ny = 1\n"
+        val r = simple_string_byte_ranges(src)
+        expect(r[0]).to_equal([4, 9])
+        expect(r[1]).to_equal([0, 2])
+        expect(r[2]).to_equal([0, 5])
+        expect(r[3]).to_equal([])
+
+    it "reports no ranges for a line with no string":
+        step("Code and a comment only")
+        val r = simple_string_byte_ranges("val n = 1  # note\n")
+        expect(r[0]).to_equal([])
+
+    it "is sized beside the raw split like the other facts":
+        step("Compare lengths across every fixture")
+        val names = ["docstring_mentions.spl", "triple_quote_inside_comment.spl",
+            "escaped_quote.spl", "comment_mentions.spl", "indent_preserved.spl",
+            "adjacent_tokens.spl", "empty.spl", "no_trailing_newline.spl"]
+        for name in names:
+            val raw = fixture(name)
+            expect(simple_string_byte_ranges(raw).len()).to_equal(raw.split("\n").len())
 
 describe "Shared lexical facts versus the hand-rolled scanners they replace":
 

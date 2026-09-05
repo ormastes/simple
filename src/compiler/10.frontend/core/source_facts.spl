@@ -30,6 +30,10 @@
 # string opened earlier, which is the other half of the same question and the
 # one a parity count gets wrong on 31 spec files in this tree.
 #
+# `simple_string_byte_ranges(source)` gives, per line, the BYTE ranges inside
+# string tokens — for tools that must keep byte columns and only need to know
+# which bytes are payload.
+#
 # `simple_code_lines(source)` returns one entry per source line holding only
 # that line's CODE, with string literal CONTENT replaced by an empty pair of
 # quotes and comments removed entirely. Column positions are preserved by
@@ -206,7 +210,91 @@ fn simple_string_continuation_lines(source: text) -> [bool]:
             mark = mark + 1
     flags
 
+fn simple_string_byte_ranges(source: text) -> [[i64]]:
+    """Per line, the BYTE ranges (line-relative, end-exclusive, flattened as
+    [s0, e0, s1, e1, ...]) that lie inside a string token, quotes included.
+
+    A byte-scanning tool that must keep its own byte columns — the `simple
+    query`/`check` lint scanners index `byte_at` on the raw line and hand those
+    columns to other byte-indexed helpers — cannot use `simple_code_lines`,
+    whose columns are character columns. This fact answers only the question
+    such a tool gets wrong on its own: WHICH bytes are string payload. It knows
+    single-quoted strings, raw strings, escapes and multi-line docstrings
+    because the lexer does; a per-line byte walker that special-cases `"` and
+    `\"\"\"` does not (it cannot see `'…'` at all).
+
+    Element i pairs with `source.split("\n")[i]`. A string spanning lines
+    contributes [start, line_len] on its opening line, [0, line_len] on each
+    interior line, and [0, end] on its closing line.
+
+    Offsets: the lexer reports CHARACTER offsets while `text.len()`/`byte_at`
+    are byte-based (measured: a 26-char source with one 2-byte `é` has
+    `len() == 27`). Each line converts char->byte once, so this is O(source).
+    """
+    val total = source_facts_line_count(source)
+    var ranges: [[i64]] = []
+    var seed: i64 = 0
+    while seed < total:
+        ranges.push([])
+        seed = seed + 1
+    if source == "":
+        return ranges
+
+    # Per character: its line, its char offset within that line, and the byte
+    # offset within that line at which it starts. Built once.
+    var char_line: [i64] = []
+    var char_col: [i64] = []
+    var char_byte: [i64] = []
+    var line_byte_len: [i64] = []
+    var line_no: i64 = 0
+    var col: i64 = 0
+    var byte_in_line: i64 = 0
+    for ch in source:
+        char_line.push(line_no)
+        char_col.push(col)
+        char_byte.push(byte_in_line)
+        if ch == "\n":
+            line_byte_len.push(byte_in_line)
+            line_no = line_no + 1
+            col = 0
+            byte_in_line = 0
+        else:
+            col = col + 1
+            byte_in_line = byte_in_line + ch.len()
+    line_byte_len.push(byte_in_line)
+
+    lex_init(source)
+    val budget = source.len() * 4 + 64
+    var steps: i64 = 0
+    while steps < budget:
+        steps = steps + 1
+        val kind = lex_next()
+        if kind == SOURCE_FACTS_TOK_EOF:
+            break
+        if kind != SOURCE_FACTS_TOK_STRING:
+            continue
+        val start_char = lex_token_start_get()
+        val end_char = lex_token_end_get()
+        if start_char < 0 or start_char >= char_line.len() or end_char <= start_char:
+            continue
+        val last_char = end_char - 1
+        if last_char >= char_line.len():
+            continue
+        val first_line = char_line[start_char]
+        val last_line = char_line[last_char]
+        # Byte offset just past the token's last char on its closing line.
+        val end_byte = char_byte[last_char] + source[last_char:last_char + 1].len()
+        var mark = first_line
+        while mark <= last_line and mark < total:
+            val from_byte = if mark == first_line: char_byte[start_char] else: 0
+            val to_byte = if mark == last_line: end_byte else: line_byte_len[mark]
+            ranges[mark].push(from_byte)
+            ranges[mark].push(to_byte)
+            mark = mark + 1
+    ranges
+
 export SOURCE_FACTS_TOK_STRING, SOURCE_FACTS_TOK_NEWLINE
 export SOURCE_FACTS_TOK_INDENT, SOURCE_FACTS_TOK_DEDENT, SOURCE_FACTS_TOK_EOF
 export SOURCE_FACTS_TOK_ERROR
 export source_facts_line_count, simple_code_lines, simple_string_continuation_lines
+export simple_string_byte_ranges

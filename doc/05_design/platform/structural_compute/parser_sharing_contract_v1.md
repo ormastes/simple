@@ -228,8 +228,11 @@ uses. Findings therefore describe the seed, not a self-hosted compiler.
 
 | spec | wired | HEAD baseline |
 |---|---|---|
-| `core_source_facts_spec.spl` | 21/21 | n/a (new) |
+| `core_source_facts_spec.spl` | 28/28 | n/a (new) |
+| `app/cli/query_source_mask_shared_lexer_spec.spl` | 11/11 | **5/11 at HEAD** — the five green are exactly the controls |
 | `sspec_maintain/shared_lexer_string_state_spec.spl` | 6/6 | 3/6 against the old tracker |
+| `spipe_docgen/shared_lexer_string_state_spec.spl` | 12/12 | 2/12 vs original walkers; 6/12 vs walker-fixed-only |
+| ten `app/cli` specs reaching the lint scanners | identical | 2/6, 1/2, 0-exec, 1/2, 0-exec, 0-exec, 0-exec, 11/11, 0-exec, 0-exec — same before and after |
 | `sspec_maintain/pending_detection_spec.spl` | 5/5 | 5/5 |
 | `sspec_maintain/scoring_spec.spl` | 18/20 | 18/20 |
 | `sspec_maintain/rule_coverage_spec.spl` | 3/5 | 3/5 |
@@ -373,19 +376,31 @@ merge owner: the ~105-line uncommitted `spipe_docgen` change that makes
 (`doc/08_tracking/bug/spipe_docgen_unrunnable_from_committed_content_2026-09-05.md`),
 and therefore the `doc/06_spec` mirrors that change blocks.
 
-### Measured and NOT migrated — `query_source_mask`
+### Seam 4 — the `query`/`check` lint scanners — **LANDED**
 
 `src/app/cli/query_source_mask.spl` feeds four `simple query`/`check` scanners.
-Its byte-level tracker is actually *correct* on the two cases that broke the
-others, but it cannot see single-quoted `'…'` strings, which CoreLexer lexes as
-ordinary `StringLit`s. `trimmed.starts_with('"""')` therefore flips its
-triple-string mode and the rest of the file is skipped for lint scanning.
-**20 `src/` files** carry that shape; two (`aorte_obligation_census_scan.spl`,
-`flight_rule_census_scan.spl`) are the file-swallowing form. Not migrated
-because it is not a drop-in: the scanner reports byte columns and the shared
-fact preserves char columns, and one consumer masks an already-trimmed single
-line. Filed with the decision needed:
-`doc/08_tracking/bug/query_source_mask_ignores_single_quoted_strings_2026-09-05.md`.
+Its byte-level tracker was *correct* on the two cases that broke the others,
+but could not see single-quoted `'…'` strings, which CoreLexer lexes as
+ordinary `StringLit`s: `starts_with('"""')` flipped its triple-string mode and
+every line up to the next `"""` in the file was skipped. **20 `src/` files**
+carry the shape; `aorte_obligation_census_scan.spl` loses a 36-line window with
+four `return` statements in it.
+
+It was not a drop-in, and the reason shaped a third shared fact. The scanners
+report **byte** columns and consumers hand those straight to byte-indexed
+helpers over the raw line (`_query_first_token_end_column(lines[i], col)`), so
+a character-column projection would corrupt every consumer on a line with a
+multibyte character. `simple_string_byte_ranges(source)` therefore publishes
+only *which bytes of each line are string payload* (char→byte converted once
+per line — the lexer reports character offsets while `len()`/`byte_at` are
+byte-based); the scanners keep their columns and drop their string logic.
+`check_tier` — which carried a third docstring tracker of its own — takes the
+whole-file facts, and `strip_strings_and_comments` is deleted callerless.
+
+| Lane | Owner | Deliverable | Acceptance gate |
+|---|---|---|---|
+| Byte-range fact | CoreLexer | `simple_string_byte_ranges` | 7 module examples incl. a pinned `"é".len() == 2` unit contract and a multibyte shift case |
+| Lint scanners | query_source_mask, check_tier | `in_triple_string`/byte-34 logic removed from three scanners; `check_tier`'s tracker and per-line masker removed | new spec red at HEAD on every discriminating arm; the byte-column example gives the SAME answer before and after, by design; ten consumer baselines byte-identical |
 
 ## Explicit non-claims
 

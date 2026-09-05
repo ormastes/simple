@@ -23,7 +23,8 @@ stop — that fact is published. See below.
 |---|---|
 | `simple_code_lines(source) -> [text]` | per line, the CODE only: string literal CONTENT blanked, comments removed, columns preserved by pad-to-column |
 | `simple_string_continuation_lines(source) -> [bool]` | per line, is this a continuation of a string opened on an earlier line |
-| `source_facts_line_count(source) -> i64` | line count; both arrays index beside `source.split("\n")` |
+| `simple_string_byte_ranges(source) -> [[i64]]` | per line, the BYTE ranges (line-relative, `[s0,e0,s1,e1,…]`) inside string tokens — for byte-scanning tools that must keep byte columns |
+| `source_facts_line_count(source) -> i64` | line count; all arrays index beside `source.split("\n")` |
 
 **NOT re-entrant.** Both call `lex_init`, resetting the global CoreLexer. Safe for a
 tool that owns its process; never call from inside an in-progress parse. This follows
@@ -81,7 +82,8 @@ every independent attempt got it wrong the same way.
 - Adjacent lane (do not edit its dirty files): `doc/03_plan/agent_tasks/parser_framework.md`,
   `doc/03_plan/platform/structural_compute/parser_framework_plan.md`
 - Gate: `scripts/check/check-parser-source-global-ratchet.shs` (+ baseline; push-tier, advisory)
-- Specs: `test/01_unit/compiler/frontend/core_source_facts_spec.spl` (21),
+- Specs: `test/01_unit/compiler/frontend/core_source_facts_spec.spl` (28),
+  `test/01_unit/app/cli/query_source_mask_shared_lexer_spec.spl` (11),
   `test/01_unit/app/sspec_maintain/shared_lexer_string_state_spec.spl` (6),
   `test/01_unit/app/spipe_docgen/shared_lexer_string_state_spec.spl` (12)
 - Fixtures: `test/fixtures/source_facts/` (14)
@@ -100,6 +102,8 @@ every independent attempt got it wrong the same way.
   (threaded through its 7-function chain rather than a module global) and never
   ends a body on a line inside a string — 11 spec files had bodies cut at a
   fixture's column-0 interior.
-- `src/app/cli/query_source_mask.spl` (four `query`/`check` consumers) cannot see
-  `'…'` strings; 20 `src/` files trip it. Measured, filed, NOT migrated — it needs a
-  byte-vs-char column decision first. See the bug record before touching it.
+- `src/app/cli/query_source_mask.spl` (four `query`/`check` consumers) and
+  `check_tier.spl` now take string detection from `simple_string_byte_ranges` and
+  keep their **byte** columns — consumers hand those columns to byte-indexed
+  helpers over the raw line, so a char-column drop-in would have corrupted them.
+  That is why the third fact exists. `strip_strings_and_comments` is gone.
