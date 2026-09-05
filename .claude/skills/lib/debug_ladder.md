@@ -192,6 +192,23 @@ capture: black-box / runtime-gated / diagnostic-build / lab-trace), §9.4-9.5
 (assertion policy, persistent crash area), and the `debug-firmware` /
 `debug-software` core-and-minidump-processing extensions in §15.2-15.3.
 
+**When the dump writer lands (2026-09-05, still deferred — read before
+picking this up):** the CONSUMER side of this step already exists and is
+strict — `src/app/cli_debug/evidence_inspect_v1.spl` reads and validates a
+`debug-evidence-bundle-v1` manifest field by field, and
+`src/app/cli_debug/evidence_replay_v1.spl` does semantic replay. The
+PRODUCER side (a dump writer / coredump-minidump capture / ELF-core parser)
+does not exist anywhere in this repo. The exact contract a future writer
+must satisfy is pinned at
+`doc/07_guide/app/debug/debug_evidence_bundle_contract.md`, with a
+conformance spec at
+`test/01_unit/app/cli_debug/debug_evidence_bundle_contract_v1_spec.spl`. Do
+NOT claim dump-based debugging works — a real inspection currently crashes
+on an unrelated pre-existing reader defect, see
+`doc/08_tracking/bug/debug_evidence_inspect_receipt_id_field_missing_2026-09-05.md`.
+On arrival this step becomes: R0 diagnose-from-dump (build/session/capture
+identity, then semantic replay) without rerunning the failing program.
+
 ## Hard rules (research doc §15.1)
 
 - Never claim PASS from absent output.
@@ -233,6 +250,63 @@ a positive-control case proves the probe fires when it should.
 | Intermittent / flaky | probability, seed, environment strata, temporal clustering | rerun with fixed seed/order where possible; do not conclude from one pass — record numerator/denominator, not a single boolean |
 | Boot / reset (bootstrap stage) | reset source, stage reached, build id | check `doc/08_tracking/bug/` for the matching stage (stage1-4) incident pattern before re-deriving one; see `.claude/rules/bootstrap.md` |
 | Build failure (seed / native) | compiler exit code, first error, whether it's E0432/E0599-class | read the compiler's own diagnostic first (step 1) before touching code; `bin/simple compile`/`native-build` --help lists exact flags, verified above |
+
+## Reproduction ladder R0-R5 (research doc §7.2, L572-585)
+
+"Reproduced" is not a claim on its own — it must **name its level and its
+oracle** (what result proves the bug, and what would disprove it). Use the
+lowest level that is sufficient; a root cause found at R0 may still need an
+R2/R3 test after the fix (diagnostic necessity vs. post-fix prevention are
+different questions).
+
+| Level | Name | Typical use | Reachable on THIS host? |
+|---|---|---|---|
+| R0 | Offline evidence replay | Parse an existing dump/log/trace; no rerun | Yes — step 1 (log review) and step 2 (`jj diff`) are R0 |
+| R1 | Deterministic trace/event replay | Replay recorded events/simulator input | Yes — the probe-script tier (step 3C) replaying recorded inputs |
+| R2 | Unit/component fixture | Minimal source/input reproducer | Yes — step 4 (`simple run <spec.spl>`), verified above |
+| R3 | Integration/system simulation | Multiple modules/services | Partial — `simple run` on a multi-module spec works; the full-CLI daemon path is BLOCKED (see environment facts) |
+| R4 | Full system/HIL/firmware | Timing, hardware, power, boot, real controller | BLOCKED here — no lab hardware, T32 not wired (see environment facts); SimpleOS/QEMU work belongs to `.claude/rules/board-runnable.md`, not this ladder |
+| R5 | Field/production-equivalent recurrence | Rare production-only condition | BLOCKED here — no production telemetry channel on this host |
+
+## Sealed prediction
+
+A hypothesis is not usable until it states its **predicted observation before
+the run** — write the prediction down first, then execute, then compare.
+Corollary: **a check that cannot distinguish at least two live hypotheses is
+not worth running** — if every hypothesis predicts the same outcome, the check
+has zero discriminating power and only wastes the budget. This is already the
+letter of `bug_hypotheses.predicted_observations` and
+`bug_experiments.expected_discriminating_outcomes` in
+`doc/01_research/infra/spipe/spipe_bug_management_debug_knowledge_evidence.md`
+§6.2 — this section just makes it an explicit ladder step: predict, then run,
+never the reverse order.
+
+## Anti-flywheel rules (research doc §30, ~L1729-1752) — read this before tuning any checklist
+
+A scoring loop that scores work, edits its own guidance from the score, then
+re-scores with that same guidance **can raise its numbers without raising
+capability** — the "wrong flywheel": `more history -> longer prompt -> same
+cases score higher -> publish everything`. **This repo already runs a loop
+shaped exactly like that**: the sspec training loop (checklist -> low-effort
+worker -> `sh scripts/check/sspec-train.shs` score -> edit the checklist ->
+re-score on the same specs) landed today
+(`doc/00_llm_process/feature_expert/modern_sspec/skill.md` "Training loop"
+section). Three cheap counter-rules, apply them to that loop and to any future
+debug-knowledge scoring loop:
+
+- **Held-out set** — keep specs/cases the checklist was NOT tuned on, and
+  report their score separately from the tuned batch.
+- **No same-case validation** — a knowledge edit derived from case X may not
+  be validated by re-scoring case X; validate on a case the edit was not
+  written to fix.
+- **Leak gate** — guidance text must not contain answer-bearing identifiers
+  (specific bug IDs, unique symbol names, rare literal strings copied from the
+  answer) that let a worker pattern-match the fix instead of deriving it.
+
+Concretely for this repo: `sh scripts/check/sspec-train.shs <dir>` is the
+scoring tool in active use. A future improvement to the checklist should score
+a held-out spec set the checklist was not tuned against, not just re-run the
+same batch that motivated the edit.
 
 ## Agent pointers
 
