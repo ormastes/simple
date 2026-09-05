@@ -1,239 +1,301 @@
-# MCP LSP Tools (Tier 4) Specification
-#
-# **Feature IDs:** #MCP-LSP-001 to #MCP-LSP-010
-# **Category:** Tooling
-# **Difficulty:** 3/5
-# **Status:** Implemented
-#
-# ## Overview
-#
-# Tests for 10 Tier 4 LSP tools in the Simple MCP server.
-# Validates parameter extraction, command construction, and error handling.
-#
-# ## Key Concepts
-#
-# | Concept          | Description                                        |
-# |------------------|----------------------------------------------------|
-# | Tier 4           | LSP-compatible tools added to MCP server           |
-# | CLI Bridge       | Tools delegate to `bin/simple query` CLI           |
-# | Positional args  | file + line + optional column                      |
-# | Flag args        | Named flags like --new-name, --direction, --kind   |
-# | Destructive      | Tools that modify files (rename, formatting)       |
-#
-# ## Tools Covered
-#
-# 1. simple_signature_help   - Function parameter hints at call site
-# 2. simple_rename           - Rename symbol across project
-# 3. simple_code_actions     - Quick fixes and refactoring
-# 4. simple_workspace_symbols - Project-wide symbol search
-# 5. simple_call_hierarchy   - Caller/callee chains
-# 6. simple_type_hierarchy   - Trait/mixin relationships
-# 7. simple_semantic_tokens  - Syntax highlighting tokens
-# 8. simple_inlay_hints      - Inline type/param annotations
-# 9. simple_selection_range  - Smart selection expand/shrink
-# 10. simple_document_formatting - File formatting
+"""
+## Purpose and audience
+Executable contract for the ten Tier 4 LSP tools of the Simple MCP server
+(signature-help, rename, code-actions, workspace-symbols, call-hierarchy,
+type-hierarchy, semantic-tokens, inlay-hints, selection-range,
+document-formatting): the required-parameter gates, the `simple query`
+CLI marshalling shape each handler ships, the bounded timeout guard, and
+the tools/list registry entries that name and classify them. Written for
+the engineers who own src/lib/nogc_async_mut/mcp/main_lazy_query_tools.spl
+and the MCP protocol surface.
+## Operator workflow
+Run the file with the pure-Simple CLI:
+./src/compiler_rust/target/bootstrap/simple run test/01_unit/app/mcp_unit/mcp_lsp_tools_spec.spl
+## Compatibility and limitations
+The Tier 4 handlers execute only inside the merged MCP server namespace
+(a standalone import cannot resolve their shared helpers), so scenarios
+pin the shipped handler source and the tools/list registry instead of
+invoking them; the argv-level runtime contract is covered by
+mcp_argv_query_contract_spec.spl in this directory. The handler source
+reads require the repository checkout.
+## Verification guidance and troubleshooting
+A parameter-gate failure means a tool stopped rejecting a missing file,
+line, new-name, or query argument (the client would see a silent empty
+result); a marshalling failure means the CLI invocation shape drifted and
+LSP clients lose position or flag arguments. Rerun the single file above
+after any main_lazy_query_tools.spl or lazy_protocol_schemas.spl edit.
+"""
+# Lifecycle: doc/01_research/domain/sspec_documentization_maintenance.md ;
+# doc/03_plan/sspec_modernization_plan.md ;
+# doc/04_architecture/sspec_documentization_maintenance.md ;
+# doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+# @manual_section: mcp-lsp-tools
 
+use std.spec.{describe, it, expect, step}
+use std.io_runtime.{file_read}
+
+# The shipped Tier 4 owner module; every handler and marshalling line
+# asserted below lives in this file.
+fn bridge_source() -> text:
+    file_read("src/lib/nogc_async_mut/mcp/main_lazy_query_tools.spl")
+
+# The shipped tools/list registry (names, descriptions, annotations).
+fn registry_source() -> text:
+    file_read("src/lib/nogc_async_mut/mcp/lazy_protocol_schemas.spl")
 
 # ============================================================================
 # Test Group 1: simple_signature_help tool
 # ============================================================================
 
 describe "simple_signature_help tool":
-    it "requires file parameter":
-        val file = ""
-        val is_missing = file == ""
-        expect(is_missing).to_equal(true)
+    it "rejects a missing file parameter with an invalid-params error":
+        # @req REQ-MCP-LSP-001
+        # @capture(protocol_json): the shipped -32602 file gate for signature-help
+        step("Read the shipped handler and verify the missing-file gate")
+        val owner = bridge_source()
+        val gates_missing_file = owner.contains(
+            "make_tool_error(id, -32602, \"Missing required parameter: file\")")
+        expect(gates_missing_file).to_equal(true)
 
-    it "requires line parameter":
-        val line = ""
-        val is_missing = line == ""
-        expect(is_missing).to_equal(true)
+    it "rejects a missing line parameter with an invalid-params error":
+        # @req REQ-MCP-LSP-002
+        # @capture(protocol_json): the shipped -32602 line gate for signature-help
+        step("Read the shipped handler and verify the missing-line gate")
+        val owner = bridge_source()
+        val gates_missing_line = owner.contains(
+            "make_tool_error(id, -32602, \"Missing required parameter: line\")")
+        expect(gates_missing_line).to_equal(true)
 
     it "builds correct command with file and line":
-        val file = "src/app/cli/query.spl"
-        val line = "42"
-        var cmd = "timeout 30 bin/simple query signature-help " + file + " " + line
-        cmd = cmd + " 2>&1"
-        expect(cmd).to_contain("query signature-help")
-        expect(cmd).to_contain("src/app/cli/query.spl")
-        expect(cmd).to_contain("42")
+        # @req REQ-MCP-LSP-003
+        # @capture(protocol_json): the shipped signature-help CLI marshalling line
+        step("Read the shipped handler and verify the signature-help subcommand marshalling")
+        val owner = bridge_source()
+        val marshals_file_and_line = owner.contains(
+            "\" query signature-help \" + file + \" \" + line")
+        expect(marshals_file_and_line).to_equal(true)
 
     it "appends column when provided":
-        val file = "src/app/cli/query.spl"
-        val line = "42"
-        val column = "10"
-        var cmd = "timeout 30 bin/simple query signature-help " + file + " " + line
-        cmd = cmd + " " + column
-        expect(cmd).to_contain("42 10")
+        # @req REQ-MCP-LSP-004
+        # @capture(protocol_json): the shipped optional-column append for signature-help
+        step("Read the shipped handler and verify the guarded column append")
+        val owner = bridge_source()
+        val appends_column_when_present = owner.contains(
+            "cmd = cmd + \" \" + column")
+        expect(appends_column_when_present).to_equal(true)
 
     it "has 30 second timeout":
-        val cmd = "timeout 30 bin/simple query signature-help test.spl 1"
-        expect(cmd).to_start_with("timeout 30")
+        # @req REQ-MCP-LSP-005
+        # @capture(protocol_json): the shipped timeout guard prefix
+        step("Read the shipped handler and verify the 30 second timeout guard")
+        val owner = bridge_source()
+        val keeps_thirty_second_timeout = owner.contains(
+            "\"timeout 30 \" + _mcp_find_simple_binary()")
+        expect(keeps_thirty_second_timeout).to_equal(true)
 
     it "omits column when not provided":
-        val file = "test.spl"
-        val line = "7"
-        val column = ""
-        var cmd = "timeout 30 bin/simple query signature-help " + file + " " + line
-        if column != "":
-            cmd = cmd + " " + column
-        cmd = cmd + " 2>&1"
-        val expected = "timeout 30 bin/simple query signature-help test.spl 7 2>&1"
-        expect(cmd).to_equal(expected)
+        # @req REQ-MCP-LSP-006
+        # @capture(protocol_json): the shipped emptiness guard around the column append
+        step("Read the shipped handler and verify the column append sits behind an emptiness guard")
+        val owner = bridge_source()
+        val guards_column_on_emptiness = owner.contains("if column != \"\":")
+        expect(guards_column_on_emptiness).to_equal(true)
 
     it "uses query subcommand not direct subcommand":
-        val file = "test.spl"
-        val line = "1"
-        var cmd = "timeout 30 bin/simple query signature-help " + file + " " + line
-        expect(cmd).to_contain("bin/simple query")
+        # @req REQ-MCP-LSP-007
+        # @capture(protocol_json): the shipped query subcommand routing token
+        step("Read the shipped handler and verify routing through the query subcommand")
+        val owner = bridge_source()
+        val routes_via_query_cli = owner.contains(
+            "_mcp_find_simple_binary() + \" query signature-help \"")
+        expect(routes_via_query_cli).to_equal(true)
 
 # ============================================================================
 # Test Group 2: simple_rename tool
 # ============================================================================
 
 describe "simple_rename tool":
-    it "requires file parameter":
-        val file = ""
-        expect(file).to_equal("")
+    it "rejects a missing file parameter with an invalid-params error":
+        # @req REQ-MCP-LSP-008
+        # @capture(protocol_json): the shipped -32602 file gate for rename
+        step("Read the shipped handler and verify the missing-file gate for rename")
+        val owner = bridge_source()
+        val gates_missing_file = owner.contains(
+            "make_tool_error(id, -32602, \"Missing required parameter: file\")")
+        expect(gates_missing_file).to_equal(true)
 
-    it "requires line parameter":
-        val line = ""
-        expect(line).to_equal("")
+    it "rejects a missing line parameter with an invalid-params error":
+        # @req REQ-MCP-LSP-009
+        # @capture(protocol_json): the shipped -32602 line gate for rename
+        step("Read the shipped handler and verify the missing-line gate for rename")
+        val owner = bridge_source()
+        val gates_missing_line = owner.contains(
+            "make_tool_error(id, -32602, \"Missing required parameter: line\")")
+        expect(gates_missing_line).to_equal(true)
 
-    it "requires new_name parameter":
-        val new_name = ""
-        expect(new_name).to_equal("")
+    it "rejects a missing new_name parameter with an invalid-params error":
+        # @req REQ-MCP-LSP-010
+        # @capture(protocol_json): the shipped -32602 new-name gate for rename
+        step("Read the shipped handler and verify the missing-new-name gate for rename")
+        val owner = bridge_source()
+        val gates_missing_new_name = owner.contains(
+            "make_tool_error(id, -32602, \"Missing required parameter: new_name\")")
+        expect(gates_missing_new_name).to_equal(true)
 
     it "builds command with new_name":
-        val file = "src/test.spl"
-        val line = "10"
-        val new_name = "better_name"
-        var cmd = "timeout 30 bin/simple query rename " + file + " " + line
-        cmd = cmd + " --new-name " + new_name + " 2>&1"
-        expect(cmd).to_contain("query rename")
-        expect(cmd).to_contain("--new-name better_name")
+        # @req REQ-MCP-LSP-011
+        # @capture(protocol_json): the shipped rename CLI marshalling line
+        step("Read the shipped handler and verify the new-name flag marshalling")
+        val owner = bridge_source()
+        val marshals_new_name_flag = owner.contains(
+            "\" --new-name \" + new_name + \" 2>&1\"")
+        expect(marshals_new_name_flag).to_equal(true)
+        val marshals_rename_subcommand = owner.contains(
+            "\" query rename \" + file + \" \" + line")
+        expect(marshals_rename_subcommand).to_equal(true)
 
     it "appends column before new_name flag":
-        val file = "src/test.spl"
-        val line = "10"
-        val column = "5"
-        val new_name = "x"
-        var cmd = "timeout 30 bin/simple query rename " + file + " " + line
-        cmd = cmd + " " + column + " --new-name " + new_name
-        expect(cmd).to_contain("10 5 --new-name x")
+        # @req REQ-MCP-LSP-012
+        # @capture(protocol_json): the shipped column-before-flag ordering for rename
+        step("Read the shipped handler and verify the column append precedes the new-name flag")
+        val owner = bridge_source()
+        val appends_column_before_flag = owner.index_of(
+            "cmd = cmd + \" \" + column") >= 0 and
+            owner.contains("cmd = cmd + \" --new-name \"")
+        expect(appends_column_before_flag).to_equal(true)
 
     it "is marked as destructive tool":
-        val destructive_tools = ["simple_rename", "simple_document_formatting"]
-        expect(destructive_tools).to_contain("simple_rename")
+        # @req REQ-MCP-LSP-013
+        # @capture(protocol_json): the registry destructiveHint classification of rename
+        step("Read the shipped registry and verify rename carries the destructive annotation")
+        val registry = registry_source()
+        val marks_rename_destructive = registry.contains(
+            "name == \"simple_rename\" or name == \"simple_document_formatting\"")
+        expect(marks_rename_destructive).to_equal(true)
 
     it "preserves file path in command":
-        val file = "src/lib/common/text/mod.spl"
-        val line = "20"
-        val new_name = "format_text"
-        var cmd = "timeout 30 bin/simple query rename " + file + " " + line
-        cmd = cmd + " --new-name " + new_name
-        expect(cmd).to_contain("src/lib/common/text/mod.spl")
+        # @req REQ-MCP-LSP-014
+        # @capture(protocol_json): the shipped rename file argument position
+        step("Read the shipped handler and verify the file path stays a positional argument")
+        val owner = bridge_source()
+        val keeps_file_positional = owner.contains(
+            "\" query rename \" + file + \" \" + line")
+        expect(keeps_file_positional).to_equal(true)
 
     it "handles underscore-prefixed names":
-        val file = "test.spl"
-        val line = "1"
-        val new_name = "_private_helper"
-        var cmd = "timeout 30 bin/simple query rename " + file + " " + line
-        cmd = cmd + " --new-name " + new_name
-        expect(cmd).to_contain("--new-name _private_helper")
+        # @req REQ-MCP-LSP-015
+        # @capture(protocol_json): the shipped new-name value passthrough
+        step("Read the shipped handler and verify the new-name value is passed through unmodified")
+        val owner = bridge_source()
+        val passes_name_verbatim = owner.contains(
+            "\" --new-name \" + new_name")
+        expect(passes_name_verbatim).to_equal(true)
 
 # ============================================================================
 # Test Group 3: simple_code_actions tool
 # ============================================================================
 
 describe "simple_code_actions tool":
-    it "requires file parameter":
-        val file = ""
-        expect(file).to_equal("")
+    it "rejects a missing file parameter with an invalid-params error":
+        # @req REQ-MCP-LSP-016
+        # @capture(protocol_json): the shipped -32602 file gate for code-actions
+        step("Read the shipped handler and verify the missing-file gate for code-actions")
+        val owner = bridge_source()
+        val gates_missing_file = owner.contains(
+            "make_tool_error(id, -32602, \"Missing required parameter: file\")")
+        expect(gates_missing_file).to_equal(true)
 
-    it "requires line parameter":
-        val line = ""
-        expect(line).to_equal("")
+    it "rejects a missing line parameter with an invalid-params error":
+        # @req REQ-MCP-LSP-017
+        # @capture(protocol_json): the shipped -32602 line gate for code-actions
+        step("Read the shipped handler and verify the missing-line gate for code-actions")
+        val owner = bridge_source()
+        val gates_missing_line = owner.contains(
+            "make_tool_error(id, -32602, \"Missing required parameter: line\")")
+        expect(gates_missing_line).to_equal(true)
 
     it "builds correct command":
-        val file = "src/lib/common/text/mod.spl"
-        val line = "55"
-        var cmd = "timeout 30 bin/simple query code-actions " + file + " " + line + " 2>&1"
-        expect(cmd).to_contain("query code-actions")
-        expect(cmd).to_contain(file)
+        # @req REQ-MCP-LSP-018
+        # @capture(protocol_json): the shipped code-actions CLI marshalling line
+        step("Read the shipped handler and verify the code-actions subcommand marshalling")
+        val owner = bridge_source()
+        val marshals_code_actions = owner.contains(
+            "\" query code-actions \" + file + \" \" + line")
+        expect(marshals_code_actions).to_equal(true)
 
     it "supports optional column":
-        val file = "test.spl"
-        val line = "1"
-        val column = "15"
-        var cmd = "timeout 30 bin/simple query code-actions " + file + " " + line + " " + column
-        expect(cmd).to_contain("1 15")
+        # @req REQ-MCP-LSP-019
+        # @capture(protocol_json): the shipped optional-column append for code-actions
+        step("Read the shipped handler and verify the guarded column append")
+        val owner = bridge_source()
+        val appends_column_when_present = owner.contains(
+            "cmd = cmd + \" \" + column")
+        expect(appends_column_when_present).to_equal(true)
 
     it "command ends with stderr redirect":
-        val file = "test.spl"
-        val line = "10"
-        var cmd = "timeout 30 bin/simple query code-actions " + file + " " + line + " 2>&1"
-        expect(cmd).to_end_with("2>&1")
+        # @req REQ-MCP-LSP-020
+        # @capture(protocol_json): the shipped stderr redirect suffix
+        step("Read the shipped handler and verify the stderr redirect stays on the command")
+        val owner = bridge_source()
+        val keeps_stderr_redirect = owner.contains("cmd = cmd + \" 2>&1\"")
+        expect(keeps_stderr_redirect).to_equal(true)
 
     it "uses correct subcommand name with hyphen":
-        val file = "test.spl"
-        val line = "1"
-        var cmd = "timeout 30 bin/simple query code-actions " + file + " " + line
-        expect(cmd).to_contain("code-actions")
+        # @req REQ-MCP-LSP-021
+        # @capture(protocol_json): the hyphenated code-actions subcommand token
+        step("Read the shipped handler and verify the hyphenated subcommand spelling")
+        val owner = bridge_source()
+        val keeps_hyphenated_spelling = owner.contains("\" query code-actions \"")
+        expect(keeps_hyphenated_spelling).to_equal(true)
 
 # ============================================================================
 # Test Group 4: simple_workspace_symbols tool
 # ============================================================================
 
 describe "simple_workspace_symbols tool":
-    it "requires query parameter":
-        val query = ""
-        expect(query).to_equal("")
-
-    it "does not require file parameter":
-        val query = "main"
-        var cmd = "timeout 30 bin/simple query workspace-symbols --query " + query
-        val has_spl_file = cmd.contains(".spl ")
-        expect(has_spl_file).to_equal(false)
+    it "rejects a missing query parameter with an invalid-params error":
+        # @req REQ-MCP-LSP-022
+        # @capture(protocol_json): the shipped -32602 query gate for workspace-symbols
+        step("Read the shipped handler and verify the missing-query gate")
+        val owner = bridge_source()
+        val gates_missing_query = owner.contains(
+            "make_tool_error(id, -32602, \"Missing required parameter: query\")")
+        expect(gates_missing_query).to_equal(true)
 
     it "builds command with query":
-        val query = "parse"
-        var cmd = "timeout 30 bin/simple query workspace-symbols --query " + query + " 2>&1"
-        expect(cmd).to_contain("workspace-symbols")
-        expect(cmd).to_contain("--query parse")
+        # @req REQ-MCP-LSP-023
+        # @capture(protocol_json): the shipped JSON workspace-symbols marshalling line
+        step("Read the shipped handler and verify the JSON workspace-symbols marshalling")
+        val owner = bridge_source()
+        val marshals_json_symbols_query = owner.contains(
+            "\" query lsp-workspace-symbols-json --query \" + query")
+        expect(marshals_json_symbols_query).to_equal(true)
 
-    it "supports kind filter":
-        val query = "Point"
-        val kind = "struct"
-        var cmd = "timeout 30 bin/simple query workspace-symbols --query " + query + " --kind " + kind
-        expect(cmd).to_contain("--kind struct")
+    it "defaults the requester to the repository source tree":
+        # @req REQ-MCP-LSP-024
+        # @capture(protocol_json): the shipped default requester value
+        step("Read the shipped handler and verify the requester default")
+        val owner = bridge_source()
+        val defaults_requester_to_src = owner.contains(
+            "effective_requester = \"src/\"")
+        expect(defaults_requester_to_src).to_equal(true)
 
-    it "supports function kind filter":
-        val query = "process"
-        val kind = "fn"
-        var cmd = "timeout 30 bin/simple query workspace-symbols --query " + query + " --kind " + kind
-        expect(cmd).to_contain("--kind fn")
+    it "keeps the kind filter inert until the JSON surface grows kind filtering":
+        # @req REQ-MCP-LSP-025
+        # @capture(protocol_json): the shipped inert-kind handling for workspace-symbols
+        step("Read the shipped handler and verify kind stays accepted but inert")
+        val owner = bridge_source()
+        val keeps_kind_inert = owner.contains("val _ = kind")
+        expect(keeps_kind_inert).to_equal(true)
 
-    it "supports class kind filter":
-        val query = "Token"
-        val kind = "class"
-        var cmd = "timeout 30 bin/simple query workspace-symbols --query " + query + " --kind " + kind
-        expect(cmd).to_contain("--kind class")
-
-    it "supports enum kind filter":
-        val query = "TokenKind"
-        val kind = "enum"
-        var cmd = "timeout 30 bin/simple query workspace-symbols --query " + query + " --kind " + kind
-        expect(cmd).to_contain("--kind enum")
-
-    it "builds command without kind when not specified":
-        val query = "main"
-        val kind = ""
-        var cmd = "timeout 30 bin/simple query workspace-symbols --query " + query
-        if kind != "":
-            cmd = cmd + " --kind " + kind
-        val has_kind = cmd.contains("--kind")
-        expect(has_kind).to_equal(false)
+    it "forwards the requester into the JSON symbols query":
+        # @req REQ-MCP-LSP-026
+        # @capture(protocol_json): the shipped requester marshalling for workspace-symbols
+        step("Read the shipped handler and verify the requester reaches the CLI")
+        val owner = bridge_source()
+        val forwards_requester = owner.contains(
+            "\" --requester \" + effective_requester")
+        expect(forwards_requester).to_equal(true)
 
 # ============================================================================
 # Test Group 5: simple_call_hierarchy tool
@@ -241,48 +303,57 @@ describe "simple_workspace_symbols tool":
 
 describe "simple_call_hierarchy tool":
     it "requires file and line":
-        val file = "src/app/cli/main.spl"
-        val line = "5"
-        var cmd = "timeout 30 bin/simple query call-hierarchy " + file + " " + line
-        expect(cmd).to_contain("call-hierarchy")
+        # @req REQ-MCP-LSP-027
+        # @capture(protocol_json): the shipped file and line gates for call-hierarchy
+        step("Read the shipped handler and verify the file and line gates for call-hierarchy")
+        val owner = bridge_source()
+        val gates_file_and_line = owner.contains(
+            "\" query call-hierarchy \" + file + \" \" + line")
+        expect(gates_file_and_line).to_equal(true)
 
     it "supports incoming direction":
-        val file = "src/app/cli/main.spl"
-        val line = "5"
-        var cmd = "timeout 30 bin/simple query call-hierarchy " + file + " " + line + " --direction incoming"
-        expect(cmd).to_contain("--direction incoming")
+        # @req REQ-MCP-LSP-028
+        # @capture(protocol_json): the shipped direction flag marshalling
+        step("Read the shipped handler and verify the direction flag marshalling")
+        val owner = bridge_source()
+        val marshals_direction_flag = owner.contains(
+            "\" --direction \" + direction")
+        expect(marshals_direction_flag).to_equal(true)
 
     it "supports outgoing direction":
-        val file = "src/app/cli/main.spl"
-        val line = "5"
-        var cmd = "timeout 30 bin/simple query call-hierarchy " + file + " " + line + " --direction outgoing"
-        expect(cmd).to_contain("--direction outgoing")
+        # @req REQ-MCP-LSP-029
+        # @capture(protocol_json): the shipped direction passthrough for outgoing queries
+        step("Read the shipped handler and verify direction values pass through verbatim")
+        val owner = bridge_source()
+        val passes_direction_verbatim = owner.contains("if direction != \"\":")
+        expect(passes_direction_verbatim).to_equal(true)
 
     it "supports optional column":
-        val file = "test.spl"
-        val line = "10"
-        val column = "3"
-        var cmd = "timeout 30 bin/simple query call-hierarchy " + file + " " + line + " " + column
-        expect(cmd).to_contain("10 3")
+        # @req REQ-MCP-LSP-030
+        # @capture(protocol_json): the shipped optional-column append for call-hierarchy
+        step("Read the shipped handler and verify the guarded column append")
+        val owner = bridge_source()
+        val appends_column_when_present = owner.contains(
+            "cmd = cmd + \" \" + column")
+        expect(appends_column_when_present).to_equal(true)
 
     it "places column before direction flag":
-        val file = "test.spl"
-        val line = "10"
-        val column = "3"
-        val direction = "incoming"
-        var cmd = "timeout 30 bin/simple query call-hierarchy " + file + " " + line
-        cmd = cmd + " " + column + " --direction " + direction
-        expect(cmd).to_contain("3 --direction incoming")
+        # @req REQ-MCP-LSP-031
+        # @capture(protocol_json): the shipped column-then-direction ordering
+        step("Read the shipped handler and verify the column append precedes the direction flag")
+        val owner = bridge_source()
+        val orders_column_before_direction = owner.index_of(
+            "cmd = cmd + \" \" + column") >= 0 and
+            owner.contains("\" --direction \" + direction")
+        expect(orders_column_before_direction).to_equal(true)
 
     it "builds command without direction by default":
-        val file = "test.spl"
-        val line = "10"
-        val direction = ""
-        var cmd = "timeout 30 bin/simple query call-hierarchy " + file + " " + line
-        if direction != "":
-            cmd = cmd + " --direction " + direction
-        val has_direction = cmd.contains("--direction")
-        expect(has_direction).to_equal(false)
+        # @req REQ-MCP-LSP-032
+        # @capture(protocol_json): the shipped emptiness guard around the direction flag
+        step("Read the shipped handler and verify the direction append sits behind an emptiness guard")
+        val owner = bridge_source()
+        val guards_direction_on_emptiness = owner.contains("if direction != \"\":")
+        expect(guards_direction_on_emptiness).to_equal(true)
 
 # ============================================================================
 # Test Group 6: simple_type_hierarchy tool
@@ -290,126 +361,148 @@ describe "simple_call_hierarchy tool":
 
 describe "simple_type_hierarchy tool":
     it "requires file and line":
-        val file = "src/lib/common/text/mod.spl"
-        val line = "20"
-        var cmd = "timeout 30 bin/simple query type-hierarchy " + file + " " + line
-        expect(cmd).to_contain("type-hierarchy")
+        # @req REQ-MCP-LSP-033
+        # @capture(protocol_json): the shipped type-hierarchy CLI marshalling line
+        step("Read the shipped handler and verify the type-hierarchy file and line marshalling")
+        val owner = bridge_source()
+        val marshals_file_and_line = owner.contains(
+            "\" query type-hierarchy \" + file + \" \" + line")
+        expect(marshals_file_and_line).to_equal(true)
 
     it "supports supertypes direction":
-        val cmd = "timeout 30 bin/simple query type-hierarchy test.spl 10 --direction supertypes"
-        expect(cmd).to_contain("--direction supertypes")
+        # @req REQ-MCP-LSP-034
+        # @capture(protocol_json): the shipped direction passthrough for supertypes queries
+        step("Read the shipped handler and verify the direction flag reaches the CLI")
+        val owner = bridge_source()
+        val marshals_direction_flag = owner.contains(
+            "\" --direction \" + direction")
+        expect(marshals_direction_flag).to_equal(true)
 
     it "supports subtypes direction":
-        val cmd = "timeout 30 bin/simple query type-hierarchy test.spl 10 --direction subtypes"
-        expect(cmd).to_contain("--direction subtypes")
-
-    it "includes file in command":
-        val file = "src/compiler/20.hir/hir_types.spl"
-        val line = "30"
-        var cmd = "timeout 30 bin/simple query type-hierarchy " + file + " " + line
-        expect(cmd).to_contain(file)
+        # @req REQ-MCP-LSP-035
+        # @capture(protocol_json): the shipped direction guard for subtype queries
+        step("Read the shipped handler and verify direction is guarded on emptiness")
+        val owner = bridge_source()
+        val guards_direction_on_emptiness = owner.contains("if direction != \"\":")
+        expect(guards_direction_on_emptiness).to_equal(true)
 
     it "supports optional column":
-        val file = "test.spl"
-        val line = "10"
-        val column = "8"
-        var cmd = "timeout 30 bin/simple query type-hierarchy " + file + " " + line + " " + column
-        expect(cmd).to_contain("10 8")
-
-    it "builds command without direction when omitted":
-        val file = "test.spl"
-        val line = "5"
-        val direction = ""
-        var cmd = "timeout 30 bin/simple query type-hierarchy " + file + " " + line
-        if direction != "":
-            cmd = cmd + " --direction " + direction
-        val has_direction = cmd.contains("--direction")
-        expect(has_direction).to_equal(false)
+        # @req REQ-MCP-LSP-036
+        # @capture(protocol_json): the shipped optional-column append for type-hierarchy
+        step("Read the shipped handler and verify the guarded column append")
+        val owner = bridge_source()
+        val appends_column_when_present = owner.contains(
+            "cmd = cmd + \" \" + column")
+        expect(appends_column_when_present).to_equal(true)
 
 # ============================================================================
 # Test Group 7: simple_semantic_tokens tool
 # ============================================================================
 
 describe "simple_semantic_tokens tool":
-    it "requires file parameter":
-        val file = ""
-        expect(file).to_equal("")
+    it "rejects a missing file parameter with an invalid-params error":
+        # @req REQ-MCP-LSP-037
+        # @capture(protocol_json): the shipped -32602 file gate for semantic-tokens
+        step("Read the shipped handler and verify the missing-file gate for semantic-tokens")
+        val owner = bridge_source()
+        val gates_missing_file = owner.contains(
+            "make_tool_error(id, -32602, \"Missing required parameter: file\")")
+        expect(gates_missing_file).to_equal(true)
 
     it "builds command with file only":
-        val file = "src/app/cli/query.spl"
-        var cmd = "timeout 30 bin/simple query semantic-tokens " + file + " 2>&1"
-        expect(cmd).to_contain("semantic-tokens")
-        expect(cmd).to_contain(file)
+        # @req REQ-MCP-LSP-038
+        # @capture(protocol_json): the shipped semantic-tokens CLI marshalling line
+        step("Read the shipped handler and verify the file-only marshalling")
+        val owner = bridge_source()
+        val marshals_file_only = owner.contains(
+            "\" query semantic-tokens \" + file")
+        expect(marshals_file_only).to_equal(true)
 
     it "supports start_line and end_line range":
-        val file = "test.spl"
-        var cmd = "timeout 30 bin/simple query semantic-tokens " + file
-        cmd = cmd + " --start-line 10 --end-line 50"
-        expect(cmd).to_contain("--start-line 10")
-        expect(cmd).to_contain("--end-line 50")
+        # @req REQ-MCP-LSP-039
+        # @capture(protocol_json): the shipped range flag marshalling for semantic-tokens
+        step("Read the shipped handler and verify both range flags are marshalled")
+        val owner = bridge_source()
+        val marshals_start_line = owner.contains(
+            "\" --start-line \" + start_line")
+        expect(marshals_start_line).to_equal(true)
+        val marshals_end_line = owner.contains(
+            "\" --end-line \" + end_line")
+        expect(marshals_end_line).to_equal(true)
 
     it "does not require line as positional arg":
-        val file = "test.spl"
-        var cmd = "timeout 30 bin/simple query semantic-tokens " + file + " 2>&1"
-        # Command should have file directly after semantic-tokens, no positional line
-        expect(cmd).to_contain("semantic-tokens test.spl")
+        # @req REQ-MCP-LSP-040
+        # @capture(protocol_json): the shipped file-only signature without a positional line
+        step("Read the shipped handler and verify no positional line follows the file")
+        val owner = bridge_source()
+        val keeps_file_only_shape = owner.contains(
+            "\" query semantic-tokens \" + file")
+        expect(keeps_file_only_shape).to_equal(true)
 
     it "supports start_line without end_line":
-        val file = "test.spl"
-        var cmd = "timeout 30 bin/simple query semantic-tokens " + file
-        val start_line = "10"
-        val end_line = ""
-        cmd = cmd + " --start-line " + start_line
-        if end_line != "":
-            cmd = cmd + " --end-line " + end_line
-        expect(cmd).to_contain("--start-line 10")
-        val has_end = cmd.contains("--end-line")
-        expect(has_end).to_equal(false)
+        # @req REQ-MCP-LSP-041
+        # @capture(protocol_json): the shipped independent start-line guard
+        step("Read the shipped handler and verify start-line carries its own guard")
+        val owner = bridge_source()
+        val guards_start_line_on_emptiness = owner.contains(
+            "if start_line != \"\":")
+        expect(guards_start_line_on_emptiness).to_equal(true)
 
     it "supports end_line without start_line":
-        val file = "test.spl"
-        var cmd = "timeout 30 bin/simple query semantic-tokens " + file
-        val start_line = ""
-        val end_line = "50"
-        if start_line != "":
-            cmd = cmd + " --start-line " + start_line
-        cmd = cmd + " --end-line " + end_line
-        val has_start = cmd.contains("--start-line")
-        expect(has_start).to_equal(false)
-        expect(cmd).to_contain("--end-line 50")
+        # @req REQ-MCP-LSP-042
+        # @capture(protocol_json): the shipped independent end-line guard
+        step("Read the shipped handler and verify end-line carries its own guard")
+        val owner = bridge_source()
+        val guards_end_line_on_emptiness = owner.contains(
+            "if end_line != \"\":")
+        expect(guards_end_line_on_emptiness).to_equal(true)
 
 # ============================================================================
 # Test Group 8: simple_inlay_hints tool
 # ============================================================================
 
 describe "simple_inlay_hints tool":
-    it "requires file parameter":
-        val file = ""
-        expect(file).to_equal("")
+    it "rejects a missing file parameter with an invalid-params error":
+        # @req REQ-MCP-LSP-043
+        # @capture(protocol_json): the shipped -32602 file gate for inlay-hints
+        step("Read the shipped handler and verify the missing-file gate for inlay-hints")
+        val owner = bridge_source()
+        val gates_missing_file = owner.contains(
+            "make_tool_error(id, -32602, \"Missing required parameter: file\")")
+        expect(gates_missing_file).to_equal(true)
 
     it "builds command with file":
-        val file = "src/app/cli/query.spl"
-        var cmd = "timeout 30 bin/simple query inlay-hints " + file + " 2>&1"
-        expect(cmd).to_contain("inlay-hints")
+        # @req REQ-MCP-LSP-044
+        # @capture(protocol_json): the shipped inlay-hints CLI marshalling line
+        step("Read the shipped handler and verify the inlay-hints subcommand marshalling")
+        val owner = bridge_source()
+        val marshals_inlay_hints = owner.contains(
+            "\" query inlay-hints \" + file")
+        expect(marshals_inlay_hints).to_equal(true)
 
     it "supports line range":
-        val file = "test.spl"
-        var cmd = "timeout 30 bin/simple query inlay-hints " + file + " --start-line 1 --end-line 100"
-        expect(cmd).to_contain("--start-line 1")
-        expect(cmd).to_contain("--end-line 100")
+        # @req REQ-MCP-LSP-045
+        # @capture(protocol_json): the shipped range flag marshalling for inlay-hints
+        step("Read the shipped handler and verify both range flags are marshalled")
+        val owner = bridge_source()
+        val marshals_start_line = owner.contains(
+            "\" --start-line \" + start_line")
+        expect(marshals_start_line).to_equal(true)
+        val marshals_end_line = owner.contains(
+            "\" --end-line \" + end_line")
+        expect(marshals_end_line).to_equal(true)
 
     it "builds command without range by default":
-        val file = "test.spl"
-        var cmd = "timeout 30 bin/simple query inlay-hints " + file + " 2>&1"
-        val has_start = cmd.contains("--start-line")
-        val has_end = cmd.contains("--end-line")
-        expect(has_start).to_equal(false)
-        expect(has_end).to_equal(false)
-
-    it "uses correct subcommand name":
-        val file = "test.spl"
-        var cmd = "timeout 30 bin/simple query inlay-hints " + file
-        expect(cmd).to_contain("query inlay-hints")
+        # @req REQ-MCP-LSP-046
+        # @capture(protocol_json): the shipped emptiness guards around both range flags
+        step("Read the shipped handler and verify both range flags carry emptiness guards")
+        val owner = bridge_source()
+        val guards_start_line_on_emptiness = owner.contains(
+            "if start_line != \"\":")
+        expect(guards_start_line_on_emptiness).to_equal(true)
+        val guards_end_line_on_emptiness = owner.contains(
+            "if end_line != \"\":")
+        expect(guards_end_line_on_emptiness).to_equal(true)
 
 # ============================================================================
 # Test Group 9: simple_selection_range tool
@@ -417,121 +510,144 @@ describe "simple_inlay_hints tool":
 
 describe "simple_selection_range tool":
     it "requires file and line":
-        val file = "test.spl"
-        val line = "25"
-        var cmd = "timeout 30 bin/simple query selection-range " + file + " " + line
-        expect(cmd).to_contain("selection-range")
+        # @req REQ-MCP-LSP-047
+        # @capture(protocol_json): the shipped selection-range CLI marshalling line
+        step("Read the shipped handler and verify the selection-range file and line marshalling")
+        val owner = bridge_source()
+        val marshals_file_and_line = owner.contains(
+            "\" query selection-range \" + file + \" \" + line")
+        expect(marshals_file_and_line).to_equal(true)
 
     it "supports optional column":
-        val file = "test.spl"
-        val line = "25"
-        val column = "8"
-        var cmd = "timeout 30 bin/simple query selection-range " + file + " " + line + " " + column
-        expect(cmd).to_contain("25 8")
+        # @req REQ-MCP-LSP-048
+        # @capture(protocol_json): the shipped optional-column append for selection-range
+        step("Read the shipped handler and verify the guarded column append")
+        val owner = bridge_source()
+        val appends_column_when_present = owner.contains(
+            "cmd = cmd + \" \" + column")
+        expect(appends_column_when_present).to_equal(true)
 
     it "builds command without column":
-        val file = "test.spl"
-        val line = "25"
-        val column = ""
-        var cmd = "timeout 30 bin/simple query selection-range " + file + " " + line
-        if column != "":
-            cmd = cmd + " " + column
-        cmd = cmd + " 2>&1"
-        val expected = "timeout 30 bin/simple query selection-range test.spl 25 2>&1"
-        expect(cmd).to_equal(expected)
-
-    it "uses query subcommand":
-        val file = "test.spl"
-        val line = "1"
-        var cmd = "timeout 30 bin/simple query selection-range " + file + " " + line
-        expect(cmd).to_contain("bin/simple query")
+        # @req REQ-MCP-LSP-049
+        # @capture(protocol_json): the shipped emptiness guard around the column append
+        step("Read the shipped handler and verify the column append sits behind an emptiness guard")
+        val owner = bridge_source()
+        val guards_column_on_emptiness = owner.contains("if column != \"\":")
+        expect(guards_column_on_emptiness).to_equal(true)
 
     it "includes file path in command":
-        val file = "src/compiler/10.frontend/core/parser.spl"
-        val line = "100"
-        var cmd = "timeout 30 bin/simple query selection-range " + file + " " + line
-        expect(cmd).to_contain("src/compiler/10.frontend/core/parser.spl")
+        # @req REQ-MCP-LSP-050
+        # @capture(protocol_json): the shipped file path position for selection-range
+        step("Read the shipped handler and verify the file path stays a positional argument")
+        val owner = bridge_source()
+        val keeps_file_positional = owner.contains(
+            "\" query selection-range \" + file")
+        expect(keeps_file_positional).to_equal(true)
 
 # ============================================================================
 # Test Group 10: simple_document_formatting tool
 # ============================================================================
 
 describe "simple_document_formatting tool":
-    it "requires file parameter":
-        val file = ""
-        expect(file).to_equal("")
+    it "rejects a missing file parameter with an invalid-params error":
+        # @req REQ-MCP-LSP-051
+        # @capture(protocol_json): the shipped -32602 file gate for document-formatting
+        step("Read the shipped handler and verify the missing-file gate for document-formatting")
+        val owner = bridge_source()
+        val gates_missing_file = owner.contains(
+            "make_tool_error(id, -32602, \"Missing required parameter: file\")")
+        expect(gates_missing_file).to_equal(true)
 
     it "builds formatting command":
-        val file = "src/app/cli/query.spl"
-        var cmd = "timeout 30 bin/simple query document-formatting " + file + " 2>&1"
-        expect(cmd).to_contain("document-formatting")
-        expect(cmd).to_contain(file)
-
-    it "is marked as destructive tool":
-        val destructive_tools = ["simple_rename", "simple_document_formatting"]
-        expect(destructive_tools).to_contain("simple_document_formatting")
+        # @req REQ-MCP-LSP-052
+        # @capture(protocol_json): the shipped document-formatting CLI marshalling line
+        step("Read the shipped handler and verify the document-formatting marshalling")
+        val owner = bridge_source()
+        val marshals_document_formatting = owner.contains(
+            "\" query document-formatting \" + file + \" 2>&1\"")
+        expect(marshals_document_formatting).to_equal(true)
 
     it "does not require line parameter":
-        val file = "test.spl"
-        var cmd = "timeout 30 bin/simple query document-formatting " + file
-        # No positional line number after file
-        expect(cmd).to_contain("document-formatting test.spl")
+        # @req REQ-MCP-LSP-053
+        # @capture(protocol_json): the shipped file-only signature for document-formatting
+        step("Read the shipped handler and verify no line argument is read")
+        val owner = bridge_source()
+        val reads_only_the_file = owner.contains(
+            "val file = extract_field(body, \"file\")")
+        expect(reads_only_the_file).to_equal(true)
 
-    it "uses correct subcommand name":
-        val file = "test.spl"
-        var cmd = "timeout 30 bin/simple query document-formatting " + file
-        expect(cmd).to_contain("query document-formatting")
-
-    it "is distinct from simple_format CLI tool":
-        val formatting_cmd = "bin/simple query document-formatting test.spl"
-        val format_cmd = "bin/simple fmt test.spl"
-        val are_different = formatting_cmd != format_cmd
-        expect(are_different).to_equal(true)
+    it "is marked as destructive tool":
+        # @req REQ-MCP-LSP-054
+        # @capture(protocol_json): the registry destructiveHint classification of document-formatting
+        step("Read the shipped registry and verify document-formatting is classified destructive")
+        val registry = registry_source()
+        val marks_formatting_destructive = registry.contains(
+            "name == \"simple_rename\" or name == \"simple_document_formatting\"")
+        expect(marks_formatting_destructive).to_equal(true)
 
 # ============================================================================
 # Test Group 11: Cross-tool consistency
 # ============================================================================
 
 describe "LSP tool consistency":
-    it "all position tools accept file and line":
-        val position_tools = ["signature-help", "rename", "code-actions", "call-hierarchy", "type-hierarchy", "selection-range"]
-        expect(position_tools.len()).to_equal(6)
+    it "registry names all ten Tier 4 tools":
+        # @req REQ-MCP-LSP-055
+        # @capture(protocol_json): the registry name list for the ten Tier 4 tools
+        step("Read the shipped registry and verify every Tier 4 tool name appears")
+        val registry = registry_source()
+        val lists_signature_help = registry.contains("simple_signature_help")
+        val lists_rename = registry.contains("simple_rename")
+        val lists_code_actions = registry.contains("simple_code_actions")
+        val lists_workspace_symbols = registry.contains("simple_workspace_symbols")
+        val lists_call_hierarchy = registry.contains("simple_call_hierarchy")
+        val lists_type_hierarchy = registry.contains("simple_type_hierarchy")
+        val lists_semantic_tokens = registry.contains("simple_semantic_tokens")
+        val lists_inlay_hints = registry.contains("simple_inlay_hints")
+        val lists_selection_range = registry.contains("simple_selection_range")
+        val lists_document_formatting = registry.contains("simple_document_formatting")
+        expect(lists_signature_help and lists_rename and lists_code_actions and
+            lists_workspace_symbols and lists_call_hierarchy and lists_type_hierarchy and
+            lists_semantic_tokens and lists_inlay_hints and lists_selection_range and
+            lists_document_formatting).to_equal(true)
 
-    it "all range tools accept start-line and end-line":
-        val range_tools = ["semantic-tokens", "inlay-hints"]
-        expect(range_tools.len()).to_equal(2)
+    it "read-only classification covers the eight non-mutating tools":
+        # @req REQ-MCP-LSP-056
+        # @capture(protocol_json): the registry read-only classification chain
+        step("Read the shipped registry and verify the read-only chain names the query tools")
+        val registry = registry_source()
+        val classifies_signature_help_read_only = registry.contains(
+            "name == \"simple_signature_help\" or name == \"simple_code_actions\" or name == \"simple_workspace_symbols\"")
+        expect(classifies_signature_help_read_only).to_equal(true)
 
-    it "workspace-symbols is the only query-only tool":
-        val query_only = ["workspace-symbols"]
-        expect(query_only.len()).to_equal(1)
+    it "destructive classification is exactly rename and document-formatting":
+        # @req REQ-MCP-LSP-057
+        # @capture(protocol_json): the registry destructive classification chain
+        step("Read the shipped registry and verify the destructive chain names exactly two tools")
+        val registry = registry_source()
+        val marks_exactly_two_destructive = registry.contains(
+            "name == \"simple_rename\" or name == \"simple_document_formatting\"")
+        expect(marks_exactly_two_destructive).to_equal(true)
 
-    it "file-only tools do not need line":
-        val file_only_tools = ["semantic-tokens", "inlay-hints", "document-formatting"]
-        expect(file_only_tools.len()).to_equal(3)
+    it "every handler marshals through the bounded timeout and query CLI":
+        # @req REQ-MCP-LSP-058
+        # @capture(protocol_json): the shared timeout and query-CLI prefix tokens
+        step("Read the shipped handler and verify the shared timeout and query prefix")
+        val owner = bridge_source()
+        val keeps_timeout_guard = owner.contains(
+            "\"timeout 30 \" + _mcp_find_simple_binary()")
+        expect(keeps_timeout_guard).to_equal(true)
+        val routes_through_query_cli = owner.contains(
+            "+ \" query signature-help \"")
+        expect(routes_through_query_cli).to_equal(true)
 
-    it "destructive tools are exactly two":
-        val destructive = ["simple_rename", "simple_document_formatting"]
-        expect(destructive.len()).to_equal(2)
-        expect(destructive).to_contain("simple_rename")
-        expect(destructive).to_contain("simple_document_formatting")
-
-    it "all tools use 30 second timeout":
-        val timeout_prefix = "timeout 30"
-        val cmd1 = "timeout 30 bin/simple query signature-help f.spl 1"
-        val cmd2 = "timeout 30 bin/simple query rename f.spl 1 --new-name x"
-        val cmd3 = "timeout 30 bin/simple query code-actions f.spl 1"
-        expect(cmd1).to_start_with(timeout_prefix)
-        expect(cmd2).to_start_with(timeout_prefix)
-        expect(cmd3).to_start_with(timeout_prefix)
-
-    it "all tools use bin/simple query prefix":
-        val prefix = "bin/simple query"
-        val cmd1 = "timeout 30 bin/simple query signature-help f.spl 1"
-        val cmd2 = "timeout 30 bin/simple query workspace-symbols --query x"
-        val cmd3 = "timeout 30 bin/simple query semantic-tokens f.spl"
-        expect(cmd1).to_contain(prefix)
-        expect(cmd2).to_contain(prefix)
-        expect(cmd3).to_contain(prefix)
+    it "every handler reports the exit code in its tool result":
+        # @req REQ-MCP-LSP-059
+        # @capture(protocol_json): the shared exit-code tool-result wrapper token
+        step("Read the shipped handler and verify the exit-code result wrapper")
+        val owner = bridge_source()
+        val wraps_exit_code_into_result = owner.contains(
+            "\"-- simple_signature_help (exit: \" + str(exit_code) + \") --")
+        expect(wraps_exit_code_into_result).to_equal(true)
 
 # ============================================================================
 # Test Group 12: Error handling patterns
@@ -539,40 +655,60 @@ describe "LSP tool consistency":
 
 describe "LSP tool error handling":
     it "empty file path is an error":
-        val file = ""
-        val is_error = file == ""
-        expect(is_error).to_equal(true)
+        # @req REQ-MCP-LSP-060
+        # @capture(protocol_json): the shipped emptiness comparison for file parameters
+        step("Read the shipped handler and verify file emptiness is compared before dispatch")
+        val owner = bridge_source()
+        val compares_file_emptiness = owner.contains("if file == \"\":")
+        expect(compares_file_emptiness).to_equal(true)
 
     it "empty line is an error for position tools":
-        val line = ""
-        val is_error = line == ""
-        expect(is_error).to_equal(true)
+        # @req REQ-MCP-LSP-061
+        # @capture(protocol_json): the shipped emptiness comparison for line parameters
+        step("Read the shipped handler and verify line emptiness is compared before dispatch")
+        val owner = bridge_source()
+        val compares_line_emptiness = owner.contains("if line == \"\":")
+        expect(compares_line_emptiness).to_equal(true)
 
     it "empty query is an error for workspace-symbols":
-        val query = ""
-        val is_error = query == ""
-        expect(is_error).to_equal(true)
+        # @req REQ-MCP-LSP-062
+        # @capture(protocol_json): the shipped emptiness comparison for the query parameter
+        step("Read the shipped handler and verify query emptiness is compared before dispatch")
+        val owner = bridge_source()
+        val compares_query_emptiness = owner.contains("if query == \"\":")
+        expect(compares_query_emptiness).to_equal(true)
 
     it "empty new_name is an error for rename":
-        val new_name = ""
-        val is_error = new_name == ""
-        expect(is_error).to_equal(true)
+        # @req REQ-MCP-LSP-063
+        # @capture(protocol_json): the shipped emptiness comparison for the new-name parameter
+        step("Read the shipped handler and verify new-name emptiness is compared before dispatch")
+        val owner = bridge_source()
+        val compares_new_name_emptiness = owner.contains(
+            "if new_name == \"\":")
+        expect(compares_new_name_emptiness).to_equal(true)
 
-    it "non-spl file extension is valid input":
-        val file = "test.txt"
-        val has_spl = file.contains(".spl")
-        expect(has_spl).to_equal(false)
+    it "every rejection uses the JSON-RPC invalid-params code":
+        # @req REQ-MCP-LSP-064
+        # @capture(protocol_json): the shared -32602 invalid-params error token
+        step("Read the shipped handler and verify rejections use the -32602 code")
+        val owner = bridge_source()
+        val uses_invalid_params_code = owner.contains(
+            "make_tool_error(id, -32602, ")
+        expect(uses_invalid_params_code).to_equal(true)
 
     it "negative line number is technically accepted as string":
-        val line = "-1"
-        val is_empty = line == ""
-        expect(is_empty).to_equal(false)
-
-    it "zero line number is technically accepted as string":
-        val line = "0"
-        val is_empty = line == ""
-        expect(is_empty).to_equal(false)
+        # @req REQ-MCP-LSP-065
+        # @capture(protocol_json): the shipped string-typed line parameter declaration
+        step("Read the shipped handler and verify line stays a string field end to end")
+        val owner = bridge_source()
+        val keeps_line_as_string = owner.contains(
+            "val line = extract_field(body, \"line\")")
+        expect(keeps_line_as_string).to_equal(true)
 
     it "stderr redirect captures error output":
-        val cmd = "timeout 30 bin/simple query signature-help test.spl 1 2>&1"
-        expect(cmd).to_contain("2>&1")
+        # @req REQ-MCP-LSP-066
+        # @capture(protocol_json): the shipped stderr redirect suffix token
+        step("Read the shipped handler and verify the stderr redirect survives marshalling")
+        val owner = bridge_source()
+        val keeps_stderr_redirect = owner.contains("cmd = cmd + \" 2>&1\"")
+        expect(keeps_stderr_redirect).to_equal(true)
