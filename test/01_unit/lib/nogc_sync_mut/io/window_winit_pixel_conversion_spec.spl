@@ -1,0 +1,41 @@
+# Winit packed-pixel conversion: pure checks without a native display.
+# The 4K latency/RSS target still requires a real presentation benchmark.
+use std.spec.{describe, it, expect}
+use std.io_runtime.{file_read}
+use std.nogc_sync_mut.io.window_winit.{winit_rgba_to_native_pixels}
+
+describe "Winit preallocated native pixel conversion":
+    it "accepts an empty pixel buffer":
+        val empty: [i64] = []
+        val actual = winit_rgba_to_native_pixels(empty)
+        expect(actual.len()).to_equal(0)
+
+    it "preserves packed channels and pixel order without mutating input":
+        val pixels: [i64] = [0, 0xFF0000FF, 0x00FF0080, 0x0000FFFF, 0xFFFFFFFF]
+        val actual = winit_rgba_to_native_pixels(pixels)
+        val expected: [u32] = [0u32, 0xFF0000FFu32, 0x00FF0080u32, 0x0000FFFFu32, 0xFFFFFFFFu32]
+        expect(actual).to_equal(expected)
+        expect(pixels[1]).to_equal(0xFF0000FF)
+        expect(pixels.len()).to_equal(5)
+
+    it "keeps the prior narrowing behavior for signed and wide inputs":
+        val pixels: [i64] = [-1, 0x100000000, 0x100000001, 0x7FFFFFFFFFFFFFFF]
+        val actual = winit_rgba_to_native_pixels(pixels)
+        val expected: [u32] = [0xFFFFFFFFu32, 0u32, 1u32, 0xFFFFFFFFu32]
+        expect(actual).to_equal(expected)
+
+    it "fills the final pixel of a multirow frame":
+        var pixels: [i64] = [0x12345678; 3840 * 2]
+        pixels[3839] = 0x87654321
+        pixels[7679] = 0xFFEEDDCC
+        val actual = winit_rgba_to_native_pixels(pixels)
+        expect(actual.len()).to_equal(7680)
+        expect(actual[0]).to_equal(0x12345678u32)
+        expect(actual[3839]).to_equal(0x87654321u32)
+        expect(actual[3840]).to_equal(0x12345678u32)
+        expect(actual[7679]).to_equal(0xFFEEDDCCu32)
+
+    it "keeps a direct u32 presentation entrypoint for renderer framebuffers":
+        val source = file_read("src/lib/nogc_sync_mut/io/window_winit.spl")
+        expect(source).to_contain("fn winit_present_rgba_u32")
+        expect(source).to_contain("rt_write_u32s_to_raw(staging, pixels)")

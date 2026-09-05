@@ -11,6 +11,11 @@
 # - _build_request: build a BrowserRequest with cookie header attached
 
 use std.gc_async_mut.gpu.browser_engine.browser_renderer.{BrowserRenderer, BeRenderResult}
+
+pub struct BrowserDomPresentationAttribute:
+    route: DomNodeRoute
+    name: text
+    value: text?
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
     simple_web_layout_reconcile_animation_instances
 }
@@ -1606,6 +1611,35 @@ impl BrowserSession:
                 self.current_dom, candidate
             )
         self._publish_runtime_body_candidate(candidate, structural)
+
+    me apply_dom_presentation_attributes(
+        updates: [BrowserDomPresentationAttribute]
+    ) -> Result<bool, text>:
+        """Atomically publish bounded, nonstructural native accessibility state."""
+        if updates.len() == 0:
+            return Ok(false)
+        if updates.len() > 128:
+            return Err("too-many-presentation-attributes")
+        val index = self._live_dom_index_for_route(updates[0].route)?
+        # Validate the whole batch before changing any owner. Identity/form
+        # attributes are deliberately excluded because they need reindexing.
+        for update in updates:
+            val _ = self._live_dom_index_for_route(update.route)?
+            if (update.name != "aria-selected" and update.name != "tabindex" and
+                update.name != "hidden"):
+                return Err("unsupported-presentation-attribute")
+            if val Some(value) = update.value:
+                if (value != "true" and value != "false" and value != "0" and
+                    value != "-1" and value != "hidden"):
+                    return Err("invalid-presentation-attribute-value")
+        var candidate = self.current_dom
+        for update in updates:
+            val action = match update.value:
+                Some(value): "set-attr:" + update.name + "=" + value
+                nil: "remove-attr:" + update.name
+            candidate = script_host_apply_action_to_route(
+                candidate, index, update.route, action, false, false)
+        self._publish_runtime_body_candidate(candidate, false)
 
     me _rollback_checkable_preactivation(
         route: DomNodeRoute, checked_before: bool,
