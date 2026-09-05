@@ -1,5 +1,24 @@
-# @req REQ-SPKC-039
-# S1-E acceptance spec: edge construction, sort, endpoint validation.
+"""
+## Purpose and audience
+Documents the S1-E acceptance surface for `app.spipe.model.edge` — edge
+record construction, endpoint validation, sort key ordering, and
+duplicate-edge-type detection — for engineers maintaining the
+spipe_knowledge_compiler graph model.
+## Operator workflow
+bin/simple test test/01_unit/app/spipe/model_edge_spec.spl
+## Compatibility and limitations
+Runs under the pure-Simple interpreter test runner; no filesystem, network,
+or platform-specific dependency.
+## Verification guidance and troubleshooting
+A failure means either the edge type name table, the endpoint validation
+rule, the sort key, or the duplicate-type guard changed. Check which
+scenario failed to localize which of the four.
+"""
+# Lifecycle: doc/01_research/infra/spipe/spipe_knowledge_compiler.md ;
+# doc/03_plan/infra/spipe/spipe_knowledge_compiler_refined_plan.md ;
+# doc/04_architecture/infra/spipe/spipe_knowledge_compiler.md ;
+# doc/05_design/infra/spipe/spipe_knowledge_compiler.md
+# @manual_section: edge-model
 
 use std.spec.{describe, it, expect}
 use app.spipe.model.types.{EdgeType, EdgeOrigin, EdgeStatus, EdgeRecord, SourceRange, LinkForm}
@@ -14,13 +33,17 @@ fn _range(path: text) -> SourceRange:
 
 describe("spipe edge type name mapping"):
     it("round-trips every one of the 19 edge type names"):
+        # @req REQ-SPKC-039
+        step("List all 19 canonical edge type names")
         val names = [
             "contains", "classifies", "evidence_for", "derives", "satisfies",
             "realizes", "schedules", "specifies", "implements", "verifies",
             "covers", "produces", "links_to", "aliases", "supersedes",
             "extends", "promoted_from", "depends_on", "mounted_as"
         ]
-        expect(names.len()).to_equal(19)
+        expect(names.len()).to_equal(19)  # oracle: the edge type enum has exactly 19 variants
+        step("Round-trip each name through from_text/to_text")
+        # @capture(statistics): count of names that round-trip successfully
         var i = 0
         while i < names.len():
             val t = edge_type_from_text(names[i]).unwrap()
@@ -28,43 +51,58 @@ describe("spipe edge type name mapping"):
             i = i + 1
 
     it("rejects an unknown edge type name"):
+        step("Look up a name that is not in the canonical edge type table")
         val result = edge_type_from_text("not_a_real_type")
+        # @capture(statistics): is_err() outcome for an unknown edge type name
         expect(result.is_err()).to_equal(true)
 
 describe("spipe edge construction"):
     it("constructs a valid links_to edge with a source_range"):
+        step("Construct a links_to edge between two distinct nodes with a source_range")
         val e = create_edge_record("E-1", EdgeType.LinksTo, "A-1", "A-2",
             EdgeOrigin.Explicit, EdgeStatus.Accepted, Some(_range("doc/a.md")))
+        # @capture(statistics): is_ok() outcome for a valid links_to construction
         expect(e.is_ok()).to_equal(true)
 
     it("rejects a bad-endpoint construction: self-loop on a non-links_to type"):
+        step("Construct a Contains edge whose from_uid and to_uid are identical")
         val e = create_edge_record("E-1", EdgeType.Contains, "A-1", "A-1",
             EdgeOrigin.Explicit, EdgeStatus.Accepted, None)
+        # @capture(statistics): is_err() outcome for a non-links_to self-loop
         expect(e.is_err()).to_equal(true)
 
     it("allows a links_to self-loop (a document linking to its own heading)"):
+        step("Construct a links_to edge whose from_uid and to_uid are identical")
         val e = create_edge_record("E-1", EdgeType.LinksTo, "A-1", "A-1",
             EdgeOrigin.Explicit, EdgeStatus.Accepted, Some(_range("doc/a.md")))
+        # @capture(statistics): is_ok() outcome for a links_to self-loop
         expect(e.is_ok()).to_equal(true)
 
     it("rejects a links_to edge with no source_range"):
+        step("Construct a links_to edge and omit its source_range")
         val e = create_edge_record("E-1", EdgeType.LinksTo, "A-1", "A-2",
             EdgeOrigin.Explicit, EdgeStatus.Accepted, None)
+        # @capture(statistics): is_err() outcome for a links_to edge missing a source_range
         expect(e.is_err()).to_equal(true)
 
     it("rejects an empty uid"):
+        step("Construct an edge with an empty uid string")
         val e = create_edge_record("", EdgeType.Contains, "A-1", "A-2",
             EdgeOrigin.Explicit, EdgeStatus.Accepted, None)
+        # @capture(statistics): is_err() outcome for an empty uid
         expect(e.is_err()).to_equal(true)
 
 describe("spipe edge sort"):
     it("sorts edges by (from_uid, edge_type, to_uid, uid) lexically"):
+        step("Construct three edges out of sort order")
         val e1 = create_edge_record("E-2", EdgeType.Contains, "A-2", "A-3",
             EdgeOrigin.Explicit, EdgeStatus.Accepted, None).unwrap()
         val e2 = create_edge_record("E-1", EdgeType.Contains, "A-1", "A-2",
             EdgeOrigin.Explicit, EdgeStatus.Accepted, None).unwrap()
         val e3 = create_edge_record("E-3", EdgeType.Classifies, "A-1", "A-9",
             EdgeOrigin.Explicit, EdgeStatus.Accepted, None).unwrap()
+        step("Sort the edges and check the resulting uid order")
+        # @capture(protocol_json): sorted edge uid sequence
         val sorted = sort_edges([e1, e2, e3])
         expect(sorted[0].uid).to_equal("E-3")
         expect(sorted[1].uid).to_equal("E-1")
@@ -72,17 +110,23 @@ describe("spipe edge sort"):
 
 describe("spipe duplicate edge type detection"):
     it("rejects a duplicate-edge-type construction between the same endpoints"):
+        step("Construct two Contains edges between the same two endpoints")
         val e1 = create_edge_record("E-1", EdgeType.Contains, "A-1", "A-2",
             EdgeOrigin.Explicit, EdgeStatus.Accepted, None).unwrap()
         val e2 = create_edge_record("E-2", EdgeType.Contains, "A-1", "A-2",
             EdgeOrigin.Explicit, EdgeStatus.Accepted, None).unwrap()
+        step("Validate the pair and check the duplicate is rejected")
+        # @capture(statistics): is_err() outcome for a duplicate edge-type pair
         val result = validate_no_duplicate_edge_types([e1, e2])
         expect(result.is_err()).to_equal(true)
 
     it("accepts distinct edge types between the same endpoints"):
+        step("Construct a Contains edge and a Classifies edge between the same two endpoints")
         val e1 = create_edge_record("E-1", EdgeType.Contains, "A-1", "A-2",
             EdgeOrigin.Explicit, EdgeStatus.Accepted, None).unwrap()
         val e2 = create_edge_record("E-2", EdgeType.Classifies, "A-1", "A-2",
             EdgeOrigin.Explicit, EdgeStatus.Accepted, None).unwrap()
+        step("Validate the pair and check distinct types are accepted")
+        # @capture(statistics): is_ok() outcome for a distinct-type pair
         val result = validate_no_duplicate_edge_types([e1, e2])
         expect(result.is_ok()).to_equal(true)
