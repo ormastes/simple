@@ -23,7 +23,7 @@ listed symbols before assuming a real regression.
 # doc-path: doc/03_plan/app/simpleos/simpleos_nodejs_ai_cli_migration.md
 # @manual_section SimpleOS Node.js AI CLI migration remains
 
-use std.spec.step
+use std.spec.{step}
 use std.spec.{describe, context, it, expect}
 use os.ai_cli_js_node_contract.{
     AiCliManifest, AiCliQemuLane,
@@ -37,6 +37,9 @@ use os.ai_cli_js_node_contract.{
     ai_cli_qemu_missing_markers,
     ai_cli_qemu_serial_accepts_lane
 }
+use std.nogc_sync_mut.io.file_ops.{file_read, file_exists}
+
+val posix_profiles_path = "doc/02_requirements/os/posix_profiles.md"
 
 describe "plan: app/simpleos/simpleos_nodejs_ai_cli_migration remains":
 
@@ -52,7 +55,7 @@ describe "plan: app/simpleos/simpleos_nodejs_ai_cli_migration remains":
             # already carries.
             val blocker = ai_cli_full_node_blocker()
             expect(blocker.contains("no-full-node-v8-libuv-artifact")).to_equal(true)
-            # evidence(assertion): the blocker substring check above is
+            # @capture(assertion): the blocker substring check above is
             # this scenario's evidence that file I/O syscalls remain
             # unaudited pending the same full-Node artifact.
 
@@ -61,7 +64,7 @@ describe "plan: app/simpleos/simpleos_nodejs_ai_cli_migration remains":
             # @req REQ-PLAN-AI-CLI-NODE-002
             val blocker = ai_cli_full_node_blocker()
             expect(blocker.contains("no-full-node-v8-libuv-artifact")).to_equal(true)
-            # evidence(assertion): same blocker check as above, scoped here
+            # @capture(assertion): same blocker check as above, scoped here
             # to the networking syscall group.
 
         it "poll (or select — libuv posix-poll.c needs one)":
@@ -69,7 +72,7 @@ describe "plan: app/simpleos/simpleos_nodejs_ai_cli_migration remains":
             # @req REQ-PLAN-AI-CLI-NODE-003
             val blocker = ai_cli_full_node_blocker()
             expect(blocker.contains("libuv-artifact")).to_equal(true)
-            # evidence(assertion): the blocker substring check above names
+            # @capture(assertion): the blocker substring check above names
             # libuv explicitly, the exact dependency this checkbox serves.
 
         it "pipe, dup2, fcntl (O_NONBLOCK, F_GETFL, F_SETFL)":
@@ -77,7 +80,7 @@ describe "plan: app/simpleos/simpleos_nodejs_ai_cli_migration remains":
             # @req REQ-PLAN-AI-CLI-NODE-004
             val blocker = ai_cli_full_node_blocker()
             expect(blocker.contains("no-full-node-v8-libuv-artifact")).to_equal(true)
-            # evidence(assertion): same shared blocker evidence, scoped to
+            # @capture(assertion): same shared blocker evidence, scoped to
             # this syscall group.
 
         it "mmap, mprotect, munmap (for QuickJS memory)":
@@ -85,7 +88,7 @@ describe "plan: app/simpleos/simpleos_nodejs_ai_cli_migration remains":
             # @req REQ-PLAN-AI-CLI-NODE-005
             val blocker = ai_cli_full_node_blocker()
             expect(blocker.contains("no-full-node-v8-libuv-artifact")).to_equal(true)
-            # evidence(assertion): same shared blocker evidence, scoped to
+            # @capture(assertion): same shared blocker evidence, scoped to
             # this syscall group.
 
         it "pthread_create, pthread_join, pthread_mutex_*, pthread_cond_*":
@@ -93,7 +96,7 @@ describe "plan: app/simpleos/simpleos_nodejs_ai_cli_migration remains":
             # @req REQ-PLAN-AI-CLI-NODE-006
             val blocker = ai_cli_full_node_blocker()
             expect(blocker.contains("libuv-artifact")).to_equal(true)
-            # evidence(assertion): same shared blocker evidence, scoped to
+            # @capture(assertion): same shared blocker evidence, scoped to
             # this syscall group.
 
         it "clock_gettime, nanosleep":
@@ -101,7 +104,7 @@ describe "plan: app/simpleos/simpleos_nodejs_ai_cli_migration remains":
             # @req REQ-PLAN-AI-CLI-NODE-007
             val blocker = ai_cli_full_node_blocker()
             expect(blocker.contains("no-full-node-v8-libuv-artifact")).to_equal(true)
-            # evidence(assertion): same shared blocker evidence, scoped to
+            # @capture(assertion): same shared blocker evidence, scoped to
             # this syscall group.
 
         it "getenv, getcwd, getpid, getuid":
@@ -109,19 +112,34 @@ describe "plan: app/simpleos/simpleos_nodejs_ai_cli_migration remains":
             # @req REQ-PLAN-AI-CLI-NODE-008
             val blocker = ai_cli_full_node_blocker()
             expect(blocker.contains("no-full-node-v8-libuv-artifact")).to_equal(true)
-            # evidence(assertion): same shared blocker evidence, scoped to
+            # @capture(assertion): same shared blocker evidence, scoped to
             # this syscall group.
 
         it "Document gaps as concrete implementation tasks":
-            step("count the 8 syscall groups enumerated above as the concrete gap inventory this checkbox requires")
+            step("read the POSIX honesty matrix this checkbox delivers and count its documented pthread gap rows, each of which must name an owning source file and an honest ENOSYS status")
             # @req REQ-PLAN-AI-CLI-NODE-009
-            # Real, checkable oracle: this file's own Phase 0 context
-            # enumerates exactly the 8 syscall groups the plan's "Minimum
-            # Syscall Surface Required" section lists as Phase 0 items.
-            var syscall_group_count = 8
-            expect(syscall_group_count).to_equal(8)  # oracle: doc's Phase 0 lists exactly 8 syscall-group checkboxes above this one
-            # evidence(assertion): the fixed group count above is this
-            # scenario's evidence.
+            # Real, tree-state oracle on the actual deliverable: the plan
+            # records this box as shipped as the POSIX honesty matrix
+            # doc/02_requirements/os/posix_profiles.md. A "documented gap" is
+            # only concrete if the row states BOTH the honest failure mode
+            # (ENOSYS) and the owning file; a row that merely names a call is
+            # not a task. Every value below is read out of that file.
+            expect(file_exists(posix_profiles_path)).to_equal(true)
+            val profiles = file_read(posix_profiles_path)
+            val required_pthread_rows = [
+                "pthread_create/join/detach",
+                "pthread mutex/rwlock/attr",
+                "pthread_cond_*",
+                "pthread_rwlock_*"
+            ]
+            var documented_gap_rows = 0u64
+            for row_name in required_pthread_rows:
+                for line in profiles.split("\n"):
+                    if line.contains(row_name) and line.contains("ENOSYS") and line.contains("src/os/libc/"):
+                        documented_gap_rows = documented_gap_rows + 1u64
+            expect(documented_gap_rows).to_equal(4u64)  # oracle: the plan's Phase 0 gap line cites four pthread_* row families in posix_profiles.md
+            # @capture(assertion): the matching honesty-matrix rows counted
+            # above are this scenario's retained evidence.
 
     context "Phase 1: QuickJS on SimpleOS":
 
@@ -137,7 +155,7 @@ describe "plan: app/simpleos/simpleos_nodejs_ai_cli_migration remains":
             # engine strategy; the profile function is the real oracle.
             val profile = bun_informed_simple_js_runtime_profile()
             expect(profile.js_engine_strategy.contains("quickjs")).to_equal(false)
-            # evidence(assertion): the real, already-shipped profile's
+            # @capture(assertion): the real, already-shipped profile's
             # js_engine_strategy field above is this scenario's evidence
             # that the plan's QuickJS decision has not been the path taken.
 
@@ -146,14 +164,14 @@ describe "plan: app/simpleos/simpleos_nodejs_ai_cli_migration remains":
             # @req REQ-PLAN-AI-CLI-NODE-011
             val blocker = ai_cli_full_node_blocker()
             expect(blocker.contains("no-full-node-v8-libuv-artifact")).to_equal(true)
-            # evidence(assertion): same shared blocker evidence.
+            # @capture(assertion): same shared blocker evidence.
 
         it "Verify: ES2023 features work (async/await, modules, generators)":
             step("re-check the shared full-Node blocker for the ES2023 feature-verification checkbox")
             # @req REQ-PLAN-AI-CLI-NODE-012
             val blocker = ai_cli_full_node_blocker()
             expect(blocker.contains("no-full-node-v8-libuv-artifact")).to_equal(true)
-            # evidence(assertion): same shared blocker evidence.
+            # @capture(assertion): same shared blocker evidence.
 
         it "Serial marker: [ai-cli] quickjs:hello target=<arch>":
             step("confirm no shipped CLI smoke manifest yet carries a quickjs:hello marker")
@@ -170,16 +188,16 @@ describe "plan: app/simpleos/simpleos_nodejs_ai_cli_migration remains":
                     found_quickjs_marker = true
                 i = i + 1u64
             expect(found_quickjs_marker).to_equal(false)
-            # evidence(assertion): the real scan of the shipped marker list
+            # @capture(assertion): the real scan of the shipped marker list
             # above is this scenario's evidence.
 
-        it "Binary size target: <2MB per arch":
-            step("pin the plan's own stated binary-size ceiling for the eventual QuickJS artifact")
-            # @req REQ-PLAN-AI-CLI-NODE-014
-            var binary_size_ceiling_mb = 2
-            expect(binary_size_ceiling_mb).to_equal(2)  # oracle: doc states "Binary size target: <2MB per arch"
-            # evidence(assertion): the fixed ceiling above is this
-            # scenario's evidence.
+        # "Binary size target: <2MB per arch" has NO observable oracle in this
+        # tree: no QuickJS artifact is built for any *-simpleos triple, and the
+        # plan names no output path, size-budget field or gate script to measure
+        # against — AiCliRuntimeProfile carries no size budget. Measuring a
+        # nonexistent binary against a path we invented would be a fabricated
+        # test, so it is recorded in
+        # scripts/check/plan_acceptance_exemptions.txt instead.
 
     context "Phase 2: libuv Port":
 
@@ -188,56 +206,56 @@ describe "plan: app/simpleos/simpleos_nodejs_ai_cli_migration remains":
             # @req REQ-PLAN-AI-CLI-NODE-015
             val blocker = ai_cli_full_node_blocker()
             expect(blocker.contains("libuv-artifact")).to_equal(true)
-            # evidence(assertion): same shared blocker evidence.
+            # @capture(assertion): same shared blocker evidence.
 
         it "Use posix-poll.c backend, disable epoll/kqueue":
             step("re-check the shared full-Node blocker for the posix-poll backend checkbox")
             # @req REQ-PLAN-AI-CLI-NODE-016
             val blocker = ai_cli_full_node_blocker()
             expect(blocker.contains("libuv-artifact")).to_equal(true)
-            # evidence(assertion): same shared blocker evidence.
+            # @capture(assertion): same shared blocker evidence.
 
         it "Build flags: -U__linux__ -DSIMPLEOS":
             step("re-check the shared full-Node blocker for the libuv build-flag checkbox")
             # @req REQ-PLAN-AI-CLI-NODE-017
             val blocker = ai_cli_full_node_blocker()
             expect(blocker.contains("libuv-artifact")).to_equal(true)
-            # evidence(assertion): same shared blocker evidence.
+            # @capture(assertion): same shared blocker evidence.
 
         it "Stub non-critical: uv_interface_addresses -> UV_ENOSYS":
             step("re-check the shared full-Node blocker for the uv_interface_addresses stub checkbox")
             # @req REQ-PLAN-AI-CLI-NODE-018
             val blocker = ai_cli_full_node_blocker()
             expect(blocker.contains("libuv-artifact")).to_equal(true)
-            # evidence(assertion): same shared blocker evidence.
+            # @capture(assertion): same shared blocker evidence.
 
         it "Stub non-critical: uv_resident_set_memory -> 0":
             step("re-check the shared full-Node blocker for the uv_resident_set_memory stub checkbox")
             # @req REQ-PLAN-AI-CLI-NODE-019
             val blocker = ai_cli_full_node_blocker()
             expect(blocker.contains("libuv-artifact")).to_equal(true)
-            # evidence(assertion): same shared blocker evidence.
+            # @capture(assertion): same shared blocker evidence.
 
         it "Real impl: uv_exepath, uv_uptime, uv_hrtime, uv_cpu_info":
             step("re-check the shared full-Node blocker for the four real-impl libuv functions")
             # @req REQ-PLAN-AI-CLI-NODE-020
             val blocker = ai_cli_full_node_blocker()
             expect(blocker.contains("libuv-artifact")).to_equal(true)
-            # evidence(assertion): same shared blocker evidence.
+            # @capture(assertion): same shared blocker evidence.
 
         it "Thread pool: verify pthreads work under SimpleOS":
             step("re-check the shared full-Node blocker for the libuv thread-pool verification checkbox")
             # @req REQ-PLAN-AI-CLI-NODE-021
             val blocker = ai_cli_full_node_blocker()
             expect(blocker.contains("libuv-artifact")).to_equal(true)
-            # evidence(assertion): same shared blocker evidence.
+            # @capture(assertion): same shared blocker evidence.
 
         it "Test: uv_run event loop spins, timer fires, TCP connect works":
             step("re-check the shared full-Node blocker for the uv_run event-loop test checkbox")
             # @req REQ-PLAN-AI-CLI-NODE-022
             val blocker = ai_cli_full_node_blocker()
             expect(blocker.contains("libuv-artifact")).to_equal(true)
-            # evidence(assertion): same shared blocker evidence.
+            # @capture(assertion): same shared blocker evidence.
 
         it "Serial marker: [ai-cli] libuv:ready target=<arch>":
             step("confirm no shipped CLI smoke manifest yet carries a libuv:ready marker")
@@ -250,7 +268,7 @@ describe "plan: app/simpleos/simpleos_nodejs_ai_cli_migration remains":
                     found_libuv_marker = true
                 i = i + 1u64
             expect(found_libuv_marker).to_equal(false)
-            # evidence(assertion): the real scan of the shipped marker list
+            # @capture(assertion): the real scan of the shipped marker list
             # above is this scenario's evidence.
 
     context "Phase 3: Node.js Compat Layer":
@@ -269,7 +287,7 @@ describe "plan: app/simpleos/simpleos_nodejs_ai_cli_migration remains":
                     found_node_compat_marker = true
                 i = i + 1u64
             expect(found_node_compat_marker).to_equal(false)
-            # evidence(assertion): the real scan of the shipped marker list
+            # @capture(assertion): the real scan of the shipped marker list
             # above is this scenario's evidence.
 
     context "Phase 4: CLI Bundle + Smoke Test — Claude Code":
@@ -281,7 +299,7 @@ describe "plan: app/simpleos/simpleos_nodejs_ai_cli_migration remains":
             # names the exact entry path an esbuild bundle must produce.
             val manifest = claude_cli_smoke_manifest()
             expect(manifest.entry_path).to_equal("/sys/apps/claude/claude.js")
-            # evidence(assertion): the real entry_path field above is this
+            # @capture(assertion): the real entry_path field above is this
             # scenario's evidence for the bundle target this checkbox
             # promises.
 
@@ -290,7 +308,7 @@ describe "plan: app/simpleos/simpleos_nodejs_ai_cli_migration remains":
             # @req REQ-PLAN-AI-CLI-NODE-026
             val manifest = claude_cli_smoke_manifest()
             expect(manifest.process_grants.contains("simple")).to_equal(true)
-            # evidence(assertion): the real process_grants field above is
+            # @capture(assertion): the real process_grants field above is
             # this scenario's evidence.
 
         it "Test: claude --version prints version string":
@@ -300,7 +318,7 @@ describe "plan: app/simpleos/simpleos_nodejs_ai_cli_migration remains":
             # this exact invocation.
             val manifest = claude_cli_smoke_manifest()
             expect(manifest.args).to_equal(["--version"])
-            # evidence(assertion): the real args field above is this
+            # @capture(assertion): the real args field above is this
             # scenario's evidence.
 
         it "Serial marker: [ai-cli] cli-smoke:start app=claude":
@@ -318,7 +336,7 @@ describe "plan: app/simpleos/simpleos_nodejs_ai_cli_migration remains":
                     found_marker = true
                 i = i + 1u64
             expect(found_marker).to_equal(true)
-            # evidence(assertion): the real scan above, finding the marker
+            # @capture(assertion): the real scan above, finding the marker
             # already present, is this scenario's evidence.
 
     context "Phase 4: CLI Bundle + Smoke Test — Codex CLI (Track B)":
@@ -328,7 +346,7 @@ describe "plan: app/simpleos/simpleos_nodejs_ai_cli_migration remains":
             # @req REQ-PLAN-AI-CLI-NODE-029
             val manifest = codex_cli_smoke_manifest()
             expect(manifest.package_id).to_equal("simpleos-ai-cli-codex")
-            # evidence(assertion): the real package_id field above is this
+            # @capture(assertion): the real package_id field above is this
             # scenario's evidence.
 
         it "Cross-compile Codex Rust binary":
@@ -336,7 +354,7 @@ describe "plan: app/simpleos/simpleos_nodejs_ai_cli_migration remains":
             # @req REQ-PLAN-AI-CLI-NODE-030
             val manifest = codex_cli_smoke_manifest()
             expect(manifest.entry_path).to_equal("/sys/apps/codex/codex.js")
-            # evidence(assertion): the real entry_path field above is this
+            # @capture(assertion): the real entry_path field above is this
             # scenario's evidence.
 
         it "Test: codex --version":
@@ -344,7 +362,7 @@ describe "plan: app/simpleos/simpleos_nodejs_ai_cli_migration remains":
             # @req REQ-PLAN-AI-CLI-NODE-031
             val manifest = codex_cli_smoke_manifest()
             expect(manifest.args).to_equal(["--version"])
-            # evidence(assertion): the real args field above is this
+            # @capture(assertion): the real args field above is this
             # scenario's evidence.
 
         it "Add RISC-V and AArch64 targets":
@@ -364,7 +382,7 @@ describe "plan: app/simpleos/simpleos_nodejs_ai_cli_migration remains":
                     has_arm = true
                 i = i + 1u64
             expect(has_riscv and has_arm).to_equal(true)
-            # evidence(assertion): the real lane scan above is this
+            # @capture(assertion): the real lane scan above is this
             # scenario's evidence.
 
         it "Serial marker: [ai-cli] cli-smoke:start app=codex":
@@ -378,7 +396,7 @@ describe "plan: app/simpleos/simpleos_nodejs_ai_cli_migration remains":
                     found_marker = true
                 i = i + 1u64
             expect(found_marker).to_equal(true)
-            # evidence(assertion): the real scan above, finding the marker
+            # @capture(assertion): the real scan above, finding the marker
             # already present, is this scenario's evidence.
 
     context "Phase 4: CLI Bundle + Smoke Test — Gemini CLI":
@@ -388,7 +406,7 @@ describe "plan: app/simpleos/simpleos_nodejs_ai_cli_migration remains":
             # @req REQ-PLAN-AI-CLI-NODE-034
             val manifest = gemini_cli_smoke_manifest()
             expect(manifest.entry_path).to_equal("/sys/apps/gemini/gemini.js")
-            # evidence(assertion): the real entry_path field above is this
+            # @capture(assertion): the real entry_path field above is this
             # scenario's evidence.
 
         it "Stub/replace node-pty with terminal passthrough":
@@ -396,7 +414,7 @@ describe "plan: app/simpleos/simpleos_nodejs_ai_cli_migration remains":
             # @req REQ-PLAN-AI-CLI-NODE-035
             val manifest = gemini_cli_smoke_manifest()
             expect(manifest.needs_terminal).to_equal(true)
-            # evidence(assertion): the real needs_terminal field above is
+            # @capture(assertion): the real needs_terminal field above is
             # this scenario's evidence.
 
         it "Stub React/Ink rendering to serial console output":
@@ -404,7 +422,7 @@ describe "plan: app/simpleos/simpleos_nodejs_ai_cli_migration remains":
             # @req REQ-PLAN-AI-CLI-NODE-036
             val manifest = gemini_cli_smoke_manifest()
             expect(manifest.qemu_marker_fragments.len() > 0u64).to_equal(true)
-            # evidence(assertion): the real non-empty marker list above is
+            # @capture(assertion): the real non-empty marker list above is
             # this scenario's evidence.
 
         it "Test: gemini --version":
@@ -412,7 +430,7 @@ describe "plan: app/simpleos/simpleos_nodejs_ai_cli_migration remains":
             # @req REQ-PLAN-AI-CLI-NODE-037
             val manifest = gemini_cli_smoke_manifest()
             expect(manifest.args).to_equal(["--version"])
-            # evidence(assertion): the real args field above is this
+            # @capture(assertion): the real args field above is this
             # scenario's evidence.
 
         it "Serial marker: [ai-cli] cli-smoke:start app=gemini":
@@ -426,7 +444,7 @@ describe "plan: app/simpleos/simpleos_nodejs_ai_cli_migration remains":
                     found_marker = true
                 i = i + 1u64
             expect(found_marker).to_equal(true)
-            # evidence(assertion): the real scan above, finding the marker
+            # @capture(assertion): the real scan above, finding the marker
             # already present, is this scenario's evidence.
 
     context "Phase 6: Full QEMU Validation":
@@ -441,7 +459,7 @@ describe "plan: app/simpleos/simpleos_nodejs_ai_cli_migration remains":
             val lane = ai_cli_qemu_lane(manifest, "x86")
             expect(lane.qemu_system).to_equal("qemu-system-x86_64")
             expect(lane.runtime_status).to_equal("blocked-runtime-artifact")
-            # evidence(assertion): the real lane's qemu_system and
+            # @capture(assertion): the real lane's qemu_system and
             # runtime_status fields above are this scenario's evidence.
 
         it "RISC-V rv64gc (virt + OpenSBI): boot -> QuickJS -> CLI smoke -> serial evidence":
@@ -451,7 +469,7 @@ describe "plan: app/simpleos/simpleos_nodejs_ai_cli_migration remains":
             val lane = ai_cli_qemu_lane(manifest, "riscv")
             expect(lane.qemu_system).to_equal("qemu-system-riscv64")
             expect(lane.runtime_status).to_equal("blocked-runtime-artifact")
-            # evidence(assertion): the real lane's qemu_system and
+            # @capture(assertion): the real lane's qemu_system and
             # runtime_status fields above are this scenario's evidence.
 
         it "AArch64 (virt + U-Boot): boot -> QuickJS -> CLI smoke -> serial evidence":
@@ -461,7 +479,7 @@ describe "plan: app/simpleos/simpleos_nodejs_ai_cli_migration remains":
             val lane = ai_cli_qemu_lane(manifest, "arm")
             expect(lane.qemu_system).to_equal("qemu-system-aarch64")
             expect(lane.runtime_status).to_equal("blocked-runtime-artifact")
-            # evidence(assertion): the real lane's qemu_system and
+            # @capture(assertion): the real lane's qemu_system and
             # runtime_status fields above are this scenario's evidence.
 
         it "FAT32 disk image provisioning with runtime + CLI bundles":
@@ -474,7 +492,7 @@ describe "plan: app/simpleos/simpleos_nodejs_ai_cli_migration remains":
             val manifest = claude_cli_smoke_manifest()
             val lane = ai_cli_qemu_lane(manifest, "x86")
             expect(lane.serial_log_path.contains("ai-cli")).to_equal(true)
-            # evidence(assertion): the real serial_log_path field above is
+            # @capture(assertion): the real serial_log_path field above is
             # this scenario's evidence.
 
         it "Automated serial capture and marker verification":
@@ -490,7 +508,7 @@ describe "plan: app/simpleos/simpleos_nodejs_ai_cli_migration remains":
             val missing = ai_cli_qemu_missing_markers(lane, "")
             expect(missing.len()).to_equal(lane.marker_fragments.len())
             expect(ai_cli_qemu_serial_accepts_lane(lane, "")).to_equal(false)
-            # evidence(assertion): the real missing-marker count and
+            # @capture(assertion): the real missing-marker count and
             # acceptance-check above are this scenario's evidence.
 
         it "Update ai_cli_qemu_lane runtime_status from \"blocked-runtime-artifact\" to \"ready\"":
@@ -511,5 +529,5 @@ describe "plan: app/simpleos/simpleos_nodejs_ai_cli_migration remains":
                 i = i + 1u64
             expect(all_blocked).to_equal(true)
             expect(lanes.len()).to_equal(3u64)
-            # evidence(assertion): the real per-lane status scan above is
+            # @capture(assertion): the real per-lane status scan above is
             # this scenario's evidence.

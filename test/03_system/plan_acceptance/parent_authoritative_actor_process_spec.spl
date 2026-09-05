@@ -88,16 +88,53 @@ fn regenerate_manual_sha(spec_path: text, output_dir: text) -> text:
     val output_path = match generate_feature_doc(parsed, output_dir):
         case Ok(path): path
         case Err(e): fail("generate_feature_doc failed for {spec_path}: {e}")
-    val written = match file_read(output_path):
-        case Ok(content): content
-        case Err(e): fail("could not read generated manual {output_path}: {e}")
-    sha256_text(written)
+    # `file_read` is `(text) -> text` across the whole tree (6009 call sites),
+    # not a `Result`, so the read is guarded fail-closed here instead: a
+    # missing or empty manual must abort the oracle, never hash to a
+    # deterministic-looking empty digest.
+    if not file_exists(output_path):
+        fail("generated manual {output_path} does not exist")
+    val written = file_read(output_path)
+    if written.len() == 0:
+        fail("could not read generated manual {output_path}")
+    sha256_text(written.trim() + "\n")
+
+# The committed mirror is NOT raw spipe-docgen output: `sspec-maintain
+# documentize` (src/app/sspec_maintain/documentize.spl:16
+# compose_sspec_documentized_manual) wraps the docgen manual in a provenance
+# block and a scorecard block. Those two blocks are exactly what the THIRD
+# oracle in this file needs -- "mirror PASS" is `mirror.contains(source_sha)`,
+# and the source sha lives only in the provenance block. So hashing the whole
+# committed file against raw docgen output could never pass while that oracle
+# passes: the two would contradict each other on one committed artifact.
+# The claim that is both true and strong is byte-exact equality over
+# everything docgen OWNS, with the two generated wrappers removed by the same
+# algorithm documentize used to add them. Nothing docgen produces is exempted.
+fn strip_generated_section(content: text, start_marker: text, end_marker: text) -> text:
+    val start = content.find(start_marker)
+    if start < 0:
+        return content
+    val suffix = content[start:].find(end_marker)
+    if suffix < 0:
+        return content[:start].trim() + "\n"
+    val end_offset = start + suffix + end_marker.len()
+    (content[:start] + content[end_offset:]).trim() + "\n"
 
 fn committed_manual_sha(manual_path: text) -> text:
-    val content = match file_read(manual_path):
-        case Ok(c): c
-        case Err(e): fail("could not read committed manual {manual_path}: {e}")
-    sha256_text(content)
+    if not file_exists(manual_path):
+        fail("committed manual {manual_path} does not exist")
+    val content = file_read(manual_path)
+    if content.len() == 0:
+        fail("could not read committed manual {manual_path}")
+    var base = strip_generated_section(content,
+        "<!-- sspec-maintain:scorecard:start -->",
+        "<!-- sspec-maintain:scorecard:end -->")
+    base = strip_generated_section(base,
+        "<!-- sspec-maintain:provenance:start -->",
+        "<!-- sspec-maintain:provenance:end -->")
+    if base.len() == 0:
+        fail("committed manual {manual_path} has no docgen-owned content")
+    sha256_text(base)
 
 describe "parent_authoritative_actor_process.md — open completion-checklist checkboxes":
 
@@ -129,7 +166,11 @@ describe "parent_authoritative_actor_process.md — open completion-checklist ch
         expect(generation > expected_min_generation).to_equal(true)
 
         val inbox = parent_commit_frame_inbox_v1_for_generation(1, generation)
-        val result = result_envelope_v1(4, 11, 0, 11,
+        # base_revision must equal the owner's live revision (1, above): the
+        # commit engine rejects any envelope built against a different base as
+        # "stale-base-revision", which is the anti-lost-update guard and must
+        # not be relaxed. Committing it advances revision 1 -> 2.
+        val result = result_envelope_v1(1, 11, 0, 11,
             ParallelResultKind.Patch, 1111, "child-11")
         val envelope = transfer_envelope_v1(11, generation,
             ParallelExecutionDomain.Process,
@@ -183,6 +224,7 @@ describe "parent_authoritative_actor_process.md — open completion-checklist ch
             ]
         )
         val comparison = compare_evidence(evidence, oracle)
+        print "native verdict evidence accepted={accepted_total} receipt_ok={outcome.commit.receipt.ok} reason={outcome.commit.receipt.reason} after_revision={outcome.mutation.after_revision} summary={comparison.summary}"
         val expected_status = EvidenceStatus.passed
         expect(comparison.status).to_equal(expected_status)
         val expected_summary = "3 check(s) passed"
@@ -206,12 +248,14 @@ describe "parent_authoritative_actor_process.md — open completion-checklist ch
         # @req REQ-PAAP-001
         # @capture: the analyze_sspec_pair_text report below (score,
         # mirror_state) is the retained evidence for this oracle.
-        val source = match file_read(e1_spec_path):
-            case Ok(c): c
-            case Err(e): fail("could not read {e1_spec_path}: {e}")
-        val mirror = match file_read(e1_mirror_path):
-            case Ok(c): c
-            case Err(e): fail("could not read {e1_mirror_path}: {e}")
+        # Fail-closed reads: `file_read` is `(text) -> text`, so an unreadable
+        # file would otherwise be scored as an empty spec and pass vacuously.
+        val source = file_read(e1_spec_path)
+        if source.len() == 0:
+            fail("could not read {e1_spec_path}")
+        val mirror = file_read(e1_mirror_path)
+        if mirror.len() == 0:
+            fail("could not read {e1_mirror_path}")
         val report = analyze_sspec_pair_text(e1_spec_path, source, Some(mirror))
 
         # "blocker=0" and "zero stubs" are the same gate: SSDOC-ORA-001 (the

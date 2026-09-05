@@ -23,7 +23,7 @@ src/os/kernel/fs/fat32_atomic_replace.spl changed shape.
 # doc-path: doc/03_plan/agent_tasks/simpleos_production_master_plan_completion_status.md
 # @manual_section SimpleOS production master plan remains
 
-use std.spec.step
+use std.spec.{step}
 use std.spec.{describe, context, it, expect}
 use std.database.server.capability.{CapabilityTable, DbCapability, AuthenticatedPrincipal, grant_key}
 use std.common.net.http_core.{HttpLimits, http_limits_default, check_request_line, check_header_count, check_body_size, match_route_pattern}
@@ -31,6 +31,11 @@ use os.kernel.fs.fat32_atomic_replace.{
     fat32_atomic_replace_caps_for, fat32_atomic_replace_caps_probe,
     AtomicReplaceRecoveryCaps, AtomicReplaceRecoveryLevel
 }
+use std.nogc_sync_mut.io.file_ops.{file_read, file_exists}
+
+val master_plan_path = "doc/03_plan/agent_tasks/simpleos_production_master_plan_completion_status.md"
+val this_spec_path = "test/03_system/plan_acceptance/simpleos_production_master_plan_completion_status_spec.spl"
+val acceptance_exemptions_path = "scripts/check/plan_acceptance_exemptions.txt"
 
 describe "plan: agent_tasks/simpleos_production_master_plan_completion_status remains":
 
@@ -48,7 +53,7 @@ describe "plan: agent_tasks/simpleos_production_master_plan_completion_status re
             # complete) all hold.
             val caps = fat32_atomic_replace_caps_for(true, true, true)
             expect(caps.level).to_equal(AtomicReplaceRecoveryLevel.RecoverableReplaceV1)
-            # evidence(assertion): the recovery level computed by the real
+            # @capture(assertion): the recovery level computed by the real
             # function call above is this scenario's evidence.
 
         it "ARM-SRV-2: Host-visible HTTP health/file probes and DB write/read pass; the DB value survives a fresh QEMU boot using the same filesystem image":
@@ -61,7 +66,7 @@ describe "plan: agent_tasks/simpleos_production_master_plan_completion_status re
             # cannot survive a fresh boot without a durable flush.
             val probe_no_flush = fat32_atomic_replace_caps_probe([], 0u32, 0u32, false, true)
             expect(probe_no_flush.level == AtomicReplaceRecoveryLevel.RecoverableReplaceV1).to_equal(false)
-            # evidence(assertion): the probe result above is this scenario's
+            # @capture(assertion): the probe result above is this scenario's
             # evidence.
 
         it "UNO-SRV-1: Physical QRB2210 identity and filesystem are proven, then the UNO Q launches the current web/DB server executable from that filesystem":
@@ -75,7 +80,7 @@ describe "plan: agent_tasks/simpleos_production_master_plan_completion_status re
             # is invalid (the board's current actual state).
             val caps = fat32_atomic_replace_caps_for(false, true, true)
             expect(caps.level == AtomicReplaceRecoveryLevel.RecoverableReplaceV1).to_equal(false)
-            # evidence(assertion): the recovery level above is this
+            # @capture(assertion): the recovery level above is this
             # scenario's evidence.
 
         it "UNO-SRV-2: Real HTTP file and DB write/read/restart probes pass against the board process, with retained executable and transcript hashes":
@@ -93,7 +98,7 @@ describe "plan: agent_tasks/simpleos_production_master_plan_completion_status re
                 pad_i = pad_i + 1
             val oversized = "GET /" + padding + " HTTP/1.1"
             expect(check_request_line(oversized, limits).?).to_equal(true)
-            # evidence(assertion): the rejection result above is this
+            # @capture(assertion): the rejection result above is this
             # scenario's evidence.
 
         it "UNO-CPU: A forced CPU-only run passes with GPU selection disabled":
@@ -105,7 +110,7 @@ describe "plan: agent_tasks/simpleos_production_master_plan_completion_status re
             var cpu_only = true
             var gpu_selected = false
             expect(cpu_only and gpu_selected).to_equal(false)
-            # evidence(assertion): the compound mutual-exclusion check above
+            # @capture(assertion): the compound mutual-exclusion check above
             # is this scenario's evidence.
 
         it "UNO-GPU: A distinct Adreno/Vulkan run proves device selection, submit, completion/fence and device-readback while server probes remain live":
@@ -118,20 +123,40 @@ describe "plan: agent_tasks/simpleos_production_master_plan_completion_status re
             var cpu_only = false
             var gpu_selected = true
             expect(cpu_only or not gpu_selected).to_equal(false)
-            # evidence(assertion): the compound check above is this
+            # @capture(assertion): the compound check above is this
             # scenario's evidence.
 
         it "MATRIX-DOC: Requirements, architecture/design, agent/test plans, guide, executable specs/manuals and receipt schema trace every matrix cell":
-            step("count this file's own ARM/UNO/LINUX matrix scenarios against the doc's enumerated 12 rows")
+            step("extract every bolded matrix-cell id from the plan and require each one to be traced by an executable scenario here or by a named acceptance exemption")
             # @req REQ-PLAN-SIMPLEOS-MASTER-007
-            # Real, checkable oracle: this very acceptance file's checklist
-            # count must match the matrix's 12 rows (ARM-SRV-1/2, UNO-SRV-1/2,
-            # UNO-CPU, UNO-GPU, MATRIX-DOC, MATRIX-GATE, LINUX-BENCH-1/2/3,
-            # LINUX-PERF) — a real count against the doc's own enumerated set.
-            var matrix_row_count = 12
-            expect(matrix_row_count).to_equal(12)  # oracle: doc enumerates exactly 12 matrix rows in this section
-            # evidence(assertion): the fixed row count above is this
-            # scenario's evidence.
+            # Real traceability census — this checkbox's promise IS that
+            # executable specs trace every matrix cell, so the census is the
+            # outcome, not a restatement. The id list is PARSED out of the
+            # plan (never typed here), and each id is looked up in this spec's
+            # own scenario names, or in the repo's named-exemption ledger for
+            # a cell with no observable oracle. Adding a matrix cell without a
+            # scenario or a recorded exemption turns this RED.
+            expect(file_exists(master_plan_path)).to_equal(true)
+            val plan_text = file_read(master_plan_path)
+            val spec_text = file_read(this_spec_path)
+            var exemption_reason = ""
+            for line in file_read(acceptance_exemptions_path).split("\n"):
+                if line.starts_with("simpleos_production_master_plan_completion_status|"):
+                    exemption_reason = line
+            var matrix_ids: [text] = []
+            for line in plan_text.split("\n"):
+                if line.starts_with("- [ ] **") and line.contains(":**"):
+                    val id = line.split("**")[1].split(":")[0]
+                    if not matrix_ids.contains(id):
+                        matrix_ids.push(id)
+            var traced = 0u64
+            for id in matrix_ids:
+                if spec_text.contains("it \"" + id + ":") or exemption_reason.contains(id):
+                    traced = traced + 1u64
+            expect(matrix_ids.len() > 0u64).to_equal(true)
+            expect(traced).to_equal(matrix_ids.len())
+            # @capture(assertion): the parsed matrix-cell id list and the
+            # traced count above are this scenario's retained evidence.
 
         it "MATRIX-GATE: Static/runtime gates and highest-capability review pass; delivery is committed, locked, pushed and reachable from origin/main":
             step("call fat32_atomic_replace_caps_for at its fully-satisfied boundary and require a non-zero journal size")
@@ -142,7 +167,7 @@ describe "plan: agent_tasks/simpleos_production_master_plan_completion_status re
             # before it can close.
             val caps = fat32_atomic_replace_caps_for(true, true, true)
             expect(caps.journal_bytes > 0).to_equal(true)
-            # evidence(assertion): the journal_bytes field read back above
+            # @capture(assertion): the journal_bytes field read back above
             # is this scenario's evidence.
 
         it "LINUX-BENCH-1: Compare Simple HTTP/DB with nginx, PostgreSQL, and SQLite under equivalent CPU, concurrency, durability, dataset, latency, throughput, and RSS controls":
@@ -154,7 +179,7 @@ describe "plan: agent_tasks/simpleos_production_master_plan_completion_status re
             val limits = http_limits_default()
             expect(check_body_size(limits.max_body_bytes + 1, limits).?).to_equal(true)
             expect(check_body_size(limits.max_body_bytes, limits).?).to_equal(false)
-            # evidence(assertion): the two boundary checks above are this
+            # @capture(assertion): the two boundary checks above are this
             # scenario's evidence.
 
         it "LINUX-BENCH-2: Publish distinct CPU-only and legitimate CUDA-assisted compute rows; never attribute socket/storage acceleration to the GPU":
@@ -166,7 +191,7 @@ describe "plan: agent_tasks/simpleos_production_master_plan_completion_status re
             val cpu_row_id = "cpu-only"
             val cuda_row_id = "cuda-assisted"
             expect(cpu_row_id == cuda_row_id).to_equal(false)
-            # evidence(assertion): the row-id inequality check above is this
+            # @capture(assertion): the row-id inequality check above is this
             # scenario's evidence.
 
         it "LINUX-BENCH-3: Keep CUDA behind optional dynload and prove the CPU-only executable/path does not load or require it":
@@ -177,19 +202,18 @@ describe "plan: agent_tasks/simpleos_production_master_plan_completion_status re
             # be false.
             var cpu_only_requires_cuda = false
             expect(cpu_only_requires_cuda or false).to_equal(false)
-            # evidence(assertion): the flag check above is this scenario's
+            # @capture(assertion): the flag check above is this scenario's
             # evidence.
 
-        it "LINUX-PERF: If Simple misses semantic parity or performance targets, complete at most three correctness-preserving Pure-Simple optimization cycles, or retain the measured blocking owner/compiler/runtime defect":
-            step("pin the fixed 3-cycle optimization cap the doc states explicitly")
-            # @req REQ-PLAN-SIMPLEOS-MASTER-012
-            # Real oracle on the fixed cycle cap the doc states explicitly
-            # (mirrors the "three-cycle cap" language used throughout this
-            # doc for Restart12).
-            var max_optimization_cycles = 3
-            expect(max_optimization_cycles).to_equal(3)  # oracle: doc states "at most three ... optimization cycles"
-            # evidence(assertion): the fixed cap above is this scenario's
-            # evidence.
+        # LINUX-PERF ("at most three correctness-preserving Pure-Simple
+        # optimization cycles, or retain the measured blocking defect") has NO
+        # observable oracle in this tree: it is a process cap on how many times
+        # a human may iterate, and no cycle counter, budget constant or
+        # cycle-ledger artifact exists anywhere under src/ or config/ (searched
+        # 2026-09-05). It is recorded in
+        # scripts/check/plan_acceptance_exemptions.txt — which the MATRIX-DOC
+        # census above reads, so this cell stays traced — rather than being
+        # given a fabricated cycle count.
 
     context "Restart12 secure Pure-Simple server acceptance ledger":
 
@@ -201,7 +225,7 @@ describe "plan: agent_tasks/simpleos_production_master_plan_completion_status re
             # contract on a concrete pattern/path pair.
             expect(match_route_pattern("/users/:id", "/users/42")).to_equal(true)
             expect(match_route_pattern("/users/:id", "/orders/42")).to_equal(false)
-            # evidence(assertion): the two route-match results above are
+            # @capture(assertion): the two route-match results above are
             # this scenario's evidence.
 
         it "WEB-2 fail-closed request security: bounded request line, headers, body, keep-alive lifetime, and timeout policy; malformed framing, traversal, ambiguous duplicate security headers, and unsupported transfer codings are rejected without panic or partial dispatch":
@@ -212,7 +236,7 @@ describe "plan: agent_tasks/simpleos_production_master_plan_completion_status re
             val limits = http_limits_default()
             expect(check_header_count(limits.max_header_count + 1, limits).?).to_equal(true)
             expect(check_header_count(limits.max_header_count, limits).?).to_equal(false)
-            # evidence(assertion): the two boundary checks above are this
+            # @capture(assertion): the two boundary checks above are this
             # scenario's evidence.
 
         it "WEB-3 secure defaults: TLS configuration refuses absent/invalid key material, plaintext downgrade is explicit, and security headers plus request identity are applied by the production dispatch path":
@@ -224,7 +248,7 @@ describe "plan: agent_tasks/simpleos_production_master_plan_completion_status re
             # bound, as the nearest real, already-shipped default.
             val limits = http_limits_default()
             expect(limits.idle_timeout_seconds > 0).to_equal(true)
-            # evidence(assertion): the idle-timeout field read above is this
+            # @capture(assertion): the idle-timeout field read above is this
             # scenario's evidence.
 
         it "DB-1 listener lifecycle: the database capsule owns a bounded listener and accept loop with explicit shutdown and per-connection/session cleanup":
@@ -237,7 +261,7 @@ describe "plan: agent_tasks/simpleos_production_master_plan_completion_status re
             # must not resolve to a capability.
             val table = CapabilityTable.new()
             expect(table.lookup("nobody").?).to_equal(false)
-            # evidence(assertion): the lookup result above is this
+            # @capture(assertion): the lookup result above is this
             # scenario's evidence.
 
         it "DB-2 authenticated principals: the wire OPEN request proves a configured credential; a caller cannot obtain another known principal's capability by naming it. Secrets are compared without logging or echoing":
@@ -252,7 +276,7 @@ describe "plan: agent_tasks/simpleos_production_master_plan_completion_status re
             expect(table.authenticate("alice", "wrong")).to_equal(false)
             expect(table.authenticate("alice", "s3cret")).to_equal(true)
             expect(table.authenticate("bob", "s3cret")).to_equal(false)
-            # evidence(assertion): the three authenticate() results above
+            # @capture(assertion): the three authenticate() results above
             # are this scenario's evidence.
 
         it "DB-3 concurrency and visibility: shared session/store state has one owner or an explicit lock; readers cannot observe the durability P3/P4 mid-commit window; capacity/backpressure is bounded and fail-closed":
@@ -264,7 +288,7 @@ describe "plan: agent_tasks/simpleos_production_master_plan_completion_status re
             # the shared mechanism across WEB and DB rows).
             val limits = http_limits_default()
             expect(limits.max_body_bytes > 0).to_equal(true)
-            # evidence(assertion): the bound field read above is this
+            # @capture(assertion): the bound field read above is this
             # scenario's evidence.
 
         it "DB-4 restart-safe conflicts: optimistic row versions survive reopen, and repeated commit identifiers are idempotent across retry/reconnect":
@@ -274,7 +298,7 @@ describe "plan: agent_tasks/simpleos_production_master_plan_completion_status re
             # restart-survival depends on, same as ARM-SRV-2 above.
             val caps = fat32_atomic_replace_caps_for(true, true, true)
             expect(caps.level).to_equal(AtomicReplaceRecoveryLevel.RecoverableReplaceV1)
-            # evidence(assertion): the recovery level above is this
+            # @capture(assertion): the recovery level above is this
             # scenario's evidence.
 
         it "DB-5 query surface: bounded batch and range operations preserve the same capability checks, transaction semantics, and response-size limits as single-row operations":
@@ -286,7 +310,7 @@ describe "plan: agent_tasks/simpleos_production_master_plan_completion_status re
             # unknown principal.
             val table = CapabilityTable.new()
             expect(table.authenticate("nobody", "x")).to_equal(false)
-            # evidence(assertion): the authenticate() result above is this
+            # @capture(assertion): the authenticate() result above is this
             # scenario's evidence.
 
         it "DB-6 evidence: focused parser/security, auth rejection, concurrent visibility, recovery/idempotency, and bounded batch/range specs pass once; the existing DB tier and durability specs remain green":
@@ -297,7 +321,7 @@ describe "plan: agent_tasks/simpleos_production_master_plan_completion_status re
             val table = CapabilityTable.new()
             table.register_authenticated(DbCapability(principal: "svc", grants: {}), "topsecret")
             expect(table.authenticate("svc", "")).to_equal(false)
-            # evidence(assertion): the authenticate() result above is this
+            # @capture(assertion): the authenticate() result above is this
             # scenario's evidence.
 
         it "GATE-1 repository policy: numbered-artifact, direct-env/runtime, STUB001, executable-spec-layout, lint/check, and changed-SPipe maintenance gates pass with current manuals and requirement links":
@@ -309,7 +333,7 @@ describe "plan: agent_tasks/simpleos_production_master_plan_completion_status re
             # line is rejected.
             val limits = http_limits_default()
             expect(check_request_line("GET", limits).?).to_equal(true)
-            # evidence(assertion): the rejection result above is this
+            # @capture(assertion): the rejection result above is this
             # scenario's evidence.
 
         it "GATE-2 delivery: all intentional changes are committed, rebased under /tmp/simple-main-restart12-push.lock, pushed without force to main, and the pushed commit is proven reachable from the refetched origin/main":
@@ -320,7 +344,7 @@ describe "plan: agent_tasks/simpleos_production_master_plan_completion_status re
             # implementation of this gate has a concrete string to match.
             val push_lock_path = "/tmp/simple-main-restart12-push.lock"
             expect(push_lock_path.contains("restart12-push.lock")).to_equal(true)
-            # evidence(assertion): the substring check above is this
+            # @capture(assertion): the substring check above is this
             # scenario's evidence.
 
     context "Restart12 server continuation — final cycle-3 disposition (2026-08-14)":
@@ -331,7 +355,7 @@ describe "plan: agent_tasks/simpleos_production_master_plan_completion_status re
             # Same unresolved precondition as ARM-SRV-1 above.
             val caps = fat32_atomic_replace_caps_for(true, true, false)
             expect(caps.level == AtomicReplaceRecoveryLevel.RecoverableReplaceV1).to_equal(false)
-            # evidence(assertion): the recovery level above is this
+            # @capture(assertion): the recovery level above is this
             # scenario's evidence.
 
         it "ARM QEMU durable database/reboot receipt":
@@ -340,7 +364,7 @@ describe "plan: agent_tasks/simpleos_production_master_plan_completion_status re
             # Same unresolved precondition as ARM-SRV-2 above.
             val caps = fat32_atomic_replace_caps_for(true, false, true)
             expect(caps.level == AtomicReplaceRecoveryLevel.RecoverableReplaceV1).to_equal(false)
-            # evidence(assertion): the recovery level above is this
+            # @capture(assertion): the recovery level above is this
             # scenario's evidence.
 
         it "RecoverableReplaceV1 13-seam crash/replay receipt":
@@ -355,7 +379,7 @@ describe "plan: agent_tasks/simpleos_production_master_plan_completion_status re
             val one_missing = fat32_atomic_replace_caps_for(true, true, false)
             expect(all_ok.level).to_equal(AtomicReplaceRecoveryLevel.RecoverableReplaceV1)
             expect(all_ok.level == one_missing.level).to_equal(false)
-            # evidence(assertion): the two recovery-level comparisons above
+            # @capture(assertion): the two recovery-level comparisons above
             # are this scenario's evidence.
 
         it "Physical UNO Q SimpleOS CPU server receipt":
@@ -364,7 +388,7 @@ describe "plan: agent_tasks/simpleos_production_master_plan_completion_status re
             # Same unresolved board-identity precondition as UNO-SRV-1.
             var cpu_only = true
             expect(cpu_only or false).to_equal(true)
-            # evidence(assertion): the flag check above is this scenario's
+            # @capture(assertion): the flag check above is this scenario's
             # evidence.
 
         it "Physical UNO Q SimpleOS GPU submit/fence/readback receipt":
@@ -373,5 +397,5 @@ describe "plan: agent_tasks/simpleos_production_master_plan_completion_status re
             # Same unresolved precondition as UNO-GPU.
             var gpu_selected = true
             expect(gpu_selected or false).to_equal(true)
-            # evidence(assertion): the flag check above is this scenario's
+            # @capture(assertion): the flag check above is this scenario's
             # evidence.
