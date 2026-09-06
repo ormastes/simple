@@ -49,29 +49,25 @@ Why there is no partial build: there is **no target/dependency model**. No
 `BuildTarget` exists in `80.driver` — only files.
 `DependencyEntry.needs_recompile` (`driver_build/incremental.spl:280`) is a
 ONE-HOP predicate that never recurses, and is **never called** — its four
-importers take only fingerprint helpers. `action_key.spl` / `cas_store.spl` have
-zero external callers and are not exported from `cache/__init__.spl`.
+importers take only fingerprint helpers. `action_key.spl` is now consumed by
+SIF, SMF, shadow-cache, and native-module witness paths and its interface
+helpers are exported. `cas_store.spl` remains outside the active build path.
 Detail: `doc/01_research/compiler/incremental_build/lib_only_build_feasibility_2026-08-09.md`.
 (NOT under `.../compiler/build/` — `.gitignore:106 build/` silently swallows any
 path containing a `build/` component, and `git add` on it is a silent no-op.)
 
-**The mechanism to fix this is designed and written, but wired to nothing:**
+**The mechanism is partly wired; recursive target traversal is still missing:**
 - `src/lib/simple.sdn` already declares `name/version/type: library/dependencies:`
   — real target edges. Read only by `src/app/info/main.spl:116` (display) and a
   lint-profile reader. **No build path traverses `dependencies:`.**
-- `action_key.spl:197-204` implements `interface_digest_of` canonically
-  (`simple/interface/v1`), with `ActionDep.iface_digest` and dep sort on
-  `(module_id, iface_digest)`. **`/usr/bin/grep -rn interface_digest_of src`
-  returns 4 lines (all under `src/compiler`): its own definition
-  (`cache/action_key.spl:199`), one schema row
-  (`cache/schema/cache_protocol.sdn:844`), and two comments that merely name it
-  (`35.semantics/interface/compile_interface.spl:37`,
-  `cache/block/block_key.spl:10`). Zero actual CALL SITES — never computed, not
-  merely ignored.** (The count matters only so the claim can't be dismissed as
-  sloppy; the load-bearing part is the zero callers.)
-- The caches that DO run are content-keyed: `object_cache_key` hashes only the
-  module's own source; `SmfManifestEntry` carries `source_hash` and has no
-  interface-digest field. The manifest ROW *is* verified on the interpret path —
+- `action_key.spl:250` implements `interface_digest_of` canonically
+  (`simple/interface/v1`), with `ActionDep.iface_digest` and dependency sorting
+  on `(module_id, iface_digest)`. SIF, SMF, incremental producer identity, and
+  native-module witness paths now compute it. The remaining gap is that package
+  `simple.sdn dependencies:` are not traversed into a recursive build graph or
+  supplied to SCV's invalidation plan.
+- The caches that DO run are content-keyed. `SmfManifestEntry` now carries both
+  `source_hash` and `iface_digest`. The manifest ROW is verified on interpret —
   `driver_api_interpret.spl:55` calls `smf_manifest_entry_matches_source` and
   fails closed to a full interpret on mismatch. What is unwired is the
   whole-entry wrapper `smf_manifest_entry_verifies`

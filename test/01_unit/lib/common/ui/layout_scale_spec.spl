@@ -11,7 +11,7 @@
 
 use std.spec.{describe, it, expect, assert_true}
 use common.ui.widget.{WidgetNode, WidgetKind}
-use common.ui.builder.{column, button, label, scroll}
+use common.ui.builder.{column, row, button, label, scroll}
 use common.ui.layout.{compute_layout, find_rect}
 use common.ui.form_factor.{compute_form_factor}
 use common.ui.viewport.{new_viewport}
@@ -27,10 +27,11 @@ use common.ui.viewport.{new_viewport}
 # 1px border that stays unscaled. The "panel border insets the scaled rect"
 # example below pins that exactly, because the panel branch once inset the
 # RAW args and so dropped DPI scaling for every container subtree.
-fn _vbox(id: text, child: WidgetNode) -> WidgetNode:
+fn _vbox(id: text, kids: [WidgetNode]) -> WidgetNode:
     var node = WidgetNode.new(id, WidgetKind.Card.to_wire())
     node = node.set_layout("vbox")
-    node = node.add_child(child)
+    for k in kids:
+        node = node.add_child(k)
     node
 
 describe "compute_layout scale_permille":
@@ -60,9 +61,9 @@ describe "compute_layout scale_permille":
             case _: assert_true(false)
 
     it "scale 2000 doubles a flex child's computed size vs scale 1000":
-        val root_a = _vbox("scale3a_root", button("scale3a_child", "C", "a"))
+        val root_a = _vbox("scale3a_root", [button("scale3a_child", "C", "a")])
         val rects_1x = compute_layout(WidgetNode(id: "scale3a_root"), 0, 0, 100, 50, 1000)
-        val root_b = _vbox("scale3b_root", button("scale3b_child", "C", "a"))
+        val root_b = _vbox("scale3b_root", [button("scale3b_child", "C", "a")])
         val rects_2x = compute_layout(WidgetNode(id: "scale3b_root"), 0, 0, 100, 50, 2000)
         match find_rect(rects_1x, "scale3a_child"):
             case Some(c1x):
@@ -159,3 +160,60 @@ describe "FormFactorProfile.scale_permille":
         val vp = new_viewport(1440, 900, "gui")
         val ff = compute_form_factor(vp, "macos", false, 1500)
         expect(ff.scale_permille).to_equal(1500)
+
+describe "size props are scaled into device units":
+    # Authored width/height/min_*/max_* props are in the SAME logical units as
+    # the x/y/w/h handed to compute_layout, but layout_vbox/layout_hbox compare
+    # them against an already-scaled rect. Before the fix the two sides of
+    # every clamp — and the fixed-size subtraction feeding the flex split —
+    # were in different units at any non-identity scale, the same class of
+    # defect as the scroll clip above.
+
+    it "scales max_height before clamping a vbox child":
+        step("Verify: scales max_height before clamping a vbox child")
+        # REGRESSION: sh = 100 at 2.0x, so the sole flex child asks for 100.
+        # max_height 30 is LOGICAL, i.e. 60 device — the child must be capped
+        # at 60, not at the 30 raw device pixels the unscaled prop gave.
+        val kid = label("scale_max_kid", "K").set_prop("max_height", "30")
+        val rects = compute_layout(_vbox("scale_max_root", [kid]), 0, 0, 100, 50, 2000)
+        match find_rect(rects, "scale_max_kid"):
+            case Some(r): expect(r.h).to_equal(60)  # oracle: 60 — 30 logical at 2.0x
+            case _: assert_true(false)
+
+    it "leaves the max_height cap untouched at identity scale (control)":
+        step("Verify: leaves the max_height cap untouched at identity scale (control)")
+        # Discriminating control: at 1000 the scaled and unscaled cap are the
+        # same number, so this must hold in both directions.
+        val kid = label("scale_max_id_kid", "K").set_prop("max_height", "30")
+        val rects = compute_layout(_vbox("scale_max_id_root", [kid]), 0, 0, 100, 50, 1000)
+        match find_rect(rects, "scale_max_id_kid"):
+            case Some(r): expect(r.h).to_equal(30)  # oracle: 30 — cap is already in device units
+            case _: assert_true(false)
+
+    it "scales a fixed height prop before splitting the remaining space":
+        step("Verify: scales a fixed height prop before splitting the remaining space")
+        # REGRESSION: sh = 100 at 2.0x. `height: 10` is LOGICAL, i.e. 20
+        # device, leaving 80 for the flex sibling. Unscaled it took 10 device
+        # and handed the sibling 90, so a fixed-size row was drawn at half
+        # size while everything around it doubled.
+        val a = label("scale_fix_a", "A").set_prop("height", "10")
+        val b = label("scale_fix_b", "B")
+        val rects = compute_layout(_vbox("scale_fix_root", [a, b]), 0, 0, 100, 50, 2000)
+        match find_rect(rects, "scale_fix_a"):
+            case Some(r): expect(r.h).to_equal(20)  # oracle: 20 — 10 logical at 2.0x
+            case _: assert_true(false)
+        match find_rect(rects, "scale_fix_b"):
+            case Some(r): expect(r.h).to_equal(80)  # oracle: 80 — 100 device less the 20 fixed
+            case _: assert_true(false)
+
+    it "scales max_width before clamping an hbox child":
+        step("Verify: scales max_width before clamping an hbox child")
+        # The same conversion on the other axis. `row()` is a Panel, so the
+        # inner width is 198 rather than 200, but the cap is what decides the
+        # result either way: 30 logical is 60 device, not 30.
+        val root = row("scale_maxw_root", [button("scale_maxw_kid", "C", "a")])
+        WidgetNode(id: "scale_maxw_kid").set_prop("max_width", "30")
+        val rects = compute_layout(WidgetNode(id: "scale_maxw_root"), 0, 0, 100, 40, 2000)
+        match find_rect(rects, "scale_maxw_kid"):
+            case Some(r): expect(r.w).to_equal(60)  # oracle: 60 — 30 logical at 2.0x
+            case _: assert_true(false)
