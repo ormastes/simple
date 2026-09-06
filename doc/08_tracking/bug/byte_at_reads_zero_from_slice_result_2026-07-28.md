@@ -1,34 +1,9 @@
 # `byte_at()` reads zeros out of a `slice()` result
 
 **Date:** 2026-07-28
-**Status:** RESOLVED (re-verified 2026-09-02, bugdb batch triage)
+**Status:** Open
 **Severity:** High — silent wrong data, no error
 **Area:** `std.tls.utilities.{byte_at, slice}`, interpreter (test-runner engine)
-
-## Resolution (2026-09-02)
-`append`/`len` in `_TlsUtilities/text_ops.spl` are no longer placeholder stubs
-(the regression spec below documents the original root cause: `append` used to
-return the list unchanged and `len` used to return 0). Re-ran the exact repro
-shape from this doc — `slice()` over a small heap array, `byte_at()` on the
-result, both directly and through a wrapping function — via a plain
-`bin/simple run` probe (the `test`/spec-DSL runner could not be exercised this
-session; see PR body) against
-`bin/release/aarch64-apple-darwin/simple` (Rust seed) on the `fix/bugdb-batch-h`
-worktree at `origin/main` tip `1b76db1d6c3`:
-
-```
-val block = [1,2,3,4,5,9,8,7,6,104,50]
-val sliced = slice(block, 6, 11)
-# sliced len=5
-# direct byte_at(sliced,0)=8 expect 8
-# direct byte_at(sliced,1)=7 expect 7
-# direct byte_at(sliced,4)=50 expect 50
-```
-All three reads matched expectations — the slice/byte_at pipeline is no longer
-zeroed. No code change was needed. Regression coverage:
-`test/01_unit/lib/nogc_sync_mut/tls/tls_utilities_slice_byte_at_spec.spl`
-(already cites this bug doc by name and covers `append`/`len`/`byte_at`/`slice`
-directly).
 
 ## Symptom
 

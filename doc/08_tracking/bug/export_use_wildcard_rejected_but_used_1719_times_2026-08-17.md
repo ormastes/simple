@@ -1,29 +1,7 @@
 # `export use X.*` is rejected by the compiler but used 1,719 times in its own source (2026-08-17)
 
-Status: RESOLVED 2026-09-02 — `export use X.*` is no longer an error.
+Status: OPEN
 Priority: P1
-
-> **RESOLVED 2026-09-02 (measured, not inspected).** The diagnostic is now
-> emitted at WARNING level and the build walks straight past it. Source: the
-> only site that produces this text is
-> `src/compiler_rust/parser/src/stmt_parsing/module_system.rs:558-566`, and it
-> pushes an `ErrorHint { level: ErrorHintLevel::Warning, … }` — not an error.
-> Behaviour, on a seed freshly built from `origin/main` `1b76db1d6c3` running
-> this record's exact hello-world repro: **75** `warning: Avoid 'export use *'`
-> diagnostics are printed, including at `src/lib/string_core.spl:3` and
-> `src/app/io/env_ops.spl`'s sibling `src/app/io/file_ops.spl:3`, and the
-> pipeline continues through them into HIR.
->
-> **Honest scope of this closure — read before citing it.** The hello-world
-> `native-build` still exits 1 on that seed, but NOT on this record's cause:
-> it reaches build phase 3 and dies with
-> `[ERROR] phase 3 FAILED (diagnostics unreadable: error array did not survive
-> transport)`. That is a separate defect (diagnostics lost in worker
-> transport) and is not tracked by this row. What this record claimed — that
-> the compiler *rejects* a form its own source uses 1,719 times, and that the
-> rejection is what blocks the build — is no longer true. The remaining
-> failure must be re-filed against the phase-3 transport, not left attached
-> here where it would keep a fixed diagnostic looking live.
 
 ## Symptom
 
