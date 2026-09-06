@@ -1,0 +1,165 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+use std.spec.step
+
+extern fn rt_file_read_text(path: text) -> text
+use std.spec.{describe, it, expect}
+use app.sj.gate_manifest.{parse_gate_manifest}
+
+val MANIFEST_PATH = "config/check/must_check_gates.sdn"
+val WORKFLOW_PATH = ".github/workflows/repo-hygiene.yml"
+val PUSH_GATE_PATH = "scripts/check/check-push-must-pass.shs"
+val CI_JOB = "code-idiom-gates"
+
+# The gate commands the `code-idiom-gates` job runs, harvested from the
+# workflow itself. Only the job's own steps are read: the job ends where the
+# next top-level job begins.
+fn workflow_gate_commands(source: text) -> [text]:
+    var commands: [text] = []
+    var inside = false
+    for raw in source.split("\n"):
+        if raw.starts_with("  " + CI_JOB + ":"):
+            inside = true
+            continue
+        if inside and raw.starts_with("  ") and not raw.starts_with("   ") and raw.trim().ends_with(":"):
+            inside = false
+        if not inside:
+            continue
+        val line = raw.trim()
+        if line.starts_with("sh scripts/") or line.starts_with("run: sh scripts/"):
+            var command = line
+            if command.starts_with("run: "):
+                command = command["run: ".len():]
+            # Only literal gate invocations are manifest rows. Lines carrying a
+            # shell variable belong to the admission machinery (the conflict
+            # class guards take a computed range), not to the ratchet set.
+            if command.contains("$"):
+                continue
+            # Deliberately unrepresented in the receipt: the extern
+            # registration scan does not terminate and cannot honestly be
+            # recorded as pass, so it has no ci row and is gated on the mode
+            # instead. See the comment above its step.
+            if command.contains("check-extern-registration"):
+                continue
+            if not commands.contains(command):
+                commands.push(command)
+    commands
+
+# ci-tier rows this job owns, as `id` and as `command`.
+fn ci_rows(manifest: text) -> [text]:
+    var rows: [text] = []
+    for line in manifest.split("\n"):
+        val trimmed = line.trim()
+        if trimmed.starts_with("ci-") and trimmed.contains(", ci, "):
+            rows.push(trimmed)
+    rows
+
+describe "Local CI receipt gate wiring":
+    it "declares the ci_job and inputs columns the receipt admission reads":
+        # @req REQ-SSPEC-UNIT
+        step("declares the ci_job and inputs columns the receipt admission reads")
+        val manifest = rt_file_read_text(MANIFEST_PATH) ?? ""
+        expect(manifest).to_contain(
+            "must_check_gates |id, tier, push_blocking, mode, command, ci_job, inputs, description|")
+        # The pinned header is also asserted inside validate_ledger_text; a
+        # manifest that loses a column must be REJECTED, never reparsed with
+        # shifted fields.
+        expect(rt_file_read_text(PUSH_GATE_PATH) ?? "").to_contain(
+            "must_check_gates |id, tier, push_blocking, mode, command, ci_job, inputs, description|")
+
+    it "keeps every manifest row parseable by the Simple reader":
+        # @req REQ-SSPEC-UNIT
+        step("keeps every manifest row parseable by the Simple reader")
+        val entries = parse_gate_manifest(rt_file_read_text(MANIFEST_PATH) ?? "")
+        expect(entries.len() > 0).to_be(true)
+        var malformed = 0
+        for entry in entries:
+            if entry.gate_id == "":
+                malformed = malformed + 1
+        expect(malformed).to_equal(0)
+
+    it "covers every gate the idiom job runs with exactly one ci row":
+        # @req REQ-SSPEC-UNIT
+        step("covers every gate the idiom job runs with exactly one ci row")
+        val workflow = rt_file_read_text(WORKFLOW_PATH) ?? ""
+        val manifest = rt_file_read_text(MANIFEST_PATH) ?? ""
+        val commands = workflow_gate_commands(workflow)
+        # Non-vacuity is absolute: a spec that harvested zero commands proves
+        # nothing about coverage.
+        expect(commands.len() > 0).to_be(true)
+        val rows = ci_rows(manifest)
+        expect(rows.len() > 0).to_be(true)
+        for command in commands:
+            expect(manifest).to_contain("\"" + command + "\", " + CI_JOB + ", ")
+        for row in rows:
+            expect(row).to_contain(", " + CI_JOB + ", ")
+
+    it "gates every idiom step on an INVERTED skip condition":
+        # @req REQ-SSPEC-UNIT
+        step("gates every idiom step on an INVERTED skip condition")
+        val workflow = rt_file_read_text(WORKFLOW_PATH) ?? ""
+        # This is the fail-closed shape: an empty, missing or unset skip_ids
+        # makes contains() false, so !contains() is true and the gate RUNS. A
+        # positive `run_ids` list would skip everything when the decision step
+        # produced nothing, which is the one defect that makes the whole
+        # feature worthless.
+        expect(workflow).to_contain("!contains(steps.receipt.outputs.skip_ids, '|ci-")
+        expect(workflow.contains("outputs.run_ids")).to_be(false)
+        for row in ci_rows(rt_file_read_text(MANIFEST_PATH) ?? ""):
+            val gate_id = row.split(",")[0].trim()
+            expect(workflow).to_contain("!contains(steps.receipt.outputs.skip_ids, '|" + gate_id + "|')")
+
+    it "starts the admission decision at full and never skips undecided":
+        # @req REQ-SSPEC-UNIT
+        step("starts the admission decision at full and never skips undecided")
+        val workflow = rt_file_read_text(WORKFLOW_PATH) ?? ""
+        expect(workflow).to_contain("mode=full")
+        expect(workflow).to_contain("LOCAL-CI-RECEIPT MODE:")
+        # The three conflict-class guards run in every mode: a receipt attests
+        # the head tree, CI tests the merge.
+        expect(workflow).to_contain("check-no-conflict-tree-push")
+        expect(workflow).to_contain("check-no-conflict-markers-push")
+        expect(workflow).to_contain("check-tree-size-push")
+        # Base-only reads: verifier, signers and manifest are materialized
+        # from the BASE sha into RUNNER_TEMP, never checked out into the
+        # workspace the gates then scan.
+        expect(workflow).to_contain("git show \"$BASE_SHA:scripts/check/verify-local-ci-receipt.shs\"")
+        expect(workflow).to_contain("git show \"$BASE_SHA:config/check/ci_receipt_allowed_signers\"")
+        expect(workflow.contains("path: .ci-base")).to_be(false)
+
+    it "delivers the receipt out of tree as a git note":
+        # @req REQ-SSPEC-UNIT
+        step("delivers the receipt out of tree as a git note")
+        val workflow = rt_file_read_text(WORKFLOW_PATH) ?? ""
+        # A tracked receipt file cannot work: the receipt binds the tree, so
+        # committing it changes the tree it binds.
+        expect(workflow).to_contain("refs/notes/ci-receipts:refs/notes/ci-receipts")
+        expect(workflow).to_contain("git notes --ref=ci-receipts show")
+        expect(workflow.contains("RECEIPT_REL:")).to_be(false)
+
+    it "falls to full for any path it cannot classify as documentation":
+        # @req REQ-SSPEC-UNIT
+        step("falls to full for any path it cannot classify as documentation")
+        val workflow = rt_file_read_text(WORKFLOW_PATH) ?? ""
+        # Mode precedence and the doc-only predicate live in one place.
+        expect(workflow).to_contain("MODE PRECEDENCE: full -> docs -> sanity -> escalate")
+        # .github/** is excluded before the .md rule is consulted, because a
+        # comment-only workflow edit can change the gate that is deciding.
+        expect(workflow).to_contain("/^\\.github\\// { print; exit }")
+        # The catch-all: anything matching no allow rule disqualifies docs mode.
+        expect(workflow).to_contain("{ print; exit }' \"$tmp/ci-all-changed\"")
+        expect(workflow).to_contain("mode=docs")
+
+    it "dispatches the receipt row byte-identically to its manifest command":
+        # @req REQ-SSPEC-UNIT
+        step("dispatches the receipt row byte-identically to its manifest command")
+        val manifest = rt_file_read_text(MANIFEST_PATH) ?? ""
+        val push_gate = rt_file_read_text(PUSH_GATE_PATH) ?? ""
+        # A manifest row with no byte-matching dispatch case lands on the
+        # fail-closed `*)` arm and blocks EVERY push.
+        expect(manifest).to_contain(
+            "push-local-ci-receipt-selftest, push, false, tree, \"sh scripts/check/verify-local-ci-receipt.shs --selftest\"")
+        expect(push_gate).to_contain(
+            "'push-local-ci-receipt-selftest:tree:sh scripts/check/verify-local-ci-receipt.shs --selftest')")
