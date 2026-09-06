@@ -1,7 +1,16 @@
 # Interpreter: `match` on an `Option<Enum>` value directly fires no arm
 
 - **Filed:** 2026-08-06
-- Status: OPEN (P2)
+- Status: **RESOLVED for the pure-Simple interpreter** — the header said
+  "OPEN (P2)" while the body already recorded the fix, the root cause and a
+  landed regression spec, so the header was simply stale. Re-run 2026-09-06:
+  `test/01_unit/compiler_core/interpreter/option_wrapped_enum_match_variant_spec.spl`
+  is `Passed: 7 / Failed: 0` under
+  `SIMPLE_TEST_RUNNER_RUST=1 bin/simple test`, host = Rust seed
+  `bin/release/aarch64-unknown-linux-gnu/simple` (50093192 bytes, 2026-09-06
+  09:59), subject = the pure-Simple interpreter's own
+  `match_enum_variant_pattern`. **Still open for the Rust seed**, which is a
+  separate implementation and was never claimed fixed by the work below.
 - Status re-verified 2026-08-17 by source inspection (triage shard 02).
 - **Severity:** Medium-High — silent, no error, no crash
 - **Component:** interpreter — Option/enum discriminant

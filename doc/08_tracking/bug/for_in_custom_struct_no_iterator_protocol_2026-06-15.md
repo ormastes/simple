@@ -64,3 +64,48 @@ type-checking and only surface via a value assertion.
   and `native_array_iteration_indexing_async_driver_smoke_2026-05-13` (array
   iteration under native driver); this is about user structs having no iterator
   hook at all.
+
+## Re-measured 2026-09-06 — the SILENT half is gone, the feature gap remains
+
+Host: `bin/release/aarch64-unknown-linux-gnu/simple`, 50093192 bytes,
+mtime 2026-09-06 09:59 (aarch64 Linux), `SIMPLE_EXECUTION_MODE=interpret`.
+
+Fixture (`build/wi/r_forin.spl`):
+
+```simple
+struct Bag:
+    items: [i64]
+
+fn main() -> void:
+    val b = Bag(items: [1, 2, 3])
+    var n = 0
+    for x in b:
+        n = n + 1
+    print("for-in custom struct iterations={n}")
+```
+
+Observed:
+
+```
+error: semantic: cannot iterate over this type: Object { class: "Bag", fields: {"items": Array([Int(1), Int(2), Int(3)])} }
+```
+
+The record's headline symptom — "iterates zero times **with no error or
+diagnostic**" — no longer holds: the loop now fails loudly and names the type.
+The dangerous, silent-wrong-answer half of this row is therefore closed.
+
+What is NOT closed, and this row should stay open for it: there is still **no
+iterator protocol**. A user type cannot opt in to `for x in <my type>` at all.
+That is a language capability gap, not a defect in the interpreter's loop
+evaluator, and closing it means designing the protocol (a trait with a
+`next()`/`iter()` contract, plus lowering in every engine), which is squarely
+out of scope for an interpreter bug-fix pass and must not be faked by making
+`for` guess at a struct's first array field.
+
+Recommended re-triage: downgrade from "silent wrong result" to a feature
+request for the iterator protocol, and re-file under language/type_system
+rather than interpreter.
+
+Scope: the **Rust seed's** interpreter lane. The pure-Simple interpreter
+(`eval_stmts.spl`, the file the work package attributed this row to) was not
+separately measured.

@@ -393,3 +393,39 @@ unobservable. Replaced with absolute `id == 0`, `generation == 1`,
 | clock_service | 6 | 0 |
 | pm_service | 8 | 3 (unrelated class) |
 | pipefs / procfs / rs / sched | 1 / 1 / 0 / 1 | 0 / 0 / 0 / 0 |
+
+## Re-reproduction attempt 2026-09-06 — NOT REPRODUCIBLE on the current seed
+
+Host: `bin/release/aarch64-unknown-linux-gnu/simple`, 50093192 bytes,
+mtime 2026-09-06 09:59 (aarch64 Linux), `SIMPLE_EXECUTION_MODE=interpret`.
+
+Minimal fixture with the record's exact shape — a mutating method call two
+struct-field hops from `self` (`build/wi/r_twohop.spl`):
+
+```simple
+class Buf:
+    var items: [i64] = []
+
+class World:
+    var output_bufs: Buf = Buf(items: [])
+
+class Sys:
+    var world: World = World(output_bufs: Buf(items: []))
+    fn push_two_hop(v: i64) -> void: self.world.output_bufs.items.push(v)
+    fn count() -> i64: self.world.output_bufs.items.len()
+```
+
+Two pushes, then read back:
+
+```
+two-hop count=2 (expected 2)
+```
+
+The mutation survives both hops. The record's own "Sites fixed" section and its
+note that two- and three-hop were "verified FIXED under INTERP" line up with
+this; the header still says OPEN.
+
+Scope: the **Rust seed's** interpreter lane only. The pure-Simple interpreter
+(`src/compiler/10.frontend/core/interpreter/eval_access.spl`, the file the work
+package attributed this row to) was NOT exercised by this run, and that
+attribution is a heuristic path mapping rather than a claim this record makes.
