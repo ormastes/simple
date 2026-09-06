@@ -2,8 +2,10 @@ use compiler.driver.driver_compiler_type.{CompilerDriver}
 use std.io_runtime.{exit, hash_text}
 use std.env.{env_get}
 use compiler.driver.driver_types.{CompileContext}
+use compiler.driver.perf.compiler_work_counters.{compiler_work_hir_schedule_v1}
 use compiler.common.driver_core_types.{SourceFile}
 use compiler.hir.hir.*
+use compiler.hir.abi_interface.{hir_abi_interface_digest_v1}
 use compiler.hir.hir_lowering.items.{
     bootstrap_hir_modules_reset,
     bootstrap_hir_module_count,
@@ -18,7 +20,7 @@ use compiler.core.ast.{ast_reset}
 use compiler.core.parser.{par_had_error_get}
 use compiler.frontend.parser_types.*
 use compiler.driver.driver_source_pipeline_impl.{dtrace, driver_end_transient_parse_scope, driver_promote_frontend_registry_owners}
-use compiler.driver.driver_bootstrap.{bootstrap_entry_module_name, bootstrap_entry_source_index}
+use compiler.driver.driver_phase_gates.{bootstrap_entry_module_name, bootstrap_entry_source_index}
 use compiler.driver.driver_orchestration.{driver_streaming_surface_enabled}
 use compiler.driver.driver_log_helpers.{log_debug, log_trace, log_warn, log_error, log_phase, log_build_progress}
 use compiler.driver.driver_mem_snapshot.{mem_snapshot_begin, mem_snapshot_finish, mem_snapshot_finish_with_outcome, mem_snapshot_abort}
@@ -47,11 +49,21 @@ use std.nogc_sync_mut.io.process_ops.{eprint}
 use compiler.hir.hir_codec.{hir_codec_roundtrip_selfcheck, hir_codec_roundtrip_line}
 use compiler.driver.driver_hir_cache.{hir_cache_enabled, hir_cache_closure_digest, hir_cache_key, hir_cache_has, hir_cache_load, hir_cache_store, hir_cache_summary, hir_cache_last_warnings, hir_shard_active, hir_shard_owns, hir_shard_levels, hir_shard_level_count, hir_shard_visit_order, hir_shard_summary}
 use compiler.hir.hir_lowering.items.{bootstrap_hir_modules_add_from_module, hir_module_logical_name_from_path}
+use compiler.common.cache.reverse_reference_facts.{
+    reverse_reference_owner_register_source_alias_v1
+}
 extern fn rt_transient_array_scope_begin() -> bool
 extern fn rt_transient_array_scope_pause() -> bool
 extern fn rt_transient_heap_promote(value: Any) -> bool
 extern fn rt_heap_ref_wellformed(value: Any) -> bool
 extern fn rt_stdout_flush()
+
+fn driver_log_typed_hir_abi_interface_v1(module: HirModule, path: text):
+    match hir_abi_interface_digest_v1(module):
+        case Ok(digest):
+            log_phase("[abi-interface] source=typed-hir module={module.name} digest={digest} path={path}")
+        case Err(reason):
+            log_warn("[abi-interface-unavailable] source=typed-hir module={module.name} reason={reason} path={path}")
 
 fn driver_hir_explicit_semantic_policy(ctx: CompileContext) -> bool:
     (ctx.config["compiler_explicit_semantic_policy"] ?? "") == "1"
@@ -60,11 +72,68 @@ fn driver_hir_ambient_bootstrap_enabled(ctx: CompileContext) -> bool:
     not driver_hir_explicit_semantic_policy(ctx) and
         (env_get("SIMPLE_BOOTSTRAP")) == "1"
 
+fn driver_register_reverse_reference_name_v1(
+        module_name: text, name: text, source: text):
+    if name == "":
+        return
+    reverse_reference_owner_register_source_alias_v1(name, source)
+    reverse_reference_owner_register_source_alias_v1(
+        "{module_name}::{name}", source)
+    val emitted_owner = module_name.replace(".", "_").replace("/", "_").replace("-", "_")
+    reverse_reference_owner_register_source_alias_v1(
+        "{emitted_owner}__{name}", source)
+
+fn driver_register_parser_module_source_aliases_v1(
+        module: ParserModule, source: text):
+    reverse_reference_owner_register_source_alias_v1(source, source)
+    reverse_reference_owner_register_source_alias_v1(module.name, source)
+    for name in module.functions.keys():
+        driver_register_reverse_reference_name_v1(module.name, name, source)
+        for attribute in module.functions[name].attributes:
+            reverse_reference_owner_register_source_alias_v1(
+                attribute.name, source)
+    for name in module.classes.keys():
+        driver_register_reverse_reference_name_v1(module.name, name, source)
+        for method_name in module.classes[name].methods.keys():
+            driver_register_reverse_reference_name_v1(
+                module.name, method_name, source)
+    for name in module.actors.keys():
+        driver_register_reverse_reference_name_v1(module.name, name, source)
+        for method_name in module.actors[name].methods.keys():
+            driver_register_reverse_reference_name_v1(
+                module.name, method_name, source)
+    for name in module.structs.keys():
+        driver_register_reverse_reference_name_v1(module.name, name, source)
+    for name in module.enums.keys():
+        driver_register_reverse_reference_name_v1(module.name, name, source)
+    for name in module.traits.keys():
+        driver_register_reverse_reference_name_v1(module.name, name, source)
+        for method in module.traits[name].methods:
+            driver_register_reverse_reference_name_v1(
+                module.name, method.name, source)
+    for name in module.constants.keys():
+        driver_register_reverse_reference_name_v1(module.name, name, source)
+    for impl_block in module.impls:
+        for method_name in impl_block.methods.keys():
+            driver_register_reverse_reference_name_v1(
+                module.name, method_name, source)
+
+fn driver_register_reverse_reference_sources_v1(ctx: CompileContext):
+    for source in ctx.sources:
+        reverse_reference_owner_register_source_alias_v1(
+            source.path, source.path)
+        reverse_reference_owner_register_source_alias_v1(
+            source.module_name, source.path)
+        if ctx.modules.contains_key(source.module_name):
+            driver_register_parser_module_source_aliases_v1(
+                ctx.modules[source.module_name], source.path)
+
 impl CompilerDriver:
     me lower_streaming_surface_source(lowering: HirLowering, source: SourceFile, is_entry: bool) -> Result<HirModule, text>:
         if not rt_transient_array_scope_begin():
             return Err("transient parser scope unavailable for {source.path}")
         val module = parse_full_frontend(source.content, source.path, source.module_name, self.ctx.logger)
+        driver_register_parser_module_source_aliases_v1(module, source.path)
         if par_had_error_get():
             return Err(driver_finish_failed_parse_scope(source.path))
         val flat_row_count_before = bootstrap_hir_module_count()
@@ -251,6 +320,9 @@ impl CompilerDriver:
                 hir_cache_load(hir_stream_key)
             else:
                 nil
+            if (env_get("SIMPLE_M4_WORK_RECEIPT") ?? "") == "1":
+                val hir_stream_work = if hir_stream_cached == nil: 1 else: 0
+                print "[M4 lower] module={source.module_name} work={hir_stream_work}"
             lowering.begin_module(source.path)
             log_phase("phase3:hir:file:start {source.path} module={source.module_name}")
             # In-flight receipt, same reasoning as the parse loop: HIR lowering
@@ -336,6 +408,7 @@ impl CompilerDriver:
                 if hir_stream_key != "":
                     if hir_cache_store(hir_stream_key, hir_module, hir_module_warnings):
                         hir_shard_lowered = hir_shard_lowered + 1
+            driver_log_typed_hir_abi_interface_v1(hir_module, source.path)
             lowered_by_surface[surface_index] = hir_module
             progress_hir_done = progress_hir_done + 1
             if not phase_hir_modules.contains_key(source.module_name):
@@ -458,10 +531,12 @@ impl CompilerDriver:
         (self.ctx, true)
 
     me lower_and_check_impl() -> (CompileContext, bool):
+        compiler_work_hir_schedule_v1(self.ctx.sources.len())
         dtrace("[DRV] lac-canary=entry")
         if self.streaming_surface_owner_ready:
             return self.lower_and_check_streaming_surfaces_impl()
         val log = self.ctx.logger
+        driver_register_reverse_reference_sources_v1(self.ctx)
 
         # Build module_name -> source_path map so each module gets the right
         # filename in module_filename (required for defining_module + visibility).
@@ -668,6 +743,9 @@ impl CompilerDriver:
             else:
                 nil
             val hir_cache_hit: bool = hir_cached != nil
+            if (env_get("SIMPLE_M4_WORK_RECEIPT") ?? "") == "1":
+                val hir_work = if hir_cache_hit: 0 else: 1
+                print "[M4 lower] module={name} work={hir_work}"
             if hir_cache_hit:
                 # Replay the one global side effect lowering has besides its
                 # return value: the flat HIR rows the bootstrap MIR bridge
@@ -839,6 +917,7 @@ impl CompilerDriver:
                 print hir_codec_roundtrip_line(hir_round_trip, src.path)
                 hir_module = hir_round_trip.module
 
+            driver_log_typed_hir_abi_interface_v1(hir_module, src.path)
             if hir_cache_key_value != "" and not hir_cache_hit:
                 if hir_cache_store(hir_cache_key_value, hir_module, hir_module_warnings):
                     hir_shard_lowered = hir_shard_lowered + 1
@@ -1057,6 +1136,7 @@ impl CompilerDriver:
 
     fn lower_to_hir_impl() -> (CompileContext, bool):
         var ctx = self.ctx
+        driver_register_reverse_reference_sources_v1(ctx)
         val retained_module_surfaces: ModuleSurfacesByName = match module_surfaces_from_modules(ctx.modules, ctx.sources):
             case Ok(value): value
             case Err(error):

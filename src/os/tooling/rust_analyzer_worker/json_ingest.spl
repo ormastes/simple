@@ -1,0 +1,134 @@
+use os.tooling.rust_analyzer_worker.model.{RustAnalysisState, RustSuggestionApplicability, RustSpanV1, RustSuggestionV1, RustDiagnosticChildV1, RustDiagnosticV1}
+use std.json.{json_parse, json_get_type, json_object_get, json_to_string, json_to_number, json_array_length, json_array_get}
+
+pub struct RustJsonPageV1:
+    state: RustAnalysisState
+    diagnostics: [RustDiagnosticV1]
+    malformed_record_count: u32
+    truncated: bool
+
+fn object_field(object: any, key: text, expected: text) -> any?:
+    val value = json_object_get(object, key)
+    if value == nil or json_get_type(value) != expected: return nil
+    value
+
+fn string_field(object: any, key: text) -> any?:
+    val value = object_field(object, key, "string")
+    if value == nil: return nil
+    json_to_string(value)
+
+fn number_field(object: any, key: text) -> any?:
+    val value = object_field(object, key, "number")
+    if value == nil: return nil
+    json_to_number(value)
+
+fn parse_span(value: any) -> Option<RustSpanV1>:
+    if json_get_type(value) != "object": return nil
+    val file_name = string_field(value, "file_name")
+    val byte_start = number_field(value, "byte_start")
+    val byte_end = number_field(value, "byte_end")
+    val line_start = number_field(value, "line_start")
+    val line_end = number_field(value, "line_end")
+    val column_start = number_field(value, "column_start")
+    val column_end = number_field(value, "column_end")
+    if file_name == nil or byte_start == nil or byte_end == nil or line_start == nil or line_end == nil or column_start == nil or column_end == nil: return nil
+    Some(RustSpanV1(file_name: file_name, byte_start: (byte_start as i64).to_u64(), byte_end: (byte_end as i64).to_u64(), line_start: (line_start as i64).to_u32(), line_end: (line_end as i64).to_u32(), column_start: (column_start as i64).to_u32(), column_end: (column_end as i64).to_u32()))
+
+fn parse_applicability(value: text) -> RustSuggestionApplicability:
+    if value == "MachineApplicable": return RustSuggestionApplicability.MachineApplicable
+    if value == "MaybeIncorrect": return RustSuggestionApplicability.MaybeIncorrect
+    if value == "HasPlaceholders": return RustSuggestionApplicability.HasPlaceholders
+    RustSuggestionApplicability.Unspecified
+
+fn parse_spans(array: any) -> ([RustSpanV1], [RustSuggestionV1], bool):
+    if json_get_type(array) != "array": return ([], [], false)
+    var spans: [RustSpanV1] = []
+    var suggestions: [RustSuggestionV1] = []
+    var valid = true
+    var index = 0
+    while index < json_array_length(array):
+        val raw_span = json_array_get(array, index)
+        match parse_span(raw_span):
+            Some(span):
+                spans.push(span)
+                val replacement = string_field(raw_span, "suggested_replacement")
+                if replacement != nil:
+                    val raw_applicability = string_field(raw_span, "suggestion_applicability")
+                    suggestions.push(RustSuggestionV1(replacement: replacement, applicability: parse_applicability(if raw_applicability == nil: "" else: raw_applicability), span: span))
+            nil: valid = false
+        index = index + 1
+    (spans, suggestions, valid)
+
+fn parse_child(value: any) -> Option<RustDiagnosticChildV1>:
+    if json_get_type(value) != "object": return nil
+    val level = string_field(value, "level")
+    val message = string_field(value, "message")
+    val raw_spans = object_field(value, "spans", "array")
+    if level == nil or message == nil or raw_spans == nil: return nil
+    val (spans, suggestions, valid) = parse_spans(raw_spans)
+    if not valid: return nil
+    Some(RustDiagnosticChildV1(level: level, message: message, spans: spans, suggestions: suggestions))
+
+fn parse_diagnostic(value: any) -> Option<RustDiagnosticV1>:
+    if json_get_type(value) != "object": return nil
+    val level = string_field(value, "level")
+    val message = string_field(value, "message")
+    val raw_spans = object_field(value, "spans", "array")
+    val raw_children = object_field(value, "children", "array")
+    if level == nil or message == nil or raw_spans == nil or raw_children == nil: return nil
+    val (spans, suggestions, spans_valid) = parse_spans(raw_spans)
+    if not spans_valid or spans.len() == 0: return nil
+    var children: [RustDiagnosticChildV1] = []
+    var child_index = 0
+    while child_index < json_array_length(raw_children):
+        match parse_child(json_array_get(raw_children, child_index)):
+            Some(child): children.push(child)
+            nil: return nil
+        child_index = child_index + 1
+    var code = ""
+    val raw_code = json_object_get(value, "code")
+    if raw_code != nil and json_get_type(raw_code) == "object":
+        val nested_code = string_field(raw_code, "code")
+        if nested_code != nil: code = nested_code
+    Some(RustDiagnosticV1(code: code, level: level, message: message, span: spans[0], spans: spans, suggestions: suggestions, children: children))
+
+fn ingest_record(record: text, page: RustJsonPageV1) -> RustJsonPageV1:
+    var result = page
+    val root = json_parse(record)
+    if root == nil or json_get_type(root) != "object":
+        result.malformed_record_count = result.malformed_record_count + 1
+        result.state = RustAnalysisState.Partial
+        return result
+    val reason = string_field(root, "reason")
+    if reason == nil:
+        result.malformed_record_count = result.malformed_record_count + 1
+        result.state = RustAnalysisState.Partial
+        return result
+    if reason != "compiler-message": return result
+    val message = object_field(root, "message", "object")
+    if message == nil:
+        result.malformed_record_count = result.malformed_record_count + 1
+        result.state = RustAnalysisState.Partial
+        return result
+    match parse_diagnostic(message):
+        Some(diagnostic): result.diagnostics.push(diagnostic)
+        nil:
+            result.malformed_record_count = result.malformed_record_count + 1
+            result.state = RustAnalysisState.Partial
+    result
+
+pub fn ingest_rust_json_lines(output: text, maximum_bytes: u64, maximum_diagnostics: u32) -> RustJsonPageV1:
+    var page = RustJsonPageV1(state: RustAnalysisState.Complete, diagnostics: [], malformed_record_count: 0, truncated: false)
+    if output.len().to_u64() > maximum_bytes:
+        page.state = RustAnalysisState.Partial
+        page.truncated = true
+        return page
+    for line in output.split("\n"):
+        val record = line.trim()
+        if record == "": continue
+        page = ingest_record(record, page)
+        if page.diagnostics.len() > maximum_diagnostics.to_i64():
+            page.diagnostics = page.diagnostics.slice(0, maximum_diagnostics.to_i64())
+            page.state = RustAnalysisState.Partial
+            page.truncated = true
+    page

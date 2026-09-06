@@ -1,0 +1,28 @@
+use std.nogc_async_mut_noalloc.kernel_plugin.allocation_proof.{
+    KpfAllocationProof,
+    KpfAllocationProofStatus,
+}
+use std.spec.step
+
+describe "KPF allocator observation proof":
+    it "records a clean interval when the allocator total does not change":
+        step("Snapshot the independently instrumented allocator at activation")
+        var proof = KpfAllocationProof.create()
+        expect(proof.activate(41u64)).to_equal(KpfAllocationProofStatus.Clean)
+        expect(proof.observe(41u64)).to_equal(KpfAllocationProofStatus.Clean)
+        expect(proof.receipt().post_activation_allocations).to_equal(0u64)
+
+    it "fails when an allocation occurs after activation":
+        step("Mutation guard: one observed allocator call invalidates the strict proof")
+        var proof = KpfAllocationProof.create()
+        expect(proof.activate(41u64)).to_equal(KpfAllocationProofStatus.Clean)
+        expect(proof.observe(42u64)).to_equal(KpfAllocationProofStatus.Violated)
+        expect(proof.receipt().post_activation_allocations).to_equal(1u64)
+
+    it "rejects reset and out-of-order allocator observations":
+        step("Allocator totals are monotonic within one proof interval")
+        var proof = KpfAllocationProof.create()
+        expect(proof.observe(1u64)).to_equal(KpfAllocationProofStatus.InvalidObservation)
+        expect(proof.activate(8u64)).to_equal(KpfAllocationProofStatus.Clean)
+        expect(proof.activate(8u64)).to_equal(KpfAllocationProofStatus.InvalidObservation)
+        expect(proof.observe(7u64)).to_equal(KpfAllocationProofStatus.InvalidObservation)

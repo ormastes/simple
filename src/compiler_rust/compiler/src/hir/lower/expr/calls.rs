@@ -212,7 +212,14 @@ impl Lowerer {
 
         // Regular function call
         let func_hir = Box::new(self.lower_expr(callee, ctx)?);
-        let mut args_hir = self.lower_call_args(args, ctx)?;
+        let ret_ty = self.call_return_type(callee, func_hir.ty);
+        let proven_nonescaping = matches!(callee, Expr::Identifier(name) if self.proven_nonescaping_functions.contains(name))
+            && !self.is_reference_type(ret_ty);
+        let mut args_hir = if proven_nonescaping {
+            self.lower_nonescaping_call_args(args, ctx)?
+        } else {
+            self.lower_call_args(args, ctx)?
+        };
 
         // M12 3b: fill omitted trailing arguments from the callee's parameter
         // defaults. Restricted to a directly-named free function called purely
@@ -249,8 +256,6 @@ impl Lowerer {
         // Prefer the declared return type for the named callee when we know it.
         // This keeps local variables initialized from imported/helper calls on a
         // concrete type path instead of degrading to ANY at the next field access.
-        let ret_ty = self.call_return_type(callee, func_hir.ty);
-
         Ok(HirExpr {
             kind: HirExprKind::Call {
                 func: func_hir,

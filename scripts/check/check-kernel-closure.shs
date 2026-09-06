@@ -1,0 +1,249 @@
+#!/bin/sh
+set -u
+
+manifest=${KERNEL_CLOSURE_MANIFEST:-doc/04_architecture/compiler/plugin_arch/kernel_closure.sdn}
+root=${KERNEL_CLOSURE_ROOT:-.}
+
+rules_file() {
+  awk '/^[[:space:]]*- class:/ { class_name=$3 } /^[[:space:]]*path:/ { print class_name "\t" $2 }' "$manifest"
+}
+
+authority_value() {
+  key=$1
+  awk -v key="$key" '
+    $1 == key ":" { count++; value=$2 }
+    END { if (count != 1 || value == "") exit 1; print value }
+  ' "$manifest"
+}
+
+verify_authority() {
+  [ "$(authority_value k1_policy)" = llvm-cranelift ] &&
+    [ "$(authority_value simple_abi_policy)" = v1 ] &&
+    [ "$(authority_value plugin_manifest_policy)" = simple-sdn ] &&
+    [ "$(authority_value coverage_cutover_policy)" = atomic-apk-only ] &&
+    [ "$(authority_value coverage_implementation)" = apk-only ] &&
+    [ "$(authority_value performance_threshold_mode)" = baseline-relative-10-percent ] &&
+    [ "$(authority_value performance_threshold_status)" = selected ] &&
+    [ "$(authority_value performance_baseline_scope)" = admitted-per-architecture-receipt ] &&
+    [ "$(authority_value performance_steady_rss_percent)" = 110 ] &&
+    [ "$(authority_value performance_growth_percent)" = 10 ] &&
+    [ "$(authority_value performance_warm_request_count)" = 20 ] || {
+      echo "FAIL — kernel closure policy authority drifted" >&2
+      return 1
+    }
+}
+
+classify_path() {
+  target=$1
+  while IFS="	" read -r class_name pattern; do
+    [ -n "$class_name" ] || continue
+    case "$target" in $pattern) printf '%s\n' "$class_name"; return 0 ;; esac
+  done < "$rules"
+  return 1
+}
+
+logical_module() {
+  case "$1" in
+    src/compiler/*) relative=${1#src/compiler/}; prefix=compiler ;;
+    src/plugins/*) relative=${1#src/plugins/}; prefix=plugins ;;
+    *) return 1 ;;
+  esac
+  stem=${relative%.spl}
+  first=${stem%%/*}
+  if [ "$prefix" = compiler ]; then
+    case "$first" in [0-9][0-9].*) first=${first#*.} ;; esac
+  fi
+  if [ "$stem" = "$first" ]; then
+    printf '%s.%s\n' "$prefix" "$first"
+  else
+    rest=${stem#*/}
+    printf '%s.%s.%s\n' "$prefix" "$first" "$(printf '%s' "$rest" | tr / .)"
+  fi
+}
+
+check_tree() {
+  [ -f "$manifest" ] || { echo "ERROR — kernel closure manifest is missing: $manifest"; return 2; }
+  verify_authority || return 1
+  root=$(CDPATH= cd -- "$root" && pwd -P) || { echo "ERROR — kernel closure root is invalid"; return 2; }
+  workspace=$(mktemp -d) || { echo "ERROR — cannot create check workspace"; return 2; }
+  trap 'rm -rf "$workspace"' EXIT HUP INT TERM
+  rules="$workspace/rules"
+  files="$workspace/files"
+  classified="$workspace/classified"
+  modules="$workspace/modules"
+  imports="$workspace/imports"
+  findings="$workspace/findings"
+  rules_file > "$rules"
+  [ -s "$rules" ] || { echo "ERROR — kernel closure manifest has no rules"; return 2; }
+  [ -d "$root/src/compiler" ] || { echo "ERROR — nothing was checked"; return 2; }
+  {
+    find "$root/src/compiler" -type f \( -name '*.spl' -o -name '*.sdn' -o -name '*.md' \) -print
+    if [ -d "$root/src/plugins" ]; then
+      find "$root/src/plugins" -type f \( -name '*.spl' -o -name '*.sdn' -o -name '*.md' \) -print
+    fi
+  } | sort > "$files"
+  count=$(wc -l < "$files" | tr -d ' ')
+  [ "$count" -gt 0 ] || { echo "ERROR — nothing was checked"; return 2; }
+
+  : > "$classified"
+  : > "$modules"
+  unclassified=0
+  while IFS= read -r absolute; do
+    relative=${absolute#"$root"/}
+    owner=$(classify_path "$relative" || true)
+    if [ -z "$owner" ]; then
+      echo "UNCLASSIFIED $relative"
+      unclassified=$((unclassified + 1))
+      continue
+    fi
+    case "$relative:$owner" in
+      src/plugins/*:P-static|src/plugins/*:P-dyn) ;;
+      src/plugins/*:*)
+        echo "MISCLASSIFIED plugin path $relative as $owner"
+        unclassified=$((unclassified + 1))
+        continue
+        ;;
+    esac
+    printf '%s\t%s\t%s\n' "$owner" "$relative" "$absolute" >> "$classified"
+    case "$relative" in
+      *.spl) printf '%s\t%s\t%s\n' "$(logical_module "$relative")" "$relative" "$owner" >> "$modules" ;;
+    esac
+  done < "$files"
+  duplicate=$(cut -f1 "$modules" | sort | uniq -d | head -1)
+  [ -z "$duplicate" ] || { echo "ERROR — ambiguous compiler module: $duplicate"; return 2; }
+
+  # Extract every K0/K1 import in one AWK process. Each classified source is
+  # opened exactly once; no per-file subprocess or repeated rule scan remains.
+  awk -F '\t' '
+    { owner[++count]=$1; relative[count]=$2; absolute[count]=$3 }
+    END {
+      OFS="\t"
+      for (item=1; item<=count; item++) {
+        while ((getline line < absolute[item]) > 0) {
+          scan=line
+          sub(/^[[:space:]]*/, "", scan)
+          fields=split(scan, word, /[[:space:]]+/)
+          imported=""
+          if (fields >= 2 && word[1] == "use") imported=word[2]
+          else if (fields >= 3 && word[1] == "export" && word[2] == "use") imported=word[3]
+          if (imported !~ /^(compiler|plugins)\./) continue
+          sub(/\{.*$/, "", imported)
+          sub(/\.$/, "", imported)
+          print owner[item], relative[item], imported
+        }
+        close(absolute[item])
+      }
+    }
+  ' "$classified" > "$imports"
+
+  # Resolve imports through an exact module index. Longest-prefix lookup is
+  # bounded by import depth: strip one dotted segment until an indexed module
+  # is found, rather than rescanning the full module table for every import.
+  awk -F '\t' '
+    NR == FNR {
+      module_path[$1]=$2
+      module_owner[$1]=$3
+      next
+    }
+    {
+      source_owner=$1
+      source_path=$2
+      imported=$3
+      if (source_owner != "K0" && source_owner != "K1") next
+      candidate=imported
+      while (candidate != "") {
+        if (candidate in module_path) {
+          target_owner=module_owner[candidate]
+          if (target_owner == "P-static" || target_owner == "P-dyn")
+            print "FORBIDDEN " source_owner "->" target_owner " " source_path " imports " imported
+          break
+        }
+        if (candidate !~ /\./) break
+        sub(/\.[^.]*$/, "", candidate)
+      }
+    }
+  ' "$modules" "$imports" > "$findings"
+  forbidden=$(wc -l < "$findings" | tr -d ' ')
+  [ "$forbidden" -eq 0 ] || cat "$findings"
+  if [ "$unclassified" -ne 0 ] || [ "$forbidden" -ne 0 ]; then
+    echo "FAIL — $count file(s) classified, $unclassified unclassified, $forbidden compiler/K0/K1->P imports"
+    return 1
+  fi
+  echo "PASS — $count file(s) classified, 0 unclassified, 0 compiler->plugin imports, 0 K0/K1->P imports"
+}
+
+selftest() {
+  fixture=$(mktemp -d) || { echo "ERROR — nothing was checked"; return 2; }
+  mkdir -p "$fixture/src/compiler/00.core" "$fixture/src/compiler/60.backend" "$fixture/src/compiler/90.optional" "$fixture/src/plugins/backend_fixture"
+  cat > "$fixture/closure.sdn" <<'EOF'
+schema: simple-kernel-closure-v1
+authority:
+  k1_policy: llvm-cranelift
+  simple_abi_policy: v1
+  plugin_manifest_policy: simple-sdn
+  coverage_cutover_policy: atomic-apk-only
+  coverage_implementation: apk-only
+  performance_threshold_mode: baseline-relative-10-percent
+  performance_threshold_status: selected
+  performance_baseline_scope: admitted-per-architecture-receipt
+  performance_steady_rss_percent: 110
+  performance_growth_percent: 10
+  performance_warm_request_count: 20
+rules:
+  - class: K0
+    path: src/compiler/00.core/**
+  - class: K1
+    path: src/compiler/60.backend/**
+  - class: P-static
+    path: src/compiler/90.optional/**
+  - class: P-static
+    path: src/plugins/backend_*/**
+EOF
+  printf 'fn ok() -> bool: true\n' > "$fixture/src/compiler/00.core/ok.spl"
+  printf 'fn ok_k1() -> bool: true\n' > "$fixture/src/compiler/60.backend/ok.spl"
+  printf 'fn optional() -> bool: true\n' > "$fixture/src/compiler/90.optional/ok.spl"
+  printf 'fn plug() -> bool: true\n' > "$fixture/src/plugins/backend_fixture/plug.spl"
+  clean_output=$(KERNEL_CLOSURE_ROOT="$fixture" KERNEL_CLOSURE_MANIFEST="$fixture/closure.sdn" /bin/sh "$0" 2>&1) || {
+    rm -rf "$fixture"
+    echo "FAIL — clean fixture did not pass: $clean_output"
+    return 1
+  }
+  printf 'use plugins.backend_fixture.plug\n' > "$fixture/src/compiler/00.core/ok.spl"
+  if KERNEL_CLOSURE_ROOT="$fixture" KERNEL_CLOSURE_MANIFEST="$fixture/closure.sdn" /bin/sh "$0" >/dev/null 2>&1; then
+    rm -rf "$fixture"; echo "FAIL — forbidden K0 import was accepted"; return 1
+  fi
+  printf 'fn ok() -> bool: true\n' > "$fixture/src/compiler/00.core/ok.spl"
+  printf 'use plugins.backend_fixture.plug\n' > "$fixture/src/compiler/60.backend/ok.spl"
+  if KERNEL_CLOSURE_ROOT="$fixture" KERNEL_CLOSURE_MANIFEST="$fixture/closure.sdn" /bin/sh "$0" >/dev/null 2>&1; then
+    rm -rf "$fixture"; echo "FAIL — forbidden K1 import was accepted"; return 1
+  fi
+  printf 'fn ok_k1() -> bool: true\n' > "$fixture/src/compiler/60.backend/ok.spl"
+  printf 'use plugins.backend_fixture.plug\n' > "$fixture/src/compiler/90.optional/ok.spl"
+  KERNEL_CLOSURE_ROOT="$fixture" KERNEL_CLOSURE_MANIFEST="$fixture/closure.sdn" /bin/sh "$0" >/dev/null 2>&1 || {
+    rm -rf "$fixture"; echo "FAIL — formally classified P-static compiler adapter was rejected"; return 1
+  }
+  sed 's/- class: P-static/- class: K1/g' "$fixture/closure.sdn" > "$fixture/deceptive.sdn"
+  printf 'fn optional() -> bool: true\n' > "$fixture/src/compiler/90.optional/ok.spl"
+  if KERNEL_CLOSURE_ROOT="$fixture" KERNEL_CLOSURE_MANIFEST="$fixture/deceptive.sdn" /bin/sh "$0" >/dev/null 2>&1; then
+    rm -rf "$fixture"; echo "FAIL — plugin path classified as kernel was accepted"; return 1
+  fi
+  sed 's/k1_policy: llvm-cranelift/k1_policy: cranelift-only/' \
+    "$fixture/closure.sdn" > "$fixture/policy-drift.sdn"
+  if KERNEL_CLOSURE_ROOT="$fixture" KERNEL_CLOSURE_MANIFEST="$fixture/policy-drift.sdn" /bin/sh "$0" >/dev/null 2>&1; then
+    rm -rf "$fixture"; echo "FAIL — policy authority drift was accepted"; return 1
+  fi
+  sed 's/performance_steady_rss_percent: 110/performance_steady_rss_percent: 111/' \
+    "$fixture/closure.sdn" > "$fixture/performance-drift.sdn"
+  if KERNEL_CLOSURE_ROOT="$fixture" KERNEL_CLOSURE_MANIFEST="$fixture/performance-drift.sdn" /bin/sh "$0" >/dev/null 2>&1; then
+    rm -rf "$fixture"; echo "FAIL — performance authority drift was accepted"; return 1
+  fi
+  rm "$fixture/src/compiler/00.core/ok.spl" "$fixture/src/compiler/60.backend/ok.spl" "$fixture/src/compiler/90.optional/ok.spl" "$fixture/src/plugins/backend_fixture/plug.spl"
+  if KERNEL_CLOSURE_ROOT="$fixture" KERNEL_CLOSURE_MANIFEST="$fixture/closure.sdn" /bin/sh "$0" >/dev/null 2>&1; then
+    rm -rf "$fixture"; echo "FAIL — empty fixture was accepted"; return 1
+  fi
+  rm -rf "$fixture"
+  echo "PASS — 7 selftest fixture(s) checked, policy authority and compiler closure fail closed"
+}
+
+if [ "${1:-}" = "--selftest" ]; then selftest; exit $?; fi
+check_tree

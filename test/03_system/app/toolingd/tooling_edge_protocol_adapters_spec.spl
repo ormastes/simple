@@ -1,0 +1,82 @@
+# Purpose: executable LSP and test edge-protocol contract for toolingd.
+# @req REQ-KPF-IDE-EDGE-001
+# @cover src/app/toolingd/protocol_adapters 80%
+# @tag: system, toolingd, lsp, test_protocol, framing
+
+use std.spec.*
+use std.common.kernel_plugin.ids.*
+use std.common.lint_kernel.*
+use std.tooling_kernel.ToolingDocumentSnapshotV1
+use app.toolingd.*
+
+fn id(value: u64) -> KpfId128:
+    KpfId128(hi: 0, lo: value)
+
+fn digest(value: u64) -> KpfDigest256:
+    KpfDigest256(w0: value, w1: value + 1, w2: 0, w3: 0)
+
+fn snapshot(revision: u64, value: u64) -> ToolingDocumentSnapshotV1:
+    ToolingDocumentSnapshotV1(document_id: id(10), language_id: id(20), revision: revision, content_digest: digest(value))
+
+fn coverage() -> AnalysisCoverageV1:
+    AnalysisCoverageV1(requested_unit_count: 1, admitted_unit_count: 1, completed_unit_count: 1, partial_unit_count: 0, not_analyzed_unit_count: 0, requested_rule_count: 1, completed_rule_count: 1, skipped_rule_count: 0, requested_phase_bits: 1, completed_phase_bits: 1, provider_receipt_digest: digest(30), input_revision_digest: digest(31))
+
+fn output() -> NormalizedLintOutputV1:
+    val artifact = ArtifactKeyV1(workspace_id: id(1), language_id: id(20), path_id: id(2), target_id: id(3), configuration_digest: digest(4))
+    val span = SourceSpanV1(artifact: artifact, revision: 1, start_byte: 1, end_byte: 3)
+    val location = LintOutputLocationV1(span: span, uri: "file:///workspace/main.spl", start_line: 0, start_column: 1, end_line: 0, end_column: 3)
+    val raw = DiagnosticV1(rule_id: id(5), provider_id: id(6), severity: 2, category: 1, primary_span: span, message_id: id(7), fix_digest: digest(8))
+    val diagnostic = NormalizedLintDiagnosticV1(diagnostic: raw, location: location, rule_name: "semantic-name", message: "unknown name", help: "declare it", related: [], fixes: [LintTextEditV1(location: location, replacement: "known", metadata: LintEditMetadataV1(provider_id: id(8), language_id: id(2), expected_snapshot_digest: digest(32), conflict_group: 1, applicability: LintFixApplicabilityV1.MachineApplicable))])
+    NormalizedLintOutputV1(result: lint_run_result(coverage(), 1, 0, 1, false, false), diagnostics: [diagnostic])
+
+fn opened_edge() -> (ToolingLspEdgeV1, ToolingDocumentSessionHandleV1):
+    val edge = ToolingLspEdgeV1.create(2, 2, 4, 8)
+    val initialized = edge.initialize(tooling_protocol_version_v1())
+    val opened = edge.open_document(initialized.connection, snapshot(1, 100), 9)
+    (edge, opened.document)
+
+describe "toolingd LSP and test edge protocol adapters":
+    it "negotiates version and validates JSON-RPC framing":
+        step("reject a future protocol version")
+        val edge = ToolingLspEdgeV1.create(1, 1, 1, 1)
+        expect(edge.initialize(ToolingProtocolVersionV1(major: 2, minor: 0)).status).to_equal(ToolingEdgeStatusV1.UnsupportedProtocol)
+        step("round-trip one valid framed edge message")
+        val encoded = tooling_edge_encode_frame_v1("{\"jsonrpc\":\"2.0\"}")
+        val decoded = tooling_edge_decode_frame_v1(encoded)
+        expect(decoded.status).to_equal(ToolingEdgeStatusV1.Ok)
+        expect(decoded.body).to_contain("jsonrpc")
+        step("reject malformed and incomplete framing")
+        expect(tooling_edge_decode_frame_v1("Length: 2\r\n\r\n{}").status).to_equal(ToolingEdgeStatusV1.MalformedFrame)
+        expect(tooling_edge_decode_frame_v1("Content-Length: 8\r\n\r\n{}").status).to_equal(ToolingEdgeStatusV1.IncompleteFrame)
+
+    it "rejects stale revisions and cancellation at the edge":
+        val (edge, document) = opened_edge()
+        step("reject analysis for a non-current revision")
+        expect(edge.begin_diagnostics(document, 0, digest(99)).status).to_equal(ToolingEdgeStatusV1.StaleRevision)
+        step("cancel current analysis and reject publication")
+        val begun = edge.begin_diagnostics(document, 1, digest(100))
+        expect(edge.cancel(begun.ticket)).to_equal(ToolingEdgeStatusV1.Ok)
+        expect(edge.publish(begun.ticket, output()).status).to_equal(ToolingEdgeStatusV1.Cancelled)
+
+    it "publishes diagnostics and code actions from typed records":
+        val (edge, document) = opened_edge()
+        val begun = edge.begin_diagnostics(document, 1, digest(100))
+        val published = edge.publish(begun.ticket, output())
+        expect(published.status).to_equal(ToolingEdgeStatusV1.Ok)
+        expect(published.response_json).to_contain("diagnostics")
+        expect(published.response_json).to_contain("codeActions")
+        expect(published.response_json).to_contain("known")
+
+    it "shares one analysis between LSP and test protocol requests":
+        val (edge, document) = opened_edge()
+        step("start the document analysis through LSP")
+        val first = edge.begin_diagnostics(document, 1, digest(100))
+        expect(first.reused).to_be(false)
+        step("reuse exactly that analysis for a test run")
+        val test = ToolingTestDescriptorV1(test_id: 41, label: "main semantic test", document: document, revision: 1, content_digest: digest(100))
+        val run = tooling_test_run_v1(edge, test)
+        expect(run.status).to_equal(ToolingEdgeStatusV1.Ok)
+        expect(run.reused).to_be(true)
+        expect(run.ticket.slot).to_equal(first.ticket.slot)
+        val discovered = tooling_test_discover_v1([test])
+        expect(discovered.response_json).to_contain("main semantic test")

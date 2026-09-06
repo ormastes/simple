@@ -1,0 +1,86 @@
+# @req MBH-REQ-001 MBH-REQ-004 MBH-REQ-006 MBH-REQ-008 MBH-REQ-009 MBH-NFR-002 MBH-NFR-003
+use std.spec.{describe, it, expect, step}
+use std.io.{file_read}
+use std.io_runtime.{process_run}
+
+describe "macOS reverse-reference M4 native qualification":
+    # MBH-NFR-002: the native harness records bounded no-op work.
+    # MBH-NFR-003: the native receipt records execution metrics.
+    it "should run the production qualification checker's mutation-red self-test":
+        step("Execute the production M4 checker over all eight fixtures")
+        val (output, errors, status) = process_run(
+            "/bin/sh",
+            ["scripts/check/check-macos-reverse-reference-m4.shs", "--self-test"])
+        expect(status).to_equal(0)
+        expect(errors).to_equal("")
+        expect(output).to_contain("M4 structural self-test PASS: 8 fixtures")
+        expect(output).to_contain("Results parser fail closed")
+        expect(output).to_contain("provider/archive mutation-red")
+
+    it "should prove an actual unchanged native-build schedules zero compiler work":
+        step("Run the production native-build twice with one isolated cache identity")
+        val (output, errors, status) = process_run(
+            "/bin/sh",
+            ["test/03_system/compiler/feature/native_zero_work_end_to_end_test.shs"])
+        expect(status).to_equal(0)
+        expect(errors).to_equal("")
+        expect(output).to_contain("PASS: actual native-build zero-work counters")
+        expect(output).to_contain("parser=0 hir=0 mir=0 codegen=0 link=0")
+
+    it "should reject an unavailable architecture rather than synthesize PASS":
+        step("Invoke the production checker with an invalid architecture mutation")
+        val (output, errors, status) = process_run(
+            "/bin/sh",
+            ["scripts/check/check-macos-reverse-reference-m4.shs", "--arch=invalid"])
+        expect(status).to_be_greater_than(0)
+        expect(output + errors).to_contain("--arch must be arm64 or x86_64")
+
+    it "should reject prebuilt tool substitution before native qualification":
+        step("Pass a helper path where M4 must build producer-bound tools itself")
+        val (output, errors, status) = process_run(
+            "/bin/sh",
+            ["scripts/check/check-macos-reverse-reference-m4.shs", "--arch=arm64",
+             "--cli=/tmp/prebuilt-helper"])
+        expect(status).to_be_greater_than(0)
+        expect(output + errors).to_contain("prebuilt tool artifacts are not M4 build evidence")
+
+    it "should reject supplied provider archives and synthetic provider receipts":
+        step("Pass a provider archive where M4 must build and trace a live archive itself")
+        val (output, errors, status) = process_run(
+            "/bin/sh",
+            ["scripts/check/check-macos-reverse-reference-m4.shs", "--arch=arm64",
+             "--provider-archive=/tmp/prebuilt-provider.a"])
+        expect(status).to_be_greater_than(0)
+        expect(output + errors).to_contain("prebuilt or synthetic provider evidence is not M4 build evidence")
+
+    it "should reject residency qualification without an admitted architecture baseline":
+        step("Inspect the production residency gate for baseline-bound derived limits and no defaults")
+        val checker = file_read("scripts/check/check-macos-m4-long-lived-residency.shs") ?? ""
+        expect(checker).to_contain("admitted per-architecture baseline receipt unavailable")
+        expect(checker).to_contain("baseline_rss_kib=$(baseline_value baseline_rss_kib)")
+        expect(checker).to_contain("baseline_receipt_sha256=$(baseline_value baseline_receipt_sha256)")
+        expect(checker).to_contain("baseline_evidence_sha256=$(baseline_value baseline_evidence_sha256)")
+        expect(checker).to_contain("baseline receipt rejected")
+
+    it "should bind qualification to authenticated Phase3 producer authority and canonical policy":
+        step("Inspect the production M4 checker for exact producer and policy recomputation")
+        val checker = file_read("scripts/check/check-macos-reverse-reference-m4.shs") ?? ""
+        expect(checker).to_contain("macos-phase3-producer-authority-v1")
+        expect(checker).to_contain("source_artifact_digest")
+        expect(checker).to_contain("qualification_workflow_sha")
+        expect(checker).to_contain("validate_canonical_policy")
+        expect(checker).to_contain("SIMPLE_BINARY=\"$child_executable\"")
+
+    it "should report BLOCKED for the non-native architecture before accepting artifacts":
+        step("Select the architecture opposite to the current native host")
+        val (machine, machine_errors, machine_status) = process_run("/usr/bin/uname", ["-m"])
+        expect(machine_status).to_equal(0)
+        expect(machine_errors).to_equal("")
+        val unavailable = if machine.contains("arm64") or machine.contains("aarch64"): "x86_64" else: "arm64"
+        step("Invoke the production checker without substituting cross-architecture evidence")
+        val (output, errors, status) = process_run(
+            "/bin/sh",
+            ["scripts/check/check-macos-reverse-reference-m4.shs", "--arch=" + unavailable,
+             "--evidence-dir=build/test-m4-blocked"])
+        expect(status).to_equal(3)
+        expect(output + errors).to_contain("M4 BLOCKED")

@@ -1,0 +1,123 @@
+use app.spipe.testing.*
+use std.common.crypto.sha256.{sha256_text}
+use std.scv.compile_source_inventory.*
+use std.io_runtime.{file_read}
+
+fn inventory_digest(label: text) -> text:
+    sha256_text(label)
+
+fn inventory_event(
+    source: text, operation: text, path: text, content: text, semantic: text
+) -> CompileSourceEventV1:
+    if source == "git":
+        return compile_source_inventory_git_event_v1(operation, path, content)
+    if source == "filesystem":
+        return compile_source_inventory_filesystem_event_v1(operation, path, content)
+    CompileSourceEventV1(source, operation, path, inventory_digest(content),
+        inventory_digest(semantic), inventory_digest(semantic),
+        inventory_digest(semantic), inventory_digest(semantic), content.len())
+
+fn empty_inventory() -> CompileSourceInventoryV1:
+    CompileSourceInventoryV1(1, 0, [])
+
+describe "event-maintained compile source inventory":
+    it "applies Git and filesystem events without source discovery":
+        val created = compile_source_inventory_apply_event_v1(
+            empty_inventory(), inventory_event(
+                "git", "create", "src/a.spl", "fn a(): 1", "a-v1"))
+        expect(created.valid).to_equal(true)
+        val modified = compile_source_inventory_apply_event_v1(
+            created.inventory!, inventory_event(
+                "filesystem", "modify", "src/a.spl", "fn a(): 2", "a-v2"))
+        expect(modified.valid).to_equal(true)
+        expect(modified.content_changed).to_equal(true)
+        expect(modified.semantics_changed).to_equal(true)
+
+    it "keeps semantic facets stable for comment-only changes":
+        val first = compile_source_inventory_apply_event_v1(
+            empty_inventory(), inventory_event(
+                "git", "create", "src/a.spl", "fn a(): 1", "a-v1"))
+        val comment = compile_source_inventory_apply_event_v1(
+            first.inventory!, inventory_event(
+                "filesystem", "modify", "src/a.spl",
+                "# comment\nfn a():    1", "a-v1"))
+        expect(comment.valid).to_equal(true)
+        expect(comment.content_changed).to_equal(true)
+        expect(comment.semantics_changed).to_equal(false)
+        expect(comment.inventory!.entries[0].content_digest !=
+            first.inventory!.entries[0].content_digest).to_equal(true)
+        expect(comment.inventory!.entries[0].export_digest).to_equal(
+            first.inventory!.entries[0].export_digest)
+        expect(comment.inventory!.entries[0].initializer_digest).to_equal(
+            first.inventory!.entries[0].initializer_digest)
+        expect(comment.inventory!.entries[0].provider_digest).to_equal(
+            first.inventory!.entries[0].provider_digest)
+
+    it "derives Git and filesystem facets through production adapters":
+        val git = compile_source_inventory_git_event_v1(
+            "create", "src/a.spl", "export fn a(): 1")
+        val filesystem = compile_source_inventory_filesystem_event_v1(
+            "modify", "src/a.spl", "# comment\nexport   fn a(): 1")
+        expect(git.semantic_digest).to_equal(filesystem.semantic_digest)
+        expect(git.export_digest).to_equal(filesystem.export_digest)
+
+    it "exposes production Git and filesystem batch adapters":
+        val content = file_read("src/lib/scv/compile_source_inventory.spl")
+        expect(content).to_contain("compile_source_inventory_apply_git_changes_v1")
+        expect(content).to_contain("compile_source_inventory_apply_filesystem_events_v1")
+        expect(content).to_contain("inventory-event-overflow")
+
+    it "contains publication locking CAS and live-owner recovery contracts":
+        val source = "src/lib/scv/compile_source_inventory.spl"
+        val content = file_read(source)
+        expect(content).to_contain("publication.lock")
+        expect(content).to_contain("current.inventory!.generation > inventory.generation")
+        expect(content).to_contain("not process_is_running(owner)")
+
+    it "routes snapshot creation through canonical inventory without walking":
+        val content = file_read("src/lib/scv/compile_snapshot.spl")
+        expect(content).to_contain("compile_source_inventory_read_current_v1")
+        expect(content).to_contain("snapshot-index-drift")
+        expect(content.contains("scv_compile_dir_walk")).to_equal(false)
+
+    it "freezes canonical rows accepted by compile snapshot inventory":
+        val first = compile_source_inventory_apply_event_v1(
+            empty_inventory(), inventory_event(
+                "git", "create", "src/z.spl", "z", "z"))
+        val second = compile_source_inventory_apply_event_v1(
+            first.inventory!, inventory_event(
+                "filesystem", "create", "src/a.spl", "a", "a"))
+        val rows = compile_source_inventory_snapshot_rows_v1(second.inventory!)
+        expect(rows.starts_with("src/a.spl|sha256_")).to_equal(true)
+        expect(rows.split("\n").len()).to_equal(2)
+
+    it "rejects unsafe paths and unknown event sources":
+        val unsafe = compile_source_inventory_apply_event_v1(
+            empty_inventory(), inventory_event(
+                "filesystem", "create", "../outside.spl", "x", "x"))
+        expect(unsafe.valid).to_equal(false)
+        val unknown = compile_source_inventory_apply_event_v1(
+            empty_inventory(), inventory_event(
+                "watcher", "create", "src/a.spl", "x", "x"))
+        expect(unknown.valid).to_equal(false)
+
+    it "round-trips one immutable canonical generation":
+        val changed = compile_source_inventory_apply_event_v1(
+            empty_inventory(), inventory_event(
+                "git", "create", "src/a.spl", "a", "a"))
+        val encoded = compile_source_inventory_encode_v1(changed.inventory!)
+        val decoded = compile_source_inventory_decode_v1(encoded)
+        expect(decoded.valid).to_equal(true)
+        expect(decoded.inventory!.generation).to_equal(1)
+        expect(decoded.digest).to_equal(compile_source_inventory_digest_v1(
+            changed.inventory!))
+
+    it "removes only the explicitly deleted source":
+        val created = compile_source_inventory_apply_event_v1(
+            empty_inventory(), inventory_event(
+                "git", "create", "src/a.spl", "a", "a"))
+        val deleted = compile_source_inventory_apply_event_v1(
+            created.inventory!, inventory_event(
+                "git", "delete", "src/a.spl", "", ""))
+        expect(deleted.valid).to_equal(true)
+        expect(deleted.inventory!.entries.len()).to_equal(0)

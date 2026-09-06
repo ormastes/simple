@@ -1,0 +1,218 @@
+use std.common.crypto.sha256.{sha256_text}
+use compiler.mir.admission.mir_admission_v1.{
+    MirAdmissionV1, MirDependencyEvidenceV1, MirDependencyKindV1,
+    MirDependencyStateV1, mir_admission_prove_v1
+}
+
+enum CombinedMirEvidenceErrorV1:
+    empty_route
+    scv_identity_mismatch
+    archive_authority_invalid
+    dirty_authority_invalid
+    duplicate_module
+    duplicate_symbol
+    dependency_unresolved
+    dependency_conflict
+    read_set_incomplete
+    admission_rejected
+
+struct CombinedMirScvIdentityV1:
+    revision: text
+    tree_digest: text
+    inventory_digest: text
+
+struct CombinedMirArchiveEvidenceV1:
+    package_id: text
+    module_id: text
+    symbol_ids: [text]
+    dependency_module_ids: [text]
+    read_set_digests: [text]
+    semantic_digest: text
+    producer_compatibility_id: text
+    configuration_variant: text
+    scv: CombinedMirScvIdentityV1
+
+struct CombinedMirDirtyEvidenceV1:
+    package_id: text
+    module_id: text
+    symbol_ids: [text]
+    dependency_module_ids: [text]
+    read_set_digests: [text]
+    semantic_digest: text
+    producer_compatibility_id: text
+    configuration_variant: text
+    scv: CombinedMirScvIdentityV1
+
+struct CombinedMirEvidenceBuilder:
+    expected_scv: CombinedMirScvIdentityV1
+    expected_producer_compatibility_id: text
+    expected_configuration_variant: text
+    archives: [CombinedMirArchiveEvidenceV1]
+    dirty: [CombinedMirDirtyEvidenceV1]
+
+struct CombinedMirAccumulationV1:
+    modules: [text]
+    symbols: [text]
+    semantic_by_module: [text]
+    dependency_ids: [text]
+    evidence: [MirDependencyEvidenceV1]
+    module_frames: [text]
+
+fn combined_mir_digest_valid_v1(value: text) -> bool:
+    if value.len() != 64:
+        return false
+    for ch in value:
+        if not ((ch >= "0" and ch <= "9") or (ch >= "a" and ch <= "f")):
+            return false
+    true
+
+fn combined_mir_text_valid_v1(value: text) -> bool:
+    value != "" and not value.contains("\n") and not value.contains("\r")
+
+fn combined_mir_scv_matches_v1(
+    actual: CombinedMirScvIdentityV1,
+    expected: CombinedMirScvIdentityV1
+) -> bool:
+    actual.revision == expected.revision and
+        actual.tree_digest == expected.tree_digest and
+        actual.inventory_digest == expected.inventory_digest
+
+fn combined_mir_sorted_text_v1(values: [text]) -> [text]:
+    var result = values
+    var left = 0
+    while left < result.len():
+        var least = left
+        var right = left + 1
+        while right < result.len():
+            if result[right] < result[least]:
+                least = right
+            right = right + 1
+        if least != left:
+            val swap = result[left]
+            result[left] = result[least]
+            result[least] = swap
+        left = left + 1
+    result
+
+fn combined_mir_unique_valid_v1(values: [text], digests: bool) -> bool:
+    if values.len() == 0:
+        return false
+    val sorted = combined_mir_sorted_text_v1(values)
+    var previous = ""
+    for value in sorted:
+        if ((digests and not combined_mir_digest_valid_v1(value)) or
+                (not digests and not combined_mir_text_valid_v1(value)) or
+                value == previous):
+            return false
+        previous = value
+    true
+
+fn combined_mir_append_frame_v1(encoded: text, value: text) -> text:
+    encoded + "{value.len()}:{value}"
+
+fn combined_mir_add_module_v1(
+    module_id: text,
+    symbol_ids: [text],
+    dependencies: [text],
+    read_sets: [text],
+    semantic_digest: text,
+    expected_scv: CombinedMirScvIdentityV1,
+    accumulation: CombinedMirAccumulationV1
+) -> Result<CombinedMirAccumulationV1, CombinedMirEvidenceErrorV1>:
+    var result = accumulation
+    if result.modules.contains(module_id):
+        val position = result.modules.index_of(module_id)
+        if result.semantic_by_module[position] != semantic_digest:
+            return Err(CombinedMirEvidenceErrorV1.dependency_conflict)
+        return Err(CombinedMirEvidenceErrorV1.duplicate_module)
+    if not combined_mir_unique_valid_v1(symbol_ids, false):
+        return Err(CombinedMirEvidenceErrorV1.duplicate_symbol)
+    if not combined_mir_unique_valid_v1(read_sets, true):
+        return Err(CombinedMirEvidenceErrorV1.read_set_incomplete)
+    if dependencies.len() > 0 and not combined_mir_unique_valid_v1(dependencies, false):
+        return Err(CombinedMirEvidenceErrorV1.dependency_conflict)
+    for symbol_id in symbol_ids:
+        if result.symbols.contains(symbol_id):
+            return Err(CombinedMirEvidenceErrorV1.duplicate_symbol)
+        result.symbols.push(symbol_id)
+    result.modules.push(module_id)
+    result.semantic_by_module.push(semantic_digest)
+    for dependency in dependencies:
+        if not combined_mir_text_valid_v1(dependency):
+            return Err(CombinedMirEvidenceErrorV1.dependency_unresolved)
+        result.dependency_ids.push(dependency)
+    val sorted_reads = combined_mir_sorted_text_v1(read_sets)
+    var materialization = semantic_digest
+    for read_digest in sorted_reads:
+        materialization = sha256_text(
+            combined_mir_append_frame_v1(materialization, read_digest))
+    result.evidence.push(MirDependencyEvidenceV1(
+        module_id, MirDependencyKindV1.body_dependency,
+        MirDependencyStateV1.concrete, expected_scv.revision, materialization))
+    result.module_frames.push(
+        combined_mir_append_frame_v1(
+            combined_mir_append_frame_v1("", module_id), semantic_digest))
+    Ok(result)
+
+fn combined_mir_evidence_build_v1(
+    builder: CombinedMirEvidenceBuilder
+) -> Result<MirAdmissionV1, CombinedMirEvidenceErrorV1>:
+    if builder.archives.len() == 0 and builder.dirty.len() == 0:
+        return Err(CombinedMirEvidenceErrorV1.empty_route)
+    if (not combined_mir_digest_valid_v1(builder.expected_scv.revision) or
+            not combined_mir_digest_valid_v1(builder.expected_scv.tree_digest) or
+            not combined_mir_digest_valid_v1(builder.expected_scv.inventory_digest)):
+        return Err(CombinedMirEvidenceErrorV1.scv_identity_mismatch)
+
+    var accumulation = CombinedMirAccumulationV1([], [], [], [], [], [])
+
+    for archive in builder.archives:
+        if (not combined_mir_scv_matches_v1(archive.scv, builder.expected_scv) or
+                archive.producer_compatibility_id !=
+                    builder.expected_producer_compatibility_id or
+                archive.configuration_variant != builder.expected_configuration_variant or
+                not combined_mir_text_valid_v1(archive.package_id) or
+                not combined_mir_digest_valid_v1(archive.semantic_digest)):
+            return Err(CombinedMirEvidenceErrorV1.archive_authority_invalid)
+        val added = combined_mir_add_module_v1(
+            archive.module_id, archive.symbol_ids, archive.dependency_module_ids,
+            archive.read_set_digests, archive.semantic_digest, builder.expected_scv,
+            accumulation)
+        if added.is_err():
+            return Err(added.unwrap_err())
+        accumulation = added.unwrap()
+
+    for dirty in builder.dirty:
+        if (not combined_mir_scv_matches_v1(dirty.scv, builder.expected_scv) or
+                dirty.producer_compatibility_id !=
+                    builder.expected_producer_compatibility_id or
+                dirty.configuration_variant != builder.expected_configuration_variant or
+                not combined_mir_text_valid_v1(dirty.package_id) or
+                not combined_mir_digest_valid_v1(dirty.semantic_digest)):
+            return Err(CombinedMirEvidenceErrorV1.dirty_authority_invalid)
+        val added = combined_mir_add_module_v1(
+            dirty.module_id, dirty.symbol_ids, dirty.dependency_module_ids,
+            dirty.read_set_digests, dirty.semantic_digest, builder.expected_scv,
+            accumulation)
+        if added.is_err():
+            return Err(added.unwrap_err())
+        accumulation = added.unwrap()
+
+    for dependency_id in accumulation.dependency_ids:
+        if not accumulation.modules.contains(dependency_id):
+            return Err(CombinedMirEvidenceErrorV1.dependency_unresolved)
+
+    var encoded = "simple/combined-mir-evidence/v1"
+    for frame in combined_mir_sorted_text_v1(accumulation.module_frames):
+        encoded = combined_mir_append_frame_v1(encoded, frame)
+    val admission = mir_admission_prove_v1(
+        builder.expected_scv.revision, builder.expected_scv.tree_digest,
+        builder.expected_scv.inventory_digest, sha256_text(encoded),
+        accumulation.evidence)
+    if admission.is_err():
+        return Err(CombinedMirEvidenceErrorV1.admission_rejected)
+    Ok(admission.unwrap())
+
+export CombinedMirEvidenceErrorV1, CombinedMirScvIdentityV1
+export CombinedMirArchiveEvidenceV1, CombinedMirDirtyEvidenceV1
+export CombinedMirEvidenceBuilder, combined_mir_evidence_build_v1

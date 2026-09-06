@@ -1,0 +1,83 @@
+#!/bin/sh
+set -eu
+
+repo_root=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd -P)
+fixture=$(mktemp -d) || exit 2
+trap 'rm -rf "$fixture"' EXIT HUP INT TERM
+mkdir -p "$fixture/src/compiler/00.kernel" "$fixture/src/compiler/70.backend" "$fixture/src/plugins/backend_wasm" \
+  "$fixture/src/compositions/kernel_llvm_cranelift/compiler/driver"
+cat > "$fixture/closure.sdn" <<'EOF'
+schema: simple-kernel-closure-v1
+authority:
+  k1_policy: llvm-cranelift
+  simple_abi_policy: v1
+  plugin_manifest_policy: simple-sdn
+  coverage_cutover_policy: atomic-apk-only
+  coverage_implementation: apk-only
+  performance_threshold_mode: baseline-relative-10-percent
+  performance_threshold_status: selected
+  performance_baseline_scope: admitted-per-architecture-receipt
+  performance_steady_rss_percent: 110
+  performance_growth_percent: 10
+  performance_warm_request_count: 20
+rules:
+  - class: P-static
+    path: src/plugins/backend_*/**
+  - class: K1
+    path: src/compiler/70.backend/**
+  - class: K0
+    path: src/compiler/00.kernel/**
+EOF
+printf 'fn kernel() -> i64: 1\n' > "$fixture/src/compiler/00.kernel/core.spl"
+printf 'interface_digest: digest-v1\n' > "$fixture/src/plugins/backend_wasm/simple.sdn"
+printf 'fn plugin() -> i64: 1\n' > "$fixture/src/plugins/backend_wasm/wasm.spl"
+printf 'use compiler.driver.driver_bootstrap\n' > "$fixture/src/compositions/kernel_llvm_cranelift/compiler/driver/bootstrap_k1_selected.spl"
+
+stream() {
+  KERNEL_CLOSURE_ROOT="$fixture" KERNEL_CLOSURE_MANIFEST=closure.sdn \
+    SIMPLE_KERNEL_K1_POLICY=llvm-cranelift SIMPLE_ABI_POLICY=v1 \
+    SIMPLE_PLUGIN_MANIFEST_POLICY=simple-sdn \
+    SIMPLE_COVERAGE_CUTOVER_STATE=atomic-apk-only \
+    /bin/sh "$repo_root/scripts/lib/kernel-closure-inputs.shs"
+}
+baseline=$(stream | cksum)
+for drift in \
+    'SIMPLE_KERNEL_K1_POLICY=cranelift-only' \
+    'SIMPLE_ABI_POLICY=deferred' \
+    'SIMPLE_PLUGIN_MANIFEST_POLICY=plugin-sdn' \
+    'SIMPLE_COVERAGE_CUTOVER_STATE=dual'; do
+  if env $drift KERNEL_CLOSURE_ROOT="$fixture" KERNEL_CLOSURE_MANIFEST=closure.sdn \
+      /bin/sh "$repo_root/scripts/lib/kernel-closure-inputs.shs" >/dev/null 2>&1; then
+    echo "FAIL — policy drift was admitted: $drift"
+    exit 1
+  fi
+done
+sed 's/performance_growth_percent: 10/performance_growth_percent: 11/' \
+  "$fixture/closure.sdn" >"$fixture/performance-drift.sdn"
+if KERNEL_CLOSURE_ROOT="$fixture" KERNEL_CLOSURE_MANIFEST=performance-drift.sdn \
+    /bin/sh "$repo_root/scripts/lib/kernel-closure-inputs.shs" >/dev/null 2>&1; then
+  echo "FAIL — baseline-relative performance policy drift was admitted"
+  exit 1
+fi
+printf 'fn plugin() -> i64: 2\n' > "$fixture/src/plugins/backend_wasm/wasm.spl"
+[ "$(stream | cksum)" = "$baseline" ] || {
+  echo "FAIL — P-static edit changed kernel inputs hash"
+  exit 1
+}
+printf 'interface_digest: digest-v2\n' > "$fixture/src/plugins/backend_wasm/simple.sdn"
+[ "$(stream | cksum)" != "$baseline" ] || {
+  echo "FAIL — P-static interface metadata did not change kernel inputs hash"
+  exit 1
+}
+printf 'interface_digest: digest-v1\n' > "$fixture/src/plugins/backend_wasm/simple.sdn"
+printf 'fn kernel() -> i64: 2\n' > "$fixture/src/compiler/00.kernel/core.spl"
+[ "$(stream | cksum)" != "$baseline" ] || {
+  echo "FAIL — K0 edit did not change kernel inputs hash"
+  exit 1
+}
+printf 'fn orphan() -> i64: 1\n' > "$fixture/src/compiler/orphan.spl"
+if stream >/dev/null 2>&1; then
+  echo "FAIL — unclassified compiler input was admitted"
+  exit 1
+fi
+echo "PASS — selected policy is hash-bound; P-static implementation edits are ignored while ABI metadata and K0 edits re-key"

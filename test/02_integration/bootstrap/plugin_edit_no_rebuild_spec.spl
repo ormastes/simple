@@ -1,0 +1,57 @@
+# @req KPM-REQ-001 KPM-REQ-007 KPM-REQ-008 KPM-REQ-009 KPM-NFR-004 KPM-NFR-006
+use std.spec.*
+use std.io_runtime.{process_run}
+use compiler.driver.driver_build.incremental.{native_build_cache_scope_key}
+
+describe "P-static backend edits do not rebuild the kernel":
+    # KPM-REQ-008: P-only edits leave the kernel rebuild identity unchanged.
+    it "keeps bootstrap kernel inputs stable under a backend implementation mutation":
+        val (stdout, stderr, status) = process_run("sh", ["scripts/check/check-bootstrap-kernel-inputs.shs"])
+        expect(status).to_equal(0)
+        expect(stderr).to_equal("")
+        expect(stdout).to_contain("ignores P-static implementation edits")
+        expect(stdout).to_contain("tracks ABI metadata")
+
+    it "rejects every K0 or K1 dependency on a P-static backend":
+        val (stdout, stderr, status) = process_run("sh", ["scripts/check/check-kernel-closure.shs"])
+        expect(status).to_equal(0)
+        expect(stderr).to_equal("")
+        expect(stdout).to_contain("0 compiler->plugin imports")
+        expect(stdout).to_contain("0 K0/K1->P imports")
+
+    it "keeps optional backend composition outside the compiler kernel":
+        val (facade_stdout, facade_stderr, facade_status) = process_run("sh", ["-c",
+            "! grep -R -E '^[[:space:]]*(export[[:space:]]+)?use[[:space:]]+plugins\\.' src/compiler --include='*.spl'"])
+        expect(facade_status).to_equal(0)
+        expect(facade_stderr).to_equal("")
+        expect(facade_stdout).to_equal("")
+        val (root_stdout, root_stderr, root_status) = process_run("sh", ["-c",
+            "grep -q 'plugins.backend_registry.full_static_backend_registry' src/app/cli/_CliMain/main_and_help.spl && grep -q 'plugins.backend_vhdl.driver.driver_aot_vhdl_output' src/plugins/backend_registry/full_static_backend_registry.spl"])
+        expect(root_status).to_equal(0)
+        expect(root_stderr).to_equal("")
+        expect(root_stdout).to_equal("")
+
+    it "rejects every direct or policy-unbound backend dispatch bypass":
+        val (tree_stdout, tree_stderr, tree_status) = process_run("sh",
+            ["scripts/check/check-phase5-backend-dispatch.shs"])
+        expect(tree_status).to_equal(0)
+        expect(tree_stderr).to_equal("")
+        expect(tree_stdout).to_contain("composition-selected")
+        val (mutation_stdout, mutation_stderr, mutation_status) = process_run("sh",
+            ["scripts/check/check-phase5-backend-dispatch.shs", "--selftest"])
+        expect(mutation_status).to_equal(0)
+        expect(mutation_stderr).to_equal("")
+        expect(mutation_stdout).to_contain("rejected 6/6 bypass mutations")
+
+    it "keeps native object scope stable when only P-static source bytes change":
+        val before = native_build_cache_scope_key(Some("wasm"), Some("wasm32"), [], 2, "kernel-digest-v1")
+        val plugin_source_before = "fn emit() -> text: \"before\""
+        val plugin_source_after = "fn emit() -> text: \"after\""
+        expect(plugin_source_before == plugin_source_after).to_equal(false)
+        val after = native_build_cache_scope_key(Some("wasm"), Some("wasm32"), [], 2, "kernel-digest-v1")
+        expect(after).to_equal(before)
+
+    it "is mutation-red when the kernel identity changes":
+        val before = native_build_cache_scope_key(Some("wasm"), Some("wasm32"), [], 2, "kernel-digest-v1")
+        val after_kernel_edit = native_build_cache_scope_key(Some("wasm"), Some("wasm32"), [], 2, "kernel-digest-v2")
+        expect(after_kernel_edit == before).to_equal(false)

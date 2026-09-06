@@ -1,0 +1,64 @@
+#!/bin/sh
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../../../.." && pwd)
+FIXTURE_DIR="$ROOT/test/02_integration/lib/sffi/fixtures"
+BUILD_DIR="$ROOT/build/test-kpf-native-dynamic-matrix"
+CC_BIN=${CC:-cc}
+
+mkdir -p "$BUILD_DIR"
+
+case "$(uname -s)" in
+    Darwin)
+        SHARED_FLAGS="-dynamiclib"
+        EXT=dylib
+        DL_FLAGS=""
+        ;;
+    Linux|FreeBSD)
+        SHARED_FLAGS="-shared"
+        EXT=so
+        DL_FLAGS="-ldl"
+        ;;
+    *)
+        echo "KPF_NATIVE_DYNAMIC_MATRIX: SKIP unsupported host" >&2
+        exit 77
+        ;;
+esac
+
+build_plugin() {
+    name=$1
+    shift
+    "$CC_BIN" $SHARED_FLAGS -fPIC -O2 -fvisibility=hidden "$@" \
+        "$FIXTURE_DIR/kpf_native_plugin_v1.c" -o "$BUILD_DIR/$name.$EXT"
+}
+
+build_plugin matching
+build_plugin older -DKPF_PLUGIN_MINOR=2 '-DKPF_PLUGIN_DIGEST="sha256:image-v2"'
+build_plugin wrong_major -DKPF_PLUGIN_MAJOR=2
+build_plugin wrong_digest '-DKPF_PLUGIN_DIGEST="sha256:image-v4-mutated"'
+
+"$CC_BIN" -std=c11 -O2 -Wall -Wextra -Werror \
+    "$FIXTURE_DIR/kpf_native_matrix_host.c" $DL_FLAGS -o "$BUILD_DIR/matrix_host"
+"$CC_BIN" -std=c11 -O2 -Wall -Wextra -Werror -DKPF_TEST_SKIP_DIGEST_CHECK=1 \
+    "$FIXTURE_DIR/kpf_native_matrix_host.c" $DL_FLAGS -o "$BUILD_DIR/matrix_host_mutation"
+
+"$BUILD_DIR/matrix_host" \
+    "$BUILD_DIR/matching.$EXT" \
+    "$BUILD_DIR/older.$EXT" \
+    "$BUILD_DIR/wrong_major.$EXT" \
+    "$BUILD_DIR/wrong_digest.$EXT"
+
+set +e
+"$BUILD_DIR/matrix_host_mutation" \
+    "$BUILD_DIR/matching.$EXT" \
+    "$BUILD_DIR/older.$EXT" \
+    "$BUILD_DIR/wrong_major.$EXT" \
+    "$BUILD_DIR/wrong_digest.$EXT" >"$BUILD_DIR/mutation.out" 2>&1
+mutation_status=$?
+set -e
+if [ "$mutation_status" -ne 65 ]; then
+    cat "$BUILD_DIR/mutation.out" >&2
+    echo "KPF_NATIVE_DYNAMIC_MATRIX: mutation was not rejected" >&2
+    exit 66
+fi
+echo "KPF_NATIVE_DYNAMIC_MATRIX_MUTATION: PASS digest-check removal rejected"

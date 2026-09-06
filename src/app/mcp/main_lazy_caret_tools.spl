@@ -27,12 +27,12 @@
 use .main_lazy_json.{extract_field, make_tool_error, make_tool_result, strip_ansi}
 use .main_lazy_query_tools.{_mcp_find_simple_binary}
 use std.io_runtime.{file_write, file_exists, dir_create_all, getpid, time_now_unix_micros, process_run_bounded, file_delete}
+use std.nogc_sync_mut.storage_roots.tooling_paths.{tooling_workspace_path, tooling_child_environment}
 
 val _CARET_PREFIX = "caret_"
 val _CARET_TOOL_CLI = "src/app/llm_caret/tool_cli.spl"
 val _CARET_TIMEOUT_MS = 120000
 val _CARET_MAX_OUTPUT_BYTES = 1048576
-val _CARET_TMP_DIR = "build/tmp/mcp_caret"
 
 fn _caret_inner(name: text) -> text:
     name.substring(_CARET_PREFIX.len())
@@ -59,8 +59,11 @@ fn _confirmed(body: text) -> bool:
 # The tool arguments travel to the child through a private file, never argv
 # or a shell, so quoting and size are not a concern.
 fn _write_input(body: text) -> text:
-    dir_create_all(_CARET_TMP_DIR)
-    val path = _CARET_TMP_DIR + "/" + getpid().to_text() + "_" + time_now_unix_micros().to_text() + ".json"
+    val directory = tooling_workspace_path("mcp-caret", getpid().to_text(), "payload")
+    if directory.is_err():
+        return ""
+    dir_create_all(directory.unwrap().value)
+    val path = directory.unwrap().value + "/" + time_now_unix_micros().to_text() + ".json"
     if not file_write(path, body):
         return ""
     path
@@ -74,13 +77,22 @@ fn handle_caret_tool(id: text, name: text, body: text) -> text:
         return make_tool_error(id, -32603, name + ": caret tool CLI not found at " + _CARET_TOOL_CLI + " (server must run from the repo root)")
     val input_path = _write_input(body)
     if input_path == "":
-        return make_tool_error(id, -32603, name + ": cannot write tool input under " + _CARET_TMP_DIR)
+        return make_tool_error(id, -32603, name + ": centralized worktree storage is unavailable")
     var argv = ["run", _CARET_TOOL_CLI, _caret_inner(name), input_path]
     if is_caret_mutating(name):
         argv.push("--allow")
     # stdout only: the child interpreter writes engine banners and gc-warnings
     # to stderr, which must not leak into the tool result.
-    val (stdout, stderr, code) = process_run_bounded(_mcp_find_simple_binary(), argv, _CARET_TIMEOUT_MS, _CARET_MAX_OUTPUT_BYTES)
+    val projected = tooling_child_environment("simple:mcp-caret")
+    if projected.is_err():
+        file_delete(input_path)
+        return make_tool_error(id, -32603, name + ": child storage environment is unavailable")
+    var child_argv: [text] = []
+    for binding in projected.unwrap().bindings:
+        child_argv.push(binding.key + "=" + binding.value)
+    child_argv.push(_mcp_find_simple_binary())
+    child_argv.extend(argv)
+    val (stdout, stderr, code) = process_run_bounded("env", child_argv, _CARET_TIMEOUT_MS, _CARET_MAX_OUTPUT_BYTES)
     file_delete(input_path)
     var out = strip_ansi(stdout).trim()
     if code == 124 or (code == -1 and stderr.contains("[TIMEOUT: Process killed after ")):

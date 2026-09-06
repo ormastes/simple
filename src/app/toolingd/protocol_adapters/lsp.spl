@@ -1,0 +1,87 @@
+use std.common.kernel_plugin.ids.{KpfDigest256, kpf_digest256_equal}
+use std.common.lint_kernel.output.{NormalizedLintOutputV1, lint_output_canonical_result_id, lint_output_to_lsp}
+use std.tooling_kernel.ToolingDocumentSnapshotV1
+use app.toolingd.*
+use app.toolingd.protocol_adapters.model.*
+
+pub class ToolingLspEdgeV1:
+    daemon: ToolingDaemonV1
+    capacity: i64
+    active: [bool]
+    documents: [ToolingDocumentSessionHandleV1]
+    revisions: [u64]
+    digests: [KpfDigest256]
+    tickets: [ToolingAnalysisTicketV1]
+
+    static fn create(connection_capacity: i64, document_capacity: i64, request_capacity: i64, diagnostic_capacity: i64) -> ToolingLspEdgeV1:
+        var active: [bool] = []
+        var documents: [ToolingDocumentSessionHandleV1] = []
+        var revisions: [u64] = []
+        var digests: [KpfDigest256] = []
+        var tickets: [ToolingAnalysisTicketV1] = []
+        for _ in 0..request_capacity:
+            active.push(false)
+            documents.push(tooling_invalid_document_session_v1())
+            revisions.push(0)
+            digests.push(KpfDigest256(w0: 0, w1: 0, w2: 0, w3: 0))
+            tickets.push(tooling_invalid_analysis_ticket_v1())
+        ToolingLspEdgeV1(daemon: ToolingDaemonV1.create(connection_capacity, document_capacity, request_capacity, diagnostic_capacity), capacity: request_capacity, active: active, documents: documents, revisions: revisions, digests: digests, tickets: tickets)
+
+    me initialize(version: ToolingProtocolVersionV1) -> ToolingLspInitializeResultV1:
+        val connected = self.daemon.connect(version)
+        val status = tooling_edge_status(connected.status)
+        val body = if status == ToolingEdgeStatusV1.Ok: "{\"capabilities\":{\"diagnosticProvider\":true,\"codeActionProvider\":true},\"protocolVersion\":\"" + connected.negotiated.major.to_string() + "." + connected.negotiated.minor.to_string() + "\"}" else: "{\"error\":\"unsupported protocol\"}"
+        ToolingLspInitializeResultV1(status: status, connection: connected.connection, response_json: body)
+
+    me open_document(connection: ToolingConnectionHandleV1, snapshot: ToolingDocumentSnapshotV1, provider_generation: u64) -> ToolingOpenDocumentSessionResultV1:
+        self.daemon.open_document(connection, ToolingOpenDocumentSessionV1(snapshot: snapshot, provider_generation: provider_generation))
+
+    me begin_diagnostics(document: ToolingDocumentSessionHandleV1, revision: u64, digest: KpfDigest256) -> ToolingLspAnalysisResultV1:
+        for index in 0..self.capacity:
+            val existing = self.documents[index]
+            if self.active[index] and existing.slot == document.slot and existing.epoch == document.epoch and self.revisions[index] == revision and kpf_digest256_equal(self.digests[index], digest):
+                return ToolingLspAnalysisResultV1(status: ToolingEdgeStatusV1.Ok, ticket: self.tickets[index], reused: true)
+        val begun = self.daemon.begin_analysis(ToolingBeginAnalysisV1(document: document, revision: revision, content_digest: digest))
+        if begun.status != ToolingDaemonStatusV1.Ok:
+            return ToolingLspAnalysisResultV1(status: tooling_edge_status(begun.status), ticket: begun.ticket, reused: false)
+        for index in 0..self.capacity:
+            if not self.active[index]:
+                self.active[index] = true
+                self.documents[index] = document
+                self.revisions[index] = revision
+                self.digests[index] = digest
+                self.tickets[index] = begun.ticket
+                return ToolingLspAnalysisResultV1(status: ToolingEdgeStatusV1.Ok, ticket: begun.ticket, reused: false)
+        self.daemon.cancel(begun.ticket)
+        ToolingLspAnalysisResultV1(status: ToolingEdgeStatusV1.CapacityExceeded, ticket: tooling_invalid_analysis_ticket_v1(), reused: false)
+
+    me cancel(ticket: ToolingAnalysisTicketV1) -> ToolingEdgeStatusV1:
+        for index in 0..self.capacity:
+            if self.active[index] and self.tickets[index].slot == ticket.slot and self.tickets[index].epoch == ticket.epoch:
+                self.active[index] = false
+        tooling_edge_status(self.daemon.cancel(ticket))
+
+    me close_document(document: ToolingDocumentSessionHandleV1) -> ToolingEdgeStatusV1:
+        for index in 0..self.capacity:
+            val existing = self.documents[index]
+            if self.active[index] and existing.slot == document.slot and existing.epoch == document.epoch:
+                self.daemon.cancel(self.tickets[index])
+                self.active[index] = false
+        tooling_edge_status(self.daemon.close_document(document))
+
+    me disconnect(connection: ToolingConnectionHandleV1) -> ToolingEdgeStatusV1:
+        for index in 0..self.capacity:
+            val document = self.documents[index]
+            if self.active[index] and document.connection.slot == connection.slot and document.connection.epoch == connection.epoch:
+                self.daemon.cancel(self.tickets[index])
+                self.active[index] = false
+        tooling_edge_status(self.daemon.disconnect(connection))
+
+    me publish(ticket: ToolingAnalysisTicketV1, output: NormalizedLintOutputV1) -> ToolingLspPublishResultV1:
+        val published = self.daemon.publish_diagnostics(ToolingPublishDiagnosticsV1(ticket: ticket, diagnostics: [for item in output.diagnostics: item.diagnostic]))
+        if published.status != ToolingDaemonStatusV1.Ok:
+            return ToolingLspPublishResultV1(status: tooling_edge_status(published.status), canonical_result_id: "", response_json: "")
+        for index in 0..self.capacity:
+            if self.active[index] and self.tickets[index].slot == ticket.slot and self.tickets[index].epoch == ticket.epoch:
+                self.active[index] = false
+        ToolingLspPublishResultV1(status: ToolingEdgeStatusV1.Ok, canonical_result_id: lint_output_canonical_result_id(output), response_json: lint_output_to_lsp(output))

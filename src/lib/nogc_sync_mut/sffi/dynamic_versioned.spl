@@ -1,110 +1,287 @@
-# Versioned Dynamic Library Loader
-#
-# Extends DynLib to support:
-#   - Version-aware loading (.so.1.0.0, .so.1, .so fallback chain)
-#   - Platform-specific extensions (.so, .dll, .dylib)
-#   - Multiple versions loaded simultaneously
-#   - Platform-specific library search paths
+# Versioned dynamic SFFI with mandatory plugin-entry negotiation.
 
-use std.sffi.dynamic.{DynLib, platform_lib_extension, platform_name}
-
+use std.sffi.dynamic.{DynLib, platform_name, spl_wffi_call_i64_checked}
+use std.common.string_core.{bytes_to_text}
+use common.plugin.iface_id.{IfaceId, ParamHeader}
+use common.plugin.negotiation.{
+    HostOfferV1, PluginAnswerV1, NegotiateVerdict, negotiate,
+    host_offer_v1_schema_valid}
 use std.io_runtime.{env_get}
 
-# ============================================================================
-# Library Version
-# ============================================================================
+val SFFI_PLUGIN_ENTRY_MAGIC_V1: text = "SPLPEV1\0"
+val SFFI_PLUGIN_ENTRY_MAX_BYTES_V1: i64 = 4096
+
+@unsafe(reason: "bounded read from a plugin-owned immutable descriptor", capabilities: [ffi, raw_ptr])
+extern fn rt_ptr_read_u8(addr: i64, offset: i64) -> i64
 
 pub struct LibVersion:
     major: i64
     minor: i64
     patch: i64
 
-# reason: positional sffi dynamic_versioned API
-pub fn lib_version(major: i64, minor: i64, patch: i64) -> LibVersion:
-    LibVersion(major: major, minor: minor, patch: patch)
+pub struct SffiPluginDescriptorV1:
+    implements: IfaceId
+    simple_abi_version: i64
+    simple_abi_deferred: bool
+    requires_caps: [text]
+    plugin_digest: text
 
-pub fn lib_version_any() -> LibVersion:
-    LibVersion(major: 0, minor: 0, patch: 0)
+struct _EntryTextV1:
+    value: text
+    next: i64
 
-pub fn lib_version_string(v: LibVersion) -> text:
-    if v.major == 0 and v.minor == 0 and v.patch == 0:
-        return "any"
-    if v.minor == 0 and v.patch == 0:
-        return "{v.major}"
-    if v.patch == 0:
-        return "{v.major}.{v.minor}"
-    "{v.major}.{v.minor}.{v.patch}"
+pub enum SffiPluginLoadError:
+    OpenFailed(text)
+    EntryMissing(text)
+    EntryCorrupt(text)
+    NegotiationRefused(text)
 
-# ============================================================================
-# VersionedDynLib
-# ============================================================================
+impl SffiPluginLoadError:
+    fn diagnostic() -> text:
+        match self:
+            case OpenFailed(detail): "PLUG-E-OPEN: " + detail
+            case EntryMissing(detail): "PLUG-E-ENTRY: missing spl_plugin_entry_v1 in " + detail
+            case EntryCorrupt(detail): "PLUG-E-ENTRY: " + detail
+            case NegotiationRefused(code): code + ": provider negotiation refused"
+
+impl SffiPluginLoadError:
+    fn code() -> text:
+        match self:
+            case OpenFailed(_): "PLUG-E-OPEN"
+            case EntryMissing(_): "PLUG-E-ENTRY"
+            case EntryCorrupt(_): "PLUG-E-ENTRY"
+            case NegotiationRefused(code): code
 
 pub class VersionedDynLib:
     lib: DynLib
     name: text
     version: LibVersion
     path: text
+    negotiation_code: text
+    descriptor: SffiPluginDescriptorV1
+
+pub fn lib_version(major: i64, minor: i64, patch: i64) -> LibVersion:
+    LibVersion(major, minor, patch)
+
+pub fn lib_version_any() -> LibVersion:
+    LibVersion(0, 0, 0)
+
+pub fn lib_version_string(version: LibVersion) -> text:
+    if version.major == 0 and version.minor == 0 and version.patch == 0:
+        return "any"
+    if version.minor == 0 and version.patch == 0:
+        return "{version.major}"
+    if version.patch == 0:
+        return "{version.major}.{version.minor}"
+    "{version.major}.{version.minor}.{version.patch}"
+
+fn _entry_u16(data: [u8], offset: i64) -> i64:
+    data[offset].to_i64() | (data[offset + 1].to_i64() << 8)
+
+fn _entry_u32(data: [u8], offset: i64) -> i64:
+    _entry_u16(data, offset) | (_entry_u16(data, offset + 2) << 16)
+
+fn _entry_push_u16(data: [u8], value: i64):
+    data.push((value & 255) as u8)
+    data.push(((value >> 8) & 255) as u8)
+
+fn _entry_push_u32(data: [u8], value: i64):
+    _entry_push_u16(data, value & 65535)
+    _entry_push_u16(data, (value >> 16) & 65535)
+
+fn _entry_push_text(data: [u8], value: text):
+    val bytes = value.bytes()
+    _entry_push_u16(data, bytes.len())
+    for byte in bytes: data.push(byte)
+
+fn sffi_plugin_descriptor_encode_v1(descriptor: SffiPluginDescriptorV1) -> [u8]:
+    var data = SFFI_PLUGIN_ENTRY_MAGIC_V1.bytes()
+    _entry_push_u32(data, 0)
+    _entry_push_u32(data, descriptor.simple_abi_version)
+    data.push(if descriptor.simple_abi_deferred: 1u8 else: 0u8)
+    data.push(0u8)
+    data.push(0u8)
+    data.push(0u8)
+    _entry_push_u16(data, descriptor.implements.major)
+    _entry_push_u16(data, descriptor.implements.minor)
+    _entry_push_text(data, descriptor.implements.name)
+    _entry_push_text(data, descriptor.implements.abi_digest)
+    _entry_push_u16(data, descriptor.requires_caps.len())
+    for capability in descriptor.requires_caps: _entry_push_text(data, capability)
+    _entry_push_text(data, descriptor.plugin_digest)
+    val size = data.len()
+    data[8] = (size & 255) as u8
+    data[9] = ((size >> 8) & 255) as u8
+    data[10] = ((size >> 16) & 255) as u8
+    data[11] = ((size >> 24) & 255) as u8
+    data
+
+fn _entry_text_slice(data: [u8], offset: i64, size: i64) -> text:
+    var value: [u8] = []
+    var index = 0
+    while index < size:
+        value.push(data[offset + index])
+        index = index + 1
+    bytes_to_text(value)
+
+fn _entry_read_text(data: [u8], offset: i64) -> Result<_EntryTextV1, text>:
+    if offset + 2 > data.len():
+        return Err("truncated text length")
+    val size = _entry_u16(data, offset)
+    if size <= 0 or offset + 2 + size > data.len():
+        return Err("invalid text extent")
+    Ok(_EntryTextV1(_entry_text_slice(data, offset + 2, size), offset + 2 + size))
+
+fn sffi_plugin_descriptor_decode_v1(data: [u8]) -> Result<SffiPluginDescriptorV1, text>:
+    if data.len() < 24 or data.len() > SFFI_PLUGIN_ENTRY_MAX_BYTES_V1:
+        return Err("descriptor size outside bounds")
+    if _entry_text_slice(data, 0, 8) != SFFI_PLUGIN_ENTRY_MAGIC_V1:
+        return Err("descriptor magic mismatch")
+    if _entry_u32(data, 8) != data.len():
+        return Err("descriptor length mismatch")
+    val simple_abi_version = _entry_u32(data, 12)
+    val deferred = data[16] == 1u8
+    if data[16] > 1u8 or data[17] != 0u8 or data[18] != 0u8 or data[19] != 0u8:
+        return Err("descriptor flags or reserved bytes are invalid")
+    val major = _entry_u16(data, 20)
+    val minor = _entry_u16(data, 22)
+    var offset = 24
+    val name_row = _entry_read_text(data, offset)?
+    offset = name_row.next
+    val digest_row = _entry_read_text(data, offset)?
+    offset = digest_row.next
+    if offset + 2 > data.len():
+        return Err("truncated capability count")
+    val capability_count = _entry_u16(data, offset)
+    offset = offset + 2
+    var capabilities: [text] = []
+    var index = 0
+    while index < capability_count:
+        val row = _entry_read_text(data, offset)?
+        capabilities.push(row.value)
+        offset = row.next
+        index = index + 1
+    val plugin_row = _entry_read_text(data, offset)?
+    offset = plugin_row.next
+    if offset != data.len():
+        return Err("descriptor has trailing bytes")
+    Ok(SffiPluginDescriptorV1(
+        IfaceId(name_row.value, major, minor, digest_row.value),
+        simple_abi_version, deferred, capabilities, plugin_row.value))
+
+@unsafe(reason: "copies one bounded plugin descriptor before validation", capabilities: [ffi, raw_ptr])
+fn _sffi_plugin_descriptor_from_ptr_v1(address: i64) -> Result<SffiPluginDescriptorV1, text>:
+    if address <= 0:
+        return Err("null descriptor pointer")
+    var data: [u8] = []
+    var index = 0
+    while index < 12:
+        data.push(rt_ptr_read_u8(address, index) as u8)
+        index = index + 1
+    if _entry_text_slice(data, 0, 8) != SFFI_PLUGIN_ENTRY_MAGIC_V1:
+        return Err("descriptor magic mismatch")
+    val size = _entry_u32(data, 8)
+    if size < 24 or size > SFFI_PLUGIN_ENTRY_MAX_BYTES_V1:
+        return Err("descriptor size outside bounds")
+    while index < size:
+        data.push(rt_ptr_read_u8(address, index) as u8)
+        index = index + 1
+    sffi_plugin_descriptor_decode_v1(data)
+
+fn negotiate_sffi_plugin_descriptor_v1(host: HostOfferV1,
+        descriptor: SffiPluginDescriptorV1) -> NegotiateVerdict:
+    negotiate(host, PluginAnswerV1(
+        ParamHeader("simple.plugin.PluginAnswerV1", 1, 0, 0),
+        descriptor.implements, descriptor.simple_abi_version,
+        descriptor.simple_abi_deferred, descriptor.requires_caps,
+        descriptor.plugin_digest, []))
 
 impl VersionedDynLib:
-    @unsafe(reason: "loads an unverified versioned dynamic provider", capabilities: [ffi])
-    pub static fn load_versioned(name: text, version: LibVersion) -> VersionedDynLib?:
-        val candidates = build_candidate_paths(name, version)
-        var i = 0
-        while i < candidates.len():
-            val path = candidates[i]
-            val lib = DynLib.load(path)
-            match lib:
-                Some(loaded_lib):
-                    return VersionedDynLib(lib: loaded_lib, name: name, version: version, path: path)
-                nil:
-                    pass
-            i = i + 1
-        nil
+    pub static fn load_plugin_path(path: text, name: text,
+            host: HostOfferV1) -> Result<VersionedDynLib, SffiPluginLoadError>:
+        val lib = unsafe(capabilities: [ffi]):
+            DynLib.load(path)
+        if lib == nil:
+            return Err(SffiPluginLoadError.OpenFailed(path))
+        val loaded = lib.unwrap()
+        val entry = unsafe(capabilities: [ffi, raw_ptr]):
+            loaded.sym_checked("spl_plugin_entry_v1")
+        if entry.is_err():
+            unsafe(capabilities: [ffi]):
+                loaded.close()
+            return Err(SffiPluginLoadError.EntryMissing(path))
+        val called = unsafe(capabilities: [ffi, raw_ptr]):
+            spl_wffi_call_i64_checked(entry.unwrap(), [], 0)
+        if called.len() != 2 or called[0] != 0 or called[1] <= 0:
+            unsafe(capabilities: [ffi]):
+                loaded.close()
+            return Err(SffiPluginLoadError.EntryCorrupt(path))
+        val descriptor = unsafe(capabilities: [ffi, raw_ptr]):
+            _sffi_plugin_descriptor_from_ptr_v1(called[1])
+        if descriptor.is_err():
+            unsafe(capabilities: [ffi]):
+                loaded.close()
+            return Err(SffiPluginLoadError.EntryCorrupt(descriptor.unwrap_err()))
+        val verdict = negotiate_sffi_plugin_descriptor_v1(host, descriptor.unwrap())
+        if not verdict.accepted():
+            unsafe(capabilities: [ffi]):
+                loaded.close()
+            return Err(SffiPluginLoadError.NegotiationRefused(verdict.code()))
+        Ok(VersionedDynLib(loaded, name, lib_version_any(), path, verdict.code(), descriptor.unwrap()))
 
-    @unsafe(reason: "loads an unverified versioned dynamic provider", capabilities: [ffi])
-    pub static fn load_best(name: text) -> VersionedDynLib?:
-        VersionedDynLib.load_versioned(name, lib_version_any())
+    pub static fn load_versioned(name: text, version: LibVersion,
+            host: HostOfferV1) -> Result<VersionedDynLib, SffiPluginLoadError>:
+        var last_error = SffiPluginLoadError.OpenFailed(name)
+        for path in build_candidate_paths(name, version):
+            val loaded = VersionedDynLib.load_plugin_path(path, name, host)
+            if loaded.is_ok():
+                var library = loaded.unwrap()
+                library.version = version
+                return Ok(library)
+            val error = loaded.unwrap_err()
+            match error:
+                case SffiPluginLoadError.OpenFailed(_): last_error = error
+                case _: return Err(error)
+        Err(last_error)
 
-    @unsafe(reason: "loads an unverified dynamic provider path", capabilities: [ffi])
-    pub static fn load_path(path: text, name: text) -> VersionedDynLib?:
-        val lib = DynLib.load(path)
-        match lib:
-            Some(loaded_lib):
-                VersionedDynLib(lib: loaded_lib, name: name, version: lib_version_any(), path: path)
-            nil:
-                nil
+    pub static fn load_best(name: text, host: HostOfferV1) -> Result<VersionedDynLib, SffiPluginLoadError>:
+        VersionedDynLib.load_versioned(name, lib_version_any(), host)
 
-    @unsafe(reason: "resolves an unverified dynamic provider symbol", capabilities: [ffi, raw_ptr])
+    pub static fn load_path(path: text, name: text,
+            host: HostOfferV1) -> Result<VersionedDynLib, SffiPluginLoadError>:
+        VersionedDynLib.load_plugin_path(path, name, host)
+
+    @unsafe(reason: "resolves symbols from an already negotiated provider", capabilities: [ffi, raw_ptr])
     pub fn has_symbol(name: text) -> bool:
-        match self.lib.sym_checked(name):
-            case Ok(_): true
-            case Err(_): false
+        self.lib.sym_checked(name).is_ok()
 
-    @unsafe(reason: "resolves unverified dynamic provider symbols", capabilities: [ffi, raw_ptr])
+    @unsafe(reason: "resolves symbols from an already negotiated provider", capabilities: [ffi, raw_ptr])
     pub fn count_symbols(names: [text]) -> i64:
-        var count: i64 = 0
-        var i = 0
-        while i < names.len():
-            if self.has_symbol(names[i]):
-                count = count + 1
-            i = i + 1
+        var count = 0
+        for symbol in names:
+            if self.has_symbol(symbol): count = count + 1
         count
 
-    @unsafe(reason: "resolves unverified dynamic provider symbols", capabilities: [ffi, raw_ptr])
+    @unsafe(reason: "resolves symbols from an already negotiated provider", capabilities: [ffi, raw_ptr])
     pub fn missing_symbols(names: [text]) -> [text]:
         var missing: [text] = []
-        var i = 0
-        while i < names.len():
-            if not self.has_symbol(names[i]):
-                missing.push(names[i])
-            i = i + 1
+        for symbol in names:
+            if not self.has_symbol(symbol): missing.push(symbol)
         missing
 
-# ============================================================================
-# MultiVersionLoader
-# ============================================================================
-
 var _multi_libs: {text: VersionedDynLib} = {}
+
+fn _host_offer_cache_key_v1(host: HostOfferV1) -> text:
+    var parts = ["schema={host.hdr.schema_name}@{host.hdr.schema_major}.{host.hdr.schema_minor}:{host.hdr.present}",
+        "abi={host.simple_abi_version}",
+        "deferred={host.simple_abi_deferred}", "producer={host.producer_identity}"]
+    for iface in host.ifaces:
+        parts.push("iface={iface.name}@{iface.major}.{iface.minor}:{iface.abi_digest}")
+    for digest in host.accepted_digests: parts.push("accept={digest}")
+    for capability in host.capabilities: parts.push("cap={capability}")
+    for extension in host.ext:
+        parts.push("ext={extension.ext_name}@{extension.ext_major}:{extension.payload_schema_hash}")
+    parts.join(";")
 
 pub class MultiVersionLoader:
     pass_dn
@@ -113,92 +290,65 @@ impl MultiVersionLoader:
     pub static fn instance() -> MultiVersionLoader:
         MultiVersionLoader()
 
-    @unsafe(reason: "loads and caches an unverified versioned dynamic provider", capabilities: [ffi])
-    pub fn load(name: text, version: LibVersion) -> VersionedDynLib?:
-        val key = "{name}:{lib_version_string(version)}"
+    pub fn load(name: text, version: LibVersion,
+            host: HostOfferV1) -> Result<VersionedDynLib, SffiPluginLoadError>:
+        if not host_offer_v1_schema_valid(host):
+            return Err(SffiPluginLoadError.NegotiationRefused("PLUG-E-SCHEMA"))
+        val key = "{name}:{lib_version_string(version)}:{_host_offer_cache_key_v1(host)}"
         if _multi_libs.contains(key):
-            return _multi_libs[key]
-        val lib = VersionedDynLib.load_versioned(name, version)
-        match lib:
-            Some(v):
-                _multi_libs[key] = v
-                return v
-            nil:
-                nil
+            return Ok(_multi_libs[key])
+        val loaded = VersionedDynLib.load_versioned(name, version, host)
+        if loaded.is_ok():
+            _multi_libs[key] = loaded.unwrap()
+        loaded
 
-    @unsafe(reason: "loads and caches an unverified versioned dynamic provider", capabilities: [ffi])
-    pub fn load_best(name: text) -> VersionedDynLib?:
-        val key = "{name}:any"
+    pub fn load_best(name: text, host: HostOfferV1) -> Result<VersionedDynLib, SffiPluginLoadError>:
+        self.load(name, lib_version_any(), host)
+
+    pub fn load_path(path: text, name: text,
+            host: HostOfferV1) -> Result<VersionedDynLib, SffiPluginLoadError>:
+        if not host_offer_v1_schema_valid(host):
+            return Err(SffiPluginLoadError.NegotiationRefused("PLUG-E-SCHEMA"))
+        val key = "{path}:{_host_offer_cache_key_v1(host)}"
         if _multi_libs.contains(key):
-            return _multi_libs[key]
-        val lib = VersionedDynLib.load_best(name)
-        match lib:
-            Some(v):
-                _multi_libs[key] = v
-                return v
-            nil:
-                nil
+            return Ok(_multi_libs[key])
+        val loaded = VersionedDynLib.load_path(path, name, host)
+        if loaded.is_ok():
+            _multi_libs[key] = loaded.unwrap()
+        loaded
 
-    @unsafe(reason: "loads and caches an unverified dynamic provider path", capabilities: [ffi])
-    pub fn load_path(path: text, name: text) -> VersionedDynLib?:
-        if _multi_libs.contains(path):
-            return _multi_libs[path]
-        val lib = VersionedDynLib.load_path(path, name)
-        match lib:
-            Some(v):
-                _multi_libs[path] = v
-                return v
-            nil:
-                nil
-
-    pub fn get(name: text, version: LibVersion) -> VersionedDynLib?:
-        val key = "{name}:{lib_version_string(version)}"
-        if _multi_libs.contains(key):
-            return _multi_libs[key]
+    pub fn get(name: text, version: LibVersion,
+            host: HostOfferV1) -> VersionedDynLib?:
+        val key = "{name}:{lib_version_string(version)}:{_host_offer_cache_key_v1(host)}"
+        if _multi_libs.contains(key): return _multi_libs[key]
         nil
 
     pub fn loaded_keys() -> [text]:
         var keys: [text] = []
-        for key in _multi_libs:
-            keys.push(key)
+        for key in _multi_libs: keys.push(key)
         keys
 
-# ============================================================================
-# Path Resolution
-# ============================================================================
-
 pub fn build_candidate_paths(name: text, version: LibVersion) -> [text]:
-    val ext = platform_lib_extension()
-    val plat = platform_name()
-    val search_dirs = library_search_paths()
+    val platform = platform_name()
     var candidates: [text] = []
-
-    var di = 0
-    while di < search_dirs.len():
-        val dir = search_dirs[di]
-        if plat == "linux" or plat == "freebsd":
+    for directory in library_search_paths():
+        if platform == "linux" or platform == "freebsd":
             if version.major > 0 and version.minor > 0 and version.patch > 0:
-                candidates.push("{dir}/lib{name}.so.{version.major}.{version.minor}.{version.patch}")
-            if version.major > 0:
-                candidates.push("{dir}/lib{name}.so.{version.major}")
-            candidates.push("{dir}/lib{name}.so")
-            candidates.push("{dir}/{name}.so")
-        elif plat == "macos":
+                candidates.push("{directory}/lib{name}.so.{version.major}.{version.minor}.{version.patch}")
+            if version.major > 0: candidates.push("{directory}/lib{name}.so.{version.major}")
+            candidates.push("{directory}/lib{name}.so")
+            candidates.push("{directory}/{name}.so")
+        elif platform == "macos":
             if version.major > 0 and version.minor > 0 and version.patch > 0:
-                candidates.push("{dir}/lib{name}.{version.major}.{version.minor}.{version.patch}.dylib")
-            if version.major > 0:
-                candidates.push("{dir}/lib{name}.{version.major}.dylib")
-            candidates.push("{dir}/lib{name}.dylib")
-            candidates.push("{dir}/{name}.dylib")
-        elif plat == "windows":
-            candidates.push("{dir}/{name}.dll")
-            candidates.push("{dir}/lib{name}.dll")
-        di = di + 1
-
-    # Bare name fallback (let dlopen search system paths)
-    if plat == "windows":
-        candidates.push("{name}.dll")
-    elif plat == "macos":
+                candidates.push("{directory}/lib{name}.{version.major}.{version.minor}.{version.patch}.dylib")
+            if version.major > 0: candidates.push("{directory}/lib{name}.{version.major}.dylib")
+            candidates.push("{directory}/lib{name}.dylib")
+            candidates.push("{directory}/{name}.dylib")
+        elif platform == "windows":
+            candidates.push("{directory}/{name}.dll")
+            candidates.push("{directory}/lib{name}.dll")
+    if platform == "windows": candidates.push("{name}.dll")
+    elif platform == "macos":
         candidates.push("lib{name}.dylib")
         candidates.push("{name}.dylib")
     else:
@@ -210,46 +360,29 @@ pub fn library_search_paths() -> [text]:
     var paths: [text] = []
     val simple_path = env_get("SIMPLE_LIB_PATH") ?? ""
     if simple_path != "":
-        val parts = simple_path.split(":")
-        var i = 0
-        while i < parts.len():
-            if parts[i] != "":
-                paths.push(parts[i])
-            i = i + 1
-    val plat = platform_name()
-    if plat == "linux" or plat == "freebsd":
-        val ldpath = env_get("LD_LIBRARY_PATH") ?? ""
-        if ldpath != "":
-            val parts = ldpath.split(":")
-            var i = 0
-            while i < parts.len():
-                if parts[i] != "":
-                    paths.push(parts[i])
-                i = i + 1
+        for path in simple_path.split(":"):
+            if path != "": paths.push(path)
+    val platform = platform_name()
+    if platform == "linux" or platform == "freebsd":
+        val ld_path = env_get("LD_LIBRARY_PATH") ?? ""
+        if ld_path != "":
+            for path in ld_path.split(":"):
+                if path != "": paths.push(path)
         paths.push("/usr/local/lib")
         paths.push("/usr/lib")
-    elif plat == "macos":
-        val dyldpath = env_get("DYLD_LIBRARY_PATH") ?? ""
-        if dyldpath != "":
-            val parts = dyldpath.split(":")
-            var i = 0
-            while i < parts.len():
-                if parts[i] != "":
-                    paths.push(parts[i])
-                i = i + 1
+    elif platform == "macos":
+        val dyld_path = env_get("DYLD_LIBRARY_PATH") ?? ""
+        if dyld_path != "":
+            for path in dyld_path.split(":"):
+                if path != "": paths.push(path)
         paths.push("/usr/local/lib")
         paths.push("/opt/homebrew/lib")
-    elif plat == "windows":
-        val winpath = env_get("PATH") ?? ""
-        if winpath != "":
-            val parts = winpath.split(";")
-            var i = 0
-            while i < parts.len():
-                if parts[i] != "":
-                    paths.push(parts[i])
-                i = i + 1
+    elif platform == "windows":
+        val path_value = env_get("PATH") ?? ""
+        if path_value != "":
+            for path in path_value.split(";"):
+                if path != "": paths.push(path)
     val t32_lib = env_get("T32_API_LIB") ?? ""
-    if t32_lib != "":
-        paths.push(t32_lib)
+    if t32_lib != "": paths.push(t32_lib)
     paths.push("/opt/t32/demo/api/capi/dll")
     paths

@@ -4,9 +4,15 @@ use app.cli._CliMain.args_and_os_commands.{GlobalFlags, get_cli_args, parse_glob
     print_error, print_error_with_help, run_dashboard, run_llm_dashboard}
 use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
 use app.io.env_ops.{env_get, env_set}
+use app.io.aspect_params_env.{aspect_params_from_env}
+use common.plugin.aspect_params.{aspect_coverage_cutover_policy_v1}
+use common.plugin.instrumentation_aspect_pack.{
+    COVERAGE_RUNTIME_COLLECTOR_V1, activate_instrumentation_coverage_startup_v1}
+use std.sffi.coverage.{coverage_enabled}
+use std.io_runtime.{getpid}
+use app.io.file_ops.{file_write}
 use std.common.mem_infra.config.{resolve_mem_infra, mem_infra_env_assignments}
-use app.io.cli_ops.{cli_file_exists, _cli_eprint, _cli_frontend_delegate_binary,
-    _cli_run_frontend_delegate}
+use app.io.cli_ops.{cli_file_exists, _cli_eprint}
 use app.io.cli_compile.{cli_compile, cli_native_build}
 use app.io.cli_commands.{cli_run_code, cli_run_file, cli_run_repl,
     cli_run_fmt, cli_run_fix, cli_run_verify,
@@ -46,6 +52,15 @@ use lazy compiler.tools.leak_check.main.{run_leak_check}
 use lazy compiler.tools.duplicate_check.main.{run_duplicate_check}
 use lazy app.test_runner_new.test_runner_main.{run_test_cli}
 use lazy app.test_runner_new.json_wrapper.{run_test_json_wrapper, test_json_requested, test_json_worker_requested}
+use plugins.backend_registry.full_static_backend_registry.{
+    install_full_static_backends_for_k1_policy_v1}
+use compiler.driver.bootstrap_k1_selected.{
+    install_selected_k1_backend_table_v1, selected_k1_backend_policy_v1}
+use app.compiler_entrypoint.admission.{compiler_entrypoint_admit_v1}
+use app.startup.dynsmf_status.{run_product_dynsmf_status}
+use app.build_progress.cli.{run_build_progress_cli}
+use app.lock.main.{run_lock_command}
+use app.update.main.{run_update_command}
 # Simple Language - Unified CLI (Written in Simple)
 #
 # This is the main entry point for the Simple CLI, written in Simple itself.
@@ -168,6 +183,19 @@ fn cli_print_help_with_progress(progress_mode: text):
     print_cli_help()
     cli_log_options_help()
 
+val CLI_STATIC_FAST_PATH_NONE: i32 = 0
+val CLI_STATIC_FAST_PATH_HELP: i32 = 1
+val CLI_STATIC_FAST_PATH_VERSION: i32 = 2
+
+fn cli_static_fast_path_kind(args: [text], phase7_child_apk_required: bool) -> i32:
+    if phase7_child_apk_required or args.len() != 1:
+        return CLI_STATIC_FAST_PATH_NONE
+    if str_eq(args[0], "-h") or str_eq(args[0], "--help"):
+        return CLI_STATIC_FAST_PATH_HELP
+    if str_eq(args[0], "-v") or str_eq(args[0], "--version"):
+        return CLI_STATIC_FAST_PATH_VERSION
+    CLI_STATIC_FAST_PATH_NONE
+
 fn cli_is_log_option(arg: text) -> bool:
     str_eq(arg, "--human") or str_eq(arg, "--llm") or str_eq(arg, "--json") or
         str_eq(arg, "--tui") or str_eq(arg, "--stdout") or str_eq(arg, "--quiet") or
@@ -214,9 +242,59 @@ fn _cli_args_from(args: [text], start_idx: i64) -> [text]:
         i = i + 1
     tail
 
+fn activate_required_child_coverage_apk() -> bool:
+    if (env_get("SIMPLE_PHASE7_CHILD_APK_REQUIRED") ?? "") != "1":
+        return true
+    val cutover = env_get("SIMPLE_COVERAGE_CUTOVER_STATE") ?? ""
+    match aspect_coverage_cutover_policy_v1(cutover):
+        case Err(message):
+            _cli_eprint(message)
+            return false
+        case Ok(_): pass
+    val receipt = activate_instrumentation_coverage_startup_v1(
+        aspect_params_from_env())
+    if not receipt.ok:
+        _cli_eprint("PLUG-E-APK-CHILD: {receipt.error}")
+        return false
+    if receipt.consumer_mode != COVERAGE_RUNTIME_COLLECTOR_V1:
+        _cli_eprint("PLUG-E-APK-CHILD: unsupported coverage consumer binding")
+        return false
+    if not coverage_enabled():
+        _cli_eprint("PLUG-E-APK-CHILD: runtime coverage collector is not enabled")
+        return false
+    val receipt_path = env_get("SIMPLE_PHASE7_CHILD_APK_RECEIPT") ?? ""
+    if receipt_path == "":
+        _cli_eprint("PLUG-E-APK-CHILD: child activation receipt path is required")
+        return false
+    val receipt_text = "schema=simple-phase7-child-apk-v1\npid={getpid()}\nactivation_count={receipt.activation_count}\ngeneration={receipt.generation}\npayload_bytes={receipt.payload_size}\nconsumer={receipt.consumer_mode}\nstatus=pass\n"
+    if not file_write(receipt_path, receipt_text):
+        _cli_eprint("PLUG-E-APK-CHILD: cannot publish child activation receipt")
+        return false
+    val _ = env_set("SIMPLE_PHASE7_CHILD_APK_RECEIPT", "")
+    print "phase7-apk-child-startup: pid={getpid()} activated={receipt.activation_count} generation={receipt.generation} payload_bytes={receipt.payload_size} consumer={receipt.consumer_mode}"
+    true
+
 
 fn main() -> i64:
+    val selected_k1_policy = selected_k1_backend_policy_v1()
+    val requested_k1_policy = env_get("SIMPLE_KERNEL_K1_POLICY") ?? "llvm-cranelift"
+    if selected_k1_policy != "llvm-cranelift" or
+            requested_k1_policy != selected_k1_policy:
+        _cli_eprint("PLUG-E-K1-POLICY: binary composition does not match requested policy")
+        return 1
     val raw_args = get_cli_args()
+    val static_fast_path = cli_static_fast_path_kind(raw_args,
+        (env_get("SIMPLE_PHASE7_CHILD_APK_REQUIRED") ?? "") == "1")
+    if static_fast_path == CLI_STATIC_FAST_PATH_HELP:
+        cli_print_help_with_progress("none")
+        return 0
+    if static_fast_path == CLI_STATIC_FAST_PATH_VERSION:
+        print_version()
+        return 0
+    if not install_selected_k1_backend_table_v1() or
+            not install_full_static_backends_for_k1_policy_v1(selected_k1_policy):
+        _cli_eprint("PLUG-E-TABLE: invalid policy-bound full-CLI backend composition")
+        return 1
 
     # These app commands own option names also recognized by the shared CLI
     # (`--tui`, `--surface`, `--count`, `--timeout`, and `--json`). Delegate
@@ -239,6 +317,24 @@ fn main() -> i64:
         return 1
 
     val args = cli_clean_log_args(raw_args)
+
+    if args.len() > 0 and str_eq(args[0], "--dynsmf-status"):
+        return run_product_dynsmf_status(raw_args, "full-cli")
+
+    if args.len() > 0 and str_eq(args[0], "build-progress"):
+        return run_build_progress_cli(args)
+
+    if args.len() > 0 and (str_eq(args[0], "check") or
+            str_eq(args[0], "compile") or str_eq(args[0], "build") or
+            str_eq(args[0], "run") or str_eq(args[0], "test") or
+            str_eq(args[0], "native-build") or
+            str_eq(args[0], "mcp") or str_eq(args[0], "lsp") or
+            str_eq(args[0], "query")):
+        val admission_roots = if str_eq(args[0], "test"): ["src", "test"] else: ["src"]
+        val admission = compiler_entrypoint_admit_v1(admission_roots)
+        if not admission.valid:
+            _cli_eprint("SCV-E-ADMISSION: " + admission.reason)
+            return 1
 
     if args.len() == 0:
         if str_eq(log_opts.log_mode, "json"):
@@ -274,6 +370,8 @@ fn main() -> i64:
         return cli_run_repl(flags.gc_log, flags.gc_off)
 
     val first = filtered_args[0]
+    if not activate_required_child_coverage_apk():
+        return 1
 
     if str_eq(first, "-h") or str_eq(first, "--help"):
         cli_print_help_with_progress(log_opts.progress)
@@ -347,13 +445,9 @@ fn main() -> i64:
             return 1
         return run_lex_command(filtered_args[1])
     elif str_eq(first, "lint"):
-        # Delegation restored 2026-07-11: the 15:09 stage-4 matrix FAILED
-        # (native check silent exit-3, run/-c print loss) — retire again only
-        # after a deployed binary passes the native-path matrix. See
-        # doc/08_tracking/bug/stage4_compiled_dict_no_growth_2026-07-11.md.
-        val lint_delegate = _cli_frontend_delegate_binary()
-        if lint_delegate != "":
-            return _cli_run_frontend_delegate(lint_delegate, filtered_args)
+        # This function and run_lint_command are compiled into the admitted
+        # self-hosted CLI. Never escape to a bootstrap seed or interpret a raw
+        # source entrypoint for a production quality command.
         return run_lint_command(filtered_args)
     elif str_eq(first, "duplicate-check"):
         return run_duplicate_check(filtered_args)
@@ -368,10 +462,9 @@ fn main() -> i64:
     elif str_eq(first, "check"):
         val check_handoff = check_cli_handoff_args(filtered_args, raw_args)
         val check_args = _cli_args_from(check_handoff, 1)
-        # Delegation restored 2026-07-11 (same matrix failure as lint above).
-        val check_delegate = _cli_frontend_delegate_binary()
-        if check_delegate != "":
-            return _cli_run_frontend_delegate(check_delegate, check_handoff)
+        # run_check is part of this compiled command image. Keep diagnostics
+        # and exit status in-process; seed delegation previously collapsed an
+        # execution sentinel to shell status 255 without diagnostics.
         return run_check(check_args)
     elif str_eq(first, "doc-coverage"):
         return run_doc_coverage(_cli_args_from(filtered_args, 1))
@@ -511,7 +604,7 @@ fn main() -> i64:
     elif str_eq(first, "release"):
         return cli_run_file("src/app/release/main.spl", filtered_args, flags.gc_log, flags.gc_off)
     elif str_eq(first, "update"):
-        return cli_run_file("src/app/update/main.spl", filtered_args, flags.gc_log, flags.gc_off)
+        return run_update_command(_cli_args_from(filtered_args, 1))
     elif str_eq(first, "list"):
         return cli_run_file("src/app/list/main.spl", filtered_args, flags.gc_log, flags.gc_off)
     elif str_eq(first, "tree"):
@@ -523,7 +616,7 @@ fn main() -> i64:
     elif str_eq(first, "env"):
         return cli_run_file("src/app/env/main.spl", filtered_args, flags.gc_log, flags.gc_off)
     elif str_eq(first, "lock"):
-        return cli_run_file("src/app/lock/main.spl", filtered_args, flags.gc_log, flags.gc_off)
+        return run_lock_command(_cli_args_from(filtered_args, 1))
     elif str_eq(first, "run"):
         return cli_handle_run(_cli_args_from(filtered_args, 1), flags.gc_log, flags.gc_off)
     elif str_eq(first, "os"):

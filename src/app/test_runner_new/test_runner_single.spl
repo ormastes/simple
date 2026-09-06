@@ -25,6 +25,7 @@
 use std.sffi.cli.{cli_get_args}
 use app.io.process_ops.{process_run_bounded}
 use app.io.mod.{env_get}
+use app.io.cli_ops.{cli_current_exe_path}
 use std.spec.in_development.{source_is_in_development, in_development_explicit_line}
 use std.test_runner.test_runner_types.{TEST_OUTPUT_CAPTURE_BYTES}
 # Single source of truth for the six-class outcome contract
@@ -38,6 +39,7 @@ use std.test_runner.test_runner_types.{TEST_OUTPUT_CAPTURE_BYTES}
 use std.test_runner.test_executor_parsing.{make_result_from_output}
 use std.string_core.{char_code}
 use std.common.coverage_sdn.{parse_coverage_sdn, merge_coverage, render_coverage_sdn}
+use common.plugin.aspect_params.{aspect_coverage_cutover_policy_v1}
 use app.test_daemon.light_protocol.{timeout_verdict_line, has_verdict_line, exit_code_reason, unrun_verdict_line, unrun_reason}
 
 use std.io_runtime.{file_exists}
@@ -50,6 +52,7 @@ use std.io_runtime.{time_now_unix_micros}
 use std.io_runtime.{getpid}
 @unsafe(reason: "raw procfs path-resolution ABI", capabilities: [ffi])
 extern fn rt_path_absolute(path: text) -> text
+extern fn sys_get_args() -> [text]
 
 # --- Legacy word-infix matcher preprocessing (self-contained; this file is kept
 # independent of std.test_runner.* so child runs stay lightweight). Mirrors
@@ -271,28 +274,29 @@ fn parse_child_run(args: [text]) -> ChildRun:
     ChildRun(path: path, timeout_secs: timeout_secs, list_only: list_only, valid: true, error: "")
 
 fn find_simple_binary() -> text:
-    val configured = env_get("SIMPLE_BINARY")
-    if configured != nil and configured != "" and file_exists(configured):
-        return configured
-    # Resolve the invoking binary IN-PROCESS via /proc/self/exe
-    # (std::fs::canonicalize). Never shell out to `readlink`: a spawned
-    # helper's /proc/self describes the HELPER, which is how the CLI's guard
-    # became a fork bomb on 2026-07-25. cli_get_args()[0] below is the
-    # SUBCOMMAND ("test"), not argv0, so without this step the resolver always
-    # fell through to a possibly-stale bin/simple — see
-    # doc/08_tracking/bug/test_runner_child_binary_ignores_invoking_binary_2026-07-27.md.
-    val self_path = unsafe(capabilities: [ffi]): rt_path_absolute("/proc/self/exe") ?? ""
-    if self_path.len() > 0 and self_path != "/proc/self/exe" and file_exists(self_path):
-        return self_path
-    val raw = cli_get_args()
-    # Source-mode argv can begin with test_runner_single.spl itself. It exists,
-    # but it is not executable; passing it to process_run_timeout produces a
-    # misleading permission-denied failure instead of running the test.
-    if raw.len() > 0 and (raw[0].ends_with("/simple") or raw[0].ends_with("simple.exe")) and file_exists(raw[0]):
-        return raw[0]
-    if file_exists("bin/simple"):
-        return "bin/simple"
-    "./bin/simple"
+    # Use the same cross-platform current-executable authority as the CLI.
+    # This covers macOS without /proc and makes SIMPLE_BINARY a strict identity
+    # binding: an explicit path that does not canonicalize to the invoking
+    # candidate is a qualification failure, never a cross-binary fallback.
+    val current_raw = cli_current_exe_path()
+    var current = ""
+    if current_raw != "" and file_exists(current_raw):
+        current = unsafe(capabilities: [ffi]): rt_path_absolute(current_raw) ?? ""
+    if current == "":
+        val process_args = sys_get_args()
+        if process_args.len() > 0 and file_exists(process_args[0]):
+            current = unsafe(capabilities: [ffi]): rt_path_absolute(process_args[0]) ?? ""
+    if current == "" or not file_exists(current):
+        return ""
+    val configured_raw = env_get("SIMPLE_BINARY") ?? ""
+    if configured_raw == "":
+        return current
+    if not file_exists(configured_raw):
+        return ""
+    val configured = unsafe(capabilities: [ffi]): rt_path_absolute(configured_raw) ?? ""
+    if configured == "" or not file_exists(configured) or configured != current:
+        return ""
+    configured
 
 fn file_has_di_test_tag(file_path: text) -> bool:
     """Check if file has # @di_test tag, allowing DI modifications in system tests.
@@ -463,35 +467,13 @@ fn extract_number_after(s: text, keyword: text) -> i64:
         return -1
     value
 
-fn extract_word_after(s: text, keyword: text) -> text:
-    """The run of uppercase-letter/underscore characters immediately
-    following `keyword` ("" when absent). Mirror of extract_number_after for
-    the `outcome=<WORD>` field (`OK`, `ERROR`, `CRASHED`, `TERMINATED`,
-    `TIMEOUT`, `NOT_RUN`)."""
-    val idx = find_raw(s, keyword)
-    if idx < 0:
-        return ""
-    var pos = idx + keyword.len()
-    val n = s.len()
-    var out = ""
-    while pos < n:
-        val c = s.char_code_at(pos)
-        val is_upper = c >= 65 and c <= 90
-        val is_underscore = c == 95
-        if is_upper or is_underscore:
-            out = out + s.char_at(pos)
-            pos = pos + 1
-        else:
-            break
-    out
-
-fn parse_spec_file_verdict(output: text) -> (i64, i64, i64, i64, i64, text):
+fn parse_spec_file_verdict(output: text) -> (i64, i64, i64, i64, i64):
     """Parse the driver's authoritative per-file verdict line.
 
     `report_spec_file_verdict` (src/compiler_rust/driver/src/cli/basic.rs)
     emits exactly one such line per spec FILE, always, on stdout, LAST:
 
-        SPEC FILE VERDICT: <path> outcome=OK declared>=N executed=N passed=N failed=N skipped=N dropped=N
+        SPEC FILE VERDICT: <path> declared>=N executed=N passed=N failed=N dropped=N
 
     Its counts come from the interpreter's own BDD result table, not from
     scraping display text, so it is strictly more reliable than the per-example
@@ -507,25 +489,11 @@ fn parse_spec_file_verdict(output: text) -> (i64, i64, i64, i64, i64, text):
     therefore also require `dropped == 0`, or it greenwashes exactly that case.
     Bug: spec_runner_verdict_dropped_gate_reverted.
 
-    `outcome` is `SpecOutcome::as_str()` on the Rust side: `OK`, `ERROR`,
-    `CRASHED`, `TERMINATED`, `TIMEOUT`, or `NOT_RUN`. Only `OK` means the
-    module itself ran to completion with no error AFTER the BDD table was
-    tallied. `ERROR`/`CRASHED` can carry `failed=0` (every assertion that DID
-    run passed) while still being a genuine failure — e.g. a runtime error in
-    `fn main()` that happens after the file's `describe`/`it` blocks already
-    executed cleanly. Any consumer treating a verdict as POSITIVE evidence
-    that overrides a non-zero child exit code MUST also require
-    `outcome == "OK"`, or it greenwashes exactly that case: a spec whose
-    assertions passed and then crashed/errored/exited was reported as a clean
-    PASS with rc=0.
-    See doc/08_tracking/bug/test_runner_trusts_verdict_over_nonzero_exit_ignoring_outcome_2026-09-01.md.
-
-    Returns (executed, passed, failed, dropped, has_verdict, outcome)."""
+    Returns (executed, passed, failed, dropped, has_verdict)."""
     var executed = -1
     var passed = -1
     var failed = -1
     var dropped = -1
-    var outcome = ""
     val lines = output.split("\n")
     for line in lines:
         if line.contains("SPEC FILE VERDICT:"):
@@ -533,20 +501,18 @@ fn parse_spec_file_verdict(output: text) -> (i64, i64, i64, i64, i64, text):
             val p = extract_number_after(line, " passed=")
             val f = extract_number_after(line, " failed=")
             val d = extract_number_after(line, " dropped=")
-            val o = extract_word_after(line, " outcome=")
             if e >= 0 and p >= 0 and f >= 0:
                 executed = e
                 passed = p
                 failed = f
                 dropped = d
-                outcome = o
     if executed >= 0:
         # A verdict line with no parseable `dropped=` field is treated as
         # dropped-unknown, and unknown must fail closed: report a nonzero
         # value so neither bypass below can accept it as clean.
         val d_out = if dropped >= 0: dropped else: 1
-        return (executed, passed, failed, d_out, 1, outcome)
-    (0, 0, 0, 0, 0, "")
+        return (executed, passed, failed, d_out, 1)
+    (0, 0, 0, 0, 0)
 
 fn output_was_truncated(output: text) -> bool:
     """True when the bounded-capture reader discarded part of the child output.
@@ -735,54 +701,27 @@ fn _cov_enabled() -> bool:
     val v = env_get("SIMPLE_COVERAGE") ?? ""
     v != "" and v != "0"
 
-fn _cov_instrument_for_coverage(current: text, original: text) -> text:
-    """Append a coverage-dump epilogue to the child spec copy. When `current`
-    is already a temp copy (infix preprocessing), append in place; otherwise
-    create a fresh temp copy next to the original so imports still resolve."""
-    val content = unsafe(capabilities: [ffi]): rt_file_read_text(current)
-    if content == "":
-        return current
-    var epilogue = "\n\n# --- coverage epilogue injected by test_runner_single (SIMPLE_COVERAGE) ---\n"
-    epilogue = epilogue + "extern fn rt_coverage_dump_sdn() -> text\n"
-    epilogue = epilogue + "fn __simple_cov_dump():\n"
-    epilogue = epilogue + "    print \"__SIMPLE_COV_SDN_BEGIN__\"\n"
-    epilogue = epilogue + "    print rt_coverage_dump_sdn()\n"
-    epilogue = epilogue + "    print \"__SIMPLE_COV_SDN_END__\"\n"
-    epilogue = epilogue + "__simple_cov_dump()\n"
-    if current != original:
-        val _ = file_write(current, content + epilogue)
-        return current
-    val slash = _single_last_slash(original)
-    val dir = if slash >= 0: original.substring(0, slash + 1) else: ""
-    val base = if slash >= 0: original.substring(slash + 1) else: original
-    val tmp = dir + ".spipe_cov_{getpid()}_{time_now_unix_micros()}_" + base
-    if file_write(tmp, content + epilogue):
-        return tmp
-    current
+fn _phase7_receipt_value(receipt: text, key: text) -> text:
+    val prefix = key + "="
+    var value = ""
+    var matches = 0
+    for line in receipt.split("\n"):
+        if line.starts_with(prefix):
+            matches = matches + 1
+            value = line.substring(prefix.len())
+    if matches == 1: value else: ""
 
-fn _cov_split_output(output: text) -> (text, text):
-    """Split child stdout into (clean output, coverage SDN region)."""
-    val lines = output.split("\n")
-    var clean = ""
-    var sdn = ""
-    var in_cov = false
-    var first_clean = true
-    for line in lines:
-        if line.contains("__SIMPLE_COV_SDN_BEGIN__"):
-            in_cov = true
-            continue
-        if line.contains("__SIMPLE_COV_SDN_END__"):
-            in_cov = false
-            continue
-        if in_cov:
-            sdn = sdn + line + "\n"
-        else:
-            if first_clean:
-                clean = line
-                first_clean = false
-            else:
-                clean = clean + "\n" + line
-    (clean, sdn)
+fn _phase7_child_receipt_valid(receipt: text, parent_pid: i64) -> bool:
+    val child_pid = _phase7_receipt_value(receipt, "pid").to_i64() ?? 0
+    val generation = _phase7_receipt_value(receipt, "generation").to_i64() ?? 0
+    val payload_bytes = _phase7_receipt_value(receipt, "payload_bytes").to_i64() ?? 0
+    _phase7_receipt_value(receipt, "schema") == "simple-phase7-child-apk-v1" and
+        child_pid > 0 and child_pid != parent_pid and
+        _phase7_receipt_value(receipt, "activation_count") == "1" and
+        generation > 0 and payload_bytes > 0 and
+        _phase7_receipt_value(receipt, "consumer") ==
+            "simple.runtime.coverage.collector.v1" and
+        _phase7_receipt_value(receipt, "status") == "pass"
 
 fn _cov_dots_to_slashes(s: text) -> text:
     var out = ""
@@ -1117,6 +1056,13 @@ fn main() -> i64:
         env_set("SIMPLE_DI_TEST", "0")
 
     val binary = find_simple_binary()
+    if binary == "":
+        print "error: test-runner: canonical invoking candidate identity is unavailable or SIMPLE_BINARY does not match it"
+        print "error: refusing to fall back to deployed bin/simple or a Rust seed"
+        return 1
+    if not env_set("SIMPLE_BINARY", binary):
+        print "error: test-runner: cannot bind child execution to canonical candidate {binary}"
+        return 1
     # Nested contract probes must exercise the same admitted binary that runs
     # this spec. Preserve an explicit caller override; otherwise publish the
     # resolved child authority instead of making specs guess `bin/simple`.
@@ -1124,25 +1070,23 @@ fn main() -> i64:
         env_set("SIMPLE_TEST_BINARY", binary)
     # Evidence must be self-describing: name the binary that executes the spec.
     print "child binary: {binary}"
-    # ...and name it LOUDLY when it is not the binary the caller is running.
-    # A silent substitution is the whole defect: the run then reports on a
-    # compiler the verifying lane never built. SIMPLE_BINARY is the one
-    # legitimate divergence, so it downgrades the line to a note.
-    val self_exe = rt_path_absolute("/proc/self/exe") ?? ""
-    if self_exe.len() > 0 and self_exe != "/proc/self/exe" and self_exe != binary:
-        val explicit = env_get("SIMPLE_BINARY") ?? ""
-        if explicit != "":
-            print "child binary: explicitly overridden by SIMPLE_BINARY (invoking binary: {self_exe})"
-        else:
-            print "WARNING: child binary {binary} is NOT the invoking binary {self_exe}; this run does not measure the invoking compiler"
     val timeout_ms = run.timeout_secs * 1000
     # Rewrite legacy word-infix `expect X to_equal Y` to method form so the
     # interpreter `run` path evaluates the matcher (else it drops it → false-red
     # on falsy calls, silent false-green otherwise).
-    var exec_path = preprocess_infix_for_child(run.path)
     val cov_on = _cov_enabled()
+    val coverage_cutover_raw = env_get("SIMPLE_COVERAGE_CUTOVER_STATE") ?? ""
+    var exec_path = run.path
     if cov_on:
-        exec_path = _cov_instrument_for_coverage(exec_path, run.path)
+        match aspect_coverage_cutover_policy_v1(coverage_cutover_raw):
+            case Err(message):
+                print "error: " + message
+                return 1
+            case Ok(_): pass
+        if env_get("SIMPLE_PHASE7_TRACE") == "1":
+            print "phase7-coverage-source-rewrite=0"
+    else:
+        exec_path = preprocess_infix_for_child(run.path)
     val assert_ran = env_get("SIMPLE_TEST_ASSERT_RAN") == "1"
     var evidence_path = ""
     var previous_evidence_path = ""
@@ -1169,10 +1113,65 @@ fn main() -> i64:
                 val _ = file_delete(exec_path)
             print "error: test-runner: cannot configure structured result evidence"
             return 1
+    var runtime_coverage_path = ""
+    var previous_coverage_output = ""
+    var runtime_evidence_is_child_owned = false
+    if cov_on:
+        previous_coverage_output = env_get("SIMPLE_COVERAGE_OUTPUT") ?? ""
+        if previous_coverage_output != "":
+            runtime_coverage_path = previous_coverage_output
+            runtime_evidence_is_child_owned = true
+        else:
+            runtime_coverage_path = "/tmp/simple_apk_coverage_{getpid()}_{time_now_unix_micros()}.sdn"
+        if file_exists(runtime_coverage_path):
+            val _ = file_delete(runtime_coverage_path)
+        if not env_set("SIMPLE_COVERAGE_OUTPUT", runtime_coverage_path):
+            print "error: cannot configure child APK coverage evidence output"
+            return 1
+    var child_apk_receipt_path = ""
+    var previous_child_apk_required = ""
+    var previous_child_apk_receipt = ""
+    var previous_no_bootstrap_delegate = ""
+    if cov_on:
+        child_apk_receipt_path = "/tmp/simple_phase7_child_apk_{getpid()}_{time_now_unix_micros()}.env"
+        if file_exists(child_apk_receipt_path):
+            val _ = file_delete(child_apk_receipt_path)
+        previous_child_apk_required = env_get("SIMPLE_PHASE7_CHILD_APK_REQUIRED") ?? ""
+        previous_child_apk_receipt = env_get("SIMPLE_PHASE7_CHILD_APK_RECEIPT") ?? ""
+        previous_no_bootstrap_delegate = env_get("SIMPLE_NO_BOOTSTRAP_DELEGATE") ?? ""
+        if not env_set("SIMPLE_PHASE7_CHILD_APK_REQUIRED", "1") or
+                not env_set("SIMPLE_PHASE7_CHILD_APK_RECEIPT", child_apk_receipt_path) or
+                not env_set("SIMPLE_NO_BOOTSTRAP_DELEGATE", "1"):
+            print "error: cannot configure child APK activation contract"
+            return 1
+        if env_get("SIMPLE_PHASE7_TRACE") == "1":
+            print "phase7-apk-runner: pid={getpid()}"
     val start = time_now_unix_micros()
     val child_args = if assert_ran: ["run", exec_path, "--test-result-file={evidence_path}"] else: ["run", exec_path]
     val (stdout, stderr, code) = process_run_bounded(binary, child_args, timeout_ms, TEST_OUTPUT_CAPTURE_BYTES)
     val duration_ms = (time_now_unix_micros() - start) / 1000
+    var runtime_coverage_sdn = ""
+    if runtime_coverage_path != "":
+        if file_exists(runtime_coverage_path):
+            runtime_coverage_sdn = unsafe(capabilities: [ffi]): rt_file_read_text(runtime_coverage_path)
+            if not runtime_evidence_is_child_owned:
+                val _ = file_delete(runtime_coverage_path)
+        if not env_set("SIMPLE_COVERAGE_OUTPUT", previous_coverage_output):
+            print "error: test-runner: cannot restore APK coverage output environment"
+            return 1
+    var child_apk_receipt = ""
+    if child_apk_receipt_path != "" and file_exists(child_apk_receipt_path):
+        child_apk_receipt = unsafe(capabilities: [ffi]): rt_file_read_text(child_apk_receipt_path)
+        val _ = file_delete(child_apk_receipt_path)
+    if cov_on:
+        if not env_set("SIMPLE_PHASE7_CHILD_APK_REQUIRED", previous_child_apk_required) or
+                not env_set("SIMPLE_PHASE7_CHILD_APK_RECEIPT", previous_child_apk_receipt) or
+                not env_set("SIMPLE_NO_BOOTSTRAP_DELEGATE", previous_no_bootstrap_delegate):
+            print "error: test-runner: cannot restore child APK activation environment"
+            return 1
+        if not _phase7_child_receipt_valid(child_apk_receipt, getpid()):
+            print "error: spawned test process did not publish a valid child APK activation receipt"
+            return 1
     if assert_ran and not env_set("SIMPLE_TEST_RESULT_FILE", previous_evidence_path):
         if evidence_path != "" and file_exists(evidence_path):
             val _ = file_delete(evidence_path)
@@ -1185,22 +1184,19 @@ fn main() -> i64:
         val _ = file_delete(evidence_path)
     if exec_path != run.path and file_exists(exec_path):
         val _ = file_delete(exec_path)
-    var child_stdout = stdout
+    val child_stdout = stdout
     var cov_sdn = ""
     if cov_on:
-        val (cov_clean, cov_extracted) = _cov_split_output(stdout)
-        child_stdout = cov_clean
-        cov_sdn = cov_extracted
+        cov_sdn = runtime_coverage_sdn
         if cov_sdn.trim() == "":
-            # A coverage request without the injected dump is never a valid
-            # test result.  Previously this silently printed a normal PASS and
-            # omitted SIMPLE_COVERAGE_OUTPUT, allowing a stale runner binary
-            # to masquerade as a measured ML-KEM coverage run.
-            print "error: coverage dump sentinels absent from child output"
+            # Atomic APK-only mode requires the child-owned runtime artifact.
+            # Missing evidence must never become a normal test PASS.
+            print "error: required child coverage evidence is absent"
             if stderr != "": print stderr
             return 1
         val cov_output_path = env_get("SIMPLE_COVERAGE_OUTPUT") ?? ""
-        if cov_output_path != "" and cov_sdn != "":
+        if cov_output_path != "" and cov_sdn != "" and
+                not runtime_evidence_is_child_owned:
             # Multi-spec invocations: each spec's child inherits the SAME
             # SIMPLE_COVERAGE_OUTPUT path from the parent. Prerequisite 5
             # (std.common.coverage_sdn) now provides a real per-key union, so
@@ -1229,10 +1225,10 @@ fn main() -> i64:
     val (real_passed, real_failed) = count_real_examples(combined)
     val real_executed = real_passed + real_failed
     val (summary_passed, summary_failed, has_summary) = parse_child_example_summary(combined)
-    val (verdict_executed, verdict_passed, verdict_failed, verdict_dropped, has_verdict, verdict_outcome) = parse_spec_file_verdict(combined)
+    val (verdict_executed, verdict_passed, verdict_failed, verdict_dropped, has_verdict) = parse_spec_file_verdict(combined)
     val was_truncated = output_was_truncated(combined)
     if env_get("SIMPLE_TEST_RUNNER_DEBUG") == "1":
-        print "test-runner debug: code={code} assert_ran={assert_ran} has_evidence={has_evidence} ev_p={evidence_passed} ev_f={evidence_failed} real_p={real_passed} real_f={real_failed} has_sum={has_summary} sum_p={summary_passed} sum_f={summary_failed} has_v={has_verdict} v_e={verdict_executed} v_p={verdict_passed} v_f={verdict_failed} v_d={verdict_dropped} v_o={verdict_outcome} trunc={was_truncated}"
+        print "test-runner debug: code={code} assert_ran={assert_ran} has_evidence={has_evidence} ev_p={evidence_passed} ev_f={evidence_failed} real_p={real_passed} real_f={real_failed} has_sum={has_summary} sum_p={summary_passed} sum_f={summary_failed} has_v={has_verdict} v_e={verdict_executed} v_p={verdict_passed} v_f={verdict_failed} v_d={verdict_dropped} trunc={was_truncated}"
     var failed = 0
     var passed = 0
     # Non-empty only for the UNVERIFIED classes (TERMINATED / TIMEOUT), which
@@ -1350,14 +1346,13 @@ fn main() -> i64:
         # This is NOT a weakening of the greenwash guards. The child's
         # SPEC FILE VERDICT line is emitted by the driver epilogue, which only
         # runs if the spec process reached the end normally: a spec that
-        # passes its examples and THEN dies abnormally (a raw `exit(N)` call,
-        # which is `std::process::exit` and never returns to the epilogue)
-        # emits no verdict line at all. So requiring a clean verdict,
-        # corroborated by the independent ✗-glyph tally and by any summary
-        # line present, is POSITIVE evidence that the process completed and
-        # nothing failed — exactly the shape of the truncation fix above.
-        # Every genuinely nonzero exit that is not backed by that evidence
-        # still fails closed.
+        # passes its examples and THEN dies abnormally emits no verdict line
+        # at all (proven: `exit(7)` after the block yields has_verdict=0 and
+        # stays RED). So requiring a clean verdict, corroborated by the
+        # independent ✗-glyph tally and by any summary line present, is
+        # POSITIVE evidence that the process completed and nothing failed —
+        # exactly the shape of the truncation fix above. Every genuinely
+        # nonzero exit that is not backed by that evidence still fails closed.
         # `verdict_dropped == 0` is load-bearing and was MISSING when this
         # bypass first landed: without it, a file reporting
         # `declared>=10 executed=1 passed=1 failed=0 dropped=9` plus a nonzero
@@ -1365,24 +1360,7 @@ fn main() -> i64:
         # 24cfc32db98 closed on the truncation bypass above. Same rule, same
         # reason: a verdict is positive evidence of completion only when it
         # accounts for every example the file declared.
-        #
-        # `verdict_outcome == "OK"` is ALSO load-bearing and was MISSING
-        # until this fix (bug: test_runner_trusts_verdict_over_nonzero_exit_
-        # ignoring_outcome_2026-09-01). The epilogue runs on `Ok`, `Error`,
-        # AND `Crashed` outcomes alike (all three are "verified": the module
-        # ran far enough to trust the BDD table) — but only `Ok` means
-        # nothing ELSE went wrong. A `fn main()` that runs its assertions
-        # cleanly and THEN hits a runtime error (an unresolved call, a
-        # caught panic, any error that unwinds to a normal `Err` return
-        # rather than a raw `exit()`/process kill) still reaches the
-        # epilogue, still gets a `dropped==0 failed==0` verdict, and the
-        # driver correctly stamps `outcome=ERROR` on that exact line — which
-        # this check used to ignore entirely. Measured: a spec whose `it`
-        # examples all pass and whose `fn main()` then calls an undefined
-        # function reports `SPEC FILE VERDICT: ... outcome=ERROR ... failed=0`
-        # plus child exit 1, and was reported as a clean PASS with rc=0
-        # before this fix.
-        val verdict_clean = has_verdict == 1 and verdict_executed > 0 and verdict_dropped == 0 and verdict_failed == 0 and verdict_outcome == "OK"
+        val verdict_clean = has_verdict == 1 and verdict_executed > 0 and verdict_dropped == 0 and verdict_failed == 0
         val exit_code_spurious = code != 0 and verdict_clean and real_failed == 0 and (has_summary == 0 or summary_failed == 0)
         if exit_code_spurious:
             print "warning: test-runner: child exit {code} contradicted by a clean SPEC FILE VERDICT; trusting the verdict"

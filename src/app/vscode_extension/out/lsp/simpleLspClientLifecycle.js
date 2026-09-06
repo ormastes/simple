@@ -38,6 +38,7 @@ const vscode = __importStar(require("vscode"));
 const child_process_1 = require("child_process");
 const node_1 = require("vscode-languageclient/node");
 const wasmLspBridge_1 = require("../wasm/wasmLspBridge");
+const simpleLspCapabilityReceipt_1 = require("./simpleLspCapabilityReceipt");
 const WASM_LSP_PATH = 'wasm/simple-lsp.wasm';
 function createSimpleLspClientBootstrap(options) {
     return async (request) => {
@@ -65,10 +66,12 @@ function createSimpleLspClientBootstrap(options) {
                 control.setEnabled(enabled);
             }
         };
+        const publishDegraded = (message, detail) => {
+            (0, simpleLspCapabilityReceipt_1.publishLspCapabilityReceipt)(options.services, options.fallbackControls ?? [], (0, simpleLspCapabilityReceipt_1.degradedLspReceipt)(message, detail));
+        };
         const syncState = (state) => {
             if (state === node_1.State.Running) {
-                options.services.markReady('lsp', 'Simple LSP server running', activeSource);
-                setFallbackEnabled(false);
+                (0, simpleLspCapabilityReceipt_1.publishLspCapabilityReceipt)(options.services, options.fallbackControls ?? [], (0, simpleLspCapabilityReceipt_1.authoritativeLspReceipt)(activeSource));
                 options.onRunningStateChanged?.(true);
                 return;
             }
@@ -81,17 +84,15 @@ function createSimpleLspClientBootstrap(options) {
                 options.onRunningStateChanged?.(false);
                 return;
             }
-            options.services.markDegraded('lsp', 'Simple LSP unavailable; fallback providers active', 'fallback');
-            setFallbackEnabled(true);
+            publishDegraded('Simple LSP unavailable');
             options.onRunningStateChanged?.(false);
         };
         return {
             start: async () => {
                 const resolved = await resolveServerOptions(request, outputChannel);
                 if (!resolved.ok) {
-                    setFallbackEnabled(true);
                     options.onRunningStateChanged?.(false);
-                    options.services.markDegraded('lsp', resolved.message, 'fallback', resolved.detail);
+                    publishDegraded(resolved.message, resolved.detail);
                     return;
                 }
                 activeSource = resolved.source;
@@ -111,16 +112,14 @@ function createSimpleLspClientBootstrap(options) {
                     const exitedQuicklyWithError = probe.status !== null && probe.status !== 0;
                     const timedOut = probe.error && 'code' in probe.error && probe.error.code === 'ETIMEDOUT';
                     if (exitedQuicklyWithError && !timedOut) {
-                        setFallbackEnabled(true);
                         options.onRunningStateChanged?.(false);
-                        options.services.markDegraded('lsp', 'Simple LSP command exits immediately; fallback providers active', 'fallback', probeOutput || `exit ${probe.status}`);
+                        publishDegraded('Simple LSP command exits immediately', probeOutput || `exit ${probe.status}`);
                         return;
                     }
                     const initializeProbe = await probeInitializeHandshake(request.server.command, request.server.args, request.server.environment);
                     if (!initializeProbe.ok) {
-                        setFallbackEnabled(true);
                         options.onRunningStateChanged?.(false);
-                        options.services.markDegraded('lsp', 'Simple LSP initialize probe failed; fallback providers active', 'fallback', initializeProbe.detail);
+                        publishDegraded('Simple LSP initialize probe failed', initializeProbe.detail);
                         return;
                     }
                 }
@@ -128,10 +127,9 @@ function createSimpleLspClientBootstrap(options) {
                     await client.start();
                 }
                 catch (error) {
-                    setFallbackEnabled(true);
                     options.onRunningStateChanged?.(false);
                     const detail = error instanceof Error ? error.stack ?? error.message : String(error);
-                    options.services.markDegraded('lsp', 'Failed to start Simple LSP server; fallback providers active', 'fallback', detail);
+                    publishDegraded('Failed to start Simple LSP server', detail);
                     throw error;
                 }
             },

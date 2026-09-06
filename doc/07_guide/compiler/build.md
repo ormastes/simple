@@ -68,6 +68,14 @@ bin/simple build --clean
 bin/simple build --verbose
 ```
 
+Native builds delete private crash/failure staging files by default while
+preserving reusable incremental cache objects. Old staging siblings for the
+same output are reclaimed at the next build after 24 hours. Use
+`--keep-intermediates` (or `SIMPLE_KEEP_BUILD_INTERMEDIATES=1`) to retain
+diagnostic scratch. Use `--print-intermediates` (or
+`SIMPLE_PRINT_BUILD_INTERMEDIATES=1`) to retain and print each exact path.
+The legacy `SIMPLE_KEEP_LLVM_IR=1` remains supported for LLVM IR only.
+
 ### Quality Commands
 
 ```bash

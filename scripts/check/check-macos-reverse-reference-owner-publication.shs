@@ -1,0 +1,108 @@
+#!/bin/sh
+set -eu
+
+root=${1:-.}
+root=$(CDPATH= cd -- "$root" && pwd -P)
+
+fail() {
+    echo "FAIL: $*" >&2
+    exit 1
+}
+
+require_text() {
+    file=$1
+    text=$2
+    label=$3
+    [ -f "$root/$file" ] || fail "$label: missing $file"
+    grep -Fq -- "$text" "$root/$file" || fail "$label"
+}
+
+require_count() {
+    file=$1
+    text=$2
+    expected=$3
+    label=$4
+    actual=$(grep -Fc -- "$text" "$root/$file" || true)
+    [ "$actual" -eq "$expected" ] || fail "$label: expected $expected, found $actual"
+}
+
+require_text src/compiler/80.driver/driver_build/incremental.spl \
+    'reverse_reference_owner_mark_known_v1("direct-import-export")' \
+    'direct import/export family is not marked known'
+require_text src/compiler/80.driver/driver_build/incremental.spl \
+    'reverse_reference_owner_mark_known_v1("module-scc-artifact")' \
+    'module/SCC family is not marked known'
+require_count src/compiler/80.driver/driver_build/incremental.spl \
+    'incremental_publish_direct_import_export_v1' 4 \
+    'direct import/export publication count drifted'
+require_count src/compiler/80.driver/driver_build/incremental.spl \
+    'incremental_publish_module_scc_artifact_v1' 3 \
+    'module/SCC publication count drifted'
+require_text src/compiler/80.driver/driver_build/incremental.spl \
+    'reverse_reference_register_module_scc_peer_v1(subject, consumer, evidence)' \
+    'module/SCC publication is not explicitly peer-bound'
+require_text src/compiler/80.driver/cache/package_scc_scheduler.spl \
+    '    package_scc_publish_reverse_reference_peers_v1(
+        generation, group_ids)' \
+    'production SCC schedule owner does not publish reverse-reference peers'
+require_text src/compiler/80.driver/cache/package_scc_scheduler.spl \
+    'reverse_reference_owner_register_source_alias_v1(' \
+    'production SCC peers do not resolve through source aliases'
+require_text src/compiler/80.driver/cache/package_scc_scheduler.spl \
+    'val scc_digest = sha256_text(encoded)' \
+    'production SCC peer evidence is not a stable digest'
+require_text src/compiler/25.traits/trait_solver.spl \
+    'reverse_reference_register_trait_candidate_v1(subject, consumer, evidence)' \
+    'trait publication seam is not subject-bound'
+require_text src/compiler/35.semantics/resolve_strategies.spl \
+    'reverse_reference_register_unresolved_method_v1(subject, consumer, evidence)' \
+    'unresolved-method publication seam is not subject-bound'
+require_text src/compiler/20.hir/hir_lowering/_Items/declaration_lowering.spl \
+    'reverse_reference_register_annotation_v1(subject, consumer, evidence)' \
+    'annotation publication seam is not subject-bound'
+require_text src/compiler/40.mono/monomorphize/note_sdn.spl \
+    'subject, consumer, evidence)' \
+    'generic publication seam is not subject-bound'
+require_text src/compiler/85.mdsoc/aop_index/reverse_index.spl \
+    'reverse_reference_register_aop_v1(subject, consumer, evidence)' \
+    'AOP publication seam is not subject-bound'
+require_text src/compiler/70.backend/backend/llvm_native_link_orchestrator.spl \
+    'reverse_reference_register_runtime_provider_v1(subject, consumer, evidence)' \
+    'runtime-provider publication seam is not subject-bound'
+require_text src/compiler/50.mir/_MirLowering/module_lowering.spl \
+    'reverse_reference_register_initializer_v1(subject, consumer, evidence)' \
+    'initializer publication seam is not subject-bound'
+require_text src/compiler/70.backend/linker/symbol_analysis.spl \
+    'reverse_reference_register_relocation_v1(subject, consumer, evidence)' \
+    'relocation publication seam is not subject-bound'
+
+[ "${MACOS_REVERSE_REFERENCE_STRUCTURAL_ONLY:-0}" = 1 ] && {
+    echo 'PASS: reverse-reference owner publication structure'
+    exit 0
+}
+
+simple_bin=${SIMPLE_BIN:-$root/bin/release/simple}
+[ -x "$simple_bin" ] || {
+    echo "BLOCKED: self-hosted runtime unavailable: $simple_bin" >&2
+    exit 2
+}
+identity=$(env SIMPLE_BOOTSTRAP= SIMPLE_RUST_SEED_WARNING= "$simple_bin" --version 2>&1) || {
+    echo "BLOCKED: self-hosted runtime identity failed: $simple_bin" >&2
+    exit 2
+}
+case "$identity" in
+    *'bootstrap seed only'*|*'Rust-built'*)
+        echo "BLOCKED: seed runtime rejected: $simple_bin" >&2
+        exit 2
+        ;;
+esac
+
+spec=$root/test/02_integration/compiler/cache/reverse_reference_projection_receipt_spec.spl
+output=$(env SIMPLE_LIB="$root/src" "$simple_bin" test "$spec" --mode=interpreter 2>&1) || {
+    printf '%s\n' "$output" >&2
+    fail 'reverse-reference projection receipt spec failed'
+}
+printf '%s\n' "$output"
+printf '%s\n' "$output" | grep -Eq 'Results: [1-9][0-9]* passed, 0 failed' ||
+    fail 'reverse-reference spec produced no non-vacuous Results line'
+echo 'PASS: reverse-reference owner publication native acceptance'

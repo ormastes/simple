@@ -25,6 +25,49 @@ use compiler.driver.driver_phase_gates.{driver_explicit_source_entry}
 use compiler.driver.driver_log_helpers.{log_phase, log_build_progress}
 use compiler.common.driver_core_modes.{CompileMode}
 use compiler.common.attributes.{parse_function_attrs}
+use compiler.driver.cache.package_index_route.{package_index_route_current_v1}
+use compiler.driver.cache.cache_root.{machine_cache_root}
+use compiler.driver.cache.pinned_archive_capability.{
+    pinned_archive_open_verified_v1
+}
+use compiler.driver.cache.route_capability_scope.{
+    route_capability_scope_close_all_v1, route_capability_scope_new_v1,
+    route_capability_scope_register_v1
+}
+use compiler.hir.archive.interface_action_archive.{
+    SemanticContext, CompileActionRegistry,
+    RouteArchiveInstallStageTransferV1, RouteArchiveInstallCommitTransferV1,
+    interface_action_archive_decode_v1, route_archive_install_begin_v1,
+    route_archive_install_stage_owned_v1, route_archive_install_commit_owned_v1,
+    route_archive_install_rollback_owned_v1
+}
+use compiler.driver.action_graph.demand_compile_integration.{
+    demand_archive_action_id_v1, demand_compile_begin_v1,
+    demand_compile_phase_begin_v1,
+    demand_compile_phase_finish_v1, demand_compile_section_reads_v1,
+    demand_compile_source_open_v1, demand_source_action_id_v1
+}
+use compiler.driver.action_graph.artifact_service_bridge.{
+    DemandArtifactClaimTransferV1, DemandArtifactCommitTransferV1,
+    demand_artifact_claim_owned_v1, demand_artifact_commit_owned_v1,
+    demand_artifact_route_v1
+}
+use compiler.driver.action_graph.build_action_v1.{BuildActionResultV1}
+use lib.compiler_artifact_service.profile.{artifact_service_profile_v1}
+use compiler.driver.backend.demand_backend_plan.{
+    DemandBackendIdentityV1, ForegroundBackendBudgetV1,
+    PrecompiledPlatformIdentityV1
+}
+use compiler.driver.smf.runtime_std_package_set.{
+    RuntimeStdPackageAuthorityV1, RUNTIME_PACKAGE_IDENTITY_V1,
+    STD_PACKAGE_IDENTITY_V1, runtime_std_action_digest_v1,
+    runtime_std_load_baseline_v1
+}
+use compiler.driver.demand_mir_evidence_builder.{
+    CombinedMirArchiveEvidenceV1, CombinedMirDirtyEvidenceV1,
+    CombinedMirEvidenceBuilder, CombinedMirScvIdentityV1,
+    combined_mir_evidence_build_v1
+}
 
 @unsafe(reason: "raw nullable bootstrap source read; nil is provider failure", capabilities: [ffi])
 extern fn rt_file_read_text(path: text) -> text?
@@ -154,8 +197,269 @@ impl CompilerDriver:
         val explicit_entry_closure = explicit_entry_input != ""
         val entry_closure_walk = explicit_entry_closure or (
             native_entry_input != "" and not native_entry_closure_pre)
+        val package_index_cold_init =
+            (rt_env_get("SIMPLE_PACKAGE_INDEX_COLD_INIT") ?? "") == "1"
+        var package_index_routed = false
+        if not package_index_cold_init:
+            val package_resolution_started_ns = demand_compile_phase_begin_v1()
+            var changed_modules: [text] = []
+            val changed_text = rt_env_get("SIMPLE_PACKAGE_INDEX_CHANGED_MODULES") ?? ""
+            if changed_text != "":
+                for changed_module in changed_text.split(","):
+                    val normalized = changed_module.trim()
+                    if normalized != "":
+                        changed_modules = changed_modules.push(normalized)
+            val route = package_index_route_current_v1(
+                if entry_closure_walk: requested_entry_input else: "",
+                rt_env_get("SIMPLE_SCV_SNAPSHOT_ROOT") ?? "",
+                rt_env_get("SIMPLE_SCV_REVISION_ID") ?? "",
+                rt_env_get("SIMPLE_SCV_TREE_ID") ?? "",
+                rt_env_get("SIMPLE_SCV_INVENTORY_DIGEST") ?? "",
+                rt_env_get("SIMPLE_PACKAGE_INDEX_PRODUCER_DIGEST") ?? "",
+                rt_env_get("SIMPLE_PACKAGE_INDEX_ROOT_GENERATION") ?? "",
+                rt_env_get("SIMPLE_PACKAGE_INDEX_VARIANT_DIGEST") ?? "",
+                changed_modules,
+                (rt_env_get("SIMPLE_PACKAGE_INDEX_PUBLIC_INTERFACE_CHANGED") ?? "") == "1")
+            if not route.valid:
+                self.ctx.add_error("persistent package index admission failed: {route.reason}; run explicit cold initialization with SIMPLE_PACKAGE_INDEX_COLD_INIT=1")
+                driver_entry_scan_cache_release()
+                return (self.ctx, false)
+            val runtime_std_authority = RuntimeStdPackageAuthorityV1(
+                rt_env_get("SIMPLE_COMPILER_DIGEST") ?? "",
+                rt_env_get("SIMPLE_ACTION_ABI_DIGEST") ?? "",
+                rt_env_get("SIMPLE_RUNTIME_ABI_DIGEST") ?? "",
+                rt_env_get("SIMPLE_STDLIB_ABI_DIGEST") ?? "",
+                rt_env_get("SIMPLE_PACKAGE_INDEX_VARIANT_DIGEST") ?? "",
+                self.ctx.native_target,
+                rt_env_get("SIMPLE_SCV_REVISION_ID") ?? "")
+            val expected_runtime_action = runtime_std_action_digest_v1(
+                runtime_std_authority, RUNTIME_PACKAGE_IDENTITY_V1)
+            val expected_std_action = runtime_std_action_digest_v1(
+                runtime_std_authority, STD_PACKAGE_IDENTITY_V1)
+            if (expected_runtime_action == "" or expected_std_action == "" or
+                    rt_env_get("SIMPLE_RUNTIME_ACTION_DIGEST") !=
+                        expected_runtime_action or
+                    rt_env_get("SIMPLE_STDLIB_ACTION_DIGEST") !=
+                        expected_std_action):
+                self.ctx.add_error(
+                    "runtime/std SMF baseline authority mismatch; rebuild the sealed precompiled package set")
+                driver_entry_scan_cache_release()
+                return (self.ctx, false)
+            val runtime_std_baseline = runtime_std_load_baseline_v1(
+                machine_cache_root(), runtime_std_authority)
+            if not runtime_std_baseline.valid:
+                self.ctx.add_error(
+                    "runtime/std SMF baseline admission failed: {runtime_std_baseline.reason}")
+                driver_entry_scan_cache_release()
+                return (self.ctx, false)
+            val demand_execution = demand_compile_begin_v1(
+                route,
+                DemandBackendIdentityV1(
+                    rt_env_get("SIMPLE_SCV_REVISION_ID") ?? "",
+                    rt_env_get("SIMPLE_SCV_TREE_ID") ?? "",
+                    rt_env_get("SIMPLE_SCV_INVENTORY_DIGEST") ?? "",
+                    rt_env_get("SIMPLE_SCV_INVENTORY_DIGEST") ?? "",
+                    self.ctx.native_target,
+                    rt_env_get("SIMPLE_PACKAGE_INDEX_VARIANT_DIGEST") ?? "",
+                    PrecompiledPlatformIdentityV1(
+                        rt_env_get("SIMPLE_RUNTIME_ACTION_DIGEST") ?? "",
+                        rt_env_get("SIMPLE_RUNTIME_ABI_DIGEST") ?? "",
+                        rt_env_get("SIMPLE_STDLIB_ACTION_DIGEST") ?? "",
+                        rt_env_get("SIMPLE_STDLIB_ABI_DIGEST") ?? "")),
+                ForegroundBackendBudgetV1(
+                    100, 512 * 1024 * 1024, 30000, false),
+                true, true, false,
+                (rt_env_get("SIMPLE_BUILD_ORDINAL") ?? "0").to_i64() ?? 0)
+            if not demand_execution.valid:
+                self.ctx.add_error(
+                    "demand compile admission failed: {demand_execution.reason}")
+                driver_entry_scan_cache_release()
+                return (self.ctx, false)
+            self.ctx.demand_compile_execution = Some(demand_execution)
+            var measured_execution = self.ctx.demand_compile_execution!
+            _ = demand_compile_phase_finish_v1(
+                &mut measured_execution, "package-resolution",
+                package_resolution_started_ns)
+            self.ctx.demand_compile_execution = Some(measured_execution)
+            val client_profile = rt_env_get("SIMPLE_DEMAND_COMPILE_PROFILE") ?? "compiler"
+            val client_priority = match client_profile:
+                "mcp": 1000
+                "lsp": 1000
+                "test-daemon": 800
+                _: 900
+            val client_pools = if client_profile == "test-daemon":
+                ["io", "parse", "semantic", "mir", "cranelift", "llvm", "link", "test"]
+            else:
+                ["io", "parse", "semantic", "mir", "cranelift", "llvm", "link"]
+            val artifact_route = demand_artifact_route_v1(
+                measured_execution,
+                artifact_service_profile_v1(
+                    client_profile,
+                    rt_env_get("SIMPLE_PACKAGE_INDEX_VARIANT_DIGEST") ?? "",
+                    client_pools, client_priority, true),
+                (rt_env_get("SIMPLE_COMPILER_ARTIFACT_SERVICE_AVAILABLE") ?? "") == "1",
+                rt_env_get("SIMPLE_COMPILER_ARTIFACT_OWNER") ?? "local-compiler-owner",
+                (rt_env_get("SIMPLE_BUILD_ORDINAL") ?? "0").to_i64() ?? 0)
+            if not artifact_route.valid:
+                self.ctx.add_error(
+                    "artifact service admission failed: {artifact_route.reason}")
+                driver_entry_scan_cache_release()
+                return (self.ctx, false)
+            self.ctx.demand_artifact_route = Some(artifact_route)
+            driver_inputs = route.source_paths
+            self.ctx.demand_dirty_modules = route.dirty_modules
+            package_index_routed = true
+            var archive_transaction = route_archive_install_begin_v1()
+            var capability_scope = route_capability_scope_new_v1(
+                512 * 1024 * 1024)
+            var archive_evidence: [CombinedMirArchiveEvidenceV1] = []
+            var dirty_evidence: [CombinedMirDirtyEvidenceV1] = []
+            val demand_snapshot = CombinedMirScvIdentityV1(
+                rt_env_get("SIMPLE_SCV_REVISION_ID") ?? "",
+                rt_env_get("SIMPLE_SCV_TREE_ID") ?? "",
+                rt_env_get("SIMPLE_SCV_INVENTORY_DIGEST") ?? "")
+            for dirty in route.dirty_modules:
+                var read_set_digests: [text] = []
+                for read in dirty.read_set:
+                    read_set_digests.push(read.content_digest)
+                dirty_evidence.push(CombinedMirDirtyEvidenceV1(
+                    dirty.package_id, dirty.module_id, [dirty.module_id],
+                    dirty.direct_dependency_module_ids, read_set_digests,
+                    dirty.semantic_digest, dirty.producer_compatibility_id,
+                    dirty.configuration_variant, demand_snapshot))
+            for admission in route.archive_admissions:
+                if admission.load.receipt == nil:
+                    _ = route_capability_scope_close_all_v1(&capability_scope)
+                    archive_transaction = route_archive_install_rollback_owned_v1(
+                        archive_transaction)
+                    self.ctx.add_error(
+                        "package archive receipt unavailable: {admission.package_identity}")
+                    driver_entry_scan_cache_release()
+                    return (self.ctx, false)
+                val opened = pinned_archive_open_verified_v1(
+                    machine_cache_root(), admission.archive_path,
+                    admission.load.receipt!)
+                if opened.is_err():
+                    _ = route_capability_scope_close_all_v1(&capability_scope)
+                    archive_transaction = route_archive_install_rollback_owned_v1(
+                        archive_transaction)
+                    self.ctx.add_error(
+                        "package archive pin failed: {admission.package_identity}")
+                    driver_entry_scan_cache_release()
+                    return (self.ctx, false)
+                val capability = opened.unwrap()
+                if route_capability_scope_register_v1(
+                        &capability_scope, capability).is_err():
+                    _ = route_capability_scope_close_all_v1(&capability_scope)
+                    archive_transaction = route_archive_install_rollback_owned_v1(
+                        archive_transaction)
+                    self.ctx.add_error(
+                        "package archive capability ownership failed: {admission.package_identity}")
+                    driver_entry_scan_cache_release()
+                    return (self.ctx, false)
+                val decoded = interface_action_archive_decode_v1(
+                    capability, admission.load.receipt!)
+                if decoded.is_err():
+                    _ = route_capability_scope_close_all_v1(&capability_scope)
+                    archive_transaction = route_archive_install_rollback_owned_v1(
+                        archive_transaction)
+                    self.ctx.add_error(
+                        "package archive decode failed: {admission.package_identity}")
+                    driver_entry_scan_cache_release()
+                    return (self.ctx, false)
+                self.ctx.demand_compile_execution = Some(
+                    demand_compile_section_reads_v1(
+                        self.ctx.demand_compile_execution!, 3))
+                val staged = route_archive_install_stage_owned_v1(
+                    archive_transaction, decoded.unwrap())
+                archive_transaction = staged.transaction
+                if staged.result.is_err():
+                    _ = route_capability_scope_close_all_v1(&capability_scope)
+                    archive_transaction = route_archive_install_rollback_owned_v1(
+                        archive_transaction)
+                    self.ctx.add_error(
+                        "package archive install failed: {admission.package_identity}")
+                    driver_entry_scan_cache_release()
+                    return (self.ctx, false)
+                var archive_read_sets: [text] = []
+                for member in admission.load.receipt!.members:
+                    archive_read_sets.push(member.payload_digest)
+                for entry in admission.module_entries:
+                    archive_evidence.push(CombinedMirArchiveEvidenceV1(
+                        admission.package_identity, entry.module_identity,
+                        [entry.module_identity], entry.direct_imports,
+                        archive_read_sets,
+                        entry.smf_metadata_digest,
+                        admission.load.receipt!.producer_digest,
+                        admission.load.receipt!.variant_digest,
+                        demand_snapshot))
+            val committed = route_archive_install_commit_owned_v1(
+                archive_transaction, self.ctx.archive_semantic_owner,
+                self.ctx.archive_action_owner)
+            archive_transaction = committed.transaction
+            self.ctx.archive_semantic_owner = committed.semantic_owner
+            self.ctx.archive_action_owner = committed.action_owner
+            if committed.result.is_err():
+                _ = route_capability_scope_close_all_v1(&capability_scope)
+                self.ctx.add_error("package archive route commit failed")
+                driver_entry_scan_cache_release()
+                return (self.ctx, false)
+            for admission in route.archive_admissions:
+                var artifact_route = self.ctx.demand_artifact_route!
+                artifact_route.execution = self.ctx.demand_compile_execution!
+                val action_id = demand_archive_action_id_v1(admission.package_identity)
+                val claimed = demand_artifact_claim_owned_v1(
+                    artifact_route, action_id,
+                    "driver-archive-owner:{action_id}", 512 * 1024 * 1024)
+                artifact_route = claimed.route
+                if not claimed.claim.valid:
+                    self.ctx.demand_compile_execution = Some(
+                        artifact_route.execution)
+                    self.ctx.demand_artifact_route = Some(artifact_route)
+                    self.ctx.add_error(
+                        "demand archive action commit failed: {admission.package_identity}")
+                    _ = route_capability_scope_close_all_v1(&capability_scope)
+                    driver_entry_scan_cache_release()
+                    return (self.ctx, false)
+                val artifact_commit = demand_artifact_commit_owned_v1(
+                    artifact_route, BuildActionResultV1(
+                        action_id,
+                        rt_env_get("SIMPLE_SCV_REVISION_ID") ?? "",
+                        true, false, admission.load.receipt!.archive_digest,
+                        admission.load.receipt!.archive_digest, [], 0))
+                artifact_route = artifact_commit.route
+                if not artifact_commit.accepted:
+                    self.ctx.demand_compile_execution = Some(
+                        artifact_route.execution)
+                    self.ctx.demand_artifact_route = Some(artifact_route)
+                    self.ctx.add_error(
+                        "demand archive action commit failed: {admission.package_identity}")
+                    _ = route_capability_scope_close_all_v1(&capability_scope)
+                    driver_entry_scan_cache_release()
+                    return (self.ctx, false)
+                self.ctx.demand_compile_execution = Some(artifact_route.execution)
+                self.ctx.demand_artifact_route = Some(artifact_route)
+            val demand_admission = combined_mir_evidence_build_v1(
+                CombinedMirEvidenceBuilder(
+                    demand_snapshot,
+                    rt_env_get("SIMPLE_PACKAGE_INDEX_PRODUCER_DIGEST") ?? "",
+                    rt_env_get("SIMPLE_PACKAGE_INDEX_VARIANT_DIGEST") ?? "",
+                    archive_evidence, dirty_evidence))
+            val close_result = route_capability_scope_close_all_v1(
+                &capability_scope)
+            if close_result.is_err():
+                self.ctx.add_error("package archive capability cleanup failed")
+                driver_entry_scan_cache_release()
+                return (self.ctx, false)
+            if demand_admission.is_err():
+                self.ctx.add_error(
+                    "combined dirty/archive MIR authority construction failed: {demand_admission.unwrap_err()}")
+                driver_entry_scan_cache_release()
+                return (self.ctx, false)
+            self.ctx.demand_mir_admission = Some(demand_admission.unwrap())
         if entry_closure_walk:
-            driver_inputs = [requested_entry_input]
+            if not package_index_routed:
+                driver_inputs = [requested_entry_input]
         elif driver_inputs.len() == 0:
             if requested_entry_input != "":
                 driver_inputs = [requested_entry_input]
@@ -164,6 +468,17 @@ impl CompilerDriver:
         if source_trace:
             print "[load_sources] inputs {input_len}"
         if input_len <= 0:
+            if package_index_routed:
+                if self.ctx.archive_action_owner.archive_actions.len() == 0:
+                    self.ctx.add_error(
+                        "persistent package index produced an empty archive-only route; refusing bootstrap source fallback")
+                    driver_entry_scan_cache_release()
+                    return (self.ctx, false)
+                # A clean package-index route is complete after pinned archive
+                # ingestion. It must never enter bootstrap source discovery.
+                self.ctx.sources = []
+                driver_entry_scan_cache_release()
+                return (self.ctx, not self.ctx.has_errors())
             if source_trace:
                 print "[load_sources] bootstrap defaults"
             self.parse_bootstrap_default_root("./src/compiler")
@@ -187,18 +502,58 @@ impl CompilerDriver:
             # then works only by evading the substring filter. Native-build
             # imports retain packaging exclusions; the compiler-owned explicit
             # API admits the exact authored source graph without those filters.
-            val loaded = if entry_closure_walk and input_path == requested_entry_input:
+            val loaded = if package_index_routed:
+                _driver_collect_explicit_compiler_source(input_path)
+            elif entry_closure_walk and input_path == requested_entry_input:
                 if explicit_entry_closure:
                     _driver_collect_explicit_compiler_source(input_path)
                 else:
                     _driver_collect_entry_import_source(input_path)
             else:
                 _driver_collect_sources(input_path)
+            if package_index_routed:
+                var open_execution = self.ctx.demand_compile_execution!
+                demand_compile_source_open_v1(&mut open_execution)
+                self.ctx.demand_compile_execution = Some(open_execution)
             for s in loaded:
                 val source_key = s.path + "::" + s.module_name
                 if not seen_sources.contains_key(source_key):
                     seen_sources[source_key] = true
                     all_sources.append(s)
+            if package_index_routed:
+                var artifact_route = self.ctx.demand_artifact_route!
+                artifact_route.execution = self.ctx.demand_compile_execution!
+                val action_id = demand_source_action_id_v1(input_path)
+                val claimed = demand_artifact_claim_owned_v1(
+                    artifact_route, action_id,
+                    "driver-source-owner:{action_id}", 512 * 1024 * 1024)
+                artifact_route = claimed.route
+                if not claimed.claim.valid:
+                    self.ctx.demand_compile_execution = Some(
+                        artifact_route.execution)
+                    self.ctx.demand_artifact_route = Some(artifact_route)
+                    self.ctx.add_error(
+                        "demand frozen-source action commit failed: {input_path}")
+                    driver_entry_scan_cache_release()
+                    return (self.ctx, false)
+                val artifact_commit = demand_artifact_commit_owned_v1(
+                    artifact_route, BuildActionResultV1(
+                        action_id,
+                        rt_env_get("SIMPLE_SCV_REVISION_ID") ?? "",
+                        loaded.len() > 0, false,
+                        if loaded.len() > 0: input_path else: "",
+                        "", [], 0))
+                artifact_route = artifact_commit.route
+                if not artifact_commit.accepted:
+                    self.ctx.demand_compile_execution = Some(
+                        artifact_route.execution)
+                    self.ctx.demand_artifact_route = Some(artifact_route)
+                    self.ctx.add_error(
+                        "demand frozen-source action commit failed: {input_path}")
+                    driver_entry_scan_cache_release()
+                    return (self.ctx, false)
+                self.ctx.demand_compile_execution = Some(artifact_route.execution)
+                self.ctx.demand_artifact_route = Some(artifact_route)
             if input_path.starts_with("src/"):
                 has_project_source = true
             log_phase(
@@ -237,7 +592,7 @@ impl CompilerDriver:
         # module is parsed, lowered, and compiled into the binary. This also
         # keeps the bootstrap Stage-4 path from parsing every explicit source
         # tree before entry-closure pruning can happen.
-        if entry_closure_walk:
+        if entry_closure_walk and not package_index_routed:
             # Explicit --source roots are resolver fallbacks, not closure seeds.
             # This preserves custom source layouts without parsing every file in
             # each root before the entry's transitive imports are known.
@@ -407,7 +762,8 @@ impl CompilerDriver:
             rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") == "1"
         val compile_mode = self.ctx.options.mode
         val needs_bulk_project_sources = compile_mode != CompileMode.Check and compile_mode != CompileMode.Interpret
-        if has_project_source and needs_bulk_project_sources and not nb_entry_closure:
+        if (has_project_source and needs_bulk_project_sources and
+                not nb_entry_closure and not package_index_routed):
             val paths = ["src/app", "src/lib", "src/compiler", "src/runtime"]
             val bulk_loaded = _driver_collect_sources_via_find(paths)
             if bulk_loaded.len() > 0:

@@ -1,0 +1,53 @@
+use os.tooling.rust_analyzer_worker.json_ingest.{ingest_rust_json_lines}
+use os.tooling.rust_analyzer_worker.model.{RustAnalysisState, RustSuggestionApplicability}
+
+fn compact_cargo_message() -> text:
+    "{\"target\":{\"name\":\"demo\"},\"reason\":\"compiler-message\",\"message\":{" +
+        "\"children\":[{\"message\":\"use `_name` instead\",\"spans\":[],\"level\":\"help\"}]," +
+        "\"spans\":[{\"column_end\":9,\"byte_end\":8,\"file_name\":\"src/lib.rs\",\"line_start\":1," +
+        "\"suggestion_applicability\":\"MachineApplicable\",\"column_start\":5,\"line_end\":1," +
+        "\"suggested_replacement\":\"_name\",\"byte_start\":4}]," +
+        "\"message\":\"unused variable\",\"code\":{\"explanation\":null,\"code\":\"unused_variables\"},\"level\":\"warning\"}}"
+
+fn pretty_reordered_message() -> text:
+    "{ \"reason\" : \"compiler-message\", \"message\" : { \"level\" : \"error\", " +
+        "\"children\" : [], \"message\" : \"cannot find `x`\", " +
+        "\"spans\" : [ { \"line_end\" : 3, \"column_start\" : 7, \"byte_start\" : 21, " +
+        "\"file_name\" : \"src/main.rs\", \"column_end\" : 8, \"byte_end\" : 22, \"line_start\" : 3 } ], " +
+        "\"code\" : { \"code\" : \"E0425\" } }, \"package_id\" : \"demo\" }"
+
+describe "Rust lint worker structured Cargo ingestion":
+    it "parses nested compact compiler-message diagnostics and suggestions":
+        val page = ingest_rust_json_lines(compact_cargo_message(), 8192, 8)
+        expect(page.state).to_equal(RustAnalysisState.Complete)
+        expect(page.diagnostics.len()).to_equal(1)
+        expect(page.diagnostics[0].code).to_equal("unused_variables")
+        expect(page.diagnostics[0].children.len()).to_equal(1)
+        expect(page.diagnostics[0].suggestions[0].applicability).to_equal(RustSuggestionApplicability.MachineApplicable)
+
+    it "accepts pretty whitespace and reordered fields":
+        val page = ingest_rust_json_lines(pretty_reordered_message(), 8192, 8)
+        expect(page.state).to_equal(RustAnalysisState.Complete)
+        expect(page.diagnostics[0].code).to_equal("E0425")
+        expect(page.diagnostics[0].span.file_name).to_equal("src/main.rs")
+
+    it "decodes escaped diagnostic and child text":
+        val input = "{\"reason\":\"compiler-message\",\"message\":{\"level\":\"warning\",\"code\":null,\"message\":\"quoted \\\"name\\\"\\nnext\",\"spans\":[{\"file_name\":\"x.rs\",\"byte_start\":0,\"byte_end\":1,\"line_start\":1,\"line_end\":1,\"column_start\":1,\"column_end\":2}],\"children\":[{\"level\":\"note\",\"message\":\"path C:\\\\tmp\",\"spans\":[]}]}}"
+        val page = ingest_rust_json_lines(input, 8192, 8)
+        expect(page.diagnostics[0].message).to_equal("quoted \"name\"\nnext")
+        expect(page.diagnostics[0].children[0].message).to_equal("path C:\\tmp")
+
+    it "marks malformed JSON and schema/type failures partial":
+        val malformed = ingest_rust_json_lines("not-json", 4096, 8)
+        expect(malformed.state).to_equal(RustAnalysisState.Partial)
+        val wrong_schema = ingest_rust_json_lines("{\"reason\":\"compiler-message\",\"message\":{\"level\":7}}", 4096, 8)
+        expect(wrong_schema.state).to_equal(RustAnalysisState.Partial)
+        expect(wrong_schema.malformed_record_count).to_equal(1)
+
+    it "bounds bytes and diagnostic count":
+        val record = compact_cargo_message()
+        val byte_limited = ingest_rust_json_lines(record, 4, 8)
+        expect(byte_limited.truncated).to_equal(true)
+        val count_limited = ingest_rust_json_lines(record + "\n" + record, 16384, 1)
+        expect(count_limited.diagnostics.len()).to_equal(1)
+        expect(count_limited.truncated).to_equal(true)

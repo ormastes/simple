@@ -12,7 +12,7 @@
 
 use compiler.backend.backend.io_compat.{backend_shell_tuple}
 use compiler.common.mir_target_context.{mir_target_context_normalize_arch}
-use std.io_runtime.{host_arch, host_os, env_get_nullable, file_exists, file_delete, process_run}
+use std.io_runtime.{host_arch, host_os, env_get_nullable, file_copy, file_exists, file_delete, process_run}
 use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
 use std.nogc_sync_mut.env.platform.{is_windows as platform_is_windows}
 
@@ -108,6 +108,19 @@ fn _obj_ext() -> text:
 
 fn runtime_compile_trace_enabled() -> bool:
     (env_get_nullable("SIMPLE_COMPILER_TRACE") ?? "") == "1"
+
+pub fn runtime_abi_policy_v1() -> Result<text, text>:
+    val configured = env_get_nullable("SIMPLE_ABI_POLICY") ?? ""
+    if configured == "" or configured == "v1":
+        return Ok("v1")
+    Err("SIMPLE_ABI_POLICY selected policy is v1; rejected '{configured}'")
+
+pub fn runtime_abi_define_args_v1(policy: text, msvc: bool) -> [text]:
+    val prefix = if msvc: "/D" else: "-D"
+    if policy == "v1":
+        return ["{prefix}SIMPLE_ABI_VERSION=1",
+            "{prefix}SIMPLE_ABI_VERSION_DEFERRED=0"]
+    []
 
 # ============================================================================
 # C Compiler Discovery
@@ -410,7 +423,7 @@ fn _runtime_dir_not_found_message() -> text:
 # Runtime Object Cache
 # ============================================================================
 
-fn _runtime_object_cache_dir(rt_dir: text, cc: text, opt_level: i64, include_dynload: bool, include_stage4_legacy_compat: bool, target: text, ext: text) -> text:
+fn _runtime_object_cache_dir(rt_dir: text, cc: text, opt_level: i64, include_dynload: bool, include_stage4_legacy_compat: bool, target: text, ext: text, abi_policy: text) -> text:
     """Directory holding prebuilt C-runtime objects for this exact input set.
 
     The C runtime was recompiled from source on EVERY native build: 27
@@ -438,7 +451,7 @@ fn _runtime_object_cache_dir(rt_dir: text, cc: text, opt_level: i64, include_dyn
     # input identical, so without them a flag flip would hit a stale object.
     # Adding inputs to the key can only cause MORE misses, never fewer.
     val riscv_vec = env_get_nullable("SIMPLE_RUNTIME_RISCV64_VECTOR") ?? ""
-    val flag_sig = "v3;cc={cc};opt={opt_level};dyn={include_dynload};legacy={include_stage4_legacy_compat};target={target};ext={ext};rt_dir={rt_dir};riscv_vec={riscv_vec};host_arch={host_arch()}"
+    val flag_sig = "v4;cc={cc};opt={opt_level};dyn={include_dynload};legacy={include_stage4_legacy_compat};target={target};ext={ext};rt_dir={rt_dir};riscv_vec={riscv_vec};host_arch={host_arch()};abi_policy={abi_policy}"
     var cmd = "( printf '%s\\n' '" + flag_sig + "'; '" + cc + "' --version 2>/dev/null; "
     cmd = cmd + "find '" + rt_dir + "' -type f \\( -name '*.c' -o -name '*.h' \\) 2>/dev/null | LC_ALL=C sort | xargs -r sha256sum 2>/dev/null "
     cmd = cmd + ") | sha256sum 2>/dev/null | cut -c1-40"
@@ -455,6 +468,31 @@ fn _runtime_object_cache_dir(rt_dir: text, cc: text, opt_level: i64, include_dyn
     if mcode != 0:
         return ""
     dir
+
+pub fn runtime_cache_stage_object_v1(cache_obj: text, obj_path: text) -> bool:
+    """Stage one immutable cache object without copying its bytes when possible.
+
+    The cache directory is already keyed by the exact runtime source content,
+    compiler identity/version, target, ABI policy, provider selection, and
+    code-generation flags.  A hard link therefore preserves the same object
+    bytes and Mach-O/ELF/COFF ABI as the former copy while avoiding redundant
+    reads and writes.  Cross-device and unsupported-filesystem cases retain
+    the byte-copy fallback.
+    """
+    val (_, _, link_code) = process_run("ln", ["-f", cache_obj, obj_path])
+    if link_code == 0:
+        return true
+    file_copy(cache_obj, obj_path)
+
+pub fn runtime_cache_stage_bytes_v1(object_sizes: [i64], hard_linked: bool) -> i64:
+    """Model bytes copied while staging a complete warm runtime cache hit."""
+    if hard_linked:
+        return 0
+    var copied: i64 = 0
+    for size in object_sizes:
+        if size > 0:
+            copied = copied + size
+    copied
 
 fn compile_runtime_objects(verbose: bool, opt_level: i64, include_dynload: bool = true, compiler: text = "", include_stage4_legacy_compat: bool = false) -> Result<[text], text>:
     """Compile all C runtime source files to object files.
@@ -506,6 +544,12 @@ fn compile_runtime_objects(verbose: bool, opt_level: i64, include_dynload: bool 
     val use_msvc = _is_msvc_cc(cc)
     val compile_pid = getpid()
     val target = env_get_nullable("SIMPLE_NATIVE_BUILD_TARGET") ?? "host"
+    val abi_policy = match runtime_abi_policy_v1():
+        case Ok(selected): selected
+        case Err(reason): return Err(reason)
+    val abi_defines = runtime_abi_define_args_v1(abi_policy, use_msvc)
+    if abi_defines.len() != 2:
+        return Err("SIMPLE_ABI_POLICY '{abi_policy}' has no canonical runtime ABI defines")
     val object_prefix = "{tmp_dir}/simple_rt_{compile_pid}_{target}_"
     var objects = [
         "{object_prefix}runtime{ext}",
@@ -562,7 +606,7 @@ fn compile_runtime_objects(verbose: bool, opt_level: i64, include_dynload: bool 
     var object_count = 0
     val cache_dir = _runtime_object_cache_dir(
         rt_dir, cc, opt_level, include_dynload,
-        include_stage4_legacy_compat, target, ext)
+        include_stage4_legacy_compat, target, ext, abi_policy)
     if trace:
         print "[RT-COMPILE] object cache dir={cache_dir}"
     if trace:
@@ -618,6 +662,8 @@ fn compile_runtime_objects(verbose: bool, opt_level: i64, include_dynload: bool 
             # -ffunction-sections -fdata-sections: emit each function/data in its own
             # section so the linker's --gc-sections can strip unreferenced code.
             comp_args = ["-c"]
+            for abi_define in abi_defines:
+                comp_args.push(abi_define)
             if not _is_windows():
                 comp_args.push("-fPIC")
             val cc_opt = if opt_level <= 0: "-O0" elif opt_level == 1: "-Oz" elif opt_level == 2: "-O2" else: "-O3"
@@ -660,9 +706,7 @@ fn compile_runtime_objects(verbose: bool, opt_level: i64, include_dynload: bool 
         if cache_obj != "":
             cache_obj_exists = file_exists(cache_obj)
         if cache_obj_exists:
-            val (hit_out, hit_err, hit_code) = backend_shell_tuple(
-                "cp -f '" + cache_obj + "' '" + obj_path + "'")
-            if hit_code == 0:
+            if runtime_cache_stage_object_v1(cache_obj, obj_path):
                 cache_hit = true
                 if trace:
                     print "[RT-COMPILE] cache hit: {name}.c"

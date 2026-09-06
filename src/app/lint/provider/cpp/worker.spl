@@ -1,0 +1,70 @@
+use std.common.crypto.sha256.sha256_text
+use app.io.mod.process_run_with_limits_bounded
+use app.lint.provider.cpp.compile_database.resolve_compile_command_v1
+use app.lint.provider.cpp.model.{CppAnalysisState, CppToolFailure, CppToolResultV1, CppToolchainFingerprintV1, TranslationUnitConfigReceiptV1, cpp_empty_config_receipt_v1, cpp_toolchain_fingerprint_complete_v1}
+use app.lint.provider.cpp.structured_output.parse_cpp_structured_output_v1
+
+pub struct CppLintWorkerLimitsV1:
+    timeout_ms: i64
+    memory_bytes: i64
+    cpu_seconds: i64
+    max_fds: i64
+    max_processes: i64
+    max_output_bytes: i64
+
+pub struct CppLintWorkerReceiptV1:
+    authoritative: bool
+    translation_unit: text
+    compile_database_path: text
+    configuration_fingerprint: text
+    toolchain_fingerprint: text
+    invocation_fingerprint: text
+
+pub struct CppLintWorkerRunV1:
+    result: CppToolResultV1
+    worker_receipt: CppLintWorkerReceiptV1
+
+pub fn cpp_lint_worker_default_limits_v1() -> CppLintWorkerLimitsV1:
+    CppLintWorkerLimitsV1(10000, 536870912, 10, 64, 8, 4194304)
+
+fn _empty_worker_receipt_v1(translation_unit: text, compile_database_path: text) -> CppLintWorkerReceiptV1:
+    CppLintWorkerReceiptV1(false, translation_unit, compile_database_path, "", "", "")
+
+fn _configuration_payload_v1(receipt: TranslationUnitConfigReceiptV1) -> text:
+    receipt.compile_database_path + "\n" + receipt.translation_unit + "\n" + receipt.directory + "\n" + receipt.configuration_id + "\n" + receipt.command + "\n" + receipt.arguments.join("\n")
+
+fn _toolchain_payload_v1(toolchain: CppToolchainFingerprintV1) -> text:
+    toolchain.tool + "\n" + toolchain.version + "\n" + toolchain.target + "\n" + toolchain.resource_directory + "\n" + "{toolchain.build_digest.w0}:{toolchain.build_digest.w1}:{toolchain.build_digest.w2}:{toolchain.build_digest.w3}"
+
+fn _worker_arguments_v1(receipt: TranslationUnitConfigReceiptV1, revision: u64, configuration_fingerprint: text, toolchain_fingerprint: text) -> [text]:
+    ["--compile-database", receipt.compile_database_path, "--translation-unit", receipt.translation_unit, "--configuration-id", receipt.configuration_id, "--revision", "{revision}", "--configuration-sha256", configuration_fingerprint, "--toolchain-sha256", toolchain_fingerprint]
+
+fn _failed_v1(state: CppAnalysisState, failure: CppToolFailure, reason: text, exit_code: i64, receipt: TranslationUnitConfigReceiptV1, toolchain: CppToolchainFingerprintV1, worker_receipt: CppLintWorkerReceiptV1) -> CppLintWorkerRunV1:
+    CppLintWorkerRunV1(CppToolResultV1(state, failure, [], exit_code, reason, receipt, toolchain), worker_receipt)
+
+pub fn run_cpp_lint_worker_v1(compile_database_content: text, compile_database_path: text, translation_unit: text, configuration_hint: text, wrapper_command: text, revision: u64, toolchain: CppToolchainFingerprintV1, limits: CppLintWorkerLimitsV1) -> CppLintWorkerRunV1:
+    val selection = resolve_compile_command_v1(compile_database_content, translation_unit, configuration_hint, compile_database_path)
+    if selection.state != CppAnalysisState.Complete or selection.receipt == nil:
+        return _failed_v1(CppAnalysisState.Incomplete, CppToolFailure.None, selection.reason, 0, cpp_empty_config_receipt_v1(), toolchain, _empty_worker_receipt_v1(translation_unit, compile_database_path))
+    if wrapper_command == "" or limits.timeout_ms <= 0 or limits.max_output_bytes <= 0:
+        return _failed_v1(CppAnalysisState.Failed, CppToolFailure.MalformedOutput, "invalid clang-tidy worker command or limits", -1, cpp_empty_config_receipt_v1(), toolchain, _empty_worker_receipt_v1(translation_unit, compile_database_path))
+    if not cpp_toolchain_fingerprint_complete_v1(toolchain):
+        return _failed_v1(CppAnalysisState.Incomplete, CppToolFailure.None, "clang toolchain fingerprint is incomplete", 0, cpp_empty_config_receipt_v1(), toolchain, _empty_worker_receipt_v1(translation_unit, compile_database_path))
+    if val receipt = selection.receipt:
+        val configuration_fingerprint = sha256_text(_configuration_payload_v1(receipt))
+        val toolchain_fingerprint = sha256_text(_toolchain_payload_v1(toolchain))
+        val arguments = _worker_arguments_v1(receipt, revision, configuration_fingerprint, toolchain_fingerprint)
+        val invocation_fingerprint = sha256_text(wrapper_command + "\n" + arguments.join("\n"))
+        val worker_receipt = CppLintWorkerReceiptV1(true, translation_unit, compile_database_path, configuration_fingerprint, toolchain_fingerprint, invocation_fingerprint)
+        val process = process_run_with_limits_bounded(wrapper_command, arguments, limits.timeout_ms, limits.memory_bytes, limits.cpu_seconds, limits.max_fds, limits.max_processes, limits.max_output_bytes)
+        if (process.limit_exceeded and process.limit_type == "timeout") or process.exit_code == -1:
+            return _failed_v1(CppAnalysisState.Failed, CppToolFailure.TimedOut, "clang-tidy worker timed out", process.exit_code, receipt, toolchain, worker_receipt)
+        if process.limit_exceeded:
+            return _failed_v1(CppAnalysisState.Failed, CppToolFailure.Crashed, "clang-tidy worker exceeded " + process.limit_type + " limit", process.exit_code, receipt, toolchain, worker_receipt)
+        if process.exit_code != 0:
+            return _failed_v1(CppAnalysisState.Failed, CppToolFailure.Crashed, "clang-tidy worker failed: " + process.stderr, process.exit_code, receipt, toolchain, worker_receipt)
+        val parsed = parse_cpp_structured_output_v1(process.stdout, revision)
+        if not parsed.valid:
+            return _failed_v1(CppAnalysisState.Failed, CppToolFailure.MalformedOutput, parsed.reason, process.exit_code, receipt, toolchain, worker_receipt)
+        return CppLintWorkerRunV1(CppToolResultV1(CppAnalysisState.Complete, CppToolFailure.None, parsed.diagnostics, process.exit_code, "", receipt, toolchain), worker_receipt)
+    _failed_v1(CppAnalysisState.Incomplete, CppToolFailure.None, "exact compile command unavailable", 0, cpp_empty_config_receipt_v1(), toolchain, _empty_worker_receipt_v1(translation_unit, compile_database_path))

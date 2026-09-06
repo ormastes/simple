@@ -1,0 +1,162 @@
+use common.kernel_plugin.ids.{KpfId128, KpfDigest256, kpf_id128_equal, kpf_id128_zero}
+use common.lint_kernel.model.{ArtifactKeyV1, SourceSpanV1, DiagnosticV1}
+use tooling_kernel.contract.model.*
+use tooling_kernel.document.store.ToolingDocumentStoreV1
+
+fn _empty_diagnostic() -> DiagnosticV1:
+    val zero = kpf_id128_zero()
+    val digest = KpfDigest256(w0: 0, w1: 0, w2: 0, w3: 0)
+    val artifact = ArtifactKeyV1(workspace_id: zero, language_id: zero, path_id: zero, target_id: zero, configuration_digest: digest)
+    DiagnosticV1(rule_id: zero, provider_id: zero, severity: 0, category: 0, primary_span: SourceSpanV1(artifact: artifact, revision: 0, start_byte: 0, end_byte: 0), message_id: zero, fix_digest: digest)
+
+pub class ToolingWorkspaceV1:
+    documents: ToolingDocumentStoreV1
+    session_capacity: i64
+    session_active: [bool]
+    session_epochs: [u64]
+    session_generations: [u64]
+    session_languages: [KpfId128]
+    generation_pins: [u32]
+    request_capacity: i64
+    request_active: [bool]
+    request_cancelled: [bool]
+    request_epochs: [u64]
+    request_documents: [ToolingDocumentHandleV1]
+    request_sessions: [ToolingSessionHandleV1]
+    request_revisions: [u64]
+    diagnostic_capacity: i64
+    diagnostics: [DiagnosticV1]
+    diagnostic_count: i64
+
+impl ToolingWorkspaceV1:
+    pub static fn create(document_capacity: i64, session_capacity: i64, request_capacity: i64, diagnostic_capacity: i64) -> ToolingWorkspaceV1:
+        var session_active: [bool] = []
+        var session_epochs: [u64] = []
+        var session_generations: [u64] = []
+        var session_languages: [KpfId128] = []
+        var generation_pins: [u32] = []
+        var index = 0
+        while index < session_capacity:
+            session_active.push(false)
+            session_epochs.push(0)
+            session_generations.push(0)
+            session_languages.push(kpf_id128_zero())
+            generation_pins.push(0)
+            index = index + 1
+        var request_active: [bool] = []
+        var request_cancelled: [bool] = []
+        var request_epochs: [u64] = []
+        var request_documents: [ToolingDocumentHandleV1] = []
+        var request_sessions: [ToolingSessionHandleV1] = []
+        var request_revisions: [u64] = []
+        index = 0
+        while index < request_capacity:
+            request_active.push(false)
+            request_cancelled.push(false)
+            request_epochs.push(0)
+            request_documents.push(tooling_invalid_document_handle_v1())
+            request_sessions.push(tooling_invalid_session_handle_v1())
+            request_revisions.push(0)
+            index = index + 1
+        var diagnostics: [DiagnosticV1] = []
+        index = 0
+        while index < diagnostic_capacity:
+            diagnostics.push(_empty_diagnostic())
+            index = index + 1
+        ToolingWorkspaceV1(documents: ToolingDocumentStoreV1.create(document_capacity), session_capacity: session_capacity, session_active: session_active, session_epochs: session_epochs, session_generations: session_generations, session_languages: session_languages, generation_pins: generation_pins, request_capacity: request_capacity, request_active: request_active, request_cancelled: request_cancelled, request_epochs: request_epochs, request_documents: request_documents, request_sessions: request_sessions, request_revisions: request_revisions, diagnostic_capacity: diagnostic_capacity, diagnostics: diagnostics, diagnostic_count: 0)
+
+    me open_language_session(language_id: KpfId128, generation: u64) -> ToolingOpenSessionResultV1:
+        var index = 0
+        while index < self.session_capacity:
+            if not self.session_active[index]:
+                self.session_epochs[index] = self.session_epochs[index] + 1
+                self.session_active[index] = true
+                self.session_generations[index] = generation
+                self.session_languages[index] = language_id
+                self.generation_pins[index] = self.generation_pins[index] + 1
+                return ToolingOpenSessionResultV1(status: ToolingStatusV1.Ok, handle: ToolingSessionHandleV1(slot: index, epoch: self.session_epochs[index], generation: generation))
+            index = index + 1
+        ToolingOpenSessionResultV1(status: ToolingStatusV1.CapacityExceeded, handle: tooling_invalid_session_handle_v1())
+
+    fn validate_session(handle: ToolingSessionHandleV1) -> ToolingStatusV1:
+        if handle.slot < 0 or handle.slot >= self.session_capacity:
+            return ToolingStatusV1.SessionNotFound
+        if not self.session_active[handle.slot] or self.session_epochs[handle.slot] != handle.epoch:
+            return ToolingStatusV1.SessionNotFound
+        if self.session_generations[handle.slot] != handle.generation:
+            return ToolingStatusV1.GenerationMismatch
+        ToolingStatusV1.Ok
+
+    me begin_request(document: ToolingDocumentHandleV1, session: ToolingSessionHandleV1) -> ToolingBeginRequestResultV1:
+        val session_status = self.validate_session(session)
+        if session_status != ToolingStatusV1.Ok:
+            return ToolingBeginRequestResultV1(status: session_status, handle: tooling_invalid_request_handle_v1())
+        val revision = self.documents.revision(document)
+        if revision == 0:
+            return ToolingBeginRequestResultV1(status: ToolingStatusV1.DocumentNotFound, handle: tooling_invalid_request_handle_v1())
+        if not kpf_id128_equal(self.documents.language(document), self.session_languages[session.slot]):
+            return ToolingBeginRequestResultV1(status: ToolingStatusV1.LanguageMismatch, handle: tooling_invalid_request_handle_v1())
+        var index = 0
+        while index < self.request_capacity:
+            if self.request_active[index] and self.request_documents[index].slot == document.slot and self.request_documents[index].epoch == document.epoch and self.request_revisions[index] < revision:
+                self.request_cancelled[index] = true
+            index = index + 1
+        index = 0
+        while index < self.request_capacity:
+            if not self.request_active[index]:
+                self.request_epochs[index] = self.request_epochs[index] + 1
+                self.request_active[index] = true
+                self.request_cancelled[index] = false
+                self.request_documents[index] = document
+                self.request_sessions[index] = session
+                self.request_revisions[index] = revision
+                return ToolingBeginRequestResultV1(status: ToolingStatusV1.Ok, handle: ToolingRequestHandleV1(slot: index, epoch: self.request_epochs[index], document_revision: revision))
+            index = index + 1
+        ToolingBeginRequestResultV1(status: ToolingStatusV1.CapacityExceeded, handle: tooling_invalid_request_handle_v1())
+
+    me publish_diagnostics(request: ToolingRequestHandleV1, digest: KpfDigest256, values: [DiagnosticV1]) -> ToolingDiagnosticPublicationV1:
+        if request.slot < 0 or request.slot >= self.request_capacity or not self.request_active[request.slot] or self.request_epochs[request.slot] != request.epoch:
+            return ToolingDiagnosticPublicationV1(status: ToolingStatusV1.Cancelled, accepted_count: 0)
+        if self.request_cancelled[request.slot]:
+            return ToolingDiagnosticPublicationV1(status: ToolingStatusV1.Cancelled, accepted_count: 0)
+        val document = self.request_documents[request.slot]
+        val snapshot_status = self.documents.matches(document, request.document_revision, digest)
+        if snapshot_status != ToolingStatusV1.Ok:
+            return ToolingDiagnosticPublicationV1(status: snapshot_status, accepted_count: 0)
+        if self.diagnostic_count + values.len() > self.diagnostic_capacity:
+            return ToolingDiagnosticPublicationV1(status: ToolingStatusV1.CapacityExceeded, accepted_count: 0)
+        for value in values:
+            if value.primary_span.revision != request.document_revision:
+                return ToolingDiagnosticPublicationV1(status: ToolingStatusV1.RevisionStale, accepted_count: 0)
+        var accepted_count: u32 = 0
+        for value in values:
+            self.diagnostics[self.diagnostic_count] = value
+            self.diagnostic_count = self.diagnostic_count + 1
+            accepted_count = accepted_count + 1
+        self.request_active[request.slot] = false
+        ToolingDiagnosticPublicationV1(status: ToolingStatusV1.Ok, accepted_count: accepted_count)
+
+    me disconnect_session(handle: ToolingSessionHandleV1) -> ToolingStatusV1:
+        val status = self.validate_session(handle)
+        if status != ToolingStatusV1.Ok:
+            return status
+        var index = 0
+        while index < self.request_capacity:
+            if self.request_active[index] and self.request_sessions[index].slot == handle.slot and self.request_sessions[index].epoch == handle.epoch:
+                self.request_cancelled[index] = true
+                self.request_active[index] = false
+            index = index + 1
+        self.session_active[handle.slot] = false
+        if self.generation_pins[handle.slot] > 0:
+            self.generation_pins[handle.slot] = self.generation_pins[handle.slot] - 1
+        ToolingStatusV1.Ok
+
+    fn generation_pin_count(handle: ToolingSessionHandleV1) -> u32:
+        if handle.slot < 0 or handle.slot >= self.session_capacity:
+            return 0
+        self.generation_pins[handle.slot]
+
+    fn is_request_cancelled(handle: ToolingRequestHandleV1) -> bool:
+        if handle.slot < 0 or handle.slot >= self.request_capacity:
+            return true
+        self.request_epochs[handle.slot] != handle.epoch or self.request_cancelled[handle.slot] or not self.request_active[handle.slot]

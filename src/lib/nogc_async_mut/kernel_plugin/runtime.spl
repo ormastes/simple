@@ -1,0 +1,249 @@
+use common.kernel_plugin.status.KpfStatus
+
+pub enum KpfQueueStatus:
+    Accepted
+    WouldBlock
+    Empty
+    StaleHandle
+    InvalidHandle
+
+impl KpfQueueStatus:
+    pub fn label() -> text:
+        match self:
+            case Accepted: "Accepted"
+            case WouldBlock: "WouldBlock"
+            case Empty: "Empty"
+            case StaleHandle: "KPF-E-STALE-HANDLE"
+            case InvalidHandle: "KPF-E-INVALID-HANDLE"
+
+pub struct KpfSessionHandleV1:
+    generation: i64
+    slot: i64
+    epoch: i64
+
+pub struct KpfRequestHandleV1:
+    generation: i64
+    session_slot: i64
+    request_slot: i64
+    request_epoch: i64
+
+pub struct KpfRequestEnvelopeV1:
+    handle: KpfRequestHandleV1
+    operation_slot: i64
+    batch_id: i64
+
+pub struct KpfCompletionEnvelopeV1:
+    handle: KpfRequestHandleV1
+    status: KpfStatus
+
+pub struct KpfSubmitResultV1:
+    status: KpfQueueStatus
+    handle: KpfRequestHandleV1
+    capacity: i64
+
+pub struct KpfRequestReceiveV1:
+    status: KpfQueueStatus
+    value: KpfRequestEnvelopeV1
+
+pub struct KpfCompletionReceiveV1:
+    status: KpfQueueStatus
+    value: KpfCompletionEnvelopeV1
+
+fn _empty_session_handle() -> KpfSessionHandleV1:
+    KpfSessionHandleV1(generation: 0, slot: -1, epoch: 0)
+
+fn _empty_request_handle() -> KpfRequestHandleV1:
+    KpfRequestHandleV1(generation: 0, session_slot: -1, request_slot: -1, request_epoch: 0)
+
+fn _empty_request() -> KpfRequestEnvelopeV1:
+    KpfRequestEnvelopeV1(handle: _empty_request_handle(), operation_slot: 0, batch_id: 0)
+
+fn _empty_completion() -> KpfCompletionEnvelopeV1:
+    KpfCompletionEnvelopeV1(handle: _empty_request_handle(), status: KpfStatus.ContractInvalid)
+
+pub class KpfSessionTableV1:
+    capacity: i64
+    generations: [i64]
+    epochs: [i64]
+    active: [bool]
+
+impl KpfSessionTableV1:
+    pub static fn create(capacity: i64) -> KpfSessionTableV1:
+        var generations: [i64] = []
+        var epochs: [i64] = []
+        var active: [bool] = []
+        var index = 0
+        while index < capacity:
+            generations.push(0)
+            epochs.push(0)
+            active.push(false)
+            index = index + 1
+        KpfSessionTableV1(capacity: capacity, generations: generations, epochs: epochs, active: active)
+
+    me open(generation: i64) -> KpfSessionHandleV1:
+        var index = 0
+        while index < self.capacity:
+            if not self.active[index]:
+                self.epochs[index] = self.epochs[index] + 1
+                self.generations[index] = generation
+                self.active[index] = true
+                return KpfSessionHandleV1(generation: generation, slot: index, epoch: self.epochs[index])
+            index = index + 1
+        _empty_session_handle()
+
+    me close(handle: KpfSessionHandleV1) -> KpfQueueStatus:
+        val status = self.validate(handle)
+        if status != KpfQueueStatus.Accepted:
+            return status
+        self.active[handle.slot] = false
+        KpfQueueStatus.Accepted
+
+    fn validate(handle: KpfSessionHandleV1) -> KpfQueueStatus:
+        if handle.slot < 0 or handle.slot >= self.capacity:
+            return KpfQueueStatus.InvalidHandle
+        if not self.active[handle.slot]:
+            return KpfQueueStatus.StaleHandle
+        if self.generations[handle.slot] != handle.generation or self.epochs[handle.slot] != handle.epoch:
+            return KpfQueueStatus.StaleHandle
+        KpfQueueStatus.Accepted
+
+pub class KpfRequestTableV1:
+    capacity: i64
+    generations: [i64]
+    session_slots: [i64]
+    epochs: [i64]
+    active: [bool]
+
+impl KpfRequestTableV1:
+    pub static fn create(capacity: i64) -> KpfRequestTableV1:
+        var generations: [i64] = []
+        var session_slots: [i64] = []
+        var epochs: [i64] = []
+        var active: [bool] = []
+        var index = 0
+        while index < capacity:
+            generations.push(0)
+            session_slots.push(-1)
+            epochs.push(0)
+            active.push(false)
+            index = index + 1
+        KpfRequestTableV1(
+            capacity: capacity,
+            generations: generations,
+            session_slots: session_slots,
+            epochs: epochs,
+            active: active)
+
+    me reserve(session: KpfSessionHandleV1) -> KpfRequestHandleV1:
+        var index = 0
+        while index < self.capacity:
+            if not self.active[index]:
+                self.epochs[index] = self.epochs[index] + 1
+                self.generations[index] = session.generation
+                self.session_slots[index] = session.slot
+                self.active[index] = true
+                return KpfRequestHandleV1(
+                    generation: session.generation,
+                    session_slot: session.slot,
+                    request_slot: index,
+                    request_epoch: self.epochs[index])
+            index = index + 1
+        _empty_request_handle()
+
+    me release(handle: KpfRequestHandleV1) -> KpfQueueStatus:
+        val status = self.validate(handle)
+        if status != KpfQueueStatus.Accepted:
+            return status
+        self.active[handle.request_slot] = false
+        KpfQueueStatus.Accepted
+
+    fn validate(handle: KpfRequestHandleV1) -> KpfQueueStatus:
+        if handle.request_slot < 0 or handle.request_slot >= self.capacity:
+            return KpfQueueStatus.InvalidHandle
+        if not self.active[handle.request_slot]:
+            return KpfQueueStatus.StaleHandle
+        if self.generations[handle.request_slot] != handle.generation or self.session_slots[handle.request_slot] != handle.session_slot:
+            return KpfQueueStatus.StaleHandle
+        if self.epochs[handle.request_slot] != handle.request_epoch:
+            return KpfQueueStatus.StaleHandle
+        KpfQueueStatus.Accepted
+
+pub class KpfSubmissionRingV1:
+    capacity: i64
+    values: [KpfRequestEnvelopeV1]
+    occupied: [bool]
+    head: i64
+    tail: i64
+    count: i64
+    high_water: i64
+
+impl KpfSubmissionRingV1:
+    pub static fn create(capacity: i64) -> KpfSubmissionRingV1:
+        var values: [KpfRequestEnvelopeV1] = []
+        var occupied: [bool] = []
+        var index = 0
+        while index < capacity:
+            values.push(_empty_request())
+            occupied.push(false)
+            index = index + 1
+        KpfSubmissionRingV1(capacity: capacity, values: values, occupied: occupied, head: 0, tail: 0, count: 0, high_water: 0)
+
+    me offer(value: KpfRequestEnvelopeV1) -> KpfQueueStatus:
+        if self.capacity <= 0 or self.count >= self.capacity:
+            return KpfQueueStatus.WouldBlock
+        self.values[self.tail] = value
+        self.occupied[self.tail] = true
+        self.tail = (self.tail + 1) % self.capacity
+        self.count = self.count + 1
+        if self.count > self.high_water:
+            self.high_water = self.count
+        KpfQueueStatus.Accepted
+
+    me poll() -> KpfRequestReceiveV1:
+        if self.count == 0:
+            return KpfRequestReceiveV1(status: KpfQueueStatus.Empty, value: _empty_request())
+        val value = self.values[self.head]
+        self.occupied[self.head] = false
+        self.head = (self.head + 1) % self.capacity
+        self.count = self.count - 1
+        KpfRequestReceiveV1(status: KpfQueueStatus.Accepted, value: value)
+
+pub class KpfCompletionRingV1:
+    capacity: i64
+    values: [KpfCompletionEnvelopeV1]
+    occupied: [bool]
+    head: i64
+    tail: i64
+    count: i64
+    high_water: i64
+
+impl KpfCompletionRingV1:
+    pub static fn create(capacity: i64) -> KpfCompletionRingV1:
+        var values: [KpfCompletionEnvelopeV1] = []
+        var occupied: [bool] = []
+        var index = 0
+        while index < capacity:
+            values.push(_empty_completion())
+            occupied.push(false)
+            index = index + 1
+        KpfCompletionRingV1(capacity: capacity, values: values, occupied: occupied, head: 0, tail: 0, count: 0, high_water: 0)
+
+    me offer(value: KpfCompletionEnvelopeV1) -> KpfQueueStatus:
+        if self.capacity <= 0 or self.count >= self.capacity:
+            return KpfQueueStatus.WouldBlock
+        self.values[self.tail] = value
+        self.occupied[self.tail] = true
+        self.tail = (self.tail + 1) % self.capacity
+        self.count = self.count + 1
+        if self.count > self.high_water:
+            self.high_water = self.count
+        KpfQueueStatus.Accepted
+
+    me poll() -> KpfCompletionReceiveV1:
+        if self.count == 0:
+            return KpfCompletionReceiveV1(status: KpfQueueStatus.Empty, value: _empty_completion())
+        val value = self.values[self.head]
+        self.occupied[self.head] = false
+        self.head = (self.head + 1) % self.capacity
+        self.count = self.count - 1
+        KpfCompletionReceiveV1(status: KpfQueueStatus.Accepted, value: value)

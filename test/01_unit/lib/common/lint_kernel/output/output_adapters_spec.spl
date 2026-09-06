@@ -1,0 +1,80 @@
+# Purpose and audience: executable normalized lint output contract for tooling maintainers.
+# @req REQ-KPF-009
+# @cover src/lib/common/lint_kernel/output 80%
+# @tag: unit, lint_kernel, json, sarif, lsp, mutation
+
+use std.spec
+use std.spec.step
+use common.kernel_plugin.ids.*
+use common.lint_kernel.model.*
+use common.lint_kernel.output.*
+use lib.json.parser.{json_parse}
+
+fn id(value: u64) -> KpfId128:
+    KpfId128(hi: 0, lo: value)
+
+fn digest(value: u64) -> KpfDigest256:
+    KpfDigest256(w0: value, w1: 0, w2: 0, w3: 0)
+
+fn coverage(completed: u32, partial: u32) -> AnalysisCoverageV1:
+    AnalysisCoverageV1(requested_unit_count: 2, admitted_unit_count: 2, completed_unit_count: completed, partial_unit_count: partial, not_analyzed_unit_count: 0, requested_rule_count: 2, completed_rule_count: if partial == 0: 2 else: 1, skipped_rule_count: partial, requested_phase_bits: 3, completed_phase_bits: if partial == 0: 3 else: 1, provider_receipt_digest: digest(31), input_revision_digest: digest(32))
+
+fn artifact(path: u64) -> ArtifactKeyV1:
+    ArtifactKeyV1(workspace_id: id(1), language_id: id(2), path_id: id(path), target_id: id(4), configuration_digest: digest(5))
+
+fn location(path: u64, uri: text, line: u32, column: u32) -> LintOutputLocationV1:
+    LintOutputLocationV1(span: SourceSpanV1(artifact: artifact(path), revision: 7, start_byte: line.to_u64() * 10 + column.to_u64(), end_byte: line.to_u64() * 10 + column.to_u64() + 2), uri: uri, start_line: line, start_column: column, end_line: line, end_column: column + 2)
+
+fn diagnostic(path: u64, rule: u64, name: text, message: text) -> NormalizedLintDiagnosticV1:
+    val primary = location(path, "file:///workspace/a\"b.spl", 2, path.to_u32())
+    val related = LintRelatedLocationV1(location: location(path + 10, "file:///workspace/related.spl", 4, 1), message: "declared\nthere")
+    val fix = LintTextEditV1(location: primary, replacement: "safe\nvalue", metadata: LintEditMetadataV1(provider_id: id(8), language_id: id(2), expected_snapshot_digest: digest(32), conflict_group: 77, applicability: LintFixApplicabilityV1.MachineApplicable))
+    NormalizedLintDiagnosticV1(diagnostic: DiagnosticV1(rule_id: id(rule), provider_id: id(8), severity: 2, category: 1, primary_span: primary.span, message_id: id(9), fix_digest: digest(rule)), location: primary, rule_name: name, message: message, help: "use a safe value", related: [related], fixes: [fix])
+
+fn complete_output(items: [NormalizedLintDiagnosticV1]) -> NormalizedLintOutputV1:
+    NormalizedLintOutputV1(result: lint_run_result(coverage(2, 0), items.len().to_u32(), 0, items.len().to_u32(), false, false), diagnostics: items)
+
+describe "REQ-KPF-009 normalized lint output projections":
+    it "drives JSON SARIF and LSP from one deterministic semantic record":
+        step("projects reverse-arrival diagnostics in canonical path order")
+        val output = complete_output([diagnostic(9, 12, "z-rule", "later"), diagnostic(3, 11, "a-rule", "quote \" and newline\n")])
+        val json = lint_output_to_json(output)
+        val sarif = lint_output_to_sarif(output)
+        val lsp = lint_output_to_lsp(output)
+        assert_false(json_parse(json) == nil)
+        assert_false(json_parse(sarif) == nil)
+        assert_false(json_parse(lsp) == nil)
+        assert_true(json.index_of("a-rule") < json.index_of("z-rule"))
+        assert_true(sarif.index_of("a-rule") < sarif.index_of("z-rule"))
+        assert_true(lsp.index_of("a-rule") < lsp.index_of("z-rule"))
+        assert_true(json.contains("quote \\\" and newline\\n"))
+        assert_true(json.contains("\"conflictGroup\":77"))
+        assert_true(json.contains("\"applicability\":\"MachineApplicable\""))
+        assert_true(sarif.contains("\"version\":\"2.1.0\""))
+        assert_true(sarif.contains("relatedLocations"))
+        assert_true(sarif.contains("artifactChanges"))
+        assert_true(lsp.contains("relatedInformation"))
+        assert_true(lsp.contains("codeActions"))
+        assert_true(lsp.contains("safe\\nvalue"))
+
+    it "projects incomplete coverage without claiming clean":
+        step("preserves partial analysis in every external format")
+        val partial = NormalizedLintOutputV1(result: lint_run_result(coverage(1, 1), 0, 0, 0, false, false), diagnostics: [])
+        val json = lint_output_to_json(partial)
+        val sarif = lint_output_to_sarif(partial)
+        val lsp = lint_output_to_lsp(partial)
+        assert_true(json.contains("\"verdict\":\"partial\""))
+        assert_true(json.contains("\"partialUnits\":1"))
+        assert_true(sarif.contains("\"verdict\":\"partial\""))
+        assert_true(lsp.contains("\"verdict\":\"partial\""))
+        assert_false(json.contains("complete-clean"))
+
+    it "mutation of canonical order escaping fixes or coverage turns the corpus red":
+        step("asserts all independently required projection evidence")
+        val item = diagnostic(3, 11, "rule-x", "bad\"value")
+        val output = complete_output([item])
+        assert_true(lint_output_to_json(output).contains("bad\\\"value"))
+        assert_true(lint_output_to_sarif(output).contains("insertedContent"))
+        assert_true(lint_output_to_lsp(output).contains("isPreferred\":true"))
+        val incomplete = NormalizedLintOutputV1(result: lint_run_result(coverage(0, 2), 0, 0, 0, false, false), diagnostics: [])
+        assert_false(lint_output_to_json(incomplete).contains("complete-clean"))

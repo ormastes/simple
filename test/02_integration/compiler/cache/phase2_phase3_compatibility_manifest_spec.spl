@@ -1,0 +1,439 @@
+# @req MBH-REQ-003 MBH-REQ-004 MBH-REQ-005 MBH-REQ-006 MBH-REQ-009
+use std.spec.{describe, it, expect, step}
+use std.io.{file_write, file_read}
+use std.io_runtime.{dir_create_all, file_hash_sha256_or_empty, file_delete}
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.cache.reverse_reference_key.{
+    ReverseReferenceKeyV1, reverse_reference_key_digest_v1,
+    reverse_reference_key_encode_v1
+}
+use compiler.common.cache.phase_compatibility_manifest.{
+    PHASE_COMPATIBILITY_FRONTEND_V1, PHASE_COMPATIBILITY_NATIVE_V1,
+    PHASE_COMPATIBILITY_PRODUCER_NEUTRAL_V1,
+    PhaseCompatibilityManifestV1, PhaseCompatibilityExpectationV1,
+    phase_compatibility_item_v1, phase_compatibility_admit_v1,
+    phase_compatibility_manifest_encode_v1, phase_compatibility_manifest_decode_v1,
+    phase_compatibility_manifest_read_only_v1,
+    phase_compatibility_compare_outputs_v1,
+    phase_compatibility_path_within_v1
+}
+use compiler.frontend.frontend_parse_cache.{FRONTEND_CACHE_ENTRY_VERSION}
+use compiler.driver.cache.phase_compatibility_admission.{
+    driver_admit_phase2_compatibility_manifest_v1,
+    driver_import_phase2_frontend_v1
+}
+use compiler.driver.cache.reverse_reference_receipt.{
+    REVERSE_REFERENCE_FAMILIES_V1,
+    ReverseReferenceProjectionV1,
+    ReverseReferenceGenerationReceiptV1,
+    reverse_reference_publish_generation_v1,
+    reverse_reference_receipt_digest_v1
+}
+use compiler.frontend.core.flat_pool_codec.{FLAT_POOL_CODEC_VERSION}
+use compiler.common.cache.phase_compatibility_path_io.{
+    phase_compatibility_canonical_directory_io_v1,
+    phase_compatibility_existing_artifact_io_v1,
+    phase_compatibility_destination_io_v1,
+    phase_compatibility_read_manifest_io_v1,
+    phase_compatibility_stage_artifact_io_v1,
+    phase_compatibility_publish_staged_io_v1
+}
+
+extern fn rt_env_set(key: text, value: text)
+extern fn rt_path_absolute(path: text) -> text
+extern fn rt_dir_create(path: text, recursive: bool) -> bool
+extern fn rt_dir_remove_all(path: text) -> bool
+extern fn rt_package_create_symlink(target: text, link_path: text) -> i32
+
+val DIGEST_A = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+val DIGEST_B = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+fn compatibility_key(kind: text, projection: text) -> ReverseReferenceKeyV1:
+    ReverseReferenceKeyV1(
+        if kind == PHASE_COMPATIBILITY_FRONTEND_V1: "semantic" else: "native",
+        "phase2-generation", "source-root", "compiler.module",
+        projection, DIGEST_A, 1)
+
+fn compatibility_manifest() -> PhaseCompatibilityManifestV1:
+    val frontend_key = compatibility_key(PHASE_COMPATIBILITY_FRONTEND_V1, "direct-import-export")
+    val native_key = compatibility_key(PHASE_COMPATIBILITY_NATIVE_V1, "module-scc-artifact")
+    PhaseCompatibilityManifestV1(
+        1, "build/cache/phase2", "build/cache/phase3",
+        "build/cache/phase2/build-cache.sdn", DIGEST_A,
+        "phase2-generation", "source-root", [
+        phase_compatibility_item_v1(
+            PHASE_COMPATIBILITY_FRONTEND_V1, frontend_key,
+            "build/cache/phase2/frontend/compiler.module.fpc", DIGEST_A,
+            PHASE_COMPATIBILITY_PRODUCER_NEUTRAL_V1, "frontend-schema-v1",
+            "target-neutral", "compiler.module"),
+        phase_compatibility_item_v1(
+            PHASE_COMPATIBILITY_NATIVE_V1, native_key,
+            "build/cache/phase2/object/compiler.module.o", DIGEST_B,
+            "stage2-exact", "runtime-provider-exact",
+            "aarch64-apple-darwin", "compiler.module")
+    ])
+
+fn expected(kind: text, producer: text, provider: text, target: text) -> PhaseCompatibilityExpectationV1:
+    val projection = if kind == PHASE_COMPATIBILITY_FRONTEND_V1:
+        "direct-import-export"
+    else:
+        "module-scc-artifact"
+    PhaseCompatibilityExpectationV1(
+        kind, reverse_reference_key_digest_v1(compatibility_key(kind, projection)),
+        DIGEST_A, "phase2-generation", "source-root",
+        producer, provider, target, 1)
+
+fn production_receipt(source: text, owner: text,
+        root: text, salt: text) -> ReverseReferenceGenerationReceiptV1:
+    var projections: [ReverseReferenceProjectionV1] = []
+    for family in REVERSE_REFERENCE_FAMILIES_V1:
+        val registry = if family == "aop-consumer": "aop"
+            elif family == "module-scc-artifact": "native"
+            elif family == "emitted-symbol-relocation": "linker"
+            else: "semantic"
+        val exact = family == "direct-import-export"
+        projections = projections.push(ReverseReferenceProjectionV1(
+            key: ReverseReferenceKeyV1(
+                registry, owner, root,
+                if exact: source else: "@unknown-family",
+                family, sha256_text("{family}:{salt}"), 1),
+            consumer_identity: if exact:
+                source
+            else:
+                "registry-not-published:{family}"))
+    ReverseReferenceGenerationReceiptV1(1, owner, root, projections)
+
+describe "M3 Phase 2 to Phase 3 compatibility manifest":
+    # MBH-NFR-001: clean and compatible-reuse outputs compare canonically.
+    # MBH-NFR-004: every admitted record is digest and identity bound.
+    # MBH-NFR-006: publication is immutable and Phase 2 remains read-only.
+    it "should keep writable caches separate and treat Phase 2 as read-only":
+        step("Bind distinct Phase 2 and Phase 3 writable roots")
+        val manifest = compatibility_manifest()
+        expect(phase_compatibility_manifest_read_only_v1(
+            manifest, "build/cache/phase3")).to_equal("ok")
+        expect(phase_compatibility_manifest_read_only_v1(
+            manifest, "build/cache/phase2")).to_equal("phase2-cache-not-read-only")
+        expect(phase_compatibility_path_within_v1(
+            "build/cache/phase3", "build/cache/phase3/frontend/item")).to_equal(true)
+        expect(phase_compatibility_path_within_v1(
+            "build/cache/phase3", "build/cache/phase3/../phase2/item")).to_equal(false)
+
+    it "should reuse producer-neutral frontend values with attribution":
+        step("Admit an exact target-neutral frontend value")
+        val decision = phase_compatibility_admit_v1(
+            compatibility_manifest(),
+            expected(PHASE_COMPATIBILITY_FRONTEND_V1, "different-stage3-producer",
+                "frontend-schema-v1", "target-neutral"), DIGEST_A)
+        expect(decision.reused).to_equal(true)
+        expect(decision.reason).to_equal("reused-producer-neutral-frontend")
+
+    it "should reuse only exact compatible native objects with attribution":
+        step("Admit an exact producer, provider, target and object digest")
+        val decision = phase_compatibility_admit_v1(
+            compatibility_manifest(),
+            expected(PHASE_COMPATIBILITY_NATIVE_V1, "stage2-exact",
+                "runtime-provider-exact", "aarch64-apple-darwin"), DIGEST_B)
+        expect(decision.reused).to_equal(true)
+        expect(decision.reason).to_equal("reused-exact-native-object")
+
+    it "should reject corruption and wrong producer provider target or schema":
+        step("Probe every fail-closed compatibility dimension")
+        val manifest = compatibility_manifest()
+        var corrupt_manifest = compatibility_manifest()
+        corrupt_manifest.items[0].key_frame = "corrupt"
+        expect(phase_compatibility_admit_v1(corrupt_manifest,
+            expected(PHASE_COMPATIBILITY_FRONTEND_V1, "stage3",
+                "frontend-schema-v1", "target-neutral"), DIGEST_A).reason).to_equal(
+                    "manifest:corrupt-key:invalid-domain-or-field-count")
+        val native = expected(PHASE_COMPATIBILITY_NATIVE_V1, "wrong",
+            "runtime-provider-exact", "aarch64-apple-darwin")
+        expect(phase_compatibility_admit_v1(manifest, native, DIGEST_B).reason).to_equal("wrong-producer")
+
+        var outside = compatibility_manifest()
+        outside.items[0].artifact_path = "build/cache/phase2/../phase3/stolen.fpc"
+        expect(phase_compatibility_manifest_decode_v1(
+            phase_compatibility_manifest_encode_v1(outside)).valid).to_equal(false)
+        expect(phase_compatibility_admit_v1(manifest,
+            expected(PHASE_COMPATIBILITY_NATIVE_V1, "stage2-exact", "wrong",
+                "aarch64-apple-darwin"), DIGEST_B).reason).to_equal("wrong-provider")
+        expect(phase_compatibility_admit_v1(manifest,
+            expected(PHASE_COMPATIBILITY_NATIVE_V1, "stage2-exact",
+                "runtime-provider-exact", "x86_64-apple-darwin"), DIGEST_B).reason).to_equal("wrong-target")
+        var wrong_schema = expected(PHASE_COMPATIBILITY_NATIVE_V1, "stage2-exact",
+            "runtime-provider-exact", "aarch64-apple-darwin")
+        wrong_schema.schema_version = 2
+        expect(phase_compatibility_admit_v1(manifest, wrong_schema, DIGEST_B).reason).to_equal("wrong-schema")
+        expect(phase_compatibility_admit_v1(manifest,
+            expected(PHASE_COMPATIBILITY_NATIVE_V1, "stage2-exact",
+                "runtime-provider-exact", "aarch64-apple-darwin"), DIGEST_A).reason).to_equal("artifact-corrupt")
+
+    it "should reject mutated M2 receipt authority and stale key generations":
+        step("Mutate each immutable M2 authority dimension independently")
+        val manifest = compatibility_manifest()
+        var wrong_digest = expected(PHASE_COMPATIBILITY_FRONTEND_V1, "stage3",
+            "frontend-schema-v1", "target-neutral")
+        wrong_digest.m2_receipt_digest = DIGEST_B
+        expect(phase_compatibility_admit_v1(
+            manifest, wrong_digest, DIGEST_A).reason).to_equal(
+                "m2-receipt-digest-mismatch")
+        var wrong_owner = expected(PHASE_COMPATIBILITY_FRONTEND_V1, "stage3",
+            "frontend-schema-v1", "target-neutral")
+        wrong_owner.m2_owner_generation = "stale-owner"
+        expect(phase_compatibility_admit_v1(
+            manifest, wrong_owner, DIGEST_A).reason).to_equal(
+                "m2-generation-mismatch")
+        var wrong_root = expected(PHASE_COMPATIBILITY_FRONTEND_V1, "stage3",
+            "frontend-schema-v1", "target-neutral")
+        wrong_root.m2_root_generation = "stale-root"
+        expect(phase_compatibility_admit_v1(
+            manifest, wrong_root, DIGEST_A).reason).to_equal(
+                "m2-generation-mismatch")
+
+        var stale_key_manifest = compatibility_manifest()
+        val stale_key = ReverseReferenceKeyV1(
+            "semantic", "stale-owner", "source-root", "compiler.module",
+            "direct-import-export", DIGEST_A, 1)
+        stale_key_manifest.items[0].key_frame =
+            reverse_reference_key_encode_v1(stale_key)
+        val stale_key_expectation = PhaseCompatibilityExpectationV1(
+            PHASE_COMPATIBILITY_FRONTEND_V1,
+            reverse_reference_key_digest_v1(stale_key), DIGEST_A,
+            "phase2-generation", "source-root",
+            PHASE_COMPATIBILITY_PRODUCER_NEUTRAL_V1,
+            "frontend-schema-v1", "target-neutral", 1)
+        expect(phase_compatibility_admit_v1(
+            stale_key_manifest, stale_key_expectation, DIGEST_A).reason).to_equal(
+                "m2-key-generation-mismatch")
+
+    it "should compare normalized clean and reused output bytes":
+        step("Normalize only documented timing and RSS receipt fields")
+        val clean = "binary=" + sha256_text("same") + "\nbuild_elapsed_us=10\npeak_rss_bytes=20\nresult=pass\n"
+        val reused = "binary=" + sha256_text("same") + "\r\nbuild_elapsed_us=99\r\npeak_rss_bytes=88\r\nresult=pass\r\n"
+        val equal = phase_compatibility_compare_outputs_v1(clean, reused)
+        expect(equal.equal).to_equal(true)
+        expect(equal.reason).to_equal("normalized-byte-identical")
+        val mismatch = phase_compatibility_compare_outputs_v1(clean, reused.replace("result=pass", "result=fail"))
+        expect(mismatch.equal).to_equal(false)
+        expect(mismatch.reason).to_equal("normalized-output-mismatch")
+
+    it "should canonically decode and reject corruption or trailing bytes":
+        step("Round-trip the canonical manifest wire format")
+        val encoded = phase_compatibility_manifest_encode_v1(compatibility_manifest())
+        val decoded = phase_compatibility_manifest_decode_v1(encoded)
+        expect(decoded.valid).to_equal(true)
+        expect(decoded.manifest.unwrap().items.len()).to_equal(2)
+        expect(phase_compatibility_manifest_decode_v1(encoded + "x").reason).to_equal("trailing-data")
+        expect(phase_compatibility_manifest_decode_v1(
+            encoded.replace("1:1", "1:2")).reason).to_equal("wrong-manifest-schema")
+        expect(phase_compatibility_manifest_decode_v1(
+            encoded.replace("64:" + DIGEST_A, "99:" + DIGEST_A)).valid).to_equal(false)
+
+    it "should consume only the current admitted M2 frontend projection":
+        step("Publish a real immutable M2 receipt and consume its exact projection")
+        val root = rt_path_absolute("build/test-artifacts/m3-phase-compatibility")
+        val _clean = rt_dir_remove_all(root)
+        val phase2 = root + "/phase2"
+        val phase3 = root + "/phase3"
+        val phase2_frontend = phase2 + "/frontend"
+        val phase3_frontend = phase3 + "/frontend"
+        val source = phase2 + "/compiler.module.spl"
+        val cache_path = phase2 + "/build-cache.sdn"
+        val manifest_path = root + "/phase2.manifest"
+        expect(dir_create_all(phase2_frontend)).to_equal(true)
+        expect(dir_create_all(phase3_frontend)).to_equal(true)
+        expect(file_write(source, "export fn answer() -> i64: 42\n")).to_equal(true)
+        expect(file_write(cache_path, "version: 1\nentries: []\n")).to_equal(true)
+        val frontend_key = file_hash_sha256_or_empty(source)
+        val source_record = phase2_frontend + "/" + frontend_key + ".fpc"
+        expect(file_write(source_record, "old-producer-header\nflat-pool-payload")).to_equal(true)
+        val artifact_digest = file_hash_sha256_or_empty(source_record)
+        val owner = sha256_text("production-owner-generation")
+        val root_generation = sha256_text("production-root-generation")
+        val receipt = production_receipt(source, owner, root_generation, "current")
+        expect(reverse_reference_publish_generation_v1(
+            cache_path, receipt)).to_equal(true)
+        val receipt_digest = reverse_reference_receipt_digest_v1(receipt)
+        val key = ReverseReferenceKeyV1(
+            "semantic", owner, root_generation, source,
+            "direct-import-export", sha256_text("direct-import-export:current"), 1)
+        val manifest = PhaseCompatibilityManifestV1(
+            1, phase2, phase3, cache_path, receipt_digest,
+            owner, root_generation, [
+            phase_compatibility_item_v1(
+                PHASE_COMPATIBILITY_FRONTEND_V1, key, source_record,
+                artifact_digest, PHASE_COMPATIBILITY_PRODUCER_NEUTRAL_V1,
+                FRONTEND_CACHE_ENTRY_VERSION + ":" + FLAT_POOL_CODEC_VERSION,
+                "target-neutral", source)
+        ])
+        expect(file_write(manifest_path,
+            phase_compatibility_manifest_encode_v1(manifest))).to_equal(true)
+        val source_hash_before = file_hash_sha256_or_empty(source_record)
+        rt_env_set("SIMPLE_FRONTEND_CACHE", "1")
+        rt_env_set("SIMPLE_FRONTEND_CACHE_SCOPE", "phase3-scope")
+        rt_env_set("SIMPLE_FRONTEND_CACHE_DIR", phase3_frontend)
+        rt_env_set("SIMPLE_PHASE2_COMPATIBILITY_MANIFEST_READ", manifest_path)
+        rt_env_set("SIMPLE_PHASE3_COMPATIBILITY_CACHE_ROOT", phase3)
+        expect(driver_import_phase2_frontend_v1()).to_equal("reused=1")
+        expect(file_hash_sha256_or_empty(source_record)).to_equal(source_hash_before)
+        val materialized_path = phase3_frontend + "/" + frontend_key + ".fpc"
+        val materialized = file_read(materialized_path)
+        expect(materialized).to_contain("phase3-scope\nflat-pool-payload")
+        expect(file_delete(materialized_path)).to_equal(true)
+        expect(file_write(source_record, "corrupt-after-publication")).to_equal(true)
+        expect(driver_import_phase2_frontend_v1()).to_equal("reused=0")
+        expect(file_write(source_record, "old-producer-header\nflat-pool-payload")).to_equal(true)
+
+        step("Reject manifest authority mutations and a superseded CURRENT receipt")
+        var wrong_digest_manifest = manifest
+        wrong_digest_manifest.m2_receipt_digest = DIGEST_A
+        expect(file_write(manifest_path,
+            phase_compatibility_manifest_encode_v1(wrong_digest_manifest))).to_equal(true)
+        expect(driver_import_phase2_frontend_v1()).to_equal(
+            "manifest-rejected:m2-receipt-digest-mismatch")
+        expect(file_write(manifest_path,
+            phase_compatibility_manifest_encode_v1(manifest))).to_equal(true)
+        val newer_receipt = production_receipt(
+            source, sha256_text("new-owner"), sha256_text("new-root"), "newer")
+        expect(reverse_reference_publish_generation_v1(
+            cache_path, newer_receipt)).to_equal(true)
+        expect(driver_import_phase2_frontend_v1()).to_equal(
+            "manifest-rejected:m2-receipt-digest-mismatch")
+        val pointer = cache_path + ".reverse-references/CURRENT"
+        val pointer_target = phase2 + "/pointer-target"
+        expect(file_write(pointer_target,
+            reverse_reference_receipt_digest_v1(newer_receipt))).to_equal(true)
+        expect(file_delete(pointer)).to_equal(true)
+        if rt_package_create_symlink(pointer_target, pointer) == 0:
+            expect(driver_admit_phase2_compatibility_manifest_v1(
+                manifest_path, phase3).reason).to_equal(
+                    "m2-receipt:generation-pointer:manifest-not-regular-no-follow")
+        else:
+            print "SKIP: symlink creation unavailable; receipt mutation negatives remain covered"
+
+        rt_env_set("SIMPLE_FRONTEND_CACHE_DIR", phase2_frontend)
+        expect(driver_import_phase2_frontend_v1()).to_contain("manifest-rejected:")
+        expect(rt_dir_remove_all(root)).to_equal(true)
+
+    it "should reject filesystem aliases symlinks and prefix collisions":
+        step("Resolve existing Phase 2 artifacts and Phase 3 parents through the OS")
+        val root = rt_path_absolute("build/test-artifacts/m3-canonical-paths")
+        val phase2 = root + "/phase2"
+        val phase3 = root + "/phase3"
+        val outside = root + "/phase3-prefix-collision"
+        expect(rt_dir_create(phase2, true)).to_equal(true)
+        expect(rt_dir_create(phase3 + "/objects", true)).to_equal(true)
+        expect(rt_dir_create(outside, true)).to_equal(true)
+        val artifact = phase2 + "/module.o"
+        val outside_artifact = outside + "/outside.o"
+        expect(file_write(artifact, "object")).to_equal(true)
+        expect(file_write(outside_artifact, "outside")).to_equal(true)
+
+        expect(phase_compatibility_canonical_directory_io_v1(phase2).valid).to_equal(true)
+        expect(phase_compatibility_existing_artifact_io_v1(phase2, artifact).valid).to_equal(true)
+        expect(phase_compatibility_existing_artifact_io_v1(
+            phase2, phase2 + "/./module.o").reason).to_equal("artifact-not-canonical")
+        expect(phase_compatibility_existing_artifact_io_v1(
+            phase2, phase2 + "//module.o").reason).to_equal("artifact-not-canonical")
+        expect(phase_compatibility_existing_artifact_io_v1(
+            phase3, outside_artifact).reason).to_equal("artifact-outside-root")
+
+        val artifact_link = phase2 + "/linked.o"
+        val parent_link = phase3 + "/linked-parent"
+        val artifact_link_status = rt_package_create_symlink(outside_artifact, artifact_link)
+        val parent_link_status = rt_package_create_symlink(outside, parent_link)
+        if artifact_link_status == 0 and parent_link_status == 0:
+            expect(phase_compatibility_existing_artifact_io_v1(
+                phase2, artifact_link).reason).to_equal("artifact-not-regular-no-follow")
+            expect(phase_compatibility_destination_io_v1(
+                phase3, parent_link + "/new.o").reason).to_equal(
+                    "destination-parent-not-canonical")
+        else:
+            print "SKIP: symlink creation unavailable; canonical alias negatives remain covered"
+
+        expect(phase_compatibility_destination_io_v1(
+            phase3, phase3 + "/objects/new.o").valid).to_equal(true)
+        expect(file_write(phase3 + "/objects/existing.o", "occupied")).to_equal(true)
+        expect(phase_compatibility_destination_io_v1(
+            phase3, phase3 + "/objects/existing.o").reason).to_equal(
+                "destination-already-exists")
+        expect(phase_compatibility_destination_io_v1(
+            phase3, phase3 + "/objects/./new.o").reason).to_equal(
+                "destination-parent-not-canonical")
+        expect(phase_compatibility_destination_io_v1(
+            phase3, phase3 + "//objects/new.o").reason).to_equal(
+                "destination-parent-not-canonical")
+        expect(phase_compatibility_destination_io_v1(
+            phase3, outside + "/new.o").reason).to_equal(
+                "destination-parent-outside-root")
+        expect(rt_dir_remove_all(root)).to_equal(true)
+
+    it "should reject manifest symlink and canonical aliases through the production reader":
+        step("Read only a canonical no-follow regular manifest leaf")
+        val root = rt_path_absolute("build/test-artifacts/m3-manifest-admission")
+        val _manifest_clean = rt_dir_remove_all(root)
+        expect(rt_dir_create(root, true)).to_equal(true)
+        val manifest = root + "/phase2.manifest"
+        val manifest_alias = root + "/./phase2.manifest"
+        val manifest_link = root + "/phase2-link.manifest"
+        expect(file_write(manifest, "canonical-manifest")).to_equal(true)
+        val admitted = phase_compatibility_read_manifest_io_v1(manifest)
+        expect(admitted.valid).to_equal(true)
+        expect(admitted.content).to_equal("canonical-manifest")
+        expect(phase_compatibility_read_manifest_io_v1(
+            manifest_alias).reason).to_equal("manifest-not-canonical")
+        if rt_package_create_symlink(manifest, manifest_link) == 0:
+            expect(phase_compatibility_read_manifest_io_v1(
+                manifest_link).reason).to_equal("manifest-not-regular-no-follow")
+        else:
+            print "SKIP: symlink creation unavailable; canonical manifest alias remains covered"
+        expect(rt_dir_remove_all(root)).to_equal(true)
+
+    it "should leave no final object when publication is interrupted before commit":
+        step("Stage complete bytes before atomically publishing the final name")
+        val root = rt_path_absolute("build/test-artifacts/m3-atomic-publication")
+        val _publication_clean = rt_dir_remove_all(root)
+        val phase2 = root + "/phase2"
+        val phase3 = root + "/phase3"
+        expect(rt_dir_create(phase2, true)).to_equal(true)
+        expect(rt_dir_create(phase3 + "/objects", true)).to_equal(true)
+        val source = phase2 + "/module.o"
+        val staging = phase3 + "/objects/module.o.interrupted.tmp"
+        val final_path = phase3 + "/objects/module.o"
+        expect(file_write(source, "complete-object-bytes")).to_equal(true)
+        expect(phase_compatibility_stage_artifact_io_v1(
+            phase2, source, phase3, staging)).to_equal("ok")
+        expect(phase_compatibility_existing_artifact_io_v1(
+            phase3, staging).valid).to_equal(true)
+        expect(phase_compatibility_existing_artifact_io_v1(
+            phase3, final_path).reason).to_equal("artifact-unavailable")
+        expect(phase_compatibility_publish_staged_io_v1(
+            phase3, staging, final_path)).to_equal("ok")
+        expect(file_read(final_path)).to_equal("complete-object-bytes")
+
+        val conflicting_source = phase2 + "/conflict.o"
+        val conflicting_staging = phase3 + "/objects/conflict.o.tmp"
+        expect(file_write(conflicting_source, "conflicting-object-bytes")).to_equal(true)
+        expect(phase_compatibility_stage_artifact_io_v1(
+            phase2, conflicting_source, phase3,
+            conflicting_staging)).to_equal("ok")
+        expect(phase_compatibility_publish_staged_io_v1(
+            phase3, conflicting_staging, final_path)).to_equal(
+                "destination-destination-already-exists")
+        expect(file_read(final_path)).to_equal("complete-object-bytes")
+        expect(rt_dir_remove_all(root)).to_equal(true)
+
+    it "should compare normalized clean and reused output artifacts":
+        step("Read clean and reused receipts through the production comparator")
+        val root = "build/test-artifacts/m3-phase-output-equivalence"
+        expect(dir_create_all(root)).to_equal(true)
+        val clean_path = root + "/clean.receipt"
+        val reused_path = root + "/reused.receipt"
+        expect(file_write(clean_path,
+            "artifact=" + DIGEST_A + "\nbuild_elapsed_us=10\npeak_rss_bytes=20\nresult=pass\n")).to_equal(true)
+        expect(file_write(reused_path,
+            "artifact=" + DIGEST_A + "\r\nbuild_elapsed_us=90\r\npeak_rss_bytes=80\r\nresult=pass\r\n")).to_equal(true)
+        val comparison = phase_compatibility_compare_outputs_v1(
+            file_read(clean_path), file_read(reused_path))
+        expect(comparison.equal).to_equal(true)
+        expect(comparison.clean_digest).to_equal(comparison.reused_digest)

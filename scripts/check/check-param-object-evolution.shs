@@ -1,0 +1,72 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+simple=${SIMPLE_BIN:-$root/bin/simple}
+checker=$root/scripts/check/check_param_object_evolution.spl
+tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/simple-param-evolution.XXXXXX")
+trap 'rm -rf "$tmp_dir"' EXIT HUP INT TERM
+
+run_typed_checker() {
+    SIMPLE_LIB="$root/src" SIMPLE_NO_STUB_FALLBACK=1 \
+        "$simple" run "$checker" --mode=interpreter --manifest="$1"
+}
+
+if [ "${1:-}" = "--selftest" ]; then
+    cat >"$tmp_dir/base.spl" <<'EOF'
+struct DemoV1:
+    hdr: ParamHeader
+    enabled: bool
+    ext: [ParamExt]
+EOF
+    cat >"$tmp_dir/clean.spl" <<'EOF'
+struct DemoV2:
+    hdr: ParamHeader
+    enabled: bool
+    added: text
+    ext: [ParamExt]
+EOF
+    cat >"$tmp_dir/mutant.spl" <<'EOF'
+# The semantic checker must ignore this decoy:
+# struct DemoV1: hdr: ParamHeader
+struct DemoV2:
+    enabled: bool
+    hdr: ParamHeader
+    ext: [ParamExt]
+EOF
+    printf 'fixture.spl|%s|%s\n' "$tmp_dir/base.spl" "$tmp_dir/clean.spl" >"$tmp_dir/clean.manifest"
+    printf 'fixture.spl|%s|%s\n' "$tmp_dir/base.spl" "$tmp_dir/mutant.spl" >"$tmp_dir/mutant.manifest"
+    run_typed_checker "$tmp_dir/clean.manifest" >/dev/null
+    if run_typed_checker "$tmp_dir/mutant.manifest" >"$tmp_dir/mutant.out" 2>&1; then
+        echo 'FAIL — mutation-red reordered ordinal was accepted'
+        exit 1
+    fi
+    grep -Fq 'FAIL — PARAM-002' "$tmp_dir/mutant.out"
+    echo 'PASS — typed AST clean append accepted; mutation-red reorder rejected'
+    exit 0
+fi
+
+resolve_ref() {
+    resolved=$(jj log --no-graph -r "$1" -T 'commit_id ++ "\n"' 2>/dev/null | head -n 1)
+    if [ -n "$resolved" ]; then
+        printf '%s\n' "$resolved"
+    else
+        git rev-parse "$1^{commit}"
+    fi
+}
+
+base_commit=$(resolve_ref "${1:-main@origin}")
+tip_commit=$(resolve_ref "${2:-@}")
+: >"$tmp_dir/pairs.manifest"
+git diff --name-only "$base_commit" "$tip_commit" -- '*.spl' |
+while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    encoded=$(printf '%s' "$path" | tr '/ ' '__')
+    base_file="$tmp_dir/base-$encoded"
+    tip_file="$tmp_dir/tip-$encoded"
+    git show "$base_commit:$path" >"$base_file" 2>/dev/null || : >"$base_file"
+    git show "$tip_commit:$path" >"$tip_file" 2>/dev/null || : >"$tip_file"
+    printf '%s|%s|%s\n' "$path" "$base_file" "$tip_file"
+done >"$tmp_dir/pairs.manifest"
+
+run_typed_checker "$tmp_dir/pairs.manifest"

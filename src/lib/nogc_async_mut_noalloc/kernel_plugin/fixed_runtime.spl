@@ -1,0 +1,432 @@
+use common.kernel_plugin.contracts.{
+    KpfMemoryContractV1,
+    KPF_FLAG_FALSE,
+    KPF_MEMORY_ARENA_ONLY,
+    KPF_MEMORY_STATIC_NOALLOC,
+    kpf_validate_memory_contract_v1,
+}
+use std.nogc_async_mut_noalloc.kernel_plugin.fixed_arena.{
+    KpfFixedArena,
+    KpfFixedArenaStatus,
+}
+use std.nogc_async_mut_noalloc.kernel_plugin.allocation_probe.{
+    KpfAllocationProbe,
+    KpfRuntimeAllocationStatus,
+}
+
+pub enum KpfNoallocPhase:
+    Configuring
+    Active
+    Quiescing
+    Retired
+
+pub enum KpfNoallocStatus:
+    Ok
+    InvalidConfiguration
+    InvalidPhase
+    CapacityExceeded
+    WouldBlock
+    StaleHandle
+    SessionBusy
+
+pub struct KpfSessionHandle:
+    slot: i32
+    epoch: u64
+
+pub struct KpfRequestHandle:
+    slot: i32
+    epoch: u64
+
+pub struct KpfSessionResult:
+    status: KpfNoallocStatus
+    handle: KpfSessionHandle
+
+pub struct KpfRequestResult:
+    status: KpfNoallocStatus
+    handle: KpfRequestHandle
+
+pub struct KpfFixedRuntimeConfig:
+    memory: KpfMemoryContractV1
+    arena_capacity_bytes: u64
+    request_capacity: i32
+
+pub struct KpfFixedRuntimeWorkloadReceipt:
+    iterations: i32
+    opened_sessions: i32
+    completed_requests: i32
+    cancelled_requests: i32
+    drained_requests: i32
+    session_capacity_exhaustions: i32
+    request_capacity_exhaustions: i32
+    session_backpressure_events: i32
+    request_table_high_water: i32
+    session_table_high_water: i32
+    arena_high_water_bytes: u64
+    arena_live_bytes_after_drain: u64
+    leak_bytes_after_drain: u64
+    fragmentation_bytes: u64
+    post_activation_allocations: u64
+    allocation_status: KpfRuntimeAllocationStatus
+
+class KpfFixedSessionSlot:
+    occupied: bool
+    epoch: u64
+    inflight: i32
+
+class KpfFixedRequestSlot:
+    occupied: bool
+    epoch: u64
+    session_slot: i32
+
+pub class KpfFixedRuntime:
+    config: KpfFixedRuntimeConfig
+    phase_value: KpfNoallocPhase
+    arena: KpfFixedArena
+    sessions: [KpfFixedSessionSlot]
+    requests: [KpfFixedRequestSlot]
+    open_session_count_value: i32
+    inflight_request_count_value: i32
+    allocation_probe: KpfAllocationProbe
+    session_high_water_count_value: i32
+    request_high_water_count_value: i32
+    session_capacity_exhaustion_count_value: i32
+    request_capacity_exhaustion_count_value: i32
+    session_backpressure_count_value: i32
+    cancellation_count_value: i32
+    drain_count_value: i32
+    activation_used_bytes: u64
+
+    pub static fn create(config: KpfFixedRuntimeConfig) -> Result<KpfFixedRuntime, KpfNoallocStatus>:
+        if not kpf_validate_memory_contract_v1(config.memory).accepted():
+            return Err(KpfNoallocStatus.InvalidConfiguration)
+        if (config.memory.memory_class != KPF_MEMORY_STATIC_NOALLOC and
+            config.memory.memory_class != KPF_MEMORY_ARENA_ONLY):
+            return Err(KpfNoallocStatus.InvalidConfiguration)
+        if config.memory.may_allocate_after_activation != KPF_FLAG_FALSE:
+            return Err(KpfNoallocStatus.InvalidConfiguration)
+        if config.arena_capacity_bytes == 0u64 or config.request_capacity <= 0:
+            return Err(KpfNoallocStatus.InvalidConfiguration)
+
+        var sessions: [KpfFixedSessionSlot] = []
+        var session_index = 0
+        while session_index < config.memory.maximum_sessions as i32:
+            sessions.push(KpfFixedSessionSlot(occupied: false, epoch: 1u64, inflight: 0))
+            session_index = session_index + 1
+
+        var requests: [KpfFixedRequestSlot] = []
+        var request_index = 0
+        while request_index < config.request_capacity:
+            requests.push(KpfFixedRequestSlot(occupied: false, epoch: 1u64, session_slot: -1))
+            request_index = request_index + 1
+
+        var arena = KpfFixedArena.create(config.arena_capacity_bytes)
+        if config.memory.initialization_bytes > 0u64:
+            if arena.reserve_configuration(config.memory.initialization_bytes) != KpfFixedArenaStatus.Ok:
+                return Err(KpfNoallocStatus.CapacityExceeded)
+        if config.memory.persistent_bytes_per_instance > 0u64:
+            if arena.reserve_configuration(config.memory.persistent_bytes_per_instance) != KpfFixedArenaStatus.Ok:
+                return Err(KpfNoallocStatus.CapacityExceeded)
+
+        Ok(KpfFixedRuntime(
+            config: config,
+            phase_value: KpfNoallocPhase.Configuring,
+            arena: arena,
+            sessions: sessions,
+            requests: requests,
+            open_session_count_value: 0,
+            inflight_request_count_value: 0,
+            allocation_probe: KpfAllocationProbe.create(),
+            session_high_water_count_value: 0,
+            request_high_water_count_value: 0,
+            session_capacity_exhaustion_count_value: 0,
+            request_capacity_exhaustion_count_value: 0,
+            session_backpressure_count_value: 0,
+            cancellation_count_value: 0,
+            drain_count_value: 0,
+            activation_used_bytes: 0u64,
+        ))
+
+    pub me activate() -> KpfNoallocStatus:
+        if self.phase_value != KpfNoallocPhase.Configuring:
+            return KpfNoallocStatus.InvalidPhase
+        self.arena.activate()
+        self.activation_used_bytes = self.arena.used()
+        self.allocation_probe.activate()
+        self.phase_value = KpfNoallocPhase.Active
+        KpfNoallocStatus.Ok
+
+    pub me begin_quiesce() -> KpfNoallocStatus:
+        if self.phase_value != KpfNoallocPhase.Active:
+            return KpfNoallocStatus.InvalidPhase
+        self.phase_value = KpfNoallocPhase.Quiescing
+        KpfNoallocStatus.Ok
+
+    pub me retire() -> KpfNoallocStatus:
+        if self.phase_value != KpfNoallocPhase.Quiescing:
+            return KpfNoallocStatus.InvalidPhase
+        if self.open_session_count_value != 0 or self.inflight_request_count_value != 0:
+            return KpfNoallocStatus.WouldBlock
+        self.phase_value = KpfNoallocPhase.Retired
+        KpfNoallocStatus.Ok
+
+    pub me open_session() -> KpfSessionResult:
+        if self.phase_value != KpfNoallocPhase.Active:
+            return session_failure(KpfNoallocStatus.InvalidPhase)
+        if self.open_session_count_value >= self.sessions.len:
+            self.session_capacity_exhaustion_count_value = self.session_capacity_exhaustion_count_value + 1
+            return session_failure(KpfNoallocStatus.CapacityExceeded)
+        val session_bytes = self.config.memory.bytes_per_session
+        if session_bytes > 0u64:
+            if self.arena.reserve_active(session_bytes) != KpfFixedArenaStatus.Ok:
+                self.session_capacity_exhaustion_count_value = self.session_capacity_exhaustion_count_value + 1
+                return session_failure(KpfNoallocStatus.CapacityExceeded)
+        var index = 0
+        while index < self.sessions.len:
+            if not self.sessions[index].occupied:
+                self.sessions[index].occupied = true
+                self.sessions[index].inflight = 0
+                self.open_session_count_value = self.open_session_count_value + 1
+                if self.open_session_count_value > self.session_high_water_count_value:
+                    self.session_high_water_count_value = self.open_session_count_value
+                return KpfSessionResult(
+                    status: KpfNoallocStatus.Ok,
+                    handle: KpfSessionHandle(slot: index, epoch: self.sessions[index].epoch),
+                )
+            index = index + 1
+        if session_bytes > 0u64:
+            self.arena.release(session_bytes)
+        self.session_capacity_exhaustion_count_value = self.session_capacity_exhaustion_count_value + 1
+        session_failure(KpfNoallocStatus.CapacityExceeded)
+
+    pub me close_session(handle: KpfSessionHandle) -> KpfNoallocStatus:
+        if self.phase_value != KpfNoallocPhase.Active and self.phase_value != KpfNoallocPhase.Quiescing:
+            return KpfNoallocStatus.InvalidPhase
+        if not self.session_valid(handle):
+            return KpfNoallocStatus.StaleHandle
+        if self.sessions[handle.slot].inflight != 0:
+            return KpfNoallocStatus.SessionBusy
+        self.sessions[handle.slot].occupied = false
+        self.sessions[handle.slot].epoch = self.sessions[handle.slot].epoch + 1u64
+        self.open_session_count_value = self.open_session_count_value - 1
+        val session_bytes = self.config.memory.bytes_per_session
+        if session_bytes > 0u64:
+            self.arena.release(session_bytes)
+        KpfNoallocStatus.Ok
+
+    pub me submit(handle: KpfSessionHandle) -> KpfRequestResult:
+        if self.phase_value != KpfNoallocPhase.Active:
+            return request_failure(KpfNoallocStatus.InvalidPhase)
+        if not self.session_valid(handle):
+            return request_failure(KpfNoallocStatus.StaleHandle)
+        if self.sessions[handle.slot].inflight >= self.config.memory.maximum_inflight_per_session as i32:
+            self.session_backpressure_count_value = self.session_backpressure_count_value + 1
+            return request_failure(KpfNoallocStatus.WouldBlock)
+        if self.inflight_request_count_value >= self.requests.len:
+            self.request_capacity_exhaustion_count_value = self.request_capacity_exhaustion_count_value + 1
+            return request_failure(KpfNoallocStatus.CapacityExceeded)
+        val request_bytes = self.config.memory.bytes_per_inflight_request
+        if request_bytes > 0u64:
+            if self.arena.reserve_active(request_bytes) != KpfFixedArenaStatus.Ok:
+                self.request_capacity_exhaustion_count_value = self.request_capacity_exhaustion_count_value + 1
+                return request_failure(KpfNoallocStatus.CapacityExceeded)
+        var index = 0
+        while index < self.requests.len:
+            if not self.requests[index].occupied:
+                self.requests[index].occupied = true
+                self.requests[index].session_slot = handle.slot
+                self.sessions[handle.slot].inflight = self.sessions[handle.slot].inflight + 1
+                self.inflight_request_count_value = self.inflight_request_count_value + 1
+                if self.inflight_request_count_value > self.request_high_water_count_value:
+                    self.request_high_water_count_value = self.inflight_request_count_value
+                return KpfRequestResult(
+                    status: KpfNoallocStatus.Ok,
+                    handle: KpfRequestHandle(slot: index, epoch: self.requests[index].epoch),
+                )
+            index = index + 1
+        if request_bytes > 0u64:
+            self.arena.release(request_bytes)
+        self.request_capacity_exhaustion_count_value = self.request_capacity_exhaustion_count_value + 1
+        request_failure(KpfNoallocStatus.CapacityExceeded)
+
+    pub me complete(handle: KpfRequestHandle) -> KpfNoallocStatus:
+        if self.phase_value != KpfNoallocPhase.Active and self.phase_value != KpfNoallocPhase.Quiescing:
+            return KpfNoallocStatus.InvalidPhase
+        if not self.request_valid(handle):
+            return KpfNoallocStatus.StaleHandle
+        self.finish_request(handle, false)
+
+    pub me cancel(handle: KpfRequestHandle) -> KpfNoallocStatus:
+        if self.phase_value != KpfNoallocPhase.Active and self.phase_value != KpfNoallocPhase.Quiescing:
+            return KpfNoallocStatus.InvalidPhase
+        if not self.request_valid(handle):
+            return KpfNoallocStatus.StaleHandle
+        self.finish_request(handle, true)
+
+    pub me drain_session(handle: KpfSessionHandle, maximum: i32) -> i32:
+        if maximum <= 0:
+            return 0
+        if self.phase_value != KpfNoallocPhase.Active and self.phase_value != KpfNoallocPhase.Quiescing:
+            return 0
+        if not self.session_valid(handle):
+            return 0
+        var drained = 0
+        var index = 0
+        while index < self.requests.len and drained < maximum:
+            if self.requests[index].occupied and self.requests[index].session_slot == handle.slot:
+                val status = self.cancel(KpfRequestHandle(slot: index, epoch: self.requests[index].epoch))
+                if status == KpfNoallocStatus.Ok:
+                    drained = drained + 1
+            index = index + 1
+        if drained > 0:
+            self.drain_count_value = self.drain_count_value + drained
+        drained
+
+    pub fn phase() -> KpfNoallocPhase:
+        self.phase_value
+
+    pub fn open_session_count() -> i32:
+        self.open_session_count_value
+
+    pub fn inflight_request_count() -> i32:
+        self.inflight_request_count_value
+
+    pub fn arena_used_bytes() -> u64:
+        self.arena.used()
+
+    pub fn arena_high_water_bytes() -> u64:
+        self.arena.high_water()
+
+    pub fn session_table_high_water() -> i32:
+        self.session_high_water_count_value
+
+    pub fn request_table_high_water() -> i32:
+        self.request_high_water_count_value
+
+    pub fn session_capacity_exhaustion_count() -> i32:
+        self.session_capacity_exhaustion_count_value
+
+    pub fn request_capacity_exhaustion_count() -> i32:
+        self.request_capacity_exhaustion_count_value
+
+    pub fn session_backpressure_count() -> i32:
+        self.session_backpressure_count_value
+
+    pub fn cancellation_count() -> i32:
+        self.cancellation_count_value
+
+    pub fn drain_count() -> i32:
+        self.drain_count_value
+
+    pub fn activation_used_bytes() -> u64:
+        self.activation_used_bytes
+
+    pub fn leak_bytes() -> u64:
+        if self.arena.used() <= self.activation_used_bytes:
+            return 0u64
+        self.arena.used() - self.activation_used_bytes
+
+    pub fn fragmentation_bytes() -> u64:
+        0u64
+
+    pub fn post_activation_allocation_count() -> u64:
+        self.allocation_probe.allocation_count()
+
+    pub fn allocation_proof_status() -> KpfRuntimeAllocationStatus:
+        self.allocation_probe.status()
+
+    pub me run_representative_workload(iterations: i32, requests_per_session: i32) -> KpfFixedRuntimeWorkloadReceipt:
+        var opened_sessions = 0
+        var completed_requests = 0
+        var cancelled_requests = 0
+        var drained_requests = 0
+        var loop_index = 0
+        while loop_index < iterations:
+            val session = self.open_session()
+            if session.status == KpfNoallocStatus.Ok:
+                opened_sessions = opened_sessions + 1
+                var request_index = 0
+                while request_index < requests_per_session:
+                    val request = self.submit(session.handle)
+                    if request.status == KpfNoallocStatus.Ok:
+                        if request_index + 1 < requests_per_session:
+                            if self.complete(request.handle) == KpfNoallocStatus.Ok:
+                                completed_requests = completed_requests + 1
+                        else:
+                            if self.cancel(request.handle) == KpfNoallocStatus.Ok:
+                                cancelled_requests = cancelled_requests + 1
+                    request_index = request_index + 1
+                val refill_one = self.submit(session.handle)
+                if refill_one.status == KpfNoallocStatus.Ok:
+                    val refill_two = self.submit(session.handle)
+                    val duplicate = self.submit(session.handle)
+                    if refill_two.status == KpfNoallocStatus.Ok and duplicate.status == KpfNoallocStatus.WouldBlock:
+                        val overflow_session = self.open_session()
+                        if overflow_session.status == KpfNoallocStatus.Ok:
+                            val overflow_limit = self.open_session()
+                            if overflow_limit.status == KpfNoallocStatus.Ok:
+                                self.close_session(overflow_limit.handle)
+                        val drained = self.drain_session(session.handle, requests_per_session)
+                        drained_requests = drained_requests + drained
+                        if overflow_session.status == KpfNoallocStatus.Ok:
+                            self.close_session(overflow_session.handle)
+                        self.close_session(session.handle)
+                    else:
+                        if refill_two.status == KpfNoallocStatus.Ok:
+                            self.complete(refill_two.handle)
+                        self.complete(refill_one.handle)
+                        self.close_session(session.handle)
+                else:
+                    self.close_session(session.handle)
+            loop_index = loop_index + 1
+        KpfFixedRuntimeWorkloadReceipt(
+            iterations: iterations,
+            opened_sessions: opened_sessions,
+            completed_requests: completed_requests,
+            cancelled_requests: cancelled_requests,
+            drained_requests: drained_requests,
+            session_capacity_exhaustions: self.session_capacity_exhaustion_count_value,
+            request_capacity_exhaustions: self.request_capacity_exhaustion_count_value,
+            session_backpressure_events: self.session_backpressure_count_value,
+            request_table_high_water: self.request_high_water_count_value,
+            session_table_high_water: self.session_high_water_count_value,
+            arena_high_water_bytes: self.arena.high_water(),
+            arena_live_bytes_after_drain: self.arena.used(),
+            leak_bytes_after_drain: self.leak_bytes(),
+            fragmentation_bytes: self.fragmentation_bytes(),
+            post_activation_allocations: self.post_activation_allocation_count(),
+            allocation_status: self.allocation_proof_status(),
+        )
+
+    fn session_valid(handle: KpfSessionHandle) -> bool:
+        handle.slot >= 0 and handle.slot < self.sessions.len and
+            self.sessions[handle.slot].occupied and self.sessions[handle.slot].epoch == handle.epoch
+
+    fn request_valid(handle: KpfRequestHandle) -> bool:
+        handle.slot >= 0 and handle.slot < self.requests.len and
+            self.requests[handle.slot].occupied and self.requests[handle.slot].epoch == handle.epoch
+
+    me finish_request(handle: KpfRequestHandle, cancelled: bool) -> KpfNoallocStatus:
+        val session_slot = self.requests[handle.slot].session_slot
+        self.requests[handle.slot].occupied = false
+        self.requests[handle.slot].epoch = self.requests[handle.slot].epoch + 1u64
+        self.requests[handle.slot].session_slot = -1
+        self.sessions[session_slot].inflight = self.sessions[session_slot].inflight - 1
+        self.inflight_request_count_value = self.inflight_request_count_value - 1
+        if cancelled:
+            self.cancellation_count_value = self.cancellation_count_value + 1
+        val request_bytes = self.config.memory.bytes_per_inflight_request
+        if request_bytes > 0u64:
+            self.arena.release(request_bytes)
+        KpfNoallocStatus.Ok
+
+fn invalid_session_handle() -> KpfSessionHandle:
+    KpfSessionHandle(slot: -1, epoch: 0u64)
+
+fn invalid_request_handle() -> KpfRequestHandle:
+    KpfRequestHandle(slot: -1, epoch: 0u64)
+
+fn session_failure(status: KpfNoallocStatus) -> KpfSessionResult:
+    KpfSessionResult(status: status, handle: invalid_session_handle())
+
+fn request_failure(status: KpfNoallocStatus) -> KpfRequestResult:
+    KpfRequestResult(status: status, handle: invalid_request_handle())

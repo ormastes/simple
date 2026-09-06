@@ -1,0 +1,166 @@
+use std.common.kernel_plugin.ids.{KpfDigest256}
+use std.common.lint_kernel.output.{NormalizedLintOutputV1}
+use std.tooling_kernel.ToolingDocumentSnapshotV1
+use app.svim.core.{BufferId, DiagnosticItem, SvimSession}
+use app.toolingd.*
+use app.toolingd.protocol_adapters.*
+
+pub enum SvimToolingModeV1:
+    Authoritative
+    DegradedSyntaxOnly
+    Unavailable
+
+pub struct SvimToolingOpenResultV1:
+    status: ToolingEdgeStatusV1
+    document: ToolingDocumentSessionHandleV1
+
+pub struct SvimToolingAnalysisResultV1:
+    status: ToolingEdgeStatusV1
+    ticket: ToolingAnalysisTicketV1
+    reused: bool
+
+pub class SvimToolingdAdapterV1:
+    edge: ToolingLspEdgeV1
+    connection: ToolingConnectionHandleV1
+    mode: SvimToolingModeV1
+    capacity: i64
+    active: [bool]
+    buffer_ids: [i64]
+    documents: [ToolingDocumentSessionHandleV1]
+    revisions: [u64]
+    digests: [KpfDigest256]
+    tickets: [ToolingAnalysisTicketV1]
+
+impl SvimToolingdAdapterV1:
+    pub static fn create(document_capacity: i64, request_capacity: i64, diagnostic_capacity: i64) -> SvimToolingdAdapterV1:
+        val edge = ToolingLspEdgeV1.create(1, document_capacity, request_capacity, diagnostic_capacity)
+        val initialized = edge.initialize(tooling_protocol_version_v1())
+        var active: [bool] = []
+        var buffer_ids: [i64] = []
+        var documents: [ToolingDocumentSessionHandleV1] = []
+        var revisions: [u64] = []
+        var digests: [KpfDigest256] = []
+        var tickets: [ToolingAnalysisTicketV1] = []
+        for _ in 0..document_capacity:
+            active.push(false)
+            buffer_ids.push(-1)
+            documents.push(tooling_invalid_document_session_v1())
+            revisions.push(0)
+            digests.push(KpfDigest256(w0: 0, w1: 0, w2: 0, w3: 0))
+            tickets.push(tooling_invalid_analysis_ticket_v1())
+        val mode = if initialized.status == ToolingEdgeStatusV1.Ok: SvimToolingModeV1.Authoritative else: SvimToolingModeV1.Unavailable
+        SvimToolingdAdapterV1(edge: edge, connection: initialized.connection, mode: mode, capacity: document_capacity, active: active, buffer_ids: buffer_ids, documents: documents, revisions: revisions, digests: digests, tickets: tickets)
+
+    fn mode_label() -> text:
+        match self.mode:
+            case SvimToolingModeV1.Authoritative: "authoritative"
+            case SvimToolingModeV1.DegradedSyntaxOnly: "degraded: syntax-only; semantic status unavailable"
+            case SvimToolingModeV1.Unavailable: "unavailable: no trustworthy analysis"
+
+    me enter_degraded_syntax_only() -> text:
+        self.mode = SvimToolingModeV1.DegradedSyntaxOnly
+        self.mode_label()
+
+    fn slot_for(buffer_id: BufferId) -> i64:
+        for index in 0..self.capacity:
+            if self.active[index] and self.buffer_ids[index] == buffer_id.value:
+                return index
+        -1
+
+    me open_snapshot(buffer_id: BufferId, snapshot: ToolingDocumentSnapshotV1, provider_generation: u64) -> SvimToolingOpenResultV1:
+        if self.mode != SvimToolingModeV1.Authoritative:
+            return SvimToolingOpenResultV1(status: ToolingEdgeStatusV1.Rejected, document: tooling_invalid_document_session_v1())
+        var slot = -1
+        for index in 0..self.capacity:
+            if not self.active[index] and slot < 0:
+                slot = index
+        if slot < 0:
+            return SvimToolingOpenResultV1(status: ToolingEdgeStatusV1.CapacityExceeded, document: tooling_invalid_document_session_v1())
+        val opened = self.edge.open_document(self.connection, snapshot, provider_generation)
+        val status = tooling_edge_status(opened.status)
+        if status == ToolingEdgeStatusV1.Ok:
+            self.active[slot] = true
+            self.buffer_ids[slot] = buffer_id.value
+            self.documents[slot] = opened.document
+            self.revisions[slot] = snapshot.revision
+            self.digests[slot] = snapshot.content_digest
+            self.tickets[slot] = tooling_invalid_analysis_ticket_v1()
+        SvimToolingOpenResultV1(status: status, document: opened.document)
+
+    me update_snapshot(buffer_id: BufferId, snapshot: ToolingDocumentSnapshotV1) -> ToolingEdgeStatusV1:
+        val slot = self.slot_for(buffer_id)
+        if slot < 0:
+            return ToolingEdgeStatusV1.Rejected
+        val ticket = self.tickets[slot]
+        if ticket.slot >= 0:
+            self.edge.cancel(ticket)
+            self.tickets[slot] = tooling_invalid_analysis_ticket_v1()
+        val status = tooling_edge_status(self.edge.daemon.update_document(self.documents[slot], snapshot))
+        if status == ToolingEdgeStatusV1.Ok:
+            self.revisions[slot] = snapshot.revision
+            self.digests[slot] = snapshot.content_digest
+        status
+
+    me begin_analysis(buffer_id: BufferId) -> SvimToolingAnalysisResultV1:
+        val slot = self.slot_for(buffer_id)
+        if slot < 0 or self.mode != SvimToolingModeV1.Authoritative:
+            return SvimToolingAnalysisResultV1(status: ToolingEdgeStatusV1.Rejected, ticket: tooling_invalid_analysis_ticket_v1(), reused: false)
+        val previous = self.tickets[slot]
+        if previous.slot >= 0:
+            self.edge.cancel(previous)
+        val begun = self.edge.begin_diagnostics(self.documents[slot], self.revisions[slot], self.digests[slot])
+        if begun.status == ToolingEdgeStatusV1.Ok:
+            self.tickets[slot] = begun.ticket
+        SvimToolingAnalysisResultV1(status: begun.status, ticket: begun.ticket, reused: begun.reused)
+
+    me publish_diagnostics(session: SvimSession, buffer_id: BufferId, output: NormalizedLintOutputV1) -> ToolingLspPublishResultV1:
+        val slot = self.slot_for(buffer_id)
+        if slot < 0:
+            return ToolingLspPublishResultV1(status: ToolingEdgeStatusV1.Rejected, canonical_result_id: "", response_json: "")
+        val ticket = self.tickets[slot]
+        val published = self.edge.publish(ticket, output)
+        if published.status != ToolingEdgeStatusV1.Ok:
+            return published
+        var diagnostics: [DiagnosticItem] = []
+        for item in output.diagnostics:
+            diagnostics.push(DiagnosticItem(row: item.location.start_line.to_i64(), col: item.location.start_column.to_i64(), severity: _svim_tooling_severity(item.diagnostic.severity), message: item.message))
+        session.replace_diagnostics(buffer_id, diagnostics)
+        self.tickets[slot] = tooling_invalid_analysis_ticket_v1()
+        published
+
+    fn discover_tests(tests: [ToolingTestDescriptorV1]) -> ToolingTestDiscoveryResultV1:
+        tooling_test_discover_v1(tests)
+
+    me run_test(test: ToolingTestDescriptorV1) -> ToolingTestRunResultV1:
+        tooling_test_run_v1(self.edge, test)
+
+    me close(buffer_id: BufferId) -> ToolingEdgeStatusV1:
+        val slot = self.slot_for(buffer_id)
+        if slot < 0:
+            return ToolingEdgeStatusV1.Rejected
+        val ticket = self.tickets[slot]
+        if ticket.slot >= 0:
+            self.edge.cancel(ticket)
+        val status = self.edge.close_document(self.documents[slot])
+        if status == ToolingEdgeStatusV1.Ok:
+            self.active[slot] = false
+            self.tickets[slot] = tooling_invalid_analysis_ticket_v1()
+        status
+
+    me disconnect() -> ToolingEdgeStatusV1:
+        val status = self.edge.disconnect(self.connection)
+        if status == ToolingEdgeStatusV1.Ok:
+            for index in 0..self.capacity:
+                self.active[index] = false
+                self.tickets[index] = tooling_invalid_analysis_ticket_v1()
+            self.mode = SvimToolingModeV1.Unavailable
+        status
+
+fn _svim_tooling_severity(severity: u32) -> text:
+    if severity >= 3:
+        return "error"
+    if severity == 2:
+        return "warn"
+    if severity == 1:
+        return "info"
+    "hint"

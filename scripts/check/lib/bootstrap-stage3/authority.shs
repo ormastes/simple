@@ -22,6 +22,14 @@ bootstrap_stage3_hash_file() {
     fi
 }
 
+bootstrap_stage3_hash_stdin() {
+    if command -v sha256sum >/dev/null 2>&1; then sha256sum | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then shasum -a 256 | awk '{print $1}'
+    elif command -v sha256 >/dev/null 2>&1; then sha256 -q
+    else return 1
+    fi
+}
+
 bootstrap_stage3_hash_stream() {
     if command -v sha256sum >/dev/null 2>&1; then
         sha256sum | awk '{print $1}'
@@ -75,6 +83,36 @@ bootstrap_stage3_args_sha256() {
     done | bootstrap_stage3_hash_stream
 }
 
+bootstrap_stage3_stage2_canonical_env_names() {
+    [ "$#" -eq 1 ] || return 1
+    printf '%s' 'RUST_LOG LIBRARY_PATH SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256 SIMPLE_BOOTSTRAP SIMPLE_ABI_POLICY SIMPLE_PLUGIN_MANIFEST_POLICY SIMPLE_KERNEL_K1_POLICY SIMPLE_COVERAGE_CUTOVER_STATE SIMPLE_K1_COMPOSITION_SHA256_BEFORE SIMPLE_NO_DEPRECATED_WARNINGS SIMPLE_NATIVE_BUILD_RUST SIMPLE_NO_STUB_FALLBACK SIMPLE_BUILD_PROGRESS_EVENTS SIMPLE_FRONTEND_CACHE SIMPLE_FRONTEND_CACHE_DIR'
+    case "$1" in
+        *windows-gnu*|*windows-msvc*)
+            printf ' %s' 'SIMPLE_WINDOWS_ABI SIMPLE_LINKER_FLAVOR'
+            ;;
+    esac
+    printf ' %s\n' 'SIMPLE_PHASE2_COMPATIBILITY_MANIFEST_WRITE SIMPLE_PHASE3_COMPATIBILITY_CACHE_ROOT SIMPLE_BINARY'
+}
+
+bootstrap_stage3_env_assignment_names() {
+    [ "$#" -gt 0 ] || return 1
+    bootstrap_stage3_env_names=
+    bootstrap_stage3_env_seen=' '
+    for bootstrap_stage3_env_assignment in "$@"; do
+        case "$bootstrap_stage3_env_assignment" in
+            [A-Z_][A-Z0-9_]*=*) ;;
+            *) return 1 ;;
+        esac
+        bootstrap_stage3_env_name=${bootstrap_stage3_env_assignment%%=*}
+        case "$bootstrap_stage3_env_seen" in
+            *" $bootstrap_stage3_env_name "*) return 1 ;;
+        esac
+        bootstrap_stage3_env_seen="${bootstrap_stage3_env_seen}${bootstrap_stage3_env_name} "
+        bootstrap_stage3_env_names="${bootstrap_stage3_env_names}${bootstrap_stage3_env_names:+ }${bootstrap_stage3_env_name}"
+    done
+    printf '%s\n' "$bootstrap_stage3_env_names"
+}
+
 # Emit the Stage 3 diagnostic pass-through environment, one NAME=1 assignment
 # per line, in a fixed lexical order.
 #
@@ -121,6 +159,7 @@ bootstrap_stage3_diagnostic_env() {
         SIMPLE_HIR_EXPORT_ORIGIN_TRACE \
         SIMPLE_HIR_PAYLOAD_LOOKUP_TRACE \
         SIMPLE_HIR_SIBLING_TRACE \
+        SIMPLE_MIR_TAG_PROBE \
         SIMPLE_MIRB_TRACE \
         SIMPLE_MIR_DEFAULT_PAD_TRACE \
         SIMPLE_MIR_FIELD_TRACE \
@@ -1559,7 +1598,12 @@ bootstrap_stage3_prepare_seed_generation() {
 "$bootstrap_stage3_generation_root/$bootstrap_stage3_generation_inputs-$bootstrap_stage3_generation_hash"
     BOOTSTRAP_STAGE3_PREPARED_STAGING=$bootstrap_stage3_generation_staging
     BOOTSTRAP_STAGE3_PREPARED_HASH=$bootstrap_stage3_generation_hash
-    chmod 500 "$bootstrap_stage3_generation_staging" || return 1
+    # Keep only the staging root owner-writable until publication.  Its files
+    # and descendant directories are already frozen by the copy/stamp owners.
+    # macOS can reject rename(2) of a pre-frozen directory in hosted-runner
+    # workspaces; immutability begins after the same-parent atomic rename and
+    # before any marker can admit the generation.
+    chmod 700 "$bootstrap_stage3_generation_staging" || return 1
 }
 
 bootstrap_stage3_publish_seed_generation() {
@@ -1607,6 +1651,7 @@ bootstrap_stage3_publish_seed_generation() {
         "$bootstrap_stage3_publish_inputs" ] || return 1
     bootstrap_stage3_publish_stamp_hash=$(bootstrap_stage3_hash_file \
         "$bootstrap_stage3_publish_stamp") || return 1
+    bootstrap_stage3_publish_mode=new
     if [ -d "$bootstrap_stage3_publish_final" ]; then
         bootstrap_stage3_publish_existing=\
 "$bootstrap_stage3_publish_root/.existing.$$"
@@ -1617,39 +1662,21 @@ bootstrap_stage3_publish_seed_generation() {
         rm -f "$bootstrap_stage3_publish_existing"
         chmod -R u+w "$bootstrap_stage3_publish_staging" 2>/dev/null || true
         rm -rf "$bootstrap_stage3_publish_staging"
-    else
-        mv "$bootstrap_stage3_publish_staging" \
-            "$bootstrap_stage3_publish_final" || return 1
+        bootstrap_stage3_publish_mode=existing
     fi
-    bootstrap_stage3_publish_transaction="$bootstrap_stage3_publish_marker.transaction"
-    bootstrap_stage3_publish_transaction_tmp=\
-"$bootstrap_stage3_publish_transaction.tmp.$$"
-    {
-        echo 'schema=simple-bootstrap-authority-transaction-v1'
-        echo "generation=$bootstrap_stage3_publish_name"
-        echo "inputs_fingerprint=$bootstrap_stage3_publish_inputs"
-        echo "generation_sha256=$bootstrap_stage3_publish_hash"
-        echo "stamp_sha256=$bootstrap_stage3_publish_stamp_hash"
-    } >"$bootstrap_stage3_publish_transaction_tmp" || return 1
-    mv "$bootstrap_stage3_publish_transaction_tmp" \
-        "$bootstrap_stage3_publish_transaction" || return 1
-    bootstrap_stage3_publish_compatibility_pointer \
-        "$bootstrap_stage3_publish_compatibility" \
+    bootstrap_stage3_publish_helper=\
+"${BOOTSTRAP_STAGE3_AUTHORITY_PUBLISH_HELPER:-\
+$(dirname -- "$BOOTSTRAP_STAGE3_FACADE_PATH")/bootstrap-authority-generation-publish.pl}"
+    [ -f "$bootstrap_stage3_publish_helper" ] || return 1
+    perl "$bootstrap_stage3_publish_helper" \
+        "$bootstrap_stage3_publish_mode" \
+        "$bootstrap_stage3_publish_staging" \
         "$bootstrap_stage3_publish_final" \
-        "$bootstrap_stage3_publish_root" || return 1
-    if [ "${BOOTSTRAP_STAGE3_TEST_STOP_AFTER_COMPATIBILITY:-0}" = 1 ]; then
-        return 99
-    fi
-    bootstrap_stage3_publish_tmp="$bootstrap_stage3_publish_marker.tmp.$$"
-    {
-        echo 'schema=simple-bootstrap-authority-current-v1'
-        echo "generation=$bootstrap_stage3_publish_name"
-        echo "inputs_fingerprint=$bootstrap_stage3_publish_inputs"
-        echo "generation_sha256=$bootstrap_stage3_publish_hash"
-        echo "stamp_sha256=$bootstrap_stage3_publish_stamp_hash"
-    } >"$bootstrap_stage3_publish_tmp" || return 1
-    mv "$bootstrap_stage3_publish_tmp" "$bootstrap_stage3_publish_marker" || return 1
-    rm -f "$bootstrap_stage3_publish_transaction"
+        "$bootstrap_stage3_publish_marker" \
+        "$bootstrap_stage3_publish_compatibility" \
+        "$bootstrap_stage3_publish_inputs" \
+        "$bootstrap_stage3_publish_hash" \
+        "$bootstrap_stage3_publish_stamp_hash"
 }
 
 bootstrap_stage3_recover_seed_transaction() {
@@ -2031,6 +2058,11 @@ bootstrap_stage3_seed_inputs_fingerprint() (
     bootstrap_stage3_seed_features=$3
     bootstrap_stage3_seed_tool_path=$4
     bootstrap_stage3_seed_target=${5:-}
+    bootstrap_stage3_seed_abi_policy=${SIMPLE_ABI_POLICY:-}
+    case "$bootstrap_stage3_seed_abi_policy" in
+        v1) ;;
+        *) return 1 ;;
+    esac
     if [ -z "$bootstrap_stage3_seed_target" ]; then
         bootstrap_stage3_seed_target=$(bootstrap_stage3_host_platform) ||
             return 1
@@ -2181,6 +2213,9 @@ bootstrap_stage3_seed_inputs_fingerprint() (
             "$bootstrap_stage3_seed_backend" \
             "$bootstrap_stage3_seed_features" \
             "$bootstrap_stage3_seed_target" \
+            >>"$bootstrap_stage3_seed_records" || exit 1
+        printf 'simple-abi-policy=%s\n' \
+            "$bootstrap_stage3_seed_abi_policy" \
             >>"$bootstrap_stage3_seed_records" || exit 1
         if [ "$bootstrap_stage3_seed_target" = \
             x86_64-pc-windows-gnu ]; then

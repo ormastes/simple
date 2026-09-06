@@ -1,0 +1,49 @@
+#!/bin/sh
+set -eu
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+. "${repo_root}/scripts/bootstrap/lib/centralized-storage.shs"
+
+fixture="${repo_root}/.simple/storage/test/bootstrap-centralized-storage.$$"
+trap 'rm -rf -- "$fixture"' EXIT HUP INT TERM
+mkdir -p "$fixture"
+export SIMPLE_USER_STORAGE_ROOT="$fixture/user"
+export SIMPLE_WORKTREE_STORAGE_ROOT="$fixture/worktree"
+simple_bootstrap_storage_init "$repo_root"
+
+fail() { echo "FAIL: $*" >&2; exit 1; }
+assert_prefix() { case "$1" in "$2"/*) ;; *) fail "$1 not below $2" ;; esac; }
+
+assert_prefix "$SIMPLE_BOOTSTRAP_CACHE_ROOT" "$SIMPLE_USER_STORAGE_ROOT"
+assert_prefix "$SIMPLE_NATIVE_BUILD_CACHE_DIR" "$SIMPLE_USER_STORAGE_ROOT"
+assert_prefix "$CARGO_HOME" "$SIMPLE_USER_STORAGE_ROOT"
+assert_prefix "$CARGO_TARGET_DIR" "$SIMPLE_USER_STORAGE_ROOT"
+assert_prefix "$SIMPLE_BOOTSTRAP_BUILD_ROOT" "$SIMPLE_WORKTREE_STORAGE_ROOT"
+assert_prefix "$SIMPLE_BOOTSTRAP_TMP_ROOT" "$SIMPLE_WORKTREE_STORAGE_ROOT"
+assert_prefix "$SIMPLE_BOOTSTRAP_TEST_ROOT" "$SIMPLE_WORKTREE_STORAGE_ROOT"
+assert_prefix "$SIMPLE_BOOTSTRAP_EVIDENCE_ROOT" "$SIMPLE_WORKTREE_STORAGE_ROOT"
+[ "$HOME" = "$SIMPLE_BOOTSTRAP_HOME_ROOT" ] || fail "HOME not projected"
+[ "$TMPDIR" = "$SIMPLE_BOOTSTRAP_TMP_ROOT" ] || fail "TMPDIR not projected"
+
+receipt="$SIMPLE_BOOTSTRAP_EVIDENCE_ROOT/default.sdn"
+selected=$(simple_bootstrap_storage_select_output build/bootstrap "$receipt")
+[ "$selected" = "$SIMPLE_BOOTSTRAP_BUILD_ROOT" ] || fail "default output escaped"
+grep -Fqx 'output_source=centralized-default' "$receipt" || fail "default receipt missing"
+
+legacy="$fixture/legacy-output"
+receipt="$SIMPLE_BOOTSTRAP_EVIDENCE_ROOT/legacy.sdn"
+selected=$(simple_bootstrap_storage_select_output "$legacy" "$receipt")
+[ "$selected" = "$legacy" ] || fail "legacy override not retained"
+grep -Fqx 'legacy_override=true' "$receipt" || fail "legacy override not receipt-visible"
+
+grep -Fq 'bootstrap-planner-admission-bound.shs' "$repo_root/scripts/bootstrap/bootstrap-from-scratch.sh" || fail "planner admission gate removed"
+grep -Fq 'SIMPLE_NO_STUB_FALLBACK' "$repo_root/scripts/bootstrap/bootstrap-from-scratch.sh" || fail "no-stub gate removed"
+if grep -Eq 'compiler_rust/target/(bootstrap|release)/simple' "$repo_root/scripts/bootstrap/lib/centralized-storage.shs"; then
+  fail "storage projection introduced seed authority"
+fi
+if rg -n '\$\{TMPDIR:-/tmp\}|mktemp -d\)' "$repo_root/scripts/bootstrap" \
+    --glob '*.sh' --glob '*.shs' -g '!*-test.shs' | grep -v '/lib/centralized-storage.shs:'; then
+  fail "bootstrap producer retained an ambient temporary authority"
+fi
+
+echo "PASS: compiler/bootstrap producers use two centralized storage roots"

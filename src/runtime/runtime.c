@@ -31,6 +31,14 @@
 
 #define SPL_LEGACY_VALUE_RUNTIME 1
 #include "runtime.h"
+
+int64_t rt_simple_abi_version(void) {
+    return (int64_t)SIMPLE_ABI_VERSION;
+}
+
+int64_t rt_simple_abi_version_deferred(void) {
+    return SIMPLE_ABI_VERSION_DEFERRED ? 1 : 0;
+}
 #include "runtime_startup_args.h"
 #include "platform/platform.h"
 #include "runtime_memtrack.h"
@@ -1993,6 +2001,98 @@ int         rt_file_create_excl(const char* path, int64_t path_len,
     return 1;
 }
 
+static char* rt_m3_owned_path(const char* path, int64_t path_len) {
+    if (!path || path_len <= 0 || (uint64_t)path_len >= SIZE_MAX ||
+        memchr(path, '\0', (size_t)path_len) != NULL) return NULL;
+    char* owned = (char*)malloc((size_t)path_len + 1);
+    if (!owned) return NULL;
+    memcpy(owned, path, (size_t)path_len);
+    owned[path_len] = '\0';
+    return owned;
+}
+
+int rt_file_copy_create_excl_no_follow(
+        const char* source, int64_t source_len,
+        const char* destination, int64_t destination_len) {
+#if defined(_WIN32) || !defined(O_NOFOLLOW)
+    (void)source; (void)source_len; (void)destination; (void)destination_len;
+    return 0;
+#else
+    char* src = rt_m3_owned_path(source, source_len);
+    char* dst = rt_m3_owned_path(destination, destination_len);
+    if (!src || !dst) { free(src); free(dst); return 0; }
+    int input = open(src, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    struct stat source_stat;
+    if (input < 0 || fstat(input, &source_stat) != 0 ||
+            !S_ISREG(source_stat.st_mode)) {
+        if (input >= 0) close(input);
+        free(src); free(dst); return 0;
+    }
+    int output = open(dst,
+        O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+    if (output < 0) {
+        close(input); free(src); free(dst); return 0;
+    }
+    int ok = 1;
+    unsigned char buffer[65536];
+    for (;;) {
+        ssize_t count = read(input, buffer, sizeof(buffer));
+        if (count == 0) break;
+        if (count < 0) {
+            if (errno == EINTR) continue;
+            ok = 0; break;
+        }
+        ssize_t offset = 0;
+        while (offset < count) {
+            ssize_t written = write(output, buffer + offset,
+                (size_t)(count - offset));
+            if (written < 0 && errno == EINTR) continue;
+            if (written <= 0) { ok = 0; break; }
+            offset += written;
+        }
+        if (!ok) break;
+    }
+    if (ok && fsync(output) != 0) ok = 0;
+    if (close(output) != 0) ok = 0;
+    if (close(input) != 0) ok = 0;
+    if (!ok) unlink(dst);
+    free(src); free(dst);
+    return ok;
+#endif
+}
+
+int rt_file_link_create_excl_no_follow(
+        const char* source, int64_t source_len,
+        const char* destination, int64_t destination_len) {
+#if defined(_WIN32) || !defined(O_NOFOLLOW)
+    (void)source; (void)source_len; (void)destination; (void)destination_len;
+    return 0;
+#else
+    char* src = rt_m3_owned_path(source, source_len);
+    char* dst = rt_m3_owned_path(destination, destination_len);
+    if (!src || !dst) { free(src); free(dst); return 0; }
+    int input = open(src, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    struct stat source_stat;
+    if (input < 0 || fstat(input, &source_stat) != 0 ||
+            !S_ISREG(source_stat.st_mode)) {
+        if (input >= 0) close(input);
+        free(src); free(dst); return 0;
+    }
+    int ok = link(src, dst) == 0;
+    struct stat destination_stat;
+    if (ok && (lstat(dst, &destination_stat) != 0 ||
+            !S_ISREG(destination_stat.st_mode) ||
+            destination_stat.st_dev != source_stat.st_dev ||
+            destination_stat.st_ino != source_stat.st_ino)) {
+        unlink(dst);
+        ok = 0;
+    }
+    close(input);
+    free(src); free(dst);
+    return ok;
+#endif
+}
+
 #if !defined(_WIN32)
 static int rt_mem_snapshot_parent_fd(char* path, const char** leaf_out) {
     char* leaf = strrchr(path, '/');
@@ -2705,19 +2805,12 @@ int64_t rt_install_crash_handler(void) { return 0; }
 
 int64_t rt_signal_install(int64_t signal_num) {
     if (signal_num < 0 || signal_num >= 32) return 0;
-#ifdef _WIN32
-    /* Windows has no sigaction; signal() is the supported registration API.
-     * SA_RESTART semantics do not exist there (no interruptible syscalls). */
-    if (signal((int)signal_num, _spl_signal_handler) == SIG_ERR) return 0;
-    return 1;
-#else
     struct sigaction sa;
     sa.sa_handler = _spl_signal_handler;
     sigemptyset(&sa.sa_mask);
     sa.sa_flags = SA_RESTART;
     if (sigaction((int)signal_num, &sa, NULL) == -1) return 0;
     return 1;
-#endif
 }
 
 int64_t rt_signal_check(int64_t signal_num) {

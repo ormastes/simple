@@ -63,6 +63,7 @@ var _g_entry_scan_siblings_by_path: Dict<text, [text]> = {}
 var _g_entry_scan_read_count: i64 = 0
 var _g_entry_scan_scan_count: i64 = 0
 var _g_entry_scan_hit_count: i64 = 0
+var _g_source_classification_count: i64 = 0
 
 @unsafe(reason: "raw monotonic clock; negative values are the provider-failure sentinel", capabilities: [ffi])
 extern fn rt_time_now_monotonic_ms() -> i64
@@ -94,6 +95,7 @@ pub fn driver_entry_scan_cache_reset():
     _g_entry_scan_read_count = 0
     _g_entry_scan_scan_count = 0
     _g_entry_scan_hit_count = 0
+    _g_source_classification_count = 0
 
 pub fn driver_entry_scan_cache_read_count() -> i64:
     _g_entry_scan_read_count
@@ -103,6 +105,9 @@ pub fn driver_entry_scan_cache_scan_count() -> i64:
 
 pub fn driver_entry_scan_cache_hit_count() -> i64:
     _g_entry_scan_hit_count
+
+pub fn driver_source_classification_count() -> i64:
+    _g_source_classification_count
 
 fn _driver_text_index_of(value: text, needle: text) -> i64:
     if needle == "":
@@ -1224,12 +1229,43 @@ fn _driver_is_filtered_test_helper_path(path: text) -> bool:
         normalized == "src/app/cli/test_entry.spl" or normalized.ends_with("/src/app/cli/test_entry.spl")
     )
 
+fn _driver_bulk_source_candidate_allowed(path: text) -> bool:
+    _g_source_classification_count = _g_source_classification_count + 1
+    if path == "" or not path.ends_with(".spl"):
+        return false
+    if path.ends_with("/check.spl") or path.ends_with("\\check.spl"):
+        return false
+    if path.ends_with("/20.hir/hir_lowering/__init__.spl") or path.ends_with("\\20.hir\\hir_lowering\\__init__.spl"):
+        return false
+    if path.contains("/test/") or path.contains("/tests/") or path.contains("/testdata/") or path.contains("/doc/") or path.contains("/verification/"):
+        return false
+    if _driver_is_filtered_test_helper_path(path) or path.contains("/core/interpreter/") or path.contains("/10.frontend/parser/") or path.contains("/10.frontend/treesitter") or path.contains("/hir_lowering/async"):
+        return false
+    if path.contains("/10.frontend/core/"):
+        val core_allowed = path.contains("/lexer") or path.contains("/parser") or path.contains("/ast") or path.contains("/tokens")
+        val core_allowed2 = core_allowed or path.contains("/types") or path.contains("/backend_types") or path.contains("/error") or path.contains("/frontend")
+        return core_allowed2 or path.ends_with("/__init__.spl")
+    true
+
+fn _driver_load_bulk_source_file(path: text, native_entry_active: bool) -> [SourceFile]:
+    var content = ""
+    if native_entry_active:
+        val (cached_content, _, _, _) = _driver_cached_entry_source_scan(path)
+        content = cached_content
+    else:
+        unsafe(capabilities: [ffi]):
+            content = rt_file_read_text(path) ?? ""
+    if content == "":
+        return []
+    _driver_module_aliases(path, content, _driver_module_name_from_path(path))
+
 pub fn _driver_collect_sources(p: text) -> [SourceFile]:
     """Collect source files from a path (file or directory). Returns list of SourceFile."""
     var result: [SourceFile] = []
     if _driver_source_trace_enabled():
         print "[collect_sources] path {p}"
     if p.ends_with(".spl"):
+        _g_source_classification_count = _g_source_classification_count + 1
         if _driver_source_trace_enabled():
             print "[collect_sources] file {p}"
         # It's a source file
@@ -1275,23 +1311,15 @@ pub fn _driver_collect_sources(p: text) -> [SourceFile]:
             discovered = rt_dir_walk(p) ?? []
         if _driver_source_trace_enabled():
             print "[collect_sources] walk_count {discovered.len()}"
+        var native_entry = ""
+        unsafe(capabilities: [ffi]):
+            native_entry = rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY") ?? ""
+        val native_entry_active = native_entry != ""
         for discovered_path in discovered:
             val path = discovered_path.trim()
-            if path == "":
+            if not _driver_bulk_source_candidate_allowed(path):
                 continue
-            if not path.ends_with(".spl"):
-                continue
-            if path.contains("/test/") or path.contains("/tests/") or path.contains("/testdata/") or path.contains("/doc/") or path.contains("/verification/"):
-                continue
-            if _driver_is_filtered_test_helper_path(path) or path.contains("/core/interpreter/") or path.contains("/10.frontend/parser/") or path.contains("/10.frontend/treesitter") or path.contains("/hir_lowering/async"):
-                continue
-            if path.contains("/10.frontend/core/"):
-                val core_allowed = path.contains("/lexer") or path.contains("/parser") or path.contains("/ast") or path.contains("/tokens")
-                val core_allowed2 = core_allowed or path.contains("/types") or path.contains("/backend_types") or path.contains("/error") or path.contains("/frontend")
-                val core_allowed3 = core_allowed2 or path.ends_with("/__init__.spl")
-                if not core_allowed3:
-                    continue
-            val loaded = _driver_collect_sources(path)
+            val loaded = _driver_load_bulk_source_file(path, native_entry_active)
             for s in loaded:
                 result = result.push(s)
     result

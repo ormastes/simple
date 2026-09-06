@@ -21,6 +21,18 @@ extern "C" {
 #endif
 
 #include <stdint.h>
+#ifndef SIMPLE_ABI_VERSION
+#define SIMPLE_ABI_VERSION 0
+#endif
+#ifndef SIMPLE_ABI_VERSION_DEFERRED
+#define SIMPLE_ABI_VERSION_DEFERRED (SIMPLE_ABI_VERSION == 0)
+#endif
+#if SIMPLE_ABI_VERSION_DEFERRED && SIMPLE_ABI_VERSION != 0
+#error "deferred SIMPLE_ABI_VERSION must be zero"
+#endif
+#if !SIMPLE_ABI_VERSION_DEFERRED && SIMPLE_ABI_VERSION <= 0
+#error "selected SIMPLE_ABI_VERSION must be positive"
+#endif
 #include <stddef.h>
 #include <stdbool.h>
 
@@ -983,6 +995,7 @@ int64_t  rt_process_spawn_async(const char* cmd, const char** args, int64_t arg_
 int64_t  rt_process_spawn_guarded(const char* cmd, const char** args, int64_t arg_count);
 int64_t  rt_process_wait(int64_t pid, int64_t timeout_ms);
 bool     rt_process_is_running(int64_t pid);
+int64_t  rt_process_start_identity(int64_t pid);
 bool     rt_process_kill(int64_t pid);
 bool     rt_process_owned_cancel(uint64_t slot, uint64_t generation,
                                  int64_t pid, uint64_t start_identity,
@@ -1184,6 +1197,12 @@ int         rt_file_sync(const uint8_t* path_ptr, uint64_t path_len);
 int64_t     rt_crc32_text(const char* text, int64_t text_len);
 int         rt_file_create_excl(const char* path, int64_t path_len,
                                 const char* content, int64_t content_len);
+int         rt_file_copy_create_excl_no_follow(
+                    const char* source, int64_t source_len,
+                    const char* destination, int64_t destination_len);
+int         rt_file_link_create_excl_no_follow(
+                    const char* source, int64_t source_len,
+                    const char* destination, int64_t destination_len);
 int64_t     rt_mem_snapshot_open(const char* path, int64_t path_len);
 int         rt_mem_snapshot_append_flush(int64_t fd, const char* record, int64_t record_len);
 int         rt_mem_snapshot_record(int64_t fd, int64_t seq,
@@ -1210,6 +1229,8 @@ int64_t     rt_file_stat(const uint8_t* path_ptr, uint64_t path_len);
 int64_t     rt_shell_output(int64_t cmd_value);
 SplArray*   rt_cli_get_args(void);
 int64_t     rt_cli_arg_count(void);
+int64_t     rt_simple_abi_version(void);
+int64_t     rt_simple_abi_version_deferred(void);
 #if defined(SPL_LEGACY_VALUE_RUNTIME)
 SplValue    rt_cli_arg_at(int64_t index);
 #else
@@ -1235,6 +1256,12 @@ int64_t spl_wffi_call_i64(int64_t fptr, int64_t args_value, int64_t nargs);
 int64_t rt_bytes_from_raw(int64_t ptr, int64_t len);
 int64_t spl_backend_plugin_run_v1(int64_t path_bytes, int64_t request_bytes,
                                   int64_t mir_bytes);
+int64_t spl_backend_plugin_batch_open_v1(int64_t provider_bytes,
+                                         int64_t request_bytes);
+int64_t spl_backend_plugin_batch_compile_v1(int64_t batch_handle,
+                                            int64_t mir_bytes);
+int64_t spl_backend_plugin_batch_finalize_v1(int64_t batch_handle);
+int32_t spl_backend_plugin_batch_close_v1(int64_t batch_handle);
 SplArray* rt_strsplit(const char* value, const char* delimiter);
 
 /* ===== JIT Exec Manager (stubs) ===== */

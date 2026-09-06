@@ -114,16 +114,54 @@ identity_changed=$(bootstrap_stage3_stage2_admission_identity \
 [ "$identity_a" != "$identity_changed" ]
 
 admission="$scratch/admission.env"
+unset SIMPLE_ABI_POLICY
+if bootstrap_stage3_write_stage2_admission_receipt \
+    "$admission" "$candidate" "$source_snapshot" "$runtime_snapshot" \
+    "$tool_snapshot" "$args_sha" "$sanity" "$receiver" "$root"; then
+    echo 'admission writer silently selected an ABI policy' >&2
+    exit 1
+fi
+[ ! -e "$admission" ] || {
+    echo 'unselected ABI policy left an admission receipt' >&2
+    exit 1
+}
+SIMPLE_ABI_POLICY=deferred
+export SIMPLE_ABI_POLICY
 bootstrap_stage3_write_stage2_admission_receipt \
     "$admission" "$candidate" "$source_snapshot" "$runtime_snapshot" \
     "$tool_snapshot" "$args_sha" "$sanity" "$receiver" "$root"
 bootstrap_stage3_verify_stage2_admission_receipt \
     "$admission" "$candidate" "$source_snapshot" "$runtime_snapshot" \
     "$tool_snapshot" "$args_sha" "$sanity" "$receiver" "$root"
+unset SIMPLE_ABI_POLICY
+if bootstrap_stage3_verify_stage2_admission_receipt \
+    "$admission" "$candidate" "$source_snapshot" "$runtime_snapshot" \
+    "$tool_snapshot" "$args_sha" "$sanity" "$receiver" "$root"; then
+    echo 'admission verifier silently selected an ABI policy' >&2
+    exit 1
+fi
+SIMPLE_ABI_POLICY=deferred
+export SIMPLE_ABI_POLICY
 [ ! -e "$marker" ] || {
     echo 'admission receipt verification executed the Stage 2 candidate' >&2
     exit 1
 }
+grep -Fxq 'simple_abi_policy=deferred' "$admission"
+grep -Fxq 'simple_abi_version=0' "$admission"
+grep -Fxq 'simple_abi_deferred=1' "$admission"
+
+cp -p "$admission" "$admission.abi-tampered"
+chmod u+w "$admission.abi-tampered"
+sed 's/^simple_abi_policy=deferred$/simple_abi_policy=v1/' \
+    "$admission.abi-tampered" >"$admission.abi-tampered.next"
+mv "$admission.abi-tampered.next" "$admission.abi-tampered"
+if bootstrap_stage3_verify_stage2_admission_receipt \
+    "$admission.abi-tampered" "$candidate" "$source_snapshot" \
+    "$runtime_snapshot" "$tool_snapshot" "$args_sha" "$sanity" \
+    "$receiver" "$root"; then
+    echo 'admission receipt accepted a mutated ABI policy' >&2
+    exit 1
+fi
 
 cp -p "$candidate" "$candidate.saved"
 printf '# candidate tamper\n' >>"$candidate"

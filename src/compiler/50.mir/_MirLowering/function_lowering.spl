@@ -48,9 +48,20 @@ fn _sffi_hir_type_discriminant(value: Any) -> i64:
     unsafe(capabilities: [ffi]):
         rt_enum_discriminant(value)
 
+val MIR_TYPE_TRANSPORT_RECEIPT_LIMIT: i64 = 16
+
+# Cached two-sided HirType transport probe. Default OFF; the dedicated gate
+# avoids enabling the broad MIR trace that previously generated enough output
+# to make the diagnostic run memory-bound.
+var mir_tag_probe_state: i64 = -1
+
 fn _mir_tag_probe_enabled() -> bool:
-    """Two-sided HirType tag probe, off unless SIMPLE_MIR_TAG_PROBE=1."""
-    (env_get("SIMPLE_MIR_TAG_PROBE") ?? "") == "1"
+    if mir_tag_probe_state < 0:
+        if (env_get("SIMPLE_MIR_TAG_PROBE") ?? "") == "1":
+            mir_tag_probe_state = 1
+        else:
+            mir_tag_probe_state = 0
+    mir_tag_probe_state == 1
 
 # Cached [mir-optional-inner] trace gate (-1 unknown, 0 off, 1 on). Default OFF.
 var mir_optional_inner_trace_state: i64 = -1
@@ -194,6 +205,11 @@ impl MirLowering:
     me lower_function_with_gpu_metadata(fn_: HirFunction, is_gpu_kernel: bool, gpu_target: text, gpu_backend_order: text) -> MirFunction:
         """Lower HIR function to MIR."""
         self.unsafe_depth = 0
+        self.mir_tag_probe_active_function = fn_.name + ""
+        self.type_transport_owner = fn_.name + ""
+        self.type_transport_context = "signature"
+        self.type_transport_param_index = -1
+        self.type_transport_caller_disc = -2
         val trace_enabled = mir_lower_trace_enabled()
         val bootstrap_trace = trace_enabled and self.ambient_bootstrap_enabled()
         if trace_enabled:
@@ -221,10 +237,16 @@ impl MirLowering:
         var params: [MirType] = []
         var pmi = 0
         while pmi < fn_.params.len():
+            val signature_param = fn_.params[pmi]
+            val signature_param_type = signature_param.type_
+            self.type_transport_context = "signature-param"
+            self.type_transport_param_index = pmi
+            self.type_transport_caller_disc = _sffi_hir_type_discriminant(
+                signature_param_type.kind)
             val lowered_param = if gpu_kernel_target == "vulkan":
-                self.lower_vulkan_kernel_param_type(fn_.params[pmi])
+                self.lower_vulkan_kernel_param_type(signature_param)
             elif gpu_kernel_target == "cuda":
-                self.lower_cuda_kernel_param_type(fn_.params[pmi])
+                self.lower_cuda_kernel_param_type(signature_param)
             else:
                 # TWO-SIDED TAG PROBE (2026-09-02, OFF unless
                 # SIMPLE_MIR_TAG_PROBE=1; zero cost and zero reads when unset).
@@ -294,7 +316,10 @@ impl MirLowering:
                     val probe_disc = _sffi_hir_type_discriminant(fn_.params[pmi].type_.kind)
                     if probe_disc == -1:
                         eprint("[mir-tag-probe] ZERO-OR-NIL-KIND AT CALLER module={self.current_module_id} fn={fn_.name} param={pmi} param_name={fn_.params[pmi].name} caller_disc={probe_disc}")
-                self.lower_type(fn_.params[pmi].type_)
+                if _mir_tag_probe_enabled():
+                    self.mir_tag_probe_pending_site = "param:{pmi}"
+                    self.mir_tag_probe_pending_caller_disc = self.type_transport_caller_disc
+                self.lower_type(signature_param_type)
             params = params.push(lowered_param)
             pmi = pmi + 1
 
@@ -315,7 +340,15 @@ impl MirLowering:
 
         if trace_enabled:
             print "[mir-lower] lower_function:return-type-start {fn_.name}"
-        val return_type = self.lower_type(fn_.return_type)
+        val signature_return_type = fn_.return_type
+        self.type_transport_context = "return"
+        self.type_transport_param_index = -1
+        self.type_transport_caller_disc = _sffi_hir_type_discriminant(
+            signature_return_type.kind)
+        if _mir_tag_probe_enabled():
+            self.mir_tag_probe_pending_site = "return"
+            self.mir_tag_probe_pending_caller_disc = self.type_transport_caller_disc
+        val return_type = self.lower_type(signature_return_type)
         if trace_enabled:
             print "[mir-lower] lower_function:return-type-done {fn_.name}"
         if bootstrap_trace:
@@ -582,6 +615,9 @@ impl MirLowering:
             print "[mir-lower] lower_function:body-start {fn_.name}"
         if bootstrap_trace:
             print "[mir-lower] real-lower:body {fn_.name}"
+        self.type_transport_context = "body"
+        self.type_transport_param_index = -1
+        self.type_transport_caller_disc = -2
         # Thread the declared return type into the body ONLY for `-> bool`
         # functions, so lower_block_expected can put a bare trailing `.?` in
         # bool position (see its tail_bool_position block). Deliberately not
@@ -625,38 +661,7 @@ impl MirLowering:
                 # Keep the coalesce out of the nested Some(call(...)) shape,
                 # but do not bind this struct optional with `if val`: compiled
                 # Stage4 can enter that arm without copying its LocalId payload.
-                var tail_local = result ?? LocalId(id: 0)
-                # Bug native_option_bool_eq_against_raw_literal_2026-08-08:
-                # an IMPLICIT tail return in a `-> T?` function handed back
-                # the bare value, while the EXPLICIT `return v` form boxes it
-                # into the canonical Option handle (lower_return_expr's
-                # ensure_option_handle call). The two forms therefore produced
-                # different physical representations for the same declared
-                # type, and every consumer that decodes through the Option box
-                # (rt_native_eq, `??`) saw a raw scalar -- `f(true) == true`
-                # compared a 0/1 word against a boxed handle and answered
-                # `false`. Box here too, but only on POSITIVE evidence that the
-                # tail is a bare primitive: its own HIR type must be recorded
-                # and be a scalar. "Not known to be Optional" is not enough --
-                # an `if flag: 7 else: nil` tail merges into a local with no
-                # recorded type, is not in nil_locals, and boxing it blind
-                # turns the None word 3 into `Some(3)` (measured: `?? -1`
-                # printed 3 instead of -1). Anything without that evidence is
-                # left exactly as it was before this fix.
-                match fn_.return_type.kind:
-                    case HirTypeKind.Optional(_):
-                        var tail_is_bare_scalar = false
-                        if val tail_ty = self.find_local_hir_type(tail_local.id):
-                            match tail_ty.kind:
-                                case HirTypeKind.Bool | HirTypeKind.Int(_, _) | HirTypeKind.Float(_) | HirTypeKind.Char | HirTypeKind.Str:
-                                    tail_is_bare_scalar = true
-                                case _:
-                                    ()
-                        if tail_is_bare_scalar:
-                            tail_local = self.ensure_option_handle(tail_local, fn_.return_type)
-                            bldr2 = self.builder
-                    case _:
-                        ()
+                val tail_local = result ?? LocalId(id: 0)
                 # WP-E: the function's own tail value moves the resource out
                 # to the caller on this exit -- exclude it from the drop
                 # sweep (see emit_pending_resource_drops's `returned_local`).
@@ -746,6 +751,7 @@ impl MirLowering:
             fn_result.vhdl_metadata = fn_.vhdl_metadata
 
         self.unsafe_depth = 0
+        self.mir_tag_probe_active_function = ""
         fn_result
 
     me lower_vulkan_kernel_param_type(param: HirParam) -> MirType:
@@ -904,6 +910,25 @@ impl MirLowering:
         if type_ == nil:
             self.error_fatal("missing HIR type during MIR lowering", nil)
             return MirType(kind: MirTypeKind.I64)
+        val callee_disc = _sffi_hir_type_discriminant(type_.kind)
+        if (_mir_tag_probe_enabled()
+                and self.type_transport_receipts < MIR_TYPE_TRANSPORT_RECEIPT_LIMIT):
+            val probe_site = self.mir_tag_probe_pending_site
+            val caller_disc = self.mir_tag_probe_pending_caller_disc
+            self.mir_tag_probe_pending_site = "recursive-or-other"
+            self.mir_tag_probe_pending_caller_disc = -2
+            if type_.kind == 0:
+                eprint("[mir-tag-probe] fn={self.mir_tag_probe_active_function} site={probe_site} caller_disc={caller_disc} callee_disc={callee_disc} kindzero=true\n")
+        if type_.kind == 0:
+            if self.type_transport_receipts < MIR_TYPE_TRANSPORT_RECEIPT_LIMIT:
+                self.type_transport_receipts = self.type_transport_receipts + 1
+                eprint("[mir-type-invariant] receipt={self.type_transport_receipts}/{MIR_TYPE_TRANSPORT_RECEIPT_LIMIT} owner={self.type_transport_owner} context={self.type_transport_context} param_index={self.type_transport_param_index} caller_disc={self.type_transport_caller_disc} callee_disc={callee_disc} kindzero=true\n")
+                val relation = if self.type_transport_caller_disc > 0:
+                    "changed-at-call-boundary"
+                else:
+                    "already-zero-at-caller"
+                self.error_fatal("E-MIR-TYPE-Transport: raw-zero HirType kind observed at MIR boundary owner={self.type_transport_owner} context={self.type_transport_context} param_index={self.type_transport_param_index} caller_disc={self.type_transport_caller_disc} callee_disc={callee_disc} relation={relation}", nil)
+            return MirType.i64()
         # [mir-lower-type-probe] -- DIAGNOSTIC, default OFF, gated by
         # SIMPLE_MIRB_TRACE via mir_trace_enabled().
         #
@@ -1195,7 +1220,9 @@ impl MirLowering:
         # for every fatal raised while that list is installed. Reported as a
         # scope hint only; a session that reads it as the offending function
         # searches the wrong file (this cost two bootstrap runs on 2026-09-02).
-        val fn_ctx = if self.current_function_names.len() > 0:
+        val fn_ctx = if self.mir_tag_probe_active_function != "":
+            "active-function:" + self.mir_tag_probe_active_function
+        elif self.current_function_names.len() > 0:
             "scope-tail:" + self.current_function_names[self.current_function_names.len() - 1]
         else:
             "<no-function-context>"

@@ -1,0 +1,104 @@
+"""Atomic, monotonic build progress snapshot publication and reading."""
+
+use std.common.build_progress.*
+use std.nogc_sync_mut.io.file_ops.{file_atomic_write, file_read, file_exists}
+
+fn _token(value: text) -> text:
+    value.replace("%", "%25").replace("\n", "%0A").replace("=", "%3D")
+
+fn _untoken(value: text) -> text:
+    value.replace("%3D", "=").replace("%0A", "\n").replace("%25", "%")
+
+fn _field(content: text, name: text) -> text:
+    val prefix = name + "="
+    for line in content.split("\n"):
+        if line.starts_with(prefix):
+            return _untoken(line.substring(prefix.len()))
+    ""
+
+fn _number(content: text, name: text) -> i64:
+    _field(content, name).to_int() ?? -1
+
+fn _state(value: text) -> BuildProgressState:
+    if value == "complete": return BuildProgressState.Complete
+    if value == "failed": return BuildProgressState.Failed
+    if value == "cancelled": return BuildProgressState.Cancelled
+    BuildProgressState.Running
+
+fn _link_state(value: text) -> BuildLinkState:
+    if value == "running": return BuildLinkState.Running
+    if value == "complete": return BuildLinkState.Complete
+    if value == "failed": return BuildLinkState.Failed
+    BuildLinkState.NotStarted
+
+pub fn encode_build_progress(snapshot: BuildProgressSnapshot) -> text:
+    var current: [text] = []
+    for path in snapshot.current_files:
+        current.push(_token(path))
+    "schema={snapshot.schema}\n" +
+    "build_id={_token(snapshot.build_id)}\nsequence={snapshot.sequence}\n" +
+    "phase={_token(snapshot.phase)}\nsubphase={_token(snapshot.subphase)}\n" +
+    "state={build_progress_state_text(snapshot.state)}\nverdict={_token(snapshot.verdict)}\n" +
+    "total_files={snapshot.total_files}\ndiscovered_files={snapshot.discovered_files}\n" +
+    "planned_files={snapshot.planned_files}\nqueued_files={snapshot.queued_files}\n" +
+    "compiling_files={snapshot.compiling_files}\ncompiled_files={snapshot.compiled_files}\n" +
+    "cached_files={snapshot.cached_files}\nfailed_files={snapshot.failed_files}\n" +
+    "remaining_files={snapshot.remaining_files}\ncurrent_files={current.join("|")}\n" +
+    "last_completed_file={_token(snapshot.last_completed_file)}\n" +
+    "error_count={snapshot.error_count}\nerror_summary={_token(snapshot.error_summary)}\n" +
+    "link_state={build_link_state_text(snapshot.link_state)}\n" +
+    "link_input_count={snapshot.link_input_count}\nlink_output={_token(snapshot.link_output)}\n" +
+    "elapsed_ms={snapshot.elapsed_ms}\nheartbeat_ms={snapshot.heartbeat_ms}\n" +
+    "files_per_second_milli={snapshot.files_per_second_milli}\neta_ms={snapshot.eta_ms}\n" +
+    "eta_confidence={_token(snapshot.eta_confidence)}\n" +
+    "cancellation_requested={if snapshot.cancellation_requested: 1 else: 0}\n" +
+    "receipt_path={_token(snapshot.receipt_path)}\nevidence_path={_token(snapshot.evidence_path)}\n"
+
+pub fn decode_build_progress(content: text) -> Result<BuildProgressSnapshot, BuildProgressPublishError>:
+    var current: [text] = []
+    val current_text = _field(content, "current_files")
+    if current_text != "":
+        for path in current_text.split("|"):
+            current.push(_untoken(path))
+    val snapshot = BuildProgressSnapshot(
+        schema: _field(content, "schema"), build_id: _field(content, "build_id"),
+        sequence: _number(content, "sequence"), phase: _field(content, "phase"),
+        subphase: _field(content, "subphase"), state: _state(_field(content, "state")),
+        verdict: _field(content, "verdict"), total_files: _number(content, "total_files"),
+        discovered_files: _number(content, "discovered_files"), planned_files: _number(content, "planned_files"),
+        queued_files: _number(content, "queued_files"), compiling_files: _number(content, "compiling_files"),
+        compiled_files: _number(content, "compiled_files"), cached_files: _number(content, "cached_files"),
+        failed_files: _number(content, "failed_files"), remaining_files: _number(content, "remaining_files"),
+        current_files: current, last_completed_file: _field(content, "last_completed_file"),
+        error_count: _number(content, "error_count"), error_summary: _field(content, "error_summary"),
+        link_state: _link_state(_field(content, "link_state")), link_input_count: _number(content, "link_input_count"),
+        link_output: _field(content, "link_output"), elapsed_ms: _number(content, "elapsed_ms"),
+        heartbeat_ms: _number(content, "heartbeat_ms"), files_per_second_milli: _number(content, "files_per_second_milli"),
+        eta_ms: _number(content, "eta_ms"), eta_confidence: _field(content, "eta_confidence"),
+        cancellation_requested: _field(content, "cancellation_requested") == "1",
+        receipt_path: _field(content, "receipt_path"), evidence_path: _field(content, "evidence_path"),
+    )
+    validate_build_progress(snapshot)?
+    Ok(snapshot)
+
+pub fn read_build_progress(path: text) -> Result<BuildProgressSnapshot, BuildProgressPublishError>:
+    if not file_exists(path):
+        return Err(BuildProgressPublishError.IoFailure)
+    decode_build_progress(file_read(path))
+
+pub fn publish_build_progress(path: text, snapshot: BuildProgressSnapshot) -> Result<(), BuildProgressPublishError>:
+    validate_build_progress(snapshot)?
+    if file_exists(path):
+        val previous = read_build_progress(path)?
+        validate_build_progress_successor(previous, snapshot)?
+    if not file_atomic_write(path, encode_build_progress(snapshot)):
+        return Err(BuildProgressPublishError.IoFailure)
+    Ok(())
+
+pub fn render_build_progress(snapshot: BuildProgressSnapshot) -> text:
+    val rate = if snapshot.files_per_second_milli < 0: "?" else: "{snapshot.files_per_second_milli / 1000}.{snapshot.files_per_second_milli % 1000}/s"
+    val eta = if snapshot.eta_ms < 0: "?" else: "{snapshot.eta_ms}ms"
+    "build={snapshot.build_id} state={build_progress_state_text(snapshot.state)} " +
+    "phase={snapshot.phase}/{snapshot.subphase} files={snapshot.compiled_files}/{snapshot.total_files} " +
+    "cached={snapshot.cached_files} failed={snapshot.failed_files} remaining={snapshot.remaining_files} " +
+    "rate={rate} eta={eta}({snapshot.eta_confidence}) link={build_link_state_text(snapshot.link_state)}"

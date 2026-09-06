@@ -1,0 +1,80 @@
+# @req MBH-REQ-001 MBH-REQ-002 MBH-REQ-009
+use std.spec.*
+use compiler.common.cache.macos_bootstrap_receipt.*
+
+fn digest(fill: text) -> text:
+    fill.repeat(64)
+
+fn valid_receipt() -> MacosBootstrapReceiptV1:
+    MacosBootstrapReceiptV1(
+        schema_version: MACOS_BOOTSTRAP_RECEIPT_SCHEMA_V1,
+        run_id: "native-aarch64-phase2-001",
+        phase: MacosBootstrapPhaseV1.Phase2,
+        target_triple: "aarch64-apple-darwin",
+        host_architecture: "aarch64",
+        artifact_architecture: "aarch64",
+        source_revision_sha256: digest("1"),
+        parent_compiler_sha256: digest("2"),
+        provider_receipt_sha256: digest("3"),
+        runtime_bundle_sha256: digest("4"),
+        sdk_identity_sha256: digest("5"),
+        command_sha256: digest("6"),
+        artifact_sha256: digest("7"),
+        wall_time_ms: 1200,
+        cpu_time_ms: 900,
+        peak_rss_bytes: 1048576,
+        retained_rss_bytes: 524288,
+        planned_modules: 10,
+        compiled_modules: 3,
+        cached_modules: 7,
+        failed_modules: 0,
+        source_reads: 3,
+        critical_path_ms: 800,
+        native_start_passed: true,
+        focused_compile_passed: true,
+        receiver_provider_contracts_passed: true,
+        results_line_seen: true,
+        rust_seed_artifact_substituted: false
+    )
+
+describe "MacosBootstrapReceiptV1 portable admission contract":
+    it "admits complete native evidence and hashes every field deterministically":
+        val first = valid_receipt()
+        val second = valid_receipt()
+        expect(first.validation_errors()).to_equal([])
+        expect(first.is_admissible()).to_equal(true)
+        expect(first.digest()).to_equal(second.digest())
+        second.critical_path_ms = 801
+        expect(first.digest() == second.digest()).to_equal(false)
+
+    it "rejects cross-architecture execution and mismatched target identity":
+        val receipt = valid_receipt()
+        receipt.host_architecture = "x86_64"
+        receipt.target_triple = "x86_64-apple-darwin"
+        expect(receipt.validation_errors()).to_contain("non-native-execution")
+        expect(receipt.validation_errors()).to_contain("target-architecture-mismatch")
+
+    it "rejects malformed hashes counters RSS and vacuous success evidence":
+        val receipt = valid_receipt()
+        receipt.sdk_identity_sha256 = "ABC"
+        receipt.compiled_modules = -1
+        receipt.cached_modules = 8
+        receipt.retained_rss_bytes = receipt.peak_rss_bytes + 1
+        receipt.results_line_seen = false
+        receipt.rust_seed_artifact_substituted = true
+        expect(receipt.validation_errors()).to_contain("invalid-sha256")
+        expect(receipt.validation_errors()).to_contain("negative-counter")
+        expect(receipt.validation_errors()).to_contain("module-count-mismatch")
+        expect(receipt.validation_errors()).to_contain("retained-rss-exceeds-peak")
+        expect(receipt.validation_errors()).to_contain("results-line-missing")
+        expect(receipt.validation_errors()).to_contain("rust-seed-artifact-substitution")
+        expect(receipt.is_admissible()).to_equal(false)
+
+    it "admits the independently native Intel receipt shape":
+        val receipt = valid_receipt()
+        receipt.run_id = "native-x86_64-phase3-001"
+        receipt.phase = MacosBootstrapPhaseV1.Phase3
+        receipt.target_triple = "x86_64-apple-darwin"
+        receipt.host_architecture = "x86_64"
+        receipt.artifact_architecture = "x86_64"
+        expect(receipt.validation_errors()).to_equal([])

@@ -5,7 +5,7 @@
 # evaluates the whole back half of the compiler (~665 modules, ~3.3 GB RSS)
 # before a single line of the shard runs. Behaviour is byte-identical: this is
 # a move, not a rewrite (doc/08_tracking/bug/memory_retention_compiler_and_interpreter_2026-08-21.md).
-use app.io.env_ops (env_get)
+use app.io.env_ops (env_get, env_set)
 use app.io.time_ops (time_now_unix_micros)
 use app.cli.native_build_warm_receipt.{native_build_warm_candidate_publish}
 use std.nogc_sync_mut.io.file_ops.{file_exists}
@@ -13,6 +13,9 @@ use std.nogc_sync_mut.io.process_ops.{eprint}
 use compiler.driver.driver_source_loading.{
     _driver_resolve_entry_import, _driver_text_bucket_set_new,
     _driver_cached_entry_source_scan
+}
+use std.scv.compile_snapshot.{
+    scv_compile_snapshot_acquire_v1, scv_compile_snapshot_open_v1
 }
 @unsafe(reason: "raw path expansion; empty text is the invalid-or-expansion-failure sentinel", capabilities: [ffi])
 extern fn rt_path_absolute(path: text) -> text
@@ -72,7 +75,119 @@ fn _nb_trim_trailing_slashes(path: text) -> text:
     p
 
 fn _nb_source_dirs_cover_workspace(source_dirs: [text]) -> bool:
-    source_dirs.contains("src/app") and source_dirs.contains("src/lib") and source_dirs.contains("src/compiler")
+    var app = false
+    var lib = false
+    var compiler = false
+    for source_dir in source_dirs:
+        val name = _nb_basename(_nb_trim_trailing_slashes(source_dir))
+        if name == "app": app = true
+        if name == "lib": lib = true
+        if name == "compiler": compiler = true
+    app and lib and compiler
+
+fn _nb_source_root_named(source_dirs: [text], name: text) -> text:
+    for source_dir in source_dirs:
+        val normalized = _nb_trim_trailing_slashes(source_dir)
+        if _nb_basename(normalized) == name:
+            return normalized
+    ""
+
+var _nb_scv_snapshot_key_v1: text = ""
+var _nb_scv_snapshot_root_v1: text = ""
+var _nb_scv_snapshot_revision_v1: text = ""
+var _nb_scv_snapshot_commit_v1: text = ""
+var _nb_scv_snapshot_tree_v1: text = ""
+var _nb_scv_snapshot_inventory_v1: text = ""
+
+fn _nb_scv_relative_path_v1(path: text) -> text:
+    val root = _nb_trim_trailing_slashes(
+        _nb_path_absolute_raw(".").replace("\\", "/"))
+    val absolute = _nb_path_absolute_raw(path).replace("\\", "/")
+    if root == "" or absolute == "":
+        return ""
+    if absolute == root:
+        return ""
+    val prefix = root + "/"
+    if not absolute.starts_with(prefix):
+        return ""
+    absolute.substring(prefix.len(), absolute.len())
+
+fn _nb_scv_snapshot_path_v1(path: text) -> text:
+    val absolute = _nb_path_absolute_raw(path).replace("\\", "/")
+    val snapshot_absolute = _nb_path_absolute_raw(
+        _nb_scv_snapshot_root_v1).replace("\\", "/")
+    if snapshot_absolute != "" and (absolute == snapshot_absolute or
+            absolute.starts_with(snapshot_absolute + "/")):
+        return absolute
+    val relative = _nb_scv_relative_path_v1(path)
+    if relative == "" or _nb_scv_snapshot_root_v1 == "":
+        return ""
+    _nb_scv_snapshot_root_v1 + "/" + relative
+
+fn _nb_scv_key_v1(entry: text, source_dirs: [text], revision: text) -> text:
+    entry + "|" + source_dirs.join("|") + "|scv=" + revision
+
+fn _nb_scv_freeze_v1(entry: text, source_dirs: [text]) -> (bool, text, [text]):
+    val key = _nb_scv_key_v1(
+        entry, source_dirs, env_get("SIMPLE_SCV_REVISION_ID") ?? "")
+    if _nb_scv_snapshot_key_v1 != key:
+        val inherited_root = env_get("SIMPLE_SCV_SNAPSHOT_ROOT") ?? ""
+        if inherited_root != "":
+            _nb_scv_snapshot_revision_v1 = env_get("SIMPLE_SCV_REVISION_ID") ?? ""
+            _nb_scv_snapshot_commit_v1 = env_get("SIMPLE_SCV_COMMIT_ID") ?? ""
+            _nb_scv_snapshot_tree_v1 = env_get("SIMPLE_SCV_TREE_ID") ?? ""
+            _nb_scv_snapshot_inventory_v1 = env_get("SIMPLE_SCV_INVENTORY_DIGEST") ?? ""
+            val opened = scv_compile_snapshot_open_v1(
+                ".", inherited_root,
+                _nb_scv_snapshot_revision_v1, _nb_scv_snapshot_commit_v1,
+                _nb_scv_snapshot_tree_v1, _nb_scv_snapshot_inventory_v1)
+            if not opened.valid:
+                _cli_eprint("SCV-E-SNAPSHOT: {opened.reason}")
+                return (false, "", [])
+            _nb_scv_snapshot_root_v1 = opened.snapshot_root
+            _nb_scv_snapshot_key_v1 = _nb_scv_key_v1(
+                entry, source_dirs, opened.revision_id)
+            if (env_get("SIMPLE_SCV_SOURCE_DRIFTED") ?? "") == "1":
+                _cli_eprint(
+                    "SCV-W-DRIFT: frozen revision retained; schedule a new build")
+        else:
+            var inventory_roots = source_dirs
+            if not inventory_roots.contains(entry):
+                inventory_roots = inventory_roots.push(entry)
+            val snapshot = scv_compile_snapshot_acquire_v1(
+                ".", "build/scv", inventory_roots)
+            if not snapshot.valid:
+                _cli_eprint("SCV-E-SNAPSHOT: {snapshot.reason}")
+                return (false, "", [])
+            _nb_scv_snapshot_root_v1 = snapshot.snapshot_root
+            _nb_scv_snapshot_revision_v1 = snapshot.revision_id
+            _nb_scv_snapshot_commit_v1 = snapshot.commit_id
+            _nb_scv_snapshot_tree_v1 = snapshot.tree_id
+            _nb_scv_snapshot_inventory_v1 = snapshot.inventory_digest
+            _nb_scv_snapshot_key_v1 = _nb_scv_key_v1(
+                entry, source_dirs, snapshot.revision_id)
+            env_set("SIMPLE_SCV_SNAPSHOT_ROOT", snapshot.snapshot_root)
+            env_set("SIMPLE_SCV_REVISION_ID", snapshot.revision_id)
+            env_set("SIMPLE_SCV_COMMIT_ID", snapshot.commit_id)
+            env_set("SIMPLE_SCV_TREE_ID", snapshot.tree_id)
+            env_set("SIMPLE_SCV_INVENTORY_DIGEST", snapshot.inventory_digest)
+            env_set("SIMPLE_SCV_SOURCE_DRIFTED",
+                if snapshot.source_drifted: "1" else: "0")
+            if snapshot.source_drifted:
+                _cli_eprint("SCV-W-DRIFT: frozen revision retained; schedule a new build")
+    val frozen_entry = _nb_scv_snapshot_path_v1(entry)
+    if frozen_entry == "" or not _nb_file_exists_raw(frozen_entry):
+        _cli_eprint("SCV-E-ENTRY: entry absent from frozen inventory")
+        return (false, "", [])
+    var frozen_dirs: [text] = []
+    for source_dir in source_dirs:
+        val frozen = _nb_scv_snapshot_path_v1(source_dir)
+        if frozen == "":
+            _cli_eprint("SCV-E-SOURCE: source root absent from frozen inventory")
+            return (false, "", [])
+        frozen_dirs = frozen_dirs.push(frozen)
+    env_set("SIMPLE_NATIVE_BUILD_ENTRY", frozen_entry)
+    (true, frozen_entry, frozen_dirs)
 
 fn _nb_normalize_source_dirs(source_dirs: [text]) -> [text]:
     # Drop duplicate roots and redundant bare `src` when explicit workspace
@@ -86,7 +201,7 @@ fn _nb_normalize_source_dirs(source_dirs: [text]) -> [text]:
     var result: [text] = []
     val workspace_covered = _nb_source_dirs_cover_workspace(normalized)
     for candidate in normalized:
-        if workspace_covered and candidate == "src":
+        if workspace_covered and _nb_basename(candidate) == "src":
             continue
         result = result.push(candidate)
     result
@@ -106,21 +221,10 @@ fn _nb_resolve_under_root(root: text, segs: [text]) -> text:
         return p3
     ""
 
-fn _nb_resolve_segs(segs: [text], source_dirs: [text], importer_path: text) -> text:
+fn _nb_resolve_segs(segs: [text], source_dirs: [text]) -> text:
     # Resolve a module segment list to an .spl file under a --source root.
     # Mirrors the Rust discovery FS-fallback: strip a leading segment matching
     # the root's dir name. Returns "" if unresolved.
-    val module_path = _nb_join_segments(segs)
-    val entry_dir = _driver_entry_import_dirname(importer_path)
-    if segs.len() > 0:
-        val resolved = _driver_resolve_entry_import(module_path, entry_dir)
-        if resolved != "":
-            val resolved_abs = _nb_path_absolute_raw(resolved).replace("\\", "/")
-            for root in source_dirs:
-                val root_abs = _nb_trim_trailing_slashes(_nb_path_absolute_raw(root).replace("\\", "/"))
-                val root_prefix = if root_abs.ends_with("/"): root_abs else: root_abs + "/"
-                if resolved_abs.starts_with(root_prefix):
-                    return resolved
     for root in source_dirs:
         val dir_name = _nb_basename(root)
         val public_lib_alias = dir_name == "lib" and segs.len() > 0 and segs[0] == "std"
@@ -136,16 +240,14 @@ fn _nb_resolve_segs(segs: [text], source_dirs: [text], importer_path: text) -> t
         val direct_path = _nb_resolve_under_root(root, segs)
         if direct_path != "":
             return direct_path
-    if segs.len() > 0 and not _nb_source_dirs_cover_workspace(source_dirs):
-        val src_path = _nb_resolve_under_root("src", segs)
-        if src_path != "":
-            return src_path
     # Unprefixed tier-qualified paths (`nogc_sync_mut.io_runtime` from the
     # std.io_runtime shim's `export use`; `common.ui.access_types`) live
     # under src/lib but carry no std./lib. prefix — no root above matches.
-    val lib_direct = _nb_resolve_under_root("src/lib", segs)
-    if lib_direct != "":
-        return lib_direct
+    val lib_root = _nb_source_root_named(source_dirs, "lib")
+    if lib_root != "":
+        val lib_direct = _nb_resolve_under_root(lib_root, segs)
+        if lib_direct != "":
+            return lib_direct
     # `std.X` flattens the concurrency-tier directories: std.mcp_sdk.server.
     # method_detect is physically src/lib/<tier>/mcp_sdk/server/method_detect
     # .spl. Mirror the seed interpreter's family-fallback order.
@@ -155,10 +257,11 @@ fn _nb_resolve_segs(segs: [text], source_dirs: [text], importer_path: text) -> t
         while tier_ti < segs.len():
             tier_tail = tier_tail.push(segs[tier_ti])
             tier_ti = tier_ti + 1
-        for tier in ["nogc_async_mut", "nogc_sync_mut", "nogc_async_immut", "common", "gc_async_mut", "nogc_async_mut_noalloc"]:
-            val tier_path = _nb_resolve_under_root("src/lib/" + tier, tier_tail)
-            if tier_path != "":
-                return tier_path
+        if lib_root != "":
+            for tier in ["nogc_async_mut", "nogc_sync_mut", "nogc_async_immut", "common", "gc_async_mut", "nogc_async_mut_noalloc"]:
+                val tier_path = _nb_resolve_under_root(lib_root + "/" + tier, tier_tail)
+                if tier_path != "":
+                    return tier_path
     ""
 
 fn _nb_join_segments(segs: [text]) -> text:
@@ -169,6 +272,11 @@ pub fn _native_build_entry_closure(entry: text, source_dirs: [text]) -> [text]:
     # modules (one `main`), not every file in the --source dirs. Over-approximates
     # safely: an unresolved `use` is skipped; a genuinely missing import still
     # errors in the compile phase.
+    val frozen = _nb_scv_freeze_v1(entry, source_dirs)
+    if not frozen.0:
+        return []
+    val frozen_entry = frozen.1
+    val frozen_source_dirs = frozen.2
     val trace_closure = (env_get("SIMPLE_NATIVE_BUILD_TRACE_CLOSURE") ?? "") == "1"
     # Level-gated, default-off per-file timing probe. The 25-file checkpoint
     # above only shows aggregate progress; this prints a per-file elapsed-us
@@ -176,12 +284,12 @@ pub fn _native_build_entry_closure(entry: text, source_dirs: [text]) -> [text]:
     # apart without waiting on the whole closure to finish. See
     # doc/08_tracking/bug/native_build_entry_closure_slow_2026-07-31.md.
     val trace_timing = (env_get("SIMPLE_NATIVE_BUILD_TRACE_CLOSURE_TIMING") ?? "") == "1"
-    var queue: [text] = [entry]
+    var queue: [text] = [frozen_entry]
     var discovered = _driver_text_bucket_set_new(512)
-    discovered[entry] = true
+    discovered[frozen_entry] = true
     var result: [text] = []
     var resolve_cache: Dict<text, text> = {}
-    val closure_source_dirs = _nb_normalize_source_dirs(source_dirs)
+    val closure_source_dirs = _nb_normalize_source_dirs(frozen_source_dirs)
     var qi = 0
     var timing_file_start_us: i64 = 0
     while qi < queue.len():
@@ -191,11 +299,11 @@ pub fn _native_build_entry_closure(entry: text, source_dirs: [text]) -> [text]:
             timing_file_start_us = time_now_unix_micros()
         result.append(f)
         if not _nb_file_exists_raw(f):
-            if trace_closure and f == entry:
+            if trace_closure and f == frozen_entry:
                 _cli_eprint("[native-build] closure entry missing {f}")
             continue
         val (content, imports, siblings, _) = _driver_cached_entry_source_scan(f)
-        if trace_closure and f == entry:
+        if trace_closure and f == frozen_entry:
             _cli_eprint("[native-build] closure entry read len={content.len()}")
         if trace_closure and result.len() % 25 == 0:
             _cli_eprint("[native-build] closure visited {result.len()} queued={queue.len()} file={f}")
@@ -219,9 +327,9 @@ pub fn _native_build_entry_closure(entry: text, source_dirs: [text]) -> [text]:
             if resolve_cache.has(seg_key):
                 rp = resolve_cache[seg_key]
             else:
-                rp = _nb_resolve_segs(segs, closure_source_dirs, f)
+                rp = _nb_resolve_segs(segs, closure_source_dirs)
                 resolve_cache[seg_key] = rp
-            if trace_closure and f == entry:
+            if trace_closure and f == frozen_entry:
                 _cli_eprint("[native-build] closure import {mp} -> {rp}")
             if rp != "" and not discovered.contains_key(rp):
                 queue.append(rp)
@@ -237,7 +345,7 @@ pub fn _native_build_entry_closure(entry: text, source_dirs: [text]) -> [text]:
                 if resolve_cache.has(drop_key):
                     drop_rp = resolve_cache[drop_key]
                 else:
-                    drop_rp = _nb_resolve_segs(drop, closure_source_dirs, f)
+                    drop_rp = _nb_resolve_segs(drop, closure_source_dirs)
                     resolve_cache[drop_key] = drop_rp
                 if drop_rp != "" and not discovered.contains_key(drop_rp):
                     queue.append(drop_rp)

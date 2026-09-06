@@ -1,0 +1,147 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname "$0")/../../.." && pwd -P)
+STORAGE_ROOTS_REPO_ROOT=$root
+export STORAGE_ROOTS_REPO_ROOT
+. "$root/scripts/lib/storage-roots.shs"
+storage_roots_init
+work=$(storage_roots_mktemp macos-m5-hermetic-wrapper-test)
+export M5_HERMETIC_TEST_MODE=1
+trap 'chmod -R u+w "$work" 2>/dev/null || true; rm -rf "$work"' EXIT HUP INT TERM
+mkdir -p "$work"
+
+fail() { echo "FAIL — $*" >&2; exit 1; }
+
+wait_for() {
+    target=$1
+    attempts=0
+    while [ ! -e "$target" ]; do
+        attempts=$((attempts + 1))
+        [ "$attempts" -lt 200 ] || fail "timed out waiting for $target"
+        sleep 0.05
+    done
+}
+
+new_fixture() {
+    fixture=$work/$1
+    mkdir -p "$fixture/scripts/check" "$fixture/scripts/release" "$fixture/build"
+    cp "$root/scripts/check/check-macos-universal-m5-hermetic.shs" \
+        "$fixture/scripts/check/check-macos-universal-m5-hermetic.shs"
+    cat >"$fixture/scripts/release/macos-universal-m5.shs" <<'EOF'
+portable-release-snapshot-v1
+EOF
+    printf 'must-not-be-copied\n' >"$fixture/decoy.txt"
+}
+
+write_fast_checker() {
+    marker=$1
+    cat >"$fixture/scripts/check/check-macos-universal-m5.shs" <<EOF
+#!/bin/sh
+set -eu
+root=\$(CDPATH= cd -- "\$(dirname -- "\$0")/../.." && pwd -P)
+[ "\$(pwd -P)" = "\$root" ]
+[ ! -e decoy.txt ]
+grep -Fxq portable-release-snapshot-v1 "\$root/scripts/release/macos-universal-m5.shs"
+: >"$marker"
+echo portable-check-pass
+EOF
+}
+
+write_waiting_checker() {
+    barrier=$1
+    cat >"$fixture/scripts/check/check-macos-universal-m5.shs" <<EOF
+#!/bin/sh
+set -eu
+root=\$(CDPATH= cd -- "\$(dirname -- "\$0")/../.." && pwd -P)
+mkdir -p "$barrier"
+: >"$barrier/ready"
+attempts=0
+while [ ! -e "$barrier/continue" ]; do
+    attempts=\$((attempts + 1))
+    [ "\$attempts" -lt 200 ] || exit 70
+    sleep 0.05
+done
+grep -Fxq portable-release-snapshot-v1 "\$root/scripts/release/macos-universal-m5.shs"
+echo portable-check-pass
+EOF
+}
+
+new_fixture success
+write_fast_checker "$fixture/checker-ran"
+(cd "$fixture" && sh "$fixture/scripts/check/check-macos-universal-m5-hermetic.shs" \
+    --evidence-dir="$fixture/build/evidence" >/dev/null)
+grep -Fxq status=PASS "$fixture/build/evidence/status.env"
+[ "$(wc -l <"$fixture/build/evidence/source-inventory.before.tsv" | tr -d ' ')" = 3 ]
+[ ! -e "$fixture/build/evidence/snapshot/decoy.txt" ]
+stdout_sha=$(awk -F= '$1 == "checker_stdout_sha256" { print $2 }' "$fixture/build/evidence/status.env")
+stderr_sha=$(awk -F= '$1 == "checker_stderr_sha256" { print $2 }' "$fixture/build/evidence/status.env")
+[ "$stdout_sha" = "$(shasum -a 256 "$fixture/build/evidence/checker.stdout" | awk '{print $1}')" ]
+[ "$stderr_sha" = "$(shasum -a 256 "$fixture/build/evidence/checker.stderr" | awk '{print $1}')" ]
+[ ! -w "$fixture/build/evidence/checker.stdout" ]
+[ ! -w "$fixture/build/evidence" ]
+
+new_fixture before-run-drift
+write_fast_checker "$fixture/checker-ran"
+barrier=$fixture/barrier
+M5_HERMETIC_TEST_MODE=1 M5_HERMETIC_TEST_BARRIER_DIR="$barrier" \
+    sh "$fixture/scripts/check/check-macos-universal-m5-hermetic.shs" \
+    --evidence-dir="$fixture/build/evidence" >/dev/null 2>&1 &
+wrapper_pid=$!
+wait_for "$barrier/ready"
+printf 'source mutation\n' >>"$fixture/scripts/check/check-macos-universal-m5.shs"
+: >"$barrier/continue"
+if wait "$wrapper_pid"; then fail 'pre-run source drift was accepted'; fi
+grep -Fxq reason=source-drift-before-run "$fixture/build/evidence/status.env"
+[ ! -e "$fixture/checker-ran" ]
+
+new_fixture during-run-source-drift
+run_barrier=$fixture/run-barrier
+write_waiting_checker "$run_barrier"
+sh "$fixture/scripts/check/check-macos-universal-m5-hermetic.shs" \
+    --evidence-dir="$fixture/build/evidence" >/dev/null 2>&1 &
+wrapper_pid=$!
+wait_for "$run_barrier/ready"
+printf 'source mutation\n' >>"$fixture/scripts/release/macos-universal-m5.shs"
+: >"$run_barrier/continue"
+if wait "$wrapper_pid"; then fail 'during-run source drift was accepted'; fi
+grep -Fxq reason=source-drift-after-run "$fixture/build/evidence/status.env"
+grep -Fxq portable-check-pass "$fixture/build/evidence/checker.stdout"
+
+new_fixture during-run-snapshot-drift
+run_barrier=$fixture/run-barrier
+write_waiting_checker "$run_barrier"
+sh "$fixture/scripts/check/check-macos-universal-m5-hermetic.shs" \
+    --evidence-dir="$fixture/build/evidence" >/dev/null 2>&1 &
+wrapper_pid=$!
+wait_for "$run_barrier/ready"
+snapshot_release=$fixture/build/evidence/snapshot/scripts/release/macos-universal-m5.shs
+chmod 600 "$snapshot_release"
+printf 'snapshot mutation\n' >>"$snapshot_release"
+: >"$run_barrier/continue"
+if wait "$wrapper_pid"; then fail 'during-run snapshot drift was accepted'; fi
+grep -Fxq reason=snapshot-drift-after-run "$fixture/build/evidence/status.env"
+
+new_fixture during-run-driver-source-drift
+run_barrier=$fixture/run-barrier
+write_waiting_checker "$run_barrier"
+sh "$fixture/scripts/check/check-macos-universal-m5-hermetic.shs" \
+    --evidence-dir="$fixture/build/evidence" >/dev/null 2>&1 &
+wrapper_pid=$!
+wait_for "$run_barrier/ready"
+printf '# driver source mutation\n' >>"$fixture/scripts/check/check-macos-universal-m5-hermetic.shs"
+: >"$run_barrier/continue"
+if wait "$wrapper_pid"; then fail 'driver source drift was accepted'; fi
+grep -Fxq reason=source-drift-after-run "$fixture/build/evidence/status.env"
+
+new_fixture symlink-source
+write_fast_checker "$fixture/checker-ran"
+rm "$fixture/scripts/release/macos-universal-m5.shs"
+ln -s "$fixture/decoy.txt" "$fixture/scripts/release/macos-universal-m5.shs"
+if sh "$fixture/scripts/check/check-macos-universal-m5-hermetic.shs" \
+    --evidence-dir="$fixture/build/evidence" >/dev/null 2>&1; then
+    fail 'symlink source was accepted'
+fi
+grep -Fxq reason=source-inventory-invalid "$fixture/build/evidence/status.env"
+
+echo 'PASS — M5 hermetic wrapper: clean snapshot admitted; 5/5 mutations rejected; undeclared files excluded'

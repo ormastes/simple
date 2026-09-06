@@ -1,0 +1,81 @@
+use app.spipe.testing.*
+use compiler.driver.cache.package_module_index.{
+    PackageModuleIndexEntryV1, PackageModuleIndexGenerationV1,
+    PackageTldrHeaderV1, PersistentSmfPackageIndexV1,
+    package_module_index_encode_v1, package_module_index_decode_v1,
+    package_module_index_entry_action_digest_v1,
+    package_module_index_invalidate_changes_v1, PackageModuleChangeV1
+}
+use std.common.crypto.sha256.{sha256_text}
+
+fn package_index_entry(
+    module_identity: text, direct_imports: [text], reverse_dependents: [text],
+    action_digest: text
+) -> PackageModuleIndexEntryV1:
+    PackageModuleIndexEntryV1(
+        package_identity: "package::{module_identity}",
+        module_identity: module_identity,
+        source_identity: "src/{module_identity}.spl",
+        source_digest: sha256_text("source:{module_identity}"),
+        smf_metadata_digest: sha256_text("smf:{module_identity}"),
+        export_digest: sha256_text("export:{module_identity}"),
+        abi_digest: sha256_text("abi:{module_identity}"),
+        initializer_digest: sha256_text("initializer:{module_identity}"),
+        provider_digest: sha256_text("provider:{module_identity}"),
+        action_digest: action_digest,
+        manifest_digest: sha256_text("manifest:{module_identity}"),
+        scc_identity: "scc::{module_identity}",
+        direct_imports: direct_imports,
+        reverse_dependents: reverse_dependents)
+
+fn package_index_generation(
+    entries: [PackageModuleIndexEntryV1]
+) -> PackageModuleIndexGenerationV1:
+    PackageModuleIndexGenerationV1(
+        schema_version: 1,
+        producer_digest: sha256_text("compiler-producer"),
+        root_generation: "root-generation-v1",
+        scv_revision_id: "scv-revision-v1-test",
+        scv_commit_id: "scv-commit-v1-test",
+        scv_tree_id: "scv-tree-v1-test",
+        inventory_digest: sha256_text("frozen-inventory"),
+        entries: entries)
+
+fn admitted_package_index() -> PersistentSmfPackageIndexV1:
+    val zero = "0000000000000000000000000000000000000000000000000000000000000000"
+    val draft_entries = [
+        package_index_entry("a", [], ["b"], zero),
+        package_index_entry("b", ["a"], [], zero),
+        package_index_entry("c", [], ["d"], zero),
+        package_index_entry("d", ["c"], [], zero)
+    ]
+    val draft = package_index_generation(draft_entries)
+    var entries: [PackageTldrHeaderV1] = []
+    for entry in draft_entries:
+        entries = entries.push(package_index_entry(
+            entry.module_identity, entry.direct_imports,
+            entry.reverse_dependents,
+            package_module_index_entry_action_digest_v1(draft, entry)))
+    package_index_generation(entries)
+
+describe "persistent package/module index":
+    it "round-trips one canonical SCV-bound generation":
+        val generation = admitted_package_index()
+        val encoded = package_module_index_encode_v1(generation)
+        expect(encoded != "").to_equal(true)
+        val decoded = package_module_index_decode_v1(encoded)
+        expect(decoded.valid).to_equal(true)
+        expect(decoded.generation!.scv_revision_id).to_equal(
+            generation.scv_revision_id)
+        expect(decoded.generation!.inventory_digest).to_equal(
+            generation.inventory_digest)
+
+    it "does not propagate an unrelated content-only root":
+        val result = package_module_index_invalidate_changes_v1(
+            admitted_package_index(), [
+                PackageModuleChangeV1("a", true, false, false, false, false),
+                PackageModuleChangeV1("c", true, true, false, false, false)
+            ])
+        expect(result.valid).to_equal(true)
+        expect(result.dirty_modules).to_equal(["a", "c", "d"])
+        expect(result.dirty_modules.contains("b")).to_equal(false)

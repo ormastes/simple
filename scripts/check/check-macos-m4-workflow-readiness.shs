@@ -1,0 +1,149 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+default_branch_ref=origin/main
+require_default_branch=0
+self_test=0
+
+fail() { echo "macOS M4 workflow readiness FAIL: $*" >&2; exit 1; }
+require_text() {
+    file=$1 text=$2 label=$3
+    grep -Fq -- "$text" "$file" || fail "$label"
+}
+require_min_count() {
+    file=$1 text=$2 minimum=$3 label=$4
+    actual=$(grep -Fc -- "$text" "$file" || true)
+    [ "$actual" -ge "$minimum" ] || fail "$label (expected at least $minimum, got $actual)"
+}
+
+check_local_contract() {
+    m4_workflow="$root/.github/workflows/macos-reverse-reference-m4.yml"
+    m5_workflow="$root/.github/workflows/macos-reverse-reference-m5.yml"
+    m4_checker="$root/scripts/check/check-macos-reverse-reference-m4.shs"
+    residency_checker="$root/scripts/check/check-macos-m4-residency-baseline-receipt.shs"
+    residency_runner="$root/scripts/check/check-macos-m4-long-lived-residency.shs"
+    m5_release="$root/scripts/release/macos-universal-m5.shs"
+    for required in "$m4_workflow" "$m5_workflow" "$m4_checker" "$residency_checker" "$residency_runner" "$m5_release"; do
+        [ -f "$required" ] || fail "required file missing: $required"
+    done
+    sh -n "$m4_checker"
+    sh -n "$residency_checker"
+    sh -n "$residency_runner"
+    sh -n "$m5_release"
+
+    require_text "$m4_checker" '[ "$host_arch" = "$requested_arch" ] || blocked' "M4 lacks native host/architecture admission"
+    require_text "$m4_workflow" 'runs-on: ${{ inputs.runner_label }}' "M4 runner is not explicit"
+    require_text "$m4_workflow" '--residency-baseline-receipt=build/m4/residency-authority/baseline.env' "M4 qualification omits admitted baseline handoff"
+    require_text "$m4_checker" '--producer-sha256="$candidate_sha"' "M4 baseline admission is not producer-bound"
+    baseline_download_line=$(grep -n -m1 'path: build/m4/residency-authority' "$m4_workflow" | cut -d: -f1)
+    qualification_line=$(grep -n -m1 'Native M4 qualification' "$m4_workflow" | cut -d: -f1)
+    [ -n "$baseline_download_line" ] && [ -n "$qualification_line" ] && [ "$baseline_download_line" -lt "$qualification_line" ] ||
+        fail "M4 baseline artifact download must precede native qualification"
+    baseline_validation_line=$(grep -n -m1 'validated_baseline=' "$residency_runner" | cut -d: -f1)
+    server_start_line=$(grep -n -m1 'SIMPLE_MCP_ALLOW_SOURCE_FALLBACK=0' "$residency_runner" | cut -d: -f1)
+    [ -n "$baseline_validation_line" ] && [ -n "$server_start_line" ] && [ "$baseline_validation_line" -lt "$server_start_line" ] ||
+        fail "baseline validation must precede production server requests"
+    require_text "$m5_workflow" 'runs-on: ${{ inputs.arm64_runner }}' "M5 arm64 runner is not explicit"
+    require_text "$m5_workflow" 'runs-on: ${{ inputs.x86_64_runner }}' "M5 x86_64 runner is not explicit"
+    require_text "$m5_workflow" 'needs: [package, verify-arm64, verify-x86_64]' "M5 authorization does not require both native lanes"
+    require_text "$m5_release" 'arm64 and x86_64 must come from distinct M4 workflow runs' "M5 does not require distinct M4 runs"
+
+    require_text "$m4_workflow" 'macos-phase3-m4-${{ inputs.requested_arch }}-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}' "M4 qualification artifact name is not run-attempt immutable"
+    require_text "$m4_workflow" 'macos-m4-evidence-${{ inputs.requested_arch }}-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}' "M4 evidence artifact name is not run-attempt immutable"
+    require_min_count "$m4_workflow" 'retention-days: 30' 2 "M4 artifacts lack explicit 30-day retention"
+    require_min_count "$m4_workflow" 'if-no-files-found: error' 2 "M4 artifacts do not fail on missing files"
+    require_min_count "$m5_workflow" 'retention-days: 30' 4 "M5 artifacts lack explicit 30-day retention"
+    require_min_count "$m5_workflow" 'if-no-files-found: error' 4 "M5 artifacts do not fail on missing files"
+
+    require_text "$m5_workflow" 'ref: ${{ inputs.source_revision }}' "M5 does not checkout the admitted source revision"
+    require_min_count "$m5_workflow" 'ref: ${{ inputs.source_revision }}' 4 "all M5 jobs must use the admitted source revision"
+    require_text "$m5_workflow" 'cmp build/m5/thin/arm64/m4-evidence-files.sha256' "M5 does not bind the arm64 thin artifact to retained evidence"
+    require_text "$m5_workflow" 'cmp build/m5/thin/x86_64/m4-evidence-files.sha256' "M5 does not bind the x86_64 thin artifact to retained evidence"
+    for binding in \
+        "--arm64-m4-run-attempt='\${{ inputs.arm64_run_attempt }}'" \
+        "--x86_64-m4-run-attempt='\${{ inputs.x86_64_run_attempt }}'" \
+        "--arm64-m4-artifact='\${{ inputs.arm64_artifact }}'" \
+        "--x86_64-m4-artifact='\${{ inputs.x86_64_artifact }}'" \
+        "--arm64-m4-evidence-artifact='\${{ inputs.arm64_evidence_artifact }}'" \
+        "--x86_64-m4-evidence-artifact='\${{ inputs.x86_64_evidence_artifact }}'" \
+        "--expected-source-revision='\${{ inputs.source_revision }}'"; do
+        require_text "$m5_workflow" "$binding" "M5 download/receipt binding missing: $binding"
+    done
+
+    for key in schema status architecture host_architecture target_triple candidate_sha256 \
+        admission_receipt_sha256 source_run_id source_artifact qualification_run_id \
+        qualification_run_attempt qualification_artifact evidence_artifact \
+        residency_authority_run_id residency_authority_artifact results_sha256 \
+        evidence_manifest_sha256 tool_builds_sha256 provider_builds_sha256 \
+        target_identity_digest sdk_identity deployment_target xcode_version_sha256 clang_version_sha256 \
+        provider_baseline_archive_sha256 provider_same_byte_archive_sha256 \
+        provider_mutated_archive_sha256 provider_baseline_members_sha256 \
+        provider_same_byte_members_sha256 provider_mutated_members_sha256 \
+        provider_baseline_payloads_sha256 provider_same_byte_payloads_sha256 \
+        provider_mutated_payloads_sha256; do
+        require_text "$m4_checker" "$key=" "M4 producer omits receipt key: $key"
+        require_text "$m4_workflow" "$key" "M4 workflow does not admit receipt key: $key"
+        require_text "$m5_release" "$key" "M5 consumer does not bind receipt key: $key"
+    done
+}
+
+check_default_branch() {
+    command -v git >/dev/null 2>&1 || fail "git is required for default-branch verification"
+    for path in .github/workflows/macos-reverse-reference-m4.yml .github/workflows/macos-reverse-reference-m5.yml; do
+        if ! git -C "$root" cat-file -e "$default_branch_ref:$path" 2>/dev/null; then
+            echo "macOS M4 workflow readiness BLOCKED: $path is absent from $default_branch_ref" >&2
+            exit 3
+        fi
+    done
+}
+
+run_self_test() {
+    STORAGE_ROOTS_REPO_ROOT=$root
+    export STORAGE_ROOTS_REPO_ROOT
+    . "$root/scripts/lib/storage-roots.shs"
+    temp_root=$(storage_roots_mktemp macos-m4-workflow-readiness)
+    trap 'rm -rf "$temp_root"' EXIT HUP INT TERM
+    mkdir -p "$temp_root/.github/workflows" "$temp_root/scripts/check" "$temp_root/scripts/release"
+    cp "$root/.github/workflows/macos-reverse-reference-m4.yml" "$temp_root/.github/workflows/"
+    cp "$root/.github/workflows/macos-reverse-reference-m5.yml" "$temp_root/.github/workflows/"
+    cp "$root/scripts/check/check-macos-reverse-reference-m4.shs" "$temp_root/scripts/check/"
+    cp "$root/scripts/check/check-macos-m4-residency-baseline-receipt.shs" "$temp_root/scripts/check/"
+    cp "$root/scripts/check/check-macos-m4-long-lived-residency.shs" "$temp_root/scripts/check/"
+    cp "$root/scripts/release/macos-universal-m5.shs" "$temp_root/scripts/release/"
+    "$0" --root="$temp_root" >/dev/null
+
+    mutate_and_reject() {
+        label=$1 file=$2 pattern=$3 replacement=$4
+        saved="$file.saved"
+        cp "$file" "$saved"
+        sed "s|$pattern|$replacement|" "$saved" >"$file"
+        if "$0" --root="$temp_root" >/dev/null 2>&1; then
+            fail "mutation was accepted: $label"
+        fi
+        mv "$saved" "$file"
+    }
+    mutate_and_reject run-attempt-name "$temp_root/.github/workflows/macos-reverse-reference-m4.yml" 'attempt-${{ github.run_attempt }}' 'attempt-static'
+    mutate_and_reject runner-separation "$temp_root/.github/workflows/macos-reverse-reference-m5.yml" 'runs-on: ${{ inputs.x86_64_runner }}' 'runs-on: ${{ inputs.arm64_runner }}'
+    mutate_and_reject source-pin "$temp_root/.github/workflows/macos-reverse-reference-m5.yml" 'ref: ${{ inputs.source_revision }}' 'ref: main'
+    mutate_and_reject retention "$temp_root/.github/workflows/macos-reverse-reference-m4.yml" 'retention-days: 30' 'retention-days: 1'
+    mutate_and_reject baseline-handoff "$temp_root/.github/workflows/macos-reverse-reference-m4.yml" '--residency-baseline-receipt=build/m4/residency-authority/baseline.env' '--residency-baseline-receipt=missing.env'
+    mutate_and_reject receipt-schema "$temp_root/scripts/check/check-macos-reverse-reference-m4.shs" 'provider_mutated_payloads_sha256=' 'provider_mutated_payload_digest='
+    echo "PASS macOS M4 workflow readiness mutation checks"
+}
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --root=*) root=${1#*=} ;;
+        --default-branch-ref=*) default_branch_ref=${1#*=} ;;
+        --require-default-branch) require_default_branch=1 ;;
+        --self-test) self_test=1 ;;
+        *) fail "unknown option: $1" ;;
+    esac
+    shift
+done
+
+check_local_contract
+[ "$self_test" -eq 0 ] || { run_self_test; exit 0; }
+[ "$require_default_branch" -eq 0 ] || check_default_branch
+echo "PASS macOS M4/M5 local workflow and receipt contract"

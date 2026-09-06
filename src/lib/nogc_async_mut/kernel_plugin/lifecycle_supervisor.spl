@@ -1,0 +1,198 @@
+pub enum KpfLifecyclePlacementV1:
+    Static
+    Native
+    Worker
+    Wasm
+
+pub enum KpfLifecyclePhaseV1:
+    Declared
+    Prepared
+    Started
+    Published
+    Draining
+    Retired
+    Unloaded
+    Faulted
+    Quarantined
+
+pub enum KpfLifecycleOutcomeV1:
+    Accepted
+    InvalidTransition
+    StaleGeneration
+    RestartAllowed
+    RestartBudgetExhausted
+    Disabled
+
+pub enum KpfFaultDispositionV1:
+    None
+    Restart
+    Quarantine
+
+pub struct KpfRestartPolicyV1:
+    maximum_restarts: i64
+    window_ns: i64
+
+pub struct KpfLifecycleReceiptV1:
+    sequence: i64
+    generation: i64
+    placement: KpfLifecyclePlacementV1
+    from_phase: KpfLifecyclePhaseV1
+    to_phase: KpfLifecyclePhaseV1
+    outcome: KpfLifecycleOutcomeV1
+    disposition: KpfFaultDispositionV1
+    faults_in_window: i64
+    restart_count: i64
+    disabled: bool
+    quarantined: bool
+    host_failed: bool
+
+pub class KpfLifecycleSupervisorV1:
+    policy: KpfRestartPolicyV1
+    placement: KpfLifecyclePlacementV1
+    restart_times: [i64]
+    var generation: i64
+    var phase: KpfLifecyclePhaseV1
+    var restart_count: i64
+    var fault_count: i64
+    var sequence: i64
+    var disabled: bool
+    var quarantined: bool
+
+impl KpfLifecycleSupervisorV1:
+    pub static fn create(policy: KpfRestartPolicyV1,
+            placement: KpfLifecyclePlacementV1) -> KpfLifecycleSupervisorV1:
+        var restart_times: [i64] = []
+        var index = 0
+        while index < policy.maximum_restarts:
+            restart_times.push(-1)
+            index = index + 1
+        KpfLifecycleSupervisorV1(policy: policy, placement: placement,
+            restart_times: restart_times, generation: 0,
+            phase: KpfLifecyclePhaseV1.Declared, restart_count: 0,
+            fault_count: 0, sequence: 0, disabled: false,
+            quarantined: false)
+
+    me _receipt(from_phase: KpfLifecyclePhaseV1,
+            to_phase: KpfLifecyclePhaseV1, outcome: KpfLifecycleOutcomeV1,
+            disposition: KpfFaultDispositionV1,
+            faults_in_window: i64) -> KpfLifecycleReceiptV1:
+        self.sequence = self.sequence + 1
+        KpfLifecycleReceiptV1(sequence: self.sequence,
+            generation: self.generation, placement: self.placement,
+            from_phase: from_phase, to_phase: to_phase, outcome: outcome,
+            disposition: disposition, faults_in_window: faults_in_window,
+            restart_count: self.restart_count, disabled: self.disabled,
+            quarantined: self.quarantined, host_failed: false)
+
+    me _clear_restart_window():
+        var index = 0
+        while index < self.restart_times.len:
+            self.restart_times[index] = -1
+            index = index + 1
+
+    fn _faults_in_window(now_ns: i64) -> i64:
+        var count = 0
+        var index = 0
+        while index < self.restart_times.len:
+            val timestamp = self.restart_times[index]
+            if timestamp >= 0 and now_ns >= timestamp and
+                    now_ns - timestamp < self.policy.window_ns:
+                count = count + 1
+            index = index + 1
+        count
+
+    me _record_restart(now_ns: i64):
+        var index = 0
+        while index < self.restart_times.len:
+            val timestamp = self.restart_times[index]
+            if timestamp < 0 or now_ns < timestamp or
+                    now_ns - timestamp >= self.policy.window_ns:
+                self.restart_times[index] = now_ns
+                return
+            index = index + 1
+
+    me prepare(generation: i64) -> KpfLifecycleReceiptV1:
+        val from_phase = self.phase
+        if generation <= 0:
+            return self._receipt(from_phase, from_phase,
+                KpfLifecycleOutcomeV1.StaleGeneration,
+                KpfFaultDispositionV1.None, 0)
+        self.generation = generation
+        self.phase = KpfLifecyclePhaseV1.Prepared
+        self.restart_count = 0
+        self.fault_count = 0
+        self.disabled = false
+        self.quarantined = false
+        self._clear_restart_window()
+        self._receipt(from_phase, self.phase, KpfLifecycleOutcomeV1.Accepted,
+            KpfFaultDispositionV1.None, 0)
+
+    me start(generation: i64) -> KpfLifecycleReceiptV1:
+        self._transition(generation, KpfLifecyclePhaseV1.Prepared,
+            KpfLifecyclePhaseV1.Started)
+
+    me publish(generation: i64) -> KpfLifecycleReceiptV1:
+        self._transition(generation, KpfLifecyclePhaseV1.Started,
+            KpfLifecyclePhaseV1.Published)
+
+    me drain(generation: i64) -> KpfLifecycleReceiptV1:
+        self._transition(generation, KpfLifecyclePhaseV1.Published,
+            KpfLifecyclePhaseV1.Draining)
+
+    me retire(generation: i64) -> KpfLifecycleReceiptV1:
+        self._transition(generation, KpfLifecyclePhaseV1.Draining,
+            KpfLifecyclePhaseV1.Retired)
+
+    me unload(generation: i64) -> KpfLifecycleReceiptV1:
+        self._transition(generation, KpfLifecyclePhaseV1.Retired,
+            KpfLifecyclePhaseV1.Unloaded)
+
+    me _transition(generation: i64, expected: KpfLifecyclePhaseV1,
+            target: KpfLifecyclePhaseV1) -> KpfLifecycleReceiptV1:
+        val from_phase = self.phase
+        if generation != self.generation:
+            return self._receipt(from_phase, from_phase,
+                KpfLifecycleOutcomeV1.StaleGeneration,
+                KpfFaultDispositionV1.None, 0)
+        if self.disabled:
+            return self._receipt(from_phase, from_phase,
+                KpfLifecycleOutcomeV1.Disabled,
+                KpfFaultDispositionV1.Quarantine, 0)
+        if from_phase != expected:
+            return self._receipt(from_phase, from_phase,
+                KpfLifecycleOutcomeV1.InvalidTransition,
+                KpfFaultDispositionV1.None, 0)
+        self.phase = target
+        self._receipt(from_phase, target, KpfLifecycleOutcomeV1.Accepted,
+            KpfFaultDispositionV1.None, 0)
+
+    me fault(generation: i64, now_ns: i64) -> KpfLifecycleReceiptV1:
+        val from_phase = self.phase
+        if generation != self.generation:
+            return self._receipt(from_phase, from_phase,
+                KpfLifecycleOutcomeV1.StaleGeneration,
+                KpfFaultDispositionV1.None, self._faults_in_window(now_ns))
+        if self.disabled:
+            return self._receipt(from_phase, from_phase,
+                KpfLifecycleOutcomeV1.Disabled,
+                KpfFaultDispositionV1.Quarantine,
+                self._faults_in_window(now_ns))
+        self.fault_count = self.fault_count + 1
+        val used = self._faults_in_window(now_ns)
+        if used >= self.policy.maximum_restarts:
+            self.phase = KpfLifecyclePhaseV1.Quarantined
+            self.disabled = true
+            self.quarantined = true
+            return self._receipt(from_phase, self.phase,
+                KpfLifecycleOutcomeV1.RestartBudgetExhausted,
+                KpfFaultDispositionV1.Quarantine, used)
+        self._record_restart(now_ns)
+        self.restart_count = self.restart_count + 1
+        self.phase = KpfLifecyclePhaseV1.Faulted
+        self._receipt(from_phase, self.phase,
+            KpfLifecycleOutcomeV1.RestartAllowed,
+            KpfFaultDispositionV1.Restart, used + 1)
+
+    me restart(generation: i64) -> KpfLifecycleReceiptV1:
+        self._transition(generation, KpfLifecyclePhaseV1.Faulted,
+            KpfLifecyclePhaseV1.Prepared)

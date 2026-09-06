@@ -1,0 +1,266 @@
+use std.common.kernel_plugin.ids.{KpfDigest256, kpf_digest256_equal}
+use std.tooling_kernel.*
+use app.toolingd.protocol.*
+
+fn _map_status(status: ToolingStatusV1) -> ToolingDaemonStatusV1:
+    match status:
+        case ToolingStatusV1.Ok: ToolingDaemonStatusV1.Ok
+        case ToolingStatusV1.CapacityExceeded: ToolingDaemonStatusV1.CapacityExceeded
+        case ToolingStatusV1.DocumentNotFound: ToolingDaemonStatusV1.DocumentNotFound
+        case ToolingStatusV1.SessionNotFound: ToolingDaemonStatusV1.Disconnected
+        case ToolingStatusV1.RevisionStale: ToolingDaemonStatusV1.RevisionStale
+        case ToolingStatusV1.SnapshotMismatch: ToolingDaemonStatusV1.SnapshotMismatch
+        case ToolingStatusV1.LanguageMismatch: ToolingDaemonStatusV1.LanguageMismatch
+        case ToolingStatusV1.GenerationMismatch: ToolingDaemonStatusV1.GenerationMismatch
+        case ToolingStatusV1.Cancelled: ToolingDaemonStatusV1.Cancelled
+        case ToolingStatusV1.Disconnected: ToolingDaemonStatusV1.Disconnected
+
+pub class ToolingDaemonV1:
+    workspace: ToolingWorkspaceV1
+    connection_capacity: i64
+    connection_active: [bool]
+    connection_epochs: [u64]
+    document_capacity: i64
+    document_active: [bool]
+    document_epochs: [u64]
+    document_connections: [ToolingConnectionHandleV1]
+    document_handles: [ToolingDocumentHandleV1]
+    language_sessions: [ToolingSessionHandleV1]
+    document_revisions: [u64]
+    document_digests: [KpfDigest256]
+    request_capacity: i64
+    request_active: [bool]
+    request_cancelled: [bool]
+    request_epochs: [u64]
+    request_documents: [ToolingDocumentSessionHandleV1]
+    request_handles: [ToolingRequestHandleV1]
+
+impl ToolingDaemonV1:
+    pub static fn create(connection_capacity: i64, document_capacity: i64, request_capacity: i64, diagnostic_capacity: i64) -> ToolingDaemonV1:
+        var connection_active: [bool] = []
+        var connection_epochs: [u64] = []
+        var index = 0
+        while index < connection_capacity:
+            connection_active.push(false)
+            connection_epochs.push(0)
+            index = index + 1
+        var document_active: [bool] = []
+        var document_epochs: [u64] = []
+        var document_connections: [ToolingConnectionHandleV1] = []
+        var document_handles: [ToolingDocumentHandleV1] = []
+        var language_sessions: [ToolingSessionHandleV1] = []
+        var document_revisions: [u64] = []
+        var document_digests: [KpfDigest256] = []
+        index = 0
+        while index < document_capacity:
+            document_active.push(false)
+            document_epochs.push(0)
+            document_connections.push(tooling_invalid_connection_v1())
+            document_handles.push(tooling_invalid_document_handle_v1())
+            language_sessions.push(tooling_invalid_session_handle_v1())
+            document_revisions.push(0)
+            document_digests.push(KpfDigest256(w0: 0, w1: 0, w2: 0, w3: 0))
+            index = index + 1
+        var request_active: [bool] = []
+        var request_cancelled: [bool] = []
+        var request_epochs: [u64] = []
+        var request_documents: [ToolingDocumentSessionHandleV1] = []
+        var request_handles: [ToolingRequestHandleV1] = []
+        index = 0
+        while index < request_capacity:
+            request_active.push(false)
+            request_cancelled.push(false)
+            request_epochs.push(0)
+            request_documents.push(tooling_invalid_document_session_v1())
+            request_handles.push(tooling_invalid_request_handle_v1())
+            index = index + 1
+        ToolingDaemonV1(
+            workspace: ToolingWorkspaceV1.create(document_capacity, document_capacity, request_capacity, diagnostic_capacity),
+            connection_capacity: connection_capacity,
+            connection_active: connection_active,
+            connection_epochs: connection_epochs,
+            document_capacity: document_capacity,
+            document_active: document_active,
+            document_epochs: document_epochs,
+            document_connections: document_connections,
+            document_handles: document_handles,
+            language_sessions: language_sessions,
+            document_revisions: document_revisions,
+            document_digests: document_digests,
+            request_capacity: request_capacity,
+            request_active: request_active,
+            request_cancelled: request_cancelled,
+            request_epochs: request_epochs,
+            request_documents: request_documents,
+            request_handles: request_handles
+        )
+
+    fn validate_connection(connection: ToolingConnectionHandleV1) -> ToolingDaemonStatusV1:
+        if connection.slot < 0 or connection.slot >= self.connection_capacity:
+            return ToolingDaemonStatusV1.ConnectionNotFound
+        if not self.connection_active[connection.slot] or self.connection_epochs[connection.slot] != connection.epoch:
+            return ToolingDaemonStatusV1.ConnectionNotFound
+        ToolingDaemonStatusV1.Ok
+
+    fn validate_document(document: ToolingDocumentSessionHandleV1) -> ToolingDaemonStatusV1:
+        val connection_status = self.validate_connection(document.connection)
+        if connection_status != ToolingDaemonStatusV1.Ok:
+            return connection_status
+        if document.slot < 0 or document.slot >= self.document_capacity:
+            return ToolingDaemonStatusV1.DocumentNotFound
+        if not self.document_active[document.slot] or self.document_epochs[document.slot] != document.epoch:
+            return ToolingDaemonStatusV1.DocumentNotFound
+        val owner = self.document_connections[document.slot]
+        if owner.slot != document.connection.slot or owner.epoch != document.connection.epoch:
+            return ToolingDaemonStatusV1.DocumentNotFound
+        ToolingDaemonStatusV1.Ok
+
+    me connect(version: ToolingProtocolVersionV1) -> ToolingConnectResultV1:
+        val negotiated = tooling_protocol_version_v1()
+        if version.major != negotiated.major or version.minor > negotiated.minor:
+            return ToolingConnectResultV1(status: ToolingDaemonStatusV1.UnsupportedProtocol, connection: tooling_invalid_connection_v1(), negotiated: negotiated)
+        var index = 0
+        while index < self.connection_capacity:
+            if not self.connection_active[index]:
+                self.connection_epochs[index] = self.connection_epochs[index] + 1
+                self.connection_active[index] = true
+                return ToolingConnectResultV1(status: ToolingDaemonStatusV1.Ok, connection: ToolingConnectionHandleV1(slot: index, epoch: self.connection_epochs[index]), negotiated: version)
+            index = index + 1
+        ToolingConnectResultV1(status: ToolingDaemonStatusV1.CapacityExceeded, connection: tooling_invalid_connection_v1(), negotiated: negotiated)
+
+    me open_document(connection: ToolingConnectionHandleV1, message: ToolingOpenDocumentSessionV1) -> ToolingOpenDocumentSessionResultV1:
+        val connection_status = self.validate_connection(connection)
+        if connection_status != ToolingDaemonStatusV1.Ok:
+            return ToolingOpenDocumentSessionResultV1(status: connection_status, document: tooling_invalid_document_session_v1())
+        var slot = -1
+        var index = 0
+        while index < self.document_capacity:
+            if not self.document_active[index] and slot < 0:
+                slot = index
+            index = index + 1
+        if slot < 0:
+            return ToolingOpenDocumentSessionResultV1(status: ToolingDaemonStatusV1.CapacityExceeded, document: tooling_invalid_document_session_v1())
+        val opened = self.workspace.documents.open(message.snapshot)
+        if opened.status != ToolingStatusV1.Ok:
+            return ToolingOpenDocumentSessionResultV1(status: _map_status(opened.status), document: tooling_invalid_document_session_v1())
+        val session = self.workspace.open_language_session(message.snapshot.language_id, message.provider_generation)
+        if session.status != ToolingStatusV1.Ok:
+            self.workspace.documents.close(opened.handle)
+            return ToolingOpenDocumentSessionResultV1(status: _map_status(session.status), document: tooling_invalid_document_session_v1())
+        self.document_epochs[slot] = self.document_epochs[slot] + 1
+        self.document_active[slot] = true
+        self.document_connections[slot] = connection
+        self.document_handles[slot] = opened.handle
+        self.language_sessions[slot] = session.handle
+        self.document_revisions[slot] = message.snapshot.revision
+        self.document_digests[slot] = message.snapshot.content_digest
+        ToolingOpenDocumentSessionResultV1(status: ToolingDaemonStatusV1.Ok, document: ToolingDocumentSessionHandleV1(slot: slot, epoch: self.document_epochs[slot], connection: connection))
+
+    me update_document(document: ToolingDocumentSessionHandleV1, snapshot: ToolingDocumentSnapshotV1) -> ToolingDaemonStatusV1:
+        val valid = self.validate_document(document)
+        if valid != ToolingDaemonStatusV1.Ok:
+            return valid
+        val current_revision = self.document_revisions[document.slot]
+        if snapshot.revision <= current_revision:
+            return ToolingDaemonStatusV1.RevisionStale
+        var index = 0
+        while index < self.request_capacity:
+            val owner = self.request_documents[index]
+            if self.request_active[index] and owner.slot == document.slot and owner.epoch == document.epoch:
+                self.workspace.publish_diagnostics(self.request_handles[index], self.document_digests[document.slot], [])
+                self.request_cancelled[index] = true
+                self.request_active[index] = false
+            index = index + 1
+        val status = self.workspace.documents.update(self.document_handles[document.slot], snapshot)
+        if status != ToolingStatusV1.Ok:
+            return _map_status(status)
+        self.document_revisions[document.slot] = snapshot.revision
+        self.document_digests[document.slot] = snapshot.content_digest
+        ToolingDaemonStatusV1.Ok
+
+    me begin_analysis(message: ToolingBeginAnalysisV1) -> ToolingBeginAnalysisResultV1:
+        val document = message.document
+        val valid = self.validate_document(document)
+        if valid != ToolingDaemonStatusV1.Ok:
+            return ToolingBeginAnalysisResultV1(status: valid, ticket: tooling_invalid_analysis_ticket_v1())
+        if message.revision != self.document_revisions[document.slot]:
+            return ToolingBeginAnalysisResultV1(status: ToolingDaemonStatusV1.RevisionStale, ticket: tooling_invalid_analysis_ticket_v1())
+        if not kpf_digest256_equal(message.content_digest, self.document_digests[document.slot]):
+            return ToolingBeginAnalysisResultV1(status: ToolingDaemonStatusV1.SnapshotMismatch, ticket: tooling_invalid_analysis_ticket_v1())
+        var request_slot = -1
+        var index = 0
+        while index < self.request_capacity:
+            if not self.request_active[index] and request_slot < 0:
+                request_slot = index
+            index = index + 1
+        if request_slot < 0:
+            return ToolingBeginAnalysisResultV1(status: ToolingDaemonStatusV1.CapacityExceeded, ticket: tooling_invalid_analysis_ticket_v1())
+        val begun = self.workspace.begin_request(self.document_handles[document.slot], self.language_sessions[document.slot])
+        if begun.status != ToolingStatusV1.Ok:
+            return ToolingBeginAnalysisResultV1(status: _map_status(begun.status), ticket: tooling_invalid_analysis_ticket_v1())
+        self.request_epochs[request_slot] = self.request_epochs[request_slot] + 1
+        self.request_active[request_slot] = true
+        self.request_cancelled[request_slot] = false
+        self.request_documents[request_slot] = document
+        self.request_handles[request_slot] = begun.handle
+        ToolingBeginAnalysisResultV1(status: ToolingDaemonStatusV1.Ok, ticket: ToolingAnalysisTicketV1(slot: request_slot, epoch: self.request_epochs[request_slot], document: document, revision: message.revision, content_digest: message.content_digest))
+
+    me cancel(ticket: ToolingAnalysisTicketV1) -> ToolingDaemonStatusV1:
+        if ticket.slot < 0 or ticket.slot >= self.request_capacity:
+            return ToolingDaemonStatusV1.Cancelled
+        if self.request_epochs[ticket.slot] != ticket.epoch:
+            return ToolingDaemonStatusV1.Cancelled
+        if not self.request_active[ticket.slot]:
+            if self.request_cancelled[ticket.slot]:
+                return ToolingDaemonStatusV1.Ok
+            return ToolingDaemonStatusV1.Cancelled
+        self.workspace.publish_diagnostics(self.request_handles[ticket.slot], ticket.content_digest, [])
+        self.request_cancelled[ticket.slot] = true
+        self.request_active[ticket.slot] = false
+        ToolingDaemonStatusV1.Ok
+
+    fn is_cancelled(ticket: ToolingAnalysisTicketV1) -> bool:
+        if ticket.slot < 0 or ticket.slot >= self.request_capacity:
+            return true
+        if not self.request_active[ticket.slot] or self.request_epochs[ticket.slot] != ticket.epoch:
+            return true
+        self.request_cancelled[ticket.slot] or self.workspace.is_request_cancelled(self.request_handles[ticket.slot])
+
+    me publish_diagnostics(message: ToolingPublishDiagnosticsV1) -> ToolingPublishDiagnosticsResultV1:
+        val ticket = message.ticket
+        if self.is_cancelled(ticket):
+            return ToolingPublishDiagnosticsResultV1(status: ToolingDaemonStatusV1.Cancelled, accepted_count: 0)
+        val publication = self.workspace.publish_diagnostics(self.request_handles[ticket.slot], ticket.content_digest, message.diagnostics)
+        if publication.status == ToolingStatusV1.Ok:
+            self.request_active[ticket.slot] = false
+        ToolingPublishDiagnosticsResultV1(status: _map_status(publication.status), accepted_count: publication.accepted_count)
+
+    me close_document(document: ToolingDocumentSessionHandleV1) -> ToolingDaemonStatusV1:
+        val valid = self.validate_document(document)
+        if valid != ToolingDaemonStatusV1.Ok:
+            return valid
+        var index = 0
+        while index < self.request_capacity:
+            val owner = self.request_documents[index]
+            if self.request_active[index] and owner.slot == document.slot and owner.epoch == document.epoch:
+                self.request_cancelled[index] = true
+                self.request_active[index] = false
+            index = index + 1
+        self.workspace.disconnect_session(self.language_sessions[document.slot])
+        self.workspace.documents.close(self.document_handles[document.slot])
+        self.document_active[document.slot] = false
+        ToolingDaemonStatusV1.Ok
+
+    me disconnect(connection: ToolingConnectionHandleV1) -> ToolingDaemonStatusV1:
+        val valid = self.validate_connection(connection)
+        if valid != ToolingDaemonStatusV1.Ok:
+            return valid
+        var index = 0
+        while index < self.document_capacity:
+            val owner = self.document_connections[index]
+            if self.document_active[index] and owner.slot == connection.slot and owner.epoch == connection.epoch:
+                val document = ToolingDocumentSessionHandleV1(slot: index, epoch: self.document_epochs[index], connection: connection)
+                self.close_document(document)
+            index = index + 1
+        self.connection_active[connection.slot] = false
+        ToolingDaemonStatusV1.Ok

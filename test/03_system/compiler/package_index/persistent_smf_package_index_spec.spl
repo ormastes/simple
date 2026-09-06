@@ -1,0 +1,515 @@
+# @req PSI-REQ-001 PSI-REQ-002 PSI-REQ-003 PSI-REQ-004 PSI-REQ-005 PSI-REQ-006 PSI-REQ-007 PSI-NFR-001 PSI-NFR-002 PSI-NFR-003 PSI-NFR-004
+# @evidence-display: links
+use std.spec.*
+use std.io_runtime.{process_run}
+
+describe "persistent SMF package index":
+    describe "PSI-REQ-001: explicit dependency closure only":
+        it "should compile the requested package and explicit closure only":
+            step("Compile the requested package from the persistent SMF index")
+            val (output, errors, status) = process_run(
+                "/bin/sh", ["scripts/check/check-persistent-smf-package-index.shs", "--scenario", "explicit-closure-only"])
+            expect(status).to_equal(0)
+            expect(errors).to_equal("")
+            expect(output).to_contain("requested=app")
+            expect(output).to_contain("resolved_closure=model,api,util,app")
+            expect(output).to_contain("compiled=model,api,util,app")
+            expect(output).to_contain("recursive_scan_count=0")
+
+        it "should compile while the unrelated tree is unreadable":
+            step("Make the unrelated source tree unreadable")
+            val (output, errors, status) = process_run(
+                "/bin/sh", ["scripts/check/check-persistent-smf-package-index.shs", "--scenario", "unrelated-tree-unreadable"])
+            expect(status).to_equal(0)
+            expect(errors).to_equal("")
+            expect(output).to_contain("result=success")
+            expect(output).to_contain("unrelated_tree=unreadable")
+            expect(output).to_contain("unrelated_read_count=0")
+            expect(output).to_contain("recursive_scan_count=0")
+
+        it "should reuse export headers without reading dependency source bodies":
+            step("Reuse dependency export headers without opening source bodies")
+            val (output, errors, status) = process_run(
+                "/bin/sh", ["scripts/check/check-persistent-smf-package-index.shs", "--scenario", "header-metadata-reuse"])
+            expect(status).to_equal(0)
+            expect(errors).to_equal("")
+            expect(output).to_contain("metadata_kind=PackageTldrHeaderV1")
+            expect(output).to_contain("header_cache_hits=model,api,util")
+            expect(output).to_contain("dependency_source_body_reads=0")
+            expect(output).to_contain("export_abi_digest_match=true")
+            expect(output).to_contain("smf_sections_read=demanded-only")
+
+        it "should read only reached TLDR headers and demanded SMF sections":
+            step("Read only TLDR and demanded SMF sections")
+            val (output, errors, status) = process_run(
+                "/bin/sh", ["scripts/check/check-persistent-smf-package-index.shs", "--scenario", "metadata-section-lazy-read"])
+            expect(status).to_equal(0)
+            expect(errors).to_equal("")
+            expect(output).to_contain("tldr_headers_read=model,api,util,app")
+            expect(output).to_contain("smf_sections_read=demanded-only")
+            expect(output).to_contain("unreached_metadata_read_count=0")
+            expect(output).to_contain("dependency_source_body_reads=0")
+
+        it "should reuse admitted dependency package archives":
+            step("Reuse admitted package archives")
+            val (output, errors, status) = process_run(
+                "/bin/sh", ["scripts/check/check-persistent-smf-package-index.shs", "--scenario", "package-archive-cache-hit"])
+            expect(status).to_equal(0)
+            expect(errors).to_equal("")
+            expect(output).to_contain("archive_receipt_kind=PackageArchiveReceiptV1")
+            expect(output).to_contain("archive_cache_hits=model,api,util")
+            expect(output).to_contain("dependency_recompile_count=0")
+            expect(output).to_contain("archive_variant_digest_match=true")
+            expect(output).to_contain("action_key_match=true")
+            expect(output).to_contain("archive_member_payloads_match=true")
+
+        it "should refuse a missing index without scanning for recovery":
+            step("Refuse an untrusted package index")
+            val (output, errors, status) = process_run(
+                "/bin/sh", ["scripts/check/check-persistent-smf-package-index.shs", "--scenario", "missing-index-denied"])
+            expect(status).to_equal(0)
+            expect(errors).to_equal("")
+            expect(output).to_contain("observed_error=PKG-IDX-001")
+            expect(output).to_contain("compile_started=false")
+            expect(output).to_contain("fallback_scan_count=0")
+
+    describe "PSI-REQ-002: package-local and variant-aware invalidation":
+        it "should invalidate one edited package and its reverse dependents only":
+            step("Edit one indexed package")
+            val (output, errors, status) = process_run(
+                "/bin/sh", ["scripts/check/check-persistent-smf-package-index.shs", "--scenario", "direct-reverse-invalidation"])
+            expect(status).to_equal(0)
+            expect(errors).to_equal("")
+            expect(output).to_contain("edited=util")
+            expect(output).to_contain("invalidated=util,app")
+            expect(output).to_contain("compiled=util,app")
+            expect(output).to_contain("retained=model,api")
+
+        it "should invalidate indirect reverse dependents transitively":
+            step("Edit one indexed package")
+            val (output, errors, status) = process_run(
+                "/bin/sh", ["scripts/check/check-persistent-smf-package-index.shs", "--scenario", "indirect-reverse-invalidation"])
+            expect(status).to_equal(0)
+            expect(errors).to_equal("")
+            expect(output).to_contain("edited=model")
+            expect(output).to_contain("invalidated=model,api,util,app")
+            expect(output).to_contain("compiled=model,api,util,app")
+            expect(output).to_contain("unrelated_read_count=0")
+
+        it "should bind generated packages to producer input and output digests":
+            step("Change a generated source input")
+            val (output, errors, status) = process_run(
+                "/bin/sh", ["scripts/check/check-persistent-smf-package-index.shs", "--scenario", "generated-source-invalidation"])
+            expect(status).to_equal(0)
+            expect(errors).to_equal("")
+            expect(output).to_contain("generated_identity_bound=true")
+            expect(output).to_contain("invalidated=generated_api,generated_app")
+            expect(output).to_contain("producer_digest_match=true")
+            expect(output).to_contain("unchanged_generated_archive_reused=true")
+
+        it "should isolate configuration variants":
+            step("Change one configuration or build-tag variant")
+            val (output, errors, status) = process_run(
+                "/bin/sh", ["scripts/check/check-persistent-smf-package-index.shs", "--scenario", "config-variant-isolation"])
+            expect(status).to_equal(0)
+            expect(errors).to_equal("")
+            expect(output).to_contain("changed_variant=debug")
+            expect(output).to_contain("invalidated_variant=debug")
+            expect(output).to_contain("retained_variant=release")
+            expect(output).to_contain("cross_variant_reuse=false")
+
+        it "should isolate build-tag variants":
+            step("Change one configuration or build-tag variant")
+            val (output, errors, status) = process_run(
+                "/bin/sh", ["scripts/check/check-persistent-smf-package-index.shs", "--scenario", "build-tag-variant-isolation"])
+            expect(status).to_equal(0)
+            expect(errors).to_equal("")
+            expect(output).to_contain("changed_build_tag=feature_x")
+            expect(output).to_contain("retained_build_tag=feature_y")
+            expect(output).to_contain("variant_key_kind=ConfigVariantKeyV1")
+            expect(output).to_contain("cross_variant_reuse=false")
+
+        it "should stop reverse invalidation after an unchanged export":
+            step("Stop invalidation after an unchanged export")
+            val (output, errors, status) = process_run(
+                "/bin/sh", ["scripts/check/check-persistent-smf-package-index.shs", "--scenario", "private-body-export-early-cutoff"])
+            expect(status).to_equal(0)
+            expect(errors).to_equal("")
+            expect(output).to_contain("producer_action_changed=true")
+            expect(output).to_contain("producer_archive_changed=true")
+            expect(output).to_contain("export_digest_changed=false")
+            expect(output).to_contain("reverse_propagation_stopped=true")
+            expect(output).to_contain("consumer_recompile_count=0")
+
+        it "should deny undeclared generated output without publishing":
+            step("Change a generated source input")
+            val (output, errors, status) = process_run(
+                "/bin/sh", ["scripts/check/check-persistent-smf-package-index.shs", "--scenario", "generated-output-undeclared-denied"])
+            expect(status).to_equal(0)
+            expect(errors).to_equal("")
+            expect(output).to_contain("observed_error=PKG-IDX-004")
+            expect(output).to_contain("generated_output_admitted=false")
+            expect(output).to_contain("index_publish_count=0")
+            expect(output).to_contain("cache_publish_count=0")
+
+    describe "PSI-REQ-003: deterministic scheduling and warm reuse":
+
+        it "should schedule independent packages in deterministic order":
+            step("Schedule independent ready packages")
+            val (output, errors, status) = process_run(
+                "/bin/sh", ["scripts/check/check-persistent-smf-package-index.shs", "--scenario", "deterministic-independent-schedule"])
+            expect(status).to_equal(0)
+            expect(errors).to_equal("")
+            expect(output).to_contain("ready_set=alpha,beta")
+            expect(output).to_contain("dispatch_order=alpha,beta")
+            expect(output).to_contain("commit_order=alpha,beta,bundle")
+            expect(output).to_contain("repeat_schedule_digest_match=true")
+
+        it "should invalidate and schedule a package cycle as one SCC group":
+            step("Invalidate one member of a package cycle")
+            val (output, errors, status) = process_run(
+                "/bin/sh", ["scripts/check/check-persistent-smf-package-index.shs", "--scenario", "scc-group-invalidation"])
+            expect(status).to_equal(0)
+            expect(errors).to_equal("")
+            expect(output).to_contain("edited=cycle_a")
+            expect(output).to_contain("invalidated_scc=cycle_a,cycle_b")
+            expect(output).to_contain("invalidated_reverse=root")
+            expect(output).to_contain("compiled=cycle_a,cycle_b,root")
+
+        it "should reuse admitted package state in a warm compiler daemon":
+            step("Compile a second request in the warm daemon")
+            val (output, errors, status) = process_run(
+                "/bin/sh", ["scripts/check/check-persistent-smf-package-index.shs", "--scenario", "daemon-warm-reuse"])
+            expect(status).to_equal(0)
+            expect(errors).to_equal("")
+            expect(output).to_contain("session_receipt_kind=PackageDaemonSessionReceiptV1")
+            expect(output).to_contain("index_reload_count=0")
+            expect(output).to_contain("second_request_compile_count=0")
+            expect(output).to_contain("warm_archive_hits=model,api,util,app")
+
+        it "should reproduce clean outputs from warm cached compilation":
+            step("Compare clean and warm build receipts")
+            val (output, errors, status) = process_run(
+                "/bin/sh", ["scripts/check/check-persistent-smf-package-index.shs", "--scenario", "clean-warm-reproducibility"])
+            expect(status).to_equal(0)
+            expect(errors).to_equal("")
+            expect(output).to_contain("output_digest_match=true")
+            expect(output).to_contain("header_digest_match=true")
+            expect(output).to_contain("archive_digest_match=true")
+            expect(output).to_contain("plan_and_receipt_digest_match=true")
+
+    describe "PSI-REQ-004: fail-closed persistence and atomic recovery":
+        it "should perform only an explicitly authorized bounded rebuild":
+            step("Authorize one bounded index rebuild")
+            val (output, errors, status) = process_run(
+                "/bin/sh", ["scripts/check/check-persistent-smf-package-index.shs", "--scenario", "missing-index-bounded-rebuild"])
+            expect(status).to_equal(0)
+            expect(errors).to_equal("")
+            expect(output).to_contain("recovery_policy=bounded")
+            expect(output).to_contain("manifest_roots_read=1")
+            expect(output).to_contain("recursive_scan_count=0")
+            expect(output).to_contain("index_publish=atomic")
+
+        it "should reject a stale package index before compilation":
+            step("Refuse an untrusted package index")
+            val (output, errors, status) = process_run(
+                "/bin/sh", ["scripts/check/check-persistent-smf-package-index.shs", "--scenario", "stale-index-denied"])
+            expect(status).to_equal(0)
+            expect(errors).to_equal("")
+            expect(output).to_contain("observed_error=PKG-IDX-002")
+            expect(output).to_contain("compile_started=false")
+            expect(output).to_contain("recursive_scan_count=0")
+
+        it "should reject a tampered package index before compilation":
+            step("Refuse an untrusted package index")
+            val (output, errors, status) = process_run(
+                "/bin/sh", ["scripts/check/check-persistent-smf-package-index.shs", "--scenario", "tampered-index-denied"])
+            expect(status).to_equal(0)
+            expect(errors).to_equal("")
+            expect(output).to_contain("observed_error=PKG-IDX-004")
+            expect(output).to_contain("compile_started=false")
+            expect(output).to_contain("recursive_scan_count=0")
+
+        it "should reject corrupt package metadata before reading an archive":
+            step("Refuse an untrusted package index")
+            val (output, errors, status) = process_run(
+                "/bin/sh", ["scripts/check/check-persistent-smf-package-index.shs", "--scenario", "corrupt-metadata-denied"])
+            expect(status).to_equal(0)
+            expect(errors).to_equal("")
+            expect(output).to_contain("observed_error=PKG-IDX-003")
+            expect(output).to_contain("header_consumed=false")
+            expect(output).to_contain("archive_consumed=false")
+            expect(output).to_contain("recursive_scan_count=0")
+
+        it "should preserve the previous index generation when interrupted before publish":
+            step("Interrupt atomic index publication")
+            val (output, errors, status) = process_run(
+                "/bin/sh", ["scripts/check/check-persistent-smf-package-index.shs", "--scenario", "crash-before-publish"])
+            expect(status).to_equal(0)
+            expect(errors).to_equal("")
+            expect(output).to_contain("crash_point=before-publish")
+            expect(output).to_contain("recovery=previous-valid-generation")
+            expect(output).to_contain("mixed_generation_observed=false")
+            expect(output).to_contain("temp_residue_count=0")
+
+        it "should admit only the complete new generation when interrupted after publish":
+            step("Interrupt atomic index publication")
+            val (output, errors, status) = process_run(
+                "/bin/sh", ["scripts/check/check-persistent-smf-package-index.shs", "--scenario", "crash-after-publish"])
+            expect(status).to_equal(0)
+            expect(errors).to_equal("")
+            expect(output).to_contain("crash_point=after-publish")
+            expect(output).to_contain("recovery=new-complete-generation")
+            expect(output).to_contain("mixed_generation_observed=false")
+            expect(output).to_contain("temp_residue_count=0")
+
+        it "should never hide a recursive full-scan fallback":
+            step("Inspect the production compile receipt")
+            val (output, errors, status) = process_run(
+                "/bin/sh", ["scripts/check/check-persistent-smf-package-index.shs", "--scenario", "no-hidden-full-scan-fallback"])
+            expect(status).to_equal(0)
+            expect(errors).to_equal("")
+            expect(output).to_contain("fallback_scan_count=0")
+            expect(output).to_contain("recursive_scan_count=0")
+            expect(output).to_contain("unrelated_read_count=0")
+            expect(output).to_contain("receipt_source=production-filesystem-boundary")
+
+    describe "PSI-REQ-005: immutable SCV compile snapshot":
+        it "should bind a canonical SCV snapshot before package discovery":
+            step("Freeze one SCV revision before package discovery")
+            val (output, errors, status) = process_run(
+                "/bin/sh", ["scripts/check/check-persistent-smf-package-index.shs", "--scenario", "scv-snapshot-bound-build"])
+            expect(status).to_equal(0)
+            expect(errors).to_equal("")
+            expect(output).to_contain("snapshot_kind=ScvCompileSnapshotV1")
+            expect(output).to_contain("inventory_canonical=true")
+            expect(output).to_contain("inventory_finalized_before_discovery=true")
+            expect(output).to_contain("action_ids_created_after_snapshot=true")
+            expect(output).to_contain("source_provider=ScvFrozenSourceProviderV1")
+
+        it "should isolate an active build from concurrent worktree edits":
+            step("Edit the live worktree during the frozen build")
+            val (output, errors, status) = process_run(
+                "/bin/sh", ["scripts/check/check-persistent-smf-package-index.shs", "--scenario", "scv-concurrent-worktree-edit-isolated"])
+            expect(status).to_equal(0)
+            expect(errors).to_equal("")
+            expect(output).to_contain("concurrent_worktree_edit=true")
+            expect(output).to_contain("active_snapshot_mutated=false")
+            expect(output).to_contain("active_plan_digest_changed=false")
+            expect(output).to_contain("active_output_digest_matches_frozen_source=true")
+            expect(output).to_contain("live_worktree_read_count=0")
+
+        it "should reject drift or schedule a distinct snapshot-bound build":
+            step("Detect source drift without mutating the active build")
+            val (output, errors, status) = process_run(
+                "/bin/sh", ["scripts/check/check-persistent-smf-package-index.shs", "--scenario", "scv-source-drift-new-build"])
+            expect(status).to_equal(0)
+            expect(errors).to_equal("")
+            expect(output).to_contain("drift_detected=true")
+            expect(output).to_contain("active_build_mutated=false")
+            expect(output).to_contain("new_snapshot_revision_distinct=true")
+            expect(output).to_contain("new_build_id_distinct=true")
+            expect(output).to_contain("drift_policy_result=rejected-or-new-build")
+
+        it "should recover atomically from interrupted snapshot creation":
+            step("Interrupt SCV snapshot creation or cleanup")
+            val (output, errors, status) = process_run(
+                "/bin/sh", ["scripts/check/check-persistent-smf-package-index.shs", "--scenario", "scv-snapshot-create-crash"])
+            expect(status).to_equal(0)
+            expect(errors).to_equal("")
+            expect(output).to_contain("crash_phase=snapshot-create")
+            expect(output).to_contain("partial_snapshot_admitted=false")
+            expect(output).to_contain("previous_snapshot_intact=true")
+            expect(output).to_contain("orphan_staging_recovered=true")
+
+        it "should recover cleanup without deleting active snapshots":
+            step("Interrupt SCV snapshot creation or cleanup")
+            val (output, errors, status) = process_run(
+                "/bin/sh", ["scripts/check/check-persistent-smf-package-index.shs", "--scenario", "scv-snapshot-cleanup-crash"])
+            expect(status).to_equal(0)
+            expect(errors).to_equal("")
+            expect(output).to_contain("crash_phase=snapshot-cleanup")
+            expect(output).to_contain("active_snapshot_deleted=false")
+            expect(output).to_contain("cleanup_idempotent=true")
+            expect(output).to_contain("mixed_snapshot_generation_observed=false")
+
+        it "should bind all compile provenance to one SCV revision":
+            step("Inspect SCV-bound build provenance")
+            val (output, errors, status) = process_run(
+                "/bin/sh", ["scripts/check/check-persistent-smf-package-index.shs", "--scenario", "scv-provenance-binding"])
+            expect(status).to_equal(0)
+            expect(errors).to_equal("")
+            expect(output).to_contain("revision_binding_match=true")
+            expect(output).to_contain("tree_binding_match=true")
+            expect(output).to_contain("inventory_digest_binding_match=true")
+            expect(output).to_contain("package_index_action_receipt_binding_match=true")
+            expect(output).to_contain("provenance_complete=true")
+
+        it "should fail closed instead of reading the live worktree":
+            step("Inspect SCV-bound build provenance")
+            val (output, errors, status) = process_run(
+                "/bin/sh", ["scripts/check/check-persistent-smf-package-index.shs", "--scenario", "scv-no-live-worktree-fallback"])
+            expect(status).to_equal(0)
+            expect(errors).to_equal("")
+            expect(output).to_contain("observed_error=SCV-BUILD-004")
+            expect(output).to_contain("live_worktree_fallback=false")
+            expect(output).to_contain("live_worktree_read_count=0")
+            expect(output).to_contain("compile_started=false")
+
+    describe "PSI-REQ-006: transparent and non-mutating automatic SCV":
+        it "should freeze source quietly for a normal compile invocation":
+            step("Invoke compile without an explicit SCV option")
+            val (output, errors, status) = process_run(
+                "/bin/sh", ["scripts/check/check-persistent-smf-package-index.shs", "--scenario", "scv-implicit-compile-quiet"])
+            expect(status).to_equal(0)
+            expect(errors).to_equal("")
+            expect(output).to_contain("explicit_scv_option=false")
+            expect(output).to_contain("automatic_snapshot_admitted=true")
+            expect(output).to_contain("normal_compile_output_lines=0")
+            expect(output).to_contain("bridge_receipt_kind=ScvCompileBridgeReceiptV1")
+            expect(output).to_contain("receipt_observable=true")
+
+        it "should update package metadata from Git or SCV events automatically":
+            step("Apply one Git or SCV source event")
+            val (output, errors, status) = process_run(
+                "/bin/sh", ["scripts/check/check-persistent-smf-package-index.shs", "--scenario", "scv-git-event-auto-index-update"])
+            expect(status).to_equal(0)
+            expect(errors).to_equal("")
+            expect(output).to_contain("event_source=git-or-scv")
+            expect(output).to_contain("explicit_scv_option=false")
+            expect(output).to_contain("affected_package_metadata_updated=true")
+            expect(output).to_contain("unaffected_package_metadata_rewritten=false")
+            expect(output).to_contain("index_generation_publish=atomic")
+
+        it "should write only owned ignored internal compile metadata":
+            step("Inspect automatic SCV internal writes")
+            val (output, errors, status) = process_run(
+                "/bin/sh", ["scripts/check/check-persistent-smf-package-index.shs", "--scenario", "scv-internal-write-boundary"])
+            expect(status).to_equal(0)
+            expect(errors).to_equal("")
+            expect(output).to_contain("automatic_write_root=build/scv/compile")
+            expect(output).to_contain("write_root_ignored=true")
+            expect(output).to_contain("writes_outside_owned_root=0")
+            expect(output).to_contain("user_authored_file_writes=0")
+            expect(output).to_contain("developer_file_timestamp_changes=0")
+
+        it "should keep dependents admitted after a comment-only edit":
+            step("Edit only comments or whitespace in frozen source")
+            val (output, errors, status) = process_run(
+                "/bin/sh", ["scripts/check/check-persistent-smf-package-index.shs", "--scenario", "comment-only-semantic-reuse"])
+            expect(status).to_equal(0)
+            expect(errors).to_equal("")
+            expect(output).to_contain("content_digest_changed=true")
+            expect(output).to_contain("semantic_export_initializer_provider_digest_changed=false")
+            expect(output).to_contain("changed_package_reparse_bounded=true")
+            expect(output).to_contain("dependent_invalidation_count=0")
+            expect(output).to_contain("dependent_recompile_count=0")
+
+        it "should keep dependents admitted after a whitespace-only edit":
+            step("Edit only comments or whitespace in frozen source")
+            val (output, errors, status) = process_run(
+                "/bin/sh", ["scripts/check/check-persistent-smf-package-index.shs", "--scenario", "whitespace-only-semantic-reuse"])
+            expect(status).to_equal(0)
+            expect(errors).to_equal("")
+            expect(output).to_contain("content_digest_changed=true")
+            expect(output).to_contain("semantic_export_initializer_provider_digest_changed=false")
+            expect(output).to_contain("changed_package_reparse_bounded=true")
+            expect(output).to_contain("dependent_invalidation_count=0")
+            expect(output).to_contain("dependent_recompile_count=0")
+
+        it "should never mutate Git state or remove Git locks":
+            step("Compare Git state before and after automatic SCV")
+            val (output, errors, status) = process_run(
+                "/bin/sh", ["scripts/check/check-persistent-smf-package-index.shs", "--scenario", "scv-git-state-nonmutation"])
+            expect(status).to_equal(0)
+            expect(errors).to_equal("")
+            expect(output).to_contain("git_index_digest_match=true")
+            expect(output).to_contain("git_refs_digest_match=true")
+            expect(output).to_contain("git_head_match=true")
+            expect(output).to_contain("git_lock_removed=false")
+            expect(output).to_contain("history_mutation_command_count=0")
+
+        it "should emit concise diagnostics only for failure or drift":
+            step("Inspect quiet success and concise failure diagnostics")
+            val (output, errors, status) = process_run(
+                "/bin/sh", ["scripts/check/check-persistent-smf-package-index.shs", "--scenario", "scv-concise-failure-diagnostics"])
+            expect(status).to_equal(0)
+            expect(errors).to_equal("")
+            expect(output).to_contain("success_diagnostic_lines=0")
+            expect(output).to_contain("failure_diagnostics_concise=true")
+            expect(output).to_contain("failure_code_present=true")
+            expect(output).to_contain("receipt_path_present=true")
+
+        it "should publish and collect internal metadata atomically":
+            step("Inspect automatic SCV internal writes")
+            val (output, errors, status) = process_run(
+                "/bin/sh", ["scripts/check/check-persistent-smf-package-index.shs", "--scenario", "scv-internal-metadata-atomic-gc"])
+            expect(status).to_equal(0)
+            expect(errors).to_equal("")
+            expect(output).to_contain("metadata_publish=atomic")
+            expect(output).to_contain("metadata_size_bounded=true")
+            expect(output).to_contain("ownership_marker_present=true")
+            expect(output).to_contain("gc_receipt_present=true")
+            expect(output).to_contain("partial_current_generation=false")
+
+    describe "PSI-REQ-007: request generation pinning and hostile remote admission":
+        it "should pin one generation per daemon request and release workspace state":
+            step("Pin and refresh one daemon generation")
+            val (output, errors, status) = process_run(
+                "/bin/sh", ["scripts/check/check-persistent-smf-package-index.shs", "--scenario", "daemon-generation-workspace-isolation"])
+            expect(status).to_equal(0)
+            expect(errors).to_equal("")
+            expect(output).to_contain("generations_observed_per_request=1")
+            expect(output).to_contain("refresh_during_request=false")
+            expect(output).to_contain("refresh_between_requests=true")
+            expect(output).to_contain("workspace_pins_after_close=0")
+            expect(output).to_contain("workspace_dirty_state_after_close=0")
+
+        it "should admit remote content through complete local verification":
+            step("Admit untrusted remote content locally")
+            val (output, errors, status) = process_run(
+                "/bin/sh", ["scripts/check/check-persistent-smf-package-index.shs", "--scenario", "remote-cache-local-admission"])
+            expect(status).to_equal(0)
+            expect(errors).to_equal("")
+            expect(output).to_contain("remote_content_untrusted=true")
+            expect(output).to_contain("local_action_admission_complete=true")
+            expect(output).to_contain("local_archive_member_admission_complete=true")
+            expect(output).to_contain("remote_graph_authority=false")
+            expect(output).to_contain("remote_dirty_state_authority=false")
+            expect(output).to_contain("remote_generation_authority=false")
+
+        it "should reject poisoned remote content without graph mutation or fallback":
+            step("Admit untrusted remote content locally")
+            val (output, errors, status) = process_run(
+                "/bin/sh", ["scripts/check/check-persistent-smf-package-index.shs", "--scenario", "remote-cache-poison-denied"])
+            expect(status).to_equal(0)
+            expect(errors).to_equal("")
+            expect(output).to_contain("observed_error=PKG-IDX-005")
+            expect(output).to_contain("remote_content_admitted=false")
+            expect(output).to_contain("graph_mutation_count=0")
+            expect(output).to_contain("fallback_scan_count=0")
+            expect(output).to_contain("recursive_scan_count=0")
+
+    describe "PSI-NFR-001 and PSI-NFR-002: reproducibility and no-scan entrypoints":
+        it "should reproduce semantic evidence across supported compile modes":
+            step("Compare reproducible compile modes")
+            val (output, errors, status) = process_run(
+                "/bin/sh", ["scripts/check/check-persistent-smf-package-index.shs", "--scenario", "cross-mode-reproducibility"])
+            expect(status).to_equal(0)
+            expect(errors).to_equal("")
+            expect(output).to_contain("worker_count_digest_match=true")
+            expect(output).to_contain("clean_incremental_digest_match=true")
+            expect(output).to_contain("daemon_restart_digest_match=true")
+            expect(output).to_contain("checkout_root_cwd_digest_match=true")
+            expect(output).to_contain("local_remote_digest_match=true")
+
+        it "should prohibit scans and unrelated reads at every production entrypoint":
+            step("Inspect every production entrypoint")
+            val (output, errors, status) = process_run(
+                "/bin/sh", ["scripts/check/check-persistent-smf-package-index.shs", "--scenario", "entrypoint-no-scan-matrix"])
+            expect(status).to_equal(0)
+            expect(errors).to_equal("")
+            expect(output).to_contain("entrypoints=compile,check,bootstrap,mcp,lsp,daemon-startup,daemon-request")
+            expect(output).to_contain("recursive_scan_count=0")
+            expect(output).to_contain("unrelated_read_count=0")
+            expect(output).to_contain("discovery_subprocess_count=0")

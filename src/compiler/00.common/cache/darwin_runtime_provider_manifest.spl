@@ -1,0 +1,261 @@
+use std.nogc_sync_mut.io_runtime.{file_exists, file_read, file_read_bytes, file_hash_sha256}
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+
+fn _drp_u32_be(bytes: [u8], offset: i64) -> i64:
+    if offset < 0 or offset + 4 > bytes.len(): return -1
+    ((bytes[offset] as i64) << 24) | ((bytes[offset + 1] as i64) << 16) |
+        ((bytes[offset + 2] as i64) << 8) | (bytes[offset + 3] as i64)
+
+fn _drp_u32_le(bytes: [u8], offset: i64) -> i64:
+    if offset < 0 or offset + 4 > bytes.len(): return -1
+    (bytes[offset] as i64) | ((bytes[offset + 1] as i64) << 8) |
+        ((bytes[offset + 2] as i64) << 16) | ((bytes[offset + 3] as i64) << 24)
+
+fn _drp_u64_be(bytes: [u8], offset: i64) -> i64:
+    val high = _drp_u32_be(bytes, offset)
+    val low = _drp_u32_be(bytes, offset + 4)
+    if high < 0 or high > 0x7fffffff or low < 0: return -1
+    (high << 32) | low
+
+fn _drp_u64_le(bytes: [u8], offset: i64) -> i64:
+    val low = _drp_u32_le(bytes, offset)
+    val high = _drp_u32_le(bytes, offset + 4)
+    if high < 0 or high > 0x7fffffff or low < 0: return -1
+    (high << 32) | low
+
+fn _drp_cpu_type(architecture: text) -> i64:
+    if architecture == "aarch64" or architecture == "arm64": return 0x0100000c
+    if architecture == "x86_64" or architecture == "amd64": return 0x01000007
+    -1
+
+fn _drp_macho_slice_error(bytes: [u8], offset: i64, size: i64, cpu: i64) -> text:
+    if size < 8 or offset < 0 or offset + size > bytes.len():
+        return "provider-artifact-corrupt-mach-o-header"
+    val magic = _drp_u32_be(bytes, offset)
+    if magic == 0xfeedfacf or magic == 0xfeedface:
+        val minimum = if magic == 0xfeedfacf: 32 else: 28
+        if size < minimum: return "provider-artifact-corrupt-mach-o-header"
+        if _drp_u32_be(bytes, offset + 4) == cpu: return ""
+        return "provider-artifact-architecture-mismatch"
+    if magic == 0xcffaedfe or magic == 0xcefaedfe:
+        val minimum = if magic == 0xcffaedfe: 32 else: 28
+        if size < minimum: return "provider-artifact-corrupt-mach-o-header"
+        if _drp_u32_le(bytes, offset + 4) == cpu: return ""
+        return "provider-artifact-architecture-mismatch"
+    val fat_big = magic == 0xcafebabe or magic == 0xcafebabf
+    val fat_little = magic == 0xbebafeca or magic == 0xbfbafeca
+    if not fat_big and not fat_little: return "provider-artifact-not-mach-o"
+    val count = if fat_big: _drp_u32_be(bytes, offset + 4) else: _drp_u32_le(bytes, offset + 4)
+    val stride = if magic == 0xcafebabf or magic == 0xbfbafeca: 32 else: 20
+    if count <= 0 or count > 128 or 8 + count * stride > size:
+        return "provider-artifact-corrupt-fat-header"
+    var slice_offsets: [i64] = []
+    var slice_sizes: [i64] = []
+    var target_found = false
+    var index = 0
+    while index < count:
+        val arch_offset = offset + 8 + index * stride
+        val observed = if fat_big: _drp_u32_be(bytes, arch_offset) else: _drp_u32_le(bytes, arch_offset)
+        val relative_offset = if stride == 32:
+            if fat_big: _drp_u64_be(bytes, arch_offset + 8) else: _drp_u64_le(bytes, arch_offset + 8)
+        else:
+            if fat_big: _drp_u32_be(bytes, arch_offset + 8) else: _drp_u32_le(bytes, arch_offset + 8)
+        val slice_size = if stride == 32:
+            if fat_big: _drp_u64_be(bytes, arch_offset + 16) else: _drp_u64_le(bytes, arch_offset + 16)
+        else:
+            if fat_big: _drp_u32_be(bytes, arch_offset + 12) else: _drp_u32_le(bytes, arch_offset + 12)
+        val header_size = 8 + count * stride
+        if relative_offset < header_size or slice_size < 8 or
+                relative_offset > size or slice_size > size - relative_offset:
+            return "provider-artifact-corrupt-fat-slice"
+        var prior = 0
+        while prior < slice_offsets.len():
+            val prior_end = slice_offsets[prior] + slice_sizes[prior]
+            val slice_end = relative_offset + slice_size
+            if relative_offset < prior_end and slice_offsets[prior] < slice_end:
+                return "provider-artifact-corrupt-fat-slice"
+            prior = prior + 1
+        val slice_offset = offset + relative_offset
+        val slice_magic = _drp_u32_be(bytes, slice_offset)
+        if slice_magic != 0xfeedfacf and slice_magic != 0xfeedface and
+                slice_magic != 0xcffaedfe and slice_magic != 0xcefaedfe:
+            return "provider-artifact-corrupt-fat-slice"
+        if _drp_macho_slice_error(bytes, slice_offset, slice_size, observed) != "":
+            return "provider-artifact-corrupt-fat-slice"
+        if observed == cpu:
+            if target_found: return "provider-artifact-corrupt-fat-slice"
+            target_found = true
+        slice_offsets.push(relative_offset)
+        slice_sizes.push(slice_size)
+        index = index + 1
+    if target_found: "" else: "provider-artifact-architecture-mismatch"
+
+fn _drp_ascii_decimal(bytes: [u8], offset: i64, length: i64) -> i64:
+    var value: i64 = 0
+    var found = false
+    var trailing_space = false
+    var index = 0
+    while index < length:
+        val byte = bytes[offset + index] as i64
+        if byte >= 48 and byte <= 57:
+            if trailing_space: return -1
+            found = true
+            if value > 922337203685477580 or
+                    (value == 922337203685477580 and byte - 48 > 7):
+                return -1
+            value = value * 10 + byte - 48
+        elif byte == 32:
+            if found: trailing_space = true
+        else:
+            return -1
+        index = index + 1
+    if found: value else: -1
+
+fn _drp_archive_member_manifest(bytes: [u8], cpu: i64, artifact_index: i64) -> Result<text, text>:
+    if bytes.len() < 8 or bytes[0] != 0x21u8 or bytes[1] != 0x3cu8 or
+            bytes[2] != 0x61u8 or bytes[3] != 0x72u8 or bytes[4] != 0x63u8 or
+            bytes[5] != 0x68u8 or bytes[6] != 0x3eu8 or bytes[7] != 0x0au8:
+        return Err("provider-artifact-not-mach-o")
+    var offset: i64 = 8
+    var validated: i64 = 0
+    var manifest = ""
+    while offset < bytes.len():
+        if offset + 60 > bytes.len(): return Err("provider-archive-corrupt-header")
+        if bytes[offset + 58] != 0x60u8 or bytes[offset + 59] != 0x0au8:
+            return Err("provider-archive-corrupt-header")
+        val member_size = _drp_ascii_decimal(bytes, offset + 48, 10)
+        if member_size < 0 or offset + 60 + member_size > bytes.len():
+            return Err("provider-archive-corrupt-member")
+        val slash_metadata = bytes[offset] == 0x2fu8 and (
+            bytes[offset + 1] == 0x20u8 or bytes[offset + 1] == 0x2fu8 or
+            (bytes[offset + 1] == 0x53u8 and bytes[offset + 2] == 0x59u8 and
+                bytes[offset + 3] == 0x4du8 and bytes[offset + 4] == 0x36u8 and
+                bytes[offset + 5] == 0x34u8 and bytes[offset + 6] == 0x2fu8)
+        )
+        val legacy_metadata = bytes[offset] == 0x5fu8 and bytes[offset + 1] == 0x5fu8 and
+            bytes[offset + 2] == 0x2eu8 and bytes[offset + 3] == 0x53u8 and
+            bytes[offset + 4] == 0x59u8 and bytes[offset + 5] == 0x4du8 and
+            bytes[offset + 6] == 0x44u8 and bytes[offset + 7] == 0x45u8 and
+            bytes[offset + 8] == 0x46u8
+        val bsd_extended = bytes[offset] == 0x23u8 and bytes[offset + 1] == 0x31u8 and
+            bytes[offset + 2] == 0x2fu8
+        var payload_offset = offset + 60
+        var payload_size = member_size
+        if bsd_extended:
+            val name_length = _drp_ascii_decimal(bytes, offset + 3, 13)
+            if name_length < 0 or name_length > member_size:
+                return Err("provider-archive-corrupt-member-name")
+            payload_offset = payload_offset + name_length
+            payload_size = payload_size - name_length
+        if not slash_metadata and not legacy_metadata and payload_size > 0:
+            val member_error = _drp_macho_slice_error(bytes, payload_offset, payload_size, cpu)
+            if member_error != "": return Err(member_error)
+            val payload = bytes[payload_offset:payload_offset + payload_size]
+            manifest = manifest + "member=" + artifact_index.to_text() + ":" +
+                validated.to_text() + "|size=" + payload_size.to_text() +
+                "|digest=" + sha256_u8_hex(payload) + "\n"
+            validated = validated + 1
+        offset = offset + 60 + member_size
+        if offset % 2 != 0:
+            if offset >= bytes.len() or bytes[offset] != 0x0au8:
+                return Err("provider-archive-missing-padding")
+            offset = offset + 1
+    if validated == 0: Err("provider-archive-has-no-mach-o-members") else: Ok(manifest)
+
+fn _drp_archive_slice_error(bytes: [u8], cpu: i64) -> text:
+    match _drp_archive_member_manifest(bytes, cpu, 0):
+        case Ok(_): ""
+        case Err(error): error
+
+fn darwin_runtime_artifact_error_v1(path: text, architecture: text) -> text:
+    if not file_exists(path): return "provider-artifact-missing"
+    val bytes = file_read_bytes(path)
+    val cpu = _drp_cpu_type(architecture)
+    if cpu < 0: return "unsupported-darwin-architecture"
+    if bytes.len() >= 8 and bytes[0] == 0x21u8 and bytes[1] == 0x3cu8:
+        return _drp_archive_slice_error(bytes, cpu)
+    _drp_macho_slice_error(bytes, 0, bytes.len(), cpu)
+
+fn darwin_runtime_provider_manifest_v1(paths: [text], architecture: text) -> Result<text, text>:
+    if paths.len() == 0: return Err("runtime-provider-artifact-set-empty")
+    var body = "simple-darwin-runtime-provider-manifest-v1\narchitecture=" + architecture + "\n"
+    var portable_identity = "simple-darwin-runtime-provider-content-v1|architecture=" +
+        architecture.len().to_text() + ":" + architecture
+    var artifact_index: i64 = 0
+    for path in paths:
+        val error = darwin_runtime_artifact_error_v1(path, architecture)
+        if error != "": return Err(error + ":" + path)
+        val digest = file_hash_sha256(path)
+        if digest.len() != 64: return Err("provider-artifact-digest-missing:" + path)
+        body = body + "artifact=" + artifact_index.to_text() + "|path=" +
+            path.len().to_text() + ":" + path + "|digest=" + digest + "\n"
+        portable_identity = portable_identity + "|artifact=" +
+            artifact_index.to_text() + "|digest=64:" + digest
+        val bytes = file_read_bytes(path)
+        if bytes.len() >= 8 and bytes[0] == 0x21u8 and bytes[1] == 0x3cu8:
+            val members = match _drp_archive_member_manifest(bytes, _drp_cpu_type(architecture), artifact_index):
+                case Ok(value): value
+                case Err(member_error): return Err(member_error + ":" + path)
+            body = body + members
+        artifact_index = artifact_index + 1
+    Ok(body + "content-identity=" + sha256_text(portable_identity) + "\n")
+
+fn darwin_runtime_provider_manifest_content_identity_v1(
+    receipt_path: text, architecture: text
+) -> text:
+    if not file_exists(receipt_path): return ""
+    val body = file_read(receipt_path)
+    val lines = body.trim().split("\n")
+    if lines.len() < 3 or
+            lines[0] != "simple-darwin-runtime-provider-manifest-v1" or
+            lines[1] != "architecture=" + architecture:
+        return ""
+    var index = 2
+    var artifact_count: i64 = 0
+    var artifact_paths: [text] = []
+    var content_identity = ""
+    var expected_content = "simple-darwin-runtime-provider-content-v1|architecture=" +
+        architecture.len().to_text() + ":" + architecture
+    while index < lines.len():
+        val line = lines[index]
+        if line.starts_with("artifact="):
+            val path_marker = line.index_of("|path=")
+            if path_marker < 10: return ""
+            val parsed_artifact_index = line[9:path_marker].to_i64() ?? -1
+            if parsed_artifact_index != artifact_count: return ""
+            val colon = line.index_of(":")
+            if colon < path_marker + 7: return ""
+            val path_length = line[path_marker + 6:colon].to_i64() ?? -1
+            if path_length <= 0: return ""
+            val digest_start = colon + 1 + path_length
+            if digest_start + 8 + 64 != line.len() or
+                    line[digest_start:digest_start + 8] != "|digest=":
+                return ""
+            val digest = line[digest_start + 8:]
+            if digest.len() != 64: return ""
+            artifact_paths.push(line[colon + 1:digest_start])
+            expected_content = expected_content + "|artifact=" +
+                artifact_count.to_text() + "|digest=64:" + digest
+            artifact_count = artifact_count + 1
+        elif line.starts_with("member="):
+            val digest_marker = line.index_of("|digest=")
+            if digest_marker < 0 or digest_marker + 8 + 64 != line.len() or
+                    artifact_count == 0 or not line.starts_with(
+                        "member=" + (artifact_count - 1).to_text() + ":"):
+                return ""
+        elif line.starts_with("content-identity="):
+            if index != lines.len() - 1: return ""
+            content_identity = line[17:]
+            if content_identity.len() != 64: return ""
+        else:
+            return ""
+        index = index + 1
+    if artifact_count == 0 or content_identity != sha256_text(expected_content):
+        return ""
+    val recomputed = match darwin_runtime_provider_manifest_v1(artifact_paths, architecture):
+        case Ok(value): value
+        case Err(_): return ""
+    if recomputed == body: content_identity else: ""
+
+export darwin_runtime_artifact_error_v1, darwin_runtime_provider_manifest_v1
+export darwin_runtime_provider_manifest_content_identity_v1

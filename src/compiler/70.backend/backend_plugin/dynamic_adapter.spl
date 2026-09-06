@@ -6,7 +6,9 @@ use compiler.backend.codegen_types.{CodegenOutput}
 use compiler.backend.backend.backend_types.{BackendKind, CompiledModule,
     CompileError, compileerror_backend_error}
 use compiler.backend.backend_plugin.dynamic_loader.{DynamicBackendPluginLease}
-use compiler.backend.backend_plugin.transport.{backend_plugin_run_module_v1}
+use compiler.backend.backend_plugin.transport.{
+    backend_plugin_run_admitted_module_v1, backend_plugin_open_admitted_batch_v1
+}
 use compiler.mir_opt.mir_opt.storage_projection_lowering.{MirStorageViewSiteBindingV1}
 
 val BACKEND_PLUGIN_FINAL_OBJECT_RESULT_KIND_V1: i64 = 2
@@ -22,10 +24,9 @@ class DynamicBackendAdapter:
         if self.closed or not self.lease.is_open():
             return Err(compileerror_backend_error(
                 BackendKind.Compiler, "dynamic backend session is closed"))
-        # The bridge owns open, compile, finalize, diagnostics, provider-buffer
-        # release, and close for this call. Only the copied final object escapes.
-        val envelope = backend_plugin_run_module_v1(
-            self.provider_path, self.request, module)
+        # Admission pins the library once; steady-state dispatch uses its handle.
+        val envelope = backend_plugin_run_admitted_module_v1(
+            self.lease.admitted_handle(), self.request, module)
         if not envelope.valid:
             return Err(compileerror_backend_error(
                 BackendKind.Compiler,
@@ -44,6 +45,51 @@ class DynamicBackendAdapter:
             return Err(compileerror_backend_error(
                 BackendKind.Compiler, "dynamic backend returned an empty final object"))
         Ok(CodegenOutput.object(module.name, envelope.payload))
+
+    fn compile_module_batch(modules: [MirModule]) -> Result<[CodegenOutput], CompileError>:
+        if self.closed or not self.lease.is_open():
+            return Err(compileerror_backend_error(
+                BackendKind.Compiler, "dynamic backend session is closed"))
+        if modules.len() == 0:
+            return Ok([])
+        val opened = backend_plugin_open_admitted_batch_v1(
+            self.lease.admitted_handle(), self.request)
+        var batch = match opened:
+            case Ok(value): value
+            case Err(reason):
+                return Err(compileerror_backend_error(
+                    BackendKind.Compiler, "dynamic backend batch open failed: " + reason))
+        for module in modules:
+            val compiled = batch.compile(module)
+            if not compiled.valid or compiled.status != 0:
+                val detail = if not compiled.valid:
+                    compiled.reason
+                else:
+                    "provider status " + compiled.status.to_string()
+                batch.close()
+                return Err(compileerror_backend_error(
+                    BackendKind.Compiler, "dynamic backend batch compile failed: " + detail))
+        val finalized = batch.finalize()
+        val close_ok = batch.close()
+        if not finalized.valid:
+            return Err(compileerror_backend_error(
+                BackendKind.Compiler, "dynamic backend batch finalize rejected response: "
+                    + finalized.reason))
+        if finalized.status != 0:
+            return Err(compileerror_backend_error(
+                BackendKind.Compiler, "dynamic backend batch finalize status "
+                    + finalized.status.to_string()))
+        if not close_ok:
+            return Err(compileerror_backend_error(
+                BackendKind.Compiler, "dynamic backend batch close failed"))
+        if finalized.result_kind != BACKEND_PLUGIN_FINAL_OBJECT_RESULT_KIND_V1:
+            return Err(compileerror_backend_error(
+                BackendKind.Compiler, "dynamic backend batch returned non-final result kind "
+                    + finalized.result_kind.to_string()))
+        if finalized.payload.len() == 0:
+            return Err(compileerror_backend_error(
+                BackendKind.Compiler, "dynamic backend batch returned an empty final object"))
+        Ok([CodegenOutput.object(modules[0].name, finalized.payload)])
 
     fn compile_aot_module(
         module: MirModule,

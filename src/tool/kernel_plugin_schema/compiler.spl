@@ -1,0 +1,169 @@
+# Minimal serial KPF schema compiler foundation.
+
+use std.common.crypto.sha256.{sha256_text}
+use std.common.sdn.parser.{parse_with_issues}
+use std.common.sdn.value.{SdnValue}
+use tool.kernel_plugin_schema.model.{KpfInterfaceIr, KpfOperationIr, KpfPackageIr}
+
+fn _required_text(value: SdnValue, key: text, context: text) -> Result<text, text>:
+    match value.get(key):
+        case Some(SdnValue.String(item)):
+            if item.trim() == "":
+                Err("{context}.{key} must not be empty")
+            else:
+                Ok(item.trim())
+        case Some(_): Err("{context}.{key} must be text")
+        case None: Err("missing required {context}.{key}")
+
+fn _required_int(value: SdnValue, key: text, context: text) -> Result<i64, text>:
+    match value.get(key):
+        case Some(SdnValue.Int(item)): Ok(item)
+        case Some(_): Err("{context}.{key} must be an integer")
+        case None: Err("missing required {context}.{key}")
+
+fn _required_bool(value: SdnValue, key: text, context: text) -> Result<bool, text>:
+    match value.get(key):
+        case Some(SdnValue.Bool(item)): Ok(item)
+        case Some(_): Err("{context}.{key} must be true or false")
+        case None: Err("missing required {context}.{key}")
+
+fn _required_array(value: SdnValue, key: text, context: text) -> Result<[SdnValue], text>:
+    match value.get(key):
+        case Some(SdnValue.Array(items)): Ok(items)
+        case Some(_): Err("{context}.{key} must be an array")
+        case None: Err("missing required {context}.{key}")
+
+fn _validate_identifier(value: text, context: text) -> Result<text, text>:
+    var index = 0
+    for character in value:
+        val alpha = ((character >= 'a' and character <= 'z') or
+                     (character >= 'A' and character <= 'Z'))
+        val digit = character >= '0' and character <= '9'
+        if not alpha and character != '_' and (index == 0 or not digit):
+            return Err("{context} must use ASCII letters, digits, or underscore")
+        if index == 0 and digit:
+            return Err("{context} must not start with a digit")
+        index = index + 1
+    Ok(value)
+
+fn _stable_id(domain: text, canonical_name: text) -> text:
+    sha256_text("{domain}\n{canonical_name}").slice(0, 32)
+
+fn _sort_operations(items: [KpfOperationIr]) -> [KpfOperationIr]:
+    var sorted = items
+    var i = 1
+    while i < sorted.len():
+        val current = sorted[i]
+        var j = i
+        while j > 0 and sorted[j - 1].name > current.name:
+            sorted[j] = sorted[j - 1]
+            j = j - 1
+        sorted[j] = current
+        i = i + 1
+    sorted
+
+fn _sort_interfaces(items: [KpfInterfaceIr]) -> [KpfInterfaceIr]:
+    var sorted = items
+    var i = 1
+    while i < sorted.len():
+        val current = sorted[i]
+        var j = i
+        while j > 0 and sorted[j - 1].name > current.name:
+            sorted[j] = sorted[j - 1]
+            j = j - 1
+        sorted[j] = current
+        i = i + 1
+    sorted
+
+fn _compile_operation(value: SdnValue, package_name: text, interface_name: text) -> Result<KpfOperationIr, text>:
+    val context = "interface {interface_name} operation"
+    val name = _validate_identifier(_required_text(value, "name", context)?, "{context}.name")?
+    val required = _required_bool(value, "required", "{context} {name}")?
+    val canonical_name = "{package_name}.{interface_name}.{name}"
+    Ok(KpfOperationIr(
+        name: name,
+        operation_id: _stable_id("kpf.operation.v1", canonical_name),
+        required: required,
+    ))
+
+fn _compile_interface(value: SdnValue, package_name: text) -> Result<KpfInterfaceIr, text>:
+    val name = _validate_identifier(_required_text(value, "name", "interface")?, "interface.name")?
+    val major = _required_int(value, "major", "interface {name}")?
+    if major <= 0:
+        return Err("interface {name}.major must be positive")
+    val raw_operations = _required_array(value, "operations", "interface {name}")?
+    if raw_operations.len() == 0:
+        return Err("interface {name}.operations must not be empty")
+
+    var operations: [KpfOperationIr] = []
+    var names: Dict<text, bool> = {}
+    for raw_operation in raw_operations:
+        val operation_ir = _compile_operation(raw_operation, package_name, name)?
+        if names.contains_key(operation_ir.name):
+            return Err("duplicate operation name {name}.{operation_ir.name}")
+        names[operation_ir.name] = true
+        operations.push(operation_ir)
+
+    operations = _sort_operations(operations)
+    if operations.len() > 63:
+        return Err("interface {name} has more than 63 operations")
+    var required_mask = 0
+    var index = 0
+    while index < operations.len():
+        if operations[index].required:
+            required_mask = required_mask | (1 << index)
+        index = index + 1
+
+    val canonical_name = "{package_name}.{name}@{major}"
+    Ok(KpfInterfaceIr(
+        name: name,
+        interface_id: _stable_id("kpf.interface.v1", canonical_name),
+        major: major,
+        operations: operations,
+        required_operation_mask: required_mask,
+    ))
+
+fn _canonicalize(package_name: text, version: text, interfaces: [KpfInterfaceIr]) -> text:
+    var output = "kpf-schema-v1\npackage={package_name}\nversion={version}\n"
+    for interface_ir in interfaces:
+        output = output + "interface={interface_ir.name}|major={interface_ir.major}|id={interface_ir.interface_id}\n"
+        for operation_ir in interface_ir.operations:
+            var required_text = "false"
+            if operation_ir.required:
+                required_text = "true"
+            output = output + "operation={operation_ir.name}|required={required_text}|id={operation_ir.operation_id}\n"
+    output
+
+# Parse, validate and canonicalize one KPF package expressed in existing SDN.
+# The returned IR is deterministic under interface and operation reordering.
+pub fn compile_kpf_schema(source: text) -> Result<KpfPackageIr, text>:
+    val parsed = parse_with_issues(source)?
+    for issue in parsed.1:
+        if issue.kind == "duplicate_key":
+            return Err("duplicate SDN key at {issue.path}")
+
+    val root = parsed.0
+    val package_name = _required_text(root, "package", "schema")?
+    val version = _required_text(root, "version", "schema")?
+    val raw_interfaces = _required_array(root, "interfaces", "schema")?
+    if raw_interfaces.len() == 0:
+        return Err("schema.interfaces must not be empty")
+
+    var interfaces: [KpfInterfaceIr] = []
+    var names: Dict<text, bool> = {}
+    for raw_interface in raw_interfaces:
+        val interface_ir = _compile_interface(raw_interface, package_name)?
+        if names.contains_key(interface_ir.name):
+            return Err("duplicate interface name {interface_ir.name}")
+        names[interface_ir.name] = true
+        interfaces.push(interface_ir)
+
+    interfaces = _sort_interfaces(interfaces)
+    val canonical = _canonicalize(package_name, version, interfaces)
+    Ok(KpfPackageIr(
+        package_name: package_name,
+        version: version,
+        schema_digest: sha256_text(canonical),
+        canonical_schema: canonical,
+        interfaces: interfaces,
+    ))

@@ -1,0 +1,76 @@
+use common.kernel_plugin.ids.{KpfId128}
+use common.lint_kernel.model.{DiagnosticV1, LintVerdict}
+use common.lint_kernel.output.model.{NormalizedLintDiagnosticV1, NormalizedLintOutputV1}
+use common.text.{escape_json}
+
+pub fn lint_output_quote(value: text) -> text:
+    "\"" + escape_json(value) + "\""
+
+pub fn lint_output_id(value: KpfId128) -> text:
+    value.hi.to_string() + ":" + value.lo.to_string()
+
+pub fn lint_output_verdict(value: LintVerdict) -> text:
+    match value:
+        case LintVerdict.CompleteClean: "complete-clean"
+        case LintVerdict.CompleteWithFindings: "complete-with-findings"
+        case LintVerdict.Partial: "partial"
+        case LintVerdict.NotAnalyzed: "not-analyzed"
+        case LintVerdict.Cancelled: "cancelled"
+        case LintVerdict.Failed: "failed"
+
+pub fn lint_output_canonical_result_id(output: NormalizedLintOutputV1) -> text:
+    val coverage = output.result.coverage
+    val provider = coverage.provider_receipt_digest
+    val revision = coverage.input_revision_digest
+    "kpf-result-v1:" + lint_output_verdict(output.result.verdict)
+        + ":" + provider.w0.to_string() + ":" + provider.w1.to_string() + ":" + provider.w2.to_string() + ":" + provider.w3.to_string()
+        + ":" + revision.w0.to_string() + ":" + revision.w1.to_string() + ":" + revision.w2.to_string() + ":" + revision.w3.to_string()
+        + ":" + coverage.completed_unit_count.to_string() + ":" + coverage.completed_rule_count.to_string()
+        + ":" + output.result.diagnostic_count.to_string()
+
+pub fn lint_output_severity(value: u32) -> text:
+    if value == 1: return "error"
+    if value == 2: return "warning"
+    if value == 3: return "information"
+    "hint"
+
+pub fn lint_output_lsp_severity(value: u32) -> u32:
+    if value >= 1 and value <= 4: return value
+    4
+
+pub fn lint_output_sarif_level(value: u32) -> text:
+    if value == 1: return "error"
+    if value == 2: return "warning"
+    if value == 3: return "note"
+    "none"
+
+fn _diagnostic_less(left: DiagnosticV1, right: DiagnosticV1) -> bool:
+    val left_artifact = left.primary_span.artifact
+    val right_artifact = right.primary_span.artifact
+    if left_artifact.workspace_id.hi != right_artifact.workspace_id.hi: return left_artifact.workspace_id.hi < right_artifact.workspace_id.hi
+    if left_artifact.workspace_id.lo != right_artifact.workspace_id.lo: return left_artifact.workspace_id.lo < right_artifact.workspace_id.lo
+    if left_artifact.path_id.hi != right_artifact.path_id.hi: return left_artifact.path_id.hi < right_artifact.path_id.hi
+    if left_artifact.path_id.lo != right_artifact.path_id.lo: return left_artifact.path_id.lo < right_artifact.path_id.lo
+    if left.primary_span.revision != right.primary_span.revision: return left.primary_span.revision < right.primary_span.revision
+    if left.primary_span.start_byte != right.primary_span.start_byte: return left.primary_span.start_byte < right.primary_span.start_byte
+    if left.primary_span.end_byte != right.primary_span.end_byte: return left.primary_span.end_byte < right.primary_span.end_byte
+    if left.rule_id.hi != right.rule_id.hi: return left.rule_id.hi < right.rule_id.hi
+    if left.rule_id.lo != right.rule_id.lo: return left.rule_id.lo < right.rule_id.lo
+    if left.provider_id.hi != right.provider_id.hi: return left.provider_id.hi < right.provider_id.hi
+    if left.provider_id.lo != right.provider_id.lo: return left.provider_id.lo < right.provider_id.lo
+    if left.message_id.hi != right.message_id.hi: return left.message_id.hi < right.message_id.hi
+    left.message_id.lo < right.message_id.lo
+
+pub fn lint_output_sorted(diagnostics: [NormalizedLintDiagnosticV1]) -> [NormalizedLintDiagnosticV1]:
+    var sorted: [NormalizedLintDiagnosticV1] = []
+    for diagnostic in diagnostics:
+        var inserted = false
+        var next: [NormalizedLintDiagnosticV1] = []
+        for existing in sorted:
+            if not inserted and _diagnostic_less(diagnostic.diagnostic, existing.diagnostic):
+                next.push(diagnostic)
+                inserted = true
+            next.push(existing)
+        if not inserted: next.push(diagnostic)
+        sorted = next
+    sorted

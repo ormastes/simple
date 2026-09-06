@@ -12,6 +12,30 @@ use compiler.driver.cache.integration.shadow_mode.{
 }
 use std.nogc_sync_mut.io_runtime.{dir_create_all, dir_list}
 use compiler.driver.cache.action_key.{interface_digest_of_source, dependency_interface_fold}
+use compiler.driver.cache.reverse_reference_receipt.{
+    REVERSE_REFERENCE_FAMILIES_V1, ReverseReferenceProjectionV1,
+    ReverseReferenceGenerationReceiptV1, reverse_reference_publish_generation_v1,
+    reverse_reference_read_current_v1, reverse_reference_consumers_v1
+}
+use compiler.common.cache.reverse_reference_key.{ReverseReferenceKeyV1}
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.cache.reverse_reference_facts.{
+    reverse_reference_owner_snapshot_v1, reverse_reference_owner_mark_known_v1,
+    reverse_reference_owner_register_source_alias_v1,
+    reverse_reference_owner_source_aliases_v1,
+    reverse_reference_register_import_export_v1,
+    reverse_reference_register_module_scc_peer_v1
+}
+
+pub fn incremental_publish_direct_import_export_v1(subject: text,
+        consumer: text, evidence: text):
+    reverse_reference_owner_mark_known_v1("direct-import-export")
+    reverse_reference_register_import_export_v1(subject, consumer, evidence)
+
+pub fn incremental_publish_module_scc_artifact_v1(subject: text,
+        consumer: text, evidence: text):
+    reverse_reference_owner_mark_known_v1("module-scc-artifact")
+    reverse_reference_register_module_scc_peer_v1(subject, consumer, evidence)
 
 # ============================================================================
 # File Fingerprinting
@@ -247,9 +271,132 @@ fn native_build_runtime_provider_fingerprint(runtime_path: text) -> text:
             return "dir-{digest.substring(0, 16)}n{lines.len()}"
     "unfingerprintable-{rt_getpid()}-{rt_time_now_unix_micros()}"
 
-pub fn native_build_producer_identity(executable_hash: text, compiler_source_fingerprint: text, runtime_provider_fingerprint: text, runtime_bundle: text) -> text:
+extern fn rt_simple_abi_version() -> i64
+extern fn rt_simple_abi_version_deferred() -> i64
+
+fn native_build_abi_receipt_field(content: text, key: text) -> Result<text, text>:
+    val prefix = key + "="
+    var found = false
+    var value = ""
+    for raw_line in content.split("\n"):
+        val line = raw_line.strip()
+        if line.starts_with(prefix):
+            if found:
+                return Err("duplicate-field:{key}")
+            found = true
+            value = line.substring(prefix.len())
+    if not found or value == "":
+        return Err("missing-field:{key}")
+    Ok(value)
+
+fn native_build_abi_receipt_required(
+    content: text, key: text, expected: text
+) -> Result<bool, text>:
+    match native_build_abi_receipt_field(content, key):
+        case Err(reason): Err(reason)
+        case Ok(actual):
+            if actual != expected:
+                return Err("field-mismatch:{key}:expected={expected}:actual={actual}")
+            Ok(true)
+
+fn native_build_canonical_sha256_v1(value: text) -> bool:
+    if value.len() != 64:
+        return false
+    val alphabet = "0123456789abcdef"
+    var index = 0
+    while index < value.len():
+        if not alphabet.contains(value.substring(index, index + 1)):
+            return false
+        index = index + 1
+    true
+
+fn native_build_stage2_admission_identity_v1(
+    receipt_content: text
+) -> Result<text, text>:
+    val keys = [
+        "candidate_sha256", "source_snapshot_sha256", "runtime_snapshot_sha256",
+        "tool_authority_sha256", "build_args_sha256", "sanity_evidence_sha256",
+        "receiver_evidence_sha256", "hosted_runtime_relative_path",
+        "hosted_runtime_sha256"]
+    var values: [text] = []
+    for key in keys:
+        match native_build_abi_receipt_field(receipt_content, key):
+            case Err(reason): return Err(reason)
+            case Ok(value): values.push(value)
+    for index in [0, 1, 2, 3, 4, 5, 6, 8]:
+        if not native_build_canonical_sha256_v1(values[index]):
+            return Err("field-not-canonical-sha256:{keys[index]}")
+    if not values[7].starts_with("deps/libspl_hosted_runtime-") or
+            not values[7].ends_with(".rlib"):
+        return Err("field-invalid:hosted_runtime_relative_path")
+    val identity_input =
+        "schema=simple-bootstrap-stage2-admission-identity-v1\n" +
+        "artifact_sha256={values[0]}\n" +
+        "source_snapshot_sha256={values[1]}\n" +
+        "runtime_snapshot_sha256={values[2]}\n" +
+        "tool_authority_sha256={values[3]}\n" +
+        "build_args_sha256={values[4]}\n" +
+        "sanity_evidence_sha256={values[5]}\n" +
+        "receiver_evidence_sha256={values[6]}\n" +
+        "hosted_runtime_relative_path={values[7]}\n" +
+        "hosted_runtime_sha256={values[8]}\n"
+    Ok(sha256_text(identity_input))
+
+pub fn native_build_admitted_abi_identity(
+    policy: text, receipt_content: text,
+    runtime_version: i64, runtime_deferred: bool,
+    executable_hash: text
+) -> Result<text, text>:
+    if policy == "":
+        return Err("policy-absent")
+    if policy != "v1":
+        return Err("policy-unknown:{policy}")
+    if runtime_version != 1 or runtime_deferred:
+        return Err("policy-runtime-mismatch:{policy}:{runtime_version}:{runtime_deferred}")
+    if not native_build_canonical_sha256_v1(executable_hash):
+        return Err("compiler-executable-digest-not-canonical")
+
+    val runtime_deferred_text = if runtime_deferred: "1" else: "0"
+    val required = [
+        ("schema", "simple-bootstrap-stage2-admission-v2"),
+        ("status", "admitted"),
+        ("candidate_sha256", executable_hash),
+        ("simple_abi_policy", policy),
+        ("simple_abi_version", runtime_version.to_text()),
+        ("simple_abi_deferred", runtime_deferred_text),
+        ("checks_executed_at_admission", "1"),
+        ("checks_replayed_during_stage3", "0")
+    ]
+    for row in required:
+        match native_build_abi_receipt_required(receipt_content, row[0], row[1]):
+            case Err(reason): return Err(reason)
+            case Ok(_): pass
+    val expected_admission_identity = match native_build_stage2_admission_identity_v1(
+            receipt_content):
+        case Err(reason): return Err(reason)
+        case Ok(identity): identity
+    match native_build_abi_receipt_required(
+            receipt_content, "admission_identity", expected_admission_identity):
+        case Err(reason): return Err(reason)
+        case Ok(_): pass
+    val receipt_digest = sha256_text(receipt_content)
+    Ok("policy={policy};version={runtime_version};deferred={runtime_deferred_text};receipt-sha256={receipt_digest}")
+
+pub fn native_build_producer_identity(executable_hash: text,
+        compiler_source_fingerprint: text, runtime_provider_fingerprint: text,
+        runtime_bundle: text, simple_abi_version: i64,
+        simple_abi_deferred: bool, simple_abi_policy: text,
+        abi_admission_identity: text) -> text:
     """Canonical cache producer identity; every codegen/ABI authority is bound."""
-    "exe={executable_hash};compiler={compiler_source_fingerprint};runtime={runtime_provider_fingerprint};bundle={runtime_bundle}"
+    val abi_identity = if simple_abi_deferred:
+        "deferred"
+    else:
+        "selected-{simple_abi_version}"
+    "exe={executable_hash};compiler={compiler_source_fingerprint};runtime={runtime_provider_fingerprint};bundle={runtime_bundle};simple-abi-policy={simple_abi_policy};simple-abi={abi_identity};simple-abi-admission={abi_admission_identity}"
+
+fn native_build_uncacheable_abi_identity(reason: text) -> text:
+    val reason_digest = sha256_text(reason).substring(0, 16)
+    "uncacheable-abi-admission-{reason_digest}-{rt_getpid()}-{rt_time_now_unix_micros()}"
 
 fn native_build_compiler_identity() -> text:
     val src_fp = native_build_compiler_source_fingerprint()
@@ -259,7 +406,23 @@ fn native_build_compiler_identity() -> text:
         val runtime_path = rt_env_get("SIMPLE_RUNTIME_PATH") ?? ""
         val runtime_bundle = rt_env_get("SIMPLE_NATIVE_RUNTIME_BUNDLE") ?? ""
         val runtime_fp = native_build_runtime_provider_fingerprint(runtime_path)
-        return native_build_producer_identity(hash, compiler_fp, runtime_fp, runtime_bundle)
+        val abi_policy = rt_env_get("SIMPLE_ABI_POLICY") ?? ""
+        val abi_receipt_path = rt_env_get("SIMPLE_ABI_ADMISSION_RECEIPT") ?? ""
+        if abi_policy == "" or abi_receipt_path == "":
+            return native_build_uncacheable_abi_identity("explicit-policy-or-receipt-absent")
+        val abi_receipt = incremental_file_read_text(abi_receipt_path)
+        if abi_receipt == nil:
+            return native_build_uncacheable_abi_identity("receipt-unreadable:{abi_receipt_path}")
+        val abi_version = rt_simple_abi_version()
+        val abi_deferred = rt_simple_abi_version_deferred() != 0
+        match native_build_admitted_abi_identity(
+            abi_policy, abi_receipt.unwrap(), abi_version, abi_deferred, hash):
+            case Err(reason):
+                return native_build_uncacheable_abi_identity(reason)
+            case Ok(admission_identity):
+                return native_build_producer_identity(hash, compiler_fp, runtime_fp,
+                    runtime_bundle, abi_version, abi_deferred, abi_policy,
+                    admission_identity)
     # Fail closed: an unknown compiler must not reuse another compiler's cache.
     "uncacheable-{rt_getpid()}-{rt_time_now_unix_micros()}"
 
@@ -339,6 +502,116 @@ fn incremental_sdn_text_array(values: [text]) -> text:
         items = items.push("\"{incremental_sdn_escape(value)}\"")
     "[" + items.join(", ") + "]"
 
+fn incremental_reverse_reference_generation_v1(cache: BuildCache) ->
+        ReverseReferenceGenerationReceiptV1:
+    val sources = incremental_sorted_text(cache.entries.keys())
+    var generation_facts: [text] = []
+    for source in sources:
+        val entry = cache.entries[source]
+        generation_facts = generation_facts.push(
+            "{source.len()}:{source}{entry.fingerprint.content_hash.len()}:{entry.fingerprint.content_hash}")
+    val root_generation = sha256_text(generation_facts.join(""))
+    val owner_generation = sha256_text(
+        "build-cache-state:{root_generation}")
+    val snapshot = reverse_reference_owner_snapshot_v1()
+    var projections: [ReverseReferenceProjectionV1] = []
+    var unresolved_families: {text: bool} = {}
+    for family in REVERSE_REFERENCE_FAMILIES_V1:
+        val registry_kind = if family == "aop-consumer": "aop"
+            elif family == "module-scc-artifact": "native"
+            elif family == "emitted-symbol-relocation": "linker"
+            else: "semantic"
+        var family_has_fact = false
+        for fact in snapshot.facts:
+            if fact.projection_kind == family:
+                family_has_fact = true
+        if not snapshot.known_families.contains(family):
+            projections = projections.push(ReverseReferenceProjectionV1(
+                key: ReverseReferenceKeyV1(
+                    registry_kind: registry_kind,
+                    owner_generation: owner_generation,
+                    root_generation: root_generation,
+                    subject_identity: "@unknown-family",
+                    projection_kind: family,
+                    projection_digest: sha256_text("unknown-family:{family}"),
+                    schema_version: 1),
+                consumer_identity: "registry-not-published:{family}"))
+        elif not family_has_fact:
+            projections = projections.push(ReverseReferenceProjectionV1(
+                key: ReverseReferenceKeyV1(
+                    registry_kind: registry_kind,
+                    owner_generation: owner_generation,
+                    root_generation: root_generation,
+                    subject_identity: "@known-empty-family",
+                    projection_kind: family,
+                    projection_digest: sha256_text("known-empty-family:{family}"),
+                    schema_version: 1),
+                consumer_identity: "registry-published-empty:{family}"))
+    for fact in snapshot.facts:
+        val registry_kind = if fact.projection_kind == "aop-consumer": "aop"
+            elif fact.projection_kind == "module-scc-artifact": "native"
+            elif fact.projection_kind == "emitted-symbol-relocation": "linker"
+            else: "semantic"
+        var subjects = reverse_reference_owner_source_aliases_v1(
+            fact.subject_identity)
+        var consumers = reverse_reference_owner_source_aliases_v1(
+            fact.consumer_identity)
+        if cache.entries.contains_key(fact.subject_identity):
+            subjects = [fact.subject_identity]
+        if cache.entries.contains_key(fact.consumer_identity):
+            consumers = [fact.consumer_identity]
+        if subjects.len() == 0 or consumers.len() == 0:
+            unresolved_families[fact.projection_kind] = true
+            continue
+        for subject_source in subjects:
+            for consumer_source in consumers:
+                projections = projections.push(ReverseReferenceProjectionV1(
+                    key: ReverseReferenceKeyV1(
+                        registry_kind: registry_kind,
+                        owner_generation: owner_generation,
+                        root_generation: root_generation,
+                        subject_identity: subject_source,
+                        projection_kind: fact.projection_kind,
+                        projection_digest: fact.evidence_digest,
+                        schema_version: 1),
+                    consumer_identity: consumer_source))
+    for family in unresolved_families.keys():
+        var retained: [ReverseReferenceProjectionV1] = []
+        for projection in projections:
+            if projection.key.projection_kind != family:
+                retained = retained.push(projection)
+        val registry_kind = if family == "aop-consumer": "aop"
+            elif family == "module-scc-artifact": "native"
+            elif family == "emitted-symbol-relocation": "linker"
+            else: "semantic"
+        retained = retained.push(ReverseReferenceProjectionV1(
+            key: ReverseReferenceKeyV1(
+                registry_kind: registry_kind,
+                owner_generation: owner_generation,
+                root_generation: root_generation,
+                subject_identity: "@unknown-family",
+                projection_kind: family,
+                projection_digest: sha256_text("unresolved-source-identity:{family}"),
+                schema_version: 1),
+            consumer_identity: "registry-source-identity-unresolved:{family}"))
+        projections = retained
+    ReverseReferenceGenerationReceiptV1(
+        schema_version: 1,
+        owner_generation: owner_generation,
+        root_generation: root_generation,
+        projections: projections)
+
+fn incremental_reverse_reference_generation_identity_v1(
+        entries: {text: DependencyEntry}) -> (text, text):
+    val sources = incremental_sorted_text(entries.keys())
+    var generation_facts: [text] = []
+    for source in sources:
+        val entry = entries[source]
+        generation_facts = generation_facts.push(
+            "{source.len()}:{source}{entry.fingerprint.content_hash.len()}:{entry.fingerprint.content_hash}")
+    val root_generation = sha256_text(generation_facts.join(""))
+    (sha256_text("build-cache-state:{root_generation}"), root_generation)
+
 struct FileFingerprint:
     """Content hash + metadata for a source file."""
     path: text
@@ -414,6 +687,7 @@ struct DependencyEntry:
     dependencies: [text]    # Files this source imports/uses
     outputs: [text]         # Generated artifact paths
     deps_iface: text        # dependency_interface_fold at compile time; "" = unknown (fail closed)
+    interface_digest: text  # source public interface at publication time
     # Versioned per-module semantic witness. A complete exact match is the
     # admission authority; the closure-wide fingerprint is comparison metadata.
     module_witness: text
@@ -520,29 +794,77 @@ fn incremental_append_deleted_changes(changes: IncrChangeSet,
 # updated at the same point as every append.  DependencyChanged entries
 # deliberately do not propagate again: this retains the established one-hop
 # invalidation contract independently of for-loop array snapshot semantics.
+var _incremental_reverse_reference_fallback_reason_v1: text = ""
+
 fn incremental_propagate_dependency_changes(changes: IncrChangeSet,
-                                            entries: {text: DependencyEntry}) -> IncrChangeSet:
+                                            entries: {text: DependencyEntry},
+                                            cache_path: text) -> IncrChangeSet:
     var result = changes
     var changed_paths: {text: bool} = {}
     for change in result.changes:
         changed_paths[change.path] = true
 
-    # entries is not mutated, so its key order is stable for every change.  A
-    # single snapshot also avoids allocating a new keys array per iteration.
-    val entry_sources = entries.keys()
+    val entry_sources = incremental_sorted_text(entries.keys())
+    val receipt_read = reverse_reference_read_current_v1(cache_path)
+    if not receipt_read.valid:
+        _incremental_reverse_reference_fallback_reason_v1 = receipt_read.reason
+        for src in entry_sources:
+            if not changed_paths.contains_key(src):
+                changed_paths[src] = true
+                result = result.add(src, ChangeKind.DependencyChanged)
+        return result
+    val expected_generation = incremental_reverse_reference_generation_identity_v1(entries)
+    if receipt_read.receipt == nil or
+            receipt_read.receipt!.owner_generation != expected_generation.0 or
+            receipt_read.receipt!.root_generation != expected_generation.1:
+        _incremental_reverse_reference_fallback_reason_v1 = "stale-generation"
+        for src in entry_sources:
+            if not changed_paths.contains_key(src):
+                changed_paths[src] = true
+                result = result.add(src, ChangeKind.DependencyChanged)
+        return result
+    _incremental_reverse_reference_fallback_reason_v1 = ""
     var change_index: i64 = 0
     while change_index < result.changes.len():
         val change = result.changes[change_index]
         match change.kind:
-            case Added | Modified:
-                for src in entry_sources:
-                    val entry = entries[src]
-                    if entry.dependencies.contains(change.path):
-                        if not changed_paths.contains_key(src):
+            case Added | Modified | DependencyChanged:
+                var selected_families = REVERSE_REFERENCE_FAMILIES_V1
+                if change.kind == ChangeKind.Modified and
+                        entries.contains_key(change.path):
+                    val recorded_interface = entries[change.path].interface_digest
+                    val current_source = incremental_file_read_text(change.path)
+                    if recorded_interface != "" and current_source != nil and
+                            interface_digest_of_source(current_source!) == recorded_interface:
+                        # A private-body edit cannot alter semantic lookup
+                        # consumers. Follow only proven native/SCC and emitted
+                        # relocation consumers; the edited source itself is
+                        # already present in `changes`.
+                        selected_families = [
+                            "module-scc-artifact",
+                            "emitted-symbol-relocation"
+                        ]
+                for family in selected_families:
+                    val lookup = reverse_reference_consumers_v1(
+                        receipt_read, change.path, family)
+                    if not lookup.exact:
+                        _incremental_reverse_reference_fallback_reason_v1 = lookup.fallback_reason
+                        for src in entry_sources:
+                            if not changed_paths.contains_key(src):
+                                changed_paths[src] = true
+                                result = result.add(src, ChangeKind.DependencyChanged)
+                        return result
+                    for src in lookup.consumers:
+                        if entries.contains_key(src) and not changed_paths.contains_key(src):
                             changed_paths[src] = true
                             result = result.add(src, ChangeKind.DependencyChanged)
-            case DependencyChanged | Deleted:
-                pass_do_nothing("derived and deleted changes retain the existing non-propagating contract")
+            case Deleted:
+                _incremental_reverse_reference_fallback_reason_v1 = "unknown-change-kind-deleted"
+                for src in entry_sources:
+                    if not changed_paths.contains_key(src):
+                        changed_paths[src] = true
+                        result = result.add(src, ChangeKind.DependencyChanged)
+                return result
         change_index = change_index + 1
     result
 
@@ -695,10 +1017,19 @@ impl BuildCache:
                                     # where the optional field was absent.
                                     module_witness = NATIVE_MODULE_CACHE_WITNESS_CORRUPT_V1
 
+                            var interface_digest = ""
+                            val id_val = item.get("interface_digest")
+                            if val id_raw = id_val:
+                                val id_value: SdnValue = id_raw
+                                val id_str = id_value.as_str()
+                                if val id_text = id_str:
+                                    interface_digest = id_text
+
                             val entry = DependencyEntry(
                                 source: source, fingerprint: fp,
                                 dependencies: deps, outputs: outs,
                                 deps_iface: deps_iface,
+                                interface_digest: interface_digest,
                                 module_witness: module_witness)
                             entries[source] = entry
                             fingerprints[source] = fp
@@ -711,7 +1042,7 @@ impl BuildCache:
         BuildCache(entries: entries, fingerprints: fingerprints,
                    cache_path: cache_path, version: version)
 
-    me save():
+    me save() -> bool:
         """Persist cache to disk."""
         build_cache_persist(self)
 
@@ -787,7 +1118,7 @@ impl BuildCache:
         changes = incremental_append_deleted_changes(
             changes, source_files, self.fingerprints.keys())
 
-        incremental_propagate_dependency_changes(changes, self.entries)
+        incremental_propagate_dependency_changes(changes, self.entries, self.cache_path)
 
     me invalidate_all():
         """Clear entire cache."""
@@ -1006,6 +1337,21 @@ pub fn build_cache_record_entry_with_fp(cache: BuildCache, source: text,
     fold is nil and "" is stored — build_cache_entry_is_valid then fails
     closed on this entry."""
     val deps_iface = dep_iface_gate_record(dependencies)
+    reverse_reference_owner_register_source_alias_v1(source, source)
+    for output in outputs:
+        reverse_reference_owner_register_source_alias_v1(output, source)
+    for dependency in dependencies:
+        reverse_reference_owner_register_source_alias_v1(
+            dependency, dependency)
+        incremental_publish_direct_import_export_v1(
+            dependency, source, deps_iface)
+        # An import proves interface consumption, not SCC membership. The
+        # action-graph/SCC owner publishes module-scc-artifact peer edges.
+    incremental_publish_direct_import_export_v1(
+        source, source, fingerprint.content_hash)
+    incremental_publish_module_scc_artifact_v1(
+        source, source,
+        if module_witness == "": fingerprint.content_hash else: module_witness)
     # Default/omitted witness means "caller has no new witness", not "erase a
     # witness published by the native AOT owner". This keeps generic legacy
     # record_compilation callers backward compatible.
@@ -1016,7 +1362,10 @@ pub fn build_cache_record_entry_with_fp(cache: BuildCache, source: text,
     cache.entries[source] = DependencyEntry(
         source: source, fingerprint: fingerprint,
         dependencies: dependencies, outputs: outputs,
-        deps_iface: deps_iface, module_witness: effective_module_witness)
+        deps_iface: deps_iface,
+        interface_digest: interface_digest_of_source(
+            incremental_file_read_text(source) ?? ""),
+        module_witness: effective_module_witness)
 
 pub fn build_cache_record_entry(cache: BuildCache, source: text,
                                 dependencies: [text], outputs: [text]) -> bool:
@@ -1047,7 +1396,7 @@ pub fn build_cache_entry_is_valid(cache: BuildCache, source: text) -> bool:
         return dep_iface_gate_valid(entry.deps_iface, entry.dependencies)
     false
 
-pub fn build_cache_persist(cache: BuildCache):
+pub fn build_cache_persist(cache: BuildCache) -> bool:
     """Persist cache to disk."""
     val dir = incremental_parent_dir(cache.cache_path)
     if dir != "":
@@ -1064,11 +1413,15 @@ pub fn build_cache_persist(cache: BuildCache):
         val deps_text = incremental_sdn_text_array(entry.dependencies)
         val outputs_text = incremental_sdn_text_array(entry.outputs)
         val deps_iface_text = incremental_sdn_escape(entry.deps_iface)
+        val interface_digest_text = incremental_sdn_escape(entry.interface_digest)
         val module_witness_text = incremental_sdn_escape(entry.module_witness)
         val fp_text = "{" + " hash: \"" + hash_text + "\", size: {fp.size}, modified_time: {fp.modified_time} " + "}"
-        lines = lines.push("  " + "{" + " source: \"" + source_text + "\", fingerprint: " + fp_text + ", dependencies: " + deps_text + ", outputs: " + outputs_text + ", deps_iface: \"" + deps_iface_text + "\", module_witness: \"" + module_witness_text + "\" " + "}")
+        lines = lines.push("  " + "{" + " source: \"" + source_text + "\", fingerprint: " + fp_text + ", dependencies: " + deps_text + ", outputs: " + outputs_text + ", deps_iface: \"" + deps_iface_text + "\", interface_digest: \"" + interface_digest_text + "\", module_witness: \"" + module_witness_text + "\" " + "}")
     lines = lines.push("]")
-    incremental_file_write_text(cache.cache_path, lines.join("\n"))
+    if not incremental_file_write_text(cache.cache_path, lines.join("\n")):
+        return false
+    val receipt = incremental_reverse_reference_generation_v1(cache)
+    reverse_reference_publish_generation_v1(cache.cache_path, receipt)
 
 
 
@@ -1082,16 +1435,28 @@ pub fn build_cache_record_entry_at(cache_path: text, source: text,
     val fp = FileFingerprint.from_file(source)
     if val fp_val = fp:
         build_cache_record_entry_with_fp(cache, source, fp_val, dependencies, outputs)
-        build_cache_persist(cache)
-        return true
+        return build_cache_persist(cache)
     false
 
 pub fn build_cache_entry_is_valid_at(cache_path: text, source: text) -> bool:
     build_cache_entry_is_valid(BuildCache.load(cache_path), source)
 
+pub fn incremental_detect_changes_at(cache_path: text,
+                                     source_files: [text]) -> IncrementalCompileResult:
+    val cache = BuildCache.load(cache_path)
+    cache.detect_changes(source_files)
+
 export build_cache_open, build_cache_record_entry, build_cache_entry_is_valid, build_cache_persist, incremental_dependency_interface_fold
 export build_cache_record_entry_at, build_cache_entry_is_valid_at
+export incremental_detect_changes_at
+export IncrementalCompileResult, IncrChangeSet, IncrChange, ChangeKind
 export dep_iface_gate_record, dep_iface_gate_valid
+export incremental_reverse_reference_fallback_reason_v1
+export incremental_publish_direct_import_export_v1
+export incremental_publish_module_scc_artifact_v1
+
+pub fn incremental_reverse_reference_fallback_reason_v1() -> text:
+    _incremental_reverse_reference_fallback_reason_v1
 
 pub fn native_module_cache_shadow_mismatch_v1(recorded: text, expected: text) -> text:
     if recorded == "": return "legacy-missing"

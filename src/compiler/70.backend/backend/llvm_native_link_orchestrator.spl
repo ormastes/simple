@@ -11,6 +11,7 @@
 
 use app.io.sysinfo_ops.{getpid}
 use compiler.common.mir_target_context.{mir_target_context_normalize_arch}
+use compiler.driver.perf.compiler_work_counters.{compiler_work_link_schedule_v1}
 use compiler.backend.backend.entry_point.{generate_entry_point_ir}
 use compiler.backend.backend.llvm_target.{LlvmTargetConfig}
 use compiler.backend.backend.llvm_backend_tools.{compile_ir_to_object, extract_symbols_nm, llc_available}
@@ -29,10 +30,20 @@ use compiler.tools.verify.allocator_symbol_scan.{flight_allocator_scan_for_profi
 # resolves doc/08_tracking/bug/compiler_native_link_direct_runtime_facade_2026-07-12.md.
 use std.nogc_sync_mut.io_runtime.{env_get, file_copy, file_delete, file_exists, file_read, file_write, file_hash_sha256, file_size_raw, remove_file_if_exists, process_run, dir_create_all, dir_exists, dir_remove_all}
 use compiler.backend.backend.llvm_native_link_stage4_projection.{llvm_link_trace_enabled, llvm_configured_external_link_objects, llvm_external_provider_rpath_flags, llvm_external_provider_retained_symbols, llvm_stage4_final_requested_symbols, llvm_stage4_file_hash_rows, llvm_stage4_selected_archive_hash_rows, llvm_stage4_cleanup_candidate_inputs, llvm_stage4_profile_failure, llvm_stage4_receipt_failure, llvm_stage4_candidate_archive_inventory, llvm_stage4_project_selected_archives}
+use compiler.common.cache.reverse_reference_facts.{
+    reverse_reference_owner_mark_known_v1,
+    reverse_reference_register_runtime_provider_v1
+}
+
+pub fn llvm_native_link_orchestrator_publish_runtime_provider_v1(
+        subject: text, consumer: text, evidence: text):
+    reverse_reference_owner_mark_known_v1("runtime-provider")
+    reverse_reference_register_runtime_provider_v1(subject, consumer, evidence)
 use compiler.backend.backend.llvm_native_link_stage4_archives.{llvm_stage4_compiler_backfill_failure, llvm_stage4_build_compiler_backfill_capsule, llvm_stage4_build_runtime_native_archive, llvm_stage4_build_runtime_legacy_compat_archive, llvm_stage4_build_contracts_provider_archive, llvm_stage4_build_process_provider_archive, llvm_stage4_build_dynload_provider_archive, llvm_stage4_build_font_provider_archive, llvm_stage4_build_memtrack_provider_archive, llvm_stage4_build_time_provider_archive, llvm_stage4_build_fork_provider_archive}
 use compiler.backend.backend.llvm_native_link_hosted_support.{NativeLinkOptions, compile_entry_point_c, native_all_allowed_for_runtime_bundle}
 use compiler.backend.backend.simpleos_native_symbols.{is_simpleos_x86_64_link, is_simpleos_arm64_link, is_simpleos_riscv64_link, is_simpleos_riscv32_link}
 use compiler.backend.backend.simpleos_native_linkers.{link_simpleos_x86_64, link_simpleos_arm64, link_simpleos_riscv64, link_simpleos_riscv32}
+use compiler.common.cache.darwin_runtime_provider_manifest.{darwin_runtime_provider_manifest_v1}
 # ============================================================================
 # Main Orchestrator
 # ============================================================================
@@ -60,7 +71,32 @@ fn _llvm_append_link_input_if_present(inputs: [text], path: text) -> [text]:
         return inputs
     inputs.push(path)
 
+fn _llvm_darwin_snapshot_link_inputs(
+    inputs: [text], cache_root: text
+) -> Result<[text], text>:
+    val snapshot_root = cache_root + "/darwin_link_inputs"
+    if not dir_create_all(snapshot_root):
+        return Err("darwin-link-input-snapshot-directory-failed")
+    var snapshots: [text] = []
+    var index: i64 = 0
+    for input in inputs:
+        if not file_exists(input): return Err("darwin-link-input-missing:" + input)
+        val digest = file_hash_sha256(input)
+        if digest.len() != 64: return Err("darwin-link-input-digest-failed:" + input)
+        val snapshot = snapshot_root + "/" + index.to_text() + "-" + digest
+        if file_exists(snapshot):
+            if file_hash_sha256(snapshot) != digest:
+                return Err("darwin-link-input-snapshot-corrupt:" + snapshot)
+        elif not file_copy(input, snapshot) or file_hash_sha256(snapshot) != digest:
+            return Err("darwin-link-input-snapshot-copy-failed:" + input)
+        snapshots.push(snapshot)
+        index = index + 1
+    if snapshots.len() != inputs.len():
+        return Err("darwin-link-input-snapshot-count-mismatch")
+    Ok(snapshots)
+
 fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptions) -> Result<text, text>:
+    compiler_work_link_schedule_v1(user_objects.len())
     """Link LLVM-compiled user objects with C runtime into a native executable.
 
     Pipeline:
@@ -479,7 +515,9 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
     # Step 3: Combine all objects and link
     if trace:
         print "[LLVM-LINK] step 3: combining objects..."
+    reverse_reference_owner_mark_known_v1("runtime-provider")
     var all_objects: [text] = []
+    var runtime_provider_inputs: [text] = []
     var user_object_i = 0
     while user_object_i < user_objects.len():
         val user_object: text = user_objects[user_object_i]
@@ -488,19 +526,24 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
     if stage4_requested:
         all_objects = all_objects.push(entry_obj_path)
         all_objects = all_objects.push(stage4_projection_capsule)
+        runtime_provider_inputs = runtime_provider_inputs.push(stage4_projection_capsule)
     else:
         var runtime_object_i = 0
         while runtime_object_i < runtime_objects.len():
             val runtime_object: text = runtime_objects[runtime_object_i]
             all_objects = all_objects.push(runtime_object)
+            runtime_provider_inputs = runtime_provider_inputs.push(runtime_object)
             runtime_object_i = runtime_object_i + 1
         if bootstrap_support_obj != "":
             all_objects = all_objects.push(bootstrap_support_obj)
+            runtime_provider_inputs = runtime_provider_inputs.push(bootstrap_support_obj)
         # Caller objects precede the archive so their undefined symbols drive
         # normal member extraction. Keep the optional append outside a nested
         # branch: self-hosted branch writeback previously dropped this input.
         all_objects = _llvm_append_link_input_if_present(
             all_objects, bootstrap_native_all)
+        runtime_provider_inputs = _llvm_append_link_input_if_present(
+            runtime_provider_inputs, bootstrap_native_all)
         all_objects = all_objects.push(entry_obj_path)
     # External providers are intentionally not temporary runtime objects: do
     # not pass them to cleanup_runtime_objects or delete them after linking.
@@ -519,6 +562,55 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
             return Err(err)
     for provider in external_providers:
         all_objects = all_objects.push(provider)
+        runtime_provider_inputs = runtime_provider_inputs.push(provider)
+    for provider in runtime_provider_inputs:
+        for user_object in user_objects:
+            llvm_native_link_orchestrator_publish_runtime_provider_v1(
+                user_object, user_object,
+                "runtime-link-input:{provider}:output:{output}")
+    if hosted_os == "macos" or hosted_os == "darwin":
+        val requested_arch = if hosted_target == "" or hosted_target == "host" or hosted_target == "native":
+            mir_target_context_normalize_arch(hosted_arch)
+        else:
+            mir_target_context_normalize_arch(hosted_target.split("-")[0])
+        val configured_cache_root = env_get("SIMPLE_NATIVE_BUILD_CACHE_DIR") ?? ""
+        val runtime_manifest_root = if configured_cache_root == "":
+            "build/native_cache"
+        else:
+            configured_cache_root
+        val snapshotted_inputs = match _llvm_darwin_snapshot_link_inputs(
+            all_objects, runtime_manifest_root):
+            case Ok(paths): paths
+            case Err(error):
+                dir_create_all(runtime_manifest_root)
+                file_write(
+                    runtime_manifest_root + "/native_runtime_provider_manifest.failure",
+                    "simple-darwin-runtime-provider-manifest-failure-v1\nreason=" + error + "\n"
+                )
+                cleanup_runtime_objects(runtime_objects)
+                file_delete(entry_obj_path)
+                return Err("Darwin link-input snapshot failed: " + error)
+        all_objects = snapshotted_inputs
+        val runtime_manifest = match darwin_runtime_provider_manifest_v1(
+            all_objects, requested_arch):
+            case Ok(body): body
+            case Err(error):
+                dir_create_all(runtime_manifest_root)
+                file_write(
+                    runtime_manifest_root + "/native_runtime_provider_manifest.failure",
+                    "simple-darwin-runtime-provider-manifest-failure-v1\nreason=" + error + "\n"
+                )
+                cleanup_runtime_objects(runtime_objects)
+                file_delete(entry_obj_path)
+                return Err("Darwin runtime/provider admission failed: " + error)
+        if not dir_create_all(runtime_manifest_root) or not file_write(
+            runtime_manifest_root + "/native_runtime_provider_manifest.receipt",
+            runtime_manifest
+        ):
+            cleanup_runtime_objects(runtime_objects)
+            file_delete(entry_obj_path)
+            return Err("Darwin runtime/provider manifest publication failed")
+
     val retained_symbols = match llvm_external_provider_retained_symbols(external_providers):
         case Ok(symbols): symbols
         case Err(err):
@@ -541,6 +633,7 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
         runtime_path: "none",
         pie: options.pie,
         debug: options.debug,
+        strip_output: options.strip_output,
         verbose: options.verbose,
         allow_duplicate_definitions: not stage4_requested,
         allow_cc_fallback: not stage4_requested,

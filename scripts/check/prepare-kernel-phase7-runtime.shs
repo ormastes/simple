@@ -1,0 +1,116 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd -P)
+output=${1:-$root/build/check/kernel-phase7/runtime-bootstrap}
+receipt=${2:-$root/build/check/kernel-phase7/runtime.env}
+cache_receipt=${receipt%.env}-cache.env
+. "$root/scripts/check/lib/kernel-phase7-runtime-bootstrap-commands.shs"
+
+[ -n "${SIMPLE_PHASE7_LLVM_RECEIPT:-}" ] && [ -f "$SIMPLE_PHASE7_LLVM_RECEIPT" ] || {
+  echo 'error: pinned LLVM 18 authority receipt is required for Phase7 Stage4' >&2
+  exit 1
+}
+SIMPLE_STAGE4_PROVENANCE_MODE=phase7-llvm
+export SIMPLE_STAGE4_PROVENANCE_MODE
+
+case "$output" in /*) ;; *) output=$root/$output ;; esac
+case "$receipt" in /*) ;; *) receipt=$root/$receipt ;; esac
+
+rm -rf "$output"
+mkdir -p "$output" "$(dirname "$receipt")"
+bootstrap_log=$output/phase7-runtime-bootstrap.log
+
+if ! BOOTSTRAP_NATIVE_CACHE_TTL_DAYS=1 SIMPLE_NO_STUB_FALLBACK=1 \
+    kernel_phase7_bootstrap_stage2 sh "$root" "$output" \
+      >"$bootstrap_log" 2>&1; then
+  echo "error: canonical Phase7 runtime bootstrap failed; tail follows" >&2
+  tail -80 "$bootstrap_log" >&2
+  exit 1
+fi
+
+stage2_candidates=$output/stage2-candidates.txt
+find "$output/stage2" -type f -name simple -perm -111 -print |
+  LC_ALL=C sort >"$stage2_candidates"
+[ "$(wc -l <"$stage2_candidates" | tr -d ' ')" -eq 1 ] || {
+  echo "error: Phase7 prerequisite did not produce exactly one Stage2 parent" >&2
+  exit 1
+}
+stage2=$(sed -n '1p' "$stage2_candidates")
+planner_receipt=$output/phase7-stage4-planner-admission-v2.env
+if ! kernel_phase7_produce_stage4_admission sh "$root" "$output" \
+    "$stage2" "$planner_receipt" >>"$bootstrap_log" 2>&1; then
+  echo "error: canonical Phase7 Stage4 admission failed; tail follows" >&2
+  tail -80 "$bootstrap_log" >&2
+  exit 1
+fi
+if ! BOOTSTRAP_NATIVE_CACHE_TTL_DAYS=1 SIMPLE_NO_STUB_FALLBACK=1 \
+    kernel_phase7_bootstrap_stage4 sh "$root" "$output" "$planner_receipt" \
+      >>"$bootstrap_log" 2>&1; then
+  echo "error: canonical Phase7 Stage4 continuation failed; tail follows" >&2
+  tail -80 "$bootstrap_log" >&2
+  exit 1
+fi
+
+candidates=$output/full-candidates.txt
+find "$output/full" -type f -name simple -perm -111 -print | LC_ALL=C sort >"$candidates"
+[ "$(wc -l <"$candidates" | tr -d ' ')" -eq 1 ] || {
+  echo "error: Phase7 prerequisite did not produce exactly one full CLI" >&2
+  exit 1
+}
+runtime=$(sed -n '1p' "$candidates")
+runtime=$(CDPATH= cd -- "$(dirname "$runtime")" && printf '%s/%s\n' "$PWD" "$(basename "$runtime")")
+provenance=${runtime}.provenance.env
+
+BOOTSTRAP_STAGE3_FACADE_PATH="$root/scripts/check/lib/bootstrap-stage3-provenance.shs"
+STAGE4_PROVENANCE_HELPER_PATH="$root/scripts/check/lib/stage4-candidate-provenance.shs"
+export BOOTSTRAP_STAGE3_FACADE_PATH STAGE4_PROVENANCE_HELPER_PATH
+. "$BOOTSTRAP_STAGE3_FACADE_PATH"
+. "$STAGE4_PROVENANCE_HELPER_PATH"
+. "$root/scripts/check/lib/kernel-phase7-runtime-admission.shs"
+cache_tmp=$cache_receipt.tmp.$$
+{
+  echo schema=simple-kernel-phase7-runtime-cache-v1
+  echo status=pass
+  echo ttl_days=1
+  echo runtime_sha256="$(kernel_phase7_hash_file "$runtime")"
+  echo provenance_sha256="$(kernel_phase7_hash_file "$provenance")"
+  echo source_revision="$(kernel_phase7_manifest_value source_revision "$provenance")"
+} >"$cache_tmp"
+mv "$cache_tmp" "$cache_receipt"
+hash_file() {
+  if command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}'
+  else sha256sum "$1" | awk '{print $1}'
+  fi
+}
+
+tmp=$receipt.tmp.$$
+trap 'rm -f "$tmp"' EXIT HUP INT TERM
+{
+  echo schema=simple-kernel-phase7-runtime-prerequisite-v1
+  echo status=pass
+  echo artifact_kind=pure-simple-full-cli
+  echo runtime_path="$runtime"
+  echo runtime_sha256="$(hash_file "$runtime")"
+  echo provenance_path="$provenance"
+  echo provenance_sha256="$(hash_file "$provenance")"
+  echo cache_receipt_path="$cache_receipt"
+  echo cache_receipt_sha256="$(hash_file "$cache_receipt")"
+  echo producer_path=scripts/check/prepare-kernel-phase7-runtime.shs
+  echo producer_sha256="$(hash_file "$root/scripts/check/prepare-kernel-phase7-runtime.shs")"
+  echo cache_policy=isolated-output-plus-bootstrap-ttl-1-day
+  echo llvm_toolchain_receipt_path="$SIMPLE_PHASE7_LLVM_RECEIPT"
+  echo llvm_toolchain_receipt_sha256="$(hash_file "$SIMPLE_PHASE7_LLVM_RECEIPT")"
+} >"$tmp"
+mv "$tmp" "$receipt"
+trap - EXIT HUP INT TERM
+
+kernel_phase7_admit_runtime "$runtime" "$provenance" "$cache_receipt" "$root" "$receipt" || {
+  echo "error: Phase7 prerequisite rejected non-admitted Stage4 runtime authority" >&2
+  exit 1
+}
+
+printf 'SIMPLE_PHASE7_RUNTIME=%s\n' "$runtime"
+printf 'SIMPLE_PHASE7_RUNTIME_PROVENANCE=%s\n' "$provenance"
+printf 'SIMPLE_PHASE7_RUNTIME_CACHE_RECEIPT=%s\n' "$cache_receipt"
+printf 'SIMPLE_PHASE7_RUNTIME_RECEIPT=%s\n' "$receipt"

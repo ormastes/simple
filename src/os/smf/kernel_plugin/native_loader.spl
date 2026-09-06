@@ -1,0 +1,278 @@
+# KPF adapter for the canonical SimpleProviderQueryV1/SMF loader authority.
+#
+# Admission resolves dynamic identity once. Steady-state callers use the
+# cached interface handle and provider context; this module never compiles,
+# repairs, scans for, or substitutes a missing provider at runtime.
+
+use common.kernel_plugin.ids.{
+    KpfId128, KpfDigest256, kpf_id128_equal, kpf_digest256_equal
+}
+use os.smf.provider_loader.{
+    PROVIDER_ADMISSION_OK, PROVIDER_SESSION_OK,
+    ProviderAdmissionRequestV1, ProviderCallableEvidenceV1,
+    ProviderAdmissionResultV1, ProviderDynamicAdmissionV1,
+    ProviderLoaderSessionV1, ProviderSessionQueryV1, ProviderSessionCliInvokeV1,
+    provider_admit_evidence_v1, provider_admit_dynamic_v1,
+    provider_session_query_v1, provider_session_release_v1,
+    provider_session_close_v1
+}
+use os.posix.dynlib_sffi.{ProviderQueryCallV1}
+use std.nogc_sync_mut.composition.provider_contract.{
+    SIMPLE_PROVIDER_OK, SimpleProviderQueryV1, SimpleProviderQueryResultV1
+}
+use std.nogc_sync_mut.kernel_plugin.{
+    KpfGenerationHandle, KpfGenerationTable, KpfGenerationView, KpfPinHandle,
+    KpfPinResult, KpfSyncStatus
+}
+use os.posix.dynlib.DynLibKind
+use os.smf.kernel_plugin.signature_policy.{
+    KpfArtifactSignatureEvidenceV1, KpfSignatureTrustPolicyV1,
+    kpf_validate_signature_trust_v1
+}
+
+pub enum KpfSmfAdmissionStatus:
+    Admitted
+    LoaderRejected
+    QueryRejected
+    AbiDigestMismatch
+    InterfaceMismatch
+    CapabilityMismatch
+    GenerationMismatch
+    GenerationPinUnavailable
+    NotOpen
+    StillPinned
+    PinReleaseFailed
+    UnloadFailed
+    SignatureTrustRejected
+
+pub struct KpfSmfCachedOperationTableV1:
+    interface_handle: u64
+    provider_context: u64
+    query_symbol_address: i64
+
+pub struct KpfSmfAdmissionReceiptV1:
+    status: KpfSmfAdmissionStatus
+    admitted: bool
+    provider_id: KpfId128
+    generation: KpfGenerationHandle
+    artifact_digest: text
+    interface_id: u64
+    interface_major: u32
+    interface_minor: u32
+    granted_capability_bits: u64
+    required_capability_bits: u64
+    abi_digest: u64
+    operation_table: KpfSmfCachedOperationTableV1
+    reason: text
+
+pub struct KpfSmfAdmissionPolicyV1:
+    provider_id: KpfId128
+    composition_digest: KpfDigest256
+    generation: KpfGenerationHandle
+    interface_id: u64
+    interface_major: u32
+    interface_minor: u32
+    expected_abi_digest: u64
+    granted_capability_bits: u64
+    required_capability_bits: u64
+
+pub class KpfSmfNativeSessionV1:
+    loader: ProviderLoaderSessionV1
+    receipt: KpfSmfAdmissionReceiptV1
+    provider_pin_id: u64
+    generation_pin: KpfPinHandle
+    var pinned: bool
+    var open: bool
+
+impl KpfSmfNativeSessionV1:
+    pub fn invoke_cli(command: text, args: [text], operation: u32,
+            output_capacity: u32) -> ProviderSessionCliInvokeV1:
+        val result = SimpleProviderQueryResultV1(
+            status: SIMPLE_PROVIDER_OK,
+            provided_major: self.receipt.interface_major,
+            provided_minor: self.receipt.interface_minor,
+            descriptor_size: 60,
+            interface_handle: self.receipt.operation_table.interface_handle,
+            provider_context: self.receipt.operation_table.provider_context,
+            provider_identity_digest: 0,
+            implementation_digest: 0,
+            abi_digest: self.receipt.abi_digest)
+        val query_status = if self.open and self.pinned: PROVIDER_SESSION_OK else: 1
+        val call_status = if self.receipt.admitted: SIMPLE_PROVIDER_OK else: -1
+        val query = ProviderSessionQueryV1(
+            status: query_status,
+            pin_id: self.provider_pin_id,
+            call: ProviderQueryCallV1(
+                ok: self.receipt.admitted,
+                call_status: call_status,
+                result: result,
+                diagnostic: self.receipt.reason),
+            reason: self.receipt.reason)
+        provider_session_invoke_cli_v1(
+            self.loader, query, command, args, operation, output_capacity)
+
+pub struct KpfSmfNativeAdmissionV1:
+    receipt: KpfSmfAdmissionReceiptV1
+    session: KpfSmfNativeSessionV1
+
+fn _empty_table() -> KpfSmfCachedOperationTableV1:
+    KpfSmfCachedOperationTableV1(interface_handle: 0, provider_context: 0, query_symbol_address: 0)
+
+fn _receipt(policy: KpfSmfAdmissionPolicyV1, status: KpfSmfAdmissionStatus,
+        admitted: bool, artifact_digest: text, major: u32, minor: u32,
+        abi_digest: u64, table: KpfSmfCachedOperationTableV1, reason: text) -> KpfSmfAdmissionReceiptV1:
+    KpfSmfAdmissionReceiptV1(
+        status: status, admitted: admitted, provider_id: policy.provider_id,
+        generation: policy.generation, artifact_digest: artifact_digest,
+        interface_id: policy.interface_id, interface_major: major,
+        interface_minor: minor, granted_capability_bits: policy.granted_capability_bits,
+        required_capability_bits: policy.required_capability_bits,
+        abi_digest: abi_digest, operation_table: table, reason: reason)
+
+fn _closed_session(loader: ProviderLoaderSessionV1, receipt: KpfSmfAdmissionReceiptV1) -> KpfSmfNativeSessionV1:
+    KpfSmfNativeSessionV1(loader: loader, receipt: receipt, provider_pin_id: 0,
+        generation_pin: KpfPinHandle(index: 0, epoch: 0), pinned: false, open: false)
+
+fn _empty_loader_session() -> ProviderLoaderSessionV1:
+    ProviderLoaderSessionV1(
+        library: DynLibKind.Invalid,
+        admission: ProviderAdmissionResultV1(
+            status: 1, query_symbol_address: 0, artifact_digest: "",
+            process_callable: false, reason: "signature-trust-rejected"),
+        open: false, next_pin_id: 1, live_pins: [],
+        cli_invoke_symbol_address: 0, cli_invoke_process_callable: false)
+
+pub fn kpf_smf_validate_admission_v1(policy: KpfSmfAdmissionPolicyV1,
+        loader_admission: ProviderAdmissionResultV1, query: SimpleProviderQueryV1,
+        result: SimpleProviderQueryResultV1, generation: KpfGenerationView) -> KpfSmfAdmissionReceiptV1:
+    if loader_admission.status != PROVIDER_ADMISSION_OK:
+        return _receipt(policy, KpfSmfAdmissionStatus.LoaderRejected, false,
+            loader_admission.artifact_digest, 0, 0, 0, _empty_table(), loader_admission.reason)
+    if query.interface_id != policy.interface_id or query.minimum_major != policy.interface_major or query.minimum_minor != policy.interface_minor:
+        return _receipt(policy, KpfSmfAdmissionStatus.InterfaceMismatch, false,
+            loader_admission.artifact_digest, 0, 0, 0, _empty_table(), "query-interface-policy-mismatch")
+    if (query.requested_capability_bits != policy.required_capability_bits or
+            (policy.granted_capability_bits & policy.required_capability_bits) != policy.required_capability_bits):
+        return _receipt(policy, KpfSmfAdmissionStatus.CapabilityMismatch, false,
+            loader_admission.artifact_digest, 0, 0, 0, _empty_table(), "capability-policy-mismatch")
+    if result.status != SIMPLE_PROVIDER_OK or result.interface_handle == 0:
+        return _receipt(policy, KpfSmfAdmissionStatus.QueryRejected, false,
+            loader_admission.artifact_digest, result.provided_major, result.provided_minor,
+            result.abi_digest, _empty_table(), "provider-query-rejected")
+    if result.provided_major != policy.interface_major or result.provided_minor < policy.interface_minor:
+        return _receipt(policy, KpfSmfAdmissionStatus.InterfaceMismatch, false,
+            loader_admission.artifact_digest, result.provided_major, result.provided_minor,
+            result.abi_digest, _empty_table(), "provider-interface-version-mismatch")
+    if policy.expected_abi_digest == 0 or result.abi_digest != policy.expected_abi_digest:
+        return _receipt(policy, KpfSmfAdmissionStatus.AbiDigestMismatch, false,
+            loader_admission.artifact_digest, result.provided_major, result.provided_minor,
+            result.abi_digest, _empty_table(), "provider-interface-abi-digest-mismatch")
+    if (not generation.status.accepted() or not generation.active or generation.retired or
+            not kpf_id128_equal(generation.provider_id, policy.provider_id) or
+            not kpf_digest256_equal(generation.composition_digest, policy.composition_digest)):
+        return _receipt(policy, KpfSmfAdmissionStatus.GenerationMismatch, false,
+            loader_admission.artifact_digest, result.provided_major, result.provided_minor,
+            result.abi_digest, _empty_table(), "provider-generation-mismatch")
+    val table = KpfSmfCachedOperationTableV1(
+        interface_handle: result.interface_handle,
+        provider_context: result.provider_context,
+        query_symbol_address: loader_admission.query_symbol_address)
+    _receipt(policy, KpfSmfAdmissionStatus.Admitted, true,
+        loader_admission.artifact_digest, result.provided_major, result.provided_minor,
+        result.abi_digest, table, "admitted")
+
+pub fn kpf_smf_admit_evidence_v1(policy: KpfSmfAdmissionPolicyV1,
+        loader_request: ProviderAdmissionRequestV1, evidence: ProviderCallableEvidenceV1,
+        query: SimpleProviderQueryV1, result: SimpleProviderQueryResultV1,
+        generation: KpfGenerationView) -> KpfSmfAdmissionReceiptV1:
+    val loader_admission = provider_admit_evidence_v1(loader_request, evidence)
+    kpf_smf_validate_admission_v1(policy, loader_admission, query, result, generation)
+
+pub fn kpf_smf_admit_trusted_evidence_v1(policy: KpfSmfAdmissionPolicyV1,
+        trust_policy: KpfSignatureTrustPolicyV1,
+        signature_evidence: KpfArtifactSignatureEvidenceV1,
+        loader_request: ProviderAdmissionRequestV1, evidence: ProviderCallableEvidenceV1,
+        query: SimpleProviderQueryV1, result: SimpleProviderQueryResultV1,
+        generation: KpfGenerationView) -> KpfSmfAdmissionReceiptV1:
+    val trust = kpf_validate_signature_trust_v1(trust_policy, signature_evidence)
+    if not trust.admitted:
+        return _receipt(policy, KpfSmfAdmissionStatus.SignatureTrustRejected, false,
+            signature_evidence.artifact_digest, 0, 0, 0, _empty_table(), trust.reason)
+    if loader_request.expected_artifact_digest != trust_policy.expected_artifact_digest or
+            evidence.artifact_digest != signature_evidence.artifact_digest:
+        return _receipt(policy, KpfSmfAdmissionStatus.SignatureTrustRejected, false,
+            signature_evidence.artifact_digest, 0, 0, 0, _empty_table(),
+            "loader-signature-artifact-digest-mismatch")
+    kpf_smf_admit_evidence_v1(policy, loader_request, evidence, query, result, generation)
+
+pub fn kpf_smf_pin_policy_generation_v1(policy: KpfSmfAdmissionPolicyV1,
+        generations: KpfGenerationTable) -> KpfPinResult:
+    # Pin the generation that validation inspected. Using pin_active() here
+    # would admit a replacement published between validation and pinning.
+    generations.pin(policy.generation)
+
+pub fn kpf_smf_admit_native_v1(policy: KpfSmfAdmissionPolicyV1,
+        loader_request: ProviderAdmissionRequestV1, query: SimpleProviderQueryV1,
+        generations: KpfGenerationTable) -> KpfSmfNativeAdmissionV1:
+    val dynamic = provider_admit_dynamic_v1(loader_request)
+    if dynamic.admission.status != PROVIDER_ADMISSION_OK:
+        val receipt = _receipt(policy, KpfSmfAdmissionStatus.LoaderRejected, false,
+            dynamic.admission.artifact_digest, 0, 0, 0, _empty_table(), dynamic.admission.reason)
+        return KpfSmfNativeAdmissionV1(receipt: receipt, session: _closed_session(dynamic.session, receipt))
+    val call = provider_session_query_v1(dynamic.session, query)
+    if call.status != PROVIDER_SESSION_OK:
+        val receipt = _receipt(policy, KpfSmfAdmissionStatus.QueryRejected, false,
+            dynamic.admission.artifact_digest, 0, 0, 0, _empty_table(), call.reason)
+        provider_session_close_v1(dynamic.session)
+        return KpfSmfNativeAdmissionV1(receipt: receipt, session: _closed_session(dynamic.session, receipt))
+    val generation_view = generations.view(policy.generation)
+    val receipt = kpf_smf_validate_admission_v1(policy, dynamic.admission, query, call.call.result, generation_view)
+    if not receipt.admitted:
+        provider_session_release_v1(dynamic.session, call.pin_id)
+        provider_session_close_v1(dynamic.session)
+        return KpfSmfNativeAdmissionV1(receipt: receipt, session: _closed_session(dynamic.session, receipt))
+    val generation_pin = kpf_smf_pin_policy_generation_v1(policy, generations)
+    if not generation_pin.status.accepted():
+        provider_session_release_v1(dynamic.session, call.pin_id)
+        provider_session_close_v1(dynamic.session)
+        val rejected = _receipt(policy, KpfSmfAdmissionStatus.GenerationPinUnavailable, false,
+            dynamic.admission.artifact_digest, call.call.result.provided_major,
+            call.call.result.provided_minor, call.call.result.abi_digest,
+            _empty_table(), "provider-generation-pin-unavailable")
+        return KpfSmfNativeAdmissionV1(receipt: rejected, session: _closed_session(dynamic.session, rejected))
+    val session = KpfSmfNativeSessionV1(loader: dynamic.session, receipt: receipt,
+        provider_pin_id: call.pin_id, generation_pin: generation_pin.handle,
+        pinned: true, open: true)
+    KpfSmfNativeAdmissionV1(receipt: receipt, session: session)
+
+pub fn kpf_smf_admit_trusted_native_v1(policy: KpfSmfAdmissionPolicyV1,
+        trust_policy: KpfSignatureTrustPolicyV1,
+        signature_evidence: KpfArtifactSignatureEvidenceV1,
+        loader_request: ProviderAdmissionRequestV1, query: SimpleProviderQueryV1,
+        generations: KpfGenerationTable) -> KpfSmfNativeAdmissionV1:
+    val trust = kpf_validate_signature_trust_v1(trust_policy, signature_evidence)
+    if not trust.admitted or loader_request.expected_artifact_digest != trust_policy.expected_artifact_digest:
+        val receipt = _receipt(policy, KpfSmfAdmissionStatus.SignatureTrustRejected, false,
+            signature_evidence.artifact_digest, 0, 0, 0, _empty_table(), trust.reason)
+        val closed = _empty_loader_session()
+        return KpfSmfNativeAdmissionV1(receipt: receipt, session: _closed_session(closed, receipt))
+    kpf_smf_admit_native_v1(policy, loader_request, query, generations)
+
+pub fn kpf_smf_release_v1(session: KpfSmfNativeSessionV1,
+        generations: KpfGenerationTable) -> KpfSmfAdmissionStatus:
+    if not session.open: return KpfSmfAdmissionStatus.NotOpen
+    if not session.pinned: return KpfSmfAdmissionStatus.PinReleaseFailed
+    if provider_session_release_v1(session.loader, session.provider_pin_id) != PROVIDER_SESSION_OK:
+        return KpfSmfAdmissionStatus.PinReleaseFailed
+    if not generations.release_pin(session.generation_pin).accepted():
+        return KpfSmfAdmissionStatus.PinReleaseFailed
+    session.pinned = false
+    KpfSmfAdmissionStatus.Admitted
+
+pub fn kpf_smf_unload_v1(session: KpfSmfNativeSessionV1) -> KpfSmfAdmissionStatus:
+    if not session.open: return KpfSmfAdmissionStatus.NotOpen
+    if session.pinned: return KpfSmfAdmissionStatus.StillPinned
+    if provider_session_close_v1(session.loader) != PROVIDER_SESSION_OK:
+        return KpfSmfAdmissionStatus.UnloadFailed
+    session.open = false
+    KpfSmfAdmissionStatus.Admitted

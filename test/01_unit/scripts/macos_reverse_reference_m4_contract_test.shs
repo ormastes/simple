@@ -1,0 +1,119 @@
+#!/bin/sh
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+STORAGE_ROOTS_REPO_ROOT=$root
+export STORAGE_ROOTS_REPO_ROOT
+. "$root/scripts/lib/storage-roots.shs"
+storage_roots_init
+checker="$root/scripts/check/check-macos-reverse-reference-m4.shs"
+sh -n "$checker"
+sh "$checker" --self-test
+workflow_readiness="$root/scripts/check/check-macos-m4-workflow-readiness.shs"
+sh -n "$workflow_readiness"
+sh "$workflow_readiness" --self-test
+performance_checker="$root/scripts/check/lib/macos-bootstrap-performance-evidence.shs"
+sh -n "$performance_checker"
+sh "$performance_checker" --self-test
+baseline_receipt_test="$root/test/01_unit/scripts/macos_m4_residency_baseline_receipt_test.shs"
+sh -n "$baseline_receipt_test"
+sh "$baseline_receipt_test"
+grep -Fq 'require_results "$evidence_dir/test-runner.log"' "$checker"
+grep -Fq 'blocked "native $requested_arch host unavailable' "$checker"
+grep -Fq 'MCP_NATIVE_BOOTSTRAP_FRESH=1' "$checker"
+grep -Fq 'require_work_evidence no_op' "$checker"
+grep -Fq 'emitted_modules_value=$(sed' "$checker"
+grep -Fq '[M4 emit] module=' "$root/src/compiler/80.driver/driver_aot_native_output.spl"
+grep -Fq 'collect_work_evidence no_op' "$checker"
+grep -Fq 'SIMPLE_M4_WORK_RECEIPT=1' "$checker"
+grep -Fq 'schema=macos-m4-observed-work-v1' "$checker"
+grep -Fq 'build_tool full_cli' "$checker"
+grep -Fq 'build_tool test_runner' "$checker"
+grep -Fq 'build_tool mcp' "$checker"
+grep -Fq 'build_tool lsp' "$checker"
+grep -Fq 'producer_sha256=$candidate_sha' "$checker"
+grep -Fq 'macos-phase3-producer-authority-v1' "$checker"
+grep -Fq 'source_artifact_digest' "$checker"
+grep -Fq 'qualification_workflow_sha' "$checker"
+grep -Fq 'validate_canonical_policy' "$checker"
+grep -Fq 'SIMPLE_BINARY="$child_executable"' "$checker"
+grep -Fq 'tool_root="$evidence_dir/tools/$candidate_sha"' "$checker"
+grep -Fq 'cache_mode=exclusive-writer' "$checker"
+if sh "$checker" --arch=arm64 --cli=/tmp/prebuilt-fake >/dev/null 2>&1; then
+  echo "prebuilt tool substitution was accepted" >&2
+  exit 1
+fi
+if sh "$checker" --arch=arm64 --provider-archive=/tmp/prebuilt-provider.a >/dev/null 2>&1; then
+  echo "prebuilt provider archive substitution was accepted" >&2
+  exit 1
+fi
+grep -Fq 'SIMPLE_LINK_OBJECTS="$active_provider_archive"' "$checker"
+grep -Fq 'macos-m4-provider-archive-oracle-v1' "$checker"
+grep -Fq 'fixture matrix differs from the exact eight-row M4 contract' "$checker"
+grep -Fq 'production archive members are missing, malformed, or unordered' "$checker"
+grep -Fq 'provider-mutation-preserved-member-payloads' "$checker"
+grep -Fq 'provider-mutation-reused-baseline-archive-bytes' "$checker"
+grep -Fq 'same-byte provider path substitution invoked the linker' "$checker"
+grep -Fq 'build_provider_archive baseline' "$checker"
+grep -Fq -- '--emit-archive --threads 1' "$checker"
+awk -F '\t' '$1 == "provider" && $2 == "runtime-provider-archive" && $3 == 0 && $4 == 0 && $5 == 0 && $6 == 1 { found=1 } END { exit !found }' \
+  "$root/test/fixtures/compiler/macos_reverse_reference_m4/cases.tsv"
+grep -Fq 'SIMPLE_MEM_SNAPSHOT_FILE="$metric_memory"' "$checker"
+grep -Fq 'SIMPLE_EXECUTION_METRICS_FILE="$metric_spans"' "$checker"
+residency="$root/scripts/check/check-macos-m4-long-lived-residency.shs"
+sh -n "$residency"
+grep -Fq 'while [ "$sequence" -le 20 ]' "$residency"
+grep -Fq 'process_start_token' "$residency"
+grep -Fq 'residency-gate "$samples"' "$residency"
+grep -Fq 'long-lived-residency/receipt.env' "$checker"
+fake_server="$root/test/fixtures/scripts/macos-m4-long-lived-fake-mcp.shs"
+fake_evidence="$SIMPLE_WORKTREE_STORAGE_ROOT/test/compiler/m4-long-lived-fake-$$"
+trap 'rm -rf "$fake_evidence"' EXIT HUP INT TERM
+chmod +x "$fake_server"
+if sh "$residency" --server="$fake_server" --evidence-dir="$fake_evidence" >/dev/null 2>&1; then
+  echo "missing baseline receipt was accepted" >&2
+  exit 1
+fi
+mkdir -p "$fake_evidence"
+authority_document_sha256=$(if command -v shasum >/dev/null 2>&1; then shasum -a 256 "$root/doc/02_requirements/nfr/macos_bootstrap_reverse_reference_harmonization.md" | awk '{print $1}'; else sha256sum "$root/doc/02_requirements/nfr/macos_bootstrap_reverse_reference_harmonization.md" | awk '{print $1}'; fi)
+fake_server_sha256=$(if command -v shasum >/dev/null 2>&1; then shasum -a 256 "$fake_server" | awk '{print $1}'; else sha256sum "$fake_server" | awk '{print $1}'; fi)
+cat >"$fake_evidence/baseline-receipt.env" <<EOF
+schema=macos-m4-residency-baseline-v1
+status=ADMITTED
+requirement_id=MBH-NFR-003
+selection_policy=baseline-relative-10-percent
+decision_source=user-final-performance-authority-2026-09-02
+architecture=arm64
+request_count=20
+baseline_rss_kib=1000
+baseline_evidence_sha256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+producer_sha256=$fake_server_sha256
+server_sha256=$fake_server_sha256
+authority_document=doc/02_requirements/nfr/macos_bootstrap_reverse_reference_harmonization.md
+authority_document_sha256=$authority_document_sha256
+EOF
+if sh "$residency" --server="$fake_server" --evidence-dir="$fake_evidence/run" \
+  --producer-sha256="$fake_server_sha256" \
+  --baseline-receipt="$fake_evidence/baseline-receipt.env" --arch=arm64 >/dev/null 2>&1; then
+  echo "script-interpreter executable substitution was accepted" >&2
+  exit 1
+fi
+[ ! -e "$fake_evidence/run/receipt.env" ] || { echo "substituted process produced a receipt" >&2; exit 1; }
+grep -Fq 'restore_baseline' "$checker"
+grep -Fq 'baseline source restoration mismatch' "$checker"
+grep -Fq 'clean/incremental executable bytes differ' "$checker"
+grep -Fq -- "-name '*.o'" "$checker"
+grep -Fq 'published baseline output changed during interruption' "$checker"
+grep -Fq 'require_native_macho "Phase3 compiler" "$compiler"' "$checker"
+grep -Fq 'M4 source worktree must be clean and immutable' "$checker"
+grep -Fq 'linker-policy mutation did not relink exactly once' "$checker"
+awk -F '\t' '$1 == "linker_policy" && $2 == "strip-policy" && $3 == 0 && $4 == 0 && $5 == 0 && $6 == 1 { found=1 } END { exit !found }' \
+  "$root/test/fixtures/compiler/macos_reverse_reference_m4/cases.tsv"
+grep -Fq 'interrupted producer exited before termination' "$checker"
+grep -Fq "grep -Fxq 'status=PASS'" "$root/.github/workflows/macos-reverse-reference-m4.yml"
+grep -Fq 'qualification_run_id=${{ github.run_id }}' "$root/.github/workflows/macos-reverse-reference-m4.yml"
+grep -Fq 'source_run_id=${{ inputs.source_run_id }}' "$root/.github/workflows/macos-reverse-reference-m4.yml"
+grep -Fq -- '--residency-baseline-receipt=build/m4/residency-authority/baseline.env' \
+  "$root/.github/workflows/macos-reverse-reference-m4.yml"
+grep -Fq -- '--arch="${{ inputs.requested_arch }}"' \
+  "$root/.github/workflows/macos-reverse-reference-m4.yml"
+echo "PASS macOS reverse-reference M4 portable contract"

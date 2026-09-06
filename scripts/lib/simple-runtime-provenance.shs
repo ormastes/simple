@@ -1,0 +1,117 @@
+#!/bin/sh
+
+# Fail-closed identity and provenance admission for deployed Simple runtimes.
+# This library never selects by directory name or version text alone.
+
+simple_runtime_sha256() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    else
+        shasum -a 256 "$1" | awk '{print $1}'
+    fi
+}
+
+simple_runtime_real_path() {
+    readlink -f -- "$1" 2>/dev/null || {
+        _srp_dir=$(CDPATH= cd -- "$(dirname -- "$1")" && pwd -P) || return 1
+        printf '%s/%s\n' "$_srp_dir" "$(basename -- "$1")"
+    }
+}
+
+simple_runtime_normalize_arch() {
+    case "$1" in
+        arm64|aarch64) printf '%s\n' aarch64 ;;
+        amd64|x86_64) printf '%s\n' x86_64 ;;
+        *) printf '%s\n' "$1" ;;
+    esac
+}
+
+simple_runtime_host_target() {
+    _srp_arch=$(simple_runtime_normalize_arch "${SIMPLE_RUNTIME_HOST_ARCH:-$(uname -m 2>/dev/null)}")
+    case "${SIMPLE_RUNTIME_HOST_OS:-$(uname -s 2>/dev/null)}:$_srp_arch" in
+        Darwin:aarch64) printf '%s\n' aarch64-apple-darwin ;;
+        Darwin:x86_64) printf '%s\n' x86_64-apple-darwin ;;
+        Linux:aarch64) printf '%s\n' aarch64-unknown-linux-gnu ;;
+        Linux:x86_64) printf '%s\n' x86_64-unknown-linux-gnu ;;
+        *) return 1 ;;
+    esac
+}
+
+simple_runtime_receipt_value() {
+    _srp_key=$1
+    _srp_receipt=$2
+    awk -F= -v key="$_srp_key" '$1 == key { sub(/^[^=]*=/, ""); print; found=1; exit } END { if (!found) exit 1 }' "$_srp_receipt"
+}
+
+simple_runtime_receipt_for() {
+    _srp_candidate=$1
+    _srp_root=${2:-.}
+    for _srp_receipt in \
+        "${_srp_candidate}.provenance.env" \
+        "${_srp_candidate}.runtime-provenance.env"; do
+        [ -f "$_srp_receipt" ] && { printf '%s\n' "$_srp_receipt"; return 0; }
+    done
+    _srp_hash=$(simple_runtime_sha256 "$_srp_candidate") || return 1
+    _srp_receipt="$_srp_root/scripts/lib/runtime-provenance/${_srp_hash}.env"
+    [ -f "$_srp_receipt" ] || return 1
+    printf '%s\n' "$_srp_receipt"
+}
+
+simple_runtime_provenance_admits() {
+    _srp_candidate=$1
+    _srp_root=${2:-.}
+    [ -f "$_srp_candidate" ] && [ -x "$_srp_candidate" ] || return 10
+    _srp_receipt=$(simple_runtime_receipt_for "$_srp_candidate" "$_srp_root") || return 11
+    [ "$(simple_runtime_receipt_value schema "$_srp_receipt")" = simple-runtime-provenance-v1 ] || return 12
+    [ "$(simple_runtime_receipt_value status "$_srp_receipt")" = admitted ] || return 13
+    [ "$(simple_runtime_receipt_value implementation "$_srp_receipt")" = pure-simple ] || return 14
+
+    _srp_hash=$(simple_runtime_sha256 "$_srp_candidate") || return 15
+    [ "$(simple_runtime_receipt_value artifact_sha256 "$_srp_receipt")" = "$_srp_hash" ] || return 16
+    _srp_target=$(simple_runtime_host_target) || return 17
+    [ "$(simple_runtime_receipt_value target_triple "$_srp_receipt")" = "$_srp_target" ] || return 18
+
+    _srp_version=$("$_srp_candidate" --version 2>&1) || return 19
+    [ -n "$_srp_version" ] || return 20
+    case "$_srp_version" in
+        *"bootstrap seed only"*|*"Rust-built Simple binary"*|*"Rust-built"*) return 21 ;;
+    esac
+    [ "$(simple_runtime_receipt_value version_output "$_srp_receipt")" = "$_srp_version" ] || return 22
+    SIMPLE_RUNTIME_REAL=$(simple_runtime_real_path "$_srp_candidate") || return 23
+    SIMPLE_RUNTIME_PROVENANCE=$(simple_runtime_real_path "$_srp_receipt") || return 24
+    SIMPLE_RUNTIME_SHA256=$_srp_hash
+    SIMPLE_RUNTIME_VERSION=$_srp_version
+    export SIMPLE_RUNTIME_REAL SIMPLE_RUNTIME_PROVENANCE SIMPLE_RUNTIME_SHA256 SIMPLE_RUNTIME_VERSION
+    return 0
+}
+
+simple_runtime_release_candidates() {
+    _srp_root=${1:-.}
+    _srp_target=$(simple_runtime_host_target) || return 1
+    case "$_srp_target" in
+        aarch64-apple-darwin)
+            printf '%s\n' \
+                "$_srp_root/bin/release/aarch64-apple-darwin/simple" \
+                "$_srp_root/bin/release/aarch64-apple-darwin-macho/simple" \
+                "$_srp_root/bin/release/macos-arm64/simple"
+            ;;
+        x86_64-apple-darwin)
+            printf '%s\n' \
+                "$_srp_root/bin/release/x86_64-apple-darwin/simple" \
+                "$_srp_root/bin/release/macos-x86_64/simple"
+            ;;
+        *) printf '%s\n' "$_srp_root/bin/release/$_srp_target/simple" ;;
+    esac
+}
+
+simple_runtime_select() {
+    _srp_root=${1:-.}
+    for _srp_candidate in $(simple_runtime_release_candidates "$_srp_root"); do
+        [ -x "$_srp_candidate" ] || continue
+        if simple_runtime_provenance_admits "$_srp_candidate" "$_srp_root"; then
+            printf '%s\n' "$SIMPLE_RUNTIME_REAL"
+            return 0
+        fi
+    done
+    return 1
+}

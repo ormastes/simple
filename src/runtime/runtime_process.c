@@ -32,6 +32,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if defined(__APPLE__)
+#include <libproc.h>
+#endif
 
 #if defined(SIMPLE_CORE_C_STANDALONE)
 #ifdef _WIN32
@@ -66,6 +69,56 @@ bool rt_process_is_running(int64_t pid) {
     if (waited == (pid_t)pid) return false;
     if (errno == ECHILD) return kill((pid_t)pid, 0) == 0 || errno == EPERM;
     return false;
+#endif
+}
+
+int64_t rt_process_start_identity(int64_t pid) {
+    if (pid <= 0) return 0;
+#ifdef _WIN32
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, (DWORD)pid);
+    if (!process) return 0;
+    FILETIME created, exited, kernel, user;
+    if (!GetProcessTimes(process, &created, &exited, &kernel, &user)) {
+        CloseHandle(process);
+        return 0;
+    }
+    CloseHandle(process);
+    ULARGE_INTEGER value;
+    value.LowPart = created.dwLowDateTime;
+    value.HighPart = created.dwHighDateTime;
+    return value.QuadPart > INT64_MAX ? 0 : (int64_t)value.QuadPart;
+#elif defined(__linux__)
+    char path[64], line[2048];
+    snprintf(path, sizeof(path), "/proc/%lld/stat", (long long)pid);
+    FILE* file = fopen(path, "r");
+    if (!file) return 0;
+    if (!fgets(line, sizeof(line), file)) {
+        fclose(file);
+        return 0;
+    }
+    fclose(file);
+    char* cursor = strrchr(line, ')');
+    if (!cursor || cursor[1] != ' ') return 0;
+    cursor += 2;
+    for (int field = 3; field < 22; field++) {
+        cursor = strchr(cursor, ' ');
+        if (!cursor) return 0;
+        cursor++;
+    }
+    errno = 0;
+    char* end = NULL;
+    unsigned long long value = strtoull(cursor, &end, 10);
+    return errno == 0 && end != cursor && value <= INT64_MAX ? (int64_t)value : 0;
+#elif defined(__APPLE__)
+    struct proc_bsdinfo info;
+    int bytes = proc_pidinfo((int)pid, PROC_PIDTBSDINFO, 0, &info, sizeof(info));
+    if (bytes != sizeof(info)) return 0;
+    uint64_t seconds = (uint64_t)info.pbi_start_tvsec;
+    uint64_t micros = (uint64_t)info.pbi_start_tvusec;
+    if (seconds > (uint64_t)INT64_MAX / 1000000ULL) return 0;
+    return (int64_t)(seconds * 1000000ULL + micros);
+#else
+    return 0;
 #endif
 }
 

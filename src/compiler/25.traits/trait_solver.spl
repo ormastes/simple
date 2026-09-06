@@ -7,6 +7,10 @@ use compiler.hir.hir.*
 use compiler.frontend.core.lexer.*
 use compiler.traits.trait_def.{SolverTraitDef, SolverTraitBound, AssocTypeDef, MethodSignature}
 use compiler.traits.trait_impl.{ImplBlock}
+use compiler.common.cache.reverse_reference_facts.{
+    reverse_reference_owner_mark_known_v1,
+    reverse_reference_register_trait_candidate_v1
+}
 use compiler.traits.trait_coherence.{impls_overlap}
 use compiler.traits.trait_validation.{TraitError}
 use compiler.traits.associated_types.{AssocTypeProjection, AssocTypeResolver}
@@ -98,6 +102,31 @@ impl ObligationCause:
 # Trait Solver
 # ============================================================================
 
+fn trait_reverse_type_identity_v1(ty: HirType) -> text:
+    match ty.kind:
+        case Named(symbol, _): symbol.name
+        case Int(bits, signed): if signed: "i{bits}" else: "u{bits}"
+        case Float(bits): "f{bits}"
+        case Bool: "bool"
+        case Char: "char"
+        case Str: "text"
+        case Unit: "unit"
+        case _: "other-type"
+
+fn trait_reverse_cause_identity_v1(cause: ObligationCause,
+        fallback: text) -> text:
+    match cause:
+        case FunctionCall(symbol): symbol.name
+        case MethodCall(symbol, _): symbol.name
+        case SolverTraitBound(symbol): symbol.name
+        case FieldAccess(symbol, _): symbol.name
+        case BuiltIn: fallback
+
+pub fn trait_solver_publish_trait_candidate_v1(subject: text,
+        consumer: text, evidence: text):
+    reverse_reference_owner_mark_known_v1("trait-type-implementation")
+    reverse_reference_register_trait_candidate_v1(subject, consumer, evidence)
+
 class TraitSolver:
     """Solves trait obligations by searching impl blocks.
 
@@ -138,6 +167,7 @@ class TraitSolver:
 impl TraitSolver:
     static fn create() -> TraitSolver:
         """Create a new trait solver."""
+        reverse_reference_owner_mark_known_v1("trait-type-implementation")
         TraitSolver(
             traits: {},
             impls: {},
@@ -177,6 +207,13 @@ impl TraitSolver:
         Also registers with the associated type resolver.
         """
         val trait_name = impl_block.trait_name
+        val impl_consumer = if impl_block.methods.len() > 0:
+            impl_block.methods[0].name
+        else:
+            trait_reverse_type_identity_v1(impl_block.for_type)
+        trait_solver_publish_trait_candidate_v1(
+            trait_name.name, impl_consumer,
+            "impl:{trait_name.name}:{impl_block.methods.len()}")
 
         # Index by trait name
         var impl_list_by_trait: [ImplBlock] = if self.impls[trait_name].?:
@@ -203,6 +240,11 @@ impl TraitSolver:
     me add_obligation(ty: HirType, trait_: HirSymbol, cause: ObligationCause, span: Span):
         """Add an obligation to solve."""
         val obligation = Obligation.create(ty, trait_, cause, span)
+        trait_solver_publish_trait_candidate_v1(
+            trait_.name,
+            trait_reverse_cause_identity_v1(
+                cause, trait_reverse_type_identity_v1(ty)),
+            "obligation:{trait_.name}:{trait_reverse_type_identity_v1(ty)}")
         self.obligations = self.obligations.push(obligation)
 
     fn has_obligations() -> bool:

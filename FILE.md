@@ -58,6 +58,8 @@ FILE.md files) are allowed.
 | `targets.sdn` | Build target registry read by `src/app/build/targets/targets_cli.spl` |
 | `gh-cli-cache` | Quarantined non-UTF-8 GitHub CLI archive pending independent review and deletion |
 | `release` | Tracked release version/support policy; generated release binaries remain ignored |
+| `include` | Public C headers for the kernel-plugin ABI (`simple_kernel_plugin_v1.h`) |
+| `sdk` | Out-of-tree kernel-plugin SDK: C/C++/Rust client and provider samples against the v1 ABI |
 | `scratch_fx` | Quarantined binary scratch fixtures pending independent review and deletion |
 | `sweep` | Quarantined non-UTF-8 sweep fixture pending independent review and deletion |
 | `tmp5` | Quarantined SCV binary packs pending independent review and deletion |

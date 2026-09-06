@@ -1,0 +1,71 @@
+use common.kernel_plugin.ids.{kpf_digest256_zero}
+use common.lint_kernel.model.{AnalysisCoverageV1, LintRunResultV1, lint_run_result}
+
+pub struct SimpleLintAdapterResult:
+    exit_code: i64
+    kernel_result: LintRunResultV1
+
+pub fn simple_lint_adapter_result(
+    requested_units: u32,
+    completed_units: u32,
+    not_analyzed_units: u32,
+    requested_rules: u32,
+    completed_rules: u32,
+    diagnostic_count: u32,
+    error_count: u32,
+    warning_count: u32,
+    infrastructure_failed: bool = false
+) -> SimpleLintAdapterResult:
+    var impossible_coverage = (
+        not_analyzed_units > requested_units or
+        completed_units > requested_units or
+        completed_rules > requested_rules)
+    if not impossible_coverage:
+        impossible_coverage = not_analyzed_units > requested_units - completed_units
+    var admitted_units: u32 = 0
+    var partial_units: u32 = 0
+    var skipped_rules: u32 = 0
+    if not impossible_coverage:
+        admitted_units = requested_units - not_analyzed_units
+        partial_units = requested_units - completed_units - not_analyzed_units
+        skipped_rules = requested_rules - completed_rules
+    val completed_phases: u64 = if not impossible_coverage and completed_units == requested_units and requested_units > 0: 1 else: 0
+    val coverage = AnalysisCoverageV1(
+        requested_unit_count: requested_units,
+        admitted_unit_count: admitted_units,
+        completed_unit_count: completed_units,
+        partial_unit_count: partial_units,
+        not_analyzed_unit_count: not_analyzed_units,
+        requested_rule_count: requested_rules,
+        completed_rule_count: completed_rules,
+        skipped_rule_count: skipped_rules,
+        requested_phase_bits: 1,
+        completed_phase_bits: completed_phases,
+        provider_receipt_digest: kpf_digest256_zero(),
+        input_revision_digest: kpf_digest256_zero()
+    )
+    val result = lint_run_result(
+        coverage, diagnostic_count, error_count, warning_count,
+        false, infrastructure_failed or impossible_coverage)
+    var exit_code: i64 = 0
+    if error_count > 0 or not_analyzed_units > 0 or infrastructure_failed or impossible_coverage or requested_units == 0:
+        exit_code = 1
+    SimpleLintAdapterResult(exit_code: exit_code, kernel_result: result)
+
+pub fn simple_lint_verdict_name(result: LintRunResultV1) -> text:
+    match result.verdict:
+        case CompleteClean: "clean"
+        case CompleteWithFindings: "findings"
+        case Partial: "partial"
+        case NotAnalyzed: "not-analyzed"
+        case Cancelled: "cancelled"
+        case Failed: "failed"
+
+pub fn simple_lint_human_summary(result: LintRunResultV1) -> text:
+    match result.verdict:
+        case CompleteClean: "Lint passed: all files clean"
+        case CompleteWithFindings: "Lint completed with {result.error_count} error(s) and {result.warning_count} warning(s)"
+        case Partial: "Lint incomplete: only {result.coverage.completed_unit_count} of {result.coverage.requested_unit_count} file(s) were fully analysed"
+        case NotAnalyzed: "NOT LINTED: {result.coverage.not_analyzed_unit_count} file(s) were not analysed"
+        case Cancelled: "Lint cancelled"
+        case Failed: "Lint failed before trustworthy completion"

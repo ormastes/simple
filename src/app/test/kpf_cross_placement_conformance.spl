@@ -1,0 +1,145 @@
+use std.cli.cli_util.get_cli_args
+use std.nogc_sync_mut.io.thread.thread_native_sleep_ms
+use std.nogc_sync_mut.composition.{parse_composition_source_v1, encode_composition_image_v1, decode_composition_image_v1}
+use std.nogc_sync_mut.composition.provider_contract.{SIMPLE_CLI_COMMAND_V1_INTERFACE, SIMPLE_CLI_RUN, SIMPLE_PROVIDER_QUERY_V1_SIZE, SimpleProviderQueryV1}
+use common.kernel_plugin.ids.{KpfId128, KpfDigest256}
+use std.nogc_sync_mut.kernel_plugin.{KpfStaticBinding, KpfStaticRegistry, KpfGenerationHandle, KpfGenerationTable}
+use std.nogc_async_mut.kernel_plugin.runtime.KpfRequestHandleV1
+use os.smf.provider_loader.ProviderAdmissionRequestV1
+use os.smf.kernel_plugin.native_loader.*
+use os.smf.kernel_plugin.real_worker_process.KpfRealWorkerProcessV1
+use os.smf.kernel_plugin.real_worker_transport.KpfRealWorkerTransportV1
+use os.smf.kernel_plugin.worker_protocol.KpfWorkerOutcome
+use os.smf.kernel_plugin.wasm_component.*
+
+val EXPECTED = "native-provider-ok"
+val PROVIDER_ID = KpfId128(hi: 0x4b50462d53454d31, lo: 1)
+val INTERFACE_ID = KpfId128(hi: 0x4b50462d53454d31, lo: 2)
+val COMPOSITION = KpfDigest256(w0: 11, w1: 12, w2: 13, w3: 14)
+
+fn semantic_operation(payload: [u8]) -> [u8]: payload
+
+fn static_direct(payload: [u8]) -> [u8]: semantic_operation(payload)
+
+fn static_table(payload: [u8]) -> [u8]:
+    val registry = KpfStaticRegistry.create(1)
+    if not registry.bind(KpfStaticBinding(provider_id: PROVIDER_ID,
+            interface_id: INTERFACE_ID, operation_table_token: 1)).accepted(): return []
+    registry.seal()
+    val resolved = registry.resolve(INTERFACE_ID)
+    if not resolved.status.accepted() or resolved.binding.operation_table_token != 1: return []
+    semantic_operation(payload)
+
+fn poll_worker(transport: KpfRealWorkerTransportV1, now_ns: i64) -> [u8]:
+    var result = transport.poll(now_ns)
+    var attempts = 0
+    while result.outcome == KpfWorkerOutcome.Empty and attempts < 1000:
+        thread_native_sleep_ms(1)
+        result = transport.poll(now_ns)
+        attempts = attempts + 1
+    if result.outcome != KpfWorkerOutcome.Accepted: return []
+    result.payload
+
+fn worker(payload: [u8], generation: i64) -> [u8]:
+    val process = KpfRealWorkerProcessV1.spawn_fixture_unisolated("/bin/sh",
+        ["test/01_unit/os/smf/kernel_plugin/fake_real_worker.shs", "normal"],
+        128, 4096, 1)
+    val transport = KpfRealWorkerTransportV1.create(process, generation, 3, 7, 1)
+    if transport.handshake(1, 1000) != KpfWorkerOutcome.Accepted: return []
+    poll_worker(transport, 1)
+    val request = KpfRequestHandleV1(generation: generation, session_slot: 3,
+        request_slot: 0, request_epoch: 1)
+    if transport.submit(request, 1, payload, 1000) != KpfWorkerOutcome.Accepted: return []
+    val result = poll_worker(transport, 2)
+    transport.quiesce()
+    transport.poll(3)
+    transport.close()
+    transport.poll(4)
+    result
+
+fn wasm(payload: [u8], generation: i64) -> [u8]:
+    val host = KpfDeterministicWasmHostV1.create(generation, 1)
+    val transport = KpfWasmComponentTransportV1.create(host, generation, 3, 1, 128)
+    val request = KpfRequestHandleV1(generation: generation, session_slot: 3,
+        request_slot: 0, request_epoch: 1)
+    if transport.submit(request, 1, payload) != KpfWasmComponentOutcome.Accepted: return []
+    val result = transport.poll()
+    if result.outcome != KpfWasmComponentOutcome.Accepted: return []
+    result.payload
+
+fn sci_digest(provider_path: text, artifact_digest: text) -> text:
+    val source = "schema: simple.composition/1\nprofile: kpf-conformance\n" +
+        "interface_groups:\n  - id: cli.command\n    major: 1\n    minor: 0\n" +
+        "    abi_digest: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n" +
+        "providers:\n  - id: semantic.native\n    artifact: " + provider_path +
+        "\n    kind: native\n    artifact_digest: " + artifact_digest +
+        "\n    interface_groups: [cli.command]\n    required_capability_bits: 1\n" +
+        "bindings:\n  - service: semantic.execute\n    interface_group: cli.command\n" +
+        "    provider: semantic.native\n"
+    val image = parse_composition_source_v1(source).unwrap()
+    val decoded = decode_composition_image_v1(encode_composition_image_v1(image))
+    if not decoded.ok: return ""
+    decoded.image.composition_digest
+
+fn kpf_cross_placement_sci_mutation_rejected(provider_path: text,
+        artifact_digest: text) -> bool:
+    val source = "schema: simple.composition/1\nprofile: kpf-conformance\n" +
+        "providers:\n  - id: semantic.native\n    artifact: " + provider_path +
+        "\n    kind: native\n    artifact_digest: " + artifact_digest +
+        "\n    interface_groups: []\n    required_capability_bits: 1\n"
+    var encoded = encode_composition_image_v1(parse_composition_source_v1(source).unwrap())
+    encoded[encoded.len() - 1] = encoded[encoded.len() - 1] ^ 1
+    not decode_composition_image_v1(encoded).ok
+
+fn native(provider_path: text, artifact_digest: text,
+        generations: KpfGenerationTable, generation: KpfGenerationHandle) -> text:
+    val request = ProviderAdmissionRequestV1(
+        artifact_path: provider_path, artifact_kind: "native",
+        expected_artifact_digest: artifact_digest,
+        granted_capability_bits: 1, required_capability_bits: 1,
+        host_abi: 1, minimum_host_abi: 1, maximum_host_abi: 1,
+        requested_interface_major: 1, requested_interface_minor: 0,
+        provided_interface_major: 1, provided_interface_minor: 0)
+    val query = SimpleProviderQueryV1(descriptor_size: SIMPLE_PROVIDER_QUERY_V1_SIZE,
+        interface_id: SIMPLE_CLI_COMMAND_V1_INTERFACE, minimum_major: 1,
+        minimum_minor: 0, host_abi: 1, target_offset: 0, target_length: 0,
+        requested_capability_bits: 1)
+    val policy = KpfSmfAdmissionPolicyV1(provider_id: PROVIDER_ID,
+        composition_digest: COMPOSITION, generation: generation,
+        interface_id: SIMPLE_CLI_COMMAND_V1_INTERFACE, interface_major: 1,
+        interface_minor: 0, expected_abi_digest: 0x3333,
+        granted_capability_bits: 1, required_capability_bits: 1)
+    val admitted = kpf_smf_admit_native_v1(policy, request, query, generations)
+    if not admitted.receipt.admitted: return ""
+    val call = admitted.session.invoke_cli("fmt", [], SIMPLE_CLI_RUN, 128)
+    val output = if call.status == 0 and call.call.ok: call.call.result.output else: ""
+    kpf_smf_release_v1(admitted.session, generations)
+    kpf_smf_unload_v1(admitted.session)
+    output
+
+fn kpf_cross_placement_conformance(provider_path: text,
+        artifact_digest: text) -> i64:
+    val sealed_digest = sci_digest(provider_path, artifact_digest)
+    if sealed_digest.len() != 64: return 3
+    val generations = KpfGenerationTable.create(2, 4)
+    val publication = generations.publish(PROVIDER_ID, COMPOSITION, 1)
+    if not publication.status.accepted(): return 4
+    val pin = generations.pin(publication.current)
+    if not pin.status.accepted(): return 5
+    val payload = EXPECTED.bytes()
+    if static_direct(payload) != payload: return 10
+    if static_table(payload) != payload: return 11
+    if native(provider_path, artifact_digest, generations, publication.current) != EXPECTED: return 12
+    if worker(payload, publication.current.epoch as i64) != payload: return 13
+    if wasm(payload, publication.current.epoch as i64) != payload: return 14
+    if not generations.release_pin(pin.handle).accepted(): return 15
+    print "PASS kpf-cross-placement semantic=" + EXPECTED +
+        " sci=" + sealed_digest + " generation=" + publication.current.epoch.to_string()
+    0
+
+fn main() -> i64:
+    val args = get_cli_args()
+    if args.len() != 2: return 2
+    kpf_cross_placement_conformance(args[0], args[1])
+
+export kpf_cross_placement_conformance, kpf_cross_placement_sci_mutation_rejected

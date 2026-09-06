@@ -5,9 +5,20 @@ tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT HUP INT TERM
 abi="$root/src/compiler/70.backend/backend_plugin/abi"; fixtures="$root/test/01_unit/compiler/backend_plugin/fixtures"
 cc -std=c11 -Wall -Wextra -Werror -fPIC -shared -I"$abi" "$fixtures/backend_plugin_v1_fixture.c" -o "$tmp/provider.so"
 cc -std=c11 -Wall -Wextra -Werror -I"$root/src/runtime" -I"$abi" "$root/src/runtime/runtime_backend_plugin.c" "$fixtures/backend_plugin_v1_bridge_host.c" -ldl -o "$tmp/host"
+cc -std=c11 -Wall -Wextra -Werror -I"$root/src/runtime" -I"$abi" "$root/src/runtime/runtime_backend_plugin.c" "$fixtures/backend_plugin_v1_batch_host.c" -ldl -o "$tmp/batch-host"
 marker="$tmp/unloaded"
 SBP_FIXTURE_UNLOAD_MARKER="$marker" "$tmp/host" "$tmp/provider.so" 0
 grep -q 'closed=1 releases=3' "$marker"
+rm -f "$marker"
+SBP_FIXTURE_UNLOAD_MARKER="$marker" "$tmp/batch-host" "$tmp/provider.so"
+grep -q 'releases=4 opens=1 closes=1' "$marker"
+for stage_mode_release in '2 compile-fail 0' '3 finalize-fail 1'; do
+    set -- $stage_mode_release; stage=$1; mode=$2; releases=$3
+    cc -std=c11 -Wall -Wextra -Werror -fPIC -shared -DSBP_FAIL_STAGE="$stage" -I"$abi" "$fixtures/backend_plugin_v1_fixture.c" -o "$tmp/batch-provider-$stage.so"
+    rm -f "$marker"
+    SBP_FIXTURE_UNLOAD_MARKER="$marker" "$tmp/batch-host" "$tmp/batch-provider-$stage.so" "$mode"
+    grep -q "releases=$releases opens=1 closes=1" "$marker"
+done
 for stage_status in '1 31 0 0' '2 32 0 1' '3 33 1 1' '4 34 2 1'; do
     set -- $stage_status; stage=$1; expected=$2; releases=$3; closed=$4
     cc -std=c11 -Wall -Wextra -Werror -fPIC -shared -DSBP_FAIL_STAGE="$stage" -I"$abi" "$fixtures/backend_plugin_v1_fixture.c" -o "$tmp/provider-$stage.so"

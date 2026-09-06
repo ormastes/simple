@@ -1,0 +1,133 @@
+use std.common.crypto.sha256.{sha256_text}
+
+enum BuildActionPoolV1:
+    io
+    parse
+    semantic
+    mir
+    cranelift
+    llvm
+    gpu_experimental
+    link
+    test
+
+enum BuildActionStateV1:
+    pending
+    ready
+    running
+    succeeded
+    failed
+    cancelled
+
+struct BuildActionV1:
+    action_id: text
+    command_identity: text
+    inputs: [text]
+    dynamic_edges: [text]
+    outputs: [text]
+    pool: BuildActionPoolV1
+    priority: i64
+    snapshot_revision: text
+    memory_budget_bytes: i64
+    restat_identity: text
+
+struct BuildActionResultV1:
+    action_id: text
+    snapshot_revision: text
+    success: bool
+    cancelled: bool
+    output_identity: text
+    restat_identity: text
+    diagnostic_frames: [text]
+    memory_peak_bytes: i64
+
+fn build_action_sorted_unique_v1(values: [text]) -> [text]:
+    var result: [text] = []
+    for value in values.sorted():
+        if value == "" or value.contains("\n") or value.contains("\r") or value.contains("|") or value.contains(","):
+            return []
+        if result.len() > 0 and result[result.len() - 1] == value:
+            return []
+        result = result.push(value)
+    result
+
+fn build_action_pool_name_v1(pool: BuildActionPoolV1) -> text:
+    match pool:
+        BuildActionPoolV1.io: "io"
+        BuildActionPoolV1.parse: "parse"
+        BuildActionPoolV1.semantic: "semantic"
+        BuildActionPoolV1.mir: "mir"
+        BuildActionPoolV1.cranelift: "cranelift"
+        BuildActionPoolV1.llvm: "llvm"
+        BuildActionPoolV1.gpu_experimental: "gpu-experimental"
+        BuildActionPoolV1.link: "link"
+        BuildActionPoolV1.test: "test"
+
+fn build_action_pool_parse_v1(value: text) -> BuildActionPoolV1?:
+    match value:
+        "io": Some(BuildActionPoolV1.io)
+        "parse": Some(BuildActionPoolV1.parse)
+        "semantic": Some(BuildActionPoolV1.semantic)
+        "mir": Some(BuildActionPoolV1.mir)
+        "cranelift": Some(BuildActionPoolV1.cranelift)
+        "llvm": Some(BuildActionPoolV1.llvm)
+        "gpu-experimental": Some(BuildActionPoolV1.gpu_experimental)
+        "link": Some(BuildActionPoolV1.link)
+        "test": Some(BuildActionPoolV1.test)
+        _: nil
+
+fn build_action_validate_v1(action: BuildActionV1) -> text:
+    if action.action_id == "" or action.command_identity == "" or action.snapshot_revision == "":
+        return "identity-missing"
+    if action.action_id.contains("|") or action.action_id.contains("\n") or action.action_id.contains(",") or action.command_identity.contains("|") or action.snapshot_revision.contains("|") or action.restat_identity.contains("|"):
+        return "action-id-invalid"
+    if action.priority < 0:
+        return "priority-invalid"
+    if action.memory_budget_bytes <= 0:
+        return "memory-budget-invalid"
+    if build_action_sorted_unique_v1(action.inputs).len() != action.inputs.len():
+        return "inputs-invalid"
+    if build_action_sorted_unique_v1(action.dynamic_edges).len() != action.dynamic_edges.len():
+        return "dynamic-edges-invalid"
+    if build_action_sorted_unique_v1(action.outputs).len() != action.outputs.len():
+        return "outputs-invalid"
+    if action.dynamic_edges.contains(action.action_id):
+        return "self-edge-invalid"
+    "ok"
+
+fn build_action_digest_v1(action: BuildActionV1) -> text:
+    if build_action_validate_v1(action) != "ok":
+        return ""
+    sha256_text([
+        "simple-build-action-v1", action.action_id, action.command_identity,
+        build_action_pool_name_v1(action.pool), action.priority.to_text(),
+        action.snapshot_revision, action.memory_budget_bytes.to_text(),
+        action.restat_identity, action.inputs.sorted().join(","),
+        action.dynamic_edges.sorted().join(","), action.outputs.sorted().join(","),
+    ].join("|"))
+
+fn build_action_result_validate_v1(
+    action: BuildActionV1, result: BuildActionResultV1
+) -> text:
+    if result.action_id != action.action_id:
+        return "action-mismatch"
+    if result.snapshot_revision != action.snapshot_revision:
+        return "snapshot-mismatch"
+    if result.success and result.cancelled:
+        return "result-state-invalid"
+    if result.memory_peak_bytes < 0 or result.memory_peak_bytes > action.memory_budget_bytes:
+        return "memory-budget-exceeded"
+    if result.diagnostic_frames.len() > 4096:
+        return "diagnostic-budget-exceeded"
+    var diagnostic_bytes = 0
+    for frame in result.diagnostic_frames:
+        diagnostic_bytes = diagnostic_bytes + frame.len()
+        if diagnostic_bytes > 4 * 1024 * 1024:
+            return "diagnostic-budget-exceeded"
+    "ok"
+
+export BuildActionPoolV1, BuildActionStateV1, BuildActionV1
+export BuildActionResultV1
+export build_action_pool_name_v1, build_action_pool_parse_v1
+export build_action_validate_v1, build_action_digest_v1
+export build_action_result_validate_v1

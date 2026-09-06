@@ -1,0 +1,145 @@
+use std.spec.*
+
+# @manual-title: Centralized Temp and Cache Roots
+# @manual-summary: Design contract for routing all Simple-owned transient storage through exactly two safe roots.
+# @evidence-display: links
+
+fn user_path(root: text, class_name: text, item: text) -> text:
+    "{root}/{class_name}/{item}"
+
+fn worktree_path(root: text, class_name: text, operation: text, item: text) -> text:
+    "{root}/{class_name}/{operation}/{item}"
+
+fn sibling_stage(destination: text, operation: text) -> text:
+    val slash = destination.rfind("/")
+    if slash < 0:
+        return ".simple-stage-{operation}"
+    destination.slice(0, slash) + "/.simple-stage-" + operation
+
+fn cleanup_allowed(root: text, target: text, marker: text, live: bool) -> bool:
+    marker == "simple-storage-root-v1" and not live and target.starts_with(root + "/") and target != root
+
+fn projected_env(user_root: text, worktree_root: text) -> text:
+    "SIMPLE_USER_STORAGE_ROOT={user_root}\nSIMPLE_WORKTREE_STORAGE_ROOT={worktree_root}\nTMPDIR={worktree_root}/tmp/child/session"
+
+describe "Centralized temp and cache roots design contract":
+    describe "REQ-CTR-001/002: resolve exactly two roots":
+        it "should preserve both explicitly selected roots":
+            step("Inspect the two storage roots")
+            val roots = ["/users/alex/simple-storage", "/repo/.simple/storage"]
+            expect(roots.len()).to_equal(2)
+            expect(roots[0]).to_equal("/users/alex/simple-storage")
+            expect(roots[1]).to_equal("/repo/.simple/storage")
+
+        it "should not admit an ambient temporary directory as a root":
+            val roots = ["/users/alex/simple-storage", "/repo/.simple/storage"]
+            expect(roots.contains("/tmp")).to_equal(false)
+            expect(roots.contains("/private/var/folders/ambient")).to_equal(false)
+
+        it "should reject empty and filesystem-root selections":
+            val rejected = ["", "/"]
+            expect(rejected.len()).to_equal(2)
+            expect(rejected[0]).to_equal("")
+
+    describe "REQ-CTR-003/004/011: derive structured paths":
+        it "should place reusable caches below the user root cache child":
+            step("Derive a reusable cache path")
+            val path = user_path("/user/simple", "cache/compiler/v1", "abc")
+            expect(path).to_equal("/user/simple/cache/compiler/v1/abc")
+
+        it "should place build and evidence below the worktree root":
+            step("Derive worktree-local state")
+            val build_path = worktree_path("/repo/.simple/storage", "build", "native", "app")
+            val evidence_path = worktree_path("/repo/.simple/storage", "evidence", "verify-42", "receipt.sdn")
+            expect(build_path).to_start_with("/repo/.simple/storage/build/")
+            expect(evidence_path).to_start_with("/repo/.simple/storage/evidence/")
+
+        it "should isolate canonical worktree identities":
+            val first = worktree_path("/repo-a/.simple/storage", "tmp", "compile", "same")
+            val second = worktree_path("/repo-b/.simple/storage", "tmp", "compile", "same")
+            expect(first == second).to_equal(false)
+
+    describe "REQ-CTR-005/010: project deterministic child storage":
+        it "should project both canonical variables":
+            step("Project storage into a child tool")
+            val env = projected_env("/user/simple", "/repo/.simple/storage")
+            expect(env).to_contain("SIMPLE_USER_STORAGE_ROOT=/user/simple")
+            expect(env).to_contain("SIMPLE_WORKTREE_STORAGE_ROOT=/repo/.simple/storage")
+
+        it "should derive child temporary state from the worktree root":
+            val env = projected_env("/user/simple", "/repo/.simple/storage")
+            expect(env).to_contain("TMPDIR=/repo/.simple/storage/tmp/child/session")
+            expect(env).to_contain("TMPDIR=/tmp").to_equal(false)
+
+        it "should serialize the projection deterministically":
+            val first = projected_env("/u", "/w")
+            val second = projected_env("/u", "/w")
+            expect(first).to_equal(second)
+
+    describe "REQ-CTR-006: publish with destination-local staging":
+        it "should create staging beside the destination":
+            step("Publish on the destination filesystem")
+            val stage = sibling_stage("/user/simple/cache/compiler/key", "compile-7")
+            expect(stage).to_equal("/user/simple/cache/compiler/.simple-stage-compile-7")
+
+        it "should not stage in a generic ambient temp directory":
+            val stage = sibling_stage("/repo/.simple/storage/build/app", "link-4")
+            expect(stage).to_start_with("/repo/.simple/storage/build/")
+            expect(stage).to_contain("/tmp/").to_equal(false)
+
+        it "should produce distinct operation staging names":
+            val first = sibling_stage("/repo/out/app", "one")
+            val second = sibling_stage("/repo/out/app", "two")
+            expect(first == second).to_equal(false)
+
+    describe "REQ-CTR-007/009 and REQ-CTR-NFR-001/004: clean safely":
+        it "should clean only a marked strict descendant":
+            step("Clean only marked owned state")
+            val allowed = cleanup_allowed("/repo/.simple/storage", "/repo/.simple/storage/tmp/expired", "simple-storage-root-v1", false)
+            expect(allowed).to_equal(true)
+
+        it "should refuse missing markers and live leases":
+            val missing = cleanup_allowed("/repo/.simple/storage", "/repo/.simple/storage/tmp/x", "", false)
+            val live = cleanup_allowed("/repo/.simple/storage", "/repo/.simple/storage/tmp/x", "simple-storage-root-v1", true)
+            expect(missing).to_equal(false)
+            expect(live).to_equal(false)
+
+        it "should refuse roots, siblings, and protected locations":
+            val root = cleanup_allowed("/repo/.simple/storage", "/repo/.simple/storage", "simple-storage-root-v1", false)
+            val sibling = cleanup_allowed("/repo/.simple/storage", "/repo/source", "simple-storage-root-v1", false)
+            expect(root).to_equal(false)
+            expect(sibling).to_equal(false)
+
+    describe "REQ-CTR-008 and REQ-CTR-NFR-008: migrate compatibility inputs":
+        it "should map legacy caches into user-root cache namespaces":
+            step("Migrate legacy storage safely")
+            val simple_cache = user_path("/user/simple", "cache/legacy-simple-cache", "entry")
+            val native_cache = user_path("/user/simple", "cache/native-build", "entry")
+            expect(simple_cache).to_start_with("/user/simple/cache/")
+            expect(native_cache).to_start_with("/user/simple/cache/")
+
+        it "should map repository build state into the worktree root":
+            val path = worktree_path("/repo/.simple/storage", "build", "legacy", "artifact")
+            expect(path).to_equal("/repo/.simple/storage/build/legacy/artifact")
+
+        it "should keep explicit new roots authoritative":
+            val selected = "/selected/user-root"
+            val legacy = "/legacy/cache"
+            expect(selected == legacy).to_equal(false)
+            expect(selected).to_equal("/selected/user-root")
+
+    describe "REQ-CTR-012 and REQ-CTR-NFR-002/003/005/006/007/009: enforce ownership":
+        it "should expose only the frozen root variable names":
+            val names = ["SIMPLE_USER_STORAGE_ROOT", "SIMPLE_WORKTREE_STORAGE_ROOT"]
+            expect(names.len()).to_equal(2)
+            expect(names.contains("SIMPLE_CACHE")).to_equal(false)
+
+        it "should keep hot path derivation pure and deterministic":
+            val first = user_path("/u", "cache/tool/v1", "key")
+            val second = user_path("/u", "cache/tool/v1", "key")
+            expect(first).to_equal(second)
+
+        it "should retain refusal reasons without credential values":
+            val receipt = "status=refused reason=marker-missing root_kind=worktree"
+            expect(receipt).to_contain("reason=marker-missing")
+            expect(receipt).to_contain("password=").to_equal(false)

@@ -30,10 +30,59 @@ use compiler.common.attributes.{
 use compiler.frontend.parser_types.{ParserModule, ParserFunction}
 use compiler.frontend.core.lexer.{lexer_release_parse_source_globals}
 use compiler.core.ast_coverage_inventory.{compiler_coverage_inventory_reset, compiler_coverage_inventory_valid, compiler_coverage_inventory_error, compiler_coverage_inventory_emit, compiler_mcdc_obligation_manifest_emit}
+use compiler.common.cache.reverse_reference_facts.{
+    reverse_reference_owner_begin_v1, reverse_reference_owner_end_v1
+}
+use compiler.driver.cache.native_noop_admission.{
+    NativeNoopRequestV1, native_noop_request_v1, native_noop_admit_v1,
+    native_noop_publish_built_v1, native_noop_admission_hit_v1,
+    native_noop_admission_generation_v1, native_noop_admission_input_count_v1,
+    native_noop_request_output_v1, native_noop_normalized_invocation_v1
+}
+use compiler.driver.cache.native_build_environment_identity.{
+    native_build_environment_fingerprint_v1
+}
+use compiler.common.driver_core_modes.{driver_output_format_native}
+use compiler.common.driver_compile_options.{compileoptions_effective_mir_opt_level}
+use compiler.driver.perf.compiler_work_counters.{
+    compiler_work_counters_reset_v1, compiler_work_counters_snapshot_v1,
+    compiler_work_counters_zero_v1, compiler_work_counters_receipt_v1
+}
+use std.io_runtime.{file_copy}
 use std.nogc_sync_mut.io.env_ops.{env_get}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 
 pub use compiler.driver.driver_phase_gates.{driver_streaming_surface_enabled}
+use compiler.driver.cache.cache_root.{machine_cache_root}
+
+fn driver_noop_default_output_v1(input_files: [text]) -> text:
+    if input_files.len() == 0:
+        return "build/native/out"
+    val path = input_files[0]
+    val slash = path.rfind("/")
+    val base = if slash >= 0: path.substring(slash + 1) else: path
+    val dot = base.rfind(".")
+    val stem = if dot > 0: base.substring(0, dot) else: base
+    "build/native/{stem}"
+
+fn driver_native_noop_request_v1(ctx: CompileContext) -> NativeNoopRequestV1:
+    val options = ctx.options
+    val delivery_output = options.output_file ?? driver_noop_default_output_v1(options.input_files)
+    val output = env_get("SIMPLE_NATIVE_NOOP_FINAL_OUTPUT") ?? delivery_output
+    val environment = native_build_environment_fingerprint_v1()
+    val environment_digest = if environment.valid: environment.digest else: ""
+    val invocation_identity = native_noop_normalized_invocation_v1(options, output)
+    native_noop_request_v1(
+        env_get("SIMPLE_NATIVE_NOOP_CACHE_ROOT") ?? machine_cache_root() + "/native-build/noop-v1",
+        output, options.backend, ctx.native_target,
+        compileoptions_effective_mir_opt_level(options), options.release,
+        options.debug_info, options.gc_off, options.profile,
+        options.allowed_families, options.backend_plugin_path,
+        env_get("SIMPLE_SCV_REVISION") ?? "",
+        env_get("SIMPLE_SCV_TREE_DIGEST") ?? "",
+        env_get("SIMPLE_SCV_INVENTORY_DIGEST") ?? "",
+        env_get("SIMPLE_BOOTSTRAP_AUTHORITY_DIGEST") ?? "",
+        environment_digest, invocation_identity, options.input_files)
 
 impl CompilerDriver:
     me capture_vhdl_metadata():
@@ -89,6 +138,14 @@ impl CompilerDriver:
             eprint("[vhdl-driver] captured-metadata={metadata_rows.len()}")
 
     me compile() -> CompileResult:
+        if not reverse_reference_owner_begin_v1():
+            return CompileResult.RuntimeError(
+                "reverse-reference owner already active in this process")
+        val result = self.compile_with_reverse_reference_owner_v1()
+        reverse_reference_owner_end_v1()
+        result
+
+    me compile_with_reverse_reference_owner_v1() -> CompileResult:
         val log = self.ctx.logger
         if self.ctx.config.contains_key("mcdc_config_error"):
             val mcdc_config_error = self.ctx.config["mcdc_config_error"] ?? "invalid MC/DC configuration"
@@ -97,6 +154,27 @@ impl CompilerDriver:
         var compile_mode_text = self.ctx.options.mode.to_text()
         if self.ctx.options.cli_mode_text != "":
             compile_mode_text = self.ctx.options.cli_mode_text
+
+        val native_noop_eligible = compile_mode_text == "aot" and
+            self.ctx.options.output_format == driver_output_format_native() and
+            (env_get("SIMPLE_NATIVE_BUILD_CLEAN") ?? "") != "1"
+        val native_noop_request = driver_native_noop_request_v1(self.ctx)
+        compiler_work_counters_reset_v1()
+        if native_noop_eligible:
+            val admission = native_noop_admit_v1(native_noop_request)
+            if native_noop_admission_hit_v1(admission):
+                val work = compiler_work_counters_snapshot_v1()
+                if not compiler_work_counters_zero_v1(work):
+                    return CompileResult.RuntimeError(
+                        "native no-op admission occurred after compiler work was scheduled")
+                val delivery_output = self.ctx.options.output_file ??
+                    driver_noop_default_output_v1(self.ctx.options.input_files)
+                if delivery_output != native_noop_request_output_v1(native_noop_request) and
+                        not file_copy(native_noop_request_output_v1(native_noop_request), delivery_output):
+                    return CompileResult.RuntimeError(
+                        "native no-op admission could not stage the admitted output")
+                print "[MBH-NFR-002] admission=hit generation={native_noop_admission_generation_v1(admission)} inputs={native_noop_admission_input_count_v1(admission)} {compiler_work_counters_receipt_v1(work)}"
+                return CompileResult.Success(delivery_output)
 
         log_phase("compile:start")
         log_build_progress("load_sources", "files", -1, -1,
@@ -292,13 +370,6 @@ impl CompilerDriver:
             log_error("phase 3 FAILED (no readable diagnostics; recorded error_count={phase3_recorded_count}; per-module root causes were emitted above as [hir-fatal])")
             return CompileResult.TypeError([])
         log_debug("phase 3 done")
-        # SIMPLE_RESOLVE_METHODS=1 (default OFF): quiet method-resolution
-        # experiment over the assembled HIR modules. Placed HERE — after
-        # phase 3 on both the streaming and non-streaming branches, before
-        # monomorphization — so both lowering paths are covered and the HIR
-        # cache (written inside the lowering loops) stays flag-agnostic.
-        if (rt_env_get("SIMPLE_RESOLVE_METHODS") ?? "") == "1":
-            self.run_resolve_methods_quiet_gated()
         log_phase("phase3:hir_typecheck:done")
         log_build_progress("hir", "modules", -1, -1,
             "complete", 3, 6, 0, 0, "running")
@@ -340,7 +411,16 @@ impl CompilerDriver:
             return self.jit_compile_and_run()
         if compile_mode_text == "aot":
             log_debug("aot mode")
-            return self.aot_compile()
+            val aot_result = self.aot_compile()
+            if aot_result.is_success() and native_noop_eligible:
+                val built_output = self.ctx.options.output_file ??
+                    driver_noop_default_output_v1(self.ctx.options.input_files)
+                val publication = native_noop_publish_built_v1(
+                    native_noop_request, self.ctx.source_paths_owner, built_output)
+                if publication != "ok":
+                    return CompileResult.CodegenError(
+                        "native no-op receipt publication failed: {publication}")
+            return aot_result
         if compile_mode_text == "smf_exec":
             log_debug("smf_exec mode")
             return self.execute_smf()

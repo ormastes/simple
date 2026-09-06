@@ -3,6 +3,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { ExtensionHostServices } from './extensionHostServices';
+import { projectSimpleToolEnvironment, resolveVsCodeStorageRoots } from './storageRoots';
 
 export const CLI_OUTPUT_LIMIT_BYTES = 64 * 1024;
 const CLI_OUTPUT_TRUNCATION_NOTICE = '\n[output truncated]';
@@ -48,7 +49,10 @@ function appendLimited(current: string, chunk: string): string {
 }
 
 export class SimpleCliService {
-    public constructor(private readonly services: ExtensionHostServices) {}
+    public constructor(
+        private readonly services: ExtensionHostServices,
+        private readonly context?: vscode.ExtensionContext,
+    ) {}
 
     public resolveSimpleCommand(resolveFrom?: string): string {
         const cliConfig = vscode.workspace.getConfiguration('simple.cli');
@@ -94,9 +98,17 @@ export class SimpleCliService {
         });
 
         return await new Promise<CliRunResult>((resolve, reject) => {
+            const cwd = options?.cwd ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+            const roots = resolveVsCodeStorageRoots(this.context, cwd);
+            if (!roots) {
+                const error = new Error('Centralized Simple storage roots are unavailable');
+                this.services.markDegraded('cli', error.message, 'native');
+                reject(error);
+                return;
+            }
             const child = spawn(command, args, {
-                cwd: options?.cwd ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath,
-                env: process.env,
+                cwd,
+                env: projectSimpleToolEnvironment(roots),
                 shell: false,
             });
 

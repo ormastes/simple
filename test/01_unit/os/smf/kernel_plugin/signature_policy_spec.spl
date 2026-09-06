@@ -1,0 +1,49 @@
+# @req REQ-KPF-SIGNATURE-TRUST-ADMISSION
+
+use std.spec
+use os.smf.kernel_plugin.signature_policy.*
+
+fn digest_a() -> text: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+fn digest_b() -> text: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+fn policy() -> KpfSignatureTrustPolicyV1:
+    KpfSignatureTrustPolicyV1(
+        expected_artifact_digest: digest_a(), trusted_publisher_id: "simple.project",
+        trusted_signing_key_id: "release-2026", required_signature_scheme: "ed25519",
+        expected_signature_digest: digest_b(), publisher_revoked: false,
+        signing_key_revoked: false)
+
+fn evidence() -> KpfArtifactSignatureEvidenceV1:
+    KpfArtifactSignatureEvidenceV1(
+        artifact_digest: digest_a(), publisher_id: "simple.project",
+        signing_key_id: "release-2026", signature_scheme: "ed25519",
+        signature_digest: digest_b(), signature_present: true,
+        signature_verified: true)
+
+describe "KPF signature and publisher trust policy":
+    it "admits only exact signed evidence from the trusted publisher and key":
+        val receipt = kpf_validate_signature_trust_v1(policy(), evidence())
+        assert_true(receipt.admitted)
+        assert_equal(receipt.status, KpfSignatureTrustStatus.Trusted)
+
+    it "fails closed for unsigned revoked and mismatched artifacts":
+        var unsigned = evidence()
+        unsigned.signature_present = false
+        assert_equal(kpf_validate_signature_trust_v1(policy(), unsigned).status,
+            KpfSignatureTrustStatus.UnsignedArtifact)
+        var revoked = policy()
+        revoked.publisher_revoked = true
+        assert_equal(kpf_validate_signature_trust_v1(revoked, evidence()).status,
+            KpfSignatureTrustStatus.PublisherRevoked)
+        var digest_mismatch = evidence()
+        digest_mismatch.artifact_digest = digest_b()
+        assert_equal(kpf_validate_signature_trust_v1(policy(), digest_mismatch).status,
+            KpfSignatureTrustStatus.ArtifactDigestMismatch)
+        var publisher_mismatch = evidence()
+        publisher_mismatch.publisher_id = "attacker"
+        assert_equal(kpf_validate_signature_trust_v1(policy(), publisher_mismatch).status,
+            KpfSignatureTrustStatus.PublisherMismatch)
+        var unverified = evidence()
+        unverified.signature_verified = false
+        assert_equal(kpf_validate_signature_trust_v1(policy(), unverified).status,
+            KpfSignatureTrustStatus.SignatureNotVerified)

@@ -70,11 +70,13 @@ fn gc_process_id_raw() -> i64:
     unsafe(capabilities: [ffi]):
         getpid()
 
-use compiler.driver.cache.metadata.cache_limits.{CacheLimits, cache_limits_low_watermark_bytes}
+use compiler.driver.cache.metadata.cache_limits.{CacheLimits, cache_limits_high_watermark_bytes, cache_limits_low_watermark_bytes}
 use std.file_system.{file_move}
 use std.io_runtime.{dir_create_all, dir_exists, dir_list, file_delete, file_exists, getpid, time_now_unix_micros}
+use std.io.{file_lock, file_unlock}
+use std.nogc_sync_mut.io_runtime.{file_read_nullable}
 use compiler.driver.cache.lease.lease.{lease_list_active, CacheLease}
-use compiler.driver.cache.cas_store.{cas_action_path}
+use compiler.driver.cache.cas_store.{CAS_MANIFEST_HEADER, RESULT_MANIFEST_HEADER, cas_action_path, cas_blob_path}
 
 fn now_secs() -> i64:
     gc_time_now_unix_micros_raw() / 1000000
@@ -105,6 +107,69 @@ fn dir_total_bytes(root: text) -> i64:
 
 fn cache_total_bytes(root: text) -> i64:
     dir_total_bytes("{root}/cas") + dir_total_bytes("{root}/actions")
+
+fn gc_manifest_artifacts(path: text) -> [text]:
+    val content = file_read_nullable(path)
+    if content == nil:
+        return []
+    val lines = content.unwrap().split("\n")
+    if lines.len() < 2:
+        return []
+    var first_artifact = 0
+    if lines[0] == CAS_MANIFEST_HEADER:
+        first_artifact = 2
+    elif lines[0] == RESULT_MANIFEST_HEADER:
+        first_artifact = 6
+    else:
+        return []
+    var artifacts: [text] = []
+    var index = first_artifact
+    while index < lines.len():
+        val digest = lines[index].trim()
+        if digest != "":
+            artifacts = artifacts.push(digest)
+        index = index + 1
+    artifacts
+
+fn gc_reachable_blob_paths(root: text, active_leases: [CacheLease]) -> [text]:
+    var reachable: [text] = []
+    for lease in active_leases:
+        for digest in lease.referenced_artifacts:
+            reachable = reachable.push(cas_blob_path(root, digest))
+    val actions_dir = "{root}/actions"
+    if gc_file_exists_raw(actions_dir):
+        for path in gc_dir_walk_raw(actions_dir):
+            if not gc_dir_exists_raw(path):
+                for digest in gc_manifest_artifacts(path):
+                    reachable = reachable.push(cas_blob_path(root, digest))
+    reachable
+
+fn gc_path_is_protected(path: text, protected: [text]) -> bool:
+    for candidate in protected:
+        if path == candidate:
+            return true
+    false
+
+fn gc_oldest_index(paths: [text]) -> i64:
+    var oldest_index: i64 = 0
+    var oldest_time = gc_file_modified_time_raw(paths[0])
+    var index: i64 = 1
+    while index < paths.len():
+        val modified = gc_file_modified_time_raw(paths[index])
+        if modified < oldest_time:
+            oldest_time = modified
+            oldest_index = index
+        index = index + 1
+    oldest_index
+
+fn gc_without_index(paths: [text], removed_index: i64) -> [text]:
+    var remaining: [text] = []
+    var index: i64 = 0
+    while index < paths.len():
+        if index != removed_index:
+            remaining = remaining.push(paths[index])
+        index = index + 1
+    remaining
 
 # Expire tmp/ entries older than tmp_hours. Temp files are private write
 # staging (see cas_store.spl write protocol) — never served, safe to delete
@@ -188,21 +253,10 @@ fn gc_fast_sweep(root: text, limits: CacheLimits) -> i64:
             if not is_protected:
                 candidates = candidates.push(path)
 
-    # Oldest-first: simple selection sort by mtime (candidate lists here are
-    # small relative to the whole CAS — full sort avoided per ponytail: no
-    # need for a comparator-based sort library for this milestone).
     var freed: i64 = 0
     var remaining = candidates
     while total > low_bytes and remaining.len() > 0:
-        var oldest_idx = 0
-        var oldest_time = gc_file_modified_time_raw(remaining[0])
-        var i = 1
-        while i < remaining.len():
-            val t = gc_file_modified_time_raw(remaining[i])
-            if t < oldest_time:
-                oldest_time = t
-                oldest_idx = i
-            i = i + 1
+        val oldest_idx = gc_oldest_index(remaining)
         val victim = remaining[oldest_idx]
         val sz = match gc_file_size_raw(victim):
             case Some(v): v.to_i64()
@@ -210,13 +264,49 @@ fn gc_fast_sweep(root: text, limits: CacheLimits) -> i64:
         if move_to_trash(root, victim):
             total = total - sz
             freed = freed + sz
-        var next: [text] = []
-        var j = 0
-        while j < remaining.len():
-            if j != oldest_idx:
-                next = next.push(remaining[j])
-            j = j + 1
-        remaining = next
+        remaining = gc_without_index(remaining, oldest_idx)
+
+    # Action mappings are the authority for immutable blob reachability.
+    # Once old mappings have been retired, reclaim only blobs unreachable from
+    # every remaining mapping and every live process lease.
+    val reachable_blobs = gc_reachable_blob_paths(root, active_leases)
+    var blob_candidates: [text] = []
+    val blobs_dir = "{root}/cas"
+    if gc_file_exists_raw(blobs_dir):
+        for path in gc_dir_walk_raw(blobs_dir):
+            if not gc_dir_exists_raw(path) and not gc_path_is_protected(path, reachable_blobs):
+                blob_candidates = blob_candidates.push(path)
+    remaining = blob_candidates
+    while total > low_bytes and remaining.len() > 0:
+        val oldest_idx = gc_oldest_index(remaining)
+        val victim = remaining[oldest_idx]
+        val sz = match gc_file_size_raw(victim):
+            case Some(v): v.to_i64()
+            case nil: 0
+        if move_to_trash(root, victim):
+            total = total - sz
+            freed = freed + sz
+        remaining = gc_without_index(remaining, oldest_idx)
 
     gc_delete_trash(root)
     freed
+
+# Production lifecycle entrypoint. The lock path is inside the already
+# project-namespaced root, so all local processes sharing that project contend
+# on one GC authority. Lock refusal is a safe no-op; provenance refusal is
+# handled by cas_open before this function is called.
+fn gc_run_if_needed(root: text, limits: CacheLimits) -> i64:
+    if cache_total_bytes(root) < cache_limits_high_watermark_bytes(limits):
+        return 0
+    val gc_lock = file_lock("{root}/gc.lock", 1)
+    if gc_lock < 0:
+        return 0
+    var freed: i64 = 0
+    # Recheck under the global lock because another process may have completed
+    # collection while this process waited.
+    if cache_total_bytes(root) >= cache_limits_high_watermark_bytes(limits):
+        freed = gc_fast_sweep(root, limits)
+    val _unlocked = file_unlock(gc_lock)
+    freed
+
+export cache_total_bytes, gc_fast_sweep, gc_run_if_needed

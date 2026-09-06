@@ -1,0 +1,127 @@
+use app.spipe.testing.*
+use compiler.driver.cache.package_tldr_metadata.{
+    ConfigVariantKeyV1, PackageExportSmfV1, PackageSmfSectionV1,
+    PackageTldrHeaderV1,
+    config_variant_digest_v1, package_tldr_action_key_v1,
+    package_export_smf_section_v1, package_export_smf_validate_v1,
+    package_tldr_admit_v1, package_tldr_early_cutoff_v1,
+    package_tldr_header_validate_v1, package_tldr_interface_key_v1
+}
+use std.common.crypto.sha256.{sha256_text}
+
+fn metadata_variant(backend: text) -> ConfigVariantKeyV1:
+    ConfigVariantKeyV1(
+        target_triple: "aarch64-apple-darwin-macho",
+        backend: backend,
+        features: ["atomic-apk"],
+        build_mode: "debug",
+        language_abi: "v1",
+        normalized_options: ["opt=0"],
+        environment_inputs: ["SIMPLE_LIB=src"])
+
+fn metadata_header(
+    source_digest: text, export_digest: text,
+    interface_archive_digest: text
+) -> PackageTldrHeaderV1:
+    PackageTldrHeaderV1(
+        schema_version: 1,
+        producer_digest: sha256_text("producer"),
+        package_identity: "pkg.alpha",
+        module_identity: "pkg.alpha.main",
+        source_identity: "pkg/alpha/main.spl",
+        variant: metadata_variant("cranelift"),
+        source_digest: source_digest,
+        source_witness_digest: sha256_text("source-witness"),
+        smf_digest: sha256_text("smf"),
+        smf_sections: [
+            PackageSmfSectionV1("exports", 0, 64, sha256_text("exports")),
+            PackageSmfSectionV1("providers", 64, 32, sha256_text("providers"))
+        ],
+        export_digest: export_digest,
+        abi_digest: sha256_text("abi"),
+        initializer_digest: sha256_text("initializer"),
+        provider_digest: sha256_text("provider"),
+        generated_source_digest: sha256_text("generated"),
+        reverse_projection_digest: sha256_text("reverse"),
+        direct_imports: ["pkg.base.main"],
+        reverse_dependents: ["pkg.client.main"],
+        scc_identity: "scc.alpha",
+        scc_members: ["pkg.alpha.main"],
+        interface_archive_digest: interface_archive_digest,
+        action_archive_digest: sha256_text("action-archive"))
+
+describe "typed package TLDR metadata":
+    it "admits independently sealed SMF sections for lazy access":
+        val sections = [
+            PackageSmfSectionV1("exports", 0, 64, sha256_text("exports")),
+            PackageSmfSectionV1("providers", 64, 32, sha256_text("providers"))
+        ]
+        val record = PackageExportSmfV1(
+            1, "pkg.alpha", "pkg.alpha.main",
+            config_variant_digest_v1(metadata_variant("cranelift")),
+            sections, sha256_text("payload"))
+        expect(package_export_smf_validate_v1(record)).to_equal("ok")
+        val demanded = package_export_smf_section_v1(record, "providers")
+        expect(demanded != nil).to_equal(true)
+        expect(demanded!.offset).to_equal(64)
+
+    it "partitions metadata and archive keys by ConfigVariantKeyV1":
+        val cranelift = metadata_variant("cranelift")
+        val llvm = metadata_variant("llvm")
+        expect(config_variant_digest_v1(cranelift) !=
+            config_variant_digest_v1(llvm)).to_equal(true)
+
+    it "opens source only for missing dirty or incompatible metadata":
+        val source_digest = sha256_text("source")
+        val header = metadata_header(
+            source_digest, sha256_text("export"), sha256_text("interface"))
+        val clean = package_tldr_admit_v1(
+            Some(header), metadata_variant("cranelift"), source_digest,
+            false, [sha256_text("dep-interface")])
+        expect(clean.valid).to_equal(true)
+        expect(clean.source_open_required).to_equal(false)
+        expect(clean.early_cutoff_allowed).to_equal(true)
+
+        val dirty = package_tldr_admit_v1(
+            Some(header), metadata_variant("cranelift"), source_digest,
+            true, [sha256_text("dep-interface")])
+        expect(dirty.reason).to_equal("metadata-dirty")
+        expect(dirty.source_open_required).to_equal(true)
+
+        val missing = package_tldr_admit_v1(
+            nil, metadata_variant("cranelift"), source_digest,
+            false, [sha256_text("dep-interface")])
+        expect(missing.reason).to_equal("metadata-missing")
+        expect(missing.source_open_required).to_equal(true)
+
+        val incompatible = package_tldr_admit_v1(
+            Some(header), metadata_variant("llvm"), source_digest,
+            false, [sha256_text("dep-interface")])
+        expect(incompatible.reason).to_equal("metadata-variant-incompatible")
+        expect(incompatible.source_open_required).to_equal(true)
+
+    it "uses separate interface and action archive keys":
+        val header = metadata_header(
+            sha256_text("source"), sha256_text("export"),
+            sha256_text("interface"))
+        val interface_key = package_tldr_interface_key_v1(header)
+        val action_key = package_tldr_action_key_v1(
+            header, [sha256_text("dep-interface")])
+        expect(package_tldr_header_validate_v1(header)).to_equal("ok")
+        expect(interface_key.len()).to_equal(64)
+        expect(action_key.len()).to_equal(64)
+        expect(interface_key != action_key).to_equal(true)
+
+    it "cuts off reverse propagation after byte-identical public metadata":
+        val before = metadata_header(
+            sha256_text("source-before"), sha256_text("export"),
+            sha256_text("interface"))
+        val after = metadata_header(
+            sha256_text("source-after"), sha256_text("export"),
+            sha256_text("interface"))
+        expect(package_tldr_early_cutoff_v1(before, after)).to_equal(true)
+
+        val changed = metadata_header(
+            sha256_text("source-after"), sha256_text("new-export"),
+            sha256_text("new-interface"))
+        expect(package_tldr_early_cutoff_v1(before, changed)).to_equal(false)

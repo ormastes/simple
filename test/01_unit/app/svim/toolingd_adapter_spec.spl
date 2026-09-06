@@ -1,0 +1,101 @@
+use std.spec.*
+use std.common.kernel_plugin.ids.{KpfDigest256, KpfId128}
+use std.common.lint_kernel.*
+use std.common.lint_kernel.output.*
+use std.tooling_kernel.ToolingDocumentSnapshotV1
+use app.svim.*
+use app.toolingd.protocol_adapters.*
+use std.tooling_kernel.conformance_corpus.tooling_ide_conformance_decode_v1
+use std.io_runtime.file_read
+
+fn id(value: u64) -> KpfId128:
+    KpfId128(hi: 0, lo: value)
+
+fn digest(value: u64) -> KpfDigest256:
+    KpfDigest256(w0: value, w1: value + 1, w2: value + 2, w3: value + 3)
+
+fn snapshot(revision: u64, value: u64) -> ToolingDocumentSnapshotV1:
+    ToolingDocumentSnapshotV1(document_id: id(1), language_id: id(2), revision: revision, content_digest: digest(value))
+
+fn output(revision: u64) -> NormalizedLintOutputV1:
+    val artifact = ArtifactKeyV1(workspace_id: id(3), language_id: id(2), path_id: id(4), target_id: id(5), configuration_digest: digest(6))
+    val span = SourceSpanV1(artifact: artifact, revision: revision, start_byte: 1, end_byte: 4)
+    val diagnostic = DiagnosticV1(rule_id: id(7), provider_id: id(8), severity: 3, category: 1, primary_span: span, message_id: id(9), fix_digest: digest(10))
+    val location = LintOutputLocationV1(span: span, uri: "main.spl", start_line: 2, start_column: 3, end_line: 2, end_column: 6)
+    val edit = LintTextEditV1(location: location, replacement: "fixed", metadata: LintEditMetadataV1(provider_id: id(8), language_id: id(2), expected_snapshot_digest: digest(32), conflict_group: 1, applicability: LintFixApplicabilityV1.MachineApplicable))
+    val normalized = NormalizedLintDiagnosticV1(diagnostic: diagnostic, location: location, rule_name: "simple.test", message: "broken", help: "fix it", related: [], fixes: [edit])
+    val coverage = AnalysisCoverageV1(requested_unit_count: 1, admitted_unit_count: 1, completed_unit_count: 1, partial_unit_count: 0, not_analyzed_unit_count: 0, requested_rule_count: 1, completed_rule_count: 1, skipped_rule_count: 0, requested_phase_bits: 1, completed_phase_bits: 1, provider_receipt_digest: digest(11), input_revision_digest: digest(12))
+    NormalizedLintOutputV1(result: lint_run_result(coverage, 1, 1, 0, false, false), diagnostics: [normalized])
+
+describe "SVIM toolingd cutover":
+    it "consumes the same canonical receipt and snapshot corpus as VS Code clients":
+        val content = file_read("src/app/vscode_extension/test-fixtures/canonical-tooling-conformance-v1.sdn") ?? ""
+        val corpus = tooling_ide_conformance_decode_v1(content).unwrap()
+        var session = SvimSession.new()
+        val buffer = session.open_text("main.spl", "canonical")
+        var adapter = SvimToolingdAdapterV1.create(2, 4, 8)
+        expect(corpus.language).to_equal("simple")
+        expect(corpus.native_source).to_equal("native")
+        expect(corpus.authority).to_equal("authoritative")
+        expect(corpus.coverage).to_equal("semantic")
+        expect(corpus.semantic_coverage_complete).to_equal(true)
+        expect(adapter.open_snapshot(buffer, snapshot(corpus.revision.to_u64(), 20), 1).status).to_equal(ToolingEdgeStatusV1.Ok)
+        expect(adapter.begin_analysis(buffer).status).to_equal(ToolingEdgeStatusV1.Ok)
+        val published = adapter.publish_diagnostics(session, buffer, output(corpus.revision.to_u64()))
+        expect(published.status).to_equal(ToolingEdgeStatusV1.Ok)
+        expect(published.canonical_result_id).to_equal(corpus.canonical_result_id)
+
+    it "keeps buffer text authoritative while routing diagnostics and code actions":
+        var session = SvimSession.new()
+        val opened_buffer = session.open_text("main.spl", "original")
+        var adapter = SvimToolingdAdapterV1.create(2, 4, 8)
+        expect(adapter.open_snapshot(opened_buffer, snapshot(1, 20), 1).status).to_equal(ToolingEdgeStatusV1.Ok)
+        expect(adapter.begin_analysis(opened_buffer).status).to_equal(ToolingEdgeStatusV1.Ok)
+        val published = adapter.publish_diagnostics(session, opened_buffer, output(1))
+        expect(published.status).to_equal(ToolingEdgeStatusV1.Ok)
+        expect(published.canonical_result_id).to_equal("kpf-result-v1:complete-with-findings:11:12:13:14:12:13:14:15:1:1:1")
+        expect(published.response_json).to_contain("\"canonicalResultId\":\"" + published.canonical_result_id + "\"")
+        expect(published.response_json).to_contain("codeActions")
+        expect(session.buffers[0].piece_table.to_text()).to_equal("original")
+        expect(session.buffers[0].diagnostics.len()).to_equal(1)
+
+    it "cancels a superseded revision and rejects its stale publication":
+        var session = SvimSession.new()
+        val buffer = session.open_text("main.spl", "one")
+        var adapter = SvimToolingdAdapterV1.create(2, 4, 8)
+        adapter.open_snapshot(buffer, snapshot(1, 30), 1)
+        val stale = adapter.begin_analysis(buffer)
+        expect(adapter.update_snapshot(buffer, snapshot(2, 31))).to_equal(ToolingEdgeStatusV1.Ok)
+        expect(adapter.edge.publish(stale.ticket, output(1)).status).to_equal(ToolingEdgeStatusV1.Cancelled)
+        expect(adapter.begin_analysis(buffer).status).to_equal(ToolingEdgeStatusV1.Ok)
+
+    it "labels degraded syntax fallback without claiming semantic authority":
+        var adapter = SvimToolingdAdapterV1.create(1, 1, 1)
+        expect(adapter.enter_degraded_syntax_only()).to_contain("degraded: syntax-only")
+        expect(adapter.mode_label()).to_contain("semantic status unavailable")
+
+    it "routes exact test operations through the shared analysis ticket":
+        var session = SvimSession.new()
+        val buffer = session.open_text("main.spl", "test")
+        var adapter = SvimToolingdAdapterV1.create(2, 4, 8)
+        val opened = adapter.open_snapshot(buffer, snapshot(1, 40), 1)
+        val test = ToolingTestDescriptorV1(test_id: 77, label: "exact", document: opened.document, revision: 1, content_digest: digest(40))
+        expect(adapter.discover_tests([test]).response_json).to_contain("exact")
+        val run = adapter.run_test(test)
+        expect(run.status).to_equal(ToolingEdgeStatusV1.Ok)
+        expect(run.response_json).to_contain("\"testId\":77")
+
+    it "cleans edge-owned analysis tickets on close and disconnect":
+        var session = SvimSession.new()
+        val first = session.open_text("first.spl", "one")
+        val second = session.open_text("second.spl", "two")
+        var adapter = SvimToolingdAdapterV1.create(2, 4, 8)
+        adapter.open_snapshot(first, snapshot(1, 50), 1)
+        adapter.open_snapshot(second, ToolingDocumentSnapshotV1(document_id: id(11), language_id: id(2), revision: 1, content_digest: digest(51)), 1)
+        val first_request = adapter.begin_analysis(first)
+        val second_request = adapter.begin_analysis(second)
+        expect(adapter.close(first)).to_equal(ToolingEdgeStatusV1.Ok)
+        expect(adapter.edge.publish(first_request.ticket, output(1)).status).to_equal(ToolingEdgeStatusV1.Cancelled)
+        expect(adapter.disconnect()).to_equal(ToolingEdgeStatusV1.Ok)
+        expect(adapter.edge.publish(second_request.ticket, output(1)).status).to_equal(ToolingEdgeStatusV1.Cancelled)
+        expect(adapter.mode_label()).to_contain("unavailable")

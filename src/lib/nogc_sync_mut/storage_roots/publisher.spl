@@ -1,0 +1,181 @@
+"""Destination-local, evidence-checked atomic artifact publication."""
+
+use std.common.storage_roots.*
+use std.nogc_sync_mut.storage_roots.path_policy.{storage_root_for_path, validate_storage_containment, validate_storage_segment}
+
+@unsafe(reason: "creates one private destination-local staging directory", capabilities: [ffi])
+extern fn rt_dir_create_all(path: text) -> bool
+@unsafe(reason: "checks destination and staging state before publication", capabilities: [ffi])
+extern fn rt_file_exists(path: text) -> bool
+@unsafe(reason: "copies a regular source without following links into an exclusive staging file", capabilities: [ffi])
+extern fn rt_file_copy_create_excl_no_follow(source: text, destination: text) -> bool
+@unsafe(reason: "hashes the staged regular file for caller-supplied evidence verification", capabilities: [ffi])
+extern fn rt_file_hash_sha256(path: text) -> text
+@unsafe(reason: "reads staged file size for caller-supplied evidence verification", capabilities: [ffi])
+extern fn rt_file_size(path: text) -> i64
+@unsafe(reason: "durably synchronizes staged data and destination directory entries", capabilities: [ffi])
+extern fn rt_file_fsync(path: text) -> bool
+@unsafe(reason: "atomically publishes a staged file on its destination filesystem", capabilities: [ffi])
+extern fn rt_file_rename(old_path: text, new_path: text) -> bool
+@unsafe(reason: "removes failed or committed private staging files", capabilities: [ffi])
+extern fn rt_file_delete(path: text) -> bool
+@unsafe(reason: "removes an empty private staging directory", capabilities: [ffi])
+extern fn rt_dir_remove(path: text, recursive: bool) -> bool
+
+pub val STORAGE_PUBLISH_STAGED_FILE: text = "artifact"
+
+fn _parent(path: text) -> text?:
+    val index = path.rfind("/")
+    if index <= 0: nil else: Some(path.substring(0, index))
+
+fn _hex_digit(value: u64) -> text:
+    "0123456789abcdef".substring(value.to_i64(), value.to_i64() + 1)
+
+fn _hex_word(value: u64) -> text:
+    var output = ""
+    var shift = 60
+    while shift >= 0:
+        output = output + _hex_digit((value >> shift.to_u64()) & 15u64)
+        shift = shift - 4
+    output
+
+fn _digest_text(digest: Digest256) -> text:
+    _hex_word(digest.w0) + _hex_word(digest.w1) + _hex_word(digest.w2) + _hex_word(digest.w3)
+
+fn _hex_value(character: text) -> u64:
+    val index = "0123456789abcdef".find(character.lower())
+    if index < 0: 0u64 else: index.to_u64()
+
+fn _parse_hex_word(value: text, start: i64) -> u64:
+    var word = 0u64
+    var offset = 0
+    while offset < 16:
+        word = (word << 4u64) | _hex_value(value.substring(start + offset, start + offset + 1))
+        offset = offset + 1
+    word
+
+pub fn artifact_evidence_for_storage_file(path: CanonicalPath) -> Result<ArtifactEvidence, PublishError>:
+    val size = unsafe(capabilities: [ffi]):
+        rt_file_size(path.value)
+    val digest = unsafe(capabilities: [ffi]):
+        rt_file_hash_sha256(path.value)
+    if size < 0 or digest.len() != 64:
+        return Err(PublishError.EvidenceMismatch)
+    Ok(ArtifactEvidence(
+        digest: Digest256(
+            w0: _parse_hex_word(digest, 0),
+            w1: _parse_hex_word(digest, 16),
+            w2: _parse_hex_word(digest, 32),
+            w3: _parse_hex_word(digest, 48),
+        ),
+        byte_count: size.to_u64(),
+        item_count: 1u64,
+    ))
+
+fn _evidence_matches(path: text, evidence: ArtifactEvidence) -> bool:
+    if evidence.item_count != 1u64:
+        return false
+    val size = unsafe(capabilities: [ffi]):
+        rt_file_size(path)
+    if size < 0 or size.to_u64() != evidence.byte_count:
+        return false
+    val digest = unsafe(capabilities: [ffi]):
+        rt_file_hash_sha256(path)
+    digest == _digest_text(evidence.digest)
+
+fn _root(roots: StorageRoots, kind: StorageRootKind) -> CanonicalPath:
+    match kind:
+        case StorageRootKind.User: roots.user_root
+        case StorageRootKind.Worktree: roots.worktree_root
+
+fn _cleanup_stage(lease: StagingLease):
+    val staged = lease.staging_root.value + "/" + STORAGE_PUBLISH_STAGED_FILE
+    val staged_exists = unsafe(capabilities: [ffi]):
+        rt_file_exists(staged)
+    if staged_exists:
+        unsafe(capabilities: [ffi]):
+            rt_file_delete(staged)
+    unsafe(capabilities: [ffi]):
+        rt_dir_remove(lease.staging_root.value, false)
+
+pub fn begin_storage_publish(roots: StorageRoots, destination: CanonicalPath, operation: OperationId, epoch: u64) -> Result<StagingLease, PublishError>:
+    val kind = storage_root_for_path(roots, destination)
+    if kind.is_err():
+        return Err(PublishError.InvalidDestination)
+    if validate_storage_segment(operation.value).is_err():
+        return Err(PublishError.InvalidDestination)
+    val parent = _parent(destination.value)
+    if parent == nil:
+        return Err(PublishError.InvalidDestination)
+    val root = _root(roots, kind.unwrap())
+    if validate_storage_containment(root, CanonicalPath(value: parent!)).is_err():
+        return Err(PublishError.InvalidDestination)
+    val stage = CanonicalPath(value: parent! + "/.simple-stage-" + operation.value + "-{epoch}")
+    if validate_storage_containment(root, stage).is_err():
+        return Err(PublishError.InvalidDestination)
+    val destination_exists = unsafe(capabilities: [ffi]):
+        rt_file_exists(destination.value)
+    val stage_exists = unsafe(capabilities: [ffi]):
+        rt_file_exists(stage.value)
+    if destination_exists:
+        return Err(PublishError.DestinationChanged)
+    if stage_exists:
+        return Err(PublishError.LeaseStale)
+    val created = unsafe(capabilities: [ffi]):
+        rt_dir_create_all(stage.value)
+    if not created:
+        return Err(PublishError.CapacityExceeded)
+    Ok(StagingLease(destination: destination, staging_root: stage, operation: operation, epoch: epoch))
+
+pub fn stage_storage_publish_source(roots: StorageRoots, lease: StagingLease, source: CanonicalPath, evidence: ArtifactEvidence) -> Result<(), PublishError>:
+    if storage_root_for_path(roots, source).is_err() or storage_root_for_path(roots, lease.destination).is_err():
+        return Err(PublishError.InvalidDestination)
+    val staged = lease.staging_root.value + "/" + STORAGE_PUBLISH_STAGED_FILE
+    val copied = unsafe(capabilities: [ffi]):
+        rt_file_copy_create_excl_no_follow(source.value, staged)
+    if not copied:
+        return Err(PublishError.CrossFilesystemPublish)
+    if not _evidence_matches(staged, evidence):
+        _cleanup_stage(lease)
+        return Err(PublishError.EvidenceMismatch)
+    Ok(())
+
+pub fn commit_storage_publish(roots: StorageRoots, lease: StagingLease, evidence: ArtifactEvidence) -> Result<PublishReceipt, PublishError>:
+    val kind = storage_root_for_path(roots, lease.destination)
+    if kind.is_err():
+        return Err(PublishError.InvalidDestination)
+    val root = _root(roots, kind.unwrap())
+    if validate_storage_containment(root, lease.staging_root).is_err():
+        return Err(PublishError.InvalidDestination)
+    val parent = _parent(lease.destination.value)
+    val stage_parent = _parent(lease.staging_root.value)
+    if parent == nil or stage_parent == nil or parent! != stage_parent!:
+        return Err(PublishError.CrossFilesystemPublish)
+    val staged = lease.staging_root.value + "/" + STORAGE_PUBLISH_STAGED_FILE
+    if not _evidence_matches(staged, evidence):
+        return Err(PublishError.EvidenceMismatch)
+    val destination_exists = unsafe(capabilities: [ffi]):
+        rt_file_exists(lease.destination.value)
+    if destination_exists:
+        return Err(PublishError.DestinationChanged)
+    val data_synced = unsafe(capabilities: [ffi]):
+        rt_file_fsync(staged)
+    if not data_synced:
+        return Err(PublishError.CapacityExceeded)
+    val renamed = unsafe(capabilities: [ffi]):
+        rt_file_rename(staged, lease.destination.value)
+    if not renamed:
+        return Err(PublishError.CrossFilesystemPublish)
+    val directory_synced = unsafe(capabilities: [ffi]):
+        rt_file_fsync(parent!)
+    if not directory_synced:
+        return Err(PublishError.CapacityExceeded)
+    unsafe(capabilities: [ffi]):
+        rt_dir_remove(lease.staging_root.value, false)
+    Ok(PublishReceipt(destination: lease.destination, evidence: evidence, operation: lease.operation))
+
+pub fn abort_storage_publish(roots: StorageRoots, lease: StagingLease) -> Result<(), PublishError>:
+    if storage_root_for_path(roots, lease.destination).is_err():
+        return Err(PublishError.InvalidDestination)
+    _cleanup_stage(lease)
+    Ok(())

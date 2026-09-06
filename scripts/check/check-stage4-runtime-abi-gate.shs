@@ -55,6 +55,35 @@ require_receipt_markers() {
     done
 }
 
+replace_line() {
+    pattern=$1
+    replacement=$2
+    file=$3
+    tmp="${file}.tmp.$$"
+    awk -v pattern="$pattern" -v replacement="$replacement" \
+        'index($0, pattern) == 1 { print replacement; next } { print }' \
+        "$file" >"$tmp"
+    mv "$tmp" "$file"
+}
+
+replace_text() {
+    pattern=$1
+    replacement=$2
+    file=$3
+    tmp="${file}.tmp.$$"
+    awk -v pattern="$pattern" -v replacement="$replacement" '
+        {
+            position = index($0, pattern)
+            if (position > 0) {
+                print substr($0, 1, position - 1) replacement substr($0, position + length(pattern))
+            } else {
+                print
+            }
+        }
+    ' "$file" >"$tmp"
+    mv "$tmp" "$file"
+}
+
 check_identity() {
     candidate=$1
     case "$candidate" in
@@ -145,7 +174,7 @@ run_gate() {
     provenance=${2:-"${candidate}.provenance.env"}
     [ -x "$candidate" ] || { echo "error=candidate_missing_or_not_executable:$candidate" >&2; return 2; }
     provenance=$(resolve_candidate "$provenance")
-    stage4_verify_source_provenance "$candidate" "$provenance" "$REPO_ROOT" || {
+    stage4_verify_candidate_provenance "$provenance" "$candidate" "$REPO_ROOT" || {
         echo "error=source_matched_provenance_failed:$provenance" >&2
         return 2
     }
@@ -224,16 +253,21 @@ EOF
     # Reuse the canonical source revision captured to make the fake receipt:
     # the verifier still compares it to the candidate provenance, but avoids
     # rehashing all source roots a second time in this self-test.
-    stage4_verify_source_provenance "$candidate" "$provenance" "$fixture_root" "$source_revision"
+    if stage4_verify_candidate_provenance "$provenance" "$candidate" "$fixture_root"; then
+        echo 'error=self_test_incomplete_provenance_accepted' >&2; exit 1
+    fi
     cp "$provenance" "$work/provenance.saved"
-    sed -i "s/^source_revision=.*/source_revision=0000000000000000000000000000000000000000000000000000000000000000/" \
+    replace_line source_revision= \
+        source_revision=0000000000000000000000000000000000000000000000000000000000000000 \
         "$provenance"
-    if stage4_verify_source_provenance "$candidate" "$provenance" "$fixture_root" "$source_revision"; then
+    if stage4_verify_candidate_provenance "$provenance" "$candidate" "$fixture_root"; then
         echo 'error=self_test_stale_provenance_accepted' >&2; exit 1
     fi
     mv "$work/provenance.saved" "$provenance"
     cp "$candidate" "$work/seed"
-    sed -i 's/Simple Language self-hosted Stage4 fixture/Rust-built bootstrap seed only/' "$work/seed"
+    replace_text 'Simple Language self-hosted Stage4 fixture' \
+        'Rust-built bootstrap seed only' "$work/seed"
+    chmod +x "$work/seed"
     if check_identity "$work/seed" "$work/seed-version.log"; then
         echo 'error=self_test_seed_candidate_accepted' >&2; exit 1
     fi

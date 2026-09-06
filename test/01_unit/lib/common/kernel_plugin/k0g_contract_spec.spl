@@ -1,0 +1,138 @@
+# Purpose and audience: executable K0g contract evidence for kernel-plugin maintainers.
+# @req REQ-KPF-K0G-CONTRACT
+# @cover src/lib/common/kernel_plugin 80%
+# @tag: unit, kernel_plugin, k0g, abi, fail_closed
+
+use std.spec
+use std.spec.step
+use common.kernel_plugin.ids.*
+use common.kernel_plugin.status.KpfStatus
+use common.kernel_plugin.schema_header.*
+use common.kernel_plugin.contracts.*
+
+fn schema_id() -> KpfId128:
+    KpfId128(hi: 0x1020304050607080u64, lo: 0x90A0B0C0D0E0F001u64)
+
+fn schema_digest() -> KpfDigest256:
+    KpfDigest256(w0: 1, w1: 2, w2: 3, w3: 4)
+
+fn valid_header() -> KpfSchemaHeaderV1:
+    KpfSchemaHeaderV1(
+        abi_version: KPF_ABI_VERSION_V1,
+        struct_size: KPF_SCHEMA_HEADER_V1_SIZE,
+        schema_id: schema_id(),
+        schema_major: 1,
+        schema_minor: 2,
+        schema_digest: schema_digest(),
+        reserved0: 0
+    )
+
+fn requirement() -> KpfSchemaRequirementV1:
+    KpfSchemaRequirementV1(
+        schema_id: schema_id(),
+        schema_major: 1,
+        minimum_minor: 1,
+        minimum_struct_size: KPF_SCHEMA_HEADER_V1_SIZE,
+        schema_digest: schema_digest()
+    )
+
+fn valid_memory() -> KpfMemoryContractV1:
+    KpfMemoryContractV1(
+        memory_class: KPF_MEMORY_NOGC_BOUNDED,
+        initialization_bytes: 1024,
+        persistent_bytes_per_instance: 2048,
+        bytes_per_session: 512,
+        bytes_per_inflight_request: 128,
+        input_alignment: 8,
+        output_alignment: 8,
+        maximum_sessions: 2,
+        maximum_inflight_per_session: 8,
+        maximum_batch_items: 64,
+        may_allocate_after_activation: KPF_FLAG_FALSE,
+        reserved0: 0
+    )
+
+describe "KPF K0g fixed identities and schema prefix":
+    it "compares all identity and digest words":
+        step("compares all identity and digest words")
+        assert_true(kpf_id128_equal(schema_id(), schema_id()))
+        assert_false(kpf_id128_equal(schema_id(), KpfId128(hi: 7, lo: 9)))
+        assert_true(kpf_id128_is_zero(kpf_id128_zero()))
+        assert_true(kpf_digest256_equal(schema_digest(), schema_digest()))
+        assert_false(kpf_digest256_equal(schema_digest(), KpfDigest256(w0: 1, w1: 2, w2: 3, w3: 5)))
+        assert_true(kpf_digest256_is_zero(kpf_digest256_zero()))
+
+    it "accepts an exact compatible schema prefix":
+        step("accepts an exact compatible schema prefix")
+        assert_true(kpf_validate_schema_header_v1(valid_header(), requirement()).accepted())
+
+    it "fails closed for unknown ABI, short prefix, identity, version, digest, and reserved data":
+        step("fails closed for every invalid schema-prefix class")
+        var header = valid_header()
+        header.abi_version = 99
+        assert_equal(kpf_validate_schema_header_v1(header, requirement()).code(), KpfStatus.AbiVersionUnsupported.code())
+        header = valid_header()
+        header.struct_size = KPF_SCHEMA_HEADER_V1_SIZE - 1
+        assert_equal(kpf_validate_schema_header_v1(header, requirement()).code(), KpfStatus.DescriptorTooShort.code())
+        header = valid_header()
+        header.schema_id = kpf_id128_zero()
+        assert_equal(kpf_validate_schema_header_v1(header, requirement()).code(), KpfStatus.SchemaIdentityMissing.code())
+        header = valid_header()
+        header.schema_id = KpfId128(hi: 7, lo: 9)
+        assert_equal(kpf_validate_schema_header_v1(header, requirement()).code(), KpfStatus.SchemaIdentityMismatch.code())
+        header = valid_header()
+        header.schema_major = 2
+        assert_equal(kpf_validate_schema_header_v1(header, requirement()).code(), KpfStatus.SchemaMajorUnsupported.code())
+        header = valid_header()
+        header.schema_minor = 0
+        assert_equal(kpf_validate_schema_header_v1(header, requirement()).code(), KpfStatus.SchemaMinorUnsupported.code())
+        header = valid_header()
+        header.schema_digest = kpf_digest256_zero()
+        assert_equal(kpf_validate_schema_header_v1(header, requirement()).code(), KpfStatus.SchemaDigestMissing.code())
+        header = valid_header()
+        header.schema_digest = KpfDigest256(w0: 4, w1: 3, w2: 2, w3: 1)
+        assert_equal(kpf_validate_schema_header_v1(header, requirement()).code(), KpfStatus.SchemaDigestMismatch.code())
+        header = valid_header()
+        header.reserved0 = 1
+        assert_equal(kpf_validate_schema_header_v1(header, requirement()).code(), KpfStatus.ReservedFieldNonzero.code())
+
+describe "KPF K0g closed policy contracts":
+    it "accepts bounded memory and rejects unknown or unbounded strict contracts":
+        step("validates bounded memory policy")
+        assert_true(kpf_validate_memory_contract_v1(valid_memory()).accepted())
+        var memory = valid_memory()
+        memory.memory_class = 99
+        assert_equal(kpf_validate_memory_contract_v1(memory).code(), KpfStatus.ContractCodeUnknown.code())
+        memory = valid_memory()
+        memory.input_alignment = 3
+        assert_equal(kpf_validate_memory_contract_v1(memory).code(), KpfStatus.ContractInvalid.code())
+        memory = valid_memory()
+        memory.memory_class = KPF_MEMORY_STATIC_NOALLOC
+        memory.may_allocate_after_activation = KPF_FLAG_TRUE
+        assert_equal(kpf_validate_memory_contract_v1(memory).code(), KpfStatus.ContractInvalid.code())
+
+    it "rejects unknown and contradictory concurrency contracts":
+        step("validates concurrency policy")
+        val valid = KpfConcurrencyContractV1(mode: KPF_CONCURRENCY_SNAPSHOT_READ_PARALLEL, reentrancy: KPF_REENTRANCY_FORBIDDEN, maximum_concurrent_calls: 4, deterministic_completion: KPF_FLAG_TRUE, reserved0: 0)
+        assert_true(kpf_validate_concurrency_contract_v1(valid).accepted())
+        val unknown = KpfConcurrencyContractV1(mode: 99, reentrancy: KPF_REENTRANCY_FORBIDDEN, maximum_concurrent_calls: 1, deterministic_completion: KPF_FLAG_TRUE, reserved0: 0)
+        assert_equal(kpf_validate_concurrency_contract_v1(unknown).code(), KpfStatus.ContractCodeUnknown.code())
+        val contradictory = KpfConcurrencyContractV1(mode: KPF_CONCURRENCY_SINGLE_THREADED, reentrancy: KPF_REENTRANCY_FORBIDDEN, maximum_concurrent_calls: 2, deterministic_completion: KPF_FLAG_TRUE, reserved0: 0)
+        assert_equal(kpf_validate_concurrency_contract_v1(contradictory).code(), KpfStatus.ContractInvalid.code())
+
+    it "requires trust evidence appropriate to each trust level":
+        step("validates trust policy")
+        val signed = KpfTrustContractV1(trust_level: KPF_TRUST_SIGNED_TRUSTED, required_capability_bits: 1, isolation_required: KPF_FLAG_FALSE, signature_required: KPF_FLAG_TRUE, workspace_trust_required: KPF_FLAG_FALSE, reserved0: 0)
+        assert_true(kpf_validate_trust_contract_v1(signed).accepted())
+        val unsigned = KpfTrustContractV1(trust_level: KPF_TRUST_SIGNED_TRUSTED, required_capability_bits: 1, isolation_required: KPF_FLAG_FALSE, signature_required: KPF_FLAG_FALSE, workspace_trust_required: KPF_FLAG_FALSE, reserved0: 0)
+        assert_equal(kpf_validate_trust_contract_v1(unsigned).code(), KpfStatus.ContractInvalid.code())
+        val unisolated = KpfTrustContractV1(trust_level: KPF_TRUST_UNTRUSTED_ISOLATED, required_capability_bits: 0, isolation_required: KPF_FLAG_FALSE, signature_required: KPF_FLAG_FALSE, workspace_trust_required: KPF_FLAG_FALSE, reserved0: 0)
+        assert_equal(kpf_validate_trust_contract_v1(unisolated).code(), KpfStatus.ContractInvalid.code())
+
+    it "allows only explicit lifecycle transitions and typed failure edges":
+        step("validates lifecycle transitions")
+        assert_true(kpf_lifecycle_transition_status(KPF_LIFECYCLE_DISCOVERED, KPF_LIFECYCLE_LOADED).accepted())
+        assert_true(kpf_lifecycle_transition_status(KPF_LIFECYCLE_LOADED, KPF_LIFECYCLE_ADMITTED).accepted())
+        assert_true(kpf_lifecycle_transition_status(KPF_LIFECYCLE_ACTIVE, KPF_LIFECYCLE_FAILED).accepted())
+        assert_equal(kpf_lifecycle_transition_status(KPF_LIFECYCLE_DISCOVERED, KPF_LIFECYCLE_ACTIVE).code(), KpfStatus.LifecycleTransitionInvalid.code())
+        assert_equal(kpf_lifecycle_transition_status(99, KPF_LIFECYCLE_FAILED).code(), KpfStatus.ContractCodeUnknown.code())

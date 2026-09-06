@@ -1,0 +1,46 @@
+use common.lint_kernel.output.model.*
+use common.lint_kernel.output.common.*
+
+fn _position(line: u32, column: u32) -> text:
+    "{\"line\":" + line.to_string() + ",\"character\":" + column.to_string() + "}"
+
+fn _range(location: LintOutputLocationV1) -> text:
+    "{\"start\":" + _position(location.start_line, location.start_column) + ",\"end\":" + _position(location.end_line, location.end_column) + "}"
+
+fn _related(items: [LintRelatedLocationV1]) -> text:
+    var result = "["
+    for index in 0..items.len():
+        if index > 0: result = result + ","
+        val item = items[index]
+        result = result + "{\"location\":{\"uri\":" + lint_output_quote(item.location.uri) + ",\"range\":" + _range(item.location) + "},\"message\":" + lint_output_quote(item.message) + "}"
+    result + "]"
+
+fn _diagnostic(item: NormalizedLintDiagnosticV1) -> text:
+    "{\"range\":" + _range(item.location) + ",\"severity\":" + lint_output_lsp_severity(item.diagnostic.severity).to_string() + ",\"code\":" + lint_output_quote(item.rule_name) + ",\"source\":\"simple-lint\",\"message\":" + lint_output_quote(item.message) + ",\"relatedInformation\":" + _related(item.related) + ",\"data\":{\"providerId\":" + lint_output_quote(lint_output_id(item.diagnostic.provider_id)) + ",\"revision\":" + item.location.span.revision.to_string() + "}}"
+
+fn _code_actions(item: NormalizedLintDiagnosticV1) -> text:
+    var result = "["
+    for index in 0..item.fixes.len():
+        if index > 0: result = result + ","
+        val fix = item.fixes[index]
+        val metadata = fix.metadata
+        result = result + "{\"title\":" + lint_output_quote("Fix " + item.rule_name) + ",\"kind\":\"quickfix\",\"isPreferred\":" + (if metadata.applicability == LintFixApplicabilityV1.MachineApplicable: "true" else: "false") + ",\"data\":{\"providerId\":" + lint_output_quote(lint_output_id(metadata.provider_id)) + ",\"languageId\":" + lint_output_quote(lint_output_id(metadata.language_id)) + ",\"conflictGroup\":" + metadata.conflict_group.to_string() + "},\"edit\":{\"changes\":{" + lint_output_quote(fix.location.uri) + ":[{\"range\":" + _range(fix.location) + ",\"newText\":" + lint_output_quote(fix.replacement) + "}]}}}"
+    result + "]"
+
+pub fn lint_output_to_lsp(output: NormalizedLintOutputV1) -> text:
+    val sorted = lint_output_sorted(output.diagnostics)
+    var diagnostics = "["
+    var actions = "["
+    var first_action = true
+    for index in 0..sorted.len():
+        if index > 0: diagnostics = diagnostics + ","
+        diagnostics = diagnostics + _diagnostic(sorted[index])
+        val item_actions = _code_actions(sorted[index])
+        if item_actions != "[]":
+            if not first_action: actions = actions + ","
+            actions = actions + item_actions.slice(1, item_actions.len() - 1)
+            first_action = false
+    diagnostics = diagnostics + "]"
+    actions = actions + "]"
+    val coverage = output.result.coverage
+    "{\"canonicalResultId\":" + lint_output_quote(lint_output_canonical_result_id(output)) + ",\"diagnostics\":" + diagnostics + ",\"codeActions\":" + actions + ",\"coverage\":{\"verdict\":" + lint_output_quote(lint_output_verdict(output.result.verdict)) + ",\"requestedUnits\":" + coverage.requested_unit_count.to_string() + ",\"completedUnits\":" + coverage.completed_unit_count.to_string() + ",\"partialUnits\":" + coverage.partial_unit_count.to_string() + ",\"notAnalyzedUnits\":" + coverage.not_analyzed_unit_count.to_string() + "}}"
