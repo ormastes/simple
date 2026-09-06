@@ -1,0 +1,92 @@
+# Executable proof for doc/08_tracking/bug/interp_mixed_numeric_arithmetic_2026-07-15.md
+#
+# The record has said since 2026-07-15: "source fixed; executable interpreter
+# proof pending a runnable pure-Simple compiler artifact". This spec IS that
+# proof — it calls the pure-Simple interpreter's own
+# src/compiler/10.frontend/core/interpreter/ops.spl directly, so no deployed
+# self-hosted binary is needed.
+#
+# Original defect: mixed int/float addition "algebraically discarded the
+# integer and doubled the float" (2 + 3.5 -> 7.0), and mixed subtraction,
+# multiplication and division were rejected outright as type errors.
+
+use compiler.core.interpreter.ops.{val_add, val_sub, val_mul, val_div, ops_get_error, ops_clear_error}
+use compiler.core.interpreter.value.{val_reset, val_make_int, val_make_float, val_make_nil}
+use compiler.core.interpreter.value.{val_get_int, val_get_float, val_get_kind, VAL_FLOAT, VAL_INT}
+
+describe "Interpreter mixed int/float arithmetic":
+    fn fresh():
+        val_reset()
+        ops_clear_error()
+
+    # ---- reproduction: the exact defect the record describes ----
+
+    it "adds int + float without discarding the integer":
+        fresh()
+        val r = val_add(val_make_int(2), val_make_float(3.5))
+        expect(ops_get_error()).to_equal("")
+        expect(val_get_kind(r)).to_equal(VAL_FLOAT)
+        expect(val_get_float(r)).to_equal(5.5)
+
+    it "adds float + int without discarding the integer":
+        fresh()
+        val r = val_add(val_make_float(3.5), val_make_int(2))
+        expect(ops_get_error()).to_equal("")
+        expect(val_get_float(r)).to_equal(5.5)
+
+    it "subtracts across int and float instead of rejecting it":
+        fresh()
+        expect(val_get_float(val_sub(val_make_int(10), val_make_float(2.5)))).to_equal(7.5)
+        expect(ops_get_error()).to_equal("")
+        fresh()
+        expect(val_get_float(val_sub(val_make_float(10.5), val_make_int(2)))).to_equal(8.5)
+        expect(ops_get_error()).to_equal("")
+
+    it "multiplies across int and float instead of rejecting it":
+        fresh()
+        expect(val_get_float(val_mul(val_make_int(3), val_make_float(1.5)))).to_equal(4.5)
+        expect(ops_get_error()).to_equal("")
+        fresh()
+        expect(val_get_float(val_mul(val_make_float(1.5), val_make_int(3)))).to_equal(4.5)
+        expect(ops_get_error()).to_equal("")
+
+    it "divides across int and float instead of rejecting it":
+        fresh()
+        expect(val_get_float(val_div(val_make_int(7), val_make_float(2.0)))).to_equal(3.5)
+        expect(ops_get_error()).to_equal("")
+        fresh()
+        expect(val_get_float(val_div(val_make_float(7.0), val_make_int(2)))).to_equal(3.5)
+        expect(ops_get_error()).to_equal("")
+
+    # ---- controls named by the record: negative and zero addition ----
+
+    it "widens correctly for a negative integer operand":
+        fresh()
+        expect(val_get_float(val_add(val_make_int(-2), val_make_float(0.5)))).to_equal(-1.5)
+        expect(ops_get_error()).to_equal("")
+
+    it "widens correctly for a zero integer operand":
+        fresh()
+        expect(val_get_float(val_add(val_make_int(0), val_make_float(4.25)))).to_equal(4.25)
+        expect(ops_get_error()).to_equal("")
+
+    # ---- generalization: the same-kind paths must be untouched ----
+
+    it "keeps int + int an integer":
+        fresh()
+        val r = val_add(val_make_int(2), val_make_int(3))
+        expect(val_get_kind(r)).to_equal(VAL_INT)
+        expect(val_get_int(r)).to_equal(5)
+
+    it "keeps float + float a float":
+        fresh()
+        expect(val_get_float(val_add(val_make_float(2.5), val_make_float(3.25)))).to_equal(5.75)
+
+    # ---- control: the error slot really does fill for a genuine type error ----
+
+    # A nil operand is neither int nor float, so subtraction must reject it.
+    # This proves ops_get_error() is a live oracle and not permanently "".
+    it "still reports a type error for an unsupported operand pair":
+        fresh()
+        val_sub(val_make_int(1), val_make_nil())
+        expect(ops_get_error()).to_contain("type error")

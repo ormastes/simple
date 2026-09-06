@@ -1,3 +1,30 @@
+> **STATUS UPDATE 2026-09-06 — RESOLVED.** `scripts/bootstrap/rollback-bootstrap-deploy.shs`
+> exists and is fail-closed. History note: it was actually first added on
+> 2026-08-08 (`1a77c01e551`), the same day this TODO was filed; the tree-wipe
+> incident at `6f86ff32a7d` (see `doc/08_tracking/bug/
+> fourth_tree_wipe_6f86ff32a7d_guard_not_enforced_2026-08-11.md`) evidently made
+> the file briefly disappear from a session's working tree, this TODO got
+> filed against that transient state, and `ae55a746719` restored the file a
+> few minutes later — but this doc was never revisited. On 2026-09-06 the
+> script was additionally hardened to match the `scripts/check/*.shs`
+> convention: `--selftest` (3 fatal fixtures, runs before every real
+> invocation), `--dry-run`, a `PASS —`/`FAIL —`/`ERROR —` verdict line as the
+> last line of stdout (a missing deploy receipt is now ERROR/exit 2, never a
+> pass — previously it was FAIL/exit 1, conflating "no record" with
+> "untrustworthy record"), a refusal (FAIL) when a rollback would leave
+> `bin/simple` dangling, and a richer on-disk rollback receipt (`command`,
+> `exit_status`, `pre_rollback_sha256`, `restored_sha256`, `smoke_output`).
+> `test/03_system/check/bootstrap_deploy_rollback_contract_spec.spl`'s
+> behavioral assertions (valid rollback, tampered-backup FAIL, invalid-platform
+> ERROR) and all but two of its literal-text assertions on the script source
+> still hold. **Still open, pre-existing, NOT part of this fix:** that spec
+> also asserts the literal text `fail_receipt stale_current_tree` and
+> `fail_receipt current_worktree`, which no version of this script in this
+> branch's history has ever contained (traced to a divergent, never-merged
+> branch, `a8244005f9b`, that added those checks under a different history
+> line). That gap predates this fix and is left for a follow-up TODO rather
+> than guessed at here.
+
 # Bootstrap Gate 5R rollback script never built
 
 `scripts/bootstrap/rollback-bootstrap-deploy.shs` is referenced as the
@@ -18,3 +45,29 @@ pre/post/restored hashes, smoke output). Until this lands, Gate 5R is
 performed manually per the steps described in the docs above; the docs have
 been softened to say "planned, not yet implemented" rather than presenting
 the script as available.
+
+## Phantom sweep 2026-09-06 (annotation only — no status/content changed)
+
+**Finding: this row is a PHANTOM.** `scripts/bootstrap/rollback-bootstrap-deploy.shs`
+exists today (`origin/main:scripts/bootstrap/rollback-bootstrap-deploy.shs`
+resolves at `a12a19eb775a`, and has continuously since `1a77c01e551`,
+2026-08-08). Evidence, per
+`doc/09_report/phantom_tracking_row_sweep_2026-09-06.md`:
+
+- Script added `1a77c01e551` (2026-08-08 07:38:20 +0000) — present.
+- Both the script and this todo file were **deleted** by the tree-wipe commit
+  `6f86ff32a7d` (2026-08-11 07:17:15 +0000) — absent.
+- Both **restored** by `ae55a746719` (2026-08-11 07:22:12 +0000), ~5 minutes
+  later — present.
+- Still present at `origin/main` now.
+
+**Mechanism correction (important nuance, does not change the verdict):** this
+file's own earliest git-add is `b3171f4257` ("sync: merge 62 shared-WC local
+commits onto origin/main"), 2026-08-09 01:19:15 +0000 — **before**, not caused
+by, the `6f86ff32a7d` wipe (53h58m earlier). At `b3171f4257` itself the script
+was **already present** in the committed tree, so this row's claim was already
+false at authoring time, most likely from a stale local checkout landing late
+via a batched sync commit. The `6f86ff32a7d`/`ae55a746719` wipe/repair only
+collaterally deleted-then-restored the (already-wrong) row unchanged a couple
+of days later. Disposition (leave open / close / reword) is left to the user —
+nothing here has been changed except this annotation.
