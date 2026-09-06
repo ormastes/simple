@@ -68,11 +68,8 @@ fn main() {
                 "/LD",
                 "/nologo",
                 src.to_str().expect("path utf8"),
-                // cl.exe and clang-cl spell attached output paths as /FePATH
-                // and /FoPATH. A colon is not a separator: `/Fo:C:/...`
-                // asks clang-cl to create a file literally beginning `:C:`.
-                &format!("/Fe{}", lib_path.to_str().expect("path utf8")),
-                &format!("/Fo{}", obj_path.to_str().expect("path utf8")),
+                &format!("/Fe:{}", lib_path.to_str().expect("path utf8")),
+                &format!("/Fo:{}", obj_path.to_str().expect("path utf8")),
             ])
             .status();
 

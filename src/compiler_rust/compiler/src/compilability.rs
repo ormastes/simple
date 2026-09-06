@@ -192,10 +192,8 @@ pub fn boxed_return_functions(items: &[Node]) -> HashSet<String> {
 /// and arrays — are flipped to boxed. Named/handle types stay unboxed (some
 /// externs return a raw i64 handle typed as a named struct, and boxing those
 /// would regress them); scalars and floats keep their historical raw-i64 unbox
-/// (f64 remains a separate, pre-existing gap). An optional inherits the ABI of
-/// its inner value: `text?` must retain a boxed `Some(text)`, while `i64?`
-/// keeps the historical scalar representation. Generics remain a future
-/// extension until each has a verified round-trip.
+/// (f64 remains a separate, pre-existing gap). Options and generics are still
+/// left as a future extension until each has a verified round-trip.
 ///
 /// `Type::Array` was the missing arm behind
 /// `doc/08_tracking/bug/jit_rt_tls13_sha256_returns_empty_2026-08-05.md`:
@@ -215,7 +213,6 @@ fn return_type_keeps_boxed(ty: &Type) -> bool {
         // `Type::Array`, and all of them marshal to a heap runtime array.
         Type::Array { .. } => true,
         Type::Simple(name) => matches!(name.as_str(), "text" | "str" | "string" | "String" | "Str"),
-        Type::Optional(inner) => return_type_keeps_boxed(inner),
         Type::Capability { inner, .. } => return_type_keeps_boxed(inner),
         _ => false,
     }
@@ -1113,24 +1110,6 @@ mod tests {
             "a scalar-returning extern must keep its historical raw-i64 unbox; \
              boxed set was {:?}",
             boxed
-        );
-    }
-
-    #[test]
-    fn optional_text_return_keeps_its_interp_call_result_boxed() {
-        let source = "fn read_line() -> text?:\n    return nil\n\
-                      fn maybe_number() -> i64?:\n    return nil\n";
-        let mut parser = Parser::new(source);
-        let module = parser.parse().expect("parse optional return declarations");
-        let boxed = boxed_return_functions(&module.items);
-
-        assert!(
-            boxed.contains("read_line"),
-            "`text?` may carry a heap string and must remain boxed across InterpCall"
-        );
-        assert!(
-            !boxed.contains("maybe_number"),
-            "`i64?` retains the scalar/nil runtime representation"
         );
     }
 

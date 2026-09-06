@@ -988,34 +988,6 @@ hash_path_list() {
 run_timeout() {
   timeout_seconds=$1
   shift
-  case "$(uname -s 2>/dev/null || echo unknown)" in
-    MSYS*|MINGW*|CYGWIN*)
-      timeout_capture=$(mktemp "${TMPDIR:-/tmp}/simple-timeout.XXXXXX") || return 1
-      timeout_marker="${timeout_capture}.expired"
-      "$@" >"${timeout_capture}" 2>&1 &
-      timeout_pid=$!
-      (
-        sleep "${timeout_seconds}"
-        if kill -0 "${timeout_pid}" 2>/dev/null; then
-          : >"${timeout_marker}"
-          kill "${timeout_pid}" 2>/dev/null || true
-          sleep 1
-          kill -9 "${timeout_pid}" 2>/dev/null || true
-        fi
-      ) &
-      timeout_watchdog=$!
-      timeout_status=0
-      wait "${timeout_pid}" || timeout_status=$?
-      kill "${timeout_watchdog}" 2>/dev/null || true
-      wait "${timeout_watchdog}" 2>/dev/null || true
-      cat "${timeout_capture}"
-      if [ -f "${timeout_marker}" ]; then
-        timeout_status=124
-      fi
-      rm -f "${timeout_capture}" "${timeout_marker}"
-      return "${timeout_status}"
-      ;;
-  esac
   if command -v timeout >/dev/null 2>&1; then
     timeout "${timeout_seconds}" "$@"
   elif command -v gtimeout >/dev/null 2>&1; then
@@ -1437,8 +1409,6 @@ bootstrap_stage_sanity() (
   sanity_system_drive=${SystemDrive:-${SYSTEMDRIVE:-}}
   sanity_program_data=${ProgramData:-${PROGRAMDATA:-}}
   sanity_win_temp=${TEMP:-${TMP:-}}
-  sanity_cc=${CC:-}
-  sanity_cxx=${CXX:-}
   for sanity_env_name in $(env | sed 's/=.*//'); do
     case "${sanity_env_name}" in
       ''|[0-9]*|*[!A-Za-z0-9_]*) continue ;;
@@ -1499,14 +1469,6 @@ bootstrap_stage_sanity() (
     TMP=${sanity_win_temp}
     export TEMP TMP
   fi
-  if [ -n "${sanity_cc}" ]; then
-    CC=${sanity_cc}
-    export CC
-  fi
-  if [ -n "${sanity_cxx}" ]; then
-    CXX=${sanity_cxx}
-    export CXX
-  fi
   evidence_tmp="${evidence_path:-${TMPDIR:-/tmp}/bootstrap-sanity}.tmp.$$"
   frontend_log="${evidence_path:-${TMPDIR:-/tmp}/bootstrap-sanity}.frontend-driver.log"
   frontend_bootstrap0_log="${evidence_path:-${TMPDIR:-/tmp}/bootstrap-sanity}.frontend-bootstrap-0.log"
@@ -1537,16 +1499,12 @@ bootstrap_stage_sanity() (
     [ "${version}" = "simple-bootstrap ${version_expected}" ]; then
     version_match_status=0
   fi
-  # Capture the native process status directly. On MSYS, wrapping this command
-  # substitution in an `if` has intermittently reported the assignment's zero
-  # status instead of the Windows child's exit 1, even though the candidate
-  # emitted the expected diagnostic. Temporarily disabling errexit preserves
-  # the actual timeout/child status without weakening any subsequent check.
-  set +e
-  unsupported=$(run_timeout 10 "${candidate}" run \
-    scripts/check/cert/redeploy_gate/fixtures/p2_add.spl 2>&1)
-  unsupported_status=$?
-  set -e
+  unsupported_status=0
+  if unsupported=$(run_timeout 10 "${candidate}" run scripts/check/cert/redeploy_gate/fixtures/p2_add.spl 2>&1); then
+    unsupported_status=0
+  else
+    unsupported_status=$?
+  fi
   frontend_status=0
   frontend_owner_pid=$(perl -e 'print getppid') || return 1
   exec 6<"${frontend_bootstrap0_log%/*}" \
@@ -1922,16 +1880,6 @@ if [ "${full_bootstrap}" -eq 1 ]; then
     echo "error: no C compiler found for Rust authority target ${PLATFORM}" >&2
     exit 1
   }
-  if [ "${os}" = windows ] && [ "${PLATFORM_ABI}" = msvc ]; then
-    # Stage 2/3 must use the compiler admitted above by exact path. Leaving
-    # CC/CXX unset makes the Rust seed perform a second PATH search; on hosts
-    # with MSYS2 before LLVM that selects an unauthorised clang-cl which may
-    # also fail native CreateProcess with STATUS_DLL_NOT_FOUND (0xc0000135).
-    bootstrap_windows_abi_env="${bootstrap_windows_abi_env} CC=${cc_abs} CXX=${cc_abs}"
-    CC=${cc_abs}
-    CXX=${cc_abs}
-    export CC CXX
-  fi
   windows_include="${INCLUDE:-}"
   windows_lib="${LIB:-}"
   windows_libpath="${LIBPATH:-}"
@@ -2603,7 +2551,6 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       "SIMPLE_NATIVE_BUILD_RUST=1" \
       "SIMPLE_NO_STUB_FALLBACK=1" \
       "SIMPLE_BUILD_PROGRESS_EVENTS=${build_progress_events}" \
-      ${bootstrap_windows_abi_env} \
       "SIMPLE_BINARY=${stage2_seed_absolute}" \
       native-build --target "${PLATFORM}" --backend "${backend}" \
       --runtime-bundle core-c-bootstrap \
@@ -2660,7 +2607,6 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       "SIMPLE_NATIVE_BUILD_CACHE_DIR=${stage3_cache_absolute}" \
       "SIMPLE_RUNTIME_PATH=${stage_runtime_absolute}" \
       "SIMPLE_NATIVE_RUNTIME_BUNDLE=core-c-bootstrap" \
-      ${bootstrap_windows_abi_env} \
       "SIMPLE_BINARY=${stage2_admitted_absolute}" \
       ${stage3_diagnostic_env} \
       native-build --target "${PLATFORM}" --backend "${backend}" \
@@ -2677,10 +2623,6 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
   cmp -s "${runtime_admitted_snapshot}" \
     "${stage3_provenance_dir}/runtime-before-stage2.txt" || exit 1
   stage2_native_log="$(absolute_path "${log_dir}/stage2-native-build.log")"
-  # A pre-execution transcript refusal produces no build log. Remove the prior
-  # attempt before entering the runner so failure diagnostics cannot attribute
-  # stale compiler output to this invocation.
-  rm -f "${stage2_native_log}"
   bootstrap_run_stage2_native() {
     bootstrap_stage3_run_transcribed \
     "$(absolute_path "${stage2_command_transcript}")" "${repo_root}" \

@@ -996,10 +996,6 @@ int64_t  rt_process_spawn_guarded(const char* cmd, const char** args, int64_t ar
 int64_t  rt_process_wait(int64_t pid, int64_t timeout_ms);
 bool     rt_process_is_running(int64_t pid);
 bool     rt_process_kill(int64_t pid);
-/* C lane of the rt_pty_* family's liveness probe. POSIX takes the pty MASTER
-   fd and answers from POLLHUP; Windows cannot resolve the Rust lane's session
-   handle and answers false. See runtime_process.c for the full contract. */
-bool     rt_pty_is_running(int64_t handle);
 bool     rt_process_owned_cancel(uint64_t slot, uint64_t generation,
                                  int64_t pid, uint64_t start_identity,
                                  RtOwnedProcessCancelReceipt* receipt);

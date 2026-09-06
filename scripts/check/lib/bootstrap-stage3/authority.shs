@@ -427,13 +427,6 @@ bootstrap_stage3_target_c_compiler() {
     esac
 }
 
-bootstrap_stage3_windows_msvc_candidate_path() {
-    case "$1" in
-        */msys*/*|*/mingw*/*) return 1 ;;
-        *) return 0 ;;
-    esac
-}
-
 bootstrap_stage3_windows_runnable_compiler() {
     bootstrap_stage3_windows_name=$1
     bootstrap_stage3_windows_probe_arg=$2
@@ -461,53 +454,13 @@ bootstrap_stage3_windows_runnable_compiler() {
                 cygpath -u "$bootstrap_stage3_windows_candidate" 2>/dev/null
             ) || continue
         fi
-        # A clang-cl shipped inside an MSYS2/MinGW toolchain is not an MSVC
-        # authority. It may run through the owning POSIX shell while failing
-        # from Cargo's native CreateProcess path (for example 0xc0000135 when
-        # its MinGW runtime DLL is unavailable or shadowed).
-        bootstrap_stage3_windows_msvc_candidate_path \
-            "$bootstrap_stage3_windows_candidate" || continue
-        bootstrap_stage3_windows_probe_source=$(mktemp \
-            "${TMPDIR:-/tmp}/simple-cc-probe.XXXXXX.c") || return 1
-        bootstrap_stage3_windows_probe_object=\
-"${bootstrap_stage3_windows_probe_source%.c}.obj"
-        printf 'int simple_cc_probe(void) { return 0; }\n' \
-            >"$bootstrap_stage3_windows_probe_source" || return 1
-        bootstrap_stage3_windows_probe_source_arg=\
-$bootstrap_stage3_windows_probe_source
-        bootstrap_stage3_windows_probe_object_arg=\
-$bootstrap_stage3_windows_probe_object
-        if command -v cygpath >/dev/null 2>&1; then
-            bootstrap_stage3_windows_probe_source_arg=$(cygpath -w \
-                "$bootstrap_stage3_windows_probe_source") || return 1
-            bootstrap_stage3_windows_probe_object_arg=$(cygpath -w \
-                "$bootstrap_stage3_windows_probe_object") || return 1
-        fi
-        # Admission must match the hermetic Rust-authority Cargo environment.
-        # Compile a translation unit rather than trusting --version: some
-        # broken Windows installations start their driver but fail when the
-        # frontend or a runtime DLL is loaded by Cargo's cc-rs.
         if [ -x "$bootstrap_stage3_windows_candidate" ] &&
-           env -i PATH="$PATH" LC_ALL=C LANG=C \
-                MSYS2_ARG_CONV_EXCL='*' \
-                INCLUDE="${INCLUDE:-}" LIB="${LIB:-}" \
-                LIBPATH="${LIBPATH:-}" \
-                SystemRoot="${SystemRoot:-${SYSTEMROOT:-${WINDIR:-${windir:-}}}}" \
-                SystemDrive="${SystemDrive:-${SYSTEMDRIVE:-}}" \
-                ProgramData="${ProgramData:-${PROGRAMDATA:-}}" \
-                TEMP="${TEMP:-${TMPDIR:-/tmp}}" \
-                "$bootstrap_stage3_windows_candidate" \
-                /nologo /c "/Fo$bootstrap_stage3_windows_probe_object_arg" \
-                "$bootstrap_stage3_windows_probe_source_arg" \
-                >/dev/null 2>&1; then
-            rm -f "$bootstrap_stage3_windows_probe_source" \
-                "$bootstrap_stage3_windows_probe_object"
+           "$bootstrap_stage3_windows_candidate" \
+                "$bootstrap_stage3_windows_probe_arg" >/dev/null 2>&1; then
             printf '%s\n' "$bootstrap_stage3_windows_candidate"
             IFS=$bootstrap_stage3_windows_old_ifs
             return 0
         fi
-        rm -f "$bootstrap_stage3_windows_probe_source" \
-            "$bootstrap_stage3_windows_probe_object"
         IFS='
 '
     done
@@ -1045,18 +998,9 @@ bootstrap_stage3_tool_authority_snapshot() (
             bootstrap_stage3_tool_c_name=${bootstrap_stage3_tool_c_name%.exe}
             ;;
     esac
-    bootstrap_stage3_hash_tool=""
-    for bootstrap_stage3_hash_candidate in \
-        sha256sum shasum sha256 openssl; do
-        if command -v "$bootstrap_stage3_hash_candidate" >/dev/null 2>&1; then
-            bootstrap_stage3_hash_tool=$bootstrap_stage3_hash_candidate
-            break
-        fi
-    done
-    [ -n "$bootstrap_stage3_hash_tool" ] || return 1
     for bootstrap_stage3_tool_name in \
         cargo rustc "$bootstrap_stage3_tool_c_name" clang ld ar ranlib sh env perl sed file \
-        "$bootstrap_stage3_hash_tool"; do
+        shasum openssl; do
         bootstrap_stage3_tool_requested=$(bootstrap_stage3_tool_requested_path \
             "$bootstrap_stage3_tool_name" "$bootstrap_stage3_tool_c_name" \
             "$bootstrap_stage3_tool_c_path") || return 1

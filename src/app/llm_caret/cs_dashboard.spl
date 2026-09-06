@@ -16,8 +16,7 @@
 # a plausible zero.
 
 use std.tui.widget.{pad_or_truncate}
-use std.nogc_async_mut.sosix.{sosix_proc_usage, sosix_is_running, sosix_which,
-    sosix_run}
+use std.nogc_async_mut.sosix.{sosix_proc_usage, sosix_is_running, sosix_which}
 use std.io_runtime.{env_get, file_exists}
 use app.llm_caret.harness_spec.{parse_harness_spec, harness_spec_display}
 use app.llm_caret.pane_backend.{Pane, pane_backend_name, pane_available,
@@ -267,9 +266,7 @@ fn _find_pane(panes: [Pane], pane_id: text, title: text) -> [Pane]:
 fn _measured(a: CsAgent, pane: Pane) -> CsAgent:
     var status = "running"
     var detail = "pane " + pane.pane_id + " title " + pane.title
-    # Windows pane_list already prunes handles whose ConPTY child exited.
-    # The generic process probe is not authoritative for ConPTY-owned children.
-    if pane_backend_name() != "windows" and not sosix_is_running(pane.pid):
+    if not sosix_is_running(pane.pid):
         status = "exited: pane pid " + pane.pid.to_text() + " is not running"
     val usage = sosix_proc_usage(pane.pid)
     var cpu = -1.0
@@ -334,19 +331,6 @@ fn cs_launch_argv(spec_text: text) -> [text]:
 # SIMPLE_BINARY, then PATH, then the repo-local wrapper. Returns "" when the
 # command genuinely cannot be found, so the caller reports that instead of
 # spawning a pane that dies on exec.
-fn windows_executable_names(name: text) -> [text]:
-    [name + ".exe", name + ".cmd", name + ".bat"]
-
-fn _windows_where(name: text) -> text:
-    val result = sosix_run("where.exe", [name])
-    if result.exit_code != 0:
-        return ""
-    for line in result.stdout.split("\n"):
-        val path = line.trim()
-        if path != "" and file_exists(path):
-            return path
-    ""
-
 fn cs_resolve_exe(name: text) -> text:
     if name == "simple":
         val override = env_get("SIMPLE_BINARY") ?? ""
@@ -355,22 +339,9 @@ fn cs_resolve_exe(name: text) -> text:
         val found = sosix_which("simple")
         if found != "":
             return found
-        if file_exists("src/compiler_rust/target/debug/simple.exe"):
-            return "src/compiler_rust/target/debug/simple.exe"
-        if file_exists("bin/simple.exe"):
-            return "bin/simple.exe"
         if file_exists("bin/simple"):
             return "bin/simple"
         return ""
-    # PATHEXT expansion normally belongs to CreateProcess/shell lookup. Our
-    # ConPTY provider receives an explicit command line, so resolve executable
-    # and npm/batch shim suffixes here before accepting an extensionless POSIX
-    # shim that Windows cannot execute directly.
-    if pane_backend_name() == "windows":
-        for candidate in windows_executable_names(name):
-            val windows_found = _windows_where(candidate)
-            if windows_found != "":
-                return windows_found
     val found = sosix_which(name)
     if found != "":
         return found
@@ -453,4 +424,4 @@ fn cs_apply_action(d: CsDashboard, action: text) -> (CsDashboard, text):
 
 export CsAgent, CsDashboard
 export cs_dashboard_new, cs_refresh, cs_render, cs_handle_command, cs_help_text
-export cs_launch_argv, cs_apply_action, cs_resolve_exe, windows_executable_names
+export cs_launch_argv, cs_apply_action, cs_resolve_exe

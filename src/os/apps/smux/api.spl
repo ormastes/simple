@@ -27,7 +27,9 @@ pub fn smux_reset_for_test():
 # ID generation
 # =========================================================================
 
-fn id_text(n: int) -> text:
+fn next_id() -> text:
+    val n = _svc.next_id
+    _svc = _svc.with_next_id(n + 1)
     return "id" + n.to_text()
 
 # =========================================================================
@@ -35,33 +37,29 @@ fn id_text(n: int) -> text:
 # =========================================================================
 
 pub fn smux_create_session(name: text) -> MuxSession:
-    # Commit the compound operation once.  Calling a helper that writes `_svc`
-    # and then reading `_svc` again in this frame loses the helper's write on
-    # older bootstrap interpreters whose call frame cached the module binding.
-    val n = _svc.next_id
-    val sid = id_text(n)
+    val sid = next_id()
     val session = MuxSession.create(sid, name)
-    var st = _svc.add_session(session)
+    _svc = _svc.add_session(session)
 
     # auto-create initial window and pane
-    val wid = id_text(n + 1)
+    val wid = next_id()
     val window = MuxWindow(id: wid, session_id: sid, name: "main", is_active: true)
-    st = st.add_window(window)
+    _svc = _svc.add_window(window)
 
-    val pid = id_text(n + 2)
+    val pid = next_id()
     val pane = MuxPane.create(pid, wid, sid)
     val pr = PaneRecord.create(pane)
-    st = st.add_pane(pr)
+    _svc = _svc.add_pane(pr)
 
     # bump startup counter
-    val m = st.metrics
+    val m = _svc.metrics
     val new_m = SmuxMetrics(
         startup_count: m.startup_count + 1,
         last_startup_ns: 1u64,
         resize_count: m.resize_count,
         capture_count: m.capture_count
     )
-    _svc = st.with_metrics(new_m).with_next_id(n + 3)
+    _svc = _svc.with_metrics(new_m)
 
     return session
 
@@ -93,16 +91,14 @@ pub fn smux_detach(client_id: text) -> bool:
 # =========================================================================
 
 pub fn smux_new_window(session_id: text, name: text) -> MuxWindow:
-    val n = _svc.next_id
-    val wid = id_text(n)
+    val wid = next_id()
     val window = MuxWindow(id: wid, session_id: session_id, name: name, is_active: false)
-    var st = _svc.add_window(window)
+    _svc = _svc.add_window(window)
 
     # auto-create initial pane for new window
-    val pid = id_text(n + 1)
+    val pid = next_id()
     val pane = MuxPane.create(pid, wid, session_id)
-    st = st.add_pane(PaneRecord.create(pane))
-    _svc = st.with_next_id(n + 2)
+    _svc = _svc.add_pane(PaneRecord.create(pane))
 
     return window
 
@@ -145,10 +141,9 @@ pub fn smux_split_pane(session_id: text, window_id: text, pane_id: text, directi
     if win_idx < 0:
         return Err("window not found: " + window_id)
 
-    val n = _svc.next_id
-    val new_pid = id_text(n)
+    val new_pid = next_id()
     val new_pane = MuxPane.create(new_pid, window_id, session_id)
-    _svc = _svc.add_pane(PaneRecord.create(new_pane)).with_next_id(n + 1)
+    _svc = _svc.add_pane(PaneRecord.create(new_pane))
     return Ok(new_pane)
 
 pub fn smux_close_pane(session_id: text, window_id: text, pane_id: text) -> bool:

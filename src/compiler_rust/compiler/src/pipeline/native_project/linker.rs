@@ -775,6 +775,7 @@ impl NativeProjectBuilder {
         let target = effective_target();
         let cxx = target_cxx_compiler(target);
         let is_msvc = uses_msvc_flags(target.linker_flavor());
+        let is_clang_cl = is_msvc && cxx.contains("clang-cl");
 
         let has_entry = self.entry_file.is_some();
         let stub_code = if is_msvc {
@@ -863,7 +864,7 @@ int main(int argc, char** argv) {
             main_o.display().to_string(),
             main_cpp.display().to_string(),
         ];
-        let argv: &[String] = if is_msvc { &clang_cl_args } else { &other_args };
+        let argv: &[String] = if is_clang_cl { &clang_cl_args } else { &other_args };
         let output = std::process::Command::new(&cxx)
             .args(argv)
             .output()

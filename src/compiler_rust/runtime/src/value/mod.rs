@@ -62,7 +62,7 @@ pub mod pbkdf2_native;
 mod process;
 mod process_transfer;
 pub mod primitive_sort;
-pub mod pty;
+mod pty;
 pub mod serial;
 // Always compile ratatui_tui module (it has stubs when feature is disabled)
 pub mod ratatui_tui;
