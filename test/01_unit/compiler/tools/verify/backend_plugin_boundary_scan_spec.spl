@@ -1,15 +1,47 @@
-# Purpose and audience: focused structural gate coverage for REQ-008.
-# @req REQ-008
+"""
+## Purpose and audience
+Focused structural gate coverage of the versioned backend-plugin
+direct-provider boundary (REQ-008) for the compiler-backend maintainers who
+own `src/compiler/tools/verify/backend_plugin_boundary_scan`. Scope: the
+allowlist predicate for provider-call owners, the source scanner's provider
+attribution and line reporting, and the comment/string/declaration
+false-positive guards.
+## Operator workflow
+Run: ./src/compiler_rust/target/bootstrap/simple run
+test/01_unit/compiler/tools/verify/backend_plugin_boundary_scan_spec.spl —
+each scenario feeds a small synthetic source text through
+scan_backend_plugin_boundary_source under a caller path and asserts the
+violation list.
+## Compatibility and limitations
+Synthetic source strings pin the scanner's text contract; the allowlist
+checks assume the pinned owner paths (cranelift adapter, sffi llvm_codegen,
+sffi_gen specs, backend_helpers, jit_sffi) keep existing.
+## Verification guidance and troubleshooting
+A failure means the scanner missed a provider call, mis-attributed a
+provider or symbol, reported a wrong line, flagged comments, strings,
+extern declarations, helper definitions, or allowed owners, or the
+allowlist predicate flipped for a pinned owner path. Each scenario name
+names which contract broke.
+"""
+# Lifecycle: doc/01_research/compiler/backend/backend_completeness_summary.md ;
+# doc/03_plan/agent_tasks/versioned_codegen_backend_plugin.md ;
+# doc/04_architecture/versioned_codegen_backend_plugin.md ;
+# doc/05_design/versioned_codegen_backend_plugin.md
+# @manual_section: backend-plugin-boundary
 
-use std.spec.{describe, it, expect}
+use std.spec.*
 use compiler.tools.verify.backend_plugin_boundary_scan.{
     backend_plugin_provider_calls_allowed,
     scan_backend_plugin_boundary_source,
 }
 
 fn spec():
+    # @manual_section: backend-plugin-boundary-scenarios
     describe("versioned backend plugin direct-provider boundary", fn():
         it("allows direct provider calls only in adapter and SFFI owners", fn():
+            # @req REQ-008
+            # @capture(statistics): allowlist verdict for each pinned owner path
+            step("Query the allowlist predicate for four pinned caller paths")
             expect(backend_plugin_provider_calls_allowed(
                 "src/compiler/70.backend/backend/cranelift_codegen_adapter.spl"
             )).to_equal(true)
@@ -25,28 +57,34 @@ fn spec():
         )
 
         it("rejects Cranelift and LLVM provider calls from a caller", fn():
+            # @req REQ-008
+            # @capture(statistics): violation count, lines, providers, and symbols
+            step("Scan a driver caller that invokes one cranelift and one llvm call")
             val source = "fn compile():\n"
                 + "    val module = rt_cranelift_new_module(1, 2, 3)\n"
                 + "    llvm_build_add(builder, lhs, rhs, name)\n"
             val violations = scan_backend_plugin_boundary_source(
                 "src/compiler/80.driver/driver_codegen.spl", source)
-            expect(violations.len()).to_equal(2)
-            expect(violations[0].line).to_equal(2)
+            expect(violations.len()).to_equal(2)  # oracle: the fixture carries exactly two provider calls, one per provider
+            expect(violations[0].line).to_equal(2)  # oracle: the cranelift call sits on the fixture's second line
             expect(violations[0].provider).to_equal("cranelift")
             expect(violations[0].symbol).to_equal("rt_cranelift_new_module")
-            expect(violations[1].line).to_equal(3)
+            expect(violations[1].line).to_equal(3)  # oracle: the llvm call sits on the fixture's third line, after the fn header
             expect(violations[1].provider).to_equal("llvm")
             expect(violations[1].symbol).to_equal("llvm_build_add")
         )
 
         it("rejects raw JIT and execution-manager calls outside session owners", fn():
+            # @req REQ-008
+            # @capture(statistics): violation providers and symbols in report order
+            step("Scan a jit-manager caller invoking raw JIT and exec-manager calls")
             val source = "fn compile_hotspot():\n"
                 + "    val handle = rt_jit_create()\n"
                 + "    rt_exec_manager_compile(handle, mir_text)\n"
             val violations = scan_backend_plugin_boundary_source(
                 "src/compiler/95.interp/execution/tiered_jit_manager.spl",
                 source)
-            expect(violations.len()).to_equal(2)
+            expect(violations.len()).to_equal(2)  # oracle: both raw calls are outside a session owner, so both must be reported
             expect(violations[0].provider).to_equal("jit")
             expect(violations[0].symbol).to_equal("rt_jit_create")
             expect(violations[1].provider).to_equal("execution-manager")
@@ -54,13 +92,16 @@ fn spec():
         )
 
         it("rejects legacy direct compile helpers from driver callers", fn():
+            # @req REQ-008
+            # @capture(statistics): the two legacy-compile violations in order
+            step("Scan a driver AOT caller invoking two legacy compile helpers")
             val source = "fn compile_aot():\n"
                 + "    val result = compile_module_with_backend(name, module, false, 0)\n"
                 + "    llvm_compile_module_direct(options, module)\n"
             val violations = scan_backend_plugin_boundary_source(
                 "src/compiler/80.driver/driver_aot_codegen_outputs.spl",
                 source)
-            expect(violations.len()).to_equal(2)
+            expect(violations.len()).to_equal(2)  # oracle: both lines are legacy direct-compile calls under a driver path
             expect(violations[0].provider).to_equal("legacy-compile")
             expect(violations[0].symbol).to_equal(
                 "compile_module_with_backend")
@@ -70,6 +111,9 @@ fn spec():
         )
 
         it("does not mistake comments strings declarations or helper names for calls", fn():
+            # @req REQ-008
+            # @capture(statistics): violation count for the all-shapes fixture
+            step("Scan a file whose provider tokens are all non-call shapes")
             val source = "# rt_cranelift_new_module(1, 2, 3)\n"
                 + "val diagnostic = \"llvm_build_add(builder, lhs, rhs, name)\"\n"
                 + "extern fn rt_cranelift_fixture(value: i64) -> i64\n"
@@ -79,28 +123,34 @@ fn spec():
                 + "val llvm_default_pipeline = 2\n"
             val violations = scan_backend_plugin_boundary_source(
                 "src/compiler/80.driver/driver_codegen.spl", source)
-            expect(violations.len()).to_equal(0)
+            expect(violations.len()).to_equal(0)  # oracle: comments, string literals, extern declarations, and definitions are not call sites
         )
 
         it("does not report provider calls in an allowed adapter", fn():
+            # @req REQ-008
+            # @capture(statistics): violation count inside the allowlisted adapter
+            step("Scan the same two provider calls from an allowlisted adapter path")
             val source = "fn compile():\n"
                 + "    rt_cranelift_new_module(1, 2, 3)\n"
                 + "    llvm_build_add(builder, lhs, rhs, name)\n"
             val violations = scan_backend_plugin_boundary_source(
                 "src/compiler/70.backend/backend/provider_adapter.spl", source)
-            expect(violations.len()).to_equal(0)
+            expect(violations.len()).to_equal(0)  # oracle: provider_adapter.spl is an allowlisted owner, so identical calls are legitimate there
         )
 
         it("allows legacy helpers and raw JIT calls only in explicit owners", fn():
+            # @req REQ-008
+            # @capture(statistics): violation counts for the legacy and JIT owner paths
+            step("Scan legacy and JIT calls from their two explicit owner paths")
             val legacy = "fn compile():\n"
                 + "    llvm_compile_module_direct(options, module)\n"
             val jit = "fn compile():\n"
                 + "    rt_jit_compile_source(handle, source)\n"
             expect(scan_backend_plugin_boundary_source(
                 "src/compiler/70.backend/backend/backend_helpers.spl",
-                legacy).len()).to_equal(0)
+                legacy).len()).to_equal(0)  # oracle: backend_helpers.spl is the explicit owner for legacy direct-compile helpers
             expect(scan_backend_plugin_boundary_source(
-                "src/app/io/jit_sffi.spl", jit).len()).to_equal(0)
+                "src/app/io/jit_sffi.spl", jit).len()).to_equal(0)  # oracle: jit_sffi.spl is the explicit owner for raw JIT calls
         )
     )
 

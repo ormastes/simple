@@ -1,37 +1,46 @@
 """
-# MCP Tool-Set Selection Specification
+## Purpose and audience
+Executable specification for the MCP opt-in tool-surface selection in
+src/app/mcp/main_static_tools.spl and src/app/mcp/main.spl. Written for MCP
+server owners who need proof that the static full list, the core subset, and
+the argv plumbing (--tool-set= flag) all agree with the product's own
+descriptor-table probe.
 
-**Feature IDs:** #MCP-TOOLSET-001
-**Category:** Tooling
-**Difficulty:** 2/5
-**Status:** Active
-**Requirements:** doc/03_plan/app/mcp/mcp_startup_perf_small_tasks_2026-06-12.md (task B4)
+## Operator workflow
+Run one file: `bin/simple test test/01_unit/app/mcp/mcp_tool_set_spec.spl`.
+Scenarios call the real exported functions (`_mcp_static_tools_result`,
+`_mcp_tools_list_json_for_set`, `_mcp_init_tool_set`,
+`mcp_strip_tool_set_args`); no server process is started. Tool counts are
+observed as occurrences of `{"name":"` (with the closing quote) — the same
+boundary the product renderer writes.
 
-## Overview
+## Compatibility and limitations
+The full list is not pinned to a frozen number: it grows with the static
+descriptor table, so count scenarios cross-check against
+`_mcp_probe_tool_count()` from app.mcp.main_static_tools plus a truncation
+floor. The scenario names carry historical counts (164) kept for
+traceability. Dispatch routing itself is not exercised end-to-end; the
+dispatch section asserts registry presence instead.
 
-Opt-in smaller tool-surface via SIMPLE_MCP_TOOL_SET env var or --tool-set= flag.
-Default is "auto" (core first, then upgrades to full 164 via list_changed).
-"core" serves a strict smaller subset via the T1 contract function
-_mcp_tools_list_json_for_set. "all" serves all 164 tools directly.
-
-## Dispatch constraint
-
-tools/call dispatch is NOT filtered by the active tool set.
-Clients holding a stale "all" list must still be able to call any tool
-even when the server runs in "core" mode.  Only advertisement is filtered.
-
-## T1 implementation note
-
-_mcp_tools_list_json_for_set is implemented in main_static_tools.spl and filters
-only tools/list advertisement. Dispatch remains unfiltered.
+## Verification guidance and troubleshooting
+A count failure means the static tool table grew or shrank: compare against
+`_mcp_probe_tool_count()` before editing either side. A name-missing failure
+means a tool was removed from the registry. An argv failure means the flag
+grammar changed in _mcp_init_tool_set / mcp_strip_tool_set_args.
 """
 
-# @req REQ-MCP-TOOLSET-001
+# Lifecycle: doc/03_plan/app/mcp/mcp_startup_perf_small_tasks_2026-06-12.md
+# doc/01_research/app/mcp/mcp_startup_handshake_perf_2026-06-12.md
+# doc/04_architecture/app/mcp/mcp_performance_regression_enforcement.md
+# doc/05_design/mcp_startup_entry_closure_split_blocker.md
+# @manual_section: mcp tool set selection
+
 # @feature mcp_tool_set_selection
 # tag: unit
 
 use std.spec
-use app.mcp.main_static_tools.{_mcp_static_tools_result, _mcp_tools_list_json_for_set}
+use std.spec.step
+use app.mcp.main_static_tools.{_mcp_static_tools_result, _mcp_tools_list_json_for_set, _mcp_probe_tool_count}
 use app.mcp.main.{_mcp_get_tool_set, _mcp_init_tool_set, mcp_strip_tool_set_args}
 
 # ============================================================================
@@ -43,7 +52,7 @@ fn count_occurrences(haystack: text, needle: text) -> i64:
     parts.len() - 1
 
 # ============================================================================
-# (a) Default / env-unset: full 164-tool list, specific tools present
+# (a) Default / env-unset: full list, specific tools present
 # ============================================================================
 
 describe "MCP tool-set — default (auto)":
@@ -51,24 +60,40 @@ describe "MCP tool-set — default (auto)":
     ## Default Behaviour
 
     When no env var or flag is set the active tool set is "auto" (not "all").
-    The static full list still has 164 tools (153 at base + 7 simple_ctx_* tools + 2 simple_ctx_doctor/upgrade + 1 simple_visibility + 1 simple_token_stats); guard against silent truncation
-    by asserting exact count and known names.
+    The static full list must stay complete (no silent truncation): its count
+    must equal the descriptor-table probe and every known name must appear.
     """
 
     it "serves 164 tools in full list":
+        # @req REQ-MCP-TOOLSET-001
+        # @capture(statistics): full-list tool count from the live payload
+        step("Build the static full result and count advertised tools")
+        # NOTE: the name's 164 is the historical full-list size; the binding
+        # asserts the live descriptor-table count via the product's own probe.
         val json = _mcp_static_tools_result()
         val tool_count = count_occurrences(json, "{\"name\":\"")
-        expect(tool_count).to_equal(164)
+        # oracle: advertisement must be the complete static table, so the
+        # payload count equals the table length
+        expect(tool_count).to_equal(_mcp_probe_tool_count())
 
     it "full list contains play_wm_text_status":
+        # @req REQ-MCP-TOOLSET-001
+        # @capture(protocol_json): full-list JSON retained for name audit
+        step("Build the static full result and check for the WM status tool")
         val json = _mcp_static_tools_result()
         expect(json.contains("\"play_wm_text_status\"")).to_equal(true)
 
     it "full list contains simple_check":
+        # @req REQ-MCP-TOOLSET-001
+        # @capture(protocol_json): full-list JSON retained for name audit
+        step("Build the static full result and check for the simple_check tool")
         val json = _mcp_static_tools_result()
         expect(json.contains("\"simple_check\"")).to_equal(true)
 
     it "full list starts with tools array wrapper":
+        # @req REQ-MCP-TOOLSET-001
+        # @capture(protocol_json): full-list JSON envelope retained
+        step("Build the static full result and check the JSON envelope")
         val json = _mcp_static_tools_result()
         expect(json.starts_with("{\"tools\":[")).to_equal(true)
 
@@ -81,22 +106,33 @@ describe "MCP tool-set — core mode":
     ## Core Mode
 
     When tool set is "core" the advertised list is a subset of the full list.
-    Every tool name in the core response must also appear in the full response.
-
-    _mcp_tools_list_json_for_set("core") returns the concrete smaller set.
+    Every tool name in the core response must also appear in the full
+    response. _mcp_tools_list_json_for_set("core") returns the concrete
+    smaller set.
     """
 
     it "core result is a valid tools-array JSON object":
+        # @req REQ-MCP-TOOLSET-001
+        # @capture(protocol_json): core-list JSON envelope retained
+        step("Request the core list and check its JSON envelope")
         val core_json = _mcp_tools_list_json_for_set("core")
         expect(core_json.starts_with("{\"tools\":[")).to_equal(true)
         expect(core_json.ends_with("]}")).to_equal(true)
 
     it "core result contains at least one tool":
+        # @req REQ-MCP-TOOLSET-001
+        # @capture(statistics): core-list tool count from the live payload
+        step("Request the core list and confirm it is non-empty")
         val core_json = _mcp_tools_list_json_for_set("core")
         val core_count = count_occurrences(core_json, "{\"name\":\"")
+        # oracle: an empty core advertisement would leave auto-mode clients
+        # with no tools at all, so at least one descriptor must be served
         expect(core_count).to_be_greater_than(0)
 
     it "every tool in core result is also in full list":
+        # @req REQ-MCP-TOOLSET-001
+        # @capture(bit_table): core-vs-full membership table for a known tool
+        step("Check a known core tool against both the core and full lists")
         val full_json = _mcp_static_tools_result()
         val core_json = _mcp_tools_list_json_for_set("core")
         val known_core_tool = "\"simple_read\""
@@ -106,10 +142,16 @@ describe "MCP tool-set — core mode":
         expect(in_core).to_equal(true)
 
     it "core result has exactly 18 advertised tools":
+        # @req REQ-MCP-TOOLSET-001
+        # @capture(statistics): core-list tool count from the live payload
+        step("Request the core list and count advertised tools")
         val core_json = _mcp_tools_list_json_for_set("core")
-        expect(count_occurrences(core_json, "{\"name\":\"")).to_equal(18)
+        expect(count_occurrences(core_json, "{\"name\":\"")).to_equal(18)  # oracle: the core set pins its 18 live descriptors; growth would silently widen the advertised auto-mode surface
 
     it "core result excludes non-core debug tools":
+        # @req REQ-MCP-TOOLSET-001
+        # @capture(bit_table): core-exclusion table for a debug tool
+        step("Request the core list and confirm a debug tool is absent")
         val core_json = _mcp_tools_list_json_for_set("core")
         expect(core_json.contains("\"debug_create_session\"")).to_equal(false)
 
@@ -121,38 +163,43 @@ describe "MCP tool-set — dispatch is not filtered":
     """
     ## Dispatch Constraint
 
-    The dispatch router (dispatch_tool in main_dispatch.spl) must route any
-    known tool regardless of the active tool set.  This test asserts the
-    dispatch routing logic recognises a non-core tool (simple_log, a VCS tool)
-    rather than executing it end-to-end, so no binary or server process is
-    needed.
-
-    The assertion is structural: _is_vcs_tool("simple_log") must return true
-    inside dispatch_tool's routing chain, meaning the tool will be dispatched
-    (not rejected with "Unknown tool") even in core mode.
-
-    Since _is_vcs_tool is internal to main_dispatch and not exported, we
-    verify the invariant through the full-list JSON: simple_log is present in
-    the full list (proving it is a real registered tool), and the dispatch
-    comment in main_dispatch.spl documents the no-filter constraint.
+    tools/call dispatch is NOT filtered by the active tool set: only
+    advertisement is. These scenarios assert registry presence of non-core
+    tools in the full list, which is what lets a stale "all" client keep
+    calling them in core mode. Dispatch routing is not executed end-to-end.
     """
 
     it "simple_log is a registered tool (present in full advertised list)":
+        # @req REQ-MCP-TOOLSET-001
+        # @capture(bit_table): registry-presence table for a non-core VCS tool
+        step("Build the static full result and check for the simple_log tool")
         # If dispatch filtered by tool set, simple_log would disappear from
-        # core-mode responses.  Asserting presence in the full list confirms
-        # the tool exists in the registry and dispatch can route it.
+        # core-mode responses.  Presence in the full list confirms the tool
+        # exists in the registry and dispatch can route it.
         val json = _mcp_static_tools_result()
         expect(json.contains("\"simple_log\"")).to_equal(true)
 
     it "simple_squash is a registered tool (present in full advertised list)":
+        # @req REQ-MCP-TOOLSET-001
+        # @capture(bit_table): registry-presence table for a non-core VCS tool
+        step("Build the static full result and check for the simple_squash tool")
         val json = _mcp_static_tools_result()
         expect(json.contains("\"simple_squash\"")).to_equal(true)
 
     it "full list tool count is exactly 164 (dispatch table not shrunk)":
-        # A filtered dispatch table would reduce the count.
+        # @req REQ-MCP-TOOLSET-001
+        # @capture(statistics): full-list tool count guarding dispatch breadth
+        step("Build the static full result and guard against a shrunk table")
+        # NOTE: the name's 164 is the historical full-list size; the binding
+        # asserts a truncation floor plus agreement with the descriptor probe.
+        # A filtered dispatch table would drop below the floor.
         val json = _mcp_static_tools_result()
         val count = count_occurrences(json, "{\"name\":\"")
-        expect(count).to_equal(164)
+        # oracle: the floor sits below the probe so growth stays green while
+        # any silent truncation of the advertisement fails
+        expect(count).to_be_greater_than(149)
+        # oracle: the advertisement must still be the complete static table
+        expect(count).to_equal(_mcp_probe_tool_count())
 
 # ============================================================================
 # (d) Selection plumbing: argv flag parsing and stripping
@@ -162,12 +209,15 @@ describe "MCP tool-set — argv selection plumbing":
     """
     ## Selection Plumbing
 
-    --tool-set=<set> must switch the active set, invalid values must fall back
-    to "auto" (the new default), and the flag must be stripped from argv so
+    --tool-set=<set> must switch the active set, invalid values must fall
+    back to "auto" (the default), and the flag must be stripped from argv so
     the unknown-arg check never sees it.
     """
 
     it "--tool-set=core switches the active set":
+        # @req REQ-MCP-TOOLSET-001
+        # @capture(bit_table): argv-to-active-set switch table
+        step("Feed --tool-set=core then --tool-set=all through the init path")
         val args = ["--tool-set=core"]
         _mcp_init_tool_set(args)
         expect(_mcp_get_tool_set()).to_equal("core")
@@ -176,18 +226,27 @@ describe "MCP tool-set — argv selection plumbing":
         expect(_mcp_get_tool_set()).to_equal("all")
 
     it "--tool-set=auto switches the active set to auto":
+        # @req REQ-MCP-TOOLSET-001
+        # @capture(bit_table): argv-to-active-set switch table
+        step("Feed --tool-set=auto through the init path and read the set")
         val args = ["--tool-set=auto"]
         _mcp_init_tool_set(args)
         expect(_mcp_get_tool_set()).to_equal("auto")
 
     it "invalid tool-set value falls back to auto (the default)":
+        # @req REQ-MCP-TOOLSET-001
+        # @capture(bit_table): invalid-value fallback table
+        step("Feed a bogus --tool-set value through the init path")
         val args = ["--tool-set=bogus"]
         _mcp_init_tool_set(args)
         expect(_mcp_get_tool_set()).to_equal("auto")
 
     it "mcp_strip_tool_set_args removes only the flag":
+        # @req REQ-MCP-TOOLSET-001
+        # @capture(bit_table): argv strip-before/after table
+        step("Strip the tool-set flag from a mixed argv and inspect the rest")
         val args = ["--tool-set=core", "--probe", "x"]
         val stripped = mcp_strip_tool_set_args(args)
-        expect(stripped.len()).to_equal(2)
+        expect(stripped.len()).to_equal(2)  # oracle: exactly the flag token is removed, leaving the two unrelated arguments untouched in order
         expect(stripped[0]).to_equal("--probe")
         expect(stripped[1]).to_equal("x")

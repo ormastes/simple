@@ -7,6 +7,43 @@
 # examples/05_stdlib/spipe/test/fixture/wave4_search/golden_results.json,
 # asserting EXACT score_milli / matched_fields / source_rank /
 # explanation_hash parity — not approximate, not skipped.
+
+"""
+## Purpose and audience
+This spec exercises the assembled spipe search pipeline
+(analyze -> postings -> bm25_fixed_v1_score_checked -> explain) end to end
+and holds it to EXACT score_milli / matched_fields / source_rank /
+explanation_hash parity with the JS oracle that produced the checked-in
+golden fixture. Audience: owners of `src/lib/common/search/query_exec.spl`
+and anyone regenerating the wave4_search golden fixture.
+
+## Operator workflow
+Run the spec with the seed runner:
+`./src/compiler_rust/target/bootstrap/simple run test/02_integration/spipe/search_golden_query_parity_spec.spl`
+The first scenario re-reads `golden_results.json` from the fixture
+directory; the query scenarios replay three oracle queries against an
+in-memory index of the fixture's three public documents.
+
+## Compatibility and limitations
+The corpus is the fixture's three PUBLIC documents only — the JS oracle
+filters private documents out before indexing, so private-document queries
+are out of scope here. The expected scores and hashes are transcriptions of
+the golden fixture pinned by the first scenario; regenerating the fixture
+requires updating them in the same change.
+
+## Verification guidance and troubleshooting
+A score_milli or explanation_hash mismatch means the pipeline drifted from
+the oracle: diff `query_exec.spl` against the fixture-generation JS and the
+golden_results.json stats block. A fixture-transcription failure means the
+checked-in fixture moved — re-transcribe the expected values rather than
+loosening them.
+"""
+
+# Lifecycle: doc/01_research/domain/sspec_documentization_maintenance.md ;
+# doc/03_plan/sspec_modernization_plan.md ;
+# doc/04_architecture/sspec_documentization_maintenance.md ;
+# doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
 use std.spec.{describe, it, expect}
 use std.fs.{read_file}
 use std.common.json.parser.{json_parse_with_error}
@@ -58,39 +95,53 @@ fn expect_hit(hit: QueryHitV1, document_id: text, score_milli: i64,
     expect(hit.source_rank).to_equal(source_rank)
     expect(hit.explanation_hash).to_equal("sha256:" + explanation_hash)
 
+# @manual_section: golden-query-parity
+
 describe "Golden query -> score pipeline (analyze -> postings -> bm25_fixed_v1_score_checked -> explain)":
     it "the checked-in golden_results.json fixture is still what these hardcoded expectations transcribe":
+        # @req REQ-SPKP-001
+        # @capture(protocol_json): the golden fixture's score literals and explanation hash retained as checked substrings
+        step("Re-read the checked-in golden_results.json fixture and pin its score literals")
         val results_text = read_file(FIXTURE_DIR + "golden_results.json")
         val parsed = json_parse_with_error(results_text)
         expect(parsed.1).to_equal("")
-        expect(results_text).to_contain("\"score_milli\":5564")
-        expect(results_text).to_contain("\"score_milli\":7407")
-        expect(results_text).to_contain("\"score_milli\":3063")
-        expect(results_text).to_contain("79a325595560360181d111119163260ab218ae630338542ed942e36f169f1040")
+        expect(results_text).to_contain("\"score_milli\":5564")  # oracle: fixture-transcribed score for query 'alpha search' on A-ascii — the exact value the oracle emitted
+        expect(results_text).to_contain("\"score_milli\":7407")  # oracle: fixture-transcribed score for the identifier query on A-ascii
+        expect(results_text).to_contain("\"score_milli\":3063")  # oracle: fixture-transcribed score for the public-filtered 'alpha' query on A-ascii
+        expect(results_text).to_contain("79a325595560360181d111119163260ab218ae630338542ed942e36f169f1040")  # oracle: the oracle's explanation hash for the top 'alpha search' hit, pinned so explain output cannot drift
 
     it "query 'alpha-search' ('alpha search', no filters) matches the oracle exactly":
+        # @req REQ-SPKP-001
+        # @capture(protocol_json): both ranked hits with score, fields, rank, and explanation hash retained
+        step("Index the three public golden documents and run the 'alpha search' query")
         val engine = IndexEngine.of_documents(golden_public_documents())
         val hits = run_query_v1(engine, "alpha search", [], 10, SCOPE_DIGEST, GOLDEN_LOGICAL_ROOT).unwrap()
-        expect(hits.len()).to_equal(2)
+        expect(hits.len()).to_equal(2)  # oracle: both public docs containing 'alpha' must rank; the empty-body doc must not appear
         expect_hit(hits[0], "A-ascii", 5564, ["title", "heading", "classification", "body"], 1,
             "79a325595560360181d111119163260ab218ae630338542ed942e36f169f1040")
         expect_hit(hits[1], "A-é", 5471, ["title", "heading", "classification", "body"], 2,
             "8cd5535ac3cbd8631371e67e3e3d7c6bc5755f9c70fcfcc3a025e03a29055bf1")
 
     it "query 'identifier' ('REQ-SPKC-011', no filters) matches the oracle exactly":
+        # @req REQ-SPKP-001 REQ-SPKC-011 REQ-SPKC-012
+        # @capture(protocol_json): both identifier-ranked hits with score, fields, rank, and explanation hash retained
+        step("Run the identifier query REQ-SPKC-011 against the golden corpus")
         val engine = IndexEngine.of_documents(golden_public_documents())
         val hits = run_query_v1(engine, "REQ-SPKC-011", [], 10, SCOPE_DIGEST, GOLDEN_LOGICAL_ROOT).unwrap()
-        expect(hits.len()).to_equal(2)
+        expect(hits.len()).to_equal(2)  # oracle: the identifier field is exact-token, so exactly the two documents carrying REQ-SPKC-011/012 family identifiers rank — A-ascii first, A-é second
         expect_hit(hits[0], "A-ascii", 7407, ["identifier"], 1,
             "1b5afa594640af982c5074b32ed7ffc221f6a5740e3b78b21ddc2d602e6fe006")
         expect_hit(hits[1], "A-é", 3625, ["identifier"], 2,
             "b18882a0f2e0a3c38773819016c7a2096ad315d7878fea621eba1fe4319a1e5a")
 
     it "query 'public-filter' ('alpha', visibility=public) matches the oracle exactly":
+        # @req REQ-SPKP-001
+        # @capture(protocol_json): both filtered hits with score, fields, rank, and explanation hash retained
+        step("Run the 'alpha' query with the visibility=public equality filter applied")
         val engine = IndexEngine.of_documents(golden_public_documents())
         val filters = [EqualityFilterV1.of("visibility", ["public"])]
         val hits = run_query_v1(engine, "alpha", filters, 10, SCOPE_DIGEST, GOLDEN_LOGICAL_ROOT).unwrap()
-        expect(hits.len()).to_equal(2)
+        expect(hits.len()).to_equal(2)  # oracle: the filter is query-time here, so both public 'alpha' docs still rank with filter-adjusted oracle scores
         expect_hit(hits[0], "A-ascii", 3063, ["title", "heading", "body"], 1,
             "ed38dc1020e16d4241ff0491e731a8526b59554ca28e2afed5e565f9b6a17e90")
         expect_hit(hits[1], "A-é", 2970, ["title", "heading", "body"], 2,

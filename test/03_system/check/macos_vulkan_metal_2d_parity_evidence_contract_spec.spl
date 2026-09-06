@@ -49,12 +49,13 @@ use std.spec.*
 
 val CHECKER = "scripts/check/check-macos-vulkan-metal-2d-parity-evidence.shs"
 
+# @manual_section: macos-vulkan-metal-parity-evidence
+
 describe "macOS Vulkan and Metal 2D parity evidence":
     describe "REQ-E2D4-005: compare completed backend evidence":
         it "should fail closed for a missing, invalid, failed, or stale lane":
-        # @req REQ-E2D4-005
-    # @req REQ-E2D4-005
-            # @req REQ-SSPEC-SYSTEM
+            # @req REQ-E2D4-005 REQ-SSPEC-SYSTEM
+            # @capture(protocol_json): the seven fail-closed lane-admission markers retained as checked substrings
             step("should fail closed for a missing, invalid, failed, or stale lane")
             step("Inspect the aggregate lane admission contract")
             val source = file_read(CHECKER)
@@ -70,7 +71,8 @@ describe "macOS Vulkan and Metal 2D parity evidence":
                 expect(source).to_contain(marker)
 
         it "should reject canonical input and output path aliases before writing":
-            # @req REQ-SSPEC-SYSTEM
+            # @req REQ-E2D4-005
+            # @capture(protocol_json): the alias-rejection and canonical-output guards retained as checked substrings
             step("should reject canonical input and output path aliases before writing")
             step("Inspect canonical path and alias rejection guards")
             val source = file_read(CHECKER)
@@ -84,7 +86,8 @@ describe "macOS Vulkan and Metal 2D parity evidence":
                 expect(source).to_contain(marker)
 
         it "should require equal dimensions, DPI, font, events, bounds, and revision":
-            # @req REQ-SSPEC-SYSTEM
+            # @req REQ-E2D4-005
+            # @capture(protocol_json): the metadata, event, and revision equality gates retained as checked substrings
             step("should require equal dimensions, DPI, font, events, bounds, and revision")
             step("Inspect exact metadata and event equality gates")
             val source = file_read(CHECKER)
@@ -103,14 +106,16 @@ describe "macOS Vulkan and Metal 2D parity evidence":
                 "source-revision-invalid"
             ]:
                 expect(source).to_contain(marker)
-            expect(source.contains("eval ")).to_equal(false)
+            val uses_eval_substitution = source.contains("eval ")
+            expect(uses_eval_substitution).to_equal(false)  # oracle: eval would let a stale env value impersonate a fresh lane field, so the checker must parse evidence.env without it
             expect(source).to_contain("[ \"$dpi\" = 300 ]")
             expect(source).to_contain(
                 "focus,pointer_move,pointer_down,pointer_up,key_down,key_up"
             )
 
         it "should compare raw PPM payload bytes and report exact pixel metrics":
-            # @req REQ-SSPEC-SYSTEM
+            # @req REQ-E2D4-005
+            # @capture(bit_table): the zero-tolerance pixel comparison gates retained as checked substrings
             step("should compare raw PPM payload bytes and report exact pixel metrics")
             step("Inspect the raw PPM pixel comparison contract")
             val source = file_read(CHECKER)
@@ -123,7 +128,8 @@ describe "macOS Vulkan and Metal 2D parity evidence":
             expect(source).to_contain("pixel-payload-mismatch")
 
         it "should require exact Draw IR and semantic transition evidence":
-            # @req REQ-SSPEC-SYSTEM
+            # @req REQ-E2D4-005
+            # @capture(bit_table): the Draw IR field list and semantic equality gates retained as checked substrings
             step("should require exact Draw IR and semantic transition evidence")
             step("Inspect Draw IR and semantic equality gates")
             val source = file_read(CHECKER)
@@ -169,7 +175,8 @@ describe "macOS Vulkan and Metal 2D parity evidence":
             expect(source).to_contain("[ \"$semantic_event\" = \"focus\" ]")
 
         it "should require equal 24 point 300 DPI font metrics and provider hashes":
-            # @req REQ-SSPEC-SYSTEM
+            # @req REQ-E2D4-005
+            # @capture(bit_table): the font metric and provider identity gates retained as checked substrings
             step("should require equal 24 point 300 DPI font metrics and provider hashes")
             step("Inspect font sizing and provider identity parity gates")
             val source = file_read(CHECKER)
@@ -199,13 +206,16 @@ describe "macOS Vulkan and Metal 2D parity evidence":
 
     describe "NFR-E2D4-004: tolerance cannot hide semantic mismatches":
         it "should gate metadata and events before the zero-tolerance pixel result":
-            # @req REQ-SSPEC-SYSTEM
+            # @req REQ-E2D4-004
+            # @capture(bit_table): the fail-fast gate ordering and fixed tolerance retained as checked offsets and booleans
             step("should gate metadata and events before the zero-tolerance pixel result")
             step("Inspect fail-fast ordering and fixed tolerance")
             val source = file_read(CHECKER)
             val metadata_gate = source.find("metadata-mismatch")
             val pixel_gate = source.find("pixel-payload-mismatch")
-            expect(metadata_gate).to_be_greater_than(0)
-            expect(pixel_gate).to_be_greater_than(metadata_gate)
-            expect(source.contains("tolerance=1")).to_equal(false)
-            expect(source.contains("blur")).to_equal(false)
+            expect(metadata_gate).to_be_greater_than(0)  # oracle: the metadata gate must exist and sit before any pixel comparison in the script's scan order
+            expect(pixel_gate).to_be_greater_than(metadata_gate)  # oracle: fail-fast ordering — a metadata drift must reject before the payload compare ever runs
+            val allows_unit_tolerance = source.contains("tolerance=1")
+            expect(allows_unit_tolerance).to_equal(false)  # oracle: tolerance=1 would let a one-channel semantic difference pass, so the script must pin tolerance=0 only
+            val allows_blur_masking = source.contains("blur")
+            expect(allows_blur_masking).to_equal(false)  # oracle: a blur fallback would mask render differences the parity contract exists to catch

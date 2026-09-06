@@ -314,21 +314,46 @@ The failure is ASLR-dependent: under `gdb` with its default
 `disable-randomization on` the unpatched binary does **not** crash, which is why
 the original report could not reproduce on demand.
 
-### Still red, and NOT caused by this bug
+### Superseded 2026-09-06 (was: "Still red, and NOT caused by this bug")
 
-`scripts/check/check-vulkan-2d-c-compare.shs` still reports
-`compare_status=skipped compare_reason=c-leg-skipped:no-vulkan-headers`: this
-host has no `vulkan/vulkan.h`, so the C leg cannot build, and the script skips
-the Simple leg whenever the C leg skips. The bench itself now runs to completion
-but reports `status=blocked reason=backend-unavailable` —
-`VulkanInstance::get_or_init` fails with `ERROR_EXTENSION_NOT_PRESENT`. Measured
-cause: `vulkaninfo --summary` on this host lists 20 instance extensions and
-`VK_KHR_surface` is **not** among them (only `VK_KHR_display` /
-`VK_EXT_*_display` / DRM ones), so the surface extensions the backend asks for
-genuinely do not exist here; there is also no `DISPLAY`/`WAYLAND_DISPLAY`. The
-bench has no headless knob — `VK2D_BACKEND` only selects another backend, which
-is how it falls back to `cpu`. Both are environment gaps, unrelated to the
-relocation defect.
+This section previously reported that
+`scripts/check/check-vulkan-2d-c-compare.shs` was skipped because this host has
+no `vulkan/vulkan.h`, and that the Simple leg was blocked because
+`vulkaninfo --summary` listed 20 instance extensions with `VK_KHR_surface`
+**not** among them. **Both claims are now falsified.** They are kept here rather
+than deleted because the second one was used as a reason to stop looking.
+
+- **The C leg builds.** The header probe only looked at
+  `/opt/homebrew/include/vulkan/vulkan.h` (macOS), `clock_gettime` was hidden by
+  glibc under `-std=c99` without `-D_POSIX_C_SOURCE=199309L`, and only
+  `libvulkan.so.1` exists here, not `libvulkan.so`. Fixed in PR #401; the C leg
+  measures.
+- **`VK_KHR_surface` is present.** `vulkaninfo --summary` lists 21 instance
+  extensions **including `VK_KHR_surface` revision 25** and
+  `VK_EXT_headless_surface`. What is genuinely absent is `VK_KHR_xlib_surface` /
+  `VK_KHR_wayland_surface`, and those are gated on loader availability by the
+  fix in PR #400 (`src/compiler_rust/runtime/src/vulkan/instance.rs:155-210`).
+  The earlier `ERROR_EXTENSION_NOT_PRESENT` came from a seed built *before* that
+  fix, not from a missing extension.
+
+Re-measured on a seed rebuilt with `--features vulkan`: `VulkanSession.init()`
+returns `code=0`, `VulkanBackend.create().init(800,600)` returns `true`, and the
+bench runs:
+
+```
+simple-vulkan-2d w=800 h=600 rects=64 frames=300 readback=true ms=2396 fps~=125
+  draw_us=561150 batch_us=857705 present_us=850054 readback_us=127285
+```
+
+against C's `fps=6774.8` -- **C is ~50-95x faster; Simple reaches ~1.4%**. Cost
+is spread evenly across draw/submit/present, the shape of per-op interpreted
+marshalling rather than GPU time. Full numbers:
+`doc/10_metrics/gpu/vulkan_2d_simple_vs_c_linux_2026-09-06.md`.
+
+Two defects found while re-measuring, filed but not fixed here: the compare gate
+prints `compare_status=fail` yet **exits 0**, contradicting its own header; and
+the C leg's checksum is not stable across runs (10505124 -> 6558172) while the
+Simple leg's is, so cross-leg pixel parity is not yet supportable.
 
 ### Upstream
 

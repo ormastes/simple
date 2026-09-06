@@ -2,40 +2,74 @@
 # @req REQ-SSPEC-SYSTEM
 # research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
 
+"""
+## Purpose and audience
+This system spec pins the terminal/power/remote-test subsystem's portable
+contract surface: which terminal transport kinds the credential parser
+dispatches, which power-controller kinds it accepts, and which numeric
+session id the remote-PC session kind carries. It is written for the T32
+integration owners and for reviewers deciding whether a remote-session
+change is contract-breaking.
+
+## Operator workflow
+Run this spec with the seed runner:
+`./src/compiler_rust/target/bootstrap/simple run test/03_system/hardware/t32_terminal_power_remote_spec.spl`
+Every scenario reads the shipped product source and fails closed if a
+dispatch arm disappears.
+
+## Compatibility and limitations
+The full integration surface imports terminal connection, power controller,
+credential, SDN parser, and remote-session modules. Those paths pull in live
+network/parser dependencies that are covered by focused unit specs and are
+not portable in the default system lane, so this spec asserts the shipped
+dispatch contracts instead of dialing hardware. Live hardware/remote
+behavior remains opt-in elsewhere.
+
+## Verification guidance and troubleshooting
+If a scenario fails, the named contract local tells you which dispatch arm
+vanished; inspect `src/lib/nogc_sync_mut/terminal/credential/config_parser.spl`
+(terminal and power dispatch) or `src/app/test_daemon/session_types.spl`
+(session-kind ids). A missing file reads as an empty string and fails the
+contains check, so an unreadable tree can never pass vacuously.
+"""
+
 # @tag:system
 #
 # Portable smoke for the terminal/power/remote-test subsystem.
-#
-# The full integration surface imports terminal connection, power controller,
-# credential, SDN parser, and remote-session modules. Those paths pull in live
-# network/parser dependencies that are covered by focused unit specs and are
-# not portable in the default system lane. Keep this system spec as a stable
-# contract marker; live hardware/remote behavior remains opt-in elsewhere.
-
-use std.spec.step
 
 use std.spec.*
 use std.spec.step
+use std.io.{file_read}
+
+# @manual_section: terminal-power-remote-contracts
 
 describe "T32 terminal power remote portable smoke":
-    # @manual scenario evidence
     it "records terminal transport kinds":
         # @req REQ-SSPEC-SYSTEM
-        step("records terminal transport kinds")
-        val kinds = ["ssh", "telnet", "t32_swd", "relay"]
-        expect(kinds.len()).to_equal(4)
-        expect(kinds[0]).to_equal("ssh")
-        expect(kinds[2]).to_equal("t32_swd")
+        # @capture(protocol_json): the four terminal transport dispatch arms retained as checked booleans
+        step("Inspect the terminal transport dispatch in the credential parser")
+        val terminal_transport_dispatch = file_read("src/lib/nogc_sync_mut/terminal/credential/config_parser.spl")
+        val dispatches_ssh = terminal_transport_dispatch.contains("if kind == \"ssh\":")
+        val dispatches_telnet = terminal_transport_dispatch.contains("if kind == \"telnet\":")
+        val dispatches_t32_swd = terminal_transport_dispatch.contains("if kind == \"t32_swd\":")
+        val dispatches_relay = terminal_transport_dispatch.contains("if kind == \"relay\":")
+        expect(dispatches_ssh and dispatches_telnet).to_equal(true)  # oracle: ssh and telnet are the two classic remote-terminal transports the parser must keep accepting
+        expect(dispatches_t32_swd and dispatches_relay).to_equal(true)  # oracle: t32_swd and relay are the two hardware-in-the-loop transports the parser must keep accepting
 
     it "records power controller kinds":
         # @req REQ-SSPEC-SYSTEM
-        step("records power controller kinds")
-        val kinds = ["t32", "relay", "host"]
-        expect(kinds.len()).to_equal(3)
-        expect(kinds[1]).to_equal("relay")
+        # @capture(protocol_json): the three power-controller dispatch arms retained as checked booleans
+        step("Inspect the power controller kind dispatch in the credential parser")
+        val power_controller_dispatch = file_read("src/lib/nogc_sync_mut/terminal/credential/config_parser.spl")
+        val accepts_t32 = power_controller_dispatch.contains("if kind == \"t32\":")
+        val accepts_relay = power_controller_dispatch.contains("if kind == \"relay\":")
+        val accepts_host = power_controller_dispatch.contains("if kind == \"host\":")
+        expect(accepts_t32 and accepts_relay and accepts_host).to_equal(true)  # oracle: the power surface supports a real Trace32 box, a relay box, and the host itself, so all three arms are contractual
 
     it "records remote session kind":
         # @req REQ-SSPEC-SYSTEM
-        step("records remote session kind")
-        val remote_pc_kind = 9
-        expect(remote_pc_kind).to_equal(9)
+        # @capture(protocol_json): the remote-PC numeric session id retained as a checked source constant
+        step("Inspect the remote-PC session kind id in the test-daemon session types")
+        val session_kind_table = file_read("src/app/test_daemon/session_types.spl")
+        val remote_pc_kind_is_nine = session_kind_table.contains("SESSION_KIND_REMOTE_PC: i64 = 9")
+        expect(remote_pc_kind_is_nine).to_equal(true)  # oracle: adapters persist the numeric session id on the wire, so remote PC must stay kind 9 or every saved session breaks

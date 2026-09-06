@@ -1,3 +1,36 @@
+"""
+## Purpose and audience
+Pins the std.common.mem_infra capability-matrix resolver: which sanitizer and
+instrumentation rows each backend supports, how "auto" expands, how unsupported
+rows degrade (or error under strict mode), and the exact env-gate strings the
+build exports. Written for engineers touching backend memory-tooling plumbing
+who need the false-safety trap (exporting env gates nothing reads) pinned shut.
+## Operator workflow
+Run the single file with the seeded runner:
+`./src/compiler_rust/target/bootstrap/simple run test/01_unit/lib/mem_infra/config_spec.spl`
+and read the `SPEC FILE VERDICT` line; the resolved plans are pure calls, so no
+device or env setup is required.
+## Compatibility and limitations
+Covers only `resolve_mem_infra`, `mem_infra_row_known`, `mem_infra_row_supported`
+and `mem_infra_env_assignments`; it does not compile any backend or prove that an
+exported env gate is actually read by the native path. One scenario is
+legitimately RED: it pins the stale auto/cranelift expectation that still lists
+`SIMPLE_MEM_GUARD_RATE=64`, which the product no longer emits (see the NOTE on
+that scenario).
+## Verification guidance and troubleshooting
+A failure in the lookup scenarios means the row table drifted from the feature
+doc; a failure in the resolve scenarios means auto-expansion or degradation
+changed; a failure in the env scenarios means exported gate strings changed.
+Rerun with the command above after any edit to
+`src/lib/common/mem_infra/config.spl` and compare pass/fail counts, not just the
+outcome banner.
+"""
+# Lifecycle: doc/01_research/local/simple_compiler_performance_memory_efficiency_audit.md ;
+# doc/03_plan/agent_tasks/simple_compiler_performance_memory_efficiency.md ;
+# doc/04_architecture/simple_compiler_performance_memory_efficiency.md ;
+# doc/05_design/minimal_bootstrap_configuration_composed_dynamic_architecture.md
+# @manual_section: mem-infra-capability-matrix
+
 # std.common.mem_infra config — capability matrix resolution + env mapping.
 #
 # Source: doc/02_requirements/runtime/memory_analysis/feature_backend_memory_infra_toggle.md
@@ -11,6 +44,9 @@ describe "std.common.mem_infra config — capability matrix":
 
     describe "capability matrix lookups":
         it "knows the seven declared rows":
+            # @req REQ-MEM-INFRA-001
+            # @capture(bit_table): row-known verdicts for the seven declared names plus one unknown control
+            step("Query mem_infra_row_known for every declared row name and one unknown control")
             expect(mem_infra_row_known("attr")).to_equal(true)
             expect(mem_infra_row_known("guard")).to_equal(true)
             expect(mem_infra_row_known("harden")).to_equal(true)
@@ -21,6 +57,9 @@ describe "std.common.mem_infra config — capability matrix":
             expect(mem_infra_row_known("bogus")).to_equal(false)
 
         it "matches the feature-doc support table per backend":
+            # @req REQ-MEM-INFRA-002
+            # @capture(bit_table): supported/not-supported per row and backend from the feature doc table
+            step("Check mem_infra_row_supported against the feature-doc table for strict, asan and attr")
             expect(mem_infra_row_supported("strict", "interpreter")).to_equal(true)
             expect(mem_infra_row_supported("strict", "cranelift")).to_equal(false)
             expect(mem_infra_row_supported("strict", "llvm")).to_equal(false)
@@ -31,17 +70,22 @@ describe "std.common.mem_infra config — capability matrix":
 
     describe "resolve_mem_infra":
         it "expands auto on cranelift to attr, guard, genarena without asan":
+            # @req REQ-MEM-INFRA-003
+            # @capture(statistics): resolved auto/cranelift plan row count and enabled order
             step("resolve 'auto' against the cranelift backend")
             val plan = resolve_mem_infra(["auto"], "cranelift", false)
-            expect(plan.enabled.len()).to_equal(2)
+            expect(plan.enabled.len()).to_equal(2)  # oracle: auto on cranelift resolves to exactly attr and genarena
             expect(plan.enabled[0]).to_equal("attr")
             expect(plan.enabled[1]).to_equal("genarena")
-            expect(plan.errors.len()).to_equal(0)
-            expect(plan.notices.len()).to_equal(0)
+            expect(plan.errors.len()).to_equal(0)  # oracle: a clean auto expansion raises no errors
+            expect(plan.notices.len()).to_equal(0)  # oracle: a clean auto expansion raises no notices
 
         it "expands auto on llvm to include asan but still not guard":
+            # @req REQ-MEM-INFRA-003
+            # @capture(statistics): resolved auto/llvm plan row count and enabled order
+            step("resolve 'auto' against the llvm backend")
             val plan = resolve_mem_infra(["auto"], "llvm", false)
-            expect(plan.enabled.len()).to_equal(3)
+            expect(plan.enabled.len()).to_equal(3)  # oracle: llvm additionally supports asan, so auto yields three rows
             expect(plan.enabled[0]).to_equal("attr")
             expect(plan.enabled[1]).to_equal("genarena")
             expect(plan.enabled[2]).to_equal("asan")
@@ -49,68 +93,88 @@ describe "std.common.mem_infra config — capability matrix":
         # The whole point of the row correction: asking for guard on a backend
         # that cannot trap must SAY SO, not quietly hand back `harden`.
         it "errors rather than silently degrading an explicit guard request on cranelift":
+            # @req REQ-MEM-INFRA-004
+            # @capture(statistics): guard/cranelift plan error count and message prefix
             step("request guard on cranelift, non-strict")
             val plan = resolve_mem_infra(["guard"], "cranelift", false)
-            expect(plan.enabled.len()).to_equal(0)
-            expect(plan.errors.len()).to_equal(1)
+            expect(plan.enabled.len()).to_equal(0)  # oracle: an explicit unsupported request enables nothing
+            expect(plan.errors.len()).to_equal(1)  # oracle: exactly one error names the missing fallback
             expect(plan.errors[0].contains("no fallback")).to_equal(true)
 
         it "degrades asan on cranelift to harden with a notice":
+            # @req REQ-MEM-INFRA-005
+            # @capture(statistics): asan/cranelift degradation result and notice count
             step("request asan on a backend that cannot support it, non-strict")
             val plan = resolve_mem_infra(["asan"], "cranelift", false)
-            expect(plan.enabled.len()).to_equal(1)
+            expect(plan.enabled.len()).to_equal(1)  # oracle: the degraded plan enables exactly the harden fallback
             expect(plan.enabled[0]).to_equal("harden")
-            expect(plan.notices.len()).to_equal(1)
-            expect(plan.errors.len()).to_equal(0)
+            expect(plan.notices.len()).to_equal(1)  # oracle: the degradation is announced with exactly one notice
+            expect(plan.errors.len()).to_equal(0)  # oracle: a degradation is a notice, never an error
 
         it "degrades memprof on cranelift to attr with a notice":
+            # @req REQ-MEM-INFRA-005
+            # @capture(statistics): memprof/cranelift degradation result and notice count
+            step("request memprof on a backend that cannot support it, non-strict")
             val plan = resolve_mem_infra(["memprof"], "cranelift", false)
-            expect(plan.enabled.len()).to_equal(1)
+            expect(plan.enabled.len()).to_equal(1)  # oracle: the degraded plan enables exactly the attr fallback
             expect(plan.enabled[0]).to_equal("attr")
-            expect(plan.notices.len()).to_equal(1)
+            expect(plan.notices.len()).to_equal(1)  # oracle: the degradation is announced with exactly one notice
 
         it "degrades strict on cranelift and on llvm to harden":
+            # @req REQ-MEM-INFRA-005
+            # @capture(statistics): strict degradation per backend and interpreter pass-through
+            step("request strict on cranelift and llvm, then confirm interpreter keeps it native")
             val cranelift_plan = resolve_mem_infra(["strict"], "cranelift", false)
             expect(cranelift_plan.enabled[0]).to_equal("harden")
             val llvm_plan = resolve_mem_infra(["strict"], "llvm", false)
-            expect(llvm_plan.enabled.len()).to_equal(0)
-            expect(llvm_plan.errors.len()).to_equal(1)
+            expect(llvm_plan.enabled.len()).to_equal(0)  # oracle: strict has no fallback on llvm, so nothing is enabled
+            expect(llvm_plan.errors.len()).to_equal(1)  # oracle: exactly one error reports the missing strict support
 
             step("strict is natively supported on the interpreter, so it never degrades")
             val interp_plan = resolve_mem_infra(["strict"], "interpreter", false)
             expect(interp_plan.enabled[0]).to_equal("strict")
-            expect(interp_plan.notices.len()).to_equal(0)
+            expect(interp_plan.notices.len()).to_equal(0)  # oracle: native support needs no degradation notice
 
         it "errors instead of degrading when asan is requested under strict mode":
+            # @req REQ-MEM-INFRA-006
+            # @capture(statistics): strict-mode asan request error count
             step("request asan on cranelift with --mem-infra-strict")
             val plan = resolve_mem_infra(["asan"], "cranelift", true)
-            expect(plan.enabled.len()).to_equal(0)
-            expect(plan.notices.len()).to_equal(0)
-            expect(plan.errors.len()).to_equal(1)
+            expect(plan.enabled.len()).to_equal(0)  # oracle: strict mode refuses instead of degrading, so nothing is enabled
+            expect(plan.notices.len()).to_equal(0)  # oracle: strict mode raises an error, never a soft notice
+            expect(plan.errors.len()).to_equal(1)  # oracle: exactly one error reports the refused request
 
         it "errors on an unknown name regardless of strict":
+            # @req REQ-MEM-INFRA-007
+            # @capture(statistics): unknown-row error counts in loose and strict modes
+            step("request the unknown row 'bogus' in both strict modes")
             val loose = resolve_mem_infra(["bogus"], "cranelift", false)
-            expect(loose.errors.len()).to_equal(1)
-            expect(loose.enabled.len()).to_equal(0)
+            expect(loose.errors.len()).to_equal(1)  # oracle: an unknown name is one error in loose mode
+            expect(loose.enabled.len()).to_equal(0)  # oracle: an unknown name enables nothing
             val tight = resolve_mem_infra(["bogus"], "cranelift", true)
-            expect(tight.errors.len()).to_equal(1)
+            expect(tight.errors.len()).to_equal(1)  # oracle: strict mode reports the same single unknown-name error
 
         it "dedups an already-enabled row reached both directly and via degradation":
+            # @req REQ-MEM-INFRA-008
+            # @capture(statistics): combined attr+harden+asan plan dedup outcome
             step("harden is already enabled; asan degrades into harden, not a duplicate")
             val plan = resolve_mem_infra(["attr", "harden", "asan"], "cranelift", false)
-            expect(plan.enabled.len()).to_equal(2)
+            expect(plan.enabled.len()).to_equal(2)  # oracle: asan degrades into the already-present harden, so two rows remain
             expect(plan.enabled[0]).to_equal("attr")
             expect(plan.enabled[1]).to_equal("harden")
 
     describe "mem_infra_env_assignments":
         it "maps every row to its exact env-gate or build-marker string":
+            # @req REQ-MEM-INFRA-009
+            # @capture(protocol_json): the ordered env-gate strings for a fully enabled plan
+            step("Map a fully enabled plan through mem_infra_env_assignments")
             val plan = MemInfraPlan(
                 enabled: ["attr", "harden", "guard", "genarena", "strict", "asan", "memprof"],
                 notices: [],
                 errors: []
             )
             val assignments = mem_infra_env_assignments(plan)
-            expect(assignments.len()).to_equal(8)
+            expect(assignments.len()).to_equal(8)  # oracle: six env gates plus two BUILD markers, one per enabled row
             expect(assignments[0]).to_equal("SIMPLE_MEM_ATTR=1")
             expect(assignments[1]).to_equal("SIMPLE_MEM_HARDEN=1")
             expect(assignments[2]).to_equal("SIMPLE_MEM_GUARD_RATE=64")
@@ -124,10 +188,22 @@ describe "std.common.mem_infra config — capability matrix":
         # auto/cranelift used to export SIMPLE_MEM_GUARD_RATE=64, an env var
         # nothing on the native path reads. Exporting it is what made the
         # no-op look enabled. It must no longer appear here.
+        #
+        # NOTE: legitimately RED. The trailing expectations still pin the STALE
+        # auto/cranelift mapping that includes SIMPLE_MEM_GUARD_RATE=64 at
+        # index 1, contradicting this scenario's own comment and name ("with no
+        # guard gate"). The product no longer emits that gate for auto/cranelift
+        # (false-safety fix), so the stale expectation fails. Kept RED by
+        # policy; the fix is to delete the stale expectation, tracked with the
+        # false-safety mechanism in
+        # doc/02_requirements/runtime/memory_analysis/feature_backend_memory_infra_toggle.md
         it "produces the auto/cranelift plan's env assignments in order, with no guard gate":
+            # @req REQ-MEM-INFRA-009
+            # @capture(protocol_json): the ordered env-gate strings for the resolved auto/cranelift plan
+            step("Resolve auto on cranelift and read back its env assignments")
             val plan = resolve_mem_infra(["auto"], "cranelift", false)
             val assignments = mem_infra_env_assignments(plan)
-            expect(assignments.len()).to_equal(3)
+            expect(assignments.len()).to_equal(3)  # oracle: auto/cranelift exports attr, ast-gen and genarena gates only
             expect(assignments[0]).to_equal("SIMPLE_MEM_ATTR=1")
             expect(assignments[1]).to_equal("SIMPLE_MEM_GUARD_RATE=64")
             expect(assignments[2]).to_equal("SIMPLE_AST_GEN_CHECK=1")

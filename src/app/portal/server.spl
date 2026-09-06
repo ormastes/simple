@@ -44,14 +44,14 @@ val COMMITS_PAGE_SIZE: i64 = 30
 val SESSION_COOKIE_NAME = "portal_session"
 
 fn default_repo_root() -> text:
-    val configured = rt_env_get("PORTAL_REPO_ROOT")
+    val configured = env_get("PORTAL_REPO_ROOT")
     if configured == nil or configured == "":
         "."
     else:
         configured
 
 fn _env_or(key: text, fallback: text) -> text:
-    val v = rt_env_get(key)
+    val v = env_get(key)
     if v == nil or v == "":
         fallback
     else:
@@ -214,10 +214,13 @@ impl PortalServer:
 
     fn _serve_static(clean_path: text) -> HttpResponseData:
         val full_path = "{PUBLIC_ROOT}{clean_path}"
-        if not rt_file_exists(full_path):
+        if not file_exists(full_path):
             return _error_response(404, "Not Found", "No such asset: {clean_path}")
         val mime = if clean_path.ends_with(".css"): "text/css" else: "application/javascript"
-        _html_ok(rt_file_read_text(full_path), mime)
+        val content = match read_file_text_result(full_path):
+            case Ok(value): value
+            case Err(_): return _error_response(500, "Internal Server Error", "Could not read asset: {clean_path}")
+        _html_ok(content, mime)
 
     fn _route_repo(clean_path: text, query: text) -> HttpResponseData:
         val segments = clean_path[1:].split("/")
@@ -451,8 +454,11 @@ fn _normalize_path(path: text) -> (text, text, text):
         return ("", "", "Empty path")
     var clean = path
     var query = ""
-    if clean.contains("?"):
-        val qidx = clean.index_of("?") ?? clean.length()
+    # index_of returns a raw i64 (-1 when absent), never nil. Branch on `< 0`
+    # for the no-query case; a `?? clean.length()` coalesce sliced out of range
+    # when "?" sat at index 3 (the nil sentinel) and left the query in `clean`.
+    val qidx = clean.index_of("?")
+    if qidx >= 0:
         query = clean[qidx + 1:]
         clean = clean[0:qidx]
     clean = clean.replace("%2F", "/")

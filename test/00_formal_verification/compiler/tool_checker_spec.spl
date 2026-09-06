@@ -1,51 +1,111 @@
+"""
+## Purpose and audience
+Executable contract for the Lean verification tool checker: the authoritative
+verification-file inventory, the comment/string/nesting-aware sorry counter,
+and the ProofResult/CheckResult summary formatting operators read after a
+verify run. Owned by the compiler verification team.
+
+## Operator workflow
+Run this spec after touching the checker's sorry scanner or summary printer:
+`bin/simple test test/00_formal_verification/compiler/tool_checker_spec.spl`.
+A failure names the inventory, counting, or formatting invariant that broke.
+
+## Compatibility and limitations
+The sorry-counting scenarios feed literal Lean source strings, so no Lean
+toolchain is required. The counter API is internal (underscore-prefixed) and
+may move; this spec pins its behaviour, not its location.
+
+## Verification guidance and troubleshooting
+Rerun with the single command above. A false-positive count usually means the
+scanner stopped skipping comments, strings, or identifiers containing "sorry";
+a summary-format failure means ProofResult.summary_line or CheckResult.summary
+changed its fixed-width columns.
+"""
+# Lifecycle: doc/01_research/domain/simple_formal_verification_2_0.md
+# doc/03_plan/agent_tasks/simple_formal_verification_2_0.md
+# doc/04_architecture/simple_formal_verification_2_0.md
+# doc/05_design/simple_formal_verification_2_0.md
+
 import spipe
 import compiler.tools.verify.checker as checker
+use std.spec.step
 
+# @manual_section: lean-tool-checker
 describe "Lean Verification Tool Checker":
     context "inventory":
         it "uses the authoritative Lean artifact list":
+            # @req REQ-LEAN-TOOLCHECK-001
+            # @capture(bit_table): checker inventory coverage over the supported Lean artifacts
+            step("Enumerate the checker's known verification files")
             val files = checker.known_verification_files()
 
-            expect(files.len()).to_equal(15)
+            expect(files.len()).to_equal(15)  # oracle: the inventory lists every supported verification artifact
             expect(files.contains("src/verification/nogc_compile/src/NogcCompile.lean")).to_equal(true)
             expect(files.contains("src/verification/type_inference_compile/src/Contracts.lean")).to_equal(true)
             expect(files.contains("src/verification/tensor_dimensions/src/TensorMemory.lean")).to_equal(true)
 
     context "sorry counting":
         it "flags a proof containing a real sorry":
+            # @req REQ-LEAN-TOOLCHECK-002
+            # @capture(statistics): sorry count for a theorem body with one real sorry
+            step("Count the sorry in an unproven theorem body")
             val src = "theorem foo : True := by\n  sorry\n"
-            expect(checker._count_sorry(src)).to_equal(1)
+            expect(checker._count_sorry(src)).to_equal(1)  # oracle: the fixture carries exactly one sorry token
 
         it "flags a real admit token":
+            # @req REQ-LEAN-TOOLCHECK-003
+            # @capture(statistics): sorry count for a theorem body using admit
+            step("Count an admit as an unproven tactic")
             val src = "theorem foo : True := by\n  admit\n"
-            expect(checker._count_sorry(src)).to_equal(1)
+            expect(checker._count_sorry(src)).to_equal(1)  # oracle: admit is treated exactly like sorry
 
         it "does not flag sorry in line comments":
+            # @req REQ-LEAN-TOOLCHECK-004
+            # @capture(statistics): sorry count for prose inside a line comment
+            step("Skip the word sorry inside a line comment")
             val src = "-- no sorry here\ntheorem t : True := trivial\n"
-            expect(checker._count_sorry(src)).to_equal(0)
+            expect(checker._count_sorry(src)).to_equal(0)  # oracle: commented prose is never counted
 
         it "does not flag sorry in block comments":
+            # @req REQ-LEAN-TOOLCHECK-005
+            # @capture(statistics): sorry count for prose inside a block comment
+            step("Skip the word sorry inside a block comment")
             val src = "/- sorry-free file, honest -/\ntheorem t : True := trivial\n"
-            expect(checker._count_sorry(src)).to_equal(0)
+            expect(checker._count_sorry(src)).to_equal(0)  # oracle: block-commented prose is never counted
 
         it "does not flag sorry in nested block comments":
+            # @req REQ-LEAN-TOOLCHECK-006
+            # @capture(statistics): sorry count for sorry inside a nested block comment
+            step("Skip sorry inside a nested block comment")
             val src = "/- outer /- sorry inside nested -/ still comment -/\ntheorem t : True := trivial\n"
-            expect(checker._count_sorry(src)).to_equal(0)
+            expect(checker._count_sorry(src)).to_equal(0)  # oracle: nesting must not resurface the inner token
 
         it "does not flag identifiers containing sorry":
+            # @req REQ-LEAN-TOOLCHECK-007
+            # @capture(statistics): sorry count for identifiers embedding the token
+            step("Leave identifiers that merely contain sorry uncounted")
             val src = "def sorryless := 1\ndef sorryAx' := 2\ndef not_sorry := 3\n"
-            expect(checker._count_sorry(src)).to_equal(0)
+            expect(checker._count_sorry(src)).to_equal(0)  # oracle: identifier substrings are not tactic tokens
 
         it "does not flag sorry inside string literals":
+            # @req REQ-LEAN-TOOLCHECK-008
+            # @capture(statistics): sorry count for the token inside a string literal
+            step("Skip the word sorry inside a string literal")
             val src = "def msg := \"sorry not counted\"\n"
-            expect(checker._count_sorry(src)).to_equal(0)
+            expect(checker._count_sorry(src)).to_equal(0)  # oracle: string contents are never tactic tokens
 
         it "still counts sorry after a comment line":
+            # @req REQ-LEAN-TOOLCHECK-009
+            # @capture(statistics): sorry count when prose precedes a real sorry
+            step("Count a real sorry that follows commented prose")
             val src = "-- prose mentions sorry\ntheorem t : True := by\n  sorry\n"
-            expect(checker._count_sorry(src)).to_equal(1)
+            expect(checker._count_sorry(src)).to_equal(1)  # oracle: only the real tactic line counts
 
     context "summary formatting":
         it "renders failed proof results with sorry details":
+            # @req REQ-LEAN-TOOLCHECK-010
+            # @capture(protocol_json): ProofResult summary line for a failed two-sorry file
+            step("Render the summary line of a failed proof result")
             val result = checker.ProofResult(
                 file_path: "src/verification/demo/src/Demo.lean",
                 status: checker.ProofStatus.Failed,
@@ -55,11 +115,14 @@ describe "Lean Verification Tool Checker":
             )
 
             expect(result.summary_line()).to_contain("[failed]")
-            expect(result.summary_line()).to_contain("3 theorems")
-            expect(result.summary_line()).to_contain("2 sorry")
+            expect(result.summary_line()).to_contain("3 theorems")  # oracle: the fixture declares theorem_count=3
+            expect(result.summary_line()).to_contain("2 sorry")  # oracle: the fixture declares sorry_count=2
             expect(result.summary_line()).to_contain("contains sorry")
 
         it "aggregates verification summary counts":
+            # @req REQ-LEAN-TOOLCHECK-011
+            # @capture(protocol_json): CheckResult summary totals across one proven and one failed file
+            step("Aggregate one proven and one failed file into the summary")
             val ok = checker.ProofResult(
                 file_path: "src/verification/a.lean",
                 status: checker.ProofStatus.ModelProven,
@@ -76,8 +139,8 @@ describe "Lean Verification Tool Checker":
             )
 
             val summary = checker.CheckResult(file_results: [ok, bad]).summary()
-            expect(summary).to_contain("Files checked: 2")
-            expect(summary).to_contain("Model proven: 1")
-            expect(summary).to_contain("Failed:    1")
-            expect(summary).to_contain("Theorems: 3")
-            expect(summary).to_contain("Pending proofs (sorry): 1")
+            expect(summary).to_contain("Files checked: 2")  # oracle: two file results were aggregated
+            expect(summary).to_contain("Model proven: 1")  # oracle: only `ok` is ModelProven
+            expect(summary).to_contain("Failed:    1")  # oracle: only `bad` is Failed
+            expect(summary).to_contain("Theorems: 3")  # oracle: 2 + 1 theorems across the two files
+            expect(summary).to_contain("Pending proofs (sorry): 1")  # oracle: only `bad` carries a sorry

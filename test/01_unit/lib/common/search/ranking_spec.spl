@@ -1,13 +1,43 @@
-# ============================================================================
-# ranking_spec.spl — BM25 / TF-IDF lexical ranking + top-k over Score (AC Phase 2)
-#
-# ABSOLUTE ORACLE discipline: the expected scores are HAND-COMPUTED from the
-# real BM25/TF-IDF mathematics (true natural log), then truncated to Score's
-# milli scale. They are NOT replayed from the implementation's integer ln
-# series — that would be self-comparison. The 3-digit gap between the internal
-# fixed-point precision (1e6) and the asserted milli scale (1e3) absorbs the
-# series/rounding error, so an independent true-math oracle matches exactly.
-#
+"""
+## Purpose and audience
+Pins the BM25 (bm25-fixed-v1) and TF-IDF lexical ranking plus top-k selection
+over the fixed-point Score type. Every expected score is HAND-COMPUTED from
+the real BM25/TF-IDF mathematics (true natural log), then truncated to Score's
+milli scale — never replayed from the implementation's integer ln series, so
+an independent true-math oracle matches exactly. The 3-digit gap between the
+internal fixed-point precision (1e6) and the asserted milli scale (1e3)
+absorbs series/rounding error. Audience: engineers implementing or changing
+the lib.common.search ranking pipeline.
+
+## Operator workflow
+Run `./src/compiler_rust/target/bootstrap/simple run
+test/01_unit/lib/common/search/ranking_spec.spl` from the repo root; every
+scenario calls the real ranking module entry points with hand-frozen inputs.
+
+## Compatibility and limitations
+Known interpreter bugs designed around: no for-in over custom structs (index
+loops only); `text + i64` garbage (we never build text); f64 untrusted
+(integer asserts). The checked `_checked` variants are exercised because they
+expose the fixed-point intermediates the public API hides.
+
+## Verification guidance and troubleshooting
+A red scenario means an intermediate no longer matches its hand-frozen vector
+— recompute from the inline comment above the failing assertion before
+touching the implementation; a genuine mismatch in a frozen vector is a
+ranking-math regression, not a test bug.
+"""
+# Lifecycle: doc/01_research/infra/spipe/spipe_knowledge_compiler.md ;
+# doc/03_plan/lib/search/custom_type_alpha_search_team_plan_2026-06-15.md ;
+# doc/04_architecture/infra/spipe/spipe_knowledge_compiler.md ;
+# doc/05_design/infra/spipe/spipe_knowledge_base_architecture.md
+# @manual_section: bm25-tfidf-ranking-oracle
+
+use std.spec.step
+
+use std.spec
+use lib.common.search.types.{Score}
+use lib.common.search.ranking.{ScoredDoc, top_k, rank_all, bm25_score_default, tfidf_score, avg_doc_len_fixed}
+
 # Hand corpus (3 docs, query = ["cat","dog"]):
 #   doc0: dl=4, tf_cat=3, tf_dog=0   (dog ABSENT)
 #   doc1: dl=6, tf_cat=1, tf_dog=2
@@ -19,16 +49,6 @@
 #   doc1 = 1116.259 -> 1116
 #   doc2 = 590.862 -> 590
 #   ranked: doc1 > doc0 > doc2
-#
-# KNOWN BUGS designed around: no for-in over custom structs (index loops only);
-# `text + i64` garbage (we never build text). f64 untrusted (integer asserts).
-# ============================================================================
-
-use std.spec.step
-
-use std.spec
-use lib.common.search.types.{Score}
-use lib.common.search.ranking.{ScoredDoc, top_k, rank_all, bm25_score_default, tfidf_score, avg_doc_len_fixed}
 
 # avgdl in fixed-point for the hand corpus: 6 * 1_000_000.
 fn corpus_avgdl() -> i64:
@@ -66,6 +86,8 @@ fn repeated_ascii(count: i64) -> text:
 
 describe "bm25-fixed-v1 checked arithmetic":
     it "matches the hand-computed term intermediate vector exactly":
+        # @req REQ-LIB-RANK-001
+        # @capture(statistics): frozen paper-vector intermediates for tf=1, dl=6, total=18, N=3, df=2 retained for review
         step("Verify the frozen integer operation-order vector")
         # Independent paper vector for tf=1, dl=6, total=18, N=3, df=2:
         # avg=18*1e6/3=6000000; ratio=6*1e12/6000000=1000000;
@@ -74,67 +96,75 @@ describe "bm25-fixed-v1 checked arithmetic":
         # idf_arg=1e6+(6-4+1)*1e6/(4+1)=1600000;
         # seven-term fixed ln=469998; weighted at 1000 remains 469998.
         val trace = bm25_fixed_v1_term_checked(1, 6, 18, 3, 2, 1000).unwrap()
-        expect(trace.average_length_scaled).to_equal(6000000)
-        expect(trace.ratio_scaled).to_equal(1000000)
-        expect(trace.norm_scaled).to_equal(1000000)
-        expect(trace.denominator_scaled).to_equal(2200000)
-        expect(trace.tf_scaled).to_equal(1000000)
-        expect(trace.idf_argument_scaled).to_equal(1600000)
-        expect(trace.idf_scaled).to_equal(469998)
-        expect(trace.unweighted).to_equal(469998)
-        expect(trace.weighted).to_equal(469998)
+        expect(trace.average_length_scaled).to_equal(6000000)  # oracle: avg = 18*1e6/3 per the frozen paper vector above
+        expect(trace.ratio_scaled).to_equal(1000000)  # oracle: ratio = 6*1e12/6000000 per the frozen vector
+        expect(trace.norm_scaled).to_equal(1000000)  # oracle: norm = 250000+750000 per the frozen vector
+        expect(trace.denominator_scaled).to_equal(2200000)  # oracle: denom = norm + k1*norm = 1000000+1200000
+        expect(trace.tf_scaled).to_equal(1000000)  # oracle: tf_scaled = 1*2200000*1e6/2200000 per the frozen vector
+        expect(trace.idf_argument_scaled).to_equal(1600000)  # oracle: idf_arg = 1e6+(6-4+1)*1e6/(4+1) per the frozen vector
+        expect(trace.idf_scaled).to_equal(469998)  # oracle: seven-term fixed ln of the idf argument truncates to 469998
+        expect(trace.unweighted).to_equal(469998)  # oracle: unweighted equals the idf term at unit tf scaling
+        expect(trace.weighted).to_equal(469998)  # oracle: field weight 1000 keeps the internal value unchanged
 
     it "matches fixed-ln reduction boundary vectors":
+        # @req REQ-LIB-RANK-002
+        # @capture(statistics): fixed-point ln boundary results around 0.5, 1, 2, and i64 max retained for review
         step("Verify hardcoded p13-series boundary results")
-        expect(fixed_ln_checked(1).unwrap()).to_equal(0 - 13815508)
-        expect(fixed_ln_checked(499999).unwrap()).to_equal(0 - 693154)
-        expect(fixed_ln_checked(500000).unwrap()).to_equal(0 - 693147)
-        expect(fixed_ln_checked(500001).unwrap()).to_equal(0 - 693147)
-        expect(fixed_ln_checked(999999).unwrap()).to_equal(0 - 7)
-        expect(fixed_ln_checked(1000000).unwrap()).to_equal(0)
-        expect(fixed_ln_checked(1000001).unwrap()).to_equal(0)
-        expect(fixed_ln_checked(1999999).unwrap()).to_equal(693142)
-        expect(fixed_ln_checked(2000000).unwrap()).to_equal(693147)
-        expect(fixed_ln_checked(2000001).unwrap()).to_equal(693147)
-        expect(fixed_ln_checked(9223372036854775807).unwrap()).to_equal(29852751)
+        expect(fixed_ln_checked(1).unwrap()).to_equal(0 - 13815508)  # oracle: ln(1e-6)*1e6 truncated to -13815508
+        expect(fixed_ln_checked(499999).unwrap()).to_equal(0 - 693154)  # oracle: just below the 0.5 midpoint truncates to -693154
+        expect(fixed_ln_checked(500000).unwrap()).to_equal(0 - 693147)  # oracle: ln(0.5)*1e6 = -693147 exactly at the boundary
+        expect(fixed_ln_checked(500001).unwrap()).to_equal(0 - 693147)  # oracle: just above 0.5 still truncates to -693147
+        expect(fixed_ln_checked(999999).unwrap()).to_equal(0 - 7)  # oracle: p13-series residual at 1-1e-6 truncates to -7
+        expect(fixed_ln_checked(1000000).unwrap()).to_equal(0)  # oracle: ln(1) = 0 exactly
+        expect(fixed_ln_checked(1000001).unwrap()).to_equal(0)  # oracle: ln just above 1 truncates to 0 at the 1e6 scale
+        expect(fixed_ln_checked(1999999).unwrap()).to_equal(693142)  # oracle: just below 2 truncates to 693142, shy of ln2
+        expect(fixed_ln_checked(2000000).unwrap()).to_equal(693147)  # oracle: ln(2)*1e6 = 693147 exactly
+        expect(fixed_ln_checked(2000001).unwrap()).to_equal(693147)  # oracle: just above 2 truncates back to 693147
+        expect(fixed_ln_checked(9223372036854775807).unwrap()).to_equal(29852751)  # oracle: ln(i64max/1e6)*1e6 truncates to 29852751
 
     it "accepts both document-frequency boundaries":
+        # @req REQ-LIB-RANK-003
+        # @capture(statistics): idf intermediates at df=0 and df=N retained for review
         step("Verify df zero and df equal to N use frozen nonnegative IDF")
         val unseen = bm25_fixed_v1_term_checked(1, 1, 1, 1, 0, 1000).unwrap()
         val universal = bm25_fixed_v1_term_checked(1, 1, 1, 1, 1, 1000).unwrap()
-        expect(unseen.idf_argument_scaled).to_equal(4000000)
-        expect(unseen.idf_scaled).to_equal(1386294)
-        expect(universal.idf_argument_scaled).to_equal(1333333)
-        expect(universal.idf_scaled).to_equal(287678)
+        expect(unseen.idf_argument_scaled).to_equal(4000000)  # oracle: df=0 clamps the idf argument to the 4e6 unseen ceiling
+        expect(unseen.idf_scaled).to_equal(1386294)  # oracle: ln(4)*1e6 truncated = 1386294 for the clamped unseen term
+        expect(universal.idf_argument_scaled).to_equal(1333333)  # oracle: 1e6 + 1e6/3 truncates to 1333333 at df=N
+        expect(universal.idf_scaled).to_equal(287678)  # oracle: ln(4/3)*1e6 truncated = 287678
 
     it "pins every truncating BM25 division stage":
+        # @req REQ-LIB-RANK-004
+        # @capture(statistics): truncation results at every BM25 division stage retained for review
         step("Verify average, ratio, norm, TF, IDF, unweighted, and field weight truncation")
         # total*S/N truncates to 333333. Each following value is calculated
         # independently from the frozen integer formula, never from a scorer.
         val average_rounding = bm25_fixed_v1_term_checked(
             1, 1, 1, 3, 1, 2000).unwrap()
-        expect(average_rounding.average_length_scaled).to_equal(333333)
-        expect(average_rounding.ratio_scaled).to_equal(3000003)
-        expect(average_rounding.norm_scaled).to_equal(2500002)
-        expect(average_rounding.denominator_scaled).to_equal(4000002)
-        expect(average_rounding.tf_scaled).to_equal(549999)
-        expect(average_rounding.idf_argument_scaled).to_equal(2666666)
-        expect(average_rounding.idf_scaled).to_equal(980825)
-        expect(average_rounding.unweighted).to_equal(539452)
-        expect(average_rounding.weighted).to_equal(1078904)
+        expect(average_rounding.average_length_scaled).to_equal(333333)  # oracle: total*S/N = 1e6/3 truncates to 333333
+        expect(average_rounding.ratio_scaled).to_equal(3000003)  # oracle: dl*S/333333 = 1e12/333333 truncates to 3000003
+        expect(average_rounding.norm_scaled).to_equal(2500002)  # oracle: 0.25*1e6 + 0.75*3000003 truncates to 2500002
+        expect(average_rounding.denominator_scaled).to_equal(4000002)  # oracle: norm + k1*avg per the frozen integer formula = 4000002
+        expect(average_rounding.tf_scaled).to_equal(549999)  # oracle: tf*(k1+norm)/denominator truncates to 549999
+        expect(average_rounding.idf_argument_scaled).to_equal(2666666)  # oracle: 1e6+(2*3-2*1+1)*1e6/3 truncates to 2666666
+        expect(average_rounding.idf_scaled).to_equal(980825)  # oracle: seven-term fixed ln(2.666666) truncates to 980825
+        expect(average_rounding.unweighted).to_equal(539452)  # oracle: tf_scaled*idf_scaled/1e6 truncates to 539452
+        expect(average_rounding.weighted).to_equal(1078904)  # oracle: unweighted*2000/1000 truncates to 1078904
         # 1,906,155 * 2,500 / 1,000 = 4,765,387.5 -> 4,765,387.
         val weight_rounding = bm25_fixed_v1_term_checked(
             1, 1, 3, 1, 0, 2500).unwrap()
-        expect(weight_rounding.average_length_scaled).to_equal(3000000)
-        expect(weight_rounding.ratio_scaled).to_equal(333333)
-        expect(weight_rounding.norm_scaled).to_equal(499999)
-        expect(weight_rounding.denominator_scaled).to_equal(1599998)
-        expect(weight_rounding.tf_scaled).to_equal(1375001)
-        expect(weight_rounding.idf_scaled).to_equal(1386294)
-        expect(weight_rounding.unweighted).to_equal(1906155)
-        expect(weight_rounding.weighted).to_equal(4765387)
+        expect(weight_rounding.average_length_scaled).to_equal(3000000)  # oracle: dl=3 gives exactly 3*1e6
+        expect(weight_rounding.ratio_scaled).to_equal(333333)  # oracle: 1e12/3000000 truncates to 333333
+        expect(weight_rounding.norm_scaled).to_equal(499999)  # oracle: 0.25*1e6 + 0.75*333333 truncates to 499999
+        expect(weight_rounding.denominator_scaled).to_equal(1599998)  # oracle: norm + k1*avg per the frozen formula = 1599998
+        expect(weight_rounding.tf_scaled).to_equal(1375001)  # oracle: tf*(k1+norm)/denominator truncates to 1375001
+        expect(weight_rounding.idf_scaled).to_equal(1386294)  # oracle: df=0 clamp gives ln(4)*1e6 = 1386294
+        expect(weight_rounding.unweighted).to_equal(1906155)  # oracle: 1375001*1386294/1e6 truncates to 1906155
+        expect(weight_rounding.weighted).to_equal(4765387)  # oracle: 1906155*2500/1000 truncates to 4765387 per the inline computation
 
     it "accumulates fields before the sole final milli conversion":
+        # @req REQ-LIB-RANK-005
+        # @capture(statistics): two-field accumulated score in milli retained for review
         step("Verify field-order accumulation does not round each field")
         # Each official-weight-4000 field contributes internal 1,879,992.
         # One final conversion is (1,879,992 + 1,879,992) / 1000 = 3,759.
@@ -144,9 +174,11 @@ describe "bm25-fixed-v1 checked arithmetic":
         val title = Bm25FieldV1.of(
             "title", ["cat"], [1], [2], 6, 18, 3)
         val score = bm25_fixed_v1_score_checked([identifier, title]).unwrap()
-        expect(milli_of(score)).to_equal(3759)
+        expect(milli_of(score)).to_equal(3759)  # oracle: (1879992+1879992)/1000 = 3759 — one final conversion, not per-field 3758
 
     it "scores each distinct ordered term once and rejects duplicates":
+        # @req REQ-LIB-RANK-006
+        # @capture(statistics): dedup acceptance and duplicate-rejection verdicts retained for review
         step("Verify the pre-deduplicated query-term boundary")
         val unique = Bm25FieldV1.of(
             "body", ["cat", "dog"], [1, 2], [2, 2], 6, 18, 3)
@@ -161,17 +193,21 @@ describe "bm25-fixed-v1 checked arithmetic":
             "invalid_parallel_arrays")
 
     it "keeps absent terms at zero without evaluating invalid divisions":
+        # @req REQ-LIB-RANK-007
+        # @capture(statistics): zero-tf short-circuit intermediates and score retained for review
         step("Verify tf zero bypasses average and denominator evaluation")
         val direct = bm25_fixed_v1_term_checked(0, 0, 0, 0, 0, 1000).unwrap()
-        expect(direct.average_length_scaled).to_equal(0)
-        expect(direct.idf_argument_scaled).to_equal(0)
-        expect(direct.denominator_scaled).to_equal(0)
-        expect(direct.weighted).to_equal(0)
+        expect(direct.average_length_scaled).to_equal(0)  # oracle: tf=0 short-circuits before average evaluation
+        expect(direct.idf_argument_scaled).to_equal(0)  # oracle: tf=0 short-circuits before idf evaluation
+        expect(direct.denominator_scaled).to_equal(0)  # oracle: tf=0 short-circuits before denominator evaluation
+        expect(direct.weighted).to_equal(0)  # oracle: a zero-tf term contributes nothing to the score
         val absent = Bm25FieldV1.of(
             "body", ["cat"], [0], [0], 0, 0, 1)
-        expect(milli_of(bm25_fixed_v1_score_checked([absent]).unwrap())).to_equal(0)
+        expect(milli_of(bm25_fixed_v1_score_checked([absent]).unwrap())).to_equal(0)  # oracle: an all-zero-tf field scores exactly zero milli
 
     it "derives all five field weights in their closed order":
+        # @req REQ-LIB-RANK-008
+        # @capture(statistics): five-field accumulated score in milli retained for review
         step("Verify canonical field authority and ordered accumulation")
         val identifier = Bm25FieldV1.of(
             "identifier", ["cat"], [1], [2], 6, 18, 3)
@@ -187,9 +223,11 @@ describe "bm25-fixed-v1 checked arithmetic":
             identifier, title, heading, classification, body,
         ]).unwrap()
         # 469998 * (4 + 4 + 2.5 + 2 + 1) = 6344973 internal -> 6344.
-        expect(milli_of(score)).to_equal(6344)
+        expect(milli_of(score)).to_equal(6344)  # oracle: 469998*(4+4+2.5+2+1) = 6344973 internal -> 6344 milli per the inline computation
 
     it "enforces exact query-term count and UTF-8 byte bounds":
+        # @req REQ-LIB-RANK-009
+        # @capture(statistics): 128-term acceptance, 129-term and 4097-byte rejections retained for review
         step("Verify 128/129 and 4096/4097 scorer boundaries")
         val terms_128 = prefix_terms(128)
         val ones_128 = repeated_i64(1, 128)
@@ -197,7 +235,7 @@ describe "bm25-fixed-v1 checked arithmetic":
         val max_terms = Bm25FieldV1.of(
             "body", terms_128, ones_128, dfs_128, 128, 384, 3)
         expect(milli_of(bm25_fixed_v1_score_checked([max_terms]).unwrap())).to_equal(
-            60159)
+            60159)  # oracle: 128 distinct maximal terms accumulate to 60159 milli at the frozen boundary
         val terms_129 = prefix_terms(129)
         val zeros_129 = repeated_i64(0, 129)
         val too_many = Bm25FieldV1.of(
@@ -215,6 +253,8 @@ describe "bm25-fixed-v1 checked arithmetic":
             "limit_exceeded")
 
     it "accepts tf equal to document length and rejects one greater":
+        # @req REQ-LIB-RANK-010
+        # @capture(statistics): tf<=dl acceptance and tf>dl rejection verdicts retained for review
         step("Verify term-frequency field-length boundary")
         expect(bm25_fixed_v1_term_checked(
             1, 1, 1, 1, 1, 1000).is_ok()).to_equal(true)
@@ -223,6 +263,8 @@ describe "bm25-fixed-v1 checked arithmetic":
 
 describe "bm25-fixed-v1 deterministic failures":
     it "returns exact corpus, frequency, average, and logarithm codes":
+        # @req REQ-LIB-RANK-011
+        # @capture(statistics): typed domain-failure codes retained for review
         step("Verify domain failures are typed and stable")
         expect(bm25_fixed_v1_term_checked(
             1, 1, 1, 0, 0, 1000).unwrap_err()).to_equal("invalid_corpus_n")
@@ -243,6 +285,8 @@ describe "bm25-fixed-v1 deterministic failures":
                 "invalid_average_length")
 
     it "rejects array mismatch, noncanonical field order, and unknown weight":
+        # @req REQ-LIB-RANK-012
+        # @capture(statistics): structural rejection codes for mismatch, order, and unknown field retained for review
         step("Verify canonical structural boundaries")
         val mismatch = Bm25FieldV1.of(
             "body", ["cat"], [1, 2], [1], 1, 1, 1)
@@ -267,6 +311,8 @@ describe "bm25-fixed-v1 deterministic failures":
             [1], [1], 1, 1000000, 0).unwrap_err()).to_equal("invalid_corpus_n")
 
     it "fails closed at multiplication and average-sum boundaries":
+        # @req REQ-LIB-RANK-013
+        # @capture(statistics): overflow rejection codes at i64 boundaries retained for review
         step("Verify conceptual i128 values and corpus sums never wrap")
         expect(bm25_fixed_v1_term_checked(
             1, 1, 9223372036854775807, 1, 1, 1000).unwrap_err()).to_equal(
@@ -286,15 +332,19 @@ describe "bm25-fixed-v1 deterministic failures":
             [1], [1], 12, 1, 1).unwrap_err()).to_equal("score_overflow")
 
     it "keeps legacy checked signatures as a hardcoded compatibility vector":
+        # @req REQ-LIB-RANK-014
+        # @capture(statistics): legacy compatibility vector result and rejection retained for review
         step("Verify compatibility retains its independently computed result")
         val legacy = bm25_score_default_checked([1], [2], 6, 6000000, 3).unwrap()
-        expect(milli_of(legacy)).to_equal(469)
+        expect(milli_of(legacy)).to_equal(469)  # oracle: the frozen compatibility vector truncates to 469 milli
         expect(bm25_score_default_checked(
             [1], [1, 2], 2, 2000000, 2).unwrap_err()).to_equal(
                 "invalid_parallel_arrays")
 
 describe "bm25-fixed-v1 public-ID tie rule":
     it "orders score descending then unsigned UTF-8 document ID ascending":
+        # @req REQ-LIB-RANK-015
+        # @capture(statistics): score-then-bytewise-ID precedence verdicts retained for review
         step("Verify deterministic score and bytewise ID precedence")
         val tied = Score.from_milli(700)
         expect(bm25_fixed_v1_precedes(tied, "z", tied, "é")).to_equal(true)
@@ -307,34 +357,55 @@ describe "bm25-fixed-v1 public-ID tie rule":
 
 describe "avg_doc_len_fixed":
     it "computes a fixed-point mean (6.0 -> 6_000_000)":
-        expect(avg_doc_len_fixed([4, 6, 8])).to_equal(6000000)
+        # @req REQ-LIB-RANK-016
+        # @capture(statistics): fixed-point mean of the hand corpus lengths retained for review
+        step("average the hand corpus lengths in fixed point")
+        expect(avg_doc_len_fixed([4, 6, 8])).to_equal(6000000)  # oracle: (4+6+8)/3 = 6 scaled by the 1e6 fixed-point factor
 
     it "keeps fractional averages in fixed-point (5/2 = 2.5 -> 2_500_000)":
-        expect(avg_doc_len_fixed([2, 3])).to_equal(2500000)
+        # @req REQ-LIB-RANK-017
+        # @capture(statistics): truncated fractional mean retained for review
+        step("average lengths whose mean is fractional")
+        expect(avg_doc_len_fixed([2, 3])).to_equal(2500000)  # oracle: 5/2 = 2.5 scaled by 1e6 and truncated to 2500000
 
     it "is 0 for an empty corpus":
-        expect(avg_doc_len_fixed([])).to_equal(0)
+        # @req REQ-LIB-RANK-018
+        # @capture(statistics): empty-corpus mean retained for review
+        step("average an empty length list")
+        expect(avg_doc_len_fixed([])).to_equal(0)  # oracle: an empty corpus has no documents, so the mean is exactly zero
 
 describe "BM25 absolute-oracle scores (k1=1.2, b=0.75)":
     it "doc0 (cat x3, dog absent, dl=4) scores 795 milli":
+        # @req REQ-LIB-RANK-019
+        # @capture(statistics): doc0 absolute milli score retained for review
+        step("score doc0 from the hand corpus under the frozen BM25 parameters")
         # tfs aligned to query [cat, dog]; df aligned the same way.
         val s = bm25_score_default([3, 0], [2, 2], 4, corpus_avgdl(), 3)
-        expect(milli_of(s)).to_equal(795)
+        expect(milli_of(s)).to_equal(795)  # oracle: hand-computed true-math BM25 = 795.391 truncated to 795 (header vector)
 
     it "doc1 (cat x1, dog x2, dl=6) scores 1116 milli":
+        # @req REQ-LIB-RANK-020
+        # @capture(statistics): doc1 absolute milli score retained for review
+        step("score doc1 from the hand corpus under the frozen BM25 parameters")
         val s = bm25_score_default([1, 2], [2, 2], 6, corpus_avgdl(), 3)
-        expect(milli_of(s)).to_equal(1116)
+        expect(milli_of(s)).to_equal(1116)  # oracle: hand-computed true-math BM25 = 1116.259 truncated to 1116
 
     it "doc2 (cat absent, dog x2, dl=8) scores 590 milli":
+        # @req REQ-LIB-RANK-021
+        # @capture(statistics): doc2 absolute milli score retained for review
+        step("score doc2 from the hand corpus under the frozen BM25 parameters")
         val s = bm25_score_default([0, 2], [2, 2], 8, corpus_avgdl(), 3)
-        expect(milli_of(s)).to_equal(590)
+        expect(milli_of(s)).to_equal(590)  # oracle: hand-computed true-math BM25 = 590.862 truncated to 590
 
     it "a term absent in a doc contributes nothing (tf=0 term dropped)":
+        # @req REQ-LIB-RANK-022
+        # @capture(statistics): two-term vs cat-only score equality retained for review
+        step("score the same document with and without the absent dog term")
         # doc with only cat present must equal the same doc scored cat-only.
         val both = bm25_score_default([3, 0], [2, 2], 4, corpus_avgdl(), 3)
         val cat_only = bm25_score_default([3], [2], 4, corpus_avgdl(), 3)
         expect(milli_of(both)).to_equal(milli_of(cat_only))
-        expect(milli_of(cat_only)).to_equal(795)
+        expect(milli_of(cat_only)).to_equal(795)  # oracle: matches the doc0 absolute vector since the dropped term cannot move the score
 
 describe "TF-IDF absolute-oracle scores":
     # idf = ln(1 + (2N - 2df + 1)/(2df + 1)). For N=3, df=3:
@@ -344,67 +415,91 @@ describe "TF-IDF absolute-oracle scores":
     #   tf=1 -> 0.133531 -> 133 milli   (frac .531)
     #   tf=3 -> 0.400594 -> 400 milli   (frac .594)
     it "tf=1, df=3, N=3 -> 133 milli (ln(8/7))":
+        # @req REQ-LIB-RANK-023
+        # @capture(statistics): tf=1 TF-IDF milli score retained for review
+        step("score a single-occurrence term against the frozen corpus")
         val s = tfidf_score([1], [3], 3)
-        expect(milli_of(s)).to_equal(133)
+        expect(milli_of(s)).to_equal(133)  # oracle: ln(8/7)*1e3 truncated to 133 (frac .531) per the inline derivation
 
     it "tf=3, df=3, N=3 -> 400 milli (3 * ln(8/7))":
+        # @req REQ-LIB-RANK-024
+        # @capture(statistics): tf=3 TF-IDF milli score retained for review
+        step("score a triple-occurrence term against the frozen corpus")
         val s = tfidf_score([3], [3], 3)
-        expect(milli_of(s)).to_equal(400)
+        expect(milli_of(s)).to_equal(400)  # oracle: 3*ln(8/7) = 0.400594 truncated to 400 (frac .594)
 
     it "tf=0 contributes 0":
+        # @req REQ-LIB-RANK-025
+        # @capture(statistics): zero-tf TF-IDF score retained for review
+        step("score a term that never occurs in the document")
         val s = tfidf_score([0], [3], 3)
-        expect(milli_of(s)).to_equal(0)
+        expect(milli_of(s)).to_equal(0)  # oracle: tf=0 multiplies the idf by exactly zero
 
 describe "ranking order over the hand corpus":
     it "ranks doc1 > doc0 > doc2 by BM25 score":
+        # @req REQ-LIB-RANK-026
+        # @capture(statistics): ranked doc ids and absolute milli relevances retained for review
+        step("rank the full hand corpus and read back ids and scores")
         val avg = corpus_avgdl()
         val d0 = ScoredDoc.of(0, bm25_score_default([3, 0], [2, 2], 4, avg, 3))
         val d1 = ScoredDoc.of(1, bm25_score_default([1, 2], [2, 2], 6, avg, 3))
         val d2 = ScoredDoc.of(2, bm25_score_default([0, 2], [2, 2], 8, avg, 3))
         val ranked = rank_all([d0, d1, d2])
-        expect(ranked.len()).to_equal(3)
-        expect(ranked[0].doc_id()).to_equal(1)
-        expect(ranked[1].doc_id()).to_equal(0)
-        expect(ranked[2].doc_id()).to_equal(2)
+        expect(ranked.len()).to_equal(3)  # oracle: rank_all returns every corpus document exactly once
+        expect(ranked[0].doc_id()).to_equal(1)  # oracle: doc1 is the BM25 winner per the header ranking doc1 > doc0 > doc2
+        expect(ranked[1].doc_id()).to_equal(0)  # oracle: doc0 takes the middle rank per the header vector
+        expect(ranked[2].doc_id()).to_equal(2)  # oracle: doc2 ranks last per the header vector
         # exact scaled scores survive into the ranked output
-        expect(milli_of(ranked[0].relevance())).to_equal(1116)
-        expect(milli_of(ranked[1].relevance())).to_equal(795)
-        expect(milli_of(ranked[2].relevance())).to_equal(590)
+        expect(milli_of(ranked[0].relevance())).to_equal(1116)  # oracle: the ranked winner carries the doc1 absolute score 1116
+        expect(milli_of(ranked[1].relevance())).to_equal(795)  # oracle: the runner-up carries the doc0 absolute score 795
+        expect(milli_of(ranked[2].relevance())).to_equal(590)  # oracle: the last rank carries the doc2 absolute score 590
 
 describe "top_k selection over Score":
     it "returns the k best in ranked order":
+        # @req REQ-LIB-RANK-027
+        # @capture(statistics): top-2 doc ids from a four-document pool retained for review
+        step("select the two best of four scored documents")
         val a = ScoredDoc.of(10, Score.from_milli(500))
         val b = ScoredDoc.of(11, Score.from_milli(900))
         val c = ScoredDoc.of(12, Score.from_milli(700))
         val d = ScoredDoc.of(13, Score.from_milli(300))
         val r = top_k([a, b, c, d], 2)
-        expect(r.len()).to_equal(2)
-        expect(r[0].doc_id()).to_equal(11)
-        expect(r[1].doc_id()).to_equal(12)
+        expect(r.len()).to_equal(2)  # oracle: k=2 selects exactly two documents
+        expect(r[0].doc_id()).to_equal(11)  # oracle: milli 900 is the best score in the pool
+        expect(r[1].doc_id()).to_equal(12)  # oracle: milli 700 is the second-best score in the pool
 
     it "breaks ties by ascending id (deterministic, no stability reliance)":
+        # @req REQ-LIB-RANK-028
+        # @capture(statistics): tie-broken doc id order for three equal scores retained for review
+        step("tie three documents at 700 milli and read back the id order")
         # three docs share score 700; ids 5, 2, 9 must come out 2, 5, 9.
         val x = ScoredDoc.of(5, Score.from_milli(700))
         val y = ScoredDoc.of(2, Score.from_milli(700))
         val z = ScoredDoc.of(9, Score.from_milli(700))
         val r = top_k([x, y, z], 3)
-        expect(r.len()).to_equal(3)
-        expect(r[0].doc_id()).to_equal(2)
-        expect(r[1].doc_id()).to_equal(5)
-        expect(r[2].doc_id()).to_equal(9)
+        expect(r.len()).to_equal(3)  # oracle: k=3 keeps all three tied documents
+        expect(r[0].doc_id()).to_equal(2)  # oracle: tied scores order by ascending id, so 2 leads
+        expect(r[1].doc_id()).to_equal(5)  # oracle: id 5 follows in the ascending tie order
+        expect(r[2].doc_id()).to_equal(9)  # oracle: id 9 closes the ascending tie order
 
     it "mixed tie and ordering: top score wins, then id tie-break":
+        # @req REQ-LIB-RANK-029
+        # @capture(statistics): mixed pool order with a 900 pair and a 400 laggard retained for review
+        step("mix a tied top pair with a lower score and read back the order")
         val p = ScoredDoc.of(8, Score.from_milli(900))
         val q = ScoredDoc.of(3, Score.from_milli(900))
         val rr = ScoredDoc.of(1, Score.from_milli(400))
         val r = top_k([p, q, rr], 3)
-        expect(r[0].doc_id()).to_equal(3)
-        expect(r[1].doc_id()).to_equal(8)
-        expect(r[2].doc_id()).to_equal(1)
+        expect(r[0].doc_id()).to_equal(3)  # oracle: the 900 pair ties, then the id tie-break puts 3 ahead of 8
+        expect(r[1].doc_id()).to_equal(8)  # oracle: id 8 follows its tied partner after the tie-break
+        expect(r[2].doc_id()).to_equal(1)  # oracle: 400 milli is the lowest score in the pool
 
     it "k larger than corpus returns all, k=0 returns none":
+        # @req REQ-LIB-RANK-030
+        # @capture(statistics): result counts for oversized k, zero k, and empty corpus retained for review
+        step("probe top_k with oversized k, zero k, and an empty pool")
         val a = ScoredDoc.of(1, Score.from_milli(100))
         val b = ScoredDoc.of(2, Score.from_milli(200))
-        expect(top_k([a, b], 9).len()).to_equal(2)
-        expect(top_k([a, b], 0).len()).to_equal(0)
-        expect(top_k([], 3).len()).to_equal(0)
+        expect(top_k([a, b], 9).len()).to_equal(2)  # oracle: k=9 exceeds the two-document corpus, so both return
+        expect(top_k([a, b], 0).len()).to_equal(0)  # oracle: k=0 must select nothing
+        expect(top_k([], 3).len()).to_equal(0)  # oracle: an empty corpus yields zero results at any k

@@ -17,7 +17,10 @@ const baselineArgbIn = process.env.SIMPLE_WEB_ENGINE2D_BASELINE_ARGB_IN || "";
 let transportBaselinePixels = null;
 let transportBaselineLoaded = false;
 
-const html = "<html><body style='background-color: #112233'><div class='wm-app-titlebar' style='background-color: #445566; width: 80px; height: 40px'></div><main class='wm-app-content simple-web-accent'>image taskbar command</main></body></html>";
+// The per-scene fixture HTML lives in check-simple-web-engine2d-js-bitmap-evidence.shs
+// (its `main()` heredoc) and is the single source of truth; this oracle models the
+// resulting frames, never the markup. The former `html` const here was read only by
+// four no-op `includes`/`indexOf` statements in the removed fallthrough.
 const fontCharset = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 .,:;!?-_()[]/\\'\"+=#%&@*<>";
 
 function rect(pixels, x, y, w, h, color) {
@@ -80,19 +83,38 @@ function renderHtmlToPixels() {
   if (scene === "simple-web-engine2d-report-table-command") {
     return renderReportTableCommand();
   }
+  if (scene === "simple-web-engine2d-image-taskbar-command") {
+    return renderImageTaskbarCommand();
+  }
+  // Fail closed (2026-09-06). This used to fall through to a fabricated frame
+  // for ANY unrecognized scene, so a scene name that no branch handles was
+  // silently compared against fiction instead of being reported. A baseline
+  // for a scene this oracle does not model is absence of evidence.
+  throw new Error(`unsupported scene: ${scene}`);
+}
+
+// Oracle for `simple-web-engine2d-image-taskbar-command`, authored from the
+// fixture HTML itself (see check-simple-web-engine2d-js-bitmap-evidence.shs):
+//   body  background-color #112233
+//   div.wm-app-titlebar  background-color #445566, width 80px, height 40px,
+//                        at the default 8px body margin => (8,8)-(87,47)
+//   main.wm-app-content  text, drawn below the div
+//
+// Superseded palette (2026-09-06): this used to paint #112233 and the #445566
+// titlebar and then cover the WHOLE canvas with rect(0,0,w,24,#2050A0) +
+// rect(0,24,w,h-24,#182230), so both were dead stores and neither appeared in
+// the output. Those two bands are the WM compositor's chrome palette from
+// src/os/compositor/hosted_wm_capture_evidence.spl (a full-width 24px #2050a0
+// titlebar over #182230) — a different renderer and a different scene. The
+// Simple engine2d path deleted its wm-app substring heuristic and now routes
+// this HTML through the real CSS layout/paint engine, which paints the body
+// background and the 80x40 titlebar box for real.
+// Measured against that path (96x64, backend "software", Rust-seed
+// interpreter): before this fix all 6144 of 6144 pixels mismatched.
+function renderImageTaskbarCommand() {
   const pixels = new Uint32Array(width * height);
-
-  // Match the Simple web renderer's recognized Engine2D heuristic for this
-  // scene: body background, first block, WM titlebar, then WM content.
-  html.includes("wm-app-titlebar");
-  html.indexOf("background-color");
-  html.includes("wm-app-content");
-  html.includes("simple-web-accent");
-
   pixels.fill(0xFF112233 >>> 0);
   rect(pixels, 8, 8, 80, 40, 0xFF445566);
-  rect(pixels, 0, 0, width, 24, 0xFF2050A0);
-  rect(pixels, 0, 24, width, height - 24, 0xFF182230);
   return pixels;
 }
 

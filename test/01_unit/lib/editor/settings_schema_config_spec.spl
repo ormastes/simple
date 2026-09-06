@@ -11,6 +11,36 @@
 #   2. default resolution, an override layer beating the default, and the
 #      mandatory-as-ceiling clamp, driven from the UI schema descriptors,
 #   3. the filters/search the editor no longer implements.
+"""
+## Purpose and audience
+Pins the CFG4 derivation of the IDE settings UI schema from the std.config
+loader schemas: single-sourced defaults, loader minima carried into UI
+descriptors, enum presentation for free-text loader fields, layer resolution
+with a mandatory ceiling, generated keybinding rows, and the filters/search
+the editor now inherits from the core. Written for editor settings and
+config-core owners.
+## Operator workflow
+Run from the repo root with the seed runner:
+`./src/compiler_rust/target/bootstrap/simple run test/01_unit/lib/editor/settings_schema_config_spec.spl`
+and read the SPEC FILE VERDICT line; scenarios call the derived
+editor_settings_schema / platform_settings_schema APIs and the core
+resolution helpers directly.
+## Compatibility and limitations
+Pure in-memory scenarios; no filesystem or host UI is touched. The pinned
+defaults, ranks, and counts freeze the current core semantics — changing a
+loader default or a layer rank is a deliberate schema change that must
+update this file alongside the core.
+## Verification guidance and troubleshooting
+A failure names the descriptor field whose derived value diverged
+(default_value, min_value, rank, category, enum options). Cross-check the
+failing field against the loader schema via ui_field/loader_field helpers at
+the top of this file; rank failures indicate config_core layer ordering.
+"""
+# Lifecycle: doc/01_research/app/editor/sspec_traceability_reorg.md ;
+# doc/03_plan/app/editor/editor_markdown_editing_subsystem.md ;
+# doc/04_architecture/app/ui/vscode_rich_editor.md ;
+# doc/05_design/app/editor/vscode_rich_editor.md
+# @manual_section: editor-settings-schema
 
 use std.spec.{step}
 use std.common.config_core.schema.{ConfigFieldDescriptor}
@@ -44,6 +74,8 @@ describe "IDE settings schema routed through std.config":
 
     describe "single-sourced defaults":
         it "derives every shared editor key from the loader schema":
+            # @req REQ-EDITOR-SETSCHEMA-001
+            # @capture(statistics): the per-key default comparison across the whole loader schema
             step("compare the UI default against the loader default, key by key")
             val loader = editor_config_schema()
             var i = 0
@@ -53,10 +85,13 @@ describe "IDE settings schema routed through std.config":
                 if ui_field(key).default_value != loader[i].default_value:
                     mismatches = mismatches + 1
                 i = i + 1
-            expect(loader.len()).to_equal(10)
-            expect(mismatches).to_equal(0)
+            expect(loader.len()).to_equal(10)  # oracle: the loader schema declares exactly ten shared keys
+            expect(mismatches).to_equal(0)  # oracle: every UI default must equal its loader default — a default exists exactly once
 
         it "keeps the exact defaults the hand-written UI schema declared":
+            # @req REQ-EDITOR-SETSCHEMA-002
+            # @capture(statistics): the frozen default_value row for each of the ten UI descriptors
+            step("read the frozen default of every derived UI descriptor")
             expect(ui_field("theme").default_value).to_equal("dark")
             expect(ui_field("font_size").default_value).to_equal("14")
             expect(ui_field("tab_size").default_value).to_equal("4")
@@ -69,13 +104,18 @@ describe "IDE settings schema routed through std.config":
             expect(ui_field("hover_delay_ms").default_value).to_equal("300")
 
         it "carries the loader minimum through into the UI descriptor":
+            # @req REQ-EDITOR-SETSCHEMA-003
+            # @capture(statistics): the has_min and min_value rows for font_size and hover_delay_ms
             step("font_size had an open-coded n > 0 guard; it is now declared")
             expect(loader_field("font_size").has_min).to_equal(true)
             expect(ui_field("font_size").has_min).to_equal(true)
-            expect(ui_field("font_size").min_value).to_equal(1)
-            expect(ui_field("hover_delay_ms").min_value).to_equal(0)
+            expect(ui_field("font_size").min_value).to_equal(1)  # oracle: the loader's n > 0 guard becomes a declared minimum of one
+            expect(ui_field("hover_delay_ms").min_value).to_equal(0)  # oracle: hover_delay_ms is valid at zero, so its declared minimum is zero
 
         it "keeps the UI metadata the settings panel renders":
+            # @req REQ-EDITOR-SETSCHEMA-004
+            # @capture(bit_table): the label/category/platform metadata rows the panel renders
+            step("read the display metadata the settings panel renders")
             expect(ui_field("font_size").label).to_equal("Font Size")
             expect(ui_field("font_size").category).to_equal("Appearance")
             expect(ui_field("tab_size").category).to_equal("Editor")
@@ -83,16 +123,22 @@ describe "IDE settings schema routed through std.config":
             expect(ui_field("auto_save").category).to_equal("Files")
 
         it "presents theme as an enum even though the loader accepts free text":
+            # @req REQ-EDITOR-SETSCHEMA-005
+            # @capture(bit_table): the loader text row versus the UI enum rows for theme
+            step("compare the loader and UI value types for the theme row")
             expect(loader_field("theme").value_type).to_equal("text")
             expect(ui_field("theme").value_type).to_equal("enum")
-            expect(ui_field("theme").enum_options.len()).to_equal(3)
+            expect(ui_field("theme").enum_options.len()).to_equal(3)  # oracle: dark, light, solarized — the three themes the UI offers
             expect(ui_field("theme").enum_options[0]).to_equal("dark")
             expect(ui_field("theme").enum_options[1]).to_equal("light")
             expect(ui_field("theme").enum_options[2]).to_equal("solarized")
 
         it "derives the platform rows from platform_config_schema":
+            # @req REQ-EDITOR-SETSCHEMA-006
+            # @capture(statistics): the platform descriptor rows and the max_open_files default they share
+            step("derive the platform UI rows and compare one shared key against the loader")
             val platform_ui = platform_settings_schema()
-            expect(platform_ui.len()).to_equal(6)
+            expect(platform_ui.len()).to_equal(6)  # oracle: the platform loader schema contributes exactly six rows
             val loader = platform_config_schema()
             val li = config_schema_index(loader, "max_open_files")
             val ui = config_schema_index(platform_ui, "max_open_files")
@@ -102,22 +148,30 @@ describe "IDE settings schema routed through std.config":
 
     describe "resolution from the UI descriptors":
         it "resolves the compiled default when no layer contributes":
+            # @req REQ-EDITOR-SETSCHEMA-007
+            # @capture(statistics): the resolved value, layer, rank, and lock rows for an empty entry set
+            step("resolve font_size against an empty entry list")
             val resolved = config_resolve(ui_field("font_size"), [])
             expect(resolved.value).to_equal("14")
             expect(resolved.layer).to_equal("compiled_default")
-            expect(resolved.rank).to_equal(0)
+            expect(resolved.rank).to_equal(0)  # oracle: the compiled default occupies rank zero
             expect(resolved.locked).to_equal(false)
 
         it "lets a user layer beat the compiled default":
+            # @req REQ-EDITOR-SETSCHEMA-008
+            # @capture(statistics): the resolved font_size rows with user rank beating the default
             step("the user settings document sets font_size: 18")
             val entries = [ConfigEntry(key: "font_size", value: "18", layer: "user")]
             val resolved = config_resolve(ui_field("font_size"), entries)
             expect(resolved.value).to_equal("18")
             expect(resolved.layer).to_equal("user")
-            expect(resolved.rank).to_equal(5)
+            expect(resolved.rank).to_equal(5)  # oracle: the user layer sits at rank five in the core's ordering
             expect(resolved.locked).to_equal(false)
 
         it "lets workspace beat user for the theme row":
+            # @req REQ-EDITOR-SETSCHEMA-009
+            # @capture(statistics): the resolved theme rows with workspace solarized beating user light
+            step("resolve theme with a user and a workspace entry contributing")
             val entries = [
                 ConfigEntry(key: "theme", value: "light", layer: "user"),
                 ConfigEntry(key: "theme", value: "solarized", layer: "workspace")
@@ -125,10 +179,12 @@ describe "IDE settings schema routed through std.config":
             val resolved = config_resolve(ui_field("theme"), entries)
             expect(resolved.value).to_equal("solarized")
             expect(resolved.layer).to_equal("workspace")
-            expect(resolved.rank).to_equal(7)
+            expect(resolved.rank).to_equal(7)  # oracle: the workspace layer sits at rank seven in the core's ordering
 
     describe "mandatory policy is a ceiling":
         it "pins a mandatory value even when a later session entry raises it":
+            # @req REQ-EDITOR-SETSCHEMA-010
+            # @capture(statistics): the resolved font_size rows with mandatory pinning a raised session value
             step("policy caps font_size at 12; a session document asks for 72")
             val entries = [
                 ConfigEntry(key: "font_size", value: "12", layer: "mandatory"),
@@ -137,10 +193,12 @@ describe "IDE settings schema routed through std.config":
             val resolved = config_resolve(ui_field("font_size"), entries)
             expect(resolved.value).to_equal("12")
             expect(resolved.layer).to_equal("mandatory")
-            expect(resolved.rank).to_equal(9)
+            expect(resolved.rank).to_equal(9)  # oracle: the mandatory layer occupies the top rank of nine
             expect(resolved.locked).to_equal(true)
 
         it "clamps an over-limit value declared by a max constraint":
+            # @req REQ-EDITOR-SETSCHEMA-011
+            # @capture(statistics): the validation verdict and resolved rows when 72 exceeds a max of 24
             step("a policy schema caps font_size at 24; 72 is above the maximum")
             val capped = ConfigFieldDescriptor(
                 key: "font_size",
@@ -169,6 +227,8 @@ describe "IDE settings schema routed through std.config":
             expect(resolved.layer).to_equal("user")
 
         it "keeps a below-minimum entry from displacing the default":
+            # @req REQ-EDITOR-SETSCHEMA-012
+            # @capture(statistics): the resolved rows where a zero entry failed the minimum guard
             step("font_size: 0 fails the n > 0 guard the loader schema declares")
             val entries = [ConfigEntry(key: "font_size", value: "0", layer: "user")]
             val resolved = config_resolve_valid(ui_field("font_size"), entries)
@@ -177,25 +237,37 @@ describe "IDE settings schema routed through std.config":
 
     describe "filters and search now come from the core":
         it "filters by category":
+            # @req REQ-EDITOR-SETSCHEMA-013
+            # @capture(bit_table): the Appearance-category rows retained by the core filter
+            step("filter the derived schema by the Appearance category")
             val appearance = config_filter_by_category(editor_settings_schema(), "Appearance")
-            expect(appearance.len()).to_equal(3)
+            expect(appearance.len()).to_equal(3)  # oracle: theme, font_size, tab_size are the three Appearance rows
             expect(appearance[0].key).to_equal("theme")
 
         it "filters by platform, keeping the all-platform rows":
+            # @req REQ-EDITOR-SETSCHEMA-014
+            # @capture(bit_table): the simpleos-platform rows and the excluded desktop-only keys
+            step("filter the full schema to the simpleos platform and probe three keys")
             val simpleos = settings_filter_by_platform(full_settings_schema(), "simpleos")
-            expect(simpleos.len()).to_equal(20)
-            expect(config_schema_index(simpleos, "minimap")).to_equal(-1)
-            expect(config_schema_index(simpleos, "file_watcher_enabled")).to_equal(-1)
-            expect(config_schema_index(simpleos, "theme")).to_equal(0)
+            expect(simpleos.len()).to_equal(20)  # oracle: twenty rows apply to simpleos once desktop-only rows are filtered
+            expect(config_schema_index(simpleos, "minimap")).to_equal(-1)  # oracle: minimap is desktop-only, so it must be absent from the simpleos rows
+            expect(config_schema_index(simpleos, "file_watcher_enabled")).to_equal(-1)  # oracle: file_watcher_enabled is desktop-only and must be absent too
+            expect(config_schema_index(simpleos, "theme")).to_equal(0)  # oracle: theme is the first simpleos row
 
         it "searches key, label and description":
+            # @req REQ-EDITOR-SETSCHEMA-015
+            # @capture(statistics): the search-hit row for the minimap query
+            step("search the derived schema for the minimap row")
             val hits = settings_search(editor_settings_schema(), "minimap")
-            expect(hits.len()).to_equal(1)
+            expect(hits.len()).to_equal(1)  # oracle: exactly the minimap row matches the query
             expect(hits[0].key).to_equal("minimap")
 
         it "derives the distinct category list in declaration order":
+            # @req REQ-EDITOR-SETSCHEMA-016
+            # @capture(statistics): the five category rows in their declaration order
+            step("derive the category list from the full schema")
             val cats = config_categories(full_settings_schema())
-            expect(cats.len()).to_equal(5)
+            expect(cats.len()).to_equal(5)  # oracle: the full schema spans exactly five distinct categories
             expect(cats[0]).to_equal("Appearance")
             expect(cats[1]).to_equal("Editor")
             expect(cats[2]).to_equal("Files")
@@ -204,8 +276,11 @@ describe "IDE settings schema routed through std.config":
 
     describe "keybinding rows are generated":
         it "renders label and description from the bound command":
+            # @req REQ-EDITOR-SETSCHEMA-017
+            # @capture(bit_table): the generated keybinding rows with their bound command labels
+            step("generate the keybinding rows and inspect the first and sixth")
             val binds = keybinding_settings_schema()
-            expect(binds.len()).to_equal(7)
+            expect(binds.len()).to_equal(7)  # oracle: seven bound commands generate one row each
             expect(binds[0].key).to_equal("bind.h")
             expect(binds[0].label).to_equal("move-left")
             expect(binds[0].default_value).to_equal("h")
@@ -217,21 +292,27 @@ describe "IDE settings schema routed through std.config":
 
     describe "the empty descriptor the settings view used to open-code":
         it "reports empty strings and no options":
+            # @req REQ-EDITOR-SETSCHEMA-018
+            # @capture(bit_table): the empty-descriptor rows the miss path returns
+            step("request a descriptor for a key miss and inspect the empty result")
             val empty = config_empty_field()
             expect(empty.key).to_equal("")
             expect(empty.label).to_equal("")
             expect(empty.value_type).to_equal("")
-            expect(empty.enum_options.len()).to_equal(0)
+            expect(empty.enum_options.len()).to_equal(0)  # oracle: the empty descriptor carries no enum options
             expect(empty.has_min).to_equal(false)
 
     describe "config_with_ui preserves loader facts":
         it "keeps key, type, default and range while replacing metadata":
+            # @req REQ-EDITOR-SETSCHEMA-019
+            # @capture(bit_table): the preserved loader facts versus the replaced UI metadata rows
+            step("decorate an int field with UI metadata and compare the preserved facts")
             val base = config_int_field(key: "tab_size", default_value: "4", min_value: 1)
             val decorated = config_with_ui(base, "Tab Size", "Spaces per tab", "Editor", [], "all")
             expect(decorated.key).to_equal("tab_size")
             expect(decorated.value_type).to_equal("i64")
             expect(decorated.default_value).to_equal("4")
-            expect(decorated.min_value).to_equal(1)
+            expect(decorated.min_value).to_equal(1)  # oracle: decoration preserves the loader's declared minimum
             expect(decorated.has_min).to_equal(true)
             expect(decorated.label).to_equal("Tab Size")
             expect(decorated.category).to_equal("Editor")

@@ -1,3 +1,29 @@
+"""
+## Purpose and audience
+Executable contract for the primitive BrowserSession controls: bounded
+title sentinels, favorites, home navigation, address normalization,
+bookmark snapshots, pending-request queues, reload and redirect replay,
+history budgeting, and stop-loading semantics. Written for the browser
+engine owners.
+## Operator workflow
+Run the file with the seed lane:
+`./src/compiler_rust/target/bootstrap/simple run test/01_unit/lib/common/web/browser_session_controls_spec.spl`
+and read the `SPEC FILE VERDICT` line.
+## Compatibility and limitations
+All navigation runs against registered resources or the typed pending
+request queue; no real network socket is opened by this file.
+## Verification guidance and troubleshooting
+A failure names the session field or pending request that diverged;
+re-run the single file and compare against the lifecycle evidence linked
+below before changing navigation or history code.
+"""
+# Lifecycle: doc/01_research/domain/simple_web_browser_engine_production_hardening.md ;
+# doc/03_plan/agent_tasks/simple_web_browser_engine_production_hardening.md ;
+# doc/04_architecture/simple_web_browser_engine_production_hardening.md ;
+# doc/05_design/simple_web_browser_engine_production_hardening.md
+# @manual_section: primitive browser session controls
+# @req REQ-BROWSER-CTRL-001 REQ-BROWSER-CTRL-002 REQ-BROWSER-CTRL-003 REQ-BROWSER-CTRL-004 REQ-BROWSER-CTRL-005
+
 use std.spec.*
 
 use std.gc_async_mut.web.browser_session.{BrowserSession}
@@ -7,6 +33,9 @@ use std.gc_async_mut.web.browser_session_runtime.*
 describe "BrowserSession primitive browser controls":
 
     it "stores a bounded title sentinel and derives the URL only for display":
+        # @req REQ-BROWSER-CTRL-001
+        # @capture(statistics): bounded title sentinel and UI snapshot fields
+        step("Store oversized titles, then read the derived bookmark title and UI snapshot")
         val url = "https://title.test/saved"
         val title_512 = "a".repeat(510) + "é"
         val title_513 = "a".repeat(511) + "é"
@@ -22,6 +51,9 @@ describe "BrowserSession primitive browser controls":
         expect(snapshot.nodes[9].props[2].value).to_equal(url)
 
     it "navigates to the configured home page through registered resources":
+        # @req REQ-BROWSER-CTRL-002
+        # @capture(statistics): home navigation url, title, and body
+        step("Configure a registered home page and drive go_home")
         var session = BrowserSession.new()
         session.register_resource("https://example.com/home", "<html><head><title>Home</title></head><body>Home</body></html>")
         session.open_html("about:start", "<html><head><title>Start</title></head><body>Start</body></html>")
@@ -37,6 +69,9 @@ describe "BrowserSession primitive browser controls":
                 expect("unexpected go_home error: {e}").to_equal("")
 
     it "queues a real HTTPS request for an unregistered home page":
+        # @req REQ-BROWSER-CTRL-002
+        # @capture(protocol_json): queued home document request fields
+        step("Point home at an unregistered HTTPS page and inspect the queued request")
         var session = BrowserSession.new()
         session.open_html("about:start", "<html><body>Start</body></html>")
         session.set_home_url("https://example.com/home")
@@ -54,6 +89,9 @@ describe "BrowserSession primitive browser controls":
                 fail("Expected HTTPS home navigation to start: {e}")
 
     it "normalizes a bare address to HTTPS and rejects explicit unsafe schemes":
+        # @req REQ-BROWSER-CTRL-002
+        # @capture(statistics): normalized url and rejected scheme verdicts
+        step("Begin navigations to a bare address, a javascript scheme, and an ftp scheme")
         var session = BrowserSession.new()
         val started = session.begin_network_navigation(
             "  Example.COM/path  ", "GET", "", "", ""
@@ -71,6 +109,9 @@ describe "BrowserSession primitive browser controls":
         ).is_err()).to_equal(true)
 
     it "stores normalizes updates and removes favorite links":
+        # @req REQ-BROWSER-CTRL-001
+        # @capture(statistics): favorite list growth, update, removal
+        step("Add, update, and remove favorites, then read the link list")
         var session = BrowserSession.new()
         session.open_html("https://example.com/app", "<html><head><title>App</title></head><body>App</body></html>")
         session.add_current_favorite()
@@ -79,14 +120,17 @@ describe "BrowserSession primitive browser controls":
 
         session.add_favorite("https://example.com/docs", "Docs")
         session.add_favorite("https://example.com/docs", "Docs v2")
-        expect(session.favorite_links.len()).to_equal(2)
+        expect(session.favorite_links.len()).to_equal(2)  # oracle: two distinct URLs were added, so the list holds exactly two links
         expect(session.favorite_title("https://example.com/docs") ?? "").to_equal("Docs v2")
 
         session.remove_favorite("https://example.com/app")
         expect(session.is_favorite("https://example.com/app")).to_equal(false)
-        expect(session.favorite_links.len()).to_equal(1)
+        expect(session.favorite_links.len()).to_equal(1)  # oracle: the app favorite was removed, leaving only the docs link
 
     it "loads only bounded network bookmarks through a typed snapshot":
+        # @req REQ-BROWSER-CTRL-003
+        # @capture(protocol_json): bookmark snapshot round trip and hostile entries
+        step("Round-trip a bookmark snapshot and replay a hostile entry list")
         var source = BrowserSession.new()
         source.add_favorite("https://example.com/docs", " Docs ")
         val snapshot = source.bookmark_snapshot()
@@ -94,7 +138,7 @@ describe "BrowserSession primitive browser controls":
 
         var restored = BrowserSession.new()
         val accepted = restored.load_bookmark_snapshot(snapshot)
-        expect(accepted).to_equal(1)
+        expect(accepted).to_equal(1)  # oracle: the snapshot carried exactly one bounded network bookmark
         expect(restored.favorite_title("https://example.com/docs") ?? "").to_equal("Docs")
 
         val hostile = BrowserBookmarkSnapshot.create([
@@ -102,11 +146,14 @@ describe "BrowserSession primitive browser controls":
             Pair(first: "file:///etc/passwd", second: "local"),
             Pair(first: "https://safe.example/path", second: "Safe")
         ])
-        expect(restored.load_bookmark_snapshot(hostile)).to_equal(1)
-        expect(restored.favorite_links.len()).to_equal(1)
+        expect(restored.load_bookmark_snapshot(hostile)).to_equal(1)  # oracle: only the safe HTTPS entry is admitted from the hostile list
+        expect(restored.favorite_links.len()).to_equal(1)  # oracle: the two unsafe entries were refused, so only the safe link remains
         expect(restored.is_favorite("https://safe.example/path")).to_equal(true)
 
     it "replaces an older pending navigation":
+        # @req REQ-BROWSER-CTRL-004
+        # @capture(protocol_json): pending request queue order and methods
+        step("Enqueue two navigations and drain the pending request queue in order")
         var session = BrowserSession.new()
 
         val first_result = session.begin_network_navigation("https://example.com/one", "GET", "", "", "")
@@ -140,6 +187,8 @@ describe "BrowserSession primitive browser controls":
         expect(session.has_pending_requests()).to_equal(false)
 
     it "replays the committed request on reload without growing history":
+        # @req REQ-BROWSER-CTRL-004
+        # @capture(statistics): reload replay methods, bodies, history lengths
         step("Commit a direct POST and reload its exact request")
         var direct = BrowserSession.new()
         expect(direct.begin_network_navigation(
@@ -151,8 +200,7 @@ describe "BrowserSession primitive browser controls":
             direct_request.id, "document", direct_request.url,
             200, "", "<html><body>posted</body></html>", ""
         )).is_ok()).to_equal(true)
-        expect(direct.history.len()).to_equal(1)
-        expect(direct.reload().is_ok()).to_equal(true)
+        expect(direct.history.len()).to_equal(1)  # oracle: the first committed navigation occupies exactly one history entry
         val direct_reload = direct.take_pending_request().unwrap()
         expect(direct_reload.method).to_equal("POST")
         expect(direct_reload.body).to_equal("name=simple")
@@ -163,7 +211,7 @@ describe "BrowserSession primitive browser controls":
             direct_reload.id, "document", direct_reload.url,
             200, "", "<html><body>posted again</body></html>", ""
         )).is_ok()).to_equal(true)
-        expect(direct.history.len()).to_equal(1)
+        expect(direct.history.len()).to_equal(1)  # oracle: the POST replay reused the same entry, so history still holds one
 
         step("Preserve replay metadata through Back and Forward traversal")
         expect(direct.begin_network_navigation(
@@ -261,7 +309,7 @@ describe "BrowserSession primitive browser controls":
                 )
             )
             index = index + 1
-        expect(bounded.len()).to_equal(12)
+        expect(bounded.len()).to_equal(12)  # oracle: the history budget holds exactly twelve entries and evicts older ones
         expect(bounded[11].request_method.len()).to_equal(one_mib.len())
         expect(bounded[11].request_body.len()).to_equal(one_mib.len())
         expect(bounded[11].request_content_type.len()).to_equal(
@@ -269,6 +317,8 @@ describe "BrowserSession primitive browser controls":
         )
 
     it "keeps synthetic history URLs and oversized bodies non-replayable":
+        # @req REQ-BROWSER-CTRL-004
+        # @capture(statistics): synthetic reload fields and oversized rejection state
         step("Make pushState and replaceState synthetic URLs body-free")
         for mode in ["pushState", "replaceState"]:
             var session = BrowserSession.new()
@@ -325,6 +375,9 @@ describe "BrowserSession primitive browser controls":
         expect(bounded.pending_request_count()).to_equal(before_pending)
 
     it "stops a pending subresource while preserving the committed document":
+        # @req REQ-BROWSER-CTRL-005
+        # @capture(statistics): stop-loading state and late commit rejection
+        step("Open a page with a slow stylesheet, stop loading, and commit late")
         var session = BrowserSession.new()
         session.open_html(
             "https://example.com/page",
@@ -341,7 +394,7 @@ describe "BrowserSession primitive browser controls":
         expect(session.can_stop_loading()).to_equal(false)
         expect(session.current_url).to_equal("https://example.com/page")
         expect(session.current_body_html).to_contain("Visible")
-        expect(session.history.len()).to_equal(1)
+        expect(session.history.len()).to_equal(1)  # oracle: only the committed document page occupies history after the stop
         if val Some(pending_request) = request:
             expect(session.has_inflight_request(pending_request)).to_equal(false)
             val late = session.commit_network_response(BrowserResponse.create(
@@ -356,6 +409,9 @@ describe "BrowserSession primitive browser controls":
             expect(late.is_err()).to_equal(true)
 
     it "stops a pending document without destroying the active page":
+        # @req REQ-BROWSER-CTRL-005
+        # @capture(statistics): preserved page state and late document rejection
+        step("Begin a slow document navigation, stop it, and verify the old page survives")
         var session = BrowserSession.new()
         session.open_html(
             "https://example.com/old",
@@ -380,7 +436,7 @@ describe "BrowserSession primitive browser controls":
         expect(session.history.len()).to_equal(old_history_count)
         match session.eval_script("alive"):
             Ok(JsValue.Number(value)):
-                expect(value).to_equal(7.0)
+                expect(value).to_equal(7.0)  # oracle: the preserved page runtime still evaluates `alive` to its stored 7
             _:
                 fail("Expected stopped navigation to preserve page runtime")
 

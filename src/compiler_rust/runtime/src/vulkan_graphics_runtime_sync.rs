@@ -41,7 +41,17 @@ pub extern "C" fn rt_vulkan_create_fence() -> i64 {
 #[cfg(feature = "vulkan")]
 pub extern "C" fn rt_vulkan_destroy_fence(fence: i64) -> i64 {
     let mut state = STATE.lock();
-    if state.fences.remove(&fence).is_some() {
+    if let Some(owned) = state.fences.remove(&fence) {
+        // The caller's handle is revoked either way; what differs is whether
+        // the vk::Fence underneath is destroyed now or retained for the next
+        // submission. `vkDestroyFence` measured ~700us on NVIDIA GB10 and this
+        // runs twice per Engine2D frame, so retaining a SIGNALLED fence is
+        // worth an explicit branch. `release_fence` itself refuses anything
+        // still unsignalled, which then falls out of scope and is destroyed
+        // exactly as before.
+        if let Ok(device) = state.require_device() {
+            device.release_fence(owned);
+        }
         return 1;
     }
     // A no-wait submit's fence is owned by the quarantine and must NOT be

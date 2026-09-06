@@ -60,9 +60,23 @@ fi
 ${CC:-cc} -O2 -Wall -Wextra -Werror "$ROOT/test/09_baselines/engine2d_vulkan/engine2d_vulkan_font_8k_bench.c" \
     -L"$ROOT/src/compiler_rust/target/release" -lsimple_runtime \
     -Wl,-rpath,"$ROOT/src/compiler_rust/target/release" $PLATFORM_LIBS -o "$BUILD_DIR/bench"
+bench_rc=0
 run_with_icd "$BUILD_DIR/bench" "$BUILD_DIR/font.spv" "$GLYPHS" "$SAMPLES" "$MODE" > "$BUILD_DIR/receipt.env" 2>&1 || bench_rc=$?
-grep -q '^engine2d_vulkan_font_mismatch_count=0$' "$BUILD_DIR/receipt.env"
-grep -q '^engine2d_vulkan_font_timed_readback_bytes=0$' "$BUILD_DIR/receipt.env"
+if [ "$bench_rc" -ne 0 ]; then
+    echo "engine2d_vulkan_font_status=fail reason=bench-exit-$bench_rc"
+    echo "FAIL — bench exited $bench_rc; receipt has $(wc -l < "$BUILD_DIR/receipt.env") line(s)"
+    exit 1
+fi
+grep -q '^engine2d_vulkan_font_mismatch_count=0$' "$BUILD_DIR/receipt.env" || {
+    echo "engine2d_vulkan_font_status=fail reason=receipt-invariant-engine2d_vulkan_font_mismatch_count"
+    echo "FAIL — receipt invariant engine2d_vulkan_font_mismatch_count not satisfied at ${WIDTH:-7680}x${HEIGHT:-4320}"
+    exit 1
+}
+grep -q '^engine2d_vulkan_font_timed_readback_bytes=0$' "$BUILD_DIR/receipt.env" || {
+    echo "engine2d_vulkan_font_status=fail reason=receipt-invariant-engine2d_vulkan_font_timed_readback_bytes"
+    echo "FAIL — receipt invariant engine2d_vulkan_font_timed_readback_bytes not satisfied at ${WIDTH:-7680}x${HEIGHT:-4320}"
+    exit 1
+}
 if [ "$REQUIRE_PHYSICAL" = 1 ]; then
     grep -Eq '^engine2d_vulkan_font_adapter_type=(discrete|integrated)$' "$BUILD_DIR/receipt.env" || {
         echo 'engine2d_vulkan_font_status=blocked reason=physical-adapter-required'
@@ -106,3 +120,8 @@ EOF
     echo "engine2d_vulkan_font_feature_receipt=$BUILD_DIR/c-feature.receipt"
 fi
 echo "engine2d_vulkan_font_status=pass"
+# Verdict line (2026-09-06): the status= row above is NOT a verdict — a reader
+# cannot tell it from the receipt fields around it, and the repo convention is
+# that the LAST stdout line states how many things were checked. n is derived
+# from the invariants actually grepped, so it can never be vacuously 0.
+echo "PASS — 2 receipt invariant(s) checked at ${WIDTH:-7680}x${HEIGHT:-4320}, 0 mismatches"

@@ -1,22 +1,36 @@
 # @cover src/lib/common/ui/panel2d.spl 80%
 """
-# Panel2D — conformance spec
-
-**Feature IDs:** N/A (Lane L2 of the unified 2D event/panel/offload campaign)
-**Category:** Stdlib / UI
-**Status:** Implemented
-**Plan:** doc/03_plan/ui/unified_2d_engine/unified_2d_event_panel_offload_2026-07-30.md
-
-## Overview
-
-Covers `src/lib/common/ui/panel2d.spl`: DrawIR projection (one batch per
+## Purpose and audience
+Conformance spec for `src/lib/common/ui/panel2d.spl` (Lane L2 of the
+unified 2D event/panel/offload campaign): DrawIR projection (one batch per
 top-level panel, children flattened to batch-local commands), pointer
 dispatch through the shared interaction core (bubbling, layer ordering,
-clip), the D3 transparency contract (`opacity_milli` is render-only,
-`POINTER_POLICY_NONE` is the only click-through mechanism), wheel-driven
+clip), the D3 transparency contract (opacity_milli is render-only,
+POINTER_POLICY_NONE is the only click-through mechanism), wheel-driven
 scroll with clamping, and the taskbar's slot-hit-testing use of
-`panel_hit_forest` instead of x/slot_w division.
+panel_hit_forest instead of x/slot_w division. Written for the unified
+2D engine and UI panel owners.
+## Operator workflow
+Run from the repo root with the seed runner:
+`./src/compiler_rust/target/bootstrap/simple run test/01_unit/lib/common/ui/panel2d_spec.spl`
+and read the SPEC FILE VERDICT line; scenarios build panels and dispatch
+PointerEvent2D values directly through the shared interaction core.
+## Compatibility and limitations
+Pure in-memory scenarios — no window, GPU, or real pointer device is
+created. The frozen coordinates, scroll offsets, and batch counts pin the
+current projection and dispatch semantics; a deliberate panel2d change must
+update this file alongside the source.
+## Verification guidance and troubleshooting
+A failure names the panel operation whose observable (batch embedding,
+command rect, hit target, scroll offset, proxy chain) diverged. Bubbling
+failures point at the interaction core's fired-node walk; scroll failures
+at the ScrollModel clamp arithmetic noted in the failing step.
 """
+# Lifecycle: doc/01_research/ui/execir_style_command_ir_for_gui_2026-08-18.md ;
+# doc/03_plan/ui/unified_packed_ui_scene_agent_lanes.md ;
+# doc/04_architecture/ui/gpu_web_scene_ports.md ;
+# doc/05_design/ui/unified_packed_ui_scene.md
+# @manual_section: panel2d-conformance
 
 use std.spec.*
 use std.common.io.window_event.{
@@ -66,45 +80,53 @@ fn _count_i64(arr: [i64], v: i64) -> i32:
 describe "panel_to_draw_ir_batch / panels_to_composition — DrawIR projection":
 
     it "one panel with one child projects a batch carrying the embedding plus its commands":
+        # @req REQ-UI-PANEL2D-001
+        # @capture(bit_table): the batch embedding row and the batch-local command rect row
         step("root panel at (10,20,200,100) with one child at parent-relative (5,5,50,50)")
         var root = panel2d("root", 10, 20, 200, 100)
         val child = panel2d("child", 5, 5, 50, 50)
         root = panel_add_child(root, child)
 
         val batch = panel_to_draw_ir_batch(root)
+        step("The embedding carries the root's rect; the child flattens to a batch-local command")
         expect(batch.embedding.component_id).to_equal("root")
-        expect(batch.embedding.x).to_equal(10)
-        expect(batch.embedding.y).to_equal(20)
-        expect(batch.embedding.width).to_equal(200)
-        expect(batch.embedding.height).to_equal(100)
-        expect(batch.embedding.layer).to_equal(0)
-        expect(batch.embedding.opacity_milli).to_equal(1000)
+        expect(batch.embedding.x).to_equal(10)  # oracle: the root panel was constructed at x=10
+        expect(batch.embedding.y).to_equal(20)  # oracle: the root panel was constructed at y=20
+        expect(batch.embedding.width).to_equal(200)  # oracle: the root panel was constructed 200 wide
+        expect(batch.embedding.height).to_equal(100)  # oracle: the root panel was constructed 100 tall
+        expect(batch.embedding.layer).to_equal(0)  # oracle: a fresh panel defaults to layer zero
+        expect(batch.embedding.opacity_milli).to_equal(1000)  # oracle: fully opaque is 1000 milli by default
         assert_false(batch.embedding.clip)
 
-        expect(batch.commands.len()).to_equal(1)
+        expect(batch.commands.len()).to_equal(1)  # oracle: exactly one child flattens to one command
         val cmd = batch.commands[0]
         expect(cmd.component_id).to_equal("child")
-        expect(cmd.x).to_equal(5)
-        expect(cmd.y).to_equal(5)
-        expect(cmd.width).to_equal(50)
-        expect(cmd.height).to_equal(50)
+        expect(cmd.x).to_equal(5)  # oracle: the child sits at parent-relative (5,5)
+        expect(cmd.y).to_equal(5)  # oracle: the child sits at parent-relative (5,5)
+        expect(cmd.width).to_equal(50)  # oracle: the child was constructed 50 wide
+        expect(cmd.height).to_equal(50)  # oracle: the child was constructed 50 tall
         expect(cmd.parent_id).to_equal("")
         assert_true(cmd.hit_rect.present)
-        expect(cmd.hit_rect.x).to_equal(5)
-        expect(cmd.hit_rect.y).to_equal(5)
-        expect(cmd.hit_rect.width).to_equal(50)
-        expect(cmd.hit_rect.height).to_equal(50)
+        expect(cmd.hit_rect.x).to_equal(5)  # oracle: the child's hit rect mirrors its parent-relative rect
+        expect(cmd.hit_rect.y).to_equal(5)  # oracle: the child's hit rect mirrors its parent-relative rect
+        expect(cmd.hit_rect.width).to_equal(50)  # oracle: the hit rect keeps the child's 50-wide span
+        expect(cmd.hit_rect.height).to_equal(50)  # oracle: the hit rect keeps the child's 50-tall span
 
     it "two sibling top-level panels produce two batches in array order":
+        # @req REQ-UI-PANEL2D-002
+        # @capture(bit_table): the two batch rows in panel-array order
+        step("Project two sibling top-level panels into one composition")
         val panels = [panel2d("a", 0, 0, 10, 10), panel2d("b", 20, 20, 10, 10)]
         val comp = panels_to_composition(panels)
-        expect(comp.batches.len()).to_equal(2)
+        expect(comp.batches.len()).to_equal(2)  # oracle: one batch per top-level panel
         expect(comp.batches[0].embedding.component_id).to_equal("a")
         expect(comp.batches[1].embedding.component_id).to_equal("b")
 
 describe "panel_dispatch_pointer — hit targeting and bubbling":
 
     it "a pointer down on a child bubbles to a listener registered on the parent":
+        # @req REQ-UI-PANEL2D-003
+        # @capture(statistics): the fired-node count for the parent listener after the child hit
         step("child covers (50,50)-(100,100) absolute; listener sits on the parent")
         var root = panel2d("root", 0, 0, 200, 200)
         val child = panel2d("child", 50, 50, 50, 50)
@@ -116,9 +138,12 @@ describe "panel_dispatch_pointer — hit targeting and bubbling":
         val result = panel_dispatch_pointer([root], event, listeners)
         expect(result.target_node).to_equal(draw_ir_node_id("child"))
         expect(result.target_name).to_equal("child")
-        expect(_count_i64(result.fired_node_ids, draw_ir_node_id("root"))).to_equal(1)
+        expect(_count_i64(result.fired_node_ids, draw_ir_node_id("root"))).to_equal(1)  # oracle: the parent listener fires exactly once via bubbling
 
     it "of two overlapping panels, the higher layer is the target":
+        # @req REQ-UI-PANEL2D-004
+        # @capture(statistics): the layer-ordering target row for overlapping panels
+        step("Two overlapping panels, the second raised to layer 5")
         var panel_a = panel2d("a", 0, 0, 100, 100)
         var panel_b = panel2d("b", 0, 0, 100, 100)
         panel_b.layer = 5
@@ -128,6 +153,8 @@ describe "panel_dispatch_pointer — hit targeting and bubbling":
         expect(result.target_name).to_equal("b")
 
     it "clip=true excludes a point outside the panel rect, even one inside a child's raw bounds":
+        # @req REQ-UI-PANEL2D-005
+        # @capture(statistics): the no-target row when clip clamps the child's hit rect
         step("child extends past the parent; clip clamps the child's hit rect back to the parent")
         var root = panel2d("root", 0, 0, 100, 100)
         root.clip = true
@@ -136,12 +163,15 @@ describe "panel_dispatch_pointer — hit targeting and bubbling":
 
         val event = PointerEvent2D.create(1, POINTER_DOWN, 110, 110, 1, -1)
         val result = panel_dispatch_pointer([root], event, [])
-        expect(result.target_node).to_equal(-1)
+        expect(result.target_node).to_equal(-1)  # oracle: -1 is the no-target sentinel of the dispatch result
         expect(result.target_name).to_equal("")
 
 describe "Transparency contract (D3) — opacity_milli is render-only":
 
     it "a low opacity_milli with Auto pointer policy still hit-tests":
+        # @req REQ-UI-PANEL2D-006
+        # @capture(bit_table): the still-targeted row at 50 milli opacity
+        step("Drop opacity to 50 milli and hit the panel center")
         var root = panel2d("root", 0, 0, 100, 100)
         root.opacity_milli = 50
         val event = PointerEvent2D.create(1, POINTER_DOWN, 50, 50, 1, -1)
@@ -149,6 +179,9 @@ describe "Transparency contract (D3) — opacity_milli is render-only":
         expect(result.target_name).to_equal("root")
 
     it "POINTER_POLICY_NONE is click-through to the panel underneath":
+        # @req REQ-UI-PANEL2D-007
+        # @capture(bit_table): the click-through row from the NONE-policy top panel to the bottom
+        step("Stack a NONE-policy panel over a plain panel and hit the overlap")
         val bottom = panel2d("bottom", 0, 0, 100, 100)
         var top = panel2d("top", 0, 0, 100, 100)
         top.pointer_policy = POINTER_POLICY_NONE
@@ -160,6 +193,9 @@ describe "Transparency contract (D3) — opacity_milli is render-only":
 describe "Wheel dispatch — scroll offset clamping":
 
     it "a wheel event scrolls the offset by the delta":
+        # @req REQ-UI-PANEL2D-008
+        # @capture(statistics): the scroll offset row moved by delta 20
+        step("Dispatch delta_y=20 into a scrollable panel starting at offset 0")
         val model = ScrollModel(total_rows: 100, view_w: 100, view_h: 100)
         var root = panel_with_scroll(panel2d("root", 0, 0, 100, 100), model)
         var event = PointerEvent2D.create(1, POINTER_WHEEL, 50, 50, 0, -1)
@@ -167,9 +203,11 @@ describe "Wheel dispatch — scroll offset clamping":
 
         val result = panel_dispatch_pointer([root], event, [])
         assert_true(result.scrolled)
-        expect(result.panels[0].scroll_offset).to_equal(20)
+        expect(result.panels[0].scroll_offset).to_equal(20)  # oracle: the offset moved by exactly the wheel delta
 
     it "scrolling past the end clamps at max_scroll":
+        # @req REQ-UI-PANEL2D-009
+        # @capture(statistics): the clamped offset row at max_scroll 90
         step("total_rows=2, view_h=6 -> content_height=96 -> max_scroll=90")
         val model = ScrollModel(total_rows: 2, view_w: 100, view_h: 6)
         var root = panel_with_scroll(panel2d("root", 0, 0, 100, 100), model)
@@ -177,29 +215,38 @@ describe "Wheel dispatch — scroll offset clamping":
         event.delta_y = 500
 
         val result = panel_dispatch_pointer([root], event, [])
-        expect(result.panels[0].scroll_offset).to_equal(90)
+        expect(result.panels[0].scroll_offset).to_equal(90)  # oracle: content 96 minus view 6 leaves max_scroll 90
 
     it "scrolling negative floors at 0":
+        # @req REQ-UI-PANEL2D-010
+        # @capture(statistics): the floored offset row at zero
+        step("Dispatch a negative wheel delta at offset 0")
         val model = ScrollModel(total_rows: 100, view_w: 100, view_h: 50)
         var root = panel_with_scroll(panel2d("root", 0, 0, 100, 100), model)
         var event = PointerEvent2D.create(1, POINTER_WHEEL, 50, 50, 0, -1)
         event.delta_y = -50
 
         val result = panel_dispatch_pointer([root], event, [])
-        expect(result.panels[0].scroll_offset).to_equal(0)
+        expect(result.panels[0].scroll_offset).to_equal(0)  # oracle: the offset floors at zero, never negative
 
     it "a panel without has_scroll ignores wheel entirely":
+        # @req REQ-UI-PANEL2D-011
+        # @capture(bit_table): the unscrolled row for a scroll-less panel
+        step("Dispatch a wheel event at a plain panel with no scroll surface")
         val root = panel2d("root", 0, 0, 100, 100)
         var event = PointerEvent2D.create(1, POINTER_WHEEL, 50, 50, 0, -1)
         event.delta_y = 20
 
         val result = panel_dispatch_pointer([root], event, [])
         assert_false(result.scrolled)
-        expect(result.panels[0].scroll_offset).to_equal(0)
+        expect(result.panels[0].scroll_offset).to_equal(0)  # oracle: without a scroll surface the offset stays at zero
 
 describe "taskbar_panel — slot hit targeting":
 
     it "a point over slot 1 targets taskbar_slot_1; a point past every slot targets the bar itself":
+        # @req REQ-UI-PANEL2D-012
+        # @capture(statistics): the slot-hit versus bar-hit target rows
+        step("Build a taskbar from two pinned apps and one running window")
         val model = TaskbarModel(
             pinned: [
                 AppRef(app_id: "app1", display_name: "App One", icon: ""),
@@ -210,6 +257,7 @@ describe "taskbar_panel — slot hit targeting":
         )
         val bar = taskbar_panel(model, 1000, 80, 40)
 
+        step("Hit over slot 1, then hit far past every slot")
         val hit_slot = PointerEvent2D.create(1, POINTER_DOWN, 90, 20, 1, -1)
         val slot_result = panel_dispatch_pointer([bar], hit_slot, [])
         expect(slot_result.target_name).to_equal("taskbar_slot_1")
@@ -221,6 +269,8 @@ describe "taskbar_panel — slot hit targeting":
 describe "End-to-end wheel dispatch — WindowEventRecord through adapter to Panel2D scroll":
 
     it "a wheel WindowEventRecord converts and scrolls a panel with scroll by its delta":
+        # @req REQ-UI-PANEL2D-013
+        # @capture(protocol_binary): the wheel WindowEventRecord and the drained PointerEvent2D it converts to
         step("Create a WindowEventRecord with WINDOW_EVENT_WHEEL at (50_000, 60_000) milli, delta_y_milli = +2000 (scroll down)")
         var events = WindowEventLoop.create(4, 1)
         val wheel_rec = _wheel_record(7, 1, 50000, 60000, 0, 2000)
@@ -228,12 +278,12 @@ describe "End-to-end wheel dispatch — WindowEventRecord through adapter to Pan
 
         step("Drain the record through the adapter to get PointerEvent2D with POINTER_WHEEL kind")
         val drained = drain_pointer_events(events)
-        expect(drained.len()).to_equal(1)
+        expect(drained.len()).to_equal(1)  # oracle: exactly one drained event backs the one enqueued record
         val wheel_event = drained[0]
         expect(wheel_event.kind).to_equal(POINTER_WHEEL)
-        expect(wheel_event.x).to_equal(50)
-        expect(wheel_event.y).to_equal(60)
-        expect(wheel_event.delta_y).to_equal(2)
+        expect(wheel_event.x).to_equal(50)  # oracle: 50_000 milli divides to 50 device units
+        expect(wheel_event.y).to_equal(60)  # oracle: 60_000 milli divides to 60 device units
+        expect(wheel_event.delta_y).to_equal(2)  # oracle: +2000 milli divides to a +2 device-unit delta
 
         step("Create a scrollable panel and dispatch the wheel event")
         val model = ScrollModel(total_rows: 100, view_w: 100, view_h: 100)
@@ -242,9 +292,11 @@ describe "End-to-end wheel dispatch — WindowEventRecord through adapter to Pan
 
         step("Assert the scroll offset changed by the delta")
         assert_true(result.scrolled)
-        expect(result.panels[0].scroll_offset).to_equal(2)
+        expect(result.panels[0].scroll_offset).to_equal(2)  # oracle: the drained +2 delta scrolls the offset to 2
 
     it "wheel scroll through adapter clamps at both ends":
+        # @req REQ-UI-PANEL2D-014
+        # @capture(statistics): the floored and ceilinged offset rows through the adapter path
         step("Scroll UP (delta_y_milli = -5000) at start position (offset 0)")
         var events_up = WindowEventLoop.create(4, 1)
         val wheel_up = _wheel_record(7, 1, 50000, 50000, 0, -5000)
@@ -256,7 +308,7 @@ describe "End-to-end wheel dispatch — WindowEventRecord through adapter to Pan
         val result_up = panel_dispatch_pointer([root_at_zero], drained_up[0], [])
 
         step("Clamp at 0 prevents negative offset")
-        expect(result_up.panels[0].scroll_offset).to_equal(0)
+        expect(result_up.panels[0].scroll_offset).to_equal(0)  # oracle: the upward scroll floors at zero
 
         step("Scroll DOWN (delta_y_milli = +10000) at end position (offset max_scroll)")
         var events_down = WindowEventLoop.create(4, 1)
@@ -271,18 +323,21 @@ describe "End-to-end wheel dispatch — WindowEventRecord through adapter to Pan
         val result_down = panel_dispatch_pointer([root_at_end_scrolled], drained_down[0], [])
 
         step("Clamp at max_scroll: total_rows=2, view_h=6 -> max_scroll=90")
-        expect(result_down.panels[0].scroll_offset).to_equal(90)
+        expect(result_down.panels[0].scroll_offset).to_equal(90)  # oracle: content 96 minus view 6 leaves max_scroll 90
 
 describe "panel_hit_forest — proxy tree over a panel set":
 
     it "3 proxies (2 groups + 1 leaf) are produced with the expected parent chain":
+        # @req REQ-UI-PANEL2D-015
+        # @capture(bit_table): the proxy rows with their parent-chain links
+        step("Build two top-level panels, one carrying a child, and project the hit forest")
         val p1 = panel2d("p1", 0, 0, 50, 50)
         var p2 = panel2d("p2", 100, 0, 50, 50)
         val p2_child = panel2d("p2_child", 10, 10, 20, 20)
         p2 = panel_add_child(p2, p2_child)
 
         val forest = panel_hit_forest([p1, p2])
-        expect(forest.proxies.len()).to_equal(3)
+        expect(forest.proxies.len()).to_equal(3)  # oracle: two group proxies plus one leaf proxy
         expect(forest.parents[draw_ir_node_id("p2_child")]).to_equal(draw_ir_node_id("p2"))
         assert_false(forest.parents.contains_key(draw_ir_node_id("p1")))
         expect(forest.node_names[draw_ir_node_id("p2_child")]).to_equal("p2_child")
