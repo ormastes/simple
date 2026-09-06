@@ -62,7 +62,7 @@ struct ChatTui:
     title: text
     hint: text
     input: InputWidget
-    status: text     # e.g. "provider=claude_cli model=claude-sonnet-4-20250514" - set once by main.spl
+    status: text     # e.g. "provider=claude_cli model=sonnet" - set once by main.spl
 
 fn make_chat_tui(title: text) -> ChatTui:
     make_chat_tui_with_status(title, "")
@@ -731,6 +731,19 @@ fn run_chat_tui(
 
 # Plain fallback loop (non-tty: piped / CI / server)
 
+# ponytail: CaretIo.read_line() cannot currently tell a genuine blank line
+# apart from EOF -- both come back as "" (measured 2026-09-06: piping
+# /dev/null makes _production_read_line's Stdin.read_line() return Ok("")
+# forever, never Err). The real upgrade path is the interpreter's
+# `rt_stdin_read_line` extern (src/compiler_rust/compiler/src/interpreter_extern/io/input.rs,
+# fn `input`), whose `.unwrap_or_default()` erases the end-of-stream `None`
+# into an empty string before Stdin.read_line() ever gets to check for nil;
+# the C runtime backend (src/runtime/runtime_native.c rt_stdin_read_line)
+# already returns NULL/nil at EOF correctly. Until that's fixed, bound the
+# spin: a run of this many consecutive empty reads with no other input is
+# treated as EOF rather than as an endless string of blank Enters.
+const _PLAIN_MAX_CONSECUTIVE_EMPTY_READS: i64 = 1000
+
 fn run_chat_plain(
     policy: PermissionPolicy,
     responder: fn([Message]) -> ModelResponse,
@@ -743,12 +756,18 @@ fn run_chat_plain(
     var session_id = hooks.session_id
     var running = true
     var exit_reason = "eof"
+    var consecutive_empty_reads = 0
     while running:
         io.emit("> ")
         if val line = io.read_line():
             val trimmed = line.trim()
             if trimmed == "":
+                consecutive_empty_reads = consecutive_empty_reads + 1
+                if consecutive_empty_reads >= _PLAIN_MAX_CONSECUTIVE_EMPTY_READS:
+                    running = false
+                    continue
                 continue
+            consecutive_empty_reads = 0
             if trimmed == "/exit" or trimmed == "/quit":
                 running = false
                 exit_reason = "command_exit"

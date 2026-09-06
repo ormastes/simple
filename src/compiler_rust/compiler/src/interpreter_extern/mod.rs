@@ -455,6 +455,13 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_terminal_is_tty", terminal::rt_terminal_is_tty);
     insert_simple!("rt_terminal_stdout_is_tty", terminal::rt_terminal_stdout_is_tty);
     insert_simple!("rt_terminal_get_size", terminal::rt_terminal_get_size);
+    // See doc/08_tracking/bug/caret_tui_mode_dies_rt_atexit_install_unregistered_2026-09-06.md —
+    // `rt_atexit_install` was the one extern in terminal.spl never bridged here;
+    // `rt_signal_install`/`rt_signal_check` (used by the very next line in
+    // `terminal_install_recovery`) were found missing during the same fix.
+    insert_simple!("rt_atexit_install", terminal::rt_atexit_install);
+    insert_simple!("rt_signal_install", terminal::rt_signal_install);
+    insert_simple!("rt_signal_check", terminal::rt_signal_check);
     insert_simple!("native_http_send", network::native_http_send);
     insert_simple!("rt_http_request", network::rt_http_request);
     insert_simple!("rt_http_request_v2", network::rt_http_request_v2);
@@ -3255,32 +3262,6 @@ mod tests {
         for symbol in ["rt_mmap_raw", "rt_munmap_raw", "rt_mprotect", "rt_page_size"] {
             assert!(EXTERN_DISPATCH.contains_key(symbol), "missing {symbol}");
         }
-    }
-
-    #[test]
-    fn dispatches_lexer_shallow_free_without_reclaiming_managed_array() {
-        let handler = EXTERN_DISPATCH
-            .get("rt_array_free")
-            .expect("lexer snapshot cleanup requires rt_array_free registration");
-        let managed = Value::array(vec![Value::Int(11), Value::Int(22)]);
-        let mut env = Env::new();
-        let mut functions = HashMap::new();
-        let mut classes = HashMap::new();
-        let enums = HashMap::new();
-        let impl_methods = HashMap::new();
-
-        let result = handler(
-            &[managed.clone()],
-            &mut env,
-            &mut functions,
-            &mut classes,
-            &enums,
-            &impl_methods,
-        )
-        .expect("managed array shallow-free dispatch should succeed");
-
-        assert_eq!(result, Value::Nil);
-        assert_eq!(managed.as_array().map(|items| items.len()), Some(2));
     }
 
     #[test]

@@ -21,6 +21,19 @@ const CS_DEFAULT_SESSION: text = "caret"
 const _CS_MIN_COLS: i64 = 40
 const _CS_MIN_ROWS: i64 = 10
 
+# ponytail: same gap as chat_tui.spl's run_chat_plain -- CaretIo.read_line()
+# cannot currently tell a genuine blank command line apart from EOF (both
+# come back as ""); see chat_tui.spl's note above _PLAIN_MAX_CONSECUTIVE_EMPTY_READS
+# for the measured evidence and the real upgrade path (the interpreter's
+# `rt_stdin_read_line` extern erasing EOF into ""). Bound the spin the same way.
+#
+# Deliberately far lower than the plain loop's ceiling: cs redraws a FULL FRAME
+# every iteration, not a 2-byte prompt, so each spin costs ~1.9KB. Measured at
+# 1000 the escape still wrote 1,944,000 bytes to stdout before exiting. 50
+# consecutive blank lines is already well beyond anything a user types at a
+# dashboard, and caps the worst case near 100KB.
+const _CS_MAX_CONSECUTIVE_EMPTY_READS: i64 = 50
+
 # A non-tty (piped stdin, CI) reports 0x0. Clamp rather than rendering a
 # zero-row frame, so the dashboard is still readable when piped.
 fn cs_effective_size(cols: i64, rows: i64) -> (i64, i64):
@@ -45,11 +58,19 @@ fn cs_run(io: CaretIo, session: text) -> CaretLoopResult:
     var d = cs_refresh(cs_dashboard_new(session))
     var reason = "eof"
     var running = true
+    var consecutive_empty_reads = 0
     while running:
         val size = io.terminal_size()
         val (cols, rows) = cs_effective_size(size.cols, size.rows)
         io.emit(cs_render(d, cols, rows))
         if val line = io.read_line():
+            if line.trim() == "":
+                consecutive_empty_reads = consecutive_empty_reads + 1
+                if consecutive_empty_reads >= _CS_MAX_CONSECUTIVE_EMPTY_READS:
+                    running = false
+                    continue
+            else:
+                consecutive_empty_reads = 0
             val (after_cmd, action) = cs_handle_command(d, line)
             if action == "quit":
                 d = after_cmd

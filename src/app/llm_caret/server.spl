@@ -7,6 +7,8 @@
 #   GET  /v1/models            (list available models)
 #   GET  /v1/health            (health check)
 
+use std.io_runtime.{time_now_unix_micros}
+
 extern fn rt_http_request(method: text, url: text, headers: text, body: text) -> (i64, text, text)
 
 # ============================================================================
@@ -14,10 +16,10 @@ extern fn rt_http_request(method: text, url: text, headers: text, body: text) ->
 # ============================================================================
 
 fn _LB() -> text:
-    (123 as char).to_text()
+    "{{"
 
 fn _RB() -> text:
-    (125 as char).to_text()
+    "}}"
 
 fn _Q() -> text:
     "\""
@@ -88,7 +90,7 @@ fn build_models_response() -> text:
     var models: [text] = []
     # Claude models
     var m1 = _LB()
-    m1 = m1 + _Q() + "id" + _Q() + ":" + _Q() + "claude-sonnet-4-20250514" + _Q() + ","
+    m1 = m1 + _Q() + "id" + _Q() + ":" + _Q() + "claude-sonnet-5" + _Q() + ","
     m1 = m1 + _Q() + "provider" + _Q() + ":" + _Q() + "claude_cli" + _Q()
     m1 = m1 + _RB()
     models = models + [m1]
@@ -117,10 +119,12 @@ fn build_models_response() -> text:
     r = r + _RB()
     r
 
-fn build_chat_completion_response(content: text, model: text, finish_reason: text) -> text:
+fn build_chat_completion_response(content: text, model: text, finish_reason: text,
+        input_tokens: i64, output_tokens: i64) -> text:
     var r = _LB()
     r = r + _Q() + "id" + _Q() + ":" + _Q() + "chatcmpl-llm_caret" + _Q() + ","
     r = r + _Q() + "object" + _Q() + ":" + _Q() + "chat.completion" + _Q() + ","
+    r = r + _Q() + "created" + _Q() + ":" + (time_now_unix_micros() / 1000000).to_text() + ","
     r = r + _Q() + "model" + _Q() + ":" + _Q() + _escape_json(model) + _Q() + ","
     # choices array
     var choice = _LB()
@@ -132,14 +136,23 @@ fn build_chat_completion_response(content: text, model: text, finish_reason: tex
     choice = choice + _Q() + "message" + _Q() + ":" + msg + ","
     choice = choice + _Q() + "finish_reason" + _Q() + ":" + _Q() + finish_reason + _Q()
     choice = choice + _RB()
-    r = r + _Q() + "choices" + _Q() + ":[" + choice + "]"
+    r = r + _Q() + "choices" + _Q() + ":[" + choice + "],"
+    # usage object
+    var usage = _LB()
+    usage = usage + _Q() + "prompt_tokens" + _Q() + ":" + input_tokens.to_text() + ","
+    usage = usage + _Q() + "completion_tokens" + _Q() + ":" + output_tokens.to_text() + ","
+    usage = usage + _Q() + "total_tokens" + _Q() + ":" + (input_tokens + output_tokens).to_text()
+    usage = usage + _RB()
+    r = r + _Q() + "usage" + _Q() + ":" + usage
     r = r + _RB()
     r
 
-fn build_anthropic_response(content: text, model: text, stop_reason: text) -> text:
+fn build_anthropic_response(content: text, model: text, stop_reason: text,
+        input_tokens: i64, output_tokens: i64) -> text:
     var r = _LB()
     r = r + _Q() + "id" + _Q() + ":" + _Q() + "msg_llm_caret" + _Q() + ","
     r = r + _Q() + "type" + _Q() + ":" + _Q() + "message" + _Q() + ","
+    r = r + _Q() + "role" + _Q() + ":" + _Q() + "assistant" + _Q() + ","
     r = r + _Q() + "model" + _Q() + ":" + _Q() + _escape_json(model) + _Q() + ","
     r = r + _Q() + "stop_reason" + _Q() + ":" + _Q() + stop_reason + _Q() + ","
     # content array
@@ -147,9 +160,135 @@ fn build_anthropic_response(content: text, model: text, stop_reason: text) -> te
     block = block + _Q() + "type" + _Q() + ":" + _Q() + "text" + _Q() + ","
     block = block + _Q() + "text" + _Q() + ":" + _Q() + _escape_json(content) + _Q()
     block = block + _RB()
-    r = r + _Q() + "content" + _Q() + ":[" + block + "]"
+    r = r + _Q() + "content" + _Q() + ":[" + block + "],"
+    # usage object
+    var usage = _LB()
+    usage = usage + _Q() + "input_tokens" + _Q() + ":" + input_tokens.to_text() + ","
+    usage = usage + _Q() + "output_tokens" + _Q() + ":" + output_tokens.to_text()
+    usage = usage + _RB()
+    r = r + _Q() + "usage" + _Q() + ":" + usage
     r = r + _RB()
     r
+
+# ============================================================================
+# Streaming (SSE) response builders
+# ============================================================================
+
+# One "chat.completion.chunk" JSON object. `role` non-empty => delta carries
+# only {"role": role}; `content` non-empty => delta carries only
+# {"content": content}; both empty => delta is `{}` (the terminal frame).
+# `finish_reason` empty => null, else the quoted reason.
+fn _build_chat_completion_chunk(model: text, role: text, content: text, finish_reason: text) -> text:
+    var delta = _LB()
+    var has_field = false
+    if role != "":
+        delta = delta + _Q() + "role" + _Q() + ":" + _Q() + role + _Q()
+        has_field = true
+    if content != "":
+        if has_field:
+            delta = delta + ","
+        delta = delta + _Q() + "content" + _Q() + ":" + _Q() + _escape_json(content) + _Q()
+        has_field = true
+    delta = delta + _RB()
+    var choice = _LB()
+    choice = choice + _Q() + "index" + _Q() + ":0,"
+    choice = choice + _Q() + "delta" + _Q() + ":" + delta + ","
+    if finish_reason == "":
+        choice = choice + _Q() + "finish_reason" + _Q() + ":null"
+    else:
+        choice = choice + _Q() + "finish_reason" + _Q() + ":" + _Q() + finish_reason + _Q()
+    choice = choice + _RB()
+    var r = _LB()
+    r = r + _Q() + "id" + _Q() + ":" + _Q() + "chatcmpl-llm_caret" + _Q() + ","
+    r = r + _Q() + "object" + _Q() + ":" + _Q() + "chat.completion.chunk" + _Q() + ","
+    r = r + _Q() + "created" + _Q() + ":" + (time_now_unix_micros() / 1000000).to_text() + ","
+    r = r + _Q() + "model" + _Q() + ":" + _Q() + _escape_json(model) + _Q() + ","
+    r = r + _Q() + "choices" + _Q() + ":[" + choice + "]"
+    r = r + _RB()
+    r
+
+# Full OpenAI-compatible SSE byte stream: role frame, content frame (if any),
+# terminal finish_reason frame, and the literal `data: [DONE]` sentinel.
+fn build_chat_completion_stream_response(content: text, model: text, finish_reason: text) -> text:
+    var out = ""
+    out = out + "data: " + _build_chat_completion_chunk(model, "assistant", "", "") + "\n\n"
+    if content != "":
+        out = out + "data: " + _build_chat_completion_chunk(model, "", content, "") + "\n\n"
+    out = out + "data: " + _build_chat_completion_chunk(model, "", "", finish_reason) + "\n\n"
+    out = out + "data: [DONE]\n\n"
+    out
+
+# Full Anthropic-compatible SSE byte stream: message_start, content_block_start,
+# content_block_delta, content_block_stop, message_delta, message_stop -- each
+# frame is `event: <name>\ndata: {...}\n\n`.
+fn build_anthropic_stream_response(content: text, model: text, stop_reason: text,
+        input_tokens: i64, output_tokens: i64) -> text:
+    var out = ""
+    # message_start
+    var msg = _LB()
+    msg = msg + _Q() + "id" + _Q() + ":" + _Q() + "msg_llm_caret" + _Q() + ","
+    msg = msg + _Q() + "type" + _Q() + ":" + _Q() + "message" + _Q() + ","
+    msg = msg + _Q() + "role" + _Q() + ":" + _Q() + "assistant" + _Q() + ","
+    msg = msg + _Q() + "model" + _Q() + ":" + _Q() + _escape_json(model) + _Q() + ","
+    msg = msg + _Q() + "content" + _Q() + ":[],"
+    var usage0 = _LB()
+    usage0 = usage0 + _Q() + "input_tokens" + _Q() + ":" + input_tokens.to_text() + ","
+    usage0 = usage0 + _Q() + "output_tokens" + _Q() + ":0"
+    usage0 = usage0 + _RB()
+    msg = msg + _Q() + "usage" + _Q() + ":" + usage0
+    msg = msg + _RB()
+    var start_data = _LB()
+    start_data = start_data + _Q() + "type" + _Q() + ":" + _Q() + "message_start" + _Q() + ","
+    start_data = start_data + _Q() + "message" + _Q() + ":" + msg
+    start_data = start_data + _RB()
+    out = out + "event: message_start\ndata: " + start_data + "\n\n"
+    # content_block_start
+    var block0 = _LB()
+    block0 = block0 + _Q() + "type" + _Q() + ":" + _Q() + "text" + _Q() + ","
+    block0 = block0 + _Q() + "text" + _Q() + ":" + _Q() + _Q()
+    block0 = block0 + _RB()
+    var cbs = _LB()
+    cbs = cbs + _Q() + "type" + _Q() + ":" + _Q() + "content_block_start" + _Q() + ","
+    cbs = cbs + _Q() + "index" + _Q() + ":0,"
+    cbs = cbs + _Q() + "content_block" + _Q() + ":" + block0
+    cbs = cbs + _RB()
+    out = out + "event: content_block_start\ndata: " + cbs + "\n\n"
+    # content_block_delta
+    var delta = _LB()
+    delta = delta + _Q() + "type" + _Q() + ":" + _Q() + "text_delta" + _Q() + ","
+    delta = delta + _Q() + "text" + _Q() + ":" + _Q() + _escape_json(content) + _Q()
+    delta = delta + _RB()
+    var cbd = _LB()
+    cbd = cbd + _Q() + "type" + _Q() + ":" + _Q() + "content_block_delta" + _Q() + ","
+    cbd = cbd + _Q() + "index" + _Q() + ":0,"
+    cbd = cbd + _Q() + "delta" + _Q() + ":" + delta
+    cbd = cbd + _RB()
+    out = out + "event: content_block_delta\ndata: " + cbd + "\n\n"
+    # content_block_stop
+    var cbe = _LB()
+    cbe = cbe + _Q() + "type" + _Q() + ":" + _Q() + "content_block_stop" + _Q() + ","
+    cbe = cbe + _Q() + "index" + _Q() + ":0"
+    cbe = cbe + _RB()
+    out = out + "event: content_block_stop\ndata: " + cbe + "\n\n"
+    # message_delta
+    var delta2 = _LB()
+    delta2 = delta2 + _Q() + "stop_reason" + _Q() + ":" + _Q() + stop_reason + _Q()
+    delta2 = delta2 + _RB()
+    var usage1 = _LB()
+    usage1 = usage1 + _Q() + "output_tokens" + _Q() + ":" + output_tokens.to_text()
+    usage1 = usage1 + _RB()
+    var md = _LB()
+    md = md + _Q() + "type" + _Q() + ":" + _Q() + "message_delta" + _Q() + ","
+    md = md + _Q() + "delta" + _Q() + ":" + delta2 + ","
+    md = md + _Q() + "usage" + _Q() + ":" + usage1
+    md = md + _RB()
+    out = out + "event: message_delta\ndata: " + md + "\n\n"
+    # message_stop
+    var ms = _LB()
+    ms = ms + _Q() + "type" + _Q() + ":" + _Q() + "message_stop" + _Q()
+    ms = ms + _RB()
+    out = out + "event: message_stop\ndata: " + ms + "\n\n"
+    out
 
 fn build_error_response(error_msg: text, status_code: i64) -> text:
     var r = _LB()

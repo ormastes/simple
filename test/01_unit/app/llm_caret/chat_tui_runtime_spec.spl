@@ -139,6 +139,27 @@ fn _fake_io() -> CaretIo:
         emit: _fake_emit
     )
 
+# Mirrors the measured production defect: Stdin.read_line() cannot currently
+# tell EOF apart from a blank line and returns Ok("") forever at real EOF
+# (never nil). This fake never signals EOF via nil, so it only exercises the
+# bounded consecutive-empty-read fallback in run_chat_plain/cs_run.
+fn _fake_read_line_always_empty() -> text?:
+    ""
+
+fn _fake_io_always_empty() -> CaretIo:
+    CaretIo(
+        is_tty: _fake_is_tty,
+        terminal_size: _fake_terminal_size,
+        begin_tui: _fake_begin_tui,
+        end_tui: _fake_end_tui,
+        clear_screen: _fake_clear_screen,
+        draw_at: _fake_draw_at,
+        flush: _fake_flush,
+        read_byte: _fake_read_byte,
+        read_line: _fake_read_line_always_empty,
+        emit: _fake_emit
+    )
+
 fn _reset_fakes():
     IO_TTY = true
     IO_BEGIN_OK = true
@@ -414,6 +435,20 @@ describe "REQ-LLM-CARET-TUI-HARDEN-009: frame and input behavior":
         expect(result.exit_reason).to_equal("eof")
         expect(IO_BEGIN_CALLS).to_equal(0)  # oracle: 0 — named expected value from the requirement
         expect(IO_END_CALLS).to_equal(0)  # oracle: 0 — named expected value from the requirement
+
+    it "should terminate the plain loop instead of spinning when read_line never signals EOF distinctly":
+        # @req REQ-SSPEC-APP
+        step("should terminate the plain loop instead of spinning when read_line never signals EOF distinctly")
+        step("Run the production plain loop against a read_line that returns \"\" forever, as real EOF does today")
+        _reset_fakes()
+        val result = run_chat_plain(
+            _policy(), _responder, _hooks(), [], _fake_io_always_empty()
+        )
+        step("Check the loop terminated instead of looping forever on the indistinguishable EOF/blank-line reads")
+        expect(result.mode).to_equal("plain")
+        expect(result.ok).to_be(true)
+        expect(result.exit_reason).to_equal("eof")
+        expect(RESPONDER_CALLS).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
     it "should ignore blank plain input without discarding later commands":
         # @req REQ-SSPEC-APP
