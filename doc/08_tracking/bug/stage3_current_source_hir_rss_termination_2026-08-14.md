@@ -690,3 +690,178 @@ import-materialization fan-out in the allocation hot path; it does not yet
 prove whether the termination is caused by a cycle, repeated acyclic work, or
 an ownership lifetime defect. The row remains OPEN pending a visited/in-flight
 audit of those three functions and a canonical Stage 3 completion.
+
+## 2026-09-06 (aarch64 measurement lane) — THE RUNTIME ALREADY RECLAIMS AGGREGATES; THE BINDING CONSTRAINT IS TRANSIENT-SCOPE COVERAGE, NOT A MISSING HEADER WORD
+
+Host: aarch64 Linux, 20 cores, 121 GiB RAM, load average 12-45 during the runs
+(contended by construction — treat wall times as an envelope, not a floor).
+Binary identity recorded with every number below:
+
+```
+readlink -f bin/simple
+  /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple
+stat -c '%s %y'  ->  50093192  2026-09-06 09:59
+bin/simple --version | tail -1  ->  Simple Language v1.0.0-rc.1
+  (banner: "this Rust-built Simple binary is a bootstrap seed only")
+```
+
+### 0. Retained-evidence audit, repeated
+
+`build/native_probe/stage3-fresh/build-cycle3.log` is **still gone**, and this
+worktree has **no `build/bootstrap/stage2` or `stage3`** either (`ls -d
+build/bootstrap/stage*` -> no such file). The Restart-12 figures remain quoted
+from this document. No canonical Stage-3 transaction was run in this lane, and
+acceptance item 3 is therefore still open.
+
+### 1. Measured: an rt_alloc'd aggregate outside a transient scope is never freed, at 16 + 8*fields bytes each
+
+Fixture (JIT-compiled by the seed — `bin/simple run` reports **no**
+`[jit-fallback]`, so this is the native C runtime, not the Rust interpreter):
+
+```simple
+class Node:
+    a: i64
+    b: i64
+    c: i64
+    d: i64
+
+fn main():
+    var n: i64 = 0
+    var sum: i64 = 0
+    val limit: i64 = 1000000        # varied per row
+    while n < limit:
+        val node = Node(a: n, b: n + 1, c: n + 2, d: n + 3)
+        sum = sum + node.a
+        n = n + 1
+    print "sum={sum}"
+```
+
+Command per row: `/usr/bin/time -v ./bin/simple run <fixture>.spl`, reading
+`Maximum resident set size (kbytes)`.
+
+| fixture | allocations | max RSS (KiB) | marginal B/alloc |
+|---|---:|---:|---:|
+| `Node` (4 x i64) | 100,000 | 40,332 | — |
+| `Node` (4 x i64) | 1,000,000 | 84,780 | 50.6 |
+| `Node` (4 x i64) | 4,000,000 | 225,484 | **48.03** |
+| `Node` (4 x i64) | 8,000,000 | 412,848 | **47.97** |
+| `Node8` (8 x i64) | 1,000,000 | 115,840 | — |
+| `Node8` (8 x i64) | 4,000,000 | 350,172 | **79.99** |
+| `[i64]` of len 4 | 1,000,000 | 124,320 | — |
+| `[i64]` of len 4 | 4,000,000 | 402,852 | **95.07** |
+
+The slope is constant to within 0.1% across an 80x input range, and 4 -> 8
+fields moves it by exactly 32 B (8 B/field, 16 B fixed). That arithmetic
+attributes the retained bytes to the **instance block itself**, not to the loop,
+the JIT, or allocator fragmentation. Every instance the program drops stays
+resident for the life of the process. Arrays leak on the same path, so this is
+not specific to class/struct aggregates.
+
+### 2. Measured: wrapping the SAME workload in a transient scope flattens the curve to zero slope
+
+Same fixture, same command, with the loop split into 1,000 batches, each
+bracketed by the runtime's existing scope primitives (`extern fn
+rt_transient_array_scope_begin() -> bool` / `rt_transient_array_scope_end() ->
+bool`; both returned `true` on the first batch, printed to prove the scope
+really opened):
+
+| allocations | max RSS (KiB), unscoped | max RSS (KiB), scoped |
+|---:|---:|---:|
+| 1,000,000 | 84,780 | 38,252 |
+| 4,000,000 | 225,484 | 38,284 |
+| 8,000,000 | 412,848 | 38,588 |
+| 16,000,000 | (not run; ~810,000 extrapolated at 48 B) | **39,180** |
+
+Scoped marginal cost across 1M -> 16M allocations: **(39,180 - 38,252) KiB /
+15,000,000 = 0.063 B/alloc** — 762x below the unscoped 48.0 B/alloc, i.e. flat
+inside sampling noise while the input grows 16x. The scoped 38-39 MiB is the
+`bin/simple run` floor (the 100,000-allocation unscoped row is 40 MiB).
+
+### 3. What this corrects in this record's §4 (2026-08-17)
+
+§4 concluded the remaining owner is a runtime **representation** change and
+scoped the fix as "a new registering `rt_object_new`, a new deep-free kind +
+child-word scan, ... a header word [that] shifts every struct field GEP in two
+backends". Re-read against current source, that is **not** what the runtime
+does today, and §2 above is the counter-measurement:
+
+- `rt_alloc` (`src/runtime/runtime_native.c:5920-5946`) already calls
+  `rt_core_transient_raw_register` on **both** the guard-sampled and the plain
+  `malloc` path.
+- `rt_core_transient_classify` (`src/runtime/runtime_native.c:2045-2052`) probes
+  the raw registry **first**, *before* the heap-tag test — so an untagged,
+  header-less `rt_alloc` block is classified `RT_CORE_TRANSIENT_RAW` with its
+  recorded byte size.
+- `rt_transient_heap_promote` already word-scans a RAW node's children
+  (`src/runtime/runtime_native.c:2131-2139`) and clears the owned bit on
+  survivors (`:2156-2161`).
+- `rt_transient_array_scope_end` -> `rt_core_reclaim_transient_raw`
+  (`src/runtime/runtime_native.c:1372-1382`, `:1549-1568`) frees every entry
+  that still carries `RT_CORE_TRANSIENT_RAW_OWNED_BIT`.
+
+So aggregates are *already* registered, *already* traversable, and *already*
+reclaimable — no kind header, no GEP shift, no `rt_object_new`. The
+`SECOND LIMIT` note (`src/runtime/runtime_native.c:6548-6565`) is accurate about
+`rt_core_deep_free_classify`, which is a **different** primitive; it is not the
+constraint on the transient path, and §4 read across the two.
+
+### 4. The actual retention, with file:line
+
+`src/runtime/runtime_native.c:1502`
+
+```c
+static int rt_core_transient_raw_register_state(void* ptr, size_t bytes, int owned) {
+    if (!ptr || !rt_core_transient_array_scope_active) return ptr != NULL;
+```
+
+**An allocation made while no transient scope is active is never recorded, so it
+can never be freed** — there is no registry entry, no header, and no other
+free path for a bare `rt_alloc` block. That single early return is what §1
+measures at 48 B/instance and what §2 removes. Reclamation is therefore a
+question of *scope coverage over the phase*, not of object representation.
+
+In the Stage-3 streaming HIR phase, the scope covers exactly
+`CompilerDriver.lower_streaming_surface_source`
+(`src/compiler/80.driver/driver_hir_pipeline_lowering.spl:65-100`): begin ->
+`parse_full_frontend` -> `lower_parser_module_unstub` -> pause -> promote HIR +
+diagnostics + flat rows + frontend registries -> end. Everything else executed
+per source in `lower_and_check_streaming_surfaces_impl` is **outside** any
+scope, including `lowering.begin_module(source.path)` (`:254`, which reallocates
+~20 dicts/arrays and drops the previous module's), the surface
+identity/fingerprint comparisons and their interpolated text (`:213-243`), the
+HIR cache key and cached-module path (`:242-274`), the per-module progress and
+`log_phase` receipts (`:255-260`), and the post-lowering diagnostic projection
+loop (`:294-...`). Each of those allocations is permanently unreclaimable by
+construction.
+
+### 5. Seed-interpreted full-closure control (discriminator, NOT a Stage-3 number)
+
+To separate "a Simple-source data structure is retained per module" from "the
+runtime cannot free what the source correctly dropped", the same pure-Simple
+compiler source was driven under the **Rust seed interpreter**, which has its
+own value lifecycle:
+
+```bash
+./bin/simple run src/app/cli/bootstrap_main.spl compile --format=smf \
+    src/app/cli/bootstrap_main.spl -o out.smf
+# sampled every 2s: VmRSS / VmHWM from /proc/<pid>/status,
+# joined to the driver's own `[build] <phase> N/775 ... +Tms` progress lines
+```
+
+`bootstrap_main.spl` itself drops to the interpreter under the seed
+(`[jit-fallback] ... case KwMod:`), so this run exercises the compiler's HIR
+lowering **source** without the no-GC native runtime underneath it.
+
+Entry closure: **775 sources** (`source_closure 775/775 ... complete` at
+`+23,143 ms`). Process floor before the closure walk: **3,356,704 KiB**.
+
+Parse phase, linear and shallow:
+
+| parse module | VmRSS (KiB) | MiB above floor | MiB/module |
+|---:|---:|---:|---:|
+| 0 | 3,356,704 | 0 | — |
+| 101 | 3,631,876 | 268.7 | 2.66 |
+| 239 | 3,924,160 | 554.2 | 2.32 |
+| 313 | 4,076,252 | 702.7 | 2.25 |
+| 364 | 4,179,828 | 803.8 | 2.21 |
+
