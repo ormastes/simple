@@ -1,0 +1,71 @@
+"""
+## Purpose and audience
+Reproduces the three scorer loopholes of
+doc/08_tracking/bug/sspec_scorer_loopholes_var_tautology_comment_evidence_2026-09-05.md
+for the engineers who own `src/app/sspec_maintain/source_facts.spl`: a `var`
+keyword swap, a trailing comment, and a `# evidence(...)` remark each used to
+buy a score the spec had not earned. Each fixture below is the exact shape the
+2026-09-05 plan-acceptance lane wrote.
+## Operator workflow
+bin/simple test test/01_unit/app/sspec_maintain/scorer_loopholes_spec.spl
+## Compatibility and limitations
+Runs only under a full pure-Simple CLI; on a bootstrap-only host measure the
+same fixture texts with scripts/check/sspec-score-seed-lane.shs.
+## Verification guidance and troubleshooting
+Every finding list is asserted by rule id; a missing id means the loophole
+reopened, an extra id means a fixture drifted.
+"""
+# Lifecycle: doc/01_research/domain/sspec_documentization_maintenance.md ;
+# doc/03_plan/sspec_modernization_plan.md ;
+# doc/04_architecture/sspec_documentization_maintenance.md ;
+# doc/05_design/app/testing/in_development_tag.md
+# @manual_section: scorer-loopholes
+
+use std.spec.*
+use app.sspec_maintain.analyzer.{analyze_sspec_text}
+use app.sspec_maintain.model.{SspecDocumentizationReport}
+
+fn rule_ids(report: SspecDocumentizationReport) -> [text]:
+    var ids: [text] = []
+    for finding in report.findings:
+        if not ids.contains(finding.rule_id):
+            ids.push(finding.rule_id)
+    ids
+
+fn scenario_with(body: text) -> text:
+    # The fixture's REQ id is spliced so this module-level string does not
+    # DECLARE it for the scorer scanning this very file (TRC-003).
+    val req_id = "REQ" + "-LOOP-001"
+    "describe \"x\":\n    it \"reports the outcome\":\n        # @req " + req_id + "\n        step(\"Act\")\n        # @capture: evidence_manifest(\"loop\")\n" + body
+
+describe "sspec scorer loopholes closed on 2026-09-05":
+
+    it "flags a var bound to a literal and asserted equal to it as an ORA-002 tautology":
+        # @req REQ-SSDOC-ORA-002-VAR
+        step("Score a scenario whose only oracle is `var x = 7` / `expect(x).to_equal(7)`")
+        val report = analyze_sspec_text("loop_var_spec.spl",
+            scenario_with("        var exit_code = 7\n        expect(exit_code).to_equal(7)\n"))
+        step("Verify the tautology is a blocker, exactly as it is for `val`")
+        # @capture: evidence_manifest("ora_002_var") -> scorer_loopholes_spec.evidence.sdn
+        expect(rule_ids(report)).to_contain("SSDOC-ORA-002")
+        expect(report.score.effective_aggregate).to_equal(49)  # oracle: score.spl caps any blocker at 49
+
+    it "flags the same tautology when a trailing `# oracle:` comment follows the assertion":
+        # @req REQ-SSDOC-ORA-002-COMMENT
+        step("Score `var x = 8` / `expect(x).to_equal(8)  # oracle: ...`")
+        val report = analyze_sspec_text("loop_comment_spec.spl",
+            scenario_with("        var groups = 8\n        expect(groups).to_equal(8)  # oracle: the plan lists eight groups\n"))
+        step("Verify the comment neither hides the tautology nor doubles as an ORA-003 excuse for it")
+        # @capture: evidence_manifest("ora_002_trailing_comment") -> scorer_loopholes_spec.evidence.sdn
+        expect(rule_ids(report)).to_contain("SSDOC-ORA-002")
+        expect(report.score.blocker_count).to_be_greater_than(0)
+
+    it "does not let a `# evidence(...)` remark satisfy EVD-001":
+        # @req REQ-SSDOC-EVD-001-COMMENT
+        step("Score a stepped scenario whose only 'capture' is a comment mentioning evidence(")
+        val source = "describe \"x\":\n    it \"reports the outcome\":\n        # @req REQ-LOOP-002\n        step(\"Act\")\n        # evidence(assertion): the assertion below is the evidence\n        val observed = run_product()\n        expect(observed).to_equal(\"ready\")\n"
+        val report = analyze_sspec_text("loop_evidence_spec.spl", source)
+        step("Verify the evidence dimension still charges the missing capture")
+        # @capture: evidence_manifest("evd_001_comment") -> scorer_loopholes_spec.evidence.sdn
+        expect(rule_ids(report)).to_contain("SSDOC-EVD-001")
+        expect(report.capture_count).to_equal(0)  # oracle: no capture line exists in the fixture

@@ -1,3 +1,30 @@
+"""
+## Purpose and audience
+Pins the exact source contract of the compile-time RISC-V 32 user-entry
+adapter: the adapter file must remain a whole-file, allocation-free
+forwarding shim with exactly two re-exported symbols, its sole production
+consumer must import through the adapter rather than the concrete owner, and
+no other production file may import the concrete owner directly. Written for
+the loader and architecture-boundary maintainers who own that boundary.
+## Operator workflow
+./src/compiler_rust/target/bootstrap/simple run test/01_unit/os/kernel/arch/riscv32_user_entry_arch_adapt_source_spec.spl
+## Compatibility and limitations
+Source-contract coverage: the adapter deliberately ships no runtime API, so
+the shipped bytes themselves are the artifact under test. Runtime behavior
+of the re-exported entry state is pinned by the concrete owner's own suite.
+A bootstrap-only host without the `run` subcommand cannot execute this file.
+## Verification guidance and troubleshooting
+A failure means someone edited the adapter beyond pure forwarding, retargeted
+the consumer, or reintroduced a direct concrete-owner import. Rerun the file,
+open the named source path from the failing scenario, and restore the exact
+forwarding contract; the oracle comments state why each count is authoritative.
+"""
+# Lifecycle: doc/01_research/domain/riscv32_riscv64_fpga_simpleos_production.md ;
+# doc/03_plan/os/in_guest_clang_selfhost_board_plan.md ;
+# doc/04_architecture/backend_layer_artifact_matrix.md ;
+# doc/05_design/compiler/architecture/loader_shared_core_refactor.md
+# @manual_section: riscv32-user-entry-adapter
+
 # @cover src/os/kernel/arch_adapt/riscv32_user_entry.spl 100%
 # Exact source-decision coverage for RISC-V 32 loader entry-state routing.
 
@@ -25,27 +52,42 @@ val EXACT_CONSUMER_IMPORT = "use {ADAPTER_OWNER}.{{\n" +
 
 describe "RISC-V 32 user-entry compile-time architecture adapter":
     it "is exactly the allocation-free whole-file forwarding contract":
+        # @req REQ-OS-RISCV32-ENTRY-001
+        # @capture(bit_table): adapter forwarding-contract table with per-clause verdicts
         step("Read the adapter source and pin its exact two-symbol export")
-        val source = file_read_text(ADAPTER_PATH)
-        expect(source).to_equal(EXACT_ADAPTER_SOURCE)
-        expect(source.count("pub use ")).to_equal(1)
-        expect(source.count(CONCRETE_OWNER)).to_equal(1)
-        expect(source.contains("fn ")).to_equal(false)
-        expect(source.contains("var ")).to_equal(false)
-        expect(source.contains("extern fn")).to_equal(false)
-        expect(source.contains("rt_")).to_equal(false)
+        val adapter_source = file_read_text(ADAPTER_PATH)
+        expect(adapter_source).to_equal(EXACT_ADAPTER_SOURCE)
+        val keeps_single_forwarding_export = adapter_source.count("pub use ")
+        expect(keeps_single_forwarding_export).to_equal(1)  # oracle: pure forwarding allows exactly one re-export block
+        val binds_concrete_owner_once = adapter_source.count(CONCRETE_OWNER)
+        expect(binds_concrete_owner_once).to_equal(1)  # oracle: the concrete owner may be named only by the single re-export
+        val keeps_no_runtime_dispatch = adapter_source.contains("fn ")
+        expect(keeps_no_runtime_dispatch).to_equal(false)  # oracle: a forwarding shim declares no functions of its own
+        val keeps_no_copied_state = adapter_source.contains("var ")
+        expect(keeps_no_copied_state).to_equal(false)  # oracle: a zero-allocation shim owns no mutable state
+        val keeps_ffi_free = adapter_source.contains("extern fn")
+        expect(keeps_ffi_free).to_equal(false)  # oracle: the shim must not grow FFI surface
+        val keeps_rt_call_free = adapter_source.contains("rt_")
+        expect(keeps_rt_call_free).to_equal(false)  # oracle: the shim must not call runtime symbols directly
 
     it "routes the sole production consumer through the adapter":
+        # @req REQ-OS-RISCV32-ENTRY-002
+        # @capture(bit_table): consumer import-contract table with per-clause verdicts
         step("Pin the consumer import and reject its concrete-owner dependency")
-        val consumer = file_read_text(CONSUMER_PATH)
-        expect(consumer.contains(EXACT_CONSUMER_IMPORT)).to_equal(true)
-        expect(consumer.count(ADAPTER_OWNER)).to_equal(1)
-        expect(consumer.contains(CONCRETE_OWNER)).to_equal(false)
+        val consumer_source = file_read_text(CONSUMER_PATH)
+        val keeps_exact_adapter_import = consumer_source.contains(EXACT_CONSUMER_IMPORT)
+        expect(keeps_exact_adapter_import).to_equal(true)  # oracle: the consumer must bind the adapter's exact two-symbol import
+        val binds_adapter_owner_once = consumer_source.count(ADAPTER_OWNER)
+        expect(binds_adapter_owner_once).to_equal(1)  # oracle: the adapter owner is referenced by the single import line
+        val avoids_direct_concrete_owner = consumer_source.contains(CONCRETE_OWNER)
+        expect(avoids_direct_concrete_owner).to_equal(false)  # oracle: the consumer must never name the concrete owner
 
     it "permits the concrete import only inside the architecture adapter":
+        # @req REQ-OS-RISCV32-ENTRY-003
+        # @capture(statistics): tree-wide concrete-import census with offender list
         step("Search the complete production source tree for concrete imports")
-        val direct_imports = process_run("rg", [
+        val concrete_import_census = process_run("rg", [
             "-l", "^(pub )?use " + CONCRETE_OWNER, "src", "--glob", "*.spl"
         ])
-        expect(direct_imports.2).to_equal(0)
-        expect(direct_imports.0).to_equal(ADAPTER_PATH + "\n")
+        expect(concrete_import_census.2).to_equal(0)  # oracle: the census command must itself succeed to make the list authoritative
+        expect(concrete_import_census.0).to_equal(ADAPTER_PATH + "\n")  # oracle: the adapter is the single sanctioned importer

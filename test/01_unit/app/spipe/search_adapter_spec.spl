@@ -1,3 +1,39 @@
+"""SearchProviderAdapter handshake, state, and contract validation
+
+## Purpose and audience
+
+The P5 SearchProviderAdapter state machine transitions to Healthy only after
+handshake validates all required contract terms (analyzer, score, explanation,
+logical index ids, provider version). Audience: search indexing and adapter
+layer maintainers and code reviewers.
+
+## Adapter state machine
+
+Initial New state; Healthy on successful handshake; Unavailable on mismatch;
+Quarantined on poisoned responses. Search rejected before handshake completes.
+
+## Handshake protocol
+
+Provider offers contract ids; adapter compares against required set; all must match.
+
+## Contract validation
+
+Validate every field independently; fail closed on any mismatch (not partial acceptance).
+
+## Response validation
+
+Poison detection: quarantine on duplicate rank or malformed page from healthy adapter.
+
+## Verification guidance and troubleshooting
+
+Each scenario verifies one state transition or validation rule; cross-check all paths.
+"""
+# Lifecycle: doc/03_plan/infra/spipe/spipe_knowledge_compiler_refined_plan.md ;
+# doc/04_architecture/infra/spipe/spipe_knowledge_compiler.md ;
+# doc/05_design/infra/spipe/spipe_knowledge_compiler_search_providers.md ;
+# doc/01_research/domain/sspec_documentization_maintenance.md
+# @manual_section: spipe-search-adapter
+
 use std.spec
 use app.spipe.search.adapter.{AdapterStateV1, ProviderHandshakeV1, required_handshake_v1, validate_handshake_v1}
 use app.spipe.search.in_process_adapter.{InProcessSearchProviderAdapter}
@@ -59,31 +95,43 @@ fn valid_query() -> SearchQuery:
 
 describe "P5 SearchProviderAdapter — handshake, boundary, state machine":
     it "starts in the New state before any handshake":
+        # @req REQ-ADAPT-001
+        # @capture: text_evidence("adapter_new_state")
         step("A freshly constructed adapter has not yet initialized")
         val provider = MockSearchProvider(next_hits: [], next_logical_root: "root-1", fail: false)
         val adapter = InProcessSearchProviderAdapter.new(provider)
-        expect(adapter.state().name()).to_equal("new")
+        expect(adapter.state().name()).to_equal("new")  # oracle: freshly constructed adapter must be in the New state (before any interaction)
 
     it "moves to Healthy on a handshake that matches every required contract id":
+        # @req REQ-ADAPT-002
+        # @capture: text_evidence("handshake_success")
         step("Offer the exact required handshake")
         val provider = MockSearchProvider(next_hits: [], next_logical_root: "root-1", fail: false)
         var adapter = InProcessSearchProviderAdapter.new(provider)
         val result = adapter.handshake(required_handshake_v1())
         match result:
-            Ok(ok): expect(ok).to_equal(true)
-            Err(_): expect(true).to_equal(false)
-        expect(adapter.state().name()).to_equal("healthy")
+            Ok(ok):
+                expect(ok).to_equal(true)  # oracle: matching handshake must return ok=true
+            Err(_):
+                expect(true).to_equal(false)  # oracle: matching handshake must not error
+        expect(adapter.state().name()).to_equal("healthy")  # oracle: adapter must transition to Healthy after successful handshake
 
     it "fails closed when the provider offers a mismatched score contract id":
+        # @req REQ-ADAPT-003
+        # @capture: text_evidence("contract_mismatch_fail_closed")
         step("Injected bug: provider disagrees on the score contract")
         val required = required_handshake_v1()
         val offered = ProviderHandshakeV1.of(required.analyzer_contract_id, "bm25-fixed-v2-rogue", required.explanation_contract_id, required.logical_index_contract_id, required.provider_version)
         val result = validate_handshake_v1(offered, required)
         match result:
-            Err(e): expect(e.code).to_equal("handshake_contract_mismatch")
-            Ok(_): expect(true).to_equal(false)
+            Err(e):
+                expect(e.code).to_equal("handshake_contract_mismatch")  # oracle: mismatched score contract must fail with handshake_contract_mismatch error code
+            Ok(_):
+                expect(true).to_equal(false)  # oracle: mismatched handshake must not succeed (fail-closed)
 
     it "fails closed and goes Unavailable when the provider offers a mismatched analyzer contract id":
+        # @req REQ-ADAPT-004
+        # @capture: text_evidence("analyzer_mismatch_unavailable")
         step("Injected bug: provider disagrees on the analyzer contract")
         val provider = MockSearchProvider(next_hits: [], next_logical_root: "root-1", fail: false)
         var adapter = InProcessSearchProviderAdapter.new(provider)
@@ -91,20 +139,28 @@ describe "P5 SearchProviderAdapter — handshake, boundary, state machine":
         val rogue = ProviderHandshakeV1.of("spipe-unicode-lex-v2-rogue", required.score_contract_id, required.explanation_contract_id, required.logical_index_contract_id, required.provider_version)
         val result = adapter.handshake(rogue)
         match result:
-            Err(e): expect(e.code).to_equal("handshake_contract_mismatch")
-            Ok(_): expect(true).to_equal(false)
-        expect(adapter.state().name()).to_equal("unavailable")
+            Err(e):
+                expect(e.code).to_equal("handshake_contract_mismatch")  # oracle: analyzer contract mismatch must fail with handshake_contract_mismatch
+            Ok(_):
+                expect(true).to_equal(false)  # oracle: must not accept mismatched analyzer contract
+        expect(adapter.state().name()).to_equal("unavailable")  # oracle: adapter must transition to Unavailable on failed handshake
 
     it "rejects a search before the handshake has completed":
+        # @req REQ-ADAPT-005
+        # @capture: text_evidence("search_before_handshake_rejected")
         step("An adapter in the New state must reject search")
         val provider = MockSearchProvider(next_hits: [], next_logical_root: "root-1", fail: false)
         var adapter = InProcessSearchProviderAdapter.new(provider)
         val result = adapter.search("snap-1", "sha256:" + "0".repeat(64), valid_query())
         match result:
-            Err(e): expect(e.code).to_equal("adapter_not_healthy")
-            Ok(_): expect(true).to_equal(false)
+            Err(e):
+                expect(e.code).to_equal("adapter_not_healthy")  # oracle: search before handshake must fail with adapter_not_healthy
+            Ok(_):
+                expect(true).to_equal(false)  # oracle: must not allow search before handshake completes
 
     it "returns a validated page once healthy":
+        # @req REQ-ADAPT-006
+        # @capture: text_evidence("validated_page_returned")
         step("Healthy adapter forwards a well-formed page through")
         val good_hits = [SearchHit.of("doc-a", Score.from_milli(9000), 1)]
         val provider = MockSearchProvider(next_hits: good_hits, next_logical_root: "root-1", fail: false)
@@ -112,10 +168,14 @@ describe "P5 SearchProviderAdapter — handshake, boundary, state machine":
         adapter.handshake(required_handshake_v1())?
         val ok_result = adapter.search("snap-1", "sha256:" + "0".repeat(64), valid_query())
         match ok_result:
-            Ok(page): expect(page.hits.len()).to_equal(1)
-            Err(_): expect(true).to_equal(false)
+            Ok(page):
+                expect(page.hits.len()).to_equal(1)  # oracle: well-formed page from healthy adapter must be validated and returned (1 hit)
+            Err(_):
+                expect(true).to_equal(false)  # oracle: healthy adapter must not reject well-formed page
 
     it "quarantines the adapter on a poisoned response (duplicate rank)":
+        # @req REQ-ADAPT-007
+        # @capture: text_evidence("poisoned_response_quarantine")
         step("A healthy adapter receiving a poisoned page rejects it and quarantines")
         val poisoned_hits = [
             SearchHit.of("doc-a", Score.from_milli(9000), 1),
@@ -126,8 +186,8 @@ describe "P5 SearchProviderAdapter — handshake, boundary, state machine":
         adapter.handshake(required_handshake_v1())?
         val bad_result = adapter.search("snap-1", "sha256:" + "0".repeat(64), valid_query())
         match bad_result:
-            Err(e): expect(e.code).to_equal("poisoned_response")
-            Ok(_): expect(true).to_equal(false)
-        expect(adapter.state().name()).to_equal("quarantined")
-
-return ()
+            Err(e):
+                expect(e.code).to_equal("poisoned_response")  # oracle: poisoned response (duplicate rank) must fail with poisoned_response code
+            Ok(_):
+                expect(true).to_equal(false)  # oracle: must not accept poisoned page (fail-closed validation)
+        expect(adapter.state().name()).to_equal("quarantined")  # oracle: adapter must transition to Quarantined after detecting poisoned response

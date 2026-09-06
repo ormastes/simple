@@ -1,0 +1,205 @@
+# @req REQ-WEB4K-001
+use std.spec.*
+use std.fs.{rt_file_read_text}
+use std.gc_async_mut.gpu.browser_engine.web_renderable_feature_inventory.*
+use std.gc_async_mut.gpu.browser_engine.web_renderable_feature_witness.*
+
+describe "Web renderable feature inventory contract":
+    it "covers every property claimed by the canonical CSS traceability source":
+        val source = rt_file_read_text("scripts/check/check-html-css-sspec-traceability.shs") ?? ""
+        expect(source.len()).to_be_greater_than(0)
+        val inventory = web_renderable_feature_inventory()
+        var in_claims = false
+        var source_count = 0
+        var missing_count = 0
+        for line in source.split("\n"):
+            if line.starts_with("CSS_SUPPORTED = "):
+                in_claims = true
+            elif in_claims:
+                if line.starts_with("CSS_NAME_RE"):
+                    in_claims = false
+                else:
+                    val quoted = line.split("\"")
+                    var index = 1
+                    while index < quoted.len():
+                        source_count = source_count + 1
+                        if web_renderable_find(inventory, WEB_FEATURE_CSS, quoted[index]) == nil:
+                            missing_count = missing_count + 1
+                        index = index + 2
+        expect(source_count).to_equal(284)
+        expect(source_count).to_equal(web_renderable_count_kind(inventory, WEB_FEATURE_CSS))
+        expect(missing_count).to_equal(0)
+
+    it "distinguishes omitted layout effects from unsupported and metadata claims":
+        val inventory = web_renderable_feature_inventory()
+        for name in ["grid-template-columns", "margin-inline", "aspect-ratio", "object-fit"]:
+            val found = web_renderable_find(inventory, WEB_FEATURE_CSS, name)
+            expect(found != nil).to_be(true)
+            if val row = found:
+                expect(row.status).to_equal(WEB_PARTIAL)
+                expect(row.production_owner).to_end_with(".spl")
+        for name in ["backface-visibility", "background-blend-mode", "column-count", "text-emphasis"]:
+            val found = web_renderable_find(inventory, WEB_FEATURE_CSS, name)
+            expect(found != nil).to_be(true)
+            if val row = found:
+                expect(row.status).to_equal(WEB_UNSUPPORTED)
+                expect(row.production_owner).to_equal("none")
+        for name in ["font-palette", "orphans", "will-change"]:
+            val found = web_renderable_find(inventory, WEB_FEATURE_CSS, name)
+            expect(found != nil).to_be(true)
+            if val row = found:
+                expect(row.status).to_equal(WEB_NONPAINT)
+
+    it "keeps stable canonical HTML and CSS rows with unique ids":
+        val inventory = web_renderable_feature_inventory()
+        expect(inventory.version).to_equal("web-renderable-feature-inventory-v1")
+        expect(web_renderable_count_kind(inventory, WEB_FEATURE_HTML)).to_equal(WEB_HTML_CANONICAL_COUNT)
+        expect(web_renderable_count_kind(inventory, WEB_FEATURE_CSS)).to_equal(WEB_CSS_CANONICAL_COUNT)
+        expect(inventory.rows.len()).to_equal(WEB_HTML_CANONICAL_COUNT + WEB_CSS_CANONICAL_COUNT)
+        var duplicate_count = 0
+        var i = 0
+        while i < inventory.rows.len():
+            var j = i + 1
+            while j < inventory.rows.len():
+                if inventory.rows[i].id == inventory.rows[j].id:
+                    duplicate_count = duplicate_count + 1
+                j = j + 1
+            i = i + 1
+        expect(duplicate_count).to_equal(0)
+
+    it "does not promote lexical occurrence to renderer support":
+        val inventory = web_renderable_feature_inventory()
+        val iframe = web_renderable_find(inventory, WEB_FEATURE_HTML, "iframe")
+        expect(iframe != nil).to_be(true)
+        if val row = iframe:
+            expect(row.status).to_equal(WEB_UNSUPPORTED)
+            expect(row.production_owner).to_equal("none")
+        val transform_box = web_renderable_find(inventory, WEB_FEATURE_CSS, "transform-box")
+        expect(transform_box != nil).to_be(true)
+        if val row = transform_box:
+            expect(row.status).to_equal(WEB_UNSUPPORTED)
+            expect(row.production_owner).to_equal("none")
+        val cursor = web_renderable_find(inventory, WEB_FEATURE_CSS, "cursor")
+        expect(cursor != nil).to_be(true)
+        if val row = cursor:
+            expect(row.status).to_equal(WEB_NONPAINT)
+
+    it "binds renderable rows to owners tests and stable showcase tabs":
+        val inventory = web_renderable_feature_inventory()
+        expect(web_renderable_count_status(inventory, WEB_RENDERABLE)).to_be_greater_than(0)
+        expect(web_renderable_count_status(inventory, WEB_PARTIAL)).to_be_greater_than(0)
+        expect(web_renderable_count_status(inventory, WEB_NONPAINT)).to_be_greater_than(0)
+        expect(web_renderable_count_status(inventory, WEB_UNSUPPORTED)).to_be_greater_than(0)
+        for row in inventory.rows:
+            val expected_prefix = if row.kind == WEB_FEATURE_HTML: "html:" else: "css:"
+            expect(row.id).to_start_with(expected_prefix)
+            expect(row.test_owner.len()).to_be_greater_than(0)
+            expect(row.showcase_tab.len()).to_be_greater_than(0)
+            if row.status == WEB_RENDERABLE:
+                expect(row.production_owner).to_end_with(".spl")
+        expect(web_renderable_count_tab(inventory, "html")).to_be_greater_than(0)
+        expect(web_renderable_count_tab(inventory, "css-layout")).to_be_greater_than(0)
+        expect(web_renderable_count_tab(inventory, "css-paint")).to_be_greater_than(0)
+        expect(web_renderable_count_tab(inventory, "forms-media")).to_be_greater_than(0)
+        expect(web_renderable_count_tab(inventory, "animation")).to_be_greater_than(0)
+
+    it "exposes value families without claiming complete CSS semantics":
+        val inventory = web_renderable_feature_inventory()
+        val color = web_renderable_find(inventory, WEB_FEATURE_CSS, "background-color")
+        expect(color != nil).to_be(true)
+        if val row = color:
+            expect(row.value_family).to_equal("color")
+            expect(row.status).to_equal(WEB_RENDERABLE)
+        val transform = web_renderable_find(inventory, WEB_FEATURE_CSS, "transform")
+        expect(transform != nil).to_be(true)
+        if val row = transform:
+            expect(row.value_family).to_equal("transform-list")
+            expect(row.status).to_equal(WEB_PARTIAL)
+
+    it "renders every classified row into visible showcase inventory markup":
+        val inventory = web_renderable_feature_inventory()
+        val html = web_renderable_feature_inventory_markup(inventory)
+        expect(html).to_contain("data-inventory-version=\"web-renderable-feature-inventory-v1\"")
+        expect(html).to_contain("data-feature-id=\"html:article\"")
+        expect(html).to_contain("data-feature-id=\"css:display\"")
+        expect(html).to_contain("data-status=\"unsupported\"")
+        expect(html).to_contain("partial, nonpaint, and unsupported rows are not passing pixels")
+
+    it "places catalog rows into the matching canonical tab panels":
+        val inventory = web_renderable_feature_inventory()
+        val fixture = "<main><!-- simple-web-inventory:html --><!-- simple-web-inventory:forms-media --><!-- simple-web-inventory:css-layout --><!-- simple-web-inventory:css-paint --><!-- simple-web-inventory:animation --></main>"
+        val rendered = web_renderable_feature_inventory_apply_to_showcase(fixture, inventory)
+        expect(rendered).to_contain("data-inventory-tab=\"html\"")
+        expect(rendered).to_contain("data-inventory-tab=\"forms-media\"")
+        expect(rendered).to_contain("data-inventory-tab=\"css-layout\"")
+        expect(rendered).to_contain("data-inventory-tab=\"css-paint\"")
+        expect(rendered).to_contain("data-inventory-tab=\"animation\"")
+        expect(rendered).to_contain("data-feature-id=\"html:article\"")
+        expect(rendered).to_contain("data-feature-id=\"css:display\"")
+        for row in inventory.rows:
+            expect(rendered).to_contain("data-feature-id=\"" + row.id + "\"")
+
+    it "gives every safely embeddable renderable HTML row a real element example":
+        val inventory = web_renderable_feature_inventory()
+        var examples = 0
+        var structural = 0
+        for row in inventory.rows:
+            if row.kind == WEB_FEATURE_HTML and row.status == WEB_RENDERABLE:
+                val sample = web_feature_html_witness(row.name)
+                val markup = web_feature_witness_markup(row.kind, row.name, row.status)
+                if row.name == "html" or row.name == "body" or row.name == "main" or row.name == "colgroup":
+                    structural = structural + 1
+                    expect(sample).to_equal("")
+                    expect(markup).to_contain("data-witness=\"structural\"")
+                else:
+                    examples = examples + 1
+                    expect(sample).to_contain("<" + row.name)
+                    expect(markup).to_contain("data-witness=\"html-example\"")
+                    expect(markup).to_contain("rendered pixels unverified")
+        expect(structural).to_equal(4)
+        expect(examples).to_be_greater_than(40)
+
+    it "keeps context-sensitive elements inside valid parent structures":
+        expect(web_feature_html_witness("caption")).to_start_with("<table><caption>")
+        expect(web_feature_html_witness("legend")).to_start_with("<fieldset><legend>")
+        expect(web_feature_html_witness("li")).to_start_with("<ul><li>")
+        expect(web_feature_html_witness("dd")).to_contain("<dl><dt>Term</dt><dd>")
+        expect(web_feature_html_witness("summary")).to_start_with("<details open><summary>")
+        expect(web_feature_html_witness("figcaption")).to_start_with("<figure>")
+        expect(web_feature_html_witness("br")).to_equal("Line one<br>Line two")
+
+    it "never emits active resource markup or samples for non-renderable rows":
+        val inventory = web_renderable_feature_inventory()
+        for row in inventory.rows:
+            if row.status != WEB_RENDERABLE:
+                val markup = web_feature_witness_markup(row.kind, row.name, row.status)
+                expect(markup).to_contain("data-witness=\"classification-only\"")
+                expect(markup.contains("data-sample=")).to_be(false)
+                expect(markup.contains("html-example")).to_be(false)
+        expect(web_feature_html_witness("script")).to_equal("")
+        expect(web_feature_html_witness("iframe")).to_equal("")
+        expect(web_feature_html_witness("img")).to_equal("")
+        expect(web_feature_html_witness("img src=x onerror=alert(1)")).to_equal("")
+        expect(web_feature_css_witness_declaration("background-image")).to_equal("")
+
+    it "pairs each renderable CSS row with a selected safe declaration":
+        val inventory = web_renderable_feature_inventory()
+        for row in inventory.rows:
+            if row.kind == WEB_FEATURE_CSS and row.status == WEB_RENDERABLE:
+                val declaration = web_feature_css_witness_declaration(row.name)
+                expect(declaration).to_start_with(row.name + ":")
+                val markup = web_feature_witness_markup(row.kind, row.name, row.status)
+                expect(markup).to_contain("data-witness=\"css-example\"")
+                expect(markup).to_contain("data-sample=\"" + declaration + "\"")
+                expect(markup).to_contain("rendered pixels unverified")
+
+    it "embeds actual examples only in the row's owning tab":
+        val inventory = web_renderable_feature_inventory()
+        val html = web_renderable_feature_inventory_tab_markup(inventory, "html")
+        val paint = web_renderable_feature_inventory_tab_markup(inventory, "css-paint")
+        val animation = web_renderable_feature_inventory_tab_markup(inventory, "animation")
+        expect(html).to_contain("<article>article example</article>")
+        expect(html).to_contain("<ul><li>List item</li></ul>")
+        expect(paint).to_contain("data-sample=\"background-color:#d04060\"")
+        expect(paint.contains("<article>article example</article>")).to_be(false)
+        expect(animation.contains("data-witness=\"css-example\"")).to_be(false)

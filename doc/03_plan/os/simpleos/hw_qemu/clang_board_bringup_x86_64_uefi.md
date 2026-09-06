@@ -35,10 +35,13 @@ timing under real cores, thermals/power.
 ## Phases
 
 ### P0 — Board selection + evidence channel (decision, blocks everything)
-- [ ] **P0.1** Pick the mini-PC with the NIC gap as the first-class criterion:
-      prefer a board with an Intel **I210/I211** (simple, well-documented
-      datasheet, e1000-family descriptor rings) over Realtek. If a board with a
-      **serial console header** (or AMT/SOL) exists, weight it heavily.
+- [x] **P0.1** Board selected: **UP Squared (Intel Apollo Lake)** — a
+      board-specific kernel arch tree exists (`src/os/kernel/arch/x86_64/up_squared/`:
+      `entry.spl`, `serial_io.spl`, `nvme_storage.spl`, `dci_mailbox.spl`,
+      `gdb_rsp_uart.spl`) and is gated statically by
+      `scripts/check/check-simpleos-up-squared-apollo-lake.shs` (serial via a
+      Tigard adapter, `UP2_TIGARD_SERIAL`, :13). — verified scripts/check/check-simpleos-up-squared-apollo-lake.shs:22 `up2_serial_init`
+  - divergence: planned "pick by NIC (I210/I211) + serial header"; shipped UP Squared APL chosen with a Tigard UART + Intel DCI evidence path; the NIC part number is NOT recorded in-repo (guide `doc/07_guide/os/simpleos_board_bringup.md:56` still says UNVERIFIED).
 - [ ] **P0.2** Decide the evidence channel, in preference order: (a) physical
       RS-232/TTL header + USB adapter, (b) framebuffer console via GOP (print
       the same serial ladder to screen + photograph), (c) NVMe evidence file
@@ -50,11 +53,13 @@ timing under real cores, thermals/power.
       this doc once purchased/selected.
 
 ### P1 — Bootable media + first light (no network needed)
-- [ ] **P1.1** `scripts/os/build_clang_board_usb.shs`: build a GPT USB image —
-      ESP partition (BOOTX64.EFI from grub-mkstandalone, same grub.cfg as the
-      OVMF harness) + FAT32 data partition (kernel ELF, `clang_static`,
-      sysroot, `/hello.c`). Reuse the staging logic from
-      `scp_retrieve_over_ssh_uefi.shs`; parameterize the disk device.
+- [x] **P1.1** `scripts/os/build-simpleos-x86_64-board-usb.shs`: builds a
+      reproducible raw GPT disk image with ONE EFI System Partition (FAT32)
+      holding a resident `BOOTX64.EFI` + `GRUBX64.EFI` fallback
+      (grub-mkstandalone, kernel embedded via memdisk) + `startup.nsh`; shape
+      is asserted without hardware by
+      `scripts/check/check-simpleos-x86_64-board-usb-image.shs`. — verified scripts/os/build-simpleos-x86_64-board-usb.shs:4 `GPT+FAT32 USB disk image`; gate scripts/check/check-simpleos-x86_64-board-usb-image.shs:5
+  - divergence: planned `build_clang_board_usb.shs` with ESP + separate FAT32 data partition carrying `clang_static`/sysroot/`hello.c`; shipped a single-ESP image with the kernel memdisk-embedded and no clang payload partition (so the compile ladder is not on the stick yet).
 - [ ] **P1.2** QEMU dry-run the exact USB image under OVMF (boot from the
       image, not from `-drive` staging) — catches ESP/partition mistakes
       before touching hardware.
@@ -102,6 +107,23 @@ timing under real cores, thermals/power.
 - [ ] **P4.3** Flip the parent plan's "physical-board bring-up" line to ✅ and
       close the goal entirely.
 
+## Refresh notes (2026-09-05)
+
+- P1.2: no script boots `build/os/up-squared-apollo-lake/usb/board-usb.img`
+  under OVMF; `check-simpleos-up-squared-apollo-lake.shs` is source-static plus
+  Tigard/media-receipt probes that exit `blocked` (:17, :128-138) — no QEMU dry-run.
+- P1.3/P1.4: board boot evidence is recorded only in bug records
+  (`doc/08_tracking/bug/up2_grub_multiboot2_transition_2026-08-20.md`, RESOLVED:
+  ELF32 shim reaches the ELF64 kernel entry via GRUB Multiboot2). No
+  `scripts/check/*.shs` gate asserts a board boot, so those rows stay open per
+  `.claude/rules/board-runnable.md`. `examples/09_embedded/simple_os/arch/x86_64/boot/up2_dci_uefi_loader.c`
+  (`efi_main`) is a DCI mailbox payload loader, not the P1.4 kernel UEFI-stub entry.
+- P0.2(c): no `BOOTLOG.TXT` writer exists anywhere under `src/os`, `scripts/os`
+  or the simple_os examples.
+- P3.1: no `src/os/drivers/intel_igb/`; `src/os/drivers/pci/pci_provider.spl:252`
+  `pci_function_is_e1000` is only a PCI-id predicate, and
+  `real_device_readiness.spl:202` models an `e1000` network mode — no NIC driver.
+
 ## Risks / fallbacks
 - Vendor UEFI rejects GRUB multiboot path → P1.4 UEFI-stub entry (designed in
   2f as option (a), unused so far).
@@ -116,3 +138,9 @@ timing under real cores, thermals/power.
 Every phase's PASS requires a durable artifact (serial capture, photo of GOP
 ladder, or `/BOOTLOG.TXT` contents) recorded under `doc/09_report/os/`. No
 phase is "done" on a verbal claim — same rule that caught the 2e/2f gap.
+
+## Acceptance
+
+Runnable oracles for the remaining open boxes: `test/03_system/plan_acceptance/clang_board_bringup_x86_64_uefi_spec.spl`
+(tagged `@tag:in-development`; one `it` per open box — see
+`doc/03_plan/agent_tasks/plan_remains_acceptance_2026-09-05.md`).

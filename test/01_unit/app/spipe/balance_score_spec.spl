@@ -5,9 +5,16 @@ deterministic, int-tenths document-balance score from Cohesion, Trace path
 alignment, Shape, and Axis coverage — the four components the refined plan
 keeps for slice 1, renormalized 43/21/21/15.
 Audience: compiler and tooling engineers maintaining `src/app/spipe/balance/`.
+
+## Lifecycle
+- Research: doc/01_research/infra/spipe/
+- Plan: doc/03_plan/infra/spipe/spipe_knowledge_compiler_refined_plan.md (S1-C)
+- Architecture: doc/04_architecture/infra/spipe/
+- Design: doc/05_design/infra/spipe/ (if available)
 """
 
 # @req: doc/03_plan/infra/spipe/spipe_knowledge_compiler_refined_plan.md §S1-C
+# @manual_section: Component scoring and determinism
 
 use std.spec.*
 use std.spec.step
@@ -54,22 +61,25 @@ describe "S1-C balance score engine":
     describe "component scoring on a clean tree":
 
         it "scores every kept component at its full weight with no deductions":
+            # @req REQ-SSPEC-BALANCE
+            # @capture(statistics): component scores and total balance score
             step("Score a scope whose inputs sit inside every target band")
             val report = score_report(good_scope(""))
 
             step("Verify: score_tenths reaches the maximum (43+21+21+15) x 10 = 1000")
-            expect(report.score_tenths).to_equal(1000)
+            expect(report.score_tenths).to_equal(1000)  # oracle: (43+21+21+15)*10 = 1000
 
             step("Verify: no deductions are emitted for a clean scope")
-            expect(report.deductions.len()).to_equal(0)
+            expect(report.deductions.len()).to_equal(0)  # oracle: clean scope = zero deductions
 
             step("Verify: each component's raw score is a perfect 1000 per-mille")
-            expect(report.components[0].raw_permille).to_equal(1000)
-            expect(report.components[1].raw_permille).to_equal(1000)
-            expect(report.components[2].raw_permille).to_equal(1000)
-            expect(report.components[3].raw_permille).to_equal(1000)
+            expect(report.components[0].raw_permille).to_equal(1000)  # oracle: perfect score
+            expect(report.components[1].raw_permille).to_equal(1000)  # oracle: perfect score
+            expect(report.components[2].raw_permille).to_equal(1000)  # oracle: perfect score
+            expect(report.components[3].raw_permille).to_equal(1000)  # oracle: perfect score
 
         it "sums each scope's own deductions back to its component points (arithmetic identity)":
+            # @capture(statistics): component deductions and arithmetic relationships
             step("Score a degraded scope")
             val report = score_report(bad_scope("doc/04_architecture/compiler"))
 
@@ -84,6 +94,7 @@ describe "S1-C balance score engine":
             expect(report.score_tenths).to_equal(summed)
 
         it "emits the reserved SPK51x diagnostic codes for a degraded scope":
+            # @capture(protocol_json): diagnostic code identifiers
             step("Score a degraded scope with a shortfall on every component")
             val report = score_report(bad_scope("doc/04_architecture/compiler"))
             var codes: [text] = []
@@ -97,6 +108,7 @@ describe "S1-C balance score engine":
             expect(find_deduction(codes, "SPK514")).to_be(true)
 
         it "scores a well-organized tree strictly higher than a badly organized one":
+            # @capture(statistics): comparative component scores
             step("Score both a good and a bad fixture at the same scope shape")
             val good = score_report(good_scope("doc"))
             val bad = score_report(bad_scope("doc"))
@@ -113,6 +125,7 @@ describe "S1-C balance score engine":
     describe "recursive scopes":
 
         it "scores nested scopes depth-first, sorted by path":
+            # @capture(statistics): nested child scores in path order
             step("Build a root scope with three children in a non-sorted input order")
             val root = mk_scope("", 100, 0, 10, 10, 1, 5, 2, 0, 2, 2, [
                 good_scope("z_scope"),
@@ -122,12 +135,13 @@ describe "S1-C balance score engine":
             val report = score_report(root)
 
             step("Verify: children come back path-sorted regardless of input order")
-            expect(report.scopes.len()).to_equal(3)
-            expect(report.scopes[0].scope).to_equal("a_scope")
+            expect(report.scopes.len()).to_equal(3)  # oracle: three inputs, three outputs
+            expect(report.scopes[0].scope).to_equal("a_scope")  # oracle: lexical order
             expect(report.scopes[1].scope).to_equal("m_scope")
             expect(report.scopes[2].scope).to_equal("z_scope")
 
         it "breaks ties between genuinely identical scopes stably on path":
+            # @capture(statistics): tie-break ordering by path
             step("Two children with byte-identical inputs, differing only by scope path")
             val root = mk_scope("", 100, 0, 10, 10, 1, 5, 2, 0, 2, 2, [
                 bad_scope("beta"),
@@ -136,13 +150,14 @@ describe "S1-C balance score engine":
             val report = score_report(root)
 
             step("Verify: tie-break lands on the lexically smaller path first")
-            expect(report.scopes[0].scope).to_equal("alpha")
-            expect(report.scopes[1].scope).to_equal("beta")
+            expect(report.scopes[0].scope).to_equal("alpha")  # oracle: lexical tie-break
+            expect(report.scopes[1].scope).to_equal("beta")   # oracle: lexical tie-break
 
             step("Verify: both tied children still produced identical scores")
             expect(report.scopes[0].score_tenths).to_equal(report.scopes[1].score_tenths)
 
         it "sorts children via the same byte-lexical comparator used for tie-breaks":
+            # @capture(statistics): lexical comparison results
             step("Verify: scope_text_less is a real byte-lexical order, not identity")
             expect(scope_text_less("a", "b")).to_be(true)
             expect(scope_text_less("b", "a")).to_be(false)
@@ -150,9 +165,12 @@ describe "S1-C balance score engine":
             expect(scope_text_less("a", "ab")).to_be(true)
 
         it "keeps sorted_children a stable, pure reordering (no elements lost or duplicated)":
+            # @capture(statistics): sorted children array ordering and cardinality
+            step("Sort three children in random input order")
             val children = [good_scope("c"), good_scope("a"), good_scope("b")]
             val sorted = sorted_children(children)
-            expect(sorted.len()).to_equal(3)
+            step("Verify: all three children are present and in sorted order")
+            expect(sorted.len()).to_equal(3)  # oracle: three inputs, three outputs
             expect(sorted[0].scope).to_equal("a")
             expect(sorted[1].scope).to_equal("b")
             expect(sorted[2].scope).to_equal("c")
@@ -160,6 +178,7 @@ describe "S1-C balance score engine":
     describe "determinism":
 
         it "produces byte-identical canonical bytes across repeated computation":
+            # @capture(bit_table): canonical byte sequence encoding and determinism
             step("Score the same non-trivial tree twice from independent inputs")
             val root_once = mk_scope("", 100, 20, 10, 7, 3, 20, 10, 1, 4, 3, [
                 bad_scope("nested_b"),
@@ -176,15 +195,17 @@ describe "S1-C balance score engine":
             expect(first).to_equal(second)
 
             step("Verify: canonical bytes are non-trivial evidence, not an empty placeholder")
-            expect(first.len()).to_be_greater_than(20)
+            expect(first.len()).to_be_greater_than(20)  # oracle: nonempty binary encoding
 
     describe "rounding arithmetic (weight * raw_permille / 100, half-up)":
 
         it "rounds .5 tenths up rather than truncating":
+            # @capture(bit_table): rounding result and fixed-point arithmetic
             step("43 weight at 850 per-mille: 43*850/100 = 365.5 -> rounds to 366")
-            expect(tenths_half_up(43, 850)).to_equal(366)
+            expect(tenths_half_up(43, 850)).to_equal(366)  # oracle: 43*850/100 = 365.5, rounds half-up
 
         it "matches plain integer division when there is no fractional remainder":
+            # @capture(bit_table): exact integer rounding result
             step("21 weight at 1000 per-mille: 21*1000/100 = 210 exactly")
-            expect(tenths_half_up(21, 1000)).to_equal(210)
+            expect(tenths_half_up(21, 1000)).to_equal(210)  # oracle: 21*1000/100 = 210 exactly
 

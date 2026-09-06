@@ -56,6 +56,17 @@ moved-source invalidation. That acceptance does not mark AC-5..AC-7 complete.
 - [x] Assert natural exit reason separately from explicit close and retain
   `close_attempts == 1` across repeated close.
 - [ ] Obtain an admitted pure-Simple native verdict.
+  - status 2026-09-05: still open, for two independent reasons. (a) No admitted
+    pure-Simple full-CLI binary exists on this host — `bin/simple` has no `run`
+    command, and a Rust seed cannot produce an "admitted" verdict by this plan's
+    own E3 text, so ticking on a seed run would be false. (b) The oracle is RED
+    anyway: `test/03_system/plan_acceptance/parent_authoritative_actor_process_spec.spl`
+    `it "Obtain an admitted pure-Simple native verdict."` reports
+    `accepted=0 receipt_ok=false reason=empty-process-result-batch after_revision=1`.
+    The already-ticked E1 spec `parent_commit_piped_result_spec.spl` is RED the
+    same way (`accepted=0 rejected=2`, 2 of 4 examples failing) while the
+    identical sequence run from `fn main()` accepts and commits —
+    `doc/08_tracking/bug/piped_process_frames_rejected_under_spec_runner_2026-09-05.md`.
 
 ## E2 completion checklist
 
@@ -63,9 +74,30 @@ moved-source invalidation. That acceptance does not mark AC-5..AC-7 complete.
 - [x] Author the mirrored operator manual without hand-claiming generation.
 - [x] Add focused system-test and agent-handoff plans.
 - [x] Link focused evidence from functional and NFR requirement maps.
-- [ ] Regenerate the manual through pure-Simple `spipe-docgen`.
-- [ ] Obtain the seven-score `sspec-maintain` verdict, blocker=0, mirror PASS,
+- [x] Regenerate the manual through pure-Simple `spipe-docgen`.
+  — verified 2026-09-05: `test/03_system/plan_acceptance/parent_authoritative_actor_process_spec.spl`
+  `it "Regenerate the manual through pure-Simple \`spipe-docgen\`."` is GREEN.
+  Closing it required fixing three real defects that made regeneration
+  impossible — `spec_kw_line` and `scenario_at_is_unconditional_pending` were
+  imported by `spipe-docgen` and defined in no module, and `sspec-maintain
+  documentize` looked for the staged manual at a path `spipe-docgen` never
+  writes (`doc/08_tracking/bug/spipe_docgen_spec_kw_line_undefined_2026-09-05.md`).
+  `sspec-maintain documentize test/03_system/feature/language/parent_commit_piped_result_spec.spl`
+  now reports `wrote doc/06_spec/03_system/feature/language/parent_commit_piped_result_spec.md`.
+  Caveat for the reviewer: the oracle compares the docgen-OWNED content of the
+  mirror (the two `<!-- sspec-maintain:* -->` wrapper blocks stripped by the same
+  algorithm `documentize` used to add them), because hashing the whole committed
+  file against raw docgen output can never pass while the next box's "mirror
+  PASS" holds — those two blocks are where the source sha lives.
+- [x] Obtain the seven-score `sspec-maintain` verdict, blocker=0, mirror PASS,
   traceability PASS, and zero stubs.
+  — verified 2026-09-05: same spec, `it "Obtain the seven-score \`sspec-maintain\`
+  verdict, …"` is GREEN — `blocker_count=0`, `mirror_state="current"`,
+  `traceability=100`, `release_ready=true` from `analyze_sspec_pair_text` over the
+  regenerated mirror. Run: `src/compiler_rust/target/debug/simple run
+  test/03_system/plan_acceptance/parent_authoritative_actor_process_spec.spl`
+  -> `3 examples, 1 failure` (the one failure is the "admitted native verdict"
+  box above, still open).
 
 ## E3 inventory and resume
 
@@ -82,3 +114,9 @@ acceptance substitute.
 Commands to resume, subject to the staged runtime's supported-command
 inventory, are recorded in
 `doc/03_plan/sys_test/parent_authoritative_actor_process.md`.
+
+## Acceptance
+
+Runnable oracles for the remaining open boxes: `test/03_system/plan_acceptance/parent_authoritative_actor_process_spec.spl`
+(tagged `@tag:in-development`; one `it` per open box — see
+`doc/03_plan/agent_tasks/plan_remains_acceptance_2026-09-05.md`).

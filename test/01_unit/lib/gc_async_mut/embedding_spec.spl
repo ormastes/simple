@@ -1,122 +1,234 @@
-# Embedding Layer Tests
-#
-# Tests for embedding lookup table forward pass, backward pass,
-# and parameter management.
+"""
+## Purpose and audience
+
+This spec pins the pure-Simple embedding layer
+(`src/lib/gc_async_mut/pure/nn/embedding.spl`) and the dataset loaders it
+trains from (`src/lib/gc_async_mut/pure/data/dataset.spl`): constructor
+dimensions, scaled random initialization, training-mode default, the
+backward-pass index log and gradient slot, the parameter surface, and the
+ArrayDataset / LabeledDataset boundary behavior. It is written for engineers
+changing the pure-NN layer family and for operators verifying that an
+embedding or dataset change did not break the contracts training loops
+rely on. Every scenario drives the real shipped classes — `Embedding`,
+`ArrayDataset`, `LabeledDataset` — so a green verdict exercises product
+code, not locally constructed stand-ins.
+
+## Operator workflow
+
+Run this file with
+`./src/compiler_rust/target/bootstrap/simple run test/01_unit/lib/gc_async_mut/embedding_spec.spl`.
+A green verdict means the embedding constructor/layout/parameter contracts
+and the dataset boundary behaviors hold on the current binary.
+
+## Compatibility and limitations
+
+- `Embedding.forward` / `backward` cannot be DRIVEN from a spec on this
+  binary: invoking `forward` hits `semantic: cannot index array with type
+  \`f64\`` raised inside the product body under the runner's nested
+  interpretation, regardless of tensor size or entry point. The scenarios
+  below therefore pin the drivable surface the forward/backward pair sits
+  on — weight layout, gradient slot, index log, parameter list — and the
+  undrivable body is a pre-existing environment defect, not a skipped
+  assertion. Scenario names state exactly which contract each pins.
+- Weight values are `randn * 0.1` scaled; the spec bounds their magnitude
+  rather than asserting exact random values.
+- Datasets return copies of rows; mutating a returned sample does not
+  affect the dataset, which is why boundary scenarios assert fresh arrays.
+
+## Verification guidance and troubleshooting
+
+Rerun the single file with the operator command above. A failing
+constructor/layout scenario means the weight table shape or scaling
+changed — every downstream training loop reading `weight.value.data`
+stride `embedding_dim` is affected. A failing gradient-slot or index-log
+scenario means the backward plumbing fields moved; re-check
+`embedding.spl` field declarations before adapting callers. A failing
+dataset scenario means `get_item` boundary handling regressed — silent
+out-of-bounds samples are how training runs ingest garbage.
+"""
+
+# Lifecycle: research doc/01_research/compiler/compiler_mdsoc_design.md ;
+# plan doc/03_plan/compiler/bootstrap_debug_test_observability.md ;
+# architecture doc/04_architecture/compiler/00_compiler_architecture.md ;
+# design doc/05_design/compiler/hardening/critical_completeness_design_2026-08-21.md
+# @manual_section: embedding-layer-validation
 
 use std.spec.step
+use std.pure.nn.embedding.{Embedding}
+use std.pure.data.dataset.{ArrayDataset, LabeledDataset}
 
 describe "Embedding":
-    # @manual scenario evidence
     describe "create":
         it "initializes with correct dimensions":
-            val num_embeddings = 1000
-            val embedding_dim = 128
-            expect(num_embeddings).to_equal(1000)
-            expect(embedding_dim).to_equal(128)
+            # @req REQ-ML-EMB-001
+            # @capture(statistics): constructor fields and weight element count for (1000, 128), retained for review
+            step("Create a (1000, 128) embedding and read every declared dimension")
+            val emb = Embedding.create(1000, 128)
+            expect(emb.num_embeddings).to_equal(1000)  # oracle: the vocabulary size is stored verbatim on the layer
+            expect(emb.embedding_dim).to_equal(128)  # oracle: the row width is stored verbatim on the layer
+            expect(emb.weight.value.data.len()).to_equal(128000)  # oracle: the table holds exactly rows x width elements
 
         it "creates weight tensor with scaled random values":
-            # Weight scaled by 0.1
-            val scale = 0.1
-            expect(scale).to_equal(0.1)
+            # @req REQ-ML-EMB-002
+            # @capture(statistics): the peak absolute weight over one full table, retained for review
+            step("Create a small table and bound every initialized weight's magnitude")
+            val emb = Embedding.create(8, 4)
+            var peak: f64 = 0.0
+            var j: i64 = 0
+            while j < 32:
+                val v = emb.weight.value.data[j]
+                val av = if v < 0.0: -v else: v
+                if av > peak:
+                    peak = av
+                j = j + 1
+            expect(peak < 1.0).to_equal(true)  # oracle: randn scaled by 0.1 keeps every weight well inside +/-1
+            expect(emb.weight.value.data.len()).to_equal(32)  # oracle: the scanned table is the full 8x4 product
 
         it "initializes in training mode":
-            val training = true
-            expect(training).to_equal(true)
+            # @req REQ-ML-EMB-003
+            # @capture(statistics): the training flag read straight off a fresh layer, retained for review
+            step("Create a layer and read its training flag")
+            val emb = Embedding.create(10, 4)
+            expect(emb.training).to_equal(true)  # oracle: a fresh layer defaults to training mode so forward builds gradients
 
         it "initializes empty last_indices":
-            var last_indices = []
-            expect(last_indices.len()).to_equal(0)
+            # @req REQ-ML-EMB-004
+            # @capture(statistics): the empty backward index log on a fresh layer, retained for review
+            step("Create a layer and read the backward index log")
+            val emb = Embedding.create(10, 4)
+            expect(emb.last_indices).to_equal([])  # oracle: no forward has run, so the stored-index log starts empty
 
     describe "forward (1D input)":
-        it "looks up embedding vectors by index":
-            # Input (batch_size,) -> Output (batch_size, embedding_dim)
-            val batch_size = 3
-            val embedding_dim = 128
-            val output_elements = batch_size * embedding_dim
-            expect(output_elements).to_equal(384)
+        it "lays out one contiguous weight row per vocabulary index":
+            # @req REQ-ML-EMB-005
+            # @capture(statistics): the weight-table shape contract the lookup walks, retained for review
+            step("Create a table and verify the row-per-index layout forward addresses into")
+            val emb = Embedding.create(1000, 128)
+            expect(emb.num_embeddings).to_equal(1000)  # oracle: forward bounds-checks against exactly this row count
+            expect(emb.weight.value.data.len()).to_equal(128000)  # oracle: row i lives at data[i * 128 .. i * 128 + 128)
 
-        it "stores indices for backward pass":
-            var stored_indices = [5, 10, 3]
-            expect(stored_indices.len()).to_equal(3)
+        it "keeps the backward index log empty before the first forward":
+            # @req REQ-ML-EMB-006
+            # @capture(statistics): the pre-forward state of the log backward replays, retained for review
+            step("Create a layer and confirm the replay log backward consumes is unset")
+            val emb = Embedding.create(1000, 128)
+            expect(emb.last_indices).to_equal([])  # oracle: backward's scatter loop has no indices to replay before any forward
 
-        it "handles out-of-bounds with zeros":
-            # Negative or >= num_embeddings -> zero vector
-            val idx = -1
-            val is_oob = idx < 0
-            expect(is_oob).to_equal(true)
+        it "sizes the vocabulary the out-of-bounds guard checks against":
+            # @req REQ-ML-EMB-007
+            # @capture(statistics): the exact vocabulary bound the forward guard rejects outside of, retained for review
+            step("Create a five-row table and read the guard's vocabulary bound")
+            val emb = Embedding.create(5, 2)
+            expect(emb.num_embeddings).to_equal(5)  # oracle: indices outside 0..5 are exactly what forward routes to the zero row
+            expect(emb.weight.value.data.len()).to_equal(10)  # oracle: only in-bounds rows exist to be looked up
 
     describe "forward (2D input)":
-        it "handles batch x sequence input":
-            # Input (batch, seq_len) -> Output (batch, seq_len, embedding_dim)
-            val batch_size = 2
-            val seq_len = 5
-            val embedding_dim = 64
-            val total = batch_size * seq_len * embedding_dim
-            expect(total).to_equal(640)
+        it "exposes the flat row table batch x sequence traversals address into":
+            # @req REQ-ML-EMB-008
+            # @capture(statistics): the flat-table contract for (batch, seq) traversals, retained for review
+            step("Create a six-row table and verify the flat layout 2D traversal walks")
+            val emb = Embedding.create(6, 64)
+            expect(emb.weight.value.data.len()).to_equal(384)  # oracle: a (batch, seq) traversal indexes the same flat rows, contiguous per position
 
     describe "backward":
-        it "scatter-adds gradients to weight":
-            # For each index from forward, accumulate grad row
-            val num_embeddings = 100
-            val embedding_dim = 32
-            val grad_size = num_embeddings * embedding_dim
-            expect(grad_size).to_equal(3200)
+        it "scatter-adds gradients into a gradient-ready weight":
+            # @req REQ-ML-EMB-009
+            # @capture(statistics): the weight tensor's gradient-receiving state before any backward, retained for review
+            step("Create a layer and verify the weight is registered to receive gradients")
+            val emb = Embedding.create(100, 32)
+            expect(emb.weight.requires_grad).to_equal(true)  # oracle: the scatter-add target is autograd-registered at construction
+            expect(emb.weight.value.data.len()).to_equal(3200)  # oracle: the full (100, 32) table is the scatter target
 
-        it "skips out-of-bounds indices":
-            val idx = -1
-            val should_skip = idx < 0
-            expect(should_skip).to_equal(true)
+        it "starts the out-of-bounds skip log empty":
+            # @req REQ-ML-EMB-010
+            # @capture(statistics): the empty skip log backward reads alongside last_indices, retained for review
+            step("Create a layer and confirm the skip log is an empty ordered list")
+            val emb = Embedding.create(100, 32)
+            expect(emb.last_indices).to_equal([])  # oracle: out-of-bounds forward positions append -1 here; before any forward it is empty
 
-        it "stores gradient in weight tensor":
-            val grad_stored = true
-            expect(grad_stored).to_equal(true)
+        it "keeps the weight gradient slot unset until backward stores it":
+            # @req REQ-ML-EMB-011
+            # @capture(statistics): the nil gradient slot backward's final store fills, retained for review
+            step("Create a layer and read the weight's gradient slot")
+            val emb = Embedding.create(100, 32)
+            expect(emb.weight.grad).to_be_nil()  # oracle: backward's terminal act is storing this slot; it must start unset
 
     describe "parameters":
         it "returns list with weight tensor":
-            val num_params = 1
-            expect(num_params).to_equal(1)
+            # @req REQ-ML-EMB-012
+            # @capture(statistics): the parameter list contents against the layer's own weight, retained for review
+            step("Create a layer and compare its parameter list against its weight")
+            val emb = Embedding.create(10, 4)
+            val params = emb.parameters()
+            expect(params.len()).to_equal(1)  # oracle: the embedding table is the layer's single learnable parameter
+            val p0 = params[0]
+            expect(p0.value.data.len()).to_equal(40)  # oracle: the returned parameter IS the (10, 4) weight table
 
     describe "train/eval modes":
         it "train sets training to true":
-            val training = true
-            expect(training).to_equal(true)
+            # @req REQ-ML-EMB-013
+            # @capture(statistics): the training flag after an eval-then-train round trip, retained for review
+            step("Flip a layer to eval and back, then read the training flag")
+            val emb = Embedding.create(10, 4)
+            emb.eval()
+            emb.train()
+            expect(emb.training).to_equal(true)  # oracle: train() restores gradient-building mode after eval()
 
         it "eval sets training to false":
-            val training = false
-            expect(training).to_equal(false)
+            # @req REQ-ML-EMB-014
+            # @capture(statistics): the training flag after eval(), retained for review
+            step("Flip a fresh training-mode layer to eval and read the flag")
+            val emb = Embedding.create(10, 4)
+            emb.eval()
+            expect(emb.training).to_equal(false)  # oracle: eval() suspends gradient building for inference
 
 describe "Dataset":
     describe "ArrayDataset":
         it "returns correct length":
-            val data = [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]
-            expect(data.len()).to_equal(3)
+            # @req REQ-ML-DATA-001
+            # @capture(statistics): the dataset length over three wrapped samples, retained for review
+            step("Wrap three samples and read the dataset length")
+            val ds = ArrayDataset(data: [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]])
+            expect(ds.len()).to_equal(3)  # oracle: the dataset reports exactly the wrapped sample count
 
         it "returns sample at valid index":
-            val data = [[1.0, 2.0], [3.0, 4.0]]
-            val sample = data[0]
-            expect(sample.len()).to_equal(2)
+            # @req REQ-ML-DATA-002
+            # @capture(statistics): the sample content delivered for a valid index, retained for review
+            step("Read the first sample from a two-column dataset")
+            val ds = ArrayDataset(data: [[1.0, 2.0], [3.0, 4.0]])
+            val sample = ds.get_item(0)
+            expect(sample.len()).to_equal(2)  # oracle: the sample keeps its feature width
+            expect(sample).to_equal([1.0, 2.0])  # oracle: the delivered row is the wrapped data, unmodified
 
         it "returns empty array for negative index":
-            val index = -1
-            val result = []
-            expect(result.len()).to_equal(0)
+            # @req REQ-ML-DATA-003
+            # @capture(statistics): the empty-array guard response for a negative index, retained for review
+            step("Read a sample below the valid index range")
+            val ds = ArrayDataset(data: [[1.0, 2.0], [3.0, 4.0]])
+            expect(ds.get_item(-1)).to_equal([])  # oracle: negative indices are rejected with an empty sample, never a wrapped row
 
         it "returns empty array for out-of-bounds index":
-            val data_len = 3
-            val index = 5
-            val oob = index >= data_len
-            expect(oob).to_equal(true)
+            # @req REQ-ML-DATA-004
+            # @capture(statistics): the empty-array guard response past the last index, retained for review
+            step("Read a sample past the end of a three-sample dataset")
+            val ds = ArrayDataset(data: [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]])
+            expect(ds.get_item(5)).to_equal([])  # oracle: indices at or past len() are rejected with an empty sample
 
     describe "LabeledDataset":
         it "returns labeled sample at valid index":
-            val feature = [1.0, 2.0]
-            val label = 0.0
-            expect(feature.len()).to_equal(2)
-            expect(label).to_equal(0.0)
+            # @req REQ-ML-DATA-005
+            # @capture(statistics): the feature/label pair delivered for a valid index, retained for review
+            step("Read one labeled sample and check both halves")
+            val ld = LabeledDataset(features: [[1.0, 2.0], [3.0, 4.0]], labels: [7.0, 8.0])
+            val item = ld.get_item(0)
+            expect(item.feature).to_equal([1.0, 2.0])  # oracle: the feature half is the wrapped row
+            expect(item.label).to_equal(7.0)  # oracle: the label half is the paired label, not a default
 
         it "returns default sample for out-of-bounds":
-            # Returns LabeledSample(feature: [], label: 0.0)
-            val default_label = 0.0
-            var default_feature = []
-            expect(default_label).to_equal(0.0)
-            expect(default_feature.len()).to_equal(0)
+            # @req REQ-ML-DATA-006
+            # @capture(statistics): the default LabeledSample delivered past the last index, retained for review
+            step("Read a labeled sample past the end of the dataset")
+            val ld = LabeledDataset(features: [[1.0, 2.0]], labels: [7.0])
+            val oob = ld.get_item(9)
+            expect(oob.feature).to_equal([])  # oracle: out-of-bounds features default to the empty row
+            expect(oob.label).to_equal(0.0)  # oracle: out-of-bounds labels default to 0.0, per the documented LabeledSample contract

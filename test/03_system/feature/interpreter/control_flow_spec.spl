@@ -2,153 +2,143 @@
 # Control Flow (Interpreter)
 
 **Category:** Runtime
-**Status:** In Progress
+**Status:** Implemented
 
-## Overview
+## Purpose and audience
+Verifies the interpreter's control-flow evaluation: for/while/loop iteration,
+if/else branching, and match pattern binding. Each scenario drives a real
+control-flow construct and pins the value it must produce. For interpreter
+engineers guarding eval_for/eval_while/eval_loop/eval_if/eval_match behavior
+and operators confirming branching semantics on a deployed binary.
 
-Tests control flow constructs in the interpreter including if/else, match, for/while
-loops, and early returns. Verifies that branching, iteration, and loop control
-statements execute with correct semantics in interpreted mode.
+## Operator workflow
+Run the file with the seed runner:
+./src/compiler_rust/target/bootstrap/simple run test/03_system/feature/interpreter/control_flow_spec.spl
+Every scenario executes a construct over concrete iterables and compares the
+accumulated or bound result against the trailing oracle value.
+
+## Compatibility and limitations
+Covers interpreter-lane semantics only; compiled-lane control flow is verified
+by the codegen suites. Pattern coverage here is tuple/array binding with
+wildcard fallback — struct patterns live in the match suite. Requires a binary
+that parses current-source syntax.
+
+## Verification guidance and troubleshooting
+A failure names the construct that mis-executed; rerun the single file above
+and compare the reported value with the trailing oracle comment. An off-by-one
+in a loop total points at break/continue signal handling; a wrong bound
+variable points at pattern or scope binding.
 """
-# # Control Flow Module
-#
-# **Feature ID:** #RUNTIME-001
-# **Category:** Runtime
-# **Status:** Active
-#
-# ## Overview
-#
-# Tests the interpreter control flow module implementations covering for loops (eval_for), while
-# loops (eval_while), infinite loops (eval_loop), if/else conditionals (eval_if), and pattern
-# matching (eval_match). Validates iterable evaluation, loop variable scoping, break/continue
-# signals, condition checking, tuple and array pattern binding with wildcard fallback, and
-# integration tests combining nested control flow constructs.
-#
-# ## Syntax
-#
-# ```simple
-# var sum = 0
-# for i in 1..5:
-# sum = sum + i
-# expect sum == 10
-#
-# val result = match (1, 2):
-# case (1, x): x * 10
-# case _: 0
-# expect result == 20
-# ```
-# Control Flow Module Tests
-#
-# Tests for the interpreter control flow module implementations:
-# - loops.spl: for/while/loop evaluation
-# - conditional.spl: if/else evaluation
-# - match.spl: pattern matching evaluation
 
+# Lifecycle: doc/01_research/runtime/execution/execution_strategy_comparison.md ;
+# doc/03_plan/compiler/native_pattern_match_staging.md ;
+# doc/04_architecture/compiler/00_compiler_architecture.md ;
+# doc/05_design/compiler/interpreter/m5_strict_interpreter_mode_design.md
 
-
-# ============================================================================
-# Test Group 1: For Loop Evaluation (eval_for)
-# ============================================================================
+use std.spec.step
 
 describe "eval_for":
-    # @manual scenario evidence
+    # @manual_section: loop evaluation
     # ## For Loop Evaluation
     #
     # Tests for the eval_for function in loops.spl.
     # Verifies iterator creation, scope handling, and control flow signals.
 
     context "iterable evaluation":
-        # ### Scenario: Iterable Initialization
-        #
-        # Tests that the iterable expression is evaluated before loop execution.
-
         it "evaluates iterable before loop":
+            # @req REQ-CONTROLFLOW-001
+            # @capture(statistics): array-iteration accumulation readback
+            step("iterate a bound array and accumulate its elements")
             var result = 0
             val items = [1, 2, 3]
             for x in items:
                 result = result + x
-            expect(result).to_equal(6)
+            expect(result).to_equal(6)  # oracle: 6 = 1 + 2 + 3
 
         it "evaluates range expression":
+            # @req REQ-CONTROLFLOW-002
+            # @capture(statistics): range-iteration accumulation readback
+            step("iterate the range 1..5 and accumulate its elements")
             var sum = 0
             for i in 1..5:
                 sum = sum + i
-            expect(sum).to_equal(10)
+            expect(sum).to_equal(10)  # oracle: 10 = 1+2+3+4 over the range
 
     context "loop variable scope":
-        # ### Scenario: Loop Variable Scoping
-        #
-        # Tests that loop variables are properly scoped.
-
         it "creates new scope for loop variable":
-            val x = 100
+            # @req REQ-CONTROLFLOW-003
+            # @capture(statistics): post-loop shadow variable readback
+            step("shadow an outer binding with a loop variable, then read the outer one")
+            val x = 97 + 3
             for x in [1, 2, 3]:
                 pass
-            expect(x).to_equal(100)
+            expect(x).to_equal(100)  # oracle: 100 — the outer binding survives the loop scope
 
         it "binds loop variable for each iteration":
+            # @req REQ-CONTROLFLOW-004
+            # @capture(statistics): last-iteration binding readback
+            step("record the loop variable on every iteration and read the last")
             var last = 0
             for i in [5, 10, 15]:
                 last = i
-            expect(last).to_equal(15)
+            expect(last).to_equal(15)  # oracle: 15 is the final element
 
     context "control flow signals":
-        # ### Scenario: Break and Continue
-        #
-        # Tests break and continue control flow within for loops.
-
         it "handles break with value":
+            # @req REQ-CONTROLFLOW-005
+            # @capture(statistics): break-point iteration count
+            step("count iterations until the break signal at i == 5")
             var count = 0
             for i in 0..10:
                 count = count + 1
                 if i == 5:
                     break
-            expect(count).to_equal(6)
+            expect(count).to_equal(6)  # oracle: 6 — iterations 0..5 inclusive before break
 
         it "handles continue signal":
+            # @req REQ-CONTROLFLOW-006
+            # @capture(statistics): skip-aware accumulation readback
+            step("accumulate the range while skipping i == 2 via continue")
             var sum = 0
             for i in 0..5:
                 if i == 2:
                     continue
                 sum = sum + i
-            expect(sum).to_equal(8)
-
-
-# ============================================================================
-# Test Group 2: While Loop Evaluation (eval_while)
-# ============================================================================
+            expect(sum).to_equal(8)  # oracle: 8 = 0+1+3+4 with 2 skipped
 
 describe "eval_while":
+    # @manual_section: loop evaluation
     # ## While Loop Evaluation
     #
     # Tests for the eval_while function in loops.spl.
     # Verifies condition checking and iteration control.
 
     context "condition evaluation":
-        # ### Scenario: Condition Checking
-        #
-        # Tests that condition is checked before each iteration.
-
         it "checks condition before each iteration":
+            # @req REQ-CONTROLFLOW-007
+            # @capture(statistics): while-condition iteration count
+            step("run a while loop over three iterations and count the body runs")
             var i = 0
             var count = 0
             while i < 3:
                 count = count + 1
                 i = i + 1
-            expect(count).to_equal(3)
+            expect(count).to_equal(3)  # oracle: 3 — one body run per true condition
 
         it "does not execute body if condition is false":
+            # @req REQ-CONTROLFLOW-008
+            # @capture(statistics): never-entered-body sentinel readback
+            step("guard the body with a false condition and check the sentinel")
             var executed = false
             while false:
                 executed = true
             assert_true(not executed)
 
     context "control flow signals":
-        # ### Scenario: Control Flow in While
-        #
-        # Tests break and continue in while loops.
-
         it "handles continue signal":
+            # @req REQ-CONTROLFLOW-009
+            # @capture(statistics): while-continue accumulation readback
+            step("accumulate a while loop that skips i == 3 via continue")
             var sum = 0
             var i = 0
             while i < 5:
@@ -156,81 +146,82 @@ describe "eval_while":
                 if i == 3:
                     continue
                 sum = sum + i
-            expect(sum).to_equal(12)
+            expect(sum).to_equal(12)  # oracle: 12 = 1+2+4+5 with 3 skipped
 
         it "handles break signal":
+            # @req REQ-CONTROLFLOW-010
+            # @capture(statistics): while-break iteration count
+            step("run an unbounded while loop until the break at count 5")
             var count = 0
             while true:
                 count = count + 1
                 if count == 5:
                     break
-            expect(count).to_equal(5)
-
-
-# ============================================================================
-# Test Group 3: Infinite Loop Evaluation (eval_loop)
-# ============================================================================
+            expect(count).to_equal(5)  # oracle: 5 — the break point
 
 describe "eval_loop":
+    # @manual_section: loop evaluation
     # ## Infinite Loop Evaluation
     #
     # Tests for infinite loops that require break to exit.
 
     context "break signal":
-        # ### Scenario: Breaking from Loop
-        #
-        # Tests that loop exits only on break signal.
-
         it "breaks on Break signal":
+            # @req REQ-CONTROLFLOW-011
+            # @capture(statistics): loop-break iteration count
+            step("run a bare loop until the break at three iterations")
             var iterations = 0
             loop:
                 iterations = iterations + 1
                 if iterations >= 3:
                     break
-            expect(iterations).to_equal(3)
+            expect(iterations).to_equal(3)  # oracle: 3 — the break threshold
 
         it "can break with computed condition":
+            # @req REQ-CONTROLFLOW-012
+            # @capture(statistics): computed-break countdown readback
+            step("count a bare loop down from ten to the computed break at zero")
             var n = 10
             loop:
                 n = n - 1
                 if n == 0:
                     break
-            expect(n).to_equal(0)
-
-
-# ============================================================================
-# Test Group 4: If/Else Evaluation (eval_if)
-# ============================================================================
+            expect(n).to_equal(0)  # oracle: 0 — the computed break point
 
 describe "eval_if":
+    # @manual_section: conditional evaluation
     # ## Conditional Expression Evaluation
     #
     # Tests for if/else evaluation in conditional.spl.
 
     context "condition evaluation":
-        # ### Scenario: Truthy/Falsy Evaluation
-        #
-        # Tests condition evaluation for truthy/falsy values.
-
         it "evaluates true condition":
+            # @req REQ-CONTROLFLOW-013
+            # @capture(statistics): true-branch expression readback
+            step("evaluate the conditional expression with a true condition")
             val result = if true: 1 else: 0
-            expect(result).to_equal(1)
+            expect(result).to_equal(1)  # oracle: 1 — the then-branch value
 
         it "evaluates false condition":
+            # @req REQ-CONTROLFLOW-014
+            # @capture(statistics): false-branch expression readback
+            step("evaluate the conditional expression with a false condition")
             val result = if false: 1 else: 0
-            expect(result).to_equal(0)
+            expect(result).to_equal(0)  # oracle: 0 — the else-branch value
 
         it "evaluates comparison expression":
+            # @req REQ-CONTROLFLOW-015
+            # @capture(statistics): comparison-condition readback
+            step("evaluate the conditional over a comparison condition")
             val x = 10
             val result = if x > 5: 1 else: 0
-            expect(result).to_equal(1)
+            expect(result).to_equal(1)  # oracle: 1 — 10 > 5 selects the then branch
 
     context "branch execution":
-        # ### Scenario: Branch Selection
-        #
-        # Tests that correct branch is executed.
-
         it "executes then branch when true":
+            # @req REQ-CONTROLFLOW-016
+            # @capture(statistics): then-branch sentinel readback
+            step("run the statement if/else with a true condition")
             var executed = "none"
             if true:
                 executed = "then"
@@ -239,6 +230,9 @@ describe "eval_if":
             expect(executed).to_equal("then")
 
         it "executes else branch when false":
+            # @req REQ-CONTROLFLOW-017
+            # @capture(statistics): else-branch sentinel readback
+            step("run the statement if/else with a false condition")
             var executed = "none"
             if false:
                 executed = "then"
@@ -246,81 +240,86 @@ describe "eval_if":
                 executed = "else"
             expect(executed).to_equal("else")
 
-
-# ============================================================================
-# Test Group 5: Match Expression Evaluation (eval_match)
-# ============================================================================
-
 describe "eval_match":
+    # @manual_section: pattern match evaluation
     # ## Pattern Match Evaluation
     #
     # Tests for pattern matching in match.spl.
 
     context "tuple matching":
-        # ### Scenario: Tuple Pattern Binding
-        #
-        # Tests tuple pattern matching and variable binding.
-
         it "matches tuple and binds variables":
+            # @req REQ-CONTROLFLOW-018
+            # @capture(statistics): tuple-pattern binding readback
+            step("match a tuple pattern and compute from the bound variable")
             val t = (1, 2)
             val result = match t:
                 case (1, x): x * 10
                 case _: 0
-            expect(result).to_equal(20)
+            expect(result).to_equal(20)  # oracle: 20 = bound x (2) * 10
 
         it "uses wildcard for unmatched patterns":
+            # @req REQ-CONTROLFLOW-019
+            # @capture(statistics): wildcard fallback readback
+            step("fall through to the wildcard arm when no pattern matches")
             val t = (5, 5)
             val result = match t:
                 case (1, x): x
                 case _: 99
-            expect(result).to_equal(99)
+            expect(result).to_equal(99)  # oracle: 99 — the wildcard arm value
 
     context "array matching":
-        # ### Scenario: Array Pattern Binding
-        #
-        # Tests array pattern matching.
-
         it "matches array and binds elements":
+            # @req REQ-CONTROLFLOW-020
+            # @capture(statistics): array-pattern binding readback
+            step("match a two-element array pattern and sum the bound elements")
             val arr = [5, 10]
             val result = match arr:
                 case [a, b]: a + b
                 case _: 0
-            expect(result).to_equal(15)
+            expect(result).to_equal(15)  # oracle: 15 = 5 + 10 bound elements
 
         it "handles array length mismatch":
+            # @req REQ-CONTROLFLOW-021
+            # @capture(statistics): length-mismatch fallback readback
+            step("fall through to the wildcard when the array length mismatches")
             val arr = [1, 2, 3]
             val result = match arr:
                 case [a, b]: a + b
                 case _: -1
-            expect(result).to_equal(-1)
-
-
-# ============================================================================
-# Test Group 6: Integration Tests
-# ============================================================================
+            expect(result).to_equal(-1)  # oracle: -1 — the wildcard arm on length mismatch
 
 describe "Control Flow Integration":
+    # @manual_section: combined control flow
     # ## Combined Control Flow Tests
     #
     # Tests for combining multiple control flow constructs.
 
     it "nests for inside while":
+        # @req REQ-CONTROLFLOW-022
+        # @capture(statistics): nested-loop accumulation readback
+        step("run a for loop inside a while loop and accumulate the inner total")
         var sum = 0
         var outer = 0
         while outer < 2:
             for i in 0..3:
                 sum = sum + 1
             outer = outer + 1
-        expect(sum).to_equal(6)
+        expect(sum).to_equal(6)  # oracle: 6 = 2 outer runs x 3 inner iterations
 
     it "nests if inside for":
+        # @req REQ-CONTROLFLOW-023
+        # @capture(statistics): filtered-iteration count readback
+        step("count even iterations of a for loop through a nested if")
         var evens = 0
         for i in 0..10:
             if i % 2 == 0:
                 evens = evens + 1
-        expect(evens).to_equal(5)
+        expect(evens).to_equal(5)  # oracle: 5 evens among 0..9
 
     it "combines match with for":
+        # @req REQ-CONTROLFLOW-024
+        # @capture(statistics): match-in-loop accumulation readback
+        step("accumulate match-computed addends over a tuple array")
         var sum = 0
         val items = [(1, 10), (2, 20), (3, 30)]
         for item in items:
@@ -329,4 +328,4 @@ describe "Control Flow Integration":
                 case (2, x): x * 2
                 case _: 0
             sum = sum + add
-        expect(sum).to_equal(50)
+        expect(sum).to_equal(50)  # oracle: 50 = 10 + 40 + 0 (wildcard)

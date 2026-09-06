@@ -39,8 +39,8 @@ bin/simple run src/app/test/freebsd_qemu_setup.spl --download --quick
 ```
 
 ## Critical Rules
-- **jj** for VCS — commit: `jj commit -m "msg"` / preferred wrapper flow: `sj bookmark set main -r @- && sj git push --bookmark main`
-- **NEVER create branches** — work directly on `main`
+- **jj** for VCS — commit: `jj commit -m "msg"` (git fallback: `git commit` when jj is absent)
+- **Land via PR, never direct push** — `main` is ruleset-protected (since 2026-09-05: PR required, 2 required checks, no bypass). Push to a short-lived topic branch, `gh pr create`, `gh pr merge --merge`, delete the branch. Topic branches exist ONLY to carry a PR — no long-lived feature branches. See `.claude/rules/vcs.md`
 - **ALL code in `.spl`/`.shs`** — no Python/Bash (except 3 bootstrap scripts)
 - **NO inheritance** — use composition, traits, mixins. **Generics:** `<>` not `[]`
 - **NEVER skip** failing tests without approval. **NEVER convert TODO to NOTE** — implement or delete

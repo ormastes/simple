@@ -201,8 +201,20 @@ fn file_mmap_read_text(path: text) -> text:
 # `rt_file_mmap_read_bytes` delegates to rt_file_read_bytes, which yields nil
 # on any fs::read error (missing/unreadable path). TOTAL with the documented
 # Preserve the provider's nullable failure state as Result.Err. A valid empty
-# mapping remains Ok([]), without a separate existence probe or second read.
+# mapping remains Ok([]).
+#
+# The provider is NOT total in every execution lane: the interpreter lane
+# raises `rt_file_mmap_read_bytes failed: <errno>` and aborts instead of
+# yielding nil, so a caller could never observe the documented Err. Reject an
+# empty or non-existent path here — through the typed `file_exists` alias, not
+# a fresh raw `rt_*` call site — so the typed Err contract holds in every lane
+# without fabricating bytes. A path that exists still goes to the provider, so
+# genuine provider failures are still reported as the provider sees them.
 fn file_mmap_read_bytes(path: text) -> Result<[i64], text>:
+    if path == "":
+        return Err("file mmap read requires a non-empty path")
+    if not file_exists(path):
+        return Err("file mmap read failed: {path}")
     var bytes: [i64]? = nil
     unsafe(capabilities: [ffi]):
         bytes = rt_file_mmap_read_bytes(path)
@@ -253,6 +265,17 @@ fn file_fsync_cached(path: text) -> bool:
 # reason positional io file_ops API
 fn file_mmap(path: text, size: i64, offset: i64, readonly: bool) -> i64:
     # Memory-map a file into process address space.
+    #
+    # Fail closed on arguments that can never name a mappable region — empty
+    # path, non-existent path, non-positive extent, negative offset — and
+    # return the documented invalid-handle sentinel -1 without entering the
+    # raw `rt_mmap` boundary. `rt_mmap` is not registered in every execution
+    # lane (the interpreter lane aborts with `unknown extern function:
+    # rt_mmap`), so without this guard the negative-handle contract this
+    # function promises is unobservable there. Existence is probed through the
+    # typed `file_exists` alias above rather than a new raw `rt_*` call site.
+    if path == "" or size <= 0 or offset < 0 or not file_exists(path):
+        return -1
     unsafe(capabilities: [ffi, raw_ptr]):
         rt_mmap(path, size, offset, if readonly: 1 else: 0)
 
