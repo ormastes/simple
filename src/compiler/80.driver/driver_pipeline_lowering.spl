@@ -281,7 +281,21 @@ impl CompilerDriver:
                         log_phase("aot:lower_to_mir:missing_hir idx={direct_idx} module={name_direct} path={src_direct.path}")
                         return false
                     direct_lowering.symbols = direct_hir.symbols
-                    var lowered_entry = direct_lowering.lower_module(direct_hir)
+                    # Per-module transient scope. The lowering arena for one
+                    # module is dead once its MirModule exists; without this
+                    # every intermediate stays registered for the life of the
+                    # process (the compiler's own immortal heap). See
+                    # lower_module_transient_scoped for the enumerated escape
+                    # set and why ambient bootstrap is excluded.
+                    val scoped_entry = direct_lowering.lower_module_transient_scoped(direct_hir)
+                    if scoped_entry.is_err():
+                        # Fail closed: the scope has already been ended, so the
+                        # arena (including the module we would have returned) is
+                        # gone. Never continue on a half-reclaimed lowering.
+                        self.ctx.add_error("MIR lowering transient scope failed for {name_direct}: {scoped_entry.unwrap_err()}")
+                        log_phase("aot:lower_to_mir:transient_scope_failed idx={direct_idx} module={name_direct}")
+                        return false
+                    var lowered_entry = scoped_entry.unwrap()
                     lowered_entry.name = name_direct
                     log_phase("aot:lower_to_mir:module:done idx={direct_idx} module={name_direct} functions={lowered_entry.functions.len()}")
                     lowered_entry

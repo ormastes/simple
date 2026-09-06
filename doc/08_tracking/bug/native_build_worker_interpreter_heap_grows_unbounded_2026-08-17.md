@@ -523,3 +523,96 @@ The safe boundary, when the tree can build one, is the one
 if `begin` returns false. Note `TRANSIENT_HEAP_SCOPE` is `thread_local!` and
 `begin` returns false if a scope is already live, so any new site must be
 per-thread and must not nest inside an existing scope.
+
+---
+
+## Addendum 2026-09-06 (lane MIR) — the libunwind blocker is resolved, and the MIR lane now has a scope
+
+### The blocker was a `LD_LIBRARY_PATH`, not a missing library
+
+"Correction B" above refused to symlink nongnu `libunwind.so.8` over LLVM's
+`libunwind.so.1` — correctly; the ABIs differ and a `dlopen` that succeeds on
+the wrong unwinder is silent corruption. **The shortcut was never needed.** LLVM's
+own libunwind is already on this host:
+
+```
+/home/yoon/dev/llvm/install/lib/aarch64-unknown-linux-gnu/libunwind.so.1
+  SONAME libunwind.so.1        18 defined _Unwind_* symbols (incl. _Unwind_RaiseException)
+```
+
+so `LD_LIBRARY_PATH=/home/yoon/dev/llvm/install/lib/aarch64-unknown-linux-gnu`
+resolves it with the matching ABI and no symlink. Anyone re-running the
+self-hosted lane on this box should export that, not install anything.
+
+### Correction to "Correction A": `--runtime-bundle core-c-bootstrap` is NOT sufficient
+
+A build with only that flag compiles all 834 modules and then **fails to link**
+with the same 167 unresolved runtime symbols the record blamed on the default
+archive (`rt_cranelift_*` 79, `rt_simd_*` 22, `rt_math_*` 18, `rt_io_file_*` 12,
+`rt_mmap`/`rt_munmap`, `rt_exec`, `rt_native_build`, `spl_backend_plugin_run_v1`,
+...). The bundle name is not what resolves them. The sanctioned invocation
+(`bootstrap-from-scratch.sh:1656-1670`, `bootstrap_native_build_main`) also
+passes **`--runtime-path "${bootstrap_runtime_authority_path}"`**, i.e.
+`src/compiler_rust/target/bootstrap` — which is where `libsimple_native_all.a`
+(390 MB) and `libsimple_compiler_backfill.a` live. Without `--runtime-path` the
+link cannot succeed no matter which bundle is named. `SIMPLE_ALLOW_UNRESOLVED_RUNTIME=1`
+is NOT an answer: the driver states outright that it yields a NULL GOT slot per
+name and a SEGV on first call.
+
+### The scope
+
+`MirLowering.lower_module_transient_scoped`
+(`src/compiler/50.mir/_MirLowering/module_lowering.spl`), called from the
+`--entry-closure` per-module loop in
+`src/compiler/80.driver/driver_pipeline_lowering.spl`. Same protocol as
+`lower_streaming_surface_source`: begin -> lower -> pause -> promote every
+escaping root -> end, with every `return Err` path closing the scope first and
+refusing to hand back the module it would otherwise have returned.
+
+**Escape set, enumerated — this is what makes the boundary safe, and the reason
+one whole path is excluded rather than scoped:**
+
+1. the returned `MirModule` — promoted;
+2. everything `lower_module` writes into the lowering owner. `MirLowering` has
+   **97 fields** and the `--entry-closure` loop shares ONE instance across all
+   modules, so `errors`, `composite_layout_*`, `struct_field_*`, `builder` and
+   `external_layout_traces` all accumulate across the boundary. The owner is
+   promoted **as a whole** rather than by a hand-written field list: a list that
+   drifts one field behind the struct is a use-after-free, not a missed
+   optimisation, and this struct demonstrably grows.
+3. module-level mutable globals. On the non-ambient-bootstrap path there are
+   **none reachable**, measured rather than assumed: 50.mir's only non-bootstrap
+   heap-typed globals are `mir_data.spl:_mir_trace_scope_slot` (an `[i64]` whose
+   writes store no heap value) and `mir_bitfield.spl:BITFIELD_REGISTRY`, which
+   has **no write site anywhere in the tree**; 25.traits, 40.mono and 30.types
+   declare no heap-typed globals at all; the only 35.semantics import into
+   50.mir is the bool reader `rt_hal_compilation_requires_finalize`; the only
+   15.blocks import is the `BlockValue` type; and none of the seven std modules
+   50.mir imports declares a module-level `var`.
+
+**Ambient bootstrap (`SIMPLE_BOOTSTRAP=1`) is deliberately EXCLUDED.** That path
+writes the flat `_bootstrap_mir_*` arrays (`_MirLowering/bootstrap_globals.spl`),
+`mir_data.spl`'s `_bootstrap_fn_*` dicts and `_bootstrap_type_runtime_names`.
+None of those is reachable from either promoted root, so reclaiming the arena
+there would dangle them. That escape set is not proven, so the scope is not
+taken and the path runs byte-for-byte as before. **Consequence, stated plainly:
+the sanctioned bootstrap lane (which sets `SIMPLE_BOOTSTRAP=1`) is still
+uncovered** — including the Stage-3 worker whose 37,171,428 kB `[heap]` mapping
+is this row's headline symptom. Extending the scope to that path means adding
+promotion accessors for those ~30 flat registries, in the shape of
+`driver_promote_frontend_registry_owners()`; it is the obvious next lane and is
+not done here.
+
+### Runnable gate
+
+`scripts/check/check-mir-transient-scope-boundary.shs` — a ratchet on the CALL
+SITE and its pairing discipline, which is the property that was missing.
+`check-transient-scope-reclaims.shs` proves the runtime mechanism reclaims and
+stays green while nothing on the compiler's hot path calls it; this one fails in
+exactly that state. Nine invariants, `--selftest` fatal and first (6 fixtures,
+including the pre-fix shape, an unclosed error path, a missing owner promotion
+and a removed ambient-bootstrap guard). Verified against the real tree, not only
+fixtures: on the committed pre-fix content of the two files it reports
+`FAIL — 3 invariant(s) checked ...: driver-entry-closure-loop-not-scoped;
+driver-still-calls-unscoped-lower_module; wrapper-missing` (exit 1), and on the
+fixed tree `PASS — 9 invariant(s) checked` (exit 0).

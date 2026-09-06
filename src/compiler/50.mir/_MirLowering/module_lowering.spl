@@ -42,6 +42,17 @@ use std.io_runtime.{env_get_opt}
 fn mir_lower_env_get(key: text) -> text?:
     env_get_opt(key)
 
+# Transient-scope reclamation for the per-module MIR lowering boundary.
+# Same runtime contract the HIR boundary uses in
+# 80.driver/driver_hir_pipeline_lowering.spl's lower_streaming_surface_source:
+# begin -> work -> pause -> promote every escaping root -> end. The scope is
+# thread-local and non-reentrant, and `end` FREES everything allocated inside
+# it that no promoted root reaches.
+extern fn rt_transient_array_scope_begin() -> bool
+extern fn rt_transient_array_scope_pause() -> bool
+extern fn rt_transient_array_scope_end() -> bool
+extern fn rt_transient_heap_promote(value: Any) -> bool
+
 fn _text_list_eq(a: [text], b: [text]) -> bool:
     """Order-sensitive equality for two variant-name lists.
 
@@ -1181,6 +1192,84 @@ impl MirLowering:
                 for prescan_param in prescan_fn.params:
                     prescan_param_tys.push(prescan_param.type_)
                 bootstrap_fn_param_hir_types_register(prescan_fn.name, prescan_param_tys)
+
+    me lower_module_transient_scoped(module: HirModule) -> Result<MirModule, text>:
+        """`lower_module` with the per-module lowering arena reclaimed.
+
+        One HIR module's lowering allocates an arena of intermediates — the
+        per-function local/type sidecars, the block and instruction graphs
+        that generic MIR construction rebuilds, every interpolated diagnostic
+        and layout-key text — and none of it is reachable once the MirModule
+        exists. Nothing in the compiler ever freed it, so the arena is
+        immortal and the compiler IS the leak
+        (doc/08_tracking/bug/native_build_worker_interpreter_heap_grows_unbounded_2026-08-17.md).
+
+        Escape set, enumerated rather than assumed (this is what makes the
+        boundary safe, and the reason the ambient-bootstrap path is excluded):
+
+        1. the returned `MirModule` — promoted;
+        2. everything `lower_module` writes into the lowering itself
+           (`errors`, `composite_layout_*`, `struct_field_*`, `builder`,
+           `external_layout_traces`, ... — these accumulate ACROSS modules on
+           the shared `--entry-closure` instance) — promoted by promoting
+           `self`, which walks the whole owner graph so no field can be
+           missed by hand-enumeration drift;
+        3. module-level mutable globals. On the NON-ambient-bootstrap path
+           there are none reachable from here: 50.mir's only non-bootstrap
+           heap-typed globals are `mir_data.spl:_mir_trace_scope_slot` (an
+           i64 array whose writes store no heap value) and
+           `mir_bitfield.spl:BITFIELD_REGISTRY` (read-only — it has no write
+           site anywhere in the tree); 25.traits, 40.mono and 30.types
+           declare no heap-typed globals; the only 35.semantics import is the
+           bool READER `rt_hal_compilation_requires_finalize`; the only
+           15.blocks import is the `BlockValue` type; and none of the std
+           modules 50.mir imports (`std.array`, `std.io_runtime`,
+           `std.common.crypto.sha256`, `std.common.encoding.sha256_contract`,
+           `std.common.mcdc.model`, `std.nogc_sync_mut.io.process_ops`,
+           `std.nogc_sync_mut.sffi.system`) declares a module-level `var`.
+
+        AMBIENT BOOTSTRAP IS EXCLUDED, deliberately. That path writes the flat
+        `_bootstrap_mir_*` registries (`_MirLowering/bootstrap_globals.spl`),
+        `mir_data.spl`'s `_bootstrap_fn_*` dicts and 20.hir's
+        `_bootstrap_hir_*` arrays. Those are NOT reachable from either
+        promoted root, so freeing the arena would dangle them. That escape set
+        is not proven here, so the scope is not taken there and the path runs
+        byte-for-byte as before — a narrower boundary is the correct answer to
+        an unproven one."""
+        if self.ambient_bootstrap_enabled():
+            return Ok(self.lower_module(module))
+        # The scope is thread-local and non-reentrant: `begin` returns false
+        # when one is already live. Reclamation is an optimisation and must
+        # never be the reason a module fails to lower, so a refused scope
+        # falls back to exactly today's unscoped behaviour.
+        if not rt_transient_array_scope_begin():
+            return Ok(self.lower_module(module))
+        val lowered: MirModule = self.lower_module(module)
+        # From here every exit path must close the scope. `end` frees the
+        # arena, so any path that ends WITHOUT a successful promotion must
+        # also refuse to hand `lowered` back.
+        if not rt_transient_array_scope_pause():
+            val _ended_pause = rt_transient_array_scope_end()
+            return Err("transient MIR scope pause failed for {module.name}")
+        if not rt_transient_heap_promote(lowered):
+            val _ended_module = rt_transient_array_scope_end()
+            return Err("MIR module ownership promotion failed for {module.name}")
+        if not self.promote_transient_owner():
+            val _ended_owner = rt_transient_array_scope_end()
+            return Err("MIR lowering owner promotion failed for {module.name}")
+        if not rt_transient_array_scope_end():
+            return Err("transient MIR scope end failed for {module.name}")
+        Ok(lowered)
+
+    me promote_transient_owner() -> bool:
+        """Promote every value `lower_module` wrote into this lowering.
+
+        Promoting the owner itself rather than a hand-written field list is
+        deliberate: MirLowering carries 97 fields and gains more, and a
+        hand-list that drifts one field behind the struct is a
+        use-after-free, not a missed optimisation. `rt_transient_heap_promote`
+        walks the whole reachable graph, so the list cannot drift."""
+        rt_transient_heap_promote(self)
 
     me lower_module(module: HirModule) -> MirModule:
         """Lower HIR module to MIR."""
