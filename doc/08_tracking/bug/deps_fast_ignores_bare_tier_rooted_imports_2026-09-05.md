@@ -193,3 +193,72 @@ Two disclosures:
   `_scan_file_recursive` still skips an unresolvable transitive edge silently,
   and `_run_deep` prints no unresolved line. "Reported, not dropped" is
   therefore a property of the entry's direct imports, not of the whole closure.
+
+## Follow-up 2026-09-06 — dotted directories, and closure-wide unresolved reporting
+
+Closure-wide reporting immediately exposed a second, larger hole:
+`deps fast src/app/ui/main.spl` reported 13 unresolved direct imports including
+`app.ui.tui.app`, `app.ui.web.server`, `app.ui.electron.app`, `app.ui.tauri.app`
+— modules that live in DOTTED DIRECTORIES (`src/app/ui.tui/app.spl`,
+`src/app/ui.web/server.spl`, …). Five further scanner defects surfaced behind it.
+
+**Canonical rule.** The dotted-directory rule is not in the pure-Simple
+`module_loader_resolve.spl` at all; it lives in the Rust module loader,
+`src/compiler_rust/compiler/src/pipeline/module_loader.rs:41-50`
+(`dotted_dir_from`) and `:78-130` (`resolve_parts_from_root`): walking the
+non-final segments, a segment that is not a real directory may instead be
+folded into the CURRENT directory's name with a `.`
+(`<parent>/<basename(cur)>.<segment>`), and the final segment is then tried as
+`<cur>/<last>.spl`, `<cur>/<last>/__init__.spl`, and
+`<dotted dir>/__init__.spl`. Mirrored verbatim as `_deps_dotted_dir_from` /
+`_deps_resolve_parts_from_root` (step 3c), which is why the spec fixture needs a
+real `x/a` directory beside `x/a.b/` — exactly the `src/app/ui` + `src/app/ui.tui`
+shape the repo has.
+
+Also fixed in `scanner.spl`, each one a separate fail-open source:
+- **Docstring prose read as imports.** `_use_lines_of` now tracks `"""` fences;
+  `use panel_with_text_family for an explicit family."""` was being parsed as an
+  import. The three duplicated line loops now share it.
+- **`use lazy X`, `pub use X`, `use x.y*`** were unparsed or misparsed;
+  `pub use <DotlessSymbol>` (a symbol re-export, e.g. `pub use BlockDevice`) is
+  now correctly not treated as a module path.
+- **`__init__.spl`** is now probed beside every `mod.spl` on every root.
+- **Member imports** (`use std.js.types.js_types.JsValue` — 44 of the residual
+  edges) fold ONE level to the prefix, and only when the prefix is an ordinary
+  module FILE. Both guards are load-bearing: an unbounded fold walks
+  `common.ui.<typo>` up to `src/lib/common.spl` and silently re-opens this bug.
+- **Cross-tier fallback for a bare tier root.** `common.ui.theme_package` really
+  lives at `src/lib/nogc_sync_mut/ui/theme_package.spl`; the real compiler
+  accepts it (`simple compile src/app/ui.web/server.spl` reports no unresolved
+  import for it, while a bogus `common.ui.zzz_no_such` does), so a bare tier root
+  now falls back to the same cross-tier search `std.X`/`lib.X` already used.
+- **`rt_env_get("SIMPLE_LIB")` can be nil**, which reached `last_index_of` on a
+  nil receiver once the new path helpers used it; now `?? ""`.
+
+`_run_fast`/`_run_normal` now print `Unresolved imports: N` for every hole found
+ANYWHERE in the walk, each as `<module>  (imported by <file>)`, and print the
+line unconditionally so `0` is stated rather than implied.
+
+`scripts/check/check-ui-slim-closure.shs`: `find_unresolved_imports` now builds
+its on-disk candidates through a new `dotted_candidates` helper carrying the same
+dotted-directory forms, so a dropped `app.ui.tui.app` edge ERRORs instead of
+passing blind. Selftest 8/8 (new fixture 8 replays exactly that); with the
+dotted forms disabled fixture 8 returns `PASS — 1 file(s) in closure` — a blind
+pass — so it is load-bearing.
+
+Measured 2026-09-06 (seed `src/compiler_rust/target/bootstrap/simple`), forbidden
+set `src/os/compositor src/os/drivers src/os/kernel src/lib/skia src/lib/gc_async_mut/gpu`:
+
+| entry | direct | unresolved | gate verdict |
+|---|---|---|---|
+| `src/app/ui/main.spl` | 1 -> 20 | 0 | `FAIL — 875 file(s) in closure, 263 forbidden` (was a 2-file blind PASS) |
+| `src/app/ui/backend_entry_tui.spl` | 2 | 0 | `PASS — 114 file(s) in closure, 0 forbidden` |
+| `src/app/ui.tui/async_app.spl` | 14 | 0 | `PASS — 111 file(s) in closure, 0 forbidden` |
+
+The `main.spl` FAIL is a real finding the old closure could not see, not a
+regression of this change.
+
+Spec now 10 examples, 0 failures. Discriminating RED, re-measured because step
+3c's `src/lib` root subsumes step 3b: with every tier branch disabled, 4 of 10
+fail; with step 3c disabled, the 2 dotted-directory examples fail. `deps_tool_spec`
+(17) and `deps_deep_spec` (13) stay green.

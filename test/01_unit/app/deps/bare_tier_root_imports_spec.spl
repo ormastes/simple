@@ -47,7 +47,7 @@ transitive edges inside `_scan_file_recursive` are still skipped silently.
 use std.spec.*
 use std.spec.step
 use std.io_runtime.{file_write, mkdir_p}
-use app.deps.scanner.{_direct_imports, _unresolved_imports, _scan_file_recursive}
+use app.deps.scanner.{_direct_imports, _unresolved_imports, _unresolved_in_closure, _scan_file_recursive}
 
 val SCRATCH = "build/nb/deps_bare_root_spec"
 
@@ -55,10 +55,15 @@ val BARE_COMMON = SCRATCH + "/bare_common.spl"
 val BARE_TIER   = SCRATCH + "/bare_tier.spl"
 val STD_CONTROL = SCRATCH + "/std_control.spl"
 val MISSING     = SCRATCH + "/missing_import.spl"
+val DOTTED_ENTRY   = SCRATCH + "/dotted_entry.spl"
+val DEEP_HOLE      = SCRATCH + "/deep_hole_entry.spl"
+val DEEP_HOLE_MID  = SCRATCH + "/deep_hole_mid.spl"
+val DOTTED_TARGET  = SCRATCH + "/x/a.b/c.spl"
 
 val KEY_CODE_TARGET = "src/lib/common/ui/key_code.spl"
 val RENDERER_TARGET = "src/lib/nogc_sync_mut/ui/gui_renderer.spl"
 val MISSING_MODULE  = "common.ui.no_such_module_zzz"
+val DEEP_MISSING    = "common.ui.no_such_deep_module_zzz"
 
 # `{` / `}` are string-interpolation delimiters in Simple, so a fixture `use`
 # line with a brace list must be assembled by concatenation, not written inline.
@@ -67,11 +72,23 @@ fn _use_line(module_path: text, symbol: text) -> text:
 
 fn _write_fixtures() -> bool:
     val ok_dir = mkdir_p(SCRATCH)
+    # A dotted-directory package: `x/a.b/c.spl`, reached by `use x.a.b.c`.
+    # `x/a` must itself be a real directory — the canonical rule folds a segment
+    # onto the directory it is STANDING IN, so `a.b` is only reachable as a
+    # dotted sibling of a real `a`. This is the exact shape of
+    # `src/app/ui` + `src/app/ui.tui` that `use app.ui.tui.app` walks.
+    val ok_dot0 = mkdir_p(SCRATCH + "/x/a")
+    val ok_dot = mkdir_p(SCRATCH + "/x/a.b") and ok_dot0
+    val e = file_write(DOTTED_TARGET, "fn c_marker():\n    pass\n")
+    val f = file_write(DOTTED_ENTRY, _use_line("x.a.b.c", "c_marker"))
+    # A two-hop chain whose SECOND hop cannot be resolved.
+    val g = file_write(DEEP_HOLE, _use_line(".deep_hole_mid", "mid_marker"))
+    val h = file_write(DEEP_HOLE_MID, _use_line(DEEP_MISSING, "Nope") + "\nfn mid_marker():\n    pass\n")
     val a = file_write(BARE_COMMON, _use_line("common.ui.key_code", "KeyCode"))
     val b = file_write(BARE_TIER, _use_line("nogc_sync_mut.ui.gui_renderer", "GuiRenderer"))
     val c = file_write(STD_CONTROL, _use_line("std.common.ui.key_code", "KeyCode"))
     val d = file_write(MISSING, _use_line(MISSING_MODULE, "Nope"))
-    ok_dir and a and b and c and d
+    ok_dir and ok_dot and a and b and c and d and e and f and g and h
 
 fn _has_suffix(items: [text], needle: text) -> bool:
     var found = false
@@ -125,6 +142,24 @@ describe "deps resolver: bare tier-rooted imports":
             step("the bare-rooted target must be inside the closure, not only in the direct list")
             expect(_has_suffix(files, KEY_CODE_TARGET)).to_be_true()
 
+    describe "dotted-directory packages resolve":
+
+        it "use x.a.b.c reaches the dotted directory x/a.b/c.spl":
+            # @req REQ-SSPEC-UNIT
+            step("write the scratch fixtures, including the x/a.b/ dotted package")
+            expect(_write_fixtures()).to_be_true()
+            step("resolve the direct imports of the dotted-package entry")
+            val directs = _direct_imports(DOTTED_ENTRY)
+            expect(directs.len()).to_equal(1)   # oracle: the one `use x.a.b.c` line must land on a real file
+            expect(_has_suffix(directs, "/x/a.b/c.spl")).to_be_true()
+
+        it "a dotted-directory import leaves nothing unresolved":
+            # @req REQ-SSPEC-UNIT
+            step("write the scratch fixtures")
+            expect(_write_fixtures()).to_be_true()
+            step("a resolvable dotted-directory edge must not be reported as a hole")
+            expect(_unresolved_in_closure(DOTTED_ENTRY).len()).to_equal(0)   # oracle: zero holes in a closure whose every edge resolves
+
     describe "an unresolvable import is reported, not silently dropped":
 
         it "a nonexistent module is absent from the resolved direct imports":
@@ -151,3 +186,15 @@ describe "deps resolver: bare tier-rooted imports":
             step("collect the unresolved direct imports of the bare-rooted fixture")
             val missing = _unresolved_imports(BARE_COMMON)
             expect(missing.len()).to_equal(0)   # oracle: a bare tier root now resolves, so nothing is left over
+
+        it "an unresolvable TRANSITIVE import is reported with its importing file":
+            # @req REQ-SSPEC-UNIT
+            step("write the scratch fixtures, including a two-hop chain with a hole in hop two")
+            expect(_write_fixtures()).to_be_true()
+            step("the entry's own direct imports are all resolvable")
+            expect(_unresolved_imports(DEEP_HOLE).len()).to_equal(0)   # oracle: hop one resolves, so a direct-only report would say nothing
+            step("the closure-wide report still finds the hole one hop deeper")
+            val holes = _unresolved_in_closure(DEEP_HOLE)
+            expect(holes.len()).to_equal(1)   # oracle: exactly the one deep sabotage edge
+            expect(holes[0].contains(DEEP_MISSING)).to_be_true()
+            expect(holes[0].contains("deep_hole_mid.spl")).to_be_true()
