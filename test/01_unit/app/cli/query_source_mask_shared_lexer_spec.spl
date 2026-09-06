@@ -22,7 +22,7 @@ use std.spec.*
 use app.cli.query_source_mask.{code_pattern_line_facts, deprecated_dunder_facts}
 use app.cli.query_source_mask.{first_code_pattern_columns}
 use app.cli.check_tier.{TierKeywords, build_tier_keyword_index, check_one_file_indexed}
-use app.io.mod.{file_read_text, file_write}
+use app.io.mod.{file_read_text}
 
 fn tq() -> text:
     "\"" + "\"" + "\""
@@ -125,18 +125,24 @@ describe "tier checking sees single-quoted strings":
         val index = build_tier_keyword_index(TierKeywords(
             seed: ["val"], core: ["val"], full: ["val", "asm"]))
 
-        step("Write a seed-tier file whose only `asm` is a word inside a single-quoted string")
-        val path = "build/test-artifacts/source_facts/tier_sq_string.spl"
-        file_write(path, "val s = 'use asm here'\n")
+        step("Check a committed seed-tier fixture whose only `asm` is a word inside a single-quoted string")
+        # A COMMITTED fixture, never a runtime write: the first version wrote
+        # its fixture under the build artifact directory, which no fresh
+        # checkout has, so the write failed silently and the checker returned
+        # its -1 "could not read" sentinel — red on every clean tree, green
+        # only where that directory had been made by hand. A peer running it
+        # on a fresh tree found it.
+        val path = "test/fixtures/source_facts/tier_sq_string.spl"
+        expect(file_read_text(path)).to_contain("'use asm here'")
         expect(check_one_file_indexed(path, "seed", index)).to_equal(0)
 
     it "still counts a tier keyword used as code":
         """Control for the same checker."""
-        step("Write a seed-tier file that uses `asm` as code")
+        step("Check a committed seed-tier fixture that uses `asm` as code")
         val index = build_tier_keyword_index(TierKeywords(
             seed: ["val"], core: ["val"], full: ["val", "asm"]))
-        val path = "build/test-artifacts/source_facts/tier_code.spl"
-        file_write(path, "val s = asm\n")
+        val path = "test/fixtures/source_facts/tier_code.spl"
+        expect(file_read_text(path)).to_equal("val s = asm\n")
         expect(check_one_file_indexed(path, "seed", index)).to_equal(1)
 
 describe "lint scanner sabotage arm":
@@ -146,7 +152,21 @@ describe "lint scanner sabotage arm":
         expect("if x == '" + tq() + "':").to_contain(tq())
         expect("if c == '#': return 1").to_contain("'#'")
 
-        step("The corpus file really has the construct at line 246 and a triple quote at 283")
+        step("The corpus file really carries the construct, found by SEARCH not by line number")
+        # Hard-coded line indices here broke the moment another change edited
+        # this same file and shifted it (PR #387 did exactly that: the pinned
+        # line 246 became a different function). A corpus arm must locate its
+        # construct, never assume where it sits.
         val raw = file_read_text("src/compiler/90.tools/verify/aorte_obligation_census_scan.spl")
-        expect(raw.split("\n")[245]).to_contain("starts_with('" + tq() + "')")
-        expect(raw.split("\n")[282]).to_contain(tq())
+        val needle = "starts_with('" + tq() + "')"
+        var construct_lines: i64 = 0
+        var closing_lines: i64 = 0
+        var seen_construct = false
+        for line in raw.split("\n"):
+            if line.contains(needle):
+                construct_lines = construct_lines + 1
+                seen_construct = true
+            elif seen_construct and line.contains(tq()):
+                closing_lines = closing_lines + 1
+        expect(construct_lines).to_be_greater_than(0)
+        expect(closing_lines).to_be_greater_than(0)

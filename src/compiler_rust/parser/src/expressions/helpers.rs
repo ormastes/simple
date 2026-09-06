@@ -566,6 +566,9 @@ impl<'a> Parser<'a> {
                     // as `examples` — it must still work as a named-arg/field label
                     // (e.g. K(and_then: "ok")).
                     TokenKind::AndThen => Some("and_then".to_string()),
+                    // `auto` is a hard keyword (auto modules); it must still work as a
+                    // named-arg/field label (e.g. FrontendOffloadSwitch(auto: true)).
+                    TokenKind::Auto => Some("auto".to_string()),
                     _ => None,
                 }
             };
@@ -707,6 +710,7 @@ impl<'a> Parser<'a> {
                         // "expected comma before argument '<name>'".
                         | TokenKind::Examples
                         | TokenKind::AndThen
+                        | TokenKind::Auto
                         | TokenKind::Grid
                         | TokenKind::Outline
                         | TokenKind::Class

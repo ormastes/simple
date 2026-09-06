@@ -5,29 +5,54 @@ alwaysApply: false
 ---
 # Version Control
 
-- Use **jj** (Jujutsu) as primary VCS, colocated with git
-- **NEVER create branches** - work directly on `main`
+- Use **jj** (Jujutsu) as primary VCS, colocated with git (plain `git` when jj is absent)
+- **Land via pull request — direct pushes to `main` are rejected server-side.**
+  Since 2026-09-05 the `spipe-vcs-v3-main` ruleset (`.github/rulesets/`) requires a
+  PR, two required status checks, and lists NO bypass actors: `git push origin
+  <sha>:main` fails with GH013 even for a one-commit fast-forward, and `gh pr merge
+  --admin` is refused. Auto-merge is disabled on the repo.
+- **Topic branches exist only to carry a PR.** No long-lived feature branches; the
+  branch is deleted at merge. Name it `<area>/<topic>-<date>`.
 - Commit: `jj commit -m "message"` (auto-tracks all changes, no staging needed)
-- Push: `sh scripts/check/land.shs` — gates the rules.sdl quick-group and integrity
-  checks against COMMITTED content, THEN runs `sj bookmark set main -r @- && sj
-  git push --bookmark main`. **Do not push via raw `sj`/`jj git push` directly** —
-  `jj git push` never invokes `.git/hooks/pre-push`, so the rules.sdl gates are
-  silently skipped on that path. See
-  `doc/08_tracking/bug/jj_push_bypasses_rules_sdl_gates_2026-08-11.md`.
-- Fetch: `sj raw jj git fetch && sj raw jj rebase -d main@origin`
+- Push/land (`land.shs` still gates the rules.sdl quick-group against COMMITTED
+  content; run it first, then):
+
+  ```bash
+  git push origin <sha>:refs/heads/<topic>          # only YOUR commits — see "Scope" below
+  gh pr create --base main --head <topic> --title "..." --body-file <file>
+  gh pr edit <n> --body-file <file>                 # REQUIRED once: fires the admission check (below)
+  gh pr merge <n> --merge                           # when mergeStateStatus is CLEAN or UNSTABLE
+  git push origin --delete <topic>
+  ```
+
+  **Required checks:** `Code Idiom & Structural Ratchet Gates` (runs on
+  `pull_request`) and `SPipe Self Review Admission` (`.github/workflows/review-admission.yml`).
+  The admission workflow's `pull_request_target` types are `[synchronize, edited,
+  closed, reopened]` — **not `opened`** — so a freshly opened PR sits `BLOCKED` with
+  no admission check-run at all. Any `edited`/`synchronize` event creates it; for
+  that event the job is skipped, and a *skipped* check-run satisfies the ruleset
+  (how PR #375 and #379 landed). `publish` is NOT required and fails on every PR
+  (runner has no `bin/simple`) — `UNSTABLE` is mergeable.
+  **Scope:** with many sessions sharing one clone, local `main` carries other
+  sessions' unpushed commits. Do not push the branch tip; rebuild only your commit
+  on `origin/main` (`git read-tree origin/main` into a temp `GIT_INDEX_FILE`, add
+  your blobs, `git write-tree`, `git commit-tree -p origin/main`) and push that sha.
+- Fetch: `sj raw jj git fetch && sj raw jj rebase -d main@origin` (git: `git fetch origin`)
 
 ## When `jj git push` fails ("External git program failed")
 
-Origin's HTTPS token is dead. Push the rebased tip directly over SSH, then re-sync tracking:
+Origin's HTTPS token is dead. Push the topic branch over SSH instead, then open the
+PR as above. **Do not push to `refs/heads/main` over SSH** — the ruleset rejects
+that path too (superseded 2026-09-05; the old direct-to-main recipe here no longer works).
 
 ```bash
 TIP=$(jj --ignore-working-copy log -r '@-' --no-graph -T 'commit_id')
 GIT_SSH_COMMAND="ssh -o BatchMode=yes -i ~/.ssh/id_ed25519_this_mac" \
-  git push git@github.com:ormastes/simple.git "$TIP":refs/heads/main
+  git push git@github.com:ormastes/simple.git "$TIP":refs/heads/<topic>
 GIT_SSH_COMMAND="ssh -o BatchMode=yes -i ~/.ssh/id_ed25519_this_mac" jj --ignore-working-copy git fetch
 ```
 
-Always verify with `git ls-remote` after — a clean-looking exit is not proof the content landed.
+Always verify with `git ls-remote` after a merge — a clean-looking exit is not proof the content landed.
 
 ## Rebase conflict loop (root-first)
 

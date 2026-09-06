@@ -39,8 +39,8 @@ bin/simple run src/app/test/freebsd_qemu_setup.spl --download --quick
 ```
 
 ## Critical Rules
-- **jj** for VCS — commit: `jj commit -m "msg"` / preferred wrapper flow: `sj bookmark set main -r @- && sj git push --bookmark main`
-- **NEVER create branches** — work directly on `main`
+- **jj** for VCS — commit: `jj commit -m "msg"` (git fallback: `git commit` when jj is absent)
+- **Land via PR, never direct push** — `main` is ruleset-protected (since 2026-09-05: PR required, 2 required checks, no bypass). Push to a short-lived topic branch, `gh pr create`, `gh pr merge --merge`, delete the branch. Topic branches exist ONLY to carry a PR — no long-lived feature branches. See `.claude/rules/vcs.md`
 - **ALL code in `.spl`/`.shs`** — no Python/Bash (except 3 bootstrap scripts)
 - **NO inheritance** — use composition, traits, mixins. **Generics:** `<>` not `[]`
 - **NEVER skip** failing tests without approval. **NEVER convert TODO to NOTE** — implement or delete
@@ -57,7 +57,7 @@ bin/simple run src/app/test/freebsd_qemu_setup.spl --download --quick
 ## Detailed Rules & Reference
 - **Rules:** `.claude/rules/` — `language.md`, `testing.md`, `bootstrap.md`, `commands.md`, `structure.md`, `code-style.md`, `vcs.md`
 - **Skills:** `.claude/skills/` — invoke `/skill-name`; Codex development uses `$sp_dev` for the SPipe dev entrypoint
-- **Agents:** `.claude/agents/` — `code`, `test`, `debug`, `explore`, `docs`, `vcs`, `infra`, `build`, `ml`
+- **Agents:** `.claude/agents/` — `code`, `test`, `debug`, `explore`, `docs`, `vcs`, `infra`, `build`, `ml`, `perf`, `mem`
 - **Memory refs:** `.claude/memory/ref_*.md` — architecture, coding, SFFI, stdlib, CUDA, etc.
 - **Syntax:** `doc/07_guide/quick_reference/syntax_quick_reference.md`
 
