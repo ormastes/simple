@@ -1,0 +1,216 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-APP
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+"""The protected-target predicate is resolved from the committed protected-ref policy, and the admitted plan branch executes."""
+# @req: REQ-SSPEC-APP
+# @ac: AC-5
+use std.spec.step
+
+use std.spec.{describe, it, expect, step}
+use std.io.{file_read}
+use std.scv.lifecycle.model.{Approval, GateBundle}
+use app.sj.gate_manifest.{parse_gate_manifest, plan_protected_gate_manifest}
+use app.sj.integrate_plan.{
+    IntegrateRequest,
+    LegacyPlanReport,
+    plan_integration,
+    plan_integration_with_manifest,
+    legacy_argv_integrate_plan_with_policy
+}
+
+val COMMITTED_POLICY_PATH = ".spipe/policy/vcs.sdn"
+val COMMITTED_MANIFEST_PATH = "config/check/must_check_gates.sdn"
+
+fn _committed_policy() -> text:
+    file_read(COMMITTED_POLICY_PATH)
+
+fn _committed_manifest() -> text:
+    file_read(COMMITTED_MANIFEST_PATH)
+
+fn _complete_request(target_ref: text, policy_digest: text) -> IntegrateRequest:
+    IntegrateRequest(
+        change_id: "chg_1", revision_id: "rev_1", base_revision_id: "rev_0",
+        expected_remote_revision: "rev_0", observed_remote_revision: "rev_0",
+        target_ref: target_ref, policy_digest: policy_digest, gate_profile: "standard",
+        actor: "agent", authority: "sj.integrate", dry_run: true
+    )
+
+fn _complete_bundle(policy_digest: text) -> GateBundle:
+    GateBundle(
+        gate_bundle_id: "gb_1", revision_id: "rev_1",
+        gate_run_ids: ["gr_1"], approval_ids: ["ap_1"],
+        complete: true, bundle_digest: "bd_1", policy_digest: policy_digest
+    )
+
+fn _exact_approval(policy_digest: text) -> Approval:
+    Approval(
+        approval_id: "ap_1", review_id: "rev_review_1", revision_id: "rev_1",
+        tree_digest: "td_1", reviewer: "reviewer", authority: "sj.integrate",
+        policy_digest: policy_digest, evidence_bundle_digest: "bd_1",
+        created_at: "2026-09-05T00:00:00Z", state: "approved"
+    )
+
+fn _joined(lines: [text]) -> text:
+    lines.join("\n")
+
+# Protected-target resolution is an internal step, so it is observed through the
+# planner's public contract: the plan text reports the predicate it resolved and
+# the gate profile it read out of the committed policy.
+fn _plan_for(target_ref: text) -> LegacyPlanReport:
+    legacy_argv_integrate_plan_with_policy(["integrate", "chg_1", target_ref], _committed_policy(), _committed_manifest())
+
+describe "Protected-target resolution reads the committed protected-ref policy":
+    it "resolves the committed policy and declares main a protected target":
+        # @req REQ-SSPEC-APP
+        step("resolves the committed policy and declares main a protected target")
+        val printed = _joined(_plan_for("main").lines)
+        expect(printed).to_contain("protected target : true")
+        expect(printed).to_contain("policy gate profile: standard")
+        # The digest is the sha256 of the committed policy payload, so a
+        # consulted policy is distinguishable from an assumed one.
+        expect(printed).to_contain("protected-ref policy: consulted (digest ")
+
+    it "declares the local integration ref and a release line protected too":
+        # @req REQ-SSPEC-APP
+        step("declares the local integration ref and a release line protected too")
+        expect(_joined(_plan_for("integration/main").lines)).to_contain("protected target : true")
+        val release = _joined(_plan_for("release/1.0").lines)
+        expect(release).to_contain("protected target : true")
+        expect(release).to_contain("policy gate profile: release_line")
+
+    it "leaves an undeclared ref unprotected without erroring":
+        # @req REQ-SSPEC-APP
+        step("leaves an undeclared ref unprotected without erroring")
+        val report = _plan_for("work/foo")
+        # Unprotected is a FAIL, never an ERROR: the policy WAS established.
+        expect(report.verdict).to_equal("FAIL")
+        expect(report.code).to_equal("SJ_POLICY_TARGET")
+        val printed = _joined(report.lines)
+        expect(printed).to_contain("protected target : false")
+        expect(printed).to_contain("policy gate profile: (none)")
+
+    it "fails closed when the policy source is absent or malformed":
+        # @req REQ-SSPEC-APP
+        step("fails closed when the policy source is absent or malformed")
+        val absent = legacy_argv_integrate_plan_with_policy(["integrate", "chg_1", "main"], "", _committed_manifest())
+        expect(absent.verdict).to_equal("ERROR")
+        expect(absent.exit_code).to_equal(2)
+        expect(_joined(absent.lines)).to_contain("protected-ref policy source is absent or empty")
+        val malformed = legacy_argv_integrate_plan_with_policy(["integrate", "chg_1", "main"], "policy:\n  schema: bogus/9\n", _committed_manifest())
+        expect(malformed.verdict).to_equal("ERROR")
+        expect(malformed.exit_code).to_equal(2)
+        expect(_joined(malformed.lines)).to_contain("protected-ref policy is malformed")
+
+describe "The admitted integration plan branch executes on real policy data":
+    it "admits a complete dry-run request whose protected target came from the committed policy":
+        # @req REQ-SSPEC-APP
+        step("admits a complete dry-run request whose protected target came from the committed policy")
+        # The committed policy is what makes `main` protected — asserted here so
+        # the `true` fed to plan_integration below is the value the real policy
+        # produces, not an assumption baked into the test.
+        expect(_joined(_plan_for("main").lines)).to_contain("protected target : true")
+        val request = _complete_request("main", "pd_1")
+        val plan = plan_integration(request, [_exact_approval("pd_1")], _complete_bundle("pd_1"), true)
+        expect(plan.admitted).to_be(true)
+        expect(plan.code).to_equal("")
+        expect(plan.message).to_equal("dry-run only; no refs mutated")
+        expect(plan.steps.len()).to_equal(9)
+        expect(plan.steps.contains("compare_and_swap_integration_ref")).to_be(true)
+
+    it "refuses the same complete request when the target is not declared protected":
+        # @req REQ-SSPEC-APP
+        step("refuses the same complete request when the target is not declared protected")
+        expect(_joined(_plan_for("work/foo").lines)).to_contain("protected target : false")
+        val request = _complete_request("work/foo", "pd_1")
+        val plan = plan_integration(request, [_exact_approval("pd_1")], _complete_bundle("pd_1"), false)
+        expect(plan.admitted).to_be(false)
+        expect(plan.code).to_equal("SJ_POLICY_TARGET")
+
+describe "The committed gate manifest is evaluated against the pinned request":
+    it "selects push-blocking gate identities from the committed manifest":
+        # @req REQ-SSPEC-APP
+        step("selects push-blocking gate identities from the committed manifest")
+        val entries = parse_gate_manifest(_committed_manifest())
+        expect(entries.len() > 0).to_be(true)
+        val printed = _joined(_plan_for("main").lines)
+        expect(printed).to_contain("would require gate: push-conflict-tree")
+        expect(printed).to_contain("would require gate: push-tree-size")
+        # Advisory (push_blocking=false) rows are never required by the plan.
+        expect(printed.contains("would require gate: push-perf-regression-tests")).to_be(false)
+
+    it "pins every selected gate invocation to the request BASE and HEAD":
+        # @req REQ-SSPEC-APP
+        step("pins every selected gate invocation to the request BASE and HEAD")
+        val entries = parse_gate_manifest(_committed_manifest())
+        val manifest_plan = plan_protected_gate_manifest(entries, "rev_0", "rev_1")
+        expect(manifest_plan.valid).to_be(true)
+        expect(manifest_plan.invocations.len() > 0).to_be(true)
+        val request = _complete_request("main", "pd_1")
+        val plan = plan_integration_with_manifest(request, [_exact_approval("pd_1")], _complete_bundle("pd_1"), true, manifest_plan)
+        expect(plan.admitted).to_be(true)
+        expect(plan.gate_invocation_ids.len()).to_equal(manifest_plan.invocations.len())
+        expect(plan.gate_invocation_ids.contains("push-conflict-tree")).to_be(true)
+
+    it "reports an unpinnable manifest plan without admitting anything":
+        # @req REQ-SSPEC-APP
+        step("reports an unpinnable manifest plan without admitting anything")
+        val entries = parse_gate_manifest(_committed_manifest())
+        val unpinned = plan_protected_gate_manifest(entries, "", "")
+        expect(unpinned.valid).to_be(false)
+        expect(unpinned.error).to_contain("distinct pinned BASE and HEAD revisions are required")
+        expect(unpinned.invocations.len()).to_equal(0)
+
+describe "The legacy argv plan consults the policy and the gate manifest":
+    it "clears the protected-target guard for main and fails on the next missing precondition":
+        # @req REQ-SSPEC-APP
+        step("clears the protected-target guard for main and fails on the next missing precondition")
+        val report = legacy_argv_integrate_plan_with_policy(["git", "push", "--bookmark", "main"], _committed_policy(), _committed_manifest())
+        expect(report.verdict).to_equal("FAIL")
+        expect(report.code).to_equal("SJ_IDENTITY_MISSING")
+        expect(report.exit_code).to_equal(1)
+        expect(report.planned).to_equal(1)
+
+    it "keeps an undeclared target ref a protected-target failure":
+        # @req REQ-SSPEC-APP
+        step("keeps an undeclared target ref a protected-target failure")
+        val report = legacy_argv_integrate_plan_with_policy(["integrate", "chg_7", "work/foo"], _committed_policy(), _committed_manifest())
+        expect(report.verdict).to_equal("FAIL")
+        expect(report.code).to_equal("SJ_POLICY_TARGET")
+
+    it "fails closed to ERROR when the protected-ref policy cannot be read":
+        # @req REQ-SSPEC-APP
+        step("fails closed to ERROR when the protected-ref policy cannot be read")
+        val report = legacy_argv_integrate_plan_with_policy(["git", "push", "--bookmark", "main"], "", _committed_manifest())
+        expect(report.verdict).to_equal("ERROR")
+        expect(report.exit_code).to_equal(2)
+        expect(report.planned).to_equal(0)
+        expect(_joined(report.lines)).to_contain("ERROR — nothing was checked")
+
+    it "fails closed to ERROR when the gate manifest carries no push-blocking gate":
+        # @req REQ-SSPEC-APP
+        step("fails closed to ERROR when the gate manifest carries no push-blocking gate")
+        val report = legacy_argv_integrate_plan_with_policy(["git", "push", "--bookmark", "main"], _committed_policy(), "")
+        expect(report.verdict).to_equal("ERROR")
+        expect(report.exit_code).to_equal(2)
+        expect(report.planned).to_equal(0)
+
+    it "fails closed to ERROR when the gate manifest carries a malformed row":
+        # @req REQ-SSPEC-APP
+        step("fails closed to ERROR when the gate manifest carries a malformed row")
+        val short_row = "must_check_gates |id, tier, push_blocking, mode, command, description|\n    push-conflict-tree, push, true, range, \"sh scripts/check/x.shs\"\n"
+        val report = legacy_argv_integrate_plan_with_policy(["git", "push", "--bookmark", "main"], _committed_policy(), short_row)
+        expect(report.verdict).to_equal("ERROR")
+        expect(report.exit_code).to_equal(2)
+        expect(report.planned).to_equal(0)
+        expect(_joined(report.lines)).to_contain("protected gate manifest carries a malformed row")
+
+    it "prints the required gates and the gate-bundle admission verdict":
+        # @req REQ-SSPEC-APP
+        step("prints the required gates and the gate-bundle admission verdict")
+        val printed = _joined(legacy_argv_integrate_plan_with_policy(["git", "push", "--bookmark", "main"], _committed_policy(), _committed_manifest()).lines)
+        expect(printed).to_contain("protected-ref policy: consulted")
+        expect(printed).to_contain("protected target : true")
+        expect(printed).to_contain("would require gate: push-conflict-tree")
+        expect(printed).to_contain("gate bundle      : LIFECYCLE_GATE_INCOMPLETE")
+        expect(printed).to_contain("gate manifest pin: distinct pinned BASE and HEAD revisions are required")
