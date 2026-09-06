@@ -19,10 +19,10 @@ The alarming estimate corrects **downward by about 6.5x**.
 | ... restricted to product paths (`src/ scripts/ config/`) | 1,928 |
 | ... + require the line to be absent at the merge result too | 1,928 |
 | ... + require it absent from the **entire tip tree**, not just the same file | 1,555 |
-| **genuine + unadjudicated product exposure after this audit's repair (`0dc18e8edfc`)** | **949 lines / ~96 files** |
+| **genuine + unadjudicated product exposure after this audit's repair (`0dc18e8edfc`)** | **951 lines / ~97 files** |
 
-`949 = 894 (a7fd32f9475) + 50 (provenance verifier, counted once) + 4
-(df31df530e7) + 1 (cb986e09bdb)`. The 35 lines hand-adjudicated **SUPERSEDED**
+`951 = 894 (a7fd32f9475) + 50 (provenance verifier, counted once) + 4
+(df31df530e7) + 2 (0547effe615) + 1 (cb986e09bdb)`. The 35 lines hand-adjudicated **SUPERSEDED**
 (31 in `d150a169f26`, 4 in `dfb069ade84`) are **already excluded** from that
 949 — do not subtract them again.
 
@@ -113,7 +113,7 @@ against `origin/main` at `0dc18e8edfc`.
 | merge | date | prior est. | raw (file-scoped) | **tree-scoped** | verdict |
 |---|---|---|---|---|---|
 | `a7fd32f9475` | 09-02 | 2178 / 114f | 1830 / 115f | **894 / 92f** | **GENUINE.** Residual after this audit repaired 606 raw lines. Wholesale revert of ~19 PRs. |
-| `0547effe615` | 08-27 | 3900 / 1f | 2 / 1f | **0 so far** | **NOT PRODUCT.** ~14k lines, `test/**` + generated `doc/06_spec/**`. Scan was still enumerating (product 0 across 329 of 978 files at report time); the raw file-scoped product figure is **2 lines / 1 file**, so a completed tree-scoped scan cannot exceed 2. |
+| `0547effe615` | 08-27 | 3900 / 1f | 2 / 1f | **2 / 1f** | **SCAN NOW COMPLETE** (536 files, 6,766 lines, 7,277 more merely relocated). Product exposure is **2 lines in one file**, exactly the ceiling predicted from the raw figure. See the breakdown below. |
 | `198737a06e9` | 09-06 | 57 / 2f | 52 / 2f | **50 / 2f** | GENUINE, **same loss as the row below** (`.shs`→`.sh`); count once. |
 | `66e58d62da8` | 09-02 | 57 / 2f | 52 / 2f | **50 / 2f** | Duplicate of the above — one 51-line loss in `bootstrap-stage3-provenance-verifier`, propagated. |
 | `d150a169f26` | 08-31 | 35 / 1f | 35 / 1f | 31 / 1f | **SUPERSEDED** — macro-generated at tip. Not a loss. |
@@ -121,8 +121,27 @@ against `origin/main` at `0dc18e8edfc`.
 | `dfb069ade84` | 09-05 | 4 / 1f | 4 / 1f | 4 / 1f | **SUPERSEDED** — confirmed false positive in the prior record (#369 comment). |
 | `cb986e09bdb` | 09-04 | 1 / 1f | 1 / 1f | **1 / 1f** | Unadjudicated. Note: 83 of its raw 84 lines were killed by filter (b). |
 
-**Deduped genuine product exposure: 894 + 50 + 4 + 1 = 949 lines**, of which
-~914 is `a7fd32f9475` and the provenance verifier.
+**Deduped genuine product exposure: 894 + 50 + 4 + 2 + 1 = 951 lines**, of which
+944 is `a7fd32f9475` and the provenance verifier.
+
+### `0547effe615` completed — the 3,900-line headline was 2 lines of product
+
+The scan finished after the first version of this report was written. Final
+tree-scoped totals, 536 files carrying still-absent content:
+
+| path class | lines |
+|---|---|
+| `doc/06_spec/**` (generated from sspec) | 4,963 |
+| `test/**` (incl. 337 in the duplicate `test/unit` tree) | 1,801 |
+| **product (`src/`)** | **2** |
+
+A further 7,277 lines flagged by the file-scoped signature are present elsewhere
+in the tip tree — relocated by the spec-regeneration, not lost. This merge
+supplied **3,900 of the prior estimate's 6,236 and contributes 2 lines of
+product exposure.** That single row is most of the correction.
+
+The 2 lines are `src/os/kernel/arch/riscv32/boot.spl`, and they are a **genuine
+rewind, adjudicated and deliberately LEFT** — see below.
 
 ## Widened detection (task 2)
 
@@ -280,6 +299,42 @@ decision. Left, and filed here.
 | `bootstrap-stage3-provenance-verifier` | 1 | 51 | Counted once across `66e58d62da8`/`198737a06e9`. Landed in the codex/stage3 lane, which is actively rebasing; belongs to that lane. |
 | `check-cpu-simd-render-scale-contract.shs` + `backend_measurement_software_export.spl` (#302), `check-native-option-bool-eq-vs-literal.shs` (#304) | 3 | 93 | **Attempted, then backed out.** Restored from `a7fd32f9475^2` and run: neither guard *discriminates* on this host. `check-cpu-simd-render-scale-contract.shs` reports `cpu_simd_render_scale_contract_status=fail / reason=4k_run_failed_exit_127` **byte-identically before and after** the restore (it needs a runnable 4K render binary); `check-native-option-bool-eq-vs-literal.shs` prints **nothing at all** and exits 0 in both states — itself the silent-guard failure mode, and unchanged by the restore. With no signal that distinguishes the restored state from the current one, landing it would be an unverified change to a guard. Backed out. Needs a host that can run the 4K lane. |
 
+### `0547effe615` / `riscv32/boot.spl` — GENUINE rewind, functionally neutral, LEFT
+
+The merge rewound this file's only call sites for the pure-Simple RV32 HAL
+providers back to raw `rt_*` externs:
+
+- gone: `use os.kernel.arch.riscv32.smp_provider.{hal_rv32_smp_wait}` and
+  `...optional_firmware_provider.{hal_rv32_boot_optional_nvme_fw_selftest}`,
+  and the body `_smp_wait_online() = hal_rv32_smp_wait(3, 2000000)`;
+- at tip instead: `extern fn rt_rv32_smp_online_count()`, `extern fn
+  rt_rv32_boot_optional_nvme_fw_selftest()`, and an inline `while c < 3 and i <
+  2000000` spin.
+
+Both provider modules **still exist at the tip and are unchanged**, and
+`hal_rv32_smp_wait` (`smp_provider.spl:18`) now has **zero callers** — the
+rewind orphaned them. The provider is a faithful equivalent: same
+`expected_harts=3`, same `spin_limit=2000000`, and it re-reads
+`_smp_online_count` through a `@naked` `la`/`lw` every iteration, which is what
+the deleted comment described.
+
+Left anyway, for two reasons that together outweigh the (small) win:
+
+1. **It is not a runtime defect.** The tip's raw externs *are* backed —
+   `src/os/kernel/arch/riscv32/boot/baremetal_stubs.c` defines both — so this is
+   not the unregistered-extern-silent-nil class. Both forms boot. What was lost
+   is compliance with the pure-Simple HAL policy
+   (`doc/07_guide/os/hal/pure_simple_hal.md`) plus two orphaned modules.
+2. **Restoring trips a ratchet I cannot re-baseline safely.**
+   `check-no-direct-rt.shs` is a *count* ratchet; removing two direct `rt_*`
+   sites makes `scripts/check/no_direct_rt_baseline.txt` stale, and this host
+   has no riscv32 boot lane to prove the swap. That is the identical trap that
+   caused `mem_snapshot.rs` to be backed out above — a policy change riding on a
+   baseline edit with no behavioural verification.
+
+The correct repair is three lines plus a baseline decrement, and it belongs to
+the RV32 lane, which can boot it.
+
 ### Left as NOT A LOSS (do not restore — restoring these is a clobber in the other direction)
 
 - **`d150a169f26` / `runtime_simd_dispatch.c`, 31 lines.** Tip generates the
@@ -290,12 +345,12 @@ decision. Left, and filed here.
   false positive by the prior record; re-confirmed.
 - **`config/check/must_check_gates.sdn`, 74 lines × 3 merges** (widened scan).
   Zero gate rows lost; 76 → 110.
-- **`0547effe615`'s ~14,000 lines.** `test/**` and generated `doc/06_spec/**`
-  from a bulk sspec-maintenance PR. Regenerating specs is the sspec tool's job,
-  and the duplicate test trees (`test/unit` vs `test/01_unit`) are under
-  divergence-baseline control, so some of it is deliberate de-dup. **Not
-  adjudicated file-by-file** — 978 files exceeds what this session could defend,
-  and its product exposure is 0.
+- **`0547effe615`'s 6,764 non-product lines** (4,963 generated `doc/06_spec/**`
+  + 1,801 `test/**`) from a bulk sspec-maintenance PR. Regenerating specs is the
+  sspec tool's job, and the duplicate test trees (`test/unit` vs `test/01_unit`)
+  are under divergence-baseline control, so some of it is deliberate de-dup.
+  **Not adjudicated file-by-file** — 536 files exceeds what this session could
+  defend. Its product exposure is 2 lines, adjudicated above.
 
 ## Prevention
 
