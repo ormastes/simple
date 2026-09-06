@@ -1,0 +1,330 @@
+# @cover src/lib/common/ui/gpu_scene_islands.spl 80%
+"""
+## Purpose and audience: executable specification evidence for the owning engineering team.
+
+# GPU Scene Islands Spec
+
+## Overview
+
+`gpu_scene_islands.spl` declares the frozen Web/GUI event/style/layout/render
+"island" subset for the GPU WebScene lane and admits each island against a
+profile/device/capability triple, purely (no device access, no execution
+proof). This spec exercises the declared subset shape and the admission
+policy: required profiles refuse without a CPU fallback, non-required
+profiles refuse with a fallback, `cpu_reference` never admits, and a
+full-capability device admits everything with the correct truth labels.
+
+## Requirements
+
+**Requirements:** REQ-GPU-SCHED-ISLAND-001, REQ-GPU-SCHED-PROFILE-001
+
+## Plan
+
+**Plan:** doc/03_plan/ui/gpu_scheduler_hardening_gpu_resident_rendering.md
+
+## Design
+
+**Design:** doc/05_design/gpu_scheduler_hardening_gpu_resident_rendering.md
+
+## Research
+
+**Research:** doc/01_research/local/gpu_scheduler_hardening_gpu_resident_rendering.md
+
+## Examples
+
+Each example below exercises one admission-policy guarantee: the declared
+subset is complete and every truth label is one of the valid tokens; a
+required profile on a compute-only device refuses layout islands naming
+exactly the missing indirect-dispatch bit with no CPU fallback; a balanced
+(non-required) profile in the same situation allows a CPU fallback instead;
+`cpu_reference` never admits anything; a full-capability device admits every
+island with `submission_autonomy = none` / `scheduling_assurance = partial`;
+and the summary text tallies admitted/refused/fallback correctly.
+"""
+
+use std.spec.step
+use std.spec.*
+use common.ui.draw_ir_v3_execution_route.{
+    DRAW_IR_V3_REASON_NONE,
+    DRAW_IR_V3_REASON_NO_DEVICE,
+    DRAW_IR_V3_REASON_MISSING_CAPABILITY,
+    DRAW_IR_V3_REASON_MODE_IS_CPU_REFERENCE
+}
+use common.ui.draw_ir_v3_ports.{
+    DRAW_IR_V3_CAP_COMPUTE_PASSES,
+    DRAW_IR_V3_CAP_INDIRECT_DISPATCH
+}
+use common.gpu.engine2d.gpu_epoch.{
+    ENGINE2D_GPU_PROFILE_CPU_REFERENCE,
+    ENGINE2D_GPU_PROFILE_SCENE_REQUIRED,
+    ENGINE2D_GPU_PROFILE_SCENE_BALANCED,
+    ENGINE2D_GPU_TRUTH_NONE,
+    ENGINE2D_GPU_TRUTH_PARTIAL,
+    Engine2dGpuTruthLabels,
+    engine2d_gpu_truth_labels_valid
+}
+use common.ui.gpu_scene_islands.{
+    gpu_scene_island_kind_known,
+    GPU_ISLAND_EVENT,
+    GPU_ISLAND_LAYOUT,
+    GPU_ISLAND_RENDER,
+    GPU_ISLAND_STYLE,
+    GpuSceneIsland,
+    gpu_scene_island_declared_subset,
+    gpu_scene_island_admit,
+    gpu_scene_islands_admit_all,
+    gpu_scene_islands_summary
+}
+
+fn find_layout_island(islands: [GpuSceneIsland], name: text) -> GpuSceneIsland:
+    var i: i64 = 0
+    val n: i64 = islands.len()
+    while i < n:
+        if islands[i].name == name:
+            return islands[i]
+        i = i + 1
+    islands[0]
+
+describe "gpu_scene_island_declared_subset -- frozen Web/GUI island shape":
+
+    it "declares 9 islands, every truth label valid, and flex_row needs indirect dispatch":
+        # @req REQ-GPU-SCHED-ISLAND-001
+        step("declares 9 islands, every truth label valid, and flex_row needs indirect dispatch")
+        step("Load the declared subset")
+        val islands = gpu_scene_island_declared_subset()
+
+        step("Expect exactly 9 islands")
+        expect(islands.len()).to_equal(9)  # oracle: 2 event + 2 style + 3 layout + 2 render
+
+        step("Every island's semantic/data residency values must be valid truth tokens")
+        var i: i64 = 0
+        val n: i64 = islands.len()
+        var all_valid = true
+        while i < n:
+            val probe = Engine2dGpuTruthLabels(
+                semantic_residency: islands[i].semantic_residency,
+                data_residency: islands[i].data_residency,
+                submission_autonomy: ENGINE2D_GPU_TRUTH_NONE,
+                scheduling_assurance: ENGINE2D_GPU_TRUTH_PARTIAL
+            )
+            if not engine2d_gpu_truth_labels_valid(probe):
+                all_valid = false
+            i = i + 1
+        assert_true(all_valid)
+
+        step("flex_row is a layout island requiring both compute passes and indirect dispatch")
+        val flex_row = find_layout_island(islands, "flex_row")
+        expect(flex_row.kind).to_equal(GPU_ISLAND_LAYOUT)
+        val needed = DRAW_IR_V3_CAP_COMPUTE_PASSES + DRAW_IR_V3_CAP_INDIRECT_DISPATCH
+        expect(flex_row.required_capabilities).to_equal(needed)  # oracle: layout tier = Tier 0 + Tier 1 capability bits
+
+describe "gpu_scene_island_admit -- required profile refuses without fallback":
+
+    it "refuses flex_row on a compute-only device, naming the missing indirect-dispatch bit, no CPU fallback":
+        # @req REQ-GPU-SCHED-ISLAND-001
+        step("refuses flex_row on a compute-only device, naming the missing indirect-dispatch bit, no CPU fallback")
+        step("Find the flex_row layout island")
+        val islands = gpu_scene_island_declared_subset()
+        val flex_row = find_layout_island(islands, "flex_row")
+
+        step("Admit under gpu_scene_required with only compute passes available")
+        val admission = gpu_scene_island_admit(flex_row, ENGINE2D_GPU_PROFILE_SCENE_REQUIRED, true, DRAW_IR_V3_CAP_COMPUTE_PASSES)
+
+        step("Expect a hard refusal naming the missing indirect-dispatch bit")
+        assert_false(admission.admitted)
+        expect(admission.reason_code).to_equal(DRAW_IR_V3_REASON_MISSING_CAPABILITY)  # oracle: capability check fires before any policy fallback
+        expect(admission.missing_capabilities).to_equal(DRAW_IR_V3_CAP_INDIRECT_DISPATCH)  # oracle: only bit 2 (indirect dispatch) is absent
+        assert_false(admission.cpu_fallback_allowed)
+
+describe "gpu_scene_island_admit -- non-required profile allows CPU fallback":
+
+    it "marks the same missing-capability case as fallback-allowed under gpu_scene_balanced":
+        # @req REQ-GPU-SCHED-ISLAND-001
+        step("marks the same missing-capability case as fallback-allowed under gpu_scene_balanced")
+        step("Find the flex_row layout island")
+        val islands = gpu_scene_island_declared_subset()
+        val flex_row = find_layout_island(islands, "flex_row")
+
+        step("Admit under gpu_scene_balanced with only compute passes available")
+        val admission = gpu_scene_island_admit(flex_row, ENGINE2D_GPU_PROFILE_SCENE_BALANCED, true, DRAW_IR_V3_CAP_COMPUTE_PASSES)
+
+        step("Expect refusal with a CPU fallback allowed")
+        assert_false(admission.admitted)
+        expect(admission.reason_code).to_equal(DRAW_IR_V3_REASON_MISSING_CAPABILITY)  # oracle: same missing bit, different fallback policy
+        assert_true(admission.cpu_fallback_allowed)
+
+describe "gpu_scene_island_admit -- cpu_reference never admits":
+
+    it "refuses every island under cpu_reference with reason MODE_IS_CPU_REFERENCE and a fallback":
+        # @req REQ-GPU-SCHED-PROFILE-001
+        step("refuses every island under cpu_reference with reason MODE_IS_CPU_REFERENCE and a fallback")
+        step("Admit all islands under cpu_reference with full device capabilities")
+        val full_caps = DRAW_IR_V3_CAP_COMPUTE_PASSES + DRAW_IR_V3_CAP_INDIRECT_DISPATCH
+        val admissions = gpu_scene_islands_admit_all(ENGINE2D_GPU_PROFILE_CPU_REFERENCE, true, full_caps)
+
+        step("Expect none admitted, all policy-refused with reason MODE_IS_CPU_REFERENCE")
+        var i: i64 = 0
+        val n: i64 = admissions.len()
+        var all_refused = true
+        while i < n:
+            if admissions[i].admitted or admissions[i].reason_code != DRAW_IR_V3_REASON_MODE_IS_CPU_REFERENCE or not admissions[i].cpu_fallback_allowed:
+                all_refused = false
+            i = i + 1
+        assert_true(all_refused)
+
+        step("Summary: everything falls into the fallback bucket")
+        expect(gpu_scene_islands_summary(admissions)).to_equal("admitted=0 refused=0 fallback=9")  # oracle: 9 declared islands, all cpu_reference-refused-with-fallback
+
+describe "gpu_scene_islands_admit_all -- full-capability device admits everything":
+
+    it "admits all 9 islands with submission_autonomy=none, scheduling_assurance=partial":
+        # @req REQ-GPU-SCHED-ISLAND-001
+        step("admits all 9 islands with submission_autonomy=none, scheduling_assurance=partial")
+        step("Admit all islands under gpu_scene_required with every relevant capability bit present")
+        val full_caps = DRAW_IR_V3_CAP_COMPUTE_PASSES + DRAW_IR_V3_CAP_INDIRECT_DISPATCH
+        val admissions = gpu_scene_islands_admit_all(ENGINE2D_GPU_PROFILE_SCENE_REQUIRED, true, full_caps)
+
+        step("Expect 9 admissions, all admitted, reason NONE")
+        expect(admissions.len()).to_equal(9)  # oracle: matches the declared subset count
+        var i: i64 = 0
+        val n: i64 = admissions.len()
+        var all_admitted = true
+        while i < n:
+            if not admissions[i].admitted or admissions[i].reason_code != DRAW_IR_V3_REASON_NONE:
+                all_admitted = false
+            if admissions[i].truth.submission_autonomy != ENGINE2D_GPU_TRUTH_NONE or admissions[i].truth.scheduling_assurance != ENGINE2D_GPU_TRUTH_PARTIAL:
+                all_admitted = false
+            i = i + 1
+        assert_true(all_admitted)
+
+        step("Summary: everything admitted, nothing refused or fallback")
+        expect(gpu_scene_islands_summary(admissions)).to_equal("admitted=9 refused=0 fallback=0")  # oracle: full device capability set covers every declared island
+
+    it "refuses every island with no CPU fallback when the device itself is absent under a required profile":
+        # @req REQ-GPU-SCHED-ISLAND-001
+        step("refuses every island with no CPU fallback when the device itself is absent under a required profile")
+        step("Admit all islands under gpu_scene_required with no device present")
+        val admissions = gpu_scene_islands_admit_all(ENGINE2D_GPU_PROFILE_SCENE_REQUIRED, false, 0u32)
+
+        step("Expect every admission refused for NO_DEVICE with no fallback")
+        var i: i64 = 0
+        val n: i64 = admissions.len()
+        var all_no_device = true
+        while i < n:
+            if admissions[i].admitted or admissions[i].reason_code != DRAW_IR_V3_REASON_NO_DEVICE or admissions[i].cpu_fallback_allowed:
+                all_no_device = false
+            i = i + 1
+        assert_true(all_no_device)
+
+        step("Summary: everything refused, nothing admitted or fallback")
+        expect(gpu_scene_islands_summary(admissions)).to_equal("admitted=0 refused=9 fallback=0")  # oracle: required profile + no device refuses all 9 with no fallback
+
+describe "gpu_scene_island kind constants -- the declared subset is a closed partition":
+
+    it "labels every declared island with one of the four kind constants and nothing else":
+        # @req REQ-GPU-SCHED-ISLAND-001
+        step("labels every declared island with one of the four kind constants and nothing else")
+        step("The four kind constants are pairwise distinct tokens")
+        var distinct = true
+        if GPU_ISLAND_EVENT == GPU_ISLAND_STYLE or GPU_ISLAND_EVENT == GPU_ISLAND_LAYOUT:
+            distinct = false
+        if GPU_ISLAND_EVENT == GPU_ISLAND_RENDER or GPU_ISLAND_STYLE == GPU_ISLAND_LAYOUT:
+            distinct = false
+        if GPU_ISLAND_STYLE == GPU_ISLAND_RENDER or GPU_ISLAND_LAYOUT == GPU_ISLAND_RENDER:
+            distinct = false
+        assert_true(distinct)
+
+        step("Tally the declared subset by kind, counting anything unrecognised separately")
+        val islands = gpu_scene_island_declared_subset()
+        var event_count: i64 = 0
+        var style_count: i64 = 0
+        var layout_count: i64 = 0
+        var render_count: i64 = 0
+        var unknown_count: i64 = 0
+        var i: i64 = 0
+        val n: i64 = islands.len()
+        while i < n:
+            val kind = islands[i].kind
+            if kind == GPU_ISLAND_EVENT:
+                event_count = event_count + 1
+            else if kind == GPU_ISLAND_STYLE:
+                style_count = style_count + 1
+            else if kind == GPU_ISLAND_LAYOUT:
+                layout_count = layout_count + 1
+            else if kind == GPU_ISLAND_RENDER:
+                render_count = render_count + 1
+            else:
+                unknown_count = unknown_count + 1
+            i = i + 1
+
+        step("Every kind is accounted for by the declared partition")
+        expect(event_count).to_equal(2)  # oracle: hit_test + pointer_route, per gpu_scene_islands.spl docstring
+        expect(style_count).to_equal(2)  # oracle: class_toggle + color_resolve
+        expect(layout_count).to_equal(3)  # oracle: flex_row + flex_column + absolute_box
+        expect(render_count).to_equal(2)  # oracle: rect_fill + text_run_cached
+        expect(event_count + style_count + layout_count + render_count).to_equal(islands.len())
+
+        step("Adverse: no island carries a kind outside the four constants")
+        expect(unknown_count).to_equal(0)  # oracle: an unrecognised kind would land here instead of a constant bucket
+
+        step("Adverse: a near-miss kind spelling matches no declared island")
+        var near_miss: i64 = 0
+        var j: i64 = 0
+        while j < n:
+            if islands[j].kind == "Event" or islands[j].kind == "renders" or islands[j].kind == "":
+                near_miss = near_miss + 1
+            j = j + 1
+        expect(near_miss).to_equal(0)  # oracle: the kind tokens are exactly the lowercase constants
+
+    it "keeps every layout island's capability requirement a strict superset of a render island's":
+        # @req REQ-GPU-SCHED-ISLAND-001
+        step("keeps every layout island's capability requirement a strict superset of a render island's")
+        step("Read the declared subset and the render-tier baseline")
+        val islands = gpu_scene_island_declared_subset()
+        val rect_fill = find_layout_island(islands, "rect_fill")
+        expect(rect_fill.kind).to_equal(GPU_ISLAND_RENDER)
+        expect(rect_fill.required_capabilities).to_equal(DRAW_IR_V3_CAP_COMPUTE_PASSES)  # oracle: render tier is Tier 0 only
+
+        step("Every layout island additionally requires indirect dispatch")
+        var layout_ok = true
+        var seen_layout: i64 = 0
+        var i: i64 = 0
+        val n: i64 = islands.len()
+        while i < n:
+            if islands[i].kind == GPU_ISLAND_LAYOUT:
+                seen_layout = seen_layout + 1
+                if islands[i].required_capabilities != DRAW_IR_V3_CAP_COMPUTE_PASSES + DRAW_IR_V3_CAP_INDIRECT_DISPATCH:
+                    layout_ok = false
+            i = i + 1
+        assert_true(layout_ok)
+        expect(seen_layout).to_equal(3)  # oracle: three declared layout islands
+
+        step("Adverse: on a compute-only device the render island admits while every layout island refuses")
+        val admissions = gpu_scene_islands_admit_all(ENGINE2D_GPU_PROFILE_SCENE_REQUIRED, true, DRAW_IR_V3_CAP_COMPUTE_PASSES)
+        var layout_refused: i64 = 0
+        var non_layout_admitted: i64 = 0
+        var k: i64 = 0
+        while k < n:
+            if islands[k].kind == GPU_ISLAND_LAYOUT:
+                if not admissions[k].admitted and admissions[k].reason_code == DRAW_IR_V3_REASON_MISSING_CAPABILITY:
+                    layout_refused = layout_refused + 1
+            else if admissions[k].admitted:
+                non_layout_admitted = non_layout_admitted + 1
+            k = k + 1
+        expect(layout_refused).to_equal(3)  # oracle: all three layout islands lack indirect dispatch
+        expect(non_layout_admitted).to_equal(6)  # oracle: the other six islands need Tier 0 only
+        expect(gpu_scene_islands_summary(admissions)).to_equal("admitted=6 refused=3 fallback=0")  # oracle: required profile grants no fallback to the three refused layout islands
+
+describe "GPU scene island kind partition":
+    it "refuses an island whose kind is outside the declared partition":
+        # @req REQ-GPU-SCHED-ISLAND-001
+        step("Ask whether each declared kind and a bogus one are known")
+        expect(gpu_scene_island_kind_known(GPU_ISLAND_EVENT)).to_be(true)
+        expect(gpu_scene_island_kind_known(GPU_ISLAND_RENDER)).to_be(true)
+        expect(gpu_scene_island_kind_known("bogus")).to_be(false)
+        step("Admit an island carrying an unknown kind on a fully capable device")
+        val rogue = GpuSceneIsland(kind: "bogus", name: "rogue", required_capabilities: 0u32, semantic_residency: ENGINE2D_GPU_TRUTH_FULL, data_residency: ENGINE2D_GPU_TRUTH_FULL)
+        val verdict = gpu_scene_island_admit(rogue, ENGINE2D_GPU_PROFILE_SCENE_BALANCED, true, DRAW_IR_V3_CAP_COMPUTE_PASSES + DRAW_IR_V3_CAP_INDIRECT_DISPATCH)
+        step("Capability bits alone must not admit it")
+        expect(verdict.admitted).to_be(false)
+        expect(verdict.cpu_fallback_allowed).to_be(false)
