@@ -249,6 +249,10 @@ static int check_spool_fallback_under_held_lock(void) {
         fprintf(stderr, "held lock: anchored spool directory was not created\n");
         return 1;
     }
+    /* No daemon ever started here, so this root can be removed completely. */
+    unlink(lock_path);
+    rmdir(spool_path);
+    rmdir(dir);
     return 0;
 }
 
@@ -350,7 +354,11 @@ static int check_hostile_socket_and_handshake(void) {
     }
     close(fd);
     /* The daemon idles out on its own (10-12s) and unlinks its socket; the test
-     * deliberately does not kill it, so the shutdown path stays exercised. */
+     * deliberately does not kill it, so the shutdown path stays exercised. That
+     * means THIS root outlives the test run: /tmp/cachedaemon_selfcheck_* keeps
+     * a lock file until the daemon exits, and the directory is left behind for
+     * /tmp cleanup rather than removed here. The spool-fallback root above
+     * starts no daemon and is removed completely. */
     return 0;
 }
 
