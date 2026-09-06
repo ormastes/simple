@@ -10,12 +10,7 @@ use os.drivers.virtio.virtio_input_wire.{
     VIRTIO_INPUT_DEVICE_POINTER
 }
 
-extern fn rt_dma_alloc(size: i64, dir_raw: i32) -> i64
-extern fn rt_dma_free(handle: i64)
-extern fn rt_dma_virt_of(handle: i64) -> i64
-extern fn rt_dma_phys_of(handle: i64) -> i64
-extern fn rt_dma_sync_for_device(handle: i64, dir_raw: i32)
-extern fn rt_dma_sync_for_cpu(handle: i64, dir_raw: i32)
+use std.io.dma.{dma_raw_alloc, dma_raw_free, dma_raw_phys_of, dma_raw_sync_for_cpu, dma_raw_sync_for_device, dma_raw_virt_of}
 extern fn rt_memory_barrier()
 
 val VIRTIO_INPUT_DEVICE_ID: u32 = 18u32
@@ -135,13 +130,13 @@ fn virtio_input_mmio_kind(base: u64) -> u32:
     _virtio_input_qemu_kind(base)
 
 fn _virtio_input_dma_create() -> VirtioInputDma:
-    val handle = rt_dma_alloc(VIRTIO_INPUT_DMA_BYTES, 2)
+    val handle = dma_raw_alloc(VIRTIO_INPUT_DMA_BYTES, 2)
     if handle < 0:
         return VirtioInputDma(handle: -1, cpu: 0u64, device: 0u64)
-    val cpu = rt_dma_virt_of(handle).to_u64()
-    val device = rt_dma_phys_of(handle).to_u64()
+    val cpu = dma_raw_virt_of(handle).to_u64()
+    val device = dma_raw_phys_of(handle).to_u64()
     if not virtio_input_mmio_layout_valid(cpu, device):
-        rt_dma_free(handle)
+        dma_raw_free(handle)
         return VirtioInputDma(handle: -1, cpu: 0u64, device: 0u64)
     var offset: u64 = 0u64
     while offset < VIRTIO_INPUT_DMA_BYTES.to_u64():
@@ -205,7 +200,7 @@ impl VirtioInputMmioDevice:
             mmio_write16(dma.cpu + VIRTIO_INPUT_AVAIL_OFFSET + 4u64 + index.to_u64() * 2u64, index)
             index = index + 1u16
         mmio_write16(dma.cpu + VIRTIO_INPUT_AVAIL_OFFSET + 2u64, VIRTIO_INPUT_QUEUE_SIZE)
-        rt_dma_sync_for_device(dma.handle, 2)
+        dma_raw_sync_for_device(dma.handle, 2)
         mmio_write32(base + VIRTIO_MMIO_QUEUE_NUM, VIRTIO_INPUT_QUEUE_SIZE.to_u32())
         device._write_queue_address(VIRTIO_MMIO_QUEUE_DESC_LOW, dma.device + VIRTIO_INPUT_DESC_OFFSET)
         device._write_queue_address(VIRTIO_MMIO_QUEUE_AVAIL_LOW, dma.device + VIRTIO_INPUT_AVAIL_OFFSET)
@@ -227,7 +222,7 @@ impl VirtioInputMmioDevice:
     # without allocating an absent receipt on every empty queue observation.
     me receipt_available() -> bool:
         if not self.ready: return false
-        rt_dma_sync_for_cpu(self.dma.handle, 2)
+        dma_raw_sync_for_cpu(self.dma.handle, 2)
         mmio_read16(self.dma.cpu + VIRTIO_INPUT_USED_OFFSET + 2u64) != self.last_used
 
     me poll_receipt() -> VirtioInputPollReceipt:
@@ -251,7 +246,7 @@ impl VirtioInputMmioDevice:
         val avail_slot = self.dma.cpu + VIRTIO_INPUT_AVAIL_OFFSET + 4u64 + (self.next_avail % VIRTIO_INPUT_QUEUE_SIZE).to_u64() * 2u64
         mmio_write16(avail_slot, used_id.to_u16())
         self.next_avail = self.next_avail + 1u16
-        rt_dma_sync_for_device(self.dma.handle, 2)
+        dma_raw_sync_for_device(self.dma.handle, 2)
         mmio_write16(self.dma.cpu + VIRTIO_INPUT_AVAIL_OFFSET + 2u64, self.next_avail)
         rt_memory_barrier()
         mmio_write32(self.base + VIRTIO_MMIO_QUEUE_NOTIFY, 0u32)
@@ -272,7 +267,7 @@ impl VirtioInputMmioDevice:
             mmio_write32(self.base + VIRTIO_MMIO_STATUS, 0u32)
             rt_memory_barrier()
         if self.dma.handle >= 0:
-            rt_dma_free(self.dma.handle)
+            dma_raw_free(self.dma.handle)
         self.dma = VirtioInputDma(handle: -1, cpu: 0u64, device: 0u64)
         self.ready = false
 

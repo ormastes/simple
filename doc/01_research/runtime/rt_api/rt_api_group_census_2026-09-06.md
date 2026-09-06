@@ -211,3 +211,68 @@ groups with none (access=unowned):  48
   part of the migration, not a prerequisite for it.
 - **The `simple_ctx_*` MCP tools returned empty stubs for every call** in this
   session, so no ctx source labels exist for this work.
+
+## Pass 2 — mechanical criterion re-applied to all 43 unowned groups (2026-09-06)
+
+Criterion (unchanged from pass 1): **100% of the group's forbidden call sites
+live in a single file AND that file is the ABI seam.**
+
+**22 of the 43 have ZERO call sites anywhere under `src/**.spl`** — neither
+forbidden nor allowlisted: `ab aop blas btreemap btreeset clear contract
+generator handle hashmap hashset mlkem monoio object par resource security
+semaphore sffi shared unique vec`. A group's `provider` is derived as the
+allowlist entry serving the most of its *allowlisted* calls, so a group with no
+Simple call sites at all has nothing to allowlist and **cannot be owned under
+the current derivation, ever**. This is the hard blocker on promoting
+`--critical` to blocking, and it is a gate-design question for the owner, not
+something a migration lane can close.
+
+The remaining 21, by concentration (sites / files / largest file's share):
+
+| group | sites | files | top file share | criterion | outcome |
+|---|---|---|---|---|---|
+| arm64 | 75 | 15 | 27% | fails (scattered) | red — whole-arch HAL surface, not one concern |
+| dma | 61 | 11 | 23% | fails | **CLOSED by building the seam** |
+| port | 53 | 9 | 23% | fails | **CLOSED by building the seam** |
+| x86 | 46 | 10 | 37% | fails | red |
+| arm32 | 42 | 6 | 52% | fails | red |
+| boot | 38 | 4 | 74% | fails | red |
+| riscv | 35 | 22 | 11% | fails | red |
+| criticality | 31 | 6 | 55% | fails | red |
+| win32 | 26 | 2 | 62% | fails | red |
+| starfive | 21 | 4 | 67% | fails | red |
+| riscv64 | 21 | 6 | 38% | fails | red |
+| packed | 12 | 2 | 67% | fails | red |
+| display | 11 | 1 | 100% | single file, NOT a seam | red (pass-1 precedent) |
+| staged | 9 | 1 | 100% | **passes** | red anyway — see the erasure bug below |
+| socket | 8 | 3 | 50% | fails | red |
+| limine | 6 | 1 | 100% | single file, NOT a seam | red (pass-1 precedent) |
+| exception | 6 | 1 | 100% | single file, NOT a seam | red — `_MirToLlvm/core_codegen.spl` emits calls, it is not a boundary |
+| pty | 4 | 1 | 100% | single file, NOT a seam | red — `smux_remote.spl` is app logic |
+| core | 4 | 3 | 50% | fails | red |
+| aes | 4 | 2 | 50% | fails | red |
+| sdn | 1 | 1 | 100% | single file, NOT a seam | red — one site in `src/config.spl` |
+
+So the mechanical criterion produced exactly **one** new candidate, `staged`,
+and naming it deletes the group instead of owning it:
+`doc/08_tracking/bug/rt_api_group_provider_erases_unbacked_group_2026-09-06.md`.
+
+### Seams built
+
+* **`port`** — `src/os/kernel/arch/x86/port_io_owner.spl` already existed with
+  `@inline` wrappers for all 7 symbols and had **no consumers**: 46 of 53 sites
+  bypassed it from 8 files, five of which redeclared the same externs. One,
+  `src/os/kernel/boot/cpu.spl`, declared them as `u64` against the C ABI
+  `uint8_t rt_port_inb(uint16_t)` — a real width bug the collapse removed. Two
+  files claimed in their own headers to be "the sole x86_NN owner of raw
+  port-I/O"; those claims are now scoped to CR3 only.
+  `src/os/kernel/arch/x86/com1_common.spl` was calling an unimported
+  `x86_port_inb`, which the migration also fixed.
+* **`dma`** — `src/lib/nogc_sync_mut/io/dma.spl` already declared itself the
+  owner, but 47 of 61 sites bypassed it from 10 driver files, each redeclaring
+  the externs and therefore missing the module's `__fallback` stubs. The
+  drivers now consume handle-level `dma_raw_*` wrappers on the owner.
+  Separately confirmed: `rt_dma_*` has **no host-lane backing at all** — the
+  pre-existing public `dma_alloc` fails with `unknown extern function:
+  rt_dma_alloc` under the interpreter, so the `__fallback` convention in that
+  file is not honoured by the seed.
