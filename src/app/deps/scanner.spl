@@ -33,6 +33,22 @@ fn _deps_path_join(a: text, b: text) -> text:
         return b
     a + "/" + b
 
+# Tier directories directly under src/lib/. Mirrors the `fams` list in
+# src/compiler/10.frontend/core/interpreter/module_loader_resolve.spl so that
+# `common.X` and `std.common.X` resolve to the same file. Order matters: it is
+# the same search order the real module resolver uses for `std.X`/`lib.X`.
+fn _deps_lib_tiers() -> [text]:
+    ["nogc_async_mut", "nogc_async_immut", "nogc_sync_immut", "nogc_sync_mut",
+     "common", "gc_async_mut", "gc_async_immut", "gc_sync_mut", "gc_sync_immut",
+     "nogc_async_mut_noalloc"]
+
+fn _deps_is_lib_tier(segment: text) -> bool:
+    var found = false
+    for tier in _deps_lib_tiers():
+        if _deps_str_eq(tier, segment):
+            found = true
+    found
+
 fn _deps_module_to_relpath(module_name: text) -> text:
     # std.X -> lib/X  (std is alias for lib/)
     var name = module_name
@@ -73,7 +89,80 @@ fn _deps_try_exists(path: text) -> text:
         return path
     ""
 
-fn _deps_resolve_module(module_name: text, current_file: text) -> text:
+fn _deps_path_basename(path: text) -> text:
+    val slash = path.last_index_of("/") ?? -1
+    if slash < 0:
+        return path
+    path.substring(slash + 1)
+
+# Dotted-directory sibling of `current`: `<parent>/<basename(current)>.<segment>`.
+# Exact mirror of `dotted_dir_from` in the canonical resolver,
+# src/compiler_rust/compiler/src/pipeline/module_loader.rs:41-50.
+fn _deps_dotted_dir_from(current: text, segment: text) -> text:
+    val parent = _deps_path_parent(current)
+    val name = _deps_path_basename(current)
+    if name == "":
+        return ""
+    val cand = _deps_path_join(parent, name + "." + segment)
+    if rt_dir_exists(cand):
+        return cand
+    ""
+
+# Resolve dotted module segments against one root, allowing any intermediate
+# segment to be folded into the previous directory's name with a `.` — this is
+# how `app.ui.tui.app` reaches `src/app/ui.tui/app.spl`. Exact mirror of
+# `resolve_parts_from_root` in the canonical resolver,
+# src/compiler_rust/compiler/src/pipeline/module_loader.rs:78-130 (the plain
+# `<root>/<parts…>.spl` case is already covered by steps 1-3b above, so only the
+# dotted walk is reproduced here).
+fn _deps_resolve_parts_from_root(root: text, parts: [text]) -> text:
+    if parts.len() == 0:
+        return ""
+    var cur = root
+    val last_idx = parts.len() - 1
+    var pi = 0
+    var ok = true
+    for part in parts:
+        if pi < last_idx and ok:
+            val direct = _deps_path_join(cur, part)
+            if rt_dir_exists(direct):
+                cur = direct
+            else:
+                val dotted = _deps_dotted_dir_from(cur, part)
+                if dotted != "":
+                    cur = dotted
+                else:
+                    ok = false
+        pi = pi + 1
+    if not ok:
+        return ""
+    val last = parts[last_idx]
+    val dotted_file = _deps_path_join(cur, last + ".spl")
+    val d1 = _deps_try_exists(dotted_file)
+    if d1 != "":
+        return d1
+    val dotted_init = _deps_path_join(_deps_path_join(cur, last), "__init__.spl")
+    val d2 = _deps_try_exists(dotted_init)
+    if d2 != "":
+        return d2
+    val dotted_mod = _deps_path_join(_deps_path_join(cur, last), "mod.spl")
+    val d2m = _deps_try_exists(dotted_mod)
+    if d2m != "":
+        return d2m
+    val last_dir = _deps_dotted_dir_from(cur, last)
+    if last_dir != "":
+        val d3 = _deps_try_exists(_deps_path_join(last_dir, "__init__.spl"))
+        if d3 != "":
+            return d3
+        val d3m = _deps_try_exists(_deps_path_join(last_dir, "mod.spl"))
+        if d3m != "":
+            return d3m
+        val d4 = _deps_try_exists(_deps_path_join(last_dir, last + ".spl"))
+        if d4 != "":
+            return d4
+    ""
+
+fn _deps_resolve_module_nofold(module_name: text, current_file: text) -> text:
     val current_dir = _deps_path_parent(current_file)
 
     # Handle relative imports: use .sibling or use ..parent.sibling
@@ -110,15 +199,21 @@ fn _deps_resolve_module(module_name: text, current_file: text) -> text:
     # 1. Local directory (relative to current file)
     val local_spl = _deps_path_join(current_dir, relpath + ".spl")
     val local_mod = _deps_path_join(current_dir, relpath + "/mod.spl")
+    val local_init = _deps_path_join(current_dir, relpath + "/__init__.spl")
     val r1 = _deps_try_exists(local_spl)
     if r1 != "":
         return r1
     val r2 = _deps_try_exists(local_mod)
     if r2 != "":
         return r2
+    val r2i = _deps_try_exists(local_init)
+    if r2i != "":
+        return r2i
 
     # 2. SIMPLE_LIB environment variable
-    val simple_lib = rt_env_get("SIMPLE_LIB")
+    # rt_env_get returns nil for an unset variable in some lanes; `?? ""`
+    # keeps every downstream path helper off a nil receiver.
+    val simple_lib = rt_env_get("SIMPLE_LIB") ?? ""
     val simple_lib_ok = simple_lib != ""
     if simple_lib_ok:
         val lib_spl = _deps_path_join(simple_lib, relpath + ".spl")
@@ -129,6 +224,9 @@ fn _deps_resolve_module(module_name: text, current_file: text) -> text:
         val r4 = _deps_try_exists(lib_mod)
         if r4 != "":
             return r4
+        val r4i = _deps_try_exists(_deps_path_join(simple_lib, relpath + "/__init__.spl"))
+        if r4i != "":
+            return r4i
 
     # 3. src/ fallback
     val src_spl = "src/" + relpath + ".spl"
@@ -139,12 +237,61 @@ fn _deps_resolve_module(module_name: text, current_file: text) -> text:
     val r6 = _deps_try_exists(src_mod)
     if r6 != "":
         return r6
+    val r6i = _deps_try_exists("src/" + relpath + "/__init__.spl")
+    if r6i != "":
+        return r6i
 
-    # 4. lib subdirectory search for std./lib. imports
+    # 3b. Bare tier-rooted import: `use common.X` / `use nogc_sync_mut.X`.
+    #     The first segment is a tier directory directly under src/lib/, so the
+    #     module resolves exactly as the `std.`-prefixed spelling would.
+    #     See doc/08_tracking/bug/deps_fast_ignores_bare_tier_rooted_imports_2026-09-05.md
+    if parts.len() >= 1 and _deps_is_lib_tier(parts[0]):
+        val tier_spl = "src/lib/" + relpath + ".spl"
+        val rt1 = _deps_try_exists(tier_spl)
+        if rt1 != "":
+            return rt1
+        val tier_mod = "src/lib/" + relpath + "/mod.spl"
+        val rt2 = _deps_try_exists(tier_mod)
+        if rt2 != "":
+            return rt2
+        val rt2i = _deps_try_exists("src/lib/" + relpath + "/__init__.spl")
+        if rt2i != "":
+            return rt2i
+
+    # 3c. Dotted-directory packages: `app.ui.tui.app` -> `src/app/ui.tui/app.spl`.
+    #     A segment that is not a real directory may instead be folded into the
+    #     previous directory's name with a `.`. Mirrors module_loader.rs:78-130.
+    val dot_local = _deps_resolve_parts_from_root(current_dir, parts)
+    if dot_local != "":
+        return dot_local
+    if simple_lib_ok:
+        val dot_lib = _deps_resolve_parts_from_root(simple_lib, parts)
+        if dot_lib != "":
+            return dot_lib
+    val dot_src = _deps_resolve_parts_from_root("src", parts)
+    if dot_src != "":
+        return dot_src
+    if parts.len() >= 1 and _deps_is_lib_tier(parts[0]):
+        val dot_tier = _deps_resolve_parts_from_root("src/lib", parts)
+        if dot_tier != "":
+            return dot_tier
+
+    # 4. lib subdirectory search for std./lib. imports, and for a bare tier root
+    #    whose own tier does not carry the module. `common.ui.theme_package` is
+    #    imported from src/app/ui.web/server.spl and really lives at
+    #    src/lib/nogc_sync_mut/ui/theme_package.spl — the real compiler accepts
+    #    it (verified: `simple compile src/app/ui.web/server.spl` reports no
+    #    unresolved import for it, while a bogus `common.ui.zzz_no_such` does),
+    #    so a bare tier root falls back to the same cross-tier variant search
+    #    that `std.X`/`lib.X` already use.
+    var tier_relpath = ""
     if relpath.starts_with("lib/"):
-        val lib_subdirs = ["nogc_sync_mut", "nogc_async_mut", "gc_async_mut",
-                           "nogc_async_mut_noalloc", "common"]
-        val base_name = relpath.substring(4)   # strip "lib/"
+        tier_relpath = relpath.substring(4)
+    elif parts.len() >= 2 and _deps_is_lib_tier(parts[0]):
+        tier_relpath = relpath.substring(parts[0].len() + 1)
+    if tier_relpath != "":
+        val lib_subdirs = _deps_lib_tiers()
+        val base_name = tier_relpath
         for sub in lib_subdirs:
             val candidate = "src/lib/" + sub + "/" + base_name + ".spl"
             val rc = _deps_try_exists(candidate)
@@ -154,6 +301,9 @@ fn _deps_resolve_module(module_name: text, current_file: text) -> text:
             val rcm = _deps_try_exists(candidate_mod)
             if rcm != "":
                 return rcm
+            val rci = _deps_try_exists("src/lib/" + sub + "/" + base_name + "/__init__.spl")
+            if rci != "":
+                return rci
 
     # 5. Numbered-directory resolution (e.g. compiler.10.frontend -> compiler/10.frontend)
     val numbered = _resolve_numbered("src", parts)
@@ -166,8 +316,36 @@ fn _deps_resolve_module(module_name: text, current_file: text) -> text:
         val r8 = _deps_try_exists(nm)
         if r8 != "":
             return r8
+        val r8i = _deps_try_exists(numbered + "/__init__.spl")
+        if r8i != "":
+            return r8i
 
     ""
+
+# Member import: `use std.js.types.js_types.JsValue` names a SYMBOL inside
+# `js_types`, not a module of its own. Drop the trailing segment and retry —
+# EXACTLY ONE level, and only accept a prefix that resolves to an ordinary
+# module FILE, never a package `__init__.spl`/`mod.spl`. Both guards matter:
+# without the one-level cap, `common.ui.<typo>` walks up to `common` and
+# resolves to `src/lib/common.spl`, which would silently re-open the fail-open
+# hole this whole record is about.
+fn _deps_resolve_module(module_name: text, current_file: text) -> text:
+    val direct = _deps_resolve_module_nofold(module_name, current_file)
+    if direct != "":
+        return direct
+    val segs = module_name.split(".")
+    if segs.len() < 2:
+        return ""
+    var prefix_parts: [text] = []
+    for ppi in range(0, segs.len() - 1):
+        prefix_parts.push(segs[ppi])
+    val prefix_resolved = _deps_resolve_module_nofold(prefix_parts.join("."), current_file)
+    if prefix_resolved == "":
+        return ""
+    val base = _deps_path_basename(prefix_resolved)
+    if base == "__init__.spl" or base == "mod.spl":
+        return ""
+    prefix_resolved
 
 # ===== `use` line parser =====
 
@@ -191,14 +369,23 @@ fn _strip_trailing_dot(s: text) -> text:
 
 fn _parse_use_line(line: text) -> [text]:
     var trimmed = line.trim()
-    # strip leading "export "
+    # strip leading "export " / "pub " modifiers
     if trimmed.starts_with("export "):
         var after_export = trimmed.substring(7)
         trimmed = after_export.trim()
+    var was_pub = false
+    if trimmed.starts_with("pub "):
+        var after_pub = trimmed.substring(4)
+        trimmed = after_pub.trim()
+        was_pub = true
     if not trimmed.starts_with("use "):
         return []
     var rest_raw = trimmed.substring(4)
     var rest = rest_raw.trim()
+    # `use lazy X.{...}` — the lazy modifier is not part of the module path
+    if rest.starts_with("lazy "):
+        var after_lazy = rest.substring(5)
+        rest = after_lazy.trim()
     # Remove trailing comment (avoid chained calls - use intermediate vars)
     val hash_idx = rest.index_of("#") ?? -1
     var no_comment = rest
@@ -225,11 +412,45 @@ fn _parse_use_line(line: text) -> [text]:
     else:
         module_part = no_comment.trim()
 
+    # `use x.y*` — glob spelled without a separating dot
+    if module_part.ends_with("*"):
+        var before_star2 = module_part.substring(0, module_part.len() - 1)
+        module_part = _strip_trailing_dot(before_star2)
     if module_part == "":
+        return []
+    # `pub use BlockDevice` re-exports a symbol already imported above; a
+    # single dotless segment after `pub use` is never a module path.
+    if was_pub and not module_part.contains("."):
         return []
     var result: [text] = []
     result.push(module_part)
     result
+
+# Extract the `use` lines of a file, skipping any line inside a `"""` docstring.
+# Prose inside a docstring routinely begins with the word "use" ("use
+# panel_with_text_family for an explicit family."), and reading those as imports
+# produced phantom unresolved edges.
+fn _use_lines_of(content: text) -> [text]:
+    var out: [text] = []
+    var in_doc = false
+    for line in content.split("\n"):
+        val trimmed = line.trim()
+        var fences = 0
+        var rest = trimmed
+        for _f in range(0, 20):
+            val idx = rest.index_of("\"\"\"") ?? -1
+            if idx < 0:
+                break
+            fences = fences + 1
+            rest = rest.substring(idx + 3)
+        val was_in_doc = in_doc
+        if fences % 2 == 1:
+            in_doc = not in_doc
+        if was_in_doc or fences > 0:
+            continue
+        if trimmed.starts_with("use ") or trimmed.starts_with("export use ") or trimmed.starts_with("pub use "):
+            out.push(trimmed)
+    out
 
 # ===== Recursive file scanner =====
 
@@ -244,11 +465,7 @@ fn _scan_file_recursive(file_path: text, visited: {text: bool}) -> {text: bool}:
     if content == "":
         print "WARN: could not read {file_path}"
         return visited
-    val lines = content.split("\n")
-    for line in lines:
-        val trimmed = line.trim()
-        if not (trimmed.starts_with("use ") or trimmed.starts_with("export use ")):
-            continue
+    for trimmed in _use_lines_of(content):
         val modules = _parse_use_line(trimmed)
         for mod_name in modules:
             val resolved = _deps_resolve_module(mod_name, file_path)
@@ -262,12 +479,8 @@ fn _direct_imports(file_path: text) -> [text]:
     val content = rt_file_read_text(file_path) ?? ""
     if content == "":
         return []
-    val lines = content.split("\n")
     var result: [text] = []
-    for line in lines:
-        val trimmed = line.trim()
-        if not (trimmed.starts_with("use ") or trimmed.starts_with("export use ")):
-            continue
+    for trimmed in _use_lines_of(content):
         val mods = _parse_use_line(trimmed)
         for mod_name in mods:
             val resolved = _deps_resolve_module(mod_name, file_path)
@@ -278,6 +491,60 @@ fn _direct_imports(file_path: text) -> [text]:
                         already = true
                 if not already:
                     result.push(resolved)
+    result
+
+# Collect the module names of direct imports that could NOT be resolved to a
+# file on disk. An unresolved import is a hole in the reported closure, so it is
+# reported rather than silently dropped (the fail-open behaviour recorded in
+# doc/08_tracking/bug/deps_fast_ignores_bare_tier_rooted_imports_2026-09-05.md).
+fn _unresolved_imports(file_path: text) -> [text]:
+    val content = rt_file_read_text(file_path) ?? ""
+    if content == "":
+        return []
+    var result: [text] = []
+    for trimmed in _use_lines_of(content):
+        val mods = _parse_use_line(trimmed)
+        for mod_name in mods:
+            val resolved = _deps_resolve_module(mod_name, file_path)
+            if resolved == "":
+                var already = false
+                for r in result:
+                    if _deps_str_eq(r, mod_name):
+                        already = true
+                if not already:
+                    result.push(mod_name)
+    result
+
+# Collect every unresolvable import edge reachable from `entry_file`, not only
+# the entry's own direct imports: a hole deeper in the walk silently truncates
+# the closure exactly the same way. Each entry is formatted
+# `<module>  (imported by <file>)`.
+fn _unresolved_in_closure(entry_file: text) -> [text]:
+    var visited: {text: bool} = {}
+    var queue: [text] = []
+    var result: [text] = []
+    queue.push(entry_file)
+    visited[entry_file] = true
+    for _iter in range(0, 100000):
+        if queue.len() == 0:
+            break
+        val current = queue[0]
+        var rest_queue: [text] = []
+        for qi in range(1, queue.len()):
+            rest_queue.push(queue[qi])
+        queue = rest_queue
+        for mod_name in _unresolved_imports(current):
+            val entry_line = mod_name + "  (imported by " + _make_relative(current) + ")"
+            var already = false
+            for r in result:
+                if _deps_str_eq(r, entry_line):
+                    already = true
+            if not already:
+                result.push(entry_line)
+        for dep in _direct_imports(current):
+            if not visited.has(dep):
+                visited[dep] = true
+                queue.push(dep)
     result
 
 # ===== Output helpers =====
@@ -348,6 +615,10 @@ fn _run_fast(entry_file: text) -> i64:
     val directs = _direct_imports(entry_file)
     print "=== deps fast: {entry_file} ==="
     print "Direct imports: {directs.len()}"
+    val unresolved = _unresolved_in_closure(entry_file)
+    print "Unresolved imports: {unresolved.len()}"
+    for u in unresolved:
+        print "  UNRESOLVED: {u}"
     print ""
     for imp in directs:
         var imp_visited: {text: bool} = {}
@@ -377,6 +648,10 @@ fn _run_normal(entry_file: text) -> i64:
     val directs = _direct_imports(entry_file)
     print "=== deps normal: {entry_file} ==="
     print "Direct imports: {directs.len()}"
+    val unresolved = _unresolved_in_closure(entry_file)
+    print "Unresolved imports: {unresolved.len()}"
+    for u in unresolved:
+        print "  UNRESOLVED: {u}"
     print ""
     # Collect transitive sets per direct import
     var import_sets: [{text: bool}] = []
