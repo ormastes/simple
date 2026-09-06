@@ -21,7 +21,7 @@ use compiler.core.tokens.{TOK_PLUS, TOK_MINUS}
 use compiler.core.tokens.{TOK_ASSIGN}
 use compiler.core.tokens.{TOK_LPAREN, TOK_RPAREN, TOK_LBRACKET}
 use compiler.core.tokens.{TOK_RBRACKET, TOK_RBRACE}
-use compiler.core.tokens.{TOK_COLON, TOK_COMMA, TOK_PIPE, TOK_FAT_ARROW}
+use compiler.core.tokens.{TOK_COLON, TOK_COMMA, TOK_PIPE, TOK_FAT_ARROW, TOK_ARROW}
 use compiler.core.tokens.{TOK_QUESTION}
 use compiler.core.tokens.{TOK_NEWLINE, TOK_INDENT, TOK_DEDENT, TOK_EOF}
 use compiler.core.tokens.{TOK_UNDERSCORE}
@@ -49,6 +49,7 @@ use compiler.frontend.core.lexer.{lex_token_start_get, lex_token_end_get, lex_so
 use compiler.frontend.core.lexer.{lex_source_len}
 use compiler.frontend.core._ParserStmt.match_type_pattern.{parse_match_type_pattern}
 use compiler.frontend.core.lexer.{lex_pop_indent, lex_enable_forced_indentation, lex_disable_forced_indentation}
+use compiler.frontend.core.lexer.{lex_mark_current_token_as_generic_close}
 use compiler.core.ast.{expr_get_tag, expr_get_str, expr_get_left, expr_get_args, expr_set_span}
 use compiler.core.ast.{expr_get_arg_names, expr_call_args_set}
 use compiler.core.ast.{stmt_expr_stmt, stmt_val_decl, stmt_if_val_decl, stmt_lazy_val_decl, stmt_var_decl}
@@ -1855,6 +1856,38 @@ fn parse_match_arms_common() -> (i64, [i64]):
                 else:
                     val arrow_expr = parse_expr()
                     case_arm_body.push(stmt_expr_stmt(arrow_expr, 0))
+            elif par_kind_get() == TOK_ARROW:
+                # `pattern -> body` — the arrow arm separator. The quick
+                # reference (doc/07_guide/quick_reference/syntax_quick_reference.md
+                # § Pattern Matching) blesses `->` as THE arm separator and calls
+                # it preferred; the caseless (no `case`, no leading `|`) spelling
+                # of it is used throughout owned source — e.g. the 15 arms of
+                # driver_class_from_code() in src/lib/nogc_sync_mut/driver/loader.spl
+                # and src/compiler/80.driver/driver_source_pipeline_parsing.spl:309.
+                # The Rust seed has always accepted it; this branch is what the
+                # self-hosted parser was missing, which is why a Stage-2 compiler
+                # could not parse the Stage-3 sources ("expected :, got -> '->'").
+                # bug doc: doc/08_tracking/bug/
+                #   stage3_selfhost_parser_rejects_arrow_match_arms_2026-09-06.md
+                #
+                # Delegating to parse_block() rather than parse_expr() is
+                # LOAD-BEARING and is exactly what the `:` spelling below does:
+                # an arrow arm body may be a STATEMENT (`Err(m) -> return Err(m)`,
+                # `0 -> return DriverClass.Block`) or an indented multi-statement
+                # block, neither of which parse_expr() accepts. parse_block()
+                # covers the same-line single statement, the same-line expression
+                # and the indented block with one call.
+                #
+                # The handoff below is equally LOAD-BEARING. token_requires_rhs()
+                # (core/tokens.spl) returns true for TOK_ARROW so a RETURN type
+                # may sit on the next physical line, so a trailing `->` normally
+                # suppresses the Newline/Indent after it. An ARM arrow opens a
+                # block instead, so the layout tokens must survive; without this
+                # a block-bodied arm silently kept only its FIRST statement and
+                # handed the second to the arm loop as the next pattern.
+                lex_mark_current_token_as_generic_close()
+                parser_advance()
+                case_arm_body = parse_block()
             else:
                 # Expect colon after pattern
                 parser_expect(161)
