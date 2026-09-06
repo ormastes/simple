@@ -121,6 +121,8 @@ static void sha256(const uint8_t *msg, size_t len, uint8_t out[32]) {
     }
 }
 
+/* Helpers below serve only the two Linux-only daemon check groups. */
+#if defined(__linux__)
 /* --------------------------------------------------------------- utilities */
 static int64_t now_ms(void) {
     struct timespec ts;
@@ -160,6 +162,7 @@ static char *make_tmpdir(char *buf, size_t cap) {
     snprintf(buf, cap, "/tmp/cachedaemon_selfcheck_XXXXXX");
     return mkdtemp(buf);
 }
+#endif /* __linux__ */
 
 /* ------------------------------------------------------------------ checks */
 
@@ -210,6 +213,10 @@ static int check_route_rejects_bad_input(void) {
     return 0;
 }
 
+/* The provider's daemon lane is #if defined(__linux__) only (see
+ * runtime_cache_host_authority_v1.c), and these two groups exercise it through
+ * SO_PEERCRED / struct ucred / SOCK_CLOEXEC. They are compiled only there. */
+#if defined(__linux__)
 /* Rust lane parity: unavailable_singleton_falls_back_to_anchored_spool_within_budget.
  * The lock is held by THIS process, so the forked daemon cannot acquire it and
  * route must select the anchored spool rather than reporting a daemon. */
@@ -361,13 +368,22 @@ static int check_hostile_socket_and_handshake(void) {
      * starts no daemon and is removed completely. */
     return 0;
 }
+#endif /* __linux__ */
 
 int main(void) {
     if (check_noncanonical_roots()) return 1;
     if (check_sha256_kat()) return 1;
     if (check_route_rejects_bad_input()) return 1;
+#if defined(__linux__)
     if (check_spool_fallback_under_held_lock()) return 1;
     if (check_hostile_socket_and_handshake()) return 1;
     printf("rt_cache_host_authority_v1_selfcheck: 5 check group(s) passed\n");
+#else
+    /* Say what was NOT run. A count that silently drops two groups would read
+     * as a full pass on a host that never exercised the daemon lane. */
+    printf("rt_cache_host_authority_v1_selfcheck: 3 check group(s) passed; "
+           "2 daemon group(s) NOT exercised on this host (the provider's "
+           "daemon lane is #if defined(__linux__) only)\n");
+#endif
     return 0;
 }

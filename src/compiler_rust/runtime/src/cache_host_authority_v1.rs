@@ -163,7 +163,7 @@ mod unix {
 
     #[cfg(any(target_os = "macos", target_os = "ios"))]
     fn stat_nsec_equal(a: &libc::stat, b: &libc::stat) -> bool {
-        a.st_mtimespec.tv_nsec == b.st_mtimespec.tv_nsec && a.st_ctimespec.tv_nsec == b.st_ctimespec.tv_nsec
+        a.st_mtime_nsec == b.st_mtime_nsec && a.st_ctime_nsec == b.st_ctime_nsec
     }
 
     #[cfg(any(target_os = "linux", target_os = "android"))]
