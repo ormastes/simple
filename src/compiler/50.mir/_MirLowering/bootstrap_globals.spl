@@ -29,10 +29,6 @@ use compiler.frontend.flat_ast_bridge.{flat_bootstrap_function_count, flat_boots
 use std.nogc_sync_mut.io.process_ops.{eprint}
 use std.io_runtime.{exit}
 
-# Called by _mir_text_index_of below; same declaration shape as the sibling
-# bootstrap module src/compiler/20.hir/hir_lowering/_Items/module_lowering.spl:45.
-extern fn rt_string_len(value: text) -> i64
-
 fn bootstrap_reject_fatal_mir_errors(lowering: MirLowering) -> bool:
     var rejected = false
     for err in lowering.errors:
@@ -394,10 +390,20 @@ fn bootstrap_lower_flat_hir_module_to_mir(module_index: i64, target_context: Mir
         constants = constants.push(bootstrap_hir_module_constant_at(module_index, constant_index))
         constant_index = constant_index + 1
     var lowering = MirLowering.new_for_target(symbols, target_context)
-    # This flat bootstrap route bypasses MirLowering.lower_module(), so mirror
-    # its per-module identity initialization before any type/layout lookup.
-    # Leaving the default empty string makes cross-module ownership checks
-    # resolve against no module and can transport corrupt HirType metadata.
+    # `lower_module` sets `current_module_id` before lowering anything
+    # (module_lowering.spl). This BOOTSTRAP-FLAT path never calls it, so the
+    # field kept its `""` initialiser for the whole lowering -- the same class
+    # of omission as the `struct_field_type_name` pre-pass this file already
+    # had to replicate. Upstream reached the same conclusion independently
+    # (PR #369, "initialize flat MIR module context"): leaving the default
+    # empty string "makes cross-module ownership checks resolve against no
+    # module and can transport corrupt HirType metadata".
+    #
+    # The mechanism, concretely: with an empty id the self-owner filter in
+    # `record_external_layout_reference_resolved` reduces to
+    # `not candidate.starts_with("::")`, true for every candidate, so a
+    # module's own composite layouts stop being excluded and a type can be
+    # attributed to the wrong owner.
     lowering.current_module_id = mir_layout_canonical_module_name(module_name)
     lowering.current_function_names = _bootstrap_function_value_names
     # Register this module's own enum/struct type defs so `E.V` reclassifies to
@@ -641,6 +647,7 @@ fn bootstrap_lower_hir_globals_to_mir_module_for_target(target_context: MirTarge
             print "error[E-MIR-BOOTSTRAP-ENTRY-NIL]: the bootstrap entry HIR module is nil at MIR lowering -- the HIR phase produced no entry module (upstream: the phase-2 module set was lost before phase 3). Refusing to lower an empty program."
             exit(1)
         var lowering = MirLowering.new_for_target(hir_module.symbols, target_context)
+        lowering.current_module_id = mir_layout_canonical_module_name(hir_module.name)
         lowering = bootstrap_register_hir_type_defs(lowering, hir_module)
         val entry_functions = hir_module.functions
         val fn_keys = entry_functions.keys()
@@ -755,6 +762,7 @@ fn bootstrap_lower_extra_hir_module_to_mir_for_target(hir_module: HirModule, tar
     val trace_enabled = mir_lower_trace_enabled()
     var added_instr_total = 0
     var lowering = MirLowering.new_for_target(hir_module.symbols, target_context)
+    lowering.current_module_id = mir_layout_canonical_module_name(hir_module.name)
     lowering = bootstrap_register_hir_type_defs(lowering, hir_module)
     # Same module-constant registration as the entry path above: non-entry
     # closure modules (std.log etc.) also reference their own module `val`s.

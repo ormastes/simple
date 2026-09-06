@@ -139,7 +139,18 @@ fn native_build_entry_args() -> [text]:
     args
 
 # The interpreted worker loads the compiler graph before codegen.
-val DEFAULT_TIMEOUT_MS = 7200000
+#
+# Raised from 7200000 (2h) to 6h on 2026-09-04. 2h is not enough for a Stage-3
+# self-host on aarch64: measured here, phase 3 alone takes ~57 min and the AOT
+# phase after it ran >1h33m in a comparable build, so the worker was reaped
+# mid-codegen with no artifact and no compile error — the failure surfaces as
+# "worker timed out ... before producing a binary", which reads like a hang
+# rather than a budget. The cost is dominated by step 5 being SERIAL regardless
+# of --threads (a 20-core box runs it at cpu_pct=100); see
+# doc/08_tracking/bug/native_build_step5_serial_threads_ignored_2026-09-04.md
+# and doc/03_plan/compiler/native_codegen/step5_real_parallelism_plan_2026-09-04.md.
+# Lower this again once step 5 is genuinely parallel.
+val DEFAULT_TIMEOUT_MS = 21600000
 
 fn print_help():
     print "Simple Native Build"
@@ -265,25 +276,87 @@ fn native_build_frontend_cache_dir_arg(args: [text]) -> text:
         i = i + 1
     ""
 
+fn native_build_normalize_exit_code(raw: i64) -> i64:
+    """The worker's exit status, sign-restored.
+
+    It is an i32 that arrives ZERO-EXTENDED across the wrapper boundary, so a
+    genuine -1 presents as 4294967295 (0xFFFFFFFF). Every `code == -1` test
+    downstream therefore never matched and BOTH abnormal-exit branches were dead
+    code: an operator saw the bare number 4294967295 instead of this file's own
+    accurate message.
+
+    Widened 2026-09-05 from an equality test on 4294967295 alone: `rt_process_wait`
+    now reports a signal death as `-(128+signo)`, and a SIGSEGV (-139) would
+    otherwise have surfaced as the equally unreadable 4294967157.
+    See doc/08_tracking/bug/stage3_worker_reaped_silently_in_hir_typecheck_2026-09-05.md"""
+    if raw > 2147483647:
+        return raw - 4294967296
+    raw
+
 fn native_build_line_is_diagnostic(line: text) -> bool:
     """True for lines a caller greps for when deciding why native-build failed.
 
     Deliberately broad: a missed diagnostic is silently dropped evidence, while
-    an extra kept line only costs a few bytes in the preserved block."""
-    line.contains("error:") or line.contains("error :") or line.contains("[ERROR]")
-        or line.contains("warning:") or line.contains("[WARN]")
-        or line.contains("undefined field") or line.contains("type 'nil'")
-        or line.contains("MIR error") or line.contains("MIR lowering error")
-        or line.contains("panic") or line.contains("Traceback")
-        or line.contains("unresolved") or line.contains("unsupported")
-        or line.contains("Assertion") or line.contains("Segmentation fault")
+    an extra kept line only costs a few bytes in the preserved block.
+
+    `timeout: the monitored command dumped core` earns its place here: it is the
+    ONLY record that a worker died by SIGSEGV rather than being killed or
+    exiting -1. On 2026-09-05 that line sat in the middle of a 9.9 MB Stage-3
+    stderr, was dropped by the truncation below, and three investigations (OOM,
+    rogue killer, double reap) chased causes measurement had already excluded.
+    See doc/08_tracking/bug/stage3_worker_reaped_silently_in_hir_typecheck_2026-09-05.md"""
+    native_build_range_is_diagnostic(line, 0, line.len())
+
+fn native_build_range_contains(
+    output: text, needle: text, line_start: i64, line_end: i64
+) -> bool:
+    val needle_len = needle.len()
+    if needle_len == 0: return true
+    var at = line_start
+    val last_start = line_end - needle_len
+    while at <= last_start:
+        var offset = 0
+        while (offset < needle_len and
+            output.byte_at(at + offset) == needle.byte_at(offset)):
+            offset = offset + 1
+        if offset == needle_len: return true
+        at = at + 1
+    false
+
+fn native_build_range_is_diagnostic(
+    output: text, line_start: i64, line_end: i64
+) -> bool:
+    native_build_range_contains(output, "error:", line_start, line_end)
+        or native_build_range_contains(output, "error :", line_start, line_end)
+        or native_build_range_contains(output, "[ERROR]", line_start, line_end)
+        or native_build_range_contains(output, "warning:", line_start, line_end)
+        or native_build_range_contains(output, "[WARN]", line_start, line_end)
+        or native_build_range_contains(output, "undefined field", line_start, line_end)
+        or native_build_range_contains(output, "type 'nil'", line_start, line_end)
+        or native_build_range_contains(output, "MIR error", line_start, line_end)
+        or native_build_range_contains(output, "MIR lowering error", line_start, line_end)
+        or native_build_range_contains(output, "panic", line_start, line_end)
+        or native_build_range_contains(output, "Traceback", line_start, line_end)
+        or native_build_range_contains(output, "unresolved", line_start, line_end)
+        or native_build_range_contains(output, "unsupported", line_start, line_end)
+        or native_build_range_contains(output, "Assertion", line_start, line_end)
+        or native_build_range_contains(output, "Segmentation fault", line_start, line_end)
+        or native_build_range_contains(output, "dumped core", line_start, line_end)
+        or native_build_range_contains(output, "core dumped", line_start, line_end)
 
 fn native_build_collect_diagnostics(output: text) -> [text]:
     """Every diagnostic line in the WHOLE stream, including the part head+tail drops."""
     var kept: [text] = []
-    for line in output.split("\n"):
-        if native_build_line_is_diagnostic(line):
-            kept = kept.push(line)
+    var line_start = 0
+    while line_start <= output.len():
+        val newline = output.index_of("\n", line_start)
+        var line_end = output.len()
+        if newline >= 0: line_end = newline
+        if native_build_range_is_diagnostic(output, line_start, line_end):
+            val line = output.substring(line_start, line_end)
+            kept.push(line)
+        if newline < 0: break
+        line_start = newline + 1
     kept
 
 fn eprint_bounded(output: text):
@@ -598,7 +671,11 @@ pub fn run_native_build_worker(args: [text]) -> i64:
     if (mode == nil or mode == "") and not compiled_bootstrap_route:
         env_set("SIMPLE_EXECUTION_MODE", "interpret")
     for arg in args:
-        worker_args = worker_args.push(arg)
+        # Already folded into SIMPLE_FRONTEND_OFFLOAD* below; forwarding the flag
+        # text as well only risks a `run` path reading it as a file (see
+        # src/app/run/main.spl).
+        if not (arg.starts_with("--frontend-offload=") or arg.starts_with("--frontend-offload-fallback=")):
+            worker_args = worker_args.push(arg)
     val simple_bin = resolve_simple_binary()
     # Propagate the resolved absolute/validated binary so the worker (and any
     # child it spawns) inherit a runnable SIMPLE_BINARY instead of re-deriving
@@ -653,15 +730,7 @@ pub fn run_native_build_worker(args: [text]) -> i64:
     if warm_receipt.eligible:
         env_set(NATIVE_BUILD_WARM_CANDIDATE_ENV, warm_receipt.candidate_path)
     val (stdout, stderr, code_raw) = process_run_timeout_live(simple_bin, worker_args, native_build_timeout_ms(args))
-    # The worker's exit status is an i32 that arrives ZERO-EXTENDED across the
-    # wrapper boundary, so a genuine -1 presents as 4294967295 (0xFFFFFFFF).
-    # Every `code == -1` test below therefore never matched and BOTH
-    # abnormal-exit branches were dead code: an operator saw the bare number
-    # 4294967295 from the `else` instead of this file's own accurate message
-    # ("wrapper exited abnormally (signal or wait failure, code -1)").
-    # Normalised once here so all downstream comparisons -- including the
-    # `code == 0` success checks -- see a real signed status.
-    val code = if code_raw == 4294967295: -1 else: code_raw
+    val code = native_build_normalize_exit_code(code_raw as i64)
     env_set("SIMPLE_NATIVE_BUILD_WORKER", old_worker_marker)
     val output_path = output_path_arg(args)
     val output_ok = output_path != "" and file_exists(output_path)
@@ -690,7 +759,34 @@ pub fn run_native_build_worker(args: [text]) -> i64:
             eprint_bounded(stdout)
         native_build_print_failure_hints(stdout, stderr)
         # Keep the real cause visible after stderr truncation.
-        if code == -1 and not stderr.contains("[TIMEOUT:"):
+        if code == -1 and (stderr.contains("dumped core") or stderr.contains("core dumped")):
+            # A crash, not a kill and not a wait failure. `timeout` reports
+            # WCOREDUMP on the monitored command, and that single line is the
+            # only evidence that survives to here -- the wrapper collapses the
+            # child's signal status to -1 (rt_process_wait's Rust twin does
+            # `status.code().unwrap_or(-1)`, discarding WTERMSIG), so the number
+            # alone cannot tell a SIGSEGV from a failed wait. Say which.
+            eprint "error: native-build worker CRASHED -- the child dumped core (see the 'dumped core' line above). NOT a timeout, NOT a kill, NOT a compile failure."
+            eprint "  For a backtrace, let the crash reporter keep cores for unpackaged binaries, then re-run:"
+            eprint "    printf '[main]\\nunpackaged=true\\n' > ~/.config/apport/settings"
+            eprint "    apport-unpack /var/crash/<report>.crash /tmp/u"
+            # `bt` alone is not enough: measured 2026-09-05 on a real compiler
+            # SIGSEGV, the PC lands in a non-executable mimalloc heap mapping
+            # with no symbol and an unwindable-to-garbage stack. The registers
+            # and the PC's mapping are what identify the fault.
+            eprint "    gdb <worker-binary> /tmp/u/CoreDump -batch -ex bt -ex 'info registers pc lr x0 x8' -ex 'x/4xg $pc'"
+            eprint "    # then locate the PC in /tmp/u/ProcMaps: a rw-p [anon:mimalloc] hit means a branch to data, not a code bug at that address"
+        elif code < -128:
+            # -(128+signo) from rt_process_wait: the wrapper really was killed,
+            # and the signal number survived. 139 = SIGSEGV, 137 = SIGKILL
+            # (an out-of-memory reaper), 143 = SIGTERM.
+            val signo = 0 - code - 128
+            eprint "error: native-build worker was KILLED by signal {signo} before producing a binary; NOT a compile failure."
+            if signo == 11 or signo == 6:
+                eprint "  A SIGSEGV/SIGABRT is a crash in the compiler itself; take a backtrace from the core (see /var/crash)."
+            elif signo == 9 or signo == 15:
+                eprint "  hint: check for an out-of-memory reaper (earlyoom/systemd-oomd: 'journalctl -t earlyoom')."
+        elif code == -1 and not stderr.contains("[TIMEOUT:"):
             # -1 without the wrapper's [TIMEOUT:] marker is NOT a timeout: the
             # wrapper died by a signal (status.code() is None) or the wait
             # itself failed. Say so instead of blaming --timeout (run6, 2026-08-21:
@@ -700,8 +796,12 @@ pub fn run_native_build_worker(args: [text]) -> i64:
             val secs = native_build_timeout_ms(args) / 1000
             eprint "error: native-build worker timed out after {secs}s before producing a binary."
             eprint "  The interpreted worker loads the whole compiler + LLVM import graph before any"
-            eprint "  codegen; a large --source set (e.g. src/os + src/lib) exceeds the budget. Raise"
-            eprint "  --timeout, shrink --source, or use the in-process backend for cross-target builds."
+            eprint "  codegen; a large --source set (e.g. src/os + src/lib) exceeds the budget."
+            eprint "  Read the last '[build] N/6' progress line to see which phase ran out of time."
+            eprint "  Steps 4 (mir, driver_pipeline_lowering.spl:262) and 5 (native_compile,"
+            eprint "  driver_build/parallel.spl:480) are both SEQUENTIAL regardless of --threads."
+            eprint "  Options: shrink --source, keep build/native_cache warm, pass --low-memory,"
+            eprint "  use --backend llvm-lib (in-process LLVM C API), or raise --timeout."
         else:
             eprint "error: native-build worker exited with code {code}."
             eprint "  interpreter: {simple_bin} (exit code {code})"

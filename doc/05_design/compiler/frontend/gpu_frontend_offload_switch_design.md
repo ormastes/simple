@@ -116,7 +116,7 @@ by the sosix lane; this switch only decides *whether* that path is requested.
 <!-- sdn-diagram:gpu-frontend-offload-switch-flow -->
 ```sdn
 cli --frontend-offload -> env SIMPLE_FRONTEND_OFFLOAD
-{env, simple.sdn frontend.offload, default off} -> resolve_frontend_offload -> FrontendOffloadSwitch
+{env, simple.sdn frontend.offload (Wave 1 GFO-005), default off} -> resolve_frontend_offload -> FrontendOffloadSwitch
 FrontendOffloadSwitch -> frontend_offload_profile -> CompilerOffloadProfile
 FrontendOffloadSwitch + gpu_parse_available -> frontend_offload_decision -> OffloadDecision | Err
 OffloadDecision -> {dtrace receipt, warm receipt row, ParseRequest.mode text}

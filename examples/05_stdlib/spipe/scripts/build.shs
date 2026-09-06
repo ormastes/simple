@@ -47,10 +47,15 @@ fi
 
 node --check cli/spipe.js >/dev/null
 node --check mcp/server.js >/dev/null
-if git -C ../.. rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-  git -C ../.. ls-files --stage examples/spipe | grep -q '^100'
-  git -C ../.. ls-files --stage .spipe/spipe | grep -q '^160000 .*	.spipe/spipe$'
-  diff -qr -x .git ../../examples/spipe ../../.spipe/spipe >/dev/null
+# Host-repo checks only. In a standalone Spipe clone these paths do not exist and
+# the whole block is skipped -- the old "git -C ../.. rev-parse" hop encoded that
+# same host-detection, but broke when the module moved from examples/spipe to
+# examples/05_stdlib/spipe (../.. now resolves to examples/, not the repo root).
+repo_root=$(git rev-parse --show-toplevel 2>/dev/null || true)
+if [ -n "$repo_root" ] && [ "$repo_root/examples/05_stdlib/spipe" = "$ROOT_DIR" ]; then
+  git -C "$repo_root" ls-files --stage examples/05_stdlib/spipe | grep -q '^100'
+  git -C "$repo_root" ls-files --stage .spipe/spipe | grep -q '^160000 .*	.spipe/spipe$'
+  diff -qr -x .git "$repo_root/examples/05_stdlib/spipe" "$repo_root/.spipe/spipe" >/dev/null
 fi
 node -e 'const p=require("./package.json"); if (p.bin.spipe !== "cli/spipe.js" || p.bin["spipe-mcp"] !== "mcp/server.js") process.exit(1)'
 printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' | node mcp/server.js | grep -q "spipe_fine_tune_guide"
@@ -201,6 +206,10 @@ grep -q 'next_attempt: "verify_loop_retry"' "$tmp_host/.spipe/llm-finetune-proce
 (cd "$tmp_host" && node "$ROOT_DIR/cli/spipe.js" fine-tune-record-training registry_ready provider-fine-tune provider-managed "provider train" model://registry-ready >/dev/null)
 (cd "$tmp_host" && node "$ROOT_DIR/cli/spipe.js" fine-tune-record-eval registry_ready "echo eval" "accuracy=1" "accuracy>=1" pass >/dev/null)
 (cd "$tmp_host" && node "$ROOT_DIR/cli/spipe.js" fine-tune-record-decision registry_ready accepted none none "build check" >/dev/null)
+# fine-tune-ready also gates on recorded app-handoff evidence and an existing
+# handoff doc; use a registry_ready-specific doc so build_check still WARNs.
+printf '# handoff\n' > "$tmp_host/registry_ready_handoff.md"
+(cd "$tmp_host" && node "$ROOT_DIR/cli/spipe.js" fine-tune-record-app registry_ready app runtime registry_ready_handoff.md "test license constraints" "refusal and disclaimer checks pass" "runtime=node memory=1g latency=100ms fallback=base-model" >/dev/null)
 (cd "$tmp_host" && node "$ROOT_DIR/cli/spipe.js" fine-tune-ready registry_ready >/dev/null)
 (cd "$tmp_host" && node "$ROOT_DIR/cli/spipe.js" fine-tune-doctor registry_ready | grep -q "STATUS: PASS llm-finetune-doctor")
 (cd "$tmp_host" && node "$ROOT_DIR/cli/spipe.js" fine-tune-new-attempt eval_pending "eval pending check" app >/dev/null)
