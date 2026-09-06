@@ -11,6 +11,9 @@ Executables, wrappers, and MCP server launchers.
 | `caret` | LLM Caret launcher |
 | `cs` | Caret suite (multi-agent session view) |
 | `cs.cmd` | Windows caret-suite wrapper |
+| `devhub` | DevHub CLI launcher |
+| `gh` | `gh` shim — routes to the configured git backend (github passthrough, otherwise DevHub) |
+| `itf` | DevHub CLI compat wrapper (pre-rename name) |
 | `jira` | Jira CLI |
 | `mail` | Email CLI |
 | `release` | Release directory |
