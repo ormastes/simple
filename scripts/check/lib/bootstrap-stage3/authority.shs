@@ -34,6 +34,136 @@ bootstrap_stage3_hash_stream() {
     fi
 }
 
+bootstrap_stage3_normalized_absolute() {
+    [ "$#" -eq 1 ] || return 1
+    case "$1" in
+        /) return 0 ;;
+        /*) ;;
+        *) return 1 ;;
+    esac
+    case "$1" in *//*|*/./*|*/../*|*/.|*/..|*/) return 1 ;; esac
+    printf '%s\n' "$1" | LC_ALL=C grep -Eq '[[:space:][:cntrl:]]' && return 1
+    case "$1" in *'*'*|*'?'*|*'['*|*']'*|*'{'*|*'}'*|*'='*) return 1 ;; esac
+    return 0
+}
+
+bootstrap_stage3_descriptor_map_value() {
+    [ "$#" -eq 3 ] || return 1
+    bootstrap_stage3_dm_file=$1 bootstrap_stage3_dm_role=$2 bootstrap_stage3_dm_field=$3
+    bootstrap_stage3_manifest_value "${bootstrap_stage3_dm_role}_${bootstrap_stage3_dm_field}" \
+        "$bootstrap_stage3_dm_file"
+}
+
+bootstrap_stage3_vector_frame() {
+    for bootstrap_stage3_vf_value in "$@"; do
+        bootstrap_stage3_vf_len=${#bootstrap_stage3_vf_value}
+        bootstrap_stage3_vf_shift=56
+        while [ "$bootstrap_stage3_vf_shift" -ge 0 ]; do
+            bootstrap_stage3_vf_byte=$(( (bootstrap_stage3_vf_len >> bootstrap_stage3_vf_shift) & 255 ))
+            printf "\\$(printf '%03o' "$bootstrap_stage3_vf_byte")"
+            bootstrap_stage3_vf_shift=$((bootstrap_stage3_vf_shift - 8))
+        done
+        printf %s "$bootstrap_stage3_vf_value"
+    done
+}
+
+bootstrap_stage3_validate_descriptor_map() (
+    [ "$#" -eq 6 ] || return 1
+    bootstrap_stage3_dm_snapshot_dir=
+    bootstrap_stage3_dm_snapshot=
+    bootstrap_stage3_dm_keys=
+    bootstrap_stage3_dm_vector_file=
+    bootstrap_stage3_dm_cleanup() {
+        [ -z "$bootstrap_stage3_dm_keys" ] || rm -f -- "$bootstrap_stage3_dm_keys"
+        [ -z "$bootstrap_stage3_dm_vector_file" ] || rm -f -- "$bootstrap_stage3_dm_vector_file"
+        [ -z "$bootstrap_stage3_dm_snapshot" ] || rm -f -- "$bootstrap_stage3_dm_snapshot"
+        [ -z "$bootstrap_stage3_dm_snapshot_dir" ] ||
+            rmdir -- "$bootstrap_stage3_dm_snapshot_dir" 2>/dev/null || :
+    }
+    trap bootstrap_stage3_dm_cleanup EXIT HUP INT TERM
+    bootstrap_stage3_dm_file=$1 bootstrap_stage3_dm_external_sha=$2
+    bootstrap_stage3_dm_schema=$3 bootstrap_stage3_dm_run=$4
+    bootstrap_stage3_dm_arch=$5 bootstrap_stage3_dm_roles=$6
+    expr "$bootstrap_stage3_dm_file" : \
+        '/proc/[1-9][0-9]*/fd/[1-9][0-9]*$' >/dev/null || return 1
+    [ -f "$bootstrap_stage3_dm_file" ] || return 1
+    printf '%s\n' "$bootstrap_stage3_dm_external_sha" | grep -Eq '^[0-9a-f]{64}$' || return 1
+    [ "$(bootstrap_stage3_hash_file "$bootstrap_stage3_dm_file")" = "$bootstrap_stage3_dm_external_sha" ] || return 1
+    bootstrap_stage3_dm_snapshot_dir=$(mktemp -d "${TMPDIR:-/tmp}/stage3-dmap.XXXXXX") || return 1
+    chmod 0700 "$bootstrap_stage3_dm_snapshot_dir" || return 1
+    bootstrap_stage3_dm_snapshot="$bootstrap_stage3_dm_snapshot_dir/map"
+    (umask 077; set -C; : >"$bootstrap_stage3_dm_snapshot") || return 1
+    dd if="$bootstrap_stage3_dm_file" of="$bootstrap_stage3_dm_snapshot" bs=65536 2>/dev/null || return 1
+    chmod 0400 "$bootstrap_stage3_dm_snapshot" || return 1
+    [ "$(bootstrap_stage3_hash_file "$bootstrap_stage3_dm_snapshot")" = "$bootstrap_stage3_dm_external_sha" ] || return 1
+    bootstrap_stage3_dm_file=$bootstrap_stage3_dm_snapshot
+    [ "$(bootstrap_stage3_manifest_value schema "$bootstrap_stage3_dm_file")" = "$bootstrap_stage3_dm_schema" ] || return 1
+    [ "$(bootstrap_stage3_manifest_value status "$bootstrap_stage3_dm_file")" = ready ] || return 1
+    [ "$(bootstrap_stage3_manifest_value run_id "$bootstrap_stage3_dm_file")" = "$bootstrap_stage3_dm_run" ] || return 1
+    [ "$(bootstrap_stage3_manifest_value architecture "$bootstrap_stage3_dm_file")" = "$bootstrap_stage3_dm_arch" ] || return 1
+    bootstrap_stage3_dm_owner=$(bootstrap_stage3_manifest_value descriptor_owner_pid "$bootstrap_stage3_dm_file") || return 1
+    bootstrap_stage3_dm_start=$(bootstrap_stage3_manifest_value descriptor_owner_start_ticks "$bootstrap_stage3_dm_file") || return 1
+    case "$bootstrap_stage3_dm_owner:$bootstrap_stage3_dm_start" in *[!0-9:]*|:*|*:) return 1 ;; esac
+    [ -r "/proc/$bootstrap_stage3_dm_owner/stat" ] || return 1
+    bootstrap_stage3_dm_live_start=$(sed 's/^.*) //' "/proc/$bootstrap_stage3_dm_owner/stat" | awk '{print $20}') || return 1
+    [ "$bootstrap_stage3_dm_live_start" = "$bootstrap_stage3_dm_start" ] || return 1
+    set -- $bootstrap_stage3_dm_roles
+    [ "$(bootstrap_stage3_manifest_value entry_count "$bootstrap_stage3_dm_file")" = "$#" ] || return 1
+    bootstrap_stage3_dm_actual=$(sed -n 's/^\([a-z0-9_]*\)_descriptor=.*/\1/p' "$bootstrap_stage3_dm_file" | tr '\n' ' ' | sed 's/ $//')
+    [ "$bootstrap_stage3_dm_actual" = "$bootstrap_stage3_dm_roles" ] || return 1
+    bootstrap_stage3_dm_expected_lines=$((8 + $# * 6))
+    [ "$(wc -l <"$bootstrap_stage3_dm_file" | tr -d ' ')" = "$bootstrap_stage3_dm_expected_lines" ] || return 1
+    bootstrap_stage3_dm_keys="${TMPDIR:-/tmp}/stage3-dmap-keys.$$.txt"
+    (umask 077; set -C; : >"$bootstrap_stage3_dm_keys") || return 1
+    printf '%s\n' schema status run_id architecture descriptor_owner_pid \
+        descriptor_owner_start_ticks entry_count map_vector_sha256 >"$bootstrap_stage3_dm_keys"
+    for bootstrap_stage3_dm_role in $bootstrap_stage3_dm_roles; do
+        for bootstrap_stage3_dm_field in descriptor display_token dev ino mode sha256; do
+            printf '%s_%s\n' "$bootstrap_stage3_dm_role" "$bootstrap_stage3_dm_field" >>"$bootstrap_stage3_dm_keys"
+        done
+    done
+    sed 's/=.*//' "$bootstrap_stage3_dm_file" | cmp -s - "$bootstrap_stage3_dm_keys" || return 1
+    rm -f "$bootstrap_stage3_dm_keys"
+    bootstrap_stage3_dm_vector_file="${TMPDIR:-/tmp}/stage3-descriptor-vector.$$.bin"
+    (umask 077; set -C; : >"$bootstrap_stage3_dm_vector_file") || return 1
+    for bootstrap_stage3_dm_role in $bootstrap_stage3_dm_roles; do
+        bootstrap_stage3_dm_descriptor=$(bootstrap_stage3_descriptor_map_value "$bootstrap_stage3_dm_file" "$bootstrap_stage3_dm_role" descriptor) || return 1
+        bootstrap_stage3_dm_display=$(bootstrap_stage3_descriptor_map_value "$bootstrap_stage3_dm_file" "$bootstrap_stage3_dm_role" display_token) || return 1
+        bootstrap_stage3_normalized_absolute "$bootstrap_stage3_dm_display" || return 1
+        bootstrap_stage3_dm_dev=$(bootstrap_stage3_descriptor_map_value "$bootstrap_stage3_dm_file" "$bootstrap_stage3_dm_role" dev) || return 1
+        bootstrap_stage3_dm_ino=$(bootstrap_stage3_descriptor_map_value "$bootstrap_stage3_dm_file" "$bootstrap_stage3_dm_role" ino) || return 1
+        bootstrap_stage3_dm_mode=$(bootstrap_stage3_descriptor_map_value "$bootstrap_stage3_dm_file" "$bootstrap_stage3_dm_role" mode) || return 1
+        bootstrap_stage3_dm_sha=$(bootstrap_stage3_descriptor_map_value "$bootstrap_stage3_dm_file" "$bootstrap_stage3_dm_role" sha256) || return 1
+        if [ "$bootstrap_stage3_dm_descriptor" = descriptor-absent ]; then
+            [ "$bootstrap_stage3_dm_role" = compiler_backfill ] || return 1
+            [ "$bootstrap_stage3_dm_dev:$bootstrap_stage3_dm_ino:$bootstrap_stage3_dm_mode:$bootstrap_stage3_dm_sha" = absent:absent:absent:absent ] || return 1
+        else
+            case "$bootstrap_stage3_dm_descriptor" in "/proc/$bootstrap_stage3_dm_owner/fd/"[0-9]*) ;; *) return 1 ;; esac
+            bootstrap_stage3_dm_fd=${bootstrap_stage3_dm_descriptor##*/}; case "$bootstrap_stage3_dm_fd" in ''|*[!0-9]*) return 1 ;; esac
+            [ -e "$bootstrap_stage3_dm_descriptor" ] || return 1
+            set -- $(stat -Lc '%d %i %f' "$bootstrap_stage3_dm_descriptor") || return 1
+            bootstrap_stage3_dm_actual_dev=$1 bootstrap_stage3_dm_actual_ino=$2
+            bootstrap_stage3_dm_actual_mode=$(printf '%d' "0x$3") || return 1
+            [ "$bootstrap_stage3_dm_actual_dev:$bootstrap_stage3_dm_actual_ino:$bootstrap_stage3_dm_actual_mode" = "$bootstrap_stage3_dm_dev:$bootstrap_stage3_dm_ino:$bootstrap_stage3_dm_mode" ] || return 1
+            if [ -d "$bootstrap_stage3_dm_descriptor" ]; then
+                [ "$bootstrap_stage3_dm_sha" = identity-only ] || return 1
+            else
+                printf '%s\n' "$bootstrap_stage3_dm_sha" | grep -Eq '^[0-9a-f]{64}$' || return 1
+                [ "$(bootstrap_stage3_hash_file "$bootstrap_stage3_dm_descriptor")" = "$bootstrap_stage3_dm_sha" ] || return 1
+            fi
+        fi
+        bootstrap_stage3_vector_frame "$bootstrap_stage3_dm_role" \
+            "$bootstrap_stage3_dm_descriptor" "$bootstrap_stage3_dm_display" \
+            "$bootstrap_stage3_dm_dev" "$bootstrap_stage3_dm_ino" \
+            "$bootstrap_stage3_dm_mode" "$bootstrap_stage3_dm_sha" \
+            >>"$bootstrap_stage3_dm_vector_file" || return 1
+    done
+    bootstrap_stage3_dm_vector=$(bootstrap_stage3_hash_file "$bootstrap_stage3_dm_vector_file") || return 1
+    [ "$(bootstrap_stage3_manifest_value map_vector_sha256 "$bootstrap_stage3_dm_file")" = "$bootstrap_stage3_dm_vector" ] || return 1
+    bootstrap_stage3_dm_cleanup
+    trap - EXIT HUP INT TERM
+)
+
 # Hash an ordered newline-delimited path manifest without starting a hash and
 # parser process for every file. The authority manifests already reject
 # newline-bearing paths; NUL-delimited xargs keeps every other shell character
@@ -154,6 +284,73 @@ bootstrap_stage3_canonical_path() {
 bootstrap_stage3_canonical_file() {
     [ -f "$1" ] || return 1
     bootstrap_stage3_canonical_path "$1"
+}
+
+# Resolve a Stage 3 output directory against the two explicit trust roots.
+# Repository-relative inputs remain supported. Absolute inputs are accepted
+# only below the physical repository build directory or at/below the separately
+# configured external-output root. Canonical equality rejects symlink aliases and the
+# component-boundary cases reject prefix collisions (for example /fast/x-evil
+# when /fast/x is trusted).
+bootstrap_stage3_resume_output_path() {
+    [ "$#" -eq 3 ] || return 1
+    bootstrap_stage3_resume_requested=$1
+    bootstrap_stage3_resume_repo=$2
+    bootstrap_stage3_resume_external=$3
+
+    bootstrap_stage3_normalized_absolute "$bootstrap_stage3_resume_repo" || return 1
+    [ -d "$bootstrap_stage3_resume_repo" ] &&
+        [ ! -L "$bootstrap_stage3_resume_repo" ] || return 1
+    bootstrap_stage3_resume_repo_physical=$(
+        CDPATH= cd -- "$bootstrap_stage3_resume_repo" && pwd -P
+    ) || return 1
+    [ "$bootstrap_stage3_resume_repo_physical" = "$bootstrap_stage3_resume_repo" ] || return 1
+    bootstrap_stage3_resume_build="$bootstrap_stage3_resume_repo/build"
+    [ -d "$bootstrap_stage3_resume_build" ] &&
+        [ ! -L "$bootstrap_stage3_resume_build" ] || return 1
+    bootstrap_stage3_resume_build_physical=$(
+        CDPATH= cd -- "$bootstrap_stage3_resume_build" && pwd -P
+    ) || return 1
+    [ "$bootstrap_stage3_resume_build_physical" = \
+        "$bootstrap_stage3_resume_build" ] || return 1
+
+    if [ -n "$bootstrap_stage3_resume_external" ]; then
+        bootstrap_stage3_normalized_absolute "$bootstrap_stage3_resume_external" || return 1
+        [ "$bootstrap_stage3_resume_external" != / ] || return 1
+        [ -d "$bootstrap_stage3_resume_external" ] &&
+            [ ! -L "$bootstrap_stage3_resume_external" ] || return 1
+        bootstrap_stage3_resume_external_physical=$(
+            CDPATH= cd -- "$bootstrap_stage3_resume_external" && pwd -P
+        ) || return 1
+        [ "$bootstrap_stage3_resume_external_physical" = \
+            "$bootstrap_stage3_resume_external" ] || return 1
+    fi
+
+    case "$bootstrap_stage3_resume_requested" in
+        /*) bootstrap_stage3_resume_candidate=$bootstrap_stage3_resume_requested ;;
+        *../*|../*|*/..|..|'') return 1 ;;
+        *) bootstrap_stage3_resume_candidate="$bootstrap_stage3_resume_repo/$bootstrap_stage3_resume_requested" ;;
+    esac
+    bootstrap_stage3_normalized_absolute "$bootstrap_stage3_resume_candidate" || return 1
+    [ -d "$bootstrap_stage3_resume_candidate" ] &&
+        [ ! -L "$bootstrap_stage3_resume_candidate" ] || return 1
+    bootstrap_stage3_resume_physical=$(
+        CDPATH= cd -- "$bootstrap_stage3_resume_candidate" && pwd -P
+    ) || return 1
+    [ "$bootstrap_stage3_resume_physical" = "$bootstrap_stage3_resume_candidate" ] || return 1
+
+    case "$bootstrap_stage3_resume_physical" in
+        "$bootstrap_stage3_resume_build"/*) ;;
+        *)
+            [ -n "$bootstrap_stage3_resume_external" ] || return 1
+            case "$bootstrap_stage3_resume_physical" in
+                "$bootstrap_stage3_resume_external"|"$bootstrap_stage3_resume_external"/*) ;;
+                *) return 1 ;;
+            esac
+            ;;
+    esac
+    BOOTSTRAP_STAGE3_RESUME_OUTPUT=$bootstrap_stage3_resume_physical
+    export BOOTSTRAP_STAGE3_RESUME_OUTPUT
 }
 
 # Resolve the one writable Cargo/seed authority target. Callers may place the
@@ -932,8 +1129,32 @@ bootstrap_stage3_tool_authority_snapshot() (
 bootstrap_stage3_directory_snapshot() {
     bootstrap_stage3_directory_snapshot_output=$1
     bootstrap_stage3_directory_snapshot_root=$2
-    [ -d "$bootstrap_stage3_directory_snapshot_root" ] &&
-        [ ! -L "$bootstrap_stage3_directory_snapshot_root" ] || return 1
+    IFS=' ' read -r bootstrap_stage3_directory_snapshot_pid \
+        bootstrap_stage3_directory_snapshot_stat_rest </proc/self/stat ||
+        return 1
+    case "$bootstrap_stage3_directory_snapshot_pid" in
+        ''|0|*[!0-9]*) return 1 ;;
+    esac
+    case "$bootstrap_stage3_directory_snapshot_root" in
+        "/proc/$bootstrap_stage3_directory_snapshot_pid/fd/"[1-9]*)
+            expr "$bootstrap_stage3_directory_snapshot_root" : \
+                "/proc/$bootstrap_stage3_directory_snapshot_pid/fd/[1-9][0-9]*$" \
+                >/dev/null || return 1
+            [ -d "$bootstrap_stage3_directory_snapshot_root" ] || return 1
+            # The exact local procfd component is the trusted magic-link
+            # anchor.  Resolve only that anchor; File::Find still lstats and
+            # rejects every descendant symlink.
+            bootstrap_stage3_directory_snapshot_scan=\
+"$bootstrap_stage3_directory_snapshot_root/."
+            ;;
+        /proc/*) return 1 ;;
+        *)
+            [ -d "$bootstrap_stage3_directory_snapshot_root" ] &&
+                [ ! -L "$bootstrap_stage3_directory_snapshot_root" ] || return 1
+            bootstrap_stage3_directory_snapshot_scan=\
+"$bootstrap_stage3_directory_snapshot_root"
+            ;;
+    esac
     # Digest::SHA::addfile streams in binary mode. Authority archives can be
     # hundreds of MiB, so retaining a whole file here is both unnecessary and
     # capable of exhausting a constrained bootstrap host.
@@ -941,18 +1162,30 @@ bootstrap_stage3_directory_snapshot() {
         use strict;
         use warnings;
         my ($root) = @ARGV;
+        my $relative_root = $root;
+        $relative_root =~ s{/\.$}{};
         my @records;
         find(
             {
                 no_chdir => 1,
                 wanted => sub {
                     my $absolute = $File::Find::name;
-                    return if $absolute eq $root;
+                    return if $absolute eq $root ||
+                        $absolute eq $relative_root;
                     -l $absolute and die "authority symlink rejected\n";
                     return unless -f $absolute;
                     my $sha = Digest::SHA->new(256);
                     $sha->addfile($absolute, "b") or die "hash\n";
-                    my $relative = substr($absolute, length($root) + 1);
+                    my $relative;
+                    if (index($absolute, "$root/") == 0) {
+                        $relative = substr($absolute, length($root) + 1);
+                    } elsif (index($absolute, "$relative_root/") == 0) {
+                        $relative = substr(
+                            $absolute, length($relative_root) + 1
+                        );
+                    } else {
+                        die "authority path escaped root\n";
+                    }
                     push @records, join(
                         ":", "file-hex", unpack("H*", $relative),
                         (-x $absolute ? 1 : 0), $sha->hexdigest
@@ -963,7 +1196,7 @@ bootstrap_stage3_directory_snapshot() {
         );
         @records or die "empty authority\n";
         print join("\n", sort @records), "\n";
-    ' "$bootstrap_stage3_directory_snapshot_root" \
+    ' "$bootstrap_stage3_directory_snapshot_scan" \
         >"$bootstrap_stage3_directory_snapshot_output"
 }
 
@@ -1318,9 +1551,22 @@ bootstrap_stage3_copy_seed_tuple() {
 bootstrap_stage3_verify_hosted_runtime_authority() {
     [ "$#" -eq 1 ] || return 64
     bootstrap_stage3_hosted_root=$1
-    [ -d "$bootstrap_stage3_hosted_root" ] &&
-        [ ! -L "$bootstrap_stage3_hosted_root" ] || return 1
-    bootstrap_stage3_hosted_receipt="$bootstrap_stage3_hosted_root/hosted-runtime.env"
+    if [ "${BOOTSTRAP_STAGE3_DESCRIPTOR_CAPSULE:-0}" = 1 ]; then
+        expr "$bootstrap_stage3_hosted_root" : \
+            '/proc/[1-9][0-9]*/fd/[1-9][0-9]*$' >/dev/null || return 1
+        [ -d "$bootstrap_stage3_hosted_root" ] || return 1
+        perl -MFcntl=:mode -e '
+            my @st = stat($ARGV[0]);
+            @st && S_ISDIR($st[2]) && S_IMODE($st[2]) == oct("0500")
+                or exit 1;
+        ' "$bootstrap_stage3_hosted_root" || return 1
+        bootstrap_stage3_hosted_walk_root="$bootstrap_stage3_hosted_root/."
+    else
+        [ -d "$bootstrap_stage3_hosted_root" ] &&
+            [ ! -L "$bootstrap_stage3_hosted_root" ] || return 1
+        bootstrap_stage3_hosted_walk_root=$bootstrap_stage3_hosted_root
+    fi
+    bootstrap_stage3_hosted_receipt="$bootstrap_stage3_hosted_walk_root/hosted-runtime.env"
     [ -f "$bootstrap_stage3_hosted_receipt" ] &&
         [ ! -L "$bootstrap_stage3_hosted_receipt" ] || return 1
     awk -F= '
@@ -1349,12 +1595,35 @@ bootstrap_stage3_verify_hosted_runtime_authority() {
     printf '%s\n' "$bootstrap_stage3_hosted_expected" |
         grep -Eq '^[0-9a-f]{64}$' || return 1
     bootstrap_stage3_hosted_path=\
-"$bootstrap_stage3_hosted_root/$bootstrap_stage3_hosted_relative"
+"$bootstrap_stage3_hosted_walk_root/$bootstrap_stage3_hosted_relative"
     [ -f "$bootstrap_stage3_hosted_path" ] &&
         [ ! -L "$bootstrap_stage3_hosted_path" ] || return 1
     [ "$(bootstrap_stage3_hash_file "$bootstrap_stage3_hosted_path")" = \
         "$bootstrap_stage3_hosted_expected" ] || return 1
-    bootstrap_stage3_hosted_count=$(find "$bootstrap_stage3_hosted_root/deps" \
+    set -- $(stat -Lc '%d %i' "$bootstrap_stage3_hosted_walk_root") || return 1
+    bootstrap_stage3_hosted_root_dev=$1
+    bootstrap_stage3_hosted_root_ino=$2
+    perl -MFile::Find -MFcntl=:mode -e '
+        use strict; use warnings;
+        my ($root, $root_dev, $root_ino) = @ARGV;
+        my $first = 1;
+        find({ no_chdir => 1, wanted => sub {
+            if ($first) {
+                $first = 0;
+                my @root_st = stat($File::Find::name);
+                @root_st && S_ISDIR($root_st[2]) &&
+                    $root_st[0] == $root_dev && $root_st[1] == $root_ino
+                    or die "hosted runtime root identity changed\n";
+                return;
+            }
+            my @st = lstat($File::Find::name);
+            @st or die "hosted runtime lstat failed\n";
+            -l _ and die "hosted runtime symlink rejected\n";
+        }}, $root);
+    ' "$bootstrap_stage3_hosted_walk_root" \
+        "$bootstrap_stage3_hosted_root_dev" \
+        "$bootstrap_stage3_hosted_root_ino" || return 1
+    bootstrap_stage3_hosted_count=$(find "$bootstrap_stage3_hosted_walk_root/deps" \
         -maxdepth 1 -type f -name 'libspl_hosted_runtime-*.rlib' |
         wc -l | tr -d ' ') || return 1
     [ "$bootstrap_stage3_hosted_count" -eq 1 ] || return 1
@@ -1371,7 +1640,7 @@ bootstrap_stage3_verify_hosted_runtime_authority() {
     # representable on this platform and is not claimed.
     case "$(uname -s 2>/dev/null || echo unknown)" in
         MSYS*|MINGW*|CYGWIN*)
-            [ -z "$(find "$bootstrap_stage3_hosted_root" -type f -perm /0222                 -print -quit)" ] || return 1
+            [ -z "$(find "$bootstrap_stage3_hosted_walk_root" -type f -perm /0222                 -print -quit)" ] || return 1
             ;;
         *)
             # POSIX -perm -MODE rather than GNU -perm /MODE: BSD find (macOS)
@@ -1379,7 +1648,7 @@ bootstrap_stage3_verify_hosted_runtime_authority() {
             # for exactly that reason; adopting its spelling here keeps the two
             # branches from conflicting, and the POSIX form is accepted by GNU
             # find too, so Linux is unaffected.
-            [ -z "$(find "$bootstrap_stage3_hosted_root"                 \( -perm -0200 -o -perm -0020 -o -perm -0002 \) -print -quit)" ] || return 1
+            [ -z "$(find "$bootstrap_stage3_hosted_walk_root"                 \( -perm -0200 -o -perm -0020 -o -perm -0002 \) -print -quit)" ] || return 1
             ;;
     esac
     perl -MFcntl=:mode -e '
@@ -1399,10 +1668,16 @@ bootstrap_stage3_verify_hosted_runtime_authority() {
             exit 1 unless $win;
             exit 1 if !S_ISDIR($st[2]) && (S_IMODE($st[2]) & 0222);
         }
-    ' "$bootstrap_stage3_hosted_root=0500" \
-        "$bootstrap_stage3_hosted_root/deps=0500" \
+    ' "$bootstrap_stage3_hosted_walk_root/deps=0500" \
         "$bootstrap_stage3_hosted_receipt=0400" \
         "$bootstrap_stage3_hosted_path=0400" || return 1
+    if [ "${BOOTSTRAP_STAGE3_DESCRIPTOR_CAPSULE:-0}" != 1 ]; then
+        perl -MFcntl=:mode -e '
+            my @st = lstat($ARGV[0]);
+            @st && !S_ISLNK($st[2]) && S_ISDIR($st[2]) &&
+                S_IMODE($st[2]) == oct("0500") or exit 1;
+        ' "$bootstrap_stage3_hosted_root" || return 1
+    fi
     BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH=$bootstrap_stage3_hosted_relative
     BOOTSTRAP_STAGE3_HOSTED_RUNTIME_SHA256=$bootstrap_stage3_hosted_expected
     BOOTSTRAP_STAGE3_HOSTED_RUNTIME_PATH=$bootstrap_stage3_hosted_path
@@ -1444,8 +1719,13 @@ bootstrap_stage3_verify_seed_stamp() {
     bootstrap_stage3_stamp_seed=$3
     bootstrap_stage3_stamp_native_all=$4
     bootstrap_stage3_stamp_backfill=$5
-    [ -f "$bootstrap_stage3_stamp" ] &&
+    [ -f "$bootstrap_stage3_stamp" ] || return 1
+    if [ "${BOOTSTRAP_STAGE3_DESCRIPTOR_CAPSULE:-0}" = 1 ]; then
+        expr "$bootstrap_stage3_stamp" : \
+            '/proc/[1-9][0-9]*/fd/[1-9][0-9]*$' >/dev/null || return 1
+    else
         [ ! -L "$bootstrap_stage3_stamp" ] || return 1
+    fi
     [ "$(bootstrap_stage3_manifest_value schema \
         "$bootstrap_stage3_stamp")" = \
         simple-bootstrap-seed-artifact-stamp-v2 ] || return 1

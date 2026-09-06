@@ -9,6 +9,37 @@
 
 include!(concat!(env!("OUT_DIR"), "/runtime_symbol_entries.rs"));
 
+// runtime_memory.c is always linked into the bootstrap runtime and provides
+// the allocator used by struct lowering.  Some already-materialized generated
+// symbol tables omitted this one provider even though they retained its paired
+// receiver validator, which made the JIT demote an entire source module.  Add
+// the real C entry at registration time so a cached/generated table cannot
+// suppress the provider.
+#[cfg(feature = "runtime-symbol-table")]
+unsafe extern "C" {
+    fn rt_struct_alloc(size: i64) -> *mut u8;
+}
+
+#[cfg(feature = "runtime-symbol-table")]
+static REGISTERED_RUNTIME_SYMBOL_ENTRIES: std::sync::OnceLock<Box<[simple_runtime_abi::RuntimeSymbolEntry]>> =
+    std::sync::OnceLock::new();
+
+#[cfg(feature = "runtime-symbol-table")]
+fn static_runtime_symbol_entries() -> &'static [simple_runtime_abi::RuntimeSymbolEntry] {
+    REGISTERED_RUNTIME_SYMBOL_ENTRIES
+        .get_or_init(|| {
+            let mut entries = RUNTIME_SYMBOL_ENTRIES.to_vec();
+            if !entries.iter().any(|entry| entry.name == "rt_struct_alloc") {
+                entries.push(simple_runtime_abi::RuntimeSymbolEntry::new(
+                    "rt_struct_alloc",
+                    rt_struct_alloc as *const u8,
+                ));
+            }
+            entries.into_boxed_slice()
+        })
+        .as_ref()
+}
+
 // The build script consumes this scanner directly; include it in the library
 // test target as well so its definition/prototype discrimination is executed.
 #[cfg(test)]
@@ -398,7 +429,7 @@ pub extern "C" fn simple_runtime_abi_version() -> u32 {
 
 pub fn register_static_runtime_symbols() {
     #[cfg(feature = "runtime-symbol-table")]
-    let _ = simple_runtime_abi::register_static_runtime_symbols(RUNTIME_SYMBOL_ENTRIES);
+    let _ = simple_runtime_abi::register_static_runtime_symbols(static_runtime_symbol_entries());
 }
 
 #[cfg(all(test, feature = "runtime-symbol-table"))]
@@ -599,11 +630,11 @@ fn runtime_symbol_table_checked_offset_read_resolves_exact_provider() {
 #[cfg(all(test, feature = "runtime-symbol-table"))]
 #[test]
 fn runtime_symbol_table_keeps_struct_allocator_and_receiver_validator_paired() {
-    let allocator = RUNTIME_SYMBOL_ENTRIES
+    let allocator = static_runtime_symbol_entries()
         .iter()
         .find(|entry| entry.name == "rt_struct_alloc")
         .expect("struct allocator provider must be registered");
-    let validator = RUNTIME_SYMBOL_ENTRIES
+    let validator = static_runtime_symbol_entries()
         .iter()
         .find(|entry| entry.name == "rt_struct_receiver_valid")
         .expect("struct receiver validator provider must be registered");

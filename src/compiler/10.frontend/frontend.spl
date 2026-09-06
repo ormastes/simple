@@ -27,6 +27,9 @@ fn preprocess_conditionals(source: text) -> text:
 use compiler.common.config.{Logger}
 use std.io_runtime.{env_get_opt}
 
+@unsafe(reason: "raw wall-clock timestamp ABI", capabilities: [ffi])
+extern fn rt_time_now_unix_micros() -> i64
+
 fn frontend_log_trace(log: Logger, message: text):
     if log.level >= 20:
         pass_dn
@@ -38,6 +41,26 @@ fn frontend_phase_trace_enabled() -> bool:
     if _frontend_phase_trace_state < 0:
         _frontend_phase_trace_state = if env_get_opt("SIMPLE_COMPILER_TRACE") == Some("1"): 1 else: 0
     _frontend_phase_trace_state == 1
+
+# Cache-boundary attribution is deliberately independent from the broader
+# parse profile.  It is OFF unless explicitly requested, so normal compiler
+# output remains byte-for-byte silent.
+var _frontend_cache_boundary_profile_state: i64 = -1
+
+@always_inline
+fn frontend_cache_boundary_profile_enabled() -> bool:
+    if _frontend_cache_boundary_profile_state < 0:
+        # env_get_opt carries an optional text through the flattened frontend.
+        # Compare its normalized value, not an Option constructor: the latter
+        # did not match in the bootstrap interpreter even when the bridge's
+        # equivalent raw-env gate was enabled.
+        _frontend_cache_boundary_profile_state = if (env_get_opt("SIMPLE_FRONTEND_CACHE_BOUNDARY_PROFILE") ?? "") == "1": 1 else: 0
+    _frontend_cache_boundary_profile_state == 1
+
+@always_inline
+fn frontend_cache_boundary_profile_now() -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_time_now_unix_micros()
 
 fn frontend_domain_kind_for_line(line: text) -> text:
     val kinds = ["schema", "style", "ui", "music", "bim", "cad", "city", "rtl"]
@@ -78,8 +101,13 @@ fn frontend_extract_domain_blocks(source: text) -> ([DomainBlock], text):
 fn frontend_parse_or_restore(parse_source: text, file_path: text, streaming_scope: bool) -> ParserModule:
     val key = if frontend_parse_cache_enabled(): frontend_parse_cache_key(file_path) else: ""
     if key != "":
+        val load_t0 = if frontend_cache_boundary_profile_enabled(): frontend_cache_boundary_profile_now() else: 0
+        val cached_blob = frontend_parse_cache_load(key)
+        if frontend_cache_boundary_profile_enabled():
+            val load_t1 = frontend_cache_boundary_profile_now()
+            print("PARSECACHE\tload_ms={(load_t1 - load_t0) / 1000}\tbytes={cached_blob.len()}\tpath={file_path}")
         val cached_module = build_module_from_flat_pool_blob(
-            frontend_parse_cache_load(key), parse_source, file_path)
+            cached_blob, parse_source, file_path)
         if cached_module != nil:
             val hit = cached_module.unwrap()
             frontend_parse_cache_note_hit()
@@ -87,7 +115,12 @@ fn frontend_parse_or_restore(parse_source: text, file_path: text, streaming_scop
         frontend_parse_cache_note_miss()
         flat_pool_capture_arm()
         val fresh = parse_and_build_module_scoped(parse_source, file_path, streaming_scope)
-        val _stored = frontend_parse_cache_store(key, flat_pool_capture_take())
+        val captured_blob = flat_pool_capture_take()
+        val store_t0 = if frontend_cache_boundary_profile_enabled(): frontend_cache_boundary_profile_now() else: 0
+        val stored = frontend_parse_cache_store(key, captured_blob)
+        if frontend_cache_boundary_profile_enabled():
+            val store_t1 = frontend_cache_boundary_profile_now()
+            print("PARSECACHE\tstore_ms={(store_t1 - store_t0) / 1000}\tbytes={captured_blob.len()}\tstored={stored}\tpath={file_path}")
         return fresh
     parse_and_build_module_scoped(parse_source, file_path, streaming_scope)
 
@@ -113,7 +146,11 @@ fn parse_full_frontend_with_scope(source: text, file_path: text, module_name: te
 
     # Phase 2d: Desugar async/await/spawn/actor syntax
     frontend_log_trace(log, "2d: desugaring...")
+    val desugar_t0 = if frontend_cache_boundary_profile_enabled(): frontend_cache_boundary_profile_now() else: 0
     module = desugar_module(module)
+    if frontend_cache_boundary_profile_enabled():
+        val desugar_t1 = frontend_cache_boundary_profile_now()
+        print("PARSECACHE\tdesugar_ms={(desugar_t1 - desugar_t0) / 1000}\tpath={file_path}")
 
     # Return the parsed-and-desugared module (declared return type is ParserModule).
     module

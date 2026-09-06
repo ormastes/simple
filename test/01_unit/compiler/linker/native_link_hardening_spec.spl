@@ -1,6 +1,7 @@
 """Unit tests for native linker hardening helpers."""
 
 use compiler.backend.linker.linker_wrapper.{
+    NativeLinkConfig,
     unresolved_symbol_flags_for_unix_linker,
     unresolved_symbol_flags_for_cc,
     native_direct_platform_flags,
@@ -32,15 +33,352 @@ describe "Native linker hardening":
         expect(native_link_config_from_build(build).runtime_path).to_equal("/admitted/runtime")
 
     it "selects the complete admitted aggregate runtime when the monolith is absent":
-        expect(native_runtime_archive_names(false, true, true)).to_equal([
+        expect(native_runtime_archive_names("host-gpu", false, true, true)).to_equal([
             "libsimple_compiler_backfill.a", "libsimple_native_all.a"
         ])
-        expect(native_runtime_archive_names(true, true, true)).to_equal(["libsimple_compiler.a"])
-        expect(native_runtime_archive_names(false, false, false)).to_equal([])
+        expect(native_runtime_archive_names("host-gpu", true, true, true)).to_equal(["libsimple_compiler.a"])
+        expect(native_runtime_archive_names("host-gpu", false, false, false)).to_equal([])
+
+    it "selects only the admitted provider pair for a core-C bootstrap bundle":
+        expect(native_runtime_archive_names(
+            "core-c-bootstrap", true, true, true
+        )).to_equal(["libsimple_compiler_backfill.a", "libsimple_native_all.a"])
+        expect(native_runtime_archive_names(
+            "core-c-bootstrap", true, false, false
+        )).to_equal([])
+        expect(native_runtime_archive_names(
+            "core-c-bootstrap", true, true, false
+        )).to_equal([])
+        expect(native_runtime_archive_names(
+            "core-c-bootstrap", true, false, true
+        )).to_equal([])
+
+    it "fails closed before direct or cc fallback can substitute the monolith":
+        val config = NativeLinkConfig(
+            libraries: [],
+            library_paths: [],
+            runtime_path: "/missing/admitted/runtime",
+            pie: true,
+            debug: false,
+            verbose: false,
+            allow_duplicate_definitions: true,
+            allow_cc_fallback: true,
+            retained_symbols: [],
+            extra_flags: [],
+            runtime_bundle: "core-c-bootstrap"
+        )
+        expect(native_runtime_provider_selection_error_for_config(config)).to_contain(
+            "has no complete admitted provider set"
+        )
+        expect(_cc_fallback_runtime_lib_args(config).contains("-lsimple_compiler")).to_equal(false)
+        val linker_source = rt_file_read_text(
+            "src/compiler/70.backend/linker/_LinkerWrapper/native_linking.spl"
+        ) ?? ""
+        expect(linker_source).to_contain(
+            "val provider_error = native_runtime_provider_selection_error_for_config_platform("
+        )
+        expect(linker_source).to_contain(
+            "val provider_error = native_runtime_provider_selection_error_for_config(config)"
+        )
+
+    it "rejects disabled, undiscovered, and unknown explicit authorities":
+        val none_config = NativeLinkConfig(
+            libraries: [], library_paths: [], runtime_path: "none", pie: true,
+            debug: false, verbose: false, allow_duplicate_definitions: true,
+            allow_cc_fallback: true, retained_symbols: [], extra_flags: [],
+            runtime_bundle: "core-c-bootstrap"
+        )
+        expect(native_runtime_provider_selection_error_for_config(none_config)).to_contain(
+            "cannot use runtime path 'none'"
+        )
+        expect(native_runtime_provider_selection_error_for(
+            "", "core-c-bootstrap", false, false, false
+        )).to_contain(
+            "requires a discovered runtime directory"
+        )
+        val typo = NativeLinkConfig(..none_config,
+            runtime_path: "/admitted/runtime", runtime_bundle: "core-c-bootstarp")
+        expect(native_runtime_provider_selection_error_for_config(typo)).to_contain(
+            "unknown runtime bundle"
+        )
+        expect(native_runtime_archive_names(
+            "core-c-bootstarp", true, true, true
+        )).to_equal([])
+
+    it "keeps empty default compatibility and renders exact validated final args":
+        expect(native_runtime_archive_names("", true, true, true)).to_equal([
+            "libsimple_compiler.a"
+        ])
+        expect(native_runtime_archive_names("auto", true, true, true)).to_equal([
+            "libsimple_compiler.a"
+        ])
+        expect(native_runtime_provider_selection_error_for(
+            "/legacy/runtime", "auto", true, false, false
+        )).to_equal("")
+        expect(native_runtime_provider_selection_error_for(
+            "none", "auto", false, false, false
+        )).to_equal("")
+        expect(native_runtime_provider_selection_error_for(
+            "", "auto", false, false, false
+        )).to_equal("")
+        expect(native_runtime_archive_names("auto", false, true, false)).to_equal([
+            "libsimple_compiler_backfill.a"
+        ])
+        val pair = [
+            "/admitted/runtime/libsimple_compiler_backfill.a",
+            "/admitted/runtime/libsimple_native_all.a"
+        ]
+        expect(native_runtime_archive_link_args(
+            "/admitted/runtime", "core-c-bootstrap", pair, false, true, true
+        )).to_equal([
+            pair[0], pair[1], pair[0], "-rpath", "/admitted/runtime"
+        ])
+        expect(native_runtime_archive_link_args(
+            "/admitted/runtime", "core-c-bootstrap", pair, true, true, true
+        )).to_equal([pair[0], pair[1], pair[0],
+            "-Wl,-rpath,/admitted/runtime"])
+        expect(native_runtime_archive_link_args(
+            "/admitted/runtime", "core-c-bootstrap", [], false, true, true
+        )).to_equal([])
+        expect(native_runtime_archive_link_args(
+            "/admitted/runtime", "core-c-bootstrap", [], true, true, true
+        )).to_equal([])
+        expect(native_runtime_archive_link_args(
+            "/legacy/runtime", "", [], false, true, true
+        )).to_equal([
+            "-L", "/legacy/runtime", "-lsimple_compiler", "-rpath", "/legacy/runtime"
+        ])
+        expect(native_runtime_archive_link_args(
+            "/legacy/runtime", "auto", [], false, true, true
+        )).to_equal([
+            "-L", "/legacy/runtime", "-lsimple_compiler", "-rpath", "/legacy/runtime"
+        ])
+        expect(native_runtime_archive_link_args(
+            "/legacy/runtime", "auto", [], true, true, true
+        )).to_equal([
+            "-L", "/legacy/runtime", "-lsimple_compiler",
+            "-Wl,-rpath,/legacy/runtime"
+        ])
+
+    it "requires complete named aggregates and maps them onto Windows providers":
+        for bundle in ["simple-core", "simple_core", "host-gpu", "host_gpu"]:
+            expect(native_runtime_archive_names(bundle, false, true, false)).to_equal([])
+            expect(native_runtime_archive_names(bundle, false, false, true)).to_equal([])
+            expect(native_runtime_archive_names(bundle, false, true, true)).to_equal([
+                "libsimple_compiler_backfill.a", "libsimple_native_all.a"
+            ])
+            expect(native_runtime_archive_names(bundle, true, true, true)).to_equal([
+                "libsimple_compiler_backfill.a", "libsimple_native_all.a"
+            ])
+            val alias_pair = [
+                "/admitted/runtime/libsimple_compiler_backfill.a",
+                "/admitted/runtime/libsimple_native_all.a"
+            ]
+            expect(native_runtime_archive_link_args(
+                "/admitted/runtime", bundle, alias_pair, false, true, true
+            )).to_equal([alias_pair[0], alias_pair[1], alias_pair[0],
+                "-rpath", "/admitted/runtime"])
+            expect(native_runtime_archive_link_args(
+                "/admitted/runtime", bundle, alias_pair, true, true, true
+            )).to_equal([alias_pair[0], alias_pair[1], alias_pair[0],
+                "-Wl,-rpath,/admitted/runtime"])
+            expect(native_runtime_provider_selection_error_for(
+                "/partial/runtime", bundle, false, true, false
+            )).to_contain("has no complete admitted provider set")
+        val windows_pair = native_runtime_archive_names_for_platform(
+            "core-c-bootstrap", true, true, true, true)
+        expect(windows_pair).to_equal([
+            "simple_compiler_backfill.lib", "simple_native_all.lib"
+        ])
+        expect(native_runtime_archive_link_args(
+            "C:/admitted/runtime", "core-c-bootstrap", windows_pair, true, false, false
+        )).to_equal([
+            "simple_compiler_backfill.lib", "simple_native_all.lib"
+        ])
+        expect(native_msvc_runtime_libraries([
+            "simple_compiler_backfill.lib", "user.lib"
+        ], [
+            "C:/admitted/runtime/simple_compiler_backfill.lib",
+            "C:/admitted/runtime/simple_native_all.lib"
+        ])).to_equal([
+            "simple_compiler_backfill.lib", "user.lib",
+            "C:/admitted/runtime/simple_native_all.lib"
+        ])
+        expect(native_msvc_runtime_libraries([
+            "C:\\configured\\simple_native_all.lib"
+        ], [
+            "C:/admitted/runtime/simple_compiler_backfill.lib",
+            "C:/admitted/runtime/simple_native_all.lib"
+        ])).to_equal([
+            "C:\\configured\\simple_native_all.lib",
+            "C:/admitted/runtime/simple_compiler_backfill.lib"
+        ])
+        for bundle in ["", "auto"]:
+            val fallback = native_msvc_runtime_selection(bundle, [])
+            expect(fallback).to_equal(["simple_compiler.lib"])
+            expect(native_msvc_runtime_libraries([
+                "simple_compiler.lib"
+            ], fallback)).to_equal(["simple_compiler.lib"])
+            expect(native_msvc_runtime_libraries([
+                "C:/configured/SIMPLE_COMPILER.LIB"
+            ], fallback)).to_equal(["C:/configured/SIMPLE_COMPILER.LIB"])
+            expect(native_msvc_runtime_libraries([
+                "C:\\configured\\Simple_Compiler.Lib"
+            ], fallback)).to_equal(["C:\\configured\\Simple_Compiler.Lib"])
+            val uppercase_config = native_msvc_configured_libraries([], [
+                "C:/configured/SIMPLE_COMPILER.LIB"
+            ])
+            expect(uppercase_config).to_equal([
+                "C:/configured/SIMPLE_COMPILER.LIB"
+            ])
+            expect(native_msvc_runtime_libraries(
+                uppercase_config, fallback)).to_equal(uppercase_config)
+            val mixed_config = native_msvc_configured_libraries([], [
+                "C:\\configured\\Simple_Compiler.Lib"
+            ])
+            expect(mixed_config).to_equal([
+                "C:\\configured\\Simple_Compiler.Lib"
+            ])
+            expect(native_msvc_runtime_libraries(
+                mixed_config, fallback)).to_equal(mixed_config)
+        val raw_pair_config = native_msvc_configured_libraries([], [
+            "C:/configured/SIMPLE_COMPILER_BACKFILL.LIB",
+            "C:\\configured\\Simple_Native_All.Lib"
+        ])
+        val selected_pair = native_msvc_runtime_selection(
+            "core-c-bootstrap", [
+                "C:/admitted/simple_compiler_backfill.lib",
+                "C:/admitted/simple_native_all.lib"
+            ])
+        expect(native_msvc_runtime_libraries(
+            raw_pair_config, selected_pair)).to_equal(raw_pair_config)
+        expect(native_msvc_configured_libraries([], ["user_provider"])).to_equal([
+            "user_provider.lib"
+        ])
+        val duplicate_config = native_msvc_configured_libraries([], [
+            "C:/configured/USER_PROVIDER.LIB", "user_provider.lib",
+            "C:\\configured\\Other_Provider.Lib"
+        ])
+        expect(duplicate_config).to_equal([
+            "C:/configured/USER_PROVIDER.LIB",
+            "C:\\configured\\Other_Provider.Lib"
+        ])
+        expect(native_msvc_runtime_libraries(
+            duplicate_config, ["simple_compiler.lib"])).to_equal([
+            "C:/configured/USER_PROVIDER.LIB",
+            "C:\\configured\\Other_Provider.Lib", "simple_compiler.lib"
+        ])
+        val configured_fallback = native_msvc_configured_libraries([], [
+            "C:\\configured\\SIMPLE_COMPILER.LIB", "distinct"
+        ])
+        expect(native_msvc_runtime_libraries(
+            configured_fallback, ["simple_compiler.lib"])).to_equal([
+            "C:\\configured\\SIMPLE_COMPILER.LIB", "distinct.lib"
+        ])
+
+    it "assembles platform-correct shared runtime commands for default and named bundles":
+        val unix_pair = ["/runtime/libsimple_compiler_backfill.a",
+            "/runtime/libsimple_native_all.a"]
+        for bundle in ["", "auto"]:
+            var unix_command = ["cc", "-shared", "user.o"]
+            for arg in native_runtime_archive_link_args(
+                    "/runtime", bundle, [], true, true, true):
+                unix_command.push(arg)
+            unix_command.push("-o")
+            unix_command.push("libuser.so")
+            expect(unix_command).to_equal([
+                "cc", "-shared", "user.o", "-L", "/runtime",
+                "-lsimple_compiler", "-Wl,-rpath,/runtime", "-o", "libuser.so"
+            ])
+            var mingw_command = ["gcc", "-shared", "user.o"]
+            for arg in native_runtime_archive_link_args(
+                    "C:/runtime", bundle, [], true, true, false):
+                mingw_command.push(arg)
+            mingw_command.push("-o")
+            mingw_command.push("user.dll")
+            expect(mingw_command).to_equal([
+                "gcc", "-shared", "user.o", "-L", "C:/runtime",
+                "-lsimple_compiler", "-o", "user.dll"
+            ])
+        var unix_pair_command = ["cc", "-shared", "user.o"]
+        for arg in native_runtime_archive_link_args(
+                "/runtime", "host-gpu", unix_pair, true, true, true):
+            unix_pair_command.push(arg)
+        expect(unix_pair_command).to_equal([
+            "cc", "-shared", "user.o", unix_pair[0], unix_pair[1], unix_pair[0],
+            "-Wl,-rpath,/runtime"
+        ])
+        var mingw_pair_command = ["gcc", "-shared", "user.o"]
+        for arg in native_runtime_archive_link_args(
+                "C:/runtime", "host-gpu", unix_pair, true, true, false):
+            mingw_pair_command.push(arg)
+        expect(mingw_pair_command).to_equal([
+            "gcc", "-shared", "user.o", unix_pair[0], unix_pair[1], unix_pair[0]
+        ])
+        val msvc_pair = ["simple_compiler_backfill.lib", "simple_native_all.lib"]
+        expect(native_msvc_runtime_selection("host-gpu", msvc_pair)).to_equal(msvc_pair)
+
+    it "validates authority before SMF and Windows dispatch and honors it in both Windows linkers":
+        val native = rt_file_read_text(
+            "src/compiler/70.backend/linker/_LinkerWrapper/native_linking.spl"
+        ) ?? ""
+        val shared = rt_file_read_text(
+            "src/compiler/70.backend/linker/_LinkerWrapper/shared_linking.spl"
+        ) ?? ""
+        val validation = native.index_of(
+            "val provider_error = native_runtime_provider_selection_error_for_config_platform(")
+        val smf_dispatch = native.index_of("val smf_inputs = filter_smf_inputs(object_files)")
+        val windows_dispatch = native.index_of('if os == "windows":', validation)
+        expect(validation).to_be_greater_than(0)
+        expect(validation).to_be_less_than(smf_dispatch)
+        expect(validation).to_be_less_than(windows_dispatch)
+        val shared_validation = shared.index_of(
+            "val provider_error = native_runtime_provider_selection_error_for_config_platform(")
+        val shared_windows_dispatch = shared.index_of(
+            'if os == "windows":', shared_validation)
+        val shared_unix_dispatch = shared.index_of(
+            "_link_shared_unix(object_files, output, config)", shared_validation)
+        expect(shared_validation).to_be_greater_than(0)
+        expect(shared_validation).to_be_less_than(shared_windows_dispatch)
+        expect(shared_validation).to_be_less_than(shared_unix_dispatch)
+        expect(native).to_contain(
+            "native_runtime_archive_inputs_for_platform(\n            runtime_dir, config.runtime_bundle, true)"
+        )
+        expect(native).to_contain(
+            "val selected_runtime_libs = native_msvc_runtime_selection("
+        )
+        expect(native).to_contain(
+            "msvc_config.libs = native_msvc_runtime_libraries("
+        )
+        expect(native).to_contain(
+            "msvc_config.libs = native_msvc_configured_libraries("
+        )
+        expect(native.contains('if lib.ends_with(".lib")')).to_equal(false)
+        expect(shared).to_contain(
+            "native_runtime_archive_link_args(\n                runtime_dir, config.runtime_bundle, runtime_archives, true, true, false)"
+        )
+        expect(shared).to_contain(
+            "native_runtime_archive_link_args(\n                runtime_dir, config.runtime_bundle, runtime_archives, true, true, true)"
+        )
+        expect(shared).to_contain(
+            "val runtime_archives = native_runtime_archive_inputs(\n            runtime_dir, config.runtime_bundle)"
+        )
+        expect(shared).to_contain(
+            "msvc_config.libs = native_msvc_configured_libraries("
+        )
+        expect(shared).to_contain(
+            "val selected_runtime_libs = native_msvc_runtime_selection("
+        )
+        expect(shared).to_contain(
+            "msvc_config.libs = native_msvc_runtime_libraries("
+        )
+        expect(shared.contains('if lib.ends_with(".lib")')).to_equal(false)
+        expect(shared.contains('msvc_config.libs.push("simple_compiler.lib")')).to_equal(false)
+        expect(shared.contains("sb.push(\" -L{runtime_dir} -lsimple_compiler\")")).to_equal(false)
+        expect(shared.contains("sb.push(\" -Wl,-rpath,{runtime_dir}\")")).to_equal(false)
 
     it "carries runtime authority explicitly through the active AOT link options":
         val options = NativeLinkOptions(
-            target_triple: "x86_64-unknown-linux-gnu",
             debug: false,
             verbose: false,
             pie: true,
