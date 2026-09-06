@@ -120,7 +120,11 @@ run_one() {
     _id=$1
     _rf="$RES/$_id"
     [ -f "$_rf" ] && return 0
-    _line=$(grep -F "|$_id|" "$PLAN" | head -1)
+    # Prefer a RUN* row: 13 ids carry BOTH a superseded `|id|MANUAL-NONE|` line
+    # and a later `|id|RUN-DERIVED-SHS|` line, and a bare `|id|` grep would find
+    # the MANUAL one first and silently record `not-run`.
+    _line=$(grep -F "|$_id|RUN" "$PLAN" | head -1)
+    [ -z "$_line" ] && _line=$(grep -F "|$_id|" "$PLAN" | head -1)
     if [ -z "$_line" ]; then
         echo "$_id|ERROR|-|no plan row|-" > "$_rf"
         return 0
@@ -190,9 +194,42 @@ case "$cmd" in
     run_one "$2"
     ;;
   run)
-    grep -E '\|RUN(-DERIVED)?\|' "$PLAN" | cut -d'|' -f2 \
+    grep -E '\|RUN(-DERIVED(-SHS)?)?\|' "$PLAN" | cut -d'|' -f2 | sort -u \
       | xargs -P "$JOBS" -n1 -I{} sh "$0" one {}
     echo "results: $(ls -1 "$RES" | wc -l)"
+    ;;
+  jit-one)
+    # Second lane. MEASURED: under `bin/simple test` a spec body sees
+    # exec_mode=interpret; under `bin/simple run` it sees exec_mode unset, i.e.
+    # the seed's default JIT lane. So a codegen-class row that only ever ran
+    # under `test` was never exercised in the lane its defect lives in.
+    _id=$2
+    _rf="$OUT/res_jit/$_id"
+    mkdir -p "$OUT/res_jit"
+    [ -f "$_rf" ] && exit 0
+    _line=$(grep -F "|$_id|RUN" "$PLAN" | head -1)
+    _repro=$(echo "$_line" | cut -d'|' -f4)
+    case "$_repro" in
+        *.spl) ;;
+        *) echo "$_id|JIT|-|not a .spl repro|-" > "$_rf"; exit 0 ;;
+    esac
+    _lg="$LOG/$_id.jit.log"
+    ( cd "$ROOT" && timeout "$TIMEOUT_S" "$ROOT/bin/simple" run "$_repro" ) > "$_lg" 2>&1
+    _rc=$?
+    _v=$(grep -m1 'SPEC FILE VERDICT:' "$_lg" 2>/dev/null)
+    [ -z "$_v" ] && _v=$(tail -3 "$_lg" 2>/dev/null | tr '\n' ' ' | cut -c1-220)
+    [ -z "$_v" ] && _v="(no output)"
+    _v=$(printf '%s' "$_v" | tr -d '\r' | sed 's/\x1b\[[0-9;]*m//g' | tr '|' '/' | cut -c1-260)
+    echo "$_id|JIT|$_rc|$_v|jit-lane" > "$_rf"
+    ;;
+  jit)
+    # Re-run the codegen-lane rows in the JIT lane. `stage-lane` rows are NOT
+    # included: they need a deployed self-hosted binary, which this host lacks,
+    # so no lane available here can certify them.
+    sh "$ROOT/scripts/check/stale-status-classify.shs" \
+      | awk -F'|' '$3=="LANE-SUSPECT" && $7 ~ /codegen/ {print $2}' \
+      | sort -u | xargs -P "$JOBS" -I{} sh "$0" jit-one {}
+    echo "jit results: $(ls -1 "$OUT/res_jit" 2>/dev/null | wc -l)"
     ;;
   report)
     for f in "$RES"/*; do
