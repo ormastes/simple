@@ -15,6 +15,7 @@ use compiler.borrow.borrow_check.nll.{NLLError, nllerror_format_related}
 use compiler.core.interpreter.hashmap.{hm_hash_text}
 use compiler.traits.trait_coherence.{CoherenceError}
 use compiler.traits.trait_validation.{TraitError}
+use std.nogc_sync_mut.io.process_ops.{eprint}
 
 @unsafe(reason: "raw source-file read; empty text is the unreadable or empty sentinel", capabilities: [ffi])
 extern fn rt_file_read_text(path: text) -> text
@@ -51,6 +52,8 @@ fn _driver_source_trace_enabled() -> bool:
 # phase has been.
 var _g_closure_timing_enabled: bool = false
 var _g_closure_timing_set: bool = false
+var _g_closure_scan_phase_trace_enabled: bool = false
+var _g_closure_scan_phase_trace_set: bool = false
 var _g_closure_ms_imports: i64 = 0
 var _g_closure_ms_resolve: i64 = 0
 var _g_closure_ms_collect: i64 = 0
@@ -75,6 +78,25 @@ fn _driver_closure_timing_enabled() -> bool:
         _g_closure_timing_enabled = trace == "1"
         _g_closure_timing_set = true
     _g_closure_timing_enabled
+
+fn _driver_closure_scan_phase_trace_enabled() -> bool:
+    """Whether the per-node closure scan boundary trace is enabled.
+
+    This is intentionally separate from SIMPLE_NATIVE_BUILD_TRACE_CLOSURE_TIMING:
+    timing emits only after a node returns, whereas this trace has start markers
+    that survive a timeout in the middle of one physical source scan."""
+    if not _g_closure_scan_phase_trace_set:
+        var trace = ""
+        unsafe(capabilities: [ffi]):
+            trace = rt_env_get("SIMPLE_NATIVE_BUILD_TRACE_CLOSURE_SCAN_PHASES") ?? ""
+        _g_closure_scan_phase_trace_enabled = trace == "1"
+        _g_closure_scan_phase_trace_set = true
+    _g_closure_scan_phase_trace_enabled
+
+pub fn driver_closure_scan_phase_trace(phase: text, path: text):
+    """Emit one opt-in, real-stderr closure boundary marker."""
+    if _driver_closure_scan_phase_trace_enabled():
+        eprint("[closure-scan] phase={phase} path={path}")
 
 pub fn driver_closure_timing_report() -> text:
     """Cumulative entry-closure sub-step costs (perf probe; empty when unused)."""
@@ -494,22 +516,53 @@ fn _driver_import_path_is_valid(path_text: text) -> bool:
 fn _driver_line_end(content: text, start: i64) -> i64:
     """Return the exclusive end of one source line without splitting the file.
 
-    Entry-closure discovery retains the canonical source text for later parse
-    phases. `content.split("\n")` therefore created a second, source-sized
-    array plus one text object per line at the peak of closure discovery. This
-    bounded cursor keeps only the current line live."""
-    # char_code_at is CHARACTER-indexed (it decodes UTF-8 --
-    # runtime_native.c:2882), while text.len() and slicing are BYTE-based. Mixing
-    # them desynchronizes at the first multi-byte character, so every line after
-    # it was sliced from the wrong offsets and silently dropped. Measured on the
-    # Stage-3 closure: 90 of 91 files that lost imports contained non-ASCII, and
-    # 248 of 249 pure-ASCII files were complete. byte_at is the byte-indexed
-    # accessor that pairs with len(). See
-    # doc/08_tracking/bug/stage3_closure_omits_definition_owner_modules_2026-09-01.md
-    var end = start
-    while end < content.len() and content.byte_at(end) != 10:
-        end = end + 1
-    end
+    `text.index_of` is a runtime text primitive. Keeping the cursor in that
+    primitive avoids a Simple-level `char_code_at` call for every byte of every
+    closure source line, while still retaining just the current range rather
+    than allocating `split("\n")`'s source-sized array."""
+    content.index_of("\n", start) ?? content.len()
+
+fn _driver_text_range_starts_with(content: text, start: i64, end: i64, prefix: text) -> bool:
+    """Allocation-free prefix check for one source-line range."""
+    if start + prefix.len() > end:
+        return false
+    var i: i64 = 0
+    while i < prefix.len():
+        if content.byte_at(start + i) != prefix.byte_at(i):
+            return false
+        i = i + 1
+    true
+
+fn _driver_entry_import_line_needs_materialization(content: text, start: i64, end: i64, in_doc: bool, has_triple_quote: bool) -> bool:
+    """Whether an import-scan line needs the allocating comment/docstring path.
+
+    Most closure lines are ordinary declarations. Scan their bytes in place so
+    the fallback does not allocate a source-sized substring and trimmed copy for
+    every one. A triple quote anywhere keeps the full path: comments can hide a
+    quote, and only that path owns the established docstring semantics. The
+    caller finds triple quotes with a single forward text cursor instead of
+    rescanning every line byte-by-byte."""
+    if in_doc:
+        return true
+    if has_triple_quote:
+        return true
+    var first = start
+    while first < end:
+        val code = content.byte_at(first)
+        if code == 32 or code == 9 or code == 13:
+            first = first + 1
+            continue
+        break
+    if first >= end:
+        return false
+    # Defer non-ASCII-leading whitespace/text to trim(), retaining its existing
+    # Unicode behaviour without placing it on the ASCII source hot path.
+    if content.byte_at(first) > 127:
+        return true
+    (_driver_text_range_starts_with(content, first, end, "use ") or
+        _driver_text_range_starts_with(content, first, end, "pub use ") or
+        _driver_text_range_starts_with(content, first, end, "export use ") or
+        _driver_text_range_starts_with(content, first, end, "import "))
 
 fn _driver_entry_import_module_paths_text_fallback(content: text) -> [text]:
     # Whole-content early-out, mirroring the `mod `/`export ` gate in
@@ -520,25 +573,28 @@ fn _driver_entry_import_module_paths_text_fallback(content: text) -> [text]:
     var result: [text] = []
     var in_doc = false
     var line_start: i64 = 0
+    # Keep the next docstring delimiter in a forward-only runtime-text search.
+    # Formula sources have thousands of ordinary lines; doing a Simple-level
+    # triple-quote byte scan on every one made closure discovery quadratic in
+    # dispatch overhead even though only the delimiter-bearing lines need the
+    # established allocating/docstring path.
+    var next_triple_quote = content.index_of("\"\"\"", 0) ?? -1
     while line_start < content.len():
-        val line_end = _driver_line_end(content, line_start)
-        val raw_line = content[line_start:line_end]
+        val current_start = line_start
+        val line_end = _driver_line_end(content, current_start)
+        val has_triple_quote = next_triple_quote >= current_start and next_triple_quote < line_end
         # Advance before every fast-path continue.
+        val materialize_line = _driver_entry_import_line_needs_materialization(
+            content, current_start, line_end, in_doc, has_triple_quote)
         line_start = line_end + 1
-        # PERF (2026-08-21): fast reject before any comment/docstring work.
-        # This body runs over every line of every file in the entry closure and
-        # measured 46.7 ms per call -- 56.5 s of a 91 s `[build] source_closure`
-        # phase, the single largest non-parse cost in a native build. Outside a
-        # docstring the ONLY lines that can contribute are ones whose trimmed
-        # form starts with a use/import keyword: comment stripping removes a
-        # TRAILING part, so it can never turn a non-keyword line into one, and a
-        # line that starts with `#` strips to empty. Every other line still needs
-        # its triple-quote count, which is what the `contains` below preserves.
-        val quick = raw_line.trim()
-        if not in_doc and not quick.contains("\"\"\""):
-            if not (quick.starts_with("use ") or quick.starts_with("pub use ") or
-                    quick.starts_with("export use ") or quick.starts_with("import ")):
-                continue
+        if has_triple_quote:
+            next_triple_quote = content.index_of("\"\"\"", line_start) ?? -1
+        # PERF: keep ordinary lines allocation-free. The predicate scans for a
+        # triple quote before rejecting so commented/docstring quote semantics
+        # remain on the established slow path.
+        if not materialize_line:
+            continue
+        val raw_line = content[current_start:line_end]
         var scan_line = raw_line
         if not in_doc:
             val comment_at = _driver_text_index_of(scan_line, "#")
@@ -650,24 +706,33 @@ pub fn _driver_entry_import_module_paths(content: text) -> [text]:
 
 pub fn _driver_cached_entry_source_scan(path: text) -> (text, [text], [text], bool):
     """Read and scan one physical source at most once during build phase 1."""
+    driver_closure_scan_phase_trace("cached_scan:start", path)
     val key = _driver_physical_source_key(path)
     if _g_entry_scan_content_by_path.contains_key(key):
         _g_entry_scan_hit_count = _g_entry_scan_hit_count + 1
+        driver_closure_scan_phase_trace("cached_scan:hit", path)
         return (
             _g_entry_scan_content_by_path[key],
             _g_entry_scan_imports_by_path[key],
             _g_entry_scan_siblings_by_path[key],
             true)
     var content = ""
+    driver_closure_scan_phase_trace("read:start", path)
     unsafe(capabilities: [ffi]):
         content = rt_file_read_text(path) ?? ""
     _g_entry_scan_read_count = _g_entry_scan_read_count + 1
+    driver_closure_scan_phase_trace("read:done", path)
+    driver_closure_scan_phase_trace("imports:start", path)
     val imports = _driver_entry_import_module_paths(content)
+    driver_closure_scan_phase_trace("imports:done", path)
+    driver_closure_scan_phase_trace("siblings:start", path)
     val siblings = _driver_entry_sibling_module_paths(content)
+    driver_closure_scan_phase_trace("siblings:done", path)
     _g_entry_scan_scan_count = _g_entry_scan_scan_count + 1
     _g_entry_scan_content_by_path[key] = content
     _g_entry_scan_imports_by_path[key] = imports
     _g_entry_scan_siblings_by_path[key] = siblings
+    driver_closure_scan_phase_trace("cached_scan:done", path)
     (content, imports, siblings, false)
 
 fn _driver_entry_sibling_path(line: text) -> text:
@@ -1132,8 +1197,12 @@ pub fn _driver_resolve_entry_import(module_path: text, entry_dir: text) -> text:
     Exact modules are preferred. Dotted terminal names are then removed one at
     a time because Simple permits `use module.function` as a glob-style import
     of the containing source module."""
+    val trace_path = "{module_path} from={entry_dir}"
+    driver_closure_scan_phase_trace("resolve:start", trace_path)
     if not _driver_closure_timing_enabled():
-        return _driver_resolve_entry_import_untimed(module_path, entry_dir)
+        val out = _driver_resolve_entry_import_untimed(module_path, entry_dir)
+        driver_closure_scan_phase_trace("resolve:done", trace_path)
+        return out
     var t0: i64 = -1
     unsafe(capabilities: [ffi]):
         t0 = rt_time_now_monotonic_ms()
@@ -1144,6 +1213,7 @@ pub fn _driver_resolve_entry_import(module_path: text, entry_dir: text) -> text:
     if t0 >= 0 and t1 >= t0:
         _g_closure_ms_resolve = _g_closure_ms_resolve + (t1 - t0)
     _g_closure_n_resolve = _g_closure_n_resolve + 1
+    driver_closure_scan_phase_trace("resolve:done", trace_path)
     out
 
 fn _driver_resolve_entry_import_untimed(module_path: text, entry_dir: text) -> text:
