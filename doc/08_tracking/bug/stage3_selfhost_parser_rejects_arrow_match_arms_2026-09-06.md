@@ -185,8 +185,21 @@ AFTER — Stage 2 built from THIS source, sha256
 
 And on the file that actually blocked Stage 3 —
 `compile --format=smf src/compiler/80.driver/driver_source_pipeline_parsing.spl`,
-which pulls the whole compiler closure: **zero `[parser_error]` lines**, the run
-proceeds past parse into HIR lowering. The parse blocker is gone.
+which pulls the whole compiler closure: **zero `[parser_error]` lines** across
+the entire closure. The parse blocker is gone.
+
+That invocation then ended at
+
+```
+error: in-process SMF compile: HIR lowering error in
+src/compiler/frontend/core/lexer.spl: invalid export origin `compiler...`
+```
+
+— **stated for completeness, and explicitly NOT claimed as the next Stage-3
+blocker.** It is an isolated single-file `compile` of one compiler module, not a
+Stage-3 whole-tree build, and single-file compiles of compiler modules do not
+resolve export origins the way a whole-tree build does. The bootstrap's real
+next blocker is the Stage-2 sanity failure below.
 
 ## Next blocker after this one (Stage 2 sanity, NOT parse, NOT SDL2)
 
@@ -205,6 +218,19 @@ The smoke's own trace shows `parse`, `hir`, `monomorphize`, `mir`, `aop_weave`
 and `native_cache` all **complete**; the failure is the native-capsule
 source-mutation check at `native_compile`. That is a different defect from both
 this record and the SDL2 one and is not investigated here.
+
+One observation, not a diagnosis. The emitter is
+`driver_native_collect_capsule_result_v1`
+(`src/compiler/80.driver/driver_aot_native_output.spl:455-462`) and it has TWO
+triggers: the on-disk source identity differing from the one recorded at parse,
+**or `capsule.source_identity` being empty**. The fixture here
+(`scripts/check/cert/redeploy_gate/fixtures/hello_world.spl`) is a tracked file
+in an isolated worktree that nothing mutated during the run, which points at the
+empty-identity branch rather than a real mutation — but that was not confirmed,
+and the run used a non-default `--output=build/bootstrap-arrow` with
+`SIMPLE_CACHE_SCOPE=arrow-arm-lane`, so a lane-isolation artifact is not ruled
+out either. Whoever picks this up should start by instrumenting which of the two
+branches fires.
 
 Note the wrapper's final line is `UNDIAGNOSABLE: the stage failed with no error
 message of any kind.` — it is wrong, and it points at the wrong log. The real
