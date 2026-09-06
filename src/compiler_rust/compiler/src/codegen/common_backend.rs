@@ -46,6 +46,43 @@ pub enum BackendError {
 
 pub type BackendResult<T> = Result<T, BackendError>;
 
+/// Generated module initialization is normally silent.  This gate is opt-in
+/// because a compiler-scale module can have thousands of runtime-backed
+/// initializers.
+fn module_init_trace_enabled_for(value: Option<&str>) -> bool {
+    value.is_some_and(|value| value != "0")
+}
+
+fn module_init_trace_enabled() -> bool {
+    module_init_trace_enabled_for(std::env::var("SIMPLE_JIT_MODULE_INIT_TRACE").ok().as_deref())
+}
+
+fn emit_module_init_trace<M: Module>(
+    module: &mut M,
+    builder: &mut cranelift_frontend::FunctionBuilder,
+    trace_id: cranelift_module::FuncId,
+    index: usize,
+    label: &str,
+) -> BackendResult<()> {
+    let message = format!("[jit-module-init] before index={index} {label}\n");
+    let data_name = format!(".Ljit_module_init_trace_{index:06}");
+    let data_id = module
+        .declare_data(&data_name, Linkage::Local, false, false)
+        .map_err(|error| BackendError::ModuleError(format!("declare module-init trace data: {error}")))?;
+    let message_len = message.len() as i64;
+    let mut data = cranelift_module::DataDescription::new();
+    data.define(message.into_bytes().into_boxed_slice());
+    module
+        .define_data(data_id, &data)
+        .map_err(|error| BackendError::ModuleError(format!("define module-init trace data: {error}")))?;
+    let data_ref = module.declare_data_in_func(data_id, builder.func);
+    let pointer = builder.ins().global_value(types::I64, data_ref);
+    let length = builder.ins().iconst(types::I64, message_len);
+    let trace_ref = module.declare_func_in_func(trace_id, builder.func);
+    builder.ins().call(trace_ref, &[pointer, length]);
+    Ok(())
+}
+
 pub(crate) fn referenced_call_names(functions: &[MirFunction]) -> HashSet<String> {
     let mut names = HashSet::new();
     for func in functions {
@@ -976,8 +1013,19 @@ impl BackendSettings {
     /// `ObjectModule`, not `JITModule`, and never touches the PLT writer.
     pub fn jit() -> Self {
         // PLT entries needed by is_pic=true are only implemented for x86_64
-        // in cranelift-jit (vendor/cranelift-jit/src/backend.rs:297).
-        // On aarch64/riscv/etc., disable PIC so the assert never fires.
+        // in cranelift-jit (vendor/cranelift-jit/src/backend.rs:296,
+        // "PLT is currently only supported on x86_64").
+        //
+        // This does NOT make non-x86_64 safe — it picks which assert you get.
+        // With is_pic=false the aarch64 call path is a direct BL
+        // (Reloc::Aarch64Call), whose 26-bit signed word immediate reaches only
+        // +/-128 MB; when the JIT's allocations land further apart than that,
+        // vendor/cranelift-jit/src/compiled_blob.rs:90 asserts
+        // `(diff >> 26 == -1) || (diff >> 26 == 0)` and the process aborts.
+        // Reproduced deterministically 2026-09-06; see
+        // doc/08_tracking/bug/jit_aarch64_branch_relocation_out_of_range_abort_2026-09-05.md
+        // for the reproducer and the aarch64 PLT stub that would let is_pic be
+        // true here.
         let is_pic = cfg!(target_arch = "x86_64");
         Self {
             opt_level: "speed",
@@ -2077,13 +2125,18 @@ impl<M: Module> CodegenBackend<M> {
         if native_trace {
             eprintln!("[rust-jit] compile_all references start functions={}", functions.len());
         }
-        let referenced_names = referenced_call_names(&functions);
+        let mut referenced_names = referenced_call_names(&functions);
+        if module_init_trace_enabled() {
+            // The generated trace runs from __module_init rather than a MIR
+            // body, so its stderr provider must be declared explicitly.
+            referenced_names.insert("rt_eprintln_str".to_string());
+        }
         let locally_defined_names: HashSet<String> = functions
             .iter()
             .filter(|func| !func.blocks.is_empty())
             .map(|func| func.name.clone())
             .collect();
-        if !Self::can_omit_runtime_imports(mir, &functions) {
+        if !Self::can_omit_runtime_imports(mir, &functions) || module_init_trace_enabled() {
             if native_trace {
                 eprintln!(
                     "[rust-jit] compile_all runtime declarations start referenced={}",
@@ -2394,6 +2447,15 @@ impl<M: Module> CodegenBackend<M> {
         }
 
         let init_name = module_init_symbol(self.module_prefix.as_deref());
+        let module_init_trace_id = if module_init_trace_enabled() {
+            Some(
+                *self.runtime_funcs.get("rt_eprintln_str").ok_or_else(|| {
+                    BackendError::ModuleError("rt_eprintln_str not declared for module-init trace".into())
+                })?,
+            )
+        } else {
+            None
+        };
 
         // Declare the init function: fn() -> void
         let call_conv = super::shared::platform_call_conv();
@@ -2476,7 +2538,13 @@ impl<M: Module> CodegenBackend<M> {
         } else {
             None
         };
-        let alloc_id = if init_functions.is_empty() {
+        // Both function-valued globals and struct-literal globals allocate
+        // ordinary heap storage.  Keep them on the same `rt_alloc` ABI as
+        // MirInst::StructInit: `rt_struct_alloc` maintains the optional
+        // receiver-validation registry and is not a constructor primitive.
+        // Module init stores the same raw aggregate representation used by
+        // ordinary struct initialization.
+        let alloc_id = if init_functions.is_empty() && init_structs.is_empty() {
             None
         } else {
             Some(
@@ -2484,16 +2552,6 @@ impl<M: Module> CodegenBackend<M> {
                     .runtime_funcs
                     .get("rt_alloc")
                     .ok_or_else(|| BackendError::ModuleError("rt_alloc not declared".into()))?,
-            )
-        };
-        let struct_alloc_id = if init_structs.is_empty() {
-            None
-        } else {
-            Some(
-                *self
-                    .runtime_funcs
-                    .get("rt_struct_alloc")
-                    .ok_or_else(|| BackendError::ModuleError("rt_struct_alloc not declared".into()))?,
             )
         };
 
@@ -2506,12 +2564,28 @@ impl<M: Module> CodegenBackend<M> {
         let entry_block = builder.create_block();
         builder.switch_to_block(entry_block);
         builder.seal_block(entry_block);
+        let mut module_init_trace_index = 0usize;
+        macro_rules! trace_module_init {
+            ($label:expr) => {
+                if let Some(trace_id) = module_init_trace_id {
+                    emit_module_init_trace(
+                        &mut self.module,
+                        &mut builder,
+                        trace_id,
+                        module_init_trace_index,
+                        &$label,
+                    )?;
+                    module_init_trace_index += 1;
+                }
+            };
+        }
 
         // Sort by name for deterministic output
         let mut sorted_strings: Vec<_> = init_strings.iter().collect();
         sorted_strings.sort_by_key(|(name, _)| (*name).clone());
 
         for (global_name, string_val) in &sorted_strings {
+            trace_module_init!(format!("string:{global_name}"));
             // 1. Create static byte data for the string
             let bytes = string_val.as_bytes();
             let data_name = format!(".Linit_str_{:016x}", {
@@ -2570,6 +2644,7 @@ impl<M: Module> CodegenBackend<M> {
         let mut sorted_arrays: Vec<_> = init_arrays.iter().collect();
         sorted_arrays.sort_by_key(|(name, _)| (*name).clone());
         for (global_name, init) in &sorted_arrays {
+            trace_module_init!(format!("array:{global_name}"));
             // All-zero initializers ([0; N]) get a compact fill loop instead of
             // N unrolled push calls (code size O(1) instead of O(N)).
             let all_zero =
@@ -2688,6 +2763,7 @@ impl<M: Module> CodegenBackend<M> {
         let mut sorted_functions: Vec<_> = init_functions.iter().collect();
         sorted_functions.sort_by_key(|(name, _)| (*name).clone());
         for (global_name, func_name) in &sorted_functions {
+            trace_module_init!(format!("function:{global_name}"));
             let func_id = self
                 .func_ids
                 .get(func_name.as_str())
@@ -2733,14 +2809,15 @@ impl<M: Module> CodegenBackend<M> {
             }
         }
 
-        // Struct-literal globals: rt_struct_alloc(n*8) + sequential field stores.
+        // Struct-literal globals: rt_alloc(n*8) + sequential field stores.
         // Field representation matches compile_struct_init: ints/bools raw,
         // nil tagged 3, strings rt_string_new handles, arrays rt_array_new
         // handles; the struct value itself is the registered raw allocation pointer.
         let mut sorted_structs: Vec<_> = init_structs.iter().collect();
         sorted_structs.sort_by_key(|(name, _)| (*name).clone());
         for (global_name, init) in &sorted_structs {
-            let alloc_ref = self.module.declare_func_in_func(struct_alloc_id.unwrap(), builder.func);
+            trace_module_init!(format!("struct:{global_name}"));
+            let alloc_ref = self.module.declare_func_in_func(alloc_id.unwrap(), builder.func);
             let size = (init.fields.len().max(1) * 8) as i64;
             let size_val = builder.ins().iconst(types::I64, size);
             let call_inst = builder.ins().call(alloc_ref, &[size_val]);
@@ -2815,6 +2892,12 @@ impl<M: Module> CodegenBackend<M> {
         // already declared/compiled as an ordinary function above, so this is
         // just an inter-function call, identical to any other call site here.
         for dyn_func_id in dynamic_init_func_ids {
+            let dynamic_name = self
+                .func_ids
+                .iter()
+                .find_map(|(name, id)| (*id == *dyn_func_id).then_some(name.as_str()))
+                .unwrap_or("<unknown>");
+            trace_module_init!(format!("dynamic:{dynamic_name}"));
             let dyn_func_ref = self.module.declare_func_in_func(*dyn_func_id, builder.func);
             builder.ins().call(dyn_func_ref, &[]);
         }
@@ -3448,5 +3531,12 @@ mod tests {
             "first struct registered under a colliding TypeId must keep the slot; the whole-program \
              map must not let a later unrelated struct's impl silently alias it"
         );
+    }
+
+    #[test]
+    fn module_init_trace_gate_is_opt_in() {
+        assert!(!module_init_trace_enabled_for(None));
+        assert!(!module_init_trace_enabled_for(Some("0")));
+        assert!(module_init_trace_enabled_for(Some("1")));
     }
 }

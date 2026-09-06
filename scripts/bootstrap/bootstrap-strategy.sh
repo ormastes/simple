@@ -394,10 +394,20 @@ if [ "$qualification_status" = passed ] &&
         "$qualification_admission" 2>/dev/null || true)
     admission_receiver=$(bootstrap_scheduler_manifest_value receiver_evidence_path \
         "$qualification_admission" 2>/dev/null || true)
+    admission_root=$(dirname -- "$(dirname -- "$qualification_admission")")
+    qualification_candidate=$admission_root/stage2-admitted/simple
+    admission_source=$admission_root/source-inputs-before.txt
+    admission_runtime=$admission_root/runtime-admitted.txt
+    admission_tool=$admission_root/tool-authority-before.txt
+    admission_sanity=$admission_root/stage2-sanity.env
+    admission_receiver=$admission_root/stage2-receiver.env
     if bootstrap_stage3_verify_stage2_admission_receipt \
-        "$qualification_admission" "$qualification_candidate" \
-        "$admission_source" "$admission_runtime" "$admission_tool" \
-        "$admission_args" "$admission_sanity" "$admission_receiver" "$root"; then
+        "$qualification_admission" "$qualification_admission" "$qualification_candidate" "$qualification_candidate" \
+        "$admission_source" "$admission_source" "$admission_runtime" "$admission_runtime" \
+        "$admission_root/stage2-runtime-authority" "$admission_root/stage2-runtime-authority" \
+        "$admission_tool" "$admission_tool" "$admission_args" "$admission_sanity" "$admission_sanity" \
+        "$(dirname -- "$admission_sanity")" "$admission_receiver" "$admission_receiver" \
+        "$(dirname -- "$admission_receiver")/stage2-receiver.log" "$(dirname -- "$admission_receiver")/stage2-receiver.log" "$root"; then
         qualification_evidence_status=verified
     fi
 fi
@@ -428,8 +438,9 @@ if [ "$stage3_manifest_count" -eq 1 ]; then
     if [ "$qualification_evidence_status" = verified ] &&
        [ "$manifest_admission" = "$qualification_admission" ] &&
        [ "$manifest_admission_sha" = "$qualification_admission_sha" ] &&
-       bootstrap_stage3_verify_manifest "$stage3_manifest" "$root" \
-           "$stage3_candidate"; then
+       bootstrap_stage3_verify_manifest "$stage3_manifest" "$stage3_manifest" \
+           "$root" "$stage3_candidate" "$stage3_candidate" \
+           "${stage3_manifest}.authority-map.env"; then
         stage3_tmp="$stage3_result.tmp.$$"
         {
             echo schema=simple-bootstrap-stage3-scheduler-result-v1
@@ -763,11 +774,15 @@ if [ "$wants_full_cli" -eq 1 ]; then
         "$qualification_result" "$stage3_result" \
         "$generation_dir/stage4.result.env" &&
        bootstrap_stage3_verify_stage2_admission_receipt \
-        "$qualification_admission" "$qualification_candidate" \
-        "$admission_source" "$admission_runtime" "$admission_tool" \
-        "$admission_args" "$admission_sanity" "$admission_receiver" "$root" &&
-       bootstrap_stage3_verify_manifest "$stage3_manifest" "$root" \
-        "$stage3_candidate"; then
+        "$qualification_admission" "$qualification_admission" "$qualification_candidate" "$qualification_candidate" \
+        "$admission_source" "$admission_source" "$admission_runtime" "$admission_runtime" \
+        "$admission_root/stage2-runtime-authority" "$admission_root/stage2-runtime-authority" \
+        "$admission_tool" "$admission_tool" "$admission_args" "$admission_sanity" "$admission_sanity" \
+        "$(dirname -- "$admission_sanity")" "$admission_receiver" "$admission_receiver" \
+        "$(dirname -- "$admission_receiver")/stage2-receiver.log" "$(dirname -- "$admission_receiver")/stage2-receiver.log" "$root" &&
+       bootstrap_stage3_verify_manifest "$stage3_manifest" "$stage3_manifest" \
+        "$root" "$stage3_candidate" "$stage3_candidate" \
+        "${stage3_manifest}.authority-map.env"; then
         promotion_barrier_status=verified
     fi
     if [ "$promotion_barrier_status" != verified ]; then

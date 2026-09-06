@@ -99,19 +99,56 @@ fi
 mkdir -p "$OUT_DIR"
 
 c_status=skipped; c_reason=not-attempted; c_fps=0; c_bin="$OUT_DIR/vk2d_bench"
-ICD=${VK_ICD_FILENAMES:-/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json}
+# Vulkan include dir and ICD are DISCOVERED, not assumed. This gate used to
+# hardcode Homebrew's /opt/homebrew paths and a MoltenVK ICD, so on Linux the C
+# leg always reported `no-vulkan-headers` and the Simple leg then reported
+# `c-leg-skipped` -- i.e. this comparison had never once run off macOS, and the
+# Simple-vs-C 2D gap it exists to measure was silently never measured.
+# $VULKAN_INCLUDE_DIR / $VK_ICD_FILENAMES still win when set.
+vk_inc=""
+for cand in ${VULKAN_INCLUDE_DIR:-} ${VULKAN_SDK:+$VULKAN_SDK/include} \
+            /opt/homebrew/include "$HOME/.local/include" /usr/local/include /usr/include; do
+    [ -n "$cand" ] && [ -f "$cand/vulkan/vulkan.h" ] && { vk_inc="$cand"; break; }
+done
+# Find the directory that actually CONTAINS a libvulkan, not merely the first
+# directory that exists. Prefer the linker-friendly unversioned .so; fall back
+# to the versioned soname, which is all a host without the -dev package has
+# (this box: libvulkan.so.1 present, libvulkan.so absent -> `mold: library not
+# found: vulkan`).
+vk_libdir=""; vk_link="-lvulkan"
+for cand in ${VULKAN_LIB_DIR:-} ${VULKAN_SDK:+$VULKAN_SDK/lib} /opt/homebrew/lib \
+            "$HOME/.local/lib" /usr/local/lib /lib/"$(uname -m)"-linux-gnu /usr/lib; do
+    [ -n "$cand" ] || continue
+    if [ -f "$cand/libvulkan.so" ] || [ -f "$cand/libvulkan.dylib" ]; then
+        vk_libdir="$cand"; vk_link="-lvulkan"; break
+    fi
+    soname=$(ls "$cand"/libvulkan.so.1 2>/dev/null | head -1)
+    if [ -n "$soname" ]; then vk_libdir="$cand"; vk_link="$soname"; break; fi
+done
+ICD=${VK_ICD_FILENAMES:-}
+if [ -z "$ICD" ]; then
+    for cand in /opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json \
+                /usr/share/vulkan/icd.d/nvidia_icd.json \
+                /usr/share/vulkan/icd.d/lvp_icd.json; do
+        [ -f "$cand" ] && { ICD="$cand"; break; }
+    done
+fi
 if ! command -v clang >/dev/null 2>&1; then
     c_reason=no-clang
 elif ! command -v glslangValidator >/dev/null 2>&1; then
     c_reason=no-glslangValidator
-elif [ ! -f /opt/homebrew/include/vulkan/vulkan.h ]; then
+elif [ -z "$vk_inc" ]; then
     c_reason=no-vulkan-headers
-elif [ ! -f "$ICD" ]; then
+elif [ -z "$ICD" ] || [ ! -f "$ICD" ]; then
     c_reason=no-vulkan-icd
 else
     (cd "$OUT_DIR" && glslangValidator -V "$BENCH_DIR/rect.comp.glsl" -o rect.spv) &&
-    clang -std=c99 -O2 "$BENCH_DIR/vk2d_bench.c" \
-        -I/opt/homebrew/include -L/opt/homebrew/lib -lvulkan -o "$c_bin" ||
+    # _POSIX_C_SOURCE is required for clock_gettime/CLOCK_MONOTONIC/struct
+    # timespec: under -std=c99 glibc hides them behind the POSIX feature-test
+    # macro, while Darwin's headers expose them unconditionally -- so this
+    # compiled on macOS and broke on Linux the moment the headers were found.
+    clang -std=c99 -D_POSIX_C_SOURCE=199309L -O2 "$BENCH_DIR/vk2d_bench.c" \
+        -I"$vk_inc" ${vk_libdir:+-L"$vk_libdir"} $vk_link -o "$c_bin" ||
         fail "C reference build failed (toolchain present but compile broke)"
     c_out=$(cd "$OUT_DIR" && VK_ICD_FILENAMES="$ICD" ./vk2d_bench "$W" "$H" "$RECTS" "$FRAMES" 1 | tail -1)
     case $c_out in

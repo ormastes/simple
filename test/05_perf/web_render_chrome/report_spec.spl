@@ -179,6 +179,27 @@ fn synth_chrome_memory(fixture: text) -> f64:
         return 80.0
     48.0
 
+# A comparison is only as real as its WEAKER side. The Chrome runner already
+# produces genuinely measured rows (it launches headless Chrome and fail-closes
+# on the PNG), while the Simple runner is still synthetic because the renderer
+# library is not linked into it. Combining those two would otherwise yield a
+# ratio of a real number over a made-up one, reported as if it were measured.
+fn comparison_source(simple_source: text, chrome_source: text) -> text:
+    if simple_source == "measured" and chrome_source == "measured":
+        "measured"
+    else:
+        "synthetic"
+
+# Fail-closed: a ratio exists only when BOTH sides were measured. A mixed pair
+# yields 0.0, which classify_status reads as PENDING rather than as "fast".
+fn comparison_ratio(simple_source: text, chrome_source: text,
+                    simple_ms: f64, chrome_ms: f64) -> f64:
+    if comparison_source(simple_source, chrome_source) != "measured":
+        return 0.0
+    if chrome_ms <= 0.0 or simple_ms < 0.0:
+        return 0.0
+    simple_ms / chrome_ms
+
 fn classify_status(source: text, simple_ms: f64, ratio: f64, pixel_pct: f64) -> text:
     if source == "synthetic":
         return "PENDING"
@@ -213,9 +234,14 @@ fn build_row(fixture: text) -> ReportRow:
     row.chrome_dropped_frames = synth_chrome_dropped(fixture)
     row.chrome_gpu_raster_ms  = synth_chrome_gpu_raster(fixture)
     row.chrome_memory_mb      = synth_chrome_memory(fixture)
-    if row.chrome_frame_ms > 0.0:
-        row.simple_vs_chrome_ratio = row.simple_frame_ms / row.chrome_frame_ms
-    row.source = "synthetic"
+    # Both sides are synthesized in this builder today; naming them explicitly
+    # means wiring a real runner into either one cannot silently produce a
+    # "measured" ratio — comparison_source keeps demanding both.
+    val simple_source = "synthetic"
+    val chrome_source = "synthetic"
+    row.simple_vs_chrome_ratio = comparison_ratio(
+        simple_source, chrome_source, row.simple_frame_ms, row.chrome_frame_ms)
+    row.source = comparison_source(simple_source, chrome_source)
     row.status = classify_status(row.source, row.simple_frame_ms, row.simple_vs_chrome_ratio, row.pixel_match_pct)
     row
 
@@ -270,8 +296,12 @@ fn all_synthetic_are_pending(rows: [ReportRow]) -> bool:
     ok
 
 fn ratio_correct_for(row: ReportRow) -> bool:
+    # A row whose two sides were not both measured must carry NO ratio. The
+    # arithmetic identity is only asserted once a real comparison exists.
+    if row.source != "measured":
+        return row.simple_vs_chrome_ratio == 0.0
     if row.chrome_frame_ms == 0.0:
-        return true
+        return row.simple_vs_chrome_ratio == 0.0
     val expected = row.simple_frame_ms / row.chrome_frame_ms
     val diff = expected - row.simple_vs_chrome_ratio
     val abs_diff = if diff < 0.0 then -diff else diff
@@ -370,6 +400,41 @@ describe "Chrome vs Simple — Report Shape":
         val has_layout  = find_row(rows, "layout_stress").fixture == "layout_stress"
         val has_paint   = find_row(rows, "paint_heavy").fixture == "paint_heavy"
         expect(has_static and has_scroll and has_layout and has_paint).to_equal(true)
+
+describe "Chrome vs Simple — Comparison Honesty":
+    it "refuses a ratio unless BOTH sides were measured":
+        # @req REQ-SSPEC-PERF
+        step("Pair a measured Chrome timing with a synthetic Simple timing")
+        # This is the live hazard: the Chrome runner genuinely launches headless
+        # Chrome and fail-closes on the 4K PNG, so real chrome_*.json artifacts
+        # exist, while the Simple runner still synthesizes its timings because
+        # the renderer library is not linked into it.
+        expect(comparison_ratio("synthetic", "measured", 40.0, 20.0)).to_equal(0.0)
+        expect(comparison_ratio("measured", "synthetic", 40.0, 20.0)).to_equal(0.0)
+        expect(comparison_ratio("synthetic", "synthetic", 40.0, 20.0)).to_equal(0.0)
+        step("Both sides measured is the only case that yields a ratio")
+        expect(comparison_ratio("measured", "measured", 40.0, 20.0)).to_equal(2.0)
+
+    it "labels a mixed pair synthetic, never measured":
+        # @req REQ-SSPEC-PERF
+        step("A comparison is only as real as its weaker side")
+        expect(comparison_source("measured", "measured")).to_equal("measured")
+        expect(comparison_source("synthetic", "measured")).to_equal("synthetic")
+        expect(comparison_source("measured", "synthetic")).to_equal("synthetic")
+        expect(comparison_source("synthetic", "synthetic")).to_equal("synthetic")
+
+    it "reports a mixed pair as PENDING rather than PASS":
+        # @req REQ-SSPEC-PERF
+        step("A real-over-synthetic ratio must never reach a PASS or FAIL verdict")
+        val mixed = comparison_source("synthetic", "measured")
+        val ratio = comparison_ratio("synthetic", "measured", 8.0, 20.0)
+        expect(classify_status(mixed, 8.0, ratio, 99.0)).to_equal("PENDING")
+
+    it "guards a zero or negative Chrome timing":
+        # @req REQ-SSPEC-PERF
+        step("A measured pair with no usable Chrome timing still yields no ratio")
+        expect(comparison_ratio("measured", "measured", 40.0, 0.0)).to_equal(0.0)
+        expect(comparison_ratio("measured", "measured", -1.0, 20.0)).to_equal(0.0)
 
 describe "Chrome vs Simple — Threshold Math":
     it "ratio = simple_frame_ms / chrome_frame_ms for static_page":
