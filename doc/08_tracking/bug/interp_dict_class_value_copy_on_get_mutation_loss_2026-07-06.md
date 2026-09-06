@@ -62,3 +62,40 @@ so flipping the constructor without adding both arms plus an audit of every
 remaining `Value::Object` site would trade silent state loss for silent
 resolution failure. That is a semantics change with its own verification pass,
 not a bug fix to fold into an unrelated session.
+## Re-verification 2026-09-06 (bug-db closeout pass) — FIXED under JIT, STILL BROKEN under the interpreter
+
+A regression spec already exists for this exact bug:
+`test/01_unit/compiler/interpreter/dict_class_value_identity_spec.spl`. Ran it
+on this host's deployed seed:
+
+```
+✓ persists a mutation made through Dict.get without a manual write-back
+✓ persists a mutation made inside a callee through a dict-valued field
+✓ keeps identity through other container kinds, not just Dict.get
+✗ behaves identically on both engines and reports no failure
+    expected true to equal false
+Results: 4 total, 3 passed, 1 failed
+```
+
+The three JIT-mode checks (run under `SIMPLE_EXECUTION_MODE=jit`) all pass —
+`Dict.get()`/callee-field-dict/array-element identity are all fixed under
+JIT. The failing fourth example compares BOTH engines. Running the sibling
+probe directly under `SIMPLE_EXECUTION_MODE=interpreter`:
+
+```
+FAIL dict_get_mutate_int got=0 want=5
+PASS dict_get_mutate_text
+FAIL dict_text_key got=10 want=99
+FAIL callee_field_dict_hits got=0 want=2
+FAIL callee_field_dict_last got=none want=seen
+FAIL array_elem_identity got=1 want=42
+FAIL two_handles_alias got=0 want=77
+DICT_CLASS_IDENTITY PROBE: FAILURES=6
+```
+
+The tree-walk interpreter — the ORIGINAL reported lane, per this doc's title
+and its "Root cause direction" section — still reproduces the defect almost
+completely (6 of 7 checks fail). **Conclusion: PARTIALLY FIXED.** The
+production-relevant JIT path (`bin/simple run`, the default engine) is fixed;
+the interpreter path (what `bin/simple test` spec BODIES execute, and what
+this bug was originally filed against) is not.
