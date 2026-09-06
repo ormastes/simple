@@ -1,0 +1,154 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+# @cover src/compiler/50.mir/mir_lowering_stmts.spl 5%
+#
+# PURE-SIMPLE condition lowering — presence rewrite for nil-shaped conditions.
+#
+# Bug: doc/08_tracking/bug/jit_if_nil_takes_true_branch_2026-08-04.md
+#
+# WHAT LANE THIS COVERS, precisely. This spec inspects the MIR that the
+# PURE-SIMPLE compiler (`src/compiler/50.mir/**`) EMITS for a condition. It
+# calls `MirLowering.lower_cond_expr` in process and reads back
+# `MirLowering.builder.instructions`. It does NOT execute the emitted MIR, and
+# it deliberately does NOT shell out to `bin/simple run` — that binary is the
+# Rust seed, whose own Cranelift/interpreter engines are a different
+# implementation, and the test runner exports SIMPLE_EXECUTION_MODE=interpret
+# which children inherit, so a subprocess probe would prove nothing about this
+# code. The defect here IS the emitted MIR, so the emitted MIR is the oracle.
+#
+# THE DEFECT. `lower_cond_expr` rewrites a condition to the `rt_is_some`
+# presence predicate only when the lowered value is a LOCAL carrying a
+# REGISTERED HIR type of kind Optional. Two condition shapes never register
+# one and so branched on the raw runtime nil sentinel RT_NIL = 3, which is
+# NON-ZERO and therefore unconditionally TRUE:
+#   1. a bare `nil` literal (HirExprKind.NilLit, `has_type_ = false`);
+#   2. a call whose declared return type is `T?` used directly as a condition
+#      (the emit_call result temp is registered under no HIR type).
+# Measured before the fix, in this exact harness:
+#   A_bare_nil: calls=[]                       <- no presence test emitted
+#   B_call_returning_opt: calls=[get_opt]      <- no presence test emitted
+#   C_bool_literal_control: calls=[]           <- correct, must stay correct
+#
+# CANONICAL SEMANTICS pinned here, matching
+# `test/01_unit/compiler/codegen/condition_tag_decode_spec.spl`: `if x:` on an
+# optional-shaped `x` means PRESENCE — "x is not nil" — the same thing `x.?`
+# already means in condition position, implemented by the same `rt_is_some`.
+#
+# THE CONTROL ARM MATTERS. A fix that rewrote every condition would be a
+# miscompile: an ordinary bool condition must keep branching on its own value.
+# The third example is that control and must show NO rt_is_some.
+
+use std.spec.*
+use std.spec.step
+
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir.mir_lowering.*
+use compiler.mir.mir_data.*
+use compiler.mir.mir_instruction_kinds.*
+use compiler.mir.mir_instruction_graph.{MirInst}
+use compiler.hir.hir_definitions.*
+use compiler.hir.hir_types.*
+use compiler.common.diagnostics.span.{Span}
+
+fn mir_callee_name(op: MirOperand) -> text:
+    """Name of a MIR call target, or "" when the operand is not a named const."""
+    match op.kind:
+        case MirOperandKind.Const(cv, _):
+            match cv:
+                case MirConstValue.Str(s): return s
+                case _: return ""
+        case _: return ""
+
+fn lowered_call_names(cond: HirExpr) -> [text]:
+    """Lower `cond` in CONDITION position and return the emitted call targets."""
+    var lowering = MirLowering.new(SymbolTable.new())
+    val ignored = lowering.lower_cond_expr(cond)
+    var names: [text] = []
+    for inst in lowering.builder.instructions:
+        match inst.kind:
+            case MirInstKind.Call(_, callee, _):
+                names = names.push(mir_callee_name(callee))
+            case _: ()
+    names
+
+fn zero_span() -> Span:
+    Span.default()
+
+fn nil_literal_condition() -> HirExpr:
+    HirExpr(
+        kind: HirExprKind.NilLit,
+        has_type_: false,
+        type_: HirType(kind: HirTypeKind.Unit, span: zero_span()),
+        span: zero_span()
+    )
+
+fn call_returning_optional_text_condition() -> HirExpr:
+    val callee = HirExpr(
+        kind: HirExprKind.NamedVar(SymbolId(id: 1), "get_opt"),
+        has_type_: false,
+        type_: HirType(kind: HirTypeKind.Unit, span: zero_span()),
+        span: zero_span()
+    )
+    val no_args: [HirCallArg] = []
+    val no_type_args: [HirType] = []
+    val optional_text = HirType(
+        kind: HirTypeKind.Optional(HirType(kind: HirTypeKind.Str, span: zero_span())),
+        span: zero_span()
+    )
+    HirExpr(
+        kind: HirExprKind.Call(callee, no_args, no_type_args),
+        has_type_: true,
+        type_: optional_text,
+        span: zero_span()
+    )
+
+fn bool_literal_condition() -> HirExpr:
+    HirExpr(
+        kind: HirExprKind.BoolLit(true),
+        has_type_: true,
+        type_: HirType(kind: HirTypeKind.Bool, span: zero_span()),
+        span: zero_span()
+    )
+
+describe "pure-Simple condition lowering emits a presence test for nil-shaped conditions":
+    # @manual scenario evidence
+    it "rewrites a bare nil literal condition to rt_is_some":
+        # @req REQ-SSPEC-COMPILER
+        step("rewrites a bare nil literal condition to rt_is_some")
+        step("Given a bare `nil` used directly in condition position")
+        val cond = nil_literal_condition()
+
+        step("When 50.mir lowers it through lower_cond_expr")
+        val names = lowered_call_names(cond)
+
+        step("Then a presence predicate is emitted — branching on the raw RT_NIL word 3 would be unconditionally true")
+        expect(names).to_contain("rt_is_some")
+
+    it "rewrites a call returning an optional used directly as a condition":
+        # @req REQ-SSPEC-COMPILER
+        step("rewrites a call returning an optional used directly as a condition")
+        step("Given `if get_opt():` where get_opt is declared to return `text?`")
+        val cond = call_returning_optional_text_condition()
+
+        step("When 50.mir lowers it through lower_cond_expr")
+        val names = lowered_call_names(cond)
+
+        step("Then the call itself is still emitted — the fix must not drop the callee")
+        expect(names).to_contain("get_opt")
+
+        step("And its result is presence-tested rather than branched on raw")
+        expect(names).to_contain("rt_is_some")
+
+    it "leaves an ordinary bool condition alone":
+        # @req REQ-SSPEC-COMPILER
+        step("leaves an ordinary bool condition alone")
+        step("Given a plain `true` in condition position")
+        val cond = bool_literal_condition()
+
+        step("When 50.mir lowers it through lower_cond_expr")
+        val names = lowered_call_names(cond)
+
+        step("Then NO presence predicate is emitted — rewriting every condition would miscompile ordinary branching")
+        expect(names).to_not_contain("rt_is_some")

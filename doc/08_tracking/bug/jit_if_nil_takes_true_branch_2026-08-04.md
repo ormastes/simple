@@ -169,3 +169,84 @@ falsy at every branch site needs a decided answer for the other falsy-candidate
 values (`0`, `""`, empty collections) so the JIT and the interpreter converge on
 one table rather than two. That is a language-semantics decision plus a seed
 rebuild, which this lane could not land safely alongside live parallel sessions.
+
+---
+
+## 2026-09-06: the PURE-SIMPLE half is FIXED (50.mir). The seed half is untouched and still open.
+
+This row has two independent halves and they must not be conflated:
+
+- **Rust seed (`src/compiler_rust/**`) — STILL OPEN.** Everything above measured
+  the seed's Cranelift/interpreter engines. Nothing in this entry changes them,
+  and the two `cross_engine_*` specs that shell out to `bin/simple` stay RED.
+- **Pure-Simple compiler (`src/compiler/50.mir/**`) — FIXED here.** The 2026-08-17
+  widening note above named the pure-Simple blind spot precisely, and it was real:
+  `lower_cond_expr` (`src/compiler/50.mir/mir_lowering_stmts.spl`) rewrote a
+  condition to the `rt_is_some` presence predicate ONLY when the lowered value was
+  a LOCAL carrying a REGISTERED HIR type of kind `Optional`. Two shapes never
+  register one, so both branched on the raw non-zero `RT_NIL` (3) and read TRUTHY:
+  a bare `nil` literal (`HirExprKind.NilLit`, `has_type_ = false`), and a CALL
+  whose declared return type is `T?` used directly in condition position (the
+  `emit_call` result temp is registered under no HIR type). The call case is
+  exactly the `condA_call_returning_nil` form the 2026-08-17 sweep reported
+  failing on BOTH engines.
+
+**Lane covered by the evidence below, stated precisely:** the MIR that the
+pure-Simple compiler EMITS, inspected in process by calling
+`MirLowering.lower_cond_expr` and reading back `MirLowering.builder.instructions`.
+The emitted MIR is NOT executed, and no subprocess is used — a
+`bin/simple run` probe would run the Rust seed, and the test runner exports
+`SIMPLE_EXECUTION_MODE=interpret` which children inherit, so such a probe is
+structurally incapable of observing this code. The defect IS the emitted MIR, so
+the emitted MIR is the oracle.
+
+BEFORE (same harness, fix reverted — `calls=` is the emitted call-target list):
+
+```
+A_bare_nil: calls=[] result_local=0                       <- no presence test
+B_call_returning_opt: calls=[get_opt] result_local=0      <- no presence test
+C_bool_literal_control: calls=[] result_local=0           <- correct, control
+```
+
+AFTER:
+
+```
+A_bare_nil: calls=[rt_is_some] result_local=1
+B_call_returning_opt: calls=[get_opt, rt_is_some] result_local=1
+C_bool_literal_control: calls=[] result_local=0           <- unchanged
+```
+
+Regression spec (new):
+`test/01_unit/compiler/codegen/pure_simple_cond_optional_presence_lowering_spec.spl`.
+It discriminates — measured on the same tree, the only difference being the
+`mir_lowering_stmts.spl` hunk:
+
+```
+fix reverted: Results: 3 total, 1 passed, 2 failed
+fix applied:  Results: 3 total, 3 passed, 0 failed
+```
+
+The third `it` is a CONTROL: a plain `true` condition must emit NO `rt_is_some`.
+It passes in both runs, which is what makes the other two failures attributable
+to the rewrite rather than to the harness.
+
+**Feature preservation.** Nothing was deleted or narrowed. The call case still
+emits the callee (`get_opt` is asserted present in the AFTER list) — the rewrite
+wraps the result, it does not replace the call. Present optionals still branch
+true, because `rt_is_some` is the same predicate the already-correct
+registered-local path uses; the only behaviour that changes is the previously
+wrong ABSENT case.
+
+**Blast radius.** `lower_cond_expr` has four condition-position callers
+(`mir_lowering_stmts.spl:2507,2510,2546` for if/while, and the `And`/`Or` operand
+recursion at `_MirLoweringExpr/expr_dispatch.spl:2464,2495`), plus one
+`function_lowering.spl:1398` call that is guarded to `ExistsCheck` only and
+therefore takes the pre-existing first arm, unaffected. Because `and`/`or` funnel
+their operands back through this function, the `nil and x` / `x or nil` leaf
+forms from the 2026-08-17 sweep are covered by the same hunk.
+
+**Still not fixed by this entry, listed so it is not read as more than it is:**
+the seed engines; the `while nil:` form on the seed; and the repo-wide
+truthiness table (`0`, `""`, empty collections) that the 2026-08-04 disposition
+called for — this change pins only the nil/presence case, which both readings
+already agree on.

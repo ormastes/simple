@@ -2652,6 +2652,38 @@ impl MirLowering:
                             cond_is_optional = true
                         case _:
                             ()
+                # Bug jit_if_nil_takes_true_branch_2026-08-04. The probe above
+                # only recognises an optional when the lowered value is a LOCAL
+                # that carries a REGISTERED HIR type. Two condition shapes never
+                # register one, so both walked straight past the guard and
+                # branched on the raw RT_NIL sentinel (3 -- non-zero, therefore
+                # unconditionally TRUE):
+                #   1. a bare `nil` literal (`if nil:`, and the `nil` leaf of
+                #      `not nil` / `nil and x` / `nil or x`, which funnel their
+                #      operands back through this same function): its HIR node
+                #      is NilLit with `has_type_ = false`, so there is no type
+                #      to find.
+                #   2. a CALL whose declared return type is `T?` used directly
+                #      in condition position: the result temp comes from
+                #      emit_call and is registered under no HIR type at all.
+                # Both are answered by the condition EXPRESSION's own kind and
+                # static type, which are in hand here and cost one match each.
+                # The rewrite is the identical rt_is_some predicate the
+                # registered-local case already uses, so a PRESENT optional
+                # still branches true and the only behaviour that changes is the
+                # previously-wrong absent case.
+                if not cond_is_optional:
+                    match cond.kind:
+                        case HirExprKind.NilLit:
+                            cond_is_optional = true
+                        case _:
+                            ()
+                if not cond_is_optional and cond.has_type_:
+                    match cond.type_.kind:
+                        case HirTypeKind.Optional(_):
+                            cond_is_optional = true
+                        case _:
+                            ()
                 if cond_is_optional:
                     var b_bare_opt = self.builder
                     val is_some_func_bare = MirOperand(kind: MirOperandKind.Const(
