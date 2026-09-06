@@ -1,0 +1,422 @@
+@allow(primitive_api)
+# Counterpart Conformance — converter graph route resolution (Wave 1, lane F5).
+#
+# primitive_api is allowed here deliberately: loss ranks, item counts and route
+# hashes are the frozen Wave-0 wire types (i64/text/bool). Newtype wrappers here
+# would fork the contract in src/lib/common/spec/evidence/counterpart/model.spl.
+#
+# Resolves a route from a provider's output schema to the canonical target
+# schema a comparison needs, and returns a TYPED route: the ordered edge list,
+# the route hash that goes into ProvenanceReceipt.converter_route_hash, the
+# per-edge ConversionReceipt list, and the route's loss (the MAX rank over its
+# edges, per design §6.1).
+#
+# Fail-closed routing, design §6.3. Every one of these is a refusal, not a
+# warning and not a silent normalization:
+#
+#   exact_relation_through_lossy_route  exact relation whose route loss exceeds
+#                                       relation_max_permitted_loss_rank
+#   required_dimension_dropped          any edge drops a required dimension
+#   ambiguous_route                     two equal-priority routes
+#   cycle                               the graph loops before reaching target
+#   missing_schema_version              a schema id without `@<version>`
+#   undeclared_default                  an edge precondition `default:<name>`
+#                                       the caller never declared
+#   zero_items                          the conversion resolved zero items
+#   provider_schema_mismatch            provider output schema != its manifest
+#   derived_expected_value              an edge derives its expected value from
+#                                       the candidate's own output (defense in
+#                                       depth; the registry refuses it first)
+#   registry_rejected                   the registry itself refused an edge
+#   no_route                            no path exists at all
+#
+# No normalization rule may live in the comparator: it belongs to a named,
+# versioned converter registered here.
+#
+# NOTE on the return type: this module returns a `RouteResolution` record
+# rather than `Result<ConverterRoute, ...>`. The resolution still carries the
+# fully typed route (never a bare bool). The reason is engine-safety: matching
+# on a generic enum result is a known miscompile surface under the JIT that
+# `bin/simple run <spec>` uses, and this module must be trustworthy in exactly
+# the lane that verifies it.
+#
+# Design: doc/05_design/infra/counterpart/counterpart_conformance_infrastructure_design_2026-08-09.md §6.3
+
+use std.common.spec.evidence.counterpart.model.{
+    ConverterManifest,
+    ConversionLoss,
+    ConversionReceipt,
+    CounterpartRelation,
+    conversion_loss_rank,
+    conversion_loss_name,
+    conversion_receipt,
+    relation_name,
+    relation_max_permitted_loss_rank
+}
+use std.nogc_sync_mut.spec.evidence.counterpart.converter_registry.{
+    ConverterRegistry,
+    schema_id_is_valid,
+    converter_edge_label,
+    manifest_derives_expected_from_candidate
+}
+
+pub val COUNTERPART_ROUTE_MAX_DEPTH: i64 = 8
+pub val COUNTERPART_ROUTE_HASH_PREFIX: text = "croute/v1"
+pub val COUNTERPART_DEFAULT_PRECONDITION_PREFIX: text = "default:"
+
+# ---------------------------------------------------------------------------
+# Request and route records
+# ---------------------------------------------------------------------------
+
+pub struct RouteRequest:
+    from_schema: text
+    to_schema: text
+    relation: CounterpartRelation
+    required_dimensions: [text]
+    declared_defaults: [text]
+    provider_output_schema: text
+    item_count: i64
+    input_hash: text
+
+pub fn route_request(
+    from_schema: text,
+    to_schema: text,
+    relation: CounterpartRelation,
+    item_count: i64,
+    input_hash: text
+) -> RouteRequest:
+    RouteRequest(
+        from_schema: from_schema,
+        to_schema: to_schema,
+        relation: relation,
+        required_dimensions: [],
+        declared_defaults: [],
+        provider_output_schema: from_schema,
+        item_count: item_count,
+        input_hash: input_hash
+    )
+
+pub fn route_request_full(
+    from_schema: text,
+    to_schema: text,
+    relation: CounterpartRelation,
+    required_dimensions: [text],
+    declared_defaults: [text],
+    provider_output_schema: text,
+    item_count: i64,
+    input_hash: text
+) -> RouteRequest:
+    RouteRequest(
+        from_schema: from_schema,
+        to_schema: to_schema,
+        relation: relation,
+        required_dimensions: required_dimensions,
+        declared_defaults: declared_defaults,
+        provider_output_schema: provider_output_schema,
+        item_count: item_count,
+        input_hash: input_hash
+    )
+
+pub struct ConverterRoute:
+    from_schema: text
+    to_schema: text
+    edges: [ConverterManifest]
+    loss: ConversionLoss
+    loss_rank: i64
+    route_hash: text
+    receipts: [ConversionReceipt]
+
+pub struct RouteResolution:
+    resolved: bool
+    rejection_code: text
+    rejection_detail: text
+    route: ConverterRoute
+
+pub fn empty_route(from_schema: text, to_schema: text) -> ConverterRoute:
+    ConverterRoute(
+        from_schema: from_schema,
+        to_schema: to_schema,
+        edges: [],
+        loss: ConversionLoss.identity,
+        loss_rank: 0,
+        route_hash: "",
+        receipts: []
+    )
+
+pub fn route_rejected(
+    request: RouteRequest,
+    code: text,
+    detail: text
+) -> RouteResolution:
+    RouteResolution(
+        resolved: false,
+        rejection_code: code,
+        rejection_detail: detail,
+        route: empty_route(request.from_schema, request.to_schema)
+    )
+
+pub fn route_edge_ids(route: ConverterRoute) -> [text]:
+    var ids: [text] = []
+    for edge in route.edges:
+        ids.push(edge.converter_id)
+    ids
+
+pub fn route_dropped_dimensions(route: ConverterRoute) -> [text]:
+    var dropped: [text] = []
+    for edge in route.edges:
+        for dimension in edge.dropped_dimensions:
+            var seen = false
+            for existing in dropped:
+                if existing == dimension:
+                    seen = true
+            if not seen:
+                dropped.push(dimension)
+    dropped
+
+# ---------------------------------------------------------------------------
+# Path search
+# ---------------------------------------------------------------------------
+
+pub struct RoutePath:
+    edges: [ConverterManifest]
+
+struct SearchOutcome:
+    paths: [RoutePath]
+    cycle_seen: bool
+
+fn text_list_contains(items: [text], needle: text) -> bool:
+    for item in items:
+        if item == needle:
+            return true
+    false
+
+fn path_loss_rank(edges: [ConverterManifest]) -> i64:
+    var worst: i64 = 0
+    for edge in edges:
+        val rank = conversion_loss_rank(edge.loss)
+        if rank > worst:
+            worst = rank
+    worst
+
+fn loss_for_rank(rank: i64) -> ConversionLoss:
+    if rank <= 0:
+        return ConversionLoss.identity
+    if rank == 1:
+        return ConversionLoss.representation_only
+    if rank == 2:
+        return ConversionLoss.canonicalizing
+    if rank == 3:
+        return ConversionLoss.semantic_projection
+    ConversionLoss.diagnostic_only
+
+# Depth-bounded enumeration of every simple path. A revisit of an already
+# visited schema is not pruned quietly: it raises `cycle_seen`, so the caller
+# can refuse the resolution instead of reporting "no route".
+fn search_paths(
+    registry: ConverterRegistry,
+    current: text,
+    target: text,
+    visited: [text],
+    depth: i64
+) -> SearchOutcome:
+    var paths: [RoutePath] = []
+    var cycle_seen = false
+    if depth >= COUNTERPART_ROUTE_MAX_DEPTH:
+        return SearchOutcome(paths: paths, cycle_seen: cycle_seen)
+
+    for edge in registry.converters:
+        if edge.from_schema == current:
+            if text_list_contains(visited, edge.to_schema):
+                cycle_seen = true
+            else:
+                if edge.to_schema == target:
+                    paths.push(RoutePath(edges: [edge]))
+                else:
+                    var next_visited = visited
+                    next_visited.push(edge.to_schema)
+                    val sub = search_paths(registry, edge.to_schema, target, next_visited, depth + 1)
+                    if sub.cycle_seen:
+                        cycle_seen = true
+                    for sub_path in sub.paths:
+                        var combined: [ConverterManifest] = [edge]
+                        for tail in sub_path.edges:
+                            combined.push(tail)
+                        paths.push(RoutePath(edges: combined))
+    SearchOutcome(paths: paths, cycle_seen: cycle_seen)
+
+# ---------------------------------------------------------------------------
+# Route hash and receipts
+# ---------------------------------------------------------------------------
+
+pub fn route_hash_of(from_schema: text, to_schema: text, edges: [ConverterManifest]) -> text:
+    var hash = COUNTERPART_ROUTE_HASH_PREFIX + "/" + from_schema + "=>" + to_schema
+    for edge in edges:
+        hash = (hash + "/" + edge.converter_id + "@" + edge.converter_version
+            + ":" + conversion_loss_name(edge.loss))
+    hash
+
+fn chained_output_hash(previous: text, edge: ConverterManifest) -> text:
+    "h(" + previous + ">" + edge.converter_id + "@" + edge.converter_version + ")"
+
+fn build_receipts(edges: [ConverterManifest], input_hash: text) -> [ConversionReceipt]:
+    var receipts: [ConversionReceipt] = []
+    var previous = input_hash
+    for edge in edges:
+        val output = chained_output_hash(previous, edge)
+        var assumptions: [text] = []
+        for precondition in edge.preconditions:
+            assumptions.push(precondition)
+        receipts.push(conversion_receipt(edge, previous, output, assumptions, "ok"))
+        previous = output
+    receipts
+
+# ---------------------------------------------------------------------------
+# Resolution
+# ---------------------------------------------------------------------------
+
+fn undeclared_defaults_of(edges: [ConverterManifest], declared: [text]) -> [text]:
+    var missing: [text] = []
+    for edge in edges:
+        for precondition in edge.preconditions:
+            if precondition.starts_with(COUNTERPART_DEFAULT_PRECONDITION_PREFIX):
+                val name = precondition.substring(
+                    COUNTERPART_DEFAULT_PRECONDITION_PREFIX.len(),
+                    precondition.len()
+                )
+                if not text_list_contains(declared, name):
+                    missing.push(edge.converter_id + " requires undeclared default '" + name + "'")
+    missing
+
+fn dropped_required_dimensions(edges: [ConverterManifest], required: [text]) -> [text]:
+    var violations: [text] = []
+    for edge in edges:
+        for dropped in edge.dropped_dimensions:
+            if text_list_contains(required, dropped):
+                violations.push(edge.converter_id + " drops required dimension '" + dropped + "'")
+    violations
+
+# The single entry point. Refuses before it resolves.
+pub fn resolve_route(registry: ConverterRegistry, request: RouteRequest) -> RouteResolution:
+    if registry.rejections.len() != 0:
+        return route_rejected(request, "registry_rejected",
+            "registry refused " + registry.rejections.len().to_text()
+                + " manifest(s); first: " + registry.rejections[0])
+
+    if not schema_id_is_valid(request.from_schema):
+        return route_rejected(request, "missing_schema_version",
+            "from_schema '" + request.from_schema + "' has no pinned version")
+    if not schema_id_is_valid(request.to_schema):
+        return route_rejected(request, "missing_schema_version",
+            "to_schema '" + request.to_schema + "' has no pinned version")
+
+    if request.provider_output_schema != request.from_schema:
+        return route_rejected(request, "provider_schema_mismatch",
+            "provider emitted '" + request.provider_output_schema
+                + "' but its manifest declares '" + request.from_schema + "'")
+
+    if request.item_count <= 0:
+        return route_rejected(request, "zero_items",
+            "conversion resolved " + request.item_count.to_text()
+                + " items: nothing was converted")
+
+    if request.input_hash == "":
+        return route_rejected(request, "missing_input_hash",
+            "route requested with an empty input hash")
+
+    if request.from_schema == request.to_schema:
+        # Identity route: no edges, no loss, but still a typed route with a
+        # hash so provenance is recorded uniformly.
+        return RouteResolution(
+            resolved: true,
+            rejection_code: "",
+            rejection_detail: "",
+            route: ConverterRoute(
+                from_schema: request.from_schema,
+                to_schema: request.to_schema,
+                edges: [],
+                loss: ConversionLoss.identity,
+                loss_rank: 0,
+                route_hash: route_hash_of(request.from_schema, request.to_schema, []),
+                receipts: []
+            )
+        )
+
+    var start_visited: [text] = [request.from_schema]
+    val outcome = search_paths(registry, request.from_schema, request.to_schema, start_visited, 0)
+
+    if outcome.paths.len() == 0:
+        if outcome.cycle_seen:
+            return route_rejected(request, "cycle",
+                "every path from '" + request.from_schema + "' to '" + request.to_schema
+                    + "' revisits a schema")
+        return route_rejected(request, "no_route",
+            "no converter path from '" + request.from_schema
+                + "' to '" + request.to_schema + "'")
+
+    # Priority: lowest loss rank first, then fewest edges. A remaining tie is
+    # ambiguity and is refused rather than broken arbitrarily.
+    var best_rank = path_loss_rank(outcome.paths[0].edges)
+    var best_len = outcome.paths[0].edges.len()
+    for candidate in outcome.paths:
+        val rank = path_loss_rank(candidate.edges)
+        val length = candidate.edges.len()
+        if rank < best_rank:
+            best_rank = rank
+            best_len = length
+        else:
+            if rank == best_rank and length < best_len:
+                best_len = length
+
+    var winners: [RoutePath] = []
+    for candidate in outcome.paths:
+        if path_loss_rank(candidate.edges) == best_rank and candidate.edges.len() == best_len:
+            winners.push(candidate)
+
+    if winners.len() != 1:
+        var labels = ""
+        for winner in winners:
+            labels = labels + "[" + route_hash_of(request.from_schema, request.to_schema, winner.edges) + "]"
+        return route_rejected(request, "ambiguous_route",
+            winners.len().to_text() + " equal-priority routes: " + labels)
+
+    val chosen = winners[0].edges
+
+    val dimension_violations = dropped_required_dimensions(chosen, request.required_dimensions)
+    if dimension_violations.len() != 0:
+        return route_rejected(request, "required_dimension_dropped", dimension_violations[0])
+
+    # Defense in depth. The registry already refuses such an edge at
+    # registration, so reaching this branch means an edge entered the graph by
+    # some other path. It is still a refusal here, never a warning.
+    for edge in chosen:
+        if manifest_derives_expected_from_candidate(edge):
+            return route_rejected(request, "derived_expected_value",
+                "converter " + edge.converter_id
+                    + " derives an expected value from the candidate under test")
+
+    val undeclared = undeclared_defaults_of(chosen, request.declared_defaults)
+    if undeclared.len() != 0:
+        return route_rejected(request, "undeclared_default", undeclared[0])
+
+    val permitted = relation_max_permitted_loss_rank(request.relation)
+    if best_rank > permitted:
+        return route_rejected(request, "exact_relation_through_lossy_route",
+            "relation " + relation_name(request.relation) + " permits loss rank "
+                + permitted.to_text() + " but route loss is "
+                + conversion_loss_name(loss_for_rank(best_rank))
+                + " via " + converter_edge_label(chosen[0]))
+
+    RouteResolution(
+        resolved: true,
+        rejection_code: "",
+        rejection_detail: "",
+        route: ConverterRoute(
+            from_schema: request.from_schema,
+            to_schema: request.to_schema,
+            edges: chosen,
+            loss: loss_for_rank(best_rank),
+            loss_rank: best_rank,
+            route_hash: route_hash_of(request.from_schema, request.to_schema, chosen),
+            receipts: build_receipts(chosen, request.input_hash)
+        )
+    )

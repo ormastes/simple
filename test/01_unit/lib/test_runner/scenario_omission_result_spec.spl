@@ -1,0 +1,45 @@
+use std.spec.{describe, it, expect}
+use std.test_runner.test_executor_parsing.{
+    make_result_from_output, parse_test_omission_evidence
+}
+use std.test_runner.test_runner_types.TestOmissionStatus
+
+fn marker(status: text) -> text:
+    "__SIMPLE_SCENARIO_OMISSION_V1__|{status}|irq-fault|physical injection rig unavailable|qualified injection rig|runtime-assurance|HAL-42|artifacts/hal/receipt.sdn|simple test --tag=hal-rig"
+
+describe "typed unavailable scenario result parsing":
+    it "keeps BLOCKED distinct and prevents a passing example from greening the file":
+        val output = "Results: 2 total, 1 passed, 0 failed, 1 skipped\n" + marker("BLOCKED")
+        val result = make_result_from_output("blocked_spec.spl", output, "", 0, 5, 60)
+        expect(result.passed).to_equal(1)
+        expect(result.blocked).to_equal(1)
+        expect(result.unsupported).to_equal(0)
+        expect(result.is_ok()).to_equal(false)
+        expect(result.error.starts_with("BLOCKED:")).to_equal(true)
+        expect(result.omission_evidence[0].prerequisite).to_equal("qualified injection rig")
+        expect(result.omission_evidence[0].artifact_paths[0]).to_equal("artifacts/hal/receipt.sdn")
+        expect(result.omission_evidence[0].resume_command).to_equal("simple test --tag=hal-rig")
+
+    it "keeps UNSUPPORTED as its own non-pass status":
+        val output = "Results: 2 total, 1 passed, 0 failed, 1 skipped\n" + marker("UNSUPPORTED")
+        val result = make_result_from_output("unsupported_spec.spl", output, "", 0, 5, 60)
+        expect(result.blocked).to_equal(0)
+        expect(result.unsupported).to_equal(1)
+        expect(result.is_ok()).to_equal(false)
+        expect(result.omission_evidence[0].status).to_equal(TestOmissionStatus.Unsupported)
+
+    it "fails closed on incomplete typed evidence":
+        val (evidence, problem) = parse_test_omission_evidence(
+            "__SIMPLE_SCENARIO_OMISSION_V1__|BLOCKED|irq-fault")
+        expect(evidence.len()).to_equal(0)
+        expect(problem).to_equal("SCENARIO-E-OMISSION-WIRE")
+
+        val (missing_artifact, artifact_problem) = parse_test_omission_evidence(
+            "__SIMPLE_SCENARIO_OMISSION_V1__|BLOCKED|irq-fault|rig unavailable|qualified rig|runtime-assurance|HAL-42||simple test --tag=hal-rig")
+        expect(missing_artifact.len()).to_equal(0)
+        expect(artifact_problem).to_equal("SCENARIO-E-OMISSION-INCOMPLETE")
+
+        val (traversal, traversal_problem) = parse_test_omission_evidence(
+            "__SIMPLE_SCENARIO_OMISSION_V1__|BLOCKED|irq-fault|rig unavailable|qualified rig|runtime-assurance|HAL-42|../private/receipt.sdn|simple test --tag=hal-rig")
+        expect(traversal.len()).to_equal(0)
+        expect(traversal_problem).to_equal("SCENARIO-E-OMISSION-ARTIFACT")

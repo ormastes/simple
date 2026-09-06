@@ -1,0 +1,67 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+unix="$root/src/runtime/platform/unix_common.h"
+win="$root/src/runtime/platform/platform_win.h"
+memory="$root/src/compiler_rust/compiler/src/interpreter_extern/memory.rs"
+file_io="$root/src/compiler_rust/compiler/src/interpreter_extern/file_io.rs"
+interpreter="$root/src/compiler_rust/compiler/src/interpreter_extern/mod.rs"
+loader="$root/src/compiler/99.loader/loader/smf_mmap_native.spl"
+top_loader="$root/src/compiler/99.loader/smf_mmap_native.spl"
+legacy="$root/src/runtime/runtime_legacy_core.c"
+
+symbols='rt_mmap_raw rt_munmap_raw rt_mprotect rt_madvise_raw rt_msync_flags rt_mlock rt_munlock rt_open_fd rt_close_fd'
+for symbol in $symbols; do
+    grep -q "insert_simple!(\"$symbol\"" "$interpreter"
+done
+
+# Invalid signed lengths must not wrap to huge size_t/SIZE_T values.
+[ "$(grep -c 'if (!addr || length <= 0) return -1;' "$unix")" -ge 6 ]
+[ "$(grep -c 'if (!addr || length <= 0) return -1;' "$win")" -ge 4 ]
+grep -q 'if (length <= 0 || offset < 0) return -1;' "$unix"
+grep -q 'if (length <= 0 || offset < 0) return -1;' "$win"
+
+# Windows has no madvise equivalent: unsupported is failure, never success.
+grep -A3 '^int64_t rt_madvise_raw' "$win" | grep -q 'return -1;'
+! grep -A3 '^int64_t rt_madvise_raw' "$win" | grep -q 'return 0;'
+
+for symbol in rt_mmap_raw rt_munmap_raw rt_mprotect rt_madvise_raw rt_msync_flags rt_mlock rt_munlock; do
+    grep -q "pub fn $symbol" "$memory"
+done
+grep -q 'pub fn rt_open_fd' "$file_io"
+grep -q 'pub fn rt_close_fd' "$file_io"
+
+# Both loader owners allocate RW and require an explicit RX transition.
+grep -q '_sffi_mmap_raw(0, size, PROT_READ | PROT_WRITE,' "$top_loader"
+grep -q 'val prot = PROT_READ | PROT_WRITE$' "$loader"
+for owner in "$top_loader" "$loader"; do
+    ! grep -q 'PROT_READ | PROT_WRITE | PROT_EXEC' "$owner"
+done
+
+# All native/interpreter provider lanes reject direct W+X requests. These are
+# constant-time bit tests before the syscall and introduce no allocation,
+# lookup, copy, or additional dispatch on the loader hot path.
+grep -q 'prot & (PROT_WRITE | PROT_EXEC)' "$unix"
+[ "$(grep -c 'prot & 0x6' "$win")" -eq 2 ]
+grep -q 'prot & 0x6' "$legacy"
+[ "$(grep -c 'prot & write_exec' "$memory")" -eq 2 ]
+! grep -q 'PAGE_EXECUTE_READWRITE' "$win"
+! grep -q 'PAGE_EXECUTE_READWRITE' "$legacy"
+
+# The existing RX transition owns cache synchronization: no additional SFFI
+# symbol, lookup, or Simple dispatch is added. Windows restores old protection
+# after a flush failure; unsupported non-x86 Rust hosts fail before granting X.
+grep -q '__builtin___clear_cache' "$unix"
+grep -q 'FlushInstructionCache(GetCurrentProcess()' "$win"
+grep -q '__builtin___clear_cache' "$legacy"
+grep -q 'FlushInstructionCache(GetCurrentProcess()' "$legacy"
+grep -A8 '^int64_t rt_mprotect' "$unix" | grep -q 'PROT_NONE'
+grep -A24 '^int64_t rt_mprotect' "$win" | grep -q 'old_protect'
+grep -A32 '^int64_t rt_mprotect' "$legacy" | grep -q 'PROT_NONE'
+grep -q 'cfg(not(any(target_arch = "x86", target_arch = "x86_64")))' "$memory"
+for owner in "$top_loader" "$loader"; do
+    grep -q 'successful RX transition performs cache sync' "$owner"
+done
+
+echo "mmap provider contract audit: PASS (9 typed interpreter registrations; native providers linked directly; invalid lengths fail closed; 4 provider lanes reject W+X; RX transition owns cache sync)"

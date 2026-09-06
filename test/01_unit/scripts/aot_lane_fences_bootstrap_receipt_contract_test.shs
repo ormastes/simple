@@ -1,0 +1,29 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+workflow="$root/.github/workflows/aot-lane-fences.yml"
+fail() { echo "FAIL: $*" >&2; exit 1; }
+
+trust_root_line=$(grep -n -- '--stop-after-stage2' "$workflow" | cut -d: -f1)
+producer_line=$(grep -n 'produce-bootstrap-planner-admission-v2.shs' "$workflow" | cut -d: -f1)
+consumer_line=$(grep -n -- '--bootstrap-receipt="\$bootstrap_receipt"' "$workflow" | cut -d: -f1)
+
+[ -n "$trust_root_line" ] && [ -n "$producer_line" ] && [ -n "$consumer_line" ] ||
+  fail "AOT workflow does not wire the complete planner-admission sequence"
+[ "$trust_root_line" -lt "$producer_line" ] && [ "$producer_line" -lt "$consumer_line" ] ||
+  fail "AOT workflow does not produce admission between trust-root and consumer"
+
+grep -Fq -- '--target=//bootstrap:stage4' "$workflow" ||
+  fail "planner admission is not bound to the Stage 4 target"
+grep -Fq -- '--reason=self-host-convergence-check' "$workflow" ||
+  fail "planner admission lacks the typed convergence reason"
+grep -Fq -- '--parent-compiler="$stage2"' "$workflow" ||
+  fail "planner admission is not bound to the produced Stage 2 parent"
+grep -Fq -- '--out="$bootstrap_receipt"' "$workflow" ||
+  fail "planner admission does not own the consumed receipt path"
+if grep -Fq 'simple-bootstrap-planner-admission-v2' "$workflow"; then
+  fail "workflow hand-authors an admission envelope instead of using the canonical producer"
+fi
+
+echo "PASS: AOT bootstrap obtains and consumes a canonical hash-bound typed-reason receipt"

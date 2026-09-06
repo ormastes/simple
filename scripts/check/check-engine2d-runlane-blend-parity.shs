@@ -1,0 +1,127 @@
+#!/bin/sh
+set -eu
+
+# Run-lane blend parity gate for engine2d span kernels.
+#
+# Why this exists: the spec-lane parity tests (`bin/simple test`) run in the
+# interpreter lane, which was never affected by the MIR/run-lane blend defect
+# (doc/08_tracking/bug/engine2d_native_blend_diverges_from_scalar_on_varied_patterns_2026-08-15.md).
+# Those specs guard formula parity only and would have been green before the
+# fix. The non-vacuous evidence is the RUN-LANE bench checksum comparison:
+# `bin/simple run test/perf/graphics_2d/bench_span_kernels.spl` with
+# SIMPLE_2D_SIMD=off (scalar) vs auto (native kernels) must print identical
+# `SPAN_BENCH_DONE checksum=NNN` lines.
+#
+# Verdict convention (last line of stdout):
+#   PASS — 2 lane(s) compared, checksums identical (<N>)   exit 0
+#   FAIL — off=<A> auto=<B> diverged                        exit 1
+#   ERROR — nothing was checked                             exit 2
+# Fail-closed: a run that produces no checksum line is ERROR, never a pass.
+#
+# Usage:
+#   sh scripts/check/check-engine2d-runlane-blend-parity.shs
+#   sh scripts/check/check-engine2d-runlane-blend-parity.shs --selftest-only
+#
+# --selftest runs automatically before every real scan and is fatal.
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+BENCH="test/perf/graphics_2d/bench_span_kernels.spl"
+BUILD_DIR="${BUILD_DIR:-build/check/engine2d-runlane-blend-parity}"
+TIMEOUT_S="${TIMEOUT_S:-280}"
+
+# Extract the checksum value from a captured bench output file.
+# Prints the checksum on stdout, or nothing if the line is absent.
+extract_checksum() {
+    # sed, not a grep pipe whose exit status could be misread.
+    sed -n 's/.*SPAN_BENCH_DONE checksum=\([0-9][0-9]*\).*/\1/p' "$1" | tail -n 1
+}
+
+# compare_lanes <off_output_file> <auto_output_file>
+# Prints the verdict line (last line of its stdout) and returns 0/1/2.
+compare_lanes() {
+    off_sum="$(extract_checksum "$1")"
+    auto_sum="$(extract_checksum "$2")"
+    if [ -z "$off_sum" ] || [ -z "$auto_sum" ]; then
+        echo "ERROR — nothing was checked"
+        return 2
+    fi
+    if [ "$off_sum" = "0" ] && [ "$auto_sum" = "0" ]; then
+        # A zero checksum on both lanes means the bench did no work; that
+        # equality is vacuous, not evidence.
+        echo "ERROR — nothing was checked"
+        return 2
+    fi
+    if [ "$off_sum" = "$auto_sum" ]; then
+        echo "PASS — 2 lane(s) compared, checksums identical ($off_sum)"
+        return 0
+    fi
+    echo "FAIL — off=$off_sum auto=$auto_sum diverged"
+    return 1
+}
+
+selftest() {
+    st_dir="$BUILD_DIR/selftest"
+    mkdir -p "$st_dir"
+
+    # Fixture 1: equal checksums must PASS.
+    printf 'noise\nSPAN_BENCH_DONE checksum=316643543\n' > "$st_dir/a1"
+    printf 'SPAN_BENCH_DONE checksum=316643543\n' > "$st_dir/b1"
+    out="$(compare_lanes "$st_dir/a1" "$st_dir/b1")" && rc=0 || rc=$?
+    if [ "$rc" -ne 0 ] || [ "$out" != "PASS — 2 lane(s) compared, checksums identical (316643543)" ]; then
+        echo "SELFTEST FAILURE: equal fixture: rc=$rc out=$out" >&2
+        exit 2
+    fi
+
+    # Fixture 2: diverged checksums must FAIL.
+    printf 'SPAN_BENCH_DONE checksum=948743592\n' > "$st_dir/a2"
+    printf 'SPAN_BENCH_DONE checksum=316643543\n' > "$st_dir/b2"
+    out="$(compare_lanes "$st_dir/a2" "$st_dir/b2")" && rc=0 || rc=$?
+    if [ "$rc" -ne 1 ] || [ "$out" != "FAIL — off=948743592 auto=316643543 diverged" ]; then
+        echo "SELFTEST FAILURE: diverged fixture: rc=$rc out=$out" >&2
+        exit 2
+    fi
+
+    # Fixture 3: missing checksum line must ERROR (fail-closed).
+    printf 'bench crashed before printing\n' > "$st_dir/a3"
+    printf 'SPAN_BENCH_DONE checksum=316643543\n' > "$st_dir/b3"
+    out="$(compare_lanes "$st_dir/a3" "$st_dir/b3")" && rc=0 || rc=$?
+    if [ "$rc" -ne 2 ] || [ "$out" != "ERROR — nothing was checked" ]; then
+        echo "SELFTEST FAILURE: missing-line fixture: rc=$rc out=$out" >&2
+        exit 2
+    fi
+
+    echo "selftest: 3 fixtures OK"
+}
+
+selftest
+if [ "${1:-}" = "--selftest-only" ]; then
+    exit 0
+fi
+
+if [ ! -f "$BENCH" ]; then
+    echo "bench file missing: $BENCH" >&2
+    echo "ERROR — nothing was checked"
+    exit 2
+fi
+
+mkdir -p "$BUILD_DIR"
+OFF_OUT="$BUILD_DIR/off.out"
+AUTO_OUT="$BUILD_DIR/auto.out"
+
+echo "running scalar lane (SIMPLE_2D_SIMD=off)..."
+SIMPLE_2D_SIMD=off timeout "$TIMEOUT_S" bin/simple run "$BENCH" > "$OFF_OUT" 2>&1 && off_rc=0 || off_rc=$?
+echo "scalar lane exit=$off_rc (output: $OFF_OUT)"
+
+echo "running native lane (SIMPLE_2D_SIMD unset/auto)..."
+env -u SIMPLE_2D_SIMD timeout "$TIMEOUT_S" bin/simple run "$BENCH" > "$AUTO_OUT" 2>&1 && auto_rc=0 || auto_rc=$?
+echo "native lane exit=$auto_rc (output: $AUTO_OUT)"
+
+if [ "$off_rc" -ne 0 ] || [ "$auto_rc" -ne 0 ]; then
+    echo "a bench run failed (off=$off_rc auto=$auto_rc); checksum lines, if any, are not trusted" >&2
+    echo "ERROR — nothing was checked"
+    exit 2
+fi
+
+compare_lanes "$OFF_OUT" "$AUTO_OUT"

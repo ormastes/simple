@@ -1,0 +1,148 @@
+# Pure-Simple enum ABI helpers.
+
+@unsafe(reason: "raw libc zeroed allocation ABI; contract: zero sentinel means failure", capabilities: [ffi, raw_ptr])
+extern fn calloc(count: i64, size: i64) -> i64
+@unsafe(reason: "raw libc heap free ABI", capabilities: [ffi, raw_ptr])
+extern fn free(ptr: i64)
+@unsafe(reason: "raw pointer i64 load ABI; contract: caller establishes alignment and bounds", capabilities: [ffi, raw_ptr])
+extern fn spl_load_i64(ptr: i64, offset: i64) -> i64
+@unsafe(reason: "raw pointer byte load ABI; contract: caller establishes bounds", capabilities: [ffi, raw_ptr])
+extern fn spl_load_u8(ptr: i64, offset: i64) -> i64
+@unsafe(reason: "raw pointer i64 store ABI; contract: caller establishes alignment and bounds", capabilities: [ffi, raw_ptr])
+extern fn spl_store_i64(ptr: i64, offset: i64, value: i64)
+@unsafe(reason: "raw pointer byte store ABI; contract: caller establishes bounds", capabilities: [ffi, raw_ptr])
+extern fn spl_store_u8(ptr: i64, offset: i64, value: i64)
+@unsafe(reason: "raw transient-tracking runtime note ABI", capabilities: [ffi, raw_ptr])
+extern fn rt_simple_core_transient_note(ptr: i64, kind: i64) -> i64
+
+@always_inline
+fn _sffi_core_enum_calloc(count: i64, size: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        calloc(count, size)
+
+@always_inline
+fn _sffi_core_enum_free(ptr: i64):
+    unsafe(capabilities: [ffi, raw_ptr]):
+        free(ptr)
+
+@always_inline
+fn _sffi_core_enum_transient_note(ptr: i64, kind: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        rt_simple_core_transient_note(ptr, kind)
+
+@always_inline
+fn _sffi_core_enum_load_i64(ptr: i64, offset: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        spl_load_i64(ptr, offset)
+
+@always_inline
+fn _sffi_core_enum_load_u8(ptr: i64, offset: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        spl_load_u8(ptr, offset)
+
+@always_inline
+fn _sffi_core_enum_store_i64(ptr: i64, offset: i64, value: i64):
+    unsafe(capabilities: [ffi, raw_ptr]):
+        spl_store_i64(ptr, offset, value)
+
+@always_inline
+fn _sffi_core_enum_store_u8(ptr: i64, offset: i64, value: i64):
+    unsafe(capabilities: [ffi, raw_ptr]):
+        spl_store_u8(ptr, offset, value)
+
+# ponytail: linear registry is enough for bootstrap-sized enum sets; replace
+# with a hash set only if profiles show enum validation on a hot path.
+var enum_registry_head: i64 = 0
+
+fn store_u32_le(ptr: i64, offset: i64, value: i64):
+    _sffi_core_enum_store_u8(ptr, offset, value & 255)
+    _sffi_core_enum_store_u8(ptr, offset + 1, (value >> 8) & 255)
+    _sffi_core_enum_store_u8(ptr, offset + 2, (value >> 16) & 255)
+    _sffi_core_enum_store_u8(ptr, offset + 3, (value >> 24) & 255)
+
+fn load_u32_le(ptr: i64, offset: i64) -> i64:
+    return _sffi_core_enum_load_u8(ptr, offset) | (_sffi_core_enum_load_u8(ptr, offset + 1) << 8) | (_sffi_core_enum_load_u8(ptr, offset + 2) << 16) | (_sffi_core_enum_load_u8(ptr, offset + 3) << 24)
+
+fn enum_ptr(value: i64) -> i64:
+    if value < 4096:
+        return 0
+    if (value & 7) != 1:
+        return 0
+    val candidate = value & -8
+    var current = enum_registry_head
+    while current > 0:
+        if current == candidate:
+            if _sffi_core_enum_load_u8(current, 0) == 4:
+                return current
+            return 0
+        current = _sffi_core_enum_load_i64(current, 24)
+    return 0
+
+pub fn rt_enum_new(enum_id: i32, discriminant: i32, payload: i64) -> i64:
+    val value = _sffi_core_enum_calloc(1, 32)
+    if value < 1:
+        return 3
+    _sffi_core_enum_store_u8(value, 0, 4)
+    store_u32_le(value, 4, enum_id)
+    store_u32_le(value, 8, discriminant)
+    _sffi_core_enum_store_i64(value, 16, payload)
+    _sffi_core_enum_store_i64(value, 24, enum_registry_head)
+    enum_registry_head = value
+    if _sffi_core_enum_transient_note(value, 4) < 0:
+        enum_registry_head = _sffi_core_enum_load_i64(value, 24)
+        _sffi_core_enum_free(value)
+        return 3
+    return value | 1
+
+# Membership test for the transient machinery (core_memory.spl).
+pub fn enum_is_valid(value: i64) -> i64:
+    return if enum_ptr(value) > 0: 1 else: 0
+
+fn enum_unregister(ptr: i64):
+    var previous: i64 = 0
+    var current = enum_registry_head
+    while current > 0:
+        val next = _sffi_core_enum_load_i64(current, 24)
+        if current == ptr:
+            if previous < 1:
+                enum_registry_head = next
+            else:
+                _sffi_core_enum_store_i64(previous, 24, next)
+            return
+        previous = current
+        current = next
+
+# Scope-end reclamation of an unpromoted transient enum (raw header ptr).
+pub fn enum_reclaim_transient(ptr: i64):
+    enum_unregister(ptr)
+    _sffi_core_enum_free(ptr)
+
+pub fn rt_enum_discriminant(value: i64) -> i64:
+    val ptr = enum_ptr(value)
+    if ptr < 1:
+        return -1
+    return load_u32_le(ptr, 8)
+
+pub fn rt_enum_id(value: i64) -> i64:
+    val ptr = enum_ptr(value)
+    if ptr < 1:
+        return -1
+    return load_u32_le(ptr, 4)
+
+pub fn rt_enum_payload(value: i64) -> i64:
+    val ptr = enum_ptr(value)
+    if ptr < 1:
+        return 3
+    return _sffi_core_enum_load_i64(ptr, 16)
+
+# Formation probe for heap-typed enum/Option payloads at fail-closed
+# handoffs. Mirrors runtime_native.c's rt_heap_ref_wellformed: 1 for either a
+# tagged heap reference or a raw/untagged class reference outside the zero
+# page. A FORMATION check, not liveness;
+# call sites own the heap-payload contract (scalar payloads report 0 by
+# design). Catches the 2026-08-22 stage-3 streaming-owner incident class
+# (Some tag survives, payload word 0) before the first field load faults.
+pub fn rt_heap_ref_wellformed(value: i64) -> i8:
+    if (value & -8) < 4096:
+        return 0
+    1

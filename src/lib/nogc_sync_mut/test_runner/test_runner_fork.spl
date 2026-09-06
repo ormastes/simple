@@ -1,0 +1,236 @@
+# Test Runner Fork Mode
+#
+# Runs test files using fork()-without-exec for fast isolation.
+# The child process inherits the loaded binary (COW pages) and calls
+# rt_cli_run_file() directly — no exec, no binary loading, no CLI parsing.
+# OS reclaims all child memory on _exit().
+# src/runtime/runtime_fork.c independently applies the same 4 MiB-per-stream
+# head/tail capture contract because fork mode does not use the process facade.
+#
+# UNSTABLE-MODE LIMITATION (documented, not fixed here).
+# Unstable mode's contract is a SEPARATE PROCESS per unit. Fork mode gives a
+# child process per spec, so a crash IS contained and never ends the suite --
+# but the child is COW-forked from the parent's ALREADY-LOADED interpreter
+# image, so accumulated in-process state (module tables, caches, globals) is
+# INHERITED rather than reset. That is crash isolation, NOT the
+# fresh-process-per-unit guarantee the other modes (interpreter/smf/native/
+# compile/safe, all of which `process_run_*` a real binary) provide. Fork mode
+# is off by default and opt-in via `--fork` / `--fork-mode`; treat a fork-mode
+# unstable run as weaker evidence than a subprocess-mode one.
+#
+# WHAT FORK MODE HAS THAT THE SUBPROCESS PATH DOES NOT: the real signal number.
+# `rt_fork_parent_wait` reads waitpid status directly and returns
+# `128 + WTERMSIG` on death-by-signal (runtime_fork.c:463-465), plus exported
+# `rt_fork_parent_signaled()` / `rt_fork_parent_timed_out()` predicates. The
+# subprocess path collapses BOTH timeout and every signal into a single `-1`
+# sentinel (env_process.rs:508,535), which is why SIGSEGV and an earlyoom
+# SIGTERM are indistinguishable there. Here they are not: 139 is SIGSEGV,
+# 143 is SIGTERM. `classify_fork_exit` below uses that directly, so fork mode
+# does not need the crash-sentinel heuristic to tell a genuine crash from an
+# outside kill.
+
+use std.test_runner.test_runner_types.{TestFileResult, TestOptions}
+use std.test_runner.test_executor_parsing.{make_result_from_output}
+use std.test_runner.test_runner_metrics.{test_resource_class, test_resource_class_name, test_execution_cohort_id}
+use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
+use std.nogc_sync_mut.io.resource_scope.{standard_resource_budget}
+use std.common.perf.execution_metrics.{ResourceUsage, ResourceEvidenceQuality, TerminationCause, evaluate_resource_budget, decision_status_name}
+
+# SFFI declarations for fork bridge
+extern fn rt_fork_child_setup() -> i64
+extern fn rt_fork_parent_wait(pid: i64, timeout_ms: i64) -> i64
+extern fn rt_fork_parent_stdout() -> text
+extern fn rt_fork_parent_stderr() -> text
+extern fn rt_fork_child_exit(code: i64)
+extern fn rt_fork_parent_signaled() -> bool
+extern fn rt_fork_parent_timed_out() -> bool
+extern fn rt_fork_parent_user_cpu_micros() -> i64
+extern fn rt_fork_parent_system_cpu_micros() -> i64
+extern fn rt_fork_parent_peak_rss_bytes() -> i64
+
+# SFFI declaration for running interpreter on a file (Rust-side, already in binary)
+extern fn rt_cli_run_file(path: text, args: [text], gc_log: bool, gc_off: bool) -> i64
+
+# =========================================================================
+# Outcome classification (fork-specific — uses the REAL signal number)
+# =========================================================================
+
+fn signal_name_of(signo: i64) -> text:
+    """Human name for the signals that actually reach a forked test child."""
+    if signo == 2: return "SIGINT"
+    if signo == 4: return "SIGILL"
+    if signo == 6: return "SIGABRT"
+    if signo == 7: return "SIGBUS"
+    if signo == 8: return "SIGFPE"
+    if signo == 9: return "SIGKILL"
+    if signo == 11: return "SIGSEGV"
+    if signo == 15: return "SIGTERM"
+    return "signal {signo}"
+
+fn is_outside_kill(signo: i64) -> bool:
+    """SIGHUP/SIGINT/SIGTERM are what an EXTERNAL killer sends.
+
+    earlyoom SIGTERMs processes named `simple` at 10% memory on this zero-swap
+    host, so these say nothing about the test itself: they are UNVERIFIED, never
+    failures. A fault signal (SIGSEGV/SIGABRT/SIGBUS/SIGILL/SIGFPE) is the
+    program's own defect and IS a failure.
+
+    SIGKILL(9) is deliberately NOT in this set. Every kill this supervisor
+    itself budgets is already classified before this predicate is reached --
+    `classify_fork_exit` returns TIMEOUT on `rt_fork_parent_timed_out()` first
+    -- so any SIGKILL that gets here is UNBUDGETED, i.e. nothing in this runner
+    asked for it. earlyoom's first move is SIGTERM, so an unbudgeted SIGKILL is
+    not attributable to it either, and is indistinguishable from the compiler
+    dying. Classifying it as TERMINATED/unverified would silently swallow
+    exactly the crash this classification exists to surface, so 137 is CRASHED.
+    (Known tension, stated rather than hidden: earlyoom CAN escalate to SIGKILL
+    after its SIGTERM. Such a run is then reported as CRASHED rather than
+    unverified -- the deliberate direction, since over-reporting a crash is
+    recoverable and under-reporting one is the silent-green defect.)"""
+    signo == 1 or signo == 2 or signo == 15
+
+fn attach_fork_resource(result: TestFileResult, file_path: text, options: TestOptions, duration_ms: i64, exit_code: i64) -> TestFileResult:
+    val signal = if rt_fork_parent_signaled() and exit_code > 128: exit_code - 128 else: 0
+    val termination = if rt_fork_parent_timed_out():
+        TerminationCause.WallTimeout
+    elif signal > 0:
+        TerminationCause.Signal
+    elif exit_code < 0:
+        TerminationCause.InfrastructureFailure
+    else:
+        TerminationCause.Exited
+    val usage = ResourceUsage(
+        wall_ms: duration_ms,
+        user_cpu_ms: rt_fork_parent_user_cpu_micros() / 1000,
+        system_cpu_ms: rt_fork_parent_system_cpu_micros() / 1000,
+        peak_tree_charge_bytes: 0,
+        peak_direct_child_rss_bytes: rt_fork_parent_peak_rss_bytes(),
+        heap_live_end_bytes: 0, heap_peak_bytes: 0,
+        io_read_bytes: 0, io_write_bytes: 0, pids_peak: 1,
+        evidence_quality: ResourceEvidenceQuality.ExactDirectChild,
+        termination: termination, signal: signal, exit_code: exit_code)
+    val resource_class = test_resource_class(file_path)
+    val budget = evaluate_resource_budget(usage, standard_resource_budget(resource_class))
+    TestFileResult(
+        path: result.path, passed: result.passed, failed: result.failed,
+        skipped: result.skipped, pending: result.pending,
+        duration_ms: result.duration_ms, setup_ms: result.setup_ms,
+        error: result.error, timed_out: result.timed_out, cached: result.cached,
+        execution_ms: duration_ms, resource_usage: usage,
+        resource_class: test_resource_class_name(resource_class),
+        cohort_id: test_execution_cohort_id(file_path, options),
+        budget_status: decision_status_name(budget.status), anomaly_status: "provisional")
+
+fn classify_fork_exit(file_path: text, exit_code: i64, timeout_secs: i64, duration_ms: i64, setup_ms: i64) -> TestFileResult:
+    """Classify a fork child's death without the -1 sentinel guesswork.
+
+    Returns a result whose `error` is ALWAYS non-empty, so `is_ok()` stays
+    false and a crash can never read as a pass or as silently absent.
+    TERMINATED and TIMEOUT carry `failed: 0` — unverified, not failures."""
+    if rt_fork_parent_timed_out():
+        return TestFileResult(path: file_path, passed: 0, failed: 0, skipped: 0, pending: 0, duration_ms: duration_ms, setup_ms: setup_ms, error: "TIMEOUT: fork child produced no result after {timeout_secs}s (unverified)", timed_out: true, cached: false)
+
+    if rt_fork_parent_signaled() and exit_code > 128:
+        val signo = exit_code - 128
+        val name = signal_name_of(signo)
+        if is_outside_kill(signo):
+            return TestFileResult(path: file_path, passed: 0, failed: 0, skipped: 0, pending: 0, duration_ms: duration_ms, setup_ms: setup_ms, error: "TERMINATED: fork child killed by {name} (unverified -- an external killer such as earlyoom cannot be ruled out)", timed_out: false, cached: false)
+        return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0, duration_ms: duration_ms, setup_ms: setup_ms, error: "CRASHED: fork child died by {name}", timed_out: false, cached: false)
+
+    # -1 with neither predicate set is a waitpid/plumbing failure, not a
+    # verdict about the test. Unverified, but never silently absent.
+    if exit_code < 0:
+        return TestFileResult(path: file_path, passed: 0, failed: 0, skipped: 0, pending: 0, duration_ms: duration_ms, setup_ms: setup_ms, error: "TERMINATED: fork parent could not reap the child (unverified)", timed_out: false, cached: false)
+
+    return TestFileResult(path: file_path, passed: 0, failed: 0, skipped: 0, pending: 0, duration_ms: duration_ms, setup_ms: setup_ms, error: "", timed_out: false, cached: false)
+
+# =========================================================================
+# Fork Mode Execution
+# =========================================================================
+
+fn run_test_file_fork(file_path: text, options: TestOptions) -> TestFileResult:
+    # NOTE: deliberately does NOT use
+    # std.test_runner.test_result_wrapper.build_interpreter_result_wrapper —
+    # see the matching note in test_runner_execute.spl's run_test_file_interpreter
+    # and doc/08_tracking/bug/std_spec_package_shadows_file_print_summary_2026-07-17.md.
+    # That harness's `print_summary`/`get_executed_test_count` read .spl
+    # module-level vars that `describe`/`it`/`expect` (native interpreter
+    # intrinsics) never write to, so every wrapped run fails with `variable
+    # test_passed not found` or a false "no examples executed" panic.
+    # `make_result_from_output` already parses real counts directly from each
+    # `describe` block's own native "N examples, M failures" summary line, so
+    # no wrapper is needed here either — run `file_path` directly.
+    val timeout_ms = options.timeout * 1000
+    val start = time_now_unix_micros()
+
+    val pid_or_zero = rt_fork_child_setup()
+
+    # Measure session setup time (fork overhead)
+    val after_fork = time_now_unix_micros()
+    val setup_ms = (after_fork - start) / 1000
+
+    if pid_or_zero == 0:
+        # === CHILD PROCESS ===
+        # Binary already in memory (COW), no loading needed.
+        # rt_cli_run_file calls the Rust interpreter directly.
+        var args: [text] = []
+        val result = rt_cli_run_file(file_path, args, options.gc_log, options.gc_off)
+        rt_fork_child_exit(result)
+        # UNREACHABLE — rt_fork_child_exit calls _exit()
+        # Return a dummy value to satisfy type checker
+        return TestFileResult(path: file_path, passed: 0, failed: 0, skipped: 0, pending: 0, duration_ms: 0, setup_ms: 0, error: "", timed_out: false, cached: false)
+
+    if pid_or_zero < 0:
+        # Fork failed — return error result
+        val end = time_now_unix_micros()
+        val duration_ms = (end - start) / 1000
+        return TestFileResult(
+            path: file_path,
+            passed: 0,
+            failed: 1,
+            skipped: 0,
+            pending: 0,
+            duration_ms: duration_ms,
+            setup_ms: setup_ms,
+            error: "fork() failed",
+            timed_out: false,
+            cached: false
+        )
+
+    # === PARENT PROCESS ===
+    val exit_code = rt_fork_parent_wait(pid_or_zero, timeout_ms)
+    val stdout = rt_fork_parent_stdout()
+    val stderr = rt_fork_parent_stderr()
+    val end = time_now_unix_micros()
+    # duration_ms = only test execution time (excludes fork setup)
+    val duration_ms = (end - after_fork) / 1000
+
+    # Signal death and timeout are classified HERE, from waitpid's real status,
+    # before make_result_from_output ever sees the code. That path only knows
+    # the `-1` sentinel plus a shell-propagated 143/144, so it cannot tell a
+    # SIGSEGV (139) from an earlyoom SIGTERM (143) — fork mode can, and must
+    # not throw that information away by deferring to the weaker classifier.
+    if rt_fork_parent_timed_out() or rt_fork_parent_signaled() or exit_code < 0:
+        return attach_fork_resource(classify_fork_exit(file_path, exit_code, options.timeout, duration_ms, setup_ms), file_path, options, duration_ms, exit_code)
+
+    val result = make_result_from_output(file_path, stdout, stderr, exit_code, duration_ms, options.timeout)
+    # Attach setup_ms to the result
+    attach_fork_resource(TestFileResult(
+        path: result.path,
+        passed: result.passed,
+        failed: result.failed,
+        skipped: result.skipped,
+        pending: result.pending,
+        duration_ms: result.duration_ms,
+        setup_ms: setup_ms,
+        error: result.error,
+        timed_out: result.timed_out,
+        cached: result.cached,
+        mcdc_evidence_v1: result.mcdc_evidence_v1,
+        blocked: result.blocked, unsupported: result.unsupported,
+        omission_evidence: result.omission_evidence
+    ), file_path, options, duration_ms, exit_code)
+
+# =========================================================================
+# Exports
+# =========================================================================

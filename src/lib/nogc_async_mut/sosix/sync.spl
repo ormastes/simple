@@ -1,0 +1,110 @@
+"""Typed synchronous SOSIX adapter: the same ring operation, waited without spinning.
+
+`sosix_sync_fs_read_at` submits through `SosixHostedFs` exactly like the async
+path (one reserve + one commit) and then drives `SosixSyncWaitState` from
+`wait_v1`: the platform driver performs exactly one native wait each time
+`should_wait` is true, completions are drained into a private wait set, and a
+bounded retry budget replaces the `while not complete: continue` loop that
+`src/os/sosix/io_rw.spl` used. The driver is a trait so the software provider
+(tests), a hosted condition wait, or the SimpleOS kernel wait plug in without
+touching the adapter.
+"""
+
+use std.common.contracts.sosix.operation_v1.{SosixOperationId}
+use std.common.contracts.sosix.capability_ref_v1.{SosixCapabilityRef, SosixBufferRef}
+use std.common.contracts.sosix.completion_v1.{SosixCompletion}
+use std.common.contracts.sosix.file_operation_v1.{SOSIX_FS_READ_AT, SOSIX_FS_WRITE_AT}
+use std.common.contracts.sosix.wait_v1.{
+    SOSIX_SYNC_WAIT_PENDING, SOSIX_SYNC_WAIT_COMPLETED, SOSIX_SYNC_WAIT_CANCELED, SOSIX_SYNC_WAIT_ERROR,
+    SosixWaitSet, SosixSyncWaitState, SosixSyncWaitDecision
+}
+use std.common.contracts.sosix.error_v1.{
+    SOSIX_ERROR_TIMED_OUT, SOSIX_ERROR_CANCELED, SOSIX_ERROR_NATIVE, SOSIX_NATIVE_DOMAIN_POSIX,
+    SosixError, sosix_error_new, sosix_error_from_status
+}
+use std.nogc_async_mut.sosix.fs.{SosixHostedFs, SosixFsSubmit}
+
+# One native wait per call. `attempt` counts prior waits for this operation so a
+# scripted driver can stay pure; a real driver blocks on its condition/futex once
+# and returns a SOSIX_NATIVE_WAIT_* code. It must never loop.
+pub trait SosixSyncWaitDriver:
+    fn wait_once(fs: SosixHostedFs, operation: SosixOperationId, deadline_ns: u64, attempt: u64) -> u8
+
+pub val SOSIX_SYNC_WAIT_BUDGET: u64 = 64
+
+pub struct SosixSyncResult:
+    outcome: u8
+    waits: u64
+    error: SosixError
+    completion: SosixCompletion
+
+fn _drain_into(fs: SosixHostedFs, wait_set: SosixWaitSet):
+    # Results live in the operation slots; the queue is only the wake vehicle,
+    # so an unwatched sibling completion dropped here loses nothing observable.
+    var draining = true
+    while draining:
+        if val completion = fs.take_completion():
+            wait_set.notify(completion)
+        else:
+            draining = false
+
+fn _result(decision: SosixSyncWaitDecision, waits: u64) -> SosixSyncResult:
+    var error = sosix_error_new(0)
+    if decision.outcome != SOSIX_SYNC_WAIT_COMPLETED:
+        error = sosix_error_new(SOSIX_ERROR_TIMED_OUT)
+    if decision.outcome == SOSIX_SYNC_WAIT_CANCELED:
+        error = sosix_error_new(SOSIX_ERROR_CANCELED)
+    if decision.outcome == SOSIX_SYNC_WAIT_ERROR:
+        error = sosix_error_from_status(decision.wait_error_status, SOSIX_NATIVE_DOMAIN_POSIX, 0u64)
+    if decision.outcome == SOSIX_SYNC_WAIT_COMPLETED and decision.completion.status < 0:
+        error = sosix_error_from_status(decision.completion.status, SOSIX_NATIVE_DOMAIN_POSIX, decision.completion.transferred)
+    SosixSyncResult(outcome: decision.outcome, waits: waits, error: error, completion: decision.completion)
+
+fn _submit_error(submit: SosixFsSubmit) -> SosixSyncResult:
+    SosixSyncResult(
+        outcome: SOSIX_SYNC_WAIT_ERROR, waits: 0u64, error: submit.error,
+        completion: SosixCompletion(operation: submit.operation, api_id: 0, status: 0, transferred: 0, partial_progress: false, terminal_state: 0))
+
+fn _wait_for(fs: SosixHostedFs, driver: SosixSyncWaitDriver, submit: SosixFsSubmit, api_id: u32, deadline_ns: u64) -> SosixSyncResult:
+    val wait_set = SosixWaitSet.create()
+    wait_set.watch(submit.operation)
+    val state = SosixSyncWaitState.begin(submit.operation, api_id, wait_set)
+    var waits: u64 = 0
+    var budget = SOSIX_SYNC_WAIT_BUDGET
+    _drain_into(fs, wait_set)
+    var decision = state.before_wait(wait_set)
+    while decision.outcome == SOSIX_SYNC_WAIT_PENDING and budget > 0u64:
+        budget = budget - 1u64
+        if decision.should_wait:
+            val native = driver.wait_once(fs, submit.operation, deadline_ns, waits)
+            waits = waits + 1u64
+            fs.pump()
+            _drain_into(fs, wait_set)
+            decision = state.after_wait(wait_set, native, 0)
+        if decision.retry:
+            _drain_into(fs, wait_set)
+            decision = state.before_wait(wait_set)
+    if decision.outcome == SOSIX_SYNC_WAIT_PENDING:
+        # Budget exhausted: fail closed instead of spinning; the operation stays owned by fs.
+        return SosixSyncResult(
+            outcome: SOSIX_SYNC_WAIT_ERROR, waits: waits, error: sosix_error_new(SOSIX_ERROR_TIMED_OUT),
+            completion: decision.completion)
+    if decision.outcome == SOSIX_SYNC_WAIT_COMPLETED:
+        # The caller holds the result value; the lease ends with the call.
+        fs.release(submit.operation)
+    _result(decision, waits)
+
+pub fn sosix_sync_fs_read_at(fs: SosixHostedFs, driver: SosixSyncWaitDriver, file: SosixCapabilityRef, buffer: SosixBufferRef, file_offset: u64, buffer_offset: u64, length: u64, deadline_ns: u64) -> SosixSyncResult:
+    val submit = fs.read_at(file, buffer, file_offset, buffer_offset, length, deadline_ns)
+    if not submit.accepted:
+        return _submit_error(submit)
+    _wait_for(fs, driver, submit, SOSIX_FS_READ_AT, deadline_ns)
+
+pub fn sosix_sync_fs_write_at(fs: SosixHostedFs, driver: SosixSyncWaitDriver, file: SosixCapabilityRef, buffer: SosixBufferRef, file_offset: u64, buffer_offset: u64, length: u64, deadline_ns: u64) -> SosixSyncResult:
+    val submit = fs.write_at(file, buffer, file_offset, buffer_offset, length, deadline_ns)
+    if not submit.accepted:
+        return _submit_error(submit)
+    _wait_for(fs, driver, submit, SOSIX_FS_WRITE_AT, deadline_ns)
+
+export SosixSyncWaitDriver, SosixSyncResult, SOSIX_SYNC_WAIT_BUDGET
+export sosix_sync_fs_read_at, sosix_sync_fs_write_at

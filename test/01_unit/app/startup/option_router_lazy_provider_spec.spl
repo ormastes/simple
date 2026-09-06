@@ -1,0 +1,82 @@
+# Stage-0 option router — sabotage probe (WP-19a): defect-class spec with a
+# positive control. Parsing argv must NOT open provider markers.
+#
+# Open-evidence design (not a log-line assertion): the UNRELATED namespace is
+# registered with a provider marker path that DOES NOT EXIST. The router's
+# provider load is fail-closed — any open attempt on that path yields an
+# explicit error. Therefore a successful parse (and a successful load of the
+# USED provider) is proof by construction that the unrelated marker was never
+# opened; an eager router would have tripped on the missing file.
+#
+# Positive control: the marker for the namespace actually used IS opened —
+# its exact on-disk content comes back from the load — so this spec cannot
+# pass by opening nothing at all.
+
+use std.spec
+use app.io.mod.{file_write, file_delete, file_exists}
+use app.startup.option_router.{
+    OptionRouterRouteV1, OptionRouterNamespaceV1,
+    option_router_table_create_v1, option_router_register_route_v1,
+    option_router_register_namespace_v1, option_router_route_argv_v1,
+    option_router_load_provider_marker_v1,
+    ROUTER_DISPATCH_EXTENSION
+}
+use std.nogc_sync_mut.composition.cli_option_route.{CLI_VALUE_MODE_FLAG}
+
+val USED_MARKER: text = "/tmp/option_router_probe_used_marker.txt"
+val UNRELATED_MARKER: text = "/tmp/option_router_probe_unrelated_marker_never_created.txt"
+val USED_CONTENT: text = "provider.hot marker payload 7f3a"
+
+fn _table():
+    var t = option_router_table_create_v1()
+    val (t1, d1) = option_router_register_route_v1(t, OptionRouterRouteV1(option_id: "core.verbose", spelling: "--verbose", value_mode: CLI_VALUE_MODE_FLAG, provider_id: ""))
+    assert d1.ok
+    val (t2, d2) = option_router_register_namespace_v1(t1, OptionRouterNamespaceV1(namespace: "hot", provider_id: "provider.hot", provider_marker_path: USED_MARKER))
+    assert d2.ok
+    val (t3, d3) = option_router_register_namespace_v1(t2, OptionRouterNamespaceV1(namespace: "cold", provider_id: "provider.cold", provider_marker_path: UNRELATED_MARKER))
+    assert d3.ok
+    t3
+
+describe "stage0 option router — lazy provider sabotage probe":
+    it "unrelated-option parse leaves both provider markers unopened":
+        file_delete(UNRELATED_MARKER)
+        expect(file_exists(UNRELATED_MARKER)).to_be(false)
+        val t = _table()
+        # argv contains ONLY an exact option — no extension token at all.
+        match option_router_route_argv_v1(t, ["--verbose", "positional"]):
+            case Ok(ds): expect(ds.len()).to_be(2)
+            case Err(e): expect(e).to_be("")
+        # open-evidence: cold's marker never existed; a parse that opened
+        # providers eagerly would have failed on it. Parse succeeded.
+        expect(file_exists(UNRELATED_MARKER)).to_be(false)
+
+    it "positive control: the used namespace's marker IS opened, the unrelated one is NOT":
+        file_write(USED_MARKER, USED_CONTENT)
+        file_delete(UNRELATED_MARKER)
+        val t = _table()
+        # Both namespaces registered; argv touches only `hot`.
+        match option_router_route_argv_v1(t, ["--xhot-mode=fast"]):
+            case Ok(ds):
+                expect(ds.len()).to_be(1)
+                expect(ds[0].kind).to_be(ROUTER_DISPATCH_EXTENSION)
+                # parse itself succeeded with cold's marker absent → cold unopened
+                expect(file_exists(UNRELATED_MARKER)).to_be(false)
+                # now the CONSUMER loads the routed provider: content round-trips,
+                # which is only possible by actually opening the used marker.
+                match option_router_load_provider_marker_v1(t, ds[0]):
+                    case Ok(content): expect(content.contains(USED_CONTENT)).to_be(true)
+                    case Err(e): expect(e).to_be("")
+            case Err(e):
+                expect(e).to_be("")
+        file_delete(USED_MARKER)
+
+    it "loading an absent provider marker is an explicit error (fail-closed load path)":
+        file_delete(UNRELATED_MARKER)
+        val t = _table()
+        match option_router_route_argv_v1(t, ["--xcold-mode=x"]):
+            case Ok(ds):
+                match option_router_load_provider_marker_v1(t, ds[0]):
+                    case Ok(_): expect(true).to_be(false)
+                    case Err(e): expect(e.contains("provider marker missing")).to_be(true)
+            case Err(e):
+                expect(e).to_be("")

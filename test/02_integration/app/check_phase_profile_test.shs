@@ -1,0 +1,42 @@
+#!/bin/sh
+set -eu
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)
+simple_bin=${SIMPLE_TEST_BINARY:-"${repo_root}/bin/simple"}
+[ -x "${simple_bin}" ] || {
+  echo "FAIL: pure-Simple test binary is not executable: ${simple_bin}" >&2
+  exit 1
+}
+
+work=$(mktemp -d "${TMPDIR:-/tmp}/simple-check-phase-profile.XXXXXX")
+trap 'rm -rf "${work}"' EXIT HUP INT TERM
+fixture="${work}/sample.spl"
+printf '%s\n' 'fn answer() -> i64: 42' >"${fixture}"
+
+run_check() {
+  SIMPLE_BINARY="${simple_bin}" SIMPLE_BIN="${simple_bin}" SIMPLE_LIB="${repo_root}/src" \
+    "${simple_bin}" run "${repo_root}/src/app/check/main.spl" "$@"
+}
+
+run_check --phase-profile "${fixture}" \
+  >"${work}/profile.stdout" 2>"${work}/profile.stderr"
+profile_combined=$(cat "${work}/profile.stdout" "${work}/profile.stderr")
+printf '%s\n' "${profile_combined}" | grep -Fq 'event=check_phase phase=parse '
+printf '%s\n' "${profile_combined}" | grep -Fq 'event=check_phase phase=lint '
+printf '%s\n' "${profile_combined}" | grep -Fq 'event=check_phase phase=command_total elapsed_ms='
+
+run_check --json "${fixture}" >"${work}/default.stdout" 2>"${work}/default.stderr"
+if grep -Fq 'event=check_phase' "${work}/default.stdout" "${work}/default.stderr"; then
+  echo "FAIL: default check emitted phase evidence" >&2
+  exit 1
+fi
+
+run_check --phase-profile --json "${fixture}" \
+  >"${work}/json.stdout" 2>"${work}/json.stderr"
+grep -Fq '"command":"check","status":"ok"' "${work}/json.stdout"
+if grep -Fq 'event=check_phase' "${work}/json.stdout" "${work}/json.stderr"; then
+  echo "FAIL: phase evidence contaminated JSON mode" >&2
+  exit 1
+fi
+
+echo "check_phase_profile=true"

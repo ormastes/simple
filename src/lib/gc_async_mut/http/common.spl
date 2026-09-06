@@ -1,0 +1,113 @@
+# HTTP Common Utilities
+#
+# Shared utility functions used across HTTP modules to avoid code duplication.
+
+use common.text.{parse_i64}
+
+# ============================================================================
+# Header Parsing (shared by request and response modules)
+# ============================================================================
+
+# Parse list of header lines into list of (name, value) tuples
+fn parse_headers(lines: list) -> list:
+    var headers = []
+    var i = 0
+    while i < lines.length():
+        val line = lines[i]
+        val header = parse_header(line)
+        headers.push(header)
+        i = i + 1
+    return headers
+
+# Parse single header line
+# Example: "Content-Type: application/json" -> ("Content-Type", "application/json")
+fn parse_header(line: text) -> tuple:
+    val colon_pos = index_of(text: line, substring: ":", start: 0)
+
+    if colon_pos < 0:
+        return ("", "")
+
+    val name = line.substring(0, colon_pos)
+
+    var value_start = colon_pos + 1
+
+    # Skip leading whitespace in value
+    while value_start < line.length():
+        val ch = line[value_start]
+        var is_space = false
+        if ch == " ":
+            is_space = true
+        if ch == "\t":
+            is_space = true
+
+        if is_space:
+            value_start = value_start + 1
+        else:
+            break
+
+    val value = line.substring(value_start, line.length())
+
+    return (name, value)
+
+# Format headers list into HTTP header text
+fn format_headers(headers: list) -> text:
+    var parts: [text] = []
+    var i = 0
+    while i < headers.length():
+        val header = headers[i]
+        val name = header[0]
+        val value = header[1]
+
+        parts.push(name + ": " + value)
+
+        i = i + 1
+    return parts.join("\r\n") + "\r\n"
+
+# ============================================================================
+# Number Parsing (shared across modules)
+# ============================================================================
+
+# Parse integer from text
+fn parse_int(text: text) -> i64:
+    parse_i64(text)
+
+# Convert hex digit to integer (RFC 5234 HEXDIG, plus lowercase a-f)
+#
+# Maps the digit by position in a literal lookup table. `text.char_code()` does
+# NOT exist -- text has no such method in any engine -- so the previous
+# implementation raised `Function 'str.char_code' not found` for EVERY input,
+# including plain "0"-"9". See http1.spl:130 for the same note. Non-hex input
+# still yields 0, matching the original contract.
+fn hex_to_int(ch: text) -> i64:
+    val lower = index_of(text: "0123456789abcdef", substring: ch, start: 0)
+    if lower >= 0:
+        return lower
+
+    val upper = index_of(text: "0123456789ABCDEF", substring: ch, start: 0)
+    if upper >= 0:
+        return upper
+
+    return 0
+
+# ============================================================================
+# String Utilities
+# ============================================================================
+
+# Find substring with start position
+fn index_of(text: text, substring: text, start: i64) -> i64:
+    var i = start
+    while i <= text.length() - substring.length():
+        var match = true
+        var j = 0
+        while j < substring.length():
+            if text[i + j] != substring[j]:
+                match = false
+                break
+            j = j + 1
+
+        if match:
+            return i
+
+        i = i + 1
+
+    return -1

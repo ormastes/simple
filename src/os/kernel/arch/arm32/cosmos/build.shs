@@ -1,0 +1,1442 @@
+#!/bin/sh
+# Clean, reproducible Cosmos+ OpenSSD ARM image build.
+set -eu
+
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+ROOT="$(CDPATH= cd -- "$SCRIPT_DIR/../../../../../.." && pwd)"
+RECEIPT_HELPER="$SCRIPT_DIR/cosmos_build_receipt.shs"
+PROFILE_HEADER="$SCRIPT_DIR/cosmos_profile_openssd2_8ch8way_v300.h"
+[ -f "$RECEIPT_HELPER" ] || {
+    echo "missing receipt helper: $RECEIPT_HELPER" >&2
+    exit 2
+}
+. "$RECEIPT_HELPER"
+
+PROFILE_SELECTOR="$(cosmos_profile_string "$PROFILE_HEADER" COSMOS_PROFILE_SELECTOR)"
+PROFILE_NAME="$(cosmos_profile_string "$PROFILE_HEADER" COSMOS_PROFILE_NAME)"
+PROFILE_SYMBOL="$(cosmos_profile_define "$PROFILE_HEADER" COSMOS_PROFILE_ELF_SYMBOL)"
+PROFILE_RECEIPT_FORMAT="$(
+    cosmos_profile_string "$PROFILE_HEADER" COSMOS_PROFILE_BUILD_RECEIPT_FORMAT
+)"
+PROFILE_SOURCE_COMMIT="$(
+    cosmos_profile_string "$PROFILE_HEADER" COSMOS_PROFILE_SOURCE_COMMIT
+)"
+PROFILE_BITSTREAM_SHA256="$(
+    cosmos_profile_string "$PROFILE_HEADER" COSMOS_PROFILE_BITSTREAM_SHA256
+)"
+COSMOS_FIRMWARE_BASE="$(
+    cosmos_profile_u32 "$PROFILE_HEADER" COSMOS_FIRMWARE_IDENTITY_BASE
+)"
+COSMOS_FIRMWARE_END="$(
+    cosmos_profile_u32 "$PROFILE_HEADER" COSMOS_FIRMWARE_IDENTITY_END
+)"
+COSMOS_DMA_BASE="$(
+    cosmos_profile_u32 "$PROFILE_HEADER" COSMOS_NFC_DMA_IDENTITY_BASE
+)"
+COSMOS_DMA_END="$(
+    cosmos_profile_u32 "$PROFILE_HEADER" COSMOS_NFC_DMA_IDENTITY_END
+)"
+COSMOS_MMIO_BASE="$(
+    cosmos_profile_u32 "$PROFILE_HEADER" COSMOS_MMIO_IDENTITY_BASE
+)"
+COSMOS_MMIO_END="$(
+    cosmos_profile_u32 "$PROFILE_HEADER" COSMOS_MMIO_IDENTITY_END
+)"
+[ "$PROFILE_RECEIPT_FORMAT" = "$COSMOS_RECEIPT_FORMAT" ] || {
+    echo "profile/receipt schema mismatch" >&2
+    exit 2
+}
+
+MODE="${COSMOS_BUILD_MODE:-qemu}"
+PROFILE="${COSMOS_SILICON_PROFILE:-}"
+case "${COSMOS_OUT:-}" in
+    "") OUT="$ROOT/build/os" ;;
+    /*) OUT="$COSMOS_OUT" ;;
+    *) OUT="$ROOT/$COSMOS_OUT" ;;
+esac
+[ "$OUT" != / ] || {
+    echo "invalid COSMOS_OUT" >&2
+    exit 2
+}
+
+case "$MODE" in
+    qemu)
+        [ -z "$PROFILE" ] || {
+            echo "QEMU builds cannot select a silicon profile" >&2
+            exit 2
+        }
+        ELF="$OUT/simpleos_cosmos_openssd.elf"
+        RECEIPT_PROFILE=unbound
+        RECEIPT_SELECTOR=unbound
+        ;;
+    silicon)
+        [ "$PROFILE" = "$PROFILE_SELECTOR" ] || {
+            echo "silicon builds require COSMOS_SILICON_PROFILE=$PROFILE_SELECTOR" >&2
+            exit 2
+        }
+        ELF="$OUT/simpleos_cosmos_openssd_silicon.elf"
+        RECEIPT_PROFILE="$PROFILE_NAME"
+        RECEIPT_SELECTOR="$PROFILE_SELECTOR"
+        ;;
+    *)
+        echo "invalid COSMOS_BUILD_MODE: $MODE (expected qemu or silicon)" >&2
+        exit 2
+        ;;
+esac
+
+case "${1:-}" in
+    "") ;;
+    --run) ;;
+    *) echo "usage: $0 [--run]" >&2; exit 2 ;;
+esac
+[ "$#" -le 1 ] || {
+    echo "usage: $0 [--run]" >&2
+    exit 2
+}
+
+CLANG="${CLANG:-clang}"
+LLD="${LLD:-ld.lld}"
+READELF="${READELF:-readelf}"
+NM="${NM:-nm}"
+SIMPLE_BINARY="${SIMPLE_BINARY:-}"
+for tool in "$CLANG" "$LLD" "$READELF" "$NM" awk sed grep cmp; do
+    command -v "$tool" >/dev/null 2>&1 || {
+        echo "missing-tool: $tool" >&2
+        exit 2
+    }
+done
+[ -x "$SIMPLE" ] || {
+    echo "missing executable pure-Simple compiler: $SIMPLE" >&2
+    exit 2
+}
+BOOTSTRAP_STAGE3_FACADE_PATH="$ROOT/scripts/check/lib/bootstrap-stage3-provenance.shs"
+STAGE4_PROVENANCE_HELPER_PATH="$ROOT/scripts/check/lib/stage4-candidate-provenance.shs"
+export BOOTSTRAP_STAGE3_FACADE_PATH STAGE4_PROVENANCE_HELPER_PATH
+. "$BOOTSTRAP_STAGE3_FACADE_PATH"
+. "$STAGE4_PROVENANCE_HELPER_PATH"
+SIMPLE_CANONICAL="$(bootstrap_stage3_canonical_file "$SIMPLE")" || {
+    echo "cannot resolve pure-Simple compiler canonically: $SIMPLE" >&2
+    exit 2
+}
+SIMPLE_PROVENANCE="${SIMPLE_PROVENANCE:-${SIMPLE_CANONICAL}.provenance.env}"
+stage4_verify_candidate_provenance \
+    "$SIMPLE_PROVENANCE" "$SIMPLE_CANONICAL" "$ROOT" || {
+    echo "pure-Simple Cosmos policy objects require admitted Stage-4 provenance" >&2
+    exit 2
+}
+SIMPLE="$SIMPLE_CANONICAL"
+SIMPLE_SHA256_ADMITTED="$(cosmos_sha256_file "$SIMPLE")"
+SIMPLE_PROVENANCE_SHA256_ADMITTED="$(
+    cosmos_sha256_file "$SIMPLE_PROVENANCE"
+)"
+SIMPLE_IDENTITY="$($SIMPLE --version 2>&1 || true)"
+case "$SIMPLE_IDENTITY" in
+    *"Rust-built Simple binary is a bootstrap seed"*)
+        echo "pure-Simple Cosmos policy objects require an admitted self-host compiler" >&2
+        exit 2
+        ;;
+esac
+
+[ -n "$SIMPLE_BINARY" ] || {
+    echo "missing-tool: set SIMPLE_BINARY to an admitted Stage-4 Pure Simple compiler" >&2
+    exit 2
+}
+case "$SIMPLE_BINARY" in
+    /*) ;;
+    *) echo "invalid-tool: SIMPLE_BINARY must be an absolute path" >&2; exit 2 ;;
+esac
+[ -x "$SIMPLE_BINARY" ] || {
+    echo "missing-tool: Pure Simple compiler is not executable: $SIMPLE_BINARY" >&2
+    exit 2
+}
+case "$SIMPLE_BINARY" in
+    *compiler_rust*)
+        echo "invalid-tool: Rust seed is forbidden for Cosmos FSBL" >&2
+        exit 2
+        ;;
+esac
+BOOTSTRAP_STAGE3_FACADE_PATH="$ROOT/scripts/check/lib/bootstrap-stage3-provenance.shs"
+STAGE4_PROVENANCE_HELPER_PATH="$ROOT/scripts/check/lib/stage4-candidate-provenance.shs"
+export BOOTSTRAP_STAGE3_FACADE_PATH STAGE4_PROVENANCE_HELPER_PATH
+. "$BOOTSTRAP_STAGE3_FACADE_PATH"
+. "$STAGE4_PROVENANCE_HELPER_PATH"
+SIMPLE_BINARY="$(bootstrap_stage3_canonical_file "$SIMPLE_BINARY")" || {
+    echo "invalid-tool: Pure Simple compiler path is not canonical" >&2
+    exit 2
+}
+COSMOS_SIMPLE_COMPILER_PROVENANCE="${SIMPLE_BINARY}.provenance.env"
+stage4_verify_candidate_provenance \
+    "$COSMOS_SIMPLE_COMPILER_PROVENANCE" "$SIMPLE_BINARY" "$ROOT" || {
+    echo "invalid-tool: Pure Simple compiler provenance is not admitted" >&2
+    exit 2
+}
+COSMOS_SIMPLE_COMPILER="$SIMPLE_BINARY"
+COSMOS_SIMPLE_COMPILER_VERSION="$($SIMPLE_BINARY --version 2>&1 | awk 'NF { print; exit }')"
+COSMOS_SIMPLE_COMPILER_SHA256="$(cosmos_sha256_file "$SIMPLE_BINARY")"
+COSMOS_SIMPLE_COMPILER_PROVENANCE_SHA256="$(
+    cosmos_sha256_file "$COSMOS_SIMPLE_COMPILER_PROVENANCE"
+)"
+export COSMOS_SIMPLE_COMPILER COSMOS_SIMPLE_COMPILER_VERSION \
+    COSMOS_SIMPLE_COMPILER_SHA256 COSMOS_SIMPLE_COMPILER_PROVENANCE \
+    COSMOS_SIMPLE_COMPILER_PROVENANCE_SHA256
+
+[ -n "$SIMPLE_BINARY" ] || {
+    echo "missing-tool: set SIMPLE_BINARY to an admitted Stage-4 Pure Simple compiler" >&2
+    exit 2
+}
+case "$SIMPLE_BINARY" in
+    /*) ;;
+    *) echo "invalid-tool: SIMPLE_BINARY must be an absolute path" >&2; exit 2 ;;
+esac
+[ -x "$SIMPLE_BINARY" ] || {
+    echo "missing-tool: Pure Simple compiler is not executable: $SIMPLE_BINARY" >&2
+    exit 2
+}
+case "$SIMPLE_BINARY" in
+    *compiler_rust*)
+        echo "invalid-tool: Rust seed is forbidden for Cosmos FSBL" >&2
+        exit 2
+        ;;
+esac
+BOOTSTRAP_STAGE3_FACADE_PATH="$ROOT/scripts/check/lib/bootstrap-stage3-provenance.shs"
+STAGE4_PROVENANCE_HELPER_PATH="$ROOT/scripts/check/lib/stage4-candidate-provenance.shs"
+export BOOTSTRAP_STAGE3_FACADE_PATH STAGE4_PROVENANCE_HELPER_PATH
+. "$BOOTSTRAP_STAGE3_FACADE_PATH"
+. "$STAGE4_PROVENANCE_HELPER_PATH"
+SIMPLE_BINARY="$(bootstrap_stage3_canonical_file "$SIMPLE_BINARY")" || {
+    echo "invalid-tool: Pure Simple compiler path is not canonical" >&2
+    exit 2
+}
+COSMOS_SIMPLE_COMPILER_PROVENANCE="${SIMPLE_BINARY}.provenance.env"
+stage4_verify_candidate_provenance \
+    "$COSMOS_SIMPLE_COMPILER_PROVENANCE" "$SIMPLE_BINARY" "$ROOT" || {
+    echo "invalid-tool: Pure Simple compiler provenance is not admitted" >&2
+    exit 2
+}
+COSMOS_SIMPLE_COMPILER="$SIMPLE_BINARY"
+COSMOS_SIMPLE_COMPILER_VERSION="$($SIMPLE_BINARY --version 2>&1 | awk 'NF { print; exit }')"
+COSMOS_SIMPLE_COMPILER_SHA256="$(cosmos_sha256_file "$SIMPLE_BINARY")"
+COSMOS_SIMPLE_COMPILER_PROVENANCE_SHA256="$(
+    cosmos_sha256_file "$COSMOS_SIMPLE_COMPILER_PROVENANCE"
+)"
+export COSMOS_SIMPLE_COMPILER COSMOS_SIMPLE_COMPILER_VERSION \
+    COSMOS_SIMPLE_COMPILER_SHA256 COSMOS_SIMPLE_COMPILER_PROVENANCE \
+    COSMOS_SIMPLE_COMPILER_PROVENANCE_SHA256
+
+OBJ="$OUT/cosmos-$MODE"
+RECEIPT="$ELF.receipt"
+OBJECT_RECEIPT="$ELF.objects"
+ELF_TMP="$ELF.tmp.$$"
+RECEIPT_TMP="$RECEIPT.tmp.$$"
+OBJECT_RECEIPT_TMP="$OBJECT_RECEIPT.tmp.$$"
+OBJECT_RECEIPT_AFTER="$OBJECT_RECEIPT.after.$$"
+LOADS_TMP="$RECEIPT.loads.$$"
+SOURCES_BEFORE="$RECEIPT.sources-before.$$"
+SOURCES_AFTER="$RECEIPT.sources-after.$$"
+cleanup() {
+    rm -f "$ELF_TMP" "$RECEIPT_TMP" "$LOADS_TMP" \
+        "$OBJECT_RECEIPT_TMP" "$OBJECT_RECEIPT_AFTER" \
+        "$SOURCES_BEFORE" "$SOURCES_AFTER"
+}
+trap cleanup EXIT HUP INT TERM
+
+mkdir -p "$OUT"
+rm -rf "$OBJ"
+mkdir -p "$OBJ"
+rm -f "$ELF" "$RECEIPT" "$OBJECT_RECEIPT"
+cosmos_write_source_manifest "$SCRIPT_DIR" "$SOURCES_BEFORE" || {
+    echo "cannot capture build inputs" >&2
+    exit 1
+}
+
+CFLAGS="--target=armv7-unknown-none-eabihf -mcpu=cortex-a9 -marm -mfloat-abi=hard -ffreestanding -nostdlib -fno-builtin -Wall -Wextra -Werror"
+if [ "$MODE" = silicon ]; then
+    CFLAGS="$CFLAGS -DCOSMOS_SILICON -include $PROFILE_HEADER"
+fi
+
+"$CLANG" $CFLAGS -c "$SCRIPT_DIR/cosmos_start.S" -o "$OBJ/cosmos_start.o"
+"$CLANG" $CFLAGS -O0 -c "$SCRIPT_DIR/cosmos_uart.c" -o "$OBJ/cosmos_uart.o"
+COSMOS_SIMPLE_FSBL_OBJECT="$OBJ/cosmos_fsbl.o"
+export COSMOS_SIMPLE_FSBL_OBJECT
+SIMPLE_NO_STUB_FALLBACK=1 "$SIMPLE_BINARY" native-build --backend llvm \
+    --source "$ROOT/src" --entry "$SCRIPT_DIR/cosmos_fsbl.spl" \
+    --entry-closure --target armv7-unknown-none-eabihf --emit-object \
+    --cache-dir "$OBJ/simple-cache" -o "$COSMOS_SIMPLE_FSBL_OBJECT"
+[ "$(cosmos_sha256_file "$SIMPLE_BINARY")" = \
+    "$COSMOS_SIMPLE_COMPILER_SHA256" ] || {
+    echo "invalid-artifact: Pure Simple compiler changed during FSBL build" >&2
+    exit 1
+}
+FSBL_HEADER="$(LC_ALL=C "$READELF" -hW "$COSMOS_SIMPLE_FSBL_OBJECT")"
+printf '%s\n' "$FSBL_HEADER" | grep -Eq 'Class:[[:space:]]+ELF32' &&
+    printf '%s\n' "$FSBL_HEADER" | grep -Eq 'Type:[[:space:]]+REL([[:space:]]|$)' &&
+    printf '%s\n' "$FSBL_HEADER" | grep -Eq 'Machine:[[:space:]]+ARM([[:space:]]|$)' &&
+    printf '%s\n' "$FSBL_HEADER" | grep -Eq 'Flags:.*hard-float ABI' || {
+    echo "invalid-artifact: Pure Simple FSBL object is not ARM32 hard-float ET_REL" >&2
+    exit 1
+}
+"$NM" "$COSMOS_SIMPLE_FSBL_OBJECT" |
+    grep -Eq '[[:space:]]T[[:space:]]+cosmos_fsbl_validate_handoff$' &&
+    "$NM" "$COSMOS_SIMPLE_FSBL_OBJECT" |
+        grep -Eq '[[:space:]]T[[:space:]]+cosmos_fsbl_selftest$' || {
+    echo "invalid-artifact: Pure Simple FSBL object lacks the historical C ABI" >&2
+    exit 1
+}
+COSMOS_SIMPLE_FSBL_OBJECT_SHA256="$(
+    cosmos_sha256_file "$COSMOS_SIMPLE_FSBL_OBJECT"
+)"
+export COSMOS_SIMPLE_FSBL_OBJECT_SHA256
+OBJECTS="$OBJ/cosmos_start.o $OBJ/cosmos_uart.o $COSMOS_SIMPLE_FSBL_OBJECT"
+for unit in cosmos_runtime cosmos_mmu_cache cosmos_smp_gic \
+    cosmos_nfc cosmos_pcie cosmos_nvme_firmware cosmos_nvme_pcie_adapter \
+    cosmos_nvme_admin cosmos_nvme_dispatch cosmos_ftl \
+    cosmos_ftl_nfc_backend cosmos_nvme_ftl_media cosmos_storage
+do
+    "$CLANG" $CFLAGS -O2 -c "$SCRIPT_DIR/$unit.c" -o "$OBJ/$unit.o"
+    OBJECTS="$OBJECTS $OBJ/$unit.o"
+done
+
+cosmos_policy_exports() {
+    awk '
+        /@export\("C"/ {
+            if ($0 ~ /name: "/) {
+                line = $0
+                sub(/^.*name: "/, "", line)
+                sub(/".*$/, "", line)
+                print line
+                pending = 0
+            } else {
+                pending = 1
+            }
+            next
+        }
+        pending && /^[[:space:]]*(pub[[:space:]]+)?fn[[:space:]]+/ {
+            line = $0
+            sub(/^[[:space:]]*/, "", line)
+            sub(/^pub[[:space:]]+/, "", line)
+            sub(/^fn[[:space:]]+/, "", line)
+            sub(/\(.*/, "", line)
+            print line
+            pending = 0
+        }
+    ' "$1" | LC_ALL=C sort -u
+}
+
+cosmos_verify_simple_unchanged() {
+    _cp_label="$1"
+    stage4_verify_candidate_provenance \
+        "$SIMPLE_PROVENANCE" "$SIMPLE" "$ROOT" || {
+        echo "pure-Simple compiler provenance changed during $_cp_label emission" >&2
+        exit 1
+    }
+    [ "$(cosmos_sha256_file "$SIMPLE")" = "$SIMPLE_SHA256_ADMITTED" ] &&
+        [ "$(cosmos_sha256_file "$SIMPLE_PROVENANCE")" = \
+            "$SIMPLE_PROVENANCE_SHA256_ADMITTED" ] || {
+        echo "pure-Simple compiler or provenance changed during $_cp_label emission" >&2
+        exit 1
+    }
+}
+
+cosmos_validate_policy_object() {
+    _cp_label="$1"
+    _cp_object="$2"
+    _cp_expected="$3"
+    _cp_undefined="$4"
+    _cp_target="$5"
+    _cp_header="$("$READELF" -hW "$_cp_object")"
+    case "$_cp_target" in
+        arm)
+            printf '%s\n' "$_cp_header" | grep -Eq 'Class:[[:space:]]+ELF32' &&
+                printf '%s\n' "$_cp_header" | grep -Eq 'Type:[[:space:]]+REL' &&
+                printf '%s\n' "$_cp_header" | grep -Eq 'Machine:[[:space:]]+ARM' || {
+                echo "invalid $_cp_label ARM policy object" >&2
+                exit 1
+            }
+            _cp_attributes="$("$READELF" -AW "$_cp_object")"
+            printf '%s\n' "$_cp_attributes" | grep -Fq 'Tag_CPU_arch: v7' &&
+                printf '%s\n' "$_cp_attributes" |
+                    grep -Fq 'Tag_CPU_name: "cortex-a9"' &&
+                printf '%s\n' "$_cp_attributes" |
+                    grep -Fq 'Tag_CPU_arch_profile: Application' || {
+                echo "invalid $_cp_label ARM Cortex-A9 attributes" >&2
+                exit 1
+            }
+            if printf '%s\n' "$_cp_attributes" |
+                    grep -Eq 'Tag_FP_arch:|Tag_ABI_HardFP_use:|Tag_ABI_VFP_args:.*VFP registers'; then
+                echo "invalid $_cp_label ARM hard-float attributes" >&2
+                exit 1
+            fi
+            ;;
+        host)
+            printf '%s\n' "$_cp_header" | grep -Eq 'Class:[[:space:]]+ELF64' &&
+                printf '%s\n' "$_cp_header" | grep -Eq 'Type:[[:space:]]+REL' &&
+                printf '%s\n' "$_cp_header" |
+                    grep -Eq 'Machine:[[:space:]]+(Advanced Micro Devices X86-64|x86-64)' || {
+                echo "invalid $_cp_label host policy object" >&2
+                exit 1
+            }
+            ;;
+        *) echo "invalid policy target: $_cp_target" >&2; exit 2 ;;
+    esac
+    _cp_symbols="$("$READELF" -sW "$_cp_object")"
+    _cp_actual="$(printf '%s\n' "$_cp_symbols" |
+        awk '$5 == "GLOBAL" && $6 == "DEFAULT" && $7 != "UND" && $8 != "" { print $8 }' |
+        LC_ALL=C sort -u)"
+    _cp_wanted="$(LC_ALL=C sort -u "$_cp_expected")"
+    [ "$_cp_actual" = "$_cp_wanted" ] || {
+        echo "invalid $_cp_label $_cp_target defined-global closure" >&2
+        printf '%s\n' "$_cp_actual" >&2
+        exit 1
+    }
+    _cp_actual_undefined="$(printf '%s\n' "$_cp_symbols" |
+        awk '$7 == "UND" && $8 != "" { print $8 }' | LC_ALL=C sort -u)"
+    [ "$_cp_actual_undefined" = "$_cp_undefined" ] || {
+        echo "invalid $_cp_label $_cp_target undefined-symbol closure" >&2
+        printf '%s\n' "$_cp_actual_undefined" >&2
+        exit 1
+    }
+    printf '%s\n' "$_cp_symbols" |
+        awk 'tolower($8) ~ /(malloc|calloc|realloc|alloc_object|gc_alloc)/ ||
+             ($7 != "UND" && ($8 == "main" || $8 == "_start" ||
+              $8 == "__simple_main" || $8 ~ /^rt_/)) { bad = 1 }
+             END { exit bad }' || {
+        echo "invalid $_cp_label $_cp_target runtime/allocation symbol" >&2
+        exit 1
+    }
+}
+
+HOST_POLICY_OBJECTS=""
+ARM_POLICY_OBJECTS=""
+LINKED_POLICY_OBJECTS=""
+cosmos_build_policy_pair() {
+    _cp_base="$1"
+    _cp_label="$2"
+    _cp_undefined="$3"
+    _cp_arm_mode="$4"
+    _cp_source="$SCRIPT_DIR/$_cp_base.spl"
+    _cp_expected="$OBJ/$_cp_base.exports"
+    cosmos_policy_exports "$_cp_source" >"$_cp_expected"
+    [ -s "$_cp_expected" ] || {
+        echo "missing C exports in $_cp_source" >&2
+        exit 1
+    }
+    SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_LIB="$ROOT/src" \
+        "$SIMPLE" native-build --backend llvm --source "$SCRIPT_DIR" \
+        --entry-closure --entry "$_cp_source" \
+        --target x86_64-unknown-linux-gnu --emit-object --no-mangle \
+        --cache-dir "$OBJ/$_cp_base-host-cache" \
+        -o "$OBJ/${_cp_base}_host.o"
+    cosmos_verify_simple_unchanged "$_cp_label host policy"
+    cosmos_validate_policy_object "$_cp_label" \
+        "$OBJ/${_cp_base}_host.o" "$_cp_expected" "$_cp_undefined" host
+    HOST_POLICY_OBJECTS="$HOST_POLICY_OBJECTS $OBJ/${_cp_base}_host.o"
+    if [ "$_cp_arm_mode" = build ]; then
+        SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_LIB="$ROOT/src" \
+            "$SIMPLE" native-build --backend llvm --source "$SCRIPT_DIR" \
+            --entry-closure --entry "$_cp_source" \
+            --target armv7-unknown-none-eabi --emit-object --no-mangle \
+            --cache-dir "$OBJ/$_cp_base-arm-cache" \
+            -o "$OBJ/${_cp_base}_simple.o"
+        cosmos_verify_simple_unchanged "$_cp_label ARM policy"
+        OBJECTS="$OBJECTS $OBJ/${_cp_base}_simple.o"
+    fi
+    cosmos_validate_policy_object "$_cp_label" \
+        "$OBJ/${_cp_base}_simple.o" "$_cp_expected" "$_cp_undefined" arm
+    ARM_POLICY_OBJECTS="$ARM_POLICY_OBJECTS $OBJ/${_cp_base}_simple.o"
+}
+SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_LIB="$ROOT/src" "$SIMPLE" native-build \
+    --backend llvm \
+    --source "$SCRIPT_DIR" \
+    --entry-closure \
+    --entry "$SCRIPT_DIR/cosmos_boot_policy.spl" \
+    --target armv7-unknown-none-eabi \
+    --emit-object \
+    --no-mangle \
+    --cache-dir "$OBJ/simple-boot-policy-cache" \
+    -o "$OBJ/cosmos_boot_policy_simple.o"
+stage4_verify_candidate_provenance \
+    "$SIMPLE_PROVENANCE" "$SIMPLE" "$ROOT" || {
+    echo "pure-Simple compiler provenance changed during boot-policy emission" >&2
+    exit 1
+}
+[ "$(cosmos_sha256_file "$SIMPLE")" = "$SIMPLE_SHA256_ADMITTED" ] &&
+    [ "$(cosmos_sha256_file "$SIMPLE_PROVENANCE")" = \
+        "$SIMPLE_PROVENANCE_SHA256_ADMITTED" ] || {
+    echo "pure-Simple compiler or provenance changed during boot-policy emission" >&2
+    exit 1
+}
+BOOT_POLICY_OBJECT_HEADER="$(
+    "$READELF" -hW "$OBJ/cosmos_boot_policy_simple.o"
+)"
+printf '%s\n' "$BOOT_POLICY_OBJECT_HEADER" | grep -Eq \
+    'Class:[[:space:]]+ELF32' &&
+    printf '%s\n' "$BOOT_POLICY_OBJECT_HEADER" | grep -Eq \
+        'Type:[[:space:]]+REL' &&
+    printf '%s\n' "$BOOT_POLICY_OBJECT_HEADER" | grep -Eq \
+        'Machine:[[:space:]]+ARM' || {
+    echo "invalid pure-Simple boot-policy object: expected ELF32 ARM REL" >&2
+    exit 1
+}
+BOOT_POLICY_OBJECT_ATTRIBUTES="$(
+    "$READELF" -AW "$OBJ/cosmos_boot_policy_simple.o"
+)"
+printf '%s\n' "$BOOT_POLICY_OBJECT_ATTRIBUTES" |
+    grep -Fq 'Tag_CPU_arch: v7' &&
+    printf '%s\n' "$BOOT_POLICY_OBJECT_ATTRIBUTES" |
+        grep -Fq 'Tag_CPU_name: "cortex-a9"' &&
+printf '%s\n' "$BOOT_POLICY_OBJECT_ATTRIBUTES" |
+        grep -Fq 'Tag_CPU_arch_profile: Application' || {
+    echo "invalid pure-Simple boot-policy object: Cortex-A9 profile missing" >&2
+    exit 1
+}
+if printf '%s\n' "$BOOT_POLICY_OBJECT_ATTRIBUTES" |
+        grep -Eq 'Tag_FP_arch:|Tag_ABI_HardFP_use:|Tag_ABI_VFP_args:.*VFP registers'; then
+    echo "invalid pure-Simple boot-policy object: hard-float/VFP attributes forbidden" >&2
+    exit 1
+fi
+BOOT_POLICY_OBJECT_SYMBOLS="$(
+    "$READELF" -sW "$OBJ/cosmos_boot_policy_simple.o"
+)"
+BOOT_POLICY_EXPECTED_GLOBALS='cosmos_boot_policy_coverage_reset
+cosmos_boot_policy_coverage_low
+cosmos_boot_policy_coverage_high
+cosmos_boot_policy_coverage_required_low
+cosmos_boot_policy_coverage_required_high
+cosmos_boot_policy_coverage_decisions
+cosmos_boot_policy_uart_should_attempt
+cosmos_boot_policy_uart_next_enabled
+cosmos_boot_policy_exception_should_capture
+cosmos_boot_policy_exception_message_kind
+cosmos_boot_policy_status_kind
+cosmos_boot_policy_stage_allowed
+cosmos_boot_policy_software_ready
+cosmos_boot_policy_selftest
+cosmos_boot_policy_handoff_allows_devices
+cosmos_boot_policy_storage_init_allowed
+cosmos_boot_policy_secondary_release_allowed
+cosmos_boot_policy_terminal_verdict
+cosmos_boot_policy_irq_enable_allowed
+cosmos_boot_policy_storage_poll_allowed
+cosmos_boot_policy_storage_poll_action'
+for symbol in $BOOT_POLICY_EXPECTED_GLOBALS
+do
+    printf '%s\n' "$BOOT_POLICY_OBJECT_SYMBOLS" |
+        awk -v symbol="$symbol" \
+            '$4 == "FUNC" && $5 == "GLOBAL" && $6 == "DEFAULT" &&
+             $7 != "UND" && $8 == symbol { count++ }
+             END { exit count != 1 }' || {
+        echo "invalid pure-Simple boot-policy export: $symbol" >&2
+        exit 1
+    }
+done
+BOOT_POLICY_ACTUAL_GLOBALS="$(
+    printf '%s\n' "$BOOT_POLICY_OBJECT_SYMBOLS" |
+        awk '$5 == "GLOBAL" && $7 != "UND" && $8 != "" {print $8}' |
+        LC_ALL=C sort -u
+)"
+BOOT_POLICY_SORTED_EXPECTED_GLOBALS="$(
+    printf '%s\n' "$BOOT_POLICY_EXPECTED_GLOBALS" | LC_ALL=C sort -u
+)"
+[ "$BOOT_POLICY_ACTUAL_GLOBALS" = "$BOOT_POLICY_SORTED_EXPECTED_GLOBALS" ] || {
+    echo "invalid pure-Simple boot-policy defined-global closure" >&2
+    printf '%s\n' "$BOOT_POLICY_ACTUAL_GLOBALS" >&2
+    exit 1
+}
+printf '%s\n' "$BOOT_POLICY_OBJECT_SYMBOLS" |
+    awk '$7 != "UND" && ($8 == "main" || $8 == "_start" ||
+                          $8 == "__simple_main" || $8 ~ /^rt_/) {bad=1}
+         END {exit bad}' || {
+    echo "invalid pure-Simple boot-policy object: forbidden entry/runtime symbol" >&2
+    exit 1
+}
+BOOT_POLICY_OBJECT_UNDEFINED="$(
+    printf '%s\n' "$BOOT_POLICY_OBJECT_SYMBOLS" |
+        awk '$7 == "UND" && $8 != "" { print $8 }' |
+        LC_ALL=C sort -u
+)"
+[ -z "$BOOT_POLICY_OBJECT_UNDEFINED" ] || {
+    echo "invalid pure-Simple boot-policy undefined-symbol closure" >&2
+    printf '%s\n' "$BOOT_POLICY_OBJECT_UNDEFINED" >&2
+    exit 1
+}
+OBJECTS="$OBJECTS $OBJ/cosmos_boot_policy_simple.o"
+SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_LIB="$ROOT/src" "$SIMPLE" native-build \
+    --backend llvm \
+    --source "$SCRIPT_DIR" \
+    --entry-closure \
+    --entry "$SCRIPT_DIR/cosmos_runtime_core.spl" \
+    --target armv7-unknown-none-eabi \
+    --emit-object \
+    --no-mangle \
+    --cache-dir "$OBJ/simple-runtime-core-cache" \
+    -o "$OBJ/cosmos_runtime_core_simple.o"
+stage4_verify_candidate_provenance \
+    "$SIMPLE_PROVENANCE" "$SIMPLE" "$ROOT" || {
+    echo "pure-Simple compiler provenance changed during runtime-core emission" >&2
+    exit 1
+}
+[ "$(cosmos_sha256_file "$SIMPLE")" = "$SIMPLE_SHA256_ADMITTED" ] &&
+    [ "$(cosmos_sha256_file "$SIMPLE_PROVENANCE")" = \
+        "$SIMPLE_PROVENANCE_SHA256_ADMITTED" ] || {
+    echo "pure-Simple compiler or provenance changed during runtime-core emission" >&2
+    exit 1
+}
+RUNTIME_CORE_OBJECT_HEADER="$(
+    "$READELF" -hW "$OBJ/cosmos_runtime_core_simple.o"
+)"
+printf '%s\n' "$RUNTIME_CORE_OBJECT_HEADER" | grep -Eq \
+    'Class:[[:space:]]+ELF32' &&
+    printf '%s\n' "$RUNTIME_CORE_OBJECT_HEADER" | grep -Eq \
+        'Type:[[:space:]]+REL' &&
+    printf '%s\n' "$RUNTIME_CORE_OBJECT_HEADER" | grep -Eq \
+        'Machine:[[:space:]]+ARM' || {
+    echo "invalid pure-Simple runtime-core object: expected ELF32 ARM REL" >&2
+    exit 1
+}
+RUNTIME_CORE_OBJECT_ATTRIBUTES="$(
+    "$READELF" -AW "$OBJ/cosmos_runtime_core_simple.o"
+)"
+printf '%s\n' "$RUNTIME_CORE_OBJECT_ATTRIBUTES" |
+    grep -Fq 'Tag_CPU_arch: v7' &&
+    printf '%s\n' "$RUNTIME_CORE_OBJECT_ATTRIBUTES" |
+        grep -Fq 'Tag_CPU_name: "cortex-a9"' &&
+    printf '%s\n' "$RUNTIME_CORE_OBJECT_ATTRIBUTES" |
+        grep -Fq 'Tag_CPU_arch_profile: Application' || {
+    echo "invalid pure-Simple runtime-core object: Cortex-A9 profile missing" >&2
+    exit 1
+}
+if printf '%s\n' "$RUNTIME_CORE_OBJECT_ATTRIBUTES" |
+        grep -Eq 'Tag_CPU_name:.*cortex-a7|Tag_FP_arch:.*VFPv4|Tag_ABI_VFP_args:.*VFP registers'; then
+    echo "invalid pure-Simple runtime-core object: not Cortex-A9 soft-float compatible" >&2
+    exit 1
+fi
+RUNTIME_CORE_OBJECT_SYMBOLS="$(
+    "$READELF" -sW "$OBJ/cosmos_runtime_core_simple.o"
+)"
+for symbol in \
+    cosmos_runtime_core_copy \
+    cosmos_runtime_core_fill \
+    cosmos_runtime_core_udivmod \
+    cosmos_runtime_core_unsigned_div0_value \
+    cosmos_runtime_core_signed_div0_value \
+    cosmos_runtime_core_coverage_reset \
+    cosmos_runtime_core_coverage_mask \
+    cosmos_runtime_core_coverage_required \
+    cosmos_runtime_core_coverage_decisions
+do
+    printf '%s\n' "$RUNTIME_CORE_OBJECT_SYMBOLS" |
+        awk -v symbol="$symbol" \
+            '$4 == "FUNC" && $5 == "GLOBAL" && $6 == "DEFAULT" &&
+             $7 != "UND" && $8 == symbol { count++ }
+             END { exit count != 1 }' || {
+        echo "invalid pure-Simple runtime-core export: $symbol" >&2
+        exit 1
+    }
+done
+RUNTIME_CORE_OBJECT_UNDEFINED="$(
+    printf '%s\n' "$RUNTIME_CORE_OBJECT_SYMBOLS" |
+        awk '$7 == "UND" && $8 != "" { print $8 }' |
+        LC_ALL=C sort -u
+)"
+[ -z "$RUNTIME_CORE_OBJECT_UNDEFINED" ] || {
+    echo "invalid pure-Simple runtime-core undefined-symbol closure" >&2
+    printf '%s\n' "$RUNTIME_CORE_OBJECT_UNDEFINED" >&2
+    exit 1
+}
+printf '%s\n' "$RUNTIME_CORE_OBJECT_SYMBOLS" |
+    awk '$7 != "UND" && ($8 == "main" || $8 == "_start" ||
+                         $8 == "__simple_main" || $8 ~ /^rt_/ ||
+                         $8 ~ /^__aeabi_/ ||
+                         $8 ~ /^(memcpy|memmove|memset|memcmp|strlen|strcmp|strncmp|strncpy)$/) { bad = 1 }
+         END { exit bad }' || {
+    echo "invalid pure-Simple runtime-core object: forbidden entry/libc/EABI symbol" >&2
+    exit 1
+}
+OBJECTS="$OBJECTS $OBJ/cosmos_runtime_core_simple.o"
+SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_LIB="$ROOT/src" "$SIMPLE" native-build \
+    --backend llvm \
+    --source "$SCRIPT_DIR" \
+    --entry-closure \
+    --entry "$SCRIPT_DIR/cosmos_runtime_residual.spl" \
+    --target armv7-unknown-none-eabi \
+    --emit-object \
+    --no-mangle \
+    --cache-dir "$OBJ/simple-runtime-residual-cache" \
+    -o "$OBJ/cosmos_runtime_residual_simple.o"
+stage4_verify_candidate_provenance \
+    "$SIMPLE_PROVENANCE" "$SIMPLE" "$ROOT" || {
+    echo "pure-Simple compiler provenance changed during runtime-residual emission" >&2
+    exit 1
+}
+[ "$(cosmos_sha256_file "$SIMPLE")" = "$SIMPLE_SHA256_ADMITTED" ] &&
+    [ "$(cosmos_sha256_file "$SIMPLE_PROVENANCE")" = \
+        "$SIMPLE_PROVENANCE_SHA256_ADMITTED" ] || {
+    echo "pure-Simple compiler or provenance changed during runtime-residual emission" >&2
+    exit 1
+}
+RUNTIME_RESIDUAL_OBJECT_HEADER="$(
+    "$READELF" -hW "$OBJ/cosmos_runtime_residual_simple.o"
+)"
+printf '%s\n' "$RUNTIME_RESIDUAL_OBJECT_HEADER" | grep -Eq \
+    'Class:[[:space:]]+ELF32' &&
+    printf '%s\n' "$RUNTIME_RESIDUAL_OBJECT_HEADER" | grep -Eq \
+        'Type:[[:space:]]+REL' &&
+    printf '%s\n' "$RUNTIME_RESIDUAL_OBJECT_HEADER" | grep -Eq \
+        'Machine:[[:space:]]+ARM' || {
+    echo "invalid pure-Simple runtime-residual object: expected ELF32 ARM REL" >&2
+    exit 1
+}
+RUNTIME_RESIDUAL_OBJECT_ATTRIBUTES="$(
+    "$READELF" -AW "$OBJ/cosmos_runtime_residual_simple.o"
+)"
+printf '%s\n' "$RUNTIME_RESIDUAL_OBJECT_ATTRIBUTES" |
+    grep -Fq 'Tag_CPU_arch: v7' &&
+    printf '%s\n' "$RUNTIME_RESIDUAL_OBJECT_ATTRIBUTES" |
+        grep -Fq 'Tag_CPU_name: "cortex-a9"' &&
+    printf '%s\n' "$RUNTIME_RESIDUAL_OBJECT_ATTRIBUTES" |
+        grep -Fq 'Tag_CPU_arch_profile: Application' || {
+    echo "invalid pure-Simple runtime-residual object: Cortex-A9 profile missing" >&2
+    exit 1
+}
+if printf '%s\n' "$RUNTIME_RESIDUAL_OBJECT_ATTRIBUTES" |
+        grep -Eq 'Tag_CPU_name:.*cortex-a7|Tag_FP_arch:|Tag_ABI_VFP_args:'; then
+    echo "invalid pure-Simple runtime-residual object: hard-float/VFP or wrong CPU" >&2
+    exit 1
+fi
+RUNTIME_RESIDUAL_OBJECT_SYMBOLS="$(
+    "$READELF" -sW "$OBJ/cosmos_runtime_residual_simple.o"
+)"
+RUNTIME_RESIDUAL_EXPECTED_GLOBALS='cosmos_runtime_residual_coverage_decisions
+cosmos_runtime_residual_coverage_mask
+cosmos_runtime_residual_coverage_required
+cosmos_runtime_residual_coverage_reset
+cosmos_runtime_residual_memcmp
+cosmos_runtime_residual_memmove
+cosmos_runtime_residual_strcmp
+cosmos_runtime_residual_strlen
+cosmos_runtime_residual_strncmp
+cosmos_runtime_residual_strncpy'
+RUNTIME_RESIDUAL_DEFINED_GLOBALS="$(
+    printf '%s\n' "$RUNTIME_RESIDUAL_OBJECT_SYMBOLS" |
+        awk '$5 == "GLOBAL" && $6 == "DEFAULT" && $7 != "UND" && $8 != "" { print $8 }' |
+        LC_ALL=C sort -u
+)"
+[ "$RUNTIME_RESIDUAL_DEFINED_GLOBALS" = "$RUNTIME_RESIDUAL_EXPECTED_GLOBALS" ] || {
+    echo "invalid pure-Simple runtime-residual global-symbol closure" >&2
+    printf '%s\n' "$RUNTIME_RESIDUAL_DEFINED_GLOBALS" >&2
+    exit 1
+}
+RUNTIME_RESIDUAL_OBJECT_UNDEFINED="$(
+    printf '%s\n' "$RUNTIME_RESIDUAL_OBJECT_SYMBOLS" |
+        awk '$7 == "UND" && $8 != "" { print $8 }' |
+        LC_ALL=C sort -u
+)"
+[ -z "$RUNTIME_RESIDUAL_OBJECT_UNDEFINED" ] || {
+    echo "invalid pure-Simple runtime-residual undefined-symbol closure" >&2
+    printf '%s\n' "$RUNTIME_RESIDUAL_OBJECT_UNDEFINED" >&2
+    exit 1
+}
+printf '%s\n' "$RUNTIME_RESIDUAL_OBJECT_SYMBOLS" |
+    awk '$7 != "UND" && ($8 == "main" || $8 == "_start" ||
+                         $8 == "__simple_main" || $8 ~ /^rt_/ ||
+                         $8 ~ /^__aeabi_/ ||
+                         $8 ~ /^(memcpy|memmove|memset|memcmp|strlen|strcmp|strncmp|strncpy)$/) { bad = 1 }
+         END { exit bad }' || {
+    echo "invalid pure-Simple runtime-residual object: forbidden entry/libc/EABI symbol" >&2
+    exit 1
+}
+OBJECTS="$OBJECTS $OBJ/cosmos_runtime_residual_simple.o"
+SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_LIB="$ROOT/src" "$SIMPLE" native-build \
+    --backend llvm \
+    --source "$SCRIPT_DIR" \
+    --entry-closure \
+    --entry "$SCRIPT_DIR/cosmos_fsbl.spl" \
+    --target armv7-unknown-none-eabi \
+    --emit-object \
+    --no-mangle \
+    --cache-dir "$OBJ/simple-cache" \
+    -o "$OBJ/cosmos_fsbl_simple.o"
+stage4_verify_candidate_provenance \
+    "$SIMPLE_PROVENANCE" "$SIMPLE" "$ROOT" || {
+    echo "pure-Simple compiler provenance changed during FSBL emission" >&2
+    exit 1
+}
+[ "$(cosmos_sha256_file "$SIMPLE")" = "$SIMPLE_SHA256_ADMITTED" ] &&
+    [ "$(cosmos_sha256_file "$SIMPLE_PROVENANCE")" = \
+        "$SIMPLE_PROVENANCE_SHA256_ADMITTED" ] || {
+    echo "pure-Simple compiler or provenance changed during FSBL emission" >&2
+    exit 1
+}
+SIMPLE_OBJECT_HEADER="$("$READELF" -hW "$OBJ/cosmos_fsbl_simple.o")"
+printf '%s\n' "$SIMPLE_OBJECT_HEADER" | grep -Eq \
+    'Class:[[:space:]]+ELF32' &&
+    printf '%s\n' "$SIMPLE_OBJECT_HEADER" | grep -Eq \
+        'Type:[[:space:]]+REL' &&
+    printf '%s\n' "$SIMPLE_OBJECT_HEADER" | grep -Eq \
+        'Machine:[[:space:]]+ARM' || {
+    echo "invalid pure-Simple FSBL object: expected ELF32 ARM REL" >&2
+    exit 1
+}
+SIMPLE_OBJECT_ATTRIBUTES="$("$READELF" -AW "$OBJ/cosmos_fsbl_simple.o")"
+printf '%s\n' "$SIMPLE_OBJECT_ATTRIBUTES" | grep -Fq 'Tag_CPU_arch: v7' || {
+    echo "invalid pure-Simple FSBL object: ARMv7 attribute missing" >&2
+    exit 1
+}
+printf '%s\n' "$SIMPLE_OBJECT_ATTRIBUTES" |
+    grep -Fq 'Tag_CPU_name: "cortex-a9"' &&
+    printf '%s\n' "$SIMPLE_OBJECT_ATTRIBUTES" |
+        grep -Fq 'Tag_CPU_arch_profile: Application' || {
+    echo "invalid pure-Simple FSBL object: Cortex-A9 application profile missing" >&2
+    exit 1
+}
+if printf '%s\n' "$SIMPLE_OBJECT_ATTRIBUTES" |
+        grep -Eq 'Tag_CPU_name:.*cortex-a7|Tag_FP_arch:.*VFPv4|Tag_ABI_VFP_args:.*VFP registers'; then
+    echo "invalid pure-Simple FSBL object: not Cortex-A9 soft-float compatible" >&2
+    exit 1
+fi
+SIMPLE_OBJECT_SYMBOLS="$("$READELF" -sW "$OBJ/cosmos_fsbl_simple.o")"
+for symbol in \
+    __cosmos_fsbl_policy_coverage_reset \
+    __cosmos_fsbl_policy_coverage_mask \
+    __cosmos_fsbl_policy_coverage_required \
+    __cosmos_fsbl_policy_coverage_decisions \
+    cosmos_fsbl_validate_handoff \
+    cosmos_fsbl_selftest
+do
+    printf '%s\n' "$SIMPLE_OBJECT_SYMBOLS" |
+        awk -v symbol="$symbol" \
+            '$4 == "FUNC" && $5 == "GLOBAL" && $6 == "DEFAULT" &&
+             $7 != "UND" && $8 == symbol { count++ }
+             END { exit count != 1 }' || {
+        echo "invalid pure-Simple FSBL object export: $symbol" >&2
+        exit 1
+    }
+done
+for symbol in cosmos_fsbl_bridge_is_qemu cosmos_fsbl_bridge_read32; do
+    printf '%s\n' "$SIMPLE_OBJECT_SYMBOLS" |
+        awk -v symbol="$symbol" \
+            '$4 == "FUNC" && $5 == "GLOBAL" && $6 == "DEFAULT" &&
+             $7 == "UND" && $8 == symbol { count++ }
+             END { exit count != 1 }' || {
+        echo "invalid pure-Simple FSBL object bridge dependency: $symbol" >&2
+        exit 1
+    }
+done
+SIMPLE_OBJECT_UNDEFINED="$(
+    printf '%s\n' "$SIMPLE_OBJECT_SYMBOLS" |
+        awk '$7 == "UND" && $8 != "" { print $8 }' |
+        LC_ALL=C sort -u
+)"
+[ "$SIMPLE_OBJECT_UNDEFINED" = "cosmos_fsbl_bridge_is_qemu
+cosmos_fsbl_bridge_read32" ] || {
+    echo "invalid pure-Simple FSBL object undefined-symbol closure" >&2
+    printf '%s\n' "$SIMPLE_OBJECT_UNDEFINED" >&2
+    exit 1
+}
+printf '%s\n' "$SIMPLE_OBJECT_SYMBOLS" |
+    awk '$7 != "UND" && ($8 == "main" || $8 == "_start" ||
+                         $8 == "__simple_main" || $8 ~ /^rt_/) { bad = 1 }
+         END { exit bad }' || {
+    echo "invalid pure-Simple FSBL object: forbidden entry/runtime definition" >&2
+    exit 1
+}
+OBJECTS="$OBJECTS $OBJ/cosmos_fsbl_simple.o"
+SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_LIB="$ROOT/src" "$SIMPLE" native-build \
+    --backend llvm \
+    --source "$SCRIPT_DIR" \
+    --entry-closure \
+    --entry "$SCRIPT_DIR/cosmos_nfc_ecc.spl" \
+    --target armv7-unknown-none-eabi \
+    --emit-object \
+    --no-mangle \
+    --cache-dir "$OBJ/simple-ecc-cache" \
+    -o "$OBJ/cosmos_nfc_ecc_simple.o"
+stage4_verify_candidate_provenance \
+    "$SIMPLE_PROVENANCE" "$SIMPLE" "$ROOT" || {
+    echo "pure-Simple compiler provenance changed during NFC ECC emission" >&2
+    exit 1
+}
+[ "$(cosmos_sha256_file "$SIMPLE")" = "$SIMPLE_SHA256_ADMITTED" ] &&
+    [ "$(cosmos_sha256_file "$SIMPLE_PROVENANCE")" = \
+        "$SIMPLE_PROVENANCE_SHA256_ADMITTED" ] || {
+    echo "pure-Simple compiler or provenance changed during NFC ECC emission" >&2
+    exit 1
+}
+ECC_OBJECT_HEADER="$("$READELF" -hW "$OBJ/cosmos_nfc_ecc_simple.o")"
+printf '%s\n' "$ECC_OBJECT_HEADER" | grep -Eq \
+    'Class:[[:space:]]+ELF32' &&
+    printf '%s\n' "$ECC_OBJECT_HEADER" | grep -Eq \
+        'Type:[[:space:]]+REL' &&
+    printf '%s\n' "$ECC_OBJECT_HEADER" | grep -Eq \
+        'Machine:[[:space:]]+ARM' || {
+    echo "invalid pure-Simple NFC ECC object: expected ELF32 ARM REL" >&2
+    exit 1
+}
+ECC_OBJECT_ATTRIBUTES="$("$READELF" -AW "$OBJ/cosmos_nfc_ecc_simple.o")"
+printf '%s\n' "$ECC_OBJECT_ATTRIBUTES" | grep -Fq 'Tag_CPU_arch: v7' || {
+    echo "invalid pure-Simple NFC ECC object: ARMv7 attribute missing" >&2
+    exit 1
+}
+printf '%s\n' "$ECC_OBJECT_ATTRIBUTES" |
+    grep -Fq 'Tag_CPU_name: "cortex-a9"' &&
+    printf '%s\n' "$ECC_OBJECT_ATTRIBUTES" |
+        grep -Fq 'Tag_CPU_arch_profile: Application' || {
+    echo "invalid pure-Simple NFC ECC object: Cortex-A9 profile missing" >&2
+    exit 1
+}
+ECC_OBJECT_SYMBOLS="$("$READELF" -sW "$OBJ/cosmos_nfc_ecc_simple.o")"
+for symbol in cosmos_nfc_ecc_policy_crc_valid \
+    cosmos_nfc_ecc_policy_spare_valid cosmos_nfc_ecc_policy_page_valid \
+    cosmos_nfc_ecc_policy_worst_chunk_errors \
+    cosmos_nfc_ecc_policy_needs_refresh cosmos_nfc_ecc_policy_status
+do
+    printf '%s\n' "$ECC_OBJECT_SYMBOLS" |
+        awk -v symbol="$symbol" \
+            '$4 == "FUNC" && $5 == "GLOBAL" && $6 == "DEFAULT" &&
+             $7 != "UND" && $8 == symbol { count++ }
+             END { exit count != 1 }' || {
+        echo "invalid pure-Simple NFC ECC object export: $symbol" >&2
+        exit 1
+    }
+done
+ECC_OBJECT_UNDEFINED="$(
+    printf '%s\n' "$ECC_OBJECT_SYMBOLS" |
+        awk '$7 == "UND" && $8 != "" { print $8 }' |
+        LC_ALL=C sort -u
+)"
+[ -z "$ECC_OBJECT_UNDEFINED" ] || {
+    echo "invalid pure-Simple NFC ECC object undefined-symbol closure" >&2
+    printf '%s\n' "$ECC_OBJECT_UNDEFINED" >&2
+    exit 1
+}
+printf '%s\n' "$ECC_OBJECT_SYMBOLS" |
+    awk '$7 != "UND" && ($8 == "main" || $8 == "_start" ||
+                         $8 == "__simple_main" || $8 ~ /^rt_/) { bad = 1 }
+         END { exit bad }' || {
+    echo "invalid pure-Simple NFC ECC object: forbidden entry/runtime definition" >&2
+    exit 1
+}
+OBJECTS="$OBJECTS $OBJ/cosmos_nfc_ecc_simple.o"
+SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_LIB="$ROOT/src" "$SIMPLE" native-build \
+    --backend llvm \
+    --source "$SCRIPT_DIR" \
+    --entry-closure \
+    --entry "$SCRIPT_DIR/cosmos_nvme_pcie_policy.spl" \
+    --target armv7-unknown-none-eabi \
+    --emit-object \
+    --no-mangle \
+    --cache-dir "$OBJ/simple-pcie-policy-cache" \
+    -o "$OBJ/cosmos_nvme_pcie_policy_simple.o"
+stage4_verify_candidate_provenance \
+    "$SIMPLE_PROVENANCE" "$SIMPLE" "$ROOT" || {
+    echo "pure-Simple compiler provenance changed during PCIe policy emission" >&2
+    exit 1
+}
+PCIE_POLICY_HEADER="$($READELF -hW "$OBJ/cosmos_nvme_pcie_policy_simple.o")"
+printf '%s\n' "$PCIE_POLICY_HEADER" | grep -Eq 'Class:[[:space:]]+ELF32' &&
+    printf '%s\n' "$PCIE_POLICY_HEADER" | grep -Eq 'Type:[[:space:]]+REL' &&
+    printf '%s\n' "$PCIE_POLICY_HEADER" | grep -Eq 'Machine:[[:space:]]+ARM' || {
+    echo "invalid pure-Simple PCIe policy object: expected ELF32 ARM REL" >&2
+    exit 1
+}
+PCIE_POLICY_ATTRIBUTES="$($READELF -AW "$OBJ/cosmos_nvme_pcie_policy_simple.o")"
+printf '%s\n' "$PCIE_POLICY_ATTRIBUTES" | grep -Fq 'Tag_CPU_arch: v7' &&
+    printf '%s\n' "$PCIE_POLICY_ATTRIBUTES" | grep -Fq 'Tag_CPU_name: "cortex-a9"' &&
+    printf '%s\n' "$PCIE_POLICY_ATTRIBUTES" |
+        grep -Fq 'Tag_CPU_arch_profile: Application' || {
+    echo "invalid pure-Simple PCIe policy object: Cortex-A9 profile missing" >&2
+    exit 1
+}
+PCIE_POLICY_SYMBOLS="$($READELF -sW "$OBJ/cosmos_nvme_pcie_policy_simple.o")"
+for symbol in cosmos_nvme_pcie_policy_status_fields_valid \
+    cosmos_nvme_pcie_policy_status_word \
+    cosmos_nvme_pcie_policy_io_sq_valid \
+    cosmos_nvme_pcie_policy_io_sq_word1 \
+    cosmos_nvme_pcie_policy_io_cq_valid \
+    cosmos_nvme_pcie_policy_io_cq_word1
+do
+    printf '%s\n' "$PCIE_POLICY_SYMBOLS" |
+        awk -v symbol="$symbol" \
+            '$4 == "FUNC" && $5 == "GLOBAL" && $6 == "DEFAULT" &&
+             $7 != "UND" && $8 == symbol { count++ }
+             END { exit count != 1 }' || {
+        echo "invalid pure-Simple PCIe policy export: $symbol" >&2
+        exit 1
+    }
+done
+PCIE_POLICY_UNDEFINED="$(
+    printf '%s\n' "$PCIE_POLICY_SYMBOLS" |
+        awk '$7 == "UND" && $8 != "" { print $8 }' |
+        LC_ALL=C sort -u
+)"
+[ -z "$PCIE_POLICY_UNDEFINED" ] || {
+    echo "invalid pure-Simple PCIe policy undefined-symbol closure" >&2
+    printf '%s\n' "$PCIE_POLICY_UNDEFINED" >&2
+    exit 1
+}
+printf '%s\n' "$PCIE_POLICY_SYMBOLS" |
+    awk '$7 != "UND" && ($8 == "main" || $8 == "_start" ||
+                         $8 == "__simple_main" || $8 ~ /^rt_/) { bad = 1 }
+         END { exit bad }' || {
+    echo "invalid pure-Simple PCIe policy object: forbidden entry/runtime symbol" >&2
+    exit 1
+}
+OBJECTS="$OBJECTS $OBJ/cosmos_nvme_pcie_policy_simple.o"
+SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_LIB="$ROOT/src" "$SIMPLE" native-build \
+    --backend llvm \
+    --source "$SCRIPT_DIR" \
+    --entry-closure \
+    --entry "$SCRIPT_DIR/cosmos_nvme_pcie_adapter_policy.spl" \
+    --target armv7-unknown-none-eabi \
+    --emit-object \
+    --no-mangle \
+    --cache-dir "$OBJ/simple-pcie-adapter-policy-cache" \
+    -o "$OBJ/cosmos_nvme_pcie_adapter_policy_simple.o"
+stage4_verify_candidate_provenance \
+    "$SIMPLE_PROVENANCE" "$SIMPLE" "$ROOT" || {
+    echo "pure-Simple compiler provenance changed during PCIe adapter policy emission" >&2
+    exit 1
+}
+ADAPTER_POLICY_HEADER="$(
+    "$READELF" -hW "$OBJ/cosmos_nvme_pcie_adapter_policy_simple.o"
+)"
+printf '%s\n' "$ADAPTER_POLICY_HEADER" | grep -Eq \
+    'Class:[[:space:]]+ELF32' &&
+    printf '%s\n' "$ADAPTER_POLICY_HEADER" | grep -Eq \
+        'Type:[[:space:]]+REL' &&
+    printf '%s\n' "$ADAPTER_POLICY_HEADER" | grep -Eq \
+        'Machine:[[:space:]]+ARM' || {
+    echo "invalid pure-Simple PCIe adapter policy object: expected ELF32 ARM REL" >&2
+    exit 1
+}
+ADAPTER_POLICY_ATTRIBUTES="$(
+    "$READELF" -AW "$OBJ/cosmos_nvme_pcie_adapter_policy_simple.o"
+)"
+printf '%s\n' "$ADAPTER_POLICY_ATTRIBUTES" |
+    grep -Fq 'Tag_CPU_arch: v7' &&
+    printf '%s\n' "$ADAPTER_POLICY_ATTRIBUTES" |
+        grep -Fq 'Tag_CPU_name: "cortex-a9"' &&
+    printf '%s\n' "$ADAPTER_POLICY_ATTRIBUTES" |
+        grep -Fq 'Tag_CPU_arch_profile: Application' || {
+    echo "invalid pure-Simple PCIe adapter policy object: Cortex-A9 profile missing" >&2
+    exit 1
+}
+ADAPTER_POLICY_SYMBOLS="$(
+    "$READELF" -sW "$OBJ/cosmos_nvme_pcie_adapter_policy_simple.o"
+)"
+ADAPTER_POLICY_EXPORT_COUNT="$(
+    printf '%s\n' "$ADAPTER_POLICY_SYMBOLS" |
+        awk '$4 == "FUNC" && $5 == "GLOBAL" && $7 != "UND" &&
+             $8 ~ /^cosmos_nvme_pcie_adapter_policy_/ { count++ }
+             END { print count + 0 }'
+)"
+[ "$ADAPTER_POLICY_EXPORT_COUNT" = 39 ] || {
+    echo "invalid pure-Simple PCIe adapter policy object: expected 39 exports" >&2
+    exit 1
+}
+printf '%s\n' "$ADAPTER_POLICY_SYMBOLS" |
+    awk '$7 == "UND" && $8 != "" { bad = 1 }
+         tolower($8) ~ /(malloc|calloc|realloc|alloc_object|gc_alloc)/ {
+             bad = 1
+         }
+         $7 != "UND" && ($8 == "main" || $8 == "_start" ||
+                         $8 == "__simple_main" || $8 ~ /^rt_/) { bad = 1 }
+         END { exit bad }' || {
+    echo "invalid pure-Simple PCIe adapter policy object: runtime/allocation dependency" >&2
+    exit 1
+}
+OBJECTS="$OBJECTS $OBJ/cosmos_nvme_pcie_adapter_policy_simple.o"
+SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_LIB="$ROOT/src" "$SIMPLE" native-build \
+    --backend llvm \
+    --source "$SCRIPT_DIR" \
+    --entry-closure \
+    --entry "$SCRIPT_DIR/cosmos_smp_gic_policy.spl" \
+    --target armv7-unknown-none-eabi \
+    --emit-object \
+    --no-mangle \
+    --cache-dir "$OBJ/simple-smp-gic-policy-cache" \
+    -o "$OBJ/cosmos_smp_gic_policy_simple.o"
+stage4_verify_candidate_provenance \
+    "$SIMPLE_PROVENANCE" "$SIMPLE" "$ROOT" || {
+    echo "pure-Simple compiler provenance changed during SMP/GIC policy emission" >&2
+    exit 1
+}
+[ "$(cosmos_sha256_file "$SIMPLE")" = "$SIMPLE_SHA256_ADMITTED" ] &&
+    [ "$(cosmos_sha256_file "$SIMPLE_PROVENANCE")" = \
+        "$SIMPLE_PROVENANCE_SHA256_ADMITTED" ] || {
+    echo "pure-Simple compiler or provenance changed during SMP/GIC policy emission" >&2
+    exit 1
+}
+SMP_GIC_POLICY_OBJECT_HEADER="$(
+    "$READELF" -hW "$OBJ/cosmos_smp_gic_policy_simple.o"
+)"
+printf '%s\n' "$SMP_GIC_POLICY_OBJECT_HEADER" | grep -Eq \
+    'Class:[[:space:]]+ELF32' &&
+    printf '%s\n' "$SMP_GIC_POLICY_OBJECT_HEADER" | grep -Eq \
+        'Type:[[:space:]]+REL' &&
+    printf '%s\n' "$SMP_GIC_POLICY_OBJECT_HEADER" | grep -Eq \
+        'Machine:[[:space:]]+ARM' || {
+    echo "invalid pure-Simple SMP/GIC policy object: expected ELF32 ARM REL" >&2
+    exit 1
+}
+SMP_GIC_POLICY_OBJECT_ATTRIBUTES="$(
+    "$READELF" -AW "$OBJ/cosmos_smp_gic_policy_simple.o"
+)"
+printf '%s\n' "$SMP_GIC_POLICY_OBJECT_ATTRIBUTES" |
+    grep -Fq 'Tag_CPU_arch: v7' &&
+    printf '%s\n' "$SMP_GIC_POLICY_OBJECT_ATTRIBUTES" |
+        grep -Fq 'Tag_CPU_name: "cortex-a9"' &&
+    printf '%s\n' "$SMP_GIC_POLICY_OBJECT_ATTRIBUTES" |
+        grep -Fq 'Tag_CPU_arch_profile: Application' || {
+    echo "invalid pure-Simple SMP/GIC policy object: Cortex-A9 profile missing" >&2
+    exit 1
+}
+if printf '%s\n' "$SMP_GIC_POLICY_OBJECT_ATTRIBUTES" |
+        grep -Eq 'Tag_CPU_name:.*cortex-a7|Tag_FP_arch:.*VFPv4|Tag_ABI_VFP_args:.*VFP registers'; then
+    echo "invalid pure-Simple SMP/GIC policy object: not Cortex-A9 soft-float compatible" >&2
+    exit 1
+fi
+SMP_GIC_POLICY_OBJECT_SYMBOLS="$(
+    "$READELF" -sW "$OBJ/cosmos_smp_gic_policy_simple.o"
+)"
+for symbol in \
+    cosmos_smp_gic_policy_coverage_reset \
+    cosmos_smp_gic_policy_coverage_mask \
+    cosmos_smp_gic_policy_coverage_required \
+    cosmos_smp_gic_policy_coverage_decisions \
+    cosmos_gic_limit_words \
+    cosmos_gic_words_from_typer \
+    cosmos_gic_target_for_word \
+    cosmos_smp_next_generation \
+    cosmos_smp_release_request_valid \
+    cosmos_smp_ready_observed \
+    cosmos_smp_secondary_state \
+    cosmos_smp_ack_observed \
+    cosmos_smp_poll_allowed \
+    cosmos_gic_irq_id \
+    cosmos_gic_irq_is_spurious \
+    cosmos_gic_disable_offset \
+    cosmos_gic_disable_mask \
+    cosmos_gic_byte_shift \
+    cosmos_gic_config_shift \
+    cosmos_gic_priority_offset \
+    cosmos_gic_target_offset \
+    cosmos_gic_config_offset \
+    cosmos_gic_priority_value \
+    cosmos_gic_target_cpu0_value \
+    cosmos_gic_level_config_value \
+    cosmos_gic_pcie_irq_in_range \
+    cosmos_gic_eoir_required \
+    cosmos_gic_quiesce_kind
+do
+    printf '%s\n' "$SMP_GIC_POLICY_OBJECT_SYMBOLS" |
+        awk -v symbol="$symbol" \
+            '$4 == "FUNC" && $5 == "GLOBAL" && $6 == "DEFAULT" &&
+             $7 != "UND" && $8 == symbol { count++ }
+             END { exit count != 1 }' || {
+        echo "invalid pure-Simple SMP/GIC policy export: $symbol" >&2
+        exit 1
+    }
+done
+SMP_GIC_POLICY_OBJECT_UNDEFINED="$(
+    printf '%s\n' "$SMP_GIC_POLICY_OBJECT_SYMBOLS" |
+        awk '$7 == "UND" && $8 != "" { print $8 }' |
+        LC_ALL=C sort -u
+)"
+[ -z "$SMP_GIC_POLICY_OBJECT_UNDEFINED" ] || {
+    echo "invalid pure-Simple SMP/GIC policy undefined-symbol closure" >&2
+    printf '%s\n' "$SMP_GIC_POLICY_OBJECT_UNDEFINED" >&2
+    exit 1
+}
+printf '%s\n' "$SMP_GIC_POLICY_OBJECT_SYMBOLS" |
+    awk '$7 != "UND" && ($8 == "main" || $8 == "_start" ||
+                         $8 == "__simple_main" || $8 ~ /^rt_/) { bad = 1 }
+         END { exit bad }' || {
+    echo "invalid pure-Simple SMP/GIC policy object: forbidden entry/runtime symbol" >&2
+    exit 1
+}
+OBJECTS="$OBJECTS $OBJ/cosmos_smp_gic_policy_simple.o"
+SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_LIB="$ROOT/src" "$SIMPLE" native-build \
+    --backend llvm \
+    --source "$SCRIPT_DIR" \
+    --entry-closure \
+    --entry "$SCRIPT_DIR/cosmos_mmu_cache_policy.spl" \
+    --target armv7-unknown-none-eabi \
+    --emit-object \
+    --no-mangle \
+    --cache-dir "$OBJ/simple-mmu-policy-cache" \
+    -o "$OBJ/cosmos_mmu_cache_policy_simple.o"
+stage4_verify_candidate_provenance \
+    "$SIMPLE_PROVENANCE" "$SIMPLE" "$ROOT" || {
+    echo "pure-Simple compiler provenance changed during MMU policy emission" >&2
+    exit 1
+}
+MMU_POLICY_HEADER="$($READELF -hW "$OBJ/cosmos_mmu_cache_policy_simple.o")"
+printf '%s\n' "$MMU_POLICY_HEADER" | grep -Eq 'Class:[[:space:]]+ELF32' &&
+    printf '%s\n' "$MMU_POLICY_HEADER" | grep -Eq 'Type:[[:space:]]+REL' &&
+    printf '%s\n' "$MMU_POLICY_HEADER" | grep -Eq 'Machine:[[:space:]]+ARM' || {
+    echo "invalid pure-Simple MMU policy object: expected ELF32 ARM REL" >&2
+    exit 1
+}
+MMU_POLICY_ATTRIBUTES="$($READELF -AW "$OBJ/cosmos_mmu_cache_policy_simple.o")"
+printf '%s\n' "$MMU_POLICY_ATTRIBUTES" | grep -Fq 'Tag_CPU_arch: v7' &&
+    printf '%s\n' "$MMU_POLICY_ATTRIBUTES" | grep -Fq 'Tag_CPU_name: "cortex-a9"' &&
+    printf '%s\n' "$MMU_POLICY_ATTRIBUTES" |
+        grep -Fq 'Tag_CPU_arch_profile: Application' || {
+    echo "invalid pure-Simple MMU policy object: Cortex-A9 profile missing" >&2
+    exit 1
+}
+MMU_POLICY_SYMBOLS="$($READELF -sW "$OBJ/cosmos_mmu_cache_policy_simple.o")"
+for symbol in \
+    cosmos_mmu_cache_policy_cache_way_shift \
+    cosmos_mmu_cache_policy_cache_setway_operand \
+    cosmos_mmu_cache_policy_ttbr0_value \
+    cosmos_mmu_cache_policy_sctlr_apply_policy \
+    cosmos_mmu_cache_policy_sctlr_policy_valid \
+    cosmos_mmu_cache_policy_control_registers_valid \
+    cosmos_mmu_cache_policy_control_policy_contract \
+    cosmos_mmu_cache_policy_scu_invalidate_mask \
+    cosmos_mmu_cache_policy_cache_enable_allowed \
+    cosmos_mmu_cache_policy_section_descriptor \
+    cosmos_mmu_cache_policy_coarse_descriptor \
+    cosmos_mmu_cache_policy_small_page_descriptor \
+    cosmos_mmu_cache_policy_small_page_cached_rx_descriptor \
+    cosmos_mmu_cache_policy_small_page_cached_rw_xn_descriptor \
+    cosmos_mmu_cache_policy_l2_descriptor_executable \
+    cosmos_mmu_cache_policy_l2_descriptor_priv_writable \
+    cosmos_mmu_cache_policy_l2_descriptor_write_execute \
+    cosmos_mmu_cache_policy_firmware_l2_descriptor_for_address \
+    cosmos_mmu_cache_policy_device_section \
+    cosmos_mmu_cache_policy_l1_descriptor_for_address \
+    cosmos_mmu_cache_policy_ocm_l2_descriptor_for_address \
+    cosmos_mmu_cache_policy_mmu_poll_allowed
+do
+    printf '%s\n' "$MMU_POLICY_SYMBOLS" |
+        awk -v symbol="$symbol" \
+            '$4 == "FUNC" && $5 == "GLOBAL" && $6 == "DEFAULT" &&
+             $7 != "UND" && $8 == symbol { count++ }
+             END { exit count != 1 }' || {
+        echo "invalid pure-Simple MMU policy export: $symbol" >&2
+        exit 1
+    }
+done
+MMU_POLICY_UNDEFINED="$(
+    printf '%s\n' "$MMU_POLICY_SYMBOLS" |
+        awk '$7 == "UND" && $8 != "" { print $8 }' |
+        LC_ALL=C sort -u
+)"
+[ -z "$MMU_POLICY_UNDEFINED" ] || {
+    echo "invalid pure-Simple MMU policy undefined-symbol closure" >&2
+    printf '%s\n' "$MMU_POLICY_UNDEFINED" >&2
+    exit 1
+}
+printf '%s\n' "$MMU_POLICY_SYMBOLS" |
+    awk '$7 != "UND" && ($8 == "main" || $8 == "_start" ||
+                         $8 == "__simple_main" || $8 ~ /^rt_/) { bad = 1 }
+         END { exit bad }' || {
+    echo "invalid pure-Simple MMU policy object: forbidden entry/runtime symbol" >&2
+    exit 1
+}
+OBJECTS="$OBJECTS $OBJ/cosmos_mmu_cache_policy_simple.o"
+
+STORAGE_POLICY_UNDEFINED='cosmos_storage_bridge_admin_init
+cosmos_storage_bridge_backend_format
+cosmos_storage_bridge_backend_init
+cosmos_storage_bridge_backend_mount
+cosmos_storage_bridge_dispatch_init
+cosmos_storage_bridge_dispatch_poll
+cosmos_storage_bridge_factory_initialize_erased
+cosmos_storage_bridge_ftl_init
+cosmos_storage_bridge_ftl_recover
+cosmos_storage_bridge_gc_step
+cosmos_storage_bridge_io_init
+cosmos_storage_bridge_is_qemu
+cosmos_storage_bridge_media_init'
+
+# Preserve the production dependency order from acquisition through lifecycle.
+cosmos_build_policy_pair cosmos_nfc_policy "NFC" "" build
+cosmos_build_policy_pair cosmos_ftl_nfc_backend_policy \
+    "FTL NFC backend" "" build
+cosmos_build_policy_pair cosmos_ftl_policy "FTL" "" build
+cosmos_build_policy_pair cosmos_nvme_media_policy "NVMe media" "" build
+cosmos_build_policy_pair cosmos_nvme_admin_policy "NVMe admin" "" build
+cosmos_build_policy_pair cosmos_nvme_pcie_adapter_policy \
+    "NVMe PCIe adapter" "" existing
+cosmos_build_policy_pair cosmos_pcie_residual_policy "PCIe residual" "" build
+cosmos_build_policy_pair cosmos_storage_policy "storage" \
+    "$STORAGE_POLICY_UNDEFINED" build
+
+cosmos_link_policy_evidence() {
+    _cp_label="$1"
+    _cp_c_object="$2"
+    _cp_policy_object="$3"
+    _cp_unresolved_prefix="$4"
+    _cp_output="$5"
+    "$LLD" -r "$_cp_c_object" "$_cp_policy_object" -o "$_cp_output"
+    _cp_remaining="$("$READELF" -sW "$_cp_output" |
+        awk -v prefix="$_cp_unresolved_prefix" \
+            '$7 == "UND" && index($8, prefix) == 1 { print $8 }' |
+        LC_ALL=C sort -u)"
+    [ -z "$_cp_remaining" ] || {
+        echo "$_cp_label C-to-Simple policy link remains unresolved" >&2
+        printf '%s\n' "$_cp_remaining" >&2
+        exit 1
+    }
+    LINKED_POLICY_OBJECTS="$LINKED_POLICY_OBJECTS $_cp_output"
+}
+
+cosmos_link_policy_evidence NFC "$OBJ/cosmos_nfc.o" \
+    "$OBJ/cosmos_nfc_policy_simple.o" cosmos_nfc_policy_ \
+    "$OBJ/cosmos_nfc_policy_linked.o"
+cosmos_link_policy_evidence "FTL NFC backend" \
+    "$OBJ/cosmos_ftl_nfc_backend.o" \
+    "$OBJ/cosmos_ftl_nfc_backend_policy_simple.o" \
+    cosmos_ftl_nfc_backend_policy_ \
+    "$OBJ/cosmos_ftl_nfc_backend_policy_linked.o"
+cosmos_link_policy_evidence FTL "$OBJ/cosmos_ftl.o" \
+    "$OBJ/cosmos_ftl_policy_simple.o" cosmos_ftl_policy_ \
+    "$OBJ/cosmos_ftl_policy_linked.o"
+cosmos_link_policy_evidence "NVMe media" "$OBJ/cosmos_nvme_ftl_media.o" \
+    "$OBJ/cosmos_nvme_media_policy_simple.o" cosmos_nvme_media_policy_ \
+    "$OBJ/cosmos_nvme_media_policy_linked.o"
+cosmos_link_policy_evidence "NVMe admin" "$OBJ/cosmos_nvme_admin.o" \
+    "$OBJ/cosmos_nvme_admin_policy_simple.o" cosmos_nvme_admin_policy_ \
+    "$OBJ/cosmos_nvme_admin_policy_linked.o"
+cosmos_link_policy_evidence "NVMe PCIe adapter" \
+    "$OBJ/cosmos_nvme_pcie_adapter.o" \
+    "$OBJ/cosmos_nvme_pcie_adapter_policy_simple.o" \
+    cosmos_nvme_pcie_adapter_policy_ \
+    "$OBJ/cosmos_nvme_pcie_adapter_policy_linked.o"
+cosmos_link_policy_evidence "PCIe residual" "$OBJ/cosmos_pcie.o" \
+    "$OBJ/cosmos_pcie_residual_policy_simple.o" cosmos_pcie_residual_policy_ \
+    "$OBJ/cosmos_pcie_residual_policy_linked.o"
+cosmos_link_policy_evidence storage "$OBJ/cosmos_storage.o" \
+    "$OBJ/cosmos_storage_policy_simple.o" cosmos_storage_bridge_ \
+    "$OBJ/cosmos_storage_policy_linked.o"
+
+cosmos_write_object_manifest() {
+    _cp_target="$1"
+    shift
+    : >"$_cp_target"
+    for _cp_object in "$@"; do
+        [ -f "$_cp_object" ] && [ -s "$_cp_object" ] || {
+            echo "missing retained object: $_cp_object" >&2
+            exit 1
+        }
+        chmod 0444 "$_cp_object"
+        printf '%s  %s\n' "$(cosmos_sha256_file "$_cp_object")" \
+            "$(basename "$_cp_object")" >>"$_cp_target"
+    done
+    LC_ALL=C sort -k2,2 -o "$_cp_target" "$_cp_target"
+    awk '{ if (seen[$2]++) bad = 1 } END { exit bad || NR == 0 }' \
+        "$_cp_target" || {
+        echo "duplicate or empty retained object manifest" >&2
+        exit 1
+    }
+}
+
+# shellcheck disable=SC2086 # object paths are controlled and contain no spaces.
+cosmos_write_object_manifest "$OBJECT_RECEIPT_TMP" \
+    $OBJECTS $HOST_POLICY_OBJECTS $LINKED_POLICY_OBJECTS
+[ "$(wc -l < "$OBJECT_RECEIPT_TMP" | tr -d ' ')" = 50 ] || {
+    echo "invalid-artifact: retained object closure must contain exactly 50 objects" >&2
+    exit 1
+}
+"$LLD" -T "$SCRIPT_DIR/cosmos_linker.ld" $OBJECTS -o "$ELF_TMP"
+# Re-hash every input after linking; no mutable object may underpin the ELF.
+cosmos_write_object_manifest "$OBJECT_RECEIPT_AFTER" \
+    $OBJECTS $HOST_POLICY_OBJECTS $LINKED_POLICY_OBJECTS
+cmp -s "$OBJECT_RECEIPT_TMP" "$OBJECT_RECEIPT_AFTER" || {
+    echo "invalid-artifact: object inputs changed during final link" >&2
+    exit 1
+}
+cosmos_write_source_manifest "$SCRIPT_DIR" "$SOURCES_AFTER" || {
+    echo "cannot recapture build inputs" >&2
+    exit 1
+}
+cmp -s "$SOURCES_BEFORE" "$SOURCES_AFTER" || {
+    echo "invalid-artifact: build inputs changed during clean build" >&2
+    exit 1
+}
+
+cosmos_validate_firmware_elf "$ELF_TMP" "$LOADS_TMP" || {
+    echo "invalid-artifact: firmware ELF policy failed" >&2
+    exit 1
+}
+
+SECTIONS="$("$READELF" -SW "$ELF_TMP")"
+SYMBOLS="$("$READELF" -sW "$ELF_TMP")"
+FINAL_UNDEFINED="$(printf '%s\n' "$SYMBOLS" |
+    awk '$7 == "UND" && $8 != "" { print $8 }' | LC_ALL=C sort -u)"
+[ -z "$FINAL_UNDEFINED" ] || {
+    echo "invalid-artifact: final firmware has undefined symbols" >&2
+    printf '%s\n' "$FINAL_UNDEFINED" >&2
+    exit 1
+}
+for expected in "$OBJ"/*.exports; do
+    while IFS= read -r symbol; do
+        printf '%s\n' "$SYMBOLS" |
+            awk -v symbol="$symbol" \
+                '$5 == "GLOBAL" && $7 != "UND" && $8 == symbol { count++ }
+                 END { exit count != 1 }' || {
+            echo "invalid-artifact: final firmware policy export $symbol" >&2
+            exit 1
+        }
+    done <"$expected"
+done
+case "$MODE" in
+    qemu)
+        if printf '%s\n' "$SECTIONS" |
+                grep -Eq '\.note\.cosmos\.profile[[:space:]]+NOTE' ||
+           printf '%s\n' "$SYMBOLS" | grep -Fq "$PROFILE_SYMBOL"; then
+            echo "invalid-artifact: QEMU image is bound to a silicon profile" >&2
+            exit 1
+        fi
+        ;;
+    silicon)
+        printf '%s\n' "$SECTIONS" |
+            grep -Eq '\.note\.cosmos\.profile[[:space:]]+NOTE' || {
+            echo "invalid-artifact: silicon image lacks Cosmos profile note" >&2
+            exit 1
+        }
+        printf '%s\n' "$SYMBOLS" |
+            awk -v symbol="$PROFILE_SYMBOL" \
+                '$4 == "OBJECT" && $5 == "GLOBAL" && $8 == symbol { found = 1 }
+                 END { exit !found }' || {
+            echo "invalid-artifact: silicon image lacks exact Cosmos profile symbol" >&2
+            exit 1
+        }
+        ;;
+esac
+
+cosmos_write_receipt "$SCRIPT_DIR" "$MODE" "$RECEIPT_PROFILE" \
+    "$RECEIPT_SELECTOR" "$ELF_TMP" "$LOADS_TMP" "$RECEIPT_TMP" \
+    "$SOURCES_BEFORE" "$OBJECT_RECEIPT_TMP" || {
+    echo "invalid-artifact: failed to write build receipt" >&2
+    exit 1
+}
+mv "$ELF_TMP" "$ELF"
+mv "$RECEIPT_TMP" "$RECEIPT"
+mv "$OBJECT_RECEIPT_TMP" "$OBJECT_RECEIPT"
+ENTRY="$(sed -n 's/^entry=//p' "$LOADS_TMP")"
+if [ "$MODE" = silicon ]; then
+    echo "built $ELF (clean, profile=$PROFILE, entry=$ENTRY, receipt=$RECEIPT)"
+else
+    echo "built $ELF (clean, unbound, entry=$ENTRY, receipt=$RECEIPT)"
+fi
+
+if [ "${1:-}" = "--run" ]; then
+    [ "$MODE" = qemu ] || {
+        echo "--run requires COSMOS_BUILD_MODE=qemu" >&2
+        exit 2
+    }
+    for tool in timeout qemu-system-arm; do
+        command -v "$tool" >/dev/null 2>&1 || {
+            echo "missing-tool: $tool" >&2
+            exit 2
+        }
+    done
+    echo "=== boot on qemu xilinx-zynq-a9 (UART1 -> stdio) ==="
+    timeout 6 qemu-system-arm -M xilinx-zynq-a9 -display none -serial null -serial stdio \
+        -kernel "$OUT/simpleos_cosmos_openssd.elf" || true
+fi

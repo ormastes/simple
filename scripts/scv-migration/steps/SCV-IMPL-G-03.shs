@@ -1,0 +1,31 @@
+#!/bin/sh
+# SCV-IMPL-G-03 — v2 state model: journal_only -> private_* -> compile_ok -> test_ok -> verified_ok -> public_ready; transitions enforced.
+# Verdict is ALWAYS the last stdout line: PASS exit 0 / FAIL exit 1 / ERROR exit 2.
+# Committed UNSIGNED.
+set -u
+LIB="src/lib/scv/state_model.spl"
+SPEC="test/integration/app/scv_state_model_spec.spl"
+[ -f "$LIB" ] && [ -f "$SPEC" ] || { echo "ERROR — nothing was checked (missing files)"; exit 2; }
+checked=0
+bad=""
+grep -q "scv_state_transition_allowed" "$LIB" || bad="$bad lib(transition_allowed)"
+checked=$((checked + 1))
+OUT="${TMPDIR:-/tmp}/SCV-IMPL-G-03.$$.log"
+SIMPLE_TIMEOUT_SECONDS=900 bin/simple test "$SPEC" > "$OUT" 2>&1
+rc=$?
+checked=$((checked + 1))
+RESULTS=$(grep 'Results:' "$OUT" | tail -1)
+rm -f "$OUT"
+[ "$rc" -eq 0 ] || bad="$bad spec-rc($rc)"
+case "$RESULTS" in
+  *", 0 failed"*) : ;;
+  "") bad="$bad spec(no-results-line)" ;;
+  *) bad="$bad spec($RESULTS)" ;;
+esac
+[ "$checked" -gt 0 ] || { echo "ERROR — nothing was checked"; exit 2; }
+if [ -z "$bad" ]; then
+  echo "PASS — $checked check(s): v2 state model enforced, $RESULTS"
+  exit 0
+fi
+echo "FAIL — $checked check(s), unmet:$bad"
+exit 1

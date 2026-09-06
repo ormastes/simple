@@ -1,0 +1,267 @@
+# test/perf/graphics_2d/perf_2d_runner.spl
+#
+# 2D rendering performance comparison runner: Simple vs C reference.
+# Uses rt_time_now_micros() for timing. No actual GPU required.
+# Scene operations simulate CPU-side draw calls on a pixel buffer.
+
+extern fn rt_time_now_micros() -> i64
+extern fn rt_file_read_text(path: text) -> text
+
+# ---------------------------------------------------------------------------
+# PerfMetrics
+# ---------------------------------------------------------------------------
+
+struct PerfMetrics:
+    name:              text
+    backend:           text
+    frame_count:       i64
+    total_frame_us:    i64
+    min_frame_us:      i64
+    max_frame_us:      i64
+    pixels_per_sec:    i64
+    draw_calls_per_sec: i64
+    rss_kb:            i64
+    pixel_hash:        i64
+
+fn perf_metrics_create(name: text, backend: text) -> PerfMetrics:
+    PerfMetrics(
+        name: name,
+        backend: backend,
+        frame_count: 0,
+        total_frame_us: 0,
+        min_frame_us: 9223372036854775807,
+        max_frame_us: 0,
+        pixels_per_sec: 0,
+        draw_calls_per_sec: 0,
+        rss_kb: 0,
+        pixel_hash: 0
+    )
+
+fn perf_record_frame(m: PerfMetrics, frame_us: i64, pixels: i64, draw_calls: i64) -> PerfMetrics:
+    var total: i64 = m.total_frame_us + frame_us
+    var mn: i64 = m.min_frame_us
+    if frame_us < mn: mn = frame_us
+    var mx: i64 = m.max_frame_us
+    if frame_us > mx: mx = frame_us
+    val cnt: i64 = m.frame_count + 1
+    val avg_us: i64 = if cnt > 0: total / cnt else: 0
+    val pps: i64 = if avg_us > 0: (pixels * 1000000) / avg_us else: 0
+    val dps: i64 = if avg_us > 0: (draw_calls * 1000000) / avg_us else: 0
+    PerfMetrics(
+        name: m.name,
+        backend: m.backend,
+        frame_count: cnt,
+        total_frame_us: total,
+        min_frame_us: mn,
+        max_frame_us: mx,
+        pixels_per_sec: pps,
+        draw_calls_per_sec: dps,
+        rss_kb: m.rss_kb,
+        pixel_hash: m.pixel_hash
+    )
+
+fn perf_avg_frame_us(m: PerfMetrics) -> i64:
+    if m.frame_count > 0: m.total_frame_us / m.frame_count else: 0
+
+fn perf_summary(m: PerfMetrics) -> text:
+    val avg: i64 = perf_avg_frame_us(m)
+    "PERF name={m.name} backend={m.backend} frames={m.frame_count} avg_us={avg} min_us={m.min_frame_us} max_us={m.max_frame_us} pps={m.pixels_per_sec} dps={m.draw_calls_per_sec} rss_kb={m.rss_kb} hash={m.pixel_hash}"
+
+# ---------------------------------------------------------------------------
+# Pixel helpers
+# ---------------------------------------------------------------------------
+
+fn fnv1a_pixel(h: i64, r: i64, g: i64, b: i64) -> i64:
+    var hh: i64 = h ^ r
+    hh = hh * 1099511628211
+    hh = hh ^ g
+    hh = hh * 1099511628211
+    hh = hh ^ b
+    hh * 1099511628211
+
+fn read_rss_kb() -> i64:
+    val status: text = rt_file_read_text("/proc/self/status")
+    if status.len() == 0:
+        return 0
+    var pos: i32 = 0
+    while pos < status.len() as i32 - 6:
+        if (status[pos] == 'V' and status[pos + 1] == 'm' and
+            status[pos + 2] == 'R' and status[pos + 3] == 'S' and
+            status[pos + 4] == 'S' and status[pos + 5] == ':'):
+            pos = pos + 6
+            while pos < status.len() as i32 and status[pos] == ' ':
+                pos = pos + 1
+            var result: i64 = 0
+            while pos < status.len() as i32 and status[pos] >= '0' and status[pos] <= '9':
+                result = result * 10 + (status[pos] as i64 - '0' as i64)
+                pos = pos + 1
+            return result
+        pos = pos + 1
+    0
+
+# ---------------------------------------------------------------------------
+# Simple2DScene benchmarks (pure CPU simulation, no GPU)
+# ---------------------------------------------------------------------------
+
+fn scene_run_fill(width: i64, height: i64, iterations: i64) -> PerfMetrics:
+    var m: PerfMetrics = perf_metrics_create("fill", "simple_cpu")
+    val pixels: i64 = width * height
+    var iter: i64 = 0
+    while iter < iterations:
+        val t0: i64 = rt_time_now_micros()
+        var h: i64 = -3750763034362895579
+        var y: i64 = 0
+        while y < height:
+            var x: i64 = 0
+            while x < width:
+                val r: i64 = (x + y) % 256
+                val g: i64 = (x * 2 + iter) % 256
+                val b: i64 = (y + iter * 3) % 256
+                h = fnv1a_pixel(h, r, g, b)
+                x = x + 1
+            y = y + 1
+        val t1: i64 = rt_time_now_micros()
+        val frame_us: i64 = t1 - t0
+        m = perf_record_frame(m, frame_us, pixels, 1)
+        iter = iter + 1
+    val rss: i64 = read_rss_kb()
+    PerfMetrics(
+        name: m.name, backend: m.backend,
+        frame_count: m.frame_count, total_frame_us: m.total_frame_us,
+        min_frame_us: m.min_frame_us, max_frame_us: m.max_frame_us,
+        pixels_per_sec: m.pixels_per_sec, draw_calls_per_sec: m.draw_calls_per_sec,
+        rss_kb: rss, pixel_hash: 0
+    )
+
+fn scene_run_rect(width: i64, height: i64, rect_count: i64, iterations: i64) -> PerfMetrics:
+    var m: PerfMetrics = perf_metrics_create("rect", "simple_cpu")
+    val pixels: i64 = width * height
+    var iter: i64 = 0
+    while iter < iterations:
+        val t0: i64 = rt_time_now_micros()
+        var h: i64 = -3750763034362895579
+        var ri: i64 = 0
+        while ri < rect_count:
+            val rx: i64 = (ri * 19) % (width - 1)
+            val ry: i64 = (ri * 11) % (height - 1)
+            val rw: i64 = 1 + (ri * 7) % (width / 4 + 1)
+            val rh: i64 = 1 + (ri * 13) % (height / 4 + 1)
+            val color_r: i64 = (ri * 37) % 256
+            val color_g: i64 = (ri * 53) % 256
+            val color_b: i64 = (ri * 71) % 256
+            var row: i64 = ry
+            while row < ry + rh and row < height:
+                var col: i64 = rx
+                while col < rx + rw and col < width:
+                    h = fnv1a_pixel(h, color_r, color_g, color_b)
+                    col = col + 1
+                row = row + 1
+            ri = ri + 1
+        val t1: i64 = rt_time_now_micros()
+        val frame_us: i64 = t1 - t0
+        m = perf_record_frame(m, frame_us, pixels, rect_count)
+        iter = iter + 1
+    val rss: i64 = read_rss_kb()
+    PerfMetrics(
+        name: m.name, backend: m.backend,
+        frame_count: m.frame_count, total_frame_us: m.total_frame_us,
+        min_frame_us: m.min_frame_us, max_frame_us: m.max_frame_us,
+        pixels_per_sec: m.pixels_per_sec, draw_calls_per_sec: m.draw_calls_per_sec,
+        rss_kb: rss, pixel_hash: 0
+    )
+
+fn scene_run_mixed(width: i64, height: i64, iterations: i64) -> PerfMetrics:
+    var m: PerfMetrics = perf_metrics_create("mixed", "simple_cpu")
+    val pixels: i64 = width * height
+    val draw_calls: i64 = 51
+    var iter: i64 = 0
+    while iter < iterations:
+        val t0: i64 = rt_time_now_micros()
+        var h: i64 = -3750763034362895579
+        # simulate clear
+        h = fnv1a_pixel(h, 0, 0, 0)
+        # simulate 50 rects
+        var ri: i64 = 0
+        while ri < 50:
+            val rx: i64 = (ri * 17) % (width - 1)
+            val ry: i64 = (ri * 13) % (height - 1)
+            val rw: i64 = 1 + (ri * 9) % (width / 8 + 1)
+            val rh: i64 = 1 + (ri * 5) % (height / 8 + 1)
+            val cr: i64 = (ri * 41) % 256
+            val cg: i64 = (ri * 59) % 256
+            val cb: i64 = (ri * 67) % 256
+            var row: i64 = ry
+            while row < ry + rh and row < height:
+                var col: i64 = rx
+                while col < rx + rw and col < width:
+                    h = fnv1a_pixel(h, cr, cg, cb)
+                    col = col + 1
+                row = row + 1
+            ri = ri + 1
+        val t1: i64 = rt_time_now_micros()
+        val frame_us: i64 = t1 - t0
+        m = perf_record_frame(m, frame_us, pixels, draw_calls)
+        iter = iter + 1
+    val rss: i64 = read_rss_kb()
+    PerfMetrics(
+        name: m.name, backend: m.backend,
+        frame_count: m.frame_count, total_frame_us: m.total_frame_us,
+        min_frame_us: m.min_frame_us, max_frame_us: m.max_frame_us,
+        pixels_per_sec: m.pixels_per_sec, draw_calls_per_sec: m.draw_calls_per_sec,
+        rss_kb: rss, pixel_hash: 0
+    )
+
+# ---------------------------------------------------------------------------
+# PerfComparison
+# ---------------------------------------------------------------------------
+
+struct PerfComparison:
+    simple_name:         text
+    simple_avg_us:       i64
+    simple_pps:          i64
+    simple_rss_kb:       i64
+    c_ref_frame_us:      i64
+    c_ref_pixels_per_sec: i64
+    c_ref_rss_kb:        i64
+    simple_vs_c_ratio:   i64
+
+fn comparison_create(simple: PerfMetrics, c_frame_us: i64, c_pixels: i64, c_rss: i64) -> PerfComparison:
+    val avg: i64 = perf_avg_frame_us(simple)
+    val ratio: i64 = if c_frame_us > 0: (avg * 100) / c_frame_us else: 0
+    PerfComparison(
+        simple_name: simple.name,
+        simple_avg_us: avg,
+        simple_pps: simple.pixels_per_sec,
+        simple_rss_kb: simple.rss_kb,
+        c_ref_frame_us: c_frame_us,
+        c_ref_pixels_per_sec: c_pixels,
+        c_ref_rss_kb: c_rss,
+        simple_vs_c_ratio: ratio
+    )
+
+fn comparison_summary(cmp: PerfComparison) -> text:
+    "COMPARISON name={cmp.simple_name} simple_avg_us={cmp.simple_avg_us} c_ref_us={cmp.c_ref_frame_us} ratio_pct={cmp.simple_vs_c_ratio} simple_pps={cmp.simple_pps} c_pps={cmp.c_ref_pixels_per_sec} simple_rss={cmp.simple_rss_kb} c_rss={cmp.c_ref_rss_kb}"
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+fn main():
+    print "=== 2D Performance: Simple vs C Reference ==="
+
+    val width: i64  = 1920
+    val height: i64 = 1080
+
+    val fill: PerfMetrics = scene_run_fill(width, height, 100)
+    print perf_summary(fill)
+
+    val rect: PerfMetrics = scene_run_rect(width, height, 1000, 100)
+    print perf_summary(rect)
+
+    val mixed: PerfMetrics = scene_run_mixed(width, height, 100)
+    print perf_summary(mixed)
+
+    val cmp: PerfComparison = comparison_create(mixed, 1000, 2000000, 8192)
+    print comparison_summary(cmp)
+
+    print "DONE"

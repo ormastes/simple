@@ -1,0 +1,86 @@
+#!/bin/sh
+# Re-entrancy gate for the PURE-SIMPLE frontend interpreter entry point
+# `core_jit_interpret` (src/compiler/10.frontend/core/interpreter/mod.spl).
+#
+# WHY: calling it twice in one process used to inherit state from the first
+# call. The damage was not limited to an error — case G of the class-identity
+# corpus silently answered ALIAS after case C had run, and a plain `if/else`
+# module died with "array index out of bounds". Root cause: the elif arena in
+# src/compiler/10.frontend/core/_Ast/decl_nodes.spl was cleared by a
+# CROSS-MODULE `.clear()` from _Ast/module_state.spl that never reached the
+# arena `elif_new` appends to. See
+# doc/08_tracking/bug/pure_simple_interpreter_core_jit_interpret_not_reentrant_2026-08-20.md
+#
+# WHAT IT CHECKS (fail-closed, verdict is the LAST line of stdout):
+#   1. two if/else modules evaluated back-to-back in ONE process both answer
+#      correctly (this is the reproduce case; it FAILS before the fix),
+#   2. the whole class-identity corpus evaluated in ONE process gives, case by
+#      case, the SAME verdict as one-case-per-process runs — the actual
+#      re-entrancy property, not a hardcoded expectation table.
+#
+#   PASS  — <n> case verdict(s) compared, in-process == fresh-process   exit 0
+#   FAIL  — ...                                                        exit 1
+#   ERROR — nothing was checked (...)                                  exit 2
+set -u
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+cd "$ROOT" || { echo "ERROR — nothing was checked (repo root unreachable)"; exit 2; }
+BIN="$ROOT/bin/simple"
+[ -x "$BIN" ] || { echo "ERROR — nothing was checked (no bin/simple)"; exit 2; }
+
+TMP=$(mktemp -d) || { echo "ERROR — nothing was checked (mktemp failed)"; exit 2; }
+trap 'rm -rf "$TMP"' EXIT
+# The driver must live OUTSIDE the repo tree or its imported modules' globals
+# are never initialised (documented at the top of the driver itself).
+DRV="$TMP/driver.spl"
+cp "$ROOT/scripts/check/class_identity_pure_simple_driver.spl" "$DRV" || {
+    echo "ERROR — nothing was checked (driver copy failed)"; exit 2; }
+
+run_driver() { # $1 = comma-separated case list, $2 = dir
+    CLASS_IDENTITY_CASES="$1" CLASS_IDENTITY_DIR="$2" \
+    SIMPLE_NO_JIT=1 SIMPLE_MODULE_LIMIT=4000 "$BIN" run "$DRV" 2>&1
+}
+
+CHECKED=0
+FAILED=""
+
+# --- 1. reproduce case: two if/else modules, one process -------------------
+REPRO_DIR="test/fixtures/repro/compiler/interp_reentrancy/"
+OUT=$(run_driver "first_if_else.spl,second_if_else.spl" "$REPRO_DIR")
+STATUS=$?
+CHECKED=$((CHECKED + 2))
+echo "$OUT" | grep -q "FIRST ok"  || FAILED="$FAILED first_if_else"
+echo "$OUT" | grep -q "SECOND ok" || FAILED="$FAILED second_if_else"
+[ "$STATUS" -eq 0 ] || FAILED="$FAILED repro-driver-rc=$STATUS"
+
+# --- 2. corpus: in-process verdicts must equal fresh-process verdicts ------
+CASES_DIR="test/fixtures/repro/compiler/class_identity/cases/"
+NAMES=$(ls "$CASES_DIR" 2>/dev/null | grep '\.spl$' | sort)
+[ -n "$NAMES" ] || { echo "ERROR — nothing was checked (no corpus cases at $CASES_DIR)"; exit 2; }
+
+LIST=$(echo "$NAMES" | tr '\n' ',' | sed 's/,$//')
+INPROC=$(run_driver "$LIST" "$CASES_DIR" | grep -E '^[A-K] ' | sort)
+
+FRESH=""
+for n in $NAMES; do
+    v=$(run_driver "$n" "$CASES_DIR" | grep -E '^[A-K] ')
+    [ -n "$v" ] || FAILED="$FAILED no-verdict:$n"
+    FRESH="$FRESH$v
+"
+    CHECKED=$((CHECKED + 1))
+done
+FRESH=$(printf '%s' "$FRESH" | grep -E '^[A-K] ' | sort)
+
+if [ "$INPROC" != "$FRESH" ]; then
+    printf '%s\n' "$FRESH" > "$TMP/fresh.txt"
+    printf '%s\n' "$INPROC" > "$TMP/inproc.txt"
+    DIFF=$(diff "$TMP/fresh.txt" "$TMP/inproc.txt" | tr '\n' ' ')
+    FAILED="$FAILED corpus-divergence:[$DIFF]"
+fi
+
+[ "$CHECKED" -gt 0 ] || { echo "ERROR — nothing was checked (0 verdicts)"; exit 2; }
+if [ -n "$FAILED" ]; then
+    echo "FAIL — $CHECKED case verdict(s) compared, offenders:$FAILED"
+    exit 1
+fi
+echo "PASS — $CHECKED case verdict(s) compared, in-process == fresh-process"
+exit 0

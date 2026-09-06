@@ -1,0 +1,86 @@
+use std.spec
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir_data.*
+use compiler.mir.mir_lowering.MirLowering
+
+extern fn rt_file_read_text(path: text) -> text
+
+fn lower_top_level_expr_fixture() -> (MirModule, i64, i64, i64):
+    val source = "fn side_effect():\n    ()\n\nfn ordinary_value() -> i64:\n    7\n\nfn main():\n    ()\n\nside_effect()\nvar ordinary: i64 = ordinary_value()\n"
+    val path = "module_top_level_expr_initializer_fixture.spl"
+    val parsed = parse_full_frontend(source, path, path, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(path)
+    val hir = hir_lowering.lower_module(parsed)
+    expect(hir_lowering.errors.len()).to_equal(0)
+
+    var expr_symbol = -1
+    var ordinary_symbol = -1
+    for constant in hir.constants.values():
+        if constant.name.starts_with("_expr_"):
+            expr_symbol = constant.symbol.id
+        if constant.name == "ordinary":
+            ordinary_symbol = constant.symbol.id
+
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir)
+    (mir, mir_lowering.errors.len(), expr_symbol, ordinary_symbol)
+
+describe "module top-level expression initializer":
+    it "executes the generated expression without inventing a static result":
+        val result = lower_top_level_expr_fixture()
+        val mir = result.0
+        val mir_error_count = result.1
+        val expr_symbol = result.2
+        val ordinary_symbol = result.3
+
+        expect(expr_symbol).to_be_greater_than(-1)
+        expect(ordinary_symbol).to_be_greater_than(-1)
+        expect(mir_error_count).to_equal(0)
+
+        var expr_static_count = 0
+        var ordinary_static_count = 0
+        for static_ in mir.statics.values():
+            if static_.symbol.id == expr_symbol:
+                expr_static_count = expr_static_count + 1
+            if static_.symbol.id == ordinary_symbol:
+                ordinary_static_count = ordinary_static_count + 1
+
+        var initializer_count = 0
+        var initializer_call_count = 0
+        var expr_store_count = 0
+        var ordinary_store_count = 0
+        for function in mir.functions.values():
+            if function.name.starts_with("__module_init_"):
+                initializer_count = initializer_count + 1
+                for block in function.blocks:
+                    for instruction in block.instructions:
+                        match instruction.kind:
+                            case MirInstKind.Call(_, _, _):
+                                initializer_call_count = initializer_call_count + 1
+                            case MirInstKind.StoreGlobal(symbol, _):
+                                if symbol.id == expr_symbol:
+                                    expr_store_count = expr_store_count + 1
+                                if symbol.id == ordinary_symbol:
+                                    ordinary_store_count = ordinary_store_count + 1
+                            case _:
+                                pass
+
+        expect(expr_static_count).to_equal(0)
+        expect(expr_store_count).to_equal(0)
+        expect(ordinary_static_count).to_equal(1)
+        expect(ordinary_store_count).to_equal(1)
+        expect(initializer_count).to_equal(1)
+        expect(initializer_call_count).to_equal(2)
+
+    it "orders runtime initializers without a closure-valued comparator":
+        val source = rt_file_read_text("src/compiler/50.mir/_MirLowering/module_lowering.spl") ?? ""
+        val ordering = source.split("fn runtime_module_initializers_in_declaration_order")[1].split("fn mir_layout_module_segment_is_tier")[0]
+
+        expect(ordering.contains("array_sort_by")).to_equal(false)
+        expect(ordering).to_contain("while i < dynamic.len():")
+        expect(ordering).to_contain("current.span.start < previous.span.start")
+        expect(ordering).to_contain("current.symbol.id < previous.symbol.id")
+        expect(ordering).to_contain("dynamic[j + 1] = current")

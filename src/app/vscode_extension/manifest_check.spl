@@ -1,0 +1,96 @@
+# VS Code bridge conformance check (IDE extension kernel campaign, lane L7).
+#
+# CHECK ONLY: compares `contributes.commands` in this directory's
+# `package.json` (the hand-maintained VS Code extension manifest) against the
+# command ids contributed by the pure-Simple extension kernel's builtin
+# manifests (`std.editor.extensions.builtin.index.builtin_manifest_providers`).
+# Generation of package.json from canonical SDN is a follow-up; this module
+# only reports where the two sides currently disagree.
+
+use app.io.mod.{file_exists, file_read}
+use std.common.json.parser.{json_parse}
+use std.common.json.path_ops.{json_path_get}
+use std.common.json.array_ops.{json_array_length, json_array_get}
+use std.common.json.object_ops.{json_object_get}
+use std.common.json.types.{json_is_array, json_to_string}
+use std.editor.extensions.builtin.index.{builtin_manifest_providers}
+
+fn vscode_package_json_path() -> text:
+    "src/app/vscode_extension/package.json"
+
+# `json_to_string` returns `any` (nil on type mismatch); narrow to text with
+# the same "if nil: default else: value" pattern used across the JSON lib's
+# other typed-accessor consumers (see app.llm_caret.claude_cli._json_text).
+fn _vscode_command_id(entry: any) -> text:
+    val value = json_to_string(json_object_get(entry, "command"))
+    if value == nil: "" else: value
+
+# The vscode command ids declared under `contributes.commands` in
+# `package.json`. Empty when the file is missing or unparseable.
+fn vscode_manifest_command_ids(package_json_text: text) -> [text]:
+    var out: [text] = []
+    if package_json_text.trim() == "":
+        return out
+    val parsed = json_parse(package_json_text)
+    if parsed == nil:
+        return out
+    val commands = json_path_get(parsed, "contributes.commands")
+    if commands == nil or not json_is_array(commands):
+        return out
+    val n = json_array_length(commands)
+    var i = 0
+    while i < n:
+        val id = _vscode_command_id(json_array_get(commands, i))
+        if id != "":
+            out.push(id)
+        i = i + 1
+    out
+
+# Command ids contributed by every builtin extension-kernel manifest.
+fn vscode_builtin_command_ids() -> [text]:
+    var out: [text] = []
+    for m in builtin_manifest_providers():
+        for cmd in m.contributes_commands:
+            out.push(cmd.id)
+    out
+
+fn _vscode_contains(xs: [text], v: text) -> bool:
+    for x in xs:
+        if x == v:
+            return true
+    false
+
+# Mismatch/classification lines between package.json's
+# `contributes.commands` and the extension kernel's builtin manifests.
+#   "missing-in-vscode: <id>" -- a builtin command has no vscode
+#                                 contribution. HARD mismatch: the generator
+#                                 (manifest_gen.spl) should add this id.
+#   "bridge-only: <id>"       -- a vscode command has no builtin manifest
+#                                 owner. ALLOWED: legitimate VS Code-side
+#                                 commands (LSP, math, AI, editor markers,
+#                                 ...) the `.spl` extension kernel doesn't
+#                                 back. Not a mismatch -- see
+#                                 `vscode_manifest_hard_mismatches()`.
+fn vscode_manifest_check() -> [text]:
+    val package_text = if file_exists(vscode_package_json_path()): file_read(vscode_package_json_path()) else: ""
+    val vscode_ids = vscode_manifest_command_ids(package_text)
+    val builtin_ids = vscode_builtin_command_ids()
+    var mismatches: [text] = []
+    for id in builtin_ids:
+        if not _vscode_contains(vscode_ids, id):
+            mismatches.push("missing-in-vscode: " + id)
+    for id in vscode_ids:
+        if not _vscode_contains(builtin_ids, id):
+            mismatches.push("bridge-only: " + id)
+    mismatches
+
+# Only the HARD mismatches from `vscode_manifest_check()` -- builtin
+# commands with no vscode contribution. This is the CI gate primitive:
+# a clean generation (manifest_gen.spl) drives this to empty; bridge-only
+# entries are excluded because they're allowed by design.
+fn vscode_manifest_hard_mismatches() -> [text]:
+    var out: [text] = []
+    for line in vscode_manifest_check():
+        if line.starts_with("missing-in-vscode: "):
+            out.push(line)
+    out

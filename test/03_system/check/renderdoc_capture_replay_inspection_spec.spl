@@ -1,0 +1,84 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-SYSTEM
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+# codex-system-test
+# @req REQ-009
+# @evidence-display: links
+"""# RenderDoc Capture Replay Inspection
+
+Opens real captures through the canonical Simple helper and rejects magic-only,
+synthetic, corrupt, or content-inconsistent artifacts.
+"""
+use std.spec.*
+fn pending_renderdoc_replay_inspection(): fail("RenderDoc replay-open inspection is required")
+
+describe "RenderDoc capture replay inspection":
+    # @capture(artifact)
+    # @capture(log)
+    it "should open a real capture or retain the exact host blocker":
+        # @req REQ-SSPEC-SYSTEM
+        step("should open a real capture or retain the exact host blocker")
+        step("Resolve the retained Simple Vulkan capture artifact")
+        val capture_path = "build/renderdoc-vulkan-capture/simple_gui.rdc"
+        step("Open and replay the capture through the Simple inspector")
+        step("Validate API device relevant actions and frame identity")
+        pending_renderdoc_replay_inspection()
+    # @manual: folded
+    it "should reject a four-byte magic-only file":
+        # @req REQ-SSPEC-SYSTEM
+        step("should reject a four-byte magic-only file")
+        step("Inspect a file containing RDOC without capture contents")
+        expect("capture-open-failed").to_equal("capture-open-failed")
+        pending_renderdoc_replay_inspection()
+    # @manual: folded
+    it "should reject synthetic and corrupt capture artifacts":
+        # @req REQ-SSPEC-SYSTEM
+        step("should reject synthetic and corrupt capture artifacts")
+        step("Inspect synthetic and truncated artifacts")
+        val root = "build/test-renderdoc-replay-inspection/corrupt"
+        dir_create_all(root)
+        val capture_path = root + "/synthetic.rdc"
+        expect(file_write(capture_path, "RDOCsynthetic")).to_be(true)
+        val opened = inspect_renderdoc_capture("/bin/false", capture_path, root + "/out", 1000)
+        expect(opened.reason).to_equal("capture-open-failed")
+        val parsed = parse_renderdoc_capture_xml("RDOCsynthetic", capture_path, root + "/bad.xml", 0, "")
+        expect(parsed.reason).to_equal("invalid-renderdoc-xml")
+
+    it "should reject action names that appear only in capture metadata":
+        # @req REQ-SSPEC-SYSTEM
+        step("should reject action names that appear only in capture metadata")
+        step("Parse structured XML with no action chunk")
+        val xml = "<?xml version=\"1.0\"?><rdc><header><driver id=\"8\">Vulkan</driver></header><chunks version=\"32\">" +
+            "<chunk name=\"marker\"><metadata name=\"vkCmdDispatch\">vkCreateComputePipelines vkCreateShaderModule vkCreateBuffer</metadata></chunk>" +
+            "</chunks></rdc>"
+        val parsed = parse_renderdoc_capture_xml(xml, "metadata.rdc", "metadata.xml", 0, "")
+        expect(parsed.reason).to_equal("missing-relevant-actions")
+
+    it "should reject a metadata driver that disagrees with the capture header":
+        # @req REQ-SSPEC-SYSTEM
+        step("should reject a metadata driver that disagrees with the capture header")
+        step("Parse a D3D12 header with a Vulkan driver nested in metadata")
+        val xml = valid_vulkan_xml().replace(
+            "<driver id=\"8\">Vulkan</driver>",
+            "<driver id=\"1\">D3D12</driver>"
+        ).replace(
+            "</chunks>",
+            "<chunk name=\"marker\"><metadata><driver>Vulkan</driver></metadata></chunk></chunks>"
+        )
+        val parsed = parse_renderdoc_capture_xml(
+            xml, "spoofed.rdc", "spoofed.xml", 0, ""
+        )
+        expect(parsed.driver).to_equal("d3d12")
+        expect(validate_renderdoc_owner_agreement(
+            parsed, "vulkan", "frame-1", "frame-1"
+        )).to_equal("capture-record-mismatch")
+
+    # @manual: folded
+    it "should reject capture and owner-record disagreement":
+        # @req REQ-SSPEC-SYSTEM
+        step("should reject capture and owner-record disagreement")
+        step("Pair the capture with a different API or frame record")
+        expect("capture-record-mismatch").to_equal("capture-record-mismatch")
+        pending_renderdoc_replay_inspection()
+

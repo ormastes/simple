@@ -1,0 +1,153 @@
+# codex-impl
+
+use std.tiny.common.abi.{TinyDrawStreamV1}
+use std.tiny.common.status.{TinyStatus, TINY_ERR_CAPACITY, TINY_ERR_INVALID}
+use std.tiny.draw.opcode.*
+
+class TinyDrawWriter:
+    words: [i32]
+    word_count: i32
+    capacity_words: i32
+    ended: bool
+
+    static fn create(capacity_words: i32) -> TinyDrawWriter:
+        var words: [i32] = []
+        var index = 0
+        while index < capacity_words:
+            words.push(0)
+            index = index + 1
+        TinyDrawWriter(words: words, word_count: 0, capacity_words: capacity_words, ended: false)
+
+    fn stream() -> [i32]:
+        self.words
+
+    fn count() -> i32:
+        self.word_count
+
+    fn envelope(required_capability_bits: i64) -> TinyDrawStreamV1:
+        TinyDrawStreamV1.create_counted(self.words, self.word_count, required_capability_bits)
+
+    fn available_words() -> i32:
+        if self.capacity_words < 0 or self.word_count > self.capacity_words: return -1
+        self.capacity_words - self.word_count
+
+    me append_unchecked(value: i32):
+        self.words[self.word_count] = value
+        self.word_count = self.word_count + 1
+
+    me append_word(value: i32) -> TinyStatus:
+        if self.ended:
+            return TinyStatus.error(TINY_ERR_INVALID, TINY_DRAW_DETAIL_TRAILING_DATA)
+        if self.available_words() < 1:
+            return TinyStatus.error(TINY_ERR_CAPACITY, TINY_DRAW_DETAIL_STREAM_CAPACITY)
+        self.append_unchecked(value)
+        TinyStatus.ok()
+
+    me end_stream() -> TinyStatus:
+        val status = self.append_word(TINY_DRAW_END)
+        if status.is_ok():
+            self.ended = true
+        status
+
+    me clear(color: i32) -> TinyStatus:
+        if self.ended: return TinyStatus.error(TINY_ERR_INVALID, TINY_DRAW_DETAIL_TRAILING_DATA)
+        if self.available_words() < 2: return TinyStatus.error(TINY_ERR_CAPACITY, TINY_DRAW_DETAIL_STREAM_CAPACITY)
+        self.append_unchecked(TINY_DRAW_CLEAR)
+        self.append_unchecked(color)
+        TinyStatus.ok()
+
+    me fill_rect(x: i32, y: i32, width: i32, height: i32, color: i32) -> TinyStatus:
+        if width < 0 or height < 0:
+            return TinyStatus.error(TINY_ERR_INVALID, TINY_DRAW_DETAIL_DIMENSION)
+        if self.ended: return TinyStatus.error(TINY_ERR_INVALID, TINY_DRAW_DETAIL_TRAILING_DATA)
+        if self.available_words() < 6: return TinyStatus.error(TINY_ERR_CAPACITY, TINY_DRAW_DETAIL_STREAM_CAPACITY)
+        self.append_unchecked(TINY_DRAW_FILL_RECT)
+        self.append_unchecked(x)
+        self.append_unchecked(y)
+        self.append_unchecked(width)
+        self.append_unchecked(height)
+        self.append_unchecked(color)
+        TinyStatus.ok()
+
+    me border_rect(x: i32, y: i32, width: i32, height: i32, color: i32) -> TinyStatus:
+        if width <= 0 or height <= 0:
+            return TinyStatus.error(TINY_ERR_INVALID, TINY_DRAW_DETAIL_DIMENSION)
+        if self.ended: return TinyStatus.error(TINY_ERR_INVALID, TINY_DRAW_DETAIL_TRAILING_DATA)
+        if self.available_words() < 6: return TinyStatus.error(TINY_ERR_CAPACITY, TINY_DRAW_DETAIL_STREAM_CAPACITY)
+        self.append_unchecked(TINY_DRAW_BORDER_RECT)
+        self.append_unchecked(x)
+        self.append_unchecked(y)
+        self.append_unchecked(width)
+        self.append_unchecked(height)
+        self.append_unchecked(color)
+        TinyStatus.ok()
+
+    me push_clip(x: i32, y: i32, width: i32, height: i32) -> TinyStatus:
+        if width < 0 or height < 0:
+            return TinyStatus.error(TINY_ERR_INVALID, TINY_DRAW_DETAIL_DIMENSION)
+        if self.ended: return TinyStatus.error(TINY_ERR_INVALID, TINY_DRAW_DETAIL_TRAILING_DATA)
+        if self.available_words() < 5: return TinyStatus.error(TINY_ERR_CAPACITY, TINY_DRAW_DETAIL_STREAM_CAPACITY)
+        self.append_unchecked(TINY_DRAW_PUSH_CLIP)
+        self.append_unchecked(x)
+        self.append_unchecked(y)
+        self.append_unchecked(width)
+        self.append_unchecked(height)
+        TinyStatus.ok()
+
+    me pop_clip() -> TinyStatus:
+        self.append_word(TINY_DRAW_POP_CLIP)
+
+    me push_translate(dx: i32, dy: i32) -> TinyStatus:
+        if self.ended: return TinyStatus.error(TINY_ERR_INVALID, TINY_DRAW_DETAIL_TRAILING_DATA)
+        if self.available_words() < 3: return TinyStatus.error(TINY_ERR_CAPACITY, TINY_DRAW_DETAIL_STREAM_CAPACITY)
+        self.append_unchecked(TINY_DRAW_PUSH_TRANSLATE)
+        self.append_unchecked(dx)
+        self.append_unchecked(dy)
+        TinyStatus.ok()
+
+    me pop_translate() -> TinyStatus:
+        self.append_word(TINY_DRAW_POP_TRANSLATE)
+
+    me glyph_mono(x: i32, y: i32, width: i32, height: i32, color: i32, rows: [i32]) -> TinyStatus:
+        if width < 0 or width > 31 or height < 0 or rows.len() != height:
+            return TinyStatus.error(TINY_ERR_INVALID, TINY_DRAW_DETAIL_GLYPH_WIDTH)
+        if self.ended: return TinyStatus.error(TINY_ERR_INVALID, TINY_DRAW_DETAIL_TRAILING_DATA)
+        val available = self.available_words()
+        if available < 6 or rows.len() > available - 6:
+            return TinyStatus.error(TINY_ERR_CAPACITY, TINY_DRAW_DETAIL_STREAM_CAPACITY)
+        self.append_unchecked(TINY_DRAW_GLYPH_MONO)
+        self.append_unchecked(x)
+        self.append_unchecked(y)
+        self.append_unchecked(width)
+        self.append_unchecked(height)
+        self.append_unchecked(color)
+        self.append_values(rows)
+
+    me blit_argb(x: i32, y: i32, width: i32, height: i32, pixels: [i32]) -> TinyStatus:
+        if width < 0 or height < 0:
+            return TinyStatus.error(TINY_ERR_INVALID, TINY_DRAW_DETAIL_DIMENSION)
+        if width != 0 and height > 2147483647 / width:
+            return TinyStatus.error(TINY_ERR_INVALID, TINY_DRAW_DETAIL_DIMENSION)
+        if width * height != pixels.len():
+            return TinyStatus.error(TINY_ERR_INVALID, TINY_DRAW_DETAIL_DIMENSION)
+        if self.ended: return TinyStatus.error(TINY_ERR_INVALID, TINY_DRAW_DETAIL_TRAILING_DATA)
+        val available = self.available_words()
+        if available < 5 or pixels.len() > available - 5:
+            return TinyStatus.error(TINY_ERR_CAPACITY, TINY_DRAW_DETAIL_STREAM_CAPACITY)
+        self.append_unchecked(TINY_DRAW_BLIT_ARGB)
+        self.append_unchecked(x)
+        self.append_unchecked(y)
+        self.append_unchecked(width)
+        self.append_unchecked(height)
+        self.append_values(pixels)
+
+    me append_values(values: [i32]) -> TinyStatus:
+        if self.ended: return TinyStatus.error(TINY_ERR_INVALID, TINY_DRAW_DETAIL_TRAILING_DATA)
+        val available = self.available_words()
+        if available < 0 or values.len() > available:
+            return TinyStatus.error(TINY_ERR_CAPACITY, TINY_DRAW_DETAIL_STREAM_CAPACITY)
+        var i = 0
+        while i < values.len():
+            self.append_unchecked(values[i])
+            i = i + 1
+        TinyStatus.ok()

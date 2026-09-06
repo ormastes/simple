@@ -1,0 +1,45 @@
+use std.spec.*
+use compiler.mir.hwir.types.{CoreConfig}
+use compiler.mir.hwir.riscv_scalar_muldiv_projection.{strict_riscv_scalar_muldiv_projection}
+use compiler.mir.hwir.riscv_scalar_muldiv_iterative_contract.{
+    strict_riscv_scalar_muldiv_iterative_contract}
+use compiler.mir.hwir.riscv_scalar_restoring_divider_datapath.{
+    strict_riscv_scalar_restoring_divider_datapath}
+
+fn config(xlen: i32, profile: text) -> CoreConfig:
+    CoreConfig(xlen: xlen, physical_address_bits: xlen, register_count: 32,
+        profile: "riscv-gen2-" + profile, isa_profile: profile,
+        compressed_decode_profile: "none")
+
+fn datapath(xlen: i32, instruction: u32):
+    strict_riscv_scalar_restoring_divider_datapath(
+        strict_riscv_scalar_muldiv_iterative_contract(
+            strict_riscv_scalar_muldiv_projection(
+                config(xlen, if xlen == 32: "rv32im" else: "rv64im"),
+                "iterative", instruction).unwrap()).unwrap()).unwrap()
+
+describe "RISC-V Gen2 restoring divider typed datapath":
+    it "builds the exact restoring transition for RV32 and RV64":
+        val rv32 = datapath(32, 0x0220C1B3)
+        expect(rv32.contract.remainder_width).to_equal(33)
+        expect(rv32.comb_ops.any(_.result == "shifted_remainder" and _.op == "or")).to_equal(true)
+        expect(rv32.comb_ops.any(_.result == "remainder_ge_divisor" and _.op == "uge")).to_equal(true)
+        expect(rv32.select_ops.any(_.result == "remainder_next")).to_equal(true)
+        val rv64 = datapath(64, 0x0220D1B3)
+        expect(rv64.contract.remainder_width).to_equal(65)
+        expect(rv64.constants.any(_.name == "zero_remainder" and _.canonical_bits.len() == 65)).to_equal(true)
+
+    it "keeps divide-zero overflow remainder and RV64 W normalization in graph":
+        val rem = datapath(64, 0x0220E1B3)
+        expect(rem.select_ops.any(_.result == "divide_zero_result" and
+            _.when_true == "original_dividend_reg")).to_equal(true)
+        expect(rem.select_ops.any(_.result == "overflow_result" and
+            _.when_true == "zero_operand")).to_equal(true)
+        val divw = datapath(64, 0x0220C1BB)
+        expect(divw.comb_ops.any(_.result == "architectural_result" and _.op == "sext")).to_equal(true)
+
+    it "rejects multiply projections at the restoring boundary":
+        val multiply = strict_riscv_scalar_muldiv_iterative_contract(
+            strict_riscv_scalar_muldiv_projection(
+                config(32, "rv32im"), "iterative", 0x022081B3).unwrap()).unwrap()
+        expect(strict_riscv_scalar_restoring_divider_datapath(multiply).is_err()).to_equal(true)

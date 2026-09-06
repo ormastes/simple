@@ -1,0 +1,141 @@
+# Bounded canonical identity owner for kernel/idle address-space roots.
+#
+# Roots enter this owner only as architecture-register readback.  Callers never
+# supply a physical root or the zero sentinel.  Equal architecture, width, and
+# decoded root reuse one immutable residency identity across CPUs.
+
+use std.thread_sffi.{mutex_raw_create, mutex_raw_lock, mutex_raw_unlock}
+use os.kernel.scheduler.architecture_switch_completion_owner_v1.{
+    ArchitectureSwitchKindV1, ArchitectureResidencyIdentityV1
+}
+
+pub enum ArchitectureKernelRootIdentityErrorV1:
+    None
+    InvalidRegisterWidth
+    TranslationDisabled
+    InvalidRegisterEncoding
+    InvalidRoot
+    RegistryFull
+    OwnerExhausted
+    SerializationUnavailable
+
+struct ArchitectureKernelRootRecordV1:
+    kind: ArchitectureSwitchKindV1
+    register_width_bits: u64
+    root_phys: u64
+    identity: ArchitectureResidencyIdentityV1
+
+val ARCHITECTURE_KERNEL_ROOT_MAX_V1: i64 = 16
+val _architecture_kernel_root_mutex_v1: i64 = mutex_raw_create()
+var _architecture_kernel_roots_v1: [ArchitectureKernelRootRecordV1] = []
+var _architecture_kernel_root_next_id_v1: u64 = 1u64
+var _architecture_kernel_root_quarantined_v1: bool = false
+
+fn _kernel_root_lock_v1() -> bool:
+    not _architecture_kernel_root_quarantined_v1 and
+        _architecture_kernel_root_mutex_v1 > 0 and
+        mutex_raw_lock(_architecture_kernel_root_mutex_v1)
+
+fn _kernel_root_unlock_v1() -> bool:
+    if mutex_raw_unlock(_architecture_kernel_root_mutex_v1): return true
+    _architecture_kernel_root_quarantined_v1 = true
+    false
+
+fn _decode_kernel_root_v1(
+    kind: ArchitectureSwitchKindV1,
+    width: u64,
+    observed: u64
+) -> Result<u64, ArchitectureKernelRootIdentityErrorV1>:
+    if width != 32u64 and width != 64u64:
+        return Err(ArchitectureKernelRootIdentityErrorV1.InvalidRegisterWidth)
+    match kind:
+        case ArchitectureSwitchKindV1.X86Cr3:
+            val register_mask = if width == 32u64:
+                0x00000000FFFFFFFFu64
+            else:
+                0xFFFFFFFFFFFFFFFFu64
+            if (observed & ~register_mask) != 0u64:
+                return Err(ArchitectureKernelRootIdentityErrorV1.InvalidRegisterEncoding)
+            val root_mask = if width == 32u64:
+                0x00000000FFFFF000u64
+            else:
+                0x000FFFFFFFFFF000u64
+            val root = observed & root_mask
+            if root == 0u64:
+                return Err(ArchitectureKernelRootIdentityErrorV1.InvalidRoot)
+            Ok(root)
+        case ArchitectureSwitchKindV1.ArmTtbr0:
+            val register_mask = if width == 32u64:
+                0x00000000FFFFFFFFu64
+            else:
+                0xFFFFFFFFFFFFFFFFu64
+            if (observed & ~register_mask) != 0u64:
+                return Err(ArchitectureKernelRootIdentityErrorV1.InvalidRegisterEncoding)
+            val root_mask = if width == 32u64:
+                0x00000000FFFFC000u64
+            else:
+                0x0000FFFFFFFFF000u64
+            val root = observed & root_mask
+            if root == 0u64:
+                return Err(ArchitectureKernelRootIdentityErrorV1.InvalidRoot)
+            Ok(root)
+        case ArchitectureSwitchKindV1.RiscvSatp:
+            if width == 32u64:
+                if (observed & 0x80000000u64) == 0u64:
+                    return Err(ArchitectureKernelRootIdentityErrorV1.TranslationDisabled)
+                if (observed & 0xFFFFFFFF00000000u64) != 0u64:
+                    return Err(ArchitectureKernelRootIdentityErrorV1.InvalidRegisterEncoding)
+                val root = (observed & 0x003FFFFFu64) << 12
+                if root == 0u64:
+                    return Err(ArchitectureKernelRootIdentityErrorV1.InvalidRoot)
+                Ok(root)
+            else:
+                if (observed >> 60) != 9u64:
+                    return Err(ArchitectureKernelRootIdentityErrorV1.TranslationDisabled)
+                val ppn = observed & 0x00000FFFFFFFFFFFu64
+                val root = ppn << 12
+                if root == 0u64 or root > 0x00FFFFFFFFFFF000u64:
+                    return Err(ArchitectureKernelRootIdentityErrorV1.InvalidRoot)
+                Ok(root)
+
+pub(package) fn architecture_kernel_root_capture_v1(
+    kind: ArchitectureSwitchKindV1,
+    register_width_bits: u64,
+    observed_register: u64
+) -> Result<ArchitectureResidencyIdentityV1, ArchitectureKernelRootIdentityErrorV1>:
+    """Canonicalize a trusted architecture-register readback."""
+    val decoded = _decode_kernel_root_v1(
+        kind, register_width_bits, observed_register)
+    if decoded.is_err(): return Err(decoded.unwrap_err())
+    val root = decoded.unwrap()
+    if not _kernel_root_lock_v1():
+        return Err(ArchitectureKernelRootIdentityErrorV1.SerializationUnavailable)
+    var answer: Result<ArchitectureResidencyIdentityV1, ArchitectureKernelRootIdentityErrorV1> =
+        Err(ArchitectureKernelRootIdentityErrorV1.RegistryFull)
+    var index = 0
+    while index < _architecture_kernel_roots_v1.len():
+        val record = _architecture_kernel_roots_v1[index]
+        if (record.kind == kind and
+            record.register_width_bits == register_width_bits and
+            record.root_phys == root):
+            answer = Ok(record.identity)
+            break
+        index = index + 1
+    if answer.is_err() and _architecture_kernel_roots_v1.len() <
+        ARCHITECTURE_KERNEL_ROOT_MAX_V1:
+        val sequence = _architecture_kernel_root_next_id_v1
+        if sequence == 0u64 or sequence >= 0x0000FFFFFFFFFFFFu64:
+            answer = Err(ArchitectureKernelRootIdentityErrorV1.OwnerExhausted)
+        else:
+            _architecture_kernel_root_next_id_v1 = sequence + 1u64
+            val identity = ArchitectureResidencyIdentityV1(
+                mapping_id: 0x4B52000000000000u64 | sequence,
+                mapping_generation: 1u64,
+                root_phys: root)
+            _architecture_kernel_roots_v1.push(ArchitectureKernelRootRecordV1(
+                kind: kind, register_width_bits: register_width_bits,
+                root_phys: root, identity: identity))
+            answer = Ok(identity)
+    if not _kernel_root_unlock_v1():
+        return Err(ArchitectureKernelRootIdentityErrorV1.SerializationUnavailable)
+    answer

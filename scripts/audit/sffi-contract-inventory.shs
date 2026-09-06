@@ -1,0 +1,515 @@
+#!/bin/sh
+# Produce the owned Simple extern/SFFI contract ledger.
+#
+# Columns distinguish runtime backing, implementation-language provenance,
+# boundary safety, and cryptographic admission. A symbol being present in a
+# binary is not evidence that its ABI, nullability, ownership, or artifact
+# signature has been verified. Source inspection therefore reports
+# `not_admitted`; it never upgrades an evidence-looking annotation to signed.
+# Set SFFI_ADMISSION_JOBS to a canonical TSV whose first row is
+# `schema<TAB>simple.sffi-admission-jobs.v1` and whose remaining rows name the
+# manifest, signature, trust store, artifact, source, build input, compiler,
+# ABI registry, and verification report. Relative paths resolve beside the
+# jobs file. Every job is freshly verified; a rejected job aborts the census.
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+scan_root=${SFFI_SCAN_ROOT:-$root}
+requested_out=${1:-/dev/stdout}
+out=$requested_out
+symbols_out=${2:-}
+if [ -z "$symbols_out" ] && [ "$out" != "/dev/stdout" ]; then
+    symbols_out=${out%.tsv}.symbols.tsv
+fi
+if [ -n "${SIMPLE_BIN:-}" ]; then
+    simple_bin=$SIMPLE_BIN
+elif [ -x "$root/bin/release/x86_64-unknown-linux-gnu/simple" ]; then
+    simple_bin=$root/bin/release/x86_64-unknown-linux-gnu/simple
+else
+    simple_bin=$root/bin/simple
+fi
+
+# bin/simple is a shell WRAPPER on some hosts (macOS deploys one that execs the
+# real binary with an absolute argv0 — see the comment in that file). `nm` on a
+# shell script yields 0 symbols, so this audit aborted with
+#   "ERROR — nothing was checked: ... yielded 0 defined symbol(s) (floor 100);
+#    it is stripped or not a readable object for this nm"
+# and, because it is a dependency of the BLOCKING push-tier gate
+# push-sffi-v2-authority, every push from such a host failed. The pre-existing
+# fallback only knows one hardcoded path
+# (bin/release/x86_64-unknown-linux-gnu/simple), which no mac has.
+# Follow the wrapper instead of guessing more triples. Explicit SIMPLE_BIN still
+# wins, and a non-wrapper bin/simple is untouched.
+if [ -f "$simple_bin" ] && [ "$(head -c 2 "$simple_bin" 2>/dev/null)" = '#!' ]; then
+    _wrapped=$(sed -n 's/^exec "\$DIR\/\([^"]*\)".*/\1/p' "$simple_bin" | head -1)
+    if [ -n "$_wrapped" ]; then
+        _wrapdir=$(CDPATH= cd -- "$(dirname -- "$simple_bin")" 2>/dev/null && pwd -P)
+        [ -n "$_wrapdir" ] && [ -x "$_wrapdir/$_wrapped" ] && simple_bin="$_wrapdir/$_wrapped"
+    fi
+fi
+
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT INT TERM
+
+# Later aggregation must read a regular file.  Reading `/dev/stdout` after
+# writing the ledger makes a default invocation consume its own pipe forever.
+# Keep the public default (TSV on stdout), but spool privately until all
+# fail-closed summaries have completed.
+if [ "$requested_out" = "/dev/stdout" ]; then
+    out="$work/sffi-contract-inventory.tsv"
+fi
+
+# Optional cryptographic admission jobs. The inventory never trusts a saved
+# receipt: each row names the nine original inputs and is re-admitted into this
+# private work directory by the canonical verifier. The configured trust store
+# in each job is the policy authority for that row.
+: >"$work/admitted-symbols.tsv"
+if [ -n "${SFFI_ADMISSION_JOBS:-}" ]; then
+    test -f "$SFFI_ADMISSION_JOBS" && test ! -L "$SFFI_ADMISSION_JOBS" || {
+        echo 'SFFI contract inventory: admission jobs must be a regular non-symlink file' >&2
+        exit 2
+    }
+    jobs_dir=$(CDPATH= cd -- "$(dirname -- "$SFFI_ADMISSION_JOBS")" && pwd)
+    tab=$(printf '\t')
+    job_index=0
+    while IFS="$tab" read -r tag manifest signature trust_store artifact \
+        source_snapshot build_input compiler abi_registry verification_report extra; do
+        job_index=$((job_index + 1))
+        if [ "$job_index" -eq 1 ]; then
+            test "$tag" = schema && test "$manifest" = simple.sffi-admission-jobs.v1 && \
+                test -z "$signature$trust_store$artifact$source_snapshot$build_input$compiler$abi_registry$verification_report$extra" || {
+                    echo 'SFFI contract inventory: invalid admission-jobs schema' >&2
+                    exit 2
+                }
+            continue
+        fi
+        valid_job=true
+        test "$tag" = job && test -z "$extra" || valid_job=false
+        for job_field in "$manifest" "$signature" "$trust_store" "$artifact" \
+            "$source_snapshot" "$build_input" "$compiler" "$abi_registry" \
+            "$verification_report"; do
+            test -n "$job_field" || valid_job=false
+        done
+        test "$valid_job" = true || {
+            echo "SFFI contract inventory: malformed admission job row $job_index" >&2
+            exit 2
+        }
+        test "$job_index" -le 257 || {
+            echo 'SFFI contract inventory: admission jobs exceed 256-row limit' >&2
+            exit 2
+        }
+        resolve_job_path() {
+            case "$1" in
+                /*) printf '%s\n' "$1" ;;
+                *) printf '%s/%s\n' "$jobs_dir" "$1" ;;
+            esac
+        }
+        manifest=$(resolve_job_path "$manifest")
+        signature=$(resolve_job_path "$signature")
+        trust_store=$(resolve_job_path "$trust_store")
+        artifact=$(resolve_job_path "$artifact")
+        source_snapshot=$(resolve_job_path "$source_snapshot")
+        build_input=$(resolve_job_path "$build_input")
+        compiler=$(resolve_job_path "$compiler")
+        abi_registry=$(resolve_job_path "$abi_registry")
+        verification_report=$(resolve_job_path "$verification_report")
+        receipt="$work/admission-$job_index.tsv"
+        sh "$root/scripts/audit/sffi-evidence-admission.shs" \
+            "$manifest" "$signature" "$trust_store" "$artifact" \
+            "$source_snapshot" "$build_input" "$compiler" "$abi_registry" \
+            "$verification_report" "$receipt" >/dev/null
+        provider=$(awk -F '\t' '$1 == "provider_id" && NF == 2 { count++; value=$2 }
+            END { if (count == 1 && value != "") print value }' "$receipt")
+        test -n "$provider" || {
+            echo "SFFI contract inventory: admitted job $job_index must have exactly one provider identity" >&2
+            exit 2
+        }
+        # Symbol name alone is not an admission key: preserve the admitted ABI
+        # signature and provider identity for the fail-closed join below.
+        awk -F '\t' -v provider="$provider" \
+            '$1 == "symbol" { print $2 "\t" $3 "\t" provider }' \
+            "$receipt" >>"$work/admitted-symbols.tsv"
+    done <"$SFFI_ADMISSION_JOBS"
+    test "$job_index" -ge 2 || {
+        echo 'SFFI contract inventory: admission jobs contain no jobs' >&2
+        exit 2
+    }
+    sort -u "$work/admitted-symbols.tsv" -o "$work/admitted-symbols.tsv"
+fi
+
+if [ "${SFFI_SOURCE_ONLY:-0}" = 1 ]; then
+    printf 'symbol\tclass\tscoped_callsites\tfirst_declaring_file\n' >"$work/backing.tsv"
+elif [ -n "${SFFI_CENSUS_INPUT:-}" ]; then
+    cp "$SFFI_CENSUS_INPUT" "$work/backing.tsv"
+else
+    SIMPLE_BIN=$simple_bin sh "$root/scripts/check/extern-backing-census.shs" \
+        "$work/backing.tsv" >/dev/null
+fi
+
+export SFFI_ROOT=$scan_root
+if [ -n "${SFFI_SOURCE_FILE_LIST:-}" ]; then
+    while IFS= read -r source_file; do
+        test -n "$source_file" && printf '%s\0' "$source_file"
+    done <"$SFFI_SOURCE_FILE_LIST" >"$work/files.bin"
+else
+    set --
+    test ! -d "$scan_root/src" || set -- "$@" "$scan_root/src"
+    test ! -d "$scan_root/test" || set -- "$@" "$scan_root/test"
+    test "$#" -gt 0 || {
+        echo 'SFFI contract inventory: scan root has neither src/ nor test/' >&2
+        exit 2
+    }
+    find "$@" -type f -name '*.spl' ! -path '*/vendor/*' -print0 >"$work/files.bin"
+fi
+test -s "$work/files.bin" || {
+    echo 'SFFI contract inventory: no Simple source files were discovered' >&2
+    exit 2
+}
+
+# Source-only mode intentionally does not claim runtime backing.  It can still
+# count direct raw calls that are visibly inside a lexical FFI capability
+# block.  This is a conservative source estimate: it is useful for tracking
+# unsafe-scope minimization, but never for artifact admission or provider
+# identity.  Keep the scan linear in source bytes and emit only symbols with
+# one or more observed lexical calls.
+if [ "${SFFI_SOURCE_ONLY:-0}" = 1 ]; then
+    xargs -0 -r -n 200 perl -0ne '
+        my $file = $ARGV;
+        my @lines = split /\n/, $_, -1;
+        my $unsafe_indent = -1;
+        for my $line (@lines) {
+            my ($prefix) = $line =~ /^(\s*)/;
+            my $indent = length($prefix // "");
+            my $code = $line;
+            $code =~ s/#.*$//;
+            if ($unsafe_indent >= 0 && $code !~ /^\s*$/ && $indent <= $unsafe_indent) {
+                $unsafe_indent = -1;
+            }
+            if ($code =~ /^(\s*)unsafe\(capabilities:\s*\[[^\]]*\bffi\b[^\]]*\]\):\s*(.*)$/) {
+                $unsafe_indent = length($1);
+                $code = $2;
+            } elsif ($unsafe_indent < 0) {
+                next;
+            }
+            while ($code =~ /\b((?:rt_|spl_)[A-Za-z0-9_]+)\s*\(/g) {
+                print "$1\n";
+            }
+        }
+    ' <"$work/files.bin" | sort | uniq -c | awk 'BEGIN { OFS="\t" }
+        { print $2, "source_static_lexical", $1, "source-only", "none_observed" }
+    ' >"$work/source-static-lexical.tsv"
+    {
+        printf 'symbol\tclass\tscoped_callsites\tfirst_declaring_file\tsource_languages\n'
+        cat "$work/source-static-lexical.tsv"
+    } >"$work/backing.tsv"
+fi
+xargs -0 -r -n 200 perl -MDigest::SHA=sha256_hex -0ne '
+    my $file = $ARGV;
+    my @lines = split /\n/, $_, -1;
+    for (my $i = 0; $i <= $#lines; $i++) {
+        my $line = $lines[$i];
+        next if $line =~ /^\s*#/;
+        my $symbol = "";
+        my $decl_start = $i;
+        if ($line =~ /^\s*(?:pub\s+)?(?:unsafe\s+)?extern\s+fn\s+([A-Za-z_]\w*)/) {
+            $symbol = $1;
+        } elsif ($line =~ /\@extern\s*\(/) {
+            my @quoted = ($line =~ /"([A-Za-z_]\w*)"/g);
+            next if !@quoted;
+            $symbol = $quoted[-1];
+            $decl_start++;
+            while ($decl_start <= $#lines && $decl_start - $i < 16 &&
+                   $lines[$decl_start] !~ /^\s*(?:pub\s+)?(?:unsafe\s+)?fn\s+[A-Za-z_]\w*\s*\(/) {
+                $decl_start++;
+            }
+            next if $decl_start > $#lines || $decl_start - $i >= 16;
+        }
+        next if $symbol eq "";
+        my $declaration = $lines[$decl_start];
+        my $depth = ($declaration =~ tr/(//) - ($declaration =~ tr/)//);
+        my $end = $decl_start;
+        while ($depth > 0 && $end < $#lines && $end - $decl_start < 32) {
+            $end++;
+            $declaration .= "\n" . $lines[$end];
+            $depth += ($lines[$end] =~ tr/(//) - ($lines[$end] =~ tr/)//);
+        }
+        $declaration =~ s/#.*$//mg;
+        $declaration =~ s/\s+/ /g;
+        $declaration =~ s/^\s+|\s+$//g;
+        my $abi_declaration = $declaration;
+        $abi_declaration =~ s/^\s*(?:pub\s+)?(?:unsafe\s+)?(?:extern\s+)?fn\s+[A-Za-z_]\w*\s*//;
+        $abi_declaration =~ s/([,(]\s*)(?:mut\s+)?[A-Za-z_]\w*\s*:/$1/g;
+        $abi_declaration =~ s/\s*([(),<>\[\]?])\s*/$1/g;
+        $abi_declaration =~ s/\s*->\s*/->/g;
+        my $signature_hash = sha256_hex($abi_declaration);
+        # Collect immediately preceding annotations, including the common
+        # common multiline @unsafe(...) form. Walk complete balanced annotation
+        # blocks only; never scan across an intervening declaration/body line.
+        my $start = $i;
+        my $look = $i - 1;
+        while ($look >= 0 && $i - $look <= 32) {
+            while ($look >= 0 && $lines[$look] =~ /^\s*#/) { $look--; }
+            last if $look < 0 || $lines[$look] =~ /^\s*$/;
+            if ($lines[$look] =~ /^\s*\@[A-Za-z_]\w*(?:\s*\([^\n]*\))?\s*$/) {
+                $start = $look--;
+                next;
+            }
+            last if $lines[$look] !~ /^\s*\)\s*,?\s*$/;
+            my $depth = 0;
+            my $end = $look;
+            my $found_start = 0;
+            while ($look >= 0 && $end - $look < 32) {
+                $depth += ($lines[$look] =~ tr/)//) - ($lines[$look] =~ tr/(//);
+                if ($depth <= 0 && $lines[$look] =~ /^\s*\@[A-Za-z_]\w*\s*\(/) {
+                    $start = $look;
+                    $look--;
+                    $found_start = 1;
+                    last;
+                }
+                $look--;
+            }
+            last if !$found_start;
+        }
+        my $context = join("\n", @lines[$start .. $i]);
+        my $provider = "missing";
+        if ($context =~ /\@sffi\s*\([\s\S]*?\bprovider\s*:\s*"([^"]+)"/i) {
+            $provider = $1;
+            $provider =~ s/[\t\r\n]/ /g;
+        }
+        my $unsafe = ($declaration =~ /\bunsafe\s+(?:extern\s+)?fn\b/ ||
+                      $context =~ /\@unsafe\s*\([\s\S]*?capabilities\s*:\s*\[[^\]]*\bffi\b[^\]]*\]/i)
+            ? "tagged" : "missing";
+        my $contract = ($context =~ /\@sffi\b/i) ? "sffi_metadata" :
+                       ($declaration =~ /->\s*(?:Result\b|Option\b|[^#\n]*\?)/) ? "typed_result" :
+                       ($context =~ /(?:\bcontract\s*:|nonnull|nullability|ownership|status[_ -]out|sentinel|false\s+means|nil\s+(?:is|means)|empty\s+(?:is|means)|negative[^\n"]*\bmeans|non-positive[^\n"]*\b(?:clear|means)|family\s+is)/i) ? "documented" :
+                       "missing";
+        # Source metadata is only a claim. This source census cannot verify a
+        # receipt, signature, trust anchor, ABI hash, or loaded artifact.
+        my $evidence = ($context =~ /(?:evidence|receipt|artifact_sha256|abi_hash|signature_verified)/i)
+            ? "claim_present_unverified" : "missing";
+        my $state = $unsafe eq "tagged"
+            ? ($contract eq "missing" ? "unsafe_contract_missing" : "unsafe_contract_declared")
+            : ($contract eq "missing" ? "unsafe_tag_and_contract_missing" : "unsafe_tag_missing");
+        $file =~ s/^\Q$ENV{SFFI_ROOT}\E\/// if defined $ENV{SFFI_ROOT};
+        print join("\t", $symbol, $provider, $signature_hash, $file, $decl_start + 1,
+                   $unsafe, $contract, $evidence, $state), "\n";
+    }
+' <"$work/files.bin" >"$work/contracts-unsorted.tsv"
+sort -u "$work/contracts-unsorted.tsv" >"$work/contracts.tsv"
+
+if test -s "$work/admitted-symbols.tsv"; then
+    awk -F '\t' '$2 != "missing" { print $1 "\t" $3 "\t" $2 }' \
+        "$work/contracts.tsv" | sort -u >"$work/declared-identities.tsv"
+    sort -u "$work/admitted-symbols.tsv" >"$work/admitted-identities.tsv"
+    comm -23 "$work/admitted-identities.tsv" "$work/declared-identities.tsv" \
+        >"$work/admitted-without-declaration.tsv"
+    if test -s "$work/admitted-without-declaration.tsv"; then
+        echo 'SFFI contract inventory: admitted symbol/signature/provider identities have no owned declaration:' >&2
+        sed -n '1,20p' "$work/admitted-without-declaration.tsv" >&2
+        exit 2
+    fi
+fi
+
+awk -F '\t' 'BEGIN { OFS="\t" }
+    FILENAME == ARGV[1] {
+        if (FNR > 1) {
+            backing[$1]=$2
+            backing_callsites[$1]=$3
+            backing_first_file[$1]=$4
+            backing_languages[$1]=$5
+        }
+        next
+    }
+    FILENAME == ARGV[2] { admitted[$1 SUBSEP $2 SUBSEP $3]++; next }
+    {
+        b = backing[$1] ? backing[$1] : "unknown"
+        language = backing_languages[$1] ? backing_languages[$1] : \
+            (b == "c_runtime_source_only") ? "c_or_cpp" : \
+            (b == "rust_source_feature_gated" || b == "interp_extern_registry") ? "rust" : \
+            (b == "libc_libm") ? "system_c" : \
+            (b == "external_library_symbol") ? "external_c_abi" : \
+            (b == "bare_exempt") ? "freestanding" : \
+            (b == "in_deployed_binary") ? "linked_native_unknown" : "none_observed"
+        admission = ($2 != "missing" && admitted[$1 SUBSEP $3 SUBSEP $2]) \
+            ? "reverified" : "not_admitted"
+        callsites = backing_callsites[$1] ~ /^[0-9]+$/ ? backing_callsites[$1] : "unknown"
+        first_file = backing_first_file[$1] != "" ? backing_first_file[$1] : "unknown"
+        print $1, b, language, $2, $3, $4, $5, $6, $7, admission, $8, $9, \
+              callsites, first_file
+    }
+' "$work/backing.tsv" "$work/admitted-symbols.tsv" "$work/contracts.tsv" >"$work/joined.tsv"
+
+{
+    printf 'symbol\tbacking\tprovider_language\tprovider_id\tsource_signature_sha256\tfile\tline\tunsafe_tag\tcontract\tcryptographic_admission\tevidence\tstate\tscoped_callsite_estimate\tbacking_first_declaring_file\n'
+    cat "$work/joined.tsv"
+} >"$out"
+
+if [ -n "$symbols_out" ]; then
+    awk -F '\t' 'BEGIN { OFS="\t" }
+        NR > 1 {
+            symbol=$1
+            if (!(symbol in backing)) backing[symbol]=$2
+            if (!(symbol in language)) language[symbol]=$3
+            declarations[symbol]++
+            signature_key=symbol SUBSEP $5
+            if (!(signature_key in seen_signature)) {
+                seen_signature[signature_key]=1
+                signatures[symbol]++
+            }
+            if ($8 == "missing") unsafe_missing[symbol]++
+            if ($9 == "missing") contract_missing[symbol]++
+            if ($10 == "reverified") admitted[symbol]++
+            if ($11 == "missing") evidence_missing[symbol]++
+            if ($11 == "claim_present_unverified") evidence_claim[symbol]++
+        }
+        END {
+            print "symbol", "backing", "provider_language", "declarations", \
+                  "distinct_source_signatures", "unsafe_tag_missing", "contract_missing", \
+                  "signed_admitted_declarations", "evidence_missing", "state"
+            for (symbol in declarations) {
+                state = signatures[symbol] > 1 ? "source_signature_variants" : \
+                    (admitted[symbol] && (admitted[symbol] < declarations[symbol] || \
+                     unsafe_missing[symbol] || contract_missing[symbol]) ? "admitted_migration_required" : \
+                    (admitted[symbol] == declarations[symbol] ? "admitted_contract_declared" : \
+                    (unsafe_missing[symbol] == declarations[symbol] && \
+                     contract_missing[symbol] == declarations[symbol] && \
+                     evidence_missing[symbol] == declarations[symbol] && !admitted[symbol] ? "untouched" : \
+                    (unsafe_missing[symbol] || contract_missing[symbol] ? "migration_required" : \
+                    (evidence_missing[symbol] ? "evidence_required" : "evidence_claim_unverified")))))
+                print symbol, backing[symbol], language[symbol], declarations[symbol], signatures[symbol], \
+                      unsafe_missing[symbol] + 0, contract_missing[symbol] + 0, \
+                      admitted[symbol] + 0, evidence_missing[symbol] + 0, state
+            }
+        }
+    ' "$out" | { IFS= read -r header; printf '%s\n' "$header"; sort; } >"$symbols_out"
+fi
+
+awk -F '\t' 'NR > 1 { count[$12]++ } END { for (state in count) print count[state], state }' "$out" \
+    | sort -nr >&2
+
+awk -F '\t' 'NR > 1 {
+    declarations++
+    if ($8 == "tagged") unsafe_tagged++
+    if ($10 == "reverified") signed_admitted++
+    if ($8 == "missing" && $9 == "missing" && $11 == "missing") untouched++
+    if ($1 ~ /^rt_/) {
+        rt_declarations++
+        if ($8 == "tagged") rt_unsafe_tagged++
+        if ($10 == "reverified") rt_signed_admitted++
+        if ($8 == "missing" && $9 == "missing" && $11 == "missing") rt_untouched++
+    }
+} END {
+    printf "SFFI declaration stats: total=%d unsafe_tagged=%d signed_admitted=%d untouched=%d\n", \
+        declarations, unsafe_tagged + 0, signed_admitted + 0, untouched + 0
+    printf "SFFI rt_declaration stats: total=%d unsafe_tagged=%d signed_admitted=%d untouched=%d\n", \
+        rt_declarations + 0, rt_unsafe_tagged + 0, rt_signed_admitted + 0, rt_untouched + 0
+}' "$out" >&2
+
+# Keep production and test debt separate without changing the stable TSV
+# schema. Duplicate fixtures are useful coverage, but must not inflate the
+# answer to "how much shipped SFFI remains unsafe or unsigned?".
+awk -F '\t' 'NR > 1 {
+    scope = ($6 ~ /^test\//) ? "test" : (($6 ~ /^src\//) ? "production" : "other")
+    declarations[scope]++
+    if ($8 == "tagged") unsafe_tagged[scope]++
+    if ($10 == "reverified") signed_admitted[scope]++
+    if ($8 == "missing" && $9 == "missing" && $11 == "missing") untouched[scope]++
+    if ($1 ~ /^rt_/) {
+        rt_declarations[scope]++
+        if ($8 == "tagged") rt_unsafe_tagged[scope]++
+        if ($10 == "reverified") rt_signed_admitted[scope]++
+        if ($8 == "missing" && $9 == "missing" && $11 == "missing") rt_untouched[scope]++
+    }
+    if ($1 ~ /^(rt_|spl_)/) {
+        raw_declarations[scope]++
+        if ($8 == "tagged") raw_unsafe_tagged[scope]++
+        if ($10 == "reverified") raw_signed_admitted[scope]++
+        if ($8 == "missing" && $9 == "missing" && $11 == "missing") raw_untouched[scope]++
+    }
+} END {
+    for (scope in declarations) {
+        printf "SFFI scope stats: scope=%s total=%d unsafe_tagged=%d signed_admitted=%d untouched=%d\n", \
+            scope, declarations[scope], unsafe_tagged[scope] + 0, \
+            signed_admitted[scope] + 0, untouched[scope] + 0
+        printf "SFFI rt_scope stats: scope=%s total=%d unsafe_tagged=%d signed_admitted=%d untouched=%d\n", \
+            scope, rt_declarations[scope] + 0, rt_unsafe_tagged[scope] + 0, \
+            rt_signed_admitted[scope] + 0, rt_untouched[scope] + 0
+        printf "SFFI raw_scope stats: scope=%s total=%d unsafe_tagged=%d signed_admitted=%d untouched=%d\n", \
+            scope, raw_declarations[scope] + 0, raw_unsafe_tagged[scope] + 0, \
+            raw_signed_admitted[scope] + 0, raw_untouched[scope] + 0
+    }
+}' "$out" | sort >&2
+
+# Report provider-language provenance with the same safety/admission dimensions
+# as the global census. This answers "how many C/Rust/other boundaries remain"
+# without treating an implementation-language guess as ABI or signature proof.
+awk -F '\t' 'NR > 1 {
+    language = $3
+    declarations[language]++
+    if ($8 == "tagged") unsafe_tagged[language]++
+    if ($10 == "reverified") signed_admitted[language]++
+    if ($8 == "missing" && $9 == "missing" && $11 == "missing") untouched[language]++
+    if ($1 ~ /^rt_/) {
+        rt_declarations[language]++
+        if ($8 == "tagged") rt_unsafe_tagged[language]++
+        if ($10 == "reverified") rt_signed_admitted[language]++
+        if ($8 == "missing" && $9 == "missing" && $11 == "missing") rt_untouched[language]++
+    }
+} END {
+    for (language in declarations) {
+        printf "SFFI language stats: language=%s total=%d unsafe_tagged=%d signed_admitted=%d untouched=%d\n", \
+            language, declarations[language], unsafe_tagged[language] + 0, \
+            signed_admitted[language] + 0, untouched[language] + 0
+        if (rt_declarations[language] > 0)
+            printf "SFFI rt_language stats: language=%s total=%d unsafe_tagged=%d signed_admitted=%d untouched=%d\n", \
+                language, rt_declarations[language], rt_unsafe_tagged[language] + 0, \
+                rt_signed_admitted[language] + 0, rt_untouched[language] + 0
+    }
+}' "$out" | sort >&2
+
+if [ -n "$symbols_out" ]; then
+    source_signature_variants=$(awk -F '\t' 'NR > 1 && $10 == "source_signature_variants" { n++ } END { print n + 0 }' "$symbols_out")
+    # `untouched` is a more precise subset of migration debt, not an exemption
+    # from the existing ratchet. Count both so this reporting upgrade cannot
+    # weaken the historical maximum.
+    migration_required=$(awk -F '\t' 'NR > 1 && ($10 == "migration_required" || $10 == "untouched" || $10 == "admitted_migration_required") { n++ } END { print n + 0 }' "$symbols_out")
+    awk -F '\t' 'NR > 1 {
+        symbols++
+        if ($6 == 0) all_declarations_unsafe_tagged++
+        else unsafe_tag_incomplete++
+        if ($8 == $4) all_declarations_admitted++
+        else if ($8 > 0) partially_admitted++
+        if ($10 == "untouched") untouched++
+        languages[$3]++
+        if ($1 ~ /^rt_/) {
+            rt_symbols++
+            if ($6 == 0) rt_all_declarations_unsafe_tagged++
+            else rt_unsafe_tag_incomplete++
+            if ($8 == $4) rt_all_declarations_admitted++
+            else if ($8 > 0) rt_partially_admitted++
+            if ($10 == "untouched") rt_untouched++
+            rt_languages[$3]++
+        }
+    } END {
+        printf "SFFI symbol stats: total=%d all_declarations_unsafe_tagged=%d unsafe_tag_incomplete=%d all_declarations_admitted=%d partially_admitted=%d untouched=%d", \
+            symbols, all_declarations_unsafe_tagged + 0, unsafe_tag_incomplete + 0, all_declarations_admitted + 0, \
+            partially_admitted + 0, untouched + 0
+        for (language in languages) printf " language_%s=%d", language, languages[language]
+        printf "\n"
+        printf "SFFI rt_symbol stats: total=%d all_declarations_unsafe_tagged=%d unsafe_tag_incomplete=%d all_declarations_admitted=%d partially_admitted=%d untouched=%d", \
+            rt_symbols + 0, rt_all_declarations_unsafe_tagged + 0, rt_unsafe_tag_incomplete + 0, rt_all_declarations_admitted + 0, \
+            rt_partially_admitted + 0, rt_untouched + 0
+        for (language in rt_languages) printf " language_%s=%d", language, rt_languages[language]
+        printf "\n"
+    }' "$symbols_out" >&2
+    max_source_signature_variants=${SFFI_MAX_SOURCE_SIGNATURE_VARIANTS:-399}
+    max_migration_required=${SFFI_MAX_MIGRATION_REQUIRED:-3546}
+    if [ "$source_signature_variants" -gt "$max_source_signature_variants" ] || [ "$migration_required" -gt "$max_migration_required" ]; then
+        echo "SFFI contract inventory: FAIL source_variants=$source_signature_variants/$max_source_signature_variants migration=$migration_required/$max_migration_required" >&2
+        exit 1
+    fi
+fi
+
+if [ "$requested_out" = "/dev/stdout" ]; then
+    cat "$out"
+fi

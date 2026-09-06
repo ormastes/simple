@@ -1,0 +1,77 @@
+# REPRODUCING SPEC for the v4.local authentication bypass.
+#
+# Root cause: src/os/crypto/paseto.spl `_p4_b64u_decode` declared `idx3`
+# INSIDE the `if i + 2 < clean_len:` block while the following
+# `if i + 3 < clean_len:` block reads it. `idx3` was therefore out of scope at
+# its use site, so base64url decoding could never produce the third byte of a
+# quad — and every v4.local decrypt (nonce, ciphertext and stored MAC alike)
+# operated on corrupt bytes.
+#
+# These assertions fail before the fix and pass after it.
+
+use std.spipe.*
+use os.crypto.paseto.{
+    paseto_v4_local_encrypt,
+    paseto_v4_local_decrypt,
+    PasetoLocalResult
+}
+
+fn _t2u(s: text) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < s.length():
+        out.push(s.char_code_at(i).to_u8())
+        i = i + 1
+    out
+
+fn _u2t(b: [u8]) -> text:
+    var s = ""
+    var i: u64 = 0
+    while i < b.len():
+        s = s + b[i].to_i64().chr()
+        i = i + 1
+    s
+
+fn _ramp(n: i64) -> [u8]:
+    var a: [u8] = []
+    var i = 0
+    while i < n:
+        a.push(((i * 7 + 3) & 0xFF).to_u8())
+        i = i + 1
+    a
+
+fn _plaintext() -> text:
+    "{\"data\":\"this is a secret message\"}"
+
+fn _empty() -> [u8]:
+    var e: [u8] = []
+    e
+
+fn _token() -> [u8]:
+    paseto_v4_local_encrypt(_t2u(_plaintext()), _empty(), _empty(), _ramp(32), _ramp(32))
+
+# Round-trip decrypt: returns the recovered plaintext, or a marker on failure.
+fn _roundtrip_plaintext() -> text:
+    val r = paseto_v4_local_decrypt(_token(), _empty(), _empty(), _ramp(32))
+    match r:
+        case PasetoLocalResult.Ok(payload):
+            return _u2t(payload)
+        case PasetoLocalResult.Err(e):
+            return "<ERR>"
+
+# Byte length of the recovered payload — 0 when decryption failed.
+fn _roundtrip_len() -> i64:
+    val r = paseto_v4_local_decrypt(_token(), _empty(), _empty(), _ramp(32))
+    match r:
+        case PasetoLocalResult.Ok(payload):
+            return payload.len().to_i64()
+        case PasetoLocalResult.Err(e):
+            return 0
+
+describe "PASETO v4.local decrypt recovers the exact plaintext":
+
+    it "an encrypt/decrypt round-trip returns the original bytes":
+        expect(_roundtrip_plaintext()).to_equal(_plaintext())
+
+    it "the recovered payload has the original length":
+        expect(_roundtrip_len()).to_equal(_plaintext().length())

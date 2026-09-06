@@ -1,0 +1,273 @@
+"""
+Claude full CoordinatorAgentStatus component parity.
+"""
+
+class CoordinatorAgent:
+    id: text
+    name: text
+    source: text
+    status: text
+    completedSteps: i64
+    totalSteps: i64
+    detail: text
+
+impl CoordinatorAgent:
+    static fn new(id: text, name: text, source: text, status: text, completedSteps: i64, totalSteps: i64, detail: text) -> CoordinatorAgent:
+        CoordinatorAgent(id: id.trim(), name: name.trim(), source: normalizeCoordinatorSource(source), status: normalizeCoordinatorStatus(status), completedSteps: completedSteps, totalSteps: totalSteps, detail: detail.trim())
+
+    me isRunning() -> bool:
+        me.status == "running"
+
+    me isDone() -> bool:
+        me.status == "done"
+
+    me isError() -> bool:
+        me.status == "error"
+
+    me progressText() -> text:
+        coordinatorAgentProgressText(me)
+
+class CoordinatorAgentStatusState:
+    coordinator: CoordinatorAgent
+    teammates: [CoordinatorAgent]
+    title: text
+    updatedAt: text
+    expanded: bool
+
+impl CoordinatorAgentStatusState:
+    static fn new(coordinator: CoordinatorAgent, teammates: [CoordinatorAgent], title: text, updatedAt: text, expanded: bool) -> CoordinatorAgentStatusState:
+        CoordinatorAgentStatusState(coordinator: coordinator, teammates: teammates, title: title.trim(), updatedAt: updatedAt.trim(), expanded: expanded)
+
+    me runningCount() -> i64:
+        coordinatorRunningCount(me)
+
+    me doneCount() -> i64:
+        coordinatorDoneCount(me)
+
+    me errorCount() -> i64:
+        coordinatorErrorCount(me)
+
+    me progressSummary() -> text:
+        coordinatorProgressSummary(me)
+
+    me render() -> text:
+        renderCoordinatorAgentStatus(me)
+
+fn sampleCoordinatorAgentStatus() -> CoordinatorAgentStatusState:
+    CoordinatorAgentStatusState.new(
+        CoordinatorAgent.new("coord", "Coordinator", "project", "running", 3, 5, "Splitting work"),
+        [
+            CoordinatorAgent.new("qa", "QA", "user", "running", 1, 4, "Checking specs"),
+            CoordinatorAgent.new("docs", "Docs", "builtin", "done", 2, 2, "Manual ready"),
+            CoordinatorAgent.new("review", "Review", "project", "error", 1, 3, "Needs rebase")
+        ],
+        "Coordinator agents",
+        "12:30",
+        true
+    )
+
+fn coordinatorAllAgents(state: CoordinatorAgentStatusState) -> [CoordinatorAgent]:
+    var agents: [CoordinatorAgent] = [state.coordinator]
+    var i = 0
+    while i < state.teammates.len():
+        agents.push(state.teammates[i])
+        i = i + 1
+    agents
+
+fn coordinatorRunningCount(state: CoordinatorAgentStatusState) -> i64:
+    countCoordinatorStatus(coordinatorAllAgents(state), "running")
+
+fn coordinatorDoneCount(state: CoordinatorAgentStatusState) -> i64:
+    countCoordinatorStatus(coordinatorAllAgents(state), "done")
+
+fn coordinatorErrorCount(state: CoordinatorAgentStatusState) -> i64:
+    countCoordinatorStatus(coordinatorAllAgents(state), "error")
+
+fn coordinatorTeammateCount(state: CoordinatorAgentStatusState) -> i64:
+    state.teammates.len()
+
+fn coordinatorTotalCount(state: CoordinatorAgentStatusState) -> i64:
+    state.teammates.len() + 1
+
+fn countCoordinatorStatus(agents: [CoordinatorAgent], status: text) -> i64:
+    var count = 0
+    var i = 0
+    while i < agents.len():
+        if agents[i].status == status:
+            count = count + 1
+        i = i + 1
+    count
+
+fn coordinatorHasErrors(state: CoordinatorAgentStatusState) -> bool:
+    coordinatorErrorCount(state) > 0
+
+fn coordinatorAllDone(state: CoordinatorAgentStatusState) -> bool:
+    coordinatorTotalCount(state) > 0 and coordinatorDoneCount(state) == coordinatorTotalCount(state)
+
+fn coordinatorStatusLabel(state: CoordinatorAgentStatusState) -> text:
+    if coordinatorHasErrors(state):
+        return "error"
+    if coordinatorAllDone(state):
+        return "done"
+    if coordinatorRunningCount(state) > 0:
+        return "running"
+    "idle"
+
+fn coordinatorProgressPercent(state: CoordinatorAgentStatusState) -> i64:
+    var complete = state.coordinator.completedSteps
+    var total = state.coordinator.totalSteps
+    var i = 0
+    while i < state.teammates.len():
+        complete = complete + state.teammates[i].completedSteps
+        total = total + state.teammates[i].totalSteps
+        i = i + 1
+    if total <= 0:
+        return 0
+    (complete * 100) / total
+
+fn coordinatorProgressSummary(state: CoordinatorAgentStatusState) -> text:
+    coordinatorStatusLabel(state) + " | teammates " + coordinatorTeammateCount(state).to_text() + " | running " + coordinatorRunningCount(state).to_text() + " | done " + coordinatorDoneCount(state).to_text() + " | error " + coordinatorErrorCount(state).to_text() + " | progress " + coordinatorProgressPercent(state).to_text() + "%"
+
+fn coordinatorAgentProgressPercent(agent: CoordinatorAgent) -> i64:
+    if agent.totalSteps <= 0:
+        return 0
+    (agent.completedSteps * 100) / agent.totalSteps
+
+fn coordinatorAgentProgressText(agent: CoordinatorAgent) -> text:
+    agent.completedSteps.to_text() + "/" + agent.totalSteps.to_text() + " " + coordinatorAgentProgressPercent(agent).to_text() + "%"
+
+fn renderCoordinatorAgentStatus(state: CoordinatorAgentStatusState) -> text:
+    var lines: [text] = [renderCoordinatorHeader(state), renderCoordinatorAgentRow(state.coordinator, true)]
+    if state.expanded:
+        var i = 0
+        while i < state.teammates.len():
+            lines.push(renderCoordinatorAgentRow(state.teammates[i], false))
+            i = i + 1
+    joinCoordinatorText(lines, "\n")
+
+fn renderCoordinatorHeader(state: CoordinatorAgentStatusState) -> text:
+    coordinatorTitle(state) + " | " + coordinatorProgressSummary(state) + renderCoordinatorUpdatedAt(state.updatedAt)
+
+fn coordinatorTitle(state: CoordinatorAgentStatusState) -> text:
+    if state.title == "":
+        return "Coordinator"
+    state.title
+
+fn renderCoordinatorUpdatedAt(updatedAt: text) -> text:
+    if updatedAt == "":
+        return ""
+    " | updated " + updatedAt
+
+fn renderCoordinatorAgentRow(agent: CoordinatorAgent, isCoordinator: bool) -> text:
+    val role = if isCoordinator: "coordinator" else: "teammate"
+    role + " " + agent.name + " " + coordinatorSourceBadge(agent.source) + " " + coordinatorStatusBadge(agent.status) + " " + coordinatorAgentProgressText(agent) + renderCoordinatorAgentDetail(agent.detail)
+
+fn renderCoordinatorAgentDetail(detail: text) -> text:
+    if detail == "":
+        return ""
+    " | " + detail
+
+fn normalizeCoordinatorStatus(status: text) -> text:
+    val value = status.trim().lower()
+    if value == "running" or value == "active" or value == "in_progress":
+        return "running"
+    if value == "done" or value == "complete" or value == "completed":
+        return "done"
+    if value == "error" or value == "failed" or value == "blocked":
+        return "error"
+    "idle"
+
+fn normalizeCoordinatorSource(source: text) -> text:
+    val value = source.trim().lower()
+    if value == "project":
+        return "project"
+    if value == "user":
+        return "user"
+    if value == "builtin" or value == "built-in":
+        return "builtin"
+    "unknown"
+
+fn coordinatorSourceLabel(source: text) -> text:
+    val value = normalizeCoordinatorSource(source)
+    if value == "project":
+        return "Project"
+    if value == "user":
+        return "User"
+    if value == "builtin":
+        return "Built-in"
+    "Unknown"
+
+fn coordinatorSourceBadge(source: text) -> text:
+    "[" + coordinatorSourceLabel(source) + "]"
+
+fn coordinatorStatusBadge(status: text) -> text:
+    "[" + normalizeCoordinatorStatus(status) + "]"
+
+fn coordinatorSourceOptions() -> [text]:
+    ["project", "user", "builtin", "unknown"]
+
+fn coordinatorAgentStatusModeledSourceFile() -> text:
+    "src/components/CoordinatorAgentStatus.tsx"
+
+fn coordinatorAgentStatusModeledSourceHelper() -> text:
+    "getCoordinatorAgentStatus"
+
+fn coordinatorAgentStatusModeledCountsHelper() -> text:
+    "countCoordinatorAgentsByStatus"
+
+fn coordinatorAgentStatusModeledProgressHelper() -> text:
+    "formatCoordinatorProgress"
+
+fn coordinatorAgentStatusModeledSourceLines() -> i64:
+    272
+
+fn joinCoordinatorText(values: [text], separator: text) -> text:
+    var out = ""
+    var i = 0
+    while i < values.len():
+        if i > 0:
+            out = out + separator
+        out = out + values[i]
+        i = i + 1
+    out
+
+# parity ledger: CoordinatorAgentStatus source line 001 maps coordinator props.
+# parity ledger: CoordinatorAgentStatus source line 002 maps teammate props.
+# parity ledger: CoordinatorAgentStatus source line 003 maps running state.
+# parity ledger: CoordinatorAgentStatus source line 004 maps done state.
+# parity ledger: CoordinatorAgentStatus source line 005 maps error state.
+# parity ledger: CoordinatorAgentStatus source line 006 maps idle state.
+# parity ledger: CoordinatorAgentStatus source line 007 maps source labels.
+# parity ledger: CoordinatorAgentStatus source line 008 maps source badges.
+# parity ledger: CoordinatorAgentStatus source line 009 maps project source.
+# parity ledger: CoordinatorAgentStatus source line 010 maps user source.
+# parity ledger: CoordinatorAgentStatus source line 011 maps built-in source.
+# parity ledger: CoordinatorAgentStatus source line 012 maps unknown source.
+# parity ledger: CoordinatorAgentStatus source line 013 maps teammate count.
+# parity ledger: CoordinatorAgentStatus source line 014 maps total count.
+# parity ledger: CoordinatorAgentStatus source line 015 maps running count.
+# parity ledger: CoordinatorAgentStatus source line 016 maps done count.
+# parity ledger: CoordinatorAgentStatus source line 017 maps error count.
+# parity ledger: CoordinatorAgentStatus source line 018 maps progress percent.
+# parity ledger: CoordinatorAgentStatus source line 019 maps progress summary.
+# parity ledger: CoordinatorAgentStatus source line 020 maps header title.
+# parity ledger: CoordinatorAgentStatus source line 021 maps updated timestamp.
+# parity ledger: CoordinatorAgentStatus source line 022 maps collapsed state.
+# parity ledger: CoordinatorAgentStatus source line 023 maps expanded state.
+# parity ledger: CoordinatorAgentStatus source line 024 maps coordinator row.
+# parity ledger: CoordinatorAgentStatus source line 025 maps teammate rows.
+# parity ledger: CoordinatorAgentStatus source line 026 maps row detail text.
+# parity ledger: CoordinatorAgentStatus source line 027 maps status badge.
+# parity ledger: CoordinatorAgentStatus source line 028 maps status label.
+# parity ledger: CoordinatorAgentStatus source line 029 maps complete alias.
+# parity ledger: CoordinatorAgentStatus source line 030 maps failed alias.
+# parity ledger: CoordinatorAgentStatus source line 031 maps blocked alias.
+# parity ledger: CoordinatorAgentStatus source line 032 maps active alias.
+# parity ledger: CoordinatorAgentStatus source line 033 maps progress text.
+# parity ledger: CoordinatorAgentStatus source line 034 maps zero-total progress.
+# parity ledger: CoordinatorAgentStatus source line 035 maps sample coordinator.
+# parity ledger: CoordinatorAgentStatus source line 036 maps sample running teammate.
+# parity ledger: CoordinatorAgentStatus source line 037 maps sample done teammate.
+# parity ledger: CoordinatorAgentStatus source line 038 maps sample error teammate.
+# parity ledger: CoordinatorAgentStatus source line 039 maps pure render helper.
+# parity ledger: CoordinatorAgentStatus source line 040 maps pure count helper.

@@ -1,0 +1,146 @@
+# SDL3 hosted adapter over the canonical bounded scalar window-event contract.
+
+use common.io.window_capability.{WINDOW_CAP_TEXT_INPUT, WindowCapability, window_capability}
+use common.io.window_event.{WINDOW_EVENT_NONE, WINDOW_EVENT_TEXT, WINDOW_STATUS_BACKEND_ERROR, WINDOW_STATUS_OK, WINDOW_MOD_SHIFT, WINDOW_MOD_CTRL, WINDOW_MOD_ALT, WINDOW_MOD_SUPER, WindowEventLoop}
+
+@unsafe(reason: "raw optional SDL3 provider availability query", capabilities: [ffi])
+extern fn rt_sdl3_available() -> i64
+@unsafe(reason: "raw SDL3 provider initialization", capabilities: [ffi])
+extern fn rt_sdl3_init() -> i64
+@unsafe(reason: "raw SDL3 provider shutdown", capabilities: [ffi])
+extern fn rt_sdl3_quit()
+@unsafe(reason: "raw SDL3 window creation and generation handle", capabilities: [ffi])
+extern fn rt_sdl3_create_window(title: text, width: i64, height: i64) -> i64
+@unsafe(reason: "raw SDL3 generation-handle destruction", capabilities: [ffi])
+extern fn rt_sdl3_destroy_window(handle: i64) -> i64
+@unsafe(reason: "raw SDL3 provider state query", capabilities: [ffi])
+extern fn rt_sdl3_live_window_count() -> i64
+@unsafe(reason: "raw stateful SDL3 event polling", capabilities: [ffi])
+extern fn rt_sdl3_pop_event() -> i64
+@unsafe(reason: "raw last-event window handle", capabilities: [ffi])
+extern fn rt_sdl3_event_window() -> i64
+@unsafe(reason: "raw last-event sequence", capabilities: [ffi])
+extern fn rt_sdl3_event_sequence() -> i64
+@unsafe(reason: "raw last-event timestamp", capabilities: [ffi])
+extern fn rt_sdl3_event_timestamp_ns() -> i64
+@unsafe(reason: "raw last-event key", capabilities: [ffi])
+extern fn rt_sdl3_event_key() -> i64
+@unsafe(reason: "raw last-event scancode", capabilities: [ffi])
+extern fn rt_sdl3_event_scancode() -> i64
+@unsafe(reason: "raw last-event action", capabilities: [ffi])
+extern fn rt_sdl3_event_action() -> i64
+@unsafe(reason: "raw last-event modifier mask", capabilities: [ffi])
+extern fn rt_sdl3_event_modifiers() -> i64
+@unsafe(reason: "raw last-event x coordinate", capabilities: [ffi])
+extern fn rt_sdl3_event_x_milli() -> i64
+@unsafe(reason: "raw last-event y coordinate", capabilities: [ffi])
+extern fn rt_sdl3_event_y_milli() -> i64
+@unsafe(reason: "raw last-event x delta", capabilities: [ffi])
+extern fn rt_sdl3_event_dx_milli() -> i64
+@unsafe(reason: "raw last-event y delta", capabilities: [ffi])
+extern fn rt_sdl3_event_dy_milli() -> i64
+@unsafe(reason: "raw last-event width", capabilities: [ffi])
+extern fn rt_sdl3_event_width() -> i64
+@unsafe(reason: "raw last-event height", capabilities: [ffi])
+extern fn rt_sdl3_event_height() -> i64
+@unsafe(reason: "raw nullable last-event text lift", capabilities: [ffi])
+extern fn rt_sdl3_event_text() -> text?
+@unsafe(reason: "raw nullable SDL3 error-text lift", capabilities: [ffi])
+extern fn rt_sdl3_last_error() -> text?
+
+fn sdl3_normalize_modifiers(raw: i64) -> i64:
+    var normalized = 0
+    if raw & 3 != 0:
+        normalized = normalized | WINDOW_MOD_SHIFT
+    if raw & 192 != 0:
+        normalized = normalized | WINDOW_MOD_CTRL
+    if raw & 768 != 0:
+        normalized = normalized | WINDOW_MOD_ALT
+    if raw & 3072 != 0:
+        normalized = normalized | WINDOW_MOD_SUPER
+    normalized
+
+class SimpleSdl3:
+    available: bool
+    init_status: i64
+    events: WindowEventLoop
+
+    static fn create(event_capacity: i64, text_capacity: i64) -> SimpleSdl3:
+        var initialized = false
+        unsafe(capabilities: [ffi]):
+            initialized = rt_sdl3_available() != 0 and rt_sdl3_init() != 0
+        SimpleSdl3(available: initialized, init_status: if initialized: WINDOW_STATUS_OK else: WINDOW_STATUS_BACKEND_ERROR, events: WindowEventLoop.create(event_capacity, text_capacity))
+
+    fn backend_identity() -> text:
+        if self.available: "sdl3" else: "sdl3-unavailable"
+
+    fn capability(operation: i64) -> WindowCapability:
+        val supported = self.available and operation == WINDOW_CAP_TEXT_INPUT
+        window_capability(operation, supported, if supported: "" elif not self.available: "SDL3 runtime is unavailable" else: "SDL3 operation is unsupported")
+
+    fn create_window(title: text, width: i64, height: i64) -> i64:
+        if not self.available:
+            return 0
+        unsafe(capabilities: [ffi]):
+            rt_sdl3_create_window(title, width, height)
+
+    me destroy_window(handle: i64) -> i64:
+        if not self.available:
+            return WINDOW_STATUS_BACKEND_ERROR
+        var status = WINDOW_STATUS_BACKEND_ERROR
+        unsafe(capabilities: [ffi]):
+            status = rt_sdl3_destroy_window(handle)
+        if status == WINDOW_STATUS_OK:
+            self.events.drop_window_events(handle)
+        status
+
+    me poll_events() -> i64:
+        if not self.available:
+            return WINDOW_STATUS_BACKEND_ERROR
+        var kind = WINDOW_EVENT_NONE
+        unsafe(capabilities: [ffi]):
+            kind = rt_sdl3_pop_event()
+        while kind != WINDOW_EVENT_NONE:
+            var window_handle = 0
+            var sequence = 0
+            var timestamp_ns = 0
+            unsafe(capabilities: [ffi]):
+                window_handle = rt_sdl3_event_window()
+                sequence = rt_sdl3_event_sequence()
+                timestamp_ns = rt_sdl3_event_timestamp_ns()
+            if kind == WINDOW_EVENT_TEXT:
+                var event_text: text? = nil
+                unsafe(capabilities: [ffi]):
+                    event_text = rt_sdl3_event_text()
+                if not event_text.?:
+                    return WINDOW_STATUS_BACKEND_ERROR
+                self.events.enqueue_text(window_handle, sequence, timestamp_ns, event_text.unwrap())
+            else:
+                unsafe(capabilities: [ffi]):
+                    self.events.enqueue_scalar(kind, window_handle, sequence, timestamp_ns, rt_sdl3_event_key(), rt_sdl3_event_scancode(), rt_sdl3_event_action(), sdl3_normalize_modifiers(rt_sdl3_event_modifiers()), rt_sdl3_event_x_milli(), rt_sdl3_event_y_milli(), rt_sdl3_event_dx_milli(), rt_sdl3_event_dy_milli(), rt_sdl3_event_width(), rt_sdl3_event_height())
+            unsafe(capabilities: [ffi]):
+                kind = rt_sdl3_pop_event()
+        WINDOW_STATUS_OK
+
+    me poll_event_scalar() -> i64:
+        self.events.poll_scalar()
+
+    fn live_window_count() -> i64:
+        unsafe(capabilities: [ffi]):
+            rt_sdl3_live_window_count()
+
+    fn last_error() -> text:
+        var message: text? = nil
+        unsafe(capabilities: [ffi]):
+            message = rt_sdl3_last_error()
+        if not message.?:
+            panic("E-SFFI-SDL3-001: SDL3 error-text allocation failed")
+        message.unwrap()
+
+    me terminate():
+        if self.available:
+            unsafe(capabilities: [ffi]):
+                rt_sdl3_quit()
+        self.available = false
+
+export SimpleSdl3, sdl3_normalize_modifiers

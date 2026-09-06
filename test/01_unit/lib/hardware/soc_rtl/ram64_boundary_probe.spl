@@ -1,0 +1,144 @@
+# Probe: ram64_read sub-word / doubleword reads that CROSS the 8-byte
+# doubleword boundary must stitch bytes from the next doubleword using LOGICAL
+# shifts (Simple's `>>` is arithmetic and would sign-extend a high-bit-set
+# value).  Regression for the OpenSBI fetch wall: a width-4 read at byte offset
+# ≡6 (mod 8) dropped its top two bytes AND sign-extended (0x0102bf03 fetched as
+# 0xFFFFBF03).  See src/lib/hardware/soc_rtl/ram64.spl (ram64_read).
+#
+# Oracle: width-1 reads are always within a single doubleword (never cross), so
+# assembling `sum(read(off+k,1) << k*8)` gives the ground-truth little-endian
+# value to check the wide read against.
+use std.hardware.soc_rtl.ram64.{ram64_init, ram64_write, ram64_read}
+
+fn check(name: text, ok: bool) -> i64:
+    if ok:
+        print("PASS {name}")
+        return 0
+    print("FAIL {name}")
+    1
+
+fn oracle(ram, off: i64, width: i64) -> i64:
+    """Ground-truth little-endian value from single-byte reads (never cross)."""
+    var v: i64 = 0
+    var k: i64 = 0
+    while k < width:
+        v = v | ((ram64_read(ram, off + k, 1) & 0xFF) << (k * 8))
+        k = k + 1
+    v
+
+fn main() -> i64:
+    var fails = 0
+
+    # Two doublewords, both with the high bit set (byte 7 = 0x88, byte 0 of the
+    # low word = 0xFF), so any sign-extension defect is exposed.
+    #   data[0] = 0x8899AABBCCDDEEFF -> bytes 0..7 = FF EE DD CC BB AA 99 88
+    #   data[1] = 0x1122334455667788 -> bytes 8..15 = 88 77 66 55 44 33 22 11
+    var ram = ram64_init(64)
+    ram = ram64_write(ram, 0, 8, 0x8899AABBCCDDEEFF)
+    ram = ram64_write(ram, 8, 8, 0x1122334455667788)
+
+    # --- Oracle-checked matrix: offsets 5/6/7 x widths 2/4/8 --------------
+    var offs: [i64] = [5, 6, 7]
+    var widths: [i64] = [2, 4, 8]
+    var oi = 0
+    while oi < offs.len():
+        var wi = 0
+        while wi < widths.len():
+            val off = offs[oi]
+            val w = widths[wi]
+            val got = ram64_read(ram, off, w)
+            val want = oracle(ram, off, w)
+            fails = fails + check("read off={off} w={w}: got={got} want={want}", got == want)
+            wi = wi + 1
+        oi = oi + 1
+
+    # --- Explicit hard-coded checks (independent of the oracle) ------------
+    # width 4 @ off 6 crosses the boundary: bytes 6,7,8,9 = 99,88,88,77 ->
+    # 0x77888899.  Byte 7 = 0x88 has the high bit set at bits 8..15; the old
+    # arithmetic-shift bug would have corrupted this.
+    fails = fails + check("width4 @off6 (dword-crossing, high-bit byte) == 0x77888899",
+        ram64_read(ram, 6, 4) == 0x77888899)
+    # width 4 @ off 5: bytes 5,6,7,8 = AA,99,88,88 -> 0x888899AA
+    fails = fails + check("width4 @off5 (dword-crossing) == 0x888899AA",
+        ram64_read(ram, 5, 4) == 0x888899AA)
+    # width 4 @ off 7: bytes 7,8,9,10 = 88,88,77,66 -> 0x66778888
+    fails = fails + check("width4 @off7 (dword-crossing) == 0x66778888",
+        ram64_read(ram, 7, 4) == 0x66778888)
+    # width 2 @ off 7 crosses: bytes 7,8 = 88,88 -> 0x8888
+    fails = fails + check("width2 @off7 (dword-crossing) == 0x8888",
+        ram64_read(ram, 7, 2) == 0x8888)
+    # width 8 @ off 5 crosses: bytes 5..12 = AA,99,88,88,77,66,55,44 ->
+    # 0x44556677888899AA
+    fails = fails + check("width8 @off5 (dword-crossing) == 0x44556677888899AA",
+        ram64_read(ram, 5, 8) == 0x44556677888899AA)
+
+    # --- Logical-shift proof: a read whose low word is negative (bit63 set)
+    # must NOT sign-extend the vacated high bits.  width2 @off6 = bytes 6,7 =
+    # 99,88 -> 0x8899, entirely within the negative low word.
+    fails = fails + check("width2 @off6 no sign-leak (== 0x8899)",
+        ram64_read(ram, 6, 2) == 0x8899)
+
+    # --- Regression mirror of the exact OpenSBI wall shape: value 0x0102bf03
+    # placed so a width-4 read at off≡6 reproduces the historical fetch.
+    #   Put bytes: off6=0x03 off7=0xbf off8=0x02 off9=0x01 (crossing).
+    var ram2 = ram64_init(64)
+    ram2 = ram64_write(ram2, 6, 1, 0x03)
+    ram2 = ram64_write(ram2, 7, 1, 0xbf)   # high bit set -> old code sign-extended
+    ram2 = ram64_write(ram2, 8, 1, 0x02)
+    ram2 = ram64_write(ram2, 9, 1, 0x01)
+    fails = fails + check("OpenSBI-shape fetch @off6 == 0x0102bf03 (was 0xFFFFBF03)",
+        ram64_read(ram2, 6, 4) == 0x0102bf03)
+
+    # --- Write-side dword-crossing: a sub-word STORE whose field crosses the
+    # 8-byte boundary must place its high bytes in the next doubleword (mirror of
+    # the read fix).  Oracle: read the value back with the (fixed) wide read AND
+    # byte-by-byte, and confirm bytes outside the field are untouched.
+    var wr_widths: [i64] = [2, 4]    # width-8 stores are aligned (aligned fast path); not crossing-tested
+    var oi2 = 0
+    while oi2 < offs.len():
+        var wi2 = 0
+        while wi2 < wr_widths.len():
+            val off = offs[oi2]
+            val w = wr_widths[wi2]
+            # Pre-fill a known background so we can detect stray clobbers.
+            var rw = ram64_init(64)
+            rw = ram64_write(rw, 0, 8, 0x1111111111111111)
+            rw = ram64_write(rw, 8, 8, 0x2222222222222222)
+            # High-bit-set value truncated to the write width.
+            val fullv: i64 = 0xF0E1D2C3B4A59687
+            val v = fullv & ((1 << (w * 8)) - 1)
+            rw = ram64_write(rw, off, w, v)
+            # Read back wide (fixed read) and per-byte.
+            val back = ram64_read(rw, off, w)
+            var okw = back == v
+            var bk = 0
+            while bk < w:
+                val want_b = (v >> (bk * 8)) & 0xFF
+                if ram64_read(rw, off + bk, 1) != want_b:
+                    okw = false
+                bk = bk + 1
+            # Byte just below and just above the field must be unchanged (0x11 or 0x22).
+            val below = ram64_read(rw, off - 1, 1)
+            val above_addr = off + w
+            val above = ram64_read(rw, above_addr, 1)
+            val below_ok = below == 0x11
+            var above_want = 0x11
+            if above_addr >= 8:
+                above_want = 0x22
+            val above_ok = above == above_want
+            fails = fails + check("write off={off} w={w}: field==0x{v} readback + neighbors intact",
+                okw and below_ok and above_ok)
+            wi2 = wi2 + 1
+        oi2 = oi2 + 1
+
+    # Explicit: width-4 store @off6 crosses; 0xDEADBEEF must round-trip exactly.
+    var rw2 = ram64_init(64)
+    rw2 = ram64_write(rw2, 6, 4, 0xDEADBEEF)
+    fails = fails + check("write width4 @off6 (crossing) round-trips 0xDEADBEEF",
+        ram64_read(rw2, 6, 4) == 0xDEADBEEF)
+
+    if fails == 0:
+        print("RAM64 BOUNDARY PROBE: ALL PASS")
+        return 0
+    print("RAM64 BOUNDARY PROBE: {fails} FAIL")
+    1

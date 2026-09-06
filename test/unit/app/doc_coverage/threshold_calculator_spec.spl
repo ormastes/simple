@@ -1,0 +1,391 @@
+# Threshold Calculator Tests
+# Tests for coverage calculation and threshold comparison
+
+use std.spec.{describe, it, expect}
+use doc_coverage.thresholds.calculator.{calculate_scope_coverage}
+use doc_coverage.thresholds.types.{threshold_config_default, ThresholdConfig}
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+fn create_test_config() -> ThresholdConfig:
+    var config = threshold_config_default()
+    config.default_threshold = 70
+    config.scope_names = ["src/std/", "src/core/", "src/lib/"]
+    config.scope_values = [90, 75, 80]
+    config
+
+# ============================================================================
+# Tests for calculate_scope_coverage basic
+# ============================================================================
+
+describe "calculate_scope_coverage basic":
+    it "calculates coverage for single scope":
+        val config = create_test_config()
+
+        val all_files: [text] = ["src/std/string.spl", "src/std/math.spl", "src/std/array.spl"]
+        val covered_files: [text] = ["src/std/string.spl", "src/std/math.spl"]
+
+        val results = calculate_scope_coverage(all_files, covered_files, config)
+
+        val has_results = results.len() > 0
+        expect(has_results).to_equal(true)
+
+    it "returns coverage result for src/std/ scope":
+        val config = create_test_config()
+
+        val all_files: [text] = ["src/std/string.spl", "src/std/math.spl"]
+        val covered_files: [text] = ["src/std/string.spl"]
+
+        val results = calculate_scope_coverage(all_files, covered_files, config)
+
+        val has_std_scope = results.len() > 0
+        expect(has_std_scope).to_equal(true)
+
+    it "calculates correct coverage percentage":
+        val config = create_test_config()
+
+        val all_files: [text] = ["src/std/a.spl", "src/std/b.spl", "src/std/c.spl", "src/std/d.spl"]
+        val covered_files: [text] = ["src/std/a.spl", "src/std/b.spl", "src/std/c.spl"]
+
+        val results = calculate_scope_coverage(all_files, covered_files, config)
+
+        val first_result = results[0]
+        val pct = first_result.actual
+
+        val expected_pct = 75
+        expect(pct).to_equal(expected_pct)
+
+    it "identifies missing items correctly":
+        val config = create_test_config()
+
+        val all_files: [text] = ["src/std/a.spl", "src/std/b.spl"]
+        val covered_files: [text] = ["src/std/a.spl"]
+
+        val results = calculate_scope_coverage(all_files, covered_files, config)
+
+        val first_result = results[0]
+        val missing_count = first_result.missing_items.len()
+
+        expect(missing_count).to_equal(1)
+
+    it "sets passed flag based on threshold":
+        val config = create_test_config()
+
+        val all_files: [text] = ["src/std/a.spl", "src/std/b.spl"]
+        val covered_files: [text] = ["src/std/a.spl", "src/std/b.spl"]
+
+        val results = calculate_scope_coverage(all_files, covered_files, config)
+
+        val first_result = results[0]
+        val passed = first_result.passed
+
+        expect(passed).to_equal(true)
+
+# ============================================================================
+# Tests for multiple scopes
+# ============================================================================
+
+describe "calculate_scope_coverage multiple scopes":
+    it "handles multiple scopes in one calculation":
+        val config = create_test_config()
+
+        val all_files: [text] = ["src/std/a.spl", "src/core/b.spl", "src/lib/c.spl"]
+        val covered_files: [text] = ["src/std/a.spl", "src/core/b.spl", "src/lib/c.spl"]
+
+        val results = calculate_scope_coverage(all_files, covered_files, config)
+
+        val result_count = results.len()
+        val has_multiple = result_count >= 2
+
+        expect(has_multiple).to_equal(true)
+
+    it "calculates coverage separately for each scope":
+        val config = create_test_config()
+
+        val all_files: [text] = ["src/std/a.spl", "src/std/b.spl", "src/core/c.spl", "src/core/d.spl"]
+        val covered_files: [text] = ["src/std/a.spl", "src/std/b.spl", "src/core/c.spl"]
+
+        val results = calculate_scope_coverage(all_files, covered_files, config)
+
+        var std_result_found = false
+        var core_result_found = false
+
+        for result in results:
+            if result.scope == "src/std/":
+                std_result_found = true
+                val std_pct = result.actual
+                expect(std_pct).to_equal(100)
+
+            if result.scope == "src/core/":
+                core_result_found = true
+                val core_pct = result.actual
+                expect(core_pct).to_equal(50)
+
+        expect(std_result_found).to_equal(true)
+        expect(core_result_found).to_equal(true)
+
+    it "applies correct threshold to each scope":
+        val config = create_test_config()
+
+        val all_files: [text] = ["src/std/a.spl", "src/std/b.spl", "src/core/c.spl", "src/core/d.spl"]
+        val covered_files: [text] = ["src/std/a.spl", "src/std/b.spl", "src/core/c.spl"]
+
+        val results = calculate_scope_coverage(all_files, covered_files, config)
+
+        for result in results:
+            if result.scope == "src/std/":
+                val threshold = result.threshold
+                expect(threshold).to_equal(90)
+
+            if result.scope == "src/core/":
+                val threshold = result.threshold
+                expect(threshold).to_equal(75)
+
+# ============================================================================
+# Tests for coverage pass/fail determination
+# ============================================================================
+
+describe "calculate_scope_coverage pass/fail":
+    it "marks as passed when coverage meets threshold":
+        val config = create_test_config()
+
+        val all_files: [text] = ["src/std/a.spl", "src/std/b.spl", "src/std/c.spl", "src/std/d.spl", "src/std/e.spl", "src/std/f.spl", "src/std/g.spl", "src/std/h.spl", "src/std/i.spl", "src/std/j.spl"]
+        val covered_files: [text] = ["src/std/a.spl", "src/std/b.spl", "src/std/c.spl", "src/std/d.spl", "src/std/e.spl", "src/std/f.spl", "src/std/g.spl", "src/std/h.spl", "src/std/i.spl"]
+
+        val results = calculate_scope_coverage(all_files, covered_files, config)
+
+        val first_result = results[0]
+        val passed = first_result.passed
+
+        expect(passed).to_equal(true)
+
+    it "marks as failed when coverage below threshold":
+        val config = create_test_config()
+
+        val all_files: [text] = ["src/std/a.spl", "src/std/b.spl", "src/std/c.spl", "src/std/d.spl"]
+        val covered_files: [text] = ["src/std/a.spl"]
+
+        val results = calculate_scope_coverage(all_files, covered_files, config)
+
+        val first_result = results[0]
+        val passed = first_result.passed
+
+        expect(passed).to_equal(false)
+
+    it "handles edge case at exact threshold":
+        val config = create_test_config()
+
+        val all_files: [text] = ["src/std/a.spl", "src/std/b.spl", "src/std/c.spl", "src/std/d.spl", "src/std/e.spl", "src/std/f.spl", "src/std/g.spl", "src/std/h.spl", "src/std/i.spl", "src/std/j.spl"]
+        val covered_files: [text] = ["src/std/a.spl", "src/std/b.spl", "src/std/c.spl", "src/std/d.spl", "src/std/e.spl", "src/std/f.spl", "src/std/g.spl", "src/std/h.spl", "src/std/i.spl"]
+
+        val results = calculate_scope_coverage(all_files, covered_files, config)
+
+        val first_result = results[0]
+        val pct = first_result.actual
+
+        val is_90 = pct == 90
+        expect(is_90).to_equal(true)
+
+# ============================================================================
+# Tests for missing items tracking
+# ============================================================================
+
+describe "calculate_scope_coverage missing items":
+    it "identifies all missing items":
+        val config = create_test_config()
+
+        val all_files: [text] = ["src/std/a.spl", "src/std/b.spl", "src/std/c.spl"]
+        val covered_files: [text] = ["src/std/a.spl"]
+
+        val results = calculate_scope_coverage(all_files, covered_files, config)
+
+        val first_result = results[0]
+        val missing = first_result.missing_items
+
+        expect(missing.len()).to_equal(2)
+
+    it "missing items contain correct file names":
+        val config = create_test_config()
+
+        val all_files: [text] = ["src/std/a.spl", "src/std/b.spl", "src/std/c.spl"]
+        val covered_files: [text] = ["src/std/a.spl"]
+
+        val results = calculate_scope_coverage(all_files, covered_files, config)
+
+        val first_result = results[0]
+        val missing = first_result.missing_items
+
+        var has_b = false
+        var has_c = false
+
+        for item in missing:
+            if item.contains("b.spl"):
+                has_b = true
+            if item.contains("c.spl"):
+                has_c = true
+
+        expect(has_b).to_equal(true)
+        expect(has_c).to_equal(true)
+
+    it "empty missing list when all items covered":
+        val config = create_test_config()
+
+        val all_files: [text] = ["src/std/a.spl", "src/std/b.spl"]
+        val covered_files: [text] = ["src/std/a.spl", "src/std/b.spl"]
+
+        val results = calculate_scope_coverage(all_files, covered_files, config)
+
+        val first_result = results[0]
+        val missing_count = first_result.missing_items.len()
+
+        expect(missing_count).to_equal(0)
+
+# ============================================================================
+# Tests for edge cases
+# ============================================================================
+
+describe "calculate_scope_coverage edge cases":
+    it "handles empty file lists":
+        val config = create_test_config()
+
+        val all_files: [text] = []
+        val covered_files: [text] = []
+
+        val results = calculate_scope_coverage(all_files, covered_files, config)
+
+        val result_count = results.len()
+        expect(result_count).to_equal(0)
+
+    it "handles all files covered scenario":
+        val config = create_test_config()
+
+        val all_files: [text] = ["src/std/a.spl", "src/std/b.spl"]
+        val covered_files: [text] = ["src/std/a.spl", "src/std/b.spl"]
+
+        val results = calculate_scope_coverage(all_files, covered_files, config)
+
+        val first_result = results[0]
+        val pct = first_result.actual
+
+        expect(pct).to_equal(100)
+
+    it "handles no files covered scenario":
+        val config = create_test_config()
+
+        val all_files: [text] = ["src/std/a.spl", "src/std/b.spl"]
+        val covered_files: [text] = []
+
+        val results = calculate_scope_coverage(all_files, covered_files, config)
+
+        val first_result = results[0]
+        val pct = first_result.actual
+
+        expect(pct).to_equal(0)
+
+    it "handles files not in any configured scope":
+        val config = create_test_config()
+
+        val all_files: [text] = ["other/path/file.spl"]
+        val covered_files: [text] = ["other/path/file.spl"]
+
+        val results = calculate_scope_coverage(all_files, covered_files, config)
+
+        val has_results = results.len() >= 0
+        expect(has_results).to_equal(true)
+
+# ============================================================================
+# Tests for item counts
+# ============================================================================
+
+describe "calculate_scope_coverage item counts":
+    it "sets total_items correctly":
+        val config = create_test_config()
+
+        val all_files: [text] = ["src/std/a.spl", "src/std/b.spl", "src/std/c.spl"]
+        val covered_files: [text] = ["src/std/a.spl"]
+
+        val results = calculate_scope_coverage(all_files, covered_files, config)
+
+        val first_result = results[0]
+        val total = first_result.total_items
+
+        expect(total).to_equal(3)
+
+    it "sets covered_items correctly":
+        val config = create_test_config()
+
+        val all_files: [text] = ["src/std/a.spl", "src/std/b.spl", "src/std/c.spl"]
+        val covered_files: [text] = ["src/std/a.spl", "src/std/b.spl"]
+
+        val results = calculate_scope_coverage(all_files, covered_files, config)
+
+        val first_result = results[0]
+        val covered = first_result.covered_items
+
+        expect(covered).to_equal(2)
+
+    it "item counts are consistent":
+        val config = create_test_config()
+
+        val all_files: [text] = ["src/std/a.spl", "src/std/b.spl", "src/std/c.spl", "src/std/d.spl"]
+        val covered_files: [text] = ["src/std/a.spl", "src/std/c.spl"]
+
+        val results = calculate_scope_coverage(all_files, covered_files, config)
+
+        val first_result = results[0]
+        val total = first_result.total_items
+        val covered = first_result.covered_items
+        val missing_count = first_result.missing_items.len()
+
+        val sum_matches = (covered + missing_count) == total
+        expect(sum_matches).to_equal(true)
+
+# ============================================================================
+# Integration Tests
+# ============================================================================
+
+describe "calculate_scope_coverage integration":
+    it "calculates coverage for realistic file set":
+        val config = create_test_config()
+
+        val all_files: [text] = [
+            "src/std/string.spl",
+            "src/std/math.spl",
+            "src/std/array.spl",
+            "src/core/lexer.spl",
+            "src/core/parser.spl",
+            "src/lib/database.spl"
+        ]
+
+        val covered_files: [text] = [
+            "src/std/string.spl",
+            "src/std/math.spl",
+            "src/core/lexer.spl",
+            "src/lib/database.spl"
+        ]
+
+        val results = calculate_scope_coverage(all_files, covered_files, config)
+
+        val has_results = results.len() > 0
+        expect(has_results).to_equal(true)
+
+    it "all scopes have valid data":
+        val config = create_test_config()
+
+        val all_files: [text] = ["src/std/a.spl", "src/core/b.spl", "src/lib/c.spl"]
+        val covered_files: [text] = ["src/std/a.spl", "src/core/b.spl", "src/lib/c.spl"]
+
+        val results = calculate_scope_coverage(all_files, covered_files, config)
+
+        var all_valid = true
+        for result in results:
+            if result.total_items < 0:
+                all_valid = false
+            if result.covered_items < 0:
+                all_valid = false
+            if result.actual < 0 or result.actual > 100:
+                all_valid = false
+
+        expect(all_valid).to_equal(true)

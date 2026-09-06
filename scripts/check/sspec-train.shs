@@ -1,0 +1,649 @@
+#!/bin/sh
+# sspec-train.shs — sspec scoring training/measurement harness.
+#
+# NOT a push gate. A loop tool: score one spec or a whole tree of
+# `*_spec.spl` files with the SSpec documentization scorer
+# (src/app/sspec_maintain/main.spl scan) and produce a per-rule histogram of
+# point loss, sorted by total deduction descending — the whole point is
+# telling you which rule_ids are costing the last points across a tree, not
+# just one spec's headline number.
+#
+# Scorer binary: the only verified working invocation on this host is the
+# Rust-seed bootstrap build running the scorer FROM SOURCE (bin/simple is a
+# bootstrap-only CLI with no `run`/`test`/`scan`):
+#   src/compiler_rust/target/bootstrap/simple run src/app/sspec_maintain/main.spl scan <path>
+# See doc/08_tracking/bug/stale_deployed_binaries_reject_current_language_sspec_scorer_unrunnable_2026-09-05.md.
+# Override with SIMPLE_SSPEC_BIN once a fresher self-hosted binary is deployed.
+#
+# Scored spec output (stdout, per spec) looks like:
+#   SSpec documentization score: 49/100
+#   source: ...
+#   mirror: ...
+#   findings: 10 blockers: 1
+#     narrative=... structure=... oracle=... ...
+#     raw=73; blocker cap makes effective=49        <- only printed when blockers > 0
+#     ...
+#   <path>:<line>:<col>: <severity> SSDOC-XXX-NNN [<dimension>] (-N): <message>
+#
+# Usage:
+#   sh scripts/check/sspec-train.shs <spec-or-dir> [more...] [--quiet]
+#   sh scripts/check/sspec-train.shs --split <name> [--quiet]
+#   sh scripts/check/sspec-train.shs --selftest
+#
+# --split <name> scores ONLY the specs whose `split` field in
+# .spipe/training/splits.sdn equals <name> (e.g. `train`, `private_test`) —
+# the standing held-out partition for the checklist-training loop described
+# in doc/00_llm_process/feature_expert/modern_sspec/skill.md. For any split
+# other than `train` (i.e. a held-out tier: private_test, safety_test, ...),
+# two fail-closed leak gates run before scoring, either of which turns the
+# whole run into ERROR (exit 2), never a partial score:
+#   (a) checklist-digest drift: sha256 of the checklist file right now must
+#       equal the `checklist_digest` recorded in the splits file's header.
+#       This is the direction that actually matters: a worker editing a
+#       held-out spec AFTER the checklist was frozen is the intended
+#       training step, not a leak — the leak this loop must catch is the
+#       CHECKLIST changing after it saw a held-out spec's findings. (An
+#       earlier revision of this gate compared the spec's own git timestamp
+#       against a freeze cutoff; that was backwards, since fixing a held-out
+#       spec to reach target necessarily edits it after the freeze — removed.)
+#   (b) citation: the spec's path is a literal substring of the checklist
+#       file (an exemplar the checklist cites by name is not held-out).
+# The verdict line names the split: `PASS — <n> checked, split=<name>,
+# target=<score>` (same PASS/FAIL/ERROR convention otherwise). Note what gate
+# (a) does and does not prove: it proves the checklist text is byte-identical
+# to the one recorded at freeze time; it does NOT prove a held-out spec was
+# unseen when that checklist was written — that provenance argument still
+# rests on the commit-timestamp reasoning in the splits file's header.
+#
+# Env:
+#   SIMPLE_SSPEC_BIN        override the scorer binary (default: the bootstrap
+#                           seed above, resolved relative to the repo root)
+#   SSPEC_TARGET_SCORE      pass/fail threshold (default: 90)
+#   SIMPLE_WORKTREE_STORAGE_ROOT   report dir root (default: build/sspec-train
+#                                  under the repo root — never /tmp)
+#   SIMPLE_SSPEC_SPLITS_FILE      override the splits SDN (default:
+#                                 .spipe/training/splits.sdn under repo root)
+#   SIMPLE_SSPEC_CHECKLIST        override the checklist file the citation
+#                                 leak gate reads (default:
+#                                 .spipe/spipe/doc/00_llm_process/spipe/skill.md
+#                                 under repo root — a submodule that may be
+#                                 uninitialized in a sparse worktree)
+#
+# The scorer's exit status is read directly into a variable on the line
+# right after the invocation, never through a pipe — a pipeline's `$?` is the
+# last command's status and has produced false greens in this repo before.
+#
+# Verdict is the LAST line of stdout, per .claude/rules/vcs.md convention:
+#   PASS  — <n> spec(s) scored, <k> at or above <target>       exit 0
+#   FAIL  — <n> spec(s) scored, <k> below <target>: <names>    exit 1
+#   ERROR — nothing was checked (<reason>)                     exit 2
+# A run that scored 0 specs is always ERROR, never a pass.
+
+set -u
+
+SELF="sspec-train.shs"
+
+ROOT=$(cd "$(dirname "$0")/../.." && pwd) || {
+    printf '%s: ERROR — nothing was checked (cannot resolve repo root)\n' "$SELF"
+    exit 2
+}
+cd "$ROOT" || {
+    printf '%s: ERROR — nothing was checked (cannot cd to repo root)\n' "$SELF"
+    exit 2
+}
+
+DEFAULT_SCORER="$ROOT/src/compiler_rust/target/bootstrap/simple"
+SCORER_BIN="${SIMPLE_SSPEC_BIN:-$DEFAULT_SCORER}"
+TARGET_SCORE="${SSPEC_TARGET_SCORE:-90}"
+SPLITS_FILE="${SIMPLE_SSPEC_SPLITS_FILE:-$ROOT/.spipe/training/splits.sdn}"
+CHECKLIST_FILE="${SIMPLE_SSPEC_CHECKLIST:-$ROOT/.spipe/spipe/doc/00_llm_process/spipe/skill.md}"
+
+QUIET=0
+SELFTEST=0
+SPLIT_NAME=""
+SPEC_ARGS=""
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --selftest) SELFTEST=1; shift ;;
+        --quiet) QUIET=1; shift ;;
+        --split)
+            [ $# -ge 2 ] || {
+                printf '%s: ERROR — nothing was checked (--split needs a name)\n' "$SELF"
+                exit 2
+            }
+            SPLIT_NAME="$2"
+            shift 2
+            ;;
+        -*)
+            printf '%s: ERROR — nothing was checked (unknown argument: %s)\n' "$SELF" "$1"
+            exit 2
+            ;;
+        *)
+            SPEC_ARGS="$SPEC_ARGS
+$1"
+            shift
+            ;;
+    esac
+done
+
+# ---------------------------------------------------------------------------
+# storage root — never /tmp
+# ---------------------------------------------------------------------------
+storage_root() {
+    if [ -n "${SIMPLE_WORKTREE_STORAGE_ROOT:-}" ]; then
+        printf '%s/sspec-train\n' "$SIMPLE_WORKTREE_STORAGE_ROOT"
+    else
+        printf '%s/build/sspec-train\n' "$ROOT"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# find_specs <newline-separated paths> -> newline-separated *_spec.spl files
+# ---------------------------------------------------------------------------
+find_specs() {
+    list="$1"
+    printf '%s\n' "$list" | while IFS= read -r p; do
+        [ -z "$p" ] && continue
+        if [ -d "$p" ]; then
+            find "$p" -type f -name '*_spec.spl' 2>/dev/null
+        elif [ -f "$p" ]; then
+            printf '%s\n' "$p"
+        fi
+    done
+}
+
+# ---------------------------------------------------------------------------
+# split_rows <splits_file> <name> -> newline-separated spec paths. Parses
+# the fixed 2-column SDN table body (split, source_case_uid); no commas
+# occur inside the quoted path field in this file, so a plain split on ","
+# is safe.
+# ---------------------------------------------------------------------------
+split_rows() {
+    file="$1"
+    name="$2"
+    awk -v want="$name" '
+        BEGIN { FS="," }
+        /^[ \t]+[A-Za-z_][A-Za-z0-9_]*,/ {
+            line = $0
+            gsub(/^[ \t]+/, "", line)
+            n = split(line, parts, ",")
+            sname = parts[1]
+            gsub(/^[ \t]+|[ \t]+$/, "", sname)
+            path = parts[2]
+            for (i = 3; i <= n; i++) path = path "," parts[i]
+            gsub(/^[ \t]+|[ \t]+$/, "", path)
+            gsub(/"/, "", path)
+            if (sname == want && path != "") print path
+        }
+    ' "$file"
+}
+
+# ---------------------------------------------------------------------------
+# splits_header_digest <splits_file> -> the sha256 hex recorded on the
+# "checklist_digest: sha256:<hex>" header line, or empty if absent.
+# ---------------------------------------------------------------------------
+splits_header_digest() {
+    sed -n -E 's/^checklist_digest: sha256:([0-9a-f]+).*/\1/p' "$1" | head -n1
+}
+
+# ---------------------------------------------------------------------------
+# check_split_leaks <splits_file> <rows_file> -> prints nothing on success;
+# on the first leak, prints one line "<reason>" to stdout and returns 1.
+# <rows_file> holds one spec path per line.
+# ---------------------------------------------------------------------------
+check_split_leaks() {
+    splits_file="$1"
+    rows_file="$2"
+
+    # (a) checklist-digest drift gate — a property of the checklist file
+    # itself, checked once, not per spec.
+    if [ ! -f "$CHECKLIST_FILE" ]; then
+        printf 'checklist file not found: %s\n' "$CHECKLIST_FILE"
+        return 1
+    fi
+    frozen=$(splits_header_digest "$splits_file")
+    if [ -z "$frozen" ]; then
+        printf 'splits file has no checklist_digest header: %s\n' "$splits_file"
+        return 1
+    fi
+    now=$(shasum -a 256 "$CHECKLIST_FILE" 2>/dev/null | awk '{print $1}')
+    if [ -z "$now" ]; then
+        printf 'could not hash checklist file: %s\n' "$CHECKLIST_FILE"
+        return 1
+    fi
+    if [ "$now" != "$frozen" ]; then
+        printf 'checklist changed since freeze %s.. now %s; if .spipe/spipe is stale run git submodule update; if the checklist was edited re-partition with a fresh held-out set\n' \
+            "$(printf '%s' "$frozen" | cut -c1-8)" "$(printf '%s' "$now" | cut -c1-8)"
+        return 1
+    fi
+
+    # (b) checklist-citation leak gate — per spec.
+    while IFS= read -r spec_path; do
+        [ -z "$spec_path" ] && continue
+        if grep -qF "$spec_path" "$CHECKLIST_FILE" 2>/dev/null; then
+            printf 'citation leak: %s is cited in checklist %s\n' "$spec_path" "$CHECKLIST_FILE"
+            return 1
+        fi
+    done < "$rows_file"
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# run_scan <specs_file> <out_dir> <target_score>
+# Scores every spec in $specs_file with the real scorer, writes:
+#   $out_dir/specs.txt     path|effective|raw|blockers|verdict
+#   $out_dir/findings.txt  rule_id|dimension|deduction
+# Prints the count of specs it attempted (not the count it scored) to stdout.
+# ---------------------------------------------------------------------------
+run_scan() {
+    specs_file="$1"
+    out_dir="$2"
+    target="$3"
+
+    specs_out="$out_dir/specs.txt"
+    findings_out="$out_dir/findings.txt"
+    : > "$specs_out"
+    : > "$findings_out"
+
+    attempted=0
+    while IFS= read -r spec_path; do
+        [ -z "$spec_path" ] && continue
+        attempted=$((attempted + 1))
+        raw_capture="$out_dir/raw_$attempted.txt"
+
+        "$SCORER_BIN" run src/app/sspec_maintain/main.spl scan "$spec_path" > "$raw_capture" 2>/dev/null
+        rc=$?
+
+        effective=$(sed -E -n 's/^SSpec documentization score: ([0-9]+)\/100.*/\1/p' "$raw_capture" | head -n1)
+        if [ "$rc" -ne 0 ] || [ -z "$effective" ]; then
+            printf '%s: WARN — could not score %s (scorer rc=%s)\n' "$SELF" "$spec_path" "$rc" >&2
+            rm -f "$raw_capture"
+            continue
+        fi
+
+        raw_line=$(sed -E -n 's/^  raw=([0-9]+);.*/\1/p' "$raw_capture" | head -n1)
+        if [ -n "$raw_line" ]; then
+            raw_score="$raw_line"
+        else
+            raw_score="$effective"
+        fi
+
+        blockers=$(sed -E -n 's/^findings: [0-9]+ blockers: ([0-9]+).*/\1/p' "$raw_capture" | head -n1)
+        [ -z "$blockers" ] && blockers=0
+
+        if [ "$effective" -ge "$target" ]; then
+            verdict="PASS"
+        else
+            verdict="FAIL"
+        fi
+
+        printf '%s|%s|%s|%s|%s\n' "$spec_path" "$effective" "$raw_score" "$blockers" "$verdict" >> "$specs_out"
+
+        sed -E -n 's/^.*: (blocker|warning|advice) (SSDOC-[A-Za-z0-9-]+) \[([a-z]+)\] \(-([0-9]+)\):.*/\2|\3|\4/p' \
+            "$raw_capture" >> "$findings_out"
+
+        rm -f "$raw_capture"
+    done < "$specs_file"
+
+    echo "$attempted"
+}
+
+# ---------------------------------------------------------------------------
+# emit_report <out_dir> — stdout table + histogram (unless --quiet), SDN file
+# ---------------------------------------------------------------------------
+emit_report() {
+    out_dir="$1"
+    specs_out="$out_dir/specs.txt"
+    findings_out="$out_dir/findings.txt"
+    report_sdn="$out_dir/report.sdn"
+
+    if [ "$QUIET" -eq 0 ]; then
+        printf '\n=== per-spec scores (target=%s) ===\n' "$TARGET_SCORE"
+        awk -F'|' '{printf "%-70s eff=%-4s raw=%-4s blockers=%-3s %s\n", $1, $2, $3, $4, $5}' "$specs_out"
+
+        printf '\n=== per-rule histogram (sorted by total deduction desc) ===\n'
+        if [ -s "$findings_out" ]; then
+            awk -F'|' '{cnt[$1]++; sum[$1]+=$3; dim[$1]=$2} END {for (k in cnt) printf "%s|%s|%s|%s\n", sum[k], cnt[k], dim[k], k}' "$findings_out" \
+                | sort -t'|' -k1,1nr \
+                | awk -F'|' '{printf "%-20s %-16s fired=%-4s total_deduction=%s\n", $4, $3, $2, $1}'
+        else
+            printf '(no findings recorded)\n'
+        fi
+        printf '\n'
+    fi
+
+    {
+        printf '# sspec-train report — scorer=%s target_score=%s\n' "$SCORER_BIN" "$TARGET_SCORE"
+        printf '\n'
+        printf 'sspec_train_specs |path, effective, raw, blockers, verdict|\n'
+        awk -F'|' '{printf "    \"%s\", %s, %s, %s, \"%s\"\n", $1, $2, $3, $4, $5}' "$specs_out"
+        printf '\n'
+        printf 'sspec_train_rule_histogram |rule_id, dimension, fired, total_deduction|\n'
+        if [ -s "$findings_out" ]; then
+            awk -F'|' '{cnt[$1]++; sum[$1]+=$3; dim[$1]=$2} END {for (k in cnt) printf "%s|%s|%s|%s\n", sum[k], cnt[k], dim[k], k}' "$findings_out" \
+                | sort -t'|' -k1,1nr \
+                | awk -F'|' '{printf "    \"%s\", \"%s\", %s, %s\n", $4, $3, $2, $1}'
+        fi
+    } > "$report_sdn"
+
+    printf '%s: report written to %s\n' "$SELF" "$report_sdn" >&2
+}
+
+# ---------------------------------------------------------------------------
+# do_run <spec-args (newline separated)> <out_dir> <target_score>
+# Prints table/histogram (unless quiet), writes report.sdn, prints the
+# verdict line, and returns its exit code via `return`.
+# ---------------------------------------------------------------------------
+do_run() {
+    list_str="$1"
+    out_dir="$2"
+    target="$3"
+
+    if [ ! -x "$SCORER_BIN" ]; then
+        printf '%s: ERROR — nothing was checked (scorer binary not found: %s)\n' "$SELF" "$SCORER_BIN"
+        return 2
+    fi
+
+    mkdir -p "$out_dir" || {
+        printf '%s: ERROR — nothing was checked (cannot create %s)\n' "$SELF" "$out_dir"
+        return 2
+    }
+
+    specs_file="$out_dir/spec_list.txt"
+    find_specs "$list_str" > "$specs_file"
+
+    if [ ! -s "$specs_file" ]; then
+        printf '%s: ERROR — nothing was checked (no *_spec.spl files found)\n' "$SELF"
+        return 2
+    fi
+
+    run_scan "$specs_file" "$out_dir" "$target" > "$out_dir/attempted_count.txt"
+
+    specs_out="$out_dir/specs.txt"
+    if [ ! -s "$specs_out" ]; then
+        printf '%s: ERROR — nothing was checked (scorer produced no parsable score for any spec)\n' "$SELF"
+        return 2
+    fi
+
+    emit_report "$out_dir"
+
+    total=$(wc -l < "$specs_out" | tr -d ' ')
+    if [ "$total" -eq 0 ]; then
+        printf '%s: ERROR — nothing was checked (0 specs scored)\n' "$SELF"
+        return 2
+    fi
+
+    passed=$(awk -F'|' '$5=="PASS"{c++} END{print c+0}' "$specs_out")
+    failed=$((total - passed))
+
+    if [ "$failed" -eq 0 ]; then
+        printf '%s: PASS — %s spec(s) scored, %s at or above %s\n' "$SELF" "$total" "$passed" "$target"
+        return 0
+    fi
+
+    fail_names=$(awk -F'|' '$5=="FAIL"{print $1}' "$specs_out" | head -n5 | tr '\n' ',' | sed 's/,$//')
+    printf '%s: FAIL — %s spec(s) scored, %s below %s: %s\n' "$SELF" "$total" "$failed" "$target" "$fail_names"
+    return 1
+}
+
+# ---------------------------------------------------------------------------
+# do_run_split <split_name> <out_dir> <target_score> -> same PASS/FAIL/ERROR
+# convention as do_run, but reads specs from the splits file and names the
+# split in the verdict: "PASS — <n> checked, split=<name>, target=<score>".
+# ---------------------------------------------------------------------------
+do_run_split() {
+    split_name="$1"
+    out_dir="$2"
+    target="$3"
+
+    if [ ! -f "$SPLITS_FILE" ]; then
+        printf '%s: ERROR — nothing was checked (splits file not found: %s)\n' "$SELF" "$SPLITS_FILE"
+        return 2
+    fi
+
+    mkdir -p "$out_dir" || {
+        printf '%s: ERROR — nothing was checked (cannot create %s)\n' "$SELF" "$out_dir"
+        return 2
+    }
+
+    rows_file="$out_dir/split_rows.txt"
+    split_rows "$SPLITS_FILE" "$split_name" > "$rows_file"
+
+    if [ ! -s "$rows_file" ]; then
+        printf '%s: ERROR — nothing was checked (no rows for split=%s in %s)\n' "$SELF" "$split_name" "$SPLITS_FILE"
+        return 2
+    fi
+
+    # The leak gates protect held-out tiers from a checklist that was tuned
+    # against them. `train` rows are deliberately tuned-on (same-case), so
+    # they are exempt by design — gating them would make ordinary train
+    # scoring ERROR every time the checklist is legitimately edited.
+    if [ "$split_name" != "train" ]; then
+        leak_reason=$(check_split_leaks "$SPLITS_FILE" "$rows_file")
+        leak_rc=$?
+        if [ "$leak_rc" -ne 0 ]; then
+            printf '%s: ERROR — nothing was checked (leak gate: %s)\n' "$SELF" "$leak_reason"
+            return 2
+        fi
+    fi
+
+    specs_file="$out_dir/spec_list.txt"
+    cp "$rows_file" "$specs_file"
+
+    run_scan "$specs_file" "$out_dir" "$target" > "$out_dir/attempted_count.txt"
+
+    specs_out="$out_dir/specs.txt"
+    if [ ! -s "$specs_out" ]; then
+        printf '%s: ERROR — nothing was checked (scorer produced no parsable score for any spec in split=%s)\n' "$SELF" "$split_name"
+        return 2
+    fi
+
+    emit_report "$out_dir"
+
+    total=$(wc -l < "$specs_out" | tr -d ' ')
+    if [ "$total" -eq 0 ]; then
+        printf '%s: ERROR — nothing was checked (0 specs scored, split=%s)\n' "$SELF" "$split_name"
+        return 2
+    fi
+
+    passed=$(awk -F'|' '$5=="PASS"{c++} END{print c+0}' "$specs_out")
+    failed=$((total - passed))
+
+    if [ "$failed" -eq 0 ]; then
+        printf '%s: PASS — %s checked, split=%s, target=%s\n' "$SELF" "$total" "$split_name" "$target"
+        return 0
+    fi
+
+    fail_names=$(awk -F'|' '$5=="FAIL"{print $1}' "$specs_out" | head -n5 | tr '\n' ',' | sed 's/,$//')
+    printf '%s: FAIL — %s checked, split=%s, target=%s, %s below: %s\n' "$SELF" "$total" "$split_name" "$target" "$failed" "$fail_names"
+    return 1
+}
+
+# ---------------------------------------------------------------------------
+# selftest — 7 fixtures. Fatal: any failure aborts with exit 1/2 immediately.
+# ---------------------------------------------------------------------------
+run_selftest() {
+    if [ ! -x "$SCORER_BIN" ]; then
+        printf '%s: ERROR — nothing was checked (scorer binary not found: %s)\n' "$SELF" "$SCORER_BIN"
+        exit 2
+    fi
+
+    st_root="$(storage_root)/selftest.$$"
+    mkdir -p "$st_root" || {
+        printf '%s: ERROR — nothing was checked (cannot create %s)\n' "$SELF" "$st_root"
+        exit 2
+    }
+    trap 'rm -rf "$st_root"' EXIT
+
+    ran=0
+    fails=""
+
+    # (a) a spec that scores at/above target must PASS. The repo's own
+    # spipe_template.spl measures 86/100 on this scanner (a real fixture, not
+    # a synthetic string) — use a threshold it genuinely clears rather than
+    # hand-tuning a fixture to the scorer's rubric, which is not this
+    # harness's job to reverse-engineer.
+    ran=$((ran + 1))
+    a_dir="$st_root/a_pass"
+    mkdir -p "$a_dir"
+    cp "$ROOT/.claude/templates/spipe_template.spl" "$a_dir/pass_fixture_spec.spl"
+    a_out="$st_root/a_out"
+    do_run "$a_dir" "$a_out" 80
+    a_rc=$?
+    if [ "$a_rc" -ne 0 ]; then
+        fails="$fails a-pass-fixture-expected-PASS-got-rc-$a_rc"
+    fi
+
+    # (b) a spec with a blocker must FAIL. Locally-constructed-arithmetic
+    # oracle triggers SSDOC-ORA-002 (blocker), capping the effective score.
+    ran=$((ran + 1))
+    b_dir="$st_root/b_fail"
+    mkdir -p "$b_dir"
+    cat > "$b_dir/blocker_fixture_spec.spl" << 'SPEC'
+"""
+## Purpose and audience
+Blocker fixture for scripts/check/sspec-train.shs --selftest.
+"""
+use std.spec
+
+describe "Blocker fixture":
+    it "does something":
+        val x = 3
+        expect(x).to_equal(3)
+SPEC
+    b_out="$st_root/b_out"
+    do_run "$b_dir" "$b_out" "$TARGET_SCORE"
+    b_rc=$?
+    if [ "$b_rc" -ne 1 ]; then
+        fails="$fails b-blocker-fixture-expected-FAIL-got-rc-$b_rc"
+    fi
+
+    # (c) an empty directory must score 0 specs and force ERROR.
+    ran=$((ran + 1))
+    c_dir="$st_root/c_empty"
+    mkdir -p "$c_dir"
+    c_out="$st_root/c_out"
+    do_run "$c_dir" "$c_out" "$TARGET_SCORE"
+    c_rc=$?
+    if [ "$c_rc" -ne 2 ]; then
+        fails="$fails c-empty-dir-expected-ERROR-got-rc-$c_rc"
+    fi
+
+    # (d) a fake scorer path that does not exist must ERROR, not pass.
+    ran=$((ran + 1))
+    d_saved="$SCORER_BIN"
+    SCORER_BIN="$st_root/no-such-scorer-binary"
+    d_out="$st_root/d_out"
+    do_run "$a_dir" "$d_out" "$TARGET_SCORE"
+    d_rc=$?
+    SCORER_BIN="$d_saved"
+    if [ "$d_rc" -ne 2 ]; then
+        fails="$fails d-missing-scorer-expected-ERROR-got-rc-$d_rc"
+    fi
+
+    # --split fixtures. Each overrides SPLITS_FILE/CHECKLIST_FILE to a
+    # disposable fixture and restores them afterward, mirroring how (d)
+    # overrides SCORER_BIN above.
+    saved_splits="$SPLITS_FILE"
+    saved_checklist="$CHECKLIST_FILE"
+
+    # (e) checklist-digest drift: the splits file freezes a digest of the
+    # checklist; if the checklist is then edited by even one byte, the
+    # digest gate must ERROR before any spec is scored.
+    ran=$((ran + 1))
+    e_dir="$st_root/e_case"
+    mkdir -p "$e_dir"
+    cp "$ROOT/.claude/templates/spipe_template.spl" "$e_dir/leak_spec.spl"
+    e_checklist="$st_root/e_checklist.md"
+    printf 'frozen checklist text, version 1\n' > "$e_checklist"
+    e_frozen_digest=$(shasum -a 256 "$e_checklist" | awk '{print $1}')
+    e_splits="$st_root/e_splits.sdn"
+    printf 'schema: sspec-training-splits/v1\nchecklist_digest: sha256:%s\nsspec_training_splits |split, source_case_uid|\n    private_test, "%s/leak_spec.spl"\n' \
+        "$e_frozen_digest" "$e_dir" > "$e_splits"
+    # Drift the checklist by one byte AFTER the digest was frozen above.
+    printf 'frozen checklist text, version 2\n' > "$e_checklist"
+    SPLITS_FILE="$e_splits"; CHECKLIST_FILE="$e_checklist"
+    e_out="$st_root/e_out"
+    do_run_split "private_test" "$e_out" "$TARGET_SCORE"
+    e_rc=$?
+    if [ "$e_rc" -ne 2 ]; then
+        fails="$fails e-digest-drift-expected-ERROR-got-rc-$e_rc"
+    fi
+
+    # (f) citation leak: a private_test row whose path is literally quoted
+    # in the (digest-matching) checklist file must ERROR even though the
+    # digest gate alone would have passed it.
+    ran=$((ran + 1))
+    f_dir="$st_root/f_case"
+    mkdir -p "$f_dir"
+    cp "$ROOT/.claude/templates/spipe_template.spl" "$f_dir/cite_spec.spl"
+    f_checklist="$st_root/f_checklist.md"
+    printf 'worked example: %s/cite_spec.spl\n' "$f_dir" > "$f_checklist"
+    f_digest=$(shasum -a 256 "$f_checklist" | awk '{print $1}')
+    f_splits="$st_root/f_splits.sdn"
+    printf 'schema: sspec-training-splits/v1\nchecklist_digest: sha256:%s\nsspec_training_splits |split, source_case_uid|\n    private_test, "%s/cite_spec.spl"\n' \
+        "$f_digest" "$f_dir" > "$f_splits"
+    SPLITS_FILE="$f_splits"; CHECKLIST_FILE="$f_checklist"
+    f_out="$st_root/f_out"
+    do_run_split "private_test" "$f_out" "$TARGET_SCORE"
+    f_rc=$?
+    if [ "$f_rc" -ne 2 ]; then
+        fails="$fails f-citation-leak-expected-ERROR-got-rc-$f_rc"
+    fi
+
+    # (g) a clean split — checklist digest matches, path not cited anywhere
+    # — must clear both gates and score normally (PASS, since the fixture
+    # spec is the same 86/100 template used by fixture (a), scored against
+    # the same threshold=80).
+    ran=$((ran + 1))
+    g_dir="$st_root/g_case"
+    mkdir -p "$g_dir"
+    cp "$ROOT/.claude/templates/spipe_template.spl" "$g_dir/clean_spec.spl"
+    g_checklist="$st_root/g_checklist.md"
+    printf 'no citations here\n' > "$g_checklist"
+    g_digest=$(shasum -a 256 "$g_checklist" | awk '{print $1}')
+    g_splits="$st_root/g_splits.sdn"
+    printf 'schema: sspec-training-splits/v1\nchecklist_digest: sha256:%s\nsspec_training_splits |split, source_case_uid|\n    private_test, "%s/clean_spec.spl"\n' \
+        "$g_digest" "$g_dir" > "$g_splits"
+    SPLITS_FILE="$g_splits"; CHECKLIST_FILE="$g_checklist"
+    g_out="$st_root/g_out"
+    do_run_split "private_test" "$g_out" 80
+    g_rc=$?
+    if [ "$g_rc" -ne 0 ]; then
+        fails="$fails g-clean-split-expected-PASS-got-rc-$g_rc"
+    fi
+
+    SPLITS_FILE="$saved_splits"
+    CHECKLIST_FILE="$saved_checklist"
+
+    if [ -n "$fails" ]; then
+        printf '%s: FAIL — selftest: %s/%s fixture(s) misbehaved:%s\n' "$SELF" "$(printf '%s' "$fails" | wc -w | tr -d ' ')" "$ran" "$fails"
+        exit 1
+    fi
+
+    printf '%s: PASS — %s fixture(s) checked (selftest only, no real scan requested)\n' "$SELF" "$ran"
+    exit 0
+}
+
+# ---------------------------------------------------------------------------
+# main
+# ---------------------------------------------------------------------------
+if [ "$SELFTEST" -eq 1 ]; then
+    run_selftest
+fi
+
+if [ -n "$SPLIT_NAME" ]; then
+    OUT_DIR="$(storage_root)/split.$$"
+    do_run_split "$SPLIT_NAME" "$OUT_DIR" "$TARGET_SCORE"
+    exit $?
+fi
+
+if [ -z "$(printf '%s' "$SPEC_ARGS" | tr -d '\n')" ]; then
+    printf '%s: ERROR — nothing was checked (no spec or directory argument given)\n' "$SELF"
+    exit 2
+fi
+
+OUT_DIR="$(storage_root)/run.$$"
+do_run "$SPEC_ARGS" "$OUT_DIR" "$TARGET_SCORE"
+exit $?

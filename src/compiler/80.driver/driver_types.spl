@@ -1,0 +1,1350 @@
+# Driver Types - heavyweight driver-only types and context wiring.
+#
+# Lightweight public types now live in driver_core_types.spl so external
+# callers can import CompileResult / CompileOptions without loading the full
+# compiler graph.
+
+export use compiler.common.driver_core_types.*
+
+use compiler.hir.hir.*
+use std.env.{env_get}
+use std.nogc_sync_mut.io.process_ops.{eprint}
+
+# Formation probe for the diagnostics array. `== nil` is NOT usable here: the
+# nil sentinel is raw 3, so a ZEROED array reports "present" to every `!= nil`
+# test. See rt_heap_ref_wellformed_lost_in_stale_snapshot_clobber_2026-08-31.md.
+extern fn rt_heap_ref_wellformed(value: Any) -> bool
+use compiler.mir.mir.*
+use compiler.frontend.core.lexer.*
+use compiler.frontend.parser_types.{ParserModule}
+use compiler.frontend.treesitter.*
+use compiler.common.config.*
+use compiler.backend.backend_port.{BackendPort}
+use lazy compiler.backend.backend_types.{BackendResult, BackendError, CompiledUnit, BackendSdnValue}
+use compiler.backend.codegen.{CodegenMode}
+use compiler.backend.backend.compiler.{CompilerBackendImpl}
+use compiler.backend.backend.interpreter.{InterpreterBackendImpl}
+use compiler.backend.backend.sdn.{SdnBackendImpl}
+use compiler.common.attributes.{VhdlHardwareMetadataFlatRow}
+use compiler.common.di.{DiContainer}
+use compiler.tools.aop.{AopWeaver, LogAspect}
+use compiler.frontend.core.aop.{WeavingConfig, Pointcut, PointcutKind}
+use compiler.common.compiler_services.{CompilerServices, create_default_services}
+use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName}
+use compiler.hir.hir_types.{HirModule}  # explicit: a glob is not an import-origin for surface projection
+# HOISTED (2026-08-21): this was a FUNCTION-LOCAL `use` inside
+# `compute_options_hash` below. The parser DISCARDS function-local `use`
+# outright (10.frontend/core/parser_stmts.spl -> parse_use_stmt_inline returns a
+# bare `pass`), so both names were unbound during HIR lowering: the signature's
+# return type died as `unresolved type: CompileOptionsHash` and the call as
+# `unresolved name: compile_options_hash_compute`. Same defect class as the
+# `unresolved type: ByteOrder` case documented in
+# 20.hir/hir_lowering/_Items/module_import_registration.spl. There is no cycle
+# to avoid here -- cache/compile_options_hash.spl imports only std -- so the
+# import belongs at module scope.
+use compiler.driver.cache.compile_options_hash.{CompileOptionsHash, compile_options_hash_compute}
+use compiler.common.assurance.policy.{policy_from_env_value}
+use compiler.common.assurance.policy_schema.{ResolvedAssurancePolicyV1}
+use compiler.mir_opt.mir_opt.storage_projection_lowering.{
+    MirStorageFieldBindingV1, MirStorageViewBindingV1, MirStorageViewSiteBindingV1
+}
+use compiler.mir_opt.mir_opt.typed_storage_view_producer.{
+    MirTypedStorageViewEvidenceV1, MirTypedStorageViewProducerResultV1
+}
+use compiler.mir.mir_json.{serialize_mir_function, serialize_mir_type,
+    serialize_const_value}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.mcdc.model.{McdcMode, mcdc_mode_from_text, mcdc_mode_name}
+use std.common.structural.storage_layout.storage_layout_contracts.{
+    storage_layout_kind_to_u8, storage_conversion_policy_to_u8
+}
+
+class FrozenStorageModuleSnapshotV1:
+    ok: bool
+    module_name: text
+    registry_identity: text
+    module_identity: text
+    sites: [MirStorageViewSiteBindingV1]
+    evidence: [MirTypedStorageViewEvidenceV1]
+    reason: text
+
+    fn identity_valid() -> bool:
+        self.ok and self.module_identity ==
+            frozen_storage_module_identity_v1(self.module_name, self.sites, self.evidence)
+
+class FrozenNativeModuleCapsuleV1:
+    ok: bool
+    module_name: text
+    capsule_identity: text
+    mir_identity: text
+    mir_module: MirModule
+    storage_snapshot: FrozenStorageModuleSnapshotV1
+    cache_source: text
+    # Content identity captured from SourceFile.content, the exact snapshot
+    # from which this module's MIR was produced. Cache publication must prove
+    # the source on disk still normalizes to this identity.
+    source_identity: text
+    module_witness: text
+    module_witness_reason: text
+    output_base: text
+    object_path: text
+    backend_name: text
+    # Hash of the admitted BackendProviderReceipt. Empty is the transitional
+    # compiler-bound built-in lane; dynamic/versioned providers must supply the
+    # exact receipt hash before their capsules are cache-authoritative.
+    provider_receipt_hash: text
+    target: text
+    target_cpu: text
+    opt_level: i64
+    is_release: bool
+    reason: text
+
+    fn expected_identity() -> text:
+        "native-capsule-v1|{storage_identity_text_v1(self.module_name)}|{storage_identity_text_v1(self.mir_identity)}|{storage_identity_text_v1(self.storage_snapshot.module_identity)}|{storage_identity_text_v1(self.cache_source)}|{storage_identity_text_v1(self.source_identity)}|{storage_identity_text_v1(self.module_witness)}|{storage_identity_text_v1(self.module_witness_reason)}|{storage_identity_text_v1(self.backend_name)}|{storage_identity_text_v1(self.provider_receipt_hash)}|{storage_identity_text_v1(self.target)}|{storage_identity_text_v1(self.target_cpu)}|{self.opt_level}|{self.is_release}|{storage_identity_text_v1(self.object_path)}"
+
+    fn identity_valid() -> bool:
+        self.ok and self.mir_identity == native_capsule_mir_identity_v1(self.mir_module)
+            and (self.cache_source == "" or self.source_identity != "")
+            and self.storage_snapshot.identity_valid()
+            and self.capsule_identity == self.expected_identity()
+
+    fn provider_receipt_valid(expected_hash: text) -> bool:
+        "" != expected_hash and self.identity_valid()
+            and self.provider_receipt_hash == expected_hash
+
+class FrozenNativeModuleCapsuleBatchV1:
+    ok: bool
+    registry_identity: text
+    capsules: [FrozenNativeModuleCapsuleV1]
+    reason: text
+
+    fn find(module_name: text) -> FrozenNativeModuleCapsuleV1:
+        var found = FrozenNativeModuleCapsuleV1(ok: false,
+            module_name: module_name, capsule_identity: "",
+            mir_identity: "",
+            mir_module: MirModule(name: "", functions: {}, statics: {},
+                constants: {}, types: {}),
+            storage_snapshot: FrozenStorageModuleSnapshotV1(ok: false,
+                module_name: module_name, registry_identity: "",
+                module_identity: "", sites: [], evidence: [],
+                reason: "capsule-not-found"),
+            cache_source: "", source_identity: "", module_witness: "",
+            module_witness_reason: "", output_base: "", object_path: "",
+            backend_name: "", provider_receipt_hash: "", target: "", target_cpu: "", opt_level: 0,
+            is_release: false,
+            reason: "capsule-not-found")
+        var count = 0
+        for capsule in self.capsules:
+            if capsule.module_name == module_name:
+                found = capsule
+                count = count + 1
+        if count != 1:
+            found.ok = false
+            found.reason = if count == 0: "capsule-not-found" else: "duplicate-capsule"
+            return found
+        found
+
+# Keep capsule lookup available as a uniquely named free function.  Bootstrap
+# native lowering can erase a class receiver and bind the common method name
+# `find` to text.find; its integer result is then misread as a capsule pointer.
+# This cold O(n) lookup preserves the batch's deterministic duplicate check.
+pub fn frozen_native_capsule_batch_find_v1(
+    batch: FrozenNativeModuleCapsuleBatchV1, module_name: text
+) -> FrozenNativeModuleCapsuleV1:
+    var found = FrozenNativeModuleCapsuleV1(ok: false,
+        module_name: module_name, capsule_identity: "", mir_identity: "",
+        mir_module: MirModule(name: "", functions: {}, statics: {},
+            constants: {}, types: {}),
+        storage_snapshot: FrozenStorageModuleSnapshotV1(ok: false,
+            module_name: module_name, registry_identity: "",
+            module_identity: "", sites: [], evidence: [],
+            reason: "capsule-not-found"),
+        cache_source: "", source_identity: "", module_witness: "",
+        module_witness_reason: "", output_base: "", object_path: "",
+        backend_name: "", provider_receipt_hash: "", target: "", target_cpu: "", opt_level: 0,
+        is_release: false, reason: "capsule-not-found")
+    var count = 0
+    for capsule in batch.capsules:
+        if capsule.module_name == module_name:
+            found = capsule
+            count = count + 1
+    if count != 1:
+        found.ok = false
+        found.reason = if count == 0: "capsule-not-found" else: "duplicate-capsule"
+    found
+
+extern fn rt_string_free(value: text) -> i64
+
+fn storage_identity_text_v1(value: text) -> text:
+    "{value.len()}:{value}"
+
+fn native_capsule_sorted_symbol_ids_v1(keys: [SymbolId]) -> [SymbolId]:
+    var result = keys
+    var i = 0
+    while i < result.len():
+        var j = i + 1
+        while j < result.len():
+            if result[j].id < result[i].id:
+                val temporary = result[i]
+                result[i] = result[j]
+                result[j] = temporary
+            j = j + 1
+        i = i + 1
+    result
+
+fn native_capsule_type_def_identity_v1(type_def: MirTypeDef) -> text:
+    var kind_identity = ""
+    match type_def.kind:
+        case Struct(fields):
+            var rows: [text] = []
+            for field in fields:
+                rows.push("{storage_identity_text_v1(field.name)}|{serialize_mir_type(field.type_)}|{field.offset}|{field.has_bits_attr}|{field.bits_width}")
+            val joined_rows = rows.join(";")
+            kind_identity = "struct|{storage_identity_text_v1(joined_rows)}"
+        case Enum(variants):
+            var rows: [text] = []
+            for variant in variants:
+                var payload = "none"
+                if val payload_type = variant.payload:
+                    payload = serialize_mir_type(payload_type)
+                rows.push("{storage_identity_text_v1(variant.name)}|{variant.discriminant}|{storage_identity_text_v1(payload)}")
+            val joined_rows = rows.join(";")
+            kind_identity = "enum|{storage_identity_text_v1(joined_rows)}"
+        case Union(variants):
+            var rows: [text] = []
+            for variant in variants: rows.push(serialize_mir_type(variant))
+            val joined_rows = rows.join(";")
+            kind_identity = "union|{storage_identity_text_v1(joined_rows)}"
+    "{type_def.symbol.id}|{storage_identity_text_v1(type_def.name)}|{storage_identity_text_v1(kind_identity)}|{type_def.is_export_c}|{storage_identity_text_v1(type_def.export_name)}"
+
+fn native_capsule_hir_type_identity_v1(type_: HirType) -> text:
+    match type_.kind:
+        case Int(bits, signed): "int:{bits}:{signed}"
+        case Float(bits): "float:{bits}"
+        case Bool: "bool"
+        case Char: "char"
+        case Str: "str"
+        case Unit: "unit"
+        case Tuple(elements):
+            var rows: [text] = []
+            for element in elements: rows.push(native_capsule_hir_type_identity_v1(element))
+            "tuple:{storage_identity_text_v1(rows.join(";"))}"
+        case Array(element, size):
+            var size_identity = "dynamic"
+            if val fixed_size = size: size_identity = fixed_size.to_text()
+            "array:{storage_identity_text_v1(native_capsule_hir_type_identity_v1(element))}:{size_identity}"
+        case Slice(element): "slice:{storage_identity_text_v1(native_capsule_hir_type_identity_v1(element))}"
+        case Dict(key, value): "dict:{storage_identity_text_v1(native_capsule_hir_type_identity_v1(key))}:{storage_identity_text_v1(native_capsule_hir_type_identity_v1(value))}"
+        case Ref(inner, mutable): "ref:{mutable}:{storage_identity_text_v1(native_capsule_hir_type_identity_v1(inner))}"
+        case Ptr(inner, mutable): "ptr:{mutable}:{storage_identity_text_v1(native_capsule_hir_type_identity_v1(inner))}"
+        case Optional(inner): "optional:{storage_identity_text_v1(native_capsule_hir_type_identity_v1(inner))}"
+        case Result(ok, err): "result:{storage_identity_text_v1(native_capsule_hir_type_identity_v1(ok))}:{storage_identity_text_v1(native_capsule_hir_type_identity_v1(err))}"
+        case Named(symbol, args):
+            var rows: [text] = []
+            for arg in args: rows.push(native_capsule_hir_type_identity_v1(arg))
+            "named:{symbol.id}:{storage_identity_text_v1(rows.join(";"))}"
+        case TypeParam(name, bounds):
+            var rows: [text] = []
+            for bound in bounds: rows.push(native_capsule_hir_type_identity_v1(bound))
+            "param:{storage_identity_text_v1(name)}:{storage_identity_text_v1(rows.join(";"))}"
+        case Union(members):
+            var rows: [text] = []
+            for member in members: rows.push(native_capsule_hir_type_identity_v1(member))
+            "union:{storage_identity_text_v1(rows.join(";"))}"
+        case DynTrait(trait_): "dyn:{trait_.id}"
+        case Function(params, ret, effects):
+            var param_rows: [text] = []
+            for param in params: param_rows.push(native_capsule_hir_type_identity_v1(param))
+            var effect_rows: [text] = []
+            for effect in effects: effect_rows.push(native_capsule_effect_identity_v1(effect))
+            "fn:{storage_identity_text_v1(param_rows.join(";"))}:{storage_identity_text_v1(native_capsule_hir_type_identity_v1(ret))}:{storage_identity_text_v1(effect_rows.join(";"))}"
+        case Projection(base, assoc_name): "projection:{storage_identity_text_v1(native_capsule_hir_type_identity_v1(base))}:{storage_identity_text_v1(assoc_name)}"
+        case Isolated(inner): "isolated:{storage_identity_text_v1(native_capsule_hir_type_identity_v1(inner))}"
+        case Infer(id, level): "infer:{id}:{level}"
+        case Error: "error"
+        case Never: "never"
+        case Any: "any"
+        case Tensor(element, dims, device):
+            var dim_rows: [text] = []
+            for dim in dims: dim_rows.push(native_capsule_dim_identity_v1(dim))
+            var device_identity = "none"
+            if val selected_device = device: device_identity = native_capsule_device_identity_v1(selected_device)
+            "tensor:{storage_identity_text_v1(native_capsule_hir_type_identity_v1(element))}:{storage_identity_text_v1(dim_rows.join(";"))}:{device_identity}"
+        case Layer(input, output):
+            var input_rows: [text] = []
+            for dim in input: input_rows.push(native_capsule_dim_identity_v1(dim))
+            var output_rows: [text] = []
+            for dim in output: output_rows.push(native_capsule_dim_identity_v1(dim))
+            "layer:{storage_identity_text_v1(input_rows.join(";"))}:{storage_identity_text_v1(output_rows.join(";"))}"
+
+fn native_capsule_dim_identity_v1(dim: DimExpr) -> text:
+    match dim.kind:
+        case Literal(value): "literal:{value}"
+        case Named(name, lo, hi):
+            var lo_identity = "none"
+            var hi_identity = "none"
+            if val lo_value = lo: lo_identity = lo_value.to_text()
+            if val hi_value = hi: hi_identity = hi_value.to_text()
+            "named:{storage_identity_text_v1(name)}:{lo_identity}:{hi_identity}"
+        case Var(id): "var:{id}"
+        case Dynamic: "dynamic"
+        case Broadcast: "broadcast"
+        case ConstParam(name): "const:{storage_identity_text_v1(name)}"
+        case Add(left, right): "add:{storage_identity_text_v1(native_capsule_dim_identity_v1(left))}:{storage_identity_text_v1(native_capsule_dim_identity_v1(right))}"
+        case Mul(left, right): "mul:{storage_identity_text_v1(native_capsule_dim_identity_v1(left))}:{storage_identity_text_v1(native_capsule_dim_identity_v1(right))}"
+        case Div(left, right): "div:{storage_identity_text_v1(native_capsule_dim_identity_v1(left))}:{storage_identity_text_v1(native_capsule_dim_identity_v1(right))}"
+
+fn native_capsule_device_identity_v1(device: DeviceType) -> text:
+    match device:
+        case CPU: "cpu"
+        case CUDA(id): "cuda:{id}"
+        case Vulkan(id): "vulkan:{id}"
+
+fn native_capsule_effect_identity_v1(effect: Effect) -> text:
+    match effect.kind:
+        case Pure: "pure"
+        case IO: "io"
+        case Async: "async"
+        case Throws(type_): "throws:{storage_identity_text_v1(native_capsule_hir_type_identity_v1(type_))}"
+        case Mutates: "mutates"
+        case Allocates: "allocates"
+        case Custom(name): "custom:{storage_identity_text_v1(name)}"
+
+fn native_capsule_function_metadata_identity_v1(function: MirFunction) -> text:
+    var generic_rows: [text] = []
+    for param in function.generic_params: generic_rows.push(storage_identity_text_v1(param))
+    var specialization = "none"
+    if val specialization_name = function.specialization_of:
+        specialization = storage_identity_text_v1(specialization_name)
+    var binding_keys = function.type_bindings.keys()
+    var i = 0
+    while i < binding_keys.len():
+        var j = i + 1
+        while j < binding_keys.len():
+            if binding_keys[j] < binding_keys[i]:
+                val temporary = binding_keys[i]
+                binding_keys[i] = binding_keys[j]
+                binding_keys[j] = temporary
+            j = j + 1
+        i = i + 1
+    var binding_rows: [text] = []
+    for key in binding_keys:
+        binding_rows.push("{storage_identity_text_v1(key)}:{storage_identity_text_v1(native_capsule_hir_type_identity_v1(function.type_bindings[key]))}")
+    var layout_identity = "none"
+    if val layout = function.layout_phase:
+        layout_identity = match layout:
+            case Startup: "startup"
+            case FirstFrame: "first-frame"
+            case Steady: "steady"
+            case Cold: "cold"
+    # `driver_manifest_attr` is nil whenever `has_driver_manifest_attr` is
+    # false -- declaration_lowering.spl:549-550 stores the paired
+    # `DriverManifestAttr?` straight through. Dereferencing it unguarded traps
+    # with "undefined field 'kind': cannot access field on value of type 'nil'"
+    # for EVERY ordinary function, which broke the whole AOT lane. Same defect
+    # class as the 2026-08-01 SIGILL documented at declaration_lowering.spl:502.
+    var manifest_kind = "none"
+    var manifest_driver_class = 0
+    var manifest_vendor = 0
+    var manifest_version = ""
+    var manifest_abi = ""
+    var device_rows: [text] = []
+    if function.has_driver_manifest_attr:
+        manifest_kind = match function.driver_manifest_attr.kind:
+            case Driver: "driver"
+            case NativeLib: "native-lib"
+        manifest_driver_class = function.driver_manifest_attr.driver_class
+        manifest_vendor = function.driver_manifest_attr.vendor
+        manifest_version = function.driver_manifest_attr.version
+        manifest_abi = function.driver_manifest_attr.abi
+        for device_id in function.driver_manifest_attr.device_ids: device_rows.push(device_id.to_text())
+    var vhdl_generic_rows: [text] = []
+    for generic in function.vhdl_metadata.generics:
+        vhdl_generic_rows.push("{storage_identity_text_v1(generic.name)}:{storage_identity_text_v1(generic.type_text)}:{storage_identity_text_v1(generic.default_text)}")
+    var validation_rows: [text] = []
+    for error in function.vhdl_metadata.clocked.validation_errors:
+        validation_rows.push(storage_identity_text_v1(error))
+    var return_rows: [text] = []
+    for field in function.vhdl_metadata.return_fields:
+        return_rows.push("{storage_identity_text_v1(field.label)}:{storage_identity_text_v1(field.type_text)}")
+    val reset_polarity = match function.vhdl_metadata.clocked.reset_polarity:
+        case ActiveLow: "active-low"
+        case ActiveHigh: "active-high"
+    val reset_synchrony = match function.vhdl_metadata.clocked.reset_synchrony:
+        case Async: "async"
+        case Sync: "sync"
+        case None_: "none"
+    "generic={storage_identity_text_v1(generic_rows.join(";"))}|template={function.is_generic_template}|specialization={specialization}|bindings={storage_identity_text_v1(binding_rows.join(";"))}|layout={layout_identity}|kernel={function.is_kernel}:{storage_identity_text_v1(function.gpu_target)}:{storage_identity_text_v1(function.gpu_backend_order)}|export={function.is_export_c}:{storage_identity_text_v1(function.export_name)}|manifest={function.has_driver_manifest_attr}:{manifest_kind}:{manifest_driver_class}:{manifest_vendor}:{storage_identity_text_v1(device_rows.join(";"))}:{storage_identity_text_v1(manifest_version)}:{storage_identity_text_v1(manifest_abi)}|vhdl={function.has_vhdl_metadata}:{function.vhdl_metadata.is_hardware}:{storage_identity_text_v1(vhdl_generic_rows.join(";"))}:{function.vhdl_metadata.has_clocked}:{storage_identity_text_v1(function.vhdl_metadata.clocked.clock_signal)}:{storage_identity_text_v1(function.vhdl_metadata.clocked.reset_signal)}:{function.vhdl_metadata.clocked.has_reset}:{reset_polarity}:{reset_synchrony}:{storage_identity_text_v1(function.vhdl_metadata.clocked.domain)}:{function.vhdl_metadata.clocked.is_valid}:{storage_identity_text_v1(validation_rows.join(";"))}:{storage_identity_text_v1(return_rows.join(";"))}:{function.vhdl_metadata.flatten_struct_output}|fast-math={function.has_fast_math}|fpga={function.unroll_factor}:{function.pipeline_ii}:{function.memory_banks}"
+
+pub fn native_capsule_mir_identity_v1(module: MirModule) -> text:
+    var rows: [text] = ["module|{storage_identity_text_v1(module.name)}"]
+    for symbol in native_capsule_sorted_symbol_ids_v1(module.functions.keys()):
+        val function = module.functions[symbol]
+        rows.push("fn|{symbol.id}|{storage_identity_text_v1(serialize_mir_function(function))}|{storage_identity_text_v1(native_capsule_function_metadata_identity_v1(function))}")
+    for symbol in native_capsule_sorted_symbol_ids_v1(module.constants.keys()):
+        val constant = module.constants[symbol]
+        rows.push("const|{symbol.id}|{storage_identity_text_v1(constant.name)}|{serialize_mir_type(constant.type_)}|{storage_identity_text_v1(serialize_const_value(constant.value))}")
+    for symbol in native_capsule_sorted_symbol_ids_v1(module.statics.keys()):
+        val static_value = module.statics[symbol]
+        var init_identity = "none"
+        if val init = static_value.init:
+            init_identity = "{init.symbol.id}|{storage_identity_text_v1(init.name)}|{serialize_mir_type(init.type_)}|{storage_identity_text_v1(serialize_const_value(init.value))}"
+        rows.push("static|{symbol.id}|{storage_identity_text_v1(static_value.name)}|{serialize_mir_type(static_value.type_)}|{static_value.is_mutable}|{storage_identity_text_v1(init_identity)}")
+    for symbol in native_capsule_sorted_symbol_ids_v1(module.types.keys()):
+        rows.push("type|{native_capsule_type_def_identity_v1(module.types[symbol])}")
+    sha256_text(rows.join("\n"))
+
+fn frozen_storage_site_identity_v1(site: MirStorageViewSiteBindingV1,
+                                   evidence: MirTypedStorageViewEvidenceV1) -> text:
+    val view = site.binding
+    val plan = view.plan
+    var field_rows: [text] = []
+    for field in view.fields:
+        field_rows.push("{field.field_id},{field.logical_offset},{field.field_size},{field.column_offset}")
+    var i = 0
+    while i < field_rows.len():
+        var j = i + 1
+        while j < field_rows.len():
+            if field_rows[j] < field_rows[i]:
+                val temporary = field_rows[i]
+                field_rows[i] = field_rows[j]
+                field_rows[j] = temporary
+            j = j + 1
+        i = i + 1
+    val fields_identity = field_rows.join(":")
+    "{site.function_symbol_id}|{site.base_local_id}|{site.index_bounds_proven}|{view.logical_type_id}|{view.revision}|{view.element_count}|{view.allocation_byte_len}|{view.logical_stride}|{view.address_observed}|{plan.contract_version}|{storage_layout_kind_to_u8(plan.layout)}|{plan.block_width}|{plan.alignment}|{plan.abi_pinned}|{storage_conversion_policy_to_u8(plan.conversion)}|{storage_identity_text_v1(plan.policy_hash)}|{storage_identity_text_v1(plan.decision_reason)}|{storage_identity_text_v1(fields_identity)}|{storage_identity_text_v1(evidence.allocation_identity)}|{storage_identity_text_v1(evidence.allocation_provenance)}|{storage_identity_text_v1(evidence.source_revision)}|{evidence.producer_contract_version}|{storage_identity_text_v1(evidence.producer_pattern)}|{storage_identity_text_v1(evidence.bounds_proof_kind)}|{evidence.produced_projection_count}"
+
+fn frozen_storage_module_identity_v1(
+    module_name: text, sites: [MirStorageViewSiteBindingV1],
+    evidence: [MirTypedStorageViewEvidenceV1]
+) -> text:
+    if sites.len() != evidence.len(): return "invalid"
+    var rows: [text] = []
+    var index = 0
+    while index < sites.len():
+        val site = sites[index]
+        val row = evidence[index]
+        if site.function_symbol_id != row.site.function_symbol_id
+            or site.base_local_id != row.site.base_local_id
+            or frozen_storage_site_identity_v1(site, row) !=
+                frozen_storage_site_identity_v1(row.site, row):
+            return "invalid"
+        rows.push(frozen_storage_site_identity_v1(site, row))
+        index = index + 1
+    var i = 0
+    while i < rows.len():
+        var j = i + 1
+        while j < rows.len():
+            if rows[j] < rows[i]:
+                val temporary = rows[i]
+                rows[i] = rows[j]
+                rows[j] = temporary
+            j = j + 1
+        i = i + 1
+    val joined = rows.join(";")
+    "storage-module-v1|{storage_identity_text_v1(module_name)}|{storage_identity_text_v1(joined)}"
+
+fn frozen_storage_copy_site_v1(site: MirStorageViewSiteBindingV1) -> MirStorageViewSiteBindingV1:
+    var copied_fields: [MirStorageFieldBindingV1] = []
+    for field in site.binding.fields:
+        copied_fields.push(field)
+    MirStorageViewSiteBindingV1(..site,
+        binding: MirStorageViewBindingV1(..site.binding, fields: copied_fields))
+
+fn frozen_storage_copy_evidence_v1(
+    evidence: MirTypedStorageViewEvidenceV1,
+    copied_site: MirStorageViewSiteBindingV1
+) -> MirTypedStorageViewEvidenceV1:
+    MirTypedStorageViewEvidenceV1(..evidence, site: copied_site)
+
+# Stem (filename without extension) computed with rfind + `>= 0`/`> 0`
+# checks, NOT std.path.stem/extension: those match rfind's raw i64 result
+# against Some(idx)/nil, and under native MIR codegen a bare i64 never
+# matches that Option pattern (crashes with "match expression exhausted...
+# for i64 value N" -- verified live, not hypothesized).
+fn _driver_types_default_stem(path_text: text) -> text:
+    val slash = path_text.rfind("/")
+    val base = if slash >= 0: path_text.substring(slash + 1) else: path_text
+    val dot = base.rfind(".")
+    if dot > 0:
+        base.substring(0, dot)
+    else:
+        base
+
+# Contained default when no output_file was requested: build/native/<stem of
+# the first input file>, never a bare filename in cwd. See
+# doc/03_plan/compiler/driver/default_output_dir_containment_plan.md.
+fn _driver_types_default_output(input_files: [text]) -> text:
+    if input_files.len() > 0:
+        "build/native/{_driver_types_default_stem(input_files[0])}"
+    else:
+        "build/native/out"
+
+# ------------------------------------------------------------------------------
+# Compilation Context
+# ------------------------------------------------------------------------------
+
+class CompileContext:
+    options: CompileOptions
+    native_target: text
+    assurance_policy: ResolvedAssurancePolicyV1
+    config: Dict<text, text>  # Using dict instead of Config to avoid interpreter issues
+    backend: BackendPort       # Typed port: visible contract, replaces extensions.resolve("Backend")
+    extensions: DiContainer    # Dynamic extension point for plugins (Feature 5)
+    aop: AopWeaver
+    logger: BootLogger
+    sources: [SourceFile]
+    # Scalar owner projection of sources. Native value-record lowering can
+    # invalidate SourceFile field handles across transient parser scopes; these
+    # arrays are created with independent text storage during phase 1.
+    source_paths_owner: [text]
+    source_authored_paths_owner: [text]
+    source_contents_owner: [text]
+    # Immutable whole-source receipt hashes captured before low-memory source
+    # eviction. Zero is reserved for unavailable/missing, so a real zero hash
+    # is remapped to one by the producer and validator.
+    source_content_hashes_owner: [i64]
+    source_module_names_owner: [text]
+    native_sources_fingerprint: text
+    modules: Dict<text, ParserModule>
+    module_surfaces: ModuleSurfacesByName?
+    hir_modules: Dict<text, HirModule>
+    hir_module_count_value: i64
+    bootstrap_entry_hir: HirModule?
+    mir_modules: Dict<text, MirModule>
+    bootstrap_entry_mir: MirModule?
+    # Dict key under which `bootstrap_entry_mir` was ALSO stored into
+    # `mir_modules`. `bootstrap_entry_mir` is an alias, not an owner: every
+    # lowering branch writes the same MirModule handle into both. Recorded
+    # here so `evict_mir_module` can clear the alias when its target is
+    # evicted (bootstrap_stage4_selfhost_parse_memory_blowup_2026-07-20,
+    # hazard 1). Empty text means "no entry alias registered". This cannot be
+    # derived from `MirModule.name`: the bootstrap flat lane stores a module
+    # whose `.name` is "" under a real key
+    # (50.mir/_MirLowering/bootstrap_globals.spl:784).
+    bootstrap_entry_mir_name: text
+    errors: [text]
+    error_count_value: i64
+    warnings: [text]
+    visibility_warnings: [text]  # Visibility warnings (W0401)
+    # Modules whose own diagnostics made their lowered aggregate unusable.
+    # A poisoned module is DROPPED (never stored into hir_modules), so
+    # downstream passes cannot consume a partially-lowered corpse -- that was
+    # the whole point of the original fail-fast at driver_hir_pipeline_lowering
+    # :344. Recording the name instead of returning lets the phase keep
+    # checking the REMAINING modules and report the whole family in one run.
+    poisoned_modules: [text]
+    # Native empty-array field reads can carry a nil aggregate at late phase
+    # boundaries. Keep the count scalar so summary/budget checks do not need
+    # to dereference the array when no module was poisoned.
+    poisoned_module_count_value: i64
+    vhdl_hardware_metadata_rows: [VhdlHardwareMetadataFlatRow]
+    # Module-qualified aligned rows. Arrays are reassigned together because
+    # nested Dict<text,[struct]> mutation is not reliable on Stage4.
+    storage_binding_module_names: [text]
+    storage_view_site_bindings: [MirStorageViewSiteBindingV1]
+    storage_evidence_module_names: [text]
+    storage_view_evidence_rows: [MirTypedStorageViewEvidenceV1]
+    storage_registry_frozen: bool
+    storage_registry_frozen_identity: text
+    # Immutable worker input captured at the one-way freeze boundary. Native
+    # module workers never consult the live registration arrays.
+    frozen_storage_module_names: [text]
+    frozen_storage_sites: [MirStorageViewSiteBindingV1]
+    frozen_storage_evidence: [MirTypedStorageViewEvidenceV1]
+    frozen_storage_known_module_names: [text]
+
+    static fn create(options: CompileOptions) -> CompileContext:
+        # Load config
+        var config: Dict<text, text> = {}
+        var compiler_config = CompilerConfig.from_env()
+        # CompileOptions is the real CLI-to-driver boundary. Apply its values
+        # after environment loading so command-line authority wins without a
+        # process-global env write that could leak into concurrent compiles.
+        if options.mcdc_mode_text != "":
+            if val cli_mcdc_mode = mcdc_mode_from_text(options.mcdc_mode_text):
+                compiler_config.mcdc_mode = cli_mcdc_mode
+            else:
+                config["mcdc_config_error"] = "MCDC-E-MODE: unknown MC/DC mode '{options.mcdc_mode_text}'"
+        if options.mcdc_owner_bytes > 0:
+            compiler_config.mcdc_owner_bytes = options.mcdc_owner_bytes
+        if options.mcdc_global_bytes > 0:
+            if options.mcdc_global_bytes >= compiler_config.mcdc_owner_bytes:
+                compiler_config.mcdc_global_bytes = options.mcdc_global_bytes
+            else:
+                config["mcdc_config_error"] = "MC/DC global byte budget must be at least the owner byte budget"
+        if compiler_config.mcdc_global_bytes < compiler_config.mcdc_owner_bytes:
+            config["mcdc_config_error"] = "MC/DC global byte budget must be at least the owner byte budget"
+        if compiler_config.coverage_enabled or options.coverage_enabled:
+            config["coverage"] = "1"
+        config["mcdc_mode"] = mcdc_mode_name(compiler_config.mcdc_mode)
+        config["mcdc_owner_bytes"] = compiler_config.mcdc_owner_bytes.to_text()
+        config["mcdc_global_bytes"] = compiler_config.mcdc_global_bytes.to_text()
+        config["mcdc_include"] = compiler_config.mcdc_include
+        config["mcdc_exclude"] = compiler_config.mcdc_exclude
+        config["rt_hal_plan"] = compiler_config.get("rt-hal-plan") ?? ""
+
+        # Standalone native CLI transports its requested mode through the
+        # stable text field because the enum field can be corrupted by the
+        # aggregate argument copy into this function.
+        var selected_mode_text = options.mode.to_text()
+        if options.cli_mode_text != "":
+            selected_mode_text = options.cli_mode_text
+
+        # Build typed BackendPort from concrete implementation based on mode
+        val backend = if selected_mode_text == "interpret" or selected_mode_text == "smf_exec":
+            val interp_impl = InterpreterBackendImpl.new()
+            val interp_name = if selected_mode_text == "interpret": "interpreter" else: "smf_exec"
+            BackendPort(
+                name: interp_name,
+                run_fn: fn(m): interp_impl.process_module(m),
+                supports_jit_fn: fn(): false,
+                target_triple_fn: fn(): interp_name
+            )
+        elif selected_mode_text == "jit":
+            val jit_impl = CompilerBackendImpl.jit()
+            BackendPort(
+                name: "jit",
+                run_fn: fn(m): jit_impl.process_module(m),
+                supports_jit_fn: fn(): true,
+                target_triple_fn: fn(): "native-jit"
+            )
+        elif selected_mode_text == "aot":
+            val output = options.output_file ?? _driver_types_default_output(options.input_files)
+            val aot_impl = CompilerBackendImpl.aot(output)
+            BackendPort(
+                name: "aot",
+                run_fn: fn(m): aot_impl.process_module(m),
+                supports_jit_fn: fn(): false,
+                target_triple_fn: fn(): "native-aot"
+            )
+        elif selected_mode_text == "sdn":
+            val sdn_impl = SdnBackendImpl()
+            BackendPort(
+                name: "sdn",
+                run_fn: fn(m): sdn_impl.process_module(m),
+                supports_jit_fn: fn(): false,
+                target_triple_fn: fn(): "sdn"
+            )
+        else:
+            BackendPort(
+                name: "check",
+                run_fn: fn(m): Ok(BackendResult.Unit),
+                supports_jit_fn: fn(): false,
+                target_triple_fn: fn(): "check"
+            )
+
+        # Setup extensions container for plugin/extension use (Feature 5)
+        val extensions = DiContainer(bindings: {}, singletons: {}, profile: options.profile, all_bindings: [], locked: false)
+
+        # Setup logger from env var (SIMPLE_LOG=debug|trace|info|warn|error)
+        val logger = if options.verbose:
+            BootLogger(level: 10)  # verbose flag forces debug level
+        else:
+            BootLogger.from_env()
+
+        # Setup AOP
+        val aop_config = WeavingConfig(enabled: false, before_advices: [], after_success_advices: [], after_error_advices: [], around_advices: [])
+        val runtime_enabled = not options.release  # Runtime advice disabled in release builds
+        var aop = AopWeaver(advices: [], config: aop_config, logger: logger, runtime_enabled: runtime_enabled, runtime_allowlist: [])
+        if options.verbose:
+            aop.add_log_aspect(LogAspect(level: 6), Pointcut(kind: PointcutKind.All, pattern: "*"))
+
+        CompileContext(
+            options: options,
+            native_target: options.native_target,
+            assurance_policy: policy_from_env_value(env_get("SIMPLE_SAFETY_PROFILE")),
+            config: config,
+            backend: backend,
+            extensions: extensions,
+            aop: aop,
+            logger: logger,
+            sources: [],
+            source_paths_owner: [],
+            source_authored_paths_owner: [],
+            source_contents_owner: [],
+            source_content_hashes_owner: [],
+            source_module_names_owner: [],
+            native_sources_fingerprint: "",
+            modules: {},
+            module_surfaces: nil,
+            hir_modules: {},
+            hir_module_count_value: 0,
+            bootstrap_entry_hir: nil,
+            mir_modules: {},
+            bootstrap_entry_mir: nil,
+            bootstrap_entry_mir_name: "",
+            errors: [],
+            error_count_value: 0,
+            warnings: [],
+            visibility_warnings: [],
+            poisoned_modules: [],
+            poisoned_module_count_value: 0,
+            vhdl_hardware_metadata_rows: [],
+            storage_binding_module_names: [],
+            storage_view_site_bindings: [],
+            storage_evidence_module_names: [],
+            storage_view_evidence_rows: [],
+            storage_registry_frozen: false,
+            storage_registry_frozen_identity: "",
+            frozen_storage_module_names: [],
+            frozen_storage_sites: [],
+            frozen_storage_evidence: []
+            , frozen_storage_known_module_names: []
+        )
+
+    fn storage_binding_rows_well_formed() -> bool:
+        self.storage_binding_module_names.len() == self.storage_view_site_bindings.len()
+
+    fn storage_evidence_rows_well_formed() -> bool:
+        self.storage_evidence_module_names.len() == self.storage_view_evidence_rows.len()
+
+    fn storage_registry_rows_well_formed() -> bool:
+        if not self.storage_binding_rows_well_formed()
+            or not self.storage_evidence_rows_well_formed()
+            or self.storage_binding_module_names.len() != self.storage_evidence_module_names.len():
+            return false
+        var index = 0
+        while index < self.storage_binding_module_names.len():
+            val site = self.storage_view_site_bindings[index]
+            val evidence = self.storage_view_evidence_rows[index]
+            if self.storage_binding_module_names[index] != self.storage_evidence_module_names[index]
+                or site.function_symbol_id != evidence.site.function_symbol_id
+                or site.base_local_id != evidence.site.base_local_id
+                or frozen_storage_site_identity_v1(site, evidence) !=
+                    frozen_storage_site_identity_v1(evidence.site, evidence):
+                return false
+            index = index + 1
+        true
+
+    me register_storage_view_site_binding(
+        module_name: text, site: MirStorageViewSiteBindingV1
+    ) -> text:
+        if self.storage_registry_frozen:
+            return "storage-registry-frozen"
+        if module_name == "" or not self.storage_binding_rows_well_formed():
+            return "invalid-storage-binding-registry"
+        var index = 0
+        while index < self.storage_binding_module_names.len():
+            val existing = self.storage_view_site_bindings[index]
+            if self.storage_binding_module_names[index] == module_name
+                and existing.function_symbol_id == site.function_symbol_id
+                and existing.base_local_id == site.base_local_id:
+                return "duplicate-storage-view-site-binding"
+            index = index + 1
+        self.storage_binding_module_names.push(module_name)
+        self.storage_view_site_bindings.push(site)
+        "ok"
+
+    me register_storage_view_evidence_batch(
+        module_name: text, rows: [MirTypedStorageViewEvidenceV1]
+    ) -> text:
+        if self.storage_registry_frozen:
+            return "storage-registry-frozen"
+        if module_name == "" or rows.len() == 0
+            or not self.storage_binding_rows_well_formed()
+            or not self.storage_evidence_rows_well_formed():
+            return "invalid-storage-evidence-registry"
+        # Preflight every existing and incoming site before mutating any row.
+        var incoming_index = 0
+        while incoming_index < rows.len():
+            val incoming = rows[incoming_index]
+            if incoming.allocation_identity == ""
+                or incoming.allocation_provenance == "" or incoming.source_revision == ""
+                or incoming.producer_contract_version <= 0
+                or incoming.producer_pattern == ""
+                or incoming.bounds_proof_kind == ""
+                or incoming.produced_projection_count <= 0:
+                return "invalid-storage-evidence-row"
+            var existing_index = 0
+            while existing_index < self.storage_binding_module_names.len():
+                val existing = self.storage_view_site_bindings[existing_index]
+                if self.storage_binding_module_names[existing_index] == module_name
+                    and existing.function_symbol_id == incoming.site.function_symbol_id
+                    and existing.base_local_id == incoming.site.base_local_id:
+                    return "duplicate-storage-view-site-binding"
+                existing_index = existing_index + 1
+            var prior = 0
+            while prior < incoming_index:
+                if rows[prior].site.function_symbol_id == incoming.site.function_symbol_id
+                    and rows[prior].site.base_local_id == incoming.site.base_local_id:
+                    return "duplicate-storage-view-site-binding"
+                prior = prior + 1
+            incoming_index = incoming_index + 1
+        for row in rows:
+            self.storage_binding_module_names.push(module_name)
+            self.storage_view_site_bindings.push(row.site)
+            self.storage_evidence_module_names.push(module_name)
+            self.storage_view_evidence_rows.push(row)
+        "ok"
+
+    me install_produced_storage_module(
+        module_name: text, produced: MirTypedStorageViewProducerResultV1
+    ) -> text:
+        if not produced.ok:
+            return "typed-storage-producer:{produced.reason}"
+        if produced.produced_count <= 0 or produced.evidence.len() == 0
+            or produced.evidence.len() != produced.sites.len():
+            return "invalid-produced-storage-module"
+        # Batch registration performs complete validation and assigns all
+        # aligned registry rows once. MIR replacement follows only after that
+        # preflight succeeds; assigning a Dict value cannot partially fail.
+        val registered = self.register_storage_view_evidence_batch(
+            module_name, produced.evidence)
+        if registered != "ok": return registered
+        self.mir_modules[module_name] = produced.module
+        if self.bootstrap_entry_mir_name == module_name:
+            self.bootstrap_entry_mir = Some(produced.module)
+        "ok"
+
+    fn storage_view_evidence_for_module(module_name: text) -> [MirTypedStorageViewEvidenceV1]:
+        var result: [MirTypedStorageViewEvidenceV1] = []
+        if not self.storage_evidence_rows_well_formed(): return result
+        var index = 0
+        while index < self.storage_evidence_module_names.len():
+            if self.storage_evidence_module_names[index] == module_name:
+                result.push(self.storage_view_evidence_rows[index])
+            index = index + 1
+        result
+
+    fn storage_view_site_bindings_for_module(module_name: text) -> [MirStorageViewSiteBindingV1]:
+        var result: [MirStorageViewSiteBindingV1] = []
+        if not self.storage_binding_rows_well_formed():
+            return result
+        var index = 0
+        while index < self.storage_binding_module_names.len():
+            if self.storage_binding_module_names[index] == module_name:
+                result.push(self.storage_view_site_bindings[index])
+            index = index + 1
+        result
+
+    fn storage_live_binding_identity() -> text:
+        if not self.storage_binding_rows_well_formed():
+            return "invalid"
+        var rows: [text] = []
+        var index = 0
+        while index < self.storage_binding_module_names.len():
+            val site = self.storage_view_site_bindings[index]
+            val view = site.binding
+            val plan = view.plan
+            var field_rows: [text] = []
+            for field in view.fields:
+                field_rows.push("{field.field_id},{field.logical_offset},{field.field_size},{field.column_offset}")
+            var field_i = 0
+            while field_i < field_rows.len():
+                var field_j = field_i + 1
+                while field_j < field_rows.len():
+                    if field_rows[field_j] < field_rows[field_i]:
+                        val field_tmp = field_rows[field_i]
+                        field_rows[field_i] = field_rows[field_j]
+                        field_rows[field_j] = field_tmp
+                    field_j = field_j + 1
+                field_i = field_i + 1
+            val fields = field_rows.join(":")
+            rows.push("{storage_identity_text_v1(self.storage_binding_module_names[index])}|{site.function_symbol_id}|{site.base_local_id}|{site.index_bounds_proven}|{view.logical_type_id}|{view.revision}|{view.element_count}|{view.allocation_byte_len}|{view.logical_stride}|{view.address_observed}|{plan.contract_version}|{storage_layout_kind_to_u8(plan.layout)}|{plan.block_width}|{plan.alignment}|{plan.abi_pinned}|{storage_conversion_policy_to_u8(plan.conversion)}|{storage_identity_text_v1(plan.policy_hash)}|{storage_identity_text_v1(plan.decision_reason)}|{storage_identity_text_v1(fields)}")
+            index = index + 1
+        # Registration order is not semantic. Keep the cache identity stable.
+        var i = 0
+        while i < rows.len():
+            var j = i + 1
+            while j < rows.len():
+                if rows[j] < rows[i]:
+                    val tmp = rows[i]
+                    rows[i] = rows[j]
+                    rows[j] = tmp
+                j = j + 1
+            i = i + 1
+        rows.join(";")
+
+    fn storage_live_evidence_identity() -> text:
+        if not self.storage_evidence_rows_well_formed(): return "invalid"
+        var rows: [text] = []
+        var index = 0
+        while index < self.storage_evidence_module_names.len():
+            val evidence = self.storage_view_evidence_rows[index]
+            rows.push("{storage_identity_text_v1(self.storage_evidence_module_names[index])}|{evidence.site.function_symbol_id}|{evidence.site.base_local_id}|{storage_identity_text_v1(evidence.allocation_identity)}|{storage_identity_text_v1(evidence.allocation_provenance)}|{storage_identity_text_v1(evidence.source_revision)}|{evidence.producer_contract_version}|{storage_identity_text_v1(evidence.producer_pattern)}|{storage_identity_text_v1(evidence.bounds_proof_kind)}|{evidence.produced_projection_count}")
+            index = index + 1
+        var i = 0
+        while i < rows.len():
+            var j = i + 1
+            while j < rows.len():
+                if rows[j] < rows[i]:
+                    val tmp = rows[i]
+                    rows[i] = rows[j]
+                    rows[j] = tmp
+                j = j + 1
+            i = i + 1
+        rows.join(";")
+
+    fn storage_binding_identity() -> text:
+        if self.storage_registry_frozen:
+            return self.storage_registry_frozen_identity
+        "unfrozen:{self.storage_live_binding_identity()}|evidence:{self.storage_live_evidence_identity()}"
+
+    fn frozen_storage_registry_well_formed() -> bool:
+        if self.frozen_storage_module_names.len() != self.frozen_storage_sites.len()
+            or self.frozen_storage_module_names.len() != self.frozen_storage_evidence.len():
+            return false
+        var index = 0
+        while index < self.frozen_storage_module_names.len():
+            val site = self.frozen_storage_sites[index]
+            val evidence = self.frozen_storage_evidence[index]
+            if self.frozen_storage_module_names[index] == ""
+                or frozen_storage_site_identity_v1(site, evidence) !=
+                    frozen_storage_site_identity_v1(evidence.site, evidence):
+                return false
+            index = index + 1
+        true
+
+    me freeze_storage_registry() -> text:
+        if self.storage_registry_frozen:
+            if not self.frozen_storage_registry_well_formed(): return "invalid"
+            return self.storage_registry_frozen_identity
+        if not self.storage_registry_rows_well_formed():
+            return "invalid"
+        self.storage_registry_frozen_identity =
+            "frozen:{self.storage_live_binding_identity()}|evidence:{self.storage_live_evidence_identity()}"
+        var frozen_names: [text] = []
+        var frozen_sites: [MirStorageViewSiteBindingV1] = []
+        var frozen_evidence: [MirTypedStorageViewEvidenceV1] = []
+        var frozen_known_names = self.mir_modules.keys()
+        if self.bootstrap_entry_mir_name != "":
+            var found_bootstrap = false
+            for known_name in frozen_known_names:
+                if known_name == self.bootstrap_entry_mir_name: found_bootstrap = true
+            if not found_bootstrap:
+                frozen_known_names.push(self.bootstrap_entry_mir_name)
+        var index = 0
+        while index < self.storage_binding_module_names.len():
+            val copied_site = frozen_storage_copy_site_v1(
+                self.storage_view_site_bindings[index])
+            frozen_names.push(self.storage_binding_module_names[index])
+            frozen_sites.push(copied_site)
+            frozen_evidence.push(frozen_storage_copy_evidence_v1(
+                self.storage_view_evidence_rows[index], copied_site))
+            index = index + 1
+        self.frozen_storage_module_names = frozen_names
+        self.frozen_storage_sites = frozen_sites
+        self.frozen_storage_evidence = frozen_evidence
+        self.frozen_storage_known_module_names = frozen_known_names
+        if not self.frozen_storage_registry_well_formed(): return "invalid"
+        self.storage_registry_frozen = true
+        self.storage_registry_frozen_identity
+
+    fn frozen_storage_module_snapshot(module_name: text) -> FrozenStorageModuleSnapshotV1:
+        if not self.storage_registry_frozen:
+            return FrozenStorageModuleSnapshotV1(ok: false, module_name: module_name,
+                registry_identity: "", module_identity: "", sites: [], evidence: [],
+                reason: "storage-registry-not-frozen")
+        if not self.frozen_storage_registry_well_formed():
+            return FrozenStorageModuleSnapshotV1(ok: false, module_name: module_name,
+                registry_identity: self.storage_registry_frozen_identity,
+                module_identity: "", sites: [], evidence: [],
+                reason: "frozen-storage-registry-malformed")
+        var sites: [MirStorageViewSiteBindingV1] = []
+        var evidence: [MirTypedStorageViewEvidenceV1] = []
+        var found_frozen_module = false
+        var index = 0
+        while index < self.frozen_storage_module_names.len():
+            if self.frozen_storage_module_names[index] == module_name:
+                found_frozen_module = true
+                val site = self.frozen_storage_sites[index]
+                val row = self.frozen_storage_evidence[index]
+                val copied_site = frozen_storage_copy_site_v1(site)
+                sites.push(copied_site)
+                evidence.push(frozen_storage_copy_evidence_v1(row, copied_site))
+            index = index + 1
+        var known_module = found_frozen_module
+        for known_name in self.frozen_storage_known_module_names:
+            if known_name == module_name: known_module = true
+        if not known_module:
+            return FrozenStorageModuleSnapshotV1(ok: false, module_name: module_name,
+                registry_identity: self.storage_registry_frozen_identity,
+                module_identity: "", sites: [], evidence: [],
+                reason: "module-not-in-frozen-storage-registry")
+        FrozenStorageModuleSnapshotV1(ok: true, module_name: module_name,
+            registry_identity: self.storage_registry_frozen_identity,
+            module_identity: frozen_storage_module_identity_v1(module_name, sites, evidence),
+            sites: sites, evidence: evidence, reason: "ok")
+
+    fn frozen_storage_module_has_sites(module_name: text) -> bool:
+        if not self.storage_registry_frozen: return false
+        for frozen_name in self.frozen_storage_module_names:
+            if frozen_name == module_name: return true
+        false
+
+    fn frozen_storage_names_with_sites(module_names: [text]) -> [text]:
+        var result: [text] = []
+        for module_name in module_names:
+            if self.frozen_storage_module_has_sites(module_name):
+                result.push(module_name)
+        result
+
+    fn frozen_storage_names_without_sites(module_names: [text]) -> [text]:
+        var result: [text] = []
+        for module_name in module_names:
+            if not self.frozen_storage_module_has_sites(module_name):
+                result.push(module_name)
+        result
+
+    fn frozen_native_cache_source_v1(module_name: text) -> text:
+        var found_path = ""
+        for source in self.sources:
+            if source.module_name == module_name:
+                found_path = source.path
+        if found_path == "": return ""
+        var path_count = 0
+        for source in self.sources:
+            if source.path == found_path: path_count = path_count + 1
+        if path_count == 1: found_path else: ""
+
+    fn frozen_native_cache_source_identity_v1(module_name: text) -> text:
+        var found_identity = ""
+        var found_count = 0
+        for source in self.sources:
+            if source.module_name == module_name:
+                found_identity = sha256_text(source.content)
+                found_count = found_count + 1
+        if found_count == 1: found_identity else: ""
+
+    fn freeze_native_module_capsules_v1(
+        module_names: [text], object_base: text, backend_name: text,
+        target: text, target_cpu: text, opt_level: i64, is_release: bool,
+        provider_receipt_hash: text = "",
+        module_witnesses: {text: text} = {},
+        module_witness_reasons: {text: text} = {}
+    ) -> FrozenNativeModuleCapsuleBatchV1:
+        if not self.storage_registry_frozen
+            or not self.frozen_storage_registry_well_formed():
+            return FrozenNativeModuleCapsuleBatchV1(ok: false,
+                registry_identity: self.storage_binding_identity(), capsules: [],
+                reason: "storage-registry-not-frozen")
+        var capsules: [FrozenNativeModuleCapsuleV1] = []
+        var index = 0
+        while index < module_names.len():
+            val module_name = module_names[index]
+            if module_name == "":
+                return FrozenNativeModuleCapsuleBatchV1(ok: false,
+                    registry_identity: self.storage_binding_identity(), capsules: [],
+                    reason: "invalid-capsule-module-name")
+            var prior = 0
+            while prior < index:
+                if module_names[prior] == module_name:
+                    return FrozenNativeModuleCapsuleBatchV1(ok: false,
+                        registry_identity: self.storage_binding_identity(), capsules: [],
+                        reason: "duplicate-capsule-module")
+                prior = prior + 1
+            val snapshot = self.frozen_storage_module_snapshot(module_name)
+            if not snapshot.ok:
+                return FrozenNativeModuleCapsuleBatchV1(ok: false,
+                    registry_identity: self.storage_binding_identity(), capsules: [],
+                    reason: snapshot.reason)
+            var module_found = false
+            var module = MirModule(name: "", functions: {}, statics: {},
+                constants: {}, types: {})
+            if module_name == self.bootstrap_entry_mir_name
+                and self.bootstrap_entry_mir.?:
+                module = self.bootstrap_entry_mir.unwrap()
+                module_found = true
+            elif self.mir_modules.has(module_name):
+                module = self.mir_modules[module_name]
+                module_found = true
+            if not module_found:
+                return FrozenNativeModuleCapsuleBatchV1(ok: false,
+                    registry_identity: self.storage_binding_identity(), capsules: [],
+                    reason: "capsule-mir-module-missing")
+            if module.name != "" and module.name != module_name:
+                return FrozenNativeModuleCapsuleBatchV1(ok: false,
+                    registry_identity: self.storage_binding_identity(), capsules: [],
+                    reason: "capsule-mir-module-name-mismatch")
+            val cache_source = self.frozen_native_cache_source_v1(module_name)
+            val source_identity = self.frozen_native_cache_source_identity_v1(module_name)
+            val module_witness = if module_witnesses.contains_key(module_name):
+                module_witnesses[module_name]
+            else:
+                ""
+            val module_witness_reason = if module_witness_reasons.contains_key(module_name):
+                module_witness_reasons[module_name]
+            else:
+                "missing-witness-facts"
+            val object_path = "{object_base}.{module_name}.o"
+            var capsule = FrozenNativeModuleCapsuleV1(ok: true,
+                module_name: module_name, capsule_identity: "",
+                mir_identity: native_capsule_mir_identity_v1(module),
+                mir_module: module, storage_snapshot: snapshot,
+                cache_source: cache_source, source_identity: source_identity,
+                module_witness: module_witness,
+                module_witness_reason: module_witness_reason,
+                output_base: object_base,
+                object_path: object_path, backend_name: backend_name,
+                provider_receipt_hash: provider_receipt_hash,
+                target: target, target_cpu: target_cpu, opt_level: opt_level,
+                is_release: is_release, reason: "ok")
+            capsule.capsule_identity = capsule.expected_identity()
+            capsules.push(capsule)
+            index = index + 1
+        FrozenNativeModuleCapsuleBatchV1(ok: true,
+            registry_identity: self.storage_binding_identity(),
+            capsules: capsules, reason: "ok")
+
+    me add_error(message: text):
+        # Level-gated (SIMPLE_DUMP_COMPILE_ERRORS=1, default off). Phase 3 loses
+        # its diagnostics entirely — see driver_orchestration.spl:235-260, where
+        # error_message_at() gets a zeroed `self` — so "native-build failed
+        # without diagnostics" is otherwise UNDIAGNOSABLE. This dump is the only
+        # way to read a phase-3 error; it recovered the mcp_server_init one.
+        if (env_get("SIMPLE_DUMP_COMPILE_ERRORS")) == "1":
+            eprint("[compile-error] {message}")
+        self.errors.push(message)
+        self.error_count_value = self.error_count_value + 1
+
+    me add_warning(message: text):
+        self.warnings.push(message)
+
+    me add_visibility_warning(message: text):
+        self.visibility_warnings.push(message)
+
+    fn has_errors() -> bool:
+        self.error_count_value > 0
+
+    fn error_count() -> i64:
+        self.error_count_value
+
+    # Method-shaped accessor for the recorded diagnostics.
+    #
+    # Callers MUST use this instead of indexing `ctx.errors[i]` directly when the
+    # context value was just reassigned from a function's return value: under the
+    # pure-Simple native codegen used for Stage-3 self-host, a direct index of an
+    # array field reached through a freshly reassigned struct local silently
+    # produces nothing (no crash, no output, loop body observably skipped) while
+    # `.len()` on the same field returns the correct count. A method call on the
+    # owner is the shape that was measured to work.
+    # See doc/08_tracking/bug/stage3_selfhost_phase3_error_array_index_after_struct_reassign_silently_noops_2026-08-10.md
+    fn error_message_at(index: i64) -> text:
+        # `errors` and `error_count_value` are transported SEPARATELY, and the
+        # scalar can survive when the array does not: measured on the Stage-2
+        # positional lane, has_errors() read error_count_value > 0 (a scalar,
+        # intact) while `errors` came through as a zeroed reference, so this
+        # accessor faulted at offset 0xb8 -- inside the very code path that
+        # exists to REPORT a failure. Probe formation before touching it; an
+        # unreadable diagnostics array yields no message, never a crash.
+        if not rt_heap_ref_wellformed(self.errors):
+            return ""
+        if index < 0 or index >= self.errors.len():
+            return ""
+        self.errors[index]
+
+    # Same split, same reason: hand callers an empty list rather than a zeroed
+    # reference they will index into.
+    fn errors_safe() -> [text]:
+        if not rt_heap_ref_wellformed(self.errors):
+            return []
+        self.errors
+
+    # ------------------------------------------------------------------
+    # Collect-all-errors policy (default) / SIMPLE_COMPILE_FAIL_FAST=1 opt-out.
+    # Both `--fail-fast` (src/app/io/_CliCompile/compile_targets.spl) and the env
+    # var reach this cap -- the flag sets the env var, so the two spellings are
+    # equivalent and this is the single place the policy is decided.
+    # ------------------------------------------------------------------
+    # Poison a module: its diagnostics are already recorded in `errors`, but
+    # its aggregate must NOT reach downstream passes. Callers keep iterating.
+    me mark_module_poisoned(name: text):
+        self.poisoned_modules = self.poisoned_modules.push(name)
+        self.poisoned_module_count_value = self.poisoned_module_count_value + 1
+
+    fn poisoned_module_count() -> i64:
+        self.poisoned_module_count_value
+
+    fn is_module_poisoned(name: text) -> bool:
+        var idx = 0
+        while idx < self.poisoned_modules.len():
+            if self.poisoned_modules[idx] == name:
+                return true
+            idx = idx + 1
+        false
+
+    # Upper bound on how many modules may be poisoned before the phase stops
+    # anyway. This is NOT a fail-open valve: hitting the cap still returns a
+    # failing phase with every diagnostic collected so far. It exists because
+    # the no-GC bootstrap runtime grew unboundedly when corrupt aggregates
+    # accumulated (the concern recorded at driver_hir_pipeline_lowering:344).
+    # `--fail-fast` / SIMPLE_COMPILE_FAIL_FAST=1 sets the cap to 1, which
+    # reproduces the historical stop-at-first-error behavior exactly.
+    fn poison_budget() -> i64:
+        if (env_get("SIMPLE_COMPILE_FAIL_FAST")) == "1":
+            return 1
+        200
+
+    # True when this phase must stop iterating units.
+    fn poison_budget_exhausted() -> bool:
+        self.poisoned_module_count_value >= self.poison_budget()
+
+    fn get_extension(name: text) -> Any:
+        # Resolve a named extension, returning nil if not registered
+        self.extensions.resolve_or(name, nil)
+
+    me register_extension(name: text, value: Any):
+        # Register a named extension instance for plugin use
+        self.extensions.bind_instance(name, value)
+
+    # ------------------------------------------------------------------
+    # Memory eviction (--low-memory mode)
+    # ------------------------------------------------------------------
+    # `rt_string_free` is registry-checked: aliases may carry the same copied
+    # RuntimeValue, and a second call safely returns 0 without dereferencing an
+    # unregistered pointer. Never inspect content after the first call because
+    # a logical alias may already name freed storage. Paths are not ownership.
+    me reclaim_source_contents() -> i64:
+        var reclaimed: i64 = 0
+        for source in self.sources:
+            val freed = rt_string_free(source.content)
+            if freed == 1:
+                reclaimed = reclaimed + 1
+        reclaimed
+
+    # Streaming HIR owns an independent source-text copy. It remains live until
+    # the last HIR consumer succeeds, then this single owner operation frees
+    # registered allocations and clears every dangling logical alias.
+    me reclaim_streaming_source_contents_owner() -> i64:
+        var reclaimed: i64 = 0
+        for content in self.source_contents_owner:
+            val freed = rt_string_free(content)
+            if freed == 1:
+                reclaimed = reclaimed + 1
+        self.source_contents_owner = []
+        reclaimed
+
+    # Streaming parse reads the promoted SoA owners, not SourceFile.content.
+    # After the AOT interface fingerprint has consumed the original records,
+    # reclaim those independent buffers while preserving one metadata record
+    # per logical source for phase counters and alignment checks.
+    me reclaim_streaming_preparse_source_records() -> i64:
+        var reclaimed: i64 = 0
+        var metadata: [SourceFile] = []
+        for source in self.sources:
+            val freed = rt_string_free(source.content)
+            if freed == 1:
+                reclaimed = reclaimed + 1
+            metadata = metadata.push(SourceFile(
+                path: source.path,
+                authored_path: source.authored_path,
+                content: "",
+                module_name: source.module_name
+            ))
+        self.sources = metadata
+        reclaimed
+
+    me source_contents_reclaimable() -> bool:
+        self.options.low_memory and self.options.backend != "vhdl"
+
+    # After parsing, raw source text is no longer needed.
+    me evict_sources():
+        var metadata: [SourceFile] = []
+        for source in self.sources:
+            metadata = metadata.push(SourceFile(
+                path: source.path,
+                authored_path: source.authored_path,
+                content: "",
+                module_name: source.module_name
+            ))
+        self.sources = metadata
+        # The streaming owner has already been reclaimed on the successful HIR
+        # path. Keep reused contexts fail-closed even when the array contained
+        # physical aliases of the source allocations above.
+        self.source_contents_owner = []
+
+    # The three evictions below drop references only. With no GC and no
+    # refcounting that reclaims NOTHING -- measured at 0 of 2001 allocations by
+    # src/runtime/test/rt_driver_eviction_reclaim_selfcheck.c (probe P0).
+    #
+    # Do NOT "fix" this by calling rt_dict_free_deep here. That was measured
+    # too, and it is worse than the no-op. All three targets are
+    # Dict<text, CLASS INSTANCE>, and a class instance on this lane is an
+    # untagged, unregistered, header-less rt_alloc block -- byte-for-byte
+    # indistinguishable from a tagged immediate. The planner classifies each
+    # module object as a LEAF, so the call ACCEPTS (verdict=1) but frees only
+    # the key strings and the dict header: 1001 of 2001, none of them the
+    # module objects that hold the memory (probe P2). Worse, those key strings
+    # are aliased from OUTSIDE the dict by HIR/AST/SymbolTable and by
+    # _bootstrap_mir_functions (hazards 2 and 4), and the planner's `seen` set
+    # spans only nodes it traverses -- so an external alias is undetectable and
+    # gets freed out from under its live holder (probe P3).
+    #
+    # Unblocking this needs class instances to be identifiable at runtime, a
+    # codegen/representation change, NOT a driver change. Full numbers:
+    # doc/08_tracking/bug/bootstrap_stage4_selfhost_parse_memory_blowup_2026-07-20.md
+    # (UPDATE 2026-08-06, third session).
+
+    # After HIR lowering, AST modules are no longer needed.
+    me evict_ast():
+        self.modules = {}
+
+    # After MIR lowering, HIR modules are no longer needed.
+    me evict_hir():
+        self.hir_modules = {}
+        self.hir_module_count_value = 0
+        self.bootstrap_entry_hir = nil
+
+    # Register the entry MIR alias together with the `mir_modules` key it was
+    # stored under, so eviction can clear both. Callers that set
+    # `bootstrap_entry_mir` WITHOUT also inserting into `mir_modules` (e.g.
+    # driver_bootstrap.spl's local re-lower path) must not use this.
+    me set_bootstrap_entry_mir(name: text, module: MirModule):
+        self.bootstrap_entry_mir = Some(module)
+        self.bootstrap_entry_mir_name = name
+
+    # After codegen writes .o for a module, its MIR can be released.
+    #
+    # `bootstrap_entry_mir` ALIASES `mir_modules[bootstrap_entry_mir_name]` --
+    # removing the dict entry alone left a dangling logical alias that
+    # driver_aot_native_output.spl:587-590 still read back. Clear the alias
+    # alongside its dict entry, mirroring `evict_hir` above which already
+    # clears its `bootstrap_entry_hir` twin.
+    me evict_mir_module(name: text):
+        self.mir_modules.remove(name)
+        var kept_names: [text] = []
+        var kept_bindings: [MirStorageViewSiteBindingV1] = []
+        var kept_evidence_names: [text] = []
+        var kept_evidence: [MirTypedStorageViewEvidenceV1] = []
+        if not self.storage_registry_frozen and self.storage_binding_rows_well_formed():
+            var index = 0
+            while index < self.storage_binding_module_names.len():
+                if self.storage_binding_module_names[index] != name:
+                    kept_names.push(self.storage_binding_module_names[index])
+                    kept_bindings.push(self.storage_view_site_bindings[index])
+                index = index + 1
+        if not self.storage_registry_frozen:
+            self.storage_binding_module_names = kept_names
+            self.storage_view_site_bindings = kept_bindings
+        if not self.storage_registry_frozen and self.storage_evidence_rows_well_formed():
+            var evidence_index = 0
+            while evidence_index < self.storage_evidence_module_names.len():
+                if self.storage_evidence_module_names[evidence_index] != name:
+                    kept_evidence_names.push(self.storage_evidence_module_names[evidence_index])
+                    kept_evidence.push(self.storage_view_evidence_rows[evidence_index])
+                evidence_index = evidence_index + 1
+        if not self.storage_registry_frozen:
+            self.storage_evidence_module_names = kept_evidence_names
+            self.storage_view_evidence_rows = kept_evidence
+        # Frozen site/evidence rows remain the immutable build receipt/cache
+        # authority; MIR eviction may reclaim payloads but not identity.
+        if self.bootstrap_entry_mir_name != "" and self.bootstrap_entry_mir_name == name:
+            self.bootstrap_entry_mir = nil
+            self.bootstrap_entry_mir_name = ""
+
+# ============================================================================
+# Compile Options Hash Helper
+# ============================================================================
+
+fn compute_options_hash(opts: CompileOptions) -> CompileOptionsHash:
+    val opt_level = compileoptions_effective_mir_opt_level(opts)
+    compile_options_hash_compute(opts.backend, opt_level, opts.release, opts.debug_info, opts.gc_off, opts.profile, opts.allowed_families)
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export CompileContext, compute_options_hash
+export BackendResult, BackendError
+export native_capsule_mir_identity_v1

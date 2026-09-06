@@ -1,0 +1,272 @@
+"""Production VFS discovery and ingestion for signed Simplebox SCR1 media."""
+
+use std.common.contracts.execution.simpleos_executable_v1.{ManifestTarget}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.string_core.{bytes_to_text}
+use os.installer.hosted_safe_artifact_io_v1.{
+    HOSTED_SAFE_ARTIFACT_MAX_BYTES_V1,
+    hosted_safe_artifact_relative_path_valid_v1
+}
+use os.installer.simplebox_signed_catalog_provisioner_v1.{
+    SIMPLEBOX_SIGNED_RECORD_MAX_BYTES_V1
+}
+use os.kernel.loader.authenticated_media_parser.{authenticated_media_hex_bytes_v1}
+use os.kernel.loader.executable_manifest_signature_verifier.{ExecutableManifestTrustedSignerV1}
+use os.kernel.loader.simplebox_pinned_catalog_image_v1.{
+    SimpleboxPinnedCatalogImageErrorV1,
+    simplebox_pinned_catalog_image_attach_clang_v1,
+    simplebox_pinned_catalog_image_create_v1,
+    simplebox_pinned_catalog_image_ingest_v1
+}
+use os.kernel.loader.clang_sysroot_catalog_bundle_v1.{ClangSysrootCatalogBundleV1}
+use os.services.vfs.vfs_init.{g_vfs_file_size, g_vfs_read_file_bytes}
+
+val SIMPLEBOX_CATALOG_TRUST_CONFIG_MAX_BYTES_V1: i64 = 16384
+val SIMPLEBOX_CATALOG_MEDIA_MAX_LAYOUTS_V1: i64 = 4
+
+pub struct SimpleboxCatalogMediaLayoutV1:
+    artifact_path: text
+    scr1_path: text
+    trust_config_path: text
+
+pub struct SimpleboxCatalogMediaBootPolicyV1:
+    target: ManifestTarget
+    layouts: [SimpleboxCatalogMediaLayoutV1]
+    pinned_key_id: text
+    pinned_public_key_hex: text
+    pinned_public_key_sha256: text
+
+pub enum SimpleboxCatalogMediaBootErrorV1:
+    None
+    PolicyRejected
+    MediaMissing
+    MediaPartial
+    MediaAmbiguous
+    MediaBoundsRejected
+    MediaReadRejected
+    TrustConfigRejected
+    TrustPinRejected
+    ImageRejected
+    IngestionRejected
+
+pub struct SimpleboxCatalogMediaBootResultV1:
+    ok: bool
+    error: SimpleboxCatalogMediaBootErrorV1
+    image_error: SimpleboxPinnedCatalogImageErrorV1
+    artifact_path: text
+    scr1_path: text
+    accepted_records: i64
+
+fn _fail_v1(
+    error: SimpleboxCatalogMediaBootErrorV1,
+    image_error: SimpleboxPinnedCatalogImageErrorV1 =
+        SimpleboxPinnedCatalogImageErrorV1.None,
+) -> SimpleboxCatalogMediaBootResultV1:
+    SimpleboxCatalogMediaBootResultV1(
+        ok: false, error: error, image_error: image_error,
+        artifact_path: "", scr1_path: "", accepted_records: 0)
+
+fn _relative_path_v1(path: text) -> text:
+    if path.starts_with("/"): return path.substring(1, path.len())
+    path
+
+fn _path_valid_v1(path: text) -> bool:
+    path.starts_with("/") and path.len() > 1 and
+        hosted_safe_artifact_relative_path_valid_v1(_relative_path_v1(path))
+
+fn _lower_sha256_v1(value: text) -> bool:
+    if value.len() != 64 or value == "0" * 64: return false
+    for ch in value:
+        if not ((ch >= '0' and ch <= '9') or (ch >= 'a' and ch <= 'f')):
+            return false
+    true
+
+fn _policy_valid_v1(policy: SimpleboxCatalogMediaBootPolicyV1) -> bool:
+    if policy.target.os != "simpleos" or policy.target.abi != "simpleos" or
+        (policy.target.arch != "x86_64" and policy.target.arch != "aarch64" and
+         policy.target.arch != "riscv64") or
+        policy.layouts.len() == 0 or
+        policy.layouts.len() > SIMPLEBOX_CATALOG_MEDIA_MAX_LAYOUTS_V1 or
+        policy.pinned_key_id == "" or policy.pinned_key_id.len() > 128 or
+        policy.pinned_key_id.contains(":") or
+        policy.pinned_public_key_hex.len() != 64 or
+        not _lower_sha256_v1(policy.pinned_public_key_sha256):
+        return false
+    val key = authenticated_media_hex_bytes_v1(policy.pinned_public_key_hex)
+    if key.len() != 32 or sha256_u8_hex(key) != policy.pinned_public_key_sha256:
+        return false
+    var index: i64 = 0
+    while index < policy.layouts.len():
+        val layout = policy.layouts[index]
+        if not _path_valid_v1(layout.artifact_path) or
+            not _path_valid_v1(layout.scr1_path) or
+            not _path_valid_v1(layout.trust_config_path) or
+            layout.artifact_path == layout.scr1_path or
+            layout.artifact_path == layout.trust_config_path or
+            layout.scr1_path == layout.trust_config_path:
+            return false
+        var prior: i64 = 0
+        while prior < index:
+            val old = policy.layouts[prior]
+            if old.artifact_path == layout.artifact_path or
+                old.scr1_path == layout.scr1_path or
+                old.trust_config_path == layout.trust_config_path:
+                return false
+            prior = prior + 1
+        index = index + 1
+    true
+
+fn _layout_in_policy_v1(
+    policy: SimpleboxCatalogMediaBootPolicyV1,
+    candidate: SimpleboxCatalogMediaLayoutV1,
+) -> bool:
+    for layout in policy.layouts:
+        if layout.artifact_path == candidate.artifact_path and
+            layout.scr1_path == candidate.scr1_path and
+            layout.trust_config_path == candidate.trust_config_path:
+            return true
+    false
+
+fn _file_size_v1(path: text) -> i64:
+    var size: i64 = -1
+    match g_vfs_file_size(path):
+        case Some(value): size = value.to_i64()
+        case None: size = -1
+    size
+
+fn _config_field_v1(document: text, name: text) -> text:
+    val prefix = name + "="
+    var found = ""
+    for raw in document.split("\n"):
+        val line = raw.trim()
+        if line.starts_with(prefix):
+            if found != "": return ""
+            found = line.substring(prefix.len(), line.len())
+    found
+
+fn _trust_config_shape_valid_v1(document: text) -> bool:
+    var count: i64 = 0
+    for raw in document.split("\n"):
+        val line = raw.trim()
+        if line != "":
+            if not line.starts_with("key_id=") and
+                not line.starts_with("public_key_ed25519_hex="):
+                return false
+            count = count + 1
+    count == 2 and _config_field_v1(document, "key_id") != "" and
+        _config_field_v1(document, "public_key_ed25519_hex") != ""
+
+fn _trust_config_bytes_valid_v1(bytes: [u8]) -> bool:
+    """Reject ambiguous/non-text trust evidence before text conversion."""
+    if bytes.len() == 0 or bytes.len() >
+        SIMPLEBOX_CATALOG_TRUST_CONFIG_MAX_BYTES_V1:
+        return false
+    var index: i64 = 0
+    while index < bytes.len():
+        val byte = bytes[index]
+        if byte != 10u8 and (byte < 32u8 or byte > 126u8): return false
+        index = index + 1
+    true
+
+pub(package) fn simplebox_catalog_media_boot_ingest_bytes_v1(
+    policy: SimpleboxCatalogMediaBootPolicyV1,
+    layout: SimpleboxCatalogMediaLayoutV1,
+    artifact: [u8],
+    scr1: [u8],
+    trust_config: [u8],
+    clang_bundle: ClangSysrootCatalogBundleV1? = nil,
+) -> SimpleboxCatalogMediaBootResultV1:
+    """Bind already-read media bytes to paths, target, and compiled root pin."""
+    if not _policy_valid_v1(policy) or not _layout_in_policy_v1(policy, layout):
+        return _fail_v1(SimpleboxCatalogMediaBootErrorV1.PolicyRejected)
+    if artifact.len() == 0 or artifact.len() > HOSTED_SAFE_ARTIFACT_MAX_BYTES_V1 or
+        scr1.len() == 0 or scr1.len() > SIMPLEBOX_SIGNED_RECORD_MAX_BYTES_V1 or
+        trust_config.len() == 0 or trust_config.len() >
+            SIMPLEBOX_CATALOG_TRUST_CONFIG_MAX_BYTES_V1:
+        return _fail_v1(SimpleboxCatalogMediaBootErrorV1.MediaBoundsRejected)
+    if not _trust_config_bytes_valid_v1(trust_config):
+        return _fail_v1(SimpleboxCatalogMediaBootErrorV1.TrustConfigRejected)
+    val trust = bytes_to_text(trust_config)
+    if not _trust_config_shape_valid_v1(trust):
+        return _fail_v1(SimpleboxCatalogMediaBootErrorV1.TrustConfigRejected)
+    val key_id = _config_field_v1(trust, "key_id")
+    val public_key_hex = _config_field_v1(trust, "public_key_ed25519_hex")
+    val public_key = authenticated_media_hex_bytes_v1(public_key_hex)
+    if key_id != policy.pinned_key_id or
+        public_key_hex != policy.pinned_public_key_hex or
+        public_key.len() != 32 or
+        sha256_u8_hex(public_key) != policy.pinned_public_key_sha256:
+        return _fail_v1(SimpleboxCatalogMediaBootErrorV1.TrustPinRejected)
+    val image = simplebox_pinned_catalog_image_create_v1(
+        layout.artifact_path, layout.scr1_path, policy.target,
+        artifact, scr1, [ExecutableManifestTrustedSignerV1(
+            key_id: key_id, public_key: public_key)])
+    if not image.?:
+        return _fail_v1(SimpleboxCatalogMediaBootErrorV1.ImageRejected)
+    var selected_image = image.unwrap()
+    if clang_bundle.?:
+        val attached = simplebox_pinned_catalog_image_attach_clang_v1(
+            selected_image, clang_bundle.unwrap())
+        if not attached.?:
+            return _fail_v1(SimpleboxCatalogMediaBootErrorV1.ImageRejected)
+        selected_image = attached.unwrap()
+    val ingested = simplebox_pinned_catalog_image_ingest_v1(selected_image)
+    if not ingested.ok:
+        return _fail_v1(SimpleboxCatalogMediaBootErrorV1.IngestionRejected, ingested.error)
+    SimpleboxCatalogMediaBootResultV1(
+        ok: true, error: SimpleboxCatalogMediaBootErrorV1.None,
+        image_error: SimpleboxPinnedCatalogImageErrorV1.None,
+        artifact_path: layout.artifact_path, scr1_path: layout.scr1_path,
+        accepted_records: 1)
+
+pub(package) fn simplebox_catalog_media_boot_ingest_v1(
+    policy: SimpleboxCatalogMediaBootPolicyV1,
+    clang_bundle: ClangSysrootCatalogBundleV1? = nil,
+) -> SimpleboxCatalogMediaBootResultV1:
+    """Discover exactly one complete policy layout and ingest its VFS bytes."""
+    if not _policy_valid_v1(policy):
+        return _fail_v1(SimpleboxCatalogMediaBootErrorV1.PolicyRejected)
+    var selected: i64 = -1
+    var artifact_size: i64 = -1
+    var scr1_size: i64 = -1
+    var trust_size: i64 = -1
+    var index: i64 = 0
+    while index < policy.layouts.len():
+        val layout = policy.layouts[index]
+        val candidate_artifact_size = _file_size_v1(layout.artifact_path)
+        val candidate_scr1_size = _file_size_v1(layout.scr1_path)
+        val candidate_trust_size = _file_size_v1(layout.trust_config_path)
+        val present = (if candidate_artifact_size >= 0: 1 else: 0) +
+            (if candidate_scr1_size >= 0: 1 else: 0) +
+            (if candidate_trust_size >= 0: 1 else: 0)
+        if present > 0 and present < 3:
+            return _fail_v1(SimpleboxCatalogMediaBootErrorV1.MediaPartial)
+        if present == 3:
+            if selected >= 0:
+                return _fail_v1(SimpleboxCatalogMediaBootErrorV1.MediaAmbiguous)
+            selected = index
+            artifact_size = candidate_artifact_size
+            scr1_size = candidate_scr1_size
+            trust_size = candidate_trust_size
+        index = index + 1
+    if selected < 0:
+        return _fail_v1(SimpleboxCatalogMediaBootErrorV1.MediaMissing)
+    if artifact_size <= 0 or artifact_size > HOSTED_SAFE_ARTIFACT_MAX_BYTES_V1 or
+        scr1_size <= 0 or scr1_size > SIMPLEBOX_SIGNED_RECORD_MAX_BYTES_V1 or
+        trust_size <= 0 or trust_size > SIMPLEBOX_CATALOG_TRUST_CONFIG_MAX_BYTES_V1:
+        return _fail_v1(SimpleboxCatalogMediaBootErrorV1.MediaBoundsRejected)
+    val layout = policy.layouts[selected]
+    val artifact = g_vfs_read_file_bytes(layout.artifact_path)
+    val scr1 = g_vfs_read_file_bytes(layout.scr1_path)
+    val trust = g_vfs_read_file_bytes(layout.trust_config_path)
+    if artifact.len() != artifact_size or scr1.len() != scr1_size or
+        trust.len() != trust_size:
+        return _fail_v1(SimpleboxCatalogMediaBootErrorV1.MediaReadRejected)
+    simplebox_catalog_media_boot_ingest_bytes_v1(
+        policy, layout, artifact, scr1, trust, clang_bundle)
+
+pub fn simplebox_catalog_media_canonical_layout_v1() -> SimpleboxCatalogMediaLayoutV1:
+    SimpleboxCatalogMediaLayoutV1(
+        artifact_path: "/boot/bin/simplebox",
+        scr1_path: "/boot/catalog/simplebox.scr1",
+        trust_config_path: "/boot/catalog/simplebox.trust")

@@ -1,0 +1,41 @@
+"""
+# Unsupported flat STMT kinds must be reported loudly, never silently no-op'd
+
+Lane C2 (flat-AST bridge transition census), extending
+`doc/08_tracking/bug/spawn_call_expr_silently_becomes_nillit_2026-07-29.md`.
+
+`convert_flat_stmt` has 21 of 29 `STMT_*` tags handled; the remaining 8 reach
+the generic catch-all, which lane NIL1 already made loud. This spec pins that
+loudness against real source text so a future refactor cannot quietly restore
+the silent no-op.
+
+It also covers the one case the loud catch-all could never see:
+`STMT_GPU_LAUNCH` (23) HAD a dedicated arm that returned a bare
+`ExprKind.NilLit` -- the catch-all's behaviour wearing an arm's clothes, so
+`flat_bridge_report_unhandled_node` was never reached for it. Lane C2 added the
+report to that arm. See
+`spec/compiler_schema/transitions/flat_stmt_to_ast_stmt.sdn`.
+"""
+
+use std.spec
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.core.parser.{parser_get_errors}
+
+fn bridge_stmt_diag(src: text, name: text) -> bool:
+    val parsed = parse_full_frontend(src, "testdata/" + name + ".spl", name, Logger(level: 0))
+    val errs = parser_get_errors()
+    var found = false
+    var i = 0
+    while i < errs.len():
+        if errs[i].contains("flat AST bridge: unhandled stmt node kind"):
+            found = true
+        i = i + 1
+    found
+
+describe "unsupported flat stmt kinds raise a loud bridge diagnostic":
+    it "reports a function-body `lazy val` (STMT_LAZY_VAL_DECL, tag 21)":
+        assert_true(bridge_stmt_diag("fn boot():\n    lazy val x = 1\n", "fixture_stmt_lazy_val"))
+
+    it "does NOT fire on an ordinary val/assign body -- control, so the spec is not vacuous":
+        assert_false(bridge_stmt_diag("fn boot() -> i64:\n    val x = 1\n    x\n", "fixture_stmt_control"))

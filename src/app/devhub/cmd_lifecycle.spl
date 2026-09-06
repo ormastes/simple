@@ -1,0 +1,221 @@
+# codex-impl
+# Typed lifecycle inspection, local record production, and observe-only planning.
+
+use app.io.mod.{file_exists, file_read}
+use app.sj.lifecycle_policy.{parse_canonical_lifecycle_vcs_policy}
+use app.devhub.version_manifest.{parse_version_manifest, version_undeclared_consumers, version_render_plan, version_explain}
+use std.scv.lifecycle.store.{lifecycle_store_probe, lifecycle_store_path, lifecycle_store_write}
+use std.scv.lifecycle.codec.{lifecycle_field_valid}
+use std.scv.lifecycle.identity.{lifecycle_change_identity}
+use std.scv.lifecycle.entity_codec.{change_record}
+use std.file_system.{dir_walk_files}
+
+fn _lifecycle_json(value: text) -> text:
+    value.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n").replace("\r", "\\r")
+
+fn _projection_version(path: text) -> text:
+    if not file_exists(path):
+        return ""
+    val payload = file_read(path).trim()
+    if path.ends_with(".spl"):
+        var previous = ""
+        for raw in payload.split("\n"):
+            val line = raw.trim()
+            if line == "" or line.starts_with("#"):
+                continue
+            val context = (previous + " " + line).to_lower()
+            val first_quote = line.index_of("\"")
+            val last_quote = line.last_index_of("\"")
+            if context.contains("version") and first_quote >= 0 and last_quote > first_quote:
+                var candidate = line[first_quote + 1:last_quote]
+                if candidate.starts_with("Simple v"):
+                    candidate = candidate[8:]
+                if candidate != "" and candidate.contains("."):
+                    return candidate
+            previous = line
+        return ""
+    if not payload.contains("\n") and not payload.contains(":"):
+        return payload
+    for raw in payload.split("\n"):
+        val line = raw.trim()
+        if line.starts_with("version:"):
+            return line[line.index_of(":") + 1:].trim().replace("\"", "")
+    ""
+
+fn _payload_declares_product_version(payload: text, semver: text) -> bool:
+    var previous = ""
+    for raw in payload.split("\n"):
+        val context = (previous + " " + raw).to_lower()
+        if context.contains("version") and raw.contains(semver):
+            return true
+        previous = raw
+    false
+
+fn _projection_matches(path: text, semver: text) -> bool:
+    if not file_exists(path):
+        return false
+    _projection_version(path) == semver
+
+fn lifecycle_projection_version(path: text) -> text:
+    _projection_version(path)
+
+fn lifecycle_capabilities_json() -> text:
+    '{"output_version":"devhub/v1","status":"ok","mutation":"local-only","remote_mutation":"disabled","domains":["change","review","feature","task","release","sync"],"operations":["inspect","policy-check","dry-run","record-change"],"provider_semantics":"capability-explicit"}'
+
+fn lifecycle_policy_json(path: text) -> (text, i64):
+    if not file_exists(path):
+        return ('{"output_version":"devhub/v1","status":"rejected","code":"POLICY_NOT_FOUND","path":"' + _lifecycle_json(path) + '"}', 1)
+    val policy = parse_canonical_lifecycle_vcs_policy(file_read(path))
+    if not policy.valid:
+        return ('{"output_version":"devhub/v1","status":"rejected","code":"POLICY_INVALID","message":"' + _lifecycle_json(policy.error) + '"}', 1)
+    ('{"output_version":"devhub/v1","status":"ok","schema":"' + policy.schema + '","protected_ref_count":' + policy.refs.len().to_text() + ',"mutation":"observe-only"}', 0)
+
+fn lifecycle_domain_known(domain: text) -> bool:
+    domain == "change" or domain == "review" or domain == "feature" or domain == "task" or domain == "release" or domain == "sync"
+
+fn lifecycle_store_kind(domain: text) -> text:
+    if domain == "sync": "sync_conflict" else: domain
+
+fn lifecycle_inspect_root_json(root: text, domain: text, entity_id: text, idempotency_key: text, explain: bool) -> (text, i64):
+    if not lifecycle_domain_known(domain):
+        return ('{"output_version":"devhub/v1","status":"rejected","code":"DOMAIN_UNSUPPORTED","domain":"' + _lifecycle_json(domain) + '"}', 2)
+    if entity_id == "":
+        return ('{"output_version":"devhub/v1","status":"rejected","code":"ENTITY_ID_REQUIRED","domain":"' + _lifecycle_json(domain) + '"}', 2)
+    val store_kind = lifecycle_store_kind(domain)
+    val stored = lifecycle_store_probe(root, store_kind, entity_id)
+    if stored.status == "corrupt" or stored.status == "rejected":
+        return ('{"output_version":"devhub/v1","status":"rejected","code":"LIFECYCLE_STORE_INTEGRITY","message":"' + _lifecycle_json(stored.error) + '"}', 1)
+    val detail = if explain: ',"explain":"inspection is local and read-only; remote projection requires an explicit binding"' else: ""
+    val status = if stored.status == "found": "found" else: "unbound"
+    val digest = if stored.status == "found": ',"record_digest":"' + stored.record.?.digest + '"' else: ""
+    ('{"output_version":"devhub/v1","status":"' + status + '","domain":"' + _lifecycle_json(domain) + '","entity_id":"' + _lifecycle_json(entity_id) + '","idempotency_key":"' + _lifecycle_json(idempotency_key) + '","mutation":"none"' + digest + detail + '}', 0)
+
+fn lifecycle_inspect_json(domain: text, entity_id: text, idempotency_key: text, explain: bool) -> (text, i64):
+    lifecycle_inspect_root_json(".", domain, entity_id, idempotency_key, explain)
+
+# The only production producer of a lifecycle store record. Local-only: it
+# derives a stable change identity, projects it to a digest-bound envelope and
+# persists it under <root>/.scv/lifecycle/change/. No remote binding is created.
+fn lifecycle_record_change_json(root: text, seed: text, title: text, owner: text, intent: text) -> (text, i64):
+    if seed == "" or title == "" or owner == "":
+        return ('{"output_version":"devhub/v1","status":"rejected","code":"CHANGE_INPUT_REQUIRED","message":"seed, title and owner are required to record a change"}', 2)
+    if not lifecycle_field_valid(title) or not lifecycle_field_valid(owner) or not lifecycle_field_valid(intent):
+        return ('{"output_version":"devhub/v1","status":"rejected","code":"CHANGE_FIELD_UNSAFE","message":"lifecycle fields may not contain a record delimiter or newline"}', 2)
+    val change = lifecycle_change_identity(seed, title, owner, intent)
+    val record = change_record(change)
+    val path = lifecycle_store_path(root, record)
+    if path == "" or not lifecycle_store_write(root, record):
+        return ('{"output_version":"devhub/v1","status":"rejected","code":"LIFECYCLE_STORE_WRITE_FAILED","entity_id":"' + _lifecycle_json(change.change_id) + '"}', 1)
+    ('{"output_version":"devhub/v1","status":"recorded","domain":"change","entity_id":"' + _lifecycle_json(change.change_id) + '","record_digest":"' + record.digest + '","path":"' + _lifecycle_json(path) + '","mutation":"local-store"}', 0)
+
+# Observe-only planning over a record that already exists in the local store.
+# Fail-closed: no domain, no identity, or no stored envelope means no plan.
+fn lifecycle_dry_run_json(root: text, domain: text, entity_id: text) -> (text, i64):
+    if domain == "" or entity_id == "":
+        return ('{"output_version":"devhub/v1","status":"rejected","code":"DRY_RUN_INPUT_REQUIRED","message":"a lifecycle domain and a stored entity identity are required"}', 2)
+    if not lifecycle_domain_known(domain):
+        return ('{"output_version":"devhub/v1","status":"rejected","code":"DOMAIN_UNSUPPORTED","domain":"' + _lifecycle_json(domain) + '"}', 2)
+    val stored = lifecycle_store_probe(root, lifecycle_store_kind(domain), entity_id)
+    if stored.status == "rejected":
+        return ('{"output_version":"devhub/v1","status":"rejected","code":"DRY_RUN_INPUT_REQUIRED","message":"' + _lifecycle_json(stored.error) + '"}', 2)
+    if stored.status == "corrupt":
+        return ('{"output_version":"devhub/v1","status":"rejected","code":"LIFECYCLE_STORE_INTEGRITY","message":"' + _lifecycle_json(stored.error) + '"}', 1)
+    if stored.status != "found":
+        return ('{"output_version":"devhub/v1","status":"rejected","code":"DRY_RUN_RECORD_ABSENT","domain":"' + _lifecycle_json(domain) + '","entity_id":"' + _lifecycle_json(entity_id) + '"}', 2)
+    val record = stored.record.?
+    ('{"output_version":"devhub/v1","status":"planned","domain":"' + _lifecycle_json(domain) + '","entity_id":"' + _lifecycle_json(entity_id) + '","record_digest":"' + record.digest + '","field_count":' + record.fields.len().to_text() + ',"mutation":"none","plan":"observe-only projection of the local envelope; no remote binding is applied"}', 0)
+
+fn _lifecycle_flag(args: [text], name: text, fallback: text) -> text:
+    var i = 0
+    while i + 1 < args.len():
+        if args[i] == name:
+            return args[i + 1]
+        i = i + 1
+    fallback
+
+fn _lifecycle_positionals(args: [text]) -> [text]:
+    var out: [text] = []
+    var i = 0
+    while i < args.len():
+        if args[i] == "--root":
+            i = i + 2
+            continue
+        out.push(args[i])
+        i = i + 1
+    out
+
+fn handle_lifecycle(args: [text]) -> i64:
+    if args.len() == 0 or args[0] == "capabilities":
+        print lifecycle_capabilities_json()
+        return 0
+    if args[0] == "policy-check":
+        val path = if args.len() > 1: args[1] else: ".spipe/policy/vcs.sdn"
+        val (payload, code) = lifecycle_policy_json(path)
+        print payload
+        return code
+    if args[0] == "version-check":
+        val path = if args.len() > 1: args[1] else: "release/version.sdn"
+        if not file_exists(path):
+            print '{"output_version":"devhub/v1","status":"rejected","code":"VERSION_MANIFEST_NOT_FOUND"}'
+            return 1
+        val manifest = parse_version_manifest(file_read(path))
+        if not manifest.valid:
+            print '{"output_version":"devhub/v1","status":"rejected","code":"VERSION_MANIFEST_INVALID","message":"' + _lifecycle_json(manifest.error) + '"}'
+            return 1
+        var discovered = ["VERSION"]
+        for consumer in dir_walk_files("src"):
+            if (consumer.ends_with("/simple.sdn") and _projection_version(consumer) == manifest.semver) or (consumer.ends_with(".spl") and _payload_declares_product_version(file_read(consumer), manifest.semver)):
+                discovered.push(consumer)
+        val undeclared = version_undeclared_consumers(manifest, discovered)
+        if undeclared.len() > 0:
+            print '{"output_version":"devhub/v1","status":"rejected","code":"VERSION_CONSUMER_UNDECLARED","paths":"' + _lifecycle_json(undeclared.join(",")) + '"}'
+            return 1
+        var drift: [text] = []
+        for projection in manifest.projections:
+            if not _projection_matches(projection, manifest.semver):
+                drift.push(projection)
+        if drift.len() > 0:
+            print '{"output_version":"devhub/v1","status":"rejected","code":"VERSION_PROJECTION_DRIFT","paths":"' + _lifecycle_json(drift.join(",")) + '"}'
+            return 1
+        print '{"output_version":"devhub/v1","status":"ok","schema":"' + _lifecycle_json(manifest.schema) + '","product":"' + _lifecycle_json(manifest.product) + '","semver":"' + _lifecycle_json(manifest.semver) + '","line":"' + _lifecycle_json(manifest.line) + '","projection_count":' + manifest.projections.len().to_text() + '}'
+        return 0
+    if args[0] == "version-explain":
+        val path = if args.len() > 1: args[1] else: "release/version.sdn"
+        if not file_exists(path):
+            print '{"output_version":"devhub/v1","status":"rejected","code":"VERSION_MANIFEST_NOT_FOUND"}'
+            return 1
+        val manifest = parse_version_manifest(file_read(path))
+        print '{"output_version":"devhub/v1","status":"' + (if manifest.valid: "ok" else: "rejected") + '","explain":"' + _lifecycle_json(version_explain(manifest)) + '","render_count":' + version_render_plan(manifest).len().to_text() + '}'
+        return if manifest.valid: 0 else: 1
+    if args[0] == "inspect":
+        val root = _lifecycle_flag(args, "--root", ".")
+        val rest = _lifecycle_positionals(args)
+        val domain = if rest.len() > 1: rest[1] else: ""
+        val entity_id = if rest.len() > 2: rest[2] else: ""
+        val idempotency_key = if rest.len() > 3: rest[3] else: ""
+        val (payload, code) = lifecycle_inspect_root_json(root, domain, entity_id, idempotency_key, true)
+        print payload
+        return code
+    if args[0] == "record-change":
+        val root = _lifecycle_flag(args, "--root", ".")
+        val rest = _lifecycle_positionals(args)
+        val seed = if rest.len() > 1: rest[1] else: ""
+        val title = if rest.len() > 2: rest[2] else: ""
+        val owner = if rest.len() > 3: rest[3] else: ""
+        val intent = if rest.len() > 4: rest[4] else: ""
+        val (payload, code) = lifecycle_record_change_json(root, seed, title, owner, intent)
+        print payload
+        return code
+    if args[0] == "dry-run":
+        val root = _lifecycle_flag(args, "--root", ".")
+        val rest = _lifecycle_positionals(args)
+        val domain = if rest.len() > 1: rest[1] else: ""
+        val entity_id = if rest.len() > 2: rest[2] else: ""
+        val (payload, code) = lifecycle_dry_run_json(root, domain, entity_id)
+        print payload
+        return code
+    print '{"output_version":"devhub/v1","status":"rejected","code":"UNKNOWN_LIFECYCLE_COMMAND"}'
+    1
+
+export lifecycle_capabilities_json, lifecycle_policy_json, lifecycle_domain_known, lifecycle_inspect_json, lifecycle_projection_version, handle_lifecycle
+export lifecycle_inspect_root_json, lifecycle_record_change_json, lifecycle_dry_run_json

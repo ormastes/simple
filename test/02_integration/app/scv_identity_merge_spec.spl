@@ -1,0 +1,70 @@
+"""
+## Purpose and audience
+Purpose: This spec proves SCV-IMPL-D-04 — identity-aware merge. A logical
+file renamed on one side (accepted FileEntityId move) and edited on the other
+is merged by EntityId, not by path or by exact-chunk coincidence: the edit
+lands at the renamed path. Rename-vs-rename and rename-vs-delete on the same
+EntityId are recorded as typed conflict DATA (jj stays the conflict-storage
+authority; SCV never invents a clean merge for them).
+Audience: Maintainers of the SCV merge engine.
+"""
+# @req: REQ-SCV-IDENTITY-MERGE-001
+use std.spec.{describe, it, expect, step}
+use app.io.mod (process_run)
+
+# The binary under test is `bin/simple` (see scv_merge_spec.spl for why the
+# production wrapper must NOT be used here).
+fn _run_script(script: text) -> text:
+    val (out, err, code) = process_run("/bin/sh", ["-c", script])
+    val combined = "{out}{err}\nexit={code}\n"
+    assert_false(out == "" and err == "")
+    assert_false(combined.contains("refusing non-production Simple runtime"))
+    combined
+
+# Shared prologue: init, base snapshot of a.txt (three lines), remember base op.
+fn _prologue(tag: text) -> text:
+    "set -eu\nREPO=$(pwd)\nTMP=$(mktemp -d /tmp/scv-idmerge-{tag}.XXXXXX)\nprintf 'one\\ntwo\\nthree\\n' > \"$TMP/a.txt\"\ncd \"$TMP\"\nSCV=\"$REPO/bin/simple run $REPO/src/app/scv/main.spl\"\nexport SIMPLE_LIB=\"$REPO/src\"\n$SCV init >/dev/null\nBASE=$($SCV snapshot | head -1 | awk '{print $2}')\nBASE_OP=$(cat .scv/HEAD_OP)\n"
+
+describe "scv identity-aware merge (D-04)":
+    it "merges a hint-accepted rename+edit on one side with an edit on the other via EntityId":
+        step("Left renames a.txt -> moved.txt AND edits line 1 (accepted move edge, content differs from base)")
+        step("Right edits line 3 of a.txt at the base path")
+        val script = _prologue("rename-edit") + "mv a.txt moved.txt\nprintf 'ONE\\ntwo\\nthree\\n' > moved.txt\nLEFT_OUT=$($SCV snapshot --rename a.txt moved.txt)\nprintf '%s\\n' \"$LEFT_OUT\"\nLEFT=$(printf '%s\\n' \"$LEFT_OUT\" | head -1 | awk '{print $2}')\n$SCV restore-op \"$BASE_OP\" >/dev/null\nprintf 'one\\ntwo\\nTHREE\\n' > a.txt\nRIGHT=$($SCV snapshot | head -1 | awk '{print $2}')\n$SCV merge-commits \"$BASE\" \"$LEFT\" \"$RIGHT\"\n$SCV export-tree out >/dev/null\ntest ! -e out/a.txt\nprintf 'moved=%s\\n' \"$(cat out/moved.txt | tr '\\n' '|')\"\n"
+        val out = _run_script(script)
+        expect(out).to_contain("move a.txt -> moved.txt")
+        expect(out).to_contain("status=accepted")
+        expect(out).to_contain("conflicts=0")
+        expect(out).to_contain("a.txt: identity-rename-source")
+        expect(out).to_contain("moved.txt: identity-rename-edit")
+        expect(out).to_contain("moved=ONE|two|THREE|")
+        expect(out).to_contain("exit=0")
+
+    it "never silently merges rename-vs-rename: the second rename is a typed conflict, nothing is dropped":
+        # The linear identity store (I-02) can attribute only ONE accepted
+        # rename per EntityId: after the left rename, `--rename a.txt right.txt`
+        # on the right finds no live id at a.txt, so right.txt carries no entity.
+        # The identity pre-pass therefore sees file_1 renamed-left / gone-right
+        # and records conflict DATA rather than inventing a clean merge; the
+        # unattributed right.txt survives on the path-based route. The strategy
+        # label `identity-rename-delete` reflects the STORE's view, not ground
+        # truth; SCV-IMPL-D-07 typed conflicts own the naming.
+        # TODO(I-04): with lane C's relations API both renames become
+        # attributable and this case is the entity_identity_ambiguous kind.
+        val script = _prologue("rename-rename") + "mv a.txt left.txt\nLEFT=$($SCV snapshot --rename a.txt left.txt | head -1 | awk '{print $2}')\n$SCV restore-op \"$BASE_OP\" >/dev/null\nmv a.txt right.txt\nprintf 'one\\ntwo\\nTHREE\\n' > right.txt\nRIGHT=$($SCV snapshot --rename a.txt right.txt | head -1 | awk '{print $2}')\n$SCV merge-commits \"$BASE\" \"$LEFT\" \"$RIGHT\"\n$SCV conflicts\n"
+        val out = _run_script(script)
+        expect(out).to_contain("conflicts=1")
+        expect(out).to_contain("a.txt: identity-rename-source")
+        expect(out).to_contain("left.txt: identity-rename-delete conflict entity=file_1")
+        expect(out).to_contain("right.txt: right-only")
+        expect(out).to_contain("kind: entity_rename_delete")
+        expect(out).to_contain("entity: file_1")
+        expect(out).to_contain("exit=0")
+
+    it "records rename-vs-delete of one EntityId as conflict data instead of silently dropping it":
+        val script = _prologue("rename-delete") + "mv a.txt moved.txt\nprintf 'ONE\\ntwo\\nthree\\n' > moved.txt\nLEFT=$($SCV snapshot --rename a.txt moved.txt | head -1 | awk '{print $2}')\n$SCV restore-op \"$BASE_OP\" >/dev/null\nrm a.txt\nprintf 'keep\\n' > other.txt\nRIGHT=$($SCV snapshot | head -1 | awk '{print $2}')\n$SCV merge-commits \"$BASE\" \"$LEFT\" \"$RIGHT\"\n$SCV conflicts\n"
+        val out = _run_script(script)
+        expect(out).to_contain("conflicts=1")
+        expect(out).to_contain("identity-rename-delete")
+        expect(out).to_contain("kind: entity_rename_delete")
+        expect(out).to_contain("other.txt: right-only")
+        expect(out).to_contain("exit=0")

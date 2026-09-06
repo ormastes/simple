@@ -1,0 +1,280 @@
+# codex-impl
+# Pure typed integration planning. This module never mutates refs or invokes a backend.
+
+use std.scv.lifecycle.model.{Approval, GateRun, GateBundle, LifecycleResult, lifecycle_ok, lifecycle_error}
+use std.scv.lifecycle.review.{lifecycle_gate_bundle_admits}
+use app.sj.gate_manifest.{GateManifestEntry, GateManifestPlan, parse_gate_manifest, plan_protected_gate_manifest}
+use app.sj.lifecycle_policy.{parse_lifecycle_vcs_policy, parse_canonical_lifecycle_vcs_policy, lifecycle_policy_ref}
+use app.sj.operation.{SJ_OP_INTEGRATE, legacy_argv_operation, vcs_operation_valid}
+
+# Committed authority sources, named here but READ BY THE ENTRY POINT. Keeping
+# the file IO in `plan_main.spl` leaves this module a pure planner: every
+# decision is a function of its arguments, so a spec can drive the absent and
+# malformed policy branches by passing payloads instead of staging files.
+val PROTECTED_REF_POLICY_PATH = ".spipe/policy/vcs.sdn"
+val PROTECTED_GATE_MANIFEST_PATH = "config/check/must_check_gates.sdn"
+
+struct IntegrateRequest:
+    change_id: text
+    revision_id: text
+    base_revision_id: text
+    expected_remote_revision: text
+    observed_remote_revision: text
+    target_ref: text
+    policy_digest: text
+    gate_profile: text
+    actor: text
+    authority: text
+    dry_run: bool
+
+struct IntegratePlan:
+    admitted: bool
+    code: text
+    message: text
+    steps: [text]
+    gate_invocation_ids: [text]
+    request: IntegrateRequest
+
+fn _rejected(request: IntegrateRequest, code: text, message: text) -> IntegratePlan:
+    IntegratePlan(admitted: false, code: code, message: message, steps: [], gate_invocation_ids: [], request: request)
+
+fn plan_integration(request: IntegrateRequest, approvals: [Approval], gate_bundle: GateBundle, protected_target: bool) -> IntegratePlan:
+    if not request.dry_run:
+        return _rejected(request, "SJ_OBSERVE_ONLY", "protected integration execution is disabled until authority promotion")
+    if not protected_target:
+        return _rejected(request, "SJ_POLICY_TARGET", "target ref is not declared by protected-ref policy")
+    if request.change_id == "" or request.revision_id == "" or request.base_revision_id == "":
+        return _rejected(request, "SJ_IDENTITY_MISSING", "change, revision, and base identities are required")
+    if request.expected_remote_revision == "" or request.observed_remote_revision != request.expected_remote_revision:
+        return _rejected(request, "SJ_REMOTE_STALE", "remote compare-and-swap precondition changed")
+    if request.policy_digest == "" or request.gate_profile == "":
+        return _rejected(request, "SJ_POLICY_MISSING", "policy digest and gate profile are required")
+    if request.actor == "" or request.authority == "":
+        return _rejected(request, "SJ_AUTHORITY_MISSING", "actor and authority are required")
+    if gate_bundle.revision_id != request.revision_id or gate_bundle.policy_digest != request.policy_digest or not gate_bundle.complete:
+        return _rejected(request, "SJ_GATE_BUNDLE", "complete exact-revision gate evidence is required")
+    var exact_approval = false
+    for approval in approvals:
+        if approval.revision_id == request.revision_id and approval.policy_digest == request.policy_digest and approval.state == "approved" and gate_bundle.approval_ids.contains(approval.approval_id):
+            exact_approval = true
+    if not exact_approval:
+        return _rejected(request, "SJ_APPROVAL_STALE", "no current exact-revision approval exists")
+    val steps = [
+        "acquire_repository_integration_lease",
+        "fetch_and_compare_remote_revision",
+        "refresh_candidate_and_revalidate_revision",
+        "execute_pinned_gate_manifest",
+        "verify_scv_jj_git_tree_equivalence",
+        "compare_and_swap_integration_ref",
+        "export_and_publish_exact_ref",
+        "verify_remote_revision",
+        "record_durable_audit_operation"
+    ]
+    IntegratePlan(admitted: true, code: "", message: if request.dry_run: "dry-run only; no refs mutated" else: "typed plan admitted", steps: steps, gate_invocation_ids: [], request: request)
+
+fn plan_integration_with_manifest(request: IntegrateRequest, approvals: [Approval], gate_bundle: GateBundle, protected_target: bool, manifest_plan: GateManifestPlan) -> IntegratePlan:
+    val base = plan_integration(request, approvals, gate_bundle, protected_target)
+    if not base.admitted:
+        return base
+    if not manifest_plan.valid or manifest_plan.invocations.len() == 0:
+        return _rejected(request, "SJ_GATE_MANIFEST", "authoritative protected gate manifest is invalid or empty")
+    var ids: [text] = []
+    for invocation in manifest_plan.invocations:
+        if invocation.base_revision != request.base_revision_id or invocation.head_revision != request.revision_id:
+            return _rejected(request, "SJ_GATE_PIN_MISMATCH", "gate invocation is not pinned to integration BASE and HEAD")
+        ids.push(invocation.gate_id)
+    IntegratePlan(admitted: true, code: "", message: base.message, steps: base.steps, gate_invocation_ids: ids, request: request)
+
+fn plan_integration_with_policy(request: IntegrateRequest, approvals: [Approval], gate_runs: [GateRun], gate_bundle: GateBundle, policy_payload: text, manifest_plan: GateManifestPlan) -> IntegratePlan:
+    val policy = parse_canonical_lifecycle_vcs_policy(policy_payload)
+    if not policy.valid or policy.digest != request.policy_digest:
+        return _rejected(request, "SJ_POLICY_UNKNOWN", "request is not bound to the validated protected-ref policy")
+    val required_refs = ["main", "integration/main", "release/*", "refs/tags/v*"]
+    for required_ref in required_refs:
+        var found = false
+        for candidate in policy.refs:
+            if candidate.ref_pattern == required_ref:
+                found = true
+        if not found:
+            return _rejected(request, "SJ_POLICY_INCOMPLETE", "validated policy is missing required protected ref class: " + required_ref)
+    val ref_policy = lifecycle_policy_ref(policy, request.target_ref)
+    if ref_policy == nil:
+        return _rejected(request, "SJ_POLICY_TARGET", "target ref is not declared by protected-ref policy")
+    if ref_policy.?.gate_profile != request.gate_profile:
+        return _rejected(request, "SJ_GATE_PROFILE", "request gate profile does not match protected-ref policy")
+    val base = plan_integration_with_manifest(request, approvals, gate_bundle, true, manifest_plan)
+    if not base.admitted:
+        return base
+    for invocation in manifest_plan.invocations:
+        var evidenced = false
+        for run in gate_runs:
+            if run.gate_id == invocation.gate_id and gate_bundle.gate_run_ids.contains(run.gate_run_id) and run.revision_id == request.revision_id and run.policy_digest == request.policy_digest and run.verdict == "pass" and run.evidence_objects.len() > 0:
+                evidenced = true
+        if not evidenced:
+            return _rejected(request, "SJ_GATE_EVIDENCE_MISSING", "required manifest gate lacks exact retained evidence: " + invocation.gate_id)
+    base
+
+# Legacy-argv bridge: a compatibility argv line is translated into the typed
+# operation vocabulary and planned as a DRY RUN. This path never mutates a ref,
+# never invokes a backend, and has no execution branch to fall through to.
+struct LegacyPlanReport:
+    verdict: text
+    exit_code: i64
+    planned: i64
+    operation_kind: text
+    entity_id: text
+    target_ref: text
+    dry_run: bool
+    admitted: bool
+    code: text
+    reason: text
+    lines: [text]
+
+fn _legacy_plan_error(argv: [text], detail: text) -> LegacyPlanReport:
+    val lines = [
+        "sj typed dry-run plan (no refs are mutated)",
+        "  legacy argv     : " + argv.join(" "),
+        "ERROR — nothing was checked (" + detail + ")"
+    ]
+    LegacyPlanReport(
+        verdict: "ERROR", exit_code: 2i64, planned: 0i64,
+        operation_kind: "", entity_id: "", target_ref: "", dry_run: true,
+        admitted: false, code: "", reason: detail, lines: lines
+    )
+
+# Resolution of the protected-target predicate against the committed
+# protected-ref policy. Fail-closed: `resolved == false` means the policy could
+# not be established at all and the caller must ERROR rather than admit.
+struct ProtectedTargetResolution:
+    resolved: bool
+    protected_target: bool
+    gate_profile: text
+    policy_digest: text
+    error: text
+
+fn _unresolved_target(policy_digest: text, detail: text) -> ProtectedTargetResolution:
+    ProtectedTargetResolution(resolved: false, protected_target: false, gate_profile: "", policy_digest: policy_digest, error: detail)
+
+fn resolve_protected_target(policy_payload: text, target_ref: text) -> ProtectedTargetResolution:
+    if policy_payload.trim() == "":
+        return _unresolved_target("", "protected-ref policy source is absent or empty")
+    # The BASIC parser is authoritative here, not the canonical one. Measured
+    # 2026-09-05, `parse_canonical_lifecycle_vcs_policy` REJECTS the committed
+    # `.spipe/policy/vcs.sdn` ("review-ref policy does not match the canonical
+    # protected contract": committed `review/*` declares `force: deny` where the
+    # canonical contract demands `lease_only`, and `candidate/*` declares
+    # `required_profile: candidate` against a demanded `release`). Binding the
+    # predicate to the canonical parser would leave every plan ERRORing and the
+    # admitted branch dead. The basic parser still validates schema, ref
+    # completeness, SJ mutator ownership, force-deny, per-class update rules and
+    # server enforcement, so it is an adequate protected-ref authority.
+    val policy = parse_lifecycle_vcs_policy(policy_payload)
+    if not policy.valid:
+        return _unresolved_target(policy.digest, "protected-ref policy is malformed: " + policy.error)
+    val ref_policy = lifecycle_policy_ref(policy, target_ref)
+    if ref_policy == nil:
+        # Resolved, but this ref is simply not declared protected. That is a
+        # FAIL for the caller's plan, never an admission and never an ERROR.
+        return ProtectedTargetResolution(resolved: true, protected_target: false, gate_profile: "", policy_digest: policy.digest, error: "")
+    ProtectedTargetResolution(resolved: true, protected_target: true, gate_profile: ref_policy.?.gate_profile, policy_digest: policy.digest, error: "")
+
+fn manifest_push_blocking_gate_ids(entries: [GateManifestEntry]) -> [text]:
+    var ids: [text] = []
+    for entry in entries:
+        if entry.tier == "push" and entry.push_blocking and entry.gate_id != "" and not ids.contains(entry.gate_id):
+            ids.push(entry.gate_id)
+    ids
+
+fn _manifest_malformed(entries: [GateManifestEntry]) -> bool:
+    for entry in entries:
+        if entry.gate_id == "":
+            return true
+    false
+
+fn legacy_argv_integrate_plan_with_policy(argv: [text], policy_payload: text, manifest_payload: text) -> LegacyPlanReport:
+    val operation = legacy_argv_operation(argv)
+    if not vcs_operation_valid(operation):
+        return _legacy_plan_error(argv, "legacy argv produced no valid typed operation")
+    val kind = operation.kind
+    if kind != SJ_OP_INTEGRATE:
+        return _legacy_plan_error(argv, "legacy argv maps to typed `" + kind + "`, which has no protected integration plan")
+    val entity_id = operation.entity_id
+    val target_ref = operation.target_ref
+    val dry_run = operation.dry_run
+    val reason = operation.reason
+    val request = IntegrateRequest(
+        change_id: entity_id, revision_id: "", base_revision_id: "",
+        expected_remote_revision: "", observed_remote_revision: "",
+        target_ref: target_ref, policy_digest: "", gate_profile: "",
+        actor: "", authority: "", dry_run: dry_run
+    )
+    val empty_bundle = GateBundle(
+        gate_bundle_id: "", revision_id: "", gate_run_ids: [], approval_ids: [],
+        complete: false, bundle_digest: "", policy_digest: ""
+    )
+    # Fail-closed: an absent, unreadable or malformed protected-ref policy is an
+    # ERROR ("nothing was checked"), never a silent admission.
+    val resolution = resolve_protected_target(policy_payload, target_ref)
+    if not resolution.resolved:
+        return _legacy_plan_error(argv, resolution.error)
+    # Same bar for the authoritative gate manifest: no rows, no push-blocking
+    # row, or any malformed row means the required gate set is unknown.
+    val manifest_entries = parse_gate_manifest(manifest_payload)
+    if _manifest_malformed(manifest_entries):
+        return _legacy_plan_error(argv, "protected gate manifest carries a malformed row")
+    val required_gate_ids = manifest_push_blocking_gate_ids(manifest_entries)
+    if required_gate_ids.len() == 0:
+        return _legacy_plan_error(argv, "protected gate manifest is absent or selects zero push-blocking gates")
+    val plan = plan_integration(request, [], empty_bundle, resolution.protected_target)
+    # Planning what the pinned gate manifest WOULD require, and what the gate
+    # evidence bundle WOULD admit. Both are observations only; nothing here
+    # invokes a gate, moves a ref, writes CAS, or mutates anything.
+    val manifest_plan = plan_protected_gate_manifest(manifest_entries, request.base_revision_id, request.revision_id)
+    val bundle_admission = lifecycle_gate_bundle_admits(empty_bundle, request.revision_id)
+    val admitted = plan.admitted
+    val code = plan.code
+    val message = plan.message
+    var lines = [
+        "sj typed dry-run plan (no refs are mutated)",
+        "  legacy argv     : " + argv.join(" "),
+        "  typed operation : " + kind,
+        "  entity id       : " + entity_id,
+        "  target ref      : " + target_ref,
+        "  dry run         : " + (if dry_run: "true" else: "false"),
+        "  operation reason: " + reason,
+        "  protected-ref policy: consulted (digest " + resolution.policy_digest + ")",
+        "  protected target : " + (if resolution.protected_target: "true" else: "false"),
+        "  policy gate profile: " + (if resolution.gate_profile == "": "(none)" else: resolution.gate_profile),
+        "  plan admitted   : " + (if admitted: "true" else: "false"),
+        "  plan code       : " + code,
+        "  plan message    : " + message
+    ]
+    for gate_id in required_gate_ids:
+        lines.push("  would require gate: " + gate_id)
+    lines.push("  gate manifest pin: " + (if manifest_plan.valid: manifest_plan.invocations.len().to_text() + " invocation(s) pinned to " + request.base_revision_id + ".." + request.revision_id else: manifest_plan.error))
+    lines.push("  gate bundle      : " + (if bundle_admission.ok: "admitted (" + bundle_admission.entity_id + ")" else: bundle_admission.code + " — " + bundle_admission.message))
+    if admitted:
+        for stepname in plan.steps:
+            lines.push("  would perform    : " + stepname)
+        lines.push("PASS — 1 operation(s) planned, admitted as dry-run only")
+        return LegacyPlanReport(
+            verdict: "PASS", exit_code: 0i64, planned: 1i64,
+            operation_kind: kind, entity_id: entity_id, target_ref: target_ref,
+            dry_run: dry_run, admitted: true, code: code, reason: reason, lines: lines
+        )
+    lines.push("FAIL — 1 operation(s) planned, not admitted: " + code)
+    LegacyPlanReport(
+        verdict: "FAIL", exit_code: 1i64, planned: 1i64,
+        operation_kind: kind, entity_id: entity_id, target_ref: target_ref,
+        dry_run: dry_run, admitted: false, code: code, reason: reason, lines: lines
+    )
+
+export IntegrateRequest, IntegratePlan, plan_integration, plan_integration_with_manifest, plan_integration_with_policy
+# `ProtectedTargetResolution`, `resolve_protected_target` and
+# `manifest_push_blocking_gate_ids` are deliberately NOT exported: they are
+# internal steps of the planner, and `legacy_argv_integrate_plan_with_policy`
+# is the whole public contract. Exporting them so a spec could poke at them
+# directly would add exported surface with no production consumer outside this
+# file, which is the dormant-symbol defect this lane exists to remove.
+export LegacyPlanReport, legacy_argv_integrate_plan_with_policy
+export PROTECTED_REF_POLICY_PATH, PROTECTED_GATE_MANIFEST_PATH

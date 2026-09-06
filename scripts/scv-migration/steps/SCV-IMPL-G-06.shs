@@ -1,0 +1,47 @@
+#!/bin/sh
+# SCV-IMPL-G-06 — build-invalidation hookup in SCV's own metadata:
+# syntactic_interface_id drives downstream invalidation (interface unchanged
+# ⇒ consumers skippable; changed ⇒ transitive consumers invalidated).
+# HONEST SCOPE: the comment-only codegen skip is gated on an explicit
+# dependency_model field; the compiler dependency model is reported
+# "unavailable" (interface_digest_of: zero callers), so the skip is BLOCKED —
+# compiler-confirmed irrelevance is never claimed.
+# Mechanical: verifies the module, spec + mirror twin, export, version, the
+# unavailable-status honesty, the interface_digest_of TODO, the confirmed-only
+# gate, and the acceptance spec's green run.
+# Verdict is ALWAYS the last stdout line: PASS exit 0 / FAIL exit 1 / ERROR 2.
+# Committed UNSIGNED: sign with
+#   sh scripts/trust/sign-script.shs --name scv-migration-root scripts/scv-migration/steps/SCV-IMPL-G-06.shs
+set -u
+checked=0
+missing=""
+for f in src/lib/scv/build_invalidation.spl \
+         test/integration/app/scv_build_invalidation_spec.spl \
+         test/02_integration/app/scv_build_invalidation_spec.spl; do
+  checked=$((checked + 1))
+  [ -f "$f" ] || missing="$missing file($f)"
+done
+checked=$((checked + 1))
+grep -q '^export build_invalidation\.\*' src/lib/scv/__init__.spl || missing="$missing export(build_invalidation)"
+checked=$((checked + 1))
+grep -q 'scv/build-invalidation/v1' src/lib/scv/build_invalidation.spl || missing="$missing version(scv/build-invalidation/v1)"
+checked=$((checked + 1))
+grep -q '"unavailable"' src/lib/scv/build_invalidation.spl || missing="$missing honest-dependency-model(unavailable)"
+checked=$((checked + 1))
+grep -q 'interface_digest_of' src/lib/scv/build_invalidation.spl || missing="$missing todo(interface_digest_of)"
+checked=$((checked + 1))
+grep -q 'dependency_model == "confirmed"' src/lib/scv/build_invalidation.spl || missing="$missing skip-gate(confirmed-only)"
+OUT="${TMPDIR:-/tmp}/SCV-IMPL-G-06.$$.out"
+SIMPLE_TIMEOUT_SECONDS=900 bin/simple test test/integration/app/scv_build_invalidation_spec.spl > "$OUT" 2>&1
+rc=$?
+checked=$((checked + 1))
+RES=$(grep 'Results:' "$OUT" | tail -1)
+rm -f "$OUT"
+{ [ "$rc" -eq 0 ] && printf '%s' "$RES" | grep -q ', 0 failed'; } || missing="$missing spec-run(rc=$rc $RES)"
+[ "$checked" -gt 0 ] || { echo "ERROR — nothing was checked"; exit 2; }
+if [ -z "$missing" ]; then
+  echo "PASS — $checked check(s) verified, build invalidation green ($RES)"
+  exit 0
+fi
+echo "FAIL — $checked check(s) verified, missing:$missing"
+exit 1

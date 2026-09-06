@@ -1,0 +1,142 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+# @req REQ-SSPEC-UNIT
+"""
+HWIR optimizer unit tests.
+
+Each scenario exercises one optimizer pass contract against the same minimal
+typed HWIR module.  The scope is optimizer planning and accounting only; it
+does not claim generated VHDL or target execution evidence.
+"""
+
+use std.spec.step
+
+use std.spec.*
+use compiler.mir.hwir.types.{HwModule, HwCostModel, HwFsm}
+use compiler.mir_opt.hwir_opt.{
+    HwirOptPassConfig,
+    HwirWidthRange, hwir_width_narrowing_pass,
+    HwirStructuralStats, hwir_structural_simplify_pass,
+    HwirResourceBindingPlan, hwir_binding_for_profile, hwir_resource_binding_pass,
+    HwirFsmOptPlan, hwir_choose_fsm_encoding, hwir_fsm_opt_pass,
+    HwirMemoryPattern, hwir_memory_from_pattern, hwir_memory_inference_pass,
+    HwirDspPattern, hwir_dsp_inference_pass
+}
+
+fn check(condition: bool):
+    expect condition == true
+
+fn test_cost() -> HwCostModel:
+    HwCostModel(lut_count: 100, ff_count: 80, dsp_count: 4, bram_count: 1, latency_cycles: 3, fmax_mhz: 100)
+
+fn test_module() -> HwModule:
+    HwModule(
+        name: "demo",
+        profile: "balanced",
+        port_count: 2,
+        signal_count: 4,
+        register_count: 2,
+        memory_count: 0,
+        comb_op_count: 3,
+        clock_domain_count: 1,
+        fallback_function: "demo",
+        cost: test_cost()
+    )
+
+describe "HWIR optimizer pass config":
+    # @manual scenario evidence
+    it "should enable every pass for the speed profile":
+        # @req REQ-SSPEC-UNIT
+        step("should enable every pass for the speed profile")
+        step("Create an all-enabled speed pass configuration")
+        val config = HwirOptPassConfig.all_enabled("speed")
+        check(config.width_narrowing)
+        check(config.structural_simplify)
+        check(config.resource_binding)
+        check(config.fsm_opt)
+        check(config.memory_inference)
+        check(config.dsp_inference)
+        expect config.profile == "speed"
+
+    it "should disable every pass for the area profile":
+        # @req REQ-SSPEC-UNIT
+        step("should disable every pass for the area profile")
+        step("Create a disabled area pass configuration")
+        val config = HwirOptPassConfig.none("area")
+        check(not config.width_narrowing)
+        check(not config.structural_simplify)
+        check(not config.resource_binding)
+        check(not config.fsm_opt)
+        check(not config.memory_inference)
+        check(not config.dsp_inference)
+        expect config.profile == "area"
+
+describe "HWIR width narrowing":
+    it "should report narrowed bits from a static range":
+        # @req REQ-SSPEC-UNIT
+        step("should report narrowed bits from a static range")
+        step("Narrow an eight-bit unsigned range whose maximum is seven")
+        val range = HwirWidthRange(node_id: "n0", min_value: 0, max_value: 7, original_width: 8, signed_value: false)
+        val result = hwir_width_narrowing_pass(test_module(), [range])
+        check(result.changed)
+        expect result.narrowed_bits == 4
+
+describe "HWIR structural simplification":
+    it "should count folded and removed nodes":
+        # @req REQ-SSPEC-UNIT
+        step("should count folded and removed nodes")
+        step("Simplify a module with foldable and dead structural nodes")
+        val stats = HwirStructuralStats(constant_folds: 2, dead_signals: 3, dead_registers: 1, redundant_muxes: 1, cse_hits: 2)
+        val result = hwir_structural_simplify_pass(test_module(), stats)
+        check(result.changed)
+        expect result.removed_nodes == 7
+
+describe "HWIR resource binding":
+    it "should share multiplier resources for the area profile":
+        # @req REQ-SSPEC-UNIT
+        step("should share multiplier resources for the area profile")
+        step("Bind an area-profile multiplier plan")
+        val plan = HwirResourceBindingPlan(profile: "area", multiplier_count: 4, shared_multiplier_count: 2, divider_count: 1, pipeline_stage_count: 0)
+        val binding = hwir_binding_for_profile("mul0", "multiplier", "area")
+        val result = hwir_resource_binding_pass(test_module(), plan)
+        check(binding.is_shared())
+        check(result.changed)
+        expect result.shared_resources == 2
+
+describe "HWIR FSM optimization":
+    it "should choose one-hot speed encoding and remove unreachable states":
+        # @req REQ-SSPEC-UNIT
+        step("should choose one-hot speed encoding and remove unreachable states")
+        step("Optimize an eight-state control FSM for speed")
+        val fsm = HwFsm.create("ctrl", "state", 8)
+        val encoding = hwir_choose_fsm_encoding(8, "speed")
+        val plan = HwirFsmOptPlan(fsm: fsm, unreachable_states: 3, encoding: encoding)
+        val result = hwir_fsm_opt_pass(test_module(), plan)
+        expect encoding == "one_hot"
+        check(result.changed)
+        expect result.removed_nodes == 3
+
+describe "HWIR memory inference":
+    it "should recognize a true dual-port RAM pattern":
+        # @req REQ-SSPEC-UNIT
+        step("should recognize a true dual-port RAM pattern")
+        step("Infer memory from a two-read-port register-file pattern")
+        val pattern = HwirMemoryPattern(name: "rf", element_width: 32, depth: 64, read_ports: 2, write_ports: 1, constant_contents: false, fifo_access: false)
+        val memory = hwir_memory_from_pattern(pattern)
+        val result = hwir_memory_inference_pass(test_module(), [pattern])
+        expect memory.template_kind == "true_dual_port_ram"
+        check(result.changed)
+        expect result.removed_nodes == 64
+
+describe "HWIR DSP inference":
+    it "should bind a multiply-accumulate pattern to DSP resources":
+        # @req REQ-SSPEC-UNIT
+        step("should bind a multiply-accumulate pattern to DSP resources")
+        step("Infer DSP use for a sixteen-bit multiply-accumulate pattern")
+        val pattern = HwirDspPattern(node_id: "mac0", pattern_kind: "mac", operand_width: 16, term_count: 2, prefer_lut: false)
+        val result = hwir_dsp_inference_pass(test_module(), [pattern])
+        check(pattern.uses_dsp())
+        check(result.changed)
+        expect result.cost_after.dsp_count == 5

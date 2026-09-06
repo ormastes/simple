@@ -1,0 +1,57 @@
+use std.spec.*
+use std.hardware.rv32i_rtl.pmp.{pmp32_check_entry, pmp32_check16, pmp32_gate_access}
+use std.hardware.rv32i_rtl.pmp_csr.pmp32_entries_reset
+
+describe "RV32 PMP matching":
+    it "matches TOR, NA4, and NAPOT ranges but rejects partial overlap":
+        val tor = pmp32_check_entry(0x09, 0x100, 0x200, 0x400, 0x407, 1, 1)
+        val na4 = pmp32_check_entry(0x11, 0, 0x100, 0x400, 0x403, 1, 1)
+        val napot = pmp32_check_entry(0x19, 0, 0x101, 0x400, 0x407, 1, 1)
+        val partial = pmp32_check_entry(0x19, 0, 0x101, 0x40C, 0x413, 1, 1)
+        expect(tor.allowed).to_equal(true)
+        expect(na4.allowed).to_equal(true)
+        expect(napot.allowed).to_equal(true)
+        expect(partial.matched).to_equal(true)
+        expect(partial.allowed).to_equal(false)
+
+    it "covers the full RV32 physical domain with wide NAPOT":
+        val tor = pmp32_check_entry(0x09, 0, 0xFFFFFFFF, 0x3FFFFFFF8, 0x3FFFFFFFB, 1, 1)
+        val result = pmp32_check_entry(0x19, 0, 0xFFFFFFFF, 0x3FFFFFFFF, 0x3FFFFFFFF, 1, 1)
+        expect(tor.matched).to_equal(true)
+        expect(tor.allowed).to_equal(true)
+        expect(result.matched).to_equal(true)
+        expect(result.allowed).to_equal(true)
+
+    it "honors lowest-entry priority and M-mode locking":
+        var entries = pmp32_entries_reset()
+        entries.cfg_0 = 0x18
+        entries.addr_0 = 0x101
+        entries.cfg_1 = 0x19
+        entries.addr_1 = 0x101
+        val priority = pmp32_check16(entries, 0x400, 4, 1, 1)
+        val unlocked_m = pmp32_check_entry(0x1A, 0, 0x101, 0x400, 0x403, 1, 3)
+        val locked_m = pmp32_check_entry(0x9A, 0, 0x101, 0x400, 0x403, 1, 3)
+        expect(priority.matched_index).to_equal(0)
+        expect(priority.allowed).to_equal(false)
+        expect(unlocked_m.allowed).to_equal(true)
+        expect(locked_m.allowed).to_equal(false)
+
+    it "fails closed for invalid ranges and non-M no-match":
+        val entries = pmp32_entries_reset()
+        val supervisor = pmp32_check16(entries, 0x400, 4, 1, 1)
+        val overflow = pmp32_check16(entries, 0xFFFFFFFF, 2, 1, 3)
+        val invalid = pmp32_check16(entries, 0x400, 0, 1, 3)
+        expect(supervisor.allowed).to_equal(false)
+        expect(overflow.allowed).to_equal(true)
+        expect(invalid.allowed).to_equal(false)
+
+    it "suppresses bus issue for PMP and translation faults":
+        var entries = pmp32_entries_reset()
+        entries.cfg_0 = 0x19
+        entries.addr_0 = 0x101
+        val denied = pmp32_gate_access(entries, 0x400, 4, 2, 1, false, 0)
+        val translation = pmp32_gate_access(entries, 0x400, 4, 1, 1, true, 13)
+        expect(denied.bus_valid).to_equal(false)
+        expect(denied.fault_cause).to_equal(7)
+        expect(translation.bus_valid).to_equal(false)
+        expect(translation.fault_cause).to_equal(13)

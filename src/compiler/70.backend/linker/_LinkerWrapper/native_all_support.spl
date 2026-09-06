@@ -1,0 +1,92 @@
+# Transitive hosted-link dependencies for the Rust seed aggregate archive.
+
+fn native_all_input_present(inputs: [text]) -> bool:
+    for input in inputs:
+        # Seed-parser compat: chained .replace().split() does not dispatch under
+        # the deployed seed (known chained-method limitation) — use a typed val.
+        val normalized: text = input.replace("\\", "/")
+        val parts = normalized.split("/")
+        val name = parts[parts.len() - 1].lower()
+        if name == "libsimple_native_all.a" or name == "simple_native_all.lib":
+            return true
+    false
+
+fn native_runtime_bundle_is_core_c(bundle: text) -> bool:
+    bundle == "core-c-bootstrap" or bundle == "core_c_bootstrap" or bundle == "core-c" or bundle == "core_c"
+
+fn native_runtime_bundle_is_known(bundle: text) -> bool:
+    bundle == "" or bundle == "auto" or bundle == "simple-core" or
+        bundle == "simple_core" or bundle == "host-gpu" or
+        bundle == "host_gpu" or native_runtime_bundle_is_core_c(bundle)
+
+fn native_runtime_archive_names(runtime_bundle: text, has_compiler: bool, has_backfill: bool, has_native_all: bool) -> [text]:
+    """Select one admitted static runtime authority without dynamic fallback."""
+    if not native_runtime_bundle_is_known(runtime_bundle):
+        return []
+    if native_runtime_bundle_is_core_c(runtime_bundle):
+        if has_backfill and has_native_all:
+            return ["libsimple_compiler_backfill.a", "libsimple_native_all.a"]
+        return []
+    if runtime_bundle != "" and runtime_bundle != "auto":
+        if has_backfill and has_native_all:
+            return ["libsimple_compiler_backfill.a", "libsimple_native_all.a"]
+        return []
+    if has_compiler:
+        return ["libsimple_compiler.a"]
+    var archives: [text] = []
+    if has_backfill:
+        archives.push("libsimple_compiler_backfill.a")
+    if has_native_all:
+        archives.push("libsimple_native_all.a")
+    archives
+
+fn native_runtime_archive_names_for_platform(runtime_bundle: text, msvc: bool,
+        has_compiler: bool, has_backfill: bool, has_native_all: bool) -> [text]:
+    val names = native_runtime_archive_names(
+        runtime_bundle, has_compiler, has_backfill, has_native_all)
+    if not msvc:
+        return names
+    var translated: [text] = []
+    for name in names:
+        if name == "libsimple_compiler.a":
+            translated.push("simple_compiler.lib")
+        elif name == "libsimple_compiler_backfill.a":
+            translated.push("simple_compiler_backfill.lib")
+        elif name == "libsimple_native_all.a":
+            translated.push("simple_native_all.lib")
+    translated
+
+fn native_all_gnu_support_args(inputs: [text], os: text, macos_prefix: text) -> [text]:
+    if not native_all_input_present(inputs):
+        return []
+    if os == "linux":
+        return ["-u", "rt_vulkan_provider_is_available", "-lstdc++", "-lunwind", "-lsqlite3", "-lz", "-lzstd", "-ltinfo", "-lffi", "-lxml2", "-lncurses"]
+    if os == "macos" or os == "darwin":
+        return [
+            "-u", "_rt_vulkan_provider_is_available", "-L" + macos_prefix + "/lib", "-lc++", "-lz", "-lffi", "-ledit", "-lzstd", "-lxml2", "-lncurses", "-lobjc", "-liconv",
+            "-framework", "CoreFoundation", "-framework", "Security", "-framework", "SystemConfiguration",
+            "-framework", "IOKit", "-framework", "CoreServices", "-framework", "Foundation",
+            "-framework", "AppKit", "-framework", "Metal", "-framework", "CoreGraphics"
+        ]
+    if os == "freebsd":
+        return ["-u", "rt_vulkan_provider_is_available", "-L/usr/local/lib", "-lc++", "-lexecinfo", "-lz", "-lzstd", "-lutil", "-lrt"]
+    if os == "windows-mingw":
+        return [
+            "-u", "rt_vulkan_provider_is_available",
+            "-lkernel32", "-lntdll", "-luserenv", "-lws2_32", "-ldbghelp", "-ladvapi32", "-lbcrypt",
+            "-lole32", "-loleaut32", "-lshell32", "-lpropsys", "-lruntimeobject", "-lsynchronization",
+            "-lcrypt32", "-lsecur32", "-lncrypt", "-liphlpapi", "-ld3d11", "-ldxgi", "-luser32",
+            "-lgdi32", "-ldwmapi", "-limm32", "-luxtheme", "-lwinmm", "-lshlwapi", "-lgcc_eh",
+            "-lmsvcrt", "-lmingwex", "-lmingw32", "-lgcc"
+        ]
+    []
+
+fn native_all_msvc_support_libraries(inputs: [text]) -> [text]:
+    if not native_all_input_present(inputs):
+        return []
+    [
+        "kernel32.lib", "ws2_32.lib", "bcrypt.lib", "userenv.lib", "ntdll.lib", "advapi32.lib",
+        "dbghelp.lib", "ole32.lib", "oleaut32.lib", "shell32.lib", "crypt32.lib", "secur32.lib",
+        "ncrypt.lib", "iphlpapi.lib", "d3d11.lib", "dxgi.lib", "user32.lib", "gdi32.lib",
+        "ucrt.lib", "msvcrt.lib", "vcruntime.lib"
+    ]

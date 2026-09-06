@@ -1,0 +1,134 @@
+"""
+## Purpose and audience
+Pins the CLI stop-probe path: profile decoding
+(`load_cli_debug_probe_profile_v1`), the fail-closed context check in
+`execute_cli_debug_probe_v1`, and the central-service probe registration
+(`central_debug_service_v1_apply_probe`) that mints the probe identity the CLI
+persists. Audience: engineers changing `src/app/cli_debug/probe_executor_v1.spl`
+or `src/lib/common/debug/service_v1.spl`.
+## Operator workflow
+src/compiler_rust/target/bootstrap/simple run test/01_unit/app/cli_debug/probe_executor_v1_spec.spl
+## Compatibility and limitations
+No live debugger is started here. The `apply` action needs a running mcpgdb
+session, so only its fail-closed branch (target session unavailable) is covered
+through the CLI entry point; the probe registration itself is exercised directly
+against the central service, which is where the identity is assigned. The
+service never contacts a target -- the CLI sends `break` through its own
+transport first and registers the result afterwards.
+## Verification guidance and troubleshooting
+A RED naming an undefined `central_debug_service_v1_apply_probe`,
+`DebugProbeKindV1` or `DebugRootOperationV1.Probe` means the contract regressed
+to the state recorded in
+`doc/08_tracking/bug/debug_service_v1_probe_and_adapter_call_undefined_symbols_2026-09-05.md`.
+"""
+# Lifecycle: doc/02_requirements/feature/simple_unified_debugging_evidence.md ;
+# doc/01_research/infra/dump_replay/simple_dump_replay_fw_spipe_devhub_design_plan_2026-09-05.md ;
+# doc/03_plan/app/debug/dump_replay_wave_plan.md ;
+# doc/04_architecture/simple_unified_debugging_evidence.md ;
+# doc/05_design/app/debug/debug_capability_truth_wave0_design.md
+# @manual_section: primary
+
+use std.spec.*
+use std.io_runtime.{file_write}
+use app.cli_debug.probe_executor_v1.{load_cli_debug_probe_profile_v1, execute_cli_debug_probe_v1}
+use std.common.debug.capability.{CapLevel}
+use std.common.debug.contracts_v1.{
+    DebugProbeKindV1, DebugPerturbationV1, DebugTargetNodeV1,
+    DebugCapabilityV1, DebugVerificationV1,
+}
+use std.common.debug.service_v1.{
+    central_debug_service_v1_open, central_debug_service_v1_add_target,
+    central_debug_service_v1_apply_probe, central_debug_service_v1_close,
+    debug_policy_development_v1,
+}
+
+val PROFILE = "/tmp/cli_debug_probe_executor_unit.sdn"
+val TARGET = "mcpgdb://session/unit"
+
+fn write_profile(session_id: text, kind: text, perturbation: text):
+    file_write(PROFILE,
+        "debug_probe:\n  schema: simple.debug-probe-profile/v1\n  session_id: " + session_id +
+        "\n  build_id: sha256:unit\n  kind: " + kind +
+        "\n  source_anchor: _start\n  perturbation: " + perturbation +
+        "\n  expires_at_ns: -1\n")
+
+describe "CLI debug probe profile and fail-closed context":
+    it "decodes the exact native stop-probe contract":
+        # @req REQ-014
+        # @capture(evidence_manifest): the profile source written to disk, with its declared kind and perturbation
+        step("Write a profile declaring a native stop probe with a stopping perturbation")
+        write_profile("dbg_unit", "stop", "stopping")
+        # @capture(evidence_manifest): the decoded profile's session, kind and source anchor fields
+        step("Decode it and verify every field is taken from the file, not defaulted")
+        match load_cli_debug_probe_profile_v1(PROFILE):
+            case Err(reason): expect(reason).to_equal("")
+            case Ok(profile):
+                expect(profile.session_id).to_equal("dbg_unit")
+                expect(profile.kind).to_equal("stop")
+                expect(profile.source_anchor).to_equal("_start")
+
+    it "rejects unsupported probe kinds instead of claiming adapter support":
+        # @req REQ-014
+        # @capture(evidence_manifest): the profile source declaring an unsupported log probe
+        step("Write a profile declaring a log probe, which the CLI cannot verify")
+        write_profile("dbg_unit", "log", "passive")
+        # @capture(evidence_manifest): the decoder's Err(reason) naming the only verified probe kind
+        step("Decode it and verify the refusal names the supported kind rather than accepting")
+        match load_cli_debug_probe_profile_v1(PROFILE):
+            case Ok(_): expect("accepted").to_equal("denied")
+            case Err(reason): expect(reason).to_contain("only native stop probes")
+
+    it "denies a profile whose adapter session is unavailable":
+        # @req REQ-014
+        # @capture(evidence_manifest): the profile naming a debugger session that is not running
+        step("Write a profile bound to a debugger session that does not exist")
+        write_profile("missing_session", "stop", "stopping")
+        # @capture(evidence_manifest): the executor's Err(reason) for the apply action
+        step("Apply the probe and verify the executor fails closed on the missing session")
+        match execute_cli_debug_probe_v1("apply", PROFILE):
+            case Ok(_): expect("accepted").to_equal("denied")
+            case Err(reason): expect(reason).to_contain("session is unavailable")
+
+    it "mints a session-bound probe identity for a registered target":
+        # @req REQ-014
+        # Reproduction for
+        # doc/08_tracking/bug/debug_service_v1_probe_and_adapter_call_undefined_symbols_2026-09-05.md:
+        # before the fix `central_debug_service_v1_apply_probe` did not exist, so
+        # the CLI had no probe identity to persist and did not compile.
+        # @capture(evidence_manifest): the opened session, the registered target node and its capability
+        step("Open a session and register the target the probe will be bound to")
+        match central_debug_service_v1_open("sha256:unit", debug_policy_development_v1()):
+            case Err(reason): expect(reason).to_equal("")
+            case Ok(session_id):
+                central_debug_service_v1_add_target(session_id,
+                    DebugTargetNodeV1(TARGET, "", "native.gdb", "mcpgdb unit"),
+                    DebugCapabilityV1(TARGET, CapLevel.Native, DebugVerificationV1.LiveVerified,
+                        DebugPerturbationV1.Stopping, "unit fixture target"))
+                # @capture(evidence_manifest): the returned probe's id, session, target and source anchor
+                step("Register an applied stop probe and verify its identity is session-bound")
+                match central_debug_service_v1_apply_probe(session_id, DebugProbeKindV1.Stop,
+                        TARGET, "_start", DebugPerturbationV1.Stopping, -1):
+                    case Err(reason): expect(reason).to_equal("")
+                    case Ok(probe):
+                        expect(probe.probe_id.starts_with("probe-")).to_equal(true)
+                        expect(probe.probe_id.contains(session_id.value)).to_equal(true)
+                        expect(probe.session_id).to_equal(session_id.value)
+                        expect(probe.target_id).to_equal(TARGET)
+                central_debug_service_v1_close(session_id)
+
+    it "rejects a probe on a target the session never registered":
+        # @req REQ-014
+        # Generalization: the identity is only minted for a target the session
+        # actually knows, so a probe id can never name an unregistered target.
+        # @capture(evidence_manifest): the opened session with no registered targets
+        step("Open a session and register no targets at all")
+        match central_debug_service_v1_open("sha256:unit", debug_policy_development_v1()):
+            case Err(reason): expect(reason).to_equal("")
+            case Ok(session_id):
+                # @capture(evidence_manifest): the apply_probe Err(reason) naming the unregistered target
+                step("Register a probe against an unknown target and verify it is refused by name")
+                match central_debug_service_v1_apply_probe(session_id, DebugProbeKindV1.Stop,
+                        TARGET, "_start", DebugPerturbationV1.Stopping, -1):
+                    case Ok(_): expect("accepted").to_equal("denied")
+                    case Err(reason): expect(reason).to_contain("unregistered probe target")
+                central_debug_service_v1_close(session_id)

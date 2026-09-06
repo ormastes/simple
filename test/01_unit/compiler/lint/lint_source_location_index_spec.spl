@@ -1,0 +1,55 @@
+"""
+## Purpose and audience
+Purpose: Pin single-pass fallback source-location indexing for lint diagnostics.
+Audience: lint and compiler-tool maintainers.
+"""
+# @req: REQ-007, REQ-017
+
+use std.spec.*
+use std.fs.{read_file}
+use compiler.tools.lint.main.{
+    lint_source_location_index, lint_source_function_line,
+    lint_source_collection_fix_line, lint_source_export_star_line
+}
+
+describe "lint fallback source location index":
+    it "indexes ordinary generic and async function declarations in one view":
+        step("Index lint fallback source locations")
+        val index = lint_source_location_index([
+            "# fn decoy()",
+            "fn first():",
+            "pub async fn fetch<T>(value: T):",
+            "static fn final():"
+        ])
+        expect(lint_source_function_line(index, "first")).to_equal(2)
+        expect(lint_source_function_line(index, "fetch")).to_equal(3)
+        expect(lint_source_function_line(index, "final")).to_equal(4)
+        expect(lint_source_function_line(index, "missing")).to_equal(0)
+
+    it "retains only a file-unique machine-fix location":
+        step("Reject ambiguous lint fix locations")
+        val unique = lint_source_location_index([
+            "fn append_one():",
+            "    items = items + [value]"
+        ])
+        expect(lint_source_collection_fix_line(unique, "COLL001")).to_equal(1)
+        val duplicate = lint_source_location_index([
+            "items = items + [first]",
+            "items = items + [second]"
+        ])
+        expect(lint_source_collection_fix_line(duplicate, "COLL001")).to_equal(-1)
+
+    it "indexes wildcard exports once for constant-time diagnostic lookup":
+        step("Reuse wildcard-export source locations")
+        var lines: [text] = ["# decoy: export ignored.path.*"]
+        var i = 0
+        while i < 128:
+            lines.push("export use fixture.module_{i}.*")
+            i = i + 1
+        val index = lint_source_location_index(lines)
+        expect(lint_source_export_star_line(index, "fixture.module_0")).to_equal(2)
+        expect(lint_source_export_star_line(index, "fixture.module_127")).to_equal(129)
+        expect(lint_source_export_star_line(index, "missing.module")).to_equal(1)
+        val source = read_file("src/compiler/90.tools/lint/_LintMain/entry_and_fixes.spl")
+        expect(source).not.to_contain(
+            "lint_cli_find_decl_line(lines, \"export \", warning.module_path)")

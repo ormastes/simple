@@ -1,0 +1,58 @@
+# RED(freestanding_text_concat_chain_drops_operands_2026-08-05): a 3+ operand
+# text `+` chain (`a + ":" + b + "\n"`) must not drop operands when the
+# middle operands infer as ANY (e.g. a `.substring(...).trim()` result with
+# no explicit `text` annotation), which routes the middle `+` through
+# `rt_any_add` instead of `rt_string_concat`.
+#
+# Root cause: the freestanding `rt_any_add` stub
+# (examples/09_embedded/simple_os/arch/{x86_64,arm64}/boot/baremetal_stubs.c)
+# used to do raw `left + right` pointer arithmetic unconditionally, instead
+# of checking the heap tag and dispatching to `rt_string_concat` like its two
+# sibling implementations (src/runtime/runtime_native.c,
+# src/runtime/simple_core/core_string.spl already did it correctly). Fixed
+# 2026-08-05 -- see doc/08_tracking/bug/
+# freestanding_text_concat_chain_drops_operands_2026-08-05.md.
+#
+# This probe follows the same convention as
+# probe_freestanding_i64_to_u32_narrow.spl in this directory (exit code 0 =
+# pass). Build + run it for real freestanding-lane coverage the same way
+# scripts/check/check-simpleos-wm-fullscreen-evidence.shs builds its kernel:
+#   bin/simple native-build --backend cranelift --cpu x86-64-v1 \
+#     --opt-level=none --target x86_64-unknown-none \
+#     --entry test/01_unit/compiler/regression/probe_freestanding_text_concat_chain.spl \
+#     -o <out>.elf --linker-script examples/09_embedded/simple_os/arch/x86_64/memory_leveling_qemu.ld
+# A standalone `.spl` freestanding entry with the same three-call chain also
+# lives at
+# examples/09_embedded/simple_os/arch/x86_64/probe_text_concat_chain_entry.spl
+# (built + disassembly-verified against the real cranelift/baremetal_stubs.c
+# freestanding lane during the 2026-08-05 investigation).
+
+fn build_chain(a: text, b: text) -> text:
+    val r = a + ":" + b + "\n"
+    return r
+
+fn build_chain_substring(body: text, dd: i64, colon: i64, semi: i64) -> text:
+    # Mirrors the field bug's exact call shape: `name`/`prop_val` come from
+    # `.substring(...).trim()` with no explicit `text` annotation, so they
+    # infer `TypeId::ANY` and the middle `+` routes through `rt_any_add`.
+    val name = body.substring(dd, colon).trim()
+    val prop_val = body.substring(colon + 1, semi).trim()
+    val entry = name + ":" + prop_val + "\n"
+    return entry
+
+fn main() -> i64:
+    val a = "hello"
+    val b = "world"
+    val r = build_chain(a, b)
+    if r.len() != 12:
+        return 1
+    if r != "hello:world\n":
+        return 2
+
+    val body = "  --radius-sm:8px;"
+    val e = build_chain_substring(body, 2, 13, 17)
+    if e.len() != 16:
+        return 3
+    if e != "--radius-sm:8px\n":
+        return 4
+    0

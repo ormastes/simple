@@ -1,0 +1,126 @@
+# Real-file capture format adapter (E8 lane, evidence manifest v1).
+#
+# This is the SECOND genuinely live-capture provider in the typed-evidence
+# system — the first was `exec_capture.spl`, which launches a real process
+# and records its real exit code/stdout/stderr. This adapter reads a REAL
+# file's contents from disk: it calls the repo's real file-I/O facade
+# (`std.nogc_sync_mut.io_runtime`: `file_exists`, `file_size`, `file_read`)
+# against an actual path on the actual filesystem, and hashes the actual
+# bytes read with `std.common.crypto.sha256.{sha256_text}`. Nothing here is
+# a constructed string literal standing in for a file — a reader should come
+# away convinced `path`/`exists`/`size_bytes`/`sha256` all describe a file
+# that really existed (or really didn't) on disk during this run.
+#
+# Design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+# Research: doc/01_research/infra/sspec/modern_sspec_typed_evidence_research_2026-08-08.md
+#
+# A nonexistent path is captured as a real FAILURE (`exists: false`, zero
+# size, empty hash) — never silently normalized to "empty but valid file".
+# `size_bytes` and `sha256` are recomputed from the actual bytes read on
+# every call, never memoized or hard-coded, so two different files written to
+# the same path across two captures produce two different hashes.
+
+use std.common.spec.evidence.model.{
+    EvidenceSelectorKind, EvidenceNode, CanonicalEvidence,
+    canonical_evidence, canonical_evidence_parse_error
+}
+use std.nogc_sync_mut.io_runtime.{file_exists, file_size, file_read}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.spec.evidence.format.json_document.{json_to_evidence}
+
+# ---------------------------------------------------------------------------
+# Live capture record
+# ---------------------------------------------------------------------------
+
+# One real file's recorded state as of the moment `capture_file` ran.
+# `raw_text` holds the actual bytes read (as text); `sha256` is recomputed
+# from those actual bytes, not looked up or cached.
+pub struct FileCapture:
+    path: text
+    exists: bool
+    size_bytes: i64
+    sha256: text
+    raw_text: text
+
+# Reads `path` for real via the repo's file-I/O facade. A path that does not
+# exist is captured with `exists: false`, `size_bytes: 0`, `sha256: ""`,
+# `raw_text: ""` — a real absence, never coerced into a fake empty-but-valid
+# file. A path that exists gets its real size and real content read, and a
+# sha256 recomputed from those real bytes every time this is called.
+pub fn capture_file(path: text) -> FileCapture:
+    if not file_exists(path):
+        return FileCapture(
+            path: path,
+            exists: false,
+            size_bytes: 0,
+            sha256: "",
+            raw_text: ""
+        )
+    val raw_text = file_read(path)
+    val size_bytes = file_size(path)
+    val digest = sha256_text(raw_text)
+    FileCapture(
+        path: path,
+        exists: true,
+        size_bytes: size_bytes,
+        sha256: digest,
+        raw_text: raw_text
+    )
+
+# ---------------------------------------------------------------------------
+# Live capture -> evidence
+# ---------------------------------------------------------------------------
+
+fn field_node(path: text, value: text, order: i64) -> EvidenceNode:
+    EvidenceNode(
+        path: path,
+        kind: EvidenceSelectorKind.protocol_field,
+        value: value,
+        raw: value,
+        order: order
+    )
+
+# Emits nodes at:
+#   <prefix>.path
+#   <prefix>.exists
+#   <prefix>.size_bytes
+#   <prefix>.sha256
+#
+# This adapter never returns a parse error — a completed real capture always
+# has a definite `exists` state (true or false), so there is no malformed
+# state analogous to `json_document`'s unparsable JSON.
+pub fn file_capture_to_evidence(capture: FileCapture, profile_id: text) -> CanonicalEvidence:
+    var nodes: [EvidenceNode] = []
+    var order = 0
+
+    nodes.push(field_node(profile_id + ".path", capture.path, order))
+    order = order + 1
+
+    val exists_text = if capture.exists: "true" else: "false"
+    nodes.push(field_node(profile_id + ".exists", exists_text, order))
+    order = order + 1
+
+    nodes.push(field_node(profile_id + ".size_bytes", "{capture.size_bytes}", order))
+    order = order + 1
+
+    nodes.push(field_node(profile_id + ".sha256", capture.sha256, order))
+    order = order + 1
+
+    canonical_evidence("file_capture", profile_id, nodes)
+
+# ---------------------------------------------------------------------------
+# Real file -> JSON evidence
+# ---------------------------------------------------------------------------
+
+# Reads a REAL file from disk and pipes its actual bytes through
+# `json_document.json_to_evidence`, so a JSON-Pointer oracle asserts against
+# a real file's real parsed structure, not a string literal typed into a
+# spec. A nonexistent path is a parse error (there is no document to parse),
+# and malformed JSON content flows through to `json_document`'s own
+# fail-closed parse-error path unchanged — this adapter never partially
+# constructs a node set from bytes it could not fully parse.
+pub fn file_json_to_evidence(path: text, profile_id: text) -> CanonicalEvidence:
+    if not file_exists(path):
+        return canonical_evidence_parse_error("file_capture.json", profile_id, "file does not exist: " + path)
+    val raw_text = file_read(path)
+    json_to_evidence(raw_text, profile_id)

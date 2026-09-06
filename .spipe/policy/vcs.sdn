@@ -1,0 +1,300 @@
+policy:
+  schema: spipe-vcs/3
+
+  protected_refs:
+    - ref: main
+      local_projection: integration/main
+      mutator: sj.integrate
+      update: fast_forward_or_merge_queue
+      force: deny
+      required_profile: standard
+      server_enforcement_required: true
+
+    - ref: integration/main
+      mutator: sj.integrate
+      update: compare_and_swap
+      force: deny
+      required_profile: standard
+      server_enforcement_required: true
+
+    - ref_pattern: release/*
+      mutator: sj.integrate_release
+      update: fast_forward
+      force: deny
+      required_profile: release_line
+      server_enforcement_required: true
+
+    - ref_pattern: refs/tags/v*
+      mutator: sj.create_release_tag
+      update: immutable_annotated_signed
+      force: deny
+      required_profile: release
+      server_enforcement_required: true
+
+    - ref_pattern: review/*
+      mutator: sj.publish_review_ref
+      update: compare_and_swap
+      force: lease_only
+      required_profile: review_projection
+      server_enforcement_required: true
+
+    - ref_pattern: candidate/*
+      mutator: sj.stage_release_candidate
+      update: create_once
+      force: deny
+      required_profile: candidate
+      server_enforcement_required: true
+
+    - ref_pattern: recovery/*
+      mutator: sj.recover
+      update: append_only
+      force: deny
+      required_profile: recovery
+      server_enforcement_required: true
+
+  authoring:
+    ordinary_change:
+      unique_workspace: required
+      unique_branch: required
+      branch_pattern: work/*
+      main_worktree: read_only
+    direct_protected_ref_update: deny
+
+  server_profiles:
+    standard:
+      provider: github_ruleset
+      projection: .github/rulesets/spipe-vcs-v3-main.json
+      pull_request: required
+      approving_reviews: 0
+      code_owner_review: not_required
+      last_push_approval: not_required
+      required_checks:
+        - context: Code Idiom & Structural Ratchet Gates
+          integration_id: 15368
+        - context: SPipe Self Review Admission
+          integration_id: 15368
+      review_threads_resolved: required
+      force: deny
+      delete: deny
+
+    release_line:
+      provider: github_ruleset
+      projection: .github/rulesets/spipe-vcs-v3-release-lines.json
+      pull_request: required
+      approving_reviews: 0
+      code_owner_review: not_required
+      last_push_approval: not_required
+      allowed_merge_methods:
+        - merge
+      required_checks:
+        - context: Code Idiom & Structural Ratchet Gates
+          integration_id: 15368
+        - context: SPipe Self Review Admission
+          integration_id: 15368
+      review_threads_resolved: required
+      force: deny
+      delete: deny
+
+    release:
+      provider: github_ruleset
+      projection: .github/rulesets/spipe-vcs-v3-version-tags.json
+      creation_projection: .github/rulesets/spipe-vcs-v3-version-tag-creation.json
+      create_authority: release_promoter
+      update: deny
+      delete: deny
+      annotated_signature: release_command_gate
+
+    candidate:
+      provider: github_ruleset
+      projection: .github/rulesets/spipe-vcs-v3-candidates.json
+      creation_projection: .github/rulesets/spipe-vcs-v3-candidate-creation.json
+      create_authority: candidate_ref_create
+      update: deny
+      delete: deny
+
+    review_projection:
+      provider: github_ruleset
+      projection: .github/rulesets/spipe-vcs-v3-review-recovery.json
+      force: deny
+      delete: deny
+
+    recovery:
+      provider: github_ruleset
+      projection: .github/rulesets/spipe-vcs-v3-review-recovery.json
+      force: deny
+      delete: deny
+
+  rebase:
+    work_private: owner_lease
+    work_submitted: renewed_review
+    protected_refs: deny
+
+  release:
+    version_authority: release/version.sdn
+    beta_backport_kind: fix
+    beta_backport_review: required
+    beta_backport_provenance: required
+    beta_backport_source_result_equivalence: stable_patch_id
+    beta_backport_provider_receipt: required
+    beta_main_discovery:
+      mode: periodic_read_only
+      checkpoints:
+        - before_candidate_attempt
+        - after_bootstrap_failure_fix
+        - before_release_admission
+      source: main
+      target: release/X.Y
+      selection: reviewed_fix_only
+      release_first_fix_classification: exhaustive
+      automatic_cherry_pick: deny
+    release_first_fix:
+      target_first: release/X.Y
+      forward_port_target: main
+      forward_port: required
+      classification_receipt: required
+      forward_port_receipt: required
+      shared_bug_fix_may_remain_release_only: false
+      bug_fix_waiver: deny
+      release_specific_compatibility_kind: non_fix
+      protected_ref_mutator: sj.integrate
+    trunk_relationship:
+      main_remains_development_trunk: true
+      main_may_track_release_branch: false
+      release_branch_may_replace_main: false
+      whole_release_line_merge_into_main: deny
+    candidate: create_once
+    promotion: admitted_artifacts_only
+    rebuild_during_promotion: deny
+    release_tag_push: exact_single_ref
+    published_tag_mutation: deny
+    withdrawal_preserves_identity: true
+
+  live_policy:
+    fingerprint: required
+    drift: deny
+    github_projection: .github/rulesets
+    release_environment: .github/release-environment.json
+    protected_integration_environment: .github/protected-integration-environment.json
+    npm_release_environment: .github/npm-release-environment.json
+    immutable_releases: required
+    review_admission:
+      schema: spipe-review-admission/1
+      preference: independent_high_capability_model
+      status_context: SPipe Review Admission
+      status_authority:
+        type: GitHubApp
+        integration_id: provider_config_required
+        provider_projection: .github/review-admission-broker.json
+      independent_receipt:
+        verifier_class: high_capability_model
+        minimum_effort: high
+        verdict: pass
+        pr_number: exact
+        session_id: exact
+        head_sha: exact
+        required_checks: exact
+        issued_at: required
+        expires_at: required
+        max_ttl_seconds: 86400
+        audit_receipt_sha256: required
+      owner_attested_fallback:
+        only_when: independent_verifier_unavailable
+        reason: no eligible independent reviewer
+        attestor:
+          type: User
+          id: 2378857
+        pr_number: exact
+        session_id: exact
+        head_sha: exact
+        required_checks: exact
+        attested_at: required
+        expires_at: required
+        max_ttl_seconds: 86400
+        audit_receipt_sha256: required
+        unavailable_verifier_receipt_sha256: required
+      caller_supplied_head_sha: deny
+      server_resolve_current_pr_head: required
+      later_push_invalidates: required
+      audit_artifact: required
+      admin_bypass: deny
+      provider_limit: conditional_model_or_owner_review_not_native
+      live_apply: unsupported_until_external_signed_broker
+    privileged_self_review:
+      decision_schema: spipe-self-review-decision/1
+      required_status_context: SPipe Self Review Admission
+      status_authority:
+        type: GitHubActions
+        integration_id: 15368
+        trust_boundary: user_authorized_generic_actions_app
+        independent_security_identity: false
+        same_repository_spoof_risk: accepted_by_user_policy
+        environment: self-review-admission
+        trusted_default_branch_definition: required
+      policy_db_schema: spipe-self-review-policy-db/1
+      grant_schema: spipe-self-review-policy-db/grant/1
+      grant_db_authority: operator_owned_external
+      default_allow: true
+      explicit_deny_precedence: required
+      optional_constraint_intersection: required
+      scope_kinds:
+        - code
+        - text
+        - file
+        - directory_files
+        - directory_recursive
+      changed_path_manifest:
+        schema: spipe-changed-path-manifest/1
+        provider_resolved: required
+        exact_repository_pr_head_base_merge_base_diff: required
+        exact_target_repository_ref_ruleset: required
+        normalized_ruleset_digest: exact
+        ruleset_projection_version: exact
+        strict_up_to_date: required
+        protected_target: required
+        rename_old_and_new: required
+        delete_old: required
+        copy_new: required
+        symlink_submodule_non_utf8_traversal_quote_whitespace_non_ascii_alias: deny
+        unknown_classification: code
+      fixed_restriction:
+        credential_or_secret_blob: deny
+        semantic_content_scan: required
+        policy_and_workflow_text: reviewable
+      review_evidence:
+        mode: self_attested
+        independent_authentication: false
+        explicitly_user_authorized: true
+        exact_head_base_merge_base_diff: required
+        verdict: PASS
+        p0_count: 0
+        p1_count: 0
+      decision_max_ttl_seconds: 600
+      scheduled_expiry_invalidator_minutes: 5
+      scheduled_invalidator_is_backup: true
+      immediate_pull_request_target_invalidation: required
+      protected_base_push_invalidation: required
+      policy_ruleset_change_dispatch_invalidation: required
+      merge_consumer_revalidation: required
+      candidate_admission_schema: spipe-review-admission/1
+      self_review_decision_candidate_authority: deny
+      later_push_invalidates: required
+      base_retarget_or_ruleset_change_invalidates: required
+      provider_approval_requirement_replaced_by_exact_head_check: true
+      provider_approval_claim: deny
+      workflow_projection: .github/workflows/review-admission.yml
+      checked_in_projection: .spipe/policy/self-review-policy.sdn
+    release_environment_approval:
+      current_mode: independent_environment_review
+      prevent_self_review: true
+      independent_reviewer:
+        type: User
+        id: 2378857
+      release_claim: approval_gated
+
+  raw_mutation:
+    default: deny
+    break_glass:
+      authority: maintainer
+      reason: required
+      audit: required
+      expiry: required

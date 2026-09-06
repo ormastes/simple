@@ -1,0 +1,173 @@
+# codex-impl
+# Observed Pure receipt authority; no Pure callback exists on this boundary.
+
+use std.common.rt_hal.model.{RtHalComparison, RtHalOperationKind, rt_hal_comparison_error}
+use std.nogc_sync_mut.rt_hal.parallel_executor.{RtHalTaskArenaCapabilities, RtHalProviderRegistry, rt_hal_provider_registry_error}
+
+pub struct RtHalDigest256:
+    word0: i64
+    word1: i64
+    word2: i64
+    word3: i64
+
+pub fn rt_hal_digest256_equal(a: RtHalDigest256, b: RtHalDigest256) -> bool:
+    a.word0 == b.word0 and a.word1 == b.word1 and a.word2 == b.word2 and a.word3 == b.word3
+
+pub struct RtHalExactRequest:
+    case_id: i64
+    operation: RtHalOperationKind
+    operation_digest: RtHalDigest256
+    input_digest: RtHalDigest256
+
+pub struct RtHalCanonicalReceipt:
+    case_id: i64
+    outcome_digest: RtHalDigest256
+    error_digest: RtHalDigest256
+    trace_digest: RtHalDigest256
+    observed_once: bool
+
+pub struct RtHalExactJoin:
+    completed: bool
+    outcome_digest: RtHalDigest256
+    error_digest: RtHalDigest256
+    trace_digest: RtHalDigest256
+
+pub struct RtHalExactArenaPort:
+    capabilities: RtHalTaskArenaCapabilities
+    spawn_compare_fn: fn(i64, RtHalExactRequest, RtHalCanonicalReceipt) -> i64
+    spawn_replay_fn: fn(i64, RtHalExactRequest, RtHalCanonicalReceipt) -> i64
+    join_until_fn: fn(i64, i64) -> RtHalExactJoin
+    cancel_fn: fn(i64) -> bool
+
+pub enum RtHalExactStatus:
+    Match
+    Mismatch
+    Unsupported
+    TimedOut
+    CancelFailed
+
+pub struct RtHalExactResult:
+    provider_ordinal: i64
+    case_index: i64
+    case_id: i64
+    provider_id: text
+    status: RtHalExactStatus
+
+pub struct RtHalExactReport:
+    results: [RtHalExactResult]
+    error: text
+    submitted_tasks: i64
+    completed_tasks: i64
+    cancelled_tasks: i64
+    actual_parallel: bool
+
+fn rt_hal_exact_arena_error(arena: RtHalExactArenaPort) -> text:
+    val cap = arena.capabilities
+    if not cap.available or not cap.bounded_queue or not cap.bounded_timed_join:
+        return "RTHAL-W-PARALLEL-UNSUPPORTED"
+    if not cap.cancellation or not cap.frozen_scalar_input or not cap.isolated_scalar_result:
+        return "RTHAL-W-PARALLEL-UNSUPPORTED"
+    ""
+
+fn rt_hal_exact_match(pure: RtHalCanonicalReceipt, child: RtHalExactJoin) -> bool:
+    rt_hal_digest256_equal(pure.outcome_digest, child.outcome_digest)
+        and rt_hal_digest256_equal(pure.error_digest, child.error_digest)
+        and rt_hal_digest256_equal(pure.trace_digest, child.trace_digest)
+
+fn rt_hal_exact_report(results: [RtHalExactResult], error: text, submitted: i64, completed: i64, cancelled: i64, parallel: bool) -> RtHalExactReport:
+    RtHalExactReport(results: results, error: error, submitted_tasks: submitted, completed_tasks: completed, cancelled_tasks: cancelled, actual_parallel: parallel)
+
+# Only foreign provider ordinals 1..N are scheduled. For effectful cases their
+# replay input is the exact trace_digest returned by the already-observed Pure
+# receipt. All 256-bit outcome/error/trace digests compare word-for-word.
+pub fn rt_hal_compare_observed_pure_exact(comparison: RtHalComparison, requests: [RtHalExactRequest], pure_receipts: [RtHalCanonicalReceipt], registry: RtHalProviderRegistry, arena: RtHalExactArenaPort) -> RtHalExactReport:
+    var results: [RtHalExactResult] = []
+    val arena_error = rt_hal_exact_arena_error(arena)
+    if arena_error != "": return rt_hal_exact_report(results, arena_error, 0, 0, 0, false)
+    val comparison_error = rt_hal_comparison_error(comparison)
+    if comparison_error != "": return rt_hal_exact_report(results, comparison_error, 0, 0, 0, false)
+    val registry_error = rt_hal_provider_registry_error(registry)
+    if registry_error != "": return rt_hal_exact_report(results, registry_error, 0, 0, 0, false)
+    val provider_count = registry.providers.len()
+    val foreign_count = provider_count - 1
+    if provider_count != comparison.providers.len() or foreign_count <= 0 or requests.len() <= 0 or pure_receipts.len() != requests.len():
+        return rt_hal_exact_report(results, "RTHAL-E-REQUEST", 0, 0, 0, false)
+    if requests.len() > comparison.queue_capacity / foreign_count or requests.len() * foreign_count > comparison.max_output_bytes / 32:
+        return rt_hal_exact_report(results, "RTHAL-E-MEMORY-BOUND", 0, 0, 0, false)
+    var case_index = 0
+    while case_index < requests.len():
+        if requests[case_index].case_id != pure_receipts[case_index].case_id or not pure_receipts[case_index].observed_once:
+            return rt_hal_exact_report(results, "RTHAL-E-PURE-OWNER", 0, 0, 0, false)
+        if case_index > 0 and requests[case_index].case_id <= requests[case_index - 1].case_id:
+            return rt_hal_exact_report(results, "RTHAL-E-CASE-ORDER", 0, 0, 0, false)
+        case_index = case_index + 1
+    case_index = 0
+    while case_index < requests.len():
+        var ordinal = 1
+        while ordinal < provider_count:
+            results.push(RtHalExactResult(
+                provider_ordinal: ordinal, case_index: case_index,
+                case_id: requests[case_index].case_id,
+                provider_id: registry.providers[ordinal].provider_id,
+                status: RtHalExactStatus.Unsupported
+            ))
+            ordinal = ordinal + 1
+        case_index = case_index + 1
+    var submitted = 0
+    var completed = 0
+    var cancelled = 0
+    var max_width = 0
+    case_index = 0
+    while case_index < requests.len():
+        val request = requests[case_index]
+        val pure = pure_receipts[case_index]
+        var wave = 1
+        while wave < provider_count:
+            var handles: [i64] = []
+            var ordinals: [i64] = []
+            var width = 0
+            while width < comparison.worker_count and wave + width < provider_count:
+                val ordinal = wave + width
+                val provider = registry.providers[ordinal]
+                val handle = if request.operation == RtHalOperationKind.Effectful:
+                    if provider.replay_capable: arena.spawn_replay_fn(provider.adapter_handle, request, pure) else: -1
+                else:
+                    if provider.query_capable: arena.spawn_compare_fn(provider.adapter_handle, request, pure) else: -1
+                if handle > 0:
+                    handles.push(handle)
+                    ordinals.push(ordinal)
+                    submitted = submitted + 1
+                width = width + 1
+            if handles.len() > max_width: max_width = handles.len()
+            var i = 0
+            while i < handles.len():
+                val ordinal = ordinals[i]
+                val joined = arena.join_until_fn(handles[i], comparison.timeout_ticks)
+                var status = RtHalExactStatus.Match
+                if not joined.completed:
+                    if arena.cancel_fn(handles[i]):
+                        cancelled = cancelled + 1
+                        status = RtHalExactStatus.TimedOut
+                    else:
+                        status = RtHalExactStatus.CancelFailed
+                elif not rt_hal_exact_match(pure, joined):
+                    status = RtHalExactStatus.Mismatch
+                    completed = completed + 1
+                else:
+                    completed = completed + 1
+                results[case_index * foreign_count + ordinal - 1] = RtHalExactResult(
+                    provider_ordinal: ordinal, case_index: case_index,
+                    case_id: request.case_id,
+                    provider_id: registry.providers[ordinal].provider_id,
+                    status: status
+                )
+                i = i + 1
+            wave = wave + comparison.worker_count
+        case_index = case_index + 1
+    var error = ""
+    for result in results:
+        if result.status == RtHalExactStatus.CancelFailed: error = "RTHAL-E-CANCEL"
+        elif result.status == RtHalExactStatus.TimedOut and error == "": error = "RTHAL-E-TIMEOUT"
+        elif result.status == RtHalExactStatus.Mismatch and error == "": error = "RTHAL-E-MISMATCH"
+        elif result.status == RtHalExactStatus.Unsupported and comparison.require_all and error == "": error = "RTHAL-W-UNSUPPORTED"
+    rt_hal_exact_report(results, error, submitted, completed, cancelled, error == "" and max_width > 1)

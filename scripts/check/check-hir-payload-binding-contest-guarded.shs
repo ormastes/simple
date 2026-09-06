@@ -1,0 +1,216 @@
+#!/bin/sh
+# check-hir-payload-binding-contest-guarded.shs
+#
+# Fail-closed guard for the Stage 3 blocker
+#   `enum payload dependency <X> resolved to non-type binding <Y> (kind `const`)`
+#
+# `claim_materialized_payload_binding`
+# (src/compiler/20.hir/hir_lowering/_Items/module_lowering.spl) reaches an
+# existing symbol via `symbols.lookup_or_invalid(local_name)` and then a
+# chained class-field `Dict<i64, HirSymbol>` bracket read. Both hops have
+# known failure modes, and when either fires the fetched record shares NO NAME
+# with the payload spelling being claimed (Stage 3: payload `TokenKind`,
+# fetched `asm_arm_backend`, kind `const`). Contesting ownership against such
+# a record is unsound by construction, so BOTH contests -- the non-type one and
+# the identity one -- must be gated on positive name agreement
+# (`hir_payload_binding_names_agree`).
+#
+# This guard fails if either contest can fire ungated.
+#
+# Verdict is the LAST line of stdout:
+#   PASS  — <n> ... checked                       exit 0
+#   FAIL  — ...                                   exit 1
+#   ERROR — nothing was checked                   exit 2
+# A run that checked 0 things is ERROR, never a pass.
+#
+# --selftest is fatal and runs before every scan.
+#
+# See doc/08_tracking/bug/stage3_register_imported_type_methods_infinite_recursion_2026-08-17.md
+
+set -u
+
+REPO_ROOT=${REPO_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}
+TARGET_REL="src/compiler/20.hir/hir_lowering/_Items/module_lowering.spl"
+
+# scan_file <path>
+# Prints one finding per line to stdout; sets nothing else.
+# Returns 0 if the file was scanned, 1 if it could not be scanned.
+scan_file() {
+    _f=$1
+    [ -f "$_f" ] || return 1
+
+    # 1. The predicate must exist and be a positive (allowlist) test.
+    if ! grep -q '^fn hir_payload_binding_names_agree(' "$_f"; then
+        echo "missing predicate hir_payload_binding_names_agree"
+    fi
+
+    # 2. The non-type contest must not fire ungated.
+    if grep -q '^ *if not hir_payload_kind_is_type(existing_kind):' "$_f"; then
+        echo "ungated non-type contest: 'if not hir_payload_kind_is_type(existing_kind):'"
+    fi
+
+    # 3. The contestable flag must be computed from the predicate.
+    if ! grep -q 'val contestable = hir_payload_binding_names_agree(' "$_f"; then
+        echo "contestable flag not derived from hir_payload_binding_names_agree"
+    fi
+
+    # 4. Both contests must be gated on it.
+    if ! grep -q 'if contestable and not hir_payload_kind_is_type(existing_kind):' "$_f"; then
+        echo "non-type contest not gated on contestable"
+    fi
+    if ! grep -q 'if contestable and existing != wanted:' "$_f"; then
+        echo "identity contest not gated on contestable"
+    fi
+
+    # 5. The kind predicate must stay a positive enumeration, never the
+    #    emptiness test that never fired (513cbb7b4).
+    if grep -q 'if existing_kind == "":' "$_f"; then
+        echo "emptiness test 'existing_kind == \"\"' reintroduced (never fires)"
+    fi
+
+    # 6. The re-entrancy breaker for the SIGSEGV must stay, and stay a list.
+    if ! grep -q 'if self.imported_type_methods_in_progress_has(reentry_key):' "$_f"; then
+        echo "register_imported_type_methods re-entrancy breaker removed"
+    fi
+    if grep -q 'imported_type_methods_in_progress: {text' "$_f"; then
+        echo "re-entrancy breaker converted to a Dict (has failed open before)"
+    fi
+
+    return 0
+}
+
+CHECKS_PER_FILE=7
+
+selftest() {
+    _tmp=$(mktemp -d) || { echo "ERROR — nothing was checked"; exit 2; }
+    _fail=0
+    _n=0
+
+    # Fixture A: the APPLIED arm — must produce zero findings.
+    cat > "$_tmp/applied.spl" <<'EOF'
+fn hir_payload_binding_names_agree(local_name: text, origin_item_name: text, symbol_name: text) -> bool:
+    symbol_name == local_name or symbol_name == origin_item_name
+                val contestable = hir_payload_binding_names_agree(local_name, origin.item_name, symbol.name)
+                if contestable and not hir_payload_kind_is_type(existing_kind):
+                    return false
+                if contestable and existing != wanted:
+                    return false
+        if self.imported_type_methods_in_progress_has(reentry_key):
+EOF
+    _out=$(scan_file "$_tmp/applied.spl"); _rc=$?
+    _n=$((_n + 1))
+    if [ "$_rc" -ne 0 ] || [ -n "$_out" ]; then
+        echo "selftest: applied fixture should be clean, got: $_out"
+        _fail=1
+    fi
+
+    # Fixture B: the REVERTED arm (pre-fix shape) — the control that MUST fail.
+    cat > "$_tmp/reverted.spl" <<'EOF'
+                if not hir_payload_kind_is_type(existing_kind):
+                    return false
+                if existing != wanted:
+                    return false
+        if self.imported_type_methods_in_progress_has(reentry_key):
+EOF
+    _out=$(scan_file "$_tmp/reverted.spl"); _rc=$?
+    _n=$((_n + 1))
+    if [ "$_rc" -ne 0 ] || [ -z "$_out" ]; then
+        echo "selftest: reverted fixture must produce findings (control failed to fail)"
+        _fail=1
+    else
+        case "$_out" in
+            *"ungated non-type contest"*) : ;;
+            *) echo "selftest: reverted fixture findings did not name the ungated contest: $_out"; _fail=1 ;;
+        esac
+    fi
+
+    # Fixture C: breaker removed — must be caught.
+    cat > "$_tmp/nobreaker.spl" <<'EOF'
+fn hir_payload_binding_names_agree(local_name: text, origin_item_name: text, symbol_name: text) -> bool:
+    symbol_name == local_name or symbol_name == origin_item_name
+                val contestable = hir_payload_binding_names_agree(local_name, origin.item_name, symbol.name)
+                if contestable and not hir_payload_kind_is_type(existing_kind):
+                if contestable and existing != wanted:
+EOF
+    _out=$(scan_file "$_tmp/nobreaker.spl"); _n=$((_n + 1))
+    case "$_out" in
+        *"re-entrancy breaker removed"*) : ;;
+        *) echo "selftest: removed breaker was not detected"; _fail=1 ;;
+    esac
+
+    # Fixture D: Dict-based breaker — must be caught.
+    cat > "$_tmp/dictbreaker.spl" <<'EOF'
+fn hir_payload_binding_names_agree(local_name: text, origin_item_name: text, symbol_name: text) -> bool:
+    symbol_name == local_name or symbol_name == origin_item_name
+                val contestable = hir_payload_binding_names_agree(local_name, origin.item_name, symbol.name)
+                if contestable and not hir_payload_kind_is_type(existing_kind):
+                if contestable and existing != wanted:
+        if self.imported_type_methods_in_progress_has(reentry_key):
+    imported_type_methods_in_progress: {text: bool}
+EOF
+    _out=$(scan_file "$_tmp/dictbreaker.spl"); _n=$((_n + 1))
+    case "$_out" in
+        *"converted to a Dict"*) : ;;
+        *) echo "selftest: Dict breaker was not detected"; _fail=1 ;;
+    esac
+
+    # Fixture E: a missing file must be UNSCANNABLE, never a silent clean pass.
+    scan_file "$_tmp/does-not-exist.spl" >/dev/null 2>&1; _rc=$?
+    _n=$((_n + 1))
+    if [ "$_rc" -eq 0 ]; then
+        echo "selftest: missing file reported as scanned (fail-open)"
+        _fail=1
+    fi
+
+    rm -rf "$_tmp"
+    if [ "$_n" -eq 0 ]; then
+        echo "selftest: 0 fixtures ran"
+        return 2
+    fi
+    return "$_fail"
+}
+
+# --- main -------------------------------------------------------------------
+
+MODE=scan
+case "${1:-}" in
+    --selftest) MODE=selftest ;;
+    "") : ;;
+    *) echo "usage: $0 [--selftest]"; echo "ERROR — nothing was checked"; exit 2 ;;
+esac
+
+selftest_out=$(selftest); selftest_rc=$?
+if [ "$selftest_rc" -ne 0 ]; then
+    printf '%s\n' "$selftest_out"
+    echo "FAIL — selftest failed (5 fixtures); guard is not trustworthy"
+    exit 1
+fi
+
+if [ "$MODE" = selftest ]; then
+    echo "PASS — 5 selftest fixture(s) checked, guard behaves as specified"
+    exit 0
+fi
+
+TARGET="$REPO_ROOT/$TARGET_REL"
+findings=$(scan_file "$TARGET"); scan_rc=$?
+if [ "$scan_rc" -ne 0 ]; then
+    echo "could not read $TARGET_REL under REPO_ROOT=$REPO_ROOT"
+    echo "ERROR — nothing was checked"
+    exit 2
+fi
+
+checked=$CHECKS_PER_FILE
+if [ "$checked" -le 0 ]; then
+    echo "ERROR — nothing was checked"
+    exit 2
+fi
+
+if [ -n "$findings" ]; then
+    printf '%s\n' "$findings"
+    count=$(printf '%s\n' "$findings" | grep -c .)
+    echo "FAIL — $checked invariant(s) checked in $TARGET_REL, $count violated"
+    exit 1
+fi
+
+echo "PASS — $checked invariant(s) checked in $TARGET_REL, 0 violated"
+exit 0

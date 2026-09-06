@@ -1,0 +1,46 @@
+@allow(primitive_api)
+# `simple counterpart verify` — re-hash the cached artifact and compare it with
+# the lock record.
+#
+# This is the command whose exit code a CI lane may depend on. It reports four
+# distinct outcomes and never merges them: VERIFIED, UNVERIFIED (the lock still
+# holds a `pending` placeholder — nothing was ever checked), MISMATCH, and
+# MISSING. Only VERIFIED exits 0.
+
+use std.nogc_sync_mut.spec.evidence.counterpart.package_registry.{
+    COUNTERPART_LOCK_PATH,
+    ResolvedProvider,
+    VerificationState,
+    load_lock_file,
+    resolve_provider_from_disk,
+    verification_state_name
+}
+use app.counterpart.inspect.{descriptors_for}
+
+pub fn verify_verdict(resolved: ResolvedProvider) -> text:
+    match resolved.verification:
+        VerificationState.verified => "VERIFIED"
+        VerificationState.unverified_placeholder => "UNVERIFIED"
+        VerificationState.hash_mismatch => "MISMATCH"
+        VerificationState.artifact_missing => "MISSING"
+        VerificationState.lock_missing => "UNLOCKED"
+        VerificationState.descriptor_rejected => "REJECTED"
+
+pub fn run_verify(provider_id: text) -> i64:
+    val descriptors = descriptors_for(provider_id)
+    if descriptors.len() == 0:
+        print "counterpart verify: no descriptor for '{provider_id}'"
+        return 1
+    val records = load_lock_file(COUNTERPART_LOCK_PATH)
+    var failed: i64 = 0
+    for descriptor in descriptors:
+        val resolved = resolve_provider_from_disk(descriptor, records)
+        print "{verify_verdict(resolved)}\t{descriptor.provider_id}\t{verification_state_name(resolved.verification)}\t{resolved.artifact_path}"
+        for reason in resolved.reasons:
+            print "  {reason}"
+        match resolved.verification:
+            VerificationState.verified => failed = failed
+            _ => failed = failed + 1
+    if failed > 0:
+        return 1
+    0

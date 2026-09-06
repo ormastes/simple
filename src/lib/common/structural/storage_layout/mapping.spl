@@ -1,0 +1,100 @@
+# Overflow-safe logical record projection for frozen v1 layout plans.
+# Backends consume the returned byte offset; this module does not allocate or
+# change the logical `T[]` element/field semantics.
+
+use std.common.structural.storage_layout.storage_layout_contracts.{
+    StorageLayoutPlanV1,
+    storage_layout_kind_to_u8,
+    storage_layout_plan_v1_well_formed
+}
+
+val STORAGE_OFFSET_MAX: i64 = 9223372036854775807
+
+struct StorageProjectionRequestV1:
+    element_index: i64
+    element_count: i64
+    field_offset: i64
+    field_size: i64
+    element_stride: i64
+    column_offset: i64
+    block_stride: i64
+    field_block_offset: i64
+
+struct StorageProjectionResultV1:
+    ok: bool
+    byte_offset: i64
+    block_index: i64
+    lane_index: i64
+    reason: text
+
+fn storage_projection_request_v1(element_index: i64, element_count: i64,
+                                 field_offset: i64, field_size: i64,
+                                 element_stride: i64, column_offset: i64,
+                                 block_stride: i64,
+                                 field_block_offset: i64) -> StorageProjectionRequestV1:
+    StorageProjectionRequestV1(element_index: element_index,
+        element_count: element_count, field_offset: field_offset,
+        field_size: field_size, element_stride: element_stride,
+        column_offset: column_offset, block_stride: block_stride,
+        field_block_offset: field_block_offset)
+
+fn storage_projection_failure(reason: text) -> StorageProjectionResultV1:
+    StorageProjectionResultV1(ok: false, byte_offset: 0,
+        block_index: 0, lane_index: 0, reason: reason)
+
+fn storage_checked_mul(a: i64, b: i64) -> i64:
+    if a < 0 or b < 0:
+        return -1
+    if a != 0 and b > STORAGE_OFFSET_MAX / a:
+        return -1
+    a * b
+
+fn storage_checked_add(a: i64, b: i64) -> i64:
+    if a < 0 or b < 0 or b > STORAGE_OFFSET_MAX - a:
+        return -1
+    a + b
+
+fn storage_layout_project(plan: StorageLayoutPlanV1,
+                          request: StorageProjectionRequestV1) -> StorageProjectionResultV1:
+    if not storage_layout_plan_v1_well_formed(plan):
+        return storage_projection_failure("invalid-layout-plan")
+    if request.element_index < 0 or request.element_count < 0
+        or request.element_index >= request.element_count:
+        return storage_projection_failure("element-index-out-of-bounds")
+    if request.field_offset < 0 or request.field_size <= 0
+        or request.element_stride <= 0 or request.column_offset < 0
+        or request.block_stride < 0 or request.field_block_offset < 0:
+        return storage_projection_failure("invalid-physical-shape")
+    val layout = storage_layout_kind_to_u8(plan.layout)
+    var offset = -1
+    var block = 0
+    var lane = request.element_index
+    if layout == 0 or layout == 7:
+        if request.field_size > request.element_stride
+            or request.field_offset > request.element_stride - request.field_size:
+            return storage_projection_failure("field-outside-element-stride")
+        offset = storage_checked_add(
+            storage_checked_mul(request.element_index, request.element_stride),
+            request.field_offset)
+    elif layout == 1:
+        offset = storage_checked_add(request.column_offset,
+            storage_checked_mul(request.element_index, request.field_size))
+    elif layout == 2:
+        if request.block_stride <= 0:
+            return storage_projection_failure("invalid-block-stride")
+        block = request.element_index / plan.block_width
+        lane = request.element_index % plan.block_width
+        val block_base = storage_checked_mul(block, request.block_stride)
+        val field_base = storage_checked_add(block_base, request.field_block_offset)
+        offset = storage_checked_add(field_base,
+            storage_checked_mul(lane, request.field_size))
+        val lane_end = storage_checked_add(request.field_block_offset,
+            storage_checked_mul(plan.block_width, request.field_size))
+        if lane_end < 0 or lane_end > request.block_stride:
+            return storage_projection_failure("field-outside-block-stride")
+    else:
+        return storage_projection_failure("layout-requires-specialized-mapping")
+    if offset < 0:
+        return storage_projection_failure("physical-offset-overflow")
+    StorageProjectionResultV1(ok: true, byte_offset: offset,
+        block_index: block, lane_index: lane, reason: "")

@@ -1,0 +1,183 @@
+# Argon2d RFC 9106 Known-Answer Tests
+
+"""
+## Purpose and audience
+Known-answer and sensitivity contract for the pure-Simple Argon2d in
+`os.crypto.argon2d`: tag-length selection across both H' branches
+(single-BLAKE2b and multi-block), determinism, salt/password/key/ad
+sensitivity, and the full RFC 9106 section 5.1 Argon2d known-answer vector.
+Owned by the os/crypto team; engineers touching the memory-hard loop or the
+H' variable-length hash are the audience.
+## Operator workflow
+Run `simple run test/01_unit/os/crypto/argon2d_kat_spec.spl`. Scenarios derive
+tags with `argon2d`/`argon2d_hash` at small interpreter-tractable parameters
+(t=1, m=8, p=1) and compare hex digests; the RFC 5.1 vector runs as a slow
+scenario because its full parameters (p=4, m=32 KiB, t=3) exceed the
+interpreter test watchdog.
+## Compatibility and limitations
+Interpreter mode runs the small-parameter scenarios only; the RFC 5.1
+scenario executes under `--only-slow` or a compiled/native lane where the
+memory-hard loop fits the watchdog. Tags are compared via hex to keep the
+assertions byte-exact and printable.
+## Verification guidance and troubleshooting
+A tag-length failure means the H' branch selection or the tag copy changed:
+check the boundary lengths 16/32/64/96 first. A sensitivity failure means two
+inputs that must differ collide — never acceptable. The RFC 5.1 slow scenario
+failing while the smoke scenarios pass points at the p-parallel or
+initial-block path that the small parameters never exercise.
+"""
+# Lifecycle: doc/01_research/lib/crypto/security_crypto_protocol_catalog_2026-06-15.md ;
+# doc/03_plan/lib/crypto/all_cipher_compress_algorithm_gate.md ;
+# doc/04_architecture/compiler/aspect_dynload/patchpoint_and_signing_prerequisites_2026-08-19.md ;
+# doc/05_design/platform/top4_sffi_wrappers_plan.md
+# Native-fast-path requirement: doc/02_requirements/feature/argon2_native_runtime_helpers_2026-05-02.md
+# @manual_section: Argon2d known-answer tests
+
+use std.spipe.*
+use std.spec.{slow_it}
+use os.crypto.argon2d.{argon2d, argon2d_hash}
+
+
+fn _bytes_to_hex(bytes: [u8]) -> text:
+    """Convert a byte list to lowercase hex without separators."""
+    val hex_chars = "0123456789abcdef"
+    var out = ""
+    var i: i64 = 0
+    val n = bytes.len()
+    while i < n:
+        val b = bytes[i].to_i64()
+        out = out + hex_chars.char_at((b >> 4) & 0xF).to_text()
+        out = out + hex_chars.char_at(b & 0xF).to_text()
+        i = i + 1
+    out
+
+fn _ascii(s: text) -> [u8]:
+    var out: [u8] = []
+    var i: i64 = 0
+    val n = s.len()
+    while i < n:
+        val ch = s[i:i + 1]
+        out.push(ch.ord().to_u8())
+        i = i + 1
+    out
+
+fn _repeat_bytes(byte: i64, n: i64) -> [u8]:
+    var out: [u8] = []
+    var i: i64 = 0
+    while i < n:
+        out.push(byte.to_u8())
+        i = i + 1
+    out
+
+describe("Argon2d pure Simple smoke (small interpreter-tractable parameters)"):
+
+    it("returns 32 bytes for the default 32-byte tag length"):
+        step("Derive a tag with the default tag length at small parameters")
+        # @req REQ-OS-ARGON2D-001
+        # @capture(statistics): derived tag length at the default T=32
+        val pwd = _ascii("password")
+        val salt = _ascii("somesalt")
+        val tag = argon2d(pwd, salt, 1, 8, 1, 32)
+        expect(tag.len()).to_equal(32)  # oracle: RFC 9106 fixes the default tag length at 32 bytes
+
+    it("returns 16 bytes when tag_len=16"):
+        step("Derive a tag at the shorter T=16 boundary")
+        # @req REQ-OS-ARGON2D-002
+        # @capture(statistics): derived tag length at the T=16 boundary
+        val pwd = _ascii("password")
+        val salt = _ascii("somesalt")
+        val tag = argon2d(pwd, salt, 1, 8, 1, 16)
+        expect(tag.len()).to_equal(16)  # oracle: the requested tag length must be honored exactly at the lower boundary
+
+    it("returns 64 bytes when tag_len=64 (single-BLAKE2b-call H' branch)"):
+        step("Derive a tag at T=64 where H' still fits one BLAKE2b call")
+        # @req REQ-OS-ARGON2D-003
+        # @capture(statistics): derived tag length on the single-call H' branch
+        val pwd = _ascii("password")
+        val salt = _ascii("somesalt")
+        val tag = argon2d(pwd, salt, 1, 8, 1, 64)
+        expect(tag.len()).to_equal(64)  # oracle: 64 bytes is the widest tag the single-BLAKE2b H' call returns
+
+    it("returns 96 bytes when tag_len=96 (multi-block H' branch)"):
+        step("Derive a tag at T=96 forcing the multi-block H' branch")
+        # @req REQ-OS-ARGON2D-004
+        # @capture(statistics): derived tag length on the multi-block H' branch
+        val pwd = _ascii("password")
+        val salt = _ascii("somesalt")
+        val tag = argon2d(pwd, salt, 1, 8, 1, 96)
+        expect(tag.len()).to_equal(96)  # oracle: 96 bytes forces the variable-length H' loop to concatenate two blocks
+
+describe("Argon2d determinism and input sensitivity"):
+
+    it("is deterministic -- same inputs produce same tag"):
+        step("Derive the same tag twice and compare hex digests")
+        # @req REQ-OS-ARGON2D-005
+        # @capture(statistics): equal hex digests across two identical derivations
+        val pwd = _ascii("password")
+        val salt = _ascii("somesalt")
+        val tag_a = argon2d(pwd, salt, 1, 8, 1, 32)
+        val tag_b = argon2d(pwd, salt, 1, 8, 1, 32)
+        expect(_bytes_to_hex(tag_a)).to_equal(_bytes_to_hex(tag_b))  # oracle: Argon2d is a deterministic KDF, so equal inputs must give equal tags
+
+    it("differing salt produces different tag"):
+        step("Derive two tags that differ only in the salt")
+        # @req REQ-OS-ARGON2D-006
+        # @capture(statistics): distinct hex digests across two salts
+        val pwd = _ascii("password")
+        val salt1 = _ascii("somesalt")
+        val salt2 = _ascii("othersalt")
+        val tag1 = argon2d(pwd, salt1, 1, 8, 1, 32)
+        val tag2 = argon2d(pwd, salt2, 1, 8, 1, 32)
+        expect(_bytes_to_hex(tag1)).to_not_equal(_bytes_to_hex(tag2))  # oracle: a salt collision would defeat the KDF's salt domain separation
+
+    it("differing password produces different tag"):
+        step("Derive two tags that differ only in password case")
+        # @req REQ-OS-ARGON2D-007
+        # @capture(statistics): distinct hex digests across two passwords
+        val salt = _ascii("somesalt")
+        val pwd1 = _ascii("password")
+        val pwd2 = _ascii("Password")
+        val tag1 = argon2d(pwd1, salt, 1, 8, 1, 32)
+        val tag2 = argon2d(pwd2, salt, 1, 8, 1, 32)
+        expect(_bytes_to_hex(tag1)).to_not_equal(_bytes_to_hex(tag2))  # oracle: a one-byte password change must change the tag
+
+    it("non-empty key changes output vs empty key (argon2d_hash)"):
+        step("Derive two tags with and without an associated key")
+        # @req REQ-OS-ARGON2D-008
+        # @capture(statistics): distinct hex digests with and without a key
+        val pwd = _ascii("password")
+        val salt = _ascii("somesalt")
+        val empty: [u8] = []
+        val key = _repeat_bytes(1, 4)
+        val tag_no_key = argon2d_hash(pwd, salt, 1, 8, 1, empty, empty, 32)
+        val tag_with_key = argon2d_hash(pwd, salt, 1, 8, 1, key, empty, 32)
+        expect(_bytes_to_hex(tag_no_key)).to_not_equal(_bytes_to_hex(tag_with_key))  # oracle: the secret key must enter the initial block and change the tag
+
+    it("non-empty ad changes output vs empty ad (argon2d_hash)"):
+        step("Derive two tags with and without associated data")
+        # @req REQ-OS-ARGON2D-009
+        # @capture(statistics): distinct hex digests with and without associated data
+        val pwd = _ascii("password")
+        val salt = _ascii("somesalt")
+        val empty: [u8] = []
+        val ad = _repeat_bytes(4, 4)
+        val tag_no_ad = argon2d_hash(pwd, salt, 1, 8, 1, empty, empty, 32)
+        val tag_with_ad = argon2d_hash(pwd, salt, 1, 8, 1, empty, ad, 32)
+        expect(_bytes_to_hex(tag_no_ad)).to_not_equal(_bytes_to_hex(tag_with_ad))  # oracle: associated data must enter the initial block and change the tag
+
+describe("Argon2d RFC 9106 section 5.1 known-answer (native fast path lane)"):
+
+    slow_it("matches the RFC 9106 5.1 Argon2d known-answer tag for p=4 m=32 t=3"):
+        step("Derive the RFC 9106 section 5.1 vector with the pure-Simple Argon2d")
+        # @req REQ-OS-ARGON2D-010
+        # @capture(protocol_binary): the 32-byte RFC 9106 section 5.1 known-answer tag bytes
+        # RFC 9106 5.1 inputs:
+        #   password = 32 bytes 0x01, salt = 16 bytes 0x02
+        #   secret = 8 bytes 0x03, ad = 12 bytes 0x04
+        #   t=3, m=32, p=4, T=32, v=0x13
+        val pwd = _repeat_bytes(1, 32)
+        val salt = _repeat_bytes(2, 16)
+        val secret = _repeat_bytes(3, 8)
+        val ad = _repeat_bytes(4, 12)
+        val tag = argon2d_hash(pwd, salt, 3, 32, 4, secret, ad, 32)
+        expect(_bytes_to_hex(tag)).to_equal("512b391b6f1162975371d30919734294f868e3be3984f3c1a13a4db9fabe4acb")  # oracle: the tag fixed by RFC 9106 section 5.1 for Argon2d

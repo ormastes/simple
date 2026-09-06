@@ -1,0 +1,66 @@
+#!/bin/sh
+# Deterministic, mutation-bounded contract test for shared QEMU host settings.
+set -eu
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+resolver=${repo_root}/scripts/qemu/simple-big-storage-root.shs
+settings=${repo_root}/scripts/qemu/simple-qemu-settings.shs
+scratch=$(mktemp -d "${TMPDIR:-/tmp}/simple-qemu-settings.XXXXXX")
+trap 'rm -rf -- "${scratch}"' EXIT HUP INT TERM
+
+fail() {
+    printf '%s\n' "simple_qemu_settings_contract=failed:$1" >&2
+    exit 1
+}
+
+config=${scratch}/storage-root
+configured_root=${scratch}/configured
+environment_root=${scratch}/environment
+printf '%s\n' "${configured_root}" > "${config}"
+
+configured=$(
+    SIMPLE_BIG_STORAGE_CONFIG="${config}" \
+        "${resolver}" --print
+)
+printf '%s\n' "${configured}" | grep -qx "simple_big_storage_root=${configured_root}" || fail config-root
+printf '%s\n' "${configured}" | grep -qx 'simple_big_storage_source=workspace-local' || fail config-source
+printf '%s\n' "${configured}" | grep -qx "simple_bootstrap_root=${configured_root}/bootstrap" || fail bootstrap-root
+
+overridden=$(
+    SIMPLE_BIG_STORAGE_CONFIG="${config}" \
+    SIMPLE_BIG_STORAGE_ROOT="${environment_root}" \
+        "${resolver}" --print
+)
+printf '%s\n' "${overridden}" | grep -qx "simple_big_storage_root=${environment_root}" || fail env-precedence
+printf '%s\n' "${overridden}" | grep -qx 'simple_big_storage_source=environment' || fail env-source
+printf '%s\n' "${overridden}" | grep -qx "simple_bootstrap_root=${environment_root}/bootstrap" || fail env-bootstrap-root
+
+windows=$(
+    SIMPLE_BIG_STORAGE_CONFIG="${config}" \
+    SIMPLE_QEMU_HOST=windows SIMPLE_QEMU_ACCELERATOR=whpx \
+        "${settings}" --print
+)
+printf '%s\n' "${windows}" | grep -qx 'simple_qemu_x86_64_bin=qemu-system-x86_64.exe' || fail windows-suffix
+printf '%s\n' "${windows}" | grep -qx 'simple_qemu_native_timing_applicable=true' || fail whpx-native
+
+freebsd=$(
+    SIMPLE_BIG_STORAGE_CONFIG="${config}" \
+    SIMPLE_QEMU_HOST=freebsd SIMPLE_QEMU_ACCELERATOR=tcg \
+        "${settings}" --print
+)
+printf '%s\n' "${freebsd}" | grep -qx 'simple_qemu_native_timing_applicable=false' || fail tcg-classification
+
+if SIMPLE_BIG_STORAGE_CONFIG="${config}" SIMPLE_QEMU_HOST=plan9 \
+    "${settings}" --print >"${scratch}/invalid-host.out" 2>&1; then
+    fail invalid-host-accepted
+fi
+if SIMPLE_BIG_STORAGE_CONFIG="${config}" SIMPLE_QEMU_HOST=linux SIMPLE_QEMU_ACCELERATOR=hvf \
+    "${settings}" --print >"${scratch}/invalid-accelerator.out" 2>&1; then
+    fail invalid-accelerator-accepted
+fi
+if SIMPLE_BIG_STORAGE_CONFIG="${config}" SIMPLE_BIG_STORAGE_ROOT=relative/path \
+    "${resolver}" --print >"${scratch}/relative-root.out" 2>&1; then
+    fail relative-root-accepted
+fi
+
+printf '%s\n' 'simple_qemu_settings_contract=pass'

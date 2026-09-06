@@ -1,0 +1,56 @@
+# V3 port: emit a `SceneDeltaRef` (see `ui_scene_delta_v2.spl`) from a live
+# `UiSceneColumnArenaV2` (lane T5, completing F3 per
+# `doc/03_plan/ui/perf/render_perf_redesign_plan_2026-08-06.md` §2).
+#
+# The arena records dirty ROW ranges per table against the BACK generation
+# (`ui_scene_column_arena_v2.spl:55-59,142-159`), cleared on `try_swap()`.
+# This port must therefore run BEFORE `try_swap()` — reading `dirty_*` after
+# a swap sees the freshly-cleared, empty state of the new back generation,
+# not the delta that was just presented. `scene_generation` on the emitted
+# ref is `arena.back_generation`: the generation identifier the dirty rows
+# were recorded against, i.e. the one that becomes FRONT on the next swap.
+#
+# `damage_start`/`damage_count` mirror the dirty range here. Real
+# occlusion-aware damage (O2, "conservative occlusion") is a separate,
+# already-landed lane (`compositor_occlusion*.spl`) that this port does not
+# wire in — using the dirty range as the damage proxy is a documented
+# equivalence (damage is always a subset of dirty; the safe default is dirty
+# == damage until an occlusion pass narrows it), not a stub left for later.
+
+use common.ui.ui_scene_delta_v2.{SceneDeltaRef, scene_delta_ref_make}
+use nogc_sync_mut.ui.ui_scene_column_arena_v2.UiSceneColumnArenaV2
+
+# Build a `SceneDeltaRef` from `arena`'s current (pre-swap) dirty state.
+# `changed_table_mask` bit `t` is set iff table `t` has at least one dirty
+# row recorded this generation (tables 0..31; the arena's own table capacity
+# is far below 32 in every real caller, so this is not a truncation risk in
+# practice, but callers with >=32 tables must not rely on bits past 31).
+fn ui_scene_v3_build_delta(arena: UiSceneColumnArenaV2) -> SceneDeltaRef:
+    var mask: u32 = 0
+    var range_start: u32 = 0
+    var range_end: u32 = 0
+    var have_range = false
+    var i: i64 = 0
+    while i < arena.dirty_len:
+        val t = arena.dirty_table[i]
+        if t < 32:
+            mask = mask | (1u32 << t)
+        val s = arena.dirty_start[i]
+        val e = s + arena.dirty_count[i]
+        if not have_range:
+            range_start = s
+            range_end = e
+            have_range = true
+        else:
+            if s < range_start:
+                range_start = s
+            if e > range_end:
+                range_end = e
+        i = i + 1
+    val range_count = if have_range: range_end - range_start else: 0_u32
+    scene_delta_ref_make(
+        arena.back_generation, mask,
+        range_start, range_count,
+        range_start, range_count)
+
+export ui_scene_v3_build_delta

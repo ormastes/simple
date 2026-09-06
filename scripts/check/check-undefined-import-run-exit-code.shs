@@ -1,0 +1,301 @@
+#!/bin/sh
+# check-undefined-import-run-exit-code.shs
+#
+# Fail-closed gate: running a `.spl` file that IMPORTS AND CALLS a symbol which
+# exists nowhere must NOT exit 0.
+#
+# ---------------------------------------------------------------------------
+# WHY THIS CHECK EXISTS (the hole the sibling guards leave open)
+# ---------------------------------------------------------------------------
+# 2026-08-17, src/lib/gc_async_mut/gpu/engine2d/engine.spl:41 imported five
+# functions that existed nowhere in the tree and called all five. The seed
+# printed `[use-warning]` lines and exited **rc=0**. Every downstream
+# "it parses / it runs" verification was therefore worthless; the real symptom
+# surfaced much later as `[jit-fallback] unresolved external symbol ... whole
+# module dropped`. That instance is fixed. The exit-code hole is not.
+#
+# Minimal reproducer, measured 2026-08-18 on the RUST SEED (`bin/simple` says so
+# on stderr; bin/release/x86_64-unknown-linux-gnu/simple, 59,620,392 bytes):
+#
+#     use std.common.use_warning_probe.{uw_probe_zzz_absent}
+#     fn never_called() -> i64:
+#         return uw_probe_zzz_absent(1)
+#     fn main():
+#         print("REACHED")
+#
+#   stdout: REACHED
+#   stderr: [jit-fallback] unresolved external symbol 'uw_probe_zzz_absent':
+#                          whole module dropped to the interpreter
+#           [use-warning] 'uw_probe_zzz_absent' is named in `use ...` but module
+#                         '.../use_warning_probe.spl' does not provide it
+#   exit  : 0                                     <-- THE DEFECT
+#
+# Moving that same call onto the executed path (into `main`) DOES fail closed on
+# this binary: it adds `error[E1002]: function ... not found` and exits 1. So the
+# undefined import is fatal only when execution happens to reach it — which is
+# why "the file runs and exits 0" proves nothing about the rest of the module,
+# and why both shapes are asserted below rather than just one.
+#
+# Neighbouring guards do not cover this:
+#   - scripts/check/check-use-warning-oracle-deployed.shs proves the ORACLE
+#     still speaks in the deployed binary. It asserts nothing about exit codes,
+#     and a warning nobody's exit code reflects is a warning nobody reads.
+#   - scripts/check/check-error-line-with-zero-exit.shs matches only
+#     `^[[:space:]]*error:`. The diagnostic here is `error[E1002]:` — a bracket,
+#     not a colon, at exactly the position that regex tests — so it does not
+#     match. That guard is CORRECT for its own shape; this is a second shape.
+#   - scripts/check/check-jit-unresolved-symbol-guard.shs covers unresolved
+#     *local variables* on the JIT lane, not `use`-imported names.
+#
+# WHERE THE DOWNGRADE HAPPENS
+#   src/compiler_rust/compiler/src/interpreter_module/module_loader.rs:493
+#     `fn warn_unprovided_use_names(...)` — its only effect is `eprintln!` at
+#     line 518. No error is accumulated, nothing is returned, no caller can
+#     observe it. The leniency is INCIDENTAL, not a documented policy: the two
+#     `return`s that DO carry comments ("opaque surface — not checkable",
+#     "not a `{...}` group import") explain skipping the *check*, never why a
+#     positive finding should be non-fatal.
+#
+# WHAT IS ASSERTED (both directions, from one run of the binary under test)
+#   1. CONTROL — a fixture importing and calling `uw_probe_plain_provided`,
+#      which the probe module really declares, must print CONTROL_OK and exit 0.
+#      If the control fails, the harness is measuring nothing: ERROR, not PASS.
+#      This is what stops a broken toolchain from passing assertion 2 trivially.
+#   2. DEFECT-A — the fixture importing and calling `uw_probe_zzz_absent`, which
+#      is deliberately absent from that module, must exit NONZERO and NOT
+#      signal-die (rc < 128, so a SIGSEGV is a FAIL too), and must not print
+#      REACHED (a silent wrong answer is a FAIL even at a nonzero rc).
+#   3. DEFECT-B — the same undefined import, but CALLED FROM A FUNCTION THAT IS
+#      NEVER EXECUTED. This is the engine.spl shape and the assertion that is
+#      still RED on the seed measured 2026-08-18 (59,620,392-byte
+#      bin/release/x86_64-unknown-linux-gnu/simple):
+#        stdout REACHED, stderr `[jit-fallback] ... whole module dropped` and
+#        `[use-warning] ...`, **exit 0**. Assertion 2 passes on this same
+#        binary (rc=1) — resolution failure is only fatal when the bad call
+#        happens to be reached at runtime, which is precisely why a "it runs,
+#        rc=0" verification proves nothing about the rest of the module.
+#
+# KNOWN-RED: on the current Rust seed this FAILS at assertion 3 (rc=0). That is
+# the point — the gap stays visible instead of advertised-but-unrun. See
+# doc/08_tracking/bug/undefined_import_called_exits_zero_2026-08-17.md.
+#
+# FIXTURE COUPLING: the probe module `src/lib/common/use_warning_probe.spl` is
+# shared with check-use-warning-oracle-deployed.shs and must keep declaring
+# `uw_probe_plain_provided` and NOT declaring `uw_probe_zzz_absent`. The
+# importer must live outside a temp dir's module root only for the *warning* to
+# fire; this guard's assertions ride on the exit code, so a temp importer that
+# names the library path is sufficient and is what is used.
+#
+# EXIT CODES (repo pre-push guard convention; verdict is the LAST stdout line)
+#   0 PASS  — `PASS — <n> fixture(s) checked, ...`  (n is always > 0)
+#   1 FAIL  — a defect was observed
+#   2 ERROR — nothing was checked (no binary, no `timeout`, control broken)
+#
+# Usage: sh scripts/check/check-undefined-import-run-exit-code.shs [--selftest]
+# Env:   UIEC_BIN=<path>  binary under test (default bin/simple). Used by the
+#                         selftest to drive stub binaries.
+set -u
+
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+REPO_ROOT="$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)"
+PROBE_MODULE="$REPO_ROOT/src/lib/common/use_warning_probe.spl"
+RUN_TIMEOUT="${UIEC_TIMEOUT:-300}"
+
+CHECKED=0
+FAILURES=""
+
+die_error() {
+    echo "$1"
+    echo "ERROR — nothing was checked"
+    exit 2
+}
+
+# Write the two fixtures into $1 (a directory). Returns paths via globals.
+write_fixtures() {
+    _d="$1"
+    F_CONTROL="$_d/uiec_control.spl"
+    F_ABSENT="$_d/uiec_zzz_absent.spl"
+    F_UNREACHED="$_d/uiec_zzz_absent_unreached.spl"
+    cat >"$F_CONTROL" <<'EOF'
+use std.common.use_warning_probe.{uw_probe_plain_provided}
+
+fn main():
+    val x = uw_probe_plain_provided()
+    print("CONTROL_OK")
+EOF
+    cat >"$F_ABSENT" <<'EOF'
+use std.common.use_warning_probe.{uw_probe_zzz_absent}
+
+fn main():
+    val x = uw_probe_zzz_absent(1)
+    print("REACHED")
+EOF
+    cat >"$F_UNREACHED" <<'EOF'
+use std.common.use_warning_probe.{uw_probe_zzz_absent}
+
+fn never_called() -> i64:
+    return uw_probe_zzz_absent(1)
+
+fn main():
+    print("REACHED")
+EOF
+}
+
+# run_fixture <bin> <file> <outfile>  -> sets RC (never read through a pipe)
+run_fixture() {
+    timeout "$RUN_TIMEOUT" "$1" run "$2" >"$3" 2>&1
+    RC=$?
+}
+
+# scan <bin> -> prints findings, sets CHECKED/FAILURES
+scan() {
+    _bin="$1"
+    _work="$2"
+    write_fixtures "$_work"
+
+    run_fixture "$_bin" "$F_CONTROL" "$_work/control.log"
+    _crc=$RC
+    if [ "$_crc" -ne 0 ] || ! grep -q 'CONTROL_OK' "$_work/control.log"; then
+        die_error "  control fixture did not run cleanly (rc=$_crc); the harness is measuring nothing"
+    fi
+    CHECKED=$((CHECKED + 1))
+    echo "  [control] uw_probe_plain_provided ran, printed CONTROL_OK, exit 0 — harness live"
+
+    run_fixture "$_bin" "$F_ABSENT" "$_work/absent.log"
+    _arc=$RC
+    CHECKED=$((CHECKED + 1))
+    if [ "$_arc" -eq 0 ]; then
+        echo "  [defect] uw_probe_zzz_absent: called an import that exists nowhere, exit 0 (FAIL-OPEN)"
+        grep -nE '^\[use-warning\]|^error' "$_work/absent.log" | head -n 5 | sed 's/^/  | /'
+        FAILURES="${FAILURES}undefined-import-exits-0 "
+    elif [ "$_arc" -ge 128 ]; then
+        echo "  [defect] uw_probe_zzz_absent: signal death rc=$_arc (crash, not a diagnostic)"
+        FAILURES="${FAILURES}undefined-import-crashes(rc=$_arc) "
+    elif grep -q 'REACHED' "$_work/absent.log"; then
+        echo "  [defect] uw_probe_zzz_absent: body executed (printed REACHED) despite rc=$_arc"
+        FAILURES="${FAILURES}undefined-import-body-ran "
+    else
+        echo "  [ok] uw_probe_zzz_absent (on the executed path): refused with exit $_arc — fail-closed"
+    fi
+
+    run_fixture "$_bin" "$F_UNREACHED" "$_work/unreached.log"
+    _urc=$RC
+    CHECKED=$((CHECKED + 1))
+    if [ "$_urc" -eq 0 ]; then
+        echo "  [defect] uw_probe_zzz_absent called OFF the executed path: exit 0 (FAIL-OPEN)"
+        grep -nE 'use-warning|jit-fallback|^error' "$_work/unreached.log" | head -n 5 | sed 's/^/  | /'
+        FAILURES="${FAILURES}unreached-undefined-import-exits-0 "
+    elif [ "$_urc" -ge 128 ]; then
+        echo "  [defect] uw_probe_zzz_absent off the executed path: signal death rc=$_urc"
+        FAILURES="${FAILURES}unreached-undefined-import-crashes(rc=$_urc) "
+    else
+        echo "  [ok] uw_probe_zzz_absent off the executed path: refused with exit $_urc — fail-closed"
+    fi
+}
+
+# --------------------------------------------------------------------------
+# selftest — fatal, runs before every real scan, drives stub binaries in BOTH
+# directions and proves fail-closedness by MUTATION of the stub's exit code.
+# --------------------------------------------------------------------------
+make_stub() {
+    # $1 = path, $2 = rc for the absent fixture, $3 = rc for the control fixture
+    cat >"$1" <<EOF
+#!/bin/sh
+f="\$2"
+if grep -q zzz_absent "\$f" 2>/dev/null; then
+    echo "[use-warning] 'uw_probe_zzz_absent' is named in \\\`use ...\\\` but module does not provide it" >&2
+    echo "error[E1002]: function \\\`uw_probe_zzz_absent\\\` not found" >&2
+    exit $2
+fi
+echo CONTROL_OK
+exit $3
+EOF
+    chmod +x "$1"
+}
+
+selftest() {
+    _st="$(mktemp -d)" || die_error "  mktemp failed"
+    _fails=0
+    _n=0
+
+    # fixture 1: fail-open stub (the real defect) -> guard must FAIL (1)
+    make_stub "$_st/stub_open" 0 0
+    # fixture 2: fail-closed stub (mutation of fixture 1's exit code) -> PASS (0)
+    make_stub "$_st/stub_closed" 1 0
+    # fixture 3: crashing stub -> FAIL (1); a SIGSEGV is not a diagnostic
+    make_stub "$_st/stub_crash" 139 0
+    # fixture 4: broken control -> ERROR (2); a dead harness never passes
+    make_stub "$_st/stub_nocontrol" 1 3
+
+    for _case in "stub_open 1" "stub_closed 0" "stub_crash 1" "stub_nocontrol 2"; do
+        _stub="${_case% *}"
+        _want="${_case#* }"
+            _n=$((_n + 1))
+        UIEC_BIN="$_st/$_stub" sh "$0" --inner >"$_st/$_stub.log" 2>&1
+        _got=$?
+        if [ "$_got" -ne "$_want" ]; then
+            echo "  selftest FAIL: $_stub expected exit $_want, got $_got"
+            sed 's/^/    | /' "$_st/$_stub.log"
+            _fails=$((_fails + 1))
+        else
+            echo "  selftest ok: $_stub -> exit $_got"
+        fi
+    done
+
+    rm -rf "$_st"
+    if [ "$_fails" -ne 0 ] || [ "$_n" -eq 0 ]; then
+        echo "FAIL — selftest: $_fails of $_n fixture(s) wrong"
+        exit 1
+    fi
+    echo "  selftest: $_n/$_n fixtures correct (both directions, mutation-proved)"
+}
+
+# --------------------------------------------------------------------------
+main() {
+    _inner=0
+    [ "${1:-}" = "--inner" ] && _inner=1
+
+    command -v timeout >/dev/null 2>&1 || die_error "  no \`timeout\` on this host"
+
+    BIN="${UIEC_BIN:-$REPO_ROOT/bin/simple}"
+    [ -x "$BIN" ] || die_error "  binary under test not executable: $BIN"
+
+    if [ "$_inner" -eq 0 ]; then
+        [ -f "$PROBE_MODULE" ] || die_error "  missing fixture module: $PROBE_MODULE"
+        grep -q 'uw_probe_plain_provided' "$PROBE_MODULE" \
+            || die_error "  fixture module no longer declares uw_probe_plain_provided"
+        # Declaration-shaped lines only — the file's header COMMENT mentions
+        # `uw_probe_zzz_absent` by design ("Do not add it"), and a bare grep
+        # would read that prose as a declaration.
+        if grep -qE '^[[:space:]]*(pub |export |extern |async |@extern )*(fn|class|struct|enum|trait|mixin|actor|interface|type|alias|macro|val|var|let|const|global|object)[[:space:]]+uw_probe_zzz_absent\b' "$PROBE_MODULE"; then
+            die_error "  fixture module now declares uw_probe_zzz_absent — the absent name is no longer absent"
+        fi
+        selftest
+    fi
+
+    WORK="$(mktemp -d)" || die_error "  mktemp failed"
+    scan "$BIN" "$WORK"
+    rm -rf "$WORK"
+
+    if [ "$CHECKED" -eq 0 ]; then
+        echo "ERROR — nothing was checked"
+        exit 2
+    fi
+    if [ -n "$FAILURES" ]; then
+        echo "FAIL — $CHECKED fixture(s) checked with $BIN, defect(s): $FAILURES"
+        exit 1
+    fi
+    echo "PASS — $CHECKED fixture(s) checked with $BIN, an undefined called import exits nonzero"
+    exit 0
+}
+
+case "${1:-}" in
+    --selftest)
+        command -v timeout >/dev/null 2>&1 || die_error "  no \`timeout\` on this host"
+        selftest
+        echo "PASS — 4 selftest fixture(s) checked, guard is fail-closed"
+        exit 0
+        ;;
+esac
+
+main "${1:-}"

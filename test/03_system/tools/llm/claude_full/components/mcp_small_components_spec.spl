@@ -1,0 +1,69 @@
+"""
+# Claude Full MCP Small Components
+
+Modern SSpec coverage for local MCP menu, warning, reconnect, tool, and approval helpers.
+"""
+
+use std.spec.*
+use app.llm_caret.claude_full.components.mcp.MCPAgentServerMenu.*
+use app.llm_caret.claude_full.components.mcp.McpParsingWarnings.*
+use app.llm_caret.claude_full.components.mcp.MCPReconnect.*
+use app.llm_caret.claude_full.components.mcp.MCPStdioServerMenu.*
+use app.llm_caret.claude_full.components.mcp.MCPToolDetailView.*
+use app.llm_caret.claude_full.components.mcp.MCPToolListView.*
+use app.llm_caret.claude_full.components.MCPServerApprovalDialog.*
+
+describe "Claude full MCP small component parity":
+    it "should render agent and stdio menu decisions":
+        step("Render agent auth options")
+        val agent = MCPAgentServerState.new("github", "http", "https://mcp.example", "", ["reviewer"], true, false, false, "", "")
+        expect(mcpAgentMenuOptions(agent)[0]).to_equal("auth:Authenticate")
+        expect(mcpAgentServerSummary(agent)).to_contain("github")
+
+        step("Render stdio menu options")
+        val stdio = MCPStdioServerState.new("fs", "connected", "node", ["server.js"], 2, 1, 0, false, false)
+        expect(mcpStdioMenuOptions(stdio)[0]).to_equal("tools:View tools")
+        expect(mcpStdioCapabilitiesSummary(stdio)).to_contain("tools=2")
+
+    it "should render diagnostics and reconnect state":
+        step("Format parsing warnings")
+        val issue = McpValidationIssue.new("project", "fatal", "bad-server", "servers.bad", "bad config")
+        expect(mcpParsingWarningsSummary("project", [issue])).to_contain("errors=1")
+        expect(mcpParsingIssueLine(issue)).to_contain("bad-server")
+
+        step("Format reconnect messages")
+        val reconnect = MCPReconnectState.new("fs", "needs-auth", "", false)
+        expect(mcpReconnectCompletionMessage(reconnect)).to_contain("requires authentication")
+        expect(mcpReconnectVisibleState(reconnect)).to_equal("error")
+
+    it "should render tool list and detail helpers":
+        step("Render list annotations")
+        val listItem = MCPToolListItem.new("mcp__fs__write", "write", false, true, true)
+        expect(mcpToolListDescription(listItem)).to_contain("destructive")
+        expect(mcpToolListDescriptionColor(listItem)).to_equal("error")
+
+        step("Render tool detail")
+        val parameter = MCPToolParameter.new("path", "string", "Target path", true)
+        val detail = MCPToolDetailState.new("fs", "mcp__fs__read", "read", "Read file", true, false, false, [parameter])
+        expect(mcpToolDetailTitle(detail)).to_contain("read-only")
+        expect(mcpToolParameterLine(parameter)).to_contain("required")
+
+    it "should apply MCP server approval choices":
+        step("Approve all project servers")
+        val settings = MCPServerApprovalSettings.new([], [], false)
+        val updated = mcpApprovalApply("github", "yes_all", settings)
+        expect(updated.enabled_servers.len()).to_equal(1)
+        expect(updated.enable_all_project_servers).to_equal(true)
+
+        step("Reject a project server")
+        expect(mcpApprovalSummary("bad", "no", settings)).to_contain("disabled=1")
+
+    it "should check modeled TypeScript source floors":
+        step("Read source line helpers")
+        expect(mcpAgentServerMenuSourceLinesModeled()).to_equal(182)
+        expect(mcpParsingWarningsSourceLinesModeled()).to_equal(212)
+        expect(mcpReconnectSourceLinesModeled()).to_equal(166)
+        expect(mcpStdioServerMenuSourceLinesModeled()).to_equal(176)
+        expect(mcpToolDetailViewSourceLinesModeled()).to_equal(211)
+        expect(mcpToolListViewSourceLinesModeled()).to_equal(140)
+        expect(mcpServerApprovalDialogSourceLinesModeled()).to_equal(114)

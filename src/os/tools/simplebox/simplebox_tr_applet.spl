@@ -1,0 +1,198 @@
+# Bounded byte translation for filesystem-launched SimpleOS Simplebox.
+
+use os.userlib.fs.{file_open_direct, file_read_direct, file_close_direct}
+use os.tools.simplebox.simplebox_fs_applets.{
+    SIMPLEBOX_FILE_BYTES_LIMIT, SIMPLEBOX_READ_CHUNK_BYTES,
+    SIMPLEBOX_PATH_OPERAND_BYTES_LIMIT
+}
+use std.nogc_sync_mut.binary_io.{bytes_to_string}
+
+extern fn stdout_write(data: text)
+
+pub const SIMPLEBOX_TR_SET_BYTES_LIMIT: u64 = 256u64
+
+struct SimpleboxTrAtom:
+    value: u8
+    next: u64
+    valid: bool
+    error: text
+
+struct SimpleboxTrSet:
+    values: [u8]
+    valid: bool
+    error: text
+
+struct SimpleboxTrState:
+    parts: [text]
+    failure: text
+
+fn _tr_hex_value(byte: u8) -> i64:
+    if byte >= 48u8 and byte <= 57u8:
+        return (byte - 48u8).to_i64()
+    if byte >= 65u8 and byte <= 70u8:
+        return (byte - 65u8).to_i64() + 10
+    if byte >= 97u8 and byte <= 102u8:
+        return (byte - 97u8).to_i64() + 10
+    -1
+
+fn _tr_atom(bytes: [u8], start: u64) -> SimpleboxTrAtom:
+    if start >= bytes.len():
+        return SimpleboxTrAtom(value: 0u8, next: start, valid: false,
+            error: "missing byte literal")
+    val byte = bytes[start]
+    if byte != 92u8: # backslash
+        if byte < 32u8 or byte > 126u8:
+            return SimpleboxTrAtom(value: 0u8, next: start, valid: false,
+                error: "sets require printable ASCII or escapes")
+        return SimpleboxTrAtom(value: byte, next: start + 1u64, valid: true,
+            error: "")
+    if start + 1u64 >= bytes.len():
+        return SimpleboxTrAtom(value: 0u8, next: start, valid: false,
+            error: "trailing backslash in set")
+    val escaped = bytes[start + 1u64]
+    if escaped == 110u8: # n
+        return SimpleboxTrAtom(value: 10u8, next: start + 2u64, valid: true,
+            error: "")
+    if escaped == 114u8: # r
+        return SimpleboxTrAtom(value: 13u8, next: start + 2u64, valid: true,
+            error: "")
+    if escaped == 116u8: # t
+        return SimpleboxTrAtom(value: 9u8, next: start + 2u64, valid: true,
+            error: "")
+    if escaped == 92u8 or escaped == 45u8: # backslash or literal hyphen
+        return SimpleboxTrAtom(value: escaped, next: start + 2u64, valid: true,
+            error: "")
+    if escaped == 120u8: # xHH
+        if start + 3u64 >= bytes.len():
+            return SimpleboxTrAtom(value: 0u8, next: start, valid: false,
+                error: "hex escape requires two digits")
+        val high = _tr_hex_value(bytes[start + 2u64])
+        val low = _tr_hex_value(bytes[start + 3u64])
+        if high < 0 or low < 0:
+            return SimpleboxTrAtom(value: 0u8, next: start, valid: false,
+                error: "invalid hex escape")
+        return SimpleboxTrAtom(value: (high * 16 + low).to_u8(),
+            next: start + 4u64, valid: true, error: "")
+    SimpleboxTrAtom(value: 0u8, next: start, valid: false,
+        error: "unsupported escape")
+
+fn _tr_parse_set(spec: text) -> SimpleboxTrSet:
+    val bytes = spec.bytes()
+    if bytes.len() == 0u64:
+        return SimpleboxTrSet(values: [], valid: false, error: "empty set")
+    var values: [u8] = []
+    var index: u64 = 0u64
+    while index < bytes.len():
+        val first = _tr_atom(bytes, index)
+        if not first.valid:
+            return SimpleboxTrSet(values: [], valid: false, error: first.error)
+        # An unescaped interior '-' denotes one ascending byte range. A leading,
+        # trailing, or escaped '-' stays literal; classes and locale syntax are
+        # intentionally outside this byte-oriented subset.
+        if (first.next < bytes.len() and bytes[first.next] == 45u8 and
+            first.next + 1u64 < bytes.len()):
+            val last = _tr_atom(bytes, first.next + 1u64)
+            if not last.valid:
+                return SimpleboxTrSet(values: [], valid: false, error: last.error)
+            if first.value > last.value:
+                return SimpleboxTrSet(values: [], valid: false,
+                    error: "descending ranges are unsupported")
+            var value = first.value.to_i64()
+            val end = last.value.to_i64()
+            while value <= end:
+                if values.len() >= SIMPLEBOX_TR_SET_BYTES_LIMIT:
+                    return SimpleboxTrSet(values: [], valid: false,
+                        error: "expanded set exceeds 256 bytes")
+                values.push(value.to_u8())
+                value = value + 1
+            index = last.next
+        else:
+            if values.len() >= SIMPLEBOX_TR_SET_BYTES_LIMIT:
+                return SimpleboxTrSet(values: [], valid: false,
+                    error: "expanded set exceeds 256 bytes")
+            values.push(first.value)
+            index = first.next
+    SimpleboxTrSet(values: values, valid: true, error: "")
+
+fn _tr_translation_table(from: [u8], to: [u8]) -> [u8]:
+    var table: [u8] = []
+    var value: i64 = 0
+    while value < 256:
+        table.push(value.to_u8())
+        value = value + 1
+    val final_replacement = to[to.len() - 1u64]
+    var index: u64 = 0u64
+    while index < from.len():
+        val replacement = if index < to.len(): to[index] else: final_replacement
+        table[from[index].to_u64()] = replacement
+        index = index + 1u64
+    table
+
+fn _tr_read_file(path: text, table: [u8]) -> SimpleboxTrState:
+    var state = SimpleboxTrState(parts: [], failure: "")
+    val opened = file_open_direct(path, 0u32)
+    match opened:
+        case Err(reason):
+            state.failure = path + ": " + reason
+            state
+        case Ok(fd):
+            var consumed: u64 = 0u64
+            var complete = false
+            while not complete and state.failure == "":
+                match file_read_direct(fd, SIMPLEBOX_READ_CHUNK_BYTES):
+                    case Err(reason): state.failure = path + ": " + reason
+                    case Ok(chunk):
+                        if chunk.len() == 0u64:
+                            complete = true
+                        elif chunk.len() > SIMPLEBOX_FILE_BYTES_LIMIT - consumed:
+                            state.failure = path + ": file exceeds simplebox byte limit"
+                        else:
+                            consumed = consumed + chunk.len()
+                            var translated: [u8] = []
+                            var index: u64 = 0u64
+                            while index < chunk.len():
+                                translated.push(table[chunk[index].to_u64()])
+                                index = index + 1u64
+                            state.parts.push(bytes_to_string(translated))
+            if not file_close_direct(fd) and state.failure == "":
+                state.failure = path + ": close failed"
+            state
+
+pub fn simplebox_tr(args: [text]) -> i32:
+    """Translate a bounded file with literal bytes and ascending byte ranges.
+
+    The safe form is `tr [--] SET1 SET2 FILE`. Sets accept printable ASCII,
+    ascending ranges, `\\n`, `\\r`, `\\t`, `\\\\`, `\\-`, and `\\xHH`.
+    SET2's last byte extends to a longer SET1. Options, character classes,
+    complement/delete/squeeze modes, stdin, and unbounded input are rejected.
+    Output starts only after the complete file is read and closed successfully.
+    """
+    var first: u64 = 0u64
+    if args.len() > 0u64 and args[0] == "--":
+        first = 1u64
+    elif args.len() > 0u64 and args[0].starts_with("-"):
+        stdout_write("tr: unsupported option: " + args[0] + "\n")
+        return 2
+    if args.len() - first != 3u64:
+        stdout_write("tr: expected SET1 SET2 FILE\n")
+        return 2
+    val from = _tr_parse_set(args[first])
+    if not from.valid:
+        stdout_write("tr: SET1: " + from.error + "\n")
+        return 2
+    val to = _tr_parse_set(args[first + 1u64])
+    if not to.valid:
+        stdout_write("tr: SET2: " + to.error + "\n")
+        return 2
+    val path = args[first + 2u64]
+    if path.len() == 0u64 or path.len() > SIMPLEBOX_PATH_OPERAND_BYTES_LIMIT:
+        stdout_write("tr: invalid path length\n")
+        return 2
+    val table = _tr_translation_table(from.values, to.values)
+    val state = _tr_read_file(path, table)
+    if state.failure != "":
+        stdout_write("tr: " + state.failure + "\n")
+        return 2
+    for part in state.parts:
+        stdout_write(part)
+    0

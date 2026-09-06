@@ -1,0 +1,74 @@
+#![allow(unnamed_duplicate_typed_args)]
+# Smux Native Backend
+
+use os.apps.shell.shell_app.{ShellApp}
+
+class NativeBackendRecord:
+    id: text
+    shell: ShellApp
+    alive: bool
+
+class NativeBackendCreateResult:
+    id: text
+    initial_output: text
+
+var g_native_backends: [NativeBackendRecord] = []
+var g_next_native_backend_id: i64 = 1
+
+fn smux_backend_reset_for_test():
+    g_native_backends = []
+    g_next_native_backend_id = 1
+
+fn _find_native_backend_index(id: text) -> i64:
+    var i = 0
+    while i < g_native_backends.len():
+        if g_native_backends[i].id == id:
+            return i
+        i = i + 1
+    -1
+
+fn smux_backend_create_native(cols: i32, rows: i32) -> Result<NativeBackendCreateResult, text>:
+    val _ignored_cols = cols
+    val _ignored_rows = rows
+
+    var shell = ShellApp.new()
+    shell.show_prompt()
+    var initial_output = shell.take_remote_output()
+    if initial_output == "":
+        initial_output = "smux ready"
+
+    val backend_id = "backend-{g_next_native_backend_id}"
+    g_next_native_backend_id = g_next_native_backend_id + 1
+    g_native_backends = g_native_backends.push(NativeBackendRecord(id: backend_id, shell: shell, alive: true))
+    Ok(NativeBackendCreateResult(id: backend_id, initial_output: initial_output))
+
+fn smux_backend_send_text(id: text, input: text) -> Result<text, text>:
+    val idx = _find_native_backend_index(id)
+    if idx < 0:
+        return Err("backend not found: {id}")
+
+    var backend = g_native_backends[idx]
+    backend.alive = backend.shell.feed_remote_input(input)
+    val out = backend.shell.take_remote_output()
+    g_native_backends[idx] = backend
+    Ok(out)
+
+fn smux_backend_send_command(id: text, command: text) -> Result<text, text>:
+    smux_backend_send_text(id, "{command}\n")
+
+fn smux_backend_resize(id: text, cols: i32, rows: i32) -> Result<text, text>:
+    val idx = _find_native_backend_index(id)
+    if idx < 0:
+        return Err("backend not found: {id}")
+    var backend = g_native_backends[idx]
+    backend.shell.terminal.resize(cols, rows)
+    g_native_backends[idx] = backend
+    Ok("resized {cols}x{rows}")
+
+fn smux_backend_poll_output(id: text) -> Result<text, text>:
+    val idx = _find_native_backend_index(id)
+    if idx < 0:
+        return Err("backend not found: {id}")
+
+    val backend = g_native_backends[idx]
+    Ok(backend.shell.take_remote_output())

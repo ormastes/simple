@@ -1,0 +1,46 @@
+# LLVM/clang toolchain pin.
+#
+# Consumed for documentation and provenance; the executable form of this pin is
+# `scripts/setup/llvm-toolchain-env.shs`, which is SOURCED to export
+# CC / CXX / LD / LLVM_CONFIG / LLVM_SYS_<ver>_PREFIX and to put the picked
+# LLVM's bin dirs at the front of PATH.
+#
+# Verified 2026-08-21 -- see doc/07_guide/infra/toolchain/llvm_23_deploy_2026-08-21.md
+
+llvm_toolchain:
+  preferred_major: 23
+  preferred_version: 23.1.0
+  preferred_package_version: "1:23.1.0~++20260818083557+55feb0a3b6b7-1~exp1~20260818083714.47"
+  preferred_source: apt.llvm.org llvm-toolchain-noble-23 (snapshot toward 23.1.0, not a final release tarball)
+  fallback_major: 20
+  fallback_version: 20.1.8
+  env_script: scripts/setup/llvm-toolchain-env.shs
+  # Non-root deployment: the host has no passwordless sudo, so the clang-23
+  # .debs were extracted with `dpkg-deb -x` into this prefix rather than
+  # installed. A normal root install of the same packages is equivalent and is
+  # found on PATH without SIMPLE_LLVM_ROOT.
+  local_prefix: /mnt/data/toolchains/llvm-23-root
+  system_wide_alternatives: false
+
+  # What is pinned to 23 and proven.
+  uses_23:
+    - C runtime syntax gate (scripts/check/check-c-runtime-compiles-push.shs, via $CC)
+    - C runtime object build (src/compiler_rust/runtime/build.rs, cc crate, via $CC)
+    - seed native-build link step (ld.lld resolved from PATH)
+    - Rust seed host cc/cxx for -sys crates
+
+  # What is NOT on 23, with the reason.
+  blocked:
+    - component: Rust seed LLVM backend (`llvm` cargo feature -> inkwell)
+      pin: inkwell 0.5 feature llvm18-0 (unchanged)
+      reason: >-
+        inkwell has no llvm23 feature at any published version. inkwell 0.10.0
+        (latest, 2026) tops out at `llvm22-1`; llvm-sys has only 231.0.0-rc2
+        (pre-release) for LLVM 23. Bumping would break the build, so the pin is
+        left alone. Revisit when inkwell publishes an `llvm23-*` feature over a
+        stable llvm-sys 231.
+    - component: system-wide update-alternatives for bare clang/clang++/lld
+      reason: >-
+        requires root; the host has no passwordless sudo. The env script
+        achieves the same effect per-shell by PATH ordering, which is also
+        reversible and does not disturb other users of this machine.

@@ -1,0 +1,45 @@
+# Hardening mutation harness (plan §19.5, row A6).
+#
+# The harness proves a hardening gate can turn RED when a defect of the class it
+# claims to catch is injected. This spec proves the HARNESS itself is honest:
+# its fatal selftest must pass (a fake always-PASS gate must be reported as an
+# undetected mutation, a fake always-FAIL gate must count as detected, and a run
+# with zero gates must ERROR rather than PASS).
+#
+# The verdict is read as the LAST line of stdout, never from a pipeline status.
+
+use std.spec.*
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+val HARNESS = "scripts/check/check-hardening-mutation.shs"
+
+fn _run(args: text) -> (text, i64):
+    val cmd = "sh " + HARNESS + " " + args + " 2>/dev/null"
+    val (stdout, _stderr, code) = rt_process_run("/bin/sh", ["-c", cmd])
+    (stdout, code)
+
+fn _last_line(out: text) -> text:
+    var last = ""
+    for line in out.split("\n"):
+        if line.trim().len() > 0:
+            last = line.trim()
+    last
+
+describe "Hardening mutation harness":
+    it "passes its own fatal selftest":
+        val (out, _code) = _run("--selftest")
+        expect(out).to_contain("selftest: OK")
+
+    it "never reports PASS while no hardening gate exists to mutate":
+        # Absence of a gate is absence of evidence: a run that could execute no
+        # mutation must ERROR, and must never be mistaken for a green gate.
+        val (out, _code) = _run("--gates-dir /nonexistent-gates-dir")
+        val verdict = _last_line(out)
+        expect(verdict).to_start_with("ERROR — nothing was checked")
+
+    it "emits a verdict as the last line of stdout":
+        val (out, _code) = _run("")
+        val verdict = _last_line(out)
+        val ok = verdict.starts_with("PASS — ") or verdict.starts_with("FAIL — ") or verdict.starts_with("ERROR — ")
+        assert_true(ok)

@@ -1,0 +1,203 @@
+#!/bin/sh
+set -eu
+root=$(CDPATH= cd -- "$(dirname "$0")/../../.." && pwd -P)
+gate="$root/scripts/check/check-mci-v2-simpleos-manifest.shs"
+work=$(mktemp -d "$root/build/mci-simpleos-contract.XXXXXX")
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+mkdir -p "$work/evidence/collectors" "$work/evidence/artifacts" "$work/evidence/receipts" "$work/evidence/signatures"
+chmod 700 "$work/evidence" "$work/evidence/collectors" "$work/evidence/artifacts" "$work/evidence/receipts" "$work/evidence/signatures"
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$work/private.pem" >/dev/null 2>&1
+openssl pkey -in "$work/private.pem" -pubout -out "$work/public.pem" >/dev/null 2>&1
+source_hash=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+compiler_hash=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+image_hash=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+payload_hash=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+hash_file() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'; else shasum -a 256 "$1" | awk '{print $1}'; fi; }
+printf 'configuration_schema=mci-simpleos-configuration-v1\nprofile=contract\n' > "$work/configuration.manifest"
+config_hash=$(hash_file "$work/configuration.manifest")
+common_artifact() { echo cell_id=linux:x86_32; echo run_id=fixture-run; echo host_identity=host-linux; echo guest_identity=guest-x86_32; }
+printf 'Simple 1.2.3 (pure-Simple)\n' > "$work/evidence/collectors/version.raw"
+printf 'output_sha256=%s\ncompile_result=pass\n' "$payload_hash" > "$work/evidence/collectors/compile.raw"
+printf 'hello world\n' > "$work/evidence/collectors/run.raw"
+printf 'sample|1|1024|1|2048\nsample|2|4096|80|8192\n' > "$work/evidence/collectors/resources.raw"
+printf 'check|scheduler|pass|0\ncheck|filesystem|pass|0\n' > "$work/evidence/collectors/invariants.raw"
+{ echo artifact_schema=simpleos-version-transcript-v1; common_artifact; echo command_sha256="$payload_hash"; echo exit_code=0; echo version_text_sha256="$(hash_file "$work/evidence/collectors/version.raw")"; echo raw_relpath=collectors/version.raw; echo raw_sha256="$(hash_file "$work/evidence/collectors/version.raw")"; echo result=pass; } > "$work/evidence/collectors/version.evidence"
+{ echo artifact_schema=simpleos-compile-transcript-v1; common_artifact; echo command_sha256="$payload_hash"; echo exit_code=0; echo source_hash="$source_hash"; echo output_sha256="$payload_hash"; echo transcript_body_sha256="$(hash_file "$work/evidence/collectors/compile.raw")"; echo raw_relpath=collectors/compile.raw; echo raw_sha256="$(hash_file "$work/evidence/collectors/compile.raw")"; echo result=pass; } > "$work/evidence/collectors/compile.evidence"
+{ echo artifact_schema=simpleos-run-transcript-v1; common_artifact; echo command_sha256="$payload_hash"; echo exit_code=0; echo image_hash="$image_hash"; echo payload_sha256="$payload_hash"; echo stdout_sha256="$(hash_file "$work/evidence/collectors/run.raw")"; echo raw_relpath=collectors/run.raw; echo raw_sha256="$(hash_file "$work/evidence/collectors/run.raw")"; echo result=pass; } > "$work/evidence/collectors/run.evidence"
+{ echo artifact_schema=simpleos-alias-identity-v1; common_artifact; echo usr_bin_sha256="$payload_hash"; echo bin_sha256="$payload_hash"; echo sys_apps_sha256="$payload_hash"; echo sys_simpletool_sdn_sha256="$payload_hash"; echo result=pass; } > "$work/evidence/collectors/aliases.evidence"
+{ echo artifact_schema=simpleos-stress-resource-series-v1; common_artifact; echo started_at_utc_ns=13600000000000; echo ended_at_utc_ns=100000000000000; echo sample_count=2; echo rss_min_bytes=1024; echo rss_max_bytes=4096; echo cpu_min_millis=1; echo cpu_max_millis=80; echo storage_min_bytes=2048; echo storage_max_bytes=8192; echo samples_sha256="$(hash_file "$work/evidence/collectors/resources.raw")"; echo raw_relpath=collectors/resources.raw; echo raw_sha256="$(hash_file "$work/evidence/collectors/resources.raw")"; echo result=pass; } > "$work/evidence/collectors/resources.evidence"
+{ echo artifact_schema=simpleos-stress-invariant-ledger-v1; common_artifact; echo check_count=2; echo violation_count=0; echo ledger_body_sha256="$(hash_file "$work/evidence/collectors/invariants.raw")"; echo raw_relpath=collectors/invariants.raw; echo raw_sha256="$(hash_file "$work/evidence/collectors/invariants.raw")"; echo result=pass; } > "$work/evidence/collectors/invariants.evidence"
+collector="$work/evidence/collectors/linux-x86_32.receipt"
+{
+    echo collector_schema=simpleos-qemu-host-collector-v1
+    echo attestation=signed-real-v1
+    echo collector_key_id=fixture-collector
+    echo cell_id=linux:x86_32
+    echo host_identity=host-linux
+    echo guest_identity=guest-x86_32
+    echo run_id=fixture-run
+    echo source_hash="$source_hash"
+    echo compiler_receipt_hash="$compiler_hash"
+    echo configuration_hash="$config_hash"
+    echo image_hash="$image_hash"
+    echo qemu_or_host_collector=real
+    echo target_side=true
+    echo guest_filesystem_execution=true
+    echo payload_paths=/usr/bin,/bin,/sys/apps,/SYS/SIMPLETOOL.SDN
+    echo usr_bin_sha256="$payload_hash"
+    echo bin_sha256="$payload_hash"
+    echo sys_apps_sha256="$payload_hash"
+    echo sys_simpletool_sdn_sha256="$payload_hash"
+    echo captured_at_utc_ns=100000000000000
+    echo valid_until_utc_ns=186400000000000
+    echo payload_execution_schema=simpleos-payload-execution-v1
+    echo version_command_sha256="$payload_hash"
+    echo version_exit_code=0
+    echo version_transcript_relpath=collectors/version.evidence
+    echo version_transcript_sha256="$(hash_file "$work/evidence/collectors/version.evidence")"
+    echo compile_command_sha256="$payload_hash"
+    echo compile_exit_code=0
+    echo compile_transcript_relpath=collectors/compile.evidence
+    echo compile_transcript_sha256="$(hash_file "$work/evidence/collectors/compile.evidence")"
+    echo run_command_sha256="$payload_hash"
+    echo run_exit_code=0
+    echo run_transcript_relpath=collectors/run.evidence
+    echo run_transcript_sha256="$(hash_file "$work/evidence/collectors/run.evidence")"
+    echo alias_identity_relpath=collectors/aliases.evidence
+    echo alias_identity_sha256="$(hash_file "$work/evidence/collectors/aliases.evidence")"
+    echo stress_schema=simpleos-stress-receipt-v1
+    echo stress_started_at_utc_ns=13600000000000
+    echo stress_ended_at_utc_ns=100000000000000
+    echo stress_duration_ns=86400000000000
+    echo stress_resource_series_relpath=collectors/resources.evidence
+    echo stress_resource_series_sha256="$(hash_file "$work/evidence/collectors/resources.evidence")"
+    echo stress_invariant_violations=0
+    echo stress_invariant_ledger_relpath=collectors/invariants.evidence
+    echo stress_invariant_ledger_sha256="$(hash_file "$work/evidence/collectors/invariants.evidence")"
+} > "$collector"
+cp "$collector" "$work/canonical"
+echo receipt_hash="$(hash_file "$work/canonical")" >> "$collector"
+openssl dgst -sha256 -sign "$work/private.pem" -out "$work/evidence/signatures/linux-x86_32.sig" "$work/canonical"
+manifest="$work/manifest.env"
+{
+    echo manifest_schema=certified-platform-manifest-v2
+    echo run_id=fixture-run
+    echo source_hash="$source_hash"
+    echo compiler_receipt_hash="$compiler_hash"
+    for host in linux windows macos freebsd; do
+        for guest in x86_32 x86_64 arm32 arm64 riscv32 riscv64; do
+            cell=$host:$guest
+            if [ "$cell" = linux:x86_32 ]; then
+                echo "row=$cell|true||host-$host|guest-$guest|$config_hash|$image_hash|collectors/linux-x86_32.receipt|signatures/linux-x86_32.sig"
+            else
+                echo "row=$cell|false|outside-certified-subset|host-$host|guest-$guest|$config_hash|$image_hash||"
+            fi
+        done
+    done
+} > "$manifest"
+if "$gate" --evidence "$work/evidence" --manifest "$manifest" --configuration-manifest "$work/configuration.manifest" --run-id fixture-run \
+    --source-hash "$source_hash" --configuration-hash "$config_hash" --compiler-receipt-hash "$compiler_hash" \
+    --captured-at-utc-ns 100000000000000 --valid-until-utc-ns 186400000000000 --now-utc-ns 100000000000000 \
+    --trusted-key-id producer-key --collector-trust-key "$work/public.pem" --collector-key-id fixture-collector \
+    --contract-fixture > "$work/output" 2>&1; then
+    echo 'fixture evidence incorrectly produced live PASS' >&2; exit 1
+fi
+[ -f "$work/evidence/artifacts/simpleos.evidence" ] || { sed -n '1,80p' "$work/output" >&2; exit 1; }
+grep -q '^simpleos_manifest_contract=PASS$' "$work/output"
+grep -q '^result=BLOCKED$' "$work/output"
+grep -q '^fixture_contract_only=true$' "$work/evidence/artifacts/simpleos.evidence"
+grep -q '^row=linux:x86_32|BLOCKED|fixture-contract-only|' "$work/evidence/artifacts/simpleos.evidence"
+grep -q '^visible_cell_count=24$' "$work/evidence/artifacts/simpleos.evidence"
+grep -q '^selected_cell_count=1$' "$work/evidence/artifacts/simpleos.evidence"
+grep -q '^umbrella_all_platforms=false$' "$work/evidence/artifacts/simpleos.evidence"
+grep -q '^structural_reason=none$' "$work/evidence/artifacts/simpleos.evidence"
+grep -q '^receipt_template_schema=mci-lane-unsigned-template-v1$' "$work/evidence/receipts/simpleos.receipt.unsigned.template"
+grep -q '^attestation=unsigned-v1$' "$work/evidence/receipts/simpleos.receipt.unsigned.template"
+grep -q '^result=blocked$' "$work/evidence/receipts/simpleos.receipt.unsigned.template"
+[ ! -e "$work/evidence/receipts/simpleos.receipt" ]
+[ ! -e "$work/evidence/signatures/simpleos.sig" ]
+
+run_negative() {
+    label=$1 manifest_input=$2 collector_input=$3 expected=$4
+    ev="$work/$label/evidence"; mkdir -p "$ev/collectors" "$ev/signatures" "$ev/artifacts" "$ev/receipts"
+    chmod 700 "$work/$label" "$ev" "$ev/collectors" "$ev/signatures" "$ev/artifacts" "$ev/receipts"
+    cp "$work/evidence/collectors/"*.evidence "$ev/collectors/"
+    cp "$work/evidence/collectors/"*.raw "$ev/collectors/"
+    if [ "$#" -ge 6 ]; then cp "$6" "$ev/collectors/$5.evidence"; fi
+    cp "$collector_input" "$ev/collectors/linux-x86_32.receipt"
+    cp "$work/evidence/signatures/linux-x86_32.sig" "$ev/signatures/linux-x86_32.sig"
+    if "$gate" --evidence "$ev" --manifest "$manifest_input" --configuration-manifest "$work/configuration.manifest" --run-id fixture-run \
+        --source-hash "$source_hash" --configuration-hash "$config_hash" --compiler-receipt-hash "$compiler_hash" \
+        --captured-at-utc-ns 100000000000000 --valid-until-utc-ns 186400000000000 --now-utc-ns 100000000000000 \
+        --trusted-key-id producer-key --collector-trust-key "$work/public.pem" --collector-key-id fixture-collector --contract-fixture >"$work/$label.out" 2>&1; then exit 1; fi
+    [ -f "$ev/artifacts/simpleos.evidence" ] || { sed -n '1,80p' "$work/$label.out" >&2; exit 1; }
+    grep -q "$expected" "$ev/artifacts/simpleos.evidence"
+}
+semantic_negative() {
+    label=$1 artifact_name=$2 expression=$3 hash_field=$4 expected=$5
+    bad_artifact="$work/$label.evidence"; sed "$expression" "$work/evidence/collectors/$artifact_name.evidence" > "$bad_artifact"
+    bad_hash=$(hash_file "$bad_artifact")
+    sed "s/^${hash_field}=.*/${hash_field}=${bad_hash}/" "$collector" | sed '/^receipt_hash=/d' > "$work/$label.receipt"
+    cp "$work/$label.receipt" "$work/bad.canonical"; echo receipt_hash="$(hash_file "$work/bad.canonical")" >> "$work/$label.receipt"
+    run_negative "$label" "$manifest" "$work/$label.receipt" "$expected" "$artifact_name" "$bad_artifact"
+}
+
+cp "$manifest" "$work/extra.manifest"; echo unexpected_key=forbidden >> "$work/extra.manifest"
+run_negative extra-schema "$work/extra.manifest" "$collector" 'structural_reason=manifest-must-have-exact-schema-and-24-rows'
+
+make_bad_collector() {
+    output=$1 expression=$2
+    sed "$expression" "$collector" | sed '/^receipt_hash=/d' > "$output"
+    cp "$output" "$work/bad.canonical"; echo receipt_hash="$(hash_file "$work/bad.canonical")" >> "$output"
+}
+make_bad_collector "$work/bad-payload.receipt" 's/^run_exit_code=0$/run_exit_code=7/'
+run_negative bad-payload "$manifest" "$work/bad-payload.receipt" 'invalid-payload-execution'
+make_bad_collector "$work/bad-stress.receipt" 's/^stress_invariant_violations=0$/stress_invariant_violations=1/'
+run_negative bad-stress "$manifest" "$work/bad-stress.receipt" 'invalid-stress-receipt'
+make_bad_collector "$work/bad-time.receipt" 's/^captured_at_utc_ns=100000000000000$/captured_at_utc_ns=99999999999999/'
+run_negative bad-time "$manifest" "$work/bad-time.receipt" 'stale-or-invalid-stress'
+cp "$work/evidence/collectors/run.evidence" "$work/evidence/collectors/run.evidence.saved"
+printf 'artifact_schema=simpleos-run-transcript-v1\nresult=tampered\n' > "$work/evidence/collectors/run.evidence"
+run_negative tampered-transcript "$manifest" "$collector" 'invalid-payload-artifact'
+mv "$work/evidence/collectors/run.evidence.saved" "$work/evidence/collectors/run.evidence"
+semantic_negative missing-field run '/^stdout_sha256=/d' run_transcript_sha256 invalid-payload-artifact
+semantic_negative extra-field run '$aextra=forbidden' run_transcript_sha256 invalid-payload-artifact
+semantic_negative duplicate-field run '/^exit_code=/aexit_code=0' run_transcript_sha256 invalid-payload-artifact
+semantic_negative nonzero-version version 's/^exit_code=0$/exit_code=9/' version_transcript_sha256 invalid-payload-artifact
+semantic_negative alias-mismatch aliases 's/^bin_sha256=.*/bin_sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/' alias_identity_sha256 invalid-payload-artifact
+semantic_negative resource-range resources 's/^rss_min_bytes=1024$/rss_min_bytes=8192/' stress_resource_series_sha256 invalid-stress-artifact
+semantic_negative ledger-violation invariants 's/^violation_count=0$/violation_count=1/' stress_invariant_ledger_sha256 invalid-stress-artifact
+raw_negative() {
+    label=$1 artifact_name=$2 raw_text=$3 hash_field=$4 expected=$5
+    raw_bad="$work/$label.raw"; printf '%b' "$raw_text" > "$raw_bad"
+    bad_evidence="$work/$label.evidence"; sed -e "s/^raw_sha256=.*/raw_sha256=$(hash_file "$raw_bad")/" -e "s/^${hash_field}=.*/${hash_field}=$(hash_file "$raw_bad")/" "$work/evidence/collectors/$artifact_name.evidence" > "$bad_evidence"
+    bad_hash=$(hash_file "$bad_evidence"); collector_field=${artifact_name}_transcript_sha256
+    [ "$artifact_name" = resources ] && collector_field=stress_resource_series_sha256
+    [ "$artifact_name" = invariants ] && collector_field=stress_invariant_ledger_sha256
+    sed "s/^${collector_field}=.*/${collector_field}=${bad_hash}/" "$collector" | sed '/^receipt_hash=/d' > "$work/$label.receipt"
+    cp "$work/$label.receipt" "$work/bad.canonical"; echo receipt_hash="$(hash_file "$work/bad.canonical")" >> "$work/$label.receipt"
+    ev="$work/$label/evidence"; mkdir -p "$ev/collectors" "$ev/signatures" "$ev/artifacts" "$ev/receipts"; chmod 700 "$work/$label" "$ev" "$ev/collectors" "$ev/signatures" "$ev/artifacts" "$ev/receipts"
+    cp "$work/evidence/collectors/"*.evidence "$work/evidence/collectors/"*.raw "$ev/collectors/"; cp "$bad_evidence" "$ev/collectors/$artifact_name.evidence"; cp "$raw_bad" "$ev/collectors/$artifact_name.raw"; cp "$work/$label.receipt" "$ev/collectors/linux-x86_32.receipt"; cp "$work/evidence/signatures/linux-x86_32.sig" "$ev/signatures/"
+    if "$gate" --evidence "$ev" --manifest "$manifest" --configuration-manifest "$work/configuration.manifest" --run-id fixture-run --source-hash "$source_hash" --configuration-hash "$config_hash" --compiler-receipt-hash "$compiler_hash" --captured-at-utc-ns 100000000000000 --valid-until-utc-ns 186400000000000 --now-utc-ns 100000000000000 --trusted-key-id producer-key --collector-trust-key "$work/public.pem" --collector-key-id fixture-collector --contract-fixture >/dev/null 2>&1; then exit 1; fi
+    grep -q "$expected" "$ev/artifacts/simpleos.evidence"
+}
+raw_negative bad-version-oracle version 'Rust seed 1.2.3\n' version_text_sha256 invalid-payload-artifact
+raw_negative bad-run-oracle run 'goodbye world\n' stdout_sha256 invalid-payload-artifact
+raw_negative bad-resource-sample resources 'sample|1|1024|1|2048\nsample|2|5000|80|8192\n' samples_sha256 invalid-stress-artifact
+raw_negative bad-invariant-row invariants 'check|scheduler|pass|0\ncheck|filesystem|fail|1\n' ledger_body_sha256 invalid-stress-artifact
+
+if "$gate" --evidence "$work/future" --manifest "$manifest" --configuration-manifest "$work/configuration.manifest" --run-id fixture-run \
+    --source-hash "$source_hash" --configuration-hash "$config_hash" --compiler-receipt-hash "$compiler_hash" --captured-at-utc-ns 100 --valid-until-utc-ns 200 --now-utc-ns 99 \
+    --trusted-key-id producer-key --collector-trust-key "$work/public.pem" --collector-key-id fixture-collector --contract-fixture >/dev/null 2>&1; then exit 1; fi
+if "$gate" --evidence "$work/wrong-config" --manifest "$manifest" --configuration-manifest "$work/configuration.manifest" --run-id fixture-run \
+    --source-hash "$source_hash" --configuration-hash aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --compiler-receipt-hash "$compiler_hash" --captured-at-utc-ns 100000000000000 --valid-until-utc-ns 186400000000000 --now-utc-ns 100000000000000 \
+    --trusted-key-id producer-key --collector-trust-key "$work/public.pem" --collector-key-id fixture-collector --contract-fixture >/dev/null 2>&1; then exit 1; fi
+
+# Prove the unsigned template has exactly the data needed for the aggregate's
+# documented signer conversion, without claiming that the fixture is live.
+sed -e 's/^receipt_template_schema=.*/receipt_schema=mci-lane-receipt-v1/' -e 's/^attestation=.*/attestation=signed-v1/' "$work/evidence/receipts/simpleos.receipt.unsigned.template" > "$work/canonical-lane"
+echo receipt_hash="$(hash_file "$work/canonical-lane")" >> "$work/canonical-lane"
+grep -q '^receipt_schema=mci-lane-receipt-v1$' "$work/canonical-lane"
+grep -q '^result=blocked$' "$work/canonical-lane"
+grep -Eq '^receipt_hash=[0-9a-f]{64}$' "$work/canonical-lane"
+echo 'mci_v2_simpleos_manifest_contract_test: PASS'

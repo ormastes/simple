@@ -1,0 +1,119 @@
+"""
+## Purpose and audience
+Pins the READ path of `simple debug inspect`: manifest decoding
+(`decode_debug_evidence_manifest_summary_v1`) and whole-bundle inspection
+(`inspect_debug_evidence_bundle_v1`), including the central-service receipt the
+inspection returns. Audience: engineers changing
+`src/app/cli_debug/evidence_inspect_v1.spl` or
+`src/lib/common/debug/service_v1.spl`.
+## Operator workflow
+src/compiler_rust/target/bootstrap/simple run test/01_unit/app/cli_debug/evidence_inspect_v1_spec.spl
+## Compatibility and limitations
+Reader only -- no evidence-bundle WRITER exists in this repo, so the on-disk
+bundles used here are checked-in fixtures under `test/fixtures/debug/`. The
+receipt identity asserted here is the in-process one issued by
+`central_debug_service_v1_record`; it is not persisted anywhere yet.
+## Verification guidance and troubleshooting
+A RED on the receipt assertions means `DebugReceiptV1.receipt_id` stopped being
+assigned by `service_v1.spl` -- see
+`doc/08_tracking/bug/debug_evidence_inspect_receipt_id_field_missing_2026-09-05.md`.
+"""
+# Lifecycle: doc/02_requirements/feature/simple_unified_debugging_evidence.md ;
+# doc/01_research/infra/dump_replay/simple_dump_replay_fw_spipe_devhub_design_plan_2026-09-05.md ;
+# doc/03_plan/app/debug/dump_replay_wave_plan.md ;
+# doc/04_architecture/simple_unified_debugging_evidence.md ;
+# doc/05_design/app/debug/debug_capability_truth_wave0_design.md ;
+# doc/07_guide/app/debug/debug_evidence_bundle_contract.md
+# @manual_section: primary
+
+use std.spec.*
+use app.cli_debug.evidence_inspect_v1.{
+    decode_debug_evidence_manifest_summary_v1, inspect_debug_evidence_bundle_v1,
+}
+use std.common.debug.service_v1.{central_debug_service_v1_session_count}
+
+val DIGEST = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+val VALID_BUNDLE = "test/fixtures/debug/evidence_bundle_contract_v1"
+
+describe "debug evidence bundle inspection":
+    it "derives exact captured context without inventing identity":
+        # @req REQ-014
+        # @capture(evidence_manifest): the raw manifest source with its exact session/build/artifact fields
+        step("Decode a manifest carrying an exact build id and captured session")
+        val source = "schema: debug-evidence-bundle-v1\n" +
+            "session_id: \"captured-session-7\"\n" +
+            "build_id: \"sha256:" + DIGEST + "\"\n" +
+            "captured_at_ns: 42\nartifacts:\n" +
+            "  - path: \"raw/core\"\n  - path: \"normalized/events.sdn\"\n"
+        # @capture(evidence_manifest): the decoded summary's session/build/timestamp/artifact-count fields
+        step("Verify every field comes from the manifest, none is synthesised")
+        match decode_debug_evidence_manifest_summary_v1(source):
+            case Err(reason): expect(reason).to_equal("")
+            case Ok(summary):
+                expect(summary.captured_session_id).to_equal("captured-session-7")
+                expect(summary.build_id).to_equal("sha256:" + DIGEST)
+                expect(summary.captured_at_ns).to_equal(42)  # oracle: source manifest declares captured_at_ns: 42 verbatim
+                expect(summary.artifact_count).to_equal(2)  # oracle: source manifest lists exactly two artifacts entries above
+
+    it "rejects a manifest without an exact build and captured session":
+        # @req REQ-014
+        # @capture(evidence_manifest): the manifest source with an empty session_id and a moving "latest" build_id
+        step("Decode a manifest whose session_id is empty and build_id is a moving label")
+        val source = "schema: debug-evidence-bundle-v1\nsession_id: \"\"\n" +
+            "build_id: \"latest\"\ncaptured_at_ns: 42\nartifacts:\n"
+        # @capture(evidence_manifest): the decoder's Err(reason) text naming the missing captured session identity
+        step("Verify the rejection names the missing captured session identity")
+        match decode_debug_evidence_manifest_summary_v1(source):
+            case Ok(_): expect("accepted").to_equal("rejected")
+            case Err(reason): expect(reason).to_contain("captured session identity")
+
+    it "records the offline inspection and closes its temporary central session":
+        # @req REQ-014
+        # Reproduction for
+        # doc/08_tracking/bug/debug_evidence_inspect_receipt_id_field_missing_2026-09-05.md:
+        # before the fix `DebugReceiptV1` had no `receipt_id`, so this module
+        # did not compile at all and the inspection produced no receipt.
+        # @capture(evidence_manifest): the central session count before inspection, and the fixture bundle path
+        step("Inspect a checked-in bundle whose artifact and receipts digests both verify")
+        val before = central_debug_service_v1_session_count()
+        match inspect_debug_evidence_bundle_v1(VALID_BUNDLE):
+            case Err(reason): expect(reason).to_equal("")
+            case Ok(inspection):
+                # @capture(evidence_manifest): the returned receipt id prefix and exact build id
+                step("Verify the inspection carries a real receipt and the bundle's exact build id")
+                expect(inspection.receipt_id.starts_with("receipt-")).to_equal(true)
+                expect(inspection.build_id).to_equal("sha256:" + DIGEST)
+        # @capture(evidence_manifest): the central session count after inspection, compared against the pre-inspection count
+        step("Verify the temporary central session was closed, not leaked")
+        expect(central_debug_service_v1_session_count()).to_equal(before)
+
+    it "binds the returned receipt to the session that issued it":
+        # @req REQ-014
+        # Generalization: the receipt is not merely non-empty -- it names its
+        # own session, so a receipt can be tied back without a side table.
+        # @capture(evidence_manifest): the fixture bundle path used for the single inspection
+        step("Inspect a valid bundle and take both identities off the returned struct")
+        match inspect_debug_evidence_bundle_v1(VALID_BUNDLE):
+            case Err(reason): expect(reason).to_equal("")
+            case Ok(inspection):
+                # @capture(evidence_manifest): the returned session_id and receipt_id, proving the receipt embeds the session
+                step("Verify the receipt id embeds the session id it was issued under")
+                expect(inspection.session_id.value == "").to_equal(false)
+                expect(inspection.receipt_id.contains(inspection.session_id.value)).to_equal(true)
+
+    it "issues a distinct receipt for each inspection of the same bundle":
+        # @req REQ-014
+        # Generalization: receipt ids are per-operation, not per-bundle, so two
+        # inspections of the same bytes are separately attributable.
+        # @capture(evidence_manifest): the fixture bundle path used for both inspections
+        step("Inspect the same valid bundle twice")
+        match inspect_debug_evidence_bundle_v1(VALID_BUNDLE):
+            case Err(reason): expect(reason).to_equal("")
+            case Ok(first):
+                match inspect_debug_evidence_bundle_v1(VALID_BUNDLE):
+                    case Err(reason): expect(reason).to_equal("")
+                    case Ok(second):
+                        # @capture(evidence_manifest): both receipt ids and both build ids, proving distinct receipts over a stable identity
+                        step("Verify the two receipts differ while the bundle identity does not")
+                        expect(first.receipt_id == second.receipt_id).to_equal(false)
+                        expect(first.build_id).to_equal(second.build_id)

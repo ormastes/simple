@@ -1,0 +1,98 @@
+#!/bin/sh
+# WM/GUI/web/2D portable-lane dependency boundary gate.
+#
+# Contract: if Simple 2D (rendering + event delivery) runs on SimpleOS, the WM
+# runs on SimpleOS. Nothing else may be a precondition. Any other route to the
+# host/OS — fs, net, process, env, timers, raw platform `extern`, kernel/driver
+# tiers — is a hidden precondition and a violation.
+#
+# This is a RATCHET against doc/08_tracking/wm_lane_boundary_baseline.txt: it
+# fails on violations NOT already in the baseline. The lane starts with a large
+# known set (doc/04_architecture/ui/wm_gui_web_dependency_audit.md); a gate that
+# failed on all of them would be switched off within a day and enforce nothing.
+#
+#   sh scripts/check/check-wm-lane-boundary.shs                  # gate
+#   sh scripts/check/check-wm-lane-boundary.shs --write-baseline # re-record
+#
+# The verdict is the LAST line of stdout:
+#   PASS  (exit 0)  — states how many files were actually scanned
+#   FAIL  (exit 1)  — new violations, each listed as `NEW VIOLATION path:line:code`
+#   ERROR (exit 2)  — nothing was checked; never mistake this for a pass
+#
+# Fail-closed on cwd: run from the repo root. Exit status alone is NOT the
+# oracle here (an unresolved `use` in this repo is only a WARN, exit 0) — this
+# script reads the verdict line, and so should you.
+set -u
+
+REPO_ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+cd "$REPO_ROOT" || { echo "ERROR — nothing was checked: cannot cd to repo root"; exit 2; }
+
+CHECKER="src/app/check/wm_lane_boundary_check.spl"
+BASELINE="doc/08_tracking/wm_lane_boundary_baseline.txt"
+SIMPLE="${SIMPLE_BIN:-bin/simple}"
+
+[ -x "$SIMPLE" ] || { echo "ERROR — nothing was checked: $SIMPLE is not executable"; exit 2; }
+[ -f "$CHECKER" ] || { echo "ERROR — nothing was checked: $CHECKER is missing"; exit 2; }
+
+WORK=$(mktemp -d) || { echo "ERROR — nothing was checked: mktemp failed"; exit 2; }
+trap 'rm -rf "$WORK"' EXIT
+
+# Scope roots come from the rule itself (wm_lane_scope_dirs), so this wrapper
+# cannot drift from what the lint rule considers in-lane.
+"$SIMPLE" run "$CHECKER" --scope-dirs > "$WORK/dirs.txt" 2>"$WORK/dirs.err"
+# The runner prints diagnostics on both streams; keep only real directories.
+: > "$WORK/roots.txt"
+while IFS= read -r d; do
+    case "$d" in
+        src/*) [ -d "$d" ] && printf '%s\n' "$d" >> "$WORK/roots.txt" ;;
+    esac
+done < "$WORK/dirs.txt"
+
+if [ ! -s "$WORK/roots.txt" ]; then
+    echo "ERROR — nothing was checked: could not read scope roots from $CHECKER"
+    exit 2
+fi
+
+# `ugrep` is the default grep here; every scan below pins /usr/bin/grep.
+: > "$WORK/files.txt"
+while IFS= read -r root; do
+    find "$root" -name '*.spl' -type f 2>/dev/null >> "$WORK/files.txt"
+done < "$WORK/roots.txt"
+# Vendored trees are never in scope.
+/usr/bin/grep -v -E '/vendor/' "$WORK/files.txt" | sort > "$WORK/scan.txt"
+
+FILE_COUNT=$(/usr/bin/grep -c '\.spl$' "$WORK/scan.txt")
+if [ "$FILE_COUNT" -lt 100 ]; then
+    echo "ERROR — nothing was checked: only $FILE_COUNT lane file(s) found (expected >=100)"
+    exit 2
+fi
+
+if [ "${1:-}" = "--write-baseline" ]; then
+    MODE="--write-baseline=$BASELINE"
+else
+    [ -f "$BASELINE" ] || { echo "ERROR — nothing was checked: $BASELINE is missing"; exit 2; }
+    MODE="--baseline=$BASELINE"
+fi
+
+# Capture to a FILE. `simple` emits hundreds of lines of unrelated deprecation
+# and symbol-collision warnings; a verdict read off the tail of a live pipe is
+# how a real failure gets reported as "no output".
+# shellcheck disable=SC2046
+"$SIMPLE" run "$CHECKER" "$MODE" $(cat "$WORK/scan.txt") > "$WORK/out.log" 2>&1
+RC=$?
+
+/usr/bin/grep -E '^NEW VIOLATION ' "$WORK/out.log"
+VERDICT=$(/usr/bin/grep -E '^(PASS|FAIL|ERROR) ' "$WORK/out.log" | tail -1)
+
+if [ -z "$VERDICT" ]; then
+    echo "ERROR — nothing was checked: checker produced no verdict line (rc=$RC), see $WORK/out.log"
+    cp "$WORK/out.log" "$REPO_ROOT/wm_lane_boundary_check_failure.log" 2>/dev/null
+    exit 2
+fi
+
+echo "$VERDICT"
+case "$VERDICT" in
+    PASS*)  exit 0 ;;
+    FAIL*)  exit 1 ;;
+    *)      exit 2 ;;
+esac

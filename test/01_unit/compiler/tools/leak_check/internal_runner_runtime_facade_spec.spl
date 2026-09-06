@@ -1,0 +1,46 @@
+"""
+# Internal Leak Runner Runtime Facade Contract
+
+The internal leak runner owns `/proc/meminfo` sampling and parsing while the
+canonical I/O runtime owner performs the exact nullable file read. The target
+execution remains bracketed by one sample before and one sample after it.
+"""
+
+use std.io_runtime.{read_file_text}
+use std.spec.step
+use compiler.tools.leak_check.internal_runner.{parse_mem_available_kb}
+
+describe "internal leak runner runtime facade ownership":
+    it "uses one exact nullable read behind each memory sample":
+        step("Load the production internal runner source")
+        val source = read_file_text("src/compiler/90.tools/leak_check/internal_runner.spl")
+
+        step("Pin canonical ownership and reject the duplicate runtime declaration")
+        expect(source).to_contain("use std.nogc_sync_mut.io_runtime.{file_read_nullable}")
+        expect(source).to_contain("val content = file_read_nullable(\"/proc/meminfo\") ?? \"\"")
+        expect(source.split("file_read_nullable(\"/proc/meminfo\")").len()).to_equal(2)
+        expect(source).to_not_contain("extern fn rt_file_read_text")
+        expect(source).to_not_contain("rt_file_read_text(")
+
+        step("Keep the target execution bracketed by exactly two samples")
+        expect(source.split("read_mem_available_kb()").len()).to_equal(4)
+        val before_pos = source.index_of("val mem_before_kb = read_mem_available_kb()")
+        val run_pos = source.index_of("val run_exit = cli_run_file")
+        val after_pos = source.index_of("val mem_after_kb = read_mem_available_kb()")
+        expect(before_pos).to_be_less_than(run_pos)
+        expect(run_pos).to_be_less_than(after_pos)
+
+    it "preserves empty missing malformed and numeric sentinels":
+        step("Empty and absent fields retain the failure sentinel")
+        expect(parse_mem_available_kb("")).to_equal(-1)
+        expect(parse_mem_available_kb("MemTotal: 8192 kB\n")).to_equal(-1)
+
+        step("Malformed values retain the failure sentinel")
+        expect(parse_mem_available_kb("MemAvailable: unknown\n")).to_equal(-1)
+        expect(parse_mem_available_kb("MemAvailable: kB\n")).to_equal(-1)
+        expect(parse_mem_available_kb("MemAvailable: 999999999999999999999999999999999999999999999999999999999999999999999999\n")).to_equal(-1)
+        expect(parse_mem_available_kb("MemAvailable: unknown\nMemAvailable: 4096 kB\n")).to_equal(-1)
+
+        step("Leading digits retain the existing successful parse behavior")
+        expect(parse_mem_available_kb("MemTotal: 8192 kB\nMemAvailable: 4096 kB\n")).to_equal(4096)
+        expect(parse_mem_available_kb("MemAvailable: 1234 trailing\n")).to_equal(1234)

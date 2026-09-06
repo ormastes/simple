@@ -1,0 +1,143 @@
+# Producer-neutral ThemeRenderSnapshot -> styled Draw IR surface policy.
+#
+# GUI and WM emit these durable style values. Engine2D owns all transient
+# backdrop sampling, masks, blur, device handles and execution receipts.
+
+use common.ui.draw_ir.{DrawIrStyleProp, draw_ir_style_prop}
+use common.ui.theme_render_snapshot.{ThemeRenderSnapshot, ThemeShadowLayer}
+
+fn _theme_draw_ir_opaque(color: u32) -> u32:
+    0xFF000000u32 | (color & 0x00FFFFFFu32)
+
+fn _theme_draw_ir_device_glass(backend_target: text) -> bool:
+    backend_target == "metal"
+
+fn _theme_draw_ir_cpu_glass(backend_target: text) -> bool:
+    backend_target == "cpu" or backend_target == "software" or
+        backend_target == "cpu_simd" or backend_target == "vulkan"
+
+fn _theme_draw_ir_alpha_milli(color: u32) -> i32:
+    (((color >> 24) & 0xFFu32) as i64 * 1000 / 255) as i32
+
+fn _theme_draw_ir_shadow_raw(shadows: [ThemeShadowLayer]) -> text:
+    var out = ""
+    var index = 0
+    for shadow in shadows:
+        if index > 0:
+            out = "{out}, "
+        val inset = if shadow.inset: "inset " else: ""
+        out = "{out}{inset}{shadow.offset_x_px}px {shadow.offset_y_px}px {shadow.blur_radius_px}px {shadow.spread_radius_px}px {shadow.rgba}"
+        index = index + 1
+    if out == "": "none" else: out
+
+fn _theme_draw_ir_engine_shadow(shadows: [ThemeShadowLayer]) -> text:
+    for shadow in shadows:
+        if not shadow.inset:
+            return "{shadow.offset_x_px}px {shadow.offset_y_px}px {shadow.rgba}"
+    "none"
+
+fn _theme_draw_ir_engine_shadow_blur(shadows: [ThemeShadowLayer]) -> i32:
+    for shadow in shadows:
+        if not shadow.inset:
+            return shadow.blur_radius_px
+    0
+
+fn theme_draw_ir_surface_fallback_color(snapshot: ThemeRenderSnapshot, active: bool, part: text) -> u32:
+    val material = snapshot.material
+    if part == "body":
+        return _theme_draw_ir_opaque(material.solid_fallback_rgba)
+    val title = if active: material.active_title_fill_rgba else: material.inactive_title_fill_rgba
+    _theme_draw_ir_opaque(title)
+
+# Device material historically carries the selected translucent tint in the
+# command channel as well as in `background-color`; CPU/SIMD/Vulkan and every
+# unresolved target retain the opaque native-safe fallback.  Keep this policy
+# here so WM and GUI cannot split on it.
+fn theme_draw_ir_surface_command_color(snapshot: ThemeRenderSnapshot, active: bool, part: text, backend_target: text) -> u32:
+    if _theme_draw_ir_device_glass(backend_target):
+        if part == "body":
+            return snapshot.material.window_fill_rgba
+        if active:
+            return snapshot.material.active_title_fill_rgba
+        return snapshot.material.inactive_title_fill_rgba
+    theme_draw_ir_surface_fallback_color(snapshot, active, part)
+
+fn theme_draw_ir_surface_initializer_color(snapshot: ThemeRenderSnapshot) -> u32:
+    _theme_draw_ir_opaque(snapshot.material.desktop_fill_rgba)
+
+fn theme_draw_ir_surface_style(snapshot: ThemeRenderSnapshot, active: bool, part: text, backend_target: text) -> [DrawIrStyleProp]:
+    val material = snapshot.material
+    val shadows = if active: material.active_shadows else: material.inactive_shadows
+    val device_glass = _theme_draw_ir_device_glass(backend_target)
+    val cpu_glass = _theme_draw_ir_cpu_glass(backend_target)
+    val glass_requested = device_glass or cpu_glass
+    val translucent_color = if part == "body":
+        material.window_fill_rgba
+    elif active:
+        material.active_title_fill_rgba
+    else:
+        material.inactive_title_fill_rgba
+    val background_color = if glass_requested:
+        translucent_color
+    else:
+        theme_draw_ir_surface_fallback_color(snapshot, active, part)
+    val gradient_requested = part == "body"
+    val has_gradient = gradient_requested and material.window_gradient_available
+    val gradient_realized = has_gradient and glass_requested
+    var style = [
+        draw_ir_style_prop("wm-theme-schema", "theme-render-snapshot-v1"),
+        draw_ir_style_prop("wm-theme-id", snapshot.id),
+        draw_ir_style_prop("wm-theme-family-id", snapshot.family_id),
+        draw_ir_style_prop("wm-theme-source-reference", snapshot.source_reference),
+        draw_ir_style_prop("wm-theme-source-manifest-sha256", snapshot.source_manifest_sha256),
+        draw_ir_style_prop("wm-theme-material-sha256", snapshot.material_sha256),
+        draw_ir_style_prop("wm-material-request", "window-surface-glass"),
+        draw_ir_style_prop("wm-material-surface-alpha-milli", (if glass_requested: _theme_draw_ir_alpha_milli(translucent_color) else: 1000).to_string()),
+        draw_ir_style_prop("background-color", background_color.to_string()),
+        draw_ir_style_prop("background-image", if gradient_realized: "linear-gradient({material.window_gradient_start_rgba},{material.window_gradient_end_rgba})" else: "none"),
+        draw_ir_style_prop("background-image-capability", if not gradient_requested: "not-requested" elif gradient_realized: "engine2d-rounded-material-v1" elif has_gradient: "unavailable-rounded-clip" else: "unavailable"),
+        draw_ir_style_prop("border-radius", material.corner_radius_px.to_string()),
+        draw_ir_style_prop("border-top-width", material.border_width_px.to_string()),
+        draw_ir_style_prop("border-right-width", material.border_width_px.to_string()),
+        draw_ir_style_prop("border-bottom-width", material.border_width_px.to_string()),
+        draw_ir_style_prop("border-left-width", material.border_width_px.to_string()),
+        draw_ir_style_prop("border-top-color", material.border_rgba.to_string()),
+        draw_ir_style_prop("border-right-color", material.border_rgba.to_string()),
+        draw_ir_style_prop("border-bottom-color", material.border_rgba.to_string()),
+        draw_ir_style_prop("border-left-color", material.border_rgba.to_string()),
+        draw_ir_style_prop("backdrop-filter", "blur({material.backdrop_blur_px}px) saturate({material.backdrop_saturation_milli / 10}%)"),
+        draw_ir_style_prop("backdrop-filter-capability", if device_glass: "engine2d-composited-glass-material-v1" elif cpu_glass: "engine2d-cpu-composited-material-v1" else: "unavailable"),
+        draw_ir_style_prop("backdrop-filter-requested-target", if device_glass: "metal-device-glass-v1" elif cpu_glass: "cpu-scalar-glass-v1" else: "solid-material"),
+        draw_ir_style_prop("backdrop-filter-fallback", if glass_requested: "cpu-composited-material" else: "solid-material"),
+        draw_ir_style_prop("backdrop-filter-fallback-target", if glass_requested: "cpu-scalar-glass-v1" else: "solid-material"),
+        draw_ir_style_prop("backdrop-filter-fallback-reason", if device_glass: "metal-device-dispatch-unavailable-at-execution" elif cpu_glass: "native-device-backdrop-path-pending" else: "cpu-raster-backdrop-sampling-unavailable")
+    ]
+    if glass_requested:
+        val realized_blur = if material.backdrop_blur_px < 4: material.backdrop_blur_px else: 4
+        style.push(draw_ir_style_prop("backdrop-filter-realized", "blur({realized_blur}px) saturate({material.backdrop_saturation_milli / 10}%)"))
+        style.push(draw_ir_style_prop("backdrop-filter-realized-blur-radius-px", realized_blur.to_string()))
+        style.push(draw_ir_style_prop("backdrop-filter-realized-saturation-milli", material.backdrop_saturation_milli.to_string()))
+        if material.backdrop_blur_px > realized_blur:
+            style.push(draw_ir_style_prop("backdrop-filter-reduction-reason", "cpu-blur-radius-bounded-to-4"))
+    if has_gradient:
+        style.push(draw_ir_style_prop("background-image-source-css", material.window_gradient_source_css))
+    if gradient_realized:
+        style.push(draw_ir_style_prop("background-image-composite-mode", "surface-then-alpha-gradient"))
+    if gradient_requested and not gradient_realized:
+        style.push(draw_ir_style_prop("background-image-fallback", "solid-material"))
+        style.push(draw_ir_style_prop("background-image-fallback-reason", if has_gradient: "rounded-gradient-clip-unavailable" else: "typed-theme-gradient-unavailable"))
+    if part == "body":
+        style.push(draw_ir_style_prop("box-shadow", _theme_draw_ir_engine_shadow(shadows)))
+        style.push(draw_ir_style_prop("box-shadow-raw", _theme_draw_ir_shadow_raw(shadows)))
+        style.push(draw_ir_style_prop("box-shadow-layer-count", shadows.len().to_string()))
+        style.push(draw_ir_style_prop("box-shadow-blur-radius", _theme_draw_ir_engine_shadow_blur(shadows).to_string()))
+    else:
+        style.push(draw_ir_style_prop("color", material.text_rgba.to_string()))
+        style.push(draw_ir_style_prop("font-family", material.font_family))
+        style.push(draw_ir_style_prop("font-size", material.font_size_px.to_string()))
+        style.push(draw_ir_style_prop("font-weight", material.font_weight.to_string()))
+    style
+
+export theme_draw_ir_surface_style, theme_draw_ir_surface_fallback_color
+export theme_draw_ir_surface_command_color
+export theme_draw_ir_surface_initializer_color

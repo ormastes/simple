@@ -1,0 +1,278 @@
+# Breakout — playable game2d game (W5b, G3.2/G3.3/G3.4).
+#
+# Menu -> Playing -> GameOver loop: paddle (left/right), ball (AABB
+# collision vs walls/paddle/bricks), score, lives. Structural App: this
+# class matches `g.App` (load/update/fixed_update/draw) without declaring
+# any inheritance, per `examples/11_advanced/game2d/hello/main.spl`.
+#
+# All physics lives in `fixed_update` (fixed dt from LoopDriver) so replay
+# with a scripted `InputSnapshot` sequence is byte-deterministic — no
+# wall-clock or unseeded-random reads in any callback.
+
+use std.common.engine.math2d.{Vec2}
+use std.common.engine.rect.{Rect2}
+use std.common.engine.color.{EngineColor}
+use std.common.engine.units.{KeyCode}
+use std.nogc_sync_mut.game2d.render.canvas.{Canvas}
+use std.nogc_sync_mut.game2d.math.{DrawMode}
+use std.nogc_sync_mut.game2d.input.api.{key_down, key_pressed_this_frame}
+use std.nogc_sync_mut.engine.physics.collision2d.{collide_circle_aabb}
+
+val SCREEN_W: f64 = 800.0
+val SCREEN_H: f64 = 600.0
+
+val PADDLE_W: f64 = 100.0
+val PADDLE_H: f64 = 14.0
+val PADDLE_Y: f64 = 560.0
+val PADDLE_SPEED: f64 = 420.0
+
+val BALL_R: f64 = 7.0
+val BALL_SPEED_X0: f64 = 140.0
+val BALL_SPEED_Y0: f64 = -220.0
+
+val BRICK_COLS: i64 = 8
+val BRICK_ROWS: i64 = 4
+val BRICK_W: f64 = 80.0
+val BRICK_H: f64 = 22.0
+val BRICK_GAP: f64 = 6.0
+val BRICK_TOP: f64 = 50.0
+
+val LEFT_KEY: i64 = 1073741904
+val RIGHT_KEY: i64 = 1073741903
+val SPACE_KEY: i64 = 32
+val ENTER_KEY: i64 = 13
+
+
+enum GameState:
+    Menu
+    Playing
+    GameOver
+
+
+class Brick:
+    x: f64
+    y: f64
+    w: f64
+    h: f64
+    alive: bool
+    row: i64
+
+
+fn _brick_color(row: i64) -> EngineColor:
+    if row == 0:
+        EngineColor(r: 0.85, g: 0.25, b: 0.25, a: 1.0)
+    elif row == 1:
+        EngineColor(r: 0.85, g: 0.55, b: 0.2, a: 1.0)
+    elif row == 2:
+        EngineColor(r: 0.3, g: 0.7, b: 0.35, a: 1.0)
+    else:
+        EngineColor(r: 0.3, g: 0.5, b: 0.85, a: 1.0)
+
+
+fn _start_or_restart_pressed() -> bool:
+    (key_pressed_this_frame(KeyCode(code: SPACE_KEY)) or
+     key_pressed_this_frame(KeyCode(code: ENTER_KEY)))
+
+
+class Game:
+    state: GameState
+    paddle_x: f64
+    ball_x: f64
+    ball_y: f64
+    ball_vx: f64
+    ball_vy: f64
+    bricks: [Brick]
+    score: i64
+    lives: i64
+    won: bool
+    frame_count: i64
+
+    static fn new_game() -> Game:
+        var g = Game(
+            state: GameState.Menu,
+            paddle_x: (SCREEN_W - PADDLE_W) / 2.0,
+            ball_x: SCREEN_W / 2.0,
+            ball_y: PADDLE_Y - BALL_R - 2.0,
+            ball_vx: BALL_SPEED_X0,
+            ball_vy: BALL_SPEED_Y0,
+            bricks: [],
+            score: 0,
+            lives: 3,
+            won: false,
+            frame_count: 0
+        )
+        g.bricks = g._spawn_bricks()
+        g
+
+
+impl Game:
+    me _spawn_bricks(self) -> [Brick]:
+        var bricks: [Brick] = []
+        val total_w = BRICK_COLS.to_f64() * BRICK_W + (BRICK_COLS - 1).to_f64() * BRICK_GAP
+        val start_x = (SCREEN_W - total_w) / 2.0
+        var row: i64 = 0
+        while row < BRICK_ROWS:
+            var col: i64 = 0
+            while col < BRICK_COLS:
+                val bx = start_x + col.to_f64() * (BRICK_W + BRICK_GAP)
+                val by = BRICK_TOP + row.to_f64() * (BRICK_H + BRICK_GAP)
+                bricks.push(Brick(x: bx, y: by, w: BRICK_W, h: BRICK_H, alive: true, row: row))
+                col = col + 1
+            row = row + 1
+        bricks
+
+    me _bricks_remaining(self) -> i64:
+        var c: i64 = 0
+        for br in self.bricks:
+            if br.alive:
+                c = c + 1
+        c
+
+    me _reset_ball_and_paddle(self):
+        self.paddle_x = (SCREEN_W - PADDLE_W) / 2.0
+        self.ball_x = SCREEN_W / 2.0
+        self.ball_y = PADDLE_Y - BALL_R - 2.0
+        self.ball_vx = BALL_SPEED_X0
+        self.ball_vy = BALL_SPEED_Y0
+
+    me reset_game(self):
+        self.bricks = self._spawn_bricks()
+        self.score = 0
+        self.lives = 3
+        self.won = false
+        self._reset_ball_and_paddle()
+
+    me _update_paddle(self, dt: f64):
+        var pdx = 0.0
+        if key_down(KeyCode(code: LEFT_KEY)):
+            pdx -= 1.0
+        if key_down(KeyCode(code: RIGHT_KEY)):
+            pdx += 1.0
+        self.paddle_x = self.paddle_x + pdx * PADDLE_SPEED * dt
+        if self.paddle_x < 0.0:
+            self.paddle_x = 0.0
+        if self.paddle_x > SCREEN_W - PADDLE_W:
+            self.paddle_x = SCREEN_W - PADDLE_W
+
+    me _update_ball_walls(self):
+        if self.ball_x - BALL_R < 0.0:
+            self.ball_x = BALL_R
+            self.ball_vx = -self.ball_vx
+        if self.ball_x + BALL_R > SCREEN_W:
+            self.ball_x = SCREEN_W - BALL_R
+            self.ball_vx = -self.ball_vx
+        if self.ball_y - BALL_R < 0.0:
+            self.ball_y = BALL_R
+            self.ball_vy = -self.ball_vy
+
+    # Detection via engine.physics.collision2d (shared narrow-phase); response
+    # math (bounce reflection, contact-offset deflection) stays game-specific.
+    # Uses a plain `!= nil` check rather than `if val` pattern-binding: the
+    # latter mis-matches nil under this file's interpreter-fallback path (a
+    # real Option/`if val` interpreter bug — see
+    # doc/08_tracking/bug/interpreter_if_val_nil_mismatch_option_2026-07-03.md).
+    me _update_ball_paddle(self):
+        val paddle_center = Vec2(x: self.paddle_x + PADDLE_W / 2.0, y: PADDLE_Y + PADDLE_H / 2.0)
+        val contact = collide_circle_aabb(Vec2(x: self.ball_x, y: self.ball_y), BALL_R,
+                                           paddle_center, PADDLE_W / 2.0, PADDLE_H / 2.0)
+        if self.ball_vy > 0.0 and contact != nil:
+            self.ball_y = PADDLE_Y - BALL_R
+            self.ball_vy = -self.ball_vy
+            val center = self.paddle_x + PADDLE_W / 2.0
+            val offset = (self.ball_x - center) / (PADDLE_W / 2.0)
+            self.ball_vx = offset * 260.0
+
+    me _update_ball_bricks(self):
+        var hit_idx: i64 = -1
+        var i: i64 = 0
+        val n = self.bricks.len() as i64
+        while i < n and hit_idx < 0:
+            val br = self.bricks[i as i32]
+            if br.alive:
+                val brick_center = Vec2(x: br.x + br.w / 2.0, y: br.y + br.h / 2.0)
+                val contact = collide_circle_aabb(Vec2(x: self.ball_x, y: self.ball_y), BALL_R,
+                                                   brick_center, br.w / 2.0, br.h / 2.0)
+                if contact != nil:
+                    hit_idx = i
+            i = i + 1
+        if hit_idx >= 0:
+            var br = self.bricks[hit_idx as i32]
+            br.alive = false
+            self.bricks[hit_idx as i32] = br
+            self.ball_vy = -self.ball_vy
+            self.score = self.score + 10
+
+    me _update_playing(self, dt: f64):
+        self._update_paddle(dt)
+        self.ball_x = self.ball_x + self.ball_vx * dt
+        self.ball_y = self.ball_y + self.ball_vy * dt
+        self._update_ball_walls()
+        self._update_ball_paddle()
+        self._update_ball_bricks()
+        if self.ball_y - BALL_R > SCREEN_H:
+            self.lives = self.lives - 1
+            if self.lives <= 0:
+                self.state = GameState.GameOver
+                self.won = false
+            else:
+                self._reset_ball_and_paddle()
+        if self._bricks_remaining() == 0:
+            self.state = GameState.GameOver
+            self.won = true
+
+    fn load(self):
+        pass_do_nothing
+
+    fn update(self, dt: f32):
+        val _ = dt
+
+    me fixed_update(self, step: f32):
+        val dt = step as f64
+        match self.state:
+            case GameState.Menu:
+                if _start_or_restart_pressed():
+                    self.reset_game()
+                    self.state = GameState.Playing
+            case GameState.Playing:
+                self._update_playing(dt)
+            case GameState.GameOver:
+                if _start_or_restart_pressed():
+                    self.reset_game()
+                    self.state = GameState.Playing
+        self.frame_count = self.frame_count + 1
+
+    me _draw_playing(self, ctx: Canvas):
+        for br in self.bricks:
+            if br.alive:
+                ctx.rect(DrawMode.Fill,
+                         Rect2(x: br.x, y: br.y, width: br.w, height: br.h),
+                         _brick_color(br.row))
+        ctx.rect(DrawMode.Fill,
+                 Rect2(x: self.paddle_x, y: PADDLE_Y, width: PADDLE_W, height: PADDLE_H),
+                 EngineColor(r: 0.9, g: 0.9, b: 0.95, a: 1.0))
+        ctx.circle(DrawMode.Fill, Vec2(x: self.ball_x, y: self.ball_y), BALL_R,
+                   EngineColor(r: 1.0, g: 1.0, b: 1.0, a: 1.0))
+        ctx.text("Score: {self.score}", Vec2(x: 12.0, y: 10.0),
+                 EngineColor(r: 1.0, g: 1.0, b: 1.0, a: 1.0))
+        ctx.text("Lives: {self.lives}", Vec2(x: 680.0, y: 10.0),
+                 EngineColor(r: 1.0, g: 1.0, b: 1.0, a: 1.0))
+
+    me draw(self, ctx: Canvas):
+        ctx.clear(EngineColor(r: 0.03, g: 0.03, b: 0.08, a: 1.0))
+        match self.state:
+            case GameState.Menu:
+                ctx.text("BREAKOUT", Vec2(x: 330.0, y: 250.0),
+                         EngineColor(r: 1.0, g: 1.0, b: 1.0, a: 1.0))
+                ctx.text("Press SPACE to start", Vec2(x: 280.0, y: 300.0),
+                         EngineColor(r: 0.8, g: 0.8, b: 0.8, a: 1.0))
+            case GameState.Playing:
+                self._draw_playing(ctx)
+            case GameState.GameOver:
+                self._draw_playing(ctx)
+                val title = if self.won: "YOU WIN" else: "GAME OVER"
+                ctx.text(title, Vec2(x: 320.0, y: 250.0),
+                         EngineColor(r: 1.0, g: 0.9, b: 0.3, a: 1.0))
+                ctx.text("Score: {self.score}", Vec2(x: 320.0, y: 280.0),
+                         EngineColor(r: 1.0, g: 1.0, b: 1.0, a: 1.0))
+                ctx.text("Press SPACE to restart", Vec2(x: 260.0, y: 310.0),
+                         EngineColor(r: 0.8, g: 0.8, b: 0.8, a: 1.0))

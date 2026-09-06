@@ -1,0 +1,43 @@
+# Which lines are inside a string is CoreLexer's fact. The previous per-line
+# triple-quote parity count treated ANY line containing `"""` as a docstring
+# boundary — including a comment that merely mentions the delimiter — and
+# then skipped every following line until the next one. Replaying that tracker
+# over the tree on 2026-09-05: in 6 spec files a comment holding `"""` hid the
+# `use std.spec` import or the first top-level `describe`, so this guidance was
+# never emitted for them. (287 more have the import inside their header
+# docstring's code fence; that is prose, and both versions stay silent.)
+use compiler.frontend.core.source_facts.{simple_code_lines, simple_string_continuation_lines}
+
+
+fn _is_spec_import(line: text) -> bool:
+    if line.starts_with(" ") or line.starts_with("\t"):
+        return false
+    val statement = line.trim()
+    val use_import = statement == "use std.spec" or statement.starts_with("use std.spec.")
+    val legacy_import = statement == "import std.spec" or statement.starts_with("import std.spec.")
+    use_import or legacy_import
+
+
+fn check_sspec_guidance(source: text, path: text) -> text:
+    var has_spec_import = false
+    var has_describe = false
+    val lines = source.split("\n")
+    val code_lines = simple_code_lines(source)
+    val string_continuation = simple_string_continuation_lines(source)
+    var i = 0
+    while i < lines.len():
+        val line = lines[i]
+        val index = i
+        i = i + 1
+        # Inside a string opened earlier, or a line that is itself only a
+        # string (a docstring opener or a one-line docstring): not a statement.
+        if string_continuation[index] or code_lines[index].trim() == "\"\"":
+            continue
+        val trimmed = line.trim()
+        if _is_spec_import(line):
+            has_spec_import = true
+        if not line.starts_with(" ") and not line.starts_with("\t") and trimmed.starts_with("describe ") and trimmed.ends_with(":"):
+            has_describe = true
+    if has_spec_import and has_describe:
+        return "error[E-SSPEC-CHECK]: SSpec command-block files must use `bin/simple test {path} --mode=interpreter`"
+    ""

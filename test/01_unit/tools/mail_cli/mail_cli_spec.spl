@@ -1,0 +1,107 @@
+"""
+# mail-cli (shell-based IMAP/SMTP client) — offline tests
+
+**Feature:** tools/mail-cli — Gmail-like email CLI wrapping curl's IMAP/SMTP
+URL scheme, restored + hardened (attachments/MIME, efficient inbox fetch,
+header-based threading, password_cmd, error mapping, color/width visual
+pass).
+
+## Scope
+
+Every check here runs **fully offline** — no IMAP/SMTP server is contacted.
+Pure-logic library functions (config.shs, format.shs) are exercised directly
+via an isolated bash probe (`fixtures/lib_probe.shs`), sourced with a
+throwaway `$HOME` so the real `~/.config/mail-cli` is never touched. The
+CLI entrypoint (`bin/mail`) is smoke-tested only for paths that need no
+network: usage/help text and argument-validation exit codes.
+"""
+
+use std.spec
+use std.process.{run}
+
+describe "mail-cli library (offline, no network — config/MIME/thread/format logic)":
+    it "config round-trip, password_cmd, MIME builder, thread/format helpers all pass":
+        val tmp_result = run("mktemp", ["-d"])
+        expect(tmp_result.exit_code).to_equal(0)
+        val work_dir = tmp_result.stdout.trim()
+
+        val result = run("bash", [
+            "test/01_unit/tools/mail_cli/fixtures/lib_probe.shs",
+            "tools/mail-cli/lib",
+            work_dir
+        ])
+
+        expect(result.exit_code).to_equal(0)
+
+        # Config round-trip (add account, list, resolve — incl. permissions)
+        expect(result.stdout).to_contain("config_round_trip_list: PASS")
+        expect(result.stdout).to_contain("config_file_permissions: PASS")
+        expect(result.stdout).to_contain("config_resolve_plaintext_password: PASS")
+
+        # password_cmd: resolved at use-time, never persisted as plaintext
+        expect(result.stdout).to_contain("config_resolve_password_cmd: PASS")
+        expect(result.stdout).to_contain("config_password_cmd_not_persisted_as_plaintext: PASS")
+
+        # Thread grouping: subject normalization strips Re:/Fwd: chains
+        expect(result.stdout).to_contain("subject_normalize_stacked_prefixes: PASS")
+        expect(result.stdout).to_contain("subject_normalize_noop: PASS")
+
+        # Column-width formatter (--wide / truncation)
+        expect(result.stdout).to_contain("truncate_cuts_and_marks: PASS")
+        expect(result.stdout).to_contain("truncate_noop_when_short: PASS")
+
+        # Relative-date rendering with safe fallback
+        expect(result.stdout).to_contain("relative_date_minutes: PASS")
+        expect(result.stdout).to_contain("relative_date_fallback_on_unparseable: PASS")
+
+        # MIME multipart/mixed attachment builder
+        expect(result.stdout).to_contain("mime_has_multipart_content_type: PASS")
+        expect(result.stdout).to_contain("mime_content_type_by_extension: PASS")
+        expect(result.stdout).to_contain("mime_content_disposition_attachment: PASS")
+        expect(result.stdout).to_contain("mime_attachment_base64_body_present: PASS")
+        expect(result.stdout).to_contain("mime_boundary_closed_once: PASS")
+
+        # FETCH-range response parser (efficient inbox fetch), incl. the
+        # mandatory fall-back-on-unparseable safety net
+        expect(result.stdout).to_contain("fetch_range_parses_two_messages: PASS")
+        expect(result.stdout).to_contain("fetch_range_first_uid: PASS")
+        expect(result.stdout).to_contain("fetch_range_second_header_decodes: PASS")
+        expect(result.stdout).to_contain("fetch_range_empty_on_unparseable: PASS")
+
+        run("rm", ["-rf", work_dir])
+
+
+describe "mail-cli bin/mail entrypoint (offline smoke — no account, no network)":
+    it "prints grouped usage listing every subcommand when run with no args":
+        val result = run("tools/mail-cli/bin/mail", [])
+        expect(result.exit_code).to_equal(0)
+        val subcommands = [
+            "auth", "inbox", "read", "send", "reply", "forward", "search",
+            "folder", "star", "archive", "delete", "move", "draft", "config",
+            "version", "help"
+        ]
+        for cmd in subcommands:
+            expect(result.stdout).to_contain(cmd)
+
+    it "--help documents the M2 hardening flags":
+        val result = run("tools/mail-cli/bin/mail", ["--help"])
+        expect(result.exit_code).to_equal(0)
+        expect(result.stdout).to_contain("--attach")
+        expect(result.stdout).to_contain("--threads")
+        expect(result.stdout).to_contain("--wide")
+        expect(result.stdout).to_contain("--password-cmd")
+
+    it "auth --help documents --password-cmd":
+        val result = run("tools/mail-cli/bin/mail", ["auth", "--help"])
+        expect(result.exit_code).to_equal(0)
+        expect(result.stdout).to_contain("--password-cmd")
+
+    it "unknown command is a usage error (exit 2), not a crash":
+        val result = run("tools/mail-cli/bin/mail", ["bogus-command"])
+        expect(result.exit_code).to_equal(2)
+        expect(result.stderr).to_contain("unknown command")
+
+    it "version command reports config path and account count":
+        val result = run("tools/mail-cli/bin/mail", ["version"])
+        expect(result.exit_code).to_equal(0)
+        expect(result.stdout).to_contain("mail-cli version")

@@ -1,0 +1,61 @@
+#![allow(primitive_api)]
+# Regression spec: PriorityMailbox.select must search the high-priority queues too.
+#
+# Before the fix, `select`/`select_by_sender` only scanned `messages_ready` and
+# `messages`, so a message delivered via `send_high` was never matched — the
+# call returned nil ("no such message") while the message was still queued.
+
+use std.nogc_async_mut.spec.{describe, it, expect}
+use std.nogc_async_mut.mailbox_actor.{PriorityMailbox, MailboxConfig}
+
+fn main():
+    describe("PriorityMailbox.select queue coverage"):
+        it("finds a high-priority message in the incoming high queue"):
+            val mb = PriorityMailbox.new(MailboxConfig.with_priority())
+            mb.send_high(111, 8, 42)
+            expect mb.total_size() == 1
+            val got = mb.select_by_sender(42)
+            expect got.?
+            expect got.sender_id.value == 42
+            expect mb.total_size() == 0
+
+        it("finds a high-priority message after it moved to the ready queue"):
+            val mb = PriorityMailbox.new(MailboxConfig.with_priority())
+            mb.send_high(1, 8, 7)
+            mb.send_high(2, 8, 9)
+            mb.receive()
+            expect mb.total_size() == 1
+            val got = mb.select_by_sender(9)
+            expect got.?
+            expect got.sender_id.value == 9
+            expect mb.total_size() == 0
+
+        it("prefers a high-priority match over a normal-priority one"):
+            val mb = PriorityMailbox.new(MailboxConfig.with_priority())
+            mb.send_normal(1, 8, 5)
+            mb.send_high(2, 8, 5)
+            val got = mb.select_by_sender(5)
+            expect got.?
+            expect got.id.value == 1
+            expect mb.total_size() == 1
+
+        # Live discriminating control: normal-priority selection worked before
+        # the fix and must keep working after it.
+        it("still finds a normal-priority message (control)"):
+            val mb = PriorityMailbox.new(MailboxConfig.with_priority())
+            mb.send_normal(111, 8, 42)
+            expect mb.total_size() == 1
+            val got = mb.select_by_sender(42)
+            expect got.?
+            expect got.sender_id.value == 42
+            expect mb.total_size() == 0
+
+        # Live discriminating control: a genuinely absent sender must still
+        # return nil in both directions.
+        it("returns nil for a sender with no queued message (control)"):
+            val mb = PriorityMailbox.new(MailboxConfig.with_priority())
+            mb.send_high(1, 8, 7)
+            mb.send_normal(2, 8, 8)
+            val got = mb.select_by_sender(99)
+            expect not got.?
+            expect mb.total_size() == 2

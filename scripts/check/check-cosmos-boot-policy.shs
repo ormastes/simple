@@ -1,0 +1,390 @@
+#!/bin/sh
+# Cosmos boot/UART pure-policy parity, exact branch, object, and link gate.
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+checker=$root/scripts/check/check-cosmos-boot-policy.shs
+source_dir=$root/src/os/kernel/arch/arm32/cosmos
+test_dir=$root/test/02_integration/os/cosmos
+policy=$source_dir/cosmos_boot_policy.spl
+header=$source_dir/cosmos_boot_policy.h
+c_bridge=$source_dir/cosmos_uart.c
+profile_header=$source_dir/cosmos_profile_openssd2_8ch8way_v300.h
+oracle=$test_dir/cosmos_boot_policy_oracle.c
+oracle_header=$test_dir/cosmos_boot_policy_oracle.h
+parity=$test_dir/cosmos_boot_policy_parity_test.c
+unit_spec=$root/test/01_unit/os/arch/arm32/cosmos_boot_policy_spec.spl
+production_build=$source_dir/build.shs
+production_receipt=$source_dir/cosmos_build_receipt.shs
+production_link_gate=$test_dir/run_cosmos_storage_link_contract_test.shs
+evidence_helper=$root/scripts/check/lib/riscv-hal-migration-evidence.shs
+stage3_helper=$root/scripts/check/lib/bootstrap-stage3-provenance.shs
+stage4_helper=$root/scripts/check/lib/stage4-candidate-provenance.shs
+mode=admitted
+
+case ${1:-} in
+    "") ;;
+    --source-only) mode=source-only ;;
+    *) echo "usage: $0 [--source-only]" >&2; exit 2 ;;
+esac
+
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/cosmos-boot-policy.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+
+fail() {
+    echo "STATUS: FAIL cosmos boot policy: $*" >&2
+    exit 1
+}
+
+blocked() {
+    echo "STATUS: BLOCKED cosmos boot policy: $*" >&2
+    exit 2
+}
+
+command -v cc >/dev/null 2>&1 || blocked "host C compiler unavailable"
+command -v readelf >/dev/null 2>&1 || blocked "readelf unavailable"
+command -v sha256sum >/dev/null 2>&1 || blocked "sha256sum unavailable"
+
+if [ "$mode" = admitted ]; then
+    [ -f "$evidence_helper" ] || blocked "canonical evidence helper unavailable"
+    evidence_helper_sha=$(sha256sum "$evidence_helper" | awk '{print $1}')
+    . "$evidence_helper"
+    hal_migration_verify_expected_hash \
+        "$evidence_helper" "$evidence_helper_sha" evidence-helper
+    HAL_MIGRATION_LANE=cosmos_boot_policy
+    export HAL_MIGRATION_LANE
+    [ "${SIMPLE_STAGE4_BIN+x}" = x ] && [ -n "$SIMPLE_STAGE4_BIN" ] ||
+        blocked "set SIMPLE_STAGE4_BIN to an admitted pure-Simple Stage-4 compiler"
+    simple=$(hal_migration_canonical_file "$SIMPLE_STAGE4_BIN") ||
+        blocked "cannot resolve Stage-4 compiler canonically"
+    [ -x "$simple" ] || blocked "Stage-4 compiler is not executable"
+    provenance=${simple}.provenance.env
+    [ -f "$provenance" ] || blocked "adjacent Stage-4 provenance is missing"
+    [ -f "$stage3_helper" ] && [ -f "$stage4_helper" ] ||
+        blocked "Stage-4 provenance helpers unavailable"
+
+    hal_migration_begin_input_freeze "$tmp/evidence-inputs.tsv"
+    hal_migration_capture_input checker "$checker"
+    hal_migration_capture_input evidence_helper "$evidence_helper"
+    hal_migration_capture_input stage3_helper "$stage3_helper"
+    hal_migration_capture_input stage4_helper "$stage4_helper"
+    hal_migration_capture_input stage4_binary "$simple"
+    hal_migration_capture_input stage4_provenance "$provenance"
+    hal_migration_capture_input simple_owner "$policy"
+    hal_migration_capture_input abi_header "$header"
+    hal_migration_capture_input c_bridge "$c_bridge"
+    hal_migration_capture_input silicon_profile_header "$profile_header"
+    hal_migration_capture_input hal_header "$source_dir/cosmos_hal.h"
+    hal_migration_capture_input storage_header "$source_dir/cosmos_storage.h"
+    hal_migration_capture_input c_oracle "$oracle"
+    hal_migration_capture_input c_oracle_header "$oracle_header"
+    hal_migration_capture_input parity_driver "$parity"
+    hal_migration_capture_input unit_spec "$unit_spec"
+    hal_migration_capture_input production_build_gate "$production_build"
+    hal_migration_capture_input production_receipt_gate "$production_receipt"
+    hal_migration_capture_input production_link_gate "$production_link_gate"
+    hal_migration_seal_input_freeze
+
+    BOOTSTRAP_STAGE3_FACADE_PATH=$stage3_helper
+    STAGE4_PROVENANCE_HELPER_PATH=$stage4_helper
+    export BOOTSTRAP_STAGE3_FACADE_PATH STAGE4_PROVENANCE_HELPER_PATH
+    . "$stage3_helper"
+    . "$stage4_helper"
+    stage4_verify_candidate_provenance "$provenance" "$simple" "$root" ||
+        blocked "compiler is not an admitted pure-Simple Stage-4 candidate"
+    case $("$simple" --version 2>&1 || true) in
+        *"Rust-built Simple binary is a bootstrap seed"*|*"bootstrap seed only"*)
+            blocked "a bootstrap seed cannot prove the pure-Simple policy" ;;
+    esac
+    simple_sha=$(hal_migration_frozen_hash stage4_binary "$simple")
+    provenance_sha=$(hal_migration_frozen_hash stage4_provenance "$provenance")
+fi
+
+cat > "$tmp/decisions" <<'EOF'
+00 uart.enabled
+01 uart.write-ok
+02 exception.first-capture
+03 exception.prefetch
+04 status.ok
+05 status.unavailable
+06 status.invalid
+07 status.timeout
+08 status.hw-error
+09 stage.status-ok
+10 software.runtime-ok
+11 software.mmu-ok
+12 software.gic-ok
+13 software.policy-selftest-ok
+14 selftest.qemu
+15 handoff.software-ready
+16 handoff.qemu
+17 handoff.fsbl-ok
+18 storage.nfc-ok
+19 storage.pcie-ok
+20 secondary.not-qemu
+21 secondary.handoff-allowed
+22 verdict.qemu
+23 verdict.software-ready
+24 verdict.qemu-smp-unavailable
+25 verdict.qemu-fsbl-unavailable
+26 verdict.qemu-nfc-unavailable
+27 verdict.qemu-pcie-unavailable
+28 verdict.qemu-storage-unavailable
+29 verdict.silicon-smp-ok
+30 verdict.silicon-fsbl-ok
+31 verdict.silicon-nfc-ok
+32 verdict.silicon-pcie-ok
+33 verdict.silicon-storage-ok
+34 irq.gic-ok
+35 storage-poll.storage-ok
+36 storage-poll.result-ok
+37 storage-poll.result-retry
+EOF
+
+[ "$(wc -l < "$tmp/decisions" | tr -d ' ')" -eq 38 ] ||
+    fail "decision inventory is not 38"
+while read -r id name; do
+    grep -Fqx "# D$id $name" "$policy" ||
+        fail "named decision D$id $name is not pinned"
+    number=${id#0}
+    [ "$(grep -Fc "_coverage_record(${number}u32," "$policy" || true)" -eq 1 ] ||
+        fail "decision D$id does not have exactly one recording site"
+done < "$tmp/decisions"
+
+cat > "$tmp/exports" <<'EOF'
+cosmos_boot_policy_coverage_reset
+cosmos_boot_policy_coverage_low
+cosmos_boot_policy_coverage_high
+cosmos_boot_policy_coverage_required_low
+cosmos_boot_policy_coverage_required_high
+cosmos_boot_policy_coverage_decisions
+cosmos_boot_policy_uart_should_attempt
+cosmos_boot_policy_uart_next_enabled
+cosmos_boot_policy_exception_should_capture
+cosmos_boot_policy_exception_message_kind
+cosmos_boot_policy_status_kind
+cosmos_boot_policy_stage_allowed
+cosmos_boot_policy_software_ready
+cosmos_boot_policy_selftest
+cosmos_boot_policy_handoff_allows_devices
+cosmos_boot_policy_storage_init_allowed
+cosmos_boot_policy_secondary_release_allowed
+cosmos_boot_policy_terminal_verdict
+cosmos_boot_policy_irq_enable_allowed
+cosmos_boot_policy_storage_poll_allowed
+cosmos_boot_policy_storage_poll_action
+EOF
+
+[ "$(wc -l < "$tmp/exports" | tr -d ' ')" -eq 21 ] ||
+    fail "export inventory is not 21"
+while read -r symbol; do
+    grep -Fq "name: \"$symbol\"" "$policy" || fail "Simple export missing: $symbol"
+    grep -Eq "^(void|int|unsigned int|unsigned long long) $symbol\\(" "$header" ||
+        fail "C declaration missing: $symbol"
+done < "$tmp/exports"
+
+grep -Fq '#include "cosmos_boot_policy.h"' "$c_bridge" ||
+    fail "C bridge omits boot policy ABI"
+for symbol in cosmos_boot_policy_software_ready \
+    cosmos_boot_policy_handoff_allows_devices \
+    cosmos_boot_policy_terminal_verdict \
+    cosmos_boot_policy_storage_poll_action; do
+    grep -Fq "$symbol(" "$c_bridge" || fail "C bridge does not consume $symbol"
+done
+grep -Eq 'static int cosmos_handoff_allows_devices|static int cosmos_boot_policy_selftest' \
+    "$c_bridge" && fail "C bridge retains migrated policy bodies"
+grep -Fq -- '--entry "$SCRIPT_DIR/cosmos_boot_policy.spl"' "$production_build" ||
+    fail "production build omits boot policy owner"
+grep -Fq 'OBJECTS="$OBJECTS $OBJ/cosmos_boot_policy_simple.o"' "$production_build" ||
+    fail "production link omits boot policy object"
+for source in cosmos_boot_policy.h cosmos_boot_policy.spl; do
+    grep -Eq "^[[:space:]]+$source( \\\\)?$" "$production_receipt" ||
+        fail "production receipt omits $source"
+done
+grep -Fq 'cosmos_boot_policy.spl:cosmos_boot_policy_simple.o' \
+    "$production_link_gate" || fail "production link gate omits boot policy object"
+for object_gate in "$checker" "$production_build"; do
+    grep -Fq 'Tag_FP_arch:|Tag_ABI_HardFP_use:|Tag_ABI_VFP_args:.*VFP registers' \
+        "$object_gate" || fail "$object_gate omits hard-float/VFP rejection"
+    grep -Fq '$8 == "__simple_main" || $8 ~ /^rt_/' "$object_gate" ||
+        fail "$object_gate omits entry/runtime symbol rejection"
+    grep -Fq '$5 == "GLOBAL" && $7 != "UND"' "$object_gate" ||
+        fail "$object_gate omits exact defined-global closure"
+    grep -Fq '$7 == "UND" && $8 != ""' "$object_gate" ||
+        fail "$object_gate omits undefined-symbol closure"
+done
+
+coverage_clang=
+coverage_profdata=
+coverage_cov=
+for version in 20 19 18 17 16 15 14; do
+    if command -v "clang-$version" >/dev/null 2>&1 &&
+            command -v "llvm-profdata-$version" >/dev/null 2>&1 &&
+            command -v "llvm-cov-$version" >/dev/null 2>&1; then
+        coverage_clang=clang-$version
+        coverage_profdata=llvm-profdata-$version
+        coverage_cov=llvm-cov-$version
+        break
+    fi
+done
+[ -n "$coverage_clang" ] || blocked "matching Clang/LLVM coverage tools unavailable"
+
+"$coverage_clang" -std=c11 -O0 -g -fprofile-instr-generate \
+    -fcoverage-mapping -Wall -Wextra -Werror -Wpedantic -Wshadow \
+    -Wconversion -Wstrict-prototypes -DCOSMOS_BOOT_POLICY_COVERAGE_ONLY \
+    -I"$source_dir" -I"$test_dir" "$oracle" "$parity" \
+    -o "$tmp/oracle-coverage"
+LLVM_PROFILE_FILE="$tmp/oracle.profraw" "$tmp/oracle-coverage" > "$tmp/oracle.out"
+grep -Fqx 'STATUS: PASS cosmos boot policy parity rows=279' "$tmp/oracle.out" ||
+    fail "C oracle parity vector inventory changed"
+"$coverage_profdata" merge -sparse "$tmp/oracle.profraw" -o "$tmp/oracle.profdata"
+"$coverage_cov" report "$tmp/oracle-coverage" \
+    -instr-profile="$tmp/oracle.profdata" "$oracle" > "$tmp/coverage.txt"
+branch_pair=$(awk '$1 ~ /cosmos_boot_policy_oracle[.]c$/ {print $(NF-2), $(NF-1)}' \
+    "$tmp/coverage.txt")
+set -- $branch_pair
+[ "$#" -eq 2 ] || fail "cannot parse C oracle branch denominator"
+[ "$1" -eq 68 ] || fail "C oracle branch denominator changed: $1 != 68"
+[ "$2" -eq 0 ] || fail "C oracle branch outcomes incomplete: $((68 - $2))/68"
+echo "cosmos_boot_policy_c_oracle_branches=68/68"
+
+for profile in qemu silicon; do
+    profile_flags=-DCOSMOS_QEMU
+    if [ "$profile" = silicon ]; then
+        profile_flags="-DCOSMOS_SILICON -include $profile_header"
+    fi
+    # shellcheck disable=SC2086
+    "$coverage_clang" --target=armv7-none-eabi -mcpu=cortex-a9 -marm \
+        -ffreestanding -nostdlib -fno-builtin -Wall -Wextra -Werror \
+        $profile_flags -I"$source_dir" -c "$c_bridge" \
+        -o "$tmp/cosmos_uart_$profile.o"
+done
+
+if [ "$mode" = source-only ]; then
+    echo "cosmos_boot_policy_vectors=279"
+    echo "cosmos_boot_policy_named_outcomes=76"
+    echo "cosmos_boot_policy_object_admission_source=pass"
+    echo "STATUS: DIAGNOSTIC cosmos boot policy source/C oracle; no Simple evidence"
+    exit 0
+fi
+
+build_object() {
+    target=$1
+    cache=$2
+    output=$3
+    (cd "$root" && SIMPLE_LIB=src "$simple" native-build \
+        --backend llvm --source "$source_dir" --entry-closure \
+        --entry "$policy" --target "$target" --emit-object --no-mangle \
+        --cache-dir "$cache" -o "$output")
+}
+
+validate_object() {
+    object=$1
+    machine=$2
+    symbols=$tmp/$(basename "$object").symbols
+    readelf -hW "$object" | grep -Eq 'Type:[[:space:]]+REL' ||
+        fail "$object is not relocatable"
+    readelf -hW "$object" | grep -Eq "Machine:[[:space:]]+$machine" ||
+        fail "$object has wrong machine"
+    attributes=$tmp/$(basename "$object").attributes
+    readelf -AW "$object" > "$attributes"
+    if grep -Eq 'Tag_FP_arch:|Tag_ABI_HardFP_use:|Tag_ABI_VFP_args:.*VFP registers' \
+            "$attributes"; then
+        fail "$object has forbidden hard-float/VFP attributes"
+    fi
+    if [ "$machine" = ARM ]; then
+        grep -Fq 'Tag_CPU_arch: v7' "$attributes" &&
+            grep -Fq 'Tag_CPU_name: "cortex-a9"' "$attributes" &&
+            grep -Fq 'Tag_CPU_arch_profile: Application' "$attributes" ||
+            fail "$object lacks the Cortex-A9 ARMv7 application profile"
+    fi
+    readelf -sW "$object" > "$symbols"
+    while read -r symbol; do
+        awk -v symbol="$symbol" \
+            '$4 == "FUNC" && $5 == "GLOBAL" && $7 != "UND" && $8 == symbol {count++}
+             END {exit count != 1}' "$symbols" || fail "$object export invalid: $symbol"
+    done < "$tmp/exports"
+    expected_globals=$(LC_ALL=C sort -u "$tmp/exports")
+    actual_globals=$(awk \
+        '$5 == "GLOBAL" && $7 != "UND" && $8 != "" {print $8}' \
+        "$symbols" | LC_ALL=C sort -u)
+    [ "$actual_globals" = "$expected_globals" ] || {
+        printf '%s\n' "$actual_globals" > "$tmp/actual-globals"
+        printf '%s\n' "$expected_globals" > "$tmp/expected-globals"
+        fail "$object defined-global closure differs from the 21 admitted exports"
+    }
+    awk '$7 != "UND" && ($8 == "main" || $8 == "_start" ||
+                          $8 == "__simple_main" || $8 ~ /^rt_/) {bad=1}
+         END {exit bad}' "$symbols" ||
+        fail "$object defines a forbidden entry/runtime symbol"
+    undefined=$(awk '$7 == "UND" && $8 != "" {print $8}' "$symbols" | LC_ALL=C sort -u)
+    [ -z "$undefined" ] || fail "$object has undefined symbols: $undefined"
+}
+
+host_object=$tmp/cosmos_boot_policy_host.o
+arm_object=$tmp/cosmos_boot_policy_arm.o
+build_object x86_64-unknown-linux-gnu "$tmp/host-cache" "$host_object"
+validate_object "$host_object" 'Advanced Micro Devices X86-64'
+cc -std=c11 -O2 -Wall -Wextra -Werror -Wpedantic -Wshadow \
+    -Wconversion -Wstrict-prototypes -I"$source_dir" -I"$test_dir" \
+    "$oracle" "$parity" "$host_object" -o "$tmp/parity"
+"$tmp/parity" > "$tmp/parity.out"
+grep -Fqx 'STATUS: PASS cosmos boot policy parity rows=279' "$tmp/parity.out" ||
+    fail "C versus Simple parity failed"
+(cd "$root" && SIMPLE_LIB=src "$simple" test \
+    test/01_unit/os/arch/arm32/cosmos_boot_policy_spec.spl \
+    --quick --no-limits --no-session-daemon) > "$tmp/unit.out" 2>&1 ||
+    fail "pure-Simple unit spec failed"
+
+build_object armv7-unknown-none-eabi "$tmp/arm-cache" "$arm_object"
+validate_object "$arm_object" ARM
+lld_bin=
+for candidate in ld.lld-20 ld.lld-19 ld.lld-18 ld.lld; do
+    if command -v "$candidate" >/dev/null 2>&1; then lld_bin=$candidate; break; fi
+done
+[ -n "$lld_bin" ] || blocked "LLD unavailable"
+"$lld_bin" -r "$tmp/cosmos_uart_silicon.o" "$arm_object" -o "$tmp/combined.o"
+if readelf -sW "$tmp/combined.o" |
+        awk '$7 == "UND" && $8 ~ /^cosmos_boot_policy_/ {bad=1} END {exit !bad}'; then
+    fail "ARM combined link retains unresolved boot policy symbols"
+fi
+
+payload=$tmp/receipt.payload
+receipt=$root/build/coverage/cosmos-boot-policy/receipt.sdn
+{
+    echo "schema=cosmos-boot-policy-evidence-v1"
+    echo "status=pass"
+    echo "claim_scope=15-scalar-boot-uart-policy-functions"
+    echo "whole_hal_claim=false"
+    echo "board_evidence=separate-unavailable"
+    echo "stage4_binary_path=$simple"
+    echo "stage4_binary_sha256=$simple_sha"
+    echo "stage4_provenance_path=$provenance"
+    echo "stage4_provenance_sha256=$provenance_sha"
+    echo "silicon_profile_header_path=$profile_header"
+    echo "silicon_profile_header_sha256=$(hal_migration_frozen_hash silicon_profile_header "$profile_header")"
+    echo "parity_rows=279"
+    echo "c_oracle_llvm_branches_hit=68"
+    echo "c_oracle_llvm_branches_total=68"
+    echo "semantic_decisions=38"
+    echo "semantic_outcomes_hit=76"
+    echo "semantic_outcomes_total=76"
+    echo "evidence_input_manifest_sha256=$HAL_MIGRATION_INPUT_MANIFEST_SHA256"
+    input_count=0
+    while IFS="	" read -r label sha path; do
+        echo "evidence_input_${label}_path=$path"
+        echo "evidence_input_${label}_sha256=$sha"
+        input_count=$((input_count + 1))
+    done < "$HAL_MIGRATION_INPUT_MANIFEST"
+    echo "evidence_input_count=$input_count"
+    while read -r id name; do echo "decision_$id=$name"; done < "$tmp/decisions"
+} > "$payload"
+stage4_verify_candidate_provenance "$provenance" "$simple" "$root" ||
+    fail "Stage-4 provenance changed before receipt publication"
+hal_migration_revalidate_inputs_before_receipt
+hal_migration_publish_receipt "$receipt" "$payload"
+
+echo "cosmos_boot_policy_parity=279/279"
+echo "cosmos_boot_policy_named_outcomes=76/76"
+echo "cosmos_boot_policy_host_arm_link=pass"
+echo "STATUS: PASS cosmos boot pure policy"

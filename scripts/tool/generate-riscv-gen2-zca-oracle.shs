@@ -1,0 +1,52 @@
+#!/bin/sh
+# Generate complete truth tables through an external adapter built from the
+# pinned Sail model. The adapter is intentionally not implemented with HWIR.
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+checkout=${SAIL_RISCV_CHECKOUT:-"$root/build/oracles/sail-riscv-a33475a"}
+adapter=${SAIL_ZCA_ORACLE_ADAPTER:-}
+output=${1:-"$root/test/fixtures/hardware/riscv_gen2/zca_sail_oracle"}
+revision=a33475aeb80090127433b5a8b30e717edaa19e71
+
+fail() { echo "ERROR: $*" >&2; exit 1; }
+
+[ -n "$adapter" ] || fail "SAIL_ZCA_ORACLE_ADAPTER is required; no local decoder fallback is permitted"
+[ -x "$adapter" ] || fail "external Sail adapter is not executable: $adapter"
+[ -d "$checkout/.git" ] || fail "missing pinned Sail checkout; run acquire-riscv-gen2-zca-oracle.shs"
+[ "$(git -C "$checkout" rev-parse HEAD)" = "$revision" ] || fail "Sail checkout is not at the admitted revision"
+[ -z "$(git -C "$checkout" status --porcelain --untracked-files=no)" ] || fail "Sail checkout has tracked modifications"
+
+archive_sha=$(git -C "$checkout" archive --format=tar HEAD | sha256sum | awk '{print $1}')
+[ "$archive_sha" = "665822b80f1f0ad2dd33709673a5fb92980ea051d9f977d50c70d587d2f0cdc8" ] || fail "Sail archive pin mismatch"
+zca_sha=$(sha256sum "$checkout/model/extensions/C/zca_insts.sail" | awk '{print $1}')
+[ "$zca_sha" = "b6dee98f5fa917dfcf37452f3f475eefd59215f949c21dda541c54f14a5de039" ] || fail "Sail Zca semantic source pin mismatch"
+
+mkdir -p "$output"
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/simple-zca-oracle.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+
+awk 'BEGIN { for (i = 0; i < 65536; i++) printf "%04X\n", i }' > "$tmp/parcels.txt"
+for xlen in 32 64; do
+    # Adapter contract: consume exactly 65,536 ordered parcel hex strings and
+    # emit TSV: parcel, classification, canonical32-or--------, length, semantic.
+    "$adapter" --model-root "$checkout" --xlen "$xlen" < "$tmp/parcels.txt" > "$tmp/rv${xlen}-zca.tsv"
+done
+
+adapter_sha=$(sha256sum "$adapter" | awk '{print $1}')
+generator_sha=$(sha256sum "$root/scripts/tool/generate-riscv-gen2-zca-oracle.shs" | awk '{print $1}')
+rv32_sha=$(sha256sum "$tmp/rv32-zca.tsv" | awk '{print $1}')
+rv64_sha=$(sha256sum "$tmp/rv64-zca.tsv" | awk '{print $1}')
+
+mv "$tmp/rv32-zca.tsv" "$output/rv32-zca.tsv"
+mv "$tmp/rv64-zca.tsv" "$output/rv64-zca.tsv"
+sed \
+    -e 's/^status=.*/status=generated/' \
+    -e "s/^adapter_sha256=.*/adapter_sha256=$adapter_sha/" \
+    -e "s/^generator_sha256=.*/generator_sha256=$generator_sha/" \
+    -e "s/^rv32_fixture_sha256=.*/rv32_fixture_sha256=$rv32_sha/" \
+    -e "s/^rv64_fixture_sha256=.*/rv64_fixture_sha256=$rv64_sha/" \
+    "$output/oracle.lock" > "$tmp/oracle.lock"
+mv "$tmp/oracle.lock" "$output/oracle.lock"
+
+"$root/scripts/check/check-riscv-gen2-zca-oracle.shs" "$output"

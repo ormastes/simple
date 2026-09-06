@@ -1,0 +1,138 @@
+"""Focused parity gate for production SIMD provider dispatch."""
+
+use std.spec.{describe, it}
+use common.gpu.engine2d.scalar_oracle.{
+    oracle_copy_span, oracle_fill_const, oracle_hash_span,
+    oracle_src_over_const, oracle_src_over_image
+}
+use std.nogc_sync_mut.gpu.engine2d.simd_isa_provider.{
+    simd_isa_copy_span, simd_isa_fill_const,
+    simd_isa_src_over_const, simd_isa_src_over_image,
+    simd_span_batch_execute
+}
+use common.gpu.engine2d.kernel_registry.{
+    KERNEL_ALIGN_UNKNOWN, KERNEL_BUCKET_LARGE,
+    KERNEL_FORMAT_ARGB8888_STRAIGHT, KERNEL_OP_COPY_SPAN,
+    KERNEL_OP_FILL_CONST, KERNEL_PROVIDER_SIMD_ISA,
+    KERNEL_SPAN_CONTIGUOUS, kernel_table_new, kernel_table_register,
+    kernel_table_seal, span_batch_new, span_batch_push
+}
+use std.gc_async_mut.gpu.engine2d.backend_software.{
+    KERNEL_PROBE_EXACT, _kernel_probe_copy_bucket
+}
+
+fn patterned(n: i64, alpha_seed: i64) -> [u32]:
+    var out: [u32] = [0; n.to_i32()]
+    var i: i64 = 0
+    while i < n:
+        val alpha = (alpha_seed + i * 37) & 255
+        out[i.to_i32()] = ((alpha << 24) | ((i * 2654435761) & 0xFFFFFF)) as u32
+        i = i + 1
+    out
+
+fn assert_image_parity(n: i64):
+    var oracle_dst = patterned(n, 91)
+    var provider_dst = patterned(n, 91)
+    val src = patterned(n, 0)
+    oracle_src_over_image(oracle_dst, 0, src, 0, n)
+    simd_isa_src_over_image(provider_dst, 0, src, 0, n)
+    assert_true(oracle_hash_span(oracle_dst, 0, n) == oracle_hash_span(provider_dst, 0, n))
+
+fn assert_const_parity(n: i64):
+    var oracle_dst = patterned(n, 73)
+    var provider_dst = patterned(n, 73)
+    oracle_src_over_const(oracle_dst, 0, n, 0x80445566)
+    simd_isa_src_over_const(provider_dst, 0, n, 0x80445566)
+    assert_true(oracle_hash_span(oracle_dst, 0, n) == oracle_hash_span(provider_dst, 0, n))
+
+describe "SIMD ISA production provider dispatch":
+    it "matches mixed-alpha image blending at 64 pixels":
+        assert_image_parity(64)
+
+    it "matches mixed-alpha image blending at 4096 pixels":
+        assert_image_parity(4096)
+
+    it "matches translucent constant blending at 64 pixels":
+        assert_const_parity(64)
+
+    it "matches translucent constant blending at 4096 pixels":
+        assert_const_parity(4096)
+
+    it "matches opaque image blending across one 8K scanline":
+        val n: i64 = 7680
+        var oracle_dst = patterned(n, 41)
+        var provider_dst = patterned(n, 41)
+        var src: [u32] = [0; n.to_i32()]
+        var i: i64 = 0
+        while i < n:
+            src[i.to_i32()] = (0xFF000000 | ((i * 2246822519) & 0xFFFFFF)) as u32
+            i = i + 1
+        oracle_src_over_image(oracle_dst, 0, src, 0, n)
+        simd_isa_src_over_image(provider_dst, 0, src, 0, n)
+        assert_true(oracle_hash_span(oracle_dst, 0, n) == oracle_hash_span(provider_dst, 0, n))
+
+    it "keeps an 8K scanline unchanged for a transparent constant":
+        val n: i64 = 7680
+        var provider_dst = patterned(n, 19)
+        val before = oracle_hash_span(provider_dst, 0, n)
+        simd_isa_src_over_const(provider_dst, 0, n, 0x00112233)
+        assert_true(oracle_hash_span(provider_dst, 0, n) == before)
+
+    it "matches fill across one 8K scanline":
+        val n: i64 = 7680
+        var oracle_dst = patterned(n, 11)
+        var provider_dst = patterned(n, 11)
+        oracle_fill_const(oracle_dst, 0, n, 0xFF123456)
+        simd_isa_fill_const(provider_dst, 0, n, 0xFF123456)
+        assert_true(oracle_hash_span(oracle_dst, 0, n) == oracle_hash_span(provider_dst, 0, n))
+
+    it "fills an offset 8K span without changing neighboring pixels":
+        val offset: i64 = 4096
+        val count: i64 = 7680
+        var oracle_dst = patterned(16384, 31)
+        var provider_dst = patterned(16384, 31)
+        val before_left = provider_dst[(offset - 1).to_i32()]
+        val before_right = provider_dst[(offset + count).to_i32()]
+        oracle_fill_const(oracle_dst, offset, count, 0xFF102030)
+        simd_isa_fill_const(provider_dst, offset, count, 0xFF102030)
+        assert_true(oracle_hash_span(oracle_dst, 0, 16384) == oracle_hash_span(provider_dst, 0, 16384))
+        assert_true(provider_dst[(offset - 1).to_i32()] == before_left)
+        assert_true(provider_dst[(offset + count).to_i32()] == before_right)
+
+    it "matches copy across one 8K scanline":
+        val n: i64 = 7680
+        val src = patterned(n, 157)
+        var oracle_dst = patterned(n, 23)
+        var provider_dst = patterned(n, 23)
+        oracle_copy_span(oracle_dst, 0, src, 0, n)
+        simd_isa_copy_span(provider_dst, 0, src, 0, n)
+        assert_true(oracle_hash_span(oracle_dst, 0, n) == oracle_hash_span(provider_dst, 0, n))
+
+    it "executes registered fill and copy slots through production dispatch":
+        val n: i64 = 7680
+        var table = kernel_table_new()
+        assert_true(kernel_table_register(
+            table, KERNEL_OP_FILL_CONST, KERNEL_FORMAT_ARGB8888_STRAIGHT,
+            KERNEL_ALIGN_UNKNOWN, KERNEL_SPAN_CONTIGUOUS,
+            KERNEL_BUCKET_LARGE, KERNEL_PROVIDER_SIMD_ISA, true, true))
+        assert_true(kernel_table_register(
+            table, KERNEL_OP_COPY_SPAN, KERNEL_FORMAT_ARGB8888_STRAIGHT,
+            KERNEL_ALIGN_UNKNOWN, KERNEL_SPAN_CONTIGUOUS,
+            KERNEL_BUCKET_LARGE, KERNEL_PROVIDER_SIMD_ISA, true, true))
+        kernel_table_seal(table)
+        var batch = span_batch_new(2)
+        assert_true(span_batch_push(batch, KERNEL_OP_FILL_CONST, 0, 0, n, 0xFF102030, 0))
+        assert_true(span_batch_push(batch, KERNEL_OP_COPY_SPAN, 0, 0, n, 0, 0))
+        val src = patterned(n, 211)
+        var dst = patterned(n, 17)
+        var mask: [u32] = []
+        val executed = simd_span_batch_execute(
+            batch, dst, src, mask, table, KERNEL_FORMAT_ARGB8888_STRAIGHT,
+            KERNEL_ALIGN_UNKNOWN, KERNEL_SPAN_CONTIGUOUS)
+        assert_true(executed == 2)
+        assert_true(batch.non_scalar_lookups == 2)
+        assert_true(oracle_hash_span(dst, 0, n) == oracle_hash_span(src, 0, n))
+
+    it "copy registration probe proves exactness at 8K row width":
+        val verdict = _kernel_probe_copy_bucket(7680, 1)
+        assert_true((verdict & KERNEL_PROBE_EXACT) != 0)

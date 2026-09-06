@@ -1,0 +1,336 @@
+# ipynb — nbformat v4 subset reader/writer.
+#
+# Purpose: parse and serialize Jupyter `.ipynb` files (nbformat v4) for Simple
+# Lab (doc/05_design/app/tools/notebook_lanes_architecture.md §7.2).
+#
+# Supported subset (anything else is a fail-fast Err, never a silent drop):
+#   - nbformat == 4 (any nbformat_minor is accepted and preserved verbatim)
+#   - cell_type: "code" | "markdown"
+#   - code cell output_type: "stream" | "display_data" | "error"
+#   - display_data "data": only the "text/plain" mimetype is supported
+#   - notebook/cell/output "metadata" objects are treated as opaque JSON and
+#     round-tripped verbatim as compact JSON text (not decomposed) — this
+#     keeps the converter lossless for arbitrary metadata content without
+#     needing a JSON<->SDN structural mapping.
+#
+# Not supported (Err): "raw" cells, nbformat != 4, output_type
+# "execute_result", any display_data mimetype other than "text/plain".
+
+use std.common.json.types.{json_get_type, json_is_object, json_is_array, json_is_string, json_is_number, json_object, json_array, json_string, json_number, json_null}
+use std.common.json.object_ops.{json_object_get, json_object_has}
+use std.common.json.parser.{json_parse_with_error}
+use std.common.json.serializer.{json_format, json_serialize}
+
+pub struct NbOutput:
+    output_type: text      # "stream" | "display_data" | "error"
+    stream_name: text       # stream only: "stdout" | "stderr"
+    text: text               # stream/display_data text, joined with real "\n"
+    metadata_json: text     # display_data only: compact JSON of "metadata" ("{}" default)
+    ename: text              # error only
+    evalue: text             # error only
+    traceback: text          # error only, joined with real "\n"
+
+pub struct NbCell:
+    cell_type: text                # "code" | "markdown"
+    metadata_json: text            # compact JSON of the cell's "metadata"
+    source: text                    # cell source, joined with real "\n"
+    has_execution_count: bool      # code cells only
+    execution_count: i64            # -1 represents JSON null
+    outputs: [NbOutput]
+
+pub struct NbNotebook:
+    nbformat_minor: i64
+    metadata_json: text             # compact JSON of the notebook's "metadata"
+    cells: [NbCell]
+
+# ============================================================================
+# Parsing (.ipynb text -> NbNotebook)
+# ============================================================================
+
+pub fn ipynb_parse(src: text) -> Result<NbNotebook, text>:
+    val parsed = json_parse_with_error(src)
+    val doc = parsed.0
+    val parse_err = parsed.1
+    if parse_err != "":
+        return Err("ipynb: JSON parse error: {parse_err}")
+    if not json_is_object(doc):
+        return Err("ipynb: top-level value must be a JSON object")
+
+    if not json_object_has(doc, "nbformat"):
+        return Err("ipynb: missing required field 'nbformat'")
+    val nbformat_v = json_object_get(doc, "nbformat")
+    if not json_is_number(nbformat_v):
+        return Err("ipynb: 'nbformat' must be a number")
+    if nbformat_v.1 != 4.0:
+        return Err("ipynb: unsupported nbformat version {nbformat_v.1} (only nbformat 4 is supported)")
+
+    var nbformat_minor = 0
+    if json_object_has(doc, "nbformat_minor"):
+        val minor_v = json_object_get(doc, "nbformat_minor")
+        if not json_is_number(minor_v):
+            return Err("ipynb: 'nbformat_minor' must be a number")
+        nbformat_minor = minor_v.1.to_i64()
+
+    var metadata_json = "{}"
+    if json_object_has(doc, "metadata"):
+        val meta_v = json_object_get(doc, "metadata")
+        if not json_is_object(meta_v):
+            return Err("ipynb: 'metadata' must be an object")
+        metadata_json = json_serialize(meta_v)
+
+    if not json_object_has(doc, "cells"):
+        return Err("ipynb: missing required field 'cells'")
+    val cells_v = json_object_get(doc, "cells")
+    if not json_is_array(cells_v):
+        return Err("ipynb: 'cells' must be an array")
+
+    var cells: [NbCell] = []
+    for cell_v in cells_v.1:
+        val cell_result = _nb_parse_cell(cell_v)
+        match cell_result:
+            case Ok(cell):
+                cells.push(cell)
+            case Err(msg):
+                return Err(msg)
+
+    Ok(NbNotebook(nbformat_minor: nbformat_minor, metadata_json: metadata_json, cells: cells))
+
+fn _nb_parse_cell(cell_v: any) -> Result<NbCell, text>:
+    if not json_is_object(cell_v):
+        return Err("ipynb: each cell must be a JSON object")
+
+    if not json_object_has(cell_v, "cell_type"):
+        return Err("ipynb: cell missing required field 'cell_type'")
+    val cell_type_v = json_object_get(cell_v, "cell_type")
+    if not json_is_string(cell_type_v):
+        return Err("ipynb: cell 'cell_type' must be a string")
+    val cell_type = cell_type_v.1
+    if cell_type != "code" and cell_type != "markdown":
+        return Err("ipynb: unsupported cell_type '{cell_type}' (supported subset: code, markdown)")
+
+    var metadata_json = "{}"
+    if json_object_has(cell_v, "metadata"):
+        val meta_v = json_object_get(cell_v, "metadata")
+        if not json_is_object(meta_v):
+            return Err("ipynb: cell 'metadata' must be an object")
+        metadata_json = json_serialize(meta_v)
+
+    if not json_object_has(cell_v, "source"):
+        return Err("ipynb: cell missing required field 'source'")
+    val source_result = _nb_json_lines_to_text(json_object_get(cell_v, "source"), "cell.source")
+    var source_text = ""
+    match source_result:
+        case Ok(t):
+            source_text = t
+        case Err(msg):
+            return Err(msg)
+
+    var has_execution_count = false
+    var execution_count: i64 = -1
+    var outputs: [NbOutput] = []
+
+    if cell_type == "code":
+        has_execution_count = true
+        if json_object_has(cell_v, "execution_count"):
+            val ec_v = json_object_get(cell_v, "execution_count")
+            if json_get_type(ec_v) == "number":
+                execution_count = ec_v.1.to_i64()
+            elif json_get_type(ec_v) == "null":
+                execution_count = -1
+            else:
+                return Err("ipynb: cell 'execution_count' must be a number or null")
+
+        if json_object_has(cell_v, "outputs"):
+            val outputs_v = json_object_get(cell_v, "outputs")
+            if not json_is_array(outputs_v):
+                return Err("ipynb: cell 'outputs' must be an array")
+            for out_v in outputs_v.1:
+                val out_result = _nb_parse_output(out_v)
+                match out_result:
+                    case Ok(out):
+                        outputs.push(out)
+                    case Err(msg):
+                        return Err(msg)
+
+    Ok(NbCell(
+        cell_type: cell_type,
+        metadata_json: metadata_json,
+        source: source_text,
+        has_execution_count: has_execution_count,
+        execution_count: execution_count,
+        outputs: outputs
+    ))
+
+fn _nb_parse_output(out_v: any) -> Result<NbOutput, text>:
+    if not json_is_object(out_v):
+        return Err("ipynb: each output must be a JSON object")
+    if not json_object_has(out_v, "output_type"):
+        return Err("ipynb: output missing required field 'output_type'")
+    val ot_v = json_object_get(out_v, "output_type")
+    if not json_is_string(ot_v):
+        return Err("ipynb: output 'output_type' must be a string")
+    val output_type = ot_v.1
+
+    if output_type == "stream":
+        var stream_name = "stdout"
+        if json_object_has(out_v, "name"):
+            val name_v = json_object_get(out_v, "name")
+            if not json_is_string(name_v):
+                return Err("ipynb: stream output 'name' must be a string")
+            stream_name = name_v.1
+        if not json_object_has(out_v, "text"):
+            return Err("ipynb: stream output missing required field 'text'")
+        val text_result = _nb_json_lines_to_text(json_object_get(out_v, "text"), "output.text")
+        var text_val = ""
+        match text_result:
+            case Ok(t):
+                text_val = t
+            case Err(msg):
+                return Err(msg)
+        return Ok(NbOutput(output_type: "stream", stream_name: stream_name, text: text_val, metadata_json: "{}", ename: "", evalue: "", traceback: ""))
+
+    if output_type == "display_data":
+        if not json_object_has(out_v, "data"):
+            return Err("ipynb: display_data output missing required field 'data'")
+        val data_v = json_object_get(out_v, "data")
+        if not json_is_object(data_v):
+            return Err("ipynb: display_data 'data' must be an object")
+        if not json_object_has(data_v, "text/plain"):
+            return Err("ipynb: unsupported display_data mimetype set (only 'text/plain' is supported)")
+        if json_object_keys_len(data_v) != 1:
+            return Err("ipynb: unsupported display_data mimetype set (only 'text/plain' is supported)")
+        val text_result = _nb_json_lines_to_text(json_object_get(data_v, "text/plain"), "output.data['text/plain']")
+        var text_val = ""
+        match text_result:
+            case Ok(t):
+                text_val = t
+            case Err(msg):
+                return Err(msg)
+        var metadata_json = "{}"
+        if json_object_has(out_v, "metadata"):
+            val meta_v = json_object_get(out_v, "metadata")
+            if not json_is_object(meta_v):
+                return Err("ipynb: display_data 'metadata' must be an object")
+            metadata_json = json_serialize(meta_v)
+        return Ok(NbOutput(output_type: "display_data", stream_name: "", text: text_val, metadata_json: metadata_json, ename: "", evalue: "", traceback: ""))
+
+    if output_type == "error":
+        var ename = ""
+        var evalue = ""
+        var traceback = ""
+        if json_object_has(out_v, "ename"):
+            val ename_v = json_object_get(out_v, "ename")
+            if not json_is_string(ename_v):
+                return Err("ipynb: error output 'ename' must be a string")
+            ename = ename_v.1
+        if json_object_has(out_v, "evalue"):
+            val evalue_v = json_object_get(out_v, "evalue")
+            if not json_is_string(evalue_v):
+                return Err("ipynb: error output 'evalue' must be a string")
+            evalue = evalue_v.1
+        if json_object_has(out_v, "traceback"):
+            val tb_result = _nb_json_lines_to_text(json_object_get(out_v, "traceback"), "output.traceback")
+            match tb_result:
+                case Ok(t):
+                    traceback = t
+                case Err(msg):
+                    return Err(msg)
+        return Ok(NbOutput(output_type: "error", stream_name: "", text: "", metadata_json: "{}", ename: ename, evalue: evalue, traceback: traceback))
+
+    Err("ipynb: unsupported output_type '{output_type}' (supported subset: stream, display_data, error)")
+
+fn json_object_keys_len(obj: any) -> i64:
+    obj.1.keys().len()
+
+# Accept nbformat's "string OR array-of-strings" convention for a text field
+# and normalize to a single `text` joined with real "\n". An empty array (or
+# empty string) normalizes to "".
+fn _nb_json_lines_to_text(v: any, field_name: text) -> Result<text, text>:
+    if json_is_string(v):
+        return Ok(v.1)
+    if json_is_array(v):
+        var parts: [text] = []
+        for item in v.1:
+            if not json_is_string(item):
+                return Err("ipynb: '{field_name}' array must contain only strings")
+            parts.push(item.1)
+        # nbformat lines already embed their own trailing "\n" (all but the
+        # last), so a bare concatenation reproduces the original text.
+        return Ok(parts.join(""))
+    Err("ipynb: '{field_name}' must be a string or an array of strings")
+
+# Split `text` on real newlines into the nbformat array-of-lines convention:
+# every line except the last keeps its trailing "\n". Empty text -> [].
+fn _nb_text_to_json_lines(text: text) -> any:
+    if text == "":
+        return json_array([])
+    val parts = text.split("\n")
+    var out: [any] = []
+    var i = 0
+    while i < parts.len():
+        if i + 1 < parts.len():
+            out.push(json_string(parts[i] + "\n"))
+        else:
+            out.push(json_string(parts[i]))
+        i = i + 1
+    json_array(out)
+
+# ============================================================================
+# Serializing (NbNotebook -> .ipynb text)
+# ============================================================================
+
+pub fn ipynb_serialize(nb: NbNotebook) -> text:
+    var cell_values: [any] = []
+    for cell in nb.cells:
+        cell_values.push(_nb_serialize_cell(cell))
+
+    val doc = json_object({
+        "nbformat": json_number(4.0),
+        "nbformat_minor": json_number(nb.nbformat_minor.to_float()),
+        "metadata": _nb_parse_json_object(nb.metadata_json),
+        "cells": json_array(cell_values)
+    })
+    json_format(doc, 0, 1) + "\n"
+
+fn _nb_parse_json_object(compact_json: text) -> any:
+    val parsed = json_parse_with_error(compact_json)
+    if parsed.1 != "":
+        return json_object({})
+    parsed.0
+
+fn _nb_serialize_cell(cell: NbCell) -> any:
+    var pairs: {text: any} = {}
+    pairs["cell_type"] = json_string(cell.cell_type)
+    pairs["metadata"] = _nb_parse_json_object(cell.metadata_json)
+    pairs["source"] = _nb_text_to_json_lines(cell.source)
+    if cell.has_execution_count:
+        if cell.execution_count < 0:
+            pairs["execution_count"] = json_null()
+        else:
+            pairs["execution_count"] = json_number(cell.execution_count.to_float())
+        var output_values: [any] = []
+        for out in cell.outputs:
+            output_values.push(_nb_serialize_output(out))
+        pairs["outputs"] = json_array(output_values)
+    json_object(pairs)
+
+fn _nb_serialize_output(out: NbOutput) -> any:
+    if out.output_type == "stream":
+        return json_object({
+            "output_type": json_string("stream"),
+            "name": json_string(out.stream_name),
+            "text": _nb_text_to_json_lines(out.text)
+        })
+    if out.output_type == "display_data":
+        return json_object({
+            "output_type": json_string("display_data"),
+            "data": json_object({"text/plain": _nb_text_to_json_lines(out.text)}),
+            "metadata": _nb_parse_json_object(out.metadata_json)
+        })
+    # "error"
+    json_object({
+        "output_type": json_string("error"),
+        "ename": json_string(out.ename),
+        "evalue": json_string(out.evalue),
+        "traceback": _nb_text_to_json_lines(out.traceback)
+    })

@@ -1,0 +1,279 @@
+# Install Dialog Library — Reusable App Installation Dialog
+#
+# Provides a reusable GUI dialog for installing individual packages:
+#   1. Shows package info and dependencies
+#   2. Asks for confirmation
+#   3. Displays per-package progress
+#   4. Reports success/failure
+#
+# Can be used from:
+#   - PackageManagerApp (install button)
+#   - Desktop shell (app launcher install)
+#   - CLI with --gui flag
+#
+# MDSOC: feature dimension, apps layer
+
+use common.ui.builder.{
+    column, row, panel, button, text_widget, label,
+    progress, divider, dialog, list_widget, scroll,
+    with_flex, with_width, build_tree_with_title
+}
+use common.ui.widget.{WidgetNode, UITree, UIEvent}
+use common.ui.session.{UISession}
+use os.tools.pkg.pkg_core.{PkgCore, PackageInfo, PkgStatus, PkgOperationResult}
+
+# =========================================================================
+# Install Dialog States
+# =========================================================================
+
+enum InstallDialogState:
+    Confirm        # Showing package info + deps, waiting for user
+    Installing     # Progress bar active
+    Success        # Installation complete
+    Failed         # Installation failed
+
+# =========================================================================
+# Install Dialog
+# =========================================================================
+
+class InstallDialog:
+    """Reusable install dialog for a single package.
+
+    Usage:
+        var dlg = InstallDialog.new(core, "simple-editor")
+        val ui = dlg.build_ui()  # Render dialog
+        dlg.handle_action("confirm")  # User clicks Install
+        # ... poll dlg.state for completion
+    """
+    core: PkgCore
+    package_name: text
+    package_info: PackageInfo?
+    dependencies: [text]
+    state: InstallDialogState
+    progress_pct: i32
+    progress_msg: text
+    result_msg: text
+    visible: bool
+
+impl InstallDialog:
+
+    static fn new(core: PkgCore, name: text) -> InstallDialog:
+        val info = core.get_info(name)
+        val deps = core.get_dependencies(name)
+        InstallDialog(
+            core: core,
+            package_name: name,
+            package_info: info,
+            dependencies: deps,
+            state: InstallDialogState.Confirm,
+            progress_pct: 0,
+            progress_msg: "",
+            result_msg: "",
+            visible: true
+        )
+
+    me confirm():
+        """User confirmed installation — start installing."""
+        self.state = InstallDialogState.Installing
+        self.progress_msg = "Resolving dependencies..."
+        self.progress_pct = 10
+
+        val result = self.core.install(self.package_name)
+
+        if result.success:
+            self.state = InstallDialogState.Success
+            self.progress_pct = 100
+            self.result_msg = result.message
+        else:
+            self.state = InstallDialogState.Failed
+            self.progress_pct = 100
+            self.result_msg = result.message
+
+    me dismiss():
+        """Close the dialog."""
+        self.visible = false
+
+    me handle_action(action: text):
+        match action:
+            "confirm_install":
+                self.confirm()
+            "cancel_install":
+                self.dismiss()
+            "close_dialog":
+                self.dismiss()
+            _: pass_dn
+
+    me handle_key(key: text):
+        match key:
+            "y":
+                if self.state == InstallDialogState.Confirm:
+                    self.confirm()
+            "n":
+                if self.state == InstallDialogState.Confirm:
+                    self.dismiss()
+            "Escape":
+                self.dismiss()
+            "Enter":
+                if self.state == InstallDialogState.Success or self.state == InstallDialogState.Failed:
+                    self.dismiss()
+            _: pass_dn
+
+    fn is_visible() -> bool:
+        self.visible
+
+    # -- UI Construction ------------------------------------------------------
+
+    fn build_ui() -> WidgetNode:
+        """Build the install dialog widget tree (embeddable in any parent)."""
+        match self.state:
+            InstallDialogState.Confirm: self._build_confirm()
+            InstallDialogState.Installing: self._build_installing()
+            InstallDialogState.Success: self._build_success()
+            InstallDialogState.Failed: self._build_failed()
+
+    fn _build_confirm() -> WidgetNode:
+        var info_widgets: [WidgetNode] = []
+
+        if val Some(pkg) = self.package_info:
+            info_widgets.push(label("idlg_name", "Package: {pkg.name}"))
+            info_widgets.push(label("idlg_ver", "Version: {pkg.version}"))
+            info_widgets.push(label("idlg_size", "Size: {pkg.size}"))
+            info_widgets.push(label("idlg_desc", "{pkg.description}"))
+        else:
+            info_widgets.push(label("idlg_name", "Package: {self.package_name}"))
+
+        if self.dependencies.len() > 0:
+            info_widgets.push(divider("idlg_dep_div"))
+            info_widgets.push(label("idlg_dep_header", "Dependencies ({self.dependencies.len()}):"))
+            var dep_labels: [text] = []
+            for dep in self.dependencies:
+                dep_labels.push("  + {dep}")
+            info_widgets.push(list_widget("idlg_dep_list", dep_labels))
+
+        info_widgets.push(divider("idlg_action_div"))
+        info_widgets.push(row("idlg_actions", [
+            button("idlg_ok", "Install (y)", "confirm_install"),
+            button("idlg_cancel", "Cancel (n)", "cancel_install")
+        ]))
+
+        return dialog("idlg_root", "Install {self.package_name}?", info_widgets)
+
+    fn _build_installing() -> WidgetNode:
+        dialog("idlg_root", "Installing {self.package_name}", [
+            label("idlg_progress_msg", self.progress_msg),
+            progress("idlg_progress_bar", self.progress_pct),
+            divider("idlg_wait_div"),
+            label("idlg_wait", "Please wait...")
+        ])
+
+    fn _build_success() -> WidgetNode:
+        dialog("idlg_root", "Installation Complete", [
+            text_widget("idlg_ok_msg", "✓  {self.package_name} installed successfully.\n\n{self.result_msg}"),
+            divider("idlg_done_div"),
+            button("idlg_close", "Done", "close_dialog")
+        ])
+
+    fn _build_failed() -> WidgetNode:
+        dialog("idlg_root", "Installation Failed", [
+            text_widget("idlg_err_msg", "✗  Failed to install {self.package_name}.\n\n{self.result_msg}"),
+            divider("idlg_fail_div"),
+            button("idlg_close", "Close", "close_dialog")
+        ])
+
+# =========================================================================
+# Convenience Functions
+# =========================================================================
+
+fn show_install_dialog(core: PkgCore, name: text) -> InstallDialog:
+    """Create and return an install dialog ready to display."""
+    InstallDialog.new(core, name)
+
+fn show_remove_dialog(core: PkgCore, name: text) -> RemoveDialog:
+    """Create and return a remove confirmation dialog."""
+    RemoveDialog.new(core, name)
+
+# =========================================================================
+# Remove Dialog (same pattern)
+# =========================================================================
+
+class RemoveDialog:
+    core: PkgCore
+    package_name: text
+    state: InstallDialogState
+    result_msg: text
+    visible: bool
+    reverse_deps: [text]
+
+impl RemoveDialog:
+    static fn new(core: PkgCore, name: text) -> RemoveDialog:
+        # Check what depends on this package
+        var rdeps: [text] = []
+        val all = core.list_installed()
+        for pkg in all:
+            for dep in pkg.dependencies:
+                val dep_name = dep.split(">=")[0]
+                if dep_name == name:
+                    rdeps.push(pkg.name)
+        RemoveDialog(
+            core: core,
+            package_name: name,
+            state: InstallDialogState.Confirm,
+            result_msg: "",
+            visible: true,
+            reverse_deps: rdeps
+        )
+
+    me confirm():
+        self.state = InstallDialogState.Installing
+        val result = self.core.remove(self.package_name)
+        if result.success:
+            self.state = InstallDialogState.Success
+            self.result_msg = result.message
+        else:
+            self.state = InstallDialogState.Failed
+            self.result_msg = result.message
+
+    me dismiss():
+        self.visible = false
+
+    me handle_action(action: text):
+        match action:
+            "confirm_remove": self.confirm()
+            "cancel_remove": self.dismiss()
+            "close_dialog": self.dismiss()
+            _: pass_dn
+
+    fn build_ui() -> WidgetNode:
+        match self.state:
+            InstallDialogState.Confirm:
+                var items: [WidgetNode] = [
+                    label("rdlg_msg", "Remove {self.package_name}?")
+                ]
+                if self.reverse_deps.len() > 0:
+                    items.push(divider("rdlg_warn_div"))
+                    items.push(text_widget("rdlg_warn", "⚠  These packages depend on {self.package_name}:"))
+                    var dep_labels: [text] = []
+                    for rd in self.reverse_deps:
+                        dep_labels.push("  - {rd}")
+                    items.push(list_widget("rdlg_rdeps", dep_labels))
+                items.push(divider("rdlg_act_div"))
+                items.push(row("rdlg_actions", [
+                    button("rdlg_ok", "Remove", "confirm_remove"),
+                    button("rdlg_cancel", "Cancel", "cancel_remove")
+                ]))
+                dialog("rdlg_root", "Remove Package", items)
+            InstallDialogState.Success:
+                dialog("rdlg_root", "Package Removed", [
+                    text_widget("rdlg_ok", "✓  {self.package_name} removed.\n{self.result_msg}"),
+                    button("rdlg_close", "Done", "close_dialog")
+                ])
+            InstallDialogState.Failed:
+                dialog("rdlg_root", "Remove Failed", [
+                    text_widget("rdlg_err", "✗  {self.result_msg}"),
+                    button("rdlg_close", "Close", "close_dialog")
+                ])
+            _:
+                dialog("rdlg_root", "Removing...", [
+                    label("rdlg_wait", "Removing {self.package_name}..."),
+                    progress("rdlg_progress", 50)
+                ])

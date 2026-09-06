@@ -1,0 +1,70 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-APP
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-APP
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-APP
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+use std.spec.step
+
+use app.check.concurrency_lint.{run_concurrency_api_lint}
+
+
+describe "checker concurrency lint token awareness":
+    # @manual scenario evidence
+    it "ignores forbidden-looking calls inside strings and comments":
+        # @req REQ-SSPEC-APP
+        step("ignores forbidden-looking calls inside strings and comments")
+        val source = "val message = \"green_spawn(42)\"\n# extern fn rt_pool_submit(closure: Any) -> i64\n"
+        expect(run_concurrency_api_lint(source, "src/app/example.spl").len()).to_equal(0)
+
+    it "rejects executable misuse outside the runtime owner":
+        # @req REQ-SSPEC-APP
+        step("rejects executable misuse outside the runtime owner")
+        val source = "extern fn rt_pool_submit(closure: Any) -> i64\nfn bad():\n    green_spawn(42)\n"
+        val errors = run_concurrency_api_lint(source, "src/app/example.spl")
+        expect(errors.len()).to_equal(2)
+        expect(errors[0]).to_contain("E-PAR-005")
+        expect(errors[1]).to_contain("E-PAR-004")
+
+    it "allows runtime extern declarations only in the canonical owner":
+        # @req REQ-SSPEC-APP
+        step("allows runtime extern declarations only in the canonical owner")
+        val source = "extern fn rt_pool_submit(closure: Any) -> i64\n"
+        val path = "src/lib/nogc_async_mut/concurrent/multicore_green.spl"
+        expect(run_concurrency_api_lint(source, path).len()).to_equal(0)
+
+    it "sees a deprecated import after a single-quoted string that holds a triple quote":
+        # @req REQ-SSPEC-APP
+        step("sees a deprecated import after a single-quoted string that holds a triple quote")
+        # The old masker knew only double quotes: the three real quote characters
+        # inside 'sep """ sep' left it believing a string was open, so the next
+        # line's import was masked away and its E-PAR-002 never fired.
+        val tq = "\"" + "\"" + "\""
+        # Braces are concatenated: `{name}` inside a plain literal is parsed as
+        # interpolation by the spec's own lexer.
+        val lb = "{"
+        val rb = "}"
+        val source = "use std.concurrent.thread." + lb + "thread_spawn2" + rb + "\n" +
+            "val marker = 'sep " + tq + " sep'\n" +
+            "use std.concurrent.thread." + lb + "spawn_isolated2" + rb + "\n"
+        val errors = run_concurrency_api_lint(source, "src/app/example.spl")
+        expect(errors.len()).to_equal(2)
+        expect(errors[0]).to_contain("thread_spawn2")
+        expect(errors[1]).to_contain("spawn_isolated2")
+
+    it "flags a string argument where an integer worker count is required":
+        # @req REQ-SSPEC-APP
+        step("flags a string argument where an integer worker count is required")
+        # This E-PAR-004 check looks for `set_parallelism("` AFTER masking. The old
+        # masker replaced the opening quote itself with a space, so the check
+        # could never match — it was dead code at HEAD, probed at 0 diagnostics.
+        val errors = run_concurrency_api_lint("multicore_green_set_parallelism(\"4\")\n", "src/app/example.spl")
+        expect(errors.len()).to_equal(1)
+        expect(errors[0]).to_contain("E-PAR-004")
+        expect(errors[0]).to_contain("integer worker count")

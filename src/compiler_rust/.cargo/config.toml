@@ -1,0 +1,64 @@
+# ---------------------------------------------------------------------------
+# Offline / vendored-sources configuration
+# ---------------------------------------------------------------------------
+# SimpleOS does NOT provide fork/exec, so cargo cannot spawn git/curl at
+# build time. All dependencies must be resolved from ./vendor/. Populate
+# it on the host with `cargo vendor --respect-source-config` BEFORE any
+# cross-build targeting x86_64-unknown-simpleos (or any other SimpleOS
+# triple). Commit the contents of vendor/ to the repo so CI and SimpleOS
+# self-builds stay hermetic.
+# ---------------------------------------------------------------------------
+
+[source.crates-io]
+replace-with = "vendored-sources"
+
+[source.vendored-sources]
+directory = "vendor"
+
+[build]
+# Build configuration for Simple language
+# Note: Test thread limits are managed dynamically by scripts/cpu-aware-test.sh
+# based on CPU_THROTTLE_THRESHOLD (default 70%) in simple.test.toml
+
+# Limit parallel jobs to prevent resource exhaustion on high-core-count systems
+# Without this, cargo test --workspace on 32+ core systems can hang at 100% CPU
+jobs = 8
+
+# Default to single-threaded Rust tests for deterministic behavior
+# Use RUST_TEST_THREADS=N or cargo test -- --test-threads=N to override
+[env]
+RUST_TEST_THREADS = "1"
+
+[target.x86_64-unknown-linux-gnu]
+# Startup optimization linker flags (#1992, #1995)
+rustflags = [
+    # #1995: Section GC - remove unused sections
+    "-C", "link-arg=-Wl,--gc-sections",
+    # #1992: RELR relocations - packed relative relocations (requires ld 2.27+)
+    "-C", "link-arg=-Wl,-z,pack-relative-relocs",
+    # Export runtime symbols so the SMF loader can resolve them from the main binary.
+    "-C", "link-arg=-Wl,--export-dynamic",
+]
+
+[target.x86_64-pc-windows-msvc]
+# Size optimization linker flags (Windows MSVC equivalent of --gc-sections)
+rustflags = [
+    # Remove unreferenced functions/data
+    "-C", "link-arg=/OPT:REF",
+    # Fold identical COMDATs (identical function folding)
+    "-C", "link-arg=/OPT:ICF",
+]
+
+# Cross-compilation linker configs
+[target.x86_64-pc-windows-gnu]
+linker = "x86_64-w64-mingw32-gcc"
+rustflags = [
+    # Size optimization: remove unused sections
+    "-C", "link-arg=-Wl,--gc-sections",
+]
+
+[target.aarch64-unknown-linux-gnu]
+linker = "aarch64-linux-gnu-gcc"
+
+[target.riscv64gc-unknown-linux-gnu]
+linker = "riscv64-linux-gnu-gcc"

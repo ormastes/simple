@@ -1,0 +1,111 @@
+# LLM Caret - Agent manager pane view (read-only)
+#
+# Discovers the caret agent panes that tmux owns and renders them through the
+# existing embedded-tmux view (agent_tmux.spl) and team summary (agent_runtime).
+#
+# It is a VIEWER, not a supervisor: tmux is the sole PID owner, so this never
+# spawns, kills, or respawns anything.
+#
+# ponytail: no respawn here because multi_caret_manager has none either - it
+# does not retain the AgentLaunchRequests needed to relaunch a dead member.
+# Add supervision when a requirement asks for it.
+#
+# ponytail: renders once and exits; the tmux pane loops it. Avoids owning a
+# refresh timer. Upgrade path: internal sleep loop if per-run startup hurts.
+#
+#   bin/simple run src/app/llm_caret/agent_manager_view.spl [session]
+
+use app.io.mod.{process_run}
+use std.nogc_sync_mut.cli.cli_util.{get_cli_args}
+use app.llm_caret.agent_runtime.{AgentProcess, AgentTeamProcess, summarize_agent_team}
+use app.llm_caret.agent_tmux.{AgentProcessUsage, build_agent_tmux_embed,
+    render_agent_tmux_tui}
+
+fn _sh(command: text) -> text:
+    val result = process_run("/bin/sh", ["-c", command])
+    (result.0 ?? "").trim()
+
+fn _nonempty_lines(raw: text) -> [text]:
+    var out: [text] = []
+    for line in raw.split("\n"):
+        if line.trim() != "":
+            out = out + [line.trim()]
+    out
+
+fn _fields(line: text) -> [text]:
+    var out: [text] = []
+    for part in line.split(" "):
+        if part.trim() != "":
+            out = out + [part.trim()]
+    out
+
+# tmux emits: "<pane_index> <pane_pid> <pane_title> <pane_dead>"
+# Pane 0 is this dashboard and is excluded from the team.
+fn _discover(session: text) -> [AgentProcess]:
+    val fmt = "#{{pane_index}} #{{pane_pid}} #{{pane_title}} #{{pane_dead}}"
+    val result = process_run("tmux", ["list-panes", "-t", session, "-F", fmt])
+    var procs: [AgentProcess] = []
+    for line in _nonempty_lines(result.0 ?? ""):
+        val cols = _fields(line)
+        if cols.len() < 4:
+            continue
+        if cols[0] == "0":
+            continue
+        val pid = cols[1].to_i64() ?? -1
+        var status = "running"
+        var reason = "pane_live"
+        if cols[3] == "1":
+            status = "error"
+            reason = "pane_dead"
+        elif pid <= 0:
+            status = "error"
+            reason = "no_pid"
+        procs = procs + [AgentProcess(agent_id: cols[2], status: status,
+            reason: reason, pid: pid)]
+    procs
+
+# A pane's child processes are its sub-agents: the CLI that caret spawned.
+fn _subagents(pid: i64) -> text:
+    if pid <= 0:
+        return "(none)"
+    val out = _sh("pgrep -P " + pid.to_text() + " -l 2>/dev/null | tr '\\n' ',' ")
+    if out == "":
+        return "(none)"
+    out
+
+fn _usages(procs: [AgentProcess]) -> [AgentProcessUsage]:
+    var out: [AgentProcessUsage] = []
+    for proc in procs:
+        var cpu = 0.0
+        var mem = 0
+        if proc.pid > 0:
+            val raw = _sh("ps -o %cpu=,rss= -p " + proc.pid.to_text() + " 2>/dev/null")
+            val cols = _fields(raw)
+            if cols.len() >= 2:
+                cpu = cols[0].to_f64() ?? 0.0
+                mem = (cols[1].to_i64() ?? 0) / 1024
+        out = out + [AgentProcessUsage(agent_id: proc.agent_id, pid: proc.pid,
+            cpu_percent: cpu, memory_mb: mem)]
+    out
+
+pub fn render_manager_view(session: text) -> text:
+    val procs = _discover(session)
+    val team = summarize_agent_team(session, procs)
+    val embed = build_agent_tmux_embed(team, _usages(procs))
+    var out = render_agent_tmux_tui(embed, team)
+    out = out + "\nTeam status: " + team.status + " (" + team.reason + ")\n"
+    out = out + "\nSub-agents (child processes of each pane)\n"
+    if procs.len() == 0:
+        return out + "  no agent panes discovered in session " + session + "\n"
+    for proc in procs:
+        out = out + "  " + proc.agent_id + " [" + proc.reason + "] -> " + _subagents(proc.pid) + "\n"
+    out + "\nViewer only - tmux owns every pid; nothing here respawns.\n"
+
+fn main():
+    var session = "caret"
+    for arg in get_cli_args():
+        if not arg.starts_with("-"):
+            session = arg
+    print render_manager_view(session)
+
+export render_manager_view

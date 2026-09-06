@@ -1,0 +1,48 @@
+extern fn rt_file_read_text(path: text) -> text
+
+use std.spec.{describe, it, expect}
+
+fn source(path: text) -> text:
+    rt_file_read_text(path) ?? ""
+
+describe "core C terminal runtime ABI":
+    it "exports the TUI terminal owner signatures and tagged size tuple":
+        val header = source("src/runtime/runtime.h")
+        val terminal = source("src/runtime/runtime_terminal.c")
+        val facade = source("src/lib/nogc_sync_mut/tui/terminal.spl")
+
+        expect(facade).to_contain("extern fn rt_terminal_get_size() -> (i64, i64)")
+        expect(header).to_contain("bool     rt_terminal_enable_raw_mode(void);")
+        expect(header).to_contain("bool     rt_terminal_disable_raw_mode(void);")
+        expect(header).to_contain("int64_t  rt_terminal_get_size(void);")
+        expect(header).to_contain("bool     rt_terminal_is_tty(void);")
+        expect(header).to_contain("bool     rt_terminal_stdout_is_tty(void);")
+        expect(header).to_contain("int64_t  rt_stdin_read_byte(void);")
+        expect(terminal).to_contain("int64_t tuple = rt_tuple_new(2);")
+        expect(terminal).to_contain("rt_tuple_set(tuple, 0, rt_value_int(cols))")
+        expect(terminal).to_contain("rt_tuple_set(tuple, 1, rt_value_int(rows))")
+
+    it "uses real POSIX and Windows terminal APIs with failure-safe fallback":
+        val terminal = source("src/runtime/runtime_terminal.c")
+
+        expect(terminal).to_contain("#if defined(_WIN32)")
+        expect(terminal).to_contain("GetConsoleMode")
+        expect(terminal).to_contain("SetConsoleMode")
+        expect(terminal).to_contain("ReadFile")
+        expect(terminal).to_contain("GetStdHandle(STD_OUTPUT_HANDLE)")
+        expect(terminal).to_contain("tcgetattr(STDIN_FILENO")
+        expect(terminal).to_contain("isatty(STDOUT_FILENO)")
+        expect(terminal).to_contain("tcsetattr(STDIN_FILENO")
+        expect(terminal).to_contain("ioctl(STDOUT_FILENO, TIOCGWINSZ")
+        expect(terminal).to_contain("while (read_count < 0 && errno == EINTR)")
+        expect(terminal).to_contain("return rt_terminal_size_tuple(80, 24);")
+        expect(terminal).to_contain("return read_count == 1 ? (int64_t)byte : -1;")
+
+    it "includes the provider in both core C archive manifests":
+        val seed_tools = source("src/compiler_rust/compiler/src/pipeline/native_project/tools.rs")
+        val capsule = source("scripts/check/build-core-c-bootstrap-runtime-capsule.shs")
+
+        expect(seed_tools).to_contain("\"runtime_terminal.c\",")
+        expect(seed_tools).to_contain("\"runtime.h\",")
+        expect(capsule).to_contain("runtime_terminal.c")
+        expect(capsule).to_contain("runtime.h")

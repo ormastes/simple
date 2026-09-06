@@ -1,0 +1,34 @@
+# Regression (duplicate semantic tables, critical_hardening_plan_2026-08-21):
+# `file_read_lines` had co-compiled definitions with DIFFERING signatures —
+# io/file_ops + file_system/file_ops returned Optional([text]) while ffi/sffi
+# io returned [text]; `path_join` was ([text])->text in std.path but
+# (text,text)->text in ffi/sffi io (now `path_join2`, matching file_system).
+# JIT call sites fall back to the LAST definition when arg types are ambiguous,
+# so a caller could receive the wrong shape. Pre-fix this spec fails:
+# `file_ops.file_read_lines` returns Some([...]) (no `.len()` == 2) and
+# `ffi.io.path_join2` does not exist.
+use std.spec
+use std.nogc_sync_mut.io.file_ops.{file_read_lines as file_ops_read_lines, file_write, file_delete}
+use std.nogc_sync_mut.ffi.io.{file_read_lines as ffi_read_lines, path_join2}
+use std.path.{path_join}
+
+describe "file_read_lines unified signature":
+    it "file_ops and ffi variants both return [text] with the same lines":
+        val p = "/tmp/file_read_lines_unified_spec.txt"
+        file_write(p, "a\nb")
+        val a: [text] = file_ops_read_lines(p)
+        val b: [text] = ffi_read_lines(p)
+        file_delete(p)
+        expect a.len() == 2
+        expect b.len() == 2
+        expect a[0] == "a"
+        expect b[1] == "b"
+
+    it "missing file yields an empty [text], not nil":
+        val a: [text] = file_ops_read_lines("/tmp/file_read_lines_unified_spec_missing.txt")
+        expect a.len() == 0
+
+describe "path_join unified signature":
+    it "std.path path_join takes [text]; two-segment form is path_join2":
+        expect path_join(["/home", "user", "f.txt"]) == "/home/user/f.txt"
+        expect path_join2("/home/user", "f.txt") == "/home/user/f.txt"

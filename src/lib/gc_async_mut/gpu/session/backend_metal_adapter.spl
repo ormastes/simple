@@ -1,0 +1,77 @@
+# Metal graphics/compute/present backend adapter (Apple platforms only).
+# Full-featured: graphics, compute, and CAMetalLayer present supported.
+
+use std.io
+use std.gc_async_mut.gpu.session.backend_runtime_ops.{
+    backend_metal_create_device, backend_metal_submit,
+    backend_metal_present, backend_metal_cleanup
+}
+use std.gc_async_mut.env.platform.{is_macos}
+
+class BackendMetalAdapter:
+    handle: i64
+    device_name: text
+    initialized: bool
+    session_mode: text
+
+    static fn create(mode: text) -> BackendMetalAdapter:
+        BackendMetalAdapter(
+            handle: 0,
+            device_name: "metal",
+            initialized: false,
+            session_mode: mode,
+        )
+
+    me init_device() -> text:
+        val h = backend_metal_create_device()
+        if h <= 0:
+            return "metal: device creation failed"
+        self.handle = h
+        self.initialized = true
+        ""
+
+    me submit_commands(cmd_count: i64) -> text:
+        if self.initialized == false:
+            return "metal: device not initialized"
+        if cmd_count < 0:
+            return "metal: invalid cmd_count"
+        backend_metal_submit(self.handle, cmd_count)
+
+    me present() -> text:
+        if self.initialized == false:
+            return "metal: device not initialized"
+        backend_metal_present(self.handle)
+
+    me readback(x: i64, y: i64, w: i64, h: i64) -> text:
+        # HONESTY (site 15-19, doc/04_architecture/ui/wm_host_platform_matrix.md):
+        # this used to return "" (the success sentinel) after validating
+        # arguments while moving zero pixels. There is no real pixel-transfer
+        # path implemented in this adapter, so it must refuse rather than
+        # claim success.
+        if self.initialized == false:
+            return "metal: device not initialized"
+        if w <= 0 or h <= 0:
+            return "metal: invalid readback dimensions"
+        "metal: readback not implemented (no pixel transfer path)"
+
+    me supports_compute() -> bool:
+        # HONESTY (site 20): hardcoded `true` on any host used to claim Metal
+        # compute support even on Linux. Gate on the platform AND a real
+        # device actually having been created.
+        is_macos() and self.initialized
+
+    me supports_graphics() -> bool:
+        is_macos() and self.initialized
+
+    me supports_present() -> bool:
+        is_macos() and self.initialized
+
+    me device_info() -> text:
+        "metal handle=" + self.handle.to_text() + " mode=" + self.session_mode + " initialized=" + self.initialized.to_text()
+
+    me cleanup() -> text:
+        if self.initialized:
+            backend_metal_cleanup(self.handle)
+        self.initialized = false
+        self.handle = 0
+        ""

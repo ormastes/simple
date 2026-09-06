@@ -1,0 +1,67 @@
+use std.spec
+use std.common.structural.parallel_commit.commit_contracts.{ParallelResultKind, result_envelope_v1}
+use std.common.structural.parallel_commit.result_envelope_codec.{encode_result_envelope}
+use std.common.structural.transfer.process_frame_auth.{process_transfer_auth_tag}
+use std.common.structural.transfer.process_frame_codec.{encode_process_transfer_frame, process_transfer_frame_v1}
+use std.common.structural.transfer.transfer_contracts.{
+    ParallelExecutionDomain, ParallelTransferMode, ParallelTransferPayload,
+    transfer_envelope_v1
+}
+use std.nogc_async_mut.parent_commit_authenticated_session.{
+    parent_commit_authenticated_session_v2,
+    parent_process_session_identity_v2
+}
+
+fn authenticated_child_frame(region_id: i64, generation: i64) -> [u8]:
+    val result = result_envelope_v1(4, region_id, 0, region_id,
+        ParallelResultKind.Patch, 700 + region_id, "authenticated-child")
+    val envelope = transfer_envelope_v1(region_id, generation,
+        ParallelExecutionDomain.Process, ParallelExecutionDomain.Parent,
+        ParallelTransferMode.Copy, ParallelTransferPayload.EncodedCopy, 0, false)
+    encode_process_transfer_frame(process_transfer_frame_v1(
+        envelope, encode_result_envelope(result)))
+
+describe "ParentCommitAuthenticatedSessionV2 replay identity":
+    it "authenticates the complete wire and rejects tampering or another key":
+        val identity = parent_process_session_identity_v2(
+            "parent-secret", "boot-a", "namespace-a", 77, 41)
+        val session = parent_commit_authenticated_session_v2(2, "wire-key", identity)
+        val frame = authenticated_child_frame(7, 41)
+        val tag = process_transfer_auth_tag("wire-key", identity.session_id, 41, frame)
+        var tampered = authenticated_child_frame(7, 41)
+        tampered[tampered.len() - 1] = tampered[tampered.len() - 1] ^ 1
+        assert_false(session.offer_authenticated_process_result_frame(tampered, tag))
+        assert_false(session.offer_authenticated_process_result_frame(frame,
+            process_transfer_auth_tag("other-key", identity.session_id, 41, frame)))
+        assert_true(session.offer_authenticated_process_result_frame(frame, tag))
+        assert_false(session.offer_authenticated_process_result_frame(frame, tag))
+
+    it "does not authorize PID reuse across namespace or parent epoch":
+        val original = parent_process_session_identity_v2(
+            "parent-secret", "boot-a", "namespace-a", 77, 41)
+        val other_namespace = parent_process_session_identity_v2(
+            "parent-secret", "boot-a", "namespace-b", 77, 41)
+        val reused_pid = parent_process_session_identity_v2(
+            "parent-secret", "boot-b", "namespace-a", 77, 41)
+        assert_false(original.session_id == other_namespace.session_id)
+        assert_false(original.session_id == reused_pid.session_id)
+        val frame = authenticated_child_frame(8, 41)
+        val stale_tag = process_transfer_auth_tag(
+            "wire-key", original.session_id, 41, frame)
+        val replacement = parent_commit_authenticated_session_v2(
+            1, "wire-key", reused_pid)
+        assert_false(replacement.offer_authenticated_process_result_frame(
+            frame, stale_tag))
+
+    it "revokes accepted ownership and all future authenticated frames":
+        val identity = parent_process_session_identity_v2(
+            "parent-secret", "boot-a", "namespace-a", 77, 41)
+        val session = parent_commit_authenticated_session_v2(2, "wire-key", identity)
+        val frame = authenticated_child_frame(9, 41)
+        val tag = process_transfer_auth_tag("wire-key", identity.session_id, 41, frame)
+        assert_true(session.offer_authenticated_process_result_frame(frame, tag))
+        assert_equal(session.inbox.depth(), 1)
+        session.revoke()
+        assert_equal(session.inbox.depth(), 0)
+        assert_false(session.offer_authenticated_process_result_frame(
+            authenticated_child_frame(10, 41), tag))

@@ -1,0 +1,84 @@
+"""
+# Linalg raw-memory owner contract
+
+The OpenBLAS and CUDA staging loops retain their exact allocation, release,
+read, and write topology while using the one no-GC sync raw-pointer owner.
+The runtime ABI remains byte-for-byte i64/f64-bit compatible and no helper may
+allocate storage per element.
+"""
+
+use std.spec
+use std.io_runtime.{file_read}
+use std.nogc_sync_mut.ptr.raw.{
+    raw_alloc, raw_release, raw_read_i64, raw_write_i64,
+    raw_f64_to_bits, raw_bits_to_f64}
+
+val OWNER_PATH = "src/lib/nogc_sync_mut/ptr/raw.spl"
+val BACKEND_PATH = "src/lib/nogc_async_mut/linalg/backend_ops.spl"
+val OPENBLAS_PATH = "src/lib/nogc_sync_mut/linalg/blas_openblas.spl"
+
+fn expect_no_leaf_memory_externs(path: text):
+    val source = file_read(path)
+    expect_not(source.contains("extern fn rt_alloc"))
+    expect_not(source.contains("extern fn rt_free"))
+    expect_not(source.contains("extern fn rt_ptr_read_i64"))
+    expect_not(source.contains("extern fn rt_ptr_write_i64"))
+    expect_not(source.contains("rt_alloc("))
+    expect_not(source.contains("rt_free("))
+    expect_not(source.contains("rt_ptr_read_i64("))
+    expect_not(source.contains("rt_ptr_write_i64("))
+
+describe "linalg raw-memory owner":
+    """
+    Maintainers can verify that linalg staging preserves its native scalar ABI,
+    owns every allocation through one module, and introduces no loop allocation.
+    """
+
+    it "round-trips integer and f64-bit payloads through the canonical owner":
+        val ptr = raw_alloc(16)
+        expect(ptr).to_be_greater_than(0)
+
+        val float_bits = raw_f64_to_bits(-3.25)
+        raw_write_i64(ptr, 0, 0x102030405060708)
+        raw_write_i64(ptr, 8, float_bits)
+
+        expect(raw_read_i64(ptr, 0)).to_equal(0x102030405060708)
+        expect(raw_read_i64(ptr, 8)).to_equal(float_bits)
+        expect(raw_bits_to_f64(raw_read_i64(ptr, 8))).to_equal(-3.25)
+        raw_release(ptr)
+
+    it "keeps runtime declarations and direct calls in one inline owner":
+        val owner = file_read(OWNER_PATH)
+        expect(owner).to_contain("pub extern fn rt_alloc(size: i64) -> i64")
+        expect(owner).to_contain("pub extern fn rt_free(ptr: i64)")
+        expect(owner).to_contain("pub extern fn rt_ptr_read_i64(addr: i64, offset: i64) -> i64")
+        expect(owner).to_contain("pub extern fn rt_ptr_write_i64(addr: i64, offset: i64, value: i64)")
+        expect(owner).to_contain("@inline\npub fn raw_alloc(size: i64) -> i64:\n    rt_alloc(size)")
+        expect(owner).to_contain("@inline\npub fn raw_release(ptr: i64):\n    rt_free(ptr)")
+        expect(owner).to_contain("@inline\n# @tag(addr=address, offset=byte_offset)\npub fn raw_read_i64(addr: i64, offset: i64) -> i64:\n    rt_ptr_read_i64(addr, offset)")
+        expect(owner).to_contain("@inline\n# @tag(addr=address, offset=byte_offset, value=stored_value)\npub fn raw_write_i64(addr: i64, offset: i64, value: i64):\n    rt_ptr_write_i64(addr, offset, value)")
+        expect(owner.count("raw_alloc(")).to_equal(1)
+
+    it "removes raw runtime memory access from both linalg leaves":
+        expect_no_leaf_memory_externs(BACKEND_PATH)
+        expect_no_leaf_memory_externs(OPENBLAS_PATH)
+
+        val backend = file_read(BACKEND_PATH)
+        val openblas = file_read(OPENBLAS_PATH)
+        val owner_import = "use std.nogc_sync_mut.ptr.raw.{raw_alloc, raw_release, raw_read_i64, raw_write_i64, raw_f64_to_bits, raw_bits_to_f64}"
+        expect(backend).to_contain(owner_import)
+        expect(openblas).to_contain(owner_import)
+
+    it "preserves staging allocation and cleanup topology without per-element allocation":
+        val backend = file_read(BACKEND_PATH)
+        val openblas = file_read(OPENBLAS_PATH)
+
+        expect(backend.count("raw_alloc(")).to_equal(35)
+        expect(backend.count("raw_release(")).to_equal(91)
+        expect(backend.count("raw_write_i64(")).to_equal(44)
+        expect(backend.count("raw_read_i64(")).to_equal(7)
+
+        expect(openblas.count("raw_alloc(")).to_equal(20)
+        expect(openblas.count("raw_release(")).to_equal(50)
+        expect(openblas.count("raw_write_i64(")).to_equal(25)
+        expect(openblas.count("raw_read_i64(")).to_equal(4)

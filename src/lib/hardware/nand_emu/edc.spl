@@ -1,0 +1,62 @@
+# ============================================================================
+# nand_emu — EDC (1 bit / 528 B parity) + copy-back validity
+# ============================================================================
+#
+# The datasheet's on-chip EDC is 1 bit per 528 B sector. Copying a page whose
+# Vt already drifted accumulates errors — which is why copy-back carries an EDC
+# status. Sub-sector random data input before a copy-back INVALIDATES the EDC
+# (7Bh I/O2 = 0); the DUT must then fall back to read-modify-write
+# (doc §7.2 last rule, §8 scenarios 12-13).
+#
+# Source: doc/01_research/hardware/nand_emu/nand_emu_fpga_riscv_emulator.md §7.2
+# ============================================================================
+
+# ----------------------------------------------------------------------------
+# Byte parity primitive — IMPLEMENTED (the EDC building block).
+# ----------------------------------------------------------------------------
+
+pub fn ne_parity_byte(b: i64) -> i64:
+    """XOR-fold parity of the low 8 bits of `b`: returns 1 for odd popcount,
+    0 for even. Fixed 8-iteration loop (freestanding-safe, no dynamic bounds)."""
+    var acc = 0
+    var i = 0
+    while i < 8:
+        acc = acc ^ ((b >> i) & 1)
+        i = i + 1
+    acc
+
+# ----------------------------------------------------------------------------
+# Sector EDC + copy-back validity (doc §7.2) — IMPLEMENTED.
+# ----------------------------------------------------------------------------
+
+pub fn ne_edc_parity(sector: [u8]) -> i64:
+    """Compute the 1-bit EDC parity over a sector (doc §7.2): the real 1
+    bit / 528 B on-chip EDC is itself a parity code, so a plain XOR-reduce
+    over every bit of the sector is a faithful (if minimal) model of it —
+    documented simplification, not a full Hamming/BCH EDC. Implemented as an
+    XOR-fold of each byte's own parity (ne_parity_byte): since XOR is
+    associative/commutative, folding per-byte parities equals the parity of
+    the whole concatenated bit stream regardless of how it's grouped."""
+    var acc = 0
+    var i = 0
+    val n = sector.len()
+    while i < n:
+        acc = acc ^ ne_parity_byte(sector[i] as i64)
+        i = i + 1
+    acc
+
+pub fn ne_edc_check(sector: [u8], stored_parity: i64) -> bool:
+    """True when the recomputed sector parity matches the stored EDC bit
+    (7Bh I/O1 EDC error is the negation of this)."""
+    ne_edc_parity(sector) == stored_parity
+
+pub fn ne_edc_invalidate_on_subsector(edc_state: i64) -> i64:
+    """Mark the sector's EDC validity bit invalid (7Bh I/O2 = 0) after a
+    sub-sector random data input before copy-back (doc §7.2 last rule, §8
+    scenario 13). edc_state bit0 is the invalidated-by-subsector-input flag
+    (0 = valid/untouched, the ne_block_meta_new() default; 1 = invalidated).
+    Only bit0 is touched — any other accumulation bits already present in
+    edc_state (e.g. per-sector state packed into higher bits by the caller)
+    are preserved, so invalidating one sector never clobbers another's state.
+    Idempotent: invalidating an already-invalidated state is a no-op."""
+    edc_state | 0x01

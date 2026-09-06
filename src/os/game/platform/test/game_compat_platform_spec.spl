@@ -1,0 +1,393 @@
+"""Game compatibility platform specification tests.
+
+Self-contained: all classes defined inline. 20 tests covering
+linux capability matrix, device platform, prefix manifest,
+sandbox policy, and proton host readiness.
+"""
+
+use std.spipe.*
+
+class CapEntry:
+    cap_name: text
+    cap_status: text
+
+    static fn ready(name: text) -> CapEntry:
+        CapEntry(cap_name: name, cap_status: "ready")
+
+    static fn partial(name: text) -> CapEntry:
+        CapEntry(cap_name: name, cap_status: "partial")
+
+    static fn missing_cap(name: text) -> CapEntry:
+        CapEntry(cap_name: name, cap_status: "missing")
+
+    me is_ready() -> bool:
+        self.cap_status == "ready"
+
+    me is_missing() -> bool:
+        self.cap_status == "missing"
+
+    me is_blocking() -> bool:
+        self.cap_status == "missing"
+
+
+class CapMatrix:
+    count: i64
+    c0_name: text
+    c0_status: text
+    c1_name: text
+    c1_status: text
+    c2_name: text
+    c2_status: text
+    c3_name: text
+    c3_status: text
+    c4_name: text
+    c4_status: text
+    c5_name: text
+    c5_status: text
+
+    static fn create() -> CapMatrix:
+        CapMatrix(
+            count: 0,
+            c0_name: "", c0_status: "",
+            c1_name: "", c1_status: "",
+            c2_name: "", c2_status: "",
+            c3_name: "", c3_status: "",
+            c4_name: "", c4_status: "",
+            c5_name: "", c5_status: ""
+        )
+
+    me add(cap: CapEntry) -> i64:
+        if self.count == 0:
+            self.c0_name = cap.cap_name
+            self.c0_status = cap.cap_status
+        if self.count == 1:
+            self.c1_name = cap.cap_name
+            self.c1_status = cap.cap_status
+        if self.count == 2:
+            self.c2_name = cap.cap_name
+            self.c2_status = cap.cap_status
+        if self.count == 3:
+            self.c3_name = cap.cap_name
+            self.c3_status = cap.cap_status
+        if self.count == 4:
+            self.c4_name = cap.cap_name
+            self.c4_status = cap.cap_status
+        if self.count == 5:
+            self.c5_name = cap.cap_name
+            self.c5_status = cap.cap_status
+        self.count = self.count + 1
+        self.count
+
+    me ready_count() -> i64:
+        var n = 0
+        if self.c0_status == "ready": n = n + 1
+        if self.c1_status == "ready": n = n + 1
+        if self.c2_status == "ready": n = n + 1
+        if self.c3_status == "ready": n = n + 1
+        if self.c4_status == "ready": n = n + 1
+        if self.c5_status == "ready": n = n + 1
+        n
+
+    me missing_count() -> i64:
+        var n = 0
+        if self.c0_status == "missing": n = n + 1
+        if self.c1_status == "missing": n = n + 1
+        if self.c2_status == "missing": n = n + 1
+        if self.c3_status == "missing": n = n + 1
+        if self.c4_status == "missing": n = n + 1
+        if self.c5_status == "missing": n = n + 1
+        n
+
+    me coverage_percent() -> i64:
+        if self.count == 0:
+            return 0
+        (self.ready_count() * 100) / self.count
+
+    me all_ready() -> bool:
+        self.missing_count() == 0
+
+
+class DevicePlatform:
+    graphics_status: text
+    audio_status: text
+    input_status: text
+    network_status: text
+    filesystem_status: text
+    cpu_fallback_status: text
+
+    static fn create(gfx: text, aud: text, inp: text, net: text, fs: text, cpu: text) -> DevicePlatform:
+        DevicePlatform(
+            graphics_status: gfx,
+            audio_status: aud,
+            input_status: inp,
+            network_status: net,
+            filesystem_status: fs,
+            cpu_fallback_status: cpu
+        )
+
+    me graphics_ready() -> bool:
+        self.graphics_status == "ready"
+
+    me audio_ready() -> bool:
+        self.audio_status == "ready"
+
+    me input_ready() -> bool:
+        self.input_status == "ready"
+
+    me filesystem_ready() -> bool:
+        self.filesystem_status == "ready"
+
+    me cpu_fallback_ready() -> bool:
+        self.cpu_fallback_status == "ready"
+
+    me all_core_ready() -> bool:
+        self.graphics_ready() and self.audio_ready() and self.input_ready() and self.filesystem_ready()
+
+    me ready_count() -> i64:
+        var n = 0
+        if self.graphics_ready(): n = n + 1
+        if self.audio_ready(): n = n + 1
+        if self.input_ready(): n = n + 1
+        if self.filesystem_ready(): n = n + 1
+        if self.cpu_fallback_ready(): n = n + 1
+        n
+
+
+class PrefixInfo:
+    app_id: text
+    steam_runtime_version: text
+    proton_version: text
+    wine_prefix: text
+    sandbox_policy: text
+    is_valid: bool
+
+    static fn create(app: text, sr: text, proton: text, wine: text, policy: text) -> PrefixInfo:
+        PrefixInfo(
+            app_id: app,
+            steam_runtime_version: sr,
+            proton_version: proton,
+            wine_prefix: wine,
+            sandbox_policy: policy,
+            is_valid: true
+        )
+
+    static fn empty(app: text) -> PrefixInfo:
+        PrefixInfo(
+            app_id: app,
+            steam_runtime_version: "",
+            proton_version: "",
+            wine_prefix: "",
+            sandbox_policy: "default",
+            is_valid: false
+        )
+
+    me has_steam_runtime() -> bool:
+        self.steam_runtime_version != ""
+
+    me has_proton() -> bool:
+        self.proton_version != ""
+
+    me is_proton_capable() -> bool:
+        self.is_valid and self.has_steam_runtime() and self.has_proton()
+
+    me prefix_root() -> text:
+        "/games/app_" + self.app_id
+
+
+class SandboxPolicy:
+    app_id: text
+    policy_name: text
+    allow_network: bool
+    allow_gpu: bool
+    allow_audio: bool
+    violations: i64
+
+    static fn game_default(app: text) -> SandboxPolicy:
+        SandboxPolicy(
+            app_id: app,
+            policy_name: "game-default",
+            allow_network: true,
+            allow_gpu: true,
+            allow_audio: true,
+            violations: 0
+        )
+
+    static fn strict(app: text) -> SandboxPolicy:
+        SandboxPolicy(
+            app_id: app,
+            policy_name: "strict",
+            allow_network: false,
+            allow_gpu: true,
+            allow_audio: true,
+            violations: 0
+        )
+
+    me record_violation() -> i64:
+        self.violations = self.violations + 1
+        self.violations
+
+    me is_clean() -> bool:
+        self.violations == 0
+
+
+class ProtonReadiness:
+    linux_abi_ok: bool
+    vulkan_ok: bool
+    audio_ok: bool
+    input_ok: bool
+    prefix_ok: bool
+    steam_runtime_version: text
+    proton_version: text
+
+    static fn create(la: bool, vk: bool, aud: bool, inp: bool, pfx: bool, sr: text, proton: text) -> ProtonReadiness:
+        ProtonReadiness(
+            linux_abi_ok: la,
+            vulkan_ok: vk,
+            audio_ok: aud,
+            input_ok: inp,
+            prefix_ok: pfx,
+            steam_runtime_version: sr,
+            proton_version: proton
+        )
+
+    me is_host_ready() -> bool:
+        self.linux_abi_ok and self.vulkan_ok and self.audio_ok and self.input_ok and self.prefix_ok
+
+    me pass_count() -> i64:
+        var n = 0
+        if self.linux_abi_ok: n = n + 1
+        if self.vulkan_ok: n = n + 1
+        if self.audio_ok: n = n + 1
+        if self.input_ok: n = n + 1
+        if self.prefix_ok: n = n + 1
+        n
+
+    me blocker_count() -> i64:
+        5 - self.pass_count()
+
+
+describe "Game Compat Platform":
+
+    it "linux_capability_ready_status_is_ready":
+        val cap = CapEntry.ready("elf_load")
+        expect(cap.is_ready()).to_equal(true)
+        expect(cap.is_missing()).to_equal(false)
+        expect(cap.cap_status).to_equal("ready")
+
+    it "linux_capability_missing_status_is_blocking":
+        val cap = CapEntry.missing_cap("epoll")
+        expect(cap.is_blocking()).to_equal(true)
+        expect(cap.is_ready()).to_equal(false)
+        expect(cap.is_missing()).to_equal(true)
+
+    it "linux_capability_partial_is_not_ready_not_missing":
+        val cap = CapEntry.partial("mmap")
+        expect(cap.is_ready()).to_equal(false)
+        expect(cap.is_missing()).to_equal(false)
+
+    it "capability_matrix_counts_ready_entries":
+        var mx = CapMatrix.create()
+        mx.add(CapEntry.ready("elf_load"))
+        mx.add(CapEntry.ready("futex"))
+        mx.add(CapEntry.partial("mmap"))
+        mx.add(CapEntry.missing_cap("epoll"))
+        expect(mx.ready_count()).to_equal(2)
+        expect(mx.missing_count()).to_equal(1)
+        expect(mx.count).to_equal(4)
+
+    it "capability_matrix_coverage_percent":
+        var mx = CapMatrix.create()
+        mx.add(CapEntry.ready("a"))
+        mx.add(CapEntry.ready("b"))
+        mx.add(CapEntry.missing_cap("c"))
+        mx.add(CapEntry.missing_cap("d"))
+        expect(mx.coverage_percent()).to_equal(50)
+
+    it "capability_matrix_all_ready_when_no_missing":
+        var mx = CapMatrix.create()
+        mx.add(CapEntry.ready("elf_load"))
+        mx.add(CapEntry.partial("mmap"))
+        expect(mx.all_ready()).to_equal(true)
+
+    it "capability_matrix_not_all_ready_when_missing_present":
+        var mx = CapMatrix.create()
+        mx.add(CapEntry.ready("elf_load"))
+        mx.add(CapEntry.missing_cap("epoll"))
+        expect(mx.all_ready()).to_equal(false)
+
+    it "device_platform_individual_readiness_markers":
+        val dp = DevicePlatform.create("ready", "partial", "ready", "partial", "ready", "not_ready")
+        expect(dp.graphics_ready()).to_equal(true)
+        expect(dp.audio_ready()).to_equal(false)
+        expect(dp.input_ready()).to_equal(true)
+        expect(dp.filesystem_ready()).to_equal(true)
+        expect(dp.cpu_fallback_ready()).to_equal(false)
+
+    it "device_platform_all_core_ready_requires_four":
+        val dp_ok = DevicePlatform.create("ready", "ready", "ready", "ready", "ready", "not_ready")
+        val dp_bad = DevicePlatform.create("partial", "ready", "ready", "ready", "ready", "not_ready")
+        expect(dp_ok.all_core_ready()).to_equal(true)
+        expect(dp_bad.all_core_ready()).to_equal(false)
+
+    it "device_platform_ready_count":
+        val dp = DevicePlatform.create("ready", "ready", "not_ready", "ready", "not_ready", "not_ready")
+        expect(dp.ready_count()).to_equal(2)
+
+    it "prefix_manifest_valid_fields":
+        val pf = PrefixInfo.create("12345", "sniper-3", "8.0-5", "/games/app_12345/pfx/drive_c", "game-default")
+        expect(pf.is_valid).to_equal(true)
+        expect(pf.has_steam_runtime()).to_equal(true)
+        expect(pf.has_proton()).to_equal(true)
+        expect(pf.is_proton_capable()).to_equal(true)
+
+    it "prefix_manifest_empty_is_not_proton_capable":
+        val pf = PrefixInfo.empty("99999")
+        expect(pf.is_valid).to_equal(false)
+        expect(pf.is_proton_capable()).to_equal(false)
+        expect(pf.has_steam_runtime()).to_equal(false)
+
+    it "prefix_manifest_root_path_format":
+        val pf = PrefixInfo.create("42", "sniper-3", "8.0-5", "/games/app_42/pfx/drive_c", "game-default")
+        expect(pf.prefix_root()).to_equal("/games/app_42")
+
+    it "sandbox_policy_game_default_allows_network_gpu_audio":
+        val sp = SandboxPolicy.game_default("12345")
+        expect(sp.allow_network).to_equal(true)
+        expect(sp.allow_gpu).to_equal(true)
+        expect(sp.allow_audio).to_equal(true)
+        expect(sp.policy_name).to_equal("game-default")
+
+    it "sandbox_policy_strict_disallows_network":
+        val sp = SandboxPolicy.strict("12345")
+        expect(sp.allow_network).to_equal(false)
+        expect(sp.allow_gpu).to_equal(true)
+
+    it "sandbox_policy_violation_tracking":
+        var sp = SandboxPolicy.game_default("12345")
+        expect(sp.is_clean()).to_equal(true)
+        sp.record_violation()
+        expect(sp.is_clean()).to_equal(false)
+        expect(sp.violations).to_equal(1)
+
+    it "proton_readiness_all_pass_is_host_ready":
+        val pr = ProtonReadiness.create(true, true, true, true, true, "sniper-3", "8.0-5")
+        expect(pr.is_host_ready()).to_equal(true)
+        expect(pr.blocker_count()).to_equal(0)
+        expect(pr.pass_count()).to_equal(5)
+
+    it "proton_readiness_missing_linux_abi_blocks_host":
+        val pr = ProtonReadiness.create(false, true, true, true, true, "sniper-3", "8.0-5")
+        expect(pr.is_host_ready()).to_equal(false)
+        expect(pr.blocker_count()).to_equal(1)
+
+    it "proton_readiness_multiple_blockers":
+        val pr = ProtonReadiness.create(false, false, true, false, true, "", "")
+        expect(pr.is_host_ready()).to_equal(false)
+        expect(pr.blocker_count()).to_equal(3)
+        expect(pr.pass_count()).to_equal(2)
+
+    it "proton_readiness_partial_simpleos_has_blockers":
+        val pr = ProtonReadiness.create(true, false, false, true, false, "sniper-3", "")
+        expect(pr.is_host_ready()).to_equal(false)
+        expect(pr.blocker_count()).to_equal(3)
+        expect(pr.steam_runtime_version).to_equal("sniper-3")

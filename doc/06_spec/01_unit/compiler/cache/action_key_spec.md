@@ -1,0 +1,889 @@
+# ActionKey Canonical Encoder Specification
+
+> Tests for the canonical ActionKey encoder — the global cache identity layer. Mirrors the Lean model's theorems: set-field reorder invariance, per-field digest sensitivity (all 15 fields), delimiter-injection resistance, resolution-witness probe order sensitivity, and golden digest stability.
+
+| Tests | Active | Skipped | Pending |
+|-------|--------|---------|--------:|
+| 32 | 32 | 0 | 0 |
+
+<details>
+<summary>Full Scenario Manual</summary>
+
+# ActionKey Canonical Encoder Specification
+
+Tests for the canonical ActionKey encoder — the global cache identity layer. Mirrors the Lean model's theorems: set-field reorder invariance, per-field digest sensitivity (all 15 fields), delimiter-injection resistance, resolution-witness probe order sensitivity, and golden digest stability.
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Infrastructure |
+| Status | Active |
+| Plan | doc/03_plan/compiler/cache/global_cas_interpreter_cache_option_c_plan_2026-07-24.md (§1.1) |
+| Source | `test/01_unit/compiler/cache/action_key_spec.spl` |
+| Updated | 2026-08-26 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+Tests for the canonical ActionKey encoder — the global cache identity layer.
+Mirrors the Lean model's theorems: set-field reorder invariance, per-field
+digest sensitivity (all 15 fields), delimiter-injection resistance,
+resolution-witness probe order sensitivity, and golden digest stability.
+
+## Scenarios
+
+### ActionKey set-field reorder invariance
+
+#### deps_reorder_hits: same deps in different order give identical digest
+
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- deps_reorder_hits: same deps in different order give identical digest
+   - Expected: action_key_digest(k1) equals `action_key_digest(k2)`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("deps_reorder_hits: same deps in different order give identical digest")
+val k1 = sample_key()
+var k2 = sample_key()
+var rev: [ActionDep] = []
+rev.push(dep("mod.beta", "iface-b"))
+rev.push(dep("mod.alpha", "iface-a"))
+k2.deps = rev
+expect(action_key_digest(k1)).to_equal(action_key_digest(k2))
+```
+
+</details>
+
+#### cfg_reorder_hits: same cfg features reordered give identical digest
+
+- cfg_reorder_hits: same cfg features reordered give identical digest
+   - Expected: action_key_digest(k1) equals `action_key_digest(k2)`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("cfg_reorder_hits: same cfg features reordered give identical digest")
+val k1 = sample_key()
+var k2 = sample_key()
+k2.cfg_features = ["feat_b", "feat_a"]
+expect(action_key_digest(k1)).to_equal(action_key_digest(k2))
+```
+
+</details>
+
+#### ct_env_reorder_hits: same ct_env_inputs reordered give identical digest
+
+- ct_env_reorder_hits: same ct_env_inputs reordered give identical digest
+   - Expected: action_key_digest(k1) equals `action_key_digest(k2)`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("ct_env_reorder_hits: same ct_env_inputs reordered give identical digest")
+val k1 = sample_key()
+var k2 = sample_key()
+k2.ct_env_inputs = ["SIMPLE_TARGET=host", "SIMPLE_CFG=1"]
+expect(action_key_digest(k1)).to_equal(action_key_digest(k2))
+```
+
+</details>
+
+### ActionKey field sensitivity (all 15 fields)
+
+#### changing domain changes the digest
+
+- changing domain changes the digest
+   - Expected: action_key_digest(k) == base is false
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("changing domain changes the digest")
+val base = action_key_digest(sample_key())
+var k = sample_key()
+k.domain = "simple/interpreter-module/v2"
+expect(action_key_digest(k) == base).to_equal(false)
+```
+
+</details>
+
+#### changing compiler_exe changes the digest
+
+- changing compiler_exe changes the digest
+   - Expected: action_key_digest(k) == base is false
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("changing compiler_exe changes the digest")
+val base = action_key_digest(sample_key())
+var k = sample_key()
+k.compiler_exe = "ce-digest-CHANGED"
+expect(action_key_digest(k) == base).to_equal(false)
+```
+
+</details>
+
+#### changing live_compiler_src changes the digest
+
+- changing live_compiler_src changes the digest
+   - Expected: action_key_digest(k) == base is false
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("changing live_compiler_src changes the digest")
+val base = action_key_digest(sample_key())
+var k = sample_key()
+k.live_compiler_src = "lcs-digest-CHANGED"
+expect(action_key_digest(k) == base).to_equal(false)
+```
+
+</details>
+
+#### changing schema_version changes the digest
+
+- changing schema_version changes the digest
+   - Expected: action_key_digest(k) == base is false
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("changing schema_version changes the digest")
+val base = action_key_digest(sample_key())
+var k = sample_key()
+k.schema_version = 4
+expect(action_key_digest(k) == base).to_equal(false)
+```
+
+</details>
+
+#### changing target_triple changes the digest
+
+- changing target_triple changes the digest
+   - Expected: action_key_digest(k) == base is false
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("changing target_triple changes the digest")
+val base = action_key_digest(sample_key())
+var k = sample_key()
+k.target_triple = "riscv64-unknown-linux-gnu"
+expect(action_key_digest(k) == base).to_equal(false)
+```
+
+</details>
+
+#### changing host_arch changes the digest
+
+- changing host_arch changes the digest
+   - Expected: action_key_digest(k) == base is false
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("changing host_arch changes the digest")
+val base = action_key_digest(sample_key())
+var k = sample_key()
+k.host_arch = "aarch64"
+expect(action_key_digest(k) == base).to_equal(false)
+```
+
+</details>
+
+#### changing cfg_features changes the digest
+
+- changing cfg_features changes the digest
+   - Expected: action_key_digest(k) == base is false
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("changing cfg_features changes the digest")
+val base = action_key_digest(sample_key())
+var k = sample_key()
+k.cfg_features = ["feat_a", "feat_c"]
+expect(action_key_digest(k) == base).to_equal(false)
+```
+
+</details>
+
+#### changing stdlib_variant changes the digest
+
+- changing stdlib_variant changes the digest
+   - Expected: action_key_digest(k) == base is false
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("changing stdlib_variant changes the digest")
+val base = action_key_digest(sample_key())
+var k = sample_key()
+k.stdlib_variant = "minimal"
+expect(action_key_digest(k) == base).to_equal(false)
+```
+
+</details>
+
+#### changing runtime_family changes the digest
+
+- changing runtime_family changes the digest
+   - Expected: action_key_digest(k) == base is false
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("changing runtime_family changes the digest")
+val base = action_key_digest(sample_key())
+var k = sample_key()
+k.runtime_family = "gc_async_mut"
+expect(action_key_digest(k) == base).to_equal(false)
+```
+
+</details>
+
+#### changing source_content changes the digest (source_change_visible)
+
+- changing source_content changes the digest (source_change_visible)
+   - Expected: action_key_digest(k) == base is false
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("changing source_content changes the digest (source_change_visible)")
+val base = action_key_digest(sample_key())
+var k = sample_key()
+k.source_content = "src-digest-CHANGED"
+expect(action_key_digest(k) == base).to_equal(false)
+```
+
+</details>
+
+#### changing resolution_witness changes the digest
+
+- changing resolution_witness changes the digest
+   - Expected: action_key_digest(k) == base is false
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("changing resolution_witness changes the digest")
+val base = action_key_digest(sample_key())
+var k = sample_key()
+k.resolution_witness = "rw-digest-CHANGED"
+expect(action_key_digest(k) == base).to_equal(false)
+```
+
+</details>
+
+#### changing deps changes the digest
+
+- changing deps changes the digest
+   - Expected: action_key_digest(k) == base is false
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("changing deps changes the digest")
+val base = action_key_digest(sample_key())
+var k = sample_key()
+var deps: [ActionDep] = []
+deps.push(dep("mod.alpha", "iface-CHANGED"))
+deps.push(dep("mod.beta", "iface-b"))
+k.deps = deps
+expect(action_key_digest(k) == base).to_equal(false)
+```
+
+</details>
+
+#### changing macro_root changes the digest
+
+- changing macro_root changes the digest
+   - Expected: action_key_digest(k) == base is false
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("changing macro_root changes the digest")
+val base = action_key_digest(sample_key())
+var k = sample_key()
+k.macro_root = "macro-digest-CHANGED"
+expect(action_key_digest(k) == base).to_equal(false)
+```
+
+</details>
+
+#### changing aop_selection changes the digest (aop_change_visible)
+
+- changing aop_selection changes the digest (aop_change_visible)
+   - Expected: action_key_digest(k) == base is false
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("changing aop_selection changes the digest (aop_change_visible)")
+val base = action_key_digest(sample_key())
+var k = sample_key()
+k.aop_selection = "aop-digest-CHANGED"
+expect(action_key_digest(k) == base).to_equal(false)
+```
+
+</details>
+
+#### changing ct_env_inputs changes the digest
+
+- changing ct_env_inputs changes the digest
+   - Expected: action_key_digest(k) == base is false
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("changing ct_env_inputs changes the digest")
+val base = action_key_digest(sample_key())
+var k = sample_key()
+k.ct_env_inputs = ["SIMPLE_CFG=2", "SIMPLE_TARGET=host"]
+expect(action_key_digest(k) == base).to_equal(false)
+```
+
+</details>
+
+### ActionKey delimiter-injection resistance
+
+#### module_id 'a' + iface 'b:c' differs from module_id 'a:b' + iface 'c'
+
+- module_id 'a' + iface 'b:c' differs from module_id 'a:b' + iface 'c'
+   - Expected: action_key_digest(k1) == action_key_digest(k2) is false
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("module_id 'a' + iface 'b:c' differs from module_id 'a:b' + iface 'c'")
+var k1 = sample_key()
+var d1: [ActionDep] = []
+d1.push(dep("a", "b:c"))
+k1.deps = d1
+var k2 = sample_key()
+var d2: [ActionDep] = []
+d2.push(dep("a:b", "c"))
+k2.deps = d2
+expect(action_key_digest(k1) == action_key_digest(k2)).to_equal(false)
+```
+
+</details>
+
+#### module_id 'ab' + iface 'c' differs from module_id 'a' + iface 'bc'
+
+- module_id 'ab' + iface 'c' differs from module_id 'a' + iface 'bc'
+   - Expected: action_key_digest(k1) == action_key_digest(k2) is false
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("module_id 'ab' + iface 'c' differs from module_id 'a' + iface 'bc'")
+var k1 = sample_key()
+var d1: [ActionDep] = []
+d1.push(dep("ab", "c"))
+k1.deps = d1
+var k2 = sample_key()
+var d2: [ActionDep] = []
+d2.push(dep("a", "bc"))
+k2.deps = d2
+expect(action_key_digest(k1) == action_key_digest(k2)).to_equal(false)
+```
+
+</details>
+
+#### cfg feature containing separator cannot forge two features
+
+- cfg feature containing separator cannot forge two features
+   - Expected: action_key_digest(k1) == action_key_digest(k2) is false
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("cfg feature containing separator cannot forge two features")
+var k1 = sample_key()
+k1.cfg_features = ["a:b"]
+var k2 = sample_key()
+k2.cfg_features = ["a", "b"]
+expect(action_key_digest(k1) == action_key_digest(k2)).to_equal(false)
+```
+
+</details>
+
+#### value spilling across adjacent scalar fields cannot forge a key
+
+- value spilling across adjacent scalar fields cannot forge a key
+   - Expected: action_key_digest(k1) == action_key_digest(k2) is false
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("value spilling across adjacent scalar fields cannot forge a key")
+var k1 = sample_key()
+k1.stdlib_variant = "xy"
+k1.runtime_family = "z"
+var k2 = sample_key()
+k2.stdlib_variant = "x"
+k2.runtime_family = "yz"
+expect(action_key_digest(k1) == action_key_digest(k2)).to_equal(false)
+```
+
+</details>
+
+### ActionKey empty vs singleton set fields
+
+#### empty cfg_features differs from singleton empty-string feature
+
+- empty cfg_features differs from singleton empty-string feature
+   - Expected: action_key_digest(k1) == action_key_digest(k2) is false
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("empty cfg_features differs from singleton empty-string feature")
+var k1 = sample_key()
+var none: [text] = []
+k1.cfg_features = none
+var k2 = sample_key()
+k2.cfg_features = [""]
+expect(action_key_digest(k1) == action_key_digest(k2)).to_equal(false)
+```
+
+</details>
+
+#### empty deps differs from singleton empty dep
+
+- empty deps differs from singleton empty dep
+   - Expected: action_key_digest(k1) == action_key_digest(k2) is false
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("empty deps differs from singleton empty dep")
+var k1 = sample_key()
+var none: [ActionDep] = []
+k1.deps = none
+var k2 = sample_key()
+var one: [ActionDep] = []
+one.push(dep("", ""))
+k2.deps = one
+expect(action_key_digest(k1) == action_key_digest(k2)).to_equal(false)
+```
+
+</details>
+
+#### empty ct_env_inputs differs from singleton empty-string input
+
+- empty ct_env_inputs differs from singleton empty-string input
+   - Expected: action_key_digest(k1) == action_key_digest(k2) is false
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("empty ct_env_inputs differs from singleton empty-string input")
+var k1 = sample_key()
+var none: [text] = []
+k1.ct_env_inputs = none
+var k2 = sample_key()
+k2.ct_env_inputs = [""]
+expect(action_key_digest(k1) == action_key_digest(k2)).to_equal(false)
+```
+
+</details>
+
+### ActionKey digest stability
+
+#### encodes the fixed sample key to the golden canonical text
+
+- encodes the fixed sample key to the golden canonical text
+   - Expected: enc.len() > 0 is true
+   - Expected: enc.starts_with("F28:simple/interpreter-module/v1Q14:") is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("encodes the fixed sample key to the golden canonical text")
+val enc = action_key_encode(sample_key())
+expect(enc.len() > 0).to_equal(true)
+# Outer frame: field tag = domain (28 chars), then a 14-item seq.
+expect(enc.starts_with("F28:simple/interpreter-module/v1Q14:")).to_equal(true)
+```
+
+</details>
+
+#### produces the golden digest for the fixed sample key
+
+- produces the golden digest for the fixed sample key
+   - Expected: action_key_digest(sample_key()) equals `3c3d8f91692d85f55643e1467e0b0c6c8eec17d707cc3d58b86b7925aa764759`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("produces the golden digest for the fixed sample key")
+# Golden value independently verified against coreutils sha256sum of the
+# hand-built canonical encoding. If this changes, the encoding changed.
+expect(action_key_digest(sample_key())).to_equal("3c3d8f91692d85f55643e1467e0b0c6c8eec17d707cc3d58b86b7925aa764759")
+```
+
+</details>
+
+### resolution_witness_digest
+
+#### reordering candidate probes CHANGES the digest (order is semantic)
+
+- reordering candidate probes CHANGES the digest (order is semantic)
+   - Expected: d1 == d2 is false
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("reordering candidate probes CHANGES the digest (order is semantic)")
+var rev: [ResolutionProbe] = []
+rev.push(ResolutionProbe(path: "/src/b.spl", found: true))
+rev.push(ResolutionProbe(path: "/src/a.spl", found: false))
+val d1 = resolution_witness_digest(probes_ab(), "/src/b.spl", "gen-1", "resolver-v1")
+val d2 = resolution_witness_digest(rev, "/src/b.spl", "gen-1", "resolver-v1")
+expect(d1 == d2).to_equal(false)
+```
+
+</details>
+
+#### changing a probe's found flag changes the digest
+
+- changing a probe's found flag changes the digest
+   - Expected: d1 == d2 is false
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("changing a probe's found flag changes the digest")
+var flipped: [ResolutionProbe] = []
+flipped.push(ResolutionProbe(path: "/src/a.spl", found: true))
+flipped.push(ResolutionProbe(path: "/src/b.spl", found: true))
+val d1 = resolution_witness_digest(probes_ab(), "/src/b.spl", "gen-1", "resolver-v1")
+val d2 = resolution_witness_digest(flipped, "/src/b.spl", "gen-1", "resolver-v1")
+expect(d1 == d2).to_equal(false)
+```
+
+</details>
+
+#### changing selected / dir_generation / resolver_version changes the digest
+
+- changing selected / dir_generation / resolver_version changes the digest
+   - Expected: d1 == d_sel is false
+   - Expected: d1 == d_gen is false
+   - Expected: d1 == d_ver is false
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("changing selected / dir_generation / resolver_version changes the digest")
+val d1 = resolution_witness_digest(probes_ab(), "/src/b.spl", "gen-1", "resolver-v1")
+val d_sel = resolution_witness_digest(probes_ab(), "/src/a.spl", "gen-1", "resolver-v1")
+val d_gen = resolution_witness_digest(probes_ab(), "/src/b.spl", "gen-2", "resolver-v1")
+val d_ver = resolution_witness_digest(probes_ab(), "/src/b.spl", "gen-1", "resolver-v2")
+expect(d1 == d_sel).to_equal(false)
+expect(d1 == d_gen).to_equal(false)
+expect(d1 == d_ver).to_equal(false)
+```
+
+</details>
+
+### interface_digest_of
+
+#### is order-insensitive (parts form a sorted set)
+
+- is order-insensitive (parts form a sorted set)
+   - Expected: d1 equals `d2`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("is order-insensitive (parts form a sorted set)")
+val d1 = interface_digest_of(["fn foo() -> i64", "fn bar() -> text"])
+val d2 = interface_digest_of(["fn bar() -> text", "fn foo() -> i64"])
+expect(d1).to_equal(d2)
+```
+
+</details>
+
+#### distinguishes different parts and resists delimiter injection
+
+- distinguishes different parts and resists delimiter injection
+   - Expected: d1 == d2 is false
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("distinguishes different parts and resists delimiter injection")
+val d1 = interface_digest_of(["ab", "c"])
+val d2 = interface_digest_of(["a", "bc"])
+expect(d1 == d2).to_equal(false)
+```
+
+</details>
+
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 32 |
+| Active scenarios | 32 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
+
+
+## Related Documentation
+
+- **Plan:** `doc/03_plan/compiler/cache/global_cas_interpreter_cache_option_c_plan_2026-07-24.md (§1.1)`
+
+
+</details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `9d9dcfca4860bcc527ffeb1097aadb5ea0ad48046eca9e75fc80c91a02f32a64`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `9d9dcfca4860bcc527ffeb1097aadb5ea0ad48046eca9e75fc80c91a02f32a64`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `9d9dcfca4860bcc527ffeb1097aadb5ea0ad48046eca9e75fc80c91a02f32a64`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/01_unit/compiler/cache/action_key_spec.spl
+mirror: doc/06_spec/01_unit/compiler/cache/action_key_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/compiler/cache/action_key_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/compiler/cache/action_key_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/compiler/cache/action_key_spec.spl:60:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'deps_reorder_hits: same deps in different order give identical digest' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/compiler/cache/action_key_spec.spl:71:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'cfg_reorder_hits: same cfg features reordered give identical digest' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/compiler/cache/action_key_spec.spl:79:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'ct_env_reorder_hits: same ct_env_inputs reordered give identical digest' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

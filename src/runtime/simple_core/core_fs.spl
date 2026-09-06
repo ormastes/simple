@@ -1,0 +1,837 @@
+# Pure-Simple `simple-core` file system ABI wrappers.
+#
+# Provides file I/O primitives (read, write, append, exists, delete, size)
+# and directory creation (mkdir -p) by delegating to libc/POSIX.
+# Public rt_* entrypoints follow the compiler runtime SFFI ABI: text inputs
+# arrive as pointer/length pairs and text outputs return runtime tagged values.
+
+@unsafe(reason: "raw libc heap allocation ABI; zero means failure", capabilities: [ffi, raw_ptr])
+extern fn malloc(size: i64) -> i64
+@unsafe(reason: "raw libc owned heap-pointer release ABI", capabilities: [ffi, raw_ptr])
+extern fn free(ptr: i64)
+@unsafe(reason: "raw NUL-terminated string pointer length ABI", capabilities: [ffi, raw_ptr])
+extern fn strlen(s: i64) -> i64
+@unsafe(reason: "raw libc path/mode pointer and FILE handle ABI; zero means failure", capabilities: [ffi, raw_ptr])
+extern fn fopen(path: i64, mode: i64) -> i64
+@unsafe(reason: "raw libc FILE-handle close status ABI", capabilities: [ffi, raw_ptr])
+extern fn fclose(stream: i64) -> i64
+@unsafe(reason: "raw libc FILE-handle mutable pointer/element extent read ABI", capabilities: [ffi, raw_ptr])
+extern fn fread(ptr: i64, size: i64, count: i64, stream: i64) -> i64
+@unsafe(reason: "raw libc FILE-handle pointer/element extent write ABI", capabilities: [ffi, raw_ptr])
+extern fn fwrite(ptr: i64, size: i64, count: i64, stream: i64) -> i64
+@unsafe(reason: "raw libc FILE-handle error-state ABI", capabilities: [ffi, raw_ptr])
+extern fn ferror(stream: i64) -> i64
+@unsafe(reason: "raw libc FILE-handle seek status ABI", capabilities: [ffi, raw_ptr])
+extern fn fseek(stream: i64, offset: i64, whence: i64) -> i64
+@unsafe(reason: "raw libc FILE-handle position ABI; negative return is failure", capabilities: [ffi, raw_ptr])
+extern fn ftell(stream: i64) -> i64
+@unsafe(reason: "raw libc path pointer and file-descriptor ABI; negative return is failure", capabilities: [ffi, raw_ptr])
+extern fn open(path: i64, flags: i64) -> i64
+@unsafe(reason: "raw file-descriptor mutable pointer/count read ABI", capabilities: [ffi, raw_ptr])
+extern fn read(fd: i64, ptr: i64, count: i64) -> i64
+@unsafe(reason: "raw file-descriptor pointer/count write ABI", capabilities: [ffi, raw_ptr])
+extern fn write(fd: i64, ptr: i64, count: i64) -> i64
+@unsafe(reason: "raw file-descriptor close status ABI", capabilities: [ffi])
+extern fn close(fd: i64) -> i64
+@unsafe(reason: "raw file-descriptor synchronization status ABI", capabilities: [ffi])
+extern fn fsync(fd: i64) -> i64
+@unsafe(reason: "raw file-descriptor seek ABI; negative return is failure", capabilities: [ffi])
+extern fn lseek(fd: i64, offset: i64, whence: i64) -> i64
+@unsafe(reason: "raw memory-map address/length and file-descriptor ABI; failure sentinel is platform-defined", capabilities: [ffi, raw_ptr])
+extern fn mmap(addr: i64, length: i64, prot: i64, flags: i64, fd: i64, offset: i64) -> i64
+@unsafe(reason: "raw memory-map address/length release ABI", capabilities: [ffi, raw_ptr])
+extern fn munmap(addr: i64, length: i64) -> i64
+@unsafe(reason: "raw libc path pointer and directory-mode status ABI", capabilities: [ffi, raw_ptr])
+extern fn mkdir(path: i64, mode: i64) -> i64
+@unsafe(reason: "raw libc mutable template secure-directory ABI", capabilities: [ffi, raw_ptr])
+extern fn mkdtemp(template: i64) -> i64
+@unsafe(reason: "raw libc path permission ABI", capabilities: [ffi, raw_ptr])
+extern fn chmod(path: i64, mode: i64) -> i64
+@unsafe(reason: "raw libc hard-link publication ABI", capabilities: [ffi, raw_ptr])
+extern fn link(old_path: i64, new_path: i64) -> i64
+@unsafe(reason: "raw libc path unlink ABI", capabilities: [ffi, raw_ptr])
+extern fn unlink(path: i64) -> i64
+@unsafe(reason: "raw libc empty-directory removal ABI", capabilities: [ffi, raw_ptr])
+extern fn rmdir(path: i64) -> i64
+@unsafe(reason: "raw libc thread-local errno pointer ABI", capabilities: [ffi, raw_ptr])
+extern fn __errno_location() -> i64
+@unsafe(reason: "raw libc path pointer and DIR handle ABI; zero means failure", capabilities: [ffi, raw_ptr])
+extern fn opendir(path: i64) -> i64
+@unsafe(reason: "raw libc DIR handle and borrowed dirent pointer ABI", capabilities: [ffi, raw_ptr])
+extern fn readdir(dir: i64) -> i64
+@unsafe(reason: "raw libc DIR-handle close status ABI", capabilities: [ffi, raw_ptr])
+extern fn closedir(dir: i64) -> i64
+@unsafe(reason: "raw libc old/new path pointer rename status ABI", capabilities: [ffi, raw_ptr])
+extern fn rename(old_path: i64, new_path: i64) -> i64
+@unsafe(reason: "raw libc path pointer removal status ABI", capabilities: [ffi, raw_ptr])
+extern fn remove(path: i64) -> i64
+@unsafe(reason: "raw tagged-string borrowed data-pointer ABI", capabilities: [ffi, raw_ptr])
+extern fn rt_string_data(value: i64) -> i64
+@unsafe(reason: "raw tagged-string length ABI", capabilities: [ffi])
+extern fn rt_string_len(value: i64) -> i64
+@unsafe(reason: "raw borrowed byte pointer/length and owned tagged-string ABI", capabilities: [ffi, raw_ptr])
+extern fn rt_string_new(bytes: i64, len: i64) -> i64
+@unsafe(reason: "raw owned tagged-array handle allocation ABI; nonpositive return is failure", capabilities: [ffi])
+extern fn rt_array_new(cap: i64) -> i64
+@unsafe(reason: "raw tagged-array handle value-transfer ABI", capabilities: [ffi])
+extern fn rt_array_push(array: i64, value: i64) -> i8
+@unsafe(reason: "raw owned byte-array handle allocation ABI; nonpositive return is failure", capabilities: [ffi])
+extern fn rt_byte_array_new_len(len: i64) -> i64
+@unsafe(reason: "raw pointer/offset byte load ABI", capabilities: [ffi, raw_ptr])
+extern fn spl_load_u8(ptr: i64, offset: i64) -> i64
+@unsafe(reason: "raw pointer/offset i64 load ABI", capabilities: [ffi, raw_ptr])
+extern fn spl_load_i64(ptr: i64, offset: i64) -> i64
+@unsafe(reason: "raw pointer/offset byte store ABI", capabilities: [ffi, raw_ptr])
+extern fn spl_store_u8(ptr: i64, offset: i64, value: i64)
+@unsafe(reason: "raw pointer/offset i64 store ABI", capabilities: [ffi, raw_ptr])
+extern fn spl_store_i64(ptr: i64, offset: i64, value: i64)
+
+@always_inline
+fn _sffi_core_fs_free(ptr: i64):
+    unsafe(capabilities: [ffi, raw_ptr]):
+        free(ptr)
+
+@always_inline
+fn _sffi_core_fs_fclose(stream: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        fclose(stream)
+
+@always_inline
+fn _sffi_core_fs_close(fd: i64) -> i64:
+    unsafe(capabilities: [ffi]):
+        close(fd)
+
+@always_inline
+fn _sffi_core_fs_rt_string_new(bytes: i64, len: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        rt_string_new(bytes, len)
+
+@always_inline
+fn _sffi_core_fs_load_u8(ptr: i64, offset: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        spl_load_u8(ptr, offset)
+
+@always_inline
+fn _sffi_core_fs_store_u8(ptr: i64, offset: i64, value: i64):
+    unsafe(capabilities: [ffi, raw_ptr]):
+        spl_store_u8(ptr, offset, value)
+
+@always_inline
+fn _sffi_core_fs_malloc(size: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        malloc(size)
+
+@always_inline
+fn _sffi_core_fs_fopen(path: i64, mode: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        fopen(path, mode)
+
+@always_inline
+fn _sffi_core_fs_open(path: i64, flags: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        open(path, flags)
+
+@always_inline
+fn _sffi_core_fs_rt_string_data(value: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        rt_string_data(value)
+
+@always_inline
+fn _sffi_core_fs_rt_string_len(value: i64) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_string_len(value)
+
+@always_inline
+fn _sffi_core_fs_lseek(fd: i64, offset: i64, whence: i64) -> i64:
+    unsafe(capabilities: [ffi]):
+        lseek(fd, offset, whence)
+
+@always_inline
+fn _sffi_core_fs_strlen(ptr: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        strlen(ptr)
+
+@always_inline
+fn _sffi_core_fs_fread(ptr: i64, size: i64, count: i64, stream: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        fread(ptr, size, count, stream)
+
+@always_inline
+fn _sffi_core_fs_fwrite(ptr: i64, size: i64, count: i64, stream: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        fwrite(ptr, size, count, stream)
+
+@always_inline
+fn _sffi_core_fs_ferror(stream: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        ferror(stream)
+
+@always_inline
+fn _sffi_core_fs_fseek(stream: i64, offset: i64, whence: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        fseek(stream, offset, whence)
+
+@always_inline
+fn _sffi_core_fs_ftell(stream: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        ftell(stream)
+
+@always_inline
+fn _sffi_core_fs_read(fd: i64, ptr: i64, count: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        read(fd, ptr, count)
+
+@always_inline
+fn _sffi_core_fs_write(fd: i64, ptr: i64, count: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        write(fd, ptr, count)
+
+@always_inline
+fn _sffi_core_fs_fsync(fd: i64) -> i64:
+    unsafe(capabilities: [ffi]):
+        fsync(fd)
+
+@always_inline
+fn _sffi_core_fs_mmap(addr: i64, length: i64, prot: i64, flags: i64, fd: i64, offset: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        mmap(addr, length, prot, flags, fd, offset)
+
+@always_inline
+fn _sffi_core_fs_munmap(addr: i64, length: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        munmap(addr, length)
+
+@always_inline
+fn _sffi_core_fs_mkdir(path: i64, mode: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        mkdir(path, mode)
+
+fn _sffi_core_fs_mkdtemp(template: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        mkdtemp(template)
+
+fn _sffi_core_fs_chmod(path: i64, mode: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        chmod(path, mode)
+
+fn _sffi_core_fs_link(old_path: i64, new_path: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        link(old_path, new_path)
+
+fn _sffi_core_fs_unlink(path: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        unlink(path)
+
+fn _sffi_core_fs_rmdir(path: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        rmdir(path)
+
+fn _sffi_core_fs_errno() -> i64:
+    val ptr = unsafe(capabilities: [ffi, raw_ptr]):
+        __errno_location()
+    if ptr < 1: -1 else: _sffi_core_fs_load_u8(ptr, 0)
+
+@always_inline
+fn _sffi_core_fs_opendir(path: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        opendir(path)
+
+@always_inline
+fn _sffi_core_fs_readdir(dir: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        readdir(dir)
+
+@always_inline
+fn _sffi_core_fs_closedir(dir: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        closedir(dir)
+
+@always_inline
+fn _sffi_core_fs_rename(old_path: i64, new_path: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        rename(old_path, new_path)
+
+@always_inline
+fn _sffi_core_fs_remove(path: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        remove(path)
+
+@always_inline
+fn _sffi_core_fs_rt_array_new(cap: i64) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_array_new(cap)
+
+@always_inline
+fn _sffi_core_fs_rt_array_push(array: i64, value: i64) -> i8:
+    unsafe(capabilities: [ffi]):
+        rt_array_push(array, value)
+
+@always_inline
+fn _sffi_core_fs_rt_byte_array_new_len(len: i64) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_byte_array_new_len(len)
+
+@always_inline
+fn _sffi_core_fs_load_i64(ptr: i64, offset: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        spl_load_i64(ptr, offset)
+
+@always_inline
+fn _sffi_core_fs_store_i64(ptr: i64, offset: i64, value: i64):
+    unsafe(capabilities: [ffi, raw_ptr]):
+        spl_store_i64(ptr, offset, value)
+
+fn fs_copy_cstr(ptr: i64, len: i64) -> i64:
+    if ptr < 1 or len < 0:
+        return 0
+    val out = _sffi_core_fs_malloc(len + 1)
+    if out < 1:
+        return 0
+    var i = 0
+    while i < len:
+        val byte = _sffi_core_fs_load_u8(ptr, i)
+        if byte == 0:
+            _sffi_core_fs_free(out)
+            return 0
+        _sffi_core_fs_store_u8(out, i, byte)
+        i = i + 1
+    _sffi_core_fs_store_u8(out, len, 0)
+    return out
+
+# --- Helpers for NUL-terminated C string literals ---
+
+fn make_mode_r() -> i64:
+    val buf = _sffi_core_fs_malloc(2)
+    if buf < 1:
+        return 0
+    _sffi_core_fs_store_u8(buf, 0, 114)
+    _sffi_core_fs_store_u8(buf, 1, 0)
+    return buf
+
+fn make_mode_w() -> i64:
+    val buf = _sffi_core_fs_malloc(2)
+    if buf < 1:
+        return 0
+    _sffi_core_fs_store_u8(buf, 0, 119)
+    _sffi_core_fs_store_u8(buf, 1, 0)
+    return buf
+
+fn make_mode_a() -> i64:
+    val buf = _sffi_core_fs_malloc(3)
+    if buf < 1:
+        return 0
+    _sffi_core_fs_store_u8(buf, 0, 97)
+    _sffi_core_fs_store_u8(buf, 1, 98)
+    _sffi_core_fs_store_u8(buf, 2, 0)
+    return buf
+
+fn make_mode_rw(create: bool) -> i64:
+    val buf = _sffi_core_fs_malloc(4)
+    if buf < 1:
+        return 0
+    _sffi_core_fs_store_u8(buf, 0, if create: 119 else: 114)
+    _sffi_core_fs_store_u8(buf, 1, 43)
+    _sffi_core_fs_store_u8(buf, 2, 98)
+    _sffi_core_fs_store_u8(buf, 3, 0)
+    buf
+
+# --- File Existence ---
+
+pub fn rt_file_exists(path_ptr_raw: i64, path_len: i64) -> i8:
+    val path_ptr = fs_copy_cstr(path_ptr_raw, path_len)
+    if path_ptr < 1:
+        return 0
+    val mode = make_mode_r()
+    if mode < 1:
+        _sffi_core_fs_free(path_ptr)
+        return 0
+    val f = _sffi_core_fs_fopen(path_ptr, mode)
+    _sffi_core_fs_free(path_ptr)
+    _sffi_core_fs_free(mode)
+    if f < 1:
+        return 0
+    _sffi_core_fs_fclose(f)
+    return 1
+
+# --- File Read ---
+
+pub fn rt_file_read_text(path_ptr_raw: i64, path_len: i64) -> i64:
+    var raw_ptr = path_ptr_raw
+    var raw_len = path_len
+    if raw_len < 1 and (raw_ptr & 7) == 1:
+        raw_len = _sffi_core_fs_rt_string_len(raw_ptr)
+        raw_ptr = _sffi_core_fs_rt_string_data(raw_ptr)
+    val path_ptr = fs_copy_cstr(raw_ptr, raw_len)
+    if path_ptr < 1:
+        return _sffi_core_fs_rt_string_new(0, 0)
+    val fd = _sffi_core_fs_open(path_ptr, 0)
+    _sffi_core_fs_free(path_ptr)
+    if fd < 0:
+        return _sffi_core_fs_rt_string_new(0, 0)
+    val size = _sffi_core_fs_lseek(fd, 0, 2)
+    if size < 1:
+        _sffi_core_fs_close(fd)
+        return _sffi_core_fs_rt_string_new(0, 0)
+    _sffi_core_fs_lseek(fd, 0, 0)
+    val buf = _sffi_core_fs_malloc(size)
+    if buf < 1:
+        _sffi_core_fs_close(fd)
+        return _sffi_core_fs_rt_string_new(0, 0)
+    val bytes_read = _sffi_core_fs_read(fd, buf, size)
+    _sffi_core_fs_close(fd)
+    if bytes_read < 1:
+        _sffi_core_fs_free(buf)
+        return _sffi_core_fs_rt_string_new(0, 0)
+    val out = _sffi_core_fs_rt_string_new(buf, bytes_read)
+    _sffi_core_fs_free(buf)
+    return out
+
+pub fn rt_file_read_text_rv(path: i64) -> i64:
+    val ptr = _sffi_core_fs_rt_string_data(path)
+    val len = _sffi_core_fs_rt_string_len(path)
+    if ptr < 1 or len < 1:
+        return _sffi_core_fs_rt_string_new(0, 0)
+    return rt_file_read_text(ptr, len)
+
+pub fn rt_file_read_bytes(path_ptr_raw: i64, path_len: i64) -> i64:
+    val path_ptr = fs_copy_cstr(path_ptr_raw, path_len)
+    if path_ptr < 1:
+        return 3
+    val fd = _sffi_core_fs_open(path_ptr, 0)
+    _sffi_core_fs_free(path_ptr)
+    if fd < 0:
+        return 3
+    val size = _sffi_core_fs_lseek(fd, 0, 2)
+    _sffi_core_fs_lseek(fd, 0, 0)
+    if size < 0:
+        _sffi_core_fs_close(fd)
+        return 3
+    val out = _sffi_core_fs_rt_byte_array_new_len(size)
+    if out < 4096 or (out & 7) != 1:
+        _sffi_core_fs_close(fd)
+        return 3
+    if size > 0:
+        val out_ptr = out & -8
+        val data = _sffi_core_fs_load_i64(out_ptr, 24)
+        val bytes_read = _sffi_core_fs_read(fd, data, size)
+        if bytes_read < 0:
+            _sffi_core_fs_close(fd)
+            return 3
+        if bytes_read < size:
+            _sffi_core_fs_store_i64(out_ptr, 8, bytes_read)
+    _sffi_core_fs_close(fd)
+    out
+
+pub fn rt_file_preload_pages(path: i64) -> i64:
+    val raw_ptr = _sffi_core_fs_rt_string_data(path)
+    val raw_len = _sffi_core_fs_rt_string_len(path)
+    val path_ptr = fs_copy_cstr(raw_ptr, raw_len)
+    if path_ptr < 1:
+        return -1
+    val fd = _sffi_core_fs_open(path_ptr, 0)
+    _sffi_core_fs_free(path_ptr)
+    if fd < 0:
+        return -2
+    val size = _sffi_core_fs_lseek(fd, 0, 2)
+    if size < 1:
+        _sffi_core_fs_close(fd)
+        return 0
+    _sffi_core_fs_lseek(fd, 0, 0)
+    # PROT_READ=1, MAP_PRIVATE=2 on POSIX/Linux.
+    val mapped = _sffi_core_fs_mmap(0, size, 1, 2, fd, 0)
+    _sffi_core_fs_close(fd)
+    if mapped == -1:
+        return -3
+    var pos = 0
+    var pages = 0
+    var sum = 0
+    while pos < size:
+        sum = sum + _sffi_core_fs_load_u8(mapped, pos)
+        pages = pages + 1
+        pos = pos + 4096
+    _sffi_core_fs_munmap(mapped, size)
+    return pages + (sum & 0)
+
+# --- File Write ---
+
+fn file_write_with_mode(path_ptr_raw: i64, path_len: i64, content_ptr: i64, content_len: i64, mode_str: i64) -> i8:
+    val path_ptr = fs_copy_cstr(path_ptr_raw, path_len)
+    if path_ptr < 1:
+        _sffi_core_fs_free(mode_str)
+        return 0
+    val f = _sffi_core_fs_fopen(path_ptr, mode_str)
+    _sffi_core_fs_free(path_ptr)
+    _sffi_core_fs_free(mode_str)
+    if f < 1:
+        return 0
+    var written = 0
+    if content_len > 0:
+        if content_ptr < 1:
+            _sffi_core_fs_fclose(f)
+            return 0
+        written = _sffi_core_fs_fwrite(content_ptr, 1, content_len, f)
+    _sffi_core_fs_fclose(f)
+    return if written == content_len: 1 else: 0
+
+pub fn rt_file_write_text(path_ptr: i64, path_len: i64, content_ptr: i64, content_len: i64) -> i8:
+    val mode = make_mode_w()
+    if mode < 1:
+        return 0
+    return file_write_with_mode(path_ptr, path_len, content_ptr, content_len, mode)
+
+pub fn rt_file_create_excl(path_ptr_raw: i64, path_len: i64, content_ptr: i64, content_len: i64) -> i8:
+    val path_ptr = fs_copy_cstr(path_ptr_raw, path_len)
+    if path_ptr < 1 or content_len < 0 or (content_len > 0 and content_ptr < 1):
+        if path_ptr > 0: _sffi_core_fs_free(path_ptr)
+        return 0
+    val fd = _sffi_core_fs_open(path_ptr, 193)
+    _sffi_core_fs_free(path_ptr)
+    if fd < 0:
+        return 0
+    var written = 0
+    if content_len > 0:
+        written = _sffi_core_fs_write(fd, content_ptr, content_len)
+    val closed = _sffi_core_fs_close(fd)
+    if written == content_len and closed == 0: 1 else: 0
+
+pub fn rt_file_sync(path_ptr_raw: i64, path_len: i64) -> i8:
+    val path_ptr = fs_copy_cstr(path_ptr_raw, path_len)
+    if path_ptr < 1:
+        return 0
+    val fd = _sffi_core_fs_open(path_ptr, 2)
+    _sffi_core_fs_free(path_ptr)
+    if fd < 0:
+        return 0
+    val synced = _sffi_core_fs_fsync(fd)
+    val closed = _sffi_core_fs_close(fd)
+    if synced == 0 and closed == 0: 1 else: 0
+
+pub fn rt_simpleos_file_atomic_caps() -> i64:
+    31
+
+pub fn rt_file_write_bytes(path_ptr: i64, path_len: i64, data_ptr: i64, data_len: i64) -> i8:
+    val mode = make_mode_w()
+    if mode < 1:
+        return 0
+    file_write_with_mode(path_ptr, path_len, data_ptr, data_len, mode)
+
+pub fn rt_file_write_text_at(path: i64, offset: i64, data: i64) -> i64:
+    if offset < 0:
+        return -1
+    val path_ptr = fs_copy_cstr(_sffi_core_fs_rt_string_data(path), _sffi_core_fs_rt_string_len(path))
+    if path_ptr < 1:
+        return -1
+    var mode = make_mode_rw(false)
+    if mode < 1:
+        _sffi_core_fs_free(path_ptr)
+        return -1
+    var f = _sffi_core_fs_fopen(path_ptr, mode)
+    _sffi_core_fs_free(mode)
+    if f < 1:
+        mode = make_mode_rw(true)
+        if mode < 1:
+            _sffi_core_fs_free(path_ptr)
+            return -1
+        f = _sffi_core_fs_fopen(path_ptr, mode)
+        _sffi_core_fs_free(mode)
+    _sffi_core_fs_free(path_ptr)
+    if f < 1:
+        return -1
+    if _sffi_core_fs_fseek(f, offset, 0) != 0:
+        _sffi_core_fs_fclose(f)
+        return -1
+    val data_ptr = _sffi_core_fs_rt_string_data(data)
+    val data_len = _sffi_core_fs_rt_string_len(data)
+    val written = _sffi_core_fs_fwrite(data_ptr, 1, data_len, f)
+    _sffi_core_fs_fclose(f)
+    written
+
+pub fn rt_file_append_text(path_ptr: i64, path_len: i64, content_ptr: i64, content_len: i64) -> i8:
+    val mode = make_mode_a()
+    if mode < 1:
+        return 0
+    return file_write_with_mode(path_ptr, path_len, content_ptr, content_len, mode)
+
+# --- File Delete ---
+
+pub fn rt_file_delete(path: i64) -> i64:
+    val path_ptr = _sffi_core_fs_rt_string_data(path)
+    if path_ptr < 1:
+        return 0
+    val result = _sffi_core_fs_remove(path_ptr)
+    if result < 0:
+        return 0
+    return 1
+
+pub fn rt_file_remove(path_ptr: i64, path_len: i64) -> i8:
+    val cstr = fs_copy_cstr(path_ptr, path_len)
+    if cstr < 1:
+        return 0
+    val result = _sffi_core_fs_remove(cstr)
+    _sffi_core_fs_free(cstr)
+    return if result == 0: 1 else: 0
+
+pub fn rt_file_copy(src_ptr: i64, src_len: i64, dst_ptr: i64, dst_len: i64) -> i8:
+    val src = fs_copy_cstr(src_ptr, src_len)
+    val dst = fs_copy_cstr(dst_ptr, dst_len)
+    if src < 1 or dst < 1:
+        if src > 0: _sffi_core_fs_free(src)
+        if dst > 0: _sffi_core_fs_free(dst)
+        return 0
+    val read_mode = make_mode_r()
+    val write_mode = make_mode_w()
+    if read_mode < 1 or write_mode < 1:
+        if read_mode > 0: _sffi_core_fs_free(read_mode)
+        if write_mode > 0: _sffi_core_fs_free(write_mode)
+        _sffi_core_fs_free(src)
+        _sffi_core_fs_free(dst)
+        return 0
+    val input = _sffi_core_fs_fopen(src, read_mode)
+    _sffi_core_fs_free(read_mode)
+    if input < 1:
+        _sffi_core_fs_free(src)
+        _sffi_core_fs_free(dst)
+        _sffi_core_fs_free(write_mode)
+        return 0
+    val output = _sffi_core_fs_fopen(dst, write_mode)
+    _sffi_core_fs_free(src)
+    _sffi_core_fs_free(dst)
+    _sffi_core_fs_free(write_mode)
+    if output < 1:
+        _sffi_core_fs_fclose(input)
+        return 0
+    val buffer = _sffi_core_fs_malloc(4096)
+    if buffer < 1:
+        _sffi_core_fs_fclose(input)
+        _sffi_core_fs_fclose(output)
+        return 0
+    var ok = 1
+    var count = _sffi_core_fs_fread(buffer, 1, 4096, input)
+    while count > 0:
+        if _sffi_core_fs_fwrite(buffer, 1, count, output) != count:
+            ok = 0
+            count = 0
+        else:
+            count = _sffi_core_fs_fread(buffer, 1, 4096, input)
+    if _sffi_core_fs_ferror(input) != 0:
+        ok = 0
+    _sffi_core_fs_free(buffer)
+    _sffi_core_fs_fclose(input)
+    _sffi_core_fs_fclose(output)
+    ok as i8
+
+pub fn rt_file_rename(src_ptr: i64, src_len: i64, dst_ptr: i64, dst_len: i64) -> i8:
+    val src = fs_copy_cstr(src_ptr, src_len)
+    val dst = fs_copy_cstr(dst_ptr, dst_len)
+    if src < 1 or dst < 1:
+        if src > 0: _sffi_core_fs_free(src)
+        if dst > 0: _sffi_core_fs_free(dst)
+        return 0
+    val result = _sffi_core_fs_rename(src, dst)
+    _sffi_core_fs_free(src)
+    _sffi_core_fs_free(dst)
+    if result == 0: 1 else: 0
+
+pub fn rt_secure_temp_dir(parent_ptr: i64, parent_len: i64, prefix_ptr: i64, prefix_len: i64) -> i64:
+    if parent_ptr < 1 or parent_len < 1 or prefix_ptr < 1 or prefix_len < 1:
+        return _sffi_core_fs_rt_string_new(0, 0)
+    var i = 0
+    while i < prefix_len:
+        val byte = _sffi_core_fs_load_u8(prefix_ptr, i)
+        if byte == 0 or byte == 47 or byte == 92:
+            return _sffi_core_fs_rt_string_new(0, 0)
+        i = i + 1
+    val path_len = parent_len + prefix_len + 8
+    val path = _sffi_core_fs_malloc(path_len + 1)
+    if path < 1:
+        return _sffi_core_fs_rt_string_new(0, 0)
+    i = 0
+    while i < parent_len:
+        _sffi_core_fs_store_u8(path, i, _sffi_core_fs_load_u8(parent_ptr, i))
+        i = i + 1
+    _sffi_core_fs_store_u8(path, parent_len, 47)
+    i = 0
+    while i < prefix_len:
+        _sffi_core_fs_store_u8(path, parent_len + 1 + i, _sffi_core_fs_load_u8(prefix_ptr, i))
+        i = i + 1
+    _sffi_core_fs_store_u8(path, parent_len + prefix_len + 1, 45)
+    i = 0
+    while i < 6:
+        _sffi_core_fs_store_u8(path, parent_len + prefix_len + 2 + i, 88)
+        i = i + 1
+    _sffi_core_fs_store_u8(path, path_len, 0)
+    if _sffi_core_fs_mkdtemp(path) < 1 or _sffi_core_fs_chmod(path, 448) != 0:
+        _sffi_core_fs_rmdir(path)
+        _sffi_core_fs_free(path)
+        return _sffi_core_fs_rt_string_new(0, 0)
+    val result = _sffi_core_fs_rt_string_new(path, path_len)
+    _sffi_core_fs_free(path)
+    result
+
+pub fn rt_file_publish_noreplace(src_ptr: i64, src_len: i64, dst_ptr: i64, dst_len: i64) -> i64:
+    val src = fs_copy_cstr(src_ptr, src_len)
+    val dst = fs_copy_cstr(dst_ptr, dst_len)
+    if src < 1 or dst < 1:
+        if src > 0: _sffi_core_fs_free(src)
+        if dst > 0: _sffi_core_fs_free(dst)
+        return -1
+    val linked = _sffi_core_fs_link(src, dst)
+    val error = if linked == 0: 0 else: _sffi_core_fs_errno()
+    if linked == 0: _sffi_core_fs_unlink(src)
+    _sffi_core_fs_free(src)
+    _sffi_core_fs_free(dst)
+    if linked == 0: 1 else: if error == 17: 0 else: -1
+
+# ponytail: guest stat lacks mtime; zero disables cache freshness until VFS stat returns it.
+pub fn rt_file_stat(path_ptr: i64, path_len: i64) -> i64:
+    val _ = path_ptr
+    val _ = path_len
+    0
+
+# --- File Size ---
+
+pub fn rt_file_size(path_ptr_raw: i64, path_len: i64) -> i64:
+    val path_ptr = fs_copy_cstr(path_ptr_raw, path_len)
+    if path_ptr < 1:
+        return 0
+    val mode = make_mode_r()
+    if mode < 1:
+        _sffi_core_fs_free(path_ptr)
+        return 0
+    val f = _sffi_core_fs_fopen(path_ptr, mode)
+    _sffi_core_fs_free(path_ptr)
+    _sffi_core_fs_free(mode)
+    if f < 1:
+        return 0
+    _sffi_core_fs_fseek(f, 0, 2)
+    val size = _sffi_core_fs_ftell(f)
+    _sffi_core_fs_fclose(f)
+    return size
+
+# --- Directory Creation (mkdir -p) ---
+
+pub fn rt_dir_exists(path_ptr_raw: i64, path_len: i64) -> i8:
+    val path_ptr = fs_copy_cstr(path_ptr_raw, path_len)
+    if path_ptr < 1:
+        return 0
+    val dir = _sffi_core_fs_opendir(path_ptr)
+    _sffi_core_fs_free(path_ptr)
+    if dir < 1:
+        return 0
+    _sffi_core_fs_closedir(dir)
+    1
+
+pub fn rt_dir_create(path_ptr: i64, path_len: i64, recursive: i8) -> i8:
+    if recursive != 0:
+        return rt_dir_create_all(path_ptr, path_len)
+    val cstr = fs_copy_cstr(path_ptr, path_len)
+    if cstr < 1:
+        return 0
+    val result = _sffi_core_fs_mkdir(cstr, 511)
+    _sffi_core_fs_free(cstr)
+    if result == 0:
+        return 1
+    rt_dir_exists(path_ptr, path_len)
+
+pub fn rt_dir_create_all(path_ptr_raw: i64, path_len: i64) -> i8:
+    val copy = fs_copy_cstr(path_ptr_raw, path_len)
+    if copy < 1:
+        return 0
+    if path_len < 1:
+        _sffi_core_fs_free(copy)
+        return 0
+    # Walk through path, creating each component
+    var pos = 0
+    # Skip leading slash
+    if _sffi_core_fs_load_u8(copy, 0) > 46 and _sffi_core_fs_load_u8(copy, 0) < 48:
+        pos = 1
+    while pos < path_len:
+        val ch = _sffi_core_fs_load_u8(copy, pos)
+        if ch > 46 and ch < 48:
+            # Found '/' (ASCII 47) — temporarily NUL-terminate and mkdir
+            _sffi_core_fs_store_u8(copy, pos, 0)
+            if _sffi_core_fs_mkdir(copy, 511) != 0 and rt_dir_exists(copy, pos) == 0:
+                _sffi_core_fs_free(copy)
+                return 0
+            _sffi_core_fs_store_u8(copy, pos, 47)
+        pos = pos + 1
+    # mkdir the final component
+    if _sffi_core_fs_mkdir(copy, 511) != 0 and rt_dir_exists(copy, path_len) == 0:
+        _sffi_core_fs_free(copy)
+        return 0
+    _sffi_core_fs_free(copy)
+    return 1
+
+pub fn rt_mkdir_p(path: i64) -> i64:
+    return rt_dir_create_all(_sffi_core_fs_rt_string_data(path), _sffi_core_fs_rt_string_len(path))
+
+pub fn rt_dir_list(path_ptr_raw: i64, path_len: i64) -> i64:
+    val path_ptr = fs_copy_cstr(path_ptr_raw, path_len)
+    if path_ptr < 1:
+        return 3
+    val dir = _sffi_core_fs_opendir(path_ptr)
+    _sffi_core_fs_free(path_ptr)
+    if dir < 1:
+        return 3
+    val out = _sffi_core_fs_rt_array_new(8)
+    if out < 4096:
+        _sffi_core_fs_closedir(dir)
+        return 3
+    var entry = _sffi_core_fs_readdir(dir)
+    while entry > 0:
+        val name = entry + 9
+        val len = _sffi_core_fs_strlen(name)
+        val dot = len == 1 and _sffi_core_fs_load_u8(name, 0) == 46
+        val dotdot = len == 2 and _sffi_core_fs_load_u8(name, 0) == 46 and _sffi_core_fs_load_u8(name, 1) == 46
+        if not dot and not dotdot:
+            _sffi_core_fs_rt_array_push(out, _sffi_core_fs_rt_string_new(name, len))
+        entry = _sffi_core_fs_readdir(dir)
+    _sffi_core_fs_closedir(dir)
+    out
+
+pub fn rt_path_join(left_ptr: i64, left_len: i64, right_ptr: i64, right_len: i64) -> i64:
+    if right_len > 0 and _sffi_core_fs_load_u8(right_ptr, 0) == 47:
+        return _sffi_core_fs_rt_string_new(right_ptr, right_len)
+    if left_len <= 0:
+        return _sffi_core_fs_rt_string_new(right_ptr, right_len)
+    if right_len <= 0:
+        return _sffi_core_fs_rt_string_new(left_ptr, left_len)
+    val needs_slash = _sffi_core_fs_load_u8(left_ptr, left_len - 1) != 47
+    val total = left_len + right_len + (if needs_slash: 1 else: 0)
+    val data = _sffi_core_fs_malloc(total)
+    if data < 1:
+        return 3
+    var pos = 0
+    while pos < left_len:
+        _sffi_core_fs_store_u8(data, pos, _sffi_core_fs_load_u8(left_ptr, pos))
+        pos = pos + 1
+    if needs_slash:
+        _sffi_core_fs_store_u8(data, pos, 47)
+        pos = pos + 1
+    var i = 0
+    while i < right_len:
+        _sffi_core_fs_store_u8(data, pos + i, _sffi_core_fs_load_u8(right_ptr, i))
+        i = i + 1
+    val out = _sffi_core_fs_rt_string_new(data, total)
+    _sffi_core_fs_free(data)
+    out
+
+pub fn rt_path_parent(path_ptr: i64, path_len: i64) -> i64:
+    if path_len <= 0:
+        return _sffi_core_fs_rt_string_new(0, 0)
+    var end = path_len
+    while end > 1 and _sffi_core_fs_load_u8(path_ptr, end - 1) == 47:
+        end = end - 1
+    var slash = end - 1
+    while slash >= 0 and _sffi_core_fs_load_u8(path_ptr, slash) != 47:
+        slash = slash - 1
+    if slash < 0:
+        val dot = _sffi_core_fs_malloc(1)
+        if dot < 1: return 3
+        _sffi_core_fs_store_u8(dot, 0, 46)
+        val out = _sffi_core_fs_rt_string_new(dot, 1)
+        _sffi_core_fs_free(dot)
+        return out
+    if slash == 0:
+        return _sffi_core_fs_rt_string_new(path_ptr, 1)
+    _sffi_core_fs_rt_string_new(path_ptr, slash)

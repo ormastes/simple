@@ -1,0 +1,106 @@
+"""IPC Port Creation — Hosted Path Specification.
+
+Proves that the kernel-side IpcManager.create_port and the hosted
+_handle_ipc_create_port dispatcher both succeed (return positive port id)
+when run in the in-process hosted runtime.
+
+This is the parity test for the wm-service '-38' bug observed on the
+x86_64 baremetal live-QEMU lane. If these pass but the baremetal lane
+still fails, the gap is confirmed to be in the baremetal stub layer
+(examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c) and NOT in the
+Simple-language kernel dispatcher.
+"""
+
+use std.spec
+use os.kernel.ipc.ipc.{IpcManager}
+use os.kernel.ipc.syscall.{syscall_handler, _handle_ipc_port_owner}
+use os.kernel.types.syscall_types.{SyscallArgs}
+use os.kernel.types.task_types.{TaskId}
+use os.kernel.scheduler.scheduler.{Scheduler}
+use os.kernel.log.klog.{KernelLog}
+
+describe "IpcManager.create_port (hosted)":
+    it "returns a port with a positive id":
+        var mgr = IpcManager.new()
+        val owner = TaskId(id: 7)
+        val port = mgr.create_port(owner, "compositor")
+        expect(port.id).to_be_greater_than(0)
+
+    it "stores the owner task id on the created port":
+        var mgr = IpcManager.new()
+        val owner = TaskId(id: 42)
+        val port = mgr.create_port(owner, "compositor")
+        expect(port.owner).to_equal(42)  # oracle: 42 — named expected value from the requirement
+        expect(mgr.port_owner_task_id(port.id)).to_equal(42)  # oracle: 42 — named expected value from the requirement
+
+    it "does not invent an owner for an unknown port":
+        # @req: REQ-OS-KERNEL-001
+        step("Verify: does not invent an owner for an unknown port")
+        val mgr = IpcManager.new()
+        expect(mgr.port_owner_task_id(999)).to_equal(0)  # oracle: 0 — named expected value from the requirement
+
+    it "returns the verified owner through SYS_IPC_PORT_OWNER handler":
+        # @req: REQ-OS-KERNEL-001
+        step("Verify: returns the verified owner through SYS_IPC_PORT_OWNER handler")
+        var mgr = IpcManager.new()
+        val port = mgr.create_port(TaskId(id: 4242), "client-reply")
+        val result = _handle_ipc_port_owner(
+            SyscallArgs(id: 19, arg0: port.id, arg1: 0, arg2: 0, arg3: 0, arg4: 0),
+            mgr
+        )
+        expect(result.value).to_equal(4242)  # oracle: 4242 — named expected value from the requirement
+
+    it "assigns distinct ids to successive ports":
+        var mgr = IpcManager.new()
+        val owner = TaskId(id: 1)
+        val p1 = mgr.create_port(owner, "compositor")
+        val p2 = mgr.create_port(owner, "launcher")
+        val different = p1.id != p2.id
+        expect(different).to_equal(true)
+
+    it "allows connect-by-name after create":
+        var mgr = IpcManager.new()
+        val owner = TaskId(id: 3)
+        mgr.create_port(owner, "compositor")
+        val found = mgr.connect("compositor")
+        val found_ok = found != nil
+        expect(found_ok).to_equal(true)
+
+describe "syscall_handler id=22 SYS_IPC_CREATE_PORT (hosted)":
+    it "dispatches to _handle_ipc_create_port and returns positive id":
+        var scheduler = Scheduler.new()
+        val result = syscall_handler(
+            SyscallArgs(
+                id: 22,
+                arg0: 0,
+                arg1: 0,
+                arg2: 0,
+                arg3: 0,
+                arg4: 0,
+                arg5: 0
+            ),
+            scheduler,
+            IpcManager.new(),
+            KernelLog.new(16)
+        )
+        # Hosted path must NOT return -38; it must return a valid port id.
+        val is_enosys = result.value == -38
+        expect(is_enosys).to_equal(false)
+        expect(result.value).to_be_greater_than(0)
+
+    it "returns monotonically increasing ids on repeated calls":
+        var scheduler = Scheduler.new()
+        var ipc = IpcManager.new()
+        val klog = KernelLog.new(16)
+        val a = syscall_handler(
+            SyscallArgs(id: 22, arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0),
+            scheduler, ipc, klog
+        )
+        val b = syscall_handler(
+            SyscallArgs(id: 22, arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0),
+            scheduler, ipc, klog
+        )
+        expect(a.value).to_be_greater_than(0)
+        expect(b.value).to_be_greater_than(0)
+        val growing = b.value > a.value
+        expect(growing).to_equal(true)

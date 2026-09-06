@@ -1,0 +1,772 @@
+#!/bin/sh
+set -u
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR" || exit 1
+
+BUILD_DIR="${BUILD_DIR:-build/check/cpu-backend-artifacts}"
+# Canonical committed fixture.  CPU_BACKEND_FIXTURE overrides only the SCAN
+# target (used by the selftest's end-to-end cases and by ablation); the
+# selftest's must-PASS case always asserts the canonical path, so an override
+# can never make the selftest vacuous.
+CANONICAL_FIXTURE="test/fixtures/compiler/backend_artifact_validation/probe.spl"
+FIXTURE="${CPU_BACKEND_FIXTURE:-$CANONICAL_FIXTURE}"
+FIXTURE_DIR="test/fixtures/compiler/backend_artifact_validation"
+REQUESTED_BACKEND=all
+REQUIRE_ALL="${CPU_BACKEND_REQUIRE_ALL:-0}"
+FAILURES=0
+SKIPS=0
+PASSES=0
+SELFTEST_ONLY=0
+
+# The exit code a correctly-codegen'd probe executable must return.  The
+# run/readback stage asserts this literal; the artifact-first tier below proves
+# the FIXTURE actually computes it, so the two can never drift apart silently.
+EXPECT_RUN_CODE=41
+
+# Committed pure-Simple backend registry.  BackendKind.to_text() is the list of
+# names the compiler actually knows; the three backends this guard drives must
+# each be registered there.  Checkable from source, no compiler needed.
+CANONICAL_REGISTRY="src/compiler/70.backend/backend/backend_types.spl"
+BACKEND_REGISTRY="${CPU_BACKEND_REGISTRY:-$CANONICAL_REGISTRY}"
+
+usage() {
+    echo "usage: $0 [--backend llvm|cranelift|wasm|all] [--require-all] [--selftest]" >&2
+    exit 2
+}
+
+# Verdict convention (.claude/rules/vcs.md).  A run that verified ZERO things is
+# never a pass.  Skips are legitimate only ALONGSIDE real verified steps, and
+# the counts are always stated.  The artifact-first tier exists precisely so
+# that a compiler-less host still verifies something rather than reporting
+# ERROR and wedging the pre-push hook.
+emit_verdict() {
+    ev_pass="$1"; ev_fail="$2"; ev_skip="$3"; ev_req="$4"
+    ev_total=$((ev_pass + ev_fail + ev_skip))
+    if [ "$ev_total" -eq 0 ]; then
+        echo "ERROR — nothing was checked (no backend step was executed)"
+        return 2
+    fi
+    if [ "$ev_fail" -gt 0 ]; then
+        echo "FAIL — $ev_total backend step(s) checked, $ev_fail failure(s), $ev_skip skip(s)"
+        return 1
+    fi
+    if [ "$ev_req" = 1 ] && [ "$ev_skip" -gt 0 ]; then
+        echo "FAIL — $ev_total backend step(s) checked, $ev_skip skip(s) not allowed under --require-all"
+        return 1
+    fi
+    if [ "$ev_pass" -eq 0 ]; then
+        echo "ERROR — nothing was checked ($ev_skip backend step(s) skipped as unavailable, 0 verified)"
+        return 2
+    fi
+    echo "PASS — $ev_total backend step(s) checked, $ev_pass verified, $ev_skip recorded skip(s)"
+    return 0
+}
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --backend)
+            [ "$#" -ge 2 ] || usage
+            REQUESTED_BACKEND="$2"
+            shift 2
+            ;;
+        --require-all)
+            REQUIRE_ALL=1
+            shift
+            ;;
+        --selftest)
+            SELFTEST_ONLY=1
+            shift
+            ;;
+        -h|--help) usage ;;
+        *) usage ;;
+    esac
+done
+
+case "$REQUESTED_BACKEND" in
+    llvm|cranelift|wasm|all) ;;
+    *) usage ;;
+esac
+
+mkdir -p "$BUILD_DIR"
+
+record_result() {
+    backend="$1"
+    stage="$2"
+    status="$3"
+    reason="$4"
+    artifact="${5:-none}"
+    echo "backend=$backend step=$stage status=$status reason=$reason artifact=$artifact"
+    case "$status" in
+        FAIL) FAILURES=$((FAILURES + 1)) ;;
+        PASS) PASSES=$((PASSES + 1)) ;;
+        SKIP_UNAVAILABLE) SKIPS=$((SKIPS + 1)) ;;
+    esac
+}
+
+find_simple_binary() {
+    if [ -n "${SIMPLE_BIN:-}" ]; then
+        printf '%s\n' "$SIMPLE_BIN"
+        return
+    fi
+    for candidate in \
+        bin/release/x86_64-unknown-linux-gnu/simple \
+        release/x86_64-unknown-linux-gnu/simple \
+        build/bootstrap/stage4/x86_64-unknown-linux-gnu/simple
+    do
+        if [ -x "$candidate" ]; then
+            printf '%s\n' "$candidate"
+            return
+        fi
+    done
+}
+
+is_rust_seed() {
+    candidate="$1"
+    case "$candidate" in
+        src/compiler_rust/*|*/src/compiler_rust/*) return 0 ;;
+    esac
+    if command -v timeout >/dev/null 2>&1; then
+        version_output="$(timeout 10 "$candidate" --version 2>&1 || true)"
+    else
+        version_output="$("$candidate" --version 2>&1 || true)"
+    fi
+    case "$version_output" in
+        *"bootstrap seed only"*|*"Rust-built"*) return 0 ;;
+    esac
+    return 1
+}
+
+has_backend_fallback() {
+    log_path="$1"
+    grep -Eiq \
+        'falling back to (the )?(llvm|cranelift|native|wasm) backend|requested backend.*unavailable.*using|backend fallback selected' \
+        "$log_path"
+}
+
+has_rejected_contract() {
+    log_path="$1"
+    grep -Eiq \
+        "unknown option|invalid backend|backend '[^']+' is not available|requires --backend" \
+        "$log_path"
+}
+
+has_backend_identity() {
+    log_path="$1"
+    backend_name="$2"
+    grep -Fq "Backend: $backend_name" "$log_path"
+}
+
+sha256_of() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | awk '{print $1}'
+    else
+        printf 'unavailable'
+    fi
+}
+
+validate_elf_object() {
+    object_path="$1"
+    [ -s "$object_path" ] || return 1
+    magic="$(od -An -tx1 -N4 "$object_path" | tr -d ' \n')"
+    [ "$magic" = "7f454c46" ] || return 1
+    header_path="${object_path}.readelf"
+    if command -v llvm-readelf >/dev/null 2>&1; then
+        if ! llvm-readelf -h "$object_path" >"$header_path" 2>&1; then
+            return 1
+        fi
+    elif command -v readelf >/dev/null 2>&1; then
+        if ! readelf -h "$object_path" >"$header_path" 2>&1; then
+            return 1
+        fi
+    else
+        return 2
+    fi
+    grep -Eq 'Type:[[:space:]]+REL' "$header_path"
+}
+
+run_expect_41() {
+    executable="$1"
+    stdout_path="$2"
+    stderr_path="$3"
+    if command -v timeout >/dev/null 2>&1; then
+        if timeout 30 "$executable" >"$stdout_path" 2>"$stderr_path"; then
+            run_code=0
+        else
+            run_code=$?
+        fi
+    else
+        if "$executable" >"$stdout_path" 2>"$stderr_path"; then
+            run_code=0
+        else
+            run_code=$?
+        fi
+    fi
+    [ "$run_code" -eq "$EXPECT_RUN_CODE" ] && [ ! -s "$stdout_path" ] && [ ! -s "$stderr_path" ]
+}
+
+# ---------------------------------------------------------------------------
+# Artifact-first tier: claims the 18 compiler-driven steps PRESUPPOSE, checked
+# from committed content alone.  These need no compiler and therefore verify
+# real things on a seed-only host.  Every one of them can fail.
+# ---------------------------------------------------------------------------
+
+# Recompute the probe fixture's main() return value from its own source text.
+# Prints the value, or nothing if the fixture does not have the expected shape.
+probe_expected_exit_code() {
+    pf="$1"
+    [ -s "$pf" ] || return 1
+    p_thr="$(sed -n 's/.*if input > \(-\{0,1\}[0-9]\{1,\}\).*/\1/p' "$pf" | head -n 1)"
+    p_mul="$(sed -n 's/.*input \* \(-\{0,1\}[0-9]\{1,\}\) + \(-\{0,1\}[0-9]\{1,\}\).*/\1/p' "$pf" | head -n 1)"
+    p_add="$(sed -n 's/.*input \* \(-\{0,1\}[0-9]\{1,\}\) + \(-\{0,1\}[0-9]\{1,\}\).*/\2/p' "$pf" | head -n 1)"
+    p_els="$(sed -n 's/.*input - \(-\{0,1\}[0-9]\{1,\}\).*/\1/p' "$pf" | head -n 1)"
+    p_arg="$(sed -n 's/.*backend_probe_value(\(-\{0,1\}[0-9]\{1,\}\)).*/\1/p' "$pf" | tail -n 1)"
+    for p_v in "$p_thr" "$p_mul" "$p_add" "$p_els" "$p_arg"; do
+        [ -n "$p_v" ] || return 1
+    done
+    if [ "$p_arg" -gt "$p_thr" ]; then
+        printf '%s\n' "$((p_arg * p_mul + p_add))"
+    else
+        printf '%s\n' "$((p_arg - p_els))"
+    fi
+}
+
+check_artifact_first_tier() {
+    # --- fixture presence -------------------------------------------------
+    if [ -s "$FIXTURE" ]; then
+        record_result contract "fixture present" PASS committed-fixture "$FIXTURE"
+    else
+        record_result contract "fixture present" FAIL missing-or-empty-fixture "$FIXTURE"
+    fi
+
+    # --- fixture return-code contract ------------------------------------
+    if [ -s "$FIXTURE" ]; then
+        computed="$(probe_expected_exit_code "$FIXTURE" || true)"
+        if [ -z "$computed" ]; then
+            record_result contract "fixture return contract" FAIL \
+                unparseable-probe-shape "$FIXTURE"
+        elif [ "$computed" = "$EXPECT_RUN_CODE" ]; then
+            record_result contract "fixture return contract" PASS \
+                "computes-$computed" "$FIXTURE"
+        else
+            record_result contract "fixture return contract" FAIL \
+                "computes-$computed-expected-$EXPECT_RUN_CODE" "$FIXTURE"
+        fi
+    else
+        record_result contract "fixture return contract" FAIL \
+            missing-or-empty-fixture "$FIXTURE"
+    fi
+
+    # --- run-stage assertion agrees with the constant ---------------------
+    # The run/readback stage must assert EXPECT_RUN_CODE, not an inlined
+    # literal.  A literal reintroduced here would drift from the fixture.
+    if grep -q 'run_code" -eq "\$EXPECT_RUN_CODE"' "$0"; then
+        record_result contract "run assertion wired to constant" PASS \
+            expect-run-code-constant "$0"
+    else
+        record_result contract "run assertion wired to constant" FAIL \
+            run-stage-uses-inline-literal "$0"
+    fi
+
+    # --- declared-vs-driven backend registration --------------------------
+    # Every backend this guard drives must be a registered BackendKind with the
+    # exact lowercase name the guard passes to --backend.  A renamed variant or
+    # a renamed string breaks the guard's own premise, and is caught here
+    # without running anything.
+    for backend in llvm cranelift wasm; do
+        if [ "$REQUESTED_BACKEND" != all ] && [ "$REQUESTED_BACKEND" != "$backend" ]; then
+            continue
+        fi
+        check_backend_registered "$backend"
+    done
+}
+
+# Enum variant that must map to a given lowercase backend name.
+backend_registry_variant() {
+    case "$1" in
+        llvm) printf 'Llvm\n' ;;
+        cranelift) printf 'Cranelift\n' ;;
+        wasm) printf 'Wasm\n' ;;
+        *) return 1 ;;
+    esac
+}
+
+check_backend_registered() {
+    br_name="$1"
+    br_variant="$(backend_registry_variant "$br_name")" || {
+        record_result "$br_name" "backend registered" FAIL \
+            no-expected-variant "$BACKEND_REGISTRY"
+        return
+    }
+    if [ ! -s "$BACKEND_REGISTRY" ]; then
+        record_result "$br_name" "backend registered" FAIL \
+            missing-backend-registry "$BACKEND_REGISTRY"
+        return
+    fi
+    if ! grep -q "^[[:space:]]*$br_variant\([[:space:]]\|\$\|#\)" "$BACKEND_REGISTRY"; then
+        record_result "$br_name" "backend registered" FAIL \
+            "missing-enum-variant-$br_variant" "$BACKEND_REGISTRY"
+        return
+    fi
+    if ! grep -q "case $br_variant: \"$br_name\"" "$BACKEND_REGISTRY"; then
+        record_result "$br_name" "backend registered" FAIL \
+            "variant-$br_variant-does-not-map-to-$br_name" "$BACKEND_REGISTRY"
+        return
+    fi
+    record_result "$br_name" "backend registered" PASS \
+        "backendkind-$br_variant" "$BACKEND_REGISTRY"
+}
+
+skip_backend() {
+    backend="$1"
+    reason="$2"
+    record_result "$backend" "emit backend IR" SKIP_UNAVAILABLE "$reason"
+    record_result "$backend" "validate backend IR" SKIP_UNAVAILABLE "$reason"
+    record_result "$backend" "emit object" SKIP_UNAVAILABLE "$reason"
+    record_result "$backend" "validate object" SKIP_UNAVAILABLE "$reason"
+    record_result "$backend" "link artifact" SKIP_UNAVAILABLE "$reason"
+    record_result "$backend" "run or read back" SKIP_UNAVAILABLE "$reason"
+}
+
+selftest() {
+    st_fail=0
+    st_dir="${TMPDIR:-/tmp}/cpu-backend-selftest.$$"
+    mkdir -p "$st_dir"
+
+    st_verdict() { # name passes failures skips require_all expect_exit expect_substr
+        st_out="$(emit_verdict "$2" "$3" "$4" "$5")"
+        st_ec=$?
+        if [ "$st_ec" -ne "$6" ]; then
+            echo "selftest FAIL $1: exit $st_ec expected $6 ($st_out)" >&2
+            st_fail=$((st_fail + 1)); return 0
+        fi
+        case "$st_out" in
+            *"$7"*) ;;
+            *) echo "selftest FAIL $1: verdict '$st_out' lacks '$7'" >&2
+               st_fail=$((st_fail + 1)) ;;
+        esac
+    }
+
+    # ---- verdict contract ------------------------------------------------
+    st_verdict must-pass 12 0 8 0 0 "PASS — 20 backend step(s) checked, 12 verified, 8 recorded skip(s)"
+    st_verdict must-pass-clean 21 0 0 0 0 "PASS — 21 backend step(s) checked, 21 verified, 0 recorded skip(s)"
+    st_verdict must-fail 15 3 0 0 1 "FAIL — 18 backend step(s) checked, 3 failure(s)"
+    st_verdict must-fail-require-all 3 0 18 1 1 "not allowed under --require-all"
+    st_verdict must-error-all-skipped 0 0 18 0 2 "ERROR — nothing was checked (18 backend step(s) skipped as unavailable, 0 verified)"
+    st_verdict must-error-empty 0 0 0 0 2 "ERROR — nothing was checked"
+
+    # ---- artifact-first check class: probe fixture return contract -------
+    st_probe() { # name file expect_value_or_empty
+        st_got="$(probe_expected_exit_code "$2" 2>/dev/null || true)"
+        if [ "$st_got" != "$3" ]; then
+            echo "selftest FAIL $1: probe value '$st_got' expected '$3'" >&2
+            st_fail=$((st_fail + 1))
+        fi
+    }
+    # must-PASS: the real committed fixture must compute EXPECT_RUN_CODE
+    st_probe must-pass-real-fixture "$CANONICAL_FIXTURE" "$EXPECT_RUN_CODE"
+    # must-FAIL: arithmetic tampered -> different value, so the guard FAILs
+    sed 's/input \* 2 + 1/input * 2 + 7/' "$CANONICAL_FIXTURE" >"$st_dir/tampered.spl"
+    st_probe must-fail-tampered-arithmetic "$st_dir/tampered.spl" 47
+    # must-FAIL: call argument tampered -> takes the else branch
+    sed 's/backend_probe_value(20)/backend_probe_value(5)/' "$CANONICAL_FIXTURE" >"$st_dir/tampered_arg.spl"
+    st_probe must-fail-tampered-argument "$st_dir/tampered_arg.spl" 4
+    # must-FAIL: unparseable shape -> empty, guard reports unparseable-probe-shape
+    printf 'fn main() -> i64:\n    0\n' >"$st_dir/unparseable.spl"
+    st_probe must-fail-unparseable "$st_dir/unparseable.spl" ""
+    # must-FAIL: missing/empty fixture -> empty
+    : >"$st_dir/empty.spl"
+    st_probe must-fail-empty "$st_dir/empty.spl" ""
+    st_probe must-fail-missing "$st_dir/does-not-exist.spl" ""
+
+    # ---- artifact-first check class: backend registration ---------------
+    st_reg() { # name registry_file backend expect_status
+        st_rout="$(BACKEND_REGISTRY="$2" check_backend_registered "$3")"
+        case "$st_rout" in
+            *"status=$4"*) ;;
+            *) echo "selftest FAIL $1: '$st_rout' lacks status=$4" >&2
+               st_fail=$((st_fail + 1)) ;;
+        esac
+    }
+    # must-PASS: the real committed registry registers all three
+    for st_b in llvm cranelift wasm; do
+        st_reg "must-pass-registry-$st_b" "$CANONICAL_REGISTRY" "$st_b" PASS
+    done
+    # must-FAIL: enum variant renamed
+    sed 's/^\( *\)Wasm\b/\1WasmRenamed/' "$CANONICAL_REGISTRY" >"$st_dir/reg_novariant.spl"
+    st_reg must-fail-registry-renamed-variant "$st_dir/reg_novariant.spl" wasm FAIL
+    # must-FAIL: variant present but mapped to a different name string
+    sed 's/case Llvm: "llvm"/case Llvm: "llvm2"/' "$CANONICAL_REGISTRY" >"$st_dir/reg_badname.spl"
+    st_reg must-fail-registry-renamed-string "$st_dir/reg_badname.spl" llvm FAIL
+    # must-FAIL: registry file missing
+    st_reg must-fail-registry-missing "$st_dir/no-such-registry.spl" cranelift FAIL
+
+    # ---- end-to-end: fixture removed must make the whole guard FAIL ------
+    st_e2e_dir="$st_dir/e2e"
+    mkdir -p "$st_e2e_dir"
+    CPU_BACKEND_SELFTEST_CHILD=1 FIXTURE_OVERRIDE="$st_dir/does-not-exist.spl" \
+        CPU_BACKEND_FIXTURE="$st_dir/does-not-exist.spl" \
+        BUILD_DIR="$st_e2e_dir/build" sh "$0" >"$st_e2e_dir/out.txt" 2>&1
+    st_e2e_ec=$?
+    st_e2e_line="$(tail -n 1 "$st_e2e_dir/out.txt")"
+    if [ "$st_e2e_ec" -ne 1 ]; then
+        echo "selftest FAIL missing-fixture-e2e: exit $st_e2e_ec expected 1 ($st_e2e_line)" >&2
+        st_fail=$((st_fail + 1))
+    fi
+    case "$st_e2e_line" in
+        FAIL*) ;;
+        *) echo "selftest FAIL missing-fixture-e2e: last line '$st_e2e_line'" >&2
+           st_fail=$((st_fail + 1)) ;;
+    esac
+
+    rm -rf "$st_dir"
+    if [ "$st_fail" -gt 0 ]; then
+        echo "cpu_backend_selftest status=FAIL cases_failed=$st_fail" >&2
+        return 1
+    fi
+    echo "cpu_backend_selftest status=PASS cases=20"
+    return 0
+}
+
+# Selftest is FATAL and runs before every scan (suppressed only inside the
+# selftest's own child invocations, to avoid infinite recursion).
+if [ "${CPU_BACKEND_SELFTEST_CHILD:-0}" != 1 ]; then
+    if ! selftest; then
+        echo "ERROR — nothing was checked (selftest failed)"
+        exit 2
+    fi
+fi
+[ "$SELFTEST_ONLY" = 1 ] && exit 0
+
+check_artifact_first_tier
+
+SIMPLE_BIN="$(find_simple_binary)"
+if [ -z "$SIMPLE_BIN" ] || [ ! -x "$SIMPLE_BIN" ]; then
+    for backend in llvm cranelift wasm; do
+        if [ "$REQUESTED_BACKEND" = all ] || [ "$REQUESTED_BACKEND" = "$backend" ]; then
+            skip_backend "$backend" simple-binary-unavailable
+        fi
+    done
+elif is_rust_seed "$SIMPLE_BIN"; then
+    for backend in llvm cranelift wasm; do
+        if [ "$REQUESTED_BACKEND" = all ] || [ "$REQUESTED_BACKEND" = "$backend" ]; then
+            skip_backend "$backend" rust-seed-forbidden
+        fi
+    done
+else
+    export SIMPLE_BIN
+
+    check_llvm() {
+        backend_dir="$BUILD_DIR/llvm"
+        cache_dir="$backend_dir/cache"
+        executable="$backend_dir/probe"
+        log_path="$backend_dir/build.log"
+        mkdir -p "$backend_dir" "$cache_dir"
+
+        missing_tools=""
+        for tool in llvm-as opt llc; do
+            if ! command -v "$tool" >/dev/null 2>&1; then
+                missing_tools="${missing_tools}${missing_tools:+,}$tool"
+            fi
+        done
+        if [ -n "$missing_tools" ]; then
+            skip_backend llvm "missing-tools-$missing_tools"
+            return
+        fi
+
+        if SIMPLE_LIB="$ROOT_DIR/src" SIMPLE_NO_STUB_FALLBACK=1 \
+            SIMPLE_LLVM_BITCODE_DEBUG=1 SIMPLE_KEEP_LLVM_IR=1 \
+            "$SIMPLE_BIN" native-build --backend llvm \
+            --verbose \
+            --source "$FIXTURE_DIR" --entry-closure --entry "$FIXTURE" \
+            --cache-dir "$cache_dir" -o "$executable" >"$log_path" 2>&1; then
+            build_code=0
+        else
+            build_code=$?
+        fi
+        if [ "$build_code" -ne 0 ]; then
+            record_result llvm "emit backend IR" FAIL native-build-failed "$log_path"
+            record_result llvm "validate backend IR" FAIL no-ir-to-validate "$log_path"
+            record_result llvm "emit object" FAIL native-build-failed "$log_path"
+            record_result llvm "validate object" FAIL no-object-to-validate "$log_path"
+            record_result llvm "link artifact" FAIL native-build-failed "$log_path"
+            record_result llvm "run or read back" FAIL no-executable "$log_path"
+            return
+        fi
+        if has_backend_fallback "$log_path" || has_rejected_contract "$log_path" || \
+            ! has_backend_identity "$log_path" llvm; then
+            record_result llvm "emit backend IR" FAIL backend-fallback-detected "$log_path"
+            record_result llvm "validate backend IR" FAIL backend-lineage-invalid "$log_path"
+            record_result llvm "emit object" FAIL backend-lineage-invalid "$log_path"
+            record_result llvm "validate object" FAIL backend-lineage-invalid "$log_path"
+            record_result llvm "link artifact" FAIL backend-lineage-invalid "$log_path"
+            record_result llvm "run or read back" FAIL backend-lineage-invalid "$log_path"
+            return
+        fi
+
+        source_ll="$(awk '/\[llvm-bitcode-debug\] ir / {path=$3} END {print path}' "$log_path")"
+        source_bc="$(awk '/\[llvm-bitcode-debug\] bitcode / {path=$3} END {print path}' "$log_path")"
+        retained_ll="$backend_dir/probe.ll"
+        retained_bc="$backend_dir/probe.bc"
+        if [ -z "$source_ll" ] || [ -z "$source_bc" ] || [ ! -s "$source_ll" ] || [ ! -s "$source_bc" ]; then
+            record_result llvm "emit backend IR" FAIL retained-ir-or-bitcode-missing "$log_path"
+            record_result llvm "validate backend IR" FAIL retained-ir-or-bitcode-missing "$log_path"
+        else
+            cp "$source_ll" "$retained_ll"
+            cp "$source_bc" "$retained_bc"
+            record_result llvm "emit backend IR" PASS \
+                "sha256-$(sha256_of "$retained_bc")" "$retained_ll,$retained_bc"
+            replay_dir="$backend_dir/replay"
+            if sh scripts/check/replay-llvm-artifact.shs "$retained_ll" "$replay_dir" \
+                >"$backend_dir/replay.log" 2>&1 && [ -s "$replay_dir/probe.o" ]; then
+                record_result llvm "validate backend IR" PASS llvm-as-opt-llc "$replay_dir/probe.o"
+            else
+                record_result llvm "validate backend IR" FAIL llvm-replay-failed "$backend_dir/replay.log"
+            fi
+        fi
+
+        cache_object="$(find "$cache_dir" -type f -name '*.o' -print 2>/dev/null | head -1)"
+        retained_object="$backend_dir/probe.native.o"
+        if [ -n "$cache_object" ] && [ -s "$cache_object" ]; then
+            cp "$cache_object" "$retained_object"
+            record_result llvm "emit object" PASS explicit-llvm-backend "$retained_object"
+            if validate_elf_object "$retained_object"; then
+                object_validation_code=0
+            else
+                object_validation_code=$?
+            fi
+            case "$object_validation_code" in
+                0) record_result llvm "validate object" PASS elf-object-validated "$retained_object" ;;
+                2) record_result llvm "validate object" SKIP_UNAVAILABLE missing-readelf "$retained_object" ;;
+                *) record_result llvm "validate object" FAIL invalid-object "$retained_object" ;;
+            esac
+        else
+            record_result llvm "emit object" FAIL native-object-missing "$cache_dir"
+            record_result llvm "validate object" FAIL native-object-missing "$cache_dir"
+        fi
+
+        if [ -s "$executable" ]; then
+            record_result llvm "link artifact" PASS explicit-llvm-backend "$executable"
+            if run_expect_41 "$executable" "$backend_dir/run.stdout" "$backend_dir/run.stderr"; then
+                record_result llvm "run or read back" PASS expected-exit-41 "$executable"
+            else
+                record_result llvm "run or read back" FAIL unexpected-runtime-result "$backend_dir/run.stderr"
+            fi
+        else
+            record_result llvm "link artifact" FAIL linked-executable-missing "$log_path"
+            record_result llvm "run or read back" FAIL linked-executable-missing "$log_path"
+        fi
+    }
+
+    check_cranelift() {
+        backend_dir="$BUILD_DIR/cranelift"
+        cache_dir="$backend_dir/cache"
+        object_path="$backend_dir/probe.o"
+        executable="$backend_dir/probe"
+        object_log="$backend_dir/object.log"
+        link_log="$backend_dir/link.log"
+        mkdir -p "$backend_dir" "$cache_dir"
+
+        record_result cranelift "emit backend IR" SKIP_UNAVAILABLE \
+            clif-dump-not-exposed-by-pure-simple "$object_log"
+        record_result cranelift "validate backend IR" SKIP_UNAVAILABLE \
+            clif-dump-not-exposed-by-pure-simple "$object_log"
+
+        if SIMPLE_LIB="$ROOT_DIR/src" SIMPLE_NO_STUB_FALLBACK=1 \
+            "$SIMPLE_BIN" native-build --backend cranelift --emit-object \
+            --verbose \
+            --source "$FIXTURE_DIR" --entry-closure --entry "$FIXTURE" \
+            --cache-dir "$cache_dir" -o "$object_path" >"$object_log" 2>&1; then
+            object_code=0
+        else
+            object_code=$?
+        fi
+        if [ "$object_code" -ne 0 ] || has_backend_fallback "$object_log" || \
+            has_rejected_contract "$object_log" || ! has_backend_identity "$object_log" cranelift; then
+            record_result cranelift "emit object" FAIL object-emission-or-lineage-failed "$object_log"
+            record_result cranelift "validate object" FAIL object-emission-or-lineage-failed "$object_log"
+        else
+            record_result cranelift "emit object" PASS explicit-cranelift-backend "$object_path"
+            if validate_elf_object "$object_path"; then
+                validation_code=0
+            else
+                validation_code=$?
+            fi
+            case "$validation_code" in
+                0) record_result cranelift "validate object" PASS elf-object-validated "$object_path" ;;
+                2) record_result cranelift "validate object" SKIP_UNAVAILABLE missing-readelf "$object_path" ;;
+                *) record_result cranelift "validate object" FAIL invalid-object "$object_path" ;;
+            esac
+        fi
+
+        if SIMPLE_LIB="$ROOT_DIR/src" SIMPLE_NO_STUB_FALLBACK=1 \
+            "$SIMPLE_BIN" native-build --backend cranelift \
+            --verbose \
+            --source "$FIXTURE_DIR" --entry-closure --entry "$FIXTURE" \
+            --cache-dir "$cache_dir" -o "$executable" >"$link_log" 2>&1; then
+            link_code=0
+        else
+            link_code=$?
+        fi
+        if [ "$link_code" -ne 0 ] || [ ! -s "$executable" ] || \
+            has_backend_fallback "$link_log" || has_rejected_contract "$link_log" || \
+            ! has_backend_identity "$link_log" cranelift; then
+            record_result cranelift "link artifact" FAIL link-or-lineage-failed "$link_log"
+            record_result cranelift "run or read back" FAIL no-valid-executable "$link_log"
+        else
+            record_result cranelift "link artifact" PASS explicit-cranelift-backend "$executable"
+            if run_expect_41 "$executable" "$backend_dir/run.stdout" "$backend_dir/run.stderr"; then
+                record_result cranelift "run or read back" PASS expected-exit-41 "$executable"
+            else
+                record_result cranelift "run or read back" FAIL unexpected-runtime-result "$backend_dir/run.stderr"
+            fi
+        fi
+    }
+
+    check_wasm() {
+        backend_dir="$BUILD_DIR/wasm"
+        wasm_path="$backend_dir/probe.wasm"
+        wat_path="$backend_dir/probe.wat"
+        log_path="$backend_dir/build.log"
+        mkdir -p "$backend_dir"
+
+        if SIMPLE_LIB="$ROOT_DIR/src" SIMPLE_NO_STUB_FALLBACK=1 \
+            "$SIMPLE_BIN" compile "$FIXTURE" --backend=wasm --target wasm32 -o "$wasm_path" \
+            --verbose \
+            >"$log_path" 2>&1; then
+            build_code=0
+        else
+            build_code=$?
+        fi
+        if [ "$build_code" -ne 0 ] || [ ! -s "$wasm_path" ]; then
+            record_result wasm "emit backend IR" FAIL wasm-compile-failed "$log_path"
+            record_result wasm "validate backend IR" FAIL no-wasm-artifact "$log_path"
+            record_result wasm "emit object" FAIL no-wasm-artifact "$log_path"
+            record_result wasm "validate object" FAIL no-wasm-artifact "$log_path"
+            record_result wasm "link artifact" FAIL no-wasm-artifact "$log_path"
+            record_result wasm "run or read back" FAIL no-wasm-artifact "$log_path"
+            return
+        fi
+        if has_backend_fallback "$log_path" || has_rejected_contract "$log_path"; then
+            record_result wasm "emit backend IR" FAIL backend-fallback-detected "$log_path"
+            record_result wasm "validate backend IR" FAIL backend-lineage-invalid "$log_path"
+            record_result wasm "emit object" FAIL backend-lineage-invalid "$log_path"
+            record_result wasm "validate object" FAIL backend-lineage-invalid "$log_path"
+            record_result wasm "link artifact" FAIL backend-lineage-invalid "$log_path"
+            record_result wasm "run or read back" FAIL backend-lineage-invalid "$log_path"
+            return
+        fi
+
+        magic="$(od -An -tx1 -N4 "$wasm_path" | tr -d ' \n')"
+        if [ "$magic" != "0061736d" ]; then
+            record_result wasm "emit backend IR" FAIL invalid-wasm-magic "$wasm_path"
+            record_result wasm "validate backend IR" FAIL invalid-wasm-magic "$wasm_path"
+            record_result wasm "emit object" FAIL invalid-wasm-magic "$wasm_path"
+            record_result wasm "validate object" FAIL invalid-wasm-magic "$wasm_path"
+            record_result wasm "link artifact" FAIL invalid-wasm-magic "$wasm_path"
+            record_result wasm "run or read back" FAIL invalid-wasm-magic "$wasm_path"
+            return
+        fi
+
+        if command -v wasm2wat >/dev/null 2>&1; then
+            if wasm2wat "$wasm_path" -o "$wat_path" >/dev/null 2>&1 && [ -s "$wat_path" ]; then
+                record_result wasm "emit backend IR" SKIP_UNAVAILABLE \
+                    source-wat-not-exposed-derived-wat-retained "$wat_path"
+            else
+                record_result wasm "emit backend IR" SKIP_UNAVAILABLE \
+                    source-wat-not-exposed-and-wasm2wat-failed "$wasm_path"
+            fi
+        else
+            record_result wasm "emit backend IR" SKIP_UNAVAILABLE \
+                source-wat-not-exposed-and-missing-wasm2wat "$wasm_path"
+        fi
+
+        record_result wasm "emit object" PASS final-wasm-binary "$wasm_path"
+
+        if command -v wasm-validate >/dev/null 2>&1; then
+            if wasm-validate "$wasm_path" >"$backend_dir/validate.log" 2>&1; then
+                record_result wasm "validate backend IR" SKIP_UNAVAILABLE \
+                    source-wat-not-retained "$wasm_path"
+                record_result wasm "validate object" PASS wasm-validate "$wasm_path"
+            else
+                record_result wasm "validate backend IR" SKIP_UNAVAILABLE \
+                    source-wat-not-retained "$wasm_path"
+                record_result wasm "validate object" FAIL wasm-validate-failed "$backend_dir/validate.log"
+            fi
+        elif command -v node >/dev/null 2>&1; then
+            if node - "$wasm_path" >"$backend_dir/validate.log" 2>&1 <<'NODE'
+const fs = require('fs');
+const bytes = fs.readFileSync(process.argv[2]);
+new WebAssembly.Module(bytes);
+NODE
+            then
+                record_result wasm "validate backend IR" SKIP_UNAVAILABLE \
+                    source-wat-not-retained "$wasm_path"
+                record_result wasm "validate object" PASS node-webassembly-module "$wasm_path"
+            else
+                record_result wasm "validate backend IR" SKIP_UNAVAILABLE \
+                    source-wat-not-retained "$wasm_path"
+                record_result wasm "validate object" FAIL node-validation-failed "$backend_dir/validate.log"
+            fi
+        else
+            record_result wasm "validate backend IR" SKIP_UNAVAILABLE \
+                source-wat-not-retained "$wasm_path"
+            record_result wasm "validate object" SKIP_UNAVAILABLE missing-wasm-validator "$wasm_path"
+        fi
+
+        record_result wasm "link artifact" PASS final-wasm-module "$wasm_path"
+        if command -v node >/dev/null 2>&1; then
+            if node - "$wasm_path" >"$backend_dir/run.log" 2>&1 <<'NODE'
+const fs = require('fs');
+const bytes = fs.readFileSync(process.argv[2]);
+const module = new WebAssembly.Module(bytes);
+if (WebAssembly.Module.imports(module).length !== 0) process.exit(20);
+const instance = new WebAssembly.Instance(module, {});
+const names = Object.keys(instance.exports);
+const entryName = names.find((name) => name === 'spl_main') ||
+  names.find((name) => name === 'main') ||
+  names.find((name) => name.endsWith('$main'));
+if (!entryName || typeof instance.exports[entryName] !== 'function') process.exit(21);
+const value = instance.exports[entryName]();
+if (value !== 41 && value !== 41n) process.exit(22);
+console.log(`entry=${entryName} value=${value}`);
+NODE
+            then
+                record_result wasm "run or read back" PASS expected-value-41 "$backend_dir/run.log"
+            else
+                record_result wasm "run or read back" FAIL node-execution-failed "$backend_dir/run.log"
+            fi
+        else
+            record_result wasm "run or read back" SKIP_UNAVAILABLE missing-wasm-runtime "$wasm_path"
+        fi
+    }
+
+    if [ "$REQUESTED_BACKEND" = all ] || [ "$REQUESTED_BACKEND" = llvm ]; then
+        check_llvm
+    fi
+    if [ "$REQUESTED_BACKEND" = all ] || [ "$REQUESTED_BACKEND" = cranelift ]; then
+        check_cranelift
+    fi
+    if [ "$REQUESTED_BACKEND" = all ] || [ "$REQUESTED_BACKEND" = wasm ]; then
+        check_wasm
+    fi
+fi
+
+if [ "$FAILURES" -gt 0 ]; then
+    MATRIX_STATUS=FAIL
+elif [ "$SKIPS" -gt 0 ]; then
+    if [ "$REQUIRE_ALL" = 1 ]; then
+        MATRIX_STATUS=FAIL
+    elif [ "$PASSES" -eq 0 ]; then
+        MATRIX_STATUS=SKIP_UNAVAILABLE
+    else
+        MATRIX_STATUS=PASS_WITH_SKIPS
+    fi
+else
+    MATRIX_STATUS=PASS
+fi
+echo "cpu_backend_matrix status=$MATRIX_STATUS pass=$PASSES failures=$FAILURES skips=$SKIPS require_all=$REQUIRE_ALL"
+emit_verdict "$PASSES" "$FAILURES" "$SKIPS" "$REQUIRE_ALL"
+exit $?

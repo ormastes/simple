@@ -1,0 +1,450 @@
+# @cover src/lib/hardware/rv64gc_rtl/core.spl 0%
+# @cover src/lib/hardware/rv64gc_rtl/trap.spl 0%
+# @cover src/lib/hardware/rv64gc_rtl/csr_s.spl 0%
+# @cover src/lib/hardware/rv64gc_rtl/decode.spl 0%
+# @cover src/lib/hardware/rv64gc_rtl/lsu.spl 0%
+# @cover src/lib/hardware/rv64gc_rtl/mmu_sv39.spl 0%
+# @cover src/lib/hardware/rv64gc_rtl/mul_div.spl 0%
+"""
+## Purpose and audience
+Integration verification for the RV64GC core (Feature IDs: rv64-fpga-linux-boot;
+Category: Infrastructure; Difficulty: 5/5; Requirements REQ-1..REQ-5): CSR/trap/
+privilege wiring, S-mode delegation in the trap handler, S-mode CSR address
+decoding, decoder SRET/SFENCE.VMA paths, the Sv39 LSU/MMU boundary, the
+mul_div unsigned-division fix, and core-level SYSTEM-instruction updates.
+Audience: maintainers of `src/lib/hardware/rv64gc_rtl/` and the rv64 FPGA
+bring-up lanes.
+## Operator workflow
+Run this file alone with the seed runner:
+`./src/compiler_rust/target/bootstrap/simple run test/01_unit/lib/hardware/rv64gc_rtl/core64_integration_spec.spl`
+## Compatibility and limitations
+Most behavior is asserted through the product functions directly in
+interpreter mode: init state, trap entry/exit, CSR address mapping, decode
+tags, Sv39 boundary, and mul_div tick loops. Full instruction-sequence
+simulation (R/I/S/B/U/J + M/A extension flows) still requires compiled mode
+with the GHDL RTL harness. Two known REDs are kept deliberately:
+`core64_init` does not zero mstatus (it boots with 0x2000) and
+`core64_step` is not exported by the core module yet — those scenarios stay
+failing until the core is repaired, and must not be softened.
+## Verification guidance and troubleshooting
+A CSR-address failure means the write decoder remapped an address; a trap
+failure means delegation or mret/sret restoration drifted; a mul_div failure
+means the unsigned 64-bit divide path regressed. Compare the failing expect
+against the module named in the scenario before touching the fingerprint-style
+constants. `core64_step` failing with `function core64_step not found` is the
+known gap, not a regression of this file.
+"""
+# Lifecycle: doc/01_research/domain/riscv_gen2_hwir_foundation.md ;
+# doc/03_plan/agent_tasks/riscv_gen2_hwir_foundation.md ;
+# doc/04_architecture/riscv_gen2_hwir_foundation.md ;
+# doc/05_design/riscv_scalar_runtime_v9_im_zicsr.md
+# @manual_section: core64_init_and_privilege
+
+use std.spipe.*
+use std.hardware.rv64gc_rtl.core.{CoreState64, CoreCombResult64, Core64StepResult, core64_init, core64_update, core64_step}
+use std.hardware.rv64gc_rtl.decode.{DecodeResult64, decode64}
+use std.hardware.rv64gc_rtl.csr.{CsrFile64, csr64_init, csr64_write}
+use std.hardware.rv64gc_rtl.csr_s.{CsrSMode64, csr_s_init, csr_s64_write}
+use std.hardware.rv64gc_rtl.mmu_sv39.{MmuState64, mmu_sv39_init, mmu64_tlb_insert}
+use std.hardware.rv64gc_rtl.mul_div.{MulDivState, MulDivResult64, mul_div64_init, mul_div64_step}
+use std.hardware.rv64gc_rtl.trap.{TrapState64, trap64_state_init, trap64_enter, trap64_mret, trap64_sret}
+use std.hardware.rv64gc_rtl.lsu.{LsuResult64, lsu64_access}
+use std.hardware.rv64gc_rtl.pkg.{SocBus64, soc_bus64_init}
+
+
+fn _system_comb(instr: u32, pc: i64) -> CoreCombResult64:
+    val dec = decode64(instr)
+    CoreCombResult64(
+        dec: dec,
+        rs1_data: 0,
+        rs2_data: 0,
+        a0_val: 0,
+        a1_val: 0,
+        alu_result: 0,
+        alu_zero: false,
+        branch_taken: false,
+        branch_target: pc + 4,
+        pc_next: pc + 4,
+        pc_plus4: pc + 4,
+        rd_data: 0,
+        dmem_addr: 0,
+        dmem_wdata: 0,
+        dmem_we: false,
+        dmem_re: false,
+        dmem_width: 0,
+        imem_addr: pc
+    )
+
+
+# ============================================================================
+# AC-1: Core Initialization and Privilege Modes
+# ============================================================================
+
+describe "Core64 Initialization":
+    it "AC-1: core64_init returns state with PC at reset vector":
+        # @req REQ-1
+        # @req REQ-2
+        # @req REQ-3
+        # @req REQ-4
+        # @req REQ-5
+        # @req REQ-SSPEC-LIB
+        # @capture(statistics): reset-vector program counter retained as evidence
+        step("Initialize the core at reset vector 0x1000 and read PC")
+        val state = core64_init(0x1000)
+        expect(state.pc).to_equal(0x1000)  # oracle: init must place PC exactly at the requested reset vector
+
+    it "AC-1: core64_init starts in M-mode (priv_mode=3)":
+        # @req REQ-1
+        # @capture(statistics): reset privilege mode retained as evidence
+        step("Initialize the core and read the privilege mode")
+        val state = core64_init(0x1000)
+        expect(state.priv_mode).to_equal(3)  # oracle: RISC-V reset always enters machine mode, encoded 3
+
+    it "AC-1: core64_init zeroes all CSRs":
+        # @req REQ-1
+        # @capture(statistics): post-init mstatus value retained as evidence
+        step("Initialize the core and read the machine and supervisor status registers")
+        val state = core64_init(0x1000)
+        expect(state.csr_m.mstatus).to_equal(0)  # oracle: the spec contract says init zeroes mstatus (currently RED: boots 0x2000)
+        expect(state.csr_s.sstatus).to_equal(0)  # oracle: the spec contract says init zeroes sstatus
+
+# @manual_section: core64_privilege_routing
+describe "RV64GC Privilege Modes":
+
+    it "AC-1: M-mode is encoded as 3":
+        # @req REQ-5
+        # @capture(statistics): non-delegated trap target mode retained as evidence
+        step("Take an undelegated ecall from S-mode and read the trap target mode")
+        val result = trap64_enter(trap64_state_init(), 9, 0, 0x8000_0000, 1, csr64_init(), csr_s_init())
+        expect(result.target_mode).to_equal(3)  # oracle: an undelegated trap must land in machine mode, encoded 3
+
+    it "AC-1: S-mode is encoded as 1":
+        # @req REQ-5
+        # @capture(statistics): delegated trap target mode retained as evidence
+        step("Delegate ecall-from-U through medeleg and read the trap target mode")
+        val csr_m = csr64_write(csr64_init(), 0x302, 0x100)
+        val result = trap64_enter(trap64_state_init(), 8, 0, 0x8000_0000, 0, csr_m, csr_s_init())
+        expect(result.target_mode).to_equal(1)  # oracle: a medeleg-delegated ecall must land in supervisor mode, encoded 1
+
+    it "AC-1: U-mode is encoded as 0":
+        # @req REQ-5
+        # @capture(statistics): mret-to-user target mode retained as evidence
+        step("Return from a trap with mstatus.MPP set to U-mode")
+        val csr_m = csr64_write(csr64_init(), 0x300, 0x80)
+        val result = trap64_mret(csr_m)
+        expect(result.target_mode).to_equal(0)  # oracle: mret with MPP=00 must restore user mode, encoded 0
+
+# ============================================================================
+# AC-1: Decoder — SRET and SFENCE.VMA (REQ-4)
+# ============================================================================
+
+# @manual_section: core64_decode_privileged
+describe "Decode64 SRET and SFENCE.VMA":
+
+    it "AC-1: decode64 recognizes MRET instruction encoding":
+        # @req REQ-4
+        # @capture(statistics): MRET decode verdict retained as evidence
+        step("Decode the MRET encoding 0x30200073")
+        val mret_instr = 0x30200073
+        val decoded = decode64(mret_instr)
+        expect(decoded.is_mret).to_equal(true)  # oracle: 0x30200073 is the MRET encoding by the RV64I privileged spec
+
+    it "AC-1: decode64 recognizes SRET instruction encoding":
+        # @req REQ-4
+        # @capture(statistics): SRET decode verdict retained as evidence
+        step("Decode the SRET encoding 0x10200073")
+        val sret_instr = 0x10200073
+        val decoded = decode64(sret_instr)
+        expect(decoded.is_sret).to_equal(true)  # oracle: 0x10200073 is the SRET encoding (funct7=0001000, opcode 1110011)
+
+    it "AC-1: decode64 recognizes SFENCE.VMA instruction encoding":
+        # @req REQ-4
+        # @capture(statistics): SFENCE.VMA decode verdict retained as evidence
+        step("Decode the SFENCE.VMA encoding 0x12000073")
+        val sfence_instr = 0x12000073
+        val decoded = decode64(sfence_instr)
+        expect(decoded.is_sfence_vma).to_equal(true)  # oracle: 0x12000073 is the SFENCE.VMA encoding (funct7=0001001)
+
+# ============================================================================
+# AC-1: Trap Handler — S-mode Delegation (REQ-5)
+# ============================================================================
+
+# @manual_section: core64_trap_delegation
+describe "Trap64 S-mode Delegation":
+
+    it "AC-1: ecall from U-mode produces cause 8 in the supervisor cause register":
+        # @req REQ-5
+        # @capture(statistics): delegated ecall cause value retained as evidence
+        step("Delegate an ecall-from-U through medeleg and read scause")
+        val csr_m = csr64_write(csr64_init(), 0x302, 0x100)
+        val result = trap64_enter(trap64_state_init(), 8, 0, 0x8000_0000, 0, csr_m, csr_s_init())
+        expect(result.csr_s.scause).to_equal(8)  # oracle: the RISC-V spec fixes ecall-from-U at cause 8
+        expect(result.target_mode).to_equal(1)  # oracle: the delegated entry must land in S-mode
+
+    it "AC-1: ecall from S-mode produces cause 9 in the machine cause register":
+        # @req REQ-5
+        # @capture(statistics): non-delegated ecall cause value retained as evidence
+        step("Take an undelegated ecall-from-S and read mcause")
+        val result = trap64_enter(trap64_state_init(), 9, 0, 0x8000_0000, 1, csr64_init(), csr_s_init())
+        expect(result.csr.mcause).to_equal(9)  # oracle: the RISC-V spec fixes ecall-from-S at cause 9
+        expect(result.target_mode).to_equal(3)  # oracle: with medeleg clear the trap stays in M-mode
+
+    it "AC-1: trap64_enter delegates to S-mode when medeleg bit is set":
+        # @req REQ-5
+        # @capture(statistics): delegation target mode retained as evidence
+        step("Set medeleg bit 8 and enter an ecall-from-U trap")
+        val csr_m = csr64_init()
+        val csr_s = csr_s_init()
+        val csr_m_deleg = csr64_write(csr_m, 0x302, 0x100)
+        val trap_state = trap64_state_init()
+        val result = trap64_enter(trap_state, 8, 0, 0x8000_0000, 0, csr_m_deleg, csr_s)
+        expect(result.target_mode).to_equal(1)  # oracle: medeleg bit 8 must route ecall-from-U to S-mode
+
+    it "AC-1: trap64_mret restores previous privilege mode":
+        # @req REQ-5
+        # @capture(statistics): mret restoration state retained as evidence
+        step("Arm mstatus with MPIE and MPP for S-mode and execute mret")
+        val csr_m0 = csr64_write(csr64_init(), 0x300, 0x880)
+        val csr_m = csr64_write(csr_m0, 0x341, 0x8000_2000)
+        val result = trap64_mret(csr_m)
+        expect(result.target_mode).to_equal(1)  # oracle: MPP=01 must restore supervisor mode
+        expect(result.return_pc).to_equal(0x8000_2000)  # oracle: mret resumes at mepc (0x341)
+        expect(result.csr.mstatus & 0x8).to_equal(0x8)  # oracle: MIE must be re-enabled from MPIE on return
+        expect(result.csr.mstatus & 0x80).to_equal(0x80)  # oracle: MPIE is set from the saved stack on return
+        expect(result.csr.mstatus & 0x1800).to_equal(0)  # oracle: MPP clears to U-mode after the return completes
+
+    it "AC-1: trap64_mret can return to U-mode":
+        # @req REQ-5
+        # @capture(statistics): mret-to-user state retained as evidence
+        step("Arm mstatus with MPP=U and a low mepc, then execute mret")
+        val csr_m0 = csr64_write(csr64_init(), 0x300, 0x80)
+        val csr_m = csr64_write(csr_m0, 0x341, 0x4000)
+        val result = trap64_mret(csr_m)
+        expect(result.target_mode).to_equal(0)  # oracle: MPP=00 must restore user mode
+        expect(result.return_pc).to_equal(0x4000)  # oracle: mret resumes at the programmed mepc
+        expect(result.csr.mstatus & 0x1800).to_equal(0)  # oracle: MPP is zeroed after returning to U-mode
+
+    it "AC-1: trap64_sret restores previous privilege from sstatus.SPP":
+        # @req REQ-5
+        # @capture(statistics): sret target mode retained as evidence
+        step("Execute sret from a zeroed supervisor CSR file")
+        val csr_s = csr_s_init()
+        val result = trap64_sret(csr_s)
+        expect(result.target_mode).to_be_less_than(4)  # oracle: sret must land in a legal privilege mode (0, 1, or 3), never out of range
+
+# ============================================================================
+# AC-1: Core SYSTEM instruction update (REQ-5)
+# ============================================================================
+
+# @manual_section: core64_system_update
+describe "Core64 SYSTEM trap returns":
+
+    it "AC-1: core64_update applies MRET to PC, privilege, and mstatus":
+        # @req REQ-5
+        # @capture(statistics): post-MRET core state retained as evidence
+        step("Arm mepc/mstatus and run one MRET through the core update path")
+        var state = core64_init(0x1000)
+        val csr_m0 = csr64_write(state.csr_m, 0x300, 0x880)
+        state.csr_m = csr64_write(csr_m0, 0x341, 0x8000_2000)
+        val comb = _system_comb(0x30200073, state.pc)
+        val next = core64_update(state, 0x30200073, comb, 0, 0)
+        expect(next.halt).to_equal(false)  # oracle: MRET is a normal instruction, not a halt
+        expect(next.pc).to_equal(0x8000_2000)  # oracle: MRET must resume at mepc
+        expect(next.priv_mode).to_equal(1)  # oracle: MPP=01 restores supervisor mode
+        expect(next.csr_m.mstatus & 0x8).to_equal(0x8)  # oracle: MIE is re-enabled on return
+        expect(next.csr_m.mstatus & 0x1800).to_equal(0)  # oracle: MPP clears after the return
+
+    it "AC-1: core64_update applies SRET to PC, privilege, and sstatus":
+        # @req REQ-5
+        # @capture(statistics): post-SRET core state retained as evidence
+        step("Run the core in S-mode and execute one SRET through the update path")
+        var state = core64_init(0x1000)
+        state.priv_mode = 1
+        val csr_s0 = csr_s64_write(state.csr_s, 0x100, 0x120)
+        state.csr_s = csr_s64_write(csr_s0, 0x141, 0x8000_3000)
+        val comb = _system_comb(0x10200073, state.pc)
+        val next = core64_update(state, 0x10200073, comb, 0, 0)
+        expect(next.halt).to_equal(false)  # oracle: SRET is a normal instruction, not a halt
+        expect(next.pc).to_equal(0x8000_3000)  # oracle: SRET must resume at sepc
+        expect(next.priv_mode).to_equal(1)  # oracle: SPP=01 restores supervisor mode
+        expect(next.csr_s.sstatus & 0x2).to_equal(0x2)  # oracle: SPIE is set from the saved stack on return
+        expect(next.csr_s.sstatus & 0x100).to_equal(0)  # oracle: SPP clears to U-mode after the return completes
+
+    it "AC-1: core64_update treats SFENCE.VMA as non-halting fence":
+        # @req REQ-4
+        # @capture(statistics): post-SFENCE TLB state retained as evidence
+        step("Insert a TLB entry and run one SFENCE.VMA through the update path")
+        var state = core64_init(0x1000)
+        state.mmu = mmu64_tlb_insert(state.mmu, 0x80000, 0x40000, 0xCF)
+        val comb = _system_comb(0x12000073, state.pc)
+        val next = core64_update(state, 0x12000073, comb, 0, 0)
+        expect(next.halt).to_equal(false)  # oracle: SFENCE.VMA is a fence, not a halt
+        expect(next.pc).to_equal(0x1004)  # oracle: the fence must fall through to the next sequential PC
+        expect(next.mmu.tlb_count).to_equal(0)  # oracle: SFENCE.VMA flushes the TLB inserted before it
+        expect(next.mmu.tlb_0.valid).to_equal(false)  # oracle: the flushed entry must be invalid after the fence
+
+# ============================================================================
+# AC-1: S-mode CSR Addresses (REQ-1)
+# ============================================================================
+
+# @manual_section: core64_smode_csr_addresses
+describe "CsrSMode Addresses":
+
+    it "AC-1: sstatus address is 0x100":
+        # @req REQ-1
+        # @capture(statistics): sstatus address mapping verdict retained as evidence
+        step("Write a masked marker through address 0x100 and read sstatus")
+        val csr = csr_s64_write(csr_s_init(), 0x100, 0x2)
+        expect(csr.sstatus).to_equal(0x2)  # oracle: the SIE bit survives the writable-field mask, proving a write through 0x100 lands in sstatus
+
+    it "AC-1: sie address is 0x104":
+        # @req REQ-1
+        # @capture(statistics): sie address mapping verdict retained as evidence
+        step("Write a marker through address 0x104 and read sie")
+        val csr = csr_s64_write(csr_s_init(), 0x104, 0x5A5A5A5A)
+        expect(csr.sie).to_equal(0x5A5A5A5A)  # oracle: a write through 0x104 must land in the sie field
+
+    it "AC-1: stvec address is 0x105":
+        # @req REQ-1
+        # @capture(statistics): stvec address mapping verdict retained as evidence
+        step("Write a marker through address 0x105 and read stvec")
+        val csr = csr_s64_write(csr_s_init(), 0x105, 0x5A5A5A5A)
+        expect(csr.stvec).to_equal(0x5A5A5A5A)  # oracle: a write through 0x105 must land in the stvec field
+
+    it "AC-1: sepc address is 0x141":
+        # @req REQ-1
+        # @capture(statistics): sepc address mapping verdict retained as evidence
+        step("Write a marker through address 0x141 and read sepc")
+        val csr = csr_s64_write(csr_s_init(), 0x141, 0x5A5A5A5A)
+        expect(csr.sepc).to_equal(0x5A5A5A5A)  # oracle: a write through 0x141 must land in the sepc field
+
+    it "AC-1: scause address is 0x142":
+        # @req REQ-1
+        # @capture(statistics): scause address mapping verdict retained as evidence
+        step("Write a marker through address 0x142 and read scause")
+        val csr = csr_s64_write(csr_s_init(), 0x142, 0x5A5A5A5A)
+        expect(csr.scause).to_equal(0x5A5A5A5A)  # oracle: a write through 0x142 must land in the scause field
+
+    it "AC-1: stval address is 0x143":
+        # @req REQ-1
+        # @capture(statistics): stval address mapping verdict retained as evidence
+        step("Write a marker through address 0x143 and read stval")
+        val csr = csr_s64_write(csr_s_init(), 0x143, 0x5A5A5A5A)
+        expect(csr.stval).to_equal(0x5A5A5A5A)  # oracle: a write through 0x143 must land in the stval field
+
+    it "AC-1: satp address is 0x180":
+        # @req REQ-1
+        # @capture(statistics): satp address mapping verdict retained as evidence
+        step("Write a marker through address 0x180 and read satp")
+        val csr = csr_s64_write(csr_s_init(), 0x180, 0x5A5A5A5A)
+        expect(csr.satp).to_equal(0x5A5A5A5A)  # oracle: a write through 0x180 must land in the satp field
+
+    it "AC-1: medeleg address is 0x302":
+        # @req REQ-1
+        # @capture(statistics): medeleg address mapping verdict retained as evidence
+        step("Write a marker through address 0x302 and read medeleg")
+        val csr = csr64_write(csr64_init(), 0x302, 0x5A5A5A5A)
+        expect(csr.medeleg).to_equal(0x5A5A5A5A)  # oracle: a write through 0x302 must land in the machine medeleg field
+
+    it "AC-1: mideleg address is 0x303":
+        # @req REQ-1
+        # @capture(statistics): mideleg address mapping verdict retained as evidence
+        step("Write a marker through address 0x303 and read mideleg")
+        val csr = csr64_write(csr64_init(), 0x303, 0x5A5A5A5A)
+        expect(csr.mideleg).to_equal(0x5A5A5A5A)  # oracle: a write through 0x303 must land in the machine mideleg field
+
+# ============================================================================
+# AC-1: LSU with MMU Sv39 (REQ-2)
+# ============================================================================
+
+# @manual_section: core64_lsu_mmu
+describe "LSU64 with MMU Sv39":
+
+    it "AC-1: lsu64_access passes through when satp.MODE=0 (bare)":
+        # @req REQ-2
+        # @capture(statistics): bare-mode physical address retained as evidence
+        step("Access memory with a bare-mode satp and read the physical address")
+        val satp_bare = 0
+        val mmu_state = mmu_sv39_init()
+        val bus = soc_bus64_init()
+        val result = lsu64_access(0, 0x8000_0000, 0, satp_bare, 3, mmu_state, bus)
+        expect(result.paddr).to_equal(0x8000_0000)  # oracle: bare mode must pass the virtual address through unchanged
+
+    it "AC-1: a Sv39-mode satp enters the LSU translation path":
+        # @req REQ-2
+        # @capture(statistics): Sv39-mode access result retained as evidence
+        step("Access memory with satp.MODE=8 and read the translation outcome")
+        val satp_sv39 = 8 << 60
+        val mmu_state = mmu_sv39_init()
+        val bus = soc_bus64_init()
+        val result = lsu64_access(0, 0x1000, 0, satp_sv39, 3, mmu_state, bus)
+        expect(result.fault).to_equal(false)  # oracle: the Sv39 decode path must not spuriously fault while the walk is unwired
+        expect(result.paddr).to_equal(0x1000)  # oracle: until the page walk lands, MODE!=0 falls through to identity — pin it so the walk becomes observable
+
+# ============================================================================
+# AC-1: Mul/Div Unsigned Division Fix (REQ-3)
+# ============================================================================
+
+# @manual_section: core64_muldiv_unsigned
+describe "MulDiv64 Unsigned Division":
+
+    it "AC-1: DIVU of large unsigned values produces correct quotient":
+        # @req REQ-3
+        # @capture(statistics): unsigned division quotient retained as evidence
+        step("Divide 0xFFFFFFFFFFFFFFFE by 2 through the DIVU step path")
+        val state = mul_div64_init()
+        val op = 5  # DIVU opcode (MULDIV_DIVU = 5)
+        val result = mul_div64_step(state, op, 0xFFFF_FFFF_FFFF_FFFE, 2)
+        expect(result.rd_val).to_equal(0x7FFF_FFFF_FFFF_FFFF)  # oracle: unsigned 0xFFFFFFFFFFFFFFFE / 2 = 0x7FFFFFFFFFFFFFFF — the signed bug would truncate
+
+    it "AC-1: REMU of large unsigned values produces correct remainder":
+        # @req REQ-3
+        # @capture(statistics): unsigned division remainder retained as evidence
+        step("Take 0xFFFFFFFFFFFFFFFF modulo 3 through the REMU step path")
+        val state = mul_div64_init()
+        val op = 7  # REMU opcode (MULDIV_REMU = 7)
+        val result = mul_div64_step(state, op, 0xFFFF_FFFF_FFFF_FFFF, 3)
+        expect(result.rd_val).to_equal(0)  # oracle: 2^64-1 is divisible by 3, so the unsigned remainder is exactly 0
+
+    it "AC-1: direct DIVU tick path handles large unsigned values":
+        # @req REQ-3
+        # @capture(statistics): ticked DIVU quotient retained as evidence
+        step("Run the DIVU multi-cycle tick loop to completion")
+        var state = mul_div_start(5, 0xFFFF_FFFF_FFFF_FFFE, 2)
+        while state.busy:
+            state = mul_div_tick(state)
+        expect(state.result).to_equal(0x7FFF_FFFF_FFFF_FFFF)  # oracle: the multi-cycle path must agree with the single-step quotient
+
+    it "AC-1: direct REMU tick path handles large unsigned values":
+        # @req REQ-3
+        # @capture(statistics): ticked REMU remainder retained as evidence
+        step("Run the REMU multi-cycle tick loop to completion")
+        var state = mul_div_start(7, 0xFFFF_FFFF_FFFF_FFFF, 3)
+        while state.busy:
+            state = mul_div_tick(state)
+        expect(state.result).to_equal(0)  # oracle: the multi-cycle path must agree with the single-step remainder
+
+# ============================================================================
+# AC-1: Core Step Execution (compiled mode required for full verification)
+# ============================================================================
+
+# @manual_section: core64_step_execution
+describe "Core64 Step Execution":
+
+    it "AC-1: core64_step returns updated state with incremented PC":
+        # @req REQ-1
+        # @capture(statistics): core64_step invocation retained as evidence
+        step("Step the core once from the reset vector")
+        val state = core64_init(0x8000_0000)
+        val bus = soc_bus64_init()
+        val result = core64_step(state, bus)
+        expect(result.state.pc).to_be_greater_than(0x8000_0000)  # oracle: one step must advance PC past the reset vector (currently RED: core64_step is not exported yet)
+
+    it "AC-1: core64_step handles R-type instruction (compiled mode for full sim)":
+        # @req REQ-3
+        # @capture(statistics): R-type step invocation retained as evidence
+        step("Step the core over an ADD encoding")
+        val state = core64_init(0x8000_0000)
+        val bus = soc_bus64_init()
+        val result = core64_step(state, bus)
+        expect(result.state.pc).to_be_greater_than(0)  # oracle: a stepped core must keep a live PC (currently RED: core64_step is not exported yet)

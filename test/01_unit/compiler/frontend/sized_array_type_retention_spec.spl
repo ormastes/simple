@@ -1,0 +1,219 @@
+# @cover src/compiler/10.frontend/core/parser.spl 2%
+# @cover src/compiler/10.frontend/_FlatAstBridge/convert_nodes.spl 2%
+# @tag: unit, compiler, bootstrap, only-compiled
+
+"""Executable regression coverage for `[T; N]` source retention."""
+
+use std.spec.{describe, it, expect}
+use std.spec.step
+use compiler.core.parser.{parse_module, parser_has_errors, parser_set_had_error}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.frontend.parser_types_expr.{Type, TypeKind, Expr, ExprKind}
+use compiler.frontend.generated.ast_visitor.{AstWalkNode, walk_ast_type}
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_codec_support.{HirCodecWriter, hc_enc_opaque_expr, hc_dec_opaque_expr}
+use compiler.frontend.core.flat_pool_codec.{FlatPoolReader}
+use compiler.core.types.{TYPE_I64, TYPE_TEXT, reset_all_pools}
+use compiler.core.types.{array_sized_type_register, array_sized_tag_to_id, array_sized_type_get_elem, array_sized_type_get_expr}
+use compiler.core.types.{flat_type_pools_dump, flat_type_pools_restore}
+use compiler.core.types.{TYPE_NAMED_BASE, TYPE_NAMED_LIMIT, TYPE_ARRAY_SIZED_BASE, TYPE_ARRAY_SIZED_LIMIT}
+use compiler.core.types.{is_named_type_tag, is_array_sized_tag}
+use compiler.core.types.{named_type_register}
+use compiler.frontend.core.type_inference.{TYPE_VAR_BASE, TYPE_VAR_LIMIT, is_type_var}
+use compiler.frontend.core.type_inference.{type_var_reset, type_var_fresh, unify_reset, unify_types, type_subst_apply, occurs_check, UNIFY_SUCCESS}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_codec.{hir_module_encode, hir_module_decode}
+
+fn count_nodes(node: AstWalkNode, count: i64) -> i64:
+    count + 1
+
+fn return_type(source: text, name: text) -> Type:
+    val module = parse_and_build_module(source, "sized_array_type_retention.spl")
+    (module.functions[name] ?? panic("missing function")).return_type
+
+describe "sized array type retention":
+    it "keeps named variables and sized arrays in disjoint explicit ranges":
+        step("Verify the complete high flat-tag namespace contract")
+        expect(TYPE_NAMED_BASE).to_equal(10000)
+        expect(TYPE_NAMED_LIMIT).to_equal(TYPE_VAR_BASE)
+        expect(TYPE_VAR_LIMIT).to_equal(TYPE_ARRAY_SIZED_BASE)
+        expect(TYPE_ARRAY_SIZED_LIMIT).to_equal(4000000000)
+        expect(is_named_type_tag(TYPE_NAMED_LIMIT - 1)).to_be(true)
+        expect(is_named_type_tag(TYPE_NAMED_LIMIT)).to_be(false)
+        expect(is_type_var(TYPE_VAR_BASE)).to_be(true)
+        expect(is_type_var(TYPE_VAR_LIMIT)).to_be(false)
+        expect(is_array_sized_tag(TYPE_ARRAY_SIZED_BASE)).to_be(true)
+        expect(is_array_sized_tag(TYPE_ARRAY_SIZED_LIMIT)).to_be(false)
+
+    it "routes sized tags through structural occurs and ordinary substitution":
+        step("Verify sized tags are concrete composites rather than type variables or named IDs")
+        reset_all_pools()
+        type_var_reset()
+        unify_reset()
+        val variable = type_var_fresh()
+        val recursive = array_sized_type_register(variable, 1)
+        expect(is_type_var(recursive)).to_be(false)
+        expect(is_named_type_tag(recursive)).to_be(false)
+        expect(occurs_check(variable, recursive)).to_be(true)
+        val concrete = array_sized_type_register(TYPE_I64, 2)
+        expect(unify_types(variable, concrete)).to_equal(UNIFY_SUCCESS)
+        expect(type_subst_apply(variable)).to_equal(concrete)
+
+    it "descends through raw named rows into sized array elements":
+        step("Verify named-tag decoding preserves sized occurs and non-occurs results")
+        reset_all_pools()
+        type_var_reset()
+        unify_reset()
+        val variable = type_var_fresh()
+        val recursive_array = array_sized_type_register(variable, 3)
+        val recursive_id = named_type_register("RecursiveSized", ["items"], [recursive_array])
+        expect(occurs_check(variable, TYPE_NAMED_BASE + recursive_id)).to_be(true)
+        val concrete_array = array_sized_type_register(TYPE_I64, 4)
+        val concrete_id = named_type_register("ConcreteSized", ["items"], [concrete_array])
+        expect(occurs_check(variable, TYPE_NAMED_BASE + concrete_id)).to_be(false)
+
+    it "keeps sized and unsized array forms distinct through the flat bridge":
+        step("Verify exact sized and unsized array shapes")
+        val sized = return_type("fn sized() -> [u32; 17]:\n    []\n", "sized")
+        match sized.kind:
+            case TypeKind.Array(element, Some(size)):
+                match size.kind:
+                    case ExprKind.IntLit(value): expect(value).to_equal(17)
+                    case _: fail("sized array size was not an integer expression")
+                expect(size.span.file).to_equal("sized_array_type_retention.spl")
+                expect(size.span.end > size.span.start).to_be(true)
+                expect(size.span.length).to_equal(size.span.end - size.span.start)
+            case _: fail("sized array shape was dropped")
+
+        val unsized = return_type("fn unsized() -> [u32]:\n    []\n", "unsized")
+        match unsized.kind:
+            case TypeKind.Array(_, size): expect(size == nil).to_be(true)
+            case _: fail("unsized array shape changed")
+
+    it "retains nonconstant and negative source expressions for canonical validation":
+        step("Verify invalid sizes remain located expressions rather than disappearing")
+        val named = return_type("fn named() -> [u8; LIMIT]:\n    []\n", "named")
+        match named.kind:
+            case TypeKind.Array(_, Some(size)):
+                match size.kind:
+                    case ExprKind.Ident(name): expect(name).to_equal("LIMIT")
+                    case _: fail("nonconstant size expression was rewritten")
+            case _: fail("nonconstant size expression was dropped")
+
+        val negative = return_type("fn negative() -> [u8; -1]:\n    []\n", "negative")
+        match negative.kind:
+            case TypeKind.Array(_, Some(size)):
+                match size.kind:
+                    case ExprKind.Unary(_, operand):
+                        match operand.kind:
+                            case ExprKind.IntLit(value): expect(value).to_equal(1)
+                            case _: fail("negative operand was not retained")
+                    case _: fail("negative size expression was rewritten")
+            case _: fail("negative size expression was dropped")
+
+    it "walks the size expression as a child of the array type":
+        step("Verify generated traversal reaches element and size")
+        val sized = return_type("fn walked() -> [i64; 5]:\n    []\n", "walked")
+        expect(walk_ast_type(sized, 0, count_nodes)).to_equal(3)
+
+    it "round trips a canonical size value and full span through the HIR codec helper":
+        step("Verify codec retains integer and every span field")
+        val span = Span(start: 11, end: 13, line: 4, col: 9, file: "codec_size.spl", length: 2)
+        val original = Expr(kind: ExprKind.IntLit(42), span: span)
+        var writer = HirCodecWriter.create()
+        hc_enc_opaque_expr(writer, original)
+        expect(writer.ok).to_be(true)
+        var reader = FlatPoolReader.new(writer.finish())
+        val restored = hc_dec_opaque_expr(reader)
+        match restored.kind:
+            case ExprKind.IntLit(value): expect(value).to_equal(42)
+            case _: fail("codec changed size expression kind")
+        expect(restored.span.start).to_equal(11)
+        expect(restored.span.end).to_equal(13)
+        expect(restored.span.line).to_equal(4)
+        expect(restored.span.col).to_equal(9)
+        expect(restored.span.file).to_equal("codec_size.spl")
+        expect(restored.span.length).to_equal(2)
+
+    it "reports malformed syntax and recovers for the next parse":
+        step("Verify missing size expression is a located parser error")
+        parser_set_had_error(false)
+        parse_module("fn bad() -> [u8;]:\n    []\n", "bad_sized_array.spl")
+        expect(parser_has_errors()).to_be(true)
+        parser_set_had_error(false)
+        parse_module("fn good() -> [u8; 2]:\n    []\n", "good_sized_array.spl")
+        expect(parser_has_errors()).to_be(false)
+
+    it "deduplicates repeated source identity and exceeds the former 266 row cap":
+        step("Verify O(1) identity index and parser-arena-bounded growth")
+        reset_all_pools()
+        val first = array_sized_type_register(TYPE_I64, 7)
+        expect(array_sized_type_register(TYPE_I64, 7)).to_equal(first)
+        var last = first
+        for i in 0..300:
+            last = array_sized_type_register(TYPE_TEXT, i)
+            expect(last > 0).to_be(true)
+        expect(array_sized_type_get_expr(array_sized_tag_to_id(last))).to_equal(299)
+
+    it "resets and atomically restores aligned sized array pools":
+        step("Verify dump reset restore and corrupt alignment rejection")
+        reset_all_pools()
+        val tag = array_sized_type_register(TYPE_TEXT, 19)
+        val blob = flat_type_pools_dump()
+        reset_all_pools()
+        var reader = FlatPoolReader.new(blob)
+        expect(flat_type_pools_restore(reader)).to_be(true)
+        expect(array_sized_type_get_elem(array_sized_tag_to_id(tag))).to_equal(TYPE_TEXT)
+        expect(array_sized_type_get_expr(array_sized_tag_to_id(tag))).to_equal(19)
+
+        # The first pool is array_generic (empty), then the two sized owners.
+        # Make their length headers disagree and prove the published registry
+        # remains the preceding valid one.
+        var lines = blob.split("\n")
+        lines[3] = "0"
+        var corrupt_reader = FlatPoolReader.new(lines.join("\n"))
+        expect(flat_type_pools_restore(corrupt_reader)).to_be(false)
+        expect(array_sized_type_get_elem(array_sized_tag_to_id(tag))).to_equal(TYPE_TEXT)
+        expect(array_sized_type_get_expr(array_sized_tag_to_id(tag))).to_equal(19)
+
+    it "retains the concrete size through conventional HIR lowering and HIR codec":
+        step("Verify source to HIR to codec fixed-size identity")
+        val parsed = parse_full_frontend(
+            "fn fixed(value: [u16; 23]) -> i64:\n    0\n",
+            "fixed_size_hir_codec.spl", "fixed_size_hir_codec", Logger(level: 0))
+        var lowering = HirLowering.with_filename("fixed_size_hir_codec.spl")
+        val hir = lowering.lower_module(parsed)
+        expect(lowering.errors.len()).to_equal(0)
+        val fixed_id = hir.symbols.lookup("fixed") ?? panic("missing fixed")
+        match hir.functions[fixed_id].params[0].type_.kind:
+            case Array(_, Some(size)): expect(size).to_equal(23)
+            case _: fail("conventional HIR dropped fixed array size")
+        val encoded = hir_module_encode(hir)
+        expect(encoded != "").to_be(true)
+        val decoded = hir_module_decode(encoded) ?? panic("HIR codec rejected fixed array")
+        val decoded_id = decoded.symbols.lookup("fixed") ?? panic("missing decoded fixed")
+        match decoded.functions[decoded_id].params[0].type_.kind:
+            case Array(_, Some(size)): expect(size).to_equal(23)
+            case _: fail("HIR codec dropped fixed array size")
+
+    it "emits exact diagnostics for negative and nonconstant sizes":
+        step("Verify conventional lowering diagnostic parity")
+        val negative_parsed = parse_full_frontend(
+            "fn bad(value: [i64; -1]) -> i64:\n    0\n",
+            "negative_size.spl", "negative_size", Logger(level: 0))
+        var negative_lowering = HirLowering.with_filename("negative_size.spl")
+        val _negative_hir = negative_lowering.lower_module(negative_parsed)
+        expect(negative_lowering.errors.len() > 0).to_be(true)
+        expect(negative_lowering.errors[0].message).to_equal(
+            "array size must be a nonnegative constant integer")
+
+        val named_parsed = parse_full_frontend(
+            "fn bad(value: [i64; WIDTH]) -> i64:\n    0\n",
+            "nonconstant_size.spl", "nonconstant_size", Logger(level: 0))
+        var named_lowering = HirLowering.with_filename("nonconstant_size.spl")
+        val _named_hir = named_lowering.lower_module(named_parsed)
+        expect(named_lowering.errors.len() > 0).to_be(true)
+        expect(named_lowering.errors[0].message).to_equal(
+            "array size must be a constant integer")

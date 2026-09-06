@@ -1,0 +1,74 @@
+# @cover src/framework/guarded.spl 80%
+"""
+# Framework — Threshold + Role Approval
+
+The approval overlay runs the shared guarded gate first, then holds large writes
+for approval: a write whose amount >= threshold, made by a non-approver (and
+non-admin), is denied with reason needs-approval. Below threshold, an approver
+role, or an admin clears it. An already-failing gate keeps its original reason —
+approval never masks a session/rbac/validation failure.
+"""
+
+use std.spec
+use framework.guarded.{Tenant, Actor, Session, gate_write_with_approval}
+
+fn demo_tenant() -> Tenant:
+    return Tenant { id: "t1", name: "Demo" }
+
+fn operator_user() -> Actor:
+    return Actor { id: 1, name: "Mina", role: "operator" }
+
+fn admin_user() -> Actor:
+    return Actor { id: 9, name: "Del", role: "admin" }
+
+fn active_for(user: Actor) -> Session:
+    return Session { token: "sess-1", user_id: user.id, tenant_id: "t1", active: true }
+
+fn inactive_for(user: Actor) -> Session:
+    return Session { token: "sess-1", user_id: user.id, tenant_id: "t1", active: false }
+
+describe "Framework — approval overlay on the guarded gate":
+    it "accepts a below-threshold write without approval":
+        val tenant = demo_tenant()
+        val user = operator_user()
+        val session = active_for(user)
+        var used: [text] = []
+        val r = gate_write_with_approval(session, tenant, user, "sale.write", true, "appr-1", used, 100, 500000, "admin")
+        expect(r.ok).to_equal(true)
+        expect(r.reason).to_equal("accepted")
+
+    it "holds an at-or-above-threshold write by a non-approver":
+        val tenant = demo_tenant()
+        val user = operator_user()
+        val session = active_for(user)
+        var used: [text] = []
+        val r = gate_write_with_approval(session, tenant, user, "sale.write", true, "appr-2", used, 500000, 500000, "admin")
+        assert_false(r.ok)
+        expect(r.reason).to_equal("needs-approval")
+
+    it "clears a large write when the actor holds the approver role":
+        val tenant = demo_tenant()
+        val user = operator_user()
+        val session = active_for(user)
+        var used: [text] = []
+        val r = gate_write_with_approval(session, tenant, user, "sale.write", true, "appr-3", used, 999999, 500000, "operator")
+        expect(r.ok).to_equal(true)
+        expect(r.reason).to_equal("accepted")
+
+    it "clears a large write for an admin regardless of approver role":
+        val tenant = demo_tenant()
+        val user = admin_user()
+        val session = active_for(user)
+        var used: [text] = []
+        val r = gate_write_with_approval(session, tenant, user, "sale.write", true, "appr-4", used, 999999, 500000, "manager")
+        expect(r.ok).to_equal(true)
+        expect(r.reason).to_equal("accepted")
+
+    it "keeps the original reason when the base gate already fails":
+        val tenant = demo_tenant()
+        val user = operator_user()
+        val session = inactive_for(user)
+        var used: [text] = []
+        val r = gate_write_with_approval(session, tenant, user, "sale.write", true, "appr-5", used, 999999, 500000, "admin")
+        assert_false(r.ok)
+        expect(r.reason).to_equal("invalid-session")

@@ -1,0 +1,153 @@
+"""Net Server — Listener / Accept Loop
+
+Generic TCP accept-loop over std.nogc_sync_mut.io.tcp.TcpListener.
+Transport plumbing only — no protocol logic (D4).
+
+API surface:
+  NetServer.bind(host, port)  -> Result<NetServer, IoError>
+  serve_once(handler)         -> Result<bool, IoError>   # accept one connection
+  serve_n(handler, n)         -> Result<(), IoError>     # accept n connections
+  serve(handler)              -> Result<(), IoError>     # blocking loop until handler returns false
+  stop()                      # signal stop (sets running = false)
+"""
+
+use std.nogc_sync_mut.io.tcp.{TcpListener, TcpStream}
+use std.io.types.{IoError, IoErrorKind}
+use std.nogc_sync_mut.net_server.connection.{ConnectionHandler}
+
+# ============================================================================
+# NetServer
+# ============================================================================
+
+class NetServer:
+    """Generic TCP accept-loop server.
+
+    Wraps TcpListener; dispatches each accepted connection to a
+    ConnectionHandler. No protocol parsing — pure transport plumbing.
+
+    Example (bounded spec loop):
+        match NetServer.bind("127.0.0.1", 0):
+            case Ok(srv):
+                match srv.local_addr():
+                    case Ok(addr):
+                        match TcpStream.connect(addr):
+                            case Ok(client):
+                                val _ = srv.serve_once(my_handler)
+                                client.close()
+                                srv.close()
+                            case Err(_):
+                                pass
+                    case Err(_):
+                        srv.close()
+            case Err(_):
+                pass
+    """
+    listener: TcpListener
+    running: bool
+
+    static fn bind(host: text, port: i64) -> Result<NetServer, IoError>:
+        """Bind to host:port and prepare to accept connections.
+
+        Args:
+            host: Hostname or IP address (e.g. "127.0.0.1")
+            port: Port number; 0 = OS assigns ephemeral port
+
+        Returns:
+            Result with NetServer or IoError
+        """
+        val addr = "{host}:{port}"
+        val l_result = TcpListener.bind(addr)
+        match l_result:
+            Err(e):
+                return Err(e)
+            Ok(l):
+                return Ok(NetServer(listener: l, running: true))
+
+    fn local_addr() -> Result<text, IoError>:
+        """Return the bound local address (e.g. "127.0.0.1:52341")."""
+        self.listener.local_addr()
+
+    fn is_open() -> bool:
+        """True while the listener socket is open."""
+        self.listener.is_open()
+
+    me stop():
+        """Signal the serve loop to stop after the current accept returns."""
+        self.running = false
+
+    me close() -> Result<(), IoError>:
+        """Close the underlying listener socket."""
+        self.running = false
+        self.listener.close()
+
+    me serve_once(handler: ConnectionHandler) -> Result<bool, IoError>:
+        """Accept one connection, dispatch to handler.
+
+        Uses accept_timeout(2000 ms) so specs don't hang on missing clients.
+
+        Returns:
+            Ok(true)  — handler returned true (keep going)
+            Ok(false) — handler returned false (stop requested)
+            Err(_)    — accept failed (e.g. timed out)
+        """
+        val accept_result = self.listener.accept_timeout(2000)
+        match accept_result:
+            Err(e):
+                return Err(e)
+            Ok(stream):
+                val cont = handler.handle(stream)
+                return Ok(cont)
+
+    me serve_n(handler: ConnectionHandler, n: i64) -> Result<(), IoError>:
+        """Accept exactly n connections, dispatching each to handler.
+
+        Stops early if handler returns false.
+
+        Args:
+            handler: ConnectionHandler implementation
+            n: Number of connections to accept
+
+        Returns:
+            Ok(()) when n connections handled (or handler stopped early)
+            Err(_) on accept error
+        """
+        var i = 0
+        while i < n:
+            val once_result = self.serve_once(handler)
+            match once_result:
+                Err(e):
+                    return Err(e)
+                Ok(cont):
+                    if not cont:
+                        return Ok(())
+            i = i + 1
+        Ok(())
+
+    me serve(handler: ConnectionHandler) -> Result<(), IoError>:
+        """Blocking accept loop until handler returns false or stop() is called.
+
+        Uses blocking accept (no timeout) for production use.
+        For test loops prefer serve_once / serve_n.
+
+        Returns:
+            Ok(()) when stopped gracefully
+            Err(_) on accept error while running
+        """
+        while self.running:
+            val accept_result = self.listener.accept()
+            match accept_result:
+                Err(e):
+                    if self.running:
+                        return Err(e)
+                    return Ok(())
+                Ok(stream):
+                    val cont = handler.handle(stream)
+                    if not cont:
+                        self.running = false
+        Ok(())
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export NetServer

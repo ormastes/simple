@@ -1,0 +1,83 @@
+#![allow(primitive_api, unnamed_duplicate_typed_args)]
+@allow(primitive_api, unnamed_duplicate_typed_args)
+"""Canonical message preparation, history, cursors, and notify-all policy."""
+
+use app.llm_caret.messaging.domain.model.{MessageOrigin, RoomMessage, messaging_id, messaging_id_valid}
+use app.llm_caret.messaging.domain.receipt.{MessageReceipt, ReceiptEvidence, ReceiptState}
+
+struct MessageMutation:
+    accepted: bool
+    error: text
+    message: RoomMessage
+    receipt: MessageReceipt
+
+struct CursorMutation:
+    accepted: bool
+    error: text
+    room_id: text
+    identity_id: text
+    room_seq: i64
+
+fn _empty_message() -> RoomMessage:
+    RoomMessage(message_id: messaging_id("message", "invalid"), workspace_id: messaging_id("workspace", "invalid"),
+        room_id: messaging_id("room", "invalid"), room_seq: 0, thread_root_id: "", reply_to_id: "",
+        sender_identity_id: messaging_id("identity", "invalid"), sender_agent_id: "", origin: MessageOrigin.System,
+        body: "", mentions: [], command: "", audience: [], external_ref: "", correlation_id: "",
+        causation_id: "", hop_count: 0, created_at: 0, edited_at: 0)
+
+fn _empty_receipt() -> MessageReceipt:
+    MessageReceipt(message_id: "", identity_id: "", state: ReceiptState.Failed,
+        evidence: ReceiptEvidence.Unknown, occurred_at: 0, detail: "invalid_message")
+
+pub fn prepare_message(message_id: text, workspace_id: text, room_id: text, next_room_seq: i64,
+        sender_identity_id: text, sender_agent_id: text, origin: MessageOrigin, body: text,
+        thread_root_id: text, reply_to_id: text, correlation_id: text, causation_id: text,
+        hop_count: i64, created_at: i64) -> MessageMutation:
+    val message_key = messaging_id("message", message_id)
+    val workspace_key = messaging_id("workspace", workspace_id)
+    val room_key = messaging_id("room", room_id)
+    val sender_key = messaging_id("identity", sender_identity_id)
+    if (not messaging_id_valid(message_key) or not messaging_id_valid(workspace_key) or
+            not messaging_id_valid(room_key) or not messaging_id_valid(sender_key)):
+        return MessageMutation(accepted: false, error: "invalid_id", message: _empty_message(), receipt: _empty_receipt())
+    if next_room_seq < 1:
+        return MessageMutation(accepted: false, error: "invalid_room_sequence", message: _empty_message(), receipt: _empty_receipt())
+    if body.trim() == "":
+        return MessageMutation(accepted: false, error: "message_body_required", message: _empty_message(), receipt: _empty_receipt())
+    if hop_count < 0:
+        return MessageMutation(accepted: false, error: "invalid_hop_count", message: _empty_message(), receipt: _empty_receipt())
+    val message = RoomMessage(message_id: message_key, workspace_id: workspace_key, room_id: room_key,
+        room_seq: next_room_seq, thread_root_id: thread_root_id, reply_to_id: reply_to_id,
+        sender_identity_id: sender_key, sender_agent_id: sender_agent_id, origin: origin, body: body.trim(),
+        mentions: [], command: "", audience: [], external_ref: "", correlation_id: correlation_id,
+        causation_id: causation_id, hop_count: hop_count, created_at: created_at, edited_at: 0)
+    val receipt = MessageReceipt(message_id: message_id, identity_id: sender_identity_id,
+        state: ReceiptState.Accepted, evidence: ReceiptEvidence.Synthetic, occurred_at: created_at, detail: "server_accepted")
+    MessageMutation(accepted: true, error: "", message: message, receipt: receipt)
+
+pub fn history_after(messages: [RoomMessage], room_id: text, after_seq: i64, limit: i64) -> [RoomMessage]:
+    var history: [RoomMessage] = []
+    if limit <= 0:
+        return history
+    for message in messages:
+        if message.room_id.value == room_id and message.room_seq > after_seq and history.len() < limit:
+            history = history + [message]
+    history
+
+pub fn advance_read_cursor(room_id: text, identity_id: text, requested_seq: i64, highest_room_seq: i64) -> CursorMutation:
+    if room_id.trim() == "" or identity_id.trim() == "":
+        return CursorMutation(accepted: false, error: "invalid_cursor_identity", room_id: room_id, identity_id: identity_id, room_seq: 0)
+    if requested_seq < 0 or requested_seq > highest_room_seq:
+        return CursorMutation(accepted: false, error: "cursor_out_of_range", room_id: room_id, identity_id: identity_id, room_seq: 0)
+    CursorMutation(accepted: true, error: "", room_id: room_id, identity_id: identity_id, room_seq: requested_seq)
+
+pub fn notify_all_allowed(actor_permissions: [text], origin: MessageOrigin) -> bool:
+    if origin == MessageOrigin.AgentUpdate:
+        return false
+    for permission in actor_permissions:
+        if permission == "notify_all" or permission == "room_owner":
+            return true
+    false
+
+export MessageMutation, CursorMutation
+export prepare_message, history_after, advance_read_cursor, notify_all_allowed

@@ -1,0 +1,189 @@
+# Feature Capabilities Registry
+#
+# Lightweight registry for runtime feature detection and capability gating.
+# Features are named strings with version constraints, descriptions, and a
+# provider tag.  The registry itself is immutable — builders produce new
+# registries via functional composition.
+#
+# Typical usage:
+#
+#   val reg = caps_registry_empty()
+#             .caps_with(feature_entry("simd_f32x4", 1, 0, "NEON/SSE4.1 f32×4", "cpu"))
+#             .caps_with(feature_entry("gpu_compute", 2, 1, "GPU compute shaders", "vulkan"))
+#
+#   if caps_available(reg, "simd_f32x4"):
+#       ...
+#
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# FeatureVersion — major.minor pair
+# ---------------------------------------------------------------------------
+
+"""Semantic version (major.minor) attached to a registered feature."""
+struct FeatureVersion:
+    major: i64
+    minor: i64
+
+"""Construct a FeatureVersion."""
+pub fn feature_version(major: i64, minor: i64) -> FeatureVersion:
+    FeatureVersion(major: major, minor: minor)
+
+"""Return true when `v` satisfies the requirement `need` (major must match,
+minor of `v` must be >= minor of `need`)."""
+pub fn version_satisfies(v: FeatureVersion, need: FeatureVersion) -> bool:
+    if v.major != need.major:
+        return false
+    v.minor >= need.minor
+
+"""Format a FeatureVersion as a human-readable string."""
+pub fn version_to_text(v: FeatureVersion) -> text:
+    "{v.major}.{v.minor}"
+
+# ---------------------------------------------------------------------------
+# FeatureEntry — a single registered feature
+# ---------------------------------------------------------------------------
+
+"""One entry in the feature capabilities registry."""
+struct FeatureEntry:
+    name:        text
+    version:     FeatureVersion
+    description: text
+    provider:    text
+
+"""Construct a FeatureEntry."""
+pub fn feature_entry(name: text, major: i64, minor: i64, description: text, provider: text) -> FeatureEntry:
+    FeatureEntry(
+        name:        name,
+        version:     FeatureVersion(major: major, minor: minor),
+        description: description,
+        provider:    provider
+    )
+
+"""Return the entry's version."""
+pub fn entry_version(e: FeatureEntry) -> FeatureVersion:
+    e.version
+
+"""Return the entry's name."""
+pub fn entry_name(e: FeatureEntry) -> text:
+    e.name
+
+"""Return the entry's description."""
+pub fn entry_description(e: FeatureEntry) -> text:
+    e.description
+
+"""Return the entry's provider tag."""
+pub fn entry_provider(e: FeatureEntry) -> text:
+    e.provider
+
+# ---------------------------------------------------------------------------
+# CapabilityRegistry — immutable collection of FeatureEntry values
+# ---------------------------------------------------------------------------
+
+"""Immutable registry mapping feature names to FeatureEntry values."""
+struct CapabilityRegistry:
+    entries: [FeatureEntry]
+
+# ---------------------------------------------------------------------------
+# Builder helpers
+# ---------------------------------------------------------------------------
+
+"""Return an empty registry."""
+pub fn caps_registry_empty() -> CapabilityRegistry:
+    CapabilityRegistry(entries: [])
+
+"""Return a new registry that includes `entry`.
+If a feature with the same name already exists it is replaced."""
+pub fn caps_with(reg: CapabilityRegistry, entry: FeatureEntry) -> CapabilityRegistry:
+    var out: [FeatureEntry] = []
+    for e in reg.entries:
+        if e.name != entry.name:
+            out.push(e)
+    out.push(entry)
+    CapabilityRegistry(entries: out)
+
+"""Return a new registry with the named feature removed.
+No-op if the name is not present."""
+pub fn caps_without(reg: CapabilityRegistry, name: text) -> CapabilityRegistry:
+    var out: [FeatureEntry] = []
+    for e in reg.entries:
+        if e.name != name:
+            out.push(e)
+    CapabilityRegistry(entries: out)
+
+"""Merge two registries.  Entries in `other` overwrite entries in `base` when
+names collide."""
+pub fn caps_merge(base: CapabilityRegistry, other: CapabilityRegistry) -> CapabilityRegistry:
+    var result = base
+    for e in other.entries:
+        result = caps_with(result, e)
+    result
+
+# ---------------------------------------------------------------------------
+# Query surface
+# ---------------------------------------------------------------------------
+
+"""Return the FeatureEntry for `name`, or Option.None if not registered."""
+pub fn caps_find(reg: CapabilityRegistry, name: text) -> Option<FeatureEntry>:
+    for e in reg.entries:
+        if e.name == name:
+            return Option.Some(e)
+    Option.None
+
+"""Return true when `name` is registered in the registry."""
+pub fn caps_available(reg: CapabilityRegistry, name: text) -> bool:
+    match caps_find(reg, name):
+        case Some(_): true
+        case None:    false
+
+"""Return true when `name` is registered AND its version satisfies `need`."""
+pub fn caps_available_version(reg: CapabilityRegistry, name: text, need: FeatureVersion) -> bool:
+    match caps_find(reg, name):
+        case Some(e): version_satisfies(e.version, need)
+        case None:    false
+
+"""Return all entries whose provider tag equals `provider`."""
+pub fn caps_by_provider(reg: CapabilityRegistry, provider: text) -> [FeatureEntry]:
+    var out: [FeatureEntry] = []
+    for e in reg.entries:
+        if e.provider == provider:
+            out.push(e)
+    out
+
+"""Return the number of registered features."""
+pub fn caps_count(reg: CapabilityRegistry) -> i64:
+    reg.entries.len()
+
+"""Return all registered entries as an array (snapshot)."""
+pub fn caps_all(reg: CapabilityRegistry) -> [FeatureEntry]:
+    reg.entries
+
+# ---------------------------------------------------------------------------
+# Gating helpers
+# ---------------------------------------------------------------------------
+
+"""Call `then_fn()` only when `name` is available; otherwise call `else_fn()`.
+Both branches must return the same type T."""
+pub fn caps_gate<T>(reg: CapabilityRegistry, name: text, then_fn: fn() -> T, else_fn: fn() -> T) -> T:
+    if caps_available(reg, name):
+        then_fn()
+    else:
+        else_fn()
+
+"""Call `then_fn(entry)` only when `name` is available at `need` version or
+higher; otherwise call `else_fn()`.  Both branches must return type T."""
+pub fn caps_gate_version<T>(
+    reg:     CapabilityRegistry,
+    name:    text,
+    need:    FeatureVersion,
+    then_fn: fn(FeatureEntry) -> T,
+    else_fn: fn() -> T
+) -> T:
+    match caps_find(reg, name):
+        case Some(e):
+            if version_satisfies(e.version, need):
+                then_fn(e)
+            else:
+                else_fn()
+        case None:
+            else_fn()

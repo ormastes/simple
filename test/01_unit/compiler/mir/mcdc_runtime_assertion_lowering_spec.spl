@@ -1,0 +1,82 @@
+"""Executable assertion MC/DC lowering and static-off erasure."""
+
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+
+struct RuntimeAssertionMcdcEvidence:
+    serialized: text
+    semantic_ids: [text]
+    condition_counts: [i64]
+    token_counts: [i64]
+    assert_arg_count: i64
+
+fn direct_call_arg_count(function: MirFunction, wanted_name: text) -> i64:
+    for block in function.blocks:
+        for instruction in block.instructions:
+            match instruction.kind:
+                case MirInstKind.Call(_, callee, args):
+                    match callee.kind:
+                        case MirOperandKind.Const(MirConstValue.Str(name), _):
+                            if name == wanted_name: return args.len()
+                        case _: ()
+                case _: ()
+    -1
+
+fn lower_runtime_assertion(policy: text) -> RuntimeAssertionMcdcEvidence:
+    val path = "src/mcdc_runtime_assertion_fixture.spl"
+    val source = "fn validate(a: bool, b: bool):\n    assert a and b, \"required\"\n"
+    val parsed = parse_full_frontend(source, path, path, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(path)
+    val hir = hir_lowering.lower_module(parsed)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    mir_lowering.mcdc_policy = policy
+    mir_lowering.mcdc_source_digest = 31337
+    val mir = mir_lowering.lower_module(hir)
+    var serialized = ""
+    var assert_arg_count = -1
+    for function in mir.functions.values():
+        if function.name == "validate" or function.name.ends_with(".validate"):
+            serialized = serialize_mir_function(function)
+            assert_arg_count = direct_call_arg_count(function, "__assert")
+    RuntimeAssertionMcdcEvidence(
+        serialized: serialized,
+        semantic_ids: mir_lowering.mcdc_manifest_semantic_ids,
+        condition_counts: mir_lowering.mcdc_manifest_condition_counts,
+        token_counts: mir_lowering.mcdc_manifest_token_counts,
+        assert_arg_count: assert_arg_count)
+
+describe "runtime assertion MC/DC lowering", tag: ["only-compiled"]:
+    it "erases assertion coverage state and dispatch in static-off mode":
+        val evidence = lower_runtime_assertion("off")
+        expect(evidence.semantic_ids.len()).to_equal(0)
+        expect(evidence.assert_arg_count).to_equal(2)
+        expect(evidence.serialized).to_contain("__assert")
+        expect(evidence.serialized.contains("rt_mcdc_record_compiled_vector_v1")).to_equal(false)
+        expect(evidence.serialized.contains("rt_mcdc_dynamic_vector_patchpoint_v1")).to_equal(false)
+
+    it "records one bounded short-circuit assertion decision in static mode":
+        val evidence = lower_runtime_assertion("static")
+        expect(evidence.semantic_ids.len()).to_equal(1)
+        expect(evidence.semantic_ids[0]).to_contain(":runtime-assertion:decision")
+        expect(evidence.condition_counts[0]).to_equal(2)
+        expect(evidence.token_counts[0]).to_equal(3)
+        expect(evidence.assert_arg_count).to_equal(2)
+        expect(evidence.serialized).to_contain("logic_rhs")
+        expect(evidence.serialized).to_contain("rt_mcdc_record_compiled_vector_v1")
+        expect(evidence.serialized).to_contain("__assert")
+        val probe_at = evidence.serialized.find("rt_mcdc_record_compiled_vector_v1")
+        val message_at = evidence.serialized.find("required")
+        val assert_at = evidence.serialized.find("__assert")
+        expect(probe_at).to_be_less_than(message_at)
+        expect(message_at).to_be_less_than(assert_at)
+
+    it "uses only the dormant patchpoint dispatch in dynamic mode":
+        val evidence = lower_runtime_assertion("dynamic")
+        expect(evidence.semantic_ids.len()).to_equal(1)
+        expect(evidence.assert_arg_count).to_equal(2)
+        expect(evidence.serialized).to_contain("rt_mcdc_dynamic_vector_patchpoint_v1")
+        expect(evidence.serialized.contains("rt_mcdc_record_compiled_vector_v1")).to_equal(false)

@@ -1,0 +1,139 @@
+#!/bin/sh
+# check-dup-struct-name-jit-soundness.shs
+#
+# Fences `SIMPLE_JIT_DUP_STRUCT_FEED`.
+#
+# Two structs (or a struct and a class) that share a bare NAME in different
+# modules are flattened into one namespace by the run/JIT lane's import
+# flattening (`load_module_with_imports`), which erases module identity: the
+# Rust AST `Span` carries no file, so nothing downstream can tell the two
+# definitions apart. There is therefore NO module-qualified struct resolution
+# on this lane.
+#
+# The lowerer's duplicate-variant "consensus" fallback
+# (`resolve_duplicate_global_field_variant`, `try_resolve_global_field_*_by_name`)
+# guesses a field offset by agreement across LAYOUT VARIANTS rather than by the
+# receiver's actual type. That guess is wrong whenever the receiver is a variant
+# that does not carry the field, and the JIT then reads a wrong slot with NO
+# diagnostic. Measured 2026-08-18 with the gate forced on (values that differ
+# from the interpreter are the miscompiles):
+#
+#   case_two_variants     interp `length=5`      jit+feed `length=130257`  MISCOMPILE
+#   case_three_variants   interp `b=2 d=5 e=6`   jit+feed `b=0 d=0 e=6`    MISCOMPILE
+#   case_param_field_read interp `g=11 o=42`     jit+feed `g=10 o=42`      MISCOMPILE
+#   case_class_vs_struct  interp `r=2 w=9`       jit+feed `r=2 w=9`        accidentally OK
+#   case_identical_layout interp `a=2 b=3`       jit+feed `a=2 b=3`        harmless (one layout)
+#
+# So the default-OFF gate is NOT conservatism to be removed: it is the only
+# thing preventing silent wrong answers, and the whole-module de-JIT it
+# preserves is correct fail-closed behaviour. This guard is GREEN today and
+# turns RED the moment the feed is enabled by default.
+#
+# Verdict is the LAST line of stdout:
+#   PASS  — <n> case(s) checked, JIT never disagrees with the interpreter   exit 0
+#   FAIL  — ...                                                            exit 1
+#   ERROR — nothing was checked                                            exit 2
+#
+# --selftest forces SIMPLE_JIT_DUP_STRUCT_FEED=1 and REQUIRES a FAIL; a run in
+# which the forced arm agrees everywhere is itself an ERROR (vacuous guard).
+
+set -u
+
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+SIMPLE="${SIMPLE_BIN:-$ROOT/bin/simple}"
+BASE="$ROOT/test/01_unit/compiler/dup_struct_name"
+CASES="case_two_variants case_three_variants case_identical_layout case_class_vs_struct case_param_field_read"
+TMP="${TMPDIR:-/tmp}/dupstruct.$$"
+mkdir -p "$TMP"
+trap 'rm -rf "$TMP"' EXIT
+
+if [ ! -x "$SIMPLE" ]; then
+    echo "ERROR — nothing was checked: no runnable binary at $SIMPLE"
+    exit 2
+fi
+
+# Extract the fixture's single result line (all fixtures print one `k=v ...`).
+result_line() {
+    grep -E '^[a-z_]+=' "$1" | head -1
+}
+
+run_arm() {
+    # $1 = case dir, $2 = out file, rest = env assignments
+    _dir="$1"; _out="$2"; shift 2
+    env "$@" "$SIMPLE" run "$BASE/$_dir/main.spl" >"$_out" 2>&1
+    return $?
+}
+
+FORCE_FEED=0
+[ "${1:-}" = "--selftest" ] && FORCE_FEED=1
+
+CHECKED=0
+DISAGREE=""
+DEJIT=""
+
+for c in $CASES; do
+    [ -f "$BASE/$c/main.spl" ] || continue
+
+    run_arm "$c" "$TMP/$c.interp" SIMPLE_EXECUTION_MODE=interpreter
+    RC_I=$?
+    if [ "$RC_I" -ne 0 ]; then
+        echo "FAIL — interpreter arm rc=$RC_I on $c (baseline unusable)"
+        exit 1
+    fi
+    EXPECT=$(result_line "$TMP/$c.interp")
+    if [ -z "$EXPECT" ]; then
+        echo "FAIL — interpreter arm produced no result line for $c"
+        exit 1
+    fi
+
+    if [ "$FORCE_FEED" -eq 1 ]; then
+        run_arm "$c" "$TMP/$c.jit" SIMPLE_EXECUTION_MODE=jit SIMPLE_JIT_DUP_STRUCT_FEED=1 SIMPLE_JIT_TRACE_ADDR=1
+    else
+        run_arm "$c" "$TMP/$c.jit" SIMPLE_EXECUTION_MODE=jit SIMPLE_JIT_TRACE_ADDR=1
+    fi
+    RC_J=$?
+    if [ "$RC_J" -ne 0 ]; then
+        echo "FAIL — jit arm rc=$RC_J on $c"
+        exit 1
+    fi
+    GOT=$(result_line "$TMP/$c.jit")
+
+    # Engine witness: `[jit-addr] <fn> 0x...` lines prove Cranelift actually
+    # emitted code; a `[jit-fallback]` line means the module de-JIT'd.
+    ADDRS=$(grep -c '\[jit-addr\]' "$TMP/$c.jit")
+    if grep -q '\[jit-fallback\]' "$TMP/$c.jit"; then
+        DEJIT="$DEJIT $c"
+    fi
+
+    echo "case $c: interp='$EXPECT' jit='$GOT' jit-addr=$ADDRS"
+    CHECKED=$((CHECKED + 1))
+
+    if [ "$GOT" != "$EXPECT" ]; then
+        DISAGREE="$DISAGREE $c(interp='$EXPECT' jit='$GOT')"
+    fi
+done
+
+if [ "$CHECKED" -eq 0 ]; then
+    echo "ERROR — nothing was checked: no fixtures found under $BASE"
+    exit 2
+fi
+
+[ -n "$DEJIT" ] && echo "note: de-JIT'd (fail-closed, expected while the gate is off):$DEJIT"
+
+if [ "$FORCE_FEED" -eq 1 ]; then
+    if [ -n "$DISAGREE" ]; then
+        echo "selftest: forced SIMPLE_JIT_DUP_STRUCT_FEED=1 miscompiles:$DISAGREE"
+        echo "PASS — $CHECKED case(s) checked, selftest confirmed the gate is unsound when forced on"
+        exit 0
+    fi
+    echo "ERROR — nothing was checked: selftest forced the feed on and found no disagreement (guard is vacuous)"
+    exit 2
+fi
+
+if [ -n "$DISAGREE" ]; then
+    echo "FAIL — $CHECKED case(s) checked, JIT disagrees with the interpreter:$DISAGREE"
+    exit 1
+fi
+
+echo "PASS — $CHECKED case(s) checked, JIT never disagrees with the interpreter"
+exit 0

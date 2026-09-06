@@ -1,0 +1,181 @@
+#!/bin/sh
+# CRYPTO-DUP001 gate: fail if a security-critical signature-verification entry
+# point is defined more than once across src/.
+#
+# WHY THIS EXISTS
+# ---------------
+# The seed interpreter's function registry is FLAT and GLOBAL: every top-level
+# `fn NAME` in every *loaded* module registers under its bare NAME. When two
+# modules define the same NAME with the SAME signature, one silently wins and
+# there is NO diagnostic and NO observable symptom distinguishing them. The
+# collision warning only ever covered *differing* signatures.
+#
+# This is not theoretical. Before 2026-08-02, `ed25519_verify` had THREE
+# same-signature definitions:
+#   src/os/crypto/ed25519.spl              — pure Simple RFC 8032 (authoritative)
+#   src/lib/nogc_sync_mut/io/signature_sffi.spl — rt_ed25519_verify native wrapper
+#   src/lib/common/crypto/ed25519.spl      — pure Simple duplicate (0 importers)
+#
+# Reproduced defect: a module that explicitly imports
+# `os.crypto.ed25519.{ed25519_verify}` and *separately* imports ANY symbol from
+# `std.nogc_sync_mut.io.signature_sffi` had its explicit import SILENTLY
+# OVERRIDDEN by the SFFI wrapper. A valid RFC 8032 TEST 1 signature then
+# verified as FALSE. Real victims: src/os/tls13/_CertVerify/der_parsing.spl and
+# src/os/tls13/_CertVerify/signature_verify.spl — i.e. TLS 1.3 certificate
+# Ed25519 signature verification.
+#
+# Note the registration rule that makes this so easy to reintroduce: importing
+# ONE symbol from a module registers ALL of that module's top-level functions.
+# You do not have to import the colliding name to be hijacked by it. (A module
+# that is never imported at all is inert — the hazard is latent until the first
+# import appears, which is exactly why a name-level gate is the right guard.)
+#
+# See doc/08_tracking/bug/compiler_cross_module_private_symbol_collision_2026-06-16.md
+# and doc/08_tracking/bug/interpreter_signature_ffi_ed25519_shadow_2026-05-03.md
+#
+# This check lives here rather than in the pure-Simple lint because that linter
+# runs ONE FILE PER PROCESS with no cross-file state (see
+# src/compiler/90.tools/lint entry_and_fixes.spl main()) — there is no
+# whole-tree pass to hook a cross-module check into. Same rationale as the
+# type-name collision gate alongside this script.
+#
+# STRICT BY DEFAULT: a duplicate here is a security defect, not a style nit.
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+SCAN_DIRS="src"
+
+# Security-critical verification/signing entry points that MUST have exactly one
+# top-level definition across the whole tree. Add to this list, never remove.
+#
+# Each name here has a single authoritative implementation. Alternate backends
+# MUST carry a backend-qualified name (e.g. ed25519_verify_native for the
+# rt_-extern wrapper, pure_ed25519_verify for the portable duplicate) so that
+# bare-name resolution can never silently pick a different backend.
+GUARDED_SYMBOLS="
+ed25519_verify
+ed25519_sign
+ecdsa_p256_verify
+ecdsa_p384_verify
+ecdsa_p521_verify
+rsa_sha256_verify
+rsa_sha512_verify
+rsa_pss_sha256_verify
+rsa_pss_sha384_verify
+rsa_pss_sha512_verify
+rsa_pss_sha256_verify_native
+rsa_pss_sha384_verify_native
+rsa_pss_sha512_verify_native
+ed25519_verify_native
+"
+
+# Known-open collisions, recorded so this gate can fail LOUDLY on anything new
+# without being permanently red on pre-existing debt it did not cause.
+#
+# Format: one "SYMBOL COUNT" per line. A symbol absent from the baseline must
+# have exactly ONE definition. A symbol present in the baseline must not EXCEED
+# its recorded count — going over fails, and driving it to 1 means deleting its
+# baseline line.
+#
+# This is a ratchet, not an exemption: the baseline may only ever shrink.
+BASELINE_FILE="$(dirname -- "$0")/crypto_verify_symbol_collisions_baseline.txt"
+
+usage() {
+    cat <<'USAGE'
+Usage: sh scripts/check/check-crypto-verify-symbol-collisions.shs [options]
+
+Fails if any security-critical signature-verify/sign entry point is defined
+more than once across src/. Same-signature duplicates are undetectable at
+runtime: one definition silently wins by module load order.
+
+Pre-existing collisions are recorded in
+scripts/check/crypto_verify_symbol_collisions_baseline.txt. The gate fails on
+any collision NOT in that baseline, and on any baselined symbol whose count
+increases. The baseline may only ever shrink.
+
+Options:
+  --list      Print the guarded symbol list and each definition site, then exit 0
+  -h, --help  Show this help
+
+Exit codes:
+  0  no new collisions beyond the recorded baseline
+  1  a new collision, or a baselined symbol got worse
+USAGE
+}
+
+LIST_ONLY=0
+for arg in "$@"; do
+    case "$arg" in
+        --list) LIST_ONLY=1 ;;
+        -h|--help) usage; exit 0 ;;
+        *) echo "check-crypto-verify-symbol-collisions: unknown option: $arg" >&2; usage; exit 2 ;;
+    esac
+done
+
+baseline_count_for() {
+    # echoes the baselined count for $1, or 1 if not baselined
+    _bc=1
+    if [ -f "$BASELINE_FILE" ]; then
+        _line=$("$GREP" -E "^$1[[:space:]]" "$BASELINE_FILE" 2>/dev/null | head -n 1 || true)
+        if [ -n "$_line" ]; then
+            _bc=$(printf '%s\n' "$_line" | awk '{print $2}')
+        fi
+    fi
+    echo "$_bc"
+}
+
+# Prefer /usr/bin/grep: ugrep is the default `grep` on some dev machines here
+# and differs on -r/-h/pattern handling.
+GREP=/usr/bin/grep
+[ -x "$GREP" ] || GREP=grep
+
+FAILED=0
+
+for sym in $GUARDED_SYMBOLS; do
+    [ -n "$sym" ] || continue
+
+    # Top-level definitions only: `fn NAME(` at column 0. Nested/indented defs
+    # and `extern fn rt_NAME(` declarations are deliberately NOT counted.
+    hits=$("$GREP" -rn --include='*.spl' "^fn ${sym}(" $SCAN_DIRS 2>/dev/null || true)
+
+    if [ -z "$hits" ]; then
+        count=0
+    else
+        count=$(printf '%s\n' "$hits" | wc -l | tr -d ' ')
+    fi
+
+    if [ "$LIST_ONLY" -eq 1 ]; then
+        echo "== $sym ($count definition(s))"
+        [ -n "$hits" ] && printf '%s\n' "$hits" | sed 's/^/   /'
+        continue
+    fi
+
+    allowed=$(baseline_count_for "$sym")
+
+    if [ "$count" -gt "$allowed" ]; then
+        echo "FAIL: '${sym}' has ${count} top-level definitions (allowed: ${allowed}):" >&2
+        printf '%s\n' "$hits" | sed 's/^/    /' >&2
+        echo "    -> Same-signature collision. One definition silently wins by module" >&2
+        echo "       load order with NO diagnostic. Give the non-authoritative backend a" >&2
+        echo "       qualified name (e.g. ${sym}_native / pure_${sym}) and repoint its callers." >&2
+        FAILED=1
+    elif [ "$count" -lt "$allowed" ] && [ "$count" -ge 1 ]; then
+        echo "NOTE: '${sym}' is down to ${count} definition(s) (baseline allows ${allowed})." >&2
+        echo "      Tighten scripts/check/crypto_verify_symbol_collisions_baseline.txt." >&2
+    fi
+done
+
+if [ "$LIST_ONLY" -eq 1 ]; then
+    exit 0
+fi
+
+if [ "$FAILED" -ne 0 ]; then
+    echo "" >&2
+    echo "check-crypto-verify-symbol-collisions: FAILED" >&2
+    exit 1
+fi
+
+echo "check-crypto-verify-symbol-collisions: OK (all guarded symbols uniquely defined)"
+exit 0

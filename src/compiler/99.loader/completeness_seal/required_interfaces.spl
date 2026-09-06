@@ -1,0 +1,121 @@
+# Required-interface table — hardening plan 2026-08-21 §13.2, §16.4, §11.4.
+#
+# Two tables, because the two manifest shapes speak at two different levels:
+#
+#   * §13.2 `extension: provides:` maps OPERATIONS (verify, type_check, effects,
+#     visit_children, lower_mir, print, hash, serialize) to handler symbols.
+#     Every complete constructor of an owner enum must supply all of them.
+#   * §16.4 `module: provides:` lists INTERFACE names (HirVerify, HirEffects,
+#     HirVisit, HirLowerMir, HirPrint, HirSerialize) — the module-level facade
+#     over those operations.
+#
+# `NotApplicable` is never a free choice: an operation drops out of the required
+# set only when the manifest declares `transition: <stage>: state: normalized`
+# for a stage that precedes the operation (§13.2 last paragraph).
+
+use compiler.loader.completeness_seal.manifest.{ExtensionManifest, TransitionDecl}
+
+# §13.2 operation contract for an owner enum.
+pub fn required_operations(owner_enum: text) -> [text]:
+    if owner_enum == "compiler.hir.HirExprKind":
+        return [
+            "effects",
+            "hash",
+            "lower_mir",
+            "print",
+            "serialize",
+            "type_check",
+            "verify",
+            "visit_children"
+        ]
+    []
+
+# §16.4 module-level interface names for an owner enum.
+pub fn required_module_interfaces(owner_enum: text) -> [text]:
+    if owner_enum == "compiler.hir.HirExprKind":
+        return [
+            "HirEffects",
+            "HirLowerMir",
+            "HirPrint",
+            "HirSerialize",
+            "HirVerify",
+            "HirVisit"
+        ]
+    []
+
+# The interface name an operation is surfaced under, used to render §17.4.
+pub fn operation_interface_name(op: text) -> text:
+    if op == "verify":
+        return "HirVerify"
+    if op == "type_check":
+        return "HirTypeCheck"
+    if op == "effects":
+        return "HirEffects"
+    if op == "visit_children":
+        return "HirVisit"
+    if op == "lower_mir":
+        return "HirLowerMir"
+    if op == "print":
+        return "HirPrint"
+    if op == "hash":
+        return "HirHash"
+    if op == "serialize":
+        return "HirSerialize"
+    op
+
+# Operations that sit downstream of a normalization barrier (§12.3). A
+# constructor normalized at `ast_to_hir` never reaches HIR or MIR, so every HIR
+# and MIR operation is NotApplicable for it; only the AST-level obligations
+# (verify, type_check, print) survive.
+pub fn not_applicable_operations(stage: text) -> [text]:
+    if stage == "ast_to_hir":
+        return ["effects", "hash", "lower_mir", "serialize", "visit_children"]
+    if stage == "hir_to_mir":
+        return ["lower_mir"]
+    []
+
+fn _contains(items: [text], needle: text) -> bool:
+    for item in items:
+        if item == needle:
+            return true
+    false
+
+fn _normalized_stage(t: TransitionDecl?) -> text:
+    match t:
+        case Some(decl):
+            if decl.state == "normalized":
+                decl.stage
+            else:
+                ""
+        case None:
+            ""
+
+# The operations this constructor must actually provide: the owner enum's
+# required set minus whatever a verified normalization barrier excuses.
+pub fn effective_required_operations(ext: ExtensionManifest) -> [text]:
+    val all = required_operations(ext.owner_enum)
+    val stage = _normalized_stage(ext.transition)
+    if stage == "":
+        return all
+    val excused = not_applicable_operations(stage)
+    var out: [text] = []
+    for op in all:
+        if not _contains(excused, op):
+            out = out + [op]
+    out
+
+# §11.4 negative space: MissingCapabilities = Required - Provided.
+pub fn missing_operations(ext: ExtensionManifest) -> [text]:
+    var out: [text] = []
+    for op in effective_required_operations(ext):
+        if not ext.provides_op(op):
+            out = out + [op]
+    out
+
+# §11.4 at module level: Required - Provided over interface names.
+pub fn missing_module_interfaces(owner_enum: text, provided: [text]) -> [text]:
+    var out: [text] = []
+    for name in required_module_interfaces(owner_enum):
+        if not _contains(provided, name):
+            out = out + [name]
+    out

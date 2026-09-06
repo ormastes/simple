@@ -1,0 +1,118 @@
+# Standalone native behavior probe for the product aspect lifecycle CAS gate.
+# This is intentionally not interpreter concurrency evidence: the interpreter
+# thread facade may execute closures inline.  Compile/run this file as a native
+# executable so `thread_spawn_with_args` uses real OS threads and AtomicI64
+# reaches the hosted atomic provider.
+
+use compiler.loader.aspect_lifecycle_gate.{
+    aspect_lifecycle_gate_enter_v1,
+    aspect_lifecycle_gate_try_enter_v1,
+    aspect_lifecycle_gate_exit_v1,
+    aspect_lifecycle_gate_locked_v1
+}
+use std.concurrent.thread.{ThreadHandle, thread_spawn_with_args, thread_yield}
+use std.nogc_sync_mut.atomic.{AtomicI64, MemoryOrdering, atomic_i64_new}
+
+val CONTENDERS: i64 = 8
+val PROBE_WAIT_BUDGET: i64 = 1048576
+var ready: AtomicI64 = atomic_i64_new(0)
+var start: AtomicI64 = atomic_i64_new(0)
+var release_workers: AtomicI64 = atomic_i64_new(0)
+var refused_claims: AtomicI64 = atomic_i64_new(0)
+var active: AtomicI64 = atomic_i64_new(0)
+var overlap_failures: AtomicI64 = atomic_i64_new(0)
+var timeout_failures: AtomicI64 = atomic_i64_new(0)
+
+fn atomic_increment(cell: AtomicI64) -> i64:
+    var tries = 0
+    while tries < PROBE_WAIT_BUDGET:
+        val prior = cell.load(MemoryOrdering.Acquire)
+        if cell.compare_exchange(
+                prior, prior + 1,
+                MemoryOrdering.AcqRel, MemoryOrdering.Acquire):
+            return prior
+        thread_yield()
+        tries = tries + 1
+    -1
+
+fn bounded_wait_for(cell: AtomicI64, target: i64) -> bool:
+    var tries = 0
+    while tries < PROBE_WAIT_BUDGET:
+        if cell.load(MemoryOrdering.Acquire) >= target:
+            return true
+        thread_yield()
+        tries = tries + 1
+    false
+
+fn gate_contender(_left: i64, _right: i64) -> i64:
+    if atomic_increment(ready) < 0:
+        return 0
+    if not bounded_wait_for(start, 1):
+        return 0
+    # Main owns this exact operation until every OS thread proves its first CAS
+    # was refused. This is a deterministic handshake, not a scheduler-delay
+    # assumption.
+    val refused = aspect_lifecycle_gate_try_enter_v1(
+        "native/facet/publication")
+    if refused.acquired:
+        atomic_increment(overlap_failures)
+        aspect_lifecycle_gate_exit_v1(refused.owner_token)
+        return 0
+    if atomic_increment(refused_claims) < 0:
+        return 0
+    if not bounded_wait_for(release_workers, 1):
+        return 0
+    val admission = aspect_lifecycle_gate_enter_v1("native/facet/publication")
+    if not admission.acquired:
+        atomic_increment(timeout_failures)
+        return 0
+    if not active.compare_exchange(
+            0, 1, MemoryOrdering.AcqRel, MemoryOrdering.Acquire):
+        atomic_increment(overlap_failures)
+    if not active.compare_exchange(
+            1, 0, MemoryOrdering.AcqRel, MemoryOrdering.Acquire):
+        atomic_increment(overlap_failures)
+    if not aspect_lifecycle_gate_exit_v1(
+            admission.owner_token):
+        atomic_increment(overlap_failures)
+    1
+
+fn main() -> i64:
+    val held = aspect_lifecycle_gate_try_enter_v1(
+        "native/facet/publication")
+    if not held.acquired:
+        return 69
+    var handles: [ThreadHandle] = []
+    var i = 0
+    while i < CONTENDERS:
+        handles.push(thread_spawn_with_args(i, 0, gate_contender))
+        i = i + 1
+    if not bounded_wait_for(ready, CONTENDERS):
+        return 70
+    if not start.compare_exchange(
+            0, 1, MemoryOrdering.AcqRel, MemoryOrdering.Acquire):
+        return 70
+    if not bounded_wait_for(refused_claims, CONTENDERS):
+        aspect_lifecycle_gate_exit_v1(held.owner_token)
+        return 70
+    if not aspect_lifecycle_gate_exit_v1(held.owner_token):
+        return 70
+    if not release_workers.compare_exchange(
+            0, 1, MemoryOrdering.AcqRel, MemoryOrdering.Acquire):
+        return 70
+    var completed = 0
+    for handle in handles:
+        completed = completed + handle.join()
+    if completed != CONTENDERS:
+        return 71
+    if refused_claims.load(MemoryOrdering.Acquire) != CONTENDERS:
+        return 72
+    if overlap_failures.load(MemoryOrdering.Acquire) != 0:
+        return 74
+    if timeout_failures.load(MemoryOrdering.Acquire) != 0:
+        return 75
+    if active.load(MemoryOrdering.Acquire) != 0:
+        return 76
+    if aspect_lifecycle_gate_locked_v1():
+        return 77
+    0

@@ -1,0 +1,91 @@
+"""
+## Purpose and audience
+Purpose: This spec proves `scv gc` (MIG-21, stabilization §9) is a conservative
+quarantine GC: dry run by default (deletes nothing, lists would-delete ids);
+real pruning only via `--prune --checkpoint <verified-checkpoint-id>` and only
+when fsck is clean, the checkpoint verifies, and objects have been unreachable
+longer than SCV_GC_QUARANTINE_DAYS (30) — otherwise FAIL naming the unmet
+condition. Pruned objects move to `.scv/quarantine/<date>/` and stay
+recoverable; nothing is unlinked. Verdict is the last line.
+Audience: Maintainers of the SCV storage layer.
+"""
+# @req: REQ-SCV-GC-QUARANTINE-001
+use std.spec.{describe, it, expect, step, assert_false}
+use app.io.mod (process_run)
+
+
+fn _harness() -> [text]:
+    [
+        "set -eu",
+        "REPO=$(pwd)",
+        "TMP=$(mktemp -d /tmp/scv-qgc.XXXXXX)",
+        "scv() { SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" \"$@\"; }",
+        "cd \"$TMP\"",
+        "printf 'base\\n' > a.txt",
+        "scv init >/dev/null",
+        "scv snapshot >/dev/null",
+        "printf 'orphan' > .scv/objects/chunks/sha256_orphan.blob"
+    ]
+
+fn _run(lines: [text]) -> text:
+    val (out, err, code) = process_run("/bin/sh", ["-c", lines.join("\n") + "\n"])
+    val combined = "{out}{err}\nexit={code}\n"
+    assert_false(out == "" and err == "")
+    combined
+
+describe "scv gc quarantine (MIG-21)":
+    it "defaults to a dry run that lists would-delete objects and deletes nothing":
+        step("Orphan chunk, count objects, run bare gc, counts unchanged")
+        var lines = _harness()
+        lines.push("BEFORE=$(find .scv/objects -type f | wc -l)")
+        lines.push("scv gc")
+        lines.push("AFTER=$(find .scv/objects -type f | wc -l)")
+        lines.push("test \"$BEFORE\" = \"$AFTER\" && printf 'objects=unchanged\\n'")
+        lines.push("test -e .scv/objects/chunks/sha256_orphan.blob && printf 'orphan=still-present\\n'")
+        val out = _run(lines)
+        expect(out).to_contain("would-delete chunks/sha256_orphan.blob")
+        expect(out).to_contain("PASS — gc dry run, nothing deleted")
+        expect(out).to_contain("objects=unchanged")
+        expect(out).to_contain("orphan=still-present")
+        expect(out).to_contain("exit=0")
+
+    it "refuses --prune without a checkpoint and when fsck is not clean":
+        step("Prune without checkpoint FAILs; corrupt chunk makes fsck gate FAIL")
+        var lines = _harness()
+        lines.push("scv gc --prune > prune1.out 2>&1 || true")
+        lines.push("cat prune1.out")
+        lines.push("test -e .scv/objects/chunks/sha256_orphan.blob && printf 'orphan1=kept\\n'")
+        lines.push("CP=$(scv checkpoint | awk '{print $2}')")
+        lines.push("LIVE=$(ls .scv/objects/chunks | grep -v orphan | head -1)")
+        lines.push("printf 'corrupt' >> \".scv/objects/chunks/$LIVE\"")
+        lines.push("scv gc --prune --checkpoint \"$CP\" > prune2.out 2>&1 || true")
+        lines.push("cat prune2.out")
+        lines.push("test -e .scv/objects/chunks/sha256_orphan.blob && printf 'orphan2=kept\\n'")
+        val out = _run(lines)
+        expect(out).to_contain("FAIL — prune requires --checkpoint <verified-checkpoint-id>")
+        expect(out).to_contain("FAIL — fsck not clean, refusing to prune")
+        expect(out).to_contain("orphan1=kept")
+        expect(out).to_contain("orphan2=kept")
+
+    it "enforces the retention age and quarantines aged objects recoverably":
+        step("Young orphan FAILs retention; backdated orphan moves to quarantine and is recoverable")
+        var lines = _harness()
+        lines.push("CP=$(scv checkpoint | awk '{print $2}')")
+        lines.push("scv gc --prune --checkpoint \"$CP\" > young.out 2>&1 || true")
+        lines.push("cat young.out")
+        lines.push("test -e .scv/objects/chunks/sha256_orphan.blob && printf 'young=kept\\n'")
+        lines.push("touch -d '40 days ago' .scv/objects/chunks/sha256_orphan.blob")
+        lines.push("scv gc --prune --checkpoint \"$CP\"")
+        lines.push("test ! -e .scv/objects/chunks/sha256_orphan.blob && printf 'orphan=gone-from-objects\\n'")
+        lines.push("Q=$(find .scv/quarantine -name sha256_orphan.blob | head -1)")
+        lines.push("test -n \"$Q\" && printf 'quarantine=holds-orphan\\n'")
+        lines.push("cp \"$Q\" .scv/objects/chunks/sha256_orphan.blob")
+        lines.push("test \"$(cat .scv/objects/chunks/sha256_orphan.blob)\" = 'orphan' && printf 'recovered=yes\\n'")
+        val out = _run(lines)
+        expect(out).to_contain("FAIL — retention age not met (SCV_GC_QUARANTINE_DAYS=30)")
+        expect(out).to_contain("young=kept")
+        expect(out).to_contain("PASS — gc pruned 1 object(s) to quarantine")
+        expect(out).to_contain("orphan=gone-from-objects")
+        expect(out).to_contain("quarantine=holds-orphan")
+        expect(out).to_contain("recovered=yes")
+        expect(out).to_contain("exit=0")

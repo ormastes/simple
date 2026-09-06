@@ -1,0 +1,1616 @@
+# Resolve Import Symbols Unit Spec
+
+> Purpose: Prove that resolve_import_symbols 2-pass import resolver.
+
+| Tests | Active | Skipped | Pending |
+|-------|--------|---------|--------:|
+| 31 | 31 | 0 | 0 |
+
+<details>
+<summary>Full Scenario Manual</summary>
+
+# Resolve Import Symbols Unit Spec
+
+Purpose: Prove that resolve_import_symbols 2-pass import resolver.
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Compiler |
+| Status | Active |
+| Source | `test/01_unit/compiler/hir/resolve_import_symbols_spec.spl` |
+| Updated | 2026-08-26 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Purpose and audience
+Purpose: Prove that resolve_import_symbols 2-pass import resolver.
+Audience: compiler and tooling engineers who maintain this spec.
+
+## Scenarios
+
+### resolve_import_symbols 2-pass import resolver
+
+#### preserves wildcard re-export surfaces and enum payload dependencies
+
+- preserves wildcard re-export surfaces and enum payload dependencies
+- Verify: preserves wildcard re-export surfaces and enum payload dependencies
+   - Expected: facade.exports.len() equals `2`
+   - Expected: facade.exports[0].items equals `["wildcard.owner.*"]`
+   - Expected: lowering.errors.len() equals `0`
+   - Expected: hir.symbols.lookup("Event") != nil is true
+   - Expected: hir.symbols.lookup("Payload") != nil is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 31 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-COMPILER
+step("preserves wildcard re-export surfaces and enum payload dependencies")
+step("Verify: preserves wildcard re-export surfaces and enum payload dependencies")
+# @req: REQ-COMPILER-HIR-001
+val log = make_logger()
+val owner_source = "struct Payload:\n    value: i64\nenum Event:\n    Wrapped(Payload)\nexport Payload, Event"
+val facade_source = "export use wildcard.owner.*\nexport Event"
+val consumer_source = "use wildcard.facade.*\nfn accept(value: Event) -> Event:\n    value"
+val owner = parse_full_frontend(owner_source, "wildcard.owner", "wildcard.owner", log)
+val facade = parse_full_frontend(facade_source, "wildcard.facade", "wildcard.facade", log)
+val consumer = parse_full_frontend(consumer_source, "wildcard.consumer", "wildcard.consumer", log)
+
+expect(facade.exports.len()).to_equal(2)  # oracle: 2 — named expected value from the requirement
+expect(facade.exports[0].items).to_equal(["wildcard.owner.*"])
+
+var modules: Dict<text, Module> = {}
+modules["wildcard.owner"] = owner
+modules["wildcard.facade"] = facade
+modules["wildcard.consumer"] = consumer
+val sources = [
+    SourceFile(path: "wildcard/owner.spl", content: owner_source, module_name: "wildcard.owner"),
+    SourceFile(path: "wildcard/facade.spl", content: facade_source, module_name: "wildcard.facade"),
+    SourceFile(path: "wildcard/consumer.spl", content: consumer_source, module_name: "wildcard.consumer")
+]
+val surfaces = resolve_import_symbols_spec_build_surfaces(modules, sources)
+var lowering = hirlowering_for_module("wildcard.consumer", surfaces)
+val hir = lowering.lower_module(consumer)
+expect(lowering.errors.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
+expect(hir.symbols.lookup("Event") != nil).to_equal(true)
+expect(hir.symbols.lookup("Payload") != nil).to_equal(true)
+expect(hir.enums.keys().len()).to_be_greater_than(0)
+```
+
+</details>
+
+#### registers an explicitly imported public function
+
+- registers an explicitly imported public function
+- Verify: registers an explicitly imported public function
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 26 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-COMPILER
+step("registers an explicitly imported public function")
+step("Verify: registers an explicitly imported public function")
+val log = make_logger()
+val src_provider = "pub fn answer() -> i64:\n    42"
+val provider = parse_full_frontend(src_provider, "provider", "provider", log)
+# NOTE: braces must be escaped (\{ \}) -- an un-escaped `{answer}` is
+# this HOST spec file's own string interpolation syntax (double-quoted
+# strings interpolate `{expr}` by default; see
+# doc/07_guide/language/syntax.md), not literal text for the GUEST
+# source being parsed. Unescaped, the host interpreter evaluates
+# `answer` as an identifier in ITS OWN scope before parse_full_frontend
+# ever runs, crashing with "variable `answer` not found" -- see
+# doc/08_tracking/bug/frontend_single_item_use_braces_import_crash_2026-07-29.md.
+val consumer_source = "use provider.\{answer\}\nfn main() -> i64:\n    if answer() == 42: 0 else: 1"
+val consumer = parse_full_frontend(consumer_source, "consumer_fn", "consumer_fn", log)
+var modules: Dict<text, Module> = {}
+modules["provider"] = provider
+modules["consumer_fn"] = consumer
+var sources: [SourceFile] = []
+sources = sources.push(SourceFile(path: "provider", content: src_provider, module_name: "provider"))
+sources = sources.push(SourceFile(path: "consumer_fn.spl", content: consumer_source, module_name: "consumer_fn"))
+val surfaces = resolve_import_symbols_spec_build_surfaces(modules, sources)
+var lowering = hirlowering_for_module("consumer_fn", surfaces)
+val hir = lowering.lower_module(consumer)
+expect(hir.symbols.lookup("answer").?).to_be_truthy()
+```
+
+</details>
+
+#### registers explicit return-only types from frozen scalar routes
+
+- registers explicit return-only types from frozen scalar routes
+   - Expected: lowering.errors.len() equals `0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 27 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-COMPILER
+step("registers explicit return-only types from frozen scalar routes")
+val log = make_logger()
+val provider_source = "pub struct ProcessResult:\n    exit_code: i64\npub struct SourceAlias:\n    value: i64"
+val consumer_source = "use result.provider.\{ProcessResult, SourceAlias as LocalAlias\}\nfn first() -> ProcessResult:\n    ProcessResult(exit_code: 0)\nfn second() -> LocalAlias:\n    LocalAlias(value: 1)"
+val provider = parse_full_frontend(
+    provider_source, "result.provider", "result.provider", log)
+val consumer = parse_full_frontend(
+    consumer_source, "result.consumer", "result.consumer", log)
+var modules: Dict<text, Module> = {}
+modules["result.provider"] = provider
+modules["result.consumer"] = consumer
+val sources = [
+    SourceFile(
+        path: "result/provider.spl", content: provider_source,
+        module_name: "result.provider"),
+    SourceFile(
+        path: "result/consumer.spl", content: consumer_source,
+        module_name: "result.consumer")
+]
+val surfaces = resolve_import_symbols_spec_build_surfaces(
+    modules, sources)
+var lowering = hirlowering_for_module("result.consumer", surfaces)
+val hir = lowering.lower_module(consumer)
+expect(lowering.errors.len()).to_equal(0)
+expect(hir.symbols.lookup("ProcessResult").?).to_be_truthy()
+expect(hir.symbols.lookup("LocalAlias").?).to_be_truthy()
+```
+
+</details>
+
+#### closes package-sibling signatures over explicit glob and re-export imports
+
+- closes package-sibling signatures over explicit glob and re-export imports
+   - Expected: lowering.errors.len() equals `0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 32 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-COMPILER
+step("closes package-sibling signatures over explicit glob and re-export imports")
+val log = make_logger()
+val owner_source = "pub struct ExternalToken:\n    value: i64\nexport ExternalToken"
+val facade_source = "export use foreign.owner.\{ExternalToken\}\nexport ExternalToken"
+val glob_sibling_source = "use foreign.owner.*\npub fn glob_token(v: ExternalToken) -> ExternalToken:\n    v"
+val named_sibling_source = "use foreign.facade.\{ExternalToken\}\npub fn named_token(v: ExternalToken) -> ExternalToken:\n    v"
+val consumer_source = "fn local_value() -> i64:\n    1"
+val owner = parse_full_frontend(owner_source, "foreign.owner", "foreign.owner", log)
+val facade = parse_full_frontend(facade_source, "foreign.facade", "foreign.facade", log)
+val glob_sibling = parse_full_frontend(glob_sibling_source, "pkg.glob_sibling", "pkg.glob_sibling", log)
+val named_sibling = parse_full_frontend(named_sibling_source, "pkg.named_sibling", "pkg.named_sibling", log)
+val consumer = parse_full_frontend(consumer_source, "pkg.consumer", "pkg.consumer", log)
+var modules: Dict<text, Module> = {}
+modules["foreign.owner"] = owner
+modules["foreign.facade"] = facade
+modules["pkg.glob_sibling"] = glob_sibling
+modules["pkg.named_sibling"] = named_sibling
+modules["pkg.consumer"] = consumer
+val sources = [
+    SourceFile(path: "foreign/owner.spl", content: owner_source, module_name: "foreign.owner"),
+    SourceFile(path: "foreign/facade.spl", content: facade_source, module_name: "foreign.facade"),
+    SourceFile(path: "pkg/glob_sibling.spl", content: glob_sibling_source, module_name: "pkg.glob_sibling"),
+    SourceFile(path: "pkg/named_sibling.spl", content: named_sibling_source, module_name: "pkg.named_sibling"),
+    SourceFile(path: "pkg/consumer.spl", content: consumer_source, module_name: "pkg.consumer")
+]
+val surfaces = resolve_import_symbols_spec_build_surfaces(modules, sources)
+var lowering = hirlowering_for_module("pkg.consumer", surfaces)
+val hir = lowering.lower_module(consumer)
+expect(lowering.errors.len()).to_equal(0)
+expect(hir.symbols.lookup("glob_token").?).to_be_truthy()
+expect(hir.symbols.lookup("named_token").?).to_be_truthy()
+```
+
+</details>
+
+#### gives a named signature dependency route precedence over an overlapping glob
+
+- gives a named signature dependency route precedence over an overlapping glob
+   - Expected: lowering.errors.len() equals `0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 33 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-COMPILER
+step("gives a named signature dependency route precedence over an overlapping glob")
+val log = make_logger()
+val named_source = "pub struct RouteToken:\n    value: i64"
+val glob_source = "pub struct RouteToken:\n    other: text"
+val owner_source = "use route.glob.*\nuse route.named.\{RouteToken\}\npub fn keep_route(value: RouteToken) -> RouteToken:\n    value"
+val consumer_source = "use route.owner.\{keep_route\}\nfn main(value: RouteToken) -> RouteToken:\n    keep_route(value)"
+val named = parse_full_frontend(named_source, "route.named", "route.named", log)
+val glob = parse_full_frontend(glob_source, "route.glob", "route.glob", log)
+val owner = parse_full_frontend(owner_source, "route.owner", "route.owner", log)
+val consumer = parse_full_frontend(consumer_source, "route.consumer", "route.consumer", log)
+var modules: Dict<text, Module> = {}
+modules["route.named"] = named
+modules["route.glob"] = glob
+modules["route.owner"] = owner
+modules["route.consumer"] = consumer
+val sources = [
+    SourceFile(path: "route/named.spl", content: named_source, module_name: "route.named"),
+    SourceFile(path: "route/glob.spl", content: glob_source, module_name: "route.glob"),
+    SourceFile(path: "route/owner.spl", content: owner_source, module_name: "route.owner"),
+    SourceFile(path: "route/consumer.spl", content: consumer_source, module_name: "route.consumer")
+]
+var surfaces = resolve_import_symbols_spec_build_surfaces(modules, sources)
+# A copied surface may carry an in-range but stale physical slot. The
+# dependency materializer must recover the owner by stable name rather
+# than reading another module's route arrays.
+val route_owner_index = surfaces.index_by_name["route.owner"]
+surfaces.surfaces[route_owner_index].physical_index = surfaces.index_by_name["route.glob"]
+var lowering = hirlowering_for_module("route.consumer", surfaces)
+val hir = lowering.lower_module(consumer)
+expect(lowering.errors.len()).to_equal(0)
+expect(hir.symbols.lookup("keep_route").?).to_be_truthy()
+expect(hir.symbols.lookup("RouteToken").?).to_be_truthy()
+```
+
+</details>
+
+#### resolves plain facade exports to their unique package sibling
+
+- resolves plain facade exports to their unique package sibling
+- Verify: resolves plain facade exports to their unique package sibling
+   - Expected: facade_surface.export_origins["tick"].owner_module equals `pkg.time_ops`
+   - Expected: facade_surface.export_origins["TickSpan"].owner_module equals `pkg.time_ops`
+   - Expected: lowering.errors.len() equals `0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 32 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-COMPILER
+step("resolves plain facade exports to their unique package sibling")
+step("Verify: resolves plain facade exports to their unique package sibling")
+val log = make_logger()
+val provider_source = "struct TickSpan:\n    value: i64\npub fn tick() -> i64:\n    42\npub fn locate() -> TickSpan:\n    TickSpan(value: 1)"
+val facade_source = "export tick, TickSpan, locate"
+val provider = parse_full_frontend(provider_source, "pkg.time_ops", "pkg.time_ops", log)
+val facade = parse_full_frontend(facade_source, "pkg.__init__", "pkg.__init__", log)
+val consumer_source = "use pkg.\{tick, TickSpan, locate\}\nfn main() -> i64:\n    val span: TickSpan = locate()\n    tick() + span.value"
+val consumer = parse_full_frontend(
+    consumer_source,
+    "plain.consumer", "plain.consumer", log)
+var modules: Dict<text, Module> = {}
+modules["pkg.time_ops"] = provider
+modules["pkg.__init__"] = facade
+modules["plain.consumer"] = consumer
+val sources = [
+    SourceFile(path: "pkg/time_ops.spl", content: provider_source, module_name: "pkg.time_ops"),
+    SourceFile(path: "pkg/__init__.spl", content: facade_source, module_name: "pkg.__init__"),
+    SourceFile(path: "plain/consumer.spl", content: consumer_source, module_name: "plain.consumer")
+]
+val surfaces = resolve_import_symbols_spec_build_surfaces(modules, sources)
+val facade_surface = surfaces.surfaces[surfaces.index_by_name["pkg.__init__"]]
+expect(facade_surface.export_origins["tick"].owner_module).to_equal("pkg.time_ops")
+expect(facade_surface.export_origins["TickSpan"].owner_module).to_equal("pkg.time_ops")
+
+var lowering = hirlowering_for_module("plain.consumer", surfaces)
+val hir = lowering.lower_module(consumer)
+expect(lowering.errors.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
+expect(hir.symbols.lookup("tick").?).to_be_truthy()
+expect(hir.symbols.lookup("TickSpan").?).to_be_truthy()
+expect(hir.symbols.lookup("locate").?).to_be_truthy()
+```
+
+</details>
+
+#### prefers a facade declaration over a same-named sibling
+
+- prefers a facade declaration over a same-named sibling
+- Verify: prefers a facade declaration over a same-named sibling
+   - Expected: result.is_ok() is true
+   - Expected: facade_surface.export_origins["answer"].owner_module equals `shadow.__init__`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 19 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-COMPILER
+step("prefers a facade declaration over a same-named sibling")
+step("Verify: prefers a facade declaration over a same-named sibling")
+val log = make_logger()
+val sibling_source = "pub fn answer() -> i64:\n    1"
+val facade_source = "pub fn answer() -> i64:\n    2\nexport answer"
+val sibling = parse_full_frontend(sibling_source, "shadow.sibling", "shadow.sibling", log)
+val facade = parse_full_frontend(facade_source, "shadow.__init__", "shadow.__init__", log)
+var modules: Dict<text, Module> = {}
+modules["shadow.sibling"] = sibling
+modules["shadow.__init__"] = facade
+val result = module_surfaces_from_modules(modules, [
+    SourceFile(path: "shadow/sibling.spl", content: sibling_source, module_name: "shadow.sibling"),
+    SourceFile(path: "shadow/__init__.spl", content: facade_source, module_name: "shadow.__init__")
+])
+expect(result.is_ok()).to_equal(true)
+val surfaces = result.unwrap()
+val facade_surface = surfaces.surfaces[surfaces.index_by_name["shadow.__init__"]]
+expect(facade_surface.export_origins["answer"].owner_module).to_equal("shadow.__init__")
+```
+
+</details>
+
+#### fails closed when a plain facade export has two sibling owners
+
+- fails closed when a plain facade export has two sibling owners
+- Verify: fails closed when a plain facade export has two sibling owners
+   - Expected: result.is_err() is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 20 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-COMPILER
+step("fails closed when a plain facade export has two sibling owners")
+step("Verify: fails closed when a plain facade export has two sibling owners")
+val log = make_logger()
+val owner_source = "pub fn duplicate() -> i64:\n    1"
+val facade_source = "export duplicate"
+val first = parse_full_frontend(owner_source, "amb.first", "amb.first", log)
+val second = parse_full_frontend(owner_source, "amb.second", "amb.second", log)
+val facade = parse_full_frontend(facade_source, "amb.__init__", "amb.__init__", log)
+var modules: Dict<text, Module> = {}
+modules["amb.first"] = first
+modules["amb.second"] = second
+modules["amb.__init__"] = facade
+val result = module_surfaces_from_modules(modules, [
+    SourceFile(path: "amb/first.spl", content: owner_source, module_name: "amb.first"),
+    SourceFile(path: "amb/second.spl", content: owner_source, module_name: "amb.second"),
+    SourceFile(path: "amb/__init__.spl", content: facade_source, module_name: "amb.__init__")
+])
+expect(result.is_err()).to_equal(true)
+expect(result.unwrap_err()).to_contain("ambiguous facade export")
+```
+
+</details>
+
+#### uses generated facade provenance when sibling owners are ambiguous
+
+- uses generated facade provenance when sibling owners are ambiguous
+- Verify: uses generated facade provenance when sibling owners are ambiguous
+   - Expected: result.is_ok() is true
+   - Expected: origin.owner_module equals `hint.io.file_ops`
+   - Expected: origin.resolution_kind equals `generated-comment`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 23 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-COMPILER
+step("uses generated facade provenance when sibling owners are ambiguous")
+step("Verify: uses generated facade provenance when sibling owners are ambiguous")
+val log = make_logger()
+val owner_source = "pub fn file_exists() -> bool:\n    true\npub fn file_append() -> bool:\n    true"
+val facade_source = "# Re-exported from file_ops.spl\nexport file_exists\n# Re-exported from file_ops.spl\nexport file_append"
+val first = parse_full_frontend(owner_source, "hint.io.file_ops", "hint.io.file_ops", log)
+val second = parse_full_frontend(owner_source, "hint.io.mod_stub", "hint.io.mod_stub", log)
+val facade = parse_full_frontend(facade_source, "hint.io", "hint.io", log)
+var modules: Dict<text, Module> = {}
+modules["hint.io.file_ops"] = first
+modules["hint.io.mod_stub"] = second
+modules["hint.io"] = facade
+val result = module_surfaces_from_modules(modules, [
+    SourceFile(path: "hint/io/file_ops.spl", content: owner_source, module_name: "hint.io.file_ops"),
+    SourceFile(path: "hint/io/mod_stub.spl", content: owner_source, module_name: "hint.io.mod_stub"),
+    SourceFile(path: "hint/io.spl", content: facade_source, module_name: "hint.io")
+])
+expect(result.is_ok()).to_equal(true)
+val surfaces = result.unwrap()
+val origin = surfaces.surfaces[surfaces.index_by_name["hint.io"]].export_origins["file_append"]
+expect(origin.owner_module).to_equal("hint.io.file_ops")
+expect(origin.resolution_kind).to_equal("generated-comment")
+```
+
+</details>
+
+#### deduplicates slash variants through one canonical physical path
+
+- deduplicates slash variants through one canonical physical path
+- Verify: deduplicates slash variants through one canonical physical path
+   - Expected: result.is_ok() is true
+   - Expected: surfaces.surfaces.len() equals `1`
+   - Expected: surfaces.surfaces[0].impls.len() equals `1`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 22 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-COMPILER
+step("deduplicates slash variants through one canonical physical path")
+step("Verify: deduplicates slash variants through one canonical physical path")
+val log = make_logger()
+val source = "pub struct SeparatorCounter:\n    value: i64\nimpl SeparatorCounter:\n    fn separator_answer() -> i64:\n        42"
+val primary = parse_full_frontend(
+    source, "separator.primary", "separator.primary", log)
+val alias = parse_full_frontend(
+    source, "separator.alias", "separator.alias", log)
+var modules: Dict<text, Module> = {}
+modules["separator.primary"] = primary
+modules["separator.alias"] = alias
+val result = module_surfaces_from_modules(modules, [
+    SourceFile(path: "separator\\owner.spl", content: source, module_name: "separator.primary"),
+    SourceFile(path: "separator/owner.spl", content: source, module_name: "separator.alias")
+])
+expect(result.is_ok()).to_equal(true)
+val surfaces = result.unwrap()
+expect(surfaces.surfaces.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
+expect(surfaces.surfaces[0].impls.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
+expect(surfaces.index_by_name["separator.primary"]).to_equal(
+    surfaces.index_by_name["separator.alias"])
+```
+
+</details>
+
+#### rejects same-path aliases with different implementation counts
+
+- rejects same-path aliases with different implementation counts
+- Verify: rejects same-path aliases with different implementation counts
+   - Expected: result.is_err() is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 19 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-COMPILER
+step("rejects same-path aliases with different implementation counts")
+step("Verify: rejects same-path aliases with different implementation counts")
+val log = make_logger()
+val first_source = "struct ImplCounter:\n    value: i64\nimpl ImplCounter:\n    fn first() -> i64:\n        1"
+val second_source = first_source + "\nimpl ImplCounter:\n    fn second() -> i64:\n        2"
+val first = parse_full_frontend(
+    first_source, "impl_count.first", "impl_count.first", log)
+val second = parse_full_frontend(
+    second_source, "impl_count.second", "impl_count.second", log)
+var modules: Dict<text, Module> = {}
+modules["impl_count.first"] = first
+modules["impl_count.second"] = second
+val result = module_surfaces_from_modules(modules, [
+    SourceFile(path: "impl_count\\owner.spl", content: first_source, module_name: "impl_count.first"),
+    SourceFile(path: "impl_count/owner.spl", content: second_source, module_name: "impl_count.second")
+])
+expect(result.is_err()).to_equal(true)
+expect(result.unwrap_err()).to_contain("conflicting declaration metadata")
+```
+
+</details>
+
+#### rejects different declarations behind one canonical physical path
+
+- rejects different declarations behind one canonical physical path
+- Verify: rejects different declarations behind one canonical physical path
+   - Expected: result.is_err() is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 19 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-COMPILER
+step("rejects different declarations behind one canonical physical path")
+step("Verify: rejects different declarations behind one canonical physical path")
+val log = make_logger()
+val first_source = "pub fn first_answer() -> i64:\n    1"
+val second_source = "pub fn second_answer() -> i64:\n    2"
+val first = parse_full_frontend(
+    first_source, "conflict.first", "conflict.first", log)
+val second = parse_full_frontend(
+    second_source, "conflict.second", "conflict.second", log)
+var modules: Dict<text, Module> = {}
+modules["conflict.first"] = first
+modules["conflict.second"] = second
+val result = module_surfaces_from_modules(modules, [
+    SourceFile(path: "conflict\\owner.spl", content: first_source, module_name: "conflict.first"),
+    SourceFile(path: "conflict/owner.spl", content: second_source, module_name: "conflict.second")
+])
+expect(result.is_err()).to_equal(true)
+expect(result.unwrap_err()).to_contain("conflicting declaration metadata")
+```
+
+</details>
+
+#### uses explicit concrete imports over compatibility stubs in a root facade
+
+- uses explicit concrete imports over compatibility stubs in a root facade
+- Verify: uses explicit concrete imports over compatibility stubs in a root facade
+   - Expected: result.is_ok() is true
+   - Expected: root_surface.export_origins["file_append"].owner_module equals `root.io.file_ops`
+   - Expected: root_surface.export_origins["file_remove"].owner_module equals `root.io.file_ops`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 24 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-COMPILER
+step("uses explicit concrete imports over compatibility stubs in a root facade")
+step("Verify: uses explicit concrete imports over compatibility stubs in a root facade")
+val log = make_logger()
+val concrete_source = "pub fn file_append() -> bool:\n    true\npub fn file_remove() -> bool:\n    true"
+val stub_source = "pub fn file_append() -> bool:\n    false\npub fn file_remove() -> bool:\n    false"
+val facade_source = "use root.io.file_ops.\{file_append, file_remove\}\nexport file_append, file_remove"
+val concrete = parse_full_frontend(concrete_source, "root.io.file_ops", "root.io.file_ops", log)
+val stub = parse_full_frontend(stub_source, "root.io.mod_stub", "root.io.mod_stub", log)
+val facade = parse_full_frontend(facade_source, "root.io", "root.io", log)
+var modules: Dict<text, Module> = {}
+modules["root.io.file_ops"] = concrete
+modules["root.io.mod_stub"] = stub
+modules["root.io"] = facade
+val result = module_surfaces_from_modules(modules, [
+    SourceFile(path: "root/io/file_ops.spl", content: concrete_source, module_name: "root.io.file_ops"),
+    SourceFile(path: "root/io/mod_stub.spl", content: stub_source, module_name: "root.io.mod_stub"),
+    SourceFile(path: "root/io.spl", content: facade_source, module_name: "root.io")
+])
+expect(result.is_ok()).to_equal(true)
+val surfaces = result.unwrap()
+val root_surface = surfaces.surfaces[surfaces.index_by_name["root.io"]]
+expect(root_surface.export_origins["file_append"].owner_module).to_equal("root.io.file_ops")
+expect(root_surface.export_origins["file_remove"].owner_module).to_equal("root.io.file_ops")
+```
+
+</details>
+
+#### follows all seven Stage 4 app io delayed explicit imports
+
+- follows all seven Stage 4 app io delayed explicit imports
+- Verify: follows all seven Stage 4 app io delayed explicit imports
+   - Expected: facade_surface.export_origins[name].owner_module equals `app.io.context_ops`
+   - Expected: facade_surface.export_origins[name].source_name equals `name`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 28 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-COMPILER
+step("follows all seven Stage 4 app io delayed explicit imports")
+step("Verify: follows all seven Stage 4 app io delayed explicit imports")
+val log = make_logger()
+val names = "context_generate, context_stats, context_index_packs, context_query_index, context_sql_index_packs, context_sql_query_packs, context_sql_query_packs_by_source"
+val context_source = "pub fn context_generate() -> i64: 1\npub fn context_stats() -> i64: 2\npub fn context_index_packs() -> i64: 3\npub fn context_query_index() -> i64: 4\npub fn context_sql_index_packs() -> i64: 5\npub fn context_sql_query_packs() -> i64: 6\npub fn context_sql_query_packs_by_source() -> i64: 7"
+val cli_source = "export use app.io.context_ops.\{" + names + "\}"
+val facade_source = "use app.io.cli_ops.\{" + names + "\}\nexport " + names
+val context_ops = parse_full_frontend(context_source, "app.io.context_ops", "app.io.context_ops", log)
+val cli_ops = parse_full_frontend(cli_source, "app.io.cli_ops", "app.io.cli_ops", log)
+val facade = parse_full_frontend(facade_source, "app.io.mod", "app.io.mod", log)
+var modules: Dict<text, Module> = {}
+modules["app.io.context_ops"] = context_ops
+modules["app.io.cli_ops"] = cli_ops
+modules["app.io.mod"] = facade
+# Exact retained Stage 4 release order for this graph.
+val result = module_surfaces_from_modules(modules, [
+    SourceFile(path: "src/app/io/cli_ops.spl", content: cli_source, module_name: "app.io.cli_ops"),
+    SourceFile(path: "src/app/io/context_ops.spl", content: context_source, module_name: "app.io.context_ops"),
+    SourceFile(path: "src/app/io/mod.spl", content: facade_source, module_name: "app.io.mod")
+])
+expect(result.is_ok()).to_be(true)
+if result.is_ok():
+    val surfaces = result.unwrap()
+    val facade_surface = surfaces.surfaces[surfaces.index_by_name["app.io.mod"]]
+    for name in names.split(", "):
+        expect(facade_surface.export_origins[name].owner_module).to_equal("app.io.context_ops")
+        expect(facade_surface.export_origins[name].source_name).to_equal(name)
+```
+
+</details>
+
+#### follows an aliased delayed explicit import in reverse discovery order
+
+- follows an aliased delayed explicit import in reverse discovery order
+- Verify: follows an aliased delayed explicit import in reverse discovery order
+   - Expected: origin.owner_module equals `app.io.context_ops`
+   - Expected: origin.source_name equals `context_generate`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 25 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-COMPILER
+step("follows an aliased delayed explicit import in reverse discovery order")
+step("Verify: follows an aliased delayed explicit import in reverse discovery order")
+val log = make_logger()
+val context_source = "pub fn context_generate() -> i64: 1"
+val cli_source = "export use app.io.context_ops.\{context_generate as generate_alias\}"
+val facade_source = "use app.io.cli_ops.\{generate_alias as public_generate\}\nexport public_generate"
+val context_ops = parse_full_frontend(context_source, "app.io.context_ops", "app.io.context_ops", log)
+val cli_ops = parse_full_frontend(cli_source, "app.io.cli_ops", "app.io.cli_ops", log)
+val facade = parse_full_frontend(facade_source, "app.io.mod", "app.io.mod", log)
+var modules: Dict<text, Module> = {}
+modules["app.io.context_ops"] = context_ops
+modules["app.io.cli_ops"] = cli_ops
+modules["app.io.mod"] = facade
+val result = module_surfaces_from_modules(modules, [
+    SourceFile(path: "src/app/io/mod.spl", content: facade_source, module_name: "app.io.mod"),
+    SourceFile(path: "src/app/io/context_ops.spl", content: context_source, module_name: "app.io.context_ops"),
+    SourceFile(path: "src/app/io/cli_ops.spl", content: cli_source, module_name: "app.io.cli_ops")
+])
+expect(result.is_ok()).to_be(true)
+if result.is_ok():
+    val surfaces = result.unwrap()
+    val origin = surfaces.surfaces[surfaces.index_by_name["app.io.mod"]].export_origins["public_generate"]
+    expect(origin.owner_module).to_equal("app.io.context_ops")
+    expect(origin.source_name).to_equal("context_generate")
+```
+
+</details>
+
+#### keeps true sibling ambiguity closed without an explicit import route
+
+- keeps true sibling ambiguity closed without an explicit import route
+- Verify: keeps true sibling ambiguity closed without an explicit import route
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 21 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-COMPILER
+step("keeps true sibling ambiguity closed without an explicit import route")
+step("Verify: keeps true sibling ambiguity closed without an explicit import route")
+val log = make_logger()
+val owner_source = "pub fn context_generate() -> text:\n    \"owner\""
+val facade_source = "export context_generate"
+val first = parse_full_frontend(owner_source, "app.io.context_ops", "app.io.context_ops", log)
+val second = parse_full_frontend(owner_source, "app.io.mod_stub", "app.io.mod_stub", log)
+val facade = parse_full_frontend(facade_source, "app.io.mod", "app.io.mod", log)
+var modules: Dict<text, Module> = {}
+modules["app.io.context_ops"] = first
+modules["app.io.mod_stub"] = second
+modules["app.io.mod"] = facade
+val result = module_surfaces_from_modules(modules, [
+    SourceFile(path: "src/app/io/context_ops.spl", content: owner_source, module_name: "app.io.context_ops"),
+    SourceFile(path: "src/app/io/mod_stub.spl", content: owner_source, module_name: "app.io.mod_stub"),
+    SourceFile(path: "src/app/io/mod.spl", content: facade_source, module_name: "app.io.mod")
+])
+expect(result.is_err()).to_be(true)
+if result.is_err():
+    expect(result.unwrap_err()).to_contain("ambiguous facade export")
+```
+
+</details>
+
+#### pins root environment exports to env_ops instead of compatibility stubs
+
+- pins root environment exports to env_ops instead of compatibility stubs
+- Verify: pins root environment exports to env_ops instead of compatibility stubs
+   - Expected: result.is_ok() is true
+   - Expected: root_surface.export_origins["cwd"].owner_module equals `root.io.env_ops`
+   - Expected: root_surface.export_origins["home"].owner_module equals `root.io.env_ops`
+   - Expected: root_surface.export_origins["host_arch"].owner_module equals `root.io.env_ops`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 25 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-COMPILER
+step("pins root environment exports to env_ops instead of compatibility stubs")
+step("Verify: pins root environment exports to env_ops instead of compatibility stubs")
+val log = make_logger()
+val env_source = "pub fn cwd() -> text:\n    \"/real\"\npub fn home() -> text:\n    \"/home\"\npub fn host_arch() -> text:\n    \"x86_64\""
+val stub_source = "pub fn cwd() -> text:\n    \"\"\npub fn home() -> text:\n    \"\""
+val facade_source = "use root.io.env_ops.\{cwd, home, host_arch\}\nexport cwd, home, host_arch"
+val env_ops = parse_full_frontend(env_source, "root.io.env_ops", "root.io.env_ops", log)
+val stub = parse_full_frontend(stub_source, "root.io.mod_stub", "root.io.mod_stub", log)
+val facade = parse_full_frontend(facade_source, "root.io", "root.io", log)
+var modules: Dict<text, Module> = {}
+modules["root.io.env_ops"] = env_ops
+modules["root.io.mod_stub"] = stub
+modules["root.io"] = facade
+val result = module_surfaces_from_modules(modules, [
+    SourceFile(path: "root/io/env_ops.spl", content: env_source, module_name: "root.io.env_ops"),
+    SourceFile(path: "root/io/mod_stub.spl", content: stub_source, module_name: "root.io.mod_stub"),
+    SourceFile(path: "root/io.spl", content: facade_source, module_name: "root.io")
+])
+expect(result.is_ok()).to_equal(true)
+val surfaces = result.unwrap()
+val root_surface = surfaces.surfaces[surfaces.index_by_name["root.io"]]
+expect(root_surface.export_origins["cwd"].owner_module).to_equal("root.io.env_ops")
+expect(root_surface.export_origins["home"].owner_module).to_equal("root.io.env_ops")
+expect(root_surface.export_origins["host_arch"].owner_module).to_equal("root.io.env_ops")
+```
+
+</details>
+
+#### pins root process exports to process_ops instead of compatibility stubs
+
+- pins root process exports to process_ops instead of compatibility stubs
+- Verify: pins root process exports to process_ops instead of compatibility stubs
+   - Expected: result.is_ok() is true
+   - Expected: root_surface.export_origins["process_run"].owner_module equals `root.io.process_ops`
+   - Expected: root_surface.export_origins["process_run_timeout"].owner_module equals `root.io.process_ops`
+   - Expected: root_surface.export_origins["process_wait"].owner_module equals `root.io.process_ops`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 25 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-COMPILER
+step("pins root process exports to process_ops instead of compatibility stubs")
+step("Verify: pins root process exports to process_ops instead of compatibility stubs")
+val log = make_logger()
+val process_source = "pub fn process_run() -> bool:\n    true\npub fn process_run_timeout() -> bool:\n    true\npub fn process_wait() -> bool:\n    true"
+val stub_source = "pub fn process_run() -> bool:\n    false\npub fn process_run_timeout() -> bool:\n    false"
+val facade_source = "use root.io.process_ops.\{process_run, process_run_timeout, process_wait\}\nexport process_run, process_run_timeout, process_wait"
+val process_ops = parse_full_frontend(process_source, "root.io.process_ops", "root.io.process_ops", log)
+val stub = parse_full_frontend(stub_source, "root.io.mod_stub", "root.io.mod_stub", log)
+val facade = parse_full_frontend(facade_source, "root.io", "root.io", log)
+var modules: Dict<text, Module> = {}
+modules["root.io.process_ops"] = process_ops
+modules["root.io.mod_stub"] = stub
+modules["root.io"] = facade
+val result = module_surfaces_from_modules(modules, [
+    SourceFile(path: "root/io/process_ops.spl", content: process_source, module_name: "root.io.process_ops"),
+    SourceFile(path: "root/io/mod_stub.spl", content: stub_source, module_name: "root.io.mod_stub"),
+    SourceFile(path: "root/io.spl", content: facade_source, module_name: "root.io")
+])
+expect(result.is_ok()).to_equal(true)
+val surfaces = result.unwrap()
+val root_surface = surfaces.surfaces[surfaces.index_by_name["root.io"]]
+expect(root_surface.export_origins["process_run"].owner_module).to_equal("root.io.process_ops")
+expect(root_surface.export_origins["process_run_timeout"].owner_module).to_equal("root.io.process_ops")
+expect(root_surface.export_origins["process_wait"].owner_module).to_equal("root.io.process_ops")
+```
+
+</details>
+
+#### accepts explanatory text after a generated provenance filename
+
+- accepts explanatory text after a generated provenance filename
+- Verify: accepts explanatory text after a generated provenance filename
+   - Expected: result.is_ok() is true
+   - Expected: origin.owner_module equals `hinted.io.file_shell`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 22 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-COMPILER
+step("accepts explanatory text after a generated provenance filename")
+step("Verify: accepts explanatory text after a generated provenance filename")
+val log = make_logger()
+val owner_source = "pub fn shell() -> bool:\n    true"
+val facade_source = "# Re-exported from file_shell.spl. Mutation stays elsewhere.\nexport shell"
+val first = parse_full_frontend(owner_source, "hinted.io.file_shell", "hinted.io.file_shell", log)
+val second = parse_full_frontend(owner_source, "hinted.io.process_ops", "hinted.io.process_ops", log)
+val facade = parse_full_frontend(facade_source, "hinted.io", "hinted.io", log)
+var modules: Dict<text, Module> = {}
+modules["hinted.io.file_shell"] = first
+modules["hinted.io.process_ops"] = second
+modules["hinted.io"] = facade
+val result = module_surfaces_from_modules(modules, [
+    SourceFile(path: "hinted/io/file_shell.spl", content: owner_source, module_name: "hinted.io.file_shell"),
+    SourceFile(path: "hinted/io/process_ops.spl", content: owner_source, module_name: "hinted.io.process_ops"),
+    SourceFile(path: "hinted/io.spl", content: facade_source, module_name: "hinted.io")
+])
+expect(result.is_ok()).to_equal(true)
+val surfaces = result.unwrap()
+val origin = surfaces.surfaces[surfaces.index_by_name["hinted.io"]].export_origins["shell"]
+expect(origin.owner_module).to_equal("hinted.io.file_shell")
+```
+
+</details>
+
+#### resolves a file facade against its same-named sibling directory
+
+- resolves a file facade against its same-named sibling directory
+- Verify: resolves a file facade against its same-named sibling directory
+   - Expected: result.is_ok() is true
+   - Expected: facade_surface.export_origins["dir_create"].owner_module equals `tree.io.ops`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 19 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-COMPILER
+step("resolves a file facade against its same-named sibling directory")
+step("Verify: resolves a file facade against its same-named sibling directory")
+val log = make_logger()
+val provider_source = "pub fn dir_create() -> bool:\n    true"
+val facade_source = "export dir_create"
+val provider = parse_full_frontend(provider_source, "tree.io.ops", "tree.io.ops", log)
+val facade = parse_full_frontend(facade_source, "tree.io", "tree.io", log)
+var modules: Dict<text, Module> = {}
+modules["tree.io.ops"] = provider
+modules["tree.io"] = facade
+val result = module_surfaces_from_modules(modules, [
+    SourceFile(path: "tree/io/ops.spl", content: provider_source, module_name: "tree.io.ops"),
+    SourceFile(path: "tree/io.spl", content: facade_source, module_name: "tree.io")
+])
+expect(result.is_ok()).to_equal(true)
+val surfaces = result.unwrap()
+val facade_surface = surfaces.surfaces[surfaces.index_by_name["tree.io"]]
+expect(facade_surface.export_origins["dir_create"].owner_module).to_equal("tree.io.ops")
+```
+
+</details>
+
+#### keeps ordinary named facades on their parent sibling package
+
+- keeps ordinary named facades on their parent sibling package
+- Verify: keeps ordinary named facades on their parent sibling package
+   - Expected: result.is_ok() is true
+   - Expected: facade_surface.export_origins["sibling_value"].owner_module equals `ordinary.provider`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 19 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-COMPILER
+step("keeps ordinary named facades on their parent sibling package")
+step("Verify: keeps ordinary named facades on their parent sibling package")
+val log = make_logger()
+val provider_source = "pub fn sibling_value() -> i64:\n    1"
+val facade_source = "export sibling_value"
+val provider = parse_full_frontend(provider_source, "ordinary.provider", "ordinary.provider", log)
+val facade = parse_full_frontend(facade_source, "ordinary.facade", "ordinary.facade", log)
+var modules: Dict<text, Module> = {}
+modules["ordinary.provider"] = provider
+modules["ordinary.facade"] = facade
+val result = module_surfaces_from_modules(modules, [
+    SourceFile(path: "ordinary/provider.spl", content: provider_source, module_name: "ordinary.provider"),
+    SourceFile(path: "ordinary/facade.spl", content: facade_source, module_name: "ordinary.facade")
+])
+expect(result.is_ok()).to_equal(true)
+val surfaces = result.unwrap()
+val facade_surface = surfaces.surfaces[surfaces.index_by_name["ordinary.facade"]]
+expect(facade_surface.export_origins["sibling_value"].owner_module).to_equal("ordinary.provider")
+```
+
+</details>
+
+#### bootstrap resolves one uniquely owned flat-global declaration
+
+- bootstrap resolves one uniquely owned flat-global declaration
+- Verify: bootstrap resolves one uniquely owned flat-global declaration
+   - Expected: lowering.errors.len() equals `0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 30 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-COMPILER
+step("bootstrap resolves one uniquely owned flat-global declaration")
+step("Verify: bootstrap resolves one uniquely owned flat-global declaration")
+val log = make_logger()
+val src_provider = "struct FlatType:\n    value: i64\npub fn flat_answer() -> i64:\n    42"
+val provider = parse_full_frontend(
+    src_provider, "flat.provider", "flat.provider", log)
+val consumer_source = "type LocalText = text\nfn consume(value: FlatType) -> i64:\n    flat_answer()\nfn inferred_answer():\n    flat_answer()\nfn local_alias(value: LocalText) -> LocalText:\n    value\nfn maybe(value: FlatType?) -> FlatType?:\n    value\nfn parse_float(value: text) -> f64:\n    if value == \"panic\":\n        panic(value)\n    float(value)"
+val consumer = parse_full_frontend(
+    consumer_source,
+    "flat.consumer", "flat.consumer", log)
+var modules: Dict<text, Module> = {}
+modules["flat.provider"] = provider
+modules["flat.consumer"] = consumer
+val sources = [
+    SourceFile(path: "flat.provider", content: src_provider, module_name: "flat.provider"),
+    SourceFile(path: "flat/consumer.spl", content: consumer_source, module_name: "flat.consumer")
+]
+val surfaces = resolve_import_symbols_spec_build_surfaces(modules, sources)
+
+rt_env_set("SIMPLE_BOOTSTRAP", "1")
+rt_env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "1")
+var lowering = hirlowering_for_module("flat.consumer", surfaces)
+val hir = lowering.lower_module(consumer)
+rt_env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "")
+rt_env_set("SIMPLE_BOOTSTRAP", "")
+
+expect(lowering.errors.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
+expect(hir.symbols.lookup("FlatType").?).to_be_truthy()
+expect(hir.symbols.lookup("flat_answer").?).to_be_truthy()
+```
+
+</details>
+
+#### named import from module A wins over same-named symbol from module B
+
+- named import from module A wins over same-named symbol from module B
+- Verify: named import from module A wins over same-named symbol from module B
+   - Expected: defining_mod.unwrap() equals `path_a`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 50 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-COMPILER
+step("named import from module A wins over same-named symbol from module B")
+step("Verify: named import from module A wins over same-named symbol from module B")
+val log = make_logger()
+
+# Module A: CompileOptions has only_in_a (unique sentinel field)
+val src_a = "struct CompileOptions:\n    input_files: [text]\n    only_in_a: i64"
+val path_a = "a"
+val module_a = parse_full_frontend(src_a, path_a, path_a, log)
+
+# Module B: CompileOptions has only_in_b (unique sentinel field)
+val src_b = "struct CompileOptions:\n    mode: text\n    only_in_b: i64"
+val path_b = "b"
+val module_b = parse_full_frontend(src_b, path_b, path_b, log)
+
+# Consumer: explicitly imports CompileOptions from module A
+val open = "{"
+val close = "}"
+val src_consumer = "use a." + open + "CompileOptions" + close
+val path_consumer = "consumer"
+val module_consumer = parse_full_frontend(src_consumer, path_consumer, path_consumer, log)
+
+# Wire up modules map — both modules available to resolve_import_symbols
+var modules_map: Dict<text, Module> = {}
+modules_map[path_a] = module_a
+modules_map[path_b] = module_b
+modules_map[path_consumer] = module_consumer
+var sources: [SourceFile] = []
+sources = sources.push(SourceFile(path: path_a, content: src_a, module_name: path_a))
+sources = sources.push(SourceFile(path: path_b, content: src_b, module_name: path_b))
+sources = sources.push(SourceFile(path: "consumer.spl", content: src_consumer, module_name: path_consumer))
+val surfaces = resolve_import_symbols_spec_build_surfaces(modules_map, sources)
+
+# Lower the consumer with module_surfaces set
+# resolve_import_symbols must pre-register A's CompileOptions first
+var lowering = hirlowering_for_module(path_consumer, surfaces)
+val hir_consumer = lowering.lower_module(module_consumer)
+
+# CompileOptions must resolve to the entry registered from module A
+val resolved_id = hir_consumer.symbols.lookup("CompileOptions")
+expect(resolved_id.?).to_be_truthy()
+
+val sym = hir_consumer.symbols.get_symbol(resolved_id)
+expect(sym.?).to_be_truthy()
+
+if val sym_value = sym:
+    val defining_mod = sym_value.defining_module
+    expect(defining_mod.?).to_be_truthy()
+    # Must resolve to module A (the explicit import target), not B
+    expect(defining_mod.unwrap()).to_equal(path_a)
+```
+
+</details>
+
+#### glob import pre-registers all type symbols from imported module
+
+- glob import pre-registers all type symbols from imported module
+- Verify: glob import pre-registers all type symbols from imported module
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 31 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-COMPILER
+step("glob import pre-registers all type symbols from imported module")
+step("Verify: glob import pre-registers all type symbols from imported module")
+val log = make_logger()
+
+# Library module with two types
+val src_lib = "struct Foo:\n    x: i64\nstruct Bar:\n    y: text"
+val path_lib = "mylib"
+val module_lib = parse_full_frontend(src_lib, path_lib, path_lib, log)
+
+# Consumer uses glob import
+val src_consumer2 = "use mylib.*"
+val path_consumer2 = "consumer2"
+val module_consumer2 = parse_full_frontend(src_consumer2, path_consumer2, path_consumer2, log)
+
+var modules_map2: Dict<text, Module> = {}
+modules_map2[path_lib] = module_lib
+modules_map2[path_consumer2] = module_consumer2
+var sources2: [SourceFile] = []
+sources2 = sources2.push(SourceFile(path: path_lib, content: src_lib, module_name: path_lib))
+sources2 = sources2.push(SourceFile(path: "consumer2.spl", content: src_consumer2, module_name: path_consumer2))
+val surfaces2 = resolve_import_symbols_spec_build_surfaces(modules_map2, sources2)
+
+var lowering2 = hirlowering_for_module(path_consumer2, surfaces2)
+val hir2 = lowering2.lower_module(module_consumer2)
+
+# Both Foo and Bar must be resolvable in the consumer's symbol table
+val foo_id = hir2.symbols.lookup("Foo")
+val bar_id = hir2.symbols.lookup("Bar")
+expect(foo_id.?).to_be_truthy()
+expect(bar_id.?).to_be_truthy()
+```
+
+</details>
+
+#### glob import follows a facade's named re-exports
+
+- glob import follows a facade's named re-exports
+- Verify: glob import follows a facade's named re-exports
+   - Expected: lowering.errors.len() equals `0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 27 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-COMPILER
+step("glob import follows a facade's named re-exports")
+step("Verify: glob import follows a facade's named re-exports")
+val log = make_logger()
+val src_inner = "struct InnerType:\n    value: i64\npub fn inner_fn() -> i64:\n    42"
+val inner = parse_full_frontend(src_inner, "pkg.inner", "pkg.inner", log)
+val src_facade = "use pkg.inner.*\nexport InnerType, inner_fn"
+val facade = parse_full_frontend(src_facade, "pkg.facade", "pkg.facade", log)
+val consumer_source = "use pkg.facade.*\nfn main() -> i64:\n    inner_fn()"
+val consumer = parse_full_frontend(consumer_source, "consumer_facade", "consumer_facade", log)
+
+var modules: Dict<text, Module> = {}
+modules["pkg.inner"] = inner
+modules["pkg.facade"] = facade
+modules["consumer_facade"] = consumer
+var sources: [SourceFile] = []
+sources = sources.push(SourceFile(path: "pkg.inner", content: src_inner, module_name: "pkg.inner"))
+sources = sources.push(SourceFile(path: "pkg.facade", content: src_facade, module_name: "pkg.facade"))
+sources = sources.push(SourceFile(path: "consumer_facade.spl", content: consumer_source, module_name: "consumer_facade"))
+val surfaces = resolve_import_symbols_spec_build_surfaces(modules, sources)
+
+var lowering = hirlowering_for_module("consumer_facade", surfaces)
+val hir = lowering.lower_module(consumer)
+
+expect(hir.symbols.lookup("InnerType").?).to_be_truthy()
+expect(hir.symbols.lookup("inner_fn").?).to_be_truthy()
+expect(lowering.errors.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
+```
+
+</details>
+
+#### follows an aliased compatibility re-export to its defining class
+
+- follows an aliased compatibility re-export to its defining class
+- Verify: follows an aliased compatibility re-export to its defining class
+   - Expected: lowering.errors.len() equals `0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 31 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-COMPILER
+step("follows an aliased compatibility re-export to its defining class")
+step("Verify: follows an aliased compatibility re-export to its defining class")
+val log = make_logger()
+val src_shared_access = "class AccessResult:\n    value: text"
+val provider = parse_full_frontend(src_shared_access, "shared.access", "shared.access", log)
+# NOTE: braces escaped (\{ \}) -- see the "registers an explicitly
+# imported public function" example above for why an un-escaped
+# single-identifier `{name}` here would be interpolated by the HOST
+# spec file's own string syntax and crash before parse_full_frontend
+# is ever reached.
+val src_compat_types = "export use shared.access.\{AccessResult as T32BridgeResult\}"
+val facade = parse_full_frontend(src_compat_types, "compat.types", "compat.types", log)
+val consumer_source = "use compat.types.\{T32BridgeResult\}\nfn main(value: T32BridgeResult) -> T32BridgeResult:\n    value"
+val consumer = parse_full_frontend(consumer_source, "compat.consumer", "compat.consumer", log)
+
+var modules: Dict<text, Module> = {}
+modules["shared.access"] = provider
+modules["compat.types"] = facade
+modules["compat.consumer"] = consumer
+var sources: [SourceFile] = []
+sources = sources.push(SourceFile(path: "shared.access", content: src_shared_access, module_name: "shared.access"))
+sources = sources.push(SourceFile(path: "compat.types", content: src_compat_types, module_name: "compat.types"))
+sources = sources.push(SourceFile(path: "compat/consumer.spl", content: consumer_source, module_name: "compat.consumer"))
+val surfaces = resolve_import_symbols_spec_build_surfaces(modules, sources)
+
+var lowering = hirlowering_for_module("compat.consumer", surfaces)
+val hir = lowering.lower_module(consumer)
+
+expect(hir.symbols.lookup("T32BridgeResult").?).to_be_truthy()
+expect(lowering.errors.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
+```
+
+</details>
+
+#### binds the mutable me receiver in a prefixed class method
+
+- binds the mutable me receiver in a prefixed class method
+- Verify: binds the mutable me receiver in a prefixed class method
+   - Expected: lowering.errors.len() equals `0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 15 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-COMPILER
+step("binds the mutable me receiver in a prefixed class method")
+step("Verify: binds the mutable me receiver in a prefixed class method")
+val log = make_logger()
+val module_source = "class Box:\n    value: i64\n    me set(next: i64) -> i64:\n        me.value = next\n        me.value"
+val module = parse_full_frontend(module_source, "me_receiver", "me_receiver", log)
+var modules: Dict<text, Module> = {}
+modules["me_receiver"] = module
+val surfaces = resolve_import_symbols_spec_build_surfaces(modules, [
+    SourceFile(path: "me_receiver.spl", content: module_source, module_name: "me_receiver")
+])
+var lowering = hirlowering_for_module("me_receiver", surfaces)
+val hir = lowering.lower_module(module)
+
+expect(lowering.errors.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
+```
+
+</details>
+
+#### aliased imports keep same-named structs from different modules distinct
+
+- aliased imports keep same-named structs from different modules distinct
+- Verify: aliased imports keep same-named structs from different modules distinct
+   - Expected: driver_value.defining_module.unwrap() equals `path_driver`
+   - Expected: backend_value.defining_module.unwrap() equals `path_backend`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 47 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-COMPILER
+step("aliased imports keep same-named structs from different modules distinct")
+step("Verify: aliased imports keep same-named structs from different modules distinct")
+val log = make_logger()
+
+val src_driver = "struct CompileOptions:\n    input_files: [text]\n    low_memory: bool"
+val path_driver = "driver_types"
+val module_driver = parse_full_frontend(src_driver, path_driver, path_driver, log)
+
+val src_backend = "struct CompileOptions:\n    target: text\n    verify_output: bool"
+val path_backend = "backend_types"
+val module_backend = parse_full_frontend(src_backend, path_backend, path_backend, log)
+
+val open = "{"
+val close = "}"
+val src_consumer = "use driver_types." + open + "CompileOptions as DriverOptions" + close + "\n" +
+    "use backend_types." + open + "CompileOptions as BackendOptions" + close
+val path_consumer = "consumer_aliases"
+val module_consumer = parse_full_frontend(src_consumer, path_consumer, path_consumer, log)
+
+var modules_map: Dict<text, Module> = {}
+modules_map[path_driver] = module_driver
+modules_map[path_backend] = module_backend
+modules_map[path_consumer] = module_consumer
+var sources: [SourceFile] = []
+sources = sources.push(SourceFile(path: path_driver, content: src_driver, module_name: path_driver))
+sources = sources.push(SourceFile(path: path_backend, content: src_backend, module_name: path_backend))
+sources = sources.push(SourceFile(path: "consumer_aliases.spl", content: src_consumer, module_name: path_consumer))
+val surfaces = resolve_import_symbols_spec_build_surfaces(modules_map, sources)
+
+var lowering = hirlowering_for_module(path_consumer, surfaces)
+val hir = lowering.lower_module(module_consumer)
+
+val driver_id = hir.symbols.lookup("DriverOptions")
+val backend_id = hir.symbols.lookup("BackendOptions")
+expect(driver_id.?).to_be_truthy()
+expect(backend_id.?).to_be_truthy()
+
+val driver_sym = hir.symbols.get_symbol(driver_id)
+val backend_sym = hir.symbols.get_symbol(backend_id)
+if val driver_value = driver_sym:
+    expect(driver_value.defining_module.unwrap()).to_equal(path_driver)
+if val backend_value = backend_sym:
+    expect(backend_value.defining_module.unwrap()).to_equal(path_backend)
+if val driver_symbol_id = driver_id:
+    if val backend_symbol_id = backend_id:
+        assert_not_equal(driver_symbol_id.id, backend_symbol_id.id)
+```
+
+</details>
+
+#### resolves a module-qualified imported function call
+
+- resolves a module-qualified imported function call
+- Verify: resolves a module-qualified imported function call
+   - Expected: lowering.errors.len() equals `0`
+   - Expected: callable.defining_module.unwrap() equals `provider`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 64 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-COMPILER
+step("resolves a module-qualified imported function call")
+step("Verify: resolves a module-qualified imported function call")
+val log = make_logger()
+val src_provider = "pub fn answer() -> i64:\n    42"
+val provider = parse_full_frontend(src_provider, "provider", "provider", log)
+val consumer_source = "import provider\nfn answer() -> i64:\n    7\nfn main() -> i64:\n    provider.answer()"
+val consumer = parse_full_frontend(consumer_source, "consumer_qualified", "consumer_qualified", log)
+var modules: Dict<text, Module> = {}
+modules["provider"] = provider
+modules["consumer_qualified"] = consumer
+var sources: [SourceFile] = []
+sources = sources.push(SourceFile(path: "provider", content: src_provider, module_name: "provider"))
+sources = sources.push(SourceFile(path: "consumer_qualified.spl", content: consumer_source, module_name: "consumer_qualified"))
+val surfaces = resolve_import_symbols_spec_build_surfaces(modules, sources)
+var lowering = hirlowering_for_module("consumer_qualified", surfaces)
+val hir = lowering.lower_module(consumer)
+
+expect(hir.symbols.lookup("provider").?).to_be_truthy()
+expect(lowering.errors.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
+for fn_ in hir.functions.values():
+    if fn_.name == "main":
+        # `provider.answer()` is the function's SOLE statement, so
+        # `lower_hir_block`'s tail-value desugar (HirBlock.has/.value,
+        # see hir_definitions.spl -- the trailing expression-statement
+        # of a value-returning function body is lifted out of `stmts`
+        # into `value`, exactly like an ordinary non-qualified
+        # single-expression body such as `fn f() -> i64: g()`) leaves
+        # `fn_.body.stmts` EMPTY and carries the call in
+        # `fn_.body.value` instead. Read whichever one is actually
+        # populated -- indexing `stmts[0]` unconditionally on a
+        # value-returning single-statement body is an "index out of
+        # bounds" false negative, not evidence the call was dropped.
+        val main_call_expr: HirExpr = if fn_.body.stmts.len() > 0:
+            match fn_.body.stmts[0].kind:
+                case HirStmtKind.Expr(expr):
+                    expr
+                case _:
+                    assert_true(false)
+                    fn_.body.value
+        elif fn_.body.has:
+            fn_.body.value
+        else:
+            assert_true(false)
+            fn_.body.value
+        match main_call_expr.kind:
+            case HirExprKind.Call(callee, _, _):
+                match callee.kind:
+                    case HirExprKind.NamedVar(symbol, _):
+                        # get_symbol_raw (raw-i64 form), not get_symbol
+                        # (SymbolId?-taking form): get_symbol's `case
+                        # SymbolId(raw):` pattern against its Option-
+                        # wrapped parameter has a known match-shape
+                        # landmine on this interpreter (falls through
+                        # for every id). get_symbol_raw sidesteps it
+                        # entirely.
+                        if val callable = hir.symbols.get_symbol_raw(symbol.id):
+                            expect(callable.defining_module.unwrap()).to_equal("provider")
+                        else:
+                            assert_true(false)
+                    case _:
+                        assert_true(false)
+            case _:
+                assert_true(false)
+```
+
+</details>
+
+#### binds a relative mod namespace before lowering its qualified member
+
+- binds a relative mod namespace before lowering its qualified member
+- Verify: binds a relative mod namespace before lowering its qualified member
+   - Expected: lowering.errors.len() equals `0`
+   - Expected: namespace.is_valid() is true
+   - Expected: namespace_symbol.defining_module.unwrap() equals `pkg.file_system.file_ops`
+   - Expected: fn_.body.has is true
+   - Expected: callable.defining_module.unwrap() equals `pkg.file_system.file_ops`
+   - Expected: probe_found is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 53 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-COMPILER
+step("binds a relative mod namespace before lowering its qualified member")
+step("Verify: binds a relative mod namespace before lowering its qualified member")
+# Reproduces the native-build failures from file_system/*.spl: `mod`
+# is a module-only import, and an absent namespace must not pass
+# through the staged Option<SymbolId> lookup guard as if present.
+val log = make_logger()
+val provider_source = "pub fn exists(path: text) -> bool:\n    path != \"\""
+val consumer_source = "mod file_system.file_ops\nfn probe(path: text) -> bool:\n    file_ops.exists(path)"
+val provider = parse_full_frontend(
+    provider_source, "pkg.file_system.file_ops",
+    "pkg/file_system/file_ops.spl", log)
+val consumer = parse_full_frontend(
+    consumer_source, "pkg.file_system.metadata",
+    "pkg/file_system/metadata.spl", log)
+
+var modules: Dict<text, Module> = {}
+modules["pkg.file_system.file_ops"] = provider
+modules["pkg.file_system.metadata"] = consumer
+val sources = [
+    SourceFile(path: "pkg/file_system/file_ops.spl", content: provider_source, module_name: "pkg.file_system.file_ops"),
+    SourceFile(path: "pkg/file_system/metadata.spl", content: consumer_source, module_name: "pkg.file_system.metadata")
+]
+val surfaces = resolve_import_symbols_spec_build_surfaces(modules, sources)
+var lowering = hirlowering_for_module("pkg.file_system.metadata", surfaces)
+val hir = lowering.lower_module(consumer)
+
+expect(lowering.errors.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
+val namespace = hir.symbols.lookup_or_invalid("file_ops")
+expect(namespace.is_valid()).to_equal(true)
+if val namespace_symbol = hir.symbols.get_symbol_raw(namespace.id):
+    expect(namespace_symbol.defining_module.unwrap()).to_equal("pkg.file_system.file_ops")
+else:
+    assert_true(false)
+
+var probe_found = false
+for fn_ in hir.functions.values():
+    if fn_.name == "probe":
+        probe_found = true
+        expect(fn_.body.has).to_equal(true)
+        match fn_.body.value.kind:
+            case HirExprKind.Call(callee, _, _):
+                match callee.kind:
+                    case HirExprKind.NamedVar(symbol, _):
+                        if val callable = hir.symbols.get_symbol_raw(symbol.id):
+                            expect(callable.defining_module.unwrap()).to_equal("pkg.file_system.file_ops")
+                        else:
+                            assert_true(false)
+                    case _:
+                        assert_true(false)
+            case _:
+                assert_true(false)
+expect(probe_found).to_equal(true)
+```
+
+</details>
+
+#### keeps private named imports out of directory siblings while sharing declarations
+
+- keeps private named imports out of directory siblings while sharing declarations
+- Verify: keeps private named imports out of directory siblings while sharing declarations
+   - Expected: lowering_b_error_count equals `0`
+   - Expected: hir_b.symbols.lookup("PrivateEvent") == nil is true
+   - Expected: hir_b.symbols.lookup("PrivateGlobType") == nil is true
+   - Expected: hir_b.symbols.lookup("NestedPayload") == nil is true
+   - Expected: hir_b.symbols.lookup("SiblingEvent") != nil is true
+   - Expected: hir_b.enums.keys().len() equals `0`
+   - Expected: hir_b.symbols.lookup("SiblingSignal") != nil is true
+   - Expected: hir_b.symbols.lookup("PublicSignal") == nil is true
+   - Expected: lowering_c_error_count equals `0`
+   - Expected: sibling_value_id != nil is true
+   - Expected: hir_c.symbols.lookup("SiblingSignal") != nil is true
+   - Expected: explicit_lowering_error_count equals `0`
+   - Expected: explicit_hir.symbols.lookup("UserGlobVisible") != nil is true
+   - Expected: explicit_hir.symbols.lookup("SiblingEvent") != nil is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 64 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-COMPILER
+step("keeps private named imports out of directory siblings while sharing declarations")
+step("Verify: keeps private named imports out of directory siblings while sharing declarations")
+val log = make_logger()
+val hidden_source = "struct NestedPayload:\n    value: i64\nenum PrivateEvent:\n    Wrapped(NestedPayload)\nenum PublicSignal:\n    Ready\nstruct UserGlobVisible:\n    value: i64"
+val private_glob_source = "struct PrivateGlobType:\n    value: i64"
+val sibling_a_source = "use hidden.defs.\{NestedPayload, PrivateEvent, UserGlobVisible\}\nuse hidden.private_glob.*\nexport use hidden.defs.\{PublicSignal as SiblingSignal\}\nenum SiblingEvent:\n    Wrapped(NestedPayload)\nfn sibling_value() -> i64:\n    42"
+val sibling_b_source = "pub fn own_value() -> i64:\n    7"
+val sibling_c_source = "fn adjacent_value() -> i64:\n    sibling_value()"
+val explicit_consumer_source = "use shared_pkg.a.*\nfn accept(value: UserGlobVisible) -> UserGlobVisible:\n    value"
+
+val hidden = parse_full_frontend(hidden_source, "hidden.defs", "hidden.defs", log)
+val private_glob = parse_full_frontend(private_glob_source, "hidden.private_glob", "hidden.private_glob", log)
+val sibling_a = parse_full_frontend(sibling_a_source, "shared_pkg.a", "shared_pkg.a", log)
+val sibling_b = parse_full_frontend(sibling_b_source, "shared_pkg.b", "shared_pkg.b", log)
+val sibling_c = parse_full_frontend(sibling_c_source, "shared_pkg.c", "shared_pkg.c", log)
+val explicit_consumer = parse_full_frontend(explicit_consumer_source, "explicit.consumer", "explicit.consumer", log)
+
+var modules: Dict<text, Module> = {}
+modules["hidden.defs"] = hidden
+modules["hidden.private_glob"] = private_glob
+modules["shared_pkg.a"] = sibling_a
+modules["shared_pkg.b"] = sibling_b
+modules["shared_pkg.c"] = sibling_c
+modules["explicit.consumer"] = explicit_consumer
+val sources = [
+    SourceFile(path: "hidden/defs.spl", content: hidden_source, module_name: "hidden.defs"),
+    SourceFile(path: "hidden/private_glob.spl", content: private_glob_source, module_name: "hidden.private_glob"),
+    SourceFile(path: "shared_pkg/a.spl", content: sibling_a_source, module_name: "shared_pkg.a"),
+    SourceFile(path: "shared_pkg/b.spl", content: sibling_b_source, module_name: "shared_pkg.b"),
+    SourceFile(path: "shared_pkg/c.spl", content: sibling_c_source, module_name: "shared_pkg.c"),
+    SourceFile(path: "explicit/consumer.spl", content: explicit_consumer_source, module_name: "explicit.consumer")
+]
+val surfaces = resolve_import_symbols_spec_build_surfaces(modules, sources)
+
+var lowering_b = hirlowering_for_module("shared_pkg.b", surfaces)
+val hir_b = lowering_b.lower_module(sibling_b)
+val lowering_b_error_count = lowering_b.errors.len()
+expect(lowering_b_error_count).to_equal(0)  # oracle: 0 — named expected value from the requirement
+expect(hir_b.symbols.lookup("PrivateEvent") == nil).to_equal(true)
+expect(hir_b.symbols.lookup("PrivateGlobType") == nil).to_equal(true)
+expect(hir_b.symbols.lookup("NestedPayload") == nil).to_equal(true)
+expect(hir_b.symbols.lookup("SiblingEvent") != nil).to_equal(true)
+expect(hir_b.enums.keys().len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
+expect(hir_b.symbols.lookup("SiblingSignal") != nil).to_equal(true)
+expect(hir_b.symbols.lookup("PublicSignal") == nil).to_equal(true)
+
+var lowering_c = hirlowering_for_module("shared_pkg.c", surfaces)
+val hir_c = lowering_c.lower_module(sibling_c)
+val lowering_c_error_count = lowering_c.errors.len()
+expect(lowering_c_error_count).to_equal(0)  # oracle: 0 — named expected value from the requirement
+val sibling_value_id = hir_c.symbols.lookup("sibling_value")
+expect(sibling_value_id != nil).to_equal(true)
+# Symbol IDs are not contractually stable; presence checks are the
+# behavioral requirement.
+expect(hir_c.symbols.lookup("SiblingSignal") != nil).to_equal(true)
+
+var explicit_lowering = hirlowering_for_module("explicit.consumer", surfaces)
+val explicit_hir = explicit_lowering.lower_module(explicit_consumer)
+val explicit_lowering_error_count = explicit_lowering.errors.len()
+expect(explicit_lowering_error_count).to_equal(0)  # oracle: 0 — named expected value from the requirement
+expect(explicit_hir.symbols.lookup("UserGlobVisible") != nil).to_equal(true)
+expect(explicit_hir.symbols.lookup("SiblingEvent") != nil).to_equal(true)
+expect(explicit_hir.enums.keys().len()).to_be_greater_than(0)
+```
+
+</details>
+
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 31 |
+| Active scenarios | 31 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
+
+
+</details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-COMPILER`
+- `REQ-COMPILER-HIR-001`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `c2ca315204c6d776dfcb766d7a0260712452b6c9611bffd22984f183c7beaa5b`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `c2ca315204c6d776dfcb766d7a0260712452b6c9611bffd22984f183c7beaa5b`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `c2ca315204c6d776dfcb766d7a0260712452b6c9611bffd22984f183c7beaa5b`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
+
+SSpec documentization score: 86/100
+source: test/01_unit/compiler/hir/resolve_import_symbols_spec.spl
+mirror: doc/06_spec/01_unit/compiler/hir/resolve_import_symbols_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/compiler/hir/resolve_import_symbols_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/compiler/hir/resolve_import_symbols_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/compiler/hir/resolve_import_symbols_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 3 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/01_unit/compiler/hir/resolve_import_symbols_spec.spl:50:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'preserves wildcard re-export surfaces and enum payload dependencies' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/compiler/hir/resolve_import_symbols_spec.spl:83:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'registers an explicitly imported public function' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/compiler/hir/resolve_import_symbols_spec.spl:111:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'registers explicit return-only types from frozen scalar routes' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

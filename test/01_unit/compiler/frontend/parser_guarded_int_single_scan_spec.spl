@@ -1,0 +1,84 @@
+# The guarded decimal parser is both a correctness boundary and a lexer hot
+# path. Pin its behavior and its one-scan/no-substring implementation shape.
+# @cover src/compiler/10.frontend/core/parser.spl
+
+use compiler.core.parser.{
+    parser_init, parser_guarded_int_text, parser_get_errors,
+    parser_diagnostics_suppressed_set}
+use std.io_runtime.{read_file_text}
+
+fn guarded(value: text) -> i64:
+    parser_init("")
+    parser_diagnostics_suppressed_set(true)
+    parser_guarded_int_text(value)
+
+fn guarded_error(value: text) -> text:
+    guarded(value)
+    parser_get_errors().join("\n")
+
+fn guarded_int_body() -> text:
+    val source = read_file_text("src/compiler/10.frontend/core/parser.spl")
+    val start = source.index_of("fn parser_guarded_int_text(t: text) -> i64:")
+    if start < 0:
+        return ""
+    val tail = source.substring(start, source.len())
+    val finish = tail.index_of("\nfn parser_warn(msg: text):")
+    if finish < 0:
+        return ""
+    tail.substring(0, finish)
+
+describe "guarded integer text single scan":
+    it "accepts short decimal text and leading zeroes":
+        expect(guarded("0")).to_equal(0)
+        expect(parser_get_errors().len()).to_equal(0)
+        expect(guarded("00042")).to_equal(42)
+        expect(parser_get_errors().len()).to_equal(0)
+
+    it "accepts every nineteen-digit boundary class":
+        expect(guarded("8223372036854775809")).to_equal(8223372036854775809)
+        expect(parser_get_errors().len()).to_equal(0)
+        expect(guarded("9223372036854775807")).to_equal(9223372036854775807)
+        expect(parser_get_errors().len()).to_equal(0)
+        expect(guarded("9223372036854775808")).to_equal(-9223372036854775808)
+        expect(parser_get_errors().len()).to_equal(0)
+
+    it "rejects a nineteen-digit value above the admitted magnitude":
+        expect(guarded("9223372036854775809")).to_equal(0)
+        expect(parser_get_errors().join("\n")).to_contain("integer literal out of range for i64")
+
+    it "rejects a valid twenty-digit value":
+        expect(guarded("10000000000000000000")).to_equal(0)
+        expect(parser_get_errors().join("\n")).to_contain("integer literal out of range for i64")
+
+    it "reports empty ASCII and non-ASCII malformed text":
+        expect(guarded_error("")).to_contain("malformed integer literal token text")
+        expect(guarded_error("12/3")).to_contain("malformed integer literal token text")
+        expect(guarded_error("12x3")).to_contain("malformed integer literal token text")
+        expect(guarded_error("12é3")).to_contain("malformed integer literal token text")
+
+    it "keeps malformed precedence over length overflow":
+        val error = guarded_error("9999999999999999999x")
+        expect(error).to_contain("malformed integer literal token text")
+        expect(error.contains("out of range for i64")).to_equal(false)
+
+    it "uses one byte scan without per-digit substring copies":
+        val source = read_file_text("src/compiler/10.frontend/core/parser.spl")
+        val start = source.index_of("fn parser_guarded_int_text(t: text) -> i64:")
+        expect(start).to_be_greater_than(-1)
+        val tail = source.substring(start, source.len())
+        expect(tail.index_of("\nfn parser_warn(msg: text):")).to_be_greater_than(-1)
+        val body = guarded_int_body()
+        expect(body.len()).to_be_greater_than(0)
+        expect(body).to_contain("while gi < digit_count:")
+        expect(body).to_contain("val code = t.byte_at(gi)")
+        expect(body).to_contain("val max_code = max19.byte_at(gi)")
+        expect(body).to_contain("acc = acc * 10 + (code - 48)")
+        expect(body.count("while ")).to_equal(1)
+        expect(body.count("\n    for ")).to_equal(0)
+        expect(body.count("\n        for ")).to_equal(0)
+        expect(body.count("\n            for ")).to_equal(0)
+        expect(body.count(".byte_at(")).to_equal(2)
+        expect(body.count("substring(")).to_equal(0)
+        expect(body.count("t[")).to_equal(0)
+        expect(body.count("max19[")).to_equal(0)
+        expect(body.count("char_code(")).to_equal(0)

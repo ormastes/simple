@@ -1,0 +1,162 @@
+"""
+# HIR -> monomorphization AST bridge (enum population, SMF enum record v2)
+
+`partition_generic_constructs` consumes `compiler.frontend.ast.AstModule`
+nodes, but nothing built a `Node.Enum(EnumDef)` from a lowered `HirEnum`
+(bug: doc/08_tracking/bug/smf_enum_def_serializes_variant_names_only_2026-08-21.md,
+"populate" follow-on). This file is that producer: it flattens every
+`HirEnum` -- payload kinds/types/field names, discriminants, decorators,
+`complete:` / `dyn:` openness -- into the parallel/flat lists `EnumDef`
+carries so the SMF writer serializes real metadata, not empty v2 blocks.
+
+Layout contract (mirrors `EnumDef` in 10.frontend/ast.spl):
+- `variant_payload_counts` / `_kinds` / `variant_discriminants` /
+  `has_explicit_discriminant` are parallel to `variants`.
+- `variant_payload_type_names` / `_field_names` are FLAT across variants in
+  source order, parallel to each other; "" field name = positional slot.
+"""
+
+use compiler.frontend.ast (AstModule, Node, EnumDef)
+use compiler.hir.hir_types.{HirModule, HirType, HirTypeKind, SymbolTable}
+use compiler.hir.hir_definitions.{HirEnum, HirVariant, HirVariantKind, HirExprKind}
+
+fn smf_type_name(t: HirType, symbols: SymbolTable) -> text:
+    """Source-level spelling of `t` as stored in the SMF payload type list.
+
+    Type parameters render by NAME (`T`) so `deferred_subst` can substitute
+    them textually; user types render by their symbol-table name; anything
+    the wire format has no spelling for renders `<unknown>` rather than
+    aborting the write."""
+    match t.kind:
+        case HirTypeKind.Int(bits, signed):
+            if signed: "i{bits}" else: "u{bits}"
+        case HirTypeKind.Float(bits): "f{bits}"
+        case HirTypeKind.Bool: "bool"
+        case HirTypeKind.Char: "char"
+        case HirTypeKind.Str: "text"
+        case HirTypeKind.Unit: "()"
+        case HirTypeKind.Tuple(elements):
+            val parts = elements.map(|e| smf_type_name(e, symbols))
+            "({parts.join(\", \")})"
+        case HirTypeKind.Array(elem, _):
+            "[{smf_type_name(elem, symbols)}]"
+        case HirTypeKind.Slice(elem):
+            "[{smf_type_name(elem, symbols)}]"
+        case HirTypeKind.Dict(key, value):
+            "Dict<{smf_type_name(key, symbols)}, {smf_type_name(value, symbols)}>"
+        case HirTypeKind.Optional(inner):
+            "{smf_type_name(inner, symbols)}?"
+        case HirTypeKind.Result(ok, err):
+            "Result<{smf_type_name(ok, symbols)}, {smf_type_name(err, symbols)}>"
+        case HirTypeKind.Ref(inner, _):
+            smf_type_name(inner, symbols)
+        case HirTypeKind.Ptr(inner, _):
+            "*{smf_type_name(inner, symbols)}"
+        case HirTypeKind.Named(symbol, args):
+            var base = "Type#{symbol.id}"
+            val sym = symbols.get_symbol(Some(symbol))
+            if sym != nil:
+                base = sym.name
+            if args.is_empty():
+                base
+            else:
+                val parts = args.map(|a| smf_type_name(a, symbols))
+                "{base}<{parts.join(\", \")}>"
+        case HirTypeKind.TypeParam(name, _): name
+        case HirTypeKind.Any: "any"
+        case HirTypeKind.Function(params, ret, _):
+            val parts = params.map(|p| smf_type_name(p, symbols))
+            "fn({parts.join(\", \")}) -> {smf_type_name(ret, symbols)}"
+        case _: "<unknown>"
+
+fn enum_def_from_hir(e: HirEnum, symbols: SymbolTable) -> EnumDef:
+    """Flatten one lowered enum into a fully populated `EnumDef`.
+
+    Implicit discriminants follow the runtime rule (`register_enum_variants`
+    in 50.mir): previous value + 1, starting at 0; an explicit non-literal
+    discriminant is recorded as implicit (MIR reports that case)."""
+    var generic_params: [text] = []
+    for tp in e.type_params:
+        generic_params = generic_params.push(tp.name)
+
+    var variants: [text] = []
+    var counts: [i64] = []
+    var kinds: [u8] = []
+    var type_names: [text] = []
+    var field_names: [text] = []
+    var discriminants: [i64] = []
+    var explicit: [bool] = []
+    var next_value: i64 = 0
+
+    for v in e.variants:
+        variants = variants.push(v.name)
+        match v.kind:
+            case HirVariantKind.Unit:
+                counts = counts.push(0)
+                kinds = kinds.push(0)
+            case HirVariantKind.Tuple(tys):
+                # HIR lowers a payload-less variant as `Tuple([])`, not `Unit`
+                # (lower_variant, declaration_lowering.spl); kind 0 = unit.
+                counts = counts.push(tys.len())
+                kinds = kinds.push(if tys.len() == 0: 0 else: 1)
+                for t in tys:
+                    type_names = type_names.push(smf_type_name(t, symbols))
+                    field_names = field_names.push("")
+            case HirVariantKind.Struct(fields):
+                counts = counts.push(fields.len())
+                kinds = kinds.push(2)
+                for f in fields:
+                    type_names = type_names.push(smf_type_name(f.type_, symbols))
+                    field_names = field_names.push(f.name)
+
+        var value = next_value
+        var has_disc = false
+        if v.has_discriminant:
+            match v.discriminant.kind:
+                case HirExprKind.IntLit(lit, _):
+                    value = lit
+                    has_disc = true
+                case _:
+                    has_disc = false
+        discriminants = discriminants.push(value)
+        explicit = explicit.push(has_disc)
+        next_value = value + 1
+
+    var attr_names: [text] = []
+    var attr_args: [text] = []
+    for a in e.attributes:
+        attr_names = attr_names.push(a.name)
+        attr_args = attr_args.push(a.args)
+
+    EnumDef(
+        name: e.name,
+        generic_params: generic_params,
+        variants: variants,
+        # Mirrors the struct rule in declaration_lowering.spl
+        # (`struct_type_params.len() > 0`): enum lowering leaves the HIR flag
+        # false, so the type-param list decides template-ness.
+        is_generic_template: e.is_generic_template or e.type_params.len() > 0,
+        has_specialization_of: e.has_specialization_of,
+        specialization_of: e.specialization_of,
+        type_bindings: {},
+        variant_payload_counts: counts,
+        variant_payload_kinds: kinds,
+        variant_payload_type_names: type_names,
+        variant_payload_field_names: field_names,
+        variant_discriminants: discriminants,
+        has_explicit_discriminant: explicit,
+        attribute_names: attr_names,
+        attribute_args: attr_args,
+        complete_open: e.complete_open,
+        dyn_open: e.dyn_open
+    )
+
+fn ast_module_enums_from_hir(hm: HirModule) -> AstModule:
+    """`AstModule` holding one `Node.Enum` per enum in `hm`, ready for
+    `partition_generic_constructs`."""
+    var items: [Node] = []
+    for e in hm.enums.values():
+        items = items.push(Node.Enum(enum_def_from_hir(e, hm.symbols)))
+    AstModule(name: hm.name, items: items)
+
+export smf_type_name, enum_def_from_hir, ast_module_enums_from_hir

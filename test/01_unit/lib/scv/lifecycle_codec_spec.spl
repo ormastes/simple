@@ -1,0 +1,62 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-LIB
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+
+
+"""Lifecycle persistence envelopes round-trip exact fields and reject tampering."""
+# @req: REQ-SSPEC-LIB
+use std.spec.step
+
+use std.spec.{describe, it, expect, step}
+use std.scv.lifecycle.codec.{lifecycle_record, lifecycle_record_encode, lifecycle_record_decode}
+use std.scv.lifecycle.store.{lifecycle_store_path, lifecycle_store_write, lifecycle_store_read, lifecycle_store_probe}
+use std.io_runtime.{file_write}
+
+describe "SCV lifecycle record codec":
+    # @manual scenario evidence
+    it "round-trips the complete canonical field vector":
+        # @req REQ-SSPEC-LIB
+        step("round-trips the complete canonical field vector")
+        step("Encode a provider-neutral lifecycle record")
+        val encoded = lifecycle_record_encode(lifecycle_record("approval", "APR-1", ["REV-1", "rev_head", "reviewer", "policy-digest", "evidence-digest", "approved"]))
+        expect(encoded).to_start_with("scv-lifecycle/1|approval|APR-1|")
+        step("Decode and retain every field")
+        val decoded = lifecycle_record_decode(encoded)
+        expect(decoded.ok).to_be(true)
+        expect(decoded.record != nil).to_be(true)
+        expect(decoded.record.?.fields).to_equal(["REV-1", "rev_head", "reviewer", "policy-digest", "evidence-digest", "approved"])
+
+    it "rejects a tampered digest":
+        # @req REQ-SSPEC-LIB
+        step("rejects a tampered digest")
+        val encoded = lifecycle_record_encode(lifecycle_record("change", "CHG-1", ["title", "owner"]))
+        expect(lifecycle_record_decode(encoded + "tampered").error).to_equal("lifecycle digest mismatch")
+
+    it "rejects unsafe delimiter-bearing fields before persistence":
+        # @req REQ-SSPEC-LIB
+        step("rejects unsafe delimiter-bearing fields before persistence")
+        expect(lifecycle_record_encode(lifecycle_record("task", "TASK-1", ["unsafe|field"]))).to_equal("")
+
+    it "persists and reloads an exact lifecycle envelope":
+        # @req REQ-SSPEC-LIB
+        step("persists and reloads an exact lifecycle envelope")
+        step("Write through the lifecycle store facade")
+        val record = lifecycle_record("change", "CHG-CODEC-1", ["title", "owner", "intent-digest"])
+        val root = "build/test-artifacts/scv-lifecycle-codec"
+        expect(lifecycle_store_path(root, record)).to_end_with("/.scv/lifecycle/change/CHG-CODEC-1.scvl")
+        expect(lifecycle_store_write(root, record)).to_be(true)
+        step("Read and verify the stored digest")
+        val decoded = lifecycle_store_read(root, "change", "CHG-CODEC-1")
+        expect(decoded.ok).to_be(true)
+        expect(decoded.record.?.digest).to_equal(record.digest)
+
+    it "distinguishes absent records from corrupt stored envelopes":
+        # @req REQ-SSPEC-LIB
+        step("distinguishes absent records from corrupt stored envelopes")
+        val root = "build/test-artifacts/scv-lifecycle-codec-probe"
+        val record = lifecycle_record("change", "CHG-CORRUPT", ["title", "owner", "intent"])
+        expect(lifecycle_store_probe(root, "change", "CHG-MISSING").status).to_equal("absent")
+        expect(lifecycle_store_write(root, record)).to_be(true)
+        expect(file_write(lifecycle_store_path(root, record), "corrupt")).to_be(true)
+        expect(lifecycle_store_probe(root, "change", "CHG-CORRUPT").status).to_equal("corrupt")

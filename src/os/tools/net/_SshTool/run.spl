@@ -1,0 +1,469 @@
+# SSH client driver: run_ssh orchestrates the full client state machine — version exchange, KEXINIT, ECDH key exchange, NEWKEYS, userauth, channel open, pty+shell, and the bidirectional I/O loop.
+use os.tools.net.ssh_tool.*
+# ssh — SSH client
+# MDSOC: feature dimension, apps layer
+#
+# Complete client state machine: version exchange → KEXINIT → KEX ECDH →
+# key derivation → NEWKEYS → service request → userauth (password) →
+# channel open → pty-req + shell → bidirectional I/O loop.
+
+use os.apps.sshd.ssh_transport.{
+    ssh_build_version_string,
+    ssh_parse_version_string,
+    ssh_build_kexinit,
+    ssh_parse_kexinit,
+    SshKexInit,
+    SSH_MSG_DEBUG,
+    SSH_MSG_EXT_INFO,
+    SSH_MSG_IGNORE,
+    SSH_MSG_KEXINIT,
+    SSH_MSG_NEWKEYS,
+    SSH_MSG_SERVICE_REQUEST,
+    SSH_MSG_SERVICE_ACCEPT,
+    SSH_VERSION_STRING
+}
+use os.apps.sshd.ssh_packet.{
+    ssh_packet_build,
+    ssh_packet_read,
+    ssh_get_u32,
+    ssh_get_string,
+    ssh_get_text,
+    ssh_ascii_text_to_bytes,
+    ssh_put_u32,
+    ssh_put_text,
+    ssh_put_string,
+    ssh_put_bool,
+    SshPacket,
+    SshPacketResult,
+    SshStringResult
+}
+use os.apps.sshd.ssh_kex.{
+    ssh_kex_generate_keypair,
+    ssh_kex_compute_shared,
+    ssh_kex_compute_exchange_hash,
+    ssh_derive_keys,
+    SshSessionKeys,
+    SSH_MSG_KEX_ECDH_INIT,
+    SSH_MSG_KEX_ECDH_REPLY
+}
+use os.apps.sshd.ssh_cipher.{SshCipher}
+use os.apps.sshd.ssh_auth.{
+    SSH_MSG_USERAUTH_REQUEST,
+    SSH_MSG_USERAUTH_SUCCESS,
+    SSH_MSG_USERAUTH_FAILURE
+}
+use os.apps.sshd.ssh_channel.{
+    ssh_build_channel_data,
+    ssh_build_channel_window_adjust,
+    ssh_build_channel_eof,
+    ssh_build_channel_close,
+    SSH_MSG_CHANNEL_OPEN,
+    SSH_MSG_CHANNEL_OPEN_CONFIRMATION,
+    SSH_MSG_CHANNEL_OPEN_FAILURE,
+    SSH_MSG_CHANNEL_WINDOW_ADJUST,
+    SSH_MSG_CHANNEL_DATA,
+    SSH_MSG_CHANNEL_EXTENDED_DATA,
+    SSH_MSG_CHANNEL_EOF,
+    SSH_MSG_CHANNEL_CLOSE,
+    SSH_MSG_CHANNEL_REQUEST,
+    DEFAULT_WINDOW_SIZE,
+    DEFAULT_MAX_PACKET
+}
+use std.io.signature_sffi.{verify_host_key}
+
+extern fn rt_stdin_read_line() -> text?
+extern fn rt_string_to_byte_array(s: text) -> [u8]
+extern fn rt_io_tcp_connect(addr: text) -> i64
+extern fn rt_io_tcp_read(fd: i64, size: i64) -> [u8]
+extern fn rt_io_tcp_write(fd: i64, data: [u8]) -> i64
+extern fn rt_io_tcp_close(fd: i64) -> bool
+
+fn run_ssh(args: [text]) -> Result<bool, text>:
+    """SSH client — full state machine from version exchange to interactive shell.
+
+    Usage: ssh [user@]host [-p port]
+    """
+    if args.len() == 0:
+        return Err("ssh: missing host\nUsage: ssh [user@]host [-p port]")
+
+    var parsed = _parse_args(args)
+    var parsed_val = ("", "", 22)
+    match parsed:
+        Err(e):
+            return Err(e)
+        Ok(value):
+            parsed_val = value
+    var user: text = parsed_val.0
+    var host: text = parsed_val.1
+    var port: u64 = parsed_val.2
+
+    print "ssh: connecting to {user}@{host}:{port}..."
+
+    val addr_text = "{host}:{port}"
+    val fd = rt_io_tcp_connect(addr_text)
+    if fd < 0:
+        return Err("ssh: connect failed: {addr_text}")
+    val sock = ClientSocket(fd: fd)
+
+    # -----------------------------------------------------------------------
+    # Version exchange (RFC 4253 section 4.2)
+    # -----------------------------------------------------------------------
+
+    var version_bytes: [u8] = ssh_build_version_string()
+    var sv_result = _socket_send_all(sock, version_bytes)
+    if sv_result.is_err():
+        var e: text = sv_result.unwrap_err()
+        return Err("ssh: send version: {e}")
+
+    var rv_result = _recv_version_line(sock)
+    var server_ver_bytes: [u8] = []
+    match rv_result:
+        Err(e):
+            return Err("ssh: recv version: {e}")
+        Ok(bytes):
+            server_ver_bytes = bytes
+
+    var pv_result = ssh_parse_version_string(server_ver_bytes)
+    var server_version: text = ""
+    match pv_result:
+        Err(e):
+            return Err("ssh: version parse: {e}")
+        Ok(version):
+            server_version = version
+    print "ssh: server version: {server_version}"
+
+    # -----------------------------------------------------------------------
+    # KEXINIT exchange (RFC 4253 section 7.1)
+    # seq c2s=0, s2c=0
+    # -----------------------------------------------------------------------
+
+    var client_kexinit_payload: [u8] = ssh_build_kexinit()
+    var r_sk = _send_plain(sock, client_kexinit_payload)
+    if r_sk.is_err():
+        var e: text = r_sk.unwrap_err()
+        return Err("ssh: send KEXINIT: {e}")
+
+    var r_rk = _socket_recv_some(sock, 4096)
+    var server_kex_bytes: [u8] = []
+    match r_rk:
+        Err(e):
+            return Err("ssh: recv KEXINIT: {e}")
+        Ok(bytes):
+            server_kex_bytes = bytes
+
+    # Extract payload using ssh_packet_read to strip framing AND padding.
+    # Manual offset-5 extraction would include padding bytes, corrupting I_S
+    # in the exchange hash (host key verify would always fail).
+    var pr_kex = ssh_packet_read(server_kex_bytes, 0)
+    var parsed_kex_packet = SshPacketResult(packet: SshPacket(payload: [], sequence: 0), consumed: 0)
+    match pr_kex:
+        Err(e):
+            return Err("ssh: parse server KEXINIT frame: {e}")
+        Ok(packet_result):
+            parsed_kex_packet = packet_result
+    var server_kexinit_payload: [u8] = parsed_kex_packet.packet.payload
+    if server_kexinit_payload.len() < 1:
+        return Err("ssh: KEXINIT response too short")
+    if server_kexinit_payload[0] != SSH_MSG_KEXINIT:
+        return Err("ssh: expected KEXINIT (20), got {server_kexinit_payload[0]}")
+
+    var pk_result = ssh_parse_kexinit(server_kexinit_payload)
+    var server_kex = SshKexInit(cookie: [], kex_algorithms: "", server_host_key_algorithms: "", encryption_client_to_server: "", encryption_server_to_client: "", mac_client_to_server: "", mac_server_to_client: "", compression_client_to_server: "", compression_server_to_client: "", first_kex_packet_follows: false)
+    match pk_result:
+        Err(e):
+            return Err("ssh: parse server KEXINIT: {e}")
+        Ok(kexinit):
+            server_kex = kexinit
+
+    print "ssh: server kex: {server_kex.kex_algorithms}"
+    print "ssh: server host key: {server_kex.server_host_key_algorithms}"
+    print "ssh: server cipher: {server_kex.encryption_client_to_server}"
+
+    # -----------------------------------------------------------------------
+    # Phase 1: KEX ECDH (RFC 8731)
+    # Generate ephemeral keypair, send KEX_ECDH_INIT (msg 30)
+    # seq c2s=1
+    # -----------------------------------------------------------------------
+
+    var kp = ssh_kex_generate_keypair()
+    var kp_private: [u8] = kp.0
+    var kp_public: [u8] = kp.1
+
+    var ecdh_init_payload: [u8] = []
+    ecdh_init_payload.push(SSH_MSG_KEX_ECDH_INIT)
+    ssh_put_string(ecdh_init_payload, kp_public)
+
+    var r_ei = _send_plain(sock, ecdh_init_payload)
+    if r_ei.is_err():
+        var e: text = r_ei.unwrap_err()
+        return Err("ssh: send KEX_ECDH_INIT: {e}")
+
+    # Receive KEX_ECDH_REPLY (msg 31)
+    # seq s2c=1
+    var r_er = _recv_plain(sock)
+    var ecdh_reply_payload: [u8] = []
+    match r_er:
+        Err(e):
+            return Err("ssh: recv KEX_ECDH_REPLY: {e}")
+        Ok(payload):
+            ecdh_reply_payload = payload
+
+    var r_pr = _parse_ecdh_reply(ecdh_reply_payload)
+    var ecdh_fields = ([], [], "", [], [])
+    match r_pr:
+        Err(e):
+            return Err("ssh: parse KEX_ECDH_REPLY: {e}")
+        Ok(fields):
+            ecdh_fields = fields
+    var host_key_blob: [u8] = ecdh_fields.0
+    var q_s: [u8] = ecdh_fields.1
+    var host_key_type: text = ecdh_fields.2
+    var host_pubkey: [u8] = ecdh_fields.3
+    var host_signature: [u8] = ecdh_fields.4
+
+    # -----------------------------------------------------------------------
+    # Phase 2: Derive keys
+    # -----------------------------------------------------------------------
+
+    var shared_secret: [u8] = ssh_kex_compute_shared(kp_private, q_s)
+
+    var exchange_hash: [u8] = ssh_kex_compute_exchange_hash(
+        ssh_ascii_text_to_bytes(SSH_VERSION_STRING),
+        ssh_ascii_text_to_bytes(server_version),
+        client_kexinit_payload,
+        server_kexinit_payload,
+        host_key_blob,
+        kp_public,
+        q_s,
+        shared_secret
+    )
+
+    # Verify host key signature over exchange hash H
+    var sig_valid: bool = verify_host_key(host_key_type, host_pubkey, exchange_hash, host_signature)
+    if not sig_valid:
+        return Err("ssh: host key verification failed")
+    print "ssh: host key verified ({host_key_type})"
+
+    # Derive session keys (session_id = first exchange hash)
+    var session_keys: SshSessionKeys = ssh_derive_keys(shared_secret, exchange_hash, exchange_hash)
+
+    # -----------------------------------------------------------------------
+    # Phase 3: NEWKEYS transition
+    # seq c2s=2
+    # -----------------------------------------------------------------------
+
+    var newkeys_payload: [u8] = []
+    newkeys_payload.push(SSH_MSG_NEWKEYS)
+    var r_nk = _send_plain(sock, newkeys_payload)
+    if r_nk.is_err():
+        var e: text = r_nk.unwrap_err()
+        return Err("ssh: send NEWKEYS: {e}")
+
+    # Receive server NEWKEYS
+    # seq s2c=2
+    var r_snk = _recv_plain(sock)
+    var snk_payload: [u8] = []
+    match r_snk:
+        Err(e):
+            return Err("ssh: recv NEWKEYS: {e}")
+        Ok(payload):
+            snk_payload = payload
+    if snk_payload.len() < 1:
+        return Err("ssh: NEWKEYS empty")
+    if snk_payload[0] != SSH_MSG_NEWKEYS:
+        return Err("ssh: expected NEWKEYS (21), got {snk_payload[0]}")
+
+    print "ssh: NEWKEYS exchanged — activating encryption"
+
+    # Activate cipher.  SshCipher.encrypt_packet uses _s2c key material
+    # and SshCipher.decrypt_packet uses _c2s key material (server perspective).
+    # We are the client, so we swap the key directions on activate so that
+    # encrypt_packet applies real c2s keys and decrypt_packet applies real s2c keys.
+    # This implementation starts the encrypted packet sequence space fresh
+    # after NEWKEYS, matching the in-tree server session handling.
+    var swapped_keys: SshSessionKeys = SshSessionKeys(
+        iv_c2s: session_keys.iv_s2c,
+        iv_s2c: session_keys.iv_c2s,
+        enc_key_c2s: session_keys.enc_key_s2c,
+        enc_key_s2c: session_keys.enc_key_c2s,
+        mac_key_c2s: session_keys.mac_key_s2c,
+        mac_key_s2c: session_keys.mac_key_c2s
+    )
+    var cipher: SshCipher = SshCipher.new()
+    cipher.activate(0, 0)
+
+    # -----------------------------------------------------------------------
+    # Phase 4: Service request + userauth
+    # -----------------------------------------------------------------------
+
+    var svc_req: [u8] = _build_service_request("ssh-userauth")
+    var r_ss = send_encrypted(sock, cipher, swapped_keys.enc_key_s2c, swapped_keys.iv_s2c, svc_req)
+    if r_ss.is_err():
+        var e: text = r_ss.unwrap_err()
+        return Err("ssh: send SERVICE_REQUEST: {e}")
+
+    var r_sa = _recv_encrypted_skip_post_kex_metadata(sock, cipher, swapped_keys.enc_key_c2s, swapped_keys.iv_c2s)
+    var sa_payload: [u8] = []
+    match r_sa:
+        Err(e):
+            return Err("ssh: recv SERVICE_ACCEPT: {e}")
+        Ok(payload):
+            sa_payload = payload
+    if sa_payload.len() < 1:
+        return Err("ssh: SERVICE_ACCEPT empty")
+    if sa_payload[0] != SSH_MSG_SERVICE_ACCEPT:
+        return Err("ssh: expected SERVICE_ACCEPT (6), got {sa_payload[0]}")
+    print "ssh: ssh-userauth service accepted"
+
+    # Prompt for password and send USERAUTH_REQUEST
+    print "Password: "
+    var pw_opt = rt_stdin_read_line()
+    var password: text = ""
+    if pw_opt != nil:
+        password = pw_opt
+
+    var auth_req: [u8] = _build_userauth_password(user, "ssh-connection", password)
+    var r_ar = send_encrypted(sock, cipher, swapped_keys.enc_key_s2c, swapped_keys.iv_s2c, auth_req)
+    if r_ar.is_err():
+        var e: text = r_ar.unwrap_err()
+        return Err("ssh: send USERAUTH_REQUEST: {e}")
+
+    var r_auth_resp = recv_encrypted(sock, cipher, swapped_keys.enc_key_c2s, swapped_keys.iv_c2s)
+    var auth_resp: [u8] = []
+    match r_auth_resp:
+        Err(e):
+            return Err("ssh: recv auth response: {e}")
+        Ok(response):
+            auth_resp = response
+    if auth_resp.len() < 1:
+        return Err("ssh: auth response empty")
+    if auth_resp[0] == SSH_MSG_USERAUTH_FAILURE:
+        return Err("ssh: authentication failed")
+    if auth_resp[0] != SSH_MSG_USERAUTH_SUCCESS:
+        return Err("ssh: unexpected auth response {auth_resp[0]}")
+    print "ssh: authenticated as {user}"
+
+    # -----------------------------------------------------------------------
+    # Phase 5: Channel open + pty-req + shell
+    # -----------------------------------------------------------------------
+
+    var local_ch_id: u32 = 0
+    var ch_open: [u8] = _build_channel_open_session(local_ch_id)
+    var r_co = send_encrypted(sock, cipher, swapped_keys.enc_key_s2c, swapped_keys.iv_s2c, ch_open)
+    if r_co.is_err():
+        var e: text = r_co.unwrap_err()
+        return Err("ssh: send CHANNEL_OPEN: {e}")
+
+    var r_cc = recv_encrypted(sock, cipher, swapped_keys.enc_key_c2s, swapped_keys.iv_c2s)
+    var cc_payload: [u8] = []
+    match r_cc:
+        Err(e):
+            return Err("ssh: recv CHANNEL_OPEN_CONFIRMATION: {e}")
+        Ok(payload):
+            cc_payload = payload
+    if cc_payload.len() < 1:
+        return Err("ssh: CHANNEL_OPEN_CONFIRMATION empty")
+    if cc_payload[0] == SSH_MSG_CHANNEL_OPEN_FAILURE:
+        return Err("ssh: channel open failed")
+    if cc_payload[0] != SSH_MSG_CHANNEL_OPEN_CONFIRMATION:
+        return Err("ssh: expected CHANNEL_OPEN_CONFIRMATION (91), got {cc_payload[0]}")
+    if cc_payload.len() < 13:
+        return Err("ssh: CHANNEL_OPEN_CONFIRMATION too short")
+    # remote_id is at offset 5 (after msg type + recipient_channel)
+    var remote_ch_id: u32 = ssh_get_u32(cc_payload, 5)
+    print "ssh: channel opened (local={local_ch_id} remote={remote_ch_id})"
+
+    # Send pty-req
+    var pty_req: [u8] = _build_channel_request_pty(remote_ch_id)
+    var r_pty = send_encrypted(sock, cipher, swapped_keys.enc_key_s2c, swapped_keys.iv_s2c, pty_req)
+    if r_pty.is_err():
+        var e: text = r_pty.unwrap_err()
+        return Err("ssh: send pty-req: {e}")
+
+    # Send shell request
+    var shell_req: [u8] = _build_channel_request_shell(remote_ch_id)
+    var r_shell = send_encrypted(sock, cipher, swapped_keys.enc_key_s2c, swapped_keys.iv_s2c, shell_req)
+    if r_shell.is_err():
+        var e: text = r_shell.unwrap_err()
+        return Err("ssh: send shell: {e}")
+
+    print "ssh: shell started — entering I/O loop"
+
+    # -----------------------------------------------------------------------
+    # Phase 5: Bidirectional I/O loop
+    # Reads one line of stdin, sends as CHANNEL_DATA; reads one server packet,
+    # dispatches on type.  Exits on EOF or CHANNEL_CLOSE.
+    # -----------------------------------------------------------------------
+
+    var running: bool = true
+    while running:
+        # Read a line from stdin and forward to server
+        var line_opt = rt_stdin_read_line()
+        if line_opt == nil:
+            # EOF on stdin — send EOF + CLOSE then break
+            var eof_pkt: [u8] = ssh_build_channel_eof(remote_ch_id)
+            send_encrypted(sock, cipher, swapped_keys.enc_key_s2c, swapped_keys.iv_s2c, eof_pkt)
+            var close_pkt: [u8] = ssh_build_channel_close(remote_ch_id)
+            send_encrypted(sock, cipher, swapped_keys.enc_key_s2c, swapped_keys.iv_s2c, close_pkt)
+            running = false
+        else:
+            var line: text = line_opt
+            var line_bytes: [u8] = rt_string_to_byte_array(line)
+            # Append newline
+            line_bytes.push(0x0A)
+            var data_pkt: [u8] = ssh_build_channel_data(remote_ch_id, line_bytes)
+            var r_dp = send_encrypted(sock, cipher, swapped_keys.enc_key_s2c, swapped_keys.iv_s2c, data_pkt)
+            if r_dp.is_err():
+                var e: text = r_dp.unwrap_err()
+                return Err("ssh: send channel data: {e}")
+
+            # Read server response (may be data, window adjust, eof, or close)
+            var r_sp = recv_encrypted(sock, cipher, swapped_keys.enc_key_c2s, swapped_keys.iv_c2s)
+            var srv_pkt: [u8] = []
+            match r_sp:
+                Err(e):
+                    return Err("ssh: recv channel packet: {e}")
+                Ok(packet):
+                    srv_pkt = packet
+
+            if srv_pkt.len() < 1:
+                running = false
+            elif srv_pkt[0] == SSH_MSG_CHANNEL_DATA:
+                # Print data to stdout; send window adjust to replenish receive window
+                if srv_pkt.len() >= 9:
+                    var data_off: u64 = 5
+                    var r_data = ssh_get_string(srv_pkt, data_off)
+                    if r_data.is_ok():
+                        var dp = SshStringResult(data: [], next_offset: 0)
+                        match r_data:
+                            Err(_e):
+                                pass_dn
+                            Ok(data_part):
+                                dp = data_part
+                        var data_text: text = rt_string_from_byte_array(dp.data)
+                        print "{data_text}"
+                        var wadj: [u8] = ssh_build_channel_window_adjust(remote_ch_id, dp.data.len().to_u32())
+                        send_encrypted(sock, cipher, swapped_keys.enc_key_s2c, swapped_keys.iv_s2c, wadj)
+            elif srv_pkt[0] == SSH_MSG_CHANNEL_EXTENDED_DATA:
+                # Ignore extended data (stderr)
+                pass_dn
+            elif srv_pkt[0] == SSH_MSG_CHANNEL_WINDOW_ADJUST:
+                # Server is giving us more send window — nothing to track in this simple impl
+                pass_dn
+            elif srv_pkt[0] == SSH_MSG_CHANNEL_EOF:
+                print "ssh: server sent EOF"
+                running = false
+            elif (srv_pkt[0] == SSH_MSG_CHANNEL_CLOSE):
+                print "ssh: channel closed by server"
+                # Send our close
+                var close_reply: [u8] = ssh_build_channel_close(remote_ch_id)
+                send_encrypted(sock, cipher, swapped_keys.enc_key_s2c, swapped_keys.iv_s2c, close_reply)
+                running = false
+            else:
+                # Ignore unknown channel messages
+                pass_dn
+
+    print "ssh: connection closed"
+    Ok(true)
+
+extern fn rt_string_from_byte_array(arr: [u8]) -> text

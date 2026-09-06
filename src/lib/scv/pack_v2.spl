@@ -1,0 +1,815 @@
+# SCV pack v2: delta-compressed packs.
+
+use app.io.mod (file_exists, file_read, dir_create, dir_walk)
+use std.nogc_sync_mut.io.file_ops.{file_read_bytes, file_write_bytes}
+use std.common.compress.gzip.{gzip_compress, gzip_decompress}
+use std.scv.core.{scv_objects_dir, scv_chunk_path, scv_object_path, scv_line_set_contains}
+use std.scv.maintenance.{scv_object_id_from_path, scv_gc_roots_reachable, scv_gc_quarantine}
+use std.scv.integrity.{scv_fsck}
+use std.scv.working_copy.{scv_snapshot}
+use std.nogc_sync_mut.io.time_ops.{current_time_ms}
+use std.scv.store.{scv_repo_exists, scv_i64_bytes_to_u8, scv_hash_text, scv_write_text, scv_content_id_for_u8, scv_write_chunk_u8, scv_text_to_u8}
+use std.scv.delta.{scv_delta_encode, scv_delta_decode, scv_delta_crc32, SCV_DELTA_MAX_DEPTH}
+use std.scv.alloc_bounds.{scv_bound_object_bytes}
+use std.scv.pack.{scv_append_bytes, scv_append_text_bytes, scv_pack_bytes_line, scv_pack_id_from_gzip_path, scv_pack_manifest_for_kind, scv_pack_payload_for_kind, scv_pack_payload_matches_manifest_bytes}
+
+val SCV_PACK_V2_DELTA_WINDOW: i64 = 4
+
+# Collect all chunk ids in a directory as a list
+fn scv_pack_collect_chunk_ids(root: text) -> [text]:
+    val dir = "{scv_objects_dir(root)}/chunks"
+    if not file_exists(dir):
+        return []
+    var ids: [text] = []
+    for path in dir_walk(dir):
+        ids.push(scv_object_id_from_path(path))
+    ids
+
+# Try to find a good base chunk for delta encoding target_id among candidate ids.
+# Returns (base_id, delta_bytes) or ("", []) if no useful delta found.
+fn scv_pack_find_delta_base(root: text, target_id: text, candidate_ids: [text]) -> (text, [u8]):
+    val target_path = scv_chunk_path(root, target_id)
+    if not file_exists(target_path):
+        return ("", [])
+    val target_raw = file_read_bytes(target_path) ?? []
+    if target_raw.len() == 0:
+        return ("", [])
+
+    var best_base_id = ""
+    var best_delta: [u8] = []
+    var best_size = target_raw.len()
+
+    for cand_id in candidate_ids:
+        if cand_id == target_id:
+            continue
+        val cand_path = scv_chunk_path(root, cand_id)
+        if not file_exists(cand_path):
+            continue
+        val base_raw = file_read_bytes(cand_path) ?? []
+        if base_raw.len() == 0:
+            continue
+        val (delta, err) = scv_delta_encode(base_raw, target_raw)
+        if err != "":
+            continue
+        if delta.len() < best_size:
+            best_base_id = cand_id
+            best_delta = delta
+            best_size = delta.len()
+
+    (best_base_id, best_delta)
+
+# Build v2 payload: full entries for all object kinds, delta entries for chunks.
+# Single-pass greedy: each chunk is classified as full XOR delta, never both.
+# A chunk gets a delta entry only if it can compress against an already-committed
+# full-entry chunk. Otherwise it becomes a full entry (and can serve as base for
+# later chunks in the same pass).
+fn scv_pack_payload_v2(root: text) -> [u8]:
+    var payload: [u8] = []
+    payload = scv_append_text_bytes(payload, "format: scv-pack-payload-v2\n")
+
+    # Collect all chunk ids
+    val chunk_ids = scv_pack_collect_chunk_ids(root)
+
+    # full_ids: newline-separated set of chunk IDs committed as full entries so far
+    var full_ids = ""
+    # full_id_list: ordered list of IDs for candidate lookup
+    var full_id_list: [text] = []
+
+    # Deferred delta entries (emitted after all full entries)
+    var delta_target_ids: [text] = []
+    var delta_base_ids_list: [text] = []
+    var delta_depths: [i64] = []
+    var delta_bytes_list: [[u8]] = []
+
+    # Pass 1: classify each chunk as full or delta.
+    # The candidate list is bounded to the most recent SCV_PACK_V2_DELTA_WINDOW
+    # full entries (git's packing-window heuristic). Before this bound every
+    # chunk was delta-encoded against EVERY earlier full chunk, so packing was
+    # O(chunks^2 * chunk_bytes) and a 50-cycle soak grew without bound. Payloads
+    # stay valid v2 either way; only which base a chunk picks can differ.
+    for target_id in chunk_ids:
+        val window_start = if full_id_list.len() > SCV_PACK_V2_DELTA_WINDOW: full_id_list.len() - SCV_PACK_V2_DELTA_WINDOW else: 0
+        val candidates = full_id_list[window_start:full_id_list.len()]
+        val (base_id, delta) = scv_pack_find_delta_base(root, target_id, candidates)
+        if base_id != "" and delta.len() > 0:
+            # Goes into delta list; base is already in full_ids
+            delta_target_ids.push(target_id)
+            delta_base_ids_list.push(base_id)
+            delta_depths.push(1)
+            delta_bytes_list.push(delta)
+        else:
+            # No useful delta against existing full entries: emit as full entry now
+            full_ids = full_ids + target_id + "\n"
+            full_id_list.push(target_id)
+            val path = scv_chunk_path(root, target_id)
+            val raw = file_read_bytes(path) ?? []
+            payload = scv_append_text_bytes(payload, "entry chunks {target_id} {raw.len()}\n")
+            payload = scv_append_bytes(payload, raw)
+            payload = scv_append_text_bytes(payload, "\nendentry\n")
+
+    # Pass 2: emit all delta entries
+    var di = 0
+    while di < delta_target_ids.len():
+        val target_id = delta_target_ids[di]
+        val base_id = delta_base_ids_list[di]
+        val depth = delta_depths[di]
+        val delta = delta_bytes_list[di]
+        payload = scv_append_text_bytes(payload, "entry-delta chunks {target_id} {base_id} {depth} {delta.len()}\n")
+        payload = scv_append_bytes(payload, delta)
+        payload = scv_append_text_bytes(payload, "\nendentry\n")
+        di = di + 1
+
+    # Non-chunk object kinds: always full entries
+    for kind in ["files", "trees", "commits", "changes", "operations", "conflicts", "syntax"]:
+        payload = scv_pack_payload_for_kind(root, kind, payload)
+
+    payload
+
+fn scv_pack_write_v2(root: text) -> text:
+    if not scv_repo_exists(root):
+        return "ERROR repository not initialized\n"
+    val pack_dir = "{scv_objects_dir(root)}/packs"
+    dir_create(pack_dir, true)
+    var manifest_rows: [text] = ["format: scv-pack-v1\n"]
+    for kind in ["chunks", "files", "trees", "commits", "changes", "operations", "conflicts", "syntax"]:
+        manifest_rows.push(scv_pack_manifest_for_kind(root, kind))
+    val manifest = manifest_rows.join("")
+    val pack_id = scv_hash_text("pack", manifest)
+    val manifest_path = "{pack_dir}/{pack_id}.manifest"
+    val gzip_path = "{pack_dir}/{pack_id}.pack.gz"
+    val payload = scv_pack_payload_v2(root)
+    val compressed = gzip_compress(payload)
+    scv_write_text(manifest_path, manifest)
+    file_write_bytes(gzip_path, compressed)
+    "pack-write-v2 {pack_id} manifest={manifest_path} gzip={gzip_path} compression=gzip payload_bytes={payload.len()} compressed_bytes={compressed.len()}\n"
+
+# Verify a v2 payload: check entry-delta base references and chain depths
+fn scv_pack_v2_verify_payload(payload: [u8]) -> text:
+    val header = "format: scv-pack-payload-v2\n".bytes()
+    if payload.len() < header.len() or payload[0:header.len()] != header:
+        return "ERROR unsupported pack payload v2 header\n"
+
+    # First pass: collect all full-entry ids (these are valid base candidates)
+    var full_ids = ""
+    var delta_entries_text = ""
+    var pos = header.len()
+
+    while pos < payload.len():
+        val (line, line_end) = scv_pack_bytes_line(payload, pos)
+        val trimmed = line.trim()
+        if trimmed == "":
+            pos = line_end + 1
+            continue
+        if trimmed.starts_with("entry "):
+            val parts = trimmed.split(" ")
+            if parts.len() >= 3:
+                full_ids = full_ids + parts[2] + "\n"
+            val size = if parts.len() >= 4: (parts[3].to_i64() ?? -1) else: -1
+            if size < 0:
+                return "ERROR bad entry size in v2 payload\n"
+            val data_start = line_end + 1
+            val data_end = data_start + size
+            if data_end > payload.len():
+                return "ERROR truncated entry in v2 payload\n"
+            pos = data_end + "\nendentry\n".bytes().len()
+        elif trimmed.starts_with("entry-delta "):
+            # entry-delta <kind> <id> <base_id> <chain_depth> <delta_byte_size>
+            delta_entries_text = delta_entries_text + trimmed + "\n"
+            val parts = trimmed.split(" ")
+            if parts.len() < 6:
+                return "ERROR malformed entry-delta in v2 payload\n"
+            val size = parts[5].to_i64() ?? -1
+            if size < 0:
+                return "ERROR bad entry-delta size in v2 payload\n"
+            val data_start = line_end + 1
+            val data_end = data_start + size
+            if data_end > payload.len():
+                return "ERROR truncated entry-delta in v2 payload\n"
+            pos = data_end + "\nendentry\n".bytes().len()
+        else:
+            pos = line_end + 1
+
+    # Second pass: verify entry-delta base references and chain depths
+    for entry_line in delta_entries_text.split("\n"):
+        val trimmed = entry_line.trim()
+        if trimmed == "":
+            continue
+        val parts = trimmed.split(" ")
+        if parts.len() < 6:
+            continue
+        val base_id = parts[3]
+        val chain_depth = parts[4].to_i64() ?? -1
+        if chain_depth < 0:
+            return "ERROR bad chain depth in entry-delta\n"
+        if chain_depth > SCV_DELTA_MAX_DEPTH:
+            return "ERROR chain depth {chain_depth} exceeds maximum {SCV_DELTA_MAX_DEPTH} in entry-delta\n"
+        # base_id must exist as a full entry or another delta entry in this pack
+        if not scv_line_set_contains(full_ids, base_id):
+            if not scv_pack_v2_delta_id_exists(delta_entries_text, base_id):
+                return "ERROR entry-delta references unknown base object: {base_id}\n"
+    ""
+
+fn scv_pack_v2_delta_id_exists(delta_entries_text: text, target_id: text) -> bool:
+    for other_line in delta_entries_text.split("\n"):
+        val other = other_line.trim()
+        if other == "":
+            continue
+        val other_parts = other.split(" ")
+        if other_parts.len() >= 3 and other_parts[2] == target_id:
+            return true
+    false
+
+fn scv_pack_verify_v2(root: text, requested_pack: text) -> text:
+    if not scv_repo_exists(root):
+        return "ERROR repository not initialized\n"
+    val pack_dir = "{scv_objects_dir(root)}/packs"
+    if not file_exists(pack_dir):
+        return "ERROR missing packs directory\n"
+    var checked = 0
+    var entries = 0
+    var delta_entries = 0
+    var payload_bytes = 0
+    var compressed_bytes = 0
+    for path in dir_walk(pack_dir):
+        if not path.ends_with(".pack.gz"):
+            continue
+        val pack_id = scv_pack_id_from_gzip_path(path)
+        if requested_pack != "" and requested_pack != pack_id:
+            continue
+        val manifest_path = "{pack_dir}/{pack_id}.manifest"
+        if not file_exists(manifest_path):
+            return "ERROR missing pack manifest: {pack_id}\n"
+        val compressed = file_read_bytes(path) ?? []
+        val payload = gzip_decompress(compressed)
+        if payload.len() == 0:
+            return "ERROR corrupt pack payload: {pack_id}\n"
+        val v2_header = "format: scv-pack-payload-v2\n".bytes()
+        val v1_header = "format: scv-pack-payload-v1\n".bytes()
+        if payload.len() >= v2_header.len() and payload[0:v2_header.len()] == v2_header:
+            val verify_err = scv_pack_v2_verify_payload(payload)
+            if verify_err != "":
+                return verify_err
+            # Count entries and delta entries
+            var pp = v2_header.len()
+            var e = 0
+            var de = 0
+            while pp < payload.len():
+                val (line, line_end) = scv_pack_bytes_line(payload, pp)
+                val t = line.trim()
+                if t == "":
+                    pp = line_end + 1
+                    continue
+                if t.starts_with("entry "):
+                    val parts = t.split(" ")
+                    val size = if parts.len() >= 4: (parts[3].to_i64() ?? -1) else: -1
+                    if size < 0:
+                        return "ERROR bad entry size in v2 pack\n"
+                    e = e + 1
+                    pp = line_end + 1 + size + "\nendentry\n".bytes().len()
+                elif t.starts_with("entry-delta "):
+                    val parts = t.split(" ")
+                    val size = if parts.len() >= 6: (parts[5].to_i64() ?? -1) else: -1
+                    if size < 0:
+                        return "ERROR bad delta size in v2 pack\n"
+                    de = de + 1
+                    pp = line_end + 1 + size + "\nendentry\n".bytes().len()
+                else:
+                    pp = line_end + 1
+            checked = checked + 1
+            entries = entries + e
+            delta_entries = delta_entries + de
+            payload_bytes = payload_bytes + payload.len()
+            compressed_bytes = compressed_bytes + compressed.len()
+        elif payload.len() >= v1_header.len() and payload[0:v1_header.len()] == v1_header:
+            # Fall back to v1 verify for v1 packs
+            val manifest_text = file_read(manifest_path)
+            val (payload_ok, payload_entries, payload_reason) = scv_pack_payload_matches_manifest_bytes(payload, manifest_text)
+            if not payload_ok and payload_reason != "":
+                return payload_reason + "\n"
+            if not payload_ok:
+                return "ERROR pack manifest payload mismatch: {pack_id}\n"
+            checked = checked + 1
+            entries = entries + payload_entries
+            payload_bytes = payload_bytes + payload.len()
+            compressed_bytes = compressed_bytes + compressed.len()
+        else:
+            return "ERROR unsupported pack payload format: {pack_id}\n"
+    if checked == 0:
+        if requested_pack != "":
+            return "ERROR pack not found: {requested_pack}\n"
+        return "ERROR no packs found\n"
+    "pack-verify-v2 packs={checked} entries={entries} delta_entries={delta_entries} payload_bytes={payload_bytes} compressed_bytes={compressed_bytes}\n"
+
+# Resolve a delta chain and return the raw bytes of an object.
+# Returns (bytes, error_text)
+fn scv_pack_resolve_object(payload: [u8], target_id: text) -> ([u8], text):
+    val v2_header = "format: scv-pack-payload-v2\n".bytes()
+    if payload.len() < v2_header.len() or payload[0:v2_header.len()] != v2_header:
+        return ([], "ERROR not a v2 payload\n")
+
+    # Scan payload for target_id as full entry or delta entry
+    var pos = v2_header.len()
+    var found_full = false
+    var found_full_data: [u8] = []
+    var found_delta = false
+    var found_base_id = ""
+    var found_delta_data: [u8] = []
+
+    while pos < payload.len():
+        val (line, line_end) = scv_pack_bytes_line(payload, pos)
+        val trimmed = line.trim()
+        if trimmed == "":
+            pos = line_end + 1
+            continue
+        if trimmed.starts_with("entry "):
+            val parts = trimmed.split(" ")
+            val size = if parts.len() >= 4: (parts[3].to_i64() ?? -1) else: -1
+            if size < 0:
+                return ([], "ERROR bad entry size\n")
+            val entry_bound = scv_bound_object_bytes(size)
+            if entry_bound != "":
+                return ([], entry_bound)
+            val data_start = line_end + 1
+            val data_end = data_start + size
+            if parts.len() >= 3 and parts[2] == target_id:
+                found_full = true
+                found_full_data = payload[data_start:data_end]
+            pos = data_end + "\nendentry\n".bytes().len()
+        elif trimmed.starts_with("entry-delta "):
+            val parts = trimmed.split(" ")
+            val size = if parts.len() >= 6: (parts[5].to_i64() ?? -1) else: -1
+            if size < 0:
+                return ([], "ERROR bad delta size\n")
+            val delta_bound = scv_bound_object_bytes(size)
+            if delta_bound != "":
+                return ([], delta_bound)
+            val data_start = line_end + 1
+            val data_end = data_start + size
+            if parts.len() >= 4 and parts[2] == target_id:
+                found_delta = true
+                found_base_id = parts[3]
+                found_delta_data = payload[data_start:data_end]
+            pos = data_end + "\nendentry\n".bytes().len()
+        else:
+            pos = line_end + 1
+
+    if found_full:
+        return (found_full_data, "")
+
+    if found_delta:
+        val (base_bytes, base_err) = scv_pack_resolve_object(payload, found_base_id)
+        if base_err != "":
+            return ([], base_err)
+        val (result, decode_err) = scv_delta_decode(base_bytes, found_delta_data)
+        if decode_err != "":
+            return ([], decode_err)
+        return (result, "")
+
+    ([], "ERROR object not found in pack: {target_id}\n")
+
+fn scv_pack_read_object(root: text, pack_id: text, object_id: text) -> [u8]:
+    val pack_dir = "{scv_objects_dir(root)}/packs"
+    for path in dir_walk(pack_dir):
+        if not path.ends_with(".pack.gz"):
+            continue
+        val pid = scv_pack_id_from_gzip_path(path)
+        if pack_id != "" and pack_id != pid:
+            continue
+        val compressed = file_read_bytes(path) ?? []
+        val payload = gzip_decompress(compressed)
+        val v2_header = "format: scv-pack-payload-v2\n".bytes()
+        if payload.len() >= v2_header.len() and payload[0:v2_header.len()] == v2_header:
+            val (data, err) = scv_pack_resolve_object(payload, object_id)
+            if err == "":
+                return data
+    []
+
+# ---------------------------------------------------------------------------
+# SCV-IMPL-B-06 — pack v2 hardening.
+#
+# Three properties, all fail-closed, all bounded:
+#   (a) reachability-aware packing. Packing walks the SAME root set the MIG-21
+#       quarantine GC walks — `scv_gc_roots_reachable` in maintenance.spl is
+#       IMPORTED, never copied, so the two can never drift. Every walked id is
+#       recorded in the payload as a `reach <id>` line and, after the pack is
+#       written, is resolved back OUT of the pack and compared byte-for-byte
+#       with its loose object. A pack that would lose a reachable object is
+#       reported as a FAIL instead of being trusted.
+#   (b) delta robustness. `scv_pack_v2_fuzz` flips bits inside chunk entry DATA
+#       (full and delta) with a seeded LCG — deterministic, never a wall-clock or PRNG-seeded source —
+#       and requires every corruption to be DETECTED, by a decode error or a
+#       content-hash mismatch. Nothing is ever written to disk while fuzzing.
+#   (c) GC-never-loses-reachable soak. `scv_pack_v2_soak` runs bounded
+#       write/pack/gc-quarantine/verify cycles and asserts after EACH cycle that
+#       every reachable object is still readable and fsck is still clean.
+#
+# Format: `reach` lines are additive inside the EXISTING v2 payload. The
+# pre-existing v2 reader skips unknown lines, so a reach-augmented pack stays
+# readable by it, and v1 packs stay readable by `scv_pack_verify_v2`. No format
+# break, both directions spec-pinned.
+
+val SCV_PACK_V2_REACH_HEADER: text = "format: scv-pack-payload-v2\n"
+
+fn scv_pack_v2_loose_path(root: text, id: text) -> text:
+    if id.starts_with("sha256_"):
+        return scv_chunk_path(root, id)
+    if id.starts_with("file_"):
+        return scv_object_path(root, "files", id)
+    if id.starts_with("tree_"):
+        return scv_object_path(root, "trees", id)
+    if id.starts_with("commit_"):
+        return scv_object_path(root, "commits", id)
+    if id.starts_with("op_"):
+        return scv_object_path(root, "operations", id)
+    if id.starts_with("change_"):
+        return scv_object_path(root, "changes", id)
+    if id.starts_with("conflict_"):
+        return scv_object_path(root, "conflicts", id)
+    if id.starts_with("syntax_"):
+        return scv_object_path(root, "syntax", id)
+    ""
+
+# Splice `reach <id>` lines in directly after the v2 header. Kept as a byte
+# splice so the rest of the payload is the byte-identical v2 payload.
+fn scv_pack_payload_v2_reachable(root: text, reachable: text) -> [u8]:
+    val base = scv_pack_payload_v2(root)
+    val header_len = SCV_PACK_V2_REACH_HEADER.bytes().len()
+    var block = ""
+    for line in reachable.split("\n"):
+        val id = line.trim()
+        if id == "":
+            continue
+        if scv_pack_v2_loose_path(root, id) == "":
+            continue
+        if not file_exists(scv_pack_v2_loose_path(root, id)):
+            continue
+        block = block + "reach " + id + "\n"
+    var out: [u8] = []
+    out = scv_append_bytes(out, base[0:header_len])
+    out = scv_append_text_bytes(out, block)
+    out = scv_append_bytes(out, base[header_len:base.len()])
+    out
+
+fn scv_pack_v2_reach_ids(payload: [u8]) -> [text]:
+    var ids: [text] = []
+    var pos = SCV_PACK_V2_REACH_HEADER.bytes().len()
+    if payload.len() < pos:
+        return ids
+    while pos < payload.len():
+        val (line, line_end) = scv_pack_bytes_line(payload, pos)
+        val trimmed = line.trim()
+        if trimmed.starts_with("reach "):
+            ids.push(trimmed[6:].trim())
+            pos = line_end + 1
+            continue
+        if trimmed.starts_with("entry ") or trimmed.starts_with("entry-delta "):
+            # reach lines are a contiguous prologue; stop at the first entry
+            return ids
+        pos = line_end + 1
+    ids
+
+# Resolve an object out of a payload AND prove the bytes are the ones that were
+# packed: content-addressed ids (sha256_) are re-hashed. A corrupted delta chain
+# therefore fails closed instead of silently decoding to wrong bytes.
+fn scv_pack_v2_resolve_verified(payload: [u8], id: text) -> ([u8], text):
+    val (data, err) = scv_pack_resolve_object(payload, id)
+    if err != "":
+        return ([], err)
+    if id.starts_with("sha256_"):
+        if scv_content_id_for_u8(data) != id:
+            return ([], "ERROR pack object hash mismatch: {id}\n")
+    (data, "")
+
+# Entry table rows: "kind|id|data_start|data_end|is_delta"
+fn scv_pack_v2_entry_rows(payload: [u8]) -> [text]:
+    var rows: [text] = []
+    val header_len = SCV_PACK_V2_REACH_HEADER.bytes().len()
+    if payload.len() < header_len:
+        return rows
+    val tail_len = "\nendentry\n".bytes().len()
+    var pos = header_len
+    while pos < payload.len():
+        val (line, line_end) = scv_pack_bytes_line(payload, pos)
+        val trimmed = line.trim()
+        if trimmed.starts_with("entry "):
+            val parts = trimmed.split(" ")
+            val size = if parts.len() >= 4: (parts[3].to_i64() ?? -1) else: -1
+            if size < 0:
+                return rows
+            val data_start = line_end + 1
+            val data_end = data_start + size
+            if data_end > payload.len():
+                return rows
+            rows.push("{parts[1]}|{parts[2]}|{data_start}|{data_end}|0")
+            pos = data_end + tail_len
+        elif trimmed.starts_with("entry-delta "):
+            val parts = trimmed.split(" ")
+            val size = if parts.len() >= 6: (parts[5].to_i64() ?? -1) else: -1
+            if size < 0:
+                return rows
+            val data_start = line_end + 1
+            val data_end = data_start + size
+            if data_end > payload.len():
+                return rows
+            rows.push("{parts[1]}|{parts[2]}|{data_start}|{data_end}|1")
+            pos = data_end + tail_len
+        else:
+            pos = line_end + 1
+    rows
+
+fn scv_pack_v2_load_payload(root: text, requested_pack: text) -> ([u8], text, text):
+    val pack_dir = "{scv_objects_dir(root)}/packs"
+    if not file_exists(pack_dir):
+        return ([], "", "ERROR missing packs directory\n")
+    for path in dir_walk(pack_dir):
+        if not path.ends_with(".pack.gz"):
+            continue
+        val pid = scv_pack_id_from_gzip_path(path)
+        if requested_pack != "" and requested_pack != pid:
+            continue
+        val compressed = file_read_bytes(path) ?? []
+        val payload = gzip_decompress(compressed)
+        if payload.len() == 0:
+            return ([], pid, "ERROR corrupt pack payload: {pid}\n")
+        val header = SCV_PACK_V2_REACH_HEADER.bytes()
+        if payload.len() < header.len() or payload[0:header.len()] != header:
+            return ([], pid, "ERROR unsupported pack payload format: {pid}\n")
+        return (payload, pid, "")
+    ([], "", "ERROR no v2 packs found\n")
+
+# (a) Reachability-aware write. Fails closed rather than reporting success when
+# any reachable loose object could not be resolved back out of the pack.
+fn scv_pack_write_v2_reachable(root: text) -> text:
+    if not scv_repo_exists(root):
+        return "ERROR repository not initialized\n"
+    val reachable = scv_gc_roots_reachable(root)
+    val pack_dir = "{scv_objects_dir(root)}/packs"
+    dir_create(pack_dir, true)
+    var manifest_rows: [text] = ["format: scv-pack-v1\n"]
+    for kind in ["chunks", "files", "trees", "commits", "changes", "operations", "conflicts", "syntax"]:
+        manifest_rows.push(scv_pack_manifest_for_kind(root, kind))
+    val manifest = manifest_rows.join("")
+    val pack_id = scv_hash_text("pack", manifest)
+    val payload = scv_pack_payload_v2_reachable(root, reachable)
+    val (checked, lost, lost_names) = scv_pack_v2_reach_check(root, payload)
+    if lost > 0:
+        return "pack-write-v2r {pack_id} reachable={checked} lost={lost}\nFAIL — pack v2 would lose {lost} reachable object(s):{lost_names}\n"
+    val compressed = scv_pack_v2_gzip_stored(payload)
+    scv_write_text("{pack_dir}/{pack_id}.manifest", manifest)
+    file_write_bytes("{pack_dir}/{pack_id}.pack.gz", compressed)
+    "pack-write-v2r {pack_id} reachable={checked} lost=0 payload_bytes={payload.len()} compressed_bytes={compressed.len()}\nPASS — pack v2 reachability-aware write: {checked} reachable object(s) packed and resolved back byte-identically\n"
+
+# Returns (checked, lost, names). A reachable id with no loose object (already
+# packed, quarantined, or a dangling ref) is not a loss — only an id whose loose
+# object exists but cannot be recovered from the pack is.
+fn scv_pack_v2_reach_check(root: text, payload: [u8]) -> (i64, i64, text):
+    var checked = 0
+    var lost = 0
+    var names = ""
+    # Entry offsets are indexed ONCE. Resolving each reachable id by rescanning
+    # the whole payload was O(reachable * payload_bytes) and dominated the soak.
+    var index = ""
+    for row in scv_pack_v2_entry_rows(payload):
+        val parts = row.split("|")
+        if parts.len() >= 5:
+            index = index + "{parts[1]}|{parts[2]}|{parts[3]}|{parts[4]}\n"
+    for id in scv_pack_v2_reach_ids(payload):
+        val path = scv_pack_v2_loose_path(root, id)
+        if path == "" or not file_exists(path):
+            continue
+        checked = checked + 1
+        val loose = file_read_bytes(path) ?? []
+        val row = scv_pack_v2_index_row(index, id)
+        var ok = false
+        if row == "":
+            ok = false
+        elif row.split("|")[3] == "0":
+            val parts = row.split("|")
+            val start = parts[1].to_i64() ?? -1
+            val end = parts[2].to_i64() ?? -1
+            ok = start >= 0 and end >= start and end <= payload.len() and payload[start:end] == loose
+        else:
+            val (packed, err) = scv_pack_v2_resolve_verified(payload, id)
+            ok = err == "" and packed == loose
+        if not ok:
+            lost = lost + 1
+            if lost <= 5:
+                names = names + " " + id
+    (checked, lost, names)
+
+fn scv_pack_v2_index_row(index: text, id: text) -> text:
+    val needle = id + "|"
+    for line in index.split("\n"):
+        if line.starts_with(needle):
+            return line
+    ""
+
+fn scv_pack_verify_v2_reachable(root: text, requested_pack: text) -> text:
+    if not scv_repo_exists(root):
+        return "ERROR repository not initialized\n"
+    val (payload, pack_id, load_err) = scv_pack_v2_load_payload(root, requested_pack)
+    if load_err != "":
+        return load_err
+    val verify_err = scv_pack_v2_verify_payload(payload)
+    if verify_err != "":
+        return verify_err
+    val (checked, lost, names) = scv_pack_v2_reach_check(root, payload)
+    if checked == 0:
+        return "ERROR — nothing was checked (pack {pack_id} records no reachable object)\n"
+    if lost > 0:
+        return "pack-verify-v2r {pack_id} reachable={checked} mismatched={lost}\nFAIL — {lost} reachable object(s) not recoverable from pack:{names}\n"
+    "pack-verify-v2r {pack_id} reachable={checked} mismatched=0\nPASS — pack v2 reachability verified: {checked} reachable object(s) resolve byte-identically\n"
+
+# (b) Deterministic bounded delta fuzz. 31-bit LCG, no nondeterministic source, no writes.
+fn scv_pack_v2_lcg_next(state: i64) -> i64:
+    (state * 1103515245 + 12345) & 0x7FFFFFFF
+
+fn scv_pack_v2_fuzz(root: text, seed: i64, cases: i64) -> text:
+    if not scv_repo_exists(root):
+        return "ERROR repository not initialized\n"
+    if cases <= 0 or cases > 4096:
+        return "ERROR — nothing was checked (case count must be 1..4096)\n"
+    val (payload, pack_id, load_err) = scv_pack_v2_load_payload(root, "")
+    if load_err != "":
+        return load_err
+    var ranges: [text] = []
+    for row in scv_pack_v2_entry_rows(payload):
+        val parts = row.split("|")
+        if parts.len() >= 5 and parts[0] == "chunks":
+            val s = parts[2].to_i64() ?? -1
+            val e = parts[3].to_i64() ?? -1
+            if s >= 0 and e > s:
+                ranges.push(row)
+    if ranges.len() == 0:
+        return "ERROR — nothing was checked (pack {pack_id} carries no chunk entry data to fuzz)\n"
+    var state = if seed < 0: 1 else: (seed & 0x7FFFFFFF) + 1
+    var detected = 0
+    var undetected = 0
+    var trace = ""
+    var c = 0
+    while c < cases:
+        state = scv_pack_v2_lcg_next(state)
+        val row = ranges[state % ranges.len()]
+        val parts = row.split("|")
+        val start = parts[2].to_i64() ?? 0
+        val end = parts[3].to_i64() ?? 0
+        state = scv_pack_v2_lcg_next(state)
+        val offset = start + (state % (end - start))
+        state = scv_pack_v2_lcg_next(state)
+        # XOR mask is forced non-zero: a no-op mutation would be counted as an
+        # undetected corruption and would make the 100% claim dishonest.
+        val mask = (state % 255) + 1
+        var mutated = payload
+        mutated[offset] = ((payload[offset].to_i64() ^ mask) & 0xFF).to_u8()
+        trace = trace + "{offset}:{mask}\n"
+        if scv_pack_v2_fuzz_case_detected(mutated, ranges):
+            detected = detected + 1
+        else:
+            undetected = undetected + 1
+        c = c + 1
+    val digest = scv_hash_text("fuzz", trace)
+    val row = "pack-fuzz-v2 seed={seed} cases={cases} pack={pack_id} ranges={ranges.len()} detected={detected} undetected={undetected} digest={digest}\n"
+    if undetected > 0:
+        return row + "FAIL — {undetected} of {cases} corruption(s) decoded silently instead of failing closed\n"
+    row + "PASS — pack v2 delta fuzz: {detected}/{cases} corruptions detected (hash mismatch or decode error), 0 silent decodes\n"
+
+# A corruption counts as detected when ANY chunk entry in the pack fails to
+# resolve or fails its content hash. Mutations are confined to chunk entry DATA,
+# so the mutated object's own hash always breaks — detection is by construction.
+fn scv_pack_v2_fuzz_case_detected(mutated: [u8], ranges: [text]) -> bool:
+    for row in ranges:
+        val parts = row.split("|")
+        if parts.len() < 2:
+            continue
+        val (_data, err) = scv_pack_v2_resolve_verified(mutated, parts[1])
+        if err != "":
+            return true
+    false
+
+# (c) GC-never-loses-reachable soak. Bounded loop, one process, one temp repo.
+fn scv_pack_v2_soak(root: text, iterations: i64) -> text:
+    if not scv_repo_exists(root):
+        return "ERROR repository not initialized\n"
+    if iterations <= 0 or iterations > 500:
+        return "ERROR — nothing was checked (iteration count must be 1..500)\n"
+    var lost = 0
+    var fsck_dirty = 0
+    var quarantined = 0
+    var first_bad = ""
+    # Per-phase millisecond totals are reported so a slow soak names its own
+    # bottleneck instead of being tuned by guesswork.
+    var ms_snapshot = 0
+    var ms_pack = 0
+    var ms_gc = 0
+    var ms_verify = 0
+    var ms_fsck = 0
+    var i = 0
+    while i < iterations:
+        # 1. write: a new reachable revision plus an unreachable orphan chunk
+        # One file rewritten each cycle, not a new file per cycle: the property
+        # under test is "GC never loses a reachable object across many cycles",
+        # and a worktree that grows every cycle turns the soak into an O(n^2)
+        # worktree walk without testing anything extra.
+        scv_write_text("{root}/soak.txt", "soak revision {i} alpha beta gamma delta epsilon\n")
+        val t_snap = current_time_ms()
+        val snap = scv_snapshot(root)
+        ms_snapshot = ms_snapshot + (current_time_ms() - t_snap)
+        if snap.starts_with("ERROR") and first_bad == "":
+            first_bad = "snapshot@{i}"
+        scv_write_chunk_u8(root, scv_text_to_u8("orphan soak {i}\n"))
+        # 2. pack (reachability-aware), fail-closed on any would-be loss
+        val t_pack = current_time_ms()
+        val write_out = scv_pack_write_v2_reachable(root)
+        ms_pack = ms_pack + (current_time_ms() - t_pack)
+        if not write_out.contains("lost=0"):
+            lost = lost + 1
+            if first_bad == "":
+                first_bad = "pack-write@{i}"
+        # 3. gc: real quarantine of unreachables (min age 0 — a dry run would
+        #    be vacuous), reusing maintenance.spl's GC, never a local copy
+        val t_gc = current_time_ms()
+        val reachable = scv_gc_roots_reachable(root)
+        val (moved, _young, _qdir) = scv_gc_quarantine(root, reachable, 0, current_time_ms())
+        ms_gc = ms_gc + (current_time_ms() - t_gc)
+        quarantined = quarantined + moved
+        # 4. verify: every reachable object still readable, fsck still clean
+        val t_verify = current_time_ms()
+        for id in reachable.split("\n"):
+            val rid = id.trim()
+            if rid == "":
+                continue
+            val path = scv_pack_v2_loose_path(root, rid)
+            if path == "" or not file_exists(path):
+                continue
+            val bytes = file_read_bytes(path) ?? []
+            if bytes.len() == 0 and rid.starts_with("sha256_"):
+                lost = lost + 1
+                if first_bad == "":
+                    first_bad = "unreadable {rid}@{i}"
+        ms_verify = ms_verify + (current_time_ms() - t_verify)
+        val t_fsck = current_time_ms()
+        val fsck = scv_fsck(root)
+        ms_fsck = ms_fsck + (current_time_ms() - t_fsck)
+        if not fsck.starts_with("OK"):
+            fsck_dirty = fsck_dirty + 1
+            if first_bad == "":
+                first_bad = "fsck@{i}"
+        i = i + 1
+    val row = "pack-soak-v2 iterations={iterations} lost={lost} fsck_dirty={fsck_dirty} quarantined={quarantined} ms_snapshot={ms_snapshot} ms_pack={ms_pack} ms_gc={ms_gc} ms_verify={ms_verify} ms_fsck={ms_fsck}\n"
+    if lost > 0 or fsck_dirty > 0:
+        return row + "FAIL — pack v2 GC soak broke at: {first_bad}\n"
+    row + "PASS — pack v2 GC soak: {iterations} cycle(s), 0 reachable object(s) lost, fsck clean after every cycle\n"
+
+# ---------------------------------------------------------------------------
+# Stored-block gzip for the reachability-aware write path.
+#
+# Measured 2026-08-26 on this host: `gzip_compress` in
+# `src/lib/common/compress/gzip.spl` needs 110 SECONDS to compress a 16 KB pack
+# payload (manifest 3 ms, payload assembly 5 ms, gzip 110,234 ms). That makes a
+# bounded 50-cycle pack/GC soak cost hours and is a pre-existing perf defect of
+# the shared gzip encoder, NOT of the pack layer — it is recorded in
+# doc/08_tracking/bug/scv_gzip_compress_quadratic_2026-08-26.md rather than
+# worked around silently, and the shared encoder is deliberately not edited here.
+#
+# What this does instead is emit a VALID gzip stream made of DEFLATE stored
+# (BTYPE=00, uncompressed) blocks. Every gzip decoder — including this repo's
+# own `gzip_decompress`, round-trip-pinned by the spec — reads it. Only
+# `scv_pack_write_v2_reachable` uses it; `pack-write` (v1) and `pack-write-v2`
+# keep the shared encoder, so no existing pack, repo, or spec changes behaviour.
+
+val SCV_PACK_V2_STORED_BLOCK: i64 = 65535
+
+fn scv_pack_v2_put_u32_le(buf: [u8], value: i64) -> [u8]:
+    var out = buf
+    out.push((value & 0xFF).to_u8())
+    out.push(((value >> 8) & 0xFF).to_u8())
+    out.push(((value >> 16) & 0xFF).to_u8())
+    out.push(((value >> 24) & 0xFF).to_u8())
+    out
+
+fn scv_pack_v2_gzip_stored(payload: [u8]) -> [u8]:
+    var out: [u8] = []
+    for b in [0x1F, 0x8B, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF]:
+        out.push(b.to_u8())
+    var pos = 0
+    var wrote_block = false
+    while pos < payload.len():
+        val remaining = payload.len() - pos
+        val len = if remaining > SCV_PACK_V2_STORED_BLOCK: SCV_PACK_V2_STORED_BLOCK else: remaining
+        val final_block = if pos + len >= payload.len(): 1 else: 0
+        out.push(final_block.to_u8())
+        out.push((len & 0xFF).to_u8())
+        out.push(((len >> 8) & 0xFF).to_u8())
+        val nlen = (~len) & 0xFFFF
+        out.push((nlen & 0xFF).to_u8())
+        out.push(((nlen >> 8) & 0xFF).to_u8())
+        out = scv_append_bytes(out, payload[pos:pos + len])
+        pos = pos + len
+        wrote_block = true
+    if not wrote_block:
+        # empty payload still needs one final, empty stored block
+        for b in [0x01, 0x00, 0x00, 0xFF, 0xFF]:
+            out.push(b.to_u8())
+    out = scv_pack_v2_put_u32_le(out, scv_delta_crc32(payload))
+    out = scv_pack_v2_put_u32_le(out, payload.len() & 0xFFFFFFFF)
+    out

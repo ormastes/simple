@@ -1,0 +1,59 @@
+use std.spec
+use std.common.rt_hal.model.*
+use std.nogc_sync_mut.rt_hal.parallel_executor.{RtHalPureTaskAdapter, RtHalComparatorTaskAdapter}
+use std.nogc_sync_mut.rt_hal.tagged.{RtHalTagPolicy, rt_hal_execute_tagged}
+use std.nogc_sync_mut.rt_hal.boundary.{rt_hal_boundary_reset, rt_hal_boundary_dispatch, rt_hal_boundary_error}
+
+fn tagged_value(item: RtHalWorkItem) -> i64:
+    item.case_id + 100
+
+fn tagged_request() -> RtHalRequest:
+    RtHalRequest(
+        case_id: 1, operation: RtHalOperationKind.Query,
+        operation_id: "clock-read", input_hash: "unit", replay_hash: ""
+    )
+
+fn tagged_pure() -> RtHalPureTaskAdapter:
+    RtHalPureTaskAdapter(provider_id: "pure-simple", query_word_fn: tagged_value, effect_word_fn: tagged_value)
+
+describe "rt(hal) tagged production route":
+    it "materializes its compiler-registered Pure binding without manual setup":
+        rt_hal_boundary_reset()
+        expect(rt_hal_boundary_dispatch("auto-clock", false, false, 101)).to_equal(0)
+
+    it "runs Pure Simple only by default even when foreign adapters are available":
+        val foreign = [RtHalComparatorTaskAdapter(
+            provider_id: "c-comparator", query_word_fn: tagged_value, replay_word_fn: tagged_value
+        )]
+        val coordinator = rt_hal_execute_tagged(
+            RtHalTagPolicy.pure_only(), [tagged_request()], tagged_pure(), foreign
+        )
+        expect(coordinator.results.len()).to_equal(1)
+        expect(coordinator.results[0].provider_id).to_equal("pure-simple")
+        expect(coordinator.error).to_equal("")
+        expect(coordinator.submitted_tasks).to_equal(0)
+
+    it "rejects enabled callback comparators before they can execute":
+        val policy = RtHalTagPolicy(
+            compare_c: true, compare_rust: false,
+            worker_count: 2, queue_capacity: 2,
+            timeout_ticks: 8, max_output_bytes: 1024,
+            require_all: true
+        )
+        val foreign = [
+            RtHalComparatorTaskAdapter(provider_id: "c-comparator", query_word_fn: tagged_value, replay_word_fn: tagged_value),
+            RtHalComparatorTaskAdapter(provider_id: "rust-comparator", query_word_fn: tagged_value, replay_word_fn: tagged_value)
+        ]
+        val coordinator = rt_hal_execute_tagged(policy, [tagged_request()], tagged_pure(), foreign)
+        # Scalar callback adapters cannot prove exact I/O, frozen transfer, or
+        # bounded cancellation/reap. The exact registered process boundary is
+        # the only foreign-comparator route, so this facade must fail closed
+        # before materializing a callback result.
+        expect(coordinator.results.len()).to_equal(0)
+        expect(coordinator.error).to_equal("RTHAL-W-PARALLEL-UNSUPPORTED")
+        expect(coordinator.submitted_tasks).to_equal(0)
+        expect(coordinator.completed_tasks).to_equal(0)
+
+    it "surfaces an unavailable safe process comparator as typed unsupported":
+        rt_hal_boundary_reset()
+        expect(rt_hal_boundary_dispatch("clock-read", true, false, 101)).to_equal(1)

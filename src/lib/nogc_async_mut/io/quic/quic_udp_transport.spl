@@ -1,0 +1,112 @@
+# QUIC UDP Transport — wires QuicTransport to native_udp_* sockets
+#
+# QuicTransport.send_packet() calls rt_io_udp_send_to which is NOT registered
+# in the interpreter. This module provides a QuicUdpTransport wrapper that:
+#   - Binds a QuicUdpSocket (native_udp_*) for the socket layer
+#   - Drives QuicTransport.on_udp_data for inbound datagram dispatch
+#   - Sends outbound packets via QuicUdpSocket.send_to (interpreter-safe)
+#
+# This is the interpreter-executable wiring path. Production/native-compiled
+# code can go via QuicServer (IoDriver path) instead.
+#
+# Reference: RFC 9000 §13
+
+use std.io.quic.quic_transport.{QuicTransport, TransportEvent}
+use std.io.quic.quic_udp_socket.{QuicUdpSocket, UdpResult}
+
+# ============================================================================
+# QuicUdpTransport — interpreter-runnable QUIC transport over native_udp_*
+# ============================================================================
+
+class QuicUdpTransport:
+    """QUIC transport backed by native_udp_* (interpreter-registered externs).
+
+    Owns a QuicUdpSocket and a QuicTransport. Routes inbound datagrams through
+    QuicTransport.on_udp_data and sends outbound packets via QuicUdpSocket.
+
+    Usage:
+        var t = QuicUdpTransport.bind_server("127.0.0.1:4433")
+        t.set_recv_timeout(500)
+        val conn_key = t.open_client_connection("127.0.0.1:4433")
+        t.send_initial_packet(conn_key)
+        val events = t.poll_once()
+    """
+    socket: QuicUdpSocket
+    transport: QuicTransport
+    local_addr: text
+
+    pub static fn bind_server(addr: text) -> QuicUdpTransport?:
+        """Bind a server-mode UDP socket and create the transport layer.
+
+        Returns nil if the socket cannot be bound.
+        """
+        val sock = QuicUdpSocket.bind(addr)
+        if sock == nil:
+            return nil
+        val transport = QuicTransport.create_server(-1, addr)
+        return QuicUdpTransport(
+            socket: sock,
+            transport: transport,
+            local_addr: addr
+        )
+
+    pub static fn bind_client(addr: text) -> QuicUdpTransport?:
+        """Bind a client-mode UDP socket and create the transport layer.
+
+        Returns nil if the socket cannot be bound.
+        """
+        val sock = QuicUdpSocket.bind(addr)
+        if sock == nil:
+            return nil
+        val transport = QuicTransport.create_client(-1, addr)
+        return QuicUdpTransport(
+            socket: sock,
+            transport: transport,
+            local_addr: addr
+        )
+
+    pub me set_recv_timeout(ms: i64):
+        """Set receive timeout on the underlying UDP socket."""
+        self.socket.set_read_timeout(ms)
+
+    pub me open_connection(peer_addr: text) -> text:
+        """Open a client connection to peer_addr. Returns the connection key."""
+        return self.transport.open_connection(peer_addr)
+
+    pub me send_raw(data: [u8], peer_addr: text) -> i64:
+        """Send a raw QUIC datagram to peer_addr. Returns bytes sent or -1."""
+        return self.socket.send_to(data, peer_addr)
+
+    pub me send_initial_packet(_conn_key: text, _peer_addr: text) -> i64:
+        """Build and send a QUIC Initial packet for the given connection.
+
+        Constructs a long-header Initial packet with the connection's local/remote
+        CIDs, packet number 0, and a PADDING payload (RFC 9000 §19.1).
+        Padding expands the datagram to 1200 bytes (RFC 9000 §8.1 minimum).
+
+        Returns bytes sent, or -1 on error.
+        """
+        # A syntactically shaped long header plus zero padding is not a QUIC
+        # Initial packet: it lacks CRYPTO, payload length, packet protection,
+        # and header protection. Fail closed until the TLS/QUIC packet owner is
+        # wired; the provider capability remains unavailable meanwhile.
+        return -1
+
+    pub me poll_once() -> [TransportEvent]:
+        """Receive one UDP datagram and process through the QUIC transport.
+
+        Returns any TransportEvents produced (NewConnection, StreamData, etc.).
+        Returns empty array on timeout or error.
+        """
+        val res = self.socket.recv_from(65535)
+        match res:
+            case Received(data, from_addr):
+                return self.transport.on_udp_data(data, from_addr)
+            case _:
+                return []
+
+    pub me close():
+        """Close the underlying UDP socket."""
+        self.socket.close()
+
+export QuicUdpTransport

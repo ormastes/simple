@@ -1,0 +1,43 @@
+# Live-process fixture for `simple mem top --pid` (M8 live-poll channel).
+#
+# Installs the SIGUSR2 memory-dump hook and then pumps signal_dispatch_pending()
+# in a short poll loop. It does NOT dump a snapshot on its own -- the only way
+# a snapshot file appears is if the parent test actually delivers SIGUSR2 (via
+# `simple mem top --pid` -> src/app/mem/live_poll.spl -> `kill -USR2`) and
+# this process notices the pending signal and fires the callback. That makes
+# the parent spec's assertions genuinely depend on the live signal channel: a
+# broken send_sigusr2(), a broken --pid wiring in src/app/mem/main.spl, or a
+# dropped dispatch-pending poll leaves no file behind and the spec goes red,
+# rather than passing on a stale leftover file.
+#
+# The poll loop is required, not incidental: src/lib/nogc_sync_mut/io/
+# signal_stubs.spl registers interest via rt_signal_install/rt_signal_check
+# (a flag the OS signal handler sets) but only signal_dispatch_pending()
+# actually invokes the registered Simple callback -- confirmed against
+# test/01_unit/lib/std/io/signal_stubs_spec.spl, which pumps it the same way.
+# A process that only calls install_mem_dump_on_usr2() and then blocks in a
+# plain thread_sleep() (as an earlier version of this fixture did) never
+# fires the handler at all, no matter how the signal is delivered.
+#
+# See doc/05_design/app/mem_cli/m8_simple_mem_cli_design.md section 2.
+
+use std.nogc_sync_mut.mem.dump.{install_mem_dump_on_usr2}
+use std.nogc_sync_mut.io.signal_stubs.{signal_dispatch_pending}
+use std.io_runtime.{getpid}
+# thread_sleep does not resolve through the std.io_runtime shim under
+# interpreter execution -- import it directly (see src/app/mem/live_poll.spl).
+use std.nogc_sync_mut.io_runtime.{thread_sleep}
+
+fn main() -> i64:
+    val installed = install_mem_dump_on_usr2()
+    print "live_poll_target: handler_installed={installed} pid={getpid()}"
+    # Poll for ~30s (1500 * 20ms) so the parent has time to signal + read
+    # even under heavy concurrent-agent load. The parent always process_kill()s
+    # this fixture once done, so a generous ceiling costs nothing on the
+    # happy path.
+    var i = 0
+    while i < 1500:
+        signal_dispatch_pending()
+        thread_sleep(20)
+        i = i + 1
+    0

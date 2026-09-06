@@ -1,0 +1,25 @@
+#!/bin/sh
+set -eu
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+bootstrap_script="$repo_root/scripts/bootstrap/bootstrap-from-scratch.sh"
+rust_cli="$repo_root/src/compiler_rust/driver/src/cli/native_build.rs"
+
+fail() {
+  echo "FAIL: $*" >&2
+  exit 1
+}
+
+grep -Fq 'stage2_compile_stack_mib=64' "$bootstrap_script" ||
+  fail "canonical Stage 2 does not own an explicit 64 MiB compile-stack policy"
+
+stage2_stack_arg_count=$(grep -Fc -- '--compile-stack-mib "${stage2_compile_stack_mib}"' "$bootstrap_script")
+[ "$stage2_stack_arg_count" -eq 2 ] ||
+  fail "Stage 2 stack policy must appear in both provenance hashing and transcribed execution"
+
+grep -Fq '"--compile-stack-mib" =>' "$rust_cli" ||
+  fail "Rust native-build CLI does not own --compile-stack-mib"
+grep -Fq 'stack_size: compile_stack_size' "$rust_cli" ||
+  fail "parsed Stage 2 stack policy does not reach NativeBuildConfig.stack_size"
+
+echo "PASS: canonical Stage 2 exact-source compile-stack policy is explicit and provenance-bound"

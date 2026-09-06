@@ -1,0 +1,33 @@
+use std.io_runtime.{file_read}
+
+describe "x86_64 filesystem exec ring3 launch contract":
+    it "reads the exact path into a raw blob and never fabricates seeded pids":
+        val source = file_read("src/os/kernel/loader/x86_64_fs_exec_spawn.spl")
+
+        expect(source).to_contain("simpleos_fat32_stream_open(path)")
+        expect(source).to_contain("simpleos_fat32_stream_read_at(0.to_u64(), buf, fsize.to_u64())")
+        expect(source).to_contain("rt_bytes_from_raw(buf as i64, fsize)")
+        expect(source).to_contain("x86_64_fs_exec_enter_image_ring3(image, raw_blob, argv, envp)")
+        expect(source.contains("_x86_64_spawn_static_seeded")).to_equal(false)
+        expect(source.contains("_x86_64_static_fat32_alias")).to_equal(false)
+        expect(source.contains("app_registry_")).to_equal(false)
+
+    it "routes shell PATH execution through the ring3 fs-exec dispatcher":
+        val shell = file_read("src/os/apps/shell/exec.spl")
+        val bridge = file_read("src/os/kernel/loader/fs_exec_spawn.spl")
+
+        expect(shell).to_contain("fs_exec_spawn_ring3")
+        expect(shell).to_contain("exec:dispatch=ring3-fs-exec-spawn")
+        expect(bridge).to_contain("pub fn fs_exec_spawn_ring3")
+        expect(bridge).to_contain("x86_64_fs_exec_spawn(path, argv, envp)")
+        expect(bridge).to_contain("arm64:no-ring3-handoff")
+
+    it "builds a real SysV argc argv envp stack frame before entering user mode":
+        val source = file_read("src/os/kernel/loader/x86_64_fs_exec_ring3.spl")
+
+        expect(source).to_contain("_build_sysv_stack_frame")
+        expect(source).to_contain("effective_argv.push(binary_path)")
+        expect(source).to_contain("argv_addrs")
+        expect(source).to_contain("envp_addrs")
+        expect(source).to_contain("AT_NULL")
+        expect(source).to_contain("TaskContext(")

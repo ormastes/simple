@@ -1,0 +1,28 @@
+"""BAR mapping cleanup records reject partial unmaps and release exact ranges."""
+
+use std.spec.{describe, it, expect}
+use os.kernel.lifecycle.task_cleanup.{
+    task_register_resource, task_bar_mapping_unmap_kind,
+    task_release_bar_mapping, task_bar_mapping_overlaps, task_dma_buffer_overlaps,
+    RES_BAR_MAPPING, RES_DMA_BUFFER
+}
+
+describe "task BAR mapping cleanup":
+    it "permits only an exact unmap of a tracked BAR mapping":
+        val owner = 251u64
+        val base = 0x50000000u64
+        val size = 0x2000u64
+        expect(task_register_resource(owner, RES_BAR_MAPPING, base, size)).to_equal(true)
+        expect(task_bar_mapping_unmap_kind(owner, base, size)).to_equal(1i64)
+        expect(task_bar_mapping_unmap_kind(owner, base, 0x1000u64)).to_equal(-1i64)
+        expect(task_bar_mapping_unmap_kind(owner, base + 0x1000u64, 0x1000u64)).to_equal(-1i64)
+        expect(task_release_bar_mapping(owner, base, size)).to_equal(true)
+        expect(task_bar_mapping_unmap_kind(owner, base, size)).to_equal(0i64)
+        val dma_base = 0x60000000u64
+        expect(task_register_resource(owner, RES_DMA_BUFFER, dma_base, size)).to_equal(true)
+        expect(task_dma_buffer_overlaps(owner, dma_base, size)).to_equal(true)
+        expect(task_dma_buffer_overlaps(owner, dma_base + size, size)).to_equal(false)
+        val bar_again = 0x70000000u64
+        expect(task_register_resource(owner, RES_BAR_MAPPING, bar_again, size)).to_equal(true)
+        expect(task_bar_mapping_overlaps(owner, bar_again + 0x1000u64, 0x1000u64)).to_equal(true)
+        expect(task_bar_mapping_overlaps(owner, bar_again + size, size)).to_equal(false)

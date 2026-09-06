@@ -1,0 +1,728 @@
+# ============================================================================
+# common/structural/placement/placement_types.spl — frozen record shapes
+#
+# PLACE lane (architecture §27). The wire records for §20.2 PlacementRequest,
+# §20.3 PlacementPlan, §20.4 LeaseSet and §20.5 ResidentView, plus the
+# predicates that make §4.1's "valid only while the referenced snapshot/object
+# lease is valid" a DECIDABLE question rather than a sentence.
+#
+# Contract document:
+#   doc/05_design/platform/structural_compute/placement_contract_v1.md
+#
+# WHY THE `...Wire` SUFFIX
+#
+# `PlacementRequest`, `PlacementPlan`, `LeaseSet`, `PlacementLease`,
+# `CostEstimate` and `ResidentView<T>` ALREADY EXIST in
+# src/lib/common/compute/placement_contracts/{planner,backend,handles}.spl.
+# Those are host-side carriers: they hold `[ResidencyTier]`, `Deadline?`,
+# `ObjectRef<T>` and `Hash256` — shapes with no byte layout. Redeclaring any of
+# them here would be two declarations of one wire type, which is how lanes
+# silently diverge. The records below are the FLATTENED, fixed-width mirrors
+# and carry the suffix so the two are never confused; the semantic types are
+# imported and used, not replaced.
+#
+# LAYOUTS (little-endian, no padding, no alignment — common/structural/wire.spl)
+#
+#   PlacementRequestWire  82
+#     0 object_slot u32 | 4 generation u32 | 8 access u8
+#     9 required_tiers u8 | 10 preferred_len u8 | 11 preferred u8 x 7
+#     18 persistence u8 | 19 deadline_present u8 | 20 reserved u16
+#     22 expected_reuse_distance u32 | 26 device_mask u64
+#     34 expected_first_use u64 | 42 expected_last_use u64
+#     50 recompute_cost u64 | 58 transfer_cost_hint u64
+#     66 affinity_group u64 | 74 deadline_us u64
+#
+#   LeaseGrant            32
+#     0 object_slot u32 | 4 generation u32 | 8 lease_epoch u32
+#     12 state u8 | 13 access u8 | 14 tier u8 | 15 reserved u8
+#     16 device_address u64 | 24 length u64
+#
+#   Exactly 32 bytes is not a coincidence: §20.9 caps the hot per-object
+#   descriptor at 32-48 bytes, and a lease grant is one per resident object.
+#
+#   PlacementCostWire     70
+#     0 cpu_work u64 | 8 simd_work u64 | 16 gpu_work u64
+#     24 host_to_device_bytes u64 | 32 device_to_host_bytes u64
+#     40 ssd_read_bytes u64 | 48 ssd_write_bytes u64
+#     56 synchronization_points u32 | 60 predicted_latency_us u64
+#     68 confidence_milli u16
+#
+#   PlacementPlanWire    142
+#     0 reservations u32:u32 | 8 transfers | 16 evictions | 24 prefetches
+#     32 leases | 40 PlacementCostWire (70) | 110 receipt_seed 32 raw bytes
+#
+#   LeaseSetWire  = lease_count u32 followed by that many LeaseGrant.
+# ============================================================================
+
+use std.common.compute.placement_contracts.handles.{ObjectRef}
+use std.common.compute.placement_contracts.planner.{CostEstimate}
+# DeviceMask bit semantics are the EXEC lane's freeze
+# (structural/execution/profile_types.spl, commit 2d06051444e): CPU_SCALAR(1),
+# CPU_SIMD(2), GPU(4), STORAGE(8), remaining 60 bits reserved. Placement ADOPTS
+# them unchanged rather than freezing a second meaning for the same u64 —
+# §20.2's `device_mask` and §21's `allowed_devices` are the same mask, and two
+# vocabularies for one wire field is exactly the divergence the freeze exists
+# to prevent.
+use std.common.structural.execution.profile_types.{
+    DEVICE_BIT_GPU,
+    device_mask_has,
+    device_mask_valid
+}
+use std.common.compute.placement_contracts.schema.{
+    PLACEMENT_NO_EPOCH,
+    PLACEMENT_NO_SLOT,
+    residency_tier_is_device,
+    residency_tier_valid
+}
+use std.common.structural.placement.placement_contracts.{
+    LEASE_ACCESS_NONE,
+    RESIDENCY_TIER_COUNT,
+    TIER_SET_EMPTY,
+    access_pattern_required_rights,
+    access_pattern_valid,
+    lease_access_satisfies,
+    lease_access_valid,
+    lease_state_is_dead,
+    lease_state_is_live,
+    lease_state_valid,
+    persistence_policy_valid,
+    place_u64_add_fits,
+    place_u64_le,
+    place_u64_lt,
+    tier_set_contains,
+    tier_set_has_device,
+    tier_set_valid
+}
+
+val PLACEMENT_REQUEST_LEN: i64 = 82
+val LEASE_GRANT_LEN: i64 = 32
+val PLACEMENT_COST_LEN: i64 = 70
+val PLACEMENT_PLAN_LEN: i64 = 142
+val PLACEMENT_HASH_LEN: i64 = 32
+
+val PLACE_U32_MAX: i64 = 4294967295
+val PLACE_U16_MAX: i64 = 65535
+
+# Filler for the unused entries of the fixed 7-slot preference array. 0xff is
+# not a valid tier discriminant (max is 6), so an unused slot cannot be misread
+# as a preference for DeviceLocal the way a 0 filler could.
+val PLACE_NO_TIER: i64 = 255
+
+# Per-mille, so 1000 is full confidence. A larger value is not a probability.
+val PLACE_CONFIDENCE_MAX: i64 = 1000
+
+fn place_u32_field_valid(v: i64) -> bool:
+    v >= 0 and v <= PLACE_U32_MAX
+
+# ----------------------------------------------------------------------------
+# PlacementRequestWire (§20.2)
+# ----------------------------------------------------------------------------
+
+struct PlacementRequestWire:
+    object_slot: i64
+    generation: i64
+    access: i64
+    required_tiers: i64
+    preferred: [i64]
+    persistence: i64
+    deadline_present: i64
+    deadline_us: i64
+    expected_reuse_distance: i64
+    device_mask: i64
+    expected_first_use: i64
+    expected_last_use: i64
+    recompute_cost: i64
+    transfer_cost_hint: i64
+    affinity_group: i64
+
+fn placement_request_wire(object_slot: i64, generation: i64, access: i64,
+                          required_tiers: i64, preferred: [i64],
+                          persistence: i64, deadline_present: i64,
+                          deadline_us: i64, expected_reuse_distance: i64,
+                          device_mask: i64, expected_first_use: i64,
+                          expected_last_use: i64, recompute_cost: i64,
+                          transfer_cost_hint: i64,
+                          affinity_group: i64) -> PlacementRequestWire:
+    PlacementRequestWire(object_slot: object_slot, generation: generation,
+                         access: access, required_tiers: required_tiers,
+                         preferred: preferred, persistence: persistence,
+                         deadline_present: deadline_present,
+                         deadline_us: deadline_us,
+                         expected_reuse_distance: expected_reuse_distance,
+                         device_mask: device_mask,
+                         expected_first_use: expected_first_use,
+                         expected_last_use: expected_last_use,
+                         recompute_cost: recompute_cost,
+                         transfer_cost_hint: transfer_cost_hint,
+                         affinity_group: affinity_group)
+
+fn placement_request_zero() -> PlacementRequestWire:
+    """The rejection carrier. Deliberately NOT well formed — `object_slot` is
+    the absent sentinel and `required_tiers` is empty — so a caller that
+    ignores `ok` and uses the value cannot mistake it for a request that
+    legitimately accepts any tier."""
+    val none: [i64] = []
+    placement_request_wire(PLACEMENT_NO_SLOT, 0, 0, TIER_SET_EMPTY, none,
+                           0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+
+fn placement_preferred_well_formed(preferred: [i64], required: i64) -> bool:
+    """The preference list is an ORDER over the required set, never a way to
+    widen it. At most `RESIDENCY_TIER_COUNT` entries because a strict order
+    over 7 tiers cannot be longer; no duplicates because a tier cannot be both
+    the 2nd and 4th choice; and every entry must be a member of
+    `required_tiers`, so a plan that lands an object in a tier the request did
+    not accept is detectable at the contract boundary."""
+    if preferred.len() > RESIDENCY_TIER_COUNT:
+        return false
+    var i = 0
+    while i < preferred.len():
+        val t = preferred[i]
+        if not residency_tier_valid(t):
+            return false
+        if not tier_set_contains(required, t):
+            return false
+        var j = 0
+        while j < i:
+            if preferred[j] == t:
+                return false
+            j = j + 1
+        i = i + 1
+    true
+
+fn placement_request_well_formed(r: PlacementRequestWire) -> bool:
+    if r.object_slot == PLACEMENT_NO_SLOT:
+        return false
+    if not place_u32_field_valid(r.object_slot):
+        return false
+    if not place_u32_field_valid(r.generation):
+        return false
+    if not place_u32_field_valid(r.expected_reuse_distance):
+        return false
+    if not access_pattern_valid(r.access):
+        return false
+    if not persistence_policy_valid(r.persistence):
+        return false
+    if not tier_set_valid(r.required_tiers):
+        return false
+    # An empty required set is unsatisfiable by construction: no tier can hold
+    # the object, so the planner has nothing to decide.
+    if r.required_tiers == TIER_SET_EMPTY:
+        return false
+    if not placement_preferred_well_formed(r.preferred, r.required_tiers):
+        return false
+    # The mask must name at least one executor and set no reserved bit — the
+    # EXEC lane's `device_mask_valid`, adopted verbatim.
+    if not device_mask_valid(r.device_mask):
+        return false
+    # §20.4's PlacementCapabilities carries a device_mask; a request that
+    # requires a device-resident tier but does not permit the GPU cannot be
+    # satisfied by any backend, so it is rejected here rather than at acquire
+    # time. DeviceLocal and DeviceShared are VRAM tiers, so the GPU bit — not
+    # merely a non-zero mask — is what makes them reachable.
+    val needs_gpu = tier_set_has_device(r.required_tiers)
+    if needs_gpu and not device_mask_has(r.device_mask, DEVICE_BIT_GPU):
+        return false
+    # §20.6 plans against liveness intervals. An interval that ends before it
+    # begins is not an interval. Compared UNSIGNED: both are u64 stage epochs
+    # and a raw `<=` reads a high epoch as negative.
+    if not place_u64_le(r.expected_first_use, r.expected_last_use):
+        return false
+    if r.deadline_present != 0 and r.deadline_present != 1:
+        return false
+    # Absence has exactly one encoding. Without this, a decoder could not tell
+    # "no deadline" from "a deadline at timestamp 0".
+    if r.deadline_present == 0 and r.deadline_us != 0:
+        return false
+    true
+
+fn placement_request_equal(a: PlacementRequestWire,
+                           b: PlacementRequestWire) -> bool:
+    if a.object_slot != b.object_slot or a.generation != b.generation:
+        return false
+    if a.access != b.access or a.required_tiers != b.required_tiers:
+        return false
+    if a.preferred.len() != b.preferred.len():
+        return false
+    var i = 0
+    while i < a.preferred.len():
+        if a.preferred[i] != b.preferred[i]:
+            return false
+        i = i + 1
+    if a.persistence != b.persistence:
+        return false
+    if a.deadline_present != b.deadline_present:
+        return false
+    if a.deadline_us != b.deadline_us:
+        return false
+    if a.expected_reuse_distance != b.expected_reuse_distance:
+        return false
+    if a.device_mask != b.device_mask:
+        return false
+    if a.expected_first_use != b.expected_first_use:
+        return false
+    if a.expected_last_use != b.expected_last_use:
+        return false
+    if a.recompute_cost != b.recompute_cost:
+        return false
+    if a.transfer_cost_hint != b.transfer_cost_hint:
+        return false
+    a.affinity_group == b.affinity_group
+
+# ----------------------------------------------------------------------------
+# LeaseGrant (§20.4 LeaseSet element, §20.5 lease rules)
+#
+# THIS IS THE POINT OF THE GROUP. §4.1 says an `EntityRef` is "valid only while
+# the referenced snapshot/object lease is valid" and §20.5 says "a raw address
+# may be used only inside the lease epoch", but neither sentence is checkable
+# against a `PlacementLease` as declared — it has no state, no rights, and no
+# rule tying its epoch to its address. The record below adds exactly those, and
+# the well-formedness rule makes a dead lease that still carries a live address
+# UNREPRESENTABLE ON THE WIRE rather than merely discouraged.
+# ----------------------------------------------------------------------------
+
+struct LeaseGrant:
+    object_slot: i64
+    generation: i64
+    lease_epoch: i64
+    state: i64
+    access: i64
+    tier: i64
+    device_address: i64
+    length: i64
+
+fn lease_grant(object_slot: i64, generation: i64, lease_epoch: i64,
+               state: i64, access: i64, tier: i64, device_address: i64,
+               length: i64) -> LeaseGrant:
+    LeaseGrant(object_slot: object_slot, generation: generation,
+               lease_epoch: lease_epoch, state: state, access: access,
+               tier: tier, device_address: device_address, length: length)
+
+fn lease_grant_zero() -> LeaseGrant:
+    """Rejection carrier: the absent slot, so it can never be mistaken for a
+    live lease on object 0."""
+    lease_grant(PLACEMENT_NO_SLOT, 0, PLACEMENT_NO_EPOCH, 0,
+                LEASE_ACCESS_NONE, 0, 0, 0)
+
+fn lease_grant_dead(object_slot: i64, generation: i64,
+                    state: i64, tier: i64) -> LeaseGrant:
+    """Build an ended lease. There is exactly one shape for a dead lease, so
+    this constructor is the only correct way to spell one."""
+    lease_grant(object_slot, generation, PLACEMENT_NO_EPOCH, state,
+                LEASE_ACCESS_NONE, tier, 0, 0)
+
+fn lease_grant_well_formed(g: LeaseGrant) -> bool:
+    if g.object_slot == PLACEMENT_NO_SLOT:
+        return false
+    if not place_u32_field_valid(g.object_slot):
+        return false
+    if not place_u32_field_valid(g.generation):
+        return false
+    if not place_u32_field_valid(g.lease_epoch):
+        return false
+    if not lease_state_valid(g.state):
+        return false
+    if not lease_access_valid(g.access):
+        return false
+    if not residency_tier_valid(g.tier):
+        return false
+    if lease_state_is_live(g.state):
+        # A live lease must name a real epoch. PLACEMENT_NO_EPOCH is already
+        # frozen in placement_contracts/schema.spl as "no live lease and its
+        # device address must not be dereferenced".
+        if g.lease_epoch == PLACEMENT_NO_EPOCH:
+            return false
+        # A lease conferring no rights permits no access, which is a dead
+        # lease wearing a live state.
+        if g.access == LEASE_ACCESS_NONE:
+            return false
+        # Address 0 cannot be dereferenced, and a zero-length window has
+        # nothing inside it; both would make §20.5's rule vacuous.
+        if g.device_address == 0 or g.length == 0:
+            return false
+        # UNSIGNED overflow check. A lease whose window wraps past 2^64 would
+        # make `lease_grant_covers` accept an address outside the object; the
+        # naive `address + length` form of this test wraps and silently passes,
+        # which is the 32-bit trap two earlier waves hit, one width up.
+        if not place_u64_add_fits(g.device_address, g.length):
+            return false
+        return true
+    if lease_state_is_dead(g.state):
+        # A dead lease is unrepresentable with a live address: all four of
+        # these must be the absent form. This is what makes "stale lease" a
+        # decode-time rejection instead of a use-after-free at first read.
+        if g.lease_epoch != PLACEMENT_NO_EPOCH:
+            return false
+        if g.access != LEASE_ACCESS_NONE:
+            return false
+        if g.device_address != 0 or g.length != 0:
+            return false
+        return true
+    false
+
+fn lease_grant_valid_at(g: LeaseGrant, epoch: i64) -> bool:
+    """§20.5 made decidable: a grant authorises its address only while it is in
+    a live state AND its epoch is the epoch the caller holds. This is the
+    predicate an `EntityRef` holder calls before dereferencing."""
+    if not lease_grant_well_formed(g):
+        return false
+    if not lease_state_is_live(g.state):
+        return false
+    g.lease_epoch == epoch
+
+fn lease_grant_end(g: LeaseGrant) -> i64:
+    """One past the last byte of the lease window, as a u64 bit pattern.
+    Callers must compare it with `place_u64_lt` / `place_u64_le`, never `<`."""
+    g.device_address + g.length
+
+fn lease_grant_covers(g: LeaseGrant, address: i64, length: i64) -> bool:
+    """True when [address, address+length) lies inside the grant's window. All
+    four comparisons are unsigned, and the candidate range is itself checked for
+    wrap first — an attacker-shaped `length` that wraps would otherwise make the
+    end comparison trivially true."""
+    if not lease_grant_well_formed(g):
+        return false
+    if not lease_state_is_live(g.state):
+        return false
+    if length == 0:
+        return false
+    if not place_u64_add_fits(address, length):
+        return false
+    if place_u64_lt(address, g.device_address):
+        return false
+    place_u64_le(address + length, lease_grant_end(g))
+
+fn lease_grant_satisfies_request(g: LeaseGrant,
+                                 r: PlacementRequestWire) -> bool:
+    """The contract-level acceptance test for §20.4's
+    `acquire(plan) -> Result<LeaseSet, PlacementError>`: a returned grant must
+    name the requested object AND generation, sit in a tier the request
+    required, and confer every right the request's AccessPattern implies. A
+    backend that returns a read-only lease for a ReadWrite request fails here
+    rather than at the first store."""
+    if not lease_grant_well_formed(g) or not placement_request_well_formed(r):
+        return false
+    if not lease_state_is_live(g.state):
+        return false
+    if g.object_slot != r.object_slot or g.generation != r.generation:
+        return false
+    if not tier_set_contains(r.required_tiers, g.tier):
+        return false
+    lease_access_satisfies(g.access, access_pattern_required_rights(r.access))
+
+fn lease_grant_equal(a: LeaseGrant, b: LeaseGrant) -> bool:
+    a.object_slot == b.object_slot and a.generation == b.generation
+        and a.lease_epoch == b.lease_epoch and a.state == b.state
+        and a.access == b.access and a.tier == b.tier
+        and a.device_address == b.device_address and a.length == b.length
+
+fn lease_grant_is_device_resident(g: LeaseGrant) -> bool:
+    lease_state_is_live(g.state) and residency_tier_is_device(g.tier)
+
+# ----------------------------------------------------------------------------
+# ResidentViewWire (§20.5)
+#
+# `ResidentView<T>` in placement_contracts/handles.spl is the generic host-side
+# view. This is its non-generic wire mirror, and it exists so the sentence "a
+# raw address may be used only inside the lease epoch" has a function.
+# ----------------------------------------------------------------------------
+
+struct ResidentViewWire:
+    device_address: i64
+    length: i64
+    object_slot: i64
+    lease_epoch: i64
+
+fn resident_view_wire(device_address: i64, length: i64, object_slot: i64,
+                      lease_epoch: i64) -> ResidentViewWire:
+    ResidentViewWire(device_address: device_address, length: length,
+                     object_slot: object_slot, lease_epoch: lease_epoch)
+
+fn resident_view_valid_under(v: ResidentViewWire, g: LeaseGrant) -> bool:
+    """§20.5 made decidable. A view may be dereferenced only when it names the
+    grant's object, carries the grant's exact epoch, and its window lies inside
+    the grant's. Epoch equality (not `>=`) is deliberate: a lease epoch is an
+    identity, not an ordering — a later epoch on the same slot is a DIFFERENT
+    lease, quite possibly at a different address."""
+    if v.object_slot != g.object_slot:
+        return false
+    if not lease_grant_valid_at(g, v.lease_epoch):
+        return false
+    lease_grant_covers(g, v.device_address, v.length)
+
+fn entity_ref_valid_under(object_slot: i64, snapshot_epoch: i64,
+                          g: LeaseGrant) -> bool:
+    """§4.1's "valid only while the referenced snapshot/object lease is valid",
+    made decidable. An `EntityRef` carries no address, so unlike a resident view
+    it needs no range check — only that the object's lease is live at the epoch
+    the holder captured."""
+    if object_slot != g.object_slot:
+        return false
+    lease_grant_valid_at(g, snapshot_epoch)
+
+# ----------------------------------------------------------------------------
+# LeaseSetWire (§20.4 `LeaseSet`)
+# ----------------------------------------------------------------------------
+
+struct LeaseSetWire:
+    grants: [LeaseGrant]
+
+fn lease_set_wire(grants: [LeaseGrant]) -> LeaseSetWire:
+    LeaseSetWire(grants: grants)
+
+fn lease_set_empty() -> LeaseSetWire:
+    val none: [LeaseGrant] = []
+    LeaseSetWire(grants: none)
+
+fn lease_set_well_formed(s: LeaseSetWire) -> bool:
+    """Every grant well formed, and the run strictly ascending by
+    `(object_slot, generation)`.
+
+    Strict ascent does two jobs at once. It gives the set ONE canonical byte
+    encoding, so a receipt hash over a lease set is reproducible. And it makes
+    a duplicate object impossible — two live leases on one object at different
+    epochs is precisely the stale-address bug §30's stale-handle gate exists to
+    catch, and it would otherwise be a perfectly encodable lease set."""
+    var i = 0
+    while i < s.grants.len():
+        if not lease_grant_well_formed(s.grants[i]):
+            return false
+        if i > 0:
+            val prev = s.grants[i - 1]
+            val cur = s.grants[i]
+            if cur.object_slot < prev.object_slot:
+                return false
+            val same_slot = cur.object_slot == prev.object_slot
+            if same_slot and cur.generation <= prev.generation:
+                return false
+        i = i + 1
+    true
+
+fn lease_set_lookup(s: LeaseSetWire, object_slot: i64) -> LeaseGrant:
+    """First grant naming `object_slot`, or the zero grant. The zero grant is
+    not well formed, so a caller that skips the check still cannot dereference
+    a miss."""
+    var i = 0
+    while i < s.grants.len():
+        if s.grants[i].object_slot == object_slot:
+            return s.grants[i]
+        i = i + 1
+    lease_grant_zero()
+
+fn lease_set_equal(a: LeaseSetWire, b: LeaseSetWire) -> bool:
+    if a.grants.len() != b.grants.len():
+        return false
+    var i = 0
+    while i < a.grants.len():
+        if not lease_grant_equal(a.grants[i], b.grants[i]):
+            return false
+        i = i + 1
+    true
+
+# ----------------------------------------------------------------------------
+# PlacementCostWire (§20.3 `estimated_cost`, §21.2)
+#
+# `CostEstimate` in placement_contracts/planner.spl has exactly these ten
+# fields with u64/u32/u16 widths. This is its flat mirror, plus bridges both
+# ways so the existing type stays the host-side truth.
+#
+# NOTE FOR THE EXEC LANE: §20.3 embeds CostEstimate BY VALUE, so a
+# PlacementPlan is unencodable without freezing its layout. The EXEC lane's
+# "ExecutionProfile and capability vocabulary" group must adopt this 70-byte
+# layout rather than mint a second one.
+# ----------------------------------------------------------------------------
+
+struct PlacementCostWire:
+    cpu_work: i64
+    simd_work: i64
+    gpu_work: i64
+    host_to_device_bytes: i64
+    device_to_host_bytes: i64
+    ssd_read_bytes: i64
+    ssd_write_bytes: i64
+    synchronization_points: i64
+    predicted_latency_us: i64
+    confidence_milli: i64
+
+fn placement_cost_wire(cpu_work: i64, simd_work: i64, gpu_work: i64,
+                       host_to_device_bytes: i64, device_to_host_bytes: i64,
+                       ssd_read_bytes: i64, ssd_write_bytes: i64,
+                       synchronization_points: i64, predicted_latency_us: i64,
+                       confidence_milli: i64) -> PlacementCostWire:
+    PlacementCostWire(cpu_work: cpu_work, simd_work: simd_work,
+                      gpu_work: gpu_work,
+                      host_to_device_bytes: host_to_device_bytes,
+                      device_to_host_bytes: device_to_host_bytes,
+                      ssd_read_bytes: ssd_read_bytes,
+                      ssd_write_bytes: ssd_write_bytes,
+                      synchronization_points: synchronization_points,
+                      predicted_latency_us: predicted_latency_us,
+                      confidence_milli: confidence_milli)
+
+fn placement_cost_zero() -> PlacementCostWire:
+    placement_cost_wire(0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+
+fn placement_cost_from_estimate(c: CostEstimate) -> PlacementCostWire:
+    """Flatten the already-frozen semantic `CostEstimate` for the wire."""
+    placement_cost_wire(c.cpu_work, c.simd_work, c.gpu_work,
+                        c.host_to_device_bytes, c.device_to_host_bytes,
+                        c.ssd_read_bytes, c.ssd_write_bytes,
+                        c.synchronization_points, c.predicted_latency_us,
+                        c.confidence_milli)
+
+fn placement_cost_well_formed(c: PlacementCostWire) -> bool:
+    if not place_u32_field_valid(c.synchronization_points):
+        return false
+    if c.confidence_milli < 0 or c.confidence_milli > PLACE_U16_MAX:
+        return false
+    # Per-mille. A confidence above 1000 is not a probability, and a planner
+    # that reads one as a weight would over-trust the estimate.
+    c.confidence_milli <= PLACE_CONFIDENCE_MAX
+
+fn placement_cost_equal(a: PlacementCostWire, b: PlacementCostWire) -> bool:
+    a.cpu_work == b.cpu_work and a.simd_work == b.simd_work
+        and a.gpu_work == b.gpu_work
+        and a.host_to_device_bytes == b.host_to_device_bytes
+        and a.device_to_host_bytes == b.device_to_host_bytes
+        and a.ssd_read_bytes == b.ssd_read_bytes
+        and a.ssd_write_bytes == b.ssd_write_bytes
+        and a.synchronization_points == b.synchronization_points
+        and a.predicted_latency_us == b.predicted_latency_us
+        and a.confidence_milli == b.confidence_milli
+
+# ----------------------------------------------------------------------------
+# PlacementPlanWire (§20.3)
+#
+# The five arena fields are `ObjectRef<...>` handles in §20.3, so they encode as
+# the `ObjectRef` pair (object_slot u32, generation u32) frozen in
+# placement_contracts/handles.spl — not as inline arenas.
+# ----------------------------------------------------------------------------
+
+struct PlacementPlanWire:
+    reservations_slot: i64
+    reservations_gen: i64
+    transfers_slot: i64
+    transfers_gen: i64
+    evictions_slot: i64
+    evictions_gen: i64
+    prefetches_slot: i64
+    prefetches_gen: i64
+    leases_slot: i64
+    leases_gen: i64
+    cost: PlacementCostWire
+    receipt_seed: text
+
+fn placement_plan_wire(reservations_slot: i64, reservations_gen: i64,
+                       transfers_slot: i64, transfers_gen: i64,
+                       evictions_slot: i64, evictions_gen: i64,
+                       prefetches_slot: i64, prefetches_gen: i64,
+                       leases_slot: i64, leases_gen: i64,
+                       cost: PlacementCostWire,
+                       receipt_seed: text) -> PlacementPlanWire:
+    PlacementPlanWire(reservations_slot: reservations_slot,
+                      reservations_gen: reservations_gen,
+                      transfers_slot: transfers_slot,
+                      transfers_gen: transfers_gen,
+                      evictions_slot: evictions_slot,
+                      evictions_gen: evictions_gen,
+                      prefetches_slot: prefetches_slot,
+                      prefetches_gen: prefetches_gen,
+                      leases_slot: leases_slot, leases_gen: leases_gen,
+                      cost: cost, receipt_seed: receipt_seed)
+
+val PLACE_ZERO_SEED: text =
+    "0000000000000000000000000000000000000000000000000000000000000000"
+
+fn placement_plan_zero() -> PlacementPlanWire:
+    """Rejection carrier: the mandatory lease arena is the absent sentinel, so
+    it can never be mistaken for an acquirable plan."""
+    placement_plan_wire(PLACEMENT_NO_SLOT, 0, PLACEMENT_NO_SLOT, 0,
+                        PLACEMENT_NO_SLOT, 0, PLACEMENT_NO_SLOT, 0,
+                        PLACEMENT_NO_SLOT, 0, placement_cost_zero(),
+                        PLACE_ZERO_SEED)
+
+fn place_hex64_valid(t: text) -> bool:
+    """64 lowercase hex characters — the same digest spelling
+    placement_contracts/storage.spl already requires of an `ArtifactId`."""
+    if t.len() != 64:
+        return false
+    var i = 0
+    while i < t.len():
+        val code = t.char_code_at(i)
+        val digit = code >= 48 and code <= 57
+        val lower_hex = code >= 97 and code <= 102
+        if not digit and not lower_hex:
+            return false
+        i = i + 1
+    true
+
+fn place_arena_ref_valid(slot: i64, generation: i64) -> bool:
+    """An optional arena handle. `PLACEMENT_NO_SLOT` means the plan has no
+    arena of that kind — a plan with nothing to evict is ordinary — and in that
+    case the generation must be zero, so absence has exactly one encoding."""
+    if not place_u32_field_valid(slot) or not place_u32_field_valid(generation):
+        return false
+    if slot == PLACEMENT_NO_SLOT:
+        return generation == 0
+    true
+
+fn placement_plan_well_formed(p: PlacementPlanWire) -> bool:
+    if not place_arena_ref_valid(p.reservations_slot, p.reservations_gen):
+        return false
+    if not place_arena_ref_valid(p.transfers_slot, p.transfers_gen):
+        return false
+    if not place_arena_ref_valid(p.evictions_slot, p.evictions_gen):
+        return false
+    if not place_arena_ref_valid(p.prefetches_slot, p.prefetches_gen):
+        return false
+    if not place_arena_ref_valid(p.leases_slot, p.leases_gen):
+        return false
+    # The lease arena is the only mandatory one. §20.4's
+    # `acquire(plan) -> Result<LeaseSet, ...>` is unconditional, so a plan that
+    # names no lease arena can never be acquired and is not a plan.
+    if p.leases_slot == PLACEMENT_NO_SLOT:
+        return false
+    if not placement_cost_well_formed(p.cost):
+        return false
+    place_hex64_valid(p.receipt_seed)
+
+fn placement_plan_equal(a: PlacementPlanWire, b: PlacementPlanWire) -> bool:
+    a.reservations_slot == b.reservations_slot
+        and a.reservations_gen == b.reservations_gen
+        and a.transfers_slot == b.transfers_slot
+        and a.transfers_gen == b.transfers_gen
+        and a.evictions_slot == b.evictions_slot
+        and a.evictions_gen == b.evictions_gen
+        and a.prefetches_slot == b.prefetches_slot
+        and a.prefetches_gen == b.prefetches_gen
+        and a.leases_slot == b.leases_slot
+        and a.leases_gen == b.leases_gen
+        and placement_cost_equal(a.cost, b.cost)
+        and a.receipt_seed == b.receipt_seed
+
+fn placement_plan_lease_ref(p: PlacementPlanWire) -> ObjectRef<LeaseGrant>:
+    """The plan's lease arena as the already-frozen `ObjectRef` handle, which is
+    what §20.3 declares the field to be."""
+    ObjectRef(object_slot: p.leases_slot, generation: p.leases_gen)
+
+export PLACEMENT_REQUEST_LEN, LEASE_GRANT_LEN, PLACEMENT_COST_LEN
+export PLACEMENT_PLAN_LEN, PLACEMENT_HASH_LEN
+export PLACE_U32_MAX, PLACE_U16_MAX, PLACE_NO_TIER, PLACE_CONFIDENCE_MAX
+export PLACE_ZERO_SEED
+export place_u32_field_valid, place_hex64_valid, place_arena_ref_valid
+export PlacementRequestWire, placement_request_wire, placement_request_zero
+export placement_preferred_well_formed, placement_request_well_formed
+export placement_request_equal
+export LeaseGrant, lease_grant, lease_grant_zero, lease_grant_dead
+export lease_grant_well_formed, lease_grant_valid_at, lease_grant_end
+export lease_grant_covers, lease_grant_satisfies_request, lease_grant_equal
+export lease_grant_is_device_resident
+export ResidentViewWire, resident_view_wire, resident_view_valid_under
+export entity_ref_valid_under
+export LeaseSetWire, lease_set_wire, lease_set_empty, lease_set_well_formed
+export lease_set_lookup, lease_set_equal
+export PlacementCostWire, placement_cost_wire, placement_cost_zero
+export placement_cost_from_estimate, placement_cost_well_formed
+export placement_cost_equal
+export PlacementPlanWire, placement_plan_wire, placement_plan_zero
+export placement_plan_well_formed, placement_plan_equal
+export placement_plan_lease_ref

@@ -1,0 +1,169 @@
+# @cover src/os/sosix/fs/async_client_v1.spl 80%
+"""Canonical typed SOSIX filesystem asynchronous client contract."""
+
+use std.spec.*
+use os.sosix.core.operation.{
+    SOSIX_OPERATION_FREE, SOSIX_OPERATION_CANCELED, SOSIX_OPERATION_TIMED_OUT,
+    sosix_operation_slot_new, sosix_operation_begin
+}
+use os.sosix.core.capability_ref.SosixCapabilityRef
+use os.sosix.fs.async_transport_state.{
+    SOSIX_FS_TRANSPORT_FREE, SOSIX_FS_TRANSPORT_PENDING,
+    SOSIX_FS_TRANSPORT_COMPLETE,
+    sosix_fs_transport_state_new, sosix_fs_transport_submit,
+    sosix_fs_transport_record_progress
+}
+use os.sosix.fs.operation_adapter.SOSIX_FS_READ_AT
+use os.sosix.fs.registered_buffer_client_v1.*
+use os.sosix.fs.async_client_v1.*
+
+fn rejected_start(deadline_ns: u64) -> SosixFsAsyncClientStartResultV1:
+    val registered = sosix_fs_client_register_buffer_v1(
+        sosix_fs_client_buffer_table_v1(9), 9, [1u8, 2u8],
+        SOSIX_FS_CLIENT_BUFFER_WRITE_V1)
+    val endpoints = SosixFsClientEndpointInputV1(
+        service_discovered: true, service_endpoint: 70,
+        reply_endpoint_created: true, reply_endpoint: 71)
+    val unconfirmed = SosixFsClientRegistrationReceiptV1(
+        authenticated: false, owner_process_id: 9, service_endpoint: 70,
+        buffer: registered.ref_, service_registration_id: 81,
+        byte_length: 2, access: SOSIX_FS_CLIENT_BUFFER_WRITE_V1,
+        memory_mode: SOSIX_FS_CLIENT_MEMORY_OWNED_COPY_V1)
+    sosix_fs_async_client_start_v1(
+        4, sosix_operation_slot_new(), sosix_fs_transport_state_new(),
+        registered.table, 9, endpoints, unconfirmed, SOSIX_FS_READ_AT,
+        SosixCapabilityRef(slot: 3, generation: 1), registered.ref_,
+        0, 0, 2, deadline_ns)
+
+fn _pending_client() -> SosixFsAsyncClientV1:
+    val begun = sosix_operation_begin(4, sosix_operation_slot_new(), 0)
+    val transport = sosix_fs_transport_submit(
+        sosix_fs_transport_state_new(), begun.operation, 2)
+    SosixFsAsyncClientV1(
+        operation: begun.operation, operation_slot: begun.slot,
+        transport_state: transport.state, key: transport.key,
+        service_endpoint: 70, reply_endpoint: 71,
+        api_id: SOSIX_FS_READ_AT,
+        submission_attempted: false, submitted: false)
+
+describe "SOSIX typed filesystem async client v1":
+    it "begins correlated state but never submits an unconfirmed receipt":
+        step("Start one typed request with an unauthenticated service receipt")
+        val result = rejected_start(100)
+        expect(result.accepted).to_be(false)
+        expect(result.reason).to_equal("service-registration-unconfirmed")
+        expect(result.client.submission_attempted).to_be(false)
+        expect(result.client.submitted).to_be(false)
+        expect(result.client.operation_slot.state).to_equal(SOSIX_OPERATION_FREE)
+        expect(result.client.transport_state.phase).to_equal(SOSIX_FS_TRANSPORT_FREE)
+        expect(result.client.key.request_token).to_equal(0)
+
+    it "terminalizes a rejected syscall 132 result for consume and release":
+        val begun = sosix_operation_begin(4, sosix_operation_slot_new(), 0)
+        val transport = sosix_fs_transport_submit(
+            sosix_fs_transport_state_new(), begun.operation, 2)
+        val pending = SosixFsAsyncClientV1(
+            operation: begun.operation, operation_slot: begun.slot,
+            transport_state: transport.state, key: transport.key,
+            service_endpoint: 70, reply_endpoint: 71,
+            api_id: SOSIX_FS_READ_AT,
+            submission_attempted: false, submitted: false)
+        val rejected = sosix_fs_async_client_apply_send_result_v1(
+            pending, 2, false, "owned-send-rejected", -5)
+        expect(rejected.accepted).to_be(false)
+        expect(rejected.client.submission_attempted).to_be(true)
+        expect(rejected.client.transport_state.phase).to_equal(SOSIX_FS_TRANSPORT_COMPLETE)
+        val consumed = sosix_fs_async_client_consume_v1(rejected.client)
+        expect(consumed.accepted).to_be(true)
+        val released = sosix_fs_async_client_release_v1(consumed.client)
+        expect(released.accepted).to_be(true)
+        expect(released.client.operation_slot.state).to_equal(SOSIX_OPERATION_FREE)
+        expect(released.client.transport_state.phase).to_equal(SOSIX_FS_TRANSPORT_FREE)
+
+    it "rejects inconsistent send receipts without mutating pending state":
+        val pending = _pending_client()
+        val bad_success = sosix_fs_async_client_apply_send_result_v1(
+            pending, 2, true, "submitted", 1)
+        expect(bad_success.accepted).to_be(false)
+        expect(bad_success.reason).to_equal("invalid-successful-send-status")
+        expect(bad_success.client.transport_state.phase).to_equal(SOSIX_FS_TRANSPORT_PENDING)
+        val bad_failure = sosix_fs_async_client_apply_send_result_v1(
+            pending, 2, false, "rejected", 0)
+        expect(bad_failure.accepted).to_be(false)
+        expect(bad_failure.reason).to_equal("invalid-rejected-send-status")
+        expect(bad_failure.client.transport_state.phase).to_equal(SOSIX_FS_TRANSPORT_PENDING)
+
+    it "terminalizes cancellation and deadline across operation and transport":
+        val begun_cancel = sosix_operation_begin(4, sosix_operation_slot_new(), 100)
+        val cancel_transport = sosix_fs_transport_submit(
+            sosix_fs_transport_state_new(), begun_cancel.operation, 2)
+        val cancel_client = SosixFsAsyncClientV1(
+            operation: begun_cancel.operation, operation_slot: begun_cancel.slot,
+            transport_state: cancel_transport.state, key: cancel_transport.key,
+            service_endpoint: 70, reply_endpoint: 71, api_id: SOSIX_FS_READ_AT,
+            submission_attempted: true, submitted: true)
+        val canceled = sosix_fs_async_client_cancel_v1(cancel_client)
+        expect(canceled.accepted).to_be(true)
+        expect(canceled.client.operation_slot.state).to_equal(SOSIX_OPERATION_CANCELED)
+        expect(canceled.client.operation_slot.cancellation_requested).to_be(true)
+        expect(canceled.client.transport_state.phase).to_equal(SOSIX_FS_TRANSPORT_COMPLETE)
+        val cancel_consumed = sosix_fs_async_client_consume_v1(canceled.client)
+        expect(cancel_consumed.accepted).to_be(true)
+        val cancel_released = sosix_fs_async_client_release_v1(cancel_consumed.client)
+        expect(cancel_released.accepted).to_be(true)
+
+        val deadline_client = cancel_client
+        val early = sosix_fs_async_client_expire_deadline_v1(deadline_client, 99)
+        expect(early.accepted).to_be(false)
+        expect(early.reason).to_equal("deadline-not-reached")
+        expect(early.client.transport_state.phase).to_equal(SOSIX_FS_TRANSPORT_PENDING)
+        val expired = sosix_fs_async_client_expire_deadline_v1(deadline_client, 100)
+        expect(expired.accepted).to_be(true)
+        expect(expired.client.operation_slot.state).to_equal(SOSIX_OPERATION_TIMED_OUT)
+        expect(expired.client.transport_state.phase).to_equal(SOSIX_FS_TRANSPORT_COMPLETE)
+        val deadline_consumed = sosix_fs_async_client_consume_v1(expired.client)
+        expect(deadline_consumed.accepted).to_be(true)
+        val deadline_released = sosix_fs_async_client_release_v1(deadline_consumed.client)
+        expect(deadline_released.accepted).to_be(true)
+
+    it "preserves transport progress identically across cancel and deadline":
+        val pending = _pending_client()
+        val transport_progress = sosix_fs_transport_record_progress(
+            pending.transport_state, pending.key, 1)
+        val progressed = SosixFsAsyncClientV1(
+            operation: pending.operation, operation_slot: pending.operation_slot,
+            transport_state: transport_progress.state, key: pending.key,
+            service_endpoint: pending.service_endpoint,
+            reply_endpoint: pending.reply_endpoint, api_id: pending.api_id,
+            submission_attempted: true, submitted: true)
+
+        val canceled = sosix_fs_async_client_cancel_v1(progressed)
+        expect(canceled.accepted).to_be(true)
+        expect(canceled.client.operation_slot.transferred).to_equal(1)
+        expect(canceled.client.transport_state.transferred).to_equal(1)
+        expect(canceled.client.operation_slot.partial_progress).to_be(true)
+
+        val begun_deadline = sosix_operation_begin(5, sosix_operation_slot_new(), 100)
+        val deadline_transport = sosix_fs_transport_submit(
+            sosix_fs_transport_state_new(), begun_deadline.operation, 2)
+        val deadline_progress = sosix_fs_transport_record_progress(
+            deadline_transport.state, deadline_transport.key, 1)
+        val deadline_client = SosixFsAsyncClientV1(
+            operation: begun_deadline.operation, operation_slot: begun_deadline.slot,
+            transport_state: deadline_progress.state, key: deadline_transport.key,
+            service_endpoint: 70, reply_endpoint: 71, api_id: SOSIX_FS_READ_AT,
+            submission_attempted: true, submitted: true)
+        val expired = sosix_fs_async_client_expire_deadline_v1(deadline_client, 100)
+        expect(expired.accepted).to_be(true)
+        expect(expired.client.operation_slot.transferred).to_equal(1)
+        expect(expired.client.transport_state.transferred).to_equal(1)
+        expect(expired.client.operation_slot.partial_progress).to_be(true)
+
+    it "does not consume or release before a completion is published":
+        val client = rejected_start(0).client
+        val consumed = sosix_fs_async_client_consume_v1(client)
+        expect(consumed.accepted).to_be(false)
+        expect(consumed.reason).to_equal("correlation-mismatch")
+        val released = sosix_fs_async_client_release_v1(client)
+        expect(released.accepted).to_be(false)
+        expect(released.reason).to_equal("correlation-mismatch")

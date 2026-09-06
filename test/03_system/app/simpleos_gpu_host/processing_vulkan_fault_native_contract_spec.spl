@@ -1,0 +1,105 @@
+# @tag: system, gpu, vulkan, processing-ir, fault-injection, native, source-contract
+"""
+## Purpose and audience
+
+Pins the shipped source contract of the native Vulkan ProcessingIR fault
+probe and its release gate wrapper: exact device output (values_exact,
+positive handle and device identity), fail-closed behaviour for every
+injected fault phase, and a bounded one-default-plus-six-isolated native
+process run. Audience: SimpleOS GPU-host maintainers reviewing fault-
+injection evidence and the preflight wrapper that produces it.
+
+## Operator workflow
+
+Run `simple run test/03_system/app/simpleos_gpu_host/processing_vulkan_fault_native_contract_spec.spl`.
+The scenarios read the shipped probe and wrapper sources and assert the
+contract clauses on them; the actual native run is executed by the wrapper
+(`scripts/check/check-processing-vulkan-fault-native.shs`).
+
+## Compatibility and limitations
+
+Source-contract layer: it proves the shipped files carry the clauses the
+gate depends on, not that a Vulkan device is present on this host. The
+native execution lane needs a Vulkan-capable machine and is owned by the
+wrapper, not this spec.
+
+## Verification guidance and troubleshooting
+
+A failure names the contract clause that went missing (exactness clause,
+fail-closed reason map, bounded-process shape). Diff the named file
+against its last gate-green revision; a wrapper edit that changes the
+`2>&1`/`set +e`/`code=$?` triplets or the phase loop must update this spec
+in the same change.
+"""
+# Lifecycle: research doc/01_research/os/vulkan/simpleos_pure_simple_venus_driver.md ;
+# plan doc/03_plan/agent_tasks/simpleos_vulkan_cuda_adreno_knowledge_routing.md ;
+# architecture doc/04_architecture/os/vulkan/simpleos_vulkan_render_backend_plan.md ;
+# design doc/05_design/os/vulkan/simpleos_pure_simple_venus_driver.md
+
+use std.spec.{describe, it, expect, step}
+use std.io_runtime.{file_exists, process_run}
+
+val PROBE = "src/app/test/processing_vulkan_fault_probe.spl"
+val WRAPPER = "scripts/check/check-processing-vulkan-fault-native.shs"
+
+describe "native Vulkan ProcessingIR fault evidence contract":
+    # @manual_section: vulkan-processing-fault-contract
+
+    it "requires exact device output and positive native provenance":
+        # @req REQ-SIMPLEOS-GPU-FAULT-001
+        # @capture(statistics): the exactness and positive-provenance clauses found in the probe source
+        step("Load the shipped fault probe and assert its exact-output contract clauses")
+        val probe_exactness_contract = file_read(PROBE)
+        expect(file_exists(PROBE)).to_equal(true)
+        expect(probe_exactness_contract).to_contain("result.completed and result.reason == \"ok\" and values_exact")
+        expect(probe_exactness_contract).to_contain("result.backend_handle > 0 and result.device_identity > 0")
+        expect(probe_exactness_contract).to_contain("processing_ir_fill_u32(64, value)")
+        expect(probe_exactness_contract).to_contain("processing_vulkan_device_identity(\"abc\") == 96354")
+        expect(probe_exactness_contract).to_contain("hash_sanity and not fault_active")
+        expect(probe_exactness_contract).to_contain("fn _values_exact(values: [u32], expected_count: i64, expected_value: u32) -> bool:")
+        expect(probe_exactness_contract).to_contain("_values_exact(result.values, 64, value)")
+        expect(probe_exactness_contract.contains("result.values[index]")).to_equal(false)  # oracle: element-by-element reads are banned; exactness goes through _values_exact
+
+    it "fails closed for every injected phase":
+        # @req REQ-SIMPLEOS-GPU-FAULT-002
+        # @capture(statistics): the full phase-to-reason map and fail-closed assertions in the probe source
+        step("Load the probe and assert every fault phase has a dispatch arm and a fail-closed check")
+        val probe_phase_dispatch_contract = file_read(PROBE)
+        for phase in ["unavailable", "init", "submit", "readback", "mismatch", "dispatch-ineligible"]:
+            expect(probe_phase_dispatch_contract).to_contain("phase == \"" + phase + "\"")
+        for phase in ["none", "unavailable", "init", "submit", "readback", "mismatch", "dispatch-ineligible"]:
+            expect(probe_phase_dispatch_contract).to_contain("if arg == \"--phase=" + phase + "\": return \"" + phase + "\"")
+        expect(probe_phase_dispatch_contract).to_contain("if arg == \"--recover=submit\": return \"recover-submit\"")
+        expect(probe_phase_dispatch_contract).to_contain("not result.completed and result.reason == _expected_reason(phase)")
+        expect(probe_phase_dispatch_contract).to_contain("result.values.len() == 0 and result.backend_handle == 0")
+        expect(probe_phase_dispatch_contract).to_contain("result.device_identity == 0 and fault_active")
+
+    it "runs one default and six bounded isolated native processes":
+        # @req REQ-SIMPLEOS-GPU-FAULT-003
+        # @capture(statistics): the wrapper's bounded-process triplets and recovery-gate clauses
+        step("Load wrapper and probe and assert the bounded isolated-process run shape")
+        val probe_run_shape_contract = file_read(PROBE)
+        val wrapper_bounded_process_contract = file_read(WRAPPER)
+        expect(probe_run_shape_contract).to_contain("fn _phase_from_args(args: [text]) -> text:")
+        expect(probe_run_shape_contract.contains(".starts_with(")).to_equal(false)  # oracle: prefix dispatch is banned; phases match as whole arguments
+        expect(file_exists(WRAPPER)).to_equal(true)
+        expect(wrapper_bounded_process_contract).to_contain("timeout -k 5 \"$TIMEOUT_SECONDS\"")
+        expect(wrapper_bounded_process_contract.split("2>&1").len() - 1).to_equal(3)  # oracle: exactly three instrumented runs (default, fault sweep, recovery) redirect stderr
+        expect(wrapper_bounded_process_contract.split("set +e").len() - 1).to_equal(3)  # oracle: each of the three runs captures its exit code without aborting the wrapper
+        expect(wrapper_bounded_process_contract.split("code=$?").len() - 1).to_equal(3)  # oracle: each run records exactly one exit-code capture
+        expect(wrapper_bounded_process_contract.split("set -e\n").len() - 1).to_equal(3)  # oracle: strict mode is re-armed after each of the three captures
+        expect(wrapper_bounded_process_contract.split("[ \"$code\" -eq 0 ] || return \"$code\"").len() - 1).to_equal(2)  # oracle: the fault sweep and recovery runs propagate failure; the expected-failure run does not
+        expect(wrapper_bounded_process_contract).to_contain("[ \"$recovery_code\" -eq 0 ]")
+        expect(wrapper_bounded_process_contract).to_contain("env -u SIMPLE_GPU_FAULT_INJECT_SKIP_MATCHES SIMPLE_GPU_TEST=1 SIMPLE_GPU_FAULT_INJECT=\"vulkan:$phase\"")
+        expect(wrapper_bounded_process_contract).to_contain("run_case none")
+        expect(wrapper_bounded_process_contract).to_contain("for phase in unavailable init submit readback mismatch dispatch-ineligible")
+        expect(wrapper_bounded_process_contract).to_contain("processing_vulkan_fault_native_status=pass")
+        expect(wrapper_bounded_process_contract).to_contain("grep -Ec '^VULKAN_FAULT_NATIVE '")
+        expect(wrapper_bounded_process_contract).to_contain("[ \"$total\" -eq 1 ] && [ \"$valid\" -eq 1 ]")
+        expect(wrapper_bounded_process_contract).to_contain("hash_sanity=true handle=[1-9][0-9]* identity=[1-9][0-9]*$")
+        expect(wrapper_bounded_process_contract).to_contain("\"$PROBE_BIN\" --recover=submit")
+        expect(wrapper_bounded_process_contract).to_contain("VULKAN_FAULT_RECOVERY status=pass")
+        expect(wrapper_bounded_process_contract).to_contain("grep -Ec '^VULKAN_FAULT_RECOVERY '")
+        expect(wrapper_bounded_process_contract).to_contain("[ \"$recovery_total\" -eq 1 ] && [ \"$recovery_valid\" -eq 1 ]")
+        expect(probe_run_shape_contract).to_contain("recovered.device_identity == before.device_identity")
+        expect(wrapper_bounded_process_contract).to_contain("identity_stable=true")

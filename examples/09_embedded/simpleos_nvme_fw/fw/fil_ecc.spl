@@ -1,0 +1,552 @@
+"""
+fil_ecc — page ECC utility for the SimpleOS NVMe firmware simulation.
+
+Pure free functions only (no struct, no me-methods).
+Computes and verifies a compact ECC word. The low bits are Hamming SECDED
+parity over the modeled low payload window; the high bits protect OOB metadata
+sensitivity for {lba, seq}.
+"""
+
+use nvme_types.*
+use nvme_payload.*   # PageData / CODEWORD_WORDS / CODEWORDS_PER_PAGE / PAGE_WORDS
+
+struct EccDecode:
+    data: i64
+    code: i64
+
+fn ecc_bit(v: i64, bit: i64) -> i64:
+    (v >> bit) & 1
+
+fn ecc_parity_pos(pos: i64) -> bool:
+    pos == 1 or pos == 2 or pos == 4 or pos == 8 or pos == 16
+
+fn ecc_pos_for_data_bit(bit: i64) -> i64:
+    var pos: i64 = 1
+    var seen: i64 = 0
+    while pos <= 22:
+        if not ecc_parity_pos(pos):
+            if seen == bit:
+                return pos
+            seen = seen + 1
+        pos = pos + 1
+    0
+
+fn ecc_hamming_payload(data: i64) -> i64:
+    var p1: i64 = 0
+    var p2: i64 = 0
+    var p4: i64 = 0
+    var p8: i64 = 0
+    var p16: i64 = 0
+    var pos: i64 = 1
+    var data_bit: i64 = 0
+    while pos <= 22:
+        if not ecc_parity_pos(pos):
+            val bit: i64 = ecc_bit(data, data_bit)
+            if (pos & 1) != 0:
+                p1 = p1 ^ bit
+            if (pos & 2) != 0:
+                p2 = p2 ^ bit
+            if (pos & 4) != 0:
+                p4 = p4 ^ bit
+            if (pos & 8) != 0:
+                p8 = p8 ^ bit
+            if (pos & 16) != 0:
+                p16 = p16 ^ bit
+            data_bit = data_bit + 1
+        pos = pos + 1
+    var overall: i64 = 0
+    pos = 1
+    data_bit = 0
+    while pos <= 22:
+        if not ecc_parity_pos(pos):
+            overall = overall ^ ecc_bit(data, data_bit)
+            data_bit = data_bit + 1
+        pos = pos + 1
+    p1 | (p2 << 1) | (p4 << 2) | (p8 << 3) | (p16 << 4) | (overall << 5)
+
+# ── ecc_compute ───────────────────────────────────────────────────────────────
+# Low 6 bits: Hamming SECDED parity over payload window. Upper bits: metadata guard.
+fn ecc_compute(data: i64, lba: i64, seq: i64) -> i64:
+    val payload: i64 = ecc_hamming_payload(data)
+    val meta: i64 = (lba ^ (seq << 4) ^ (lba >> 3) ^ (seq >> 5)) & 0x7FF
+    payload | (meta << 6)
+
+fn ecc_flip_data_pos(data: i64, pos: i64) -> i64:
+    var bit: i64 = 0
+    while bit < 17:
+        if ecc_pos_for_data_bit(bit) == pos:
+            return data ^ (1 << bit)
+        bit = bit + 1
+    data
+
+fn ecc_decode(data: i64, lba: i64, seq: i64, stored: i64, injected_flips: i64) -> EccDecode:
+    val flips: i64 = if injected_flips < 0: 0 else: injected_flips
+    val recomputed: i64 = ecc_compute(data, lba, seq)
+    val stored_meta: i64 = (stored >> 6) & 0x7FF
+    val recomputed_meta: i64 = (recomputed >> 6) & 0x7FF
+    if flips >= 2:
+        return EccDecode(data: data, code: NAND_ECC_FAIL)
+    if stored_meta != recomputed_meta:
+        return EccDecode(data: data, code: NAND_ECC_FAIL)
+
+    val syndrome: i64 = (stored ^ recomputed) & 0x1F
+    val overall: i64 = ((stored >> 5) ^ (recomputed >> 5)) & 1
+    if syndrome == 0:
+        if overall == 0:
+            if flips == 1:
+                return EccDecode(data: data, code: NAND_ECC_FIXED)
+            return EccDecode(data: data, code: NAND_OK)
+        return EccDecode(data: data, code: NAND_ECC_FIXED)
+    if overall == 0:
+        return EccDecode(data: data, code: NAND_ECC_FAIL)
+    if ecc_parity_pos(syndrome):
+        return EccDecode(data: data, code: NAND_ECC_FIXED)
+    EccDecode(data: ecc_flip_data_pos(data, syndrome), code: NAND_ECC_FIXED)
+
+# ── ecc_check ─────────────────────────────────────────────────────────────────
+# Verify a page read against its stored ECC given an injected_flips count
+# (the NAND hardware bit-error counter for this read).
+#
+# NAND semantics:
+#   injected_flips >= 2  ->  NAND_ECC_FAIL (uncorrectable)
+#   recomputed != stored ->  NAND_ECC_FAIL (silent data/OOB corruption)
+#   injected_flips == 1  ->  NAND_ECC_FIXED (1-bit error, correctable)
+#   otherwise            ->  NAND_OK
+fn ecc_check(data: i64, lba: i64, seq: i64, stored: i64, injected_flips: i64) -> i64:
+    ecc_decode(data, lba, seq, stored, injected_flips).code
+
+# ══════════════════════════════════════════════════════════════════════════════
+# D4 — per-codeword ECC over REAL codewords (4 x 128 words = 4 x 8192 bits)
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# CODE AND CAPABILITY — stated honestly, because a storage ECC that overclaims
+# is worse than one that underclaims:
+#
+#   This is a **SEC-DED Hamming code** in its "XOR-of-positions" (syndrome =
+#   XOR of the 1-based bit positions of the set bits) formulation, computed
+#   INDEPENDENTLY per 1024-byte codeword. It is **NOT BCH**. Per codeword:
+#     * corrects exactly ONE bit error                     (guaranteed)
+#     * detects  exactly TWO bit errors, never mis-corrects them (guaranteed)
+#     * any even-weight error pattern is DETECTED, never mis-corrected
+#       (the overall-parity bit is 0 for every even pattern, and the code
+#       refuses to correct when the overall parity agrees but the syndrome
+#       does not — see `ecc_codeword_decode`)
+#     * an ODD-weight pattern of 3 or more flips inside ONE codeword CAN alias
+#       onto a valid single-bit syndrome and be mis-corrected. This is an
+#       inherent property of SEC-DED, not a defect of this implementation, and
+#       it is the honest reason a production SSD uses BCH/LDPC instead. It is
+#       NOT claimed to be detected, and no check in this tree asserts that it is.
+#   Per PAGE the capability is therefore "1 bit per codeword, 4 codewords" —
+#   up to 4 correctable flips per page provided they land in distinct codewords.
+#
+# SIZE: syndrome 14 bits (positions 1..8192) + 1 overall-parity bit + an 11-bit
+#   {lba,seq} metadata guard = 26 bits, stored one i64 per codeword in
+#   `OobData.parity[1 + idx]`. The budget is PARITY_BYTES_PER_CODEWORD = 16
+#   bytes = 128 bits, so this uses 26 of 128 — room the BCH upgrade will need.
+#
+# OFFLOAD ELIGIBILITY (doc/03_plan/hardware/nvme_offload_hw_sw_partition_design.md):
+#   `ecc_parity_of`, `ecc_xor_index`, `ecc_codeword_syndrome`,
+#   `ecc_codeword_compute`, `ecc_codeword_decode` use ONLY `and / or / xor /
+#   shl / shr / add / sub` on fixed-width values, with fixed-bound loops
+#   (`while w < n`, n <= CODEWORD_WORDS) — no `/`, no `%`, no unbounded
+#   iteration. That is deliberate: it is the `hw_ready_comb`-after-unrolling
+#   shape §1 of that design asks for. Two gaps remain on the COMPILER side, not
+#   here: (1) `xor` and `add`/`sub` are absent from `strict_mir_comb_op`
+#   (design §4 Tier A item 1), and (2) these take `i64`, while the strict path
+#   accepts Bool/u32/i32/Bits (Tier A item 2) — a *type* migration, not an
+#   algorithm rewrite, exactly as that document requires. `ecc_page_*` below are
+#   NOT offload-eligible: they walk `[i64]` arrays and build PageData.
+#
+# WHY XOR-OF-POSITIONS, AND WHY IT IS FAST:
+#   `xor_index` (XOR of the set-bit indices of a word) is LINEAR over XOR:
+#   xor_index(a) ^ xor_index(b) == xor_index(a ^ b). So the low 6 syndrome bits
+#   need ONE `ecc_xor_index` call over the XOR-fold of the whole codeword rather
+#   than 8192 per-bit steps. The high bits (the word index) are recovered from 7
+#   XOR accumulators, one per bit of the word index. Cost is therefore
+#   O(CODEWORD_WORDS) word ops, not O(bits) — ~15 integer ops per word.
+
+val ECC_CW_SYN_BITS:  i64 = 14          # positions 1..8192 need 14 bits
+val ECC_CW_SYN_MASK:  i64 = 0x3FFF
+val ECC_CW_OVERALL_SHIFT: i64 = 14
+val ECC_CW_META_SHIFT: i64 = 15
+val ECC_CW_META_MASK:  i64 = 0x7FF
+
+# Decoded outcome for ONE codeword.
+# `flip_word` is the codeword-local word index to repair (-1 = nothing to do),
+# `flip_mask` the single-bit mask to XOR into it.
+struct EccCwDecode:
+    flip_word: i64
+    flip_mask: i64
+    code:      i64
+
+# Decoded outcome for a whole page.
+struct EccPageDecode:
+    page:      PageData
+    code:      i64   # NAND_OK / NAND_ECC_FIXED / NAND_ECC_FAIL (worst codeword)
+    corrected: i64   # how many codewords were repaired
+    failed_cw: i64   # first uncorrectable codeword index, -1 when none
+
+# ── ecc_parity_of ─────────────────────────────────────────────────────────────
+# Popcount parity of a 64-bit word, by XOR halving. Every shift is masked so the
+# arithmetic (sign-extending) `>>` on i64 cannot leak ones down from bit 63.
+fn ecc_parity_of(v: i64) -> i64:
+    var x: i64 = v
+    x = x ^ ((x >> 32) & 0xFFFFFFFF)
+    x = x ^ ((x >> 16) & 0xFFFF)
+    x = x ^ ((x >> 8) & 0xFF)
+    x = x ^ ((x >> 4) & 0xF)
+    x = x ^ ((x >> 2) & 0x3)
+    x = x ^ ((x >> 1) & 0x1)
+    x & 1
+
+# ── ecc_xor_index ─────────────────────────────────────────────────────────────
+# XOR of the bit INDICES (0..63) of every set bit of `v`. Computed by folding
+# halves: at each level the parity of the upper half gives one index bit, and
+# XOR-ing the halves preserves the remaining index bits exactly (this is why the
+# function is linear over XOR — the property the codeword encoder relies on).
+fn ecc_xor_index(v: i64) -> i64:
+    val hi32: i64 = (v >> 32) & 0xFFFFFFFF
+    val b5:   i64 = ecc_parity_of(hi32)
+    val v32:  i64 = (v & 0xFFFFFFFF) ^ hi32
+    val hi16: i64 = (v32 >> 16) & 0xFFFF
+    val b4:   i64 = ecc_parity_of(hi16)
+    val v16:  i64 = (v32 & 0xFFFF) ^ hi16
+    val hi8:  i64 = (v16 >> 8) & 0xFF
+    val b3:   i64 = ecc_parity_of(hi8)
+    val v8:   i64 = (v16 & 0xFF) ^ hi8
+    val hi4:  i64 = (v8 >> 4) & 0xF
+    val b2:   i64 = ecc_parity_of(hi4)
+    val v4:   i64 = (v8 & 0xF) ^ hi4
+    val hi2:  i64 = (v4 >> 2) & 0x3
+    val b1:   i64 = ecc_parity_of(hi2)
+    val v2:   i64 = (v4 & 0x3) ^ hi2
+    val b0:   i64 = (v2 >> 1) & 1
+    b0 | (b1 << 1) | (b2 << 2) | (b3 << 3) | (b4 << 4) | (b5 << 5)
+
+# ── ecc_codeword_syndrome ─────────────────────────────────────────────────────
+# Returns `syndrome | (overall_parity << 14)` for the `n`-word window of `p`
+# starting at page word `off`.
+#
+# Bit position numbering is ONE-BASED: the bit at codeword-local word `w`,
+# in-word bit `b`, has position (w << 6) + b + 1, ranging 1..8192. One-based is
+# load-bearing: with 0-based positions a flip of the very first bit would give
+# syndrome 0, indistinguishable from "no error".
+#
+# The `+ 1` is realised by shifting each word left by one (`vs = v << 1`), which
+# maps in-word bit b to index b+1 for b < 63. Bit 63 has no room and is carried
+# explicitly: its position is (w << 6) + 64 == ((w + 1) << 6), accumulated in the
+# c0..c7 single-bit accumulators.
+fn ecc_codeword_syndrome(p: PageData, off: i64, n: i64) -> i64:
+    var a0: i64 = 0
+    var a1: i64 = 0
+    var a2: i64 = 0
+    var a3: i64 = 0
+    var a4: i64 = 0
+    var a5: i64 = 0
+    var a6: i64 = 0
+    var c0: i64 = 0
+    var c1: i64 = 0
+    var c2: i64 = 0
+    var c3: i64 = 0
+    var c4: i64 = 0
+    var c5: i64 = 0
+    var c6: i64 = 0
+    var c7: i64 = 0
+    var vs_all: i64 = 0
+    var v_all:  i64 = 0
+    var w: i64 = 0
+    while w < n:
+        val v:  i64 = page_word(p, off + w)
+        val vs: i64 = v << 1
+        v_all  = v_all ^ v
+        vs_all = vs_all ^ vs
+        if (w & 1) != 0:
+            a0 = a0 ^ vs
+        if (w & 2) != 0:
+            a1 = a1 ^ vs
+        if (w & 4) != 0:
+            a2 = a2 ^ vs
+        if (w & 8) != 0:
+            a3 = a3 ^ vs
+        if (w & 16) != 0:
+            a4 = a4 ^ vs
+        if (w & 32) != 0:
+            a5 = a5 ^ vs
+        if (w & 64) != 0:
+            a6 = a6 ^ vs
+        val hi: i64 = (v >> 63) & 1
+        if hi != 0:
+            val wp: i64 = w + 1
+            c0 = c0 ^ (wp & 1)
+            c1 = c1 ^ ((wp >> 1) & 1)
+            c2 = c2 ^ ((wp >> 2) & 1)
+            c3 = c3 ^ ((wp >> 3) & 1)
+            c4 = c4 ^ ((wp >> 4) & 1)
+            c5 = c5 ^ ((wp >> 5) & 1)
+            c6 = c6 ^ ((wp >> 6) & 1)
+            c7 = c7 ^ ((wp >> 7) & 1)
+        w = w + 1
+    # Low 6 syndrome bits: one xor_index over the whole XOR-fold (linearity).
+    val low: i64 = ecc_xor_index(vs_all)
+    # High bits 6..12: whether an odd number of set bits lived in words whose
+    # index has bit j set. Bits 6..13 additionally carry the bit-63 positions.
+    var high: i64 = 0
+    high = high ^ (ecc_parity_of(a0) << 6)
+    high = high ^ (ecc_parity_of(a1) << 7)
+    high = high ^ (ecc_parity_of(a2) << 8)
+    high = high ^ (ecc_parity_of(a3) << 9)
+    high = high ^ (ecc_parity_of(a4) << 10)
+    high = high ^ (ecc_parity_of(a5) << 11)
+    high = high ^ (ecc_parity_of(a6) << 12)
+    high = high ^ (c0 << 6)
+    high = high ^ (c1 << 7)
+    high = high ^ (c2 << 8)
+    high = high ^ (c3 << 9)
+    high = high ^ (c4 << 10)
+    high = high ^ (c5 << 11)
+    high = high ^ (c6 << 12)
+    high = high ^ (c7 << 13)
+    val syn: i64 = (low | (high & 0x3FC0)) & ECC_CW_SYN_MASK
+    val overall: i64 = ecc_parity_of(v_all)
+    syn | (overall << ECC_CW_OVERALL_SHIFT)
+
+# ── ecc_codeword_compute ──────────────────────────────────────────────────────
+# The stored parity word for codeword `idx` of page `p`.
+#
+# The metadata guard uses EXACTLY the scalar path's formula (`ecc_compute`) and
+# deliberately does NOT mix in `idx`: an ERASED page has all-zero words, lba
+# UNMAP(-1) and seq 0, for which that formula yields 0 — so an erased page's
+# recomputed parity equals the erased stored parity (0) and reads clean. Folding
+# `idx` in would make codewords 1..3 of every erased page report ECC_FAIL.
+# Per-codeword INDEPENDENCE comes from the syndrome being computed over that
+# codeword's words alone, not from the metadata guard.
+fn ecc_codeword_compute(p: PageData, idx: i64, lba: i64, seq: i64) -> i64:
+    val s: CodewordSpan = codeword_span(idx)
+    val body: i64 = ecc_codeword_syndrome(p, s.page_word_off, s.word_count)
+    val meta: i64 = (lba ^ (seq << 4) ^ (lba >> 3) ^ (seq >> 5)) & ECC_CW_META_MASK
+    body | (meta << ECC_CW_META_SHIFT)
+
+# ── ecc_page_compute ──────────────────────────────────────────────────────────
+# CODEWORDS_PER_PAGE parity words, index i covering page words
+# [i*CODEWORD_WORDS, (i+1)*CODEWORD_WORDS).
+fn ecc_page_compute(p: PageData, lba: i64, seq: i64) -> [i64]:
+    var out: [i64] = []
+    var i: i64 = 0
+    while i < CODEWORDS_PER_PAGE:
+        out.push(ecc_codeword_compute(p, i, lba, seq))
+        i = i + 1
+    out
+
+# ── ecc_codeword_decode ───────────────────────────────────────────────────────
+# SEC-DED decision table over (stored, recomputed):
+#
+#   meta mismatch                  -> FAIL  (OOB {lba,seq} disagrees with data)
+#   dSyn == 0, dParity == 0        -> OK
+#   dSyn == 0, dParity == 1        -> FIXED, no data repair (the stored overall
+#                                     parity bit itself flipped)
+#   dSyn != 0, dParity == 1        -> single-bit error at position dSyn: repair,
+#                                     unless dSyn addresses outside the codeword
+#                                     (then FAIL — refuse to write a wild bit)
+#   dSyn != 0, dParity == 0        -> EVEN-weight error (>= 2 bits): FAIL.
+#                                     This branch is what makes silent
+#                                     mis-correction of a 2-bit burst impossible.
+fn ecc_codeword_decode(stored: i64, recomputed: i64, n: i64) -> EccCwDecode:
+    val stored_meta:     i64 = (stored >> ECC_CW_META_SHIFT) & ECC_CW_META_MASK
+    val recomputed_meta: i64 = (recomputed >> ECC_CW_META_SHIFT) & ECC_CW_META_MASK
+    if stored_meta != recomputed_meta:
+        return EccCwDecode(flip_word: -1, flip_mask: 0, code: NAND_ECC_FAIL)
+    val d_syn:    i64 = (stored ^ recomputed) & ECC_CW_SYN_MASK
+    val d_parity: i64 = ((stored >> ECC_CW_OVERALL_SHIFT) ^ (recomputed >> ECC_CW_OVERALL_SHIFT)) & 1
+    if d_syn == 0:
+        if d_parity == 0:
+            return EccCwDecode(flip_word: -1, flip_mask: 0, code: NAND_OK)
+        return EccCwDecode(flip_word: -1, flip_mask: 0, code: NAND_ECC_FIXED)
+    if d_parity == 0:
+        return EccCwDecode(flip_word: -1, flip_mask: 0, code: NAND_ECC_FAIL)
+    val pos:  i64 = d_syn - 1          # back to 0-based
+    val widx: i64 = pos >> 6           # shift, never `/` — offload discipline
+    val bidx: i64 = pos & 63
+    if widx >= n:
+        return EccCwDecode(flip_word: -1, flip_mask: 0, code: NAND_ECC_FAIL)
+    EccCwDecode(flip_word: widx, flip_mask: 1 << bidx, code: NAND_ECC_FIXED)
+
+# ── ecc_page_severity ─────────────────────────────────────────────────────────
+# Worst-of over NAND_OK < NAND_ECC_FIXED < NAND_ECC_FAIL, expressed without
+# depending on the numeric values of the NAND_* constants.
+fn ecc_severity_of(code: i64) -> i64:
+    if code == NAND_ECC_FAIL:
+        return 2
+    if code == NAND_ECC_FIXED:
+        return 1
+    0
+
+fn ecc_code_of_severity(sev: i64) -> i64:
+    if sev >= 2:
+        return NAND_ECC_FAIL
+    if sev == 1:
+        return NAND_ECC_FIXED
+    NAND_OK
+
+# ── ecc_page_decode ───────────────────────────────────────────────────────────
+# Decode all CODEWORDS_PER_PAGE codewords of a sensed page against the parity
+# words stored in OOB at program time. Each codeword is decoded INDEPENDENTLY:
+# a repair in codeword k touches only words [k*128, (k+1)*128), and an
+# uncorrectable codeword k does not suppress the correction of any other.
+#
+# `injected_flips` is the NAND hardware bit-error counter for this sense; it is
+# folded in with the same semantics the scalar path has always used (>= 2 is
+# uncorrectable, == 1 is a correction event) so the behavioural backend's
+# injected-error tests keep their meaning.
+#
+# CORRECTION IS COPY-ON-DEMAND. The page is returned UNCHANGED (and unaliased)
+# whenever nothing needs repair, which is the overwhelmingly common case; a fresh
+# page is materialised by `ecc_page_clone` only when a bit actually has to be
+# flipped. That keeps the per-read cost at O(PAGE_WORDS) integer ops with no
+# allocation, instead of a 512-word copy on every read.
+#
+# MEASURED SEED HAZARD (2026-09-01, Rust seed): `var q: PageData = p` does NOT
+# deep-copy the nested `words: [i64]` — a write through `q.words[i]` is visible
+# through `p`. Proven with a 6-line fixture. Simple's documented value semantics
+# say otherwise, so this is a seed defect, not an intended behaviour. Every
+# correction here therefore goes through the explicit `ecc_page_clone` rebuild
+# rather than relying on assignment to copy. Do not "simplify" that away.
+fn ecc_page_clone(p: PageData) -> PageData:
+    var w: [i64] = []
+    var i: i64 = 0
+    while i < p.words.len():
+        w.push(p.words[i])
+        i = i + 1
+    PageData(words: w)
+
+fn ecc_page_decode(p: PageData, lba: i64, seq: i64, stored: [i64], injected_flips: i64) -> EccPageDecode:
+    val flips: i64 = if injected_flips < 0: 0 else: injected_flips
+    var sev: i64 = 0
+    var corrected: i64 = 0
+    var failed_cw: i64 = -1
+    var repair_word: [i64] = []   # absolute page word index of each repair
+    var repair_mask: [i64] = []
+    if stored.len() < CODEWORDS_PER_PAGE:
+        # Parity was never stored for this page at the widened width: report
+        # uncorrectable rather than silently pretending the page verified.
+        return EccPageDecode(page: p, code: NAND_ECC_FAIL, corrected: 0, failed_cw: 0)
+    var i: i64 = 0
+    while i < CODEWORDS_PER_PAGE:
+        val s: CodewordSpan = codeword_span(i)
+        val recomputed: i64 = ecc_codeword_compute(p, i, lba, seq)
+        val d: EccCwDecode = ecc_codeword_decode(stored[i], recomputed, s.word_count)
+        if d.code == NAND_ECC_FIXED:
+            if d.flip_word >= 0:
+                repair_word.push(s.page_word_off + d.flip_word)
+                repair_mask.push(d.flip_mask)
+            corrected = corrected + 1
+        if d.code == NAND_ECC_FAIL:
+            if failed_cw < 0:
+                failed_cw = i
+        val cs: i64 = ecc_severity_of(d.code)
+        if cs > sev:
+            sev = cs
+        i = i + 1
+    if flips >= 2:
+        sev = 2
+        if failed_cw < 0:
+            failed_cw = 0
+    if flips == 1:
+        if sev < 1:
+            sev = 1
+    if repair_word.len() == 0:
+        return EccPageDecode(page: p, code: ecc_code_of_severity(sev), corrected: corrected, failed_cw: failed_cw)
+    var out: PageData = ecc_page_clone(p)
+    var r: i64 = 0
+    while r < repair_word.len():
+        # Mutate through the single owner `out`, never a temporary alias.
+        out.words[repair_word[r]] = out.words[repair_word[r]] ^ repair_mask[r]
+        r = r + 1
+    EccPageDecode(page: out, code: ecc_code_of_severity(sev), corrected: corrected, failed_cw: failed_cw)
+
+# ── ecc_selftest ──────────────────────────────────────────────────────────────
+fn ecc_selftest() -> i64:
+    var failures: i64 = 0
+
+    # Determinism: identical inputs must produce identical checksum
+    val e1: i64 = ecc_compute(0xAB, 7, 3)
+    val e2: i64 = ecc_compute(0xAB, 7, 3)
+    failures = failures + expect_eq(e1, e2, "ecc_compute deterministic")
+
+    # Result stays positive and carries metadata above the payload parity bits.
+    val e3: i64 = ecc_compute(0xFF, 255, 63)
+    var range_ok: i64 = 0
+    if e3 >= 0:
+        if (e3 >> 6) > 0:
+            range_ok = 1
+    failures = failures + expect_eq(range_ok, 1, "ecc_compute payload+metadata range")
+
+    # Sensitivity: different data must differ (or at least not trivially collide)
+    val ea: i64 = ecc_compute(0x01, 0, 0)
+    val eb: i64 = ecc_compute(0x02, 0, 0)
+    var differs: i64 = 0
+    if ea != eb:
+        differs = 1
+    failures = failures + expect_eq(differs, 1, "ecc_compute data sensitivity")
+
+    val em0: i64 = ecc_compute(0x02, 1, 1)
+    val em1: i64 = ecc_compute(0x02, 2, 1)
+    var meta_differs: i64 = 0
+    if em0 != em1:
+        meta_differs = 1
+    failures = failures + expect_eq(meta_differs, 1, "ecc_compute metadata sensitivity")
+
+    # --- ecc_check cases ---
+    val data1: i64 = 0x42
+    val lba1: i64 = 100
+    val seq1: i64 = 5
+    val ecc1: i64 = ecc_compute(data1, lba1, seq1)
+
+    # matching stored, 0 flips -> NAND_OK
+    failures = failures + expect_eq(
+        ecc_check(data1, lba1, seq1, ecc1, 0),
+        NAND_OK,
+        "check 0-flips -> NAND_OK")
+    failures = failures + expect_eq(
+        ecc_check(data1, lba1, seq1, ecc1, -1),
+        NAND_OK,
+        "check negative flips clamps to NAND_OK")
+
+    # matching stored, 1 flip -> NAND_ECC_FIXED
+    failures = failures + expect_eq(
+        ecc_check(data1, lba1, seq1, ecc1, 1),
+        NAND_ECC_FIXED,
+        "check 1-flip -> NAND_ECC_FIXED")
+
+    # matching stored, 2 flips -> NAND_ECC_FAIL (uncorrectable)
+    failures = failures + expect_eq(
+        ecc_check(data1, lba1, seq1, ecc1, 2),
+        NAND_ECC_FAIL,
+        "check 2-flips -> NAND_ECC_FAIL")
+
+    # matching stored, 3 flips -> NAND_ECC_FAIL (>= 2)
+    failures = failures + expect_eq(
+        ecc_check(data1, lba1, seq1, ecc1, 3),
+        NAND_ECC_FAIL,
+        "check 3-flips -> NAND_ECC_FAIL")
+
+    # wrong stored ecc, 0 flips -> NAND_ECC_FAIL (silent corruption)
+    val bad_ecc: i64 = ecc1 ^ 0x1
+    failures = failures + expect_eq(
+        ecc_check(data1, lba1, seq1, bad_ecc, 0),
+        NAND_ECC_FAIL,
+        "check stored-ecc parity mismatch -> NAND_ECC_FAIL")
+
+    val single_data: EccDecode = ecc_decode(data1 ^ 0x01, lba1, seq1, ecc1, 0)
+    failures = failures + expect_eq(single_data.code, NAND_ECC_FIXED, "single silent payload bit -> ECC_FIXED")
+    failures = failures + expect_eq(single_data.data, data1, "single silent payload bit corrected")
+
+    val high_data: i64 = 0x123456
+    val high_ecc: i64 = ecc_compute(high_data, lba1, seq1)
+    val high_single: EccDecode = ecc_decode(high_data ^ 0x10000, lba1, seq1, high_ecc, 0)
+    failures = failures + expect_eq(high_single.code, NAND_ECC_FIXED, "single high payload bit -> ECC_FIXED")
+    failures = failures + expect_eq(high_single.data, high_data, "single high payload bit corrected")
+
+    val double_data: EccDecode = ecc_decode(data1 ^ 0x03, lba1, seq1, ecc1, 0)
+    failures = failures + expect_eq(double_data.code, NAND_ECC_FAIL, "double silent payload bit -> ECC_FAIL")
+
+    failures

@@ -1,0 +1,65 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER_CORE
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+fn read_bidir_source(path: text) -> text:
+    # Fail closed on a missing/empty file. Without this a deleted or renamed
+    # source reads as "" and every `.contains(...) == false` check below passes
+    # VACUOUSLY while guarding nothing. Requiring content keeps both directions
+    # of these source guards honest.
+    val source = rt_file_read_text(path) ?? ""
+    expect(source.len() > 0).to_equal(true)
+    source
+
+
+
+use std.spec.step
+
+use compiler.types.bidirectional_types.{BidirInferMode, BidirHirType, BidirHirExpr}
+use compiler.types.bidirectional_inferencer.{TypeInferencer}
+
+describe "bidirectional inference behavior (real oracle)":
+    # @manual scenario evidence
+    it "synthesizes i64 from an integer literal":
+        # @req REQ-SSPEC-COMPILER_CORE
+        step("Verify: synthesize_expr(IntLit) returns BidirHirType.Int")
+        val ctx = TypeInferencer.empty()
+        val ty = ctx.synthesize_expr(BidirHirExpr.int_lit(42))
+        expect(ty.to_string()).to_equal("i64")  # oracle: Int renders as i64
+
+    it "synthesizes bool from a boolean literal":
+        # @req REQ-SSPEC-COMPILER_CORE
+        step("Verify: synthesize_expr(BoolLit) returns BidirHirType.Bool")
+        val ctx = TypeInferencer.empty()
+        val ty = ctx.synthesize_expr(BidirHirExpr.bool_lit(false))
+        expect(ty.to_string()).to_equal("bool")  # oracle: Bool renders as bool
+
+    it "synthesizes a function type from a lambda":
+        # @req REQ-SSPEC-COMPILER_CORE
+        step("Verify: lambda over int body synthesizes fn(T0) -> i64")
+        val ctx = TypeInferencer.empty()
+        val body = BidirHirExpr.int_lit(1)
+        val lam = BidirHirExpr.lambda(["x"], body)
+        val ty = ctx.synthesize_expr(lam)
+        expect(ty.to_string()).to_equal("fn(T0) -> i64")  # oracle: fresh param var T0, int body
+
+    it "checks an int literal against i64 successfully":
+        # @req REQ-SSPEC-COMPILER_CORE
+        step("Verify: check_expr(IntLit, Int) returns Int")
+        val ctx = TypeInferencer.empty()
+        val ty = ctx.check_expr(BidirHirExpr.int_lit(7), BidirHirType.Int)
+        expect(ty.to_string()).to_equal("i64")  # oracle: successful check returns the expected type
+
+    it "subsumption rejects bool against i64":
+        # @req REQ-SSPEC-COMPILER_CORE
+        step("Verify: subsume(Bool, Int) is false")
+        val ctx = TypeInferencer.empty()
+        expect(ctx.subsume(BidirHirType.Bool, BidirHirType.Int)).to_equal(false)  # oracle: incompatible types never subsume
+
+    it "synthesizes a tuple type from elements":
+        # @req REQ-SSPEC-COMPILER_CORE
+        step("Verify: tuple of (int, bool) synthesizes (i64, bool)")
+        val ctx = TypeInferencer.empty()
+        val tup = BidirHirExpr.tuple([BidirHirExpr.int_lit(1), BidirHirExpr.bool_lit(true)])
+        val ty = ctx.synthesize_expr(tup)
+        expect(ty.to_string()).to_equal("(i64, bool)")  # oracle: element order preserved

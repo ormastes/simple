@@ -1,0 +1,528 @@
+# Metal font-atlas companion. Kept separate from the legacy Metal facade so
+# the generated-kernel ABI and persistent atlas lifecycle stay reviewable.
+
+use std.gc_async_mut.gpu.engine2d.metal_session.{MetalSession}
+use std.gpu.engine2d.backend_software.{SoftwareBackend}
+use std.common.gpu.font_atlas_composite.{font_atlas_composite_program_version_valid, font_atlas_composite_cache_identity, font_atlas_composite_metal_source, font_atlas_composite_metal_packed_source, font_atlas_subrect_pixels, font_destination_origin}
+use std.common.crypto.sha256.{sha256_text}
+use std.gc_async_mut.text_layout.font_renderer.{FontRenderBatch, font_render_batch_atlas_owner_identity}
+use std.gpu.engine2d.backend_metal_runtime_ops.{metal_buffer_upload_ptr, metal_set_bytes_ptr, metal_write_u32s_to_ptr}
+use std.gc_async_mut.io.metal_sffi.{
+    metal_sffi_alloc_buffer, metal_sffi_free_buffer,
+    metal_sffi_create_command_buffer, metal_sffi_create_compute_encoder,
+    metal_sffi_set_buffer, metal_sffi_dispatch_compute,
+    metal_sffi_end_compute_encoder, metal_sffi_commit_command_buffer,
+    metal_sffi_wait_completed,
+    metal_sffi_destroy_compute_encoder, metal_sffi_destroy_command_buffer
+}
+
+extern fn rt_alloc(size: i64) -> i64
+extern fn rt_free(ptr: i64) -> i64
+@unsafe(reason: "nonnull raw store; Metal staging allocation and bounds are caller-owned", capabilities: [ffi, raw_ptr])
+extern fn rt_ptr_write_i32(ptr: i64, offset: i64, value: i32)
+
+
+fn _font_pack_i32_le(mut buf: [u8], offset: i32, value: i32) -> i32:
+    buf[offset] = (value & 0xFF) as u8
+    buf[offset + 1] = ((value >> 8) & 0xFF) as u8
+    buf[offset + 2] = ((value >> 16) & 0xFF) as u8
+    buf[offset + 3] = ((value >> 24) & 0xFF) as u8
+    offset + 4
+
+fn metal_font_atlas_composite_params(atlas_width: i32, atlas_height: i32, atlas_count: i64,
+                                     atlas_x: i32, atlas_y: i32, quad_width: i32, quad_height: i32,
+                                     dst_width: i32, dst_height: i32, dst_count: i64,
+                                     dst_x: i32, dst_y: i32, color: u32) -> [u8]:
+    var p: [u8] = [0u8; 52]
+    var off = 0
+    val values: [i32] = [atlas_width, atlas_height, atlas_count as i32, atlas_x, atlas_y,
+        quad_width, quad_height, dst_width, dst_height, dst_count as i32, dst_x, dst_y, color as i32]
+    for value in values:
+        off = _font_pack_i32_le(p, off, value)
+    p
+
+val METAL_FONT_PARAMS_BYTES: i64 = 52
+val METAL_FONT_PACKED_HEADER_WORDS: i64 = 8
+val METAL_FONT_PACKED_GLYPH_WORDS: i64 = 7
+val METAL_FONT_FRAME_GLYPH_CAP: i64 = 4096
+val METAL_FONT_PACKED_MAX_WORDS: i64 = METAL_FONT_PACKED_HEADER_WORDS + METAL_FONT_FRAME_GLYPH_CAP * METAL_FONT_PACKED_GLYPH_WORDS
+val METAL_FONT_PACKED_MAX_BYTES: i64 = METAL_FONT_PACKED_MAX_WORDS * 4
+
+fn metal_font_frame_batch_contract(text_count: i64, command_count: i64,
+                                   commit_count: i64, wait_count: i64) -> bool:
+    """Metal twin of `vulkan_font_frame_batch_contract`.
+
+    A frame that drew any text must have cost exactly one command buffer, one
+    commit and one completion wait, no matter how many text batches it held.
+    """
+    text_count > 0 and command_count == 1 and commit_count == 1 and wait_count == 1
+
+fn metal_font_dispatch_groups(pixel_count: i64) -> i64:
+    if pixel_count <= 0 or pixel_count > 2147483647:
+        0
+    else:
+        (pixel_count + 63) / 64
+
+fn metal_font_packed_params(batch: FontRenderBatch, origin_x: i32, origin_y: i32,
+                            dst_width: i32, dst_height: i32) -> [u32]:
+    """Pack every glyph of one batch into a single word buffer.
+
+    Byte-for-byte the layout `vulkan_font_packed_params` produces: 8 header
+    words, then 7 words per glyph. Word 7 carries the widest glyph in pixels,
+    which is the dispatch width the caller needs.
+    """
+    val glyph_count = batch.quads.len()
+    val word_count = METAL_FONT_PACKED_HEADER_WORDS + glyph_count * METAL_FONT_PACKED_GLYPH_WORDS
+    if glyph_count <= 0 or glyph_count > METAL_FONT_FRAME_GLYPH_CAP or word_count > 2147483647 / 4:
+        return []
+    val atlas_count = batch.atlas_width.to_i64() * batch.atlas_height.to_i64()
+    val dst_count = dst_width.to_i64() * dst_height.to_i64()
+    if atlas_count <= 0 or atlas_count > 2147483647 or dst_count <= 0 or dst_count > 2147483647:
+        return []
+    if batch.atlas_pixels.len().to_i64() < atlas_count:
+        return []
+    var packed: [u32] = [0u32; word_count]
+    packed[0] = batch.atlas_width as u32
+    packed[1] = batch.atlas_height as u32
+    packed[2] = atlas_count as u32
+    packed[3] = dst_width as u32
+    packed[4] = dst_height as u32
+    packed[5] = dst_count as u32
+    packed[6] = glyph_count as u32
+    var max_pixels: i64 = 0
+    var off = METAL_FONT_PACKED_HEADER_WORDS
+    for q in batch.quads:
+        if (q.width <= 0 or q.height <= 0 or q.atlas_x < 0 or q.atlas_y < 0 or
+            q.atlas_x > batch.atlas_width or q.atlas_y > batch.atlas_height or
+            q.width > batch.atlas_width - q.atlas_x or
+            q.height > batch.atlas_height - q.atlas_y):
+            return []
+        val pixels = q.width.to_i64() * q.height.to_i64()
+        if pixels > max_pixels:
+            max_pixels = pixels
+        val dst_x = font_destination_origin(origin_x, q.dst_x, q.width)
+        val dst_y = font_destination_origin(origin_y, q.dst_y, q.height)
+        if dst_x == nil or dst_y == nil:
+            return []
+        packed[off] = q.atlas_x as u32
+        packed[off + 1] = q.atlas_y as u32
+        packed[off + 2] = q.width as u32
+        packed[off + 3] = q.height as u32
+        packed[off + 4] = dst_x.? as u32
+        packed[off + 5] = dst_y.? as u32
+        packed[off + 6] = q.color
+        off = off + METAL_FONT_PACKED_GLYPH_WORDS
+    packed[7] = max_pixels as u32
+    packed
+
+class MetalFontBackendState:
+    atlas_buffer: i64
+    atlas_bytes: i64
+    atlas_generation: i64
+    atlas_owner_identity: text
+    font_artifact_sha256: text
+    # Warm packed-params pool. One device buffer per text batch still pending
+    # in the current frame, reused across frames — a single shared buffer would
+    # be overwritten by batch N+1 before batch N's dispatch had run.
+    packed_pool: [i64]
+    packed_pool_bytes: [i64]
+    pending_pool_index: i64
+    # Warm host staging. The packed words and the 4-byte word count were
+    # allocated and freed once per text batch; both are now kept and grown only
+    # when a bigger batch arrives, matching how the device buffers are pooled.
+    staging_host: i64
+    staging_bytes: i64
+    word_count_host: i64
+    pending_command: i64
+    pending_encoder: i64
+    pending_glyph_count: i64
+    # Per-frame submission counters, read by `metal_font_frame_batch_contract`.
+    frame_text_count: i64
+    frame_command_count: i64
+    frame_commit_count: i64
+    frame_wait_count: i64
+    completion_unknown: bool
+
+    static fn create() -> MetalFontBackendState:
+        MetalFontBackendState(atlas_buffer: 0, atlas_bytes: 0, atlas_generation: -1,
+            atlas_owner_identity: "", font_artifact_sha256: "",
+            packed_pool: [], packed_pool_bytes: [], pending_pool_index: 0,
+            staging_host: 0, staging_bytes: 0, word_count_host: 0,
+            pending_command: 0, pending_encoder: 0, pending_glyph_count: 0,
+            frame_text_count: 0, frame_command_count: 0, frame_commit_count: 0,
+            frame_wait_count: 0, completion_unknown: false)
+
+    me begin_frame():
+        """Reset the per-frame submission counters. Never drops pending work."""
+        self.frame_text_count = 0
+        self.frame_command_count = 0
+        self.frame_commit_count = 0
+        self.frame_wait_count = 0
+
+    me frame_batch_contract_met() -> bool:
+        metal_font_frame_batch_contract(self.frame_text_count, self.frame_command_count,
+            self.frame_commit_count, self.frame_wait_count)
+
+    me _discard_pending(mark_unknown: bool):
+        if self.pending_encoder != 0:
+            metal_sffi_destroy_compute_encoder(self.pending_encoder)
+        if self.pending_command != 0:
+            metal_sffi_destroy_command_buffer(self.pending_command)
+        self.pending_encoder = 0
+        self.pending_command = 0
+        self.pending_glyph_count = 0
+        self.pending_pool_index = 0
+        if mark_unknown:
+            self.completion_unknown = true
+
+    me flush() -> i64:
+        """End, commit and wait the one command buffer holding this frame's text.
+
+        Returns 1 when the batch completed, 0 when there was nothing pending,
+        and -1 when submission failed. A failure always tears the pending
+        objects down and latches `completion_unknown`, so a caller can never
+        keep drawing into a command buffer the device rejected.
+        """
+        if self.pending_command == 0:
+            return 0
+        val encoder = self.pending_encoder
+        val cmd = self.pending_command
+        var ok = if encoder != 0: metal_sffi_end_compute_encoder(encoder) else: false
+        if ok:
+            ok = metal_sffi_commit_command_buffer(cmd)
+            if ok:
+                self.frame_commit_count = self.frame_commit_count + 1
+        if ok:
+            ok = metal_sffi_wait_completed(cmd)
+            if ok:
+                self.frame_wait_count = self.frame_wait_count + 1
+        self._discard_pending(not ok)
+        if ok: 1 else: -1
+
+    me _ensure_pending_encoder(session: MetalSession) -> bool:
+        if self.pending_command != 0 and self.pending_encoder != 0:
+            return true
+        val cmd = metal_sffi_create_command_buffer(session.command_queue)
+        if cmd == 0:
+            return false
+        val encoder = metal_sffi_create_compute_encoder(cmd)
+        if encoder == 0:
+            metal_sffi_destroy_command_buffer(cmd)
+            return false
+        self.pending_command = cmd
+        self.pending_encoder = encoder
+        self.pending_glyph_count = 0
+        self.pending_pool_index = 0
+        self.frame_command_count = self.frame_command_count + 1
+        true
+
+    me _ensure_staging(bytes: i64) -> bool:
+        """Keep one host staging block, growing it only when it is too small."""
+        if bytes <= 0:
+            return false
+        if self.staging_host != 0 and self.staging_bytes >= bytes:
+            return true
+        val fresh = rt_alloc(bytes)
+        if fresh == 0:
+            return false
+        if self.staging_host != 0:
+            rt_free(self.staging_host)
+        self.staging_host = fresh
+        self.staging_bytes = bytes
+        true
+
+    me _ensure_word_count_host() -> bool:
+        if self.word_count_host != 0:
+            return true
+        val fresh = rt_alloc(4)
+        if fresh == 0:
+            return false
+        self.word_count_host = fresh
+        true
+
+    me _packed_slot(session: MetalSession) -> i64:
+        """Take the next warm pool slot, growing the pool only on a new high water."""
+        val index = self.pending_pool_index
+        if index < self.packed_pool.len():
+            self.pending_pool_index = index + 1
+            return self.packed_pool[index]
+        val fresh = metal_sffi_alloc_buffer(session.device, METAL_FONT_PACKED_MAX_BYTES)
+        if fresh == 0:
+            return 0
+        self.packed_pool.push(fresh)
+        self.packed_pool_bytes.push(METAL_FONT_PACKED_MAX_BYTES)
+        self.pending_pool_index = index + 1
+        fresh
+
+    me release():
+        self.flush()
+        if self.atlas_buffer != 0:
+            metal_sffi_free_buffer(self.atlas_buffer)
+        for slot in self.packed_pool:
+            metal_sffi_free_buffer(slot)
+        if self.staging_host != 0:
+            rt_free(self.staging_host)
+        if self.word_count_host != 0:
+            rt_free(self.word_count_host)
+        self.staging_host = 0
+        self.staging_bytes = 0
+        self.word_count_host = 0
+        self.packed_pool = []
+        self.packed_pool_bytes = []
+        self.pending_pool_index = 0
+        self.atlas_buffer = 0
+        self.atlas_bytes = 0
+        self.atlas_generation = -1
+        self.atlas_owner_identity = ""
+        self.font_artifact_sha256 = ""
+        self.completion_unknown = false
+
+    me invalidate():
+        self.atlas_generation = -1
+        self.atlas_owner_identity = ""
+
+    me _upload(session: MetalSession, batch: FontRenderBatch) -> bool:
+        if batch.atlas_width <= 0 or batch.atlas_height <= 0:
+            return false
+        val count = batch.atlas_width.to_i64() * batch.atlas_height.to_i64()
+        if count <= 0 or count > 2147483647 or batch.atlas_pixels.len() != count:
+            return false
+        val bytes = count * 4
+        val device_features = if session.device > 0: "device=" + session.device.to_string() else: ""
+        if (self.font_artifact_sha256 == "" and session.font_shader_lib > 0 and
+            session.pipe_font_atlas_composite > 0):
+            val source_sha256 = sha256_text(font_atlas_composite_metal_source())
+            if source_sha256.len() == 64:
+                self.font_artifact_sha256 = source_sha256
+        val artifact_identity = if (session.font_shader_lib > 0 and session.pipe_font_atlas_composite > 0 and
+            self.font_artifact_sha256.len() == 64):
+            "source-sha256=" + self.font_artifact_sha256 + ";library=" + session.font_shader_lib.to_string() +
+                ";pipeline=" + session.pipe_font_atlas_composite.to_string()
+        else: ""
+        val dependency_identity = if session.command_queue > 0 and session.generation > 0:
+            "queue=" + session.command_queue.to_string() + ";generation=" + session.generation.to_string()
+        else: ""
+        val owner_identity = font_atlas_composite_cache_identity(
+            font_render_batch_atlas_owner_identity(batch), "metal", device_features,
+            artifact_identity, dependency_identity)
+        if owner_identity == "":
+            return false
+        if self.atlas_buffer == 0 or self.atlas_bytes != bytes:
+            val fresh = metal_sffi_alloc_buffer(session.device, bytes)
+            if fresh == 0:
+                return false
+            if self.atlas_buffer != 0:
+                metal_sffi_free_buffer(self.atlas_buffer)
+            self.atlas_buffer = fresh
+            self.atlas_bytes = bytes
+            self.atlas_generation = -1
+            self.atlas_owner_identity = ""
+        if self.atlas_generation == batch.atlas_generation and self.atlas_owner_identity == owner_identity:
+            return true
+        val host = rt_alloc(bytes)
+        if host == 0:
+            return false
+        # One-call block marshalling (the helper exists precisely for this):
+        # the old per-pixel rt_ptr_write_i32 loop costs ~1M FFI round trips
+        # for a 1024x1024 atlas.
+        val written = metal_write_u32s_to_ptr(host, batch.atlas_pixels)
+        if written != count:
+            rt_free(host)
+            return false
+        val ok = metal_buffer_upload_ptr(self.atlas_buffer, host, bytes) != 0
+        rt_free(host)
+        if ok:
+            self.atlas_generation = batch.atlas_generation
+            self.atlas_owner_identity = owner_identity
+        else:
+            self.atlas_generation = -1
+            self.atlas_owner_identity = ""
+        ok
+
+    me draw_font_batch(session: MetalSession, framebuffer: i64, mirror: SoftwareBackend,
+                       mirror_enabled: bool, width: i32, height: i32, origin_x: i32, origin_y: i32,
+                       batch: FontRenderBatch) -> i64:
+        if not font_atlas_composite_program_version_valid(batch.program_version):
+            return 0
+        if not batch.valid or batch.quads.len() == 0 or framebuffer == 0:
+            return 0
+        if self.completion_unknown:
+            return 0
+        val dst_count = width.to_i64() * height.to_i64()
+        if width <= 0 or height <= 0 or dst_count <= 0 or dst_count > 2147483647:
+            return 0
+        if mirror_enabled and (mirror.clip_enabled or mirror.mask_buf.len() != 0):
+            return 0
+        if not self._upload(session, batch):
+            return 0
+        if session.pipe_font_atlas_composite_packed != 0:
+            return self._draw_packed(session, framebuffer, mirror, mirror_enabled,
+                width, height, origin_x, origin_y, batch, dst_count)
+        self._draw_per_quad(session, framebuffer, mirror, mirror_enabled,
+            width, height, origin_x, origin_y, batch, dst_count)
+
+    me _draw_packed(session: MetalSession, framebuffer: i64, mirror: SoftwareBackend,
+                    mirror_enabled: bool, width: i32, height: i32, origin_x: i32, origin_y: i32,
+                    batch: FontRenderBatch, dst_count: i64) -> i64:
+        """One dispatch for the whole batch, appended to this frame's command buffer.
+
+        This is the Vulkan shape: every glyph of the batch travels in one
+        packed word buffer, y of the dispatch grid selects the glyph, and no
+        commit happens here. The frame's single commit and wait belong to
+        `flush()`, which the backend calls before any host-visible read.
+        """
+        val glyph_count = batch.quads.len()
+        if glyph_count > METAL_FONT_FRAME_GLYPH_CAP:
+            return 0
+        # Bound the frame the same way Vulkan does: a batch that would exceed
+        # the per-frame glyph cap submits what is already pending first.
+        if self.pending_glyph_count + glyph_count > METAL_FONT_FRAME_GLYPH_CAP:
+            if self.flush() < 0:
+                return 0
+        val packed = metal_font_packed_params(batch, origin_x, origin_y, width, height)
+        if packed.len() == 0:
+            return 0
+        val max_pixels = packed[7].to_i64()
+        val groups = metal_font_dispatch_groups(max_pixels)
+        if groups <= 0:
+            return 0
+        if not self._ensure_pending_encoder(session):
+            return 0
+        val slot = self._packed_slot(session)
+        if slot == 0:
+            return 0
+        val packed_bytes = packed.len().to_i64() * 4
+        if not self._ensure_staging(packed_bytes):
+            return 0
+        val host = self.staging_host
+        val written = metal_write_u32s_to_ptr(host, packed)
+        var ok = written == packed.len().to_i64()
+        if ok:
+            ok = metal_buffer_upload_ptr(slot, host, packed_bytes) != 0
+        if not ok:
+            return 0
+        if not self._ensure_word_count_host():
+            return 0
+        val word_host = self.word_count_host
+        unsafe(capabilities: [ffi, raw_ptr]):
+            rt_ptr_write_i32(word_host, 0, packed.len() as i32)
+        val encoder = self.pending_encoder
+        ok = metal_sffi_set_buffer(encoder, self.atlas_buffer, 0, 0)
+        ok = ok and metal_sffi_set_buffer(encoder, framebuffer, 0, 1)
+        ok = ok and metal_sffi_set_buffer(encoder, slot, 0, 2)
+        ok = ok and (metal_set_bytes_ptr(encoder, word_host, 4, 3) != 0)
+        ok = ok and metal_sffi_dispatch_compute(
+            encoder, session.pipe_font_atlas_composite_packed, groups, glyph_count, 1, 64, 1, 1)
+        if not ok:
+            self._discard_pending(true)
+            return 0
+        self.pending_glyph_count = self.pending_glyph_count + glyph_count
+        self.frame_text_count = self.frame_text_count + 1
+        # The CPU mirror is only rasterized when it is actually read. In
+        # gpu-only mode the per-quad subrect extraction is pure waste.
+        if mirror_enabled and mirror.width() == width and mirror.height() == height:
+            for q in batch.quads:
+                val pixels = font_atlas_subrect_pixels(batch.atlas_pixels, batch.atlas_width,
+                    batch.atlas_height, q.atlas_x, q.atlas_y, q.width, q.height, q.color)
+                val dst_x = font_destination_origin(origin_x, q.dst_x, q.width)
+                val dst_y = font_destination_origin(origin_y, q.dst_y, q.height)
+                if dst_x != nil and dst_y != nil and pixels.len() == q.width.to_i64() * q.height.to_i64():
+                    mirror.draw_image_blend(dst_x.?, dst_y.?, q.width, q.height, pixels)
+        glyph_count
+
+    me _draw_per_quad(session: MetalSession, framebuffer: i64, mirror: SoftwareBackend,
+                      mirror_enabled: bool, width: i32, height: i32, origin_x: i32, origin_y: i32,
+                      batch: FontRenderBatch, dst_count: i64) -> i64:
+        """Fallback for a runtime whose packed font pipeline did not compile.
+
+        Still one encoder and one commit per batch, but one dispatch per quad.
+        """
+        # PERF: the old loop submitted one full Metal command buffer PER QUAD
+        # (create + encode + commit + waitUntilCompleted each, ~10 ms of fixed
+        # cost). A 30-text frame is ~360 quads, i.e. ~36 s of pure submission
+        # overhead per frame. One encoder now carries every quad of the batch:
+        # setBuffer binds happen once, per-quad params are re-staged with
+        # setBytes, and there is exactly ONE commit + ONE completion wait.
+        if session.pipe_font_atlas_composite == 0:
+            return 0
+        val cmd = metal_sffi_create_command_buffer(session.command_queue)
+        if cmd == 0:
+            return 0
+        self.frame_command_count = self.frame_command_count + 1
+        self.frame_text_count = self.frame_text_count + 1
+        val encoder = metal_sffi_create_compute_encoder(cmd)
+        if encoder == 0:
+            metal_sffi_destroy_command_buffer(cmd)
+            return 0
+        val host = rt_alloc(52)
+        if host == 0:
+            metal_sffi_destroy_compute_encoder(encoder)
+            metal_sffi_destroy_command_buffer(cmd)
+            return 0
+        var ok = metal_sffi_set_buffer(encoder, self.atlas_buffer, 0, 0)
+        ok = ok and metal_sffi_set_buffer(encoder, framebuffer, 0, 1)
+        var done: i64 = 0
+        while ok and done < batch.quads.len():
+            val q = batch.quads[done]
+            val pixels = font_atlas_subrect_pixels(batch.atlas_pixels, batch.atlas_width, batch.atlas_height,
+                q.atlas_x, q.atlas_y, q.width, q.height, q.color)
+            val total = q.width.to_i64() * q.height.to_i64()
+            if total <= 0 or pixels.len() != total:
+                break
+            val dst_x = font_destination_origin(origin_x, q.dst_x, q.width)
+            val dst_y = font_destination_origin(origin_y, q.dst_y, q.height)
+            if dst_x == nil or dst_y == nil:
+                break
+            _font_params_into_host(host, batch.atlas_width, batch.atlas_height, batch.atlas_pixels.len(),
+                q.atlas_x, q.atlas_y, q.width, q.height, width, height, dst_count,
+                dst_x.?, dst_y.?, q.color)
+            ok = ok and (metal_set_bytes_ptr(encoder, host, 52, 2) != 0)
+            ok = ok and metal_sffi_dispatch_compute(
+                encoder, session.pipe_font_atlas_composite, (total + 63) / 64, 1, 1, 64, 1, 1)
+            if ok and mirror_enabled and mirror.width() == width and mirror.height() == height:
+                mirror.draw_image_blend(dst_x.?, dst_y.?, q.width, q.height, pixels)
+            if ok:
+                done = done + 1
+        if ok:
+            ok = metal_sffi_end_compute_encoder(encoder)
+        if ok:
+            ok = metal_sffi_commit_command_buffer(cmd)
+            if ok:
+                self.frame_commit_count = self.frame_commit_count + 1
+        if ok:
+            ok = metal_sffi_wait_completed(cmd)
+            if ok:
+                self.frame_wait_count = self.frame_wait_count + 1
+        rt_free(host)
+        metal_sffi_destroy_compute_encoder(encoder)
+        metal_sffi_destroy_command_buffer(cmd)
+        done
+
+# Pack the 13-field FontAtlasCompositeParams into a host i32 buffer (little
+# endian, identical layout to metal_font_atlas_composite_params' [u8] form).
+fn _font_params_into_host(host: i64, atlas_width: i32, atlas_height: i32, atlas_count: i64,
+                          atlas_x: i32, atlas_y: i32, quad_width: i32, quad_height: i32,
+                          dst_width: i32, dst_height: i32, dst_count: i64,
+                          dst_x: i32, dst_y: i32, color: u32):
+    unsafe(capabilities: [ffi, raw_ptr]):
+        rt_ptr_write_i32(host, 0, atlas_width)
+        rt_ptr_write_i32(host, 4, atlas_height)
+        rt_ptr_write_i32(host, 8, atlas_count as i32)
+        rt_ptr_write_i32(host, 12, atlas_x)
+        rt_ptr_write_i32(host, 16, atlas_y)
+        rt_ptr_write_i32(host, 20, quad_width)
+        rt_ptr_write_i32(host, 24, quad_height)
+        rt_ptr_write_i32(host, 28, dst_width)
+        rt_ptr_write_i32(host, 32, dst_height)
+        rt_ptr_write_i32(host, 36, dst_count as i32)
+        rt_ptr_write_i32(host, 40, dst_x)
+        rt_ptr_write_i32(host, 44, dst_y)
+        rt_ptr_write_i32(host, 48, color as i32)
+
+export MetalFontBackendState
+export METAL_FONT_PARAMS_BYTES
+export METAL_FONT_PACKED_HEADER_WORDS, METAL_FONT_PACKED_GLYPH_WORDS
+export METAL_FONT_FRAME_GLYPH_CAP, METAL_FONT_PACKED_MAX_BYTES
+export metal_font_atlas_composite_params
+export metal_font_packed_params, metal_font_dispatch_groups
+export metal_font_frame_batch_contract

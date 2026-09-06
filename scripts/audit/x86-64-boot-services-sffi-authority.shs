@@ -1,0 +1,38 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+module="$root/src/os/kernel/boot/x86_64_services.spl"
+registry="$root/src/compiler_rust/compiler/src/codegen/runtime_sffi.rs"
+interpreter="$root/src/compiler_rust/compiler/src/interpreter_extern/mod.rs"
+
+[ "$(grep -c '^extern fn ' "$module")" -eq 7 ]
+[ "$(grep -c '^@unsafe(reason:' "$module")" -eq 7 ]
+[ "$(grep -c '^@always_inline$' "$module")" -eq 7 ]
+
+call_count=$(perl -0ne '
+    s/""".*?"""//sg; s/#.*//mg; s/^\s*extern fn .*\n//mg;
+    while (/\b(?:serial_println|rt_pci_device_count|rt_pci_get_field|rt_net_init|rt_net_tx_test|rt_net_rx_ready|rt_net_stats)\s*\(/g) { $n++ }
+    END { print $n + 0 }
+' "$module")
+[ "$call_count" -eq 7 ]
+
+grep -q '^val X86_64_PCI_DEVICE_LIMIT: i64 = 32$' "$module"
+grep -q 'val count = if raw_count >= 0 and raw_count <= X86_64_PCI_DEVICE_LIMIT: raw_count else: 0' "$module"
+grep -q 'if init_rc < 0:' "$module"
+grep -q 'if tx_rc < 0:' "$module"
+grep -q 'if rx_rc < 0:' "$module"
+grep -q 'if stats_rc < 0:' "$module"
+grep -q '^pub fn x86_64_network_ready() -> bool:' "$module"
+grep -q 'return x86_64_network_ok == 1' "$module"
+
+# Hosted registries do not provide these baremetal device operations. Logging
+# is interpreter-only. Keep that lane gap visible rather than calling it proof.
+! grep -q 'RuntimeFuncSpec::new("serial_println"' "$registry"
+grep -q 'insert_simple!("serial_println"' "$interpreter"
+for symbol in rt_pci_device_count rt_pci_get_field rt_net_init rt_net_tx_test rt_net_rx_ready rt_net_stats; do
+    ! grep -q "RuntimeFuncSpec::new(\"$symbol\"" "$registry"
+    ! grep -q "insert_simple!(\"$symbol\"" "$interpreter"
+done
+
+echo "x86_64 boot-services SFFI authority audit: PASS (28 former calls routed through 7 mandatory-inline owners; PCI count bounded to 32; signed-status readiness and semantic bool retained; 0 both/1 interpreter-only/6 no-provider)"

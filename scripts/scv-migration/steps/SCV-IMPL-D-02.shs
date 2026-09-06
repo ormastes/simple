@@ -1,0 +1,35 @@
+#!/bin/sh
+# SCV-IMPL-D-02 — three-view diff (--view raw|syntax|entity|semantic|all,
+# --git-patch always-applicable export).
+# Verdict is ALWAYS the last stdout line: PASS exit 0 / FAIL exit 1 / ERROR exit 2.
+# Committed UNSIGNED.
+set -u
+LIB="src/lib/scv/three_view_diff.spl"
+SPEC="test/integration/app/scv_three_view_diff_spec.spl"
+MAIN="src/app/scv/main.spl"
+[ -f "$LIB" ] && [ -f "$SPEC" ] && [ -f "$MAIN" ] || { echo "ERROR — nothing was checked (missing files)"; exit 2; }
+checked=0
+bad=""
+grep -q 'scv_diff_views' "$MAIN" || bad="$bad dispatch(diff--view)"
+checked=$((checked + 1))
+grep -q -- '--git-patch' "$MAIN" || bad="$bad dispatch(git-patch)"
+checked=$((checked + 1))
+OUT="${TMPDIR:-/tmp}/SCV-IMPL-D-02.$$.log"
+SIMPLE_TIMEOUT_SECONDS=900 bin/simple test "$SPEC" > "$OUT" 2>&1
+rc=$?
+checked=$((checked + 1))
+RESULTS=$(grep 'Results:' "$OUT" | tail -1)
+rm -f "$OUT"
+[ "$rc" -eq 0 ] || bad="$bad spec-rc($rc)"
+case "$RESULTS" in
+  *", 0 failed"*) : ;;
+  "") bad="$bad spec(no-results-line)" ;;
+  *) bad="$bad spec($RESULTS)" ;;
+esac
+[ "$checked" -gt 0 ] || { echo "ERROR — nothing was checked"; exit 2; }
+if [ -z "$bad" ]; then
+  echo "PASS — $checked check(s): three-view diff wired, $RESULTS"
+  exit 0
+fi
+echo "FAIL — $checked check(s), unmet:$bad"
+exit 1

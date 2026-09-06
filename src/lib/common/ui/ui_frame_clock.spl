@@ -1,0 +1,44 @@
+# Portable frame-clock port for the WM/GUI/web/2D lane.
+#
+# WML001/WML002 (src/compiler/90.tools/lint/_LintMain/wm_lane_boundary_lints.spl)
+# forbid depending on io.time_ops or declaring raw rt_time_now_*/
+# rt_sleep_nanos externs directly inside the portable lane -- real time is a
+# host precondition the WM must not need in order to boot on SimpleOS.
+# FrameClock is the seam: lane code takes a FrameClock by injection instead
+# of reaching for the host clock itself. The real implementation
+# (src/lib/nogc_sync_mut/ui/host_frame_clock.spl) lives outside the lane's
+# scope dirs, where the io import is legal.
+#
+# No io import here -- that would defeat the entire point of the port.
+# See doc/03_plan/ui/wm_lane_boundary_ratchet_lanes.md (tranche W1).
+
+trait FrameClock:
+    # Current time in microseconds. Monotonic; epoch is unspecified.
+    fn now_micros() -> i64
+    # Wait until `deadline_us` (absolute, same basis as now_micros()) is
+    # reached. A requested WAKE VALUE rather than a duration, so callers
+    # never need real "now" just to express a relative sleep.
+    fn sleep_until(deadline_us: i64)
+
+# Pure FrameClock test double. Starts at time 0 and only moves when driven
+# -- by `sleep_until` (jumps to the requested deadline, never backwards) or
+# by `advance` -- so tests get deterministic, repeatable elapsed-time values.
+class FixedStepClock:
+    var current_us: i64
+    var step_us: i64
+
+    static fn new(step_us: i64) -> FixedStepClock:
+        FixedStepClock(current_us: 0, step_us: step_us)
+
+    me advance(step_us: i64):
+        self.current_us = self.current_us + step_us
+
+impl FrameClock for FixedStepClock:
+    me now_micros() -> i64:
+        self.current_us
+
+    me sleep_until(deadline_us: i64):
+        if deadline_us > self.current_us:
+            self.current_us = deadline_us
+        else:
+            self.current_us = self.current_us + self.step_us

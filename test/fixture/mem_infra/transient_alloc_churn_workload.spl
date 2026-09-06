@@ -1,0 +1,68 @@
+# Transient-allocation churn workload.
+#
+# Allocates CHURN_N short-lived heap values of one family (CHURN_KIND:
+# 0 = text, 1 = array, 2 = dict) inside a loop, keeps NO reference to any of
+# them past the iteration that made them, then reports its own VmRSS.
+#
+# The point is the SLOPE across two CHURN_N values: with reclamation the RSS
+# is flat in CHURN_N; without it, RSS grows linearly at a fixed
+# bytes-per-iteration rate. See
+# doc/08_tracking/bug/bootstrap_stage4_selfhost_parse_memory_blowup_2026-07-20.md
+# and the specs that drive this fixture.
+
+extern fn rt_env_get_i64(key: text, default_value: i64) -> i64
+extern fn rt_file_read_text(path: text) -> text
+
+fn rss_line() -> text:
+    val st = rt_file_read_text("/proc/self/status")
+    val lines = st.split("\n")
+    for line in lines:
+        if line.starts_with("VmRSS:"):
+            return line
+    return "VmRSS: 0 kB"
+
+fn churn_text(n: i64) -> i64:
+    var acc: i64 = 0
+    var i: i64 = 0
+    while i < n:
+        val s = "prefix_" + "{i}" + "_suffix"
+        acc = acc + s.len()
+        i = i + 1
+    return acc
+
+fn churn_array(n: i64) -> i64:
+    var acc: i64 = 0
+    var i: i64 = 0
+    while i < n:
+        val a = [i, i + 1, i + 2, i + 3]
+        acc = acc + a.len()
+        i = i + 1
+    return acc
+
+fn churn_dict(n: i64) -> i64:
+    var acc: i64 = 0
+    var i: i64 = 0
+    while i < n:
+        var d: {text: i64} = {}
+        d["k"] = i
+        acc = acc + d.len()
+        i = i + 1
+    return acc
+
+fn main() -> i64:
+    val n = rt_env_get_i64("CHURN_N", 10000)
+    val kind = rt_env_get_i64("CHURN_KIND", 0)
+    var acc: i64 = 0
+    if kind == 1:
+        acc = churn_array(n)
+    else:
+        if kind == 2:
+            acc = churn_dict(n)
+        else:
+            acc = churn_text(n)
+    print "churn_kind={kind}"
+    print "churn_n={n}"
+    print "churn_acc={acc}"
+    print "churn_{rss_line()}"
+    print "CHURN_DONE"
+    return 0

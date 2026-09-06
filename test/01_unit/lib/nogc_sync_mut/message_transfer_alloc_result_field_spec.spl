@@ -1,0 +1,51 @@
+# Proves the shared-heap transfer path reads the SharedHeap allocation
+# result through its real field. `SharedHeap.allocate` returns an
+# `AllocResult`, whose payload field is `ref_val`. The transfer code
+# previously read `result.wrapper_val` -- the payload name belonging to
+# the unrelated `TransferResult` class -- so every shared-heap transfer
+# aborted with `class AllocResult has no field named wrapper_val`.
+
+use std.nogc_sync_mut.message_transfer.{MessageTransfer, ValueKind}
+
+describe "MessageTransfer shared-heap path reads AllocResult.ref_val":
+    """Both shared-heap sites (wrap_text over the 64-byte threshold and
+    wrap_for_send when sharing) must produce a SharedRef wrapper carrying
+    the allocation's real length."""
+
+    it "wrap_for_send returns a shared ref with the allocated length":
+        var mt = MessageTransfer.always_share()
+        val r = mt.wrap_for_send(process_id: 1, size: 256, type_tag: ValueKind.Binary)
+        expect(r.is_success()).to_equal(true)
+        val w = r.unwrap()
+        expect(w.is_shared()).to_equal(true)
+        expect(w.estimated_size()).to_equal(256)
+
+    it "wrap_text over the small-binary threshold shares and keeps the length":
+        var mt = MessageTransfer.new()
+        var s = ""
+        for i in 0..10:
+            s = s + "0123456789"
+        expect(s.len()).to_equal(100)
+        val r = mt.wrap_text(s)
+        expect(r.is_success()).to_equal(true)
+        val w = r.unwrap()
+        expect(w.is_shared()).to_equal(true)
+        expect(w.estimated_size()).to_equal(100)
+
+    it "carries a distinct heap ref id and length per shared transfer":
+        var mt = MessageTransfer.always_share()
+        val a = mt.wrap_for_send(process_id: 7, size: 512, type_tag: ValueKind.Binary)
+        val b = mt.wrap_for_send(process_id: 7, size: 128, type_tag: ValueKind.Binary)
+        expect(a.is_success()).to_equal(true)
+        expect(b.is_success()).to_equal(true)
+        val wa = a.unwrap()
+        val wb = b.unwrap()
+        expect(wa.ref_length.value).to_equal(512)
+        expect(wb.ref_length.value).to_equal(128)
+        expect(wa.ref_offset.value == 0).to_equal(true)
+
+    it "still inlines small values without touching the heap result":
+        var mt = MessageTransfer.new()
+        val r = mt.wrap_text("short")
+        expect(r.is_success()).to_equal(true)
+        expect(r.unwrap().is_shared()).to_equal(false)

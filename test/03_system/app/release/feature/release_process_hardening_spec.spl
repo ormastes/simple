@@ -1,0 +1,613 @@
+"""
+# Protected beta and stable software release
+
+## Overview
+
+This manual shows a release operator how Simple and Spipe validate a beta or
+stable release before any VCS, build, signing, or hosting provider mutates
+external state. The executable scenarios exercise pure plans only. A local PASS
+does not claim that GitHub rulesets, signing keys, protected pushes, immutable
+publication, or registries were changed.
+
+## Requirements
+
+**Requirements:** doc/02_requirements/feature/release_process_hardening.md
+
+**NFRs:** doc/02_requirements/nfr/release_process_hardening.md
+
+**Research:** doc/01_research/infra/release/simple_spipe_release_branch_tag_test_repair_bootstrap_scheduling_hardening_2026-08-26.md
+
+**Plan:** doc/03_plan/sys_test/release_process_hardening.md
+
+**Architecture:** doc/04_architecture/release_process_hardening.md
+
+**Design:** doc/05_design/release_process_hardening.md
+
+## Operator flow
+
+Begin in an isolated release session with a unique work branch and worktree.
+Load the canonical version and protected-ref policy. For beta maintenance,
+target the matching release line and validate one explicit reviewed bug fix at
+a time. After renewed focused evidence passes for the resulting revision,
+integrate through compare-and-swap and freeze a new immutable candidate.
+
+Build and qualify that exact candidate once. Promotion consumes the admitted
+artifact manifest without rebuilding or fallback and prepares one signed,
+annotated, exact tag ref. Rollback redeploys an older admitted version;
+withdrawal never deletes, moves, or reuses release identity.
+
+## Commands
+
+Use the shipped validation commands before provider mutation:
+
+```text
+simple release version-check
+simple release beta-prepare
+simple release backport-check
+simple release self-review-plan
+simple release candidate-check
+simple release promote-check
+simple release withdraw-check
+```
+
+The Spipe plugin exposes `spipe release-guide` and
+`spipe release-capabilities` as read-only discovery surfaces.
+
+## Examples
+
+A valid beta identity is `1.4.0-beta.2` on `release/1.4`; its first immutable
+candidate is `candidate/v1.4.0-beta.2/a001` and its eventual signed tag is
+`v1.4.0-beta.2`. Uppercase or unnumbered beta suffixes are invalid for new
+releases. A backport with `kind=feat` is rejected even when its commit and
+review fields are present. A promotion plan with matching artifacts is still
+rejected when it requests a rebuild, fallback, unsigned tag, or broad tag push.
+
+## Beta backport evidence
+
+A valid beta backport records the exact source SHA, stable change and work IDs,
+change kind `fix`, review receipt digest, target `release/X.Y`, expected target
+SHA, explicit adaptation reason, result SHA, and renewed evidence digest. Reject
+feature commits, commit ranges, moving refs, stale review, wrong release line,
+or evidence from before the backport was applied.
+
+Protected convergence additionally binds every selected main source SHA to one
+result reachable in the pre-merge release inventory. Source and result must
+have the same stable patch ID and share the exact release PR review/check
+receipt; candidate admission independently replays every binding.
+
+## Candidate evidence
+
+The candidate binds version, attempt, candidate ref, exact commit, source tree,
+policy, version manifest, toolchain, support, and evidence digests. An identical
+repeat is idempotent. A different identity at the same candidate is mutation
+and fails.
+
+## Promotion evidence
+
+Promotion requires an admitted candidate, matching commit and artifact digest,
+canonical tag, signed and annotated intent, and exact single-ref push intent.
+`rebuild=true`, fallback artifacts, unsigned/lightweight tags, all-tag pushes,
+or a mismatched commit/digest fail before a provider can run.
+
+## Troubleshooting
+
+- `release version channel does not match` means the suffix and declared
+  channel disagree; choose a new canonical version and render projections.
+- `release mutation is forbidden in the main worktree` means the operator must
+  start or resume an isolated release session.
+- `beta backports accept reviewed bug fixes only` means the supplied change is
+  not an admissible maintenance fix.
+- `candidate identity is create-once` means inputs changed; allocate a new
+  candidate attempt instead of overwriting the old one.
+- `promotion must not rebuild` means return to candidate build/qualification;
+  promotion is never a build retry.
+- `withdrawal must preserve published release identity` means redeploy or
+  publish a new correction rather than rewriting history.
+- `no exact self-attested review evidence` means review the server-current
+  target/head/base/diff and redispatch; never label it independently
+  authenticated, reuse expired evidence, or claim provider Approve.
+
+## Verification boundary
+
+Run this focused scenario once after changes, generate this mirror through
+SPipe, scan it with `sspec-maintain`, and then run the release-bound whole suite
+once. Required external rows stay blocked until their own receipts exist.
+"""
+# @req: REQ-001 REQ-002 REQ-003 REQ-004 REQ-005 REQ-006 REQ-007 REQ-008
+# @req: REQ-009 REQ-010 REQ-011 REQ-012 REQ-013 REQ-014 REQ-015 REQ-016
+# @req: REQ-017 REQ-018 REQ-019 REQ-020 REQ-021
+# research: doc/01_research/infra/release/simple_spipe_release_branch_tag_test_repair_bootstrap_scheduling_hardening_2026-08-26.md
+# architecture: doc/04_architecture/release_process_hardening.md
+# design: doc/05_design/release_process_hardening.md
+# plan: doc/03_plan/sys_test/release_process_hardening.md
+
+use std.spec.{describe, it, expect, step}
+use app.release.policy.{
+    ReleaseSession, BackportRequest, CandidateManifest, QualificationReceipt, ReleaseAdmission, PromotionPlan,
+    parse_release_version, check_version_channel, check_version_projection,
+    validate_release_session, check_beta_preparation, check_backport_admission,
+    check_candidate_manifest, candidate_identity, check_candidate_create_once, check_qualification_receipt,
+    check_promotion_plan, check_withdrawal_plan
+}
+use app.release.convergence.{
+    ReviewedBugFix, ConvergenceRequest, ConvergenceAdmissionRequest,
+    plan_release_main_convergence, check_convergence_admission
+}
+use app.release.self_review_policy.{
+    SelfReviewRequest, parse_self_review_policy_db,
+    parse_self_review_changed_manifest, evaluate_self_review
+}
+
+fn sha_a() -> text: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+fn sha_b() -> text: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+fn sha_c() -> text: "cccccccccccccccccccccccccccccccccccccccc"
+fn digest_a() -> text: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+fn digest_b() -> text: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+fn digest_c() -> text: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+fn digest_d() -> text: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+fn digest_e() -> text: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+fn digest_f() -> text: "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+
+fn setup_self_review_policy() -> text:
+    "{\"schema\":\"spipe-self-review-policy-db/1\",\"default_allow\":true,\"max_ttl_seconds\":86400,\"authority\":\"operator_owned_external\"}\n"
+
+fn setup_self_review_manifest() -> text:
+    """changed_paths:
+  schema: spipe-changed-path-manifest/1
+  repository_provider: github
+  repository_id: 1175797696
+  repository_node_id: R_kgDORhU_wA
+  repository: ormastes/simple
+  pull_request_number: 28
+  head_sha: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  base_repository_provider: github
+  base_repository_id: 1175797696
+  base_repository_node_id: R_kgDORhU_wA
+  base_repository: ormastes/simple
+  base_ref: refs/heads/main
+  base_sha: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  merge_base_sha: cccccccccccccccccccccccccccccccccccccccc
+  diff_sha256: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  changes:
+    - status: modified
+      path: doc/07_guide/infra/software_release.md
+      previous_path:
+      content_kind: text
+      previous_content_kind: text
+      semantic_class: ordinary
+      previous_semantic_class: ordinary
+      file_type: regular
+      previous_file_type: regular
+      encoding: utf8
+      previous_encoding: utf8
+"""
+
+fn setup_self_review_request(policy_sha256: text) -> SelfReviewRequest:
+    SelfReviewRequest(
+        repository_provider: "github", repository_id: 1175797696,
+        repository_node_id: "R_kgDORhU_wA", repository: "ormastes/simple",
+        pull_request_number: 28, head_sha: sha_a(), session_id: "release-hardening",
+        author_provider: "github", author_identity: "2378857",
+        reviewer_provider: "github", reviewer_identity: "2378857",
+        reviewer_model: "codex/gpt-5.6-sol", reviewer_tier: "high_capability",
+        reviewer_effort: "xhigh", review_evidence_mode: "self_attested",
+        now_unix: 1787846400,
+        decision_expires_at_unix: 1787847300,
+        higher_model_verdict: "PASS", higher_model_p0_count: 0,
+        higher_model_p1_count: 0,
+        review_evidence_sha256: digest_a(),
+        expected_policy_db_sha256: policy_sha256,
+        policy_db_authenticated: true, changed_manifest_authenticated: true,
+        review_evidence_broker_authenticated: false,
+        self_attestation_authorized: true,
+        target_repository_id: 1175797696, target_ref: "refs/heads/main",
+        target_ruleset_id: "github:ruleset:123", target_ruleset_version: "spipe-vcs-v3-main",
+        target_ruleset_sha256: digest_c(),
+        base_sha: sha_b(),
+        merge_base_sha: sha_c(), diff_sha256: digest_b(),
+        strict_up_to_date: true, protected_target: true,
+        provider_resolution_authenticated: true
+    )
+
+fn setup_release_fixture() -> ReleaseSession:
+    ReleaseSession(
+        session_id: "s-release-001",
+        workspace_path: "/workspace/release-beta",
+        main_workspace_path: "/workspace/main",
+        work_branch: "work/release/v1.4.0-beta.2-s-release-001",
+        target_ref: "release/1.4",
+        base_sha: sha_a(),
+        expected_target_sha: sha_b(),
+        policy_sha256: digest_a()
+    )
+
+fn setup_backport_fixture() -> BackportRequest:
+    BackportRequest(
+        direction: "main_to_beta",
+        source_ref: "main",
+        source_commit_sha: sha_a(),
+        change_id: "change-k3m8z",
+        work_id: "gh-512",
+        change_kind: "fix",
+        review_receipt_sha256: digest_a(),
+        reviewed_source_commit_sha: sha_a(),
+        reviewed_change_id: "change-k3m8z",
+        target_line: "release/1.4",
+        expected_target_sha: sha_b(),
+        adaptation_reason: "none",
+        evidence_sha256: digest_b(),
+        evidence_result_commit_sha: sha_c(),
+        evidence_target_sha: sha_b(),
+        result_commit_sha: sha_c(),
+        forward_port_target_ref: "",
+        forward_port_receipt_sha256: ""
+    )
+
+fn setup_candidate_fixture() -> CandidateManifest:
+    CandidateManifest(
+        version: "1.4.0-beta.2",
+        attempt: 1,
+        candidate_ref: "candidate/v1.4.0-beta.2/a001",
+        commit_sha: sha_c(),
+        source_tree_sha256: digest_a(),
+        policy_sha256: digest_b(),
+        version_manifest_sha256: digest_c(),
+        toolchain_manifest_sha256: digest_d(),
+        support_manifest_sha256: digest_e(),
+        build_graph_sha256: digest_a(),
+        creator_identity: "github:ormastes/simple/actions/runs/42/attempts/1",
+        evidence_manifest_sha256: digest_f()
+    )
+
+describe "Hardened Simple and Spipe software release":
+    it "loads the canonical release policy and rejects stale version projections":
+        step("Load the canonical release policy")
+        val beta = parse_release_version("1.4.0-beta.2")
+        expect(beta.canonical).to_equal("1.4.0-beta.2")
+        expect(beta.line).to_equal("1.4")
+        expect(check_version_channel(beta, "beta").valid).to_be(true)
+        expect(check_version_projection(beta.canonical, "VERSION", "1.4.0-beta.1").reason).to_equal("version projection is stale: VERSION")
+        expect(parse_release_version("1.4.0-BETA").channel).to_equal("invalid")
+        expect(parse_release_version("v1.4.0-beta.2").channel).to_equal("invalid")
+
+    it "prepares an isolated beta release and rejects the main worktree":
+        step("Prepare an isolated beta release")
+        val session = setup_release_fixture()
+        expect(validate_release_session(session).valid).to_be(true)
+        expect(check_beta_preparation(parse_release_version("1.4.0-beta.2"), session).valid).to_be(true)
+        val main_session = ReleaseSession(
+            session_id: session.session_id,
+            workspace_path: session.main_workspace_path,
+            main_workspace_path: session.main_workspace_path,
+            work_branch: session.work_branch,
+            target_ref: session.target_ref,
+            base_sha: session.base_sha,
+            expected_target_sha: session.expected_target_sha,
+            policy_sha256: session.policy_sha256
+        )
+        expect(validate_release_session(main_session).reason).to_equal("release mutation is forbidden in the main worktree")
+        val unsafe_branch = ReleaseSession(
+            session_id: session.session_id,
+            workspace_path: session.workspace_path,
+            main_workspace_path: session.main_workspace_path,
+            work_branch: "work/release/../../main",
+            target_ref: session.target_ref,
+            base_sha: session.base_sha,
+            expected_target_sha: session.expected_target_sha,
+            policy_sha256: session.policy_sha256
+        )
+        expect(validate_release_session(unsafe_branch).reason).to_equal("release session must own a work branch")
+
+    it "admits reviewed bug-fix backports and rejects unrelated features":
+        step("Admit reviewed bug-fix backports")
+        val request = setup_backport_fixture()
+        expect(check_backport_admission(request).valid).to_be(true)
+        val feature = BackportRequest(
+            direction: request.direction,
+            source_ref: request.source_ref,
+            source_commit_sha: request.source_commit_sha,
+            change_id: request.change_id,
+            work_id: request.work_id,
+            change_kind: "feat",
+            review_receipt_sha256: request.review_receipt_sha256,
+            reviewed_source_commit_sha: request.reviewed_source_commit_sha,
+            reviewed_change_id: request.reviewed_change_id,
+            target_line: request.target_line,
+            expected_target_sha: request.expected_target_sha,
+            adaptation_reason: request.adaptation_reason,
+            evidence_sha256: request.evidence_sha256,
+            evidence_result_commit_sha: request.evidence_result_commit_sha,
+            evidence_target_sha: request.evidence_target_sha,
+            result_commit_sha: request.result_commit_sha,
+            forward_port_target_ref: request.forward_port_target_ref,
+            forward_port_receipt_sha256: request.forward_port_receipt_sha256
+        )
+        expect(check_backport_admission(feature).reason).to_equal("beta backports accept reviewed bug fixes only")
+        val stale_review = BackportRequest(
+            direction: request.direction,
+            source_ref: request.source_ref,
+            source_commit_sha: request.source_commit_sha,
+            change_id: request.change_id,
+            work_id: request.work_id,
+            change_kind: request.change_kind,
+            review_receipt_sha256: request.review_receipt_sha256,
+            reviewed_source_commit_sha: sha_b(),
+            reviewed_change_id: request.reviewed_change_id,
+            target_line: request.target_line,
+            expected_target_sha: request.expected_target_sha,
+            adaptation_reason: request.adaptation_reason,
+            evidence_sha256: request.evidence_sha256,
+            evidence_result_commit_sha: request.evidence_result_commit_sha,
+            evidence_target_sha: request.evidence_target_sha,
+            result_commit_sha: request.result_commit_sha,
+            forward_port_target_ref: request.forward_port_target_ref,
+            forward_port_receipt_sha256: request.forward_port_receipt_sha256
+        )
+        expect(check_backport_admission(stale_review).reason).to_equal("backport review receipt binding does not match the requested change")
+        val emergency = BackportRequest(
+            direction: "beta_to_main",
+            source_ref: request.target_line,
+            source_commit_sha: request.source_commit_sha,
+            change_id: request.change_id,
+            work_id: request.work_id,
+            change_kind: request.change_kind,
+            review_receipt_sha256: request.review_receipt_sha256,
+            reviewed_source_commit_sha: request.reviewed_source_commit_sha,
+            reviewed_change_id: request.reviewed_change_id,
+            target_line: request.target_line,
+            expected_target_sha: request.expected_target_sha,
+            adaptation_reason: "emergency correction originated on the beta line",
+            evidence_sha256: request.evidence_sha256,
+            evidence_result_commit_sha: request.evidence_result_commit_sha,
+            evidence_target_sha: request.evidence_target_sha,
+            result_commit_sha: request.result_commit_sha,
+            forward_port_target_ref: "main",
+            forward_port_receipt_sha256: digest_c()
+        )
+        expect(check_backport_admission(emergency).valid).to_be(true)
+        val missing_forward_port = BackportRequest(
+            direction: emergency.direction,
+            source_ref: emergency.source_ref,
+            source_commit_sha: emergency.source_commit_sha,
+            change_id: emergency.change_id,
+            work_id: emergency.work_id,
+            change_kind: emergency.change_kind,
+            review_receipt_sha256: emergency.review_receipt_sha256,
+            reviewed_source_commit_sha: emergency.reviewed_source_commit_sha,
+            reviewed_change_id: emergency.reviewed_change_id,
+            target_line: emergency.target_line,
+            expected_target_sha: emergency.expected_target_sha,
+            adaptation_reason: emergency.adaptation_reason,
+            evidence_sha256: emergency.evidence_sha256,
+            evidence_result_commit_sha: emergency.evidence_result_commit_sha,
+            evidence_target_sha: emergency.evidence_target_sha,
+            result_commit_sha: emergency.result_commit_sha,
+            forward_port_target_ref: "main",
+            forward_port_receipt_sha256: ""
+        )
+        expect(check_backport_admission(missing_forward_port).reason).to_equal("release-first emergency fix requires an exact forward-port receipt to main")
+
+    it "plans reviewed bidirectional convergence without mutating or repointing main":
+        step("Reconcile reviewed fixes with main")
+        val main_fix = ReviewedBugFix(
+            commit_sha: sha_a(), review_receipt_sha256: digest_a(),
+            source_ref: "main", change_kind: "fix"
+        )
+        val backport = ConvergenceRequest(
+            last_scanned_main_sha: sha_b(), current_main_sha: sha_c(),
+            release_ref: "release/1.4", release_head_sha: sha_b(),
+            last_scan_epoch_seconds: 100, current_epoch_seconds: 200,
+            scan_interval_seconds: 60, eligible_reviewed_bug_fixes: [main_fix],
+            selected_bug_fix_shas: [sha_a()], caller_selection_confirmed: true,
+            direction: "main_to_release", forward_port_required: false,
+            forward_port_target_ref: "", main_tracks_release: false
+        )
+        val backport_plan = plan_release_main_convergence(backport)
+        expect(backport_plan.valid).to_be(true)
+        expect(backport_plan.ready).to_be(true)
+        expect(backport_plan.mutation).to_equal("none")
+        expect(backport_plan.main_remains_independent).to_be(true)
+
+        val release_fix = ReviewedBugFix(
+            commit_sha: sha_a(), review_receipt_sha256: digest_b(),
+            source_ref: "release/1.4", change_kind: "fix"
+        )
+        val forward_port = ConvergenceRequest(
+            last_scanned_main_sha: sha_b(), current_main_sha: sha_c(),
+            release_ref: "release/1.4", release_head_sha: sha_b(),
+            last_scan_epoch_seconds: 100, current_epoch_seconds: 200,
+            scan_interval_seconds: 60, eligible_reviewed_bug_fixes: [release_fix],
+            selected_bug_fix_shas: [sha_a()], caller_selection_confirmed: true,
+            direction: "release_to_main", forward_port_required: true,
+            forward_port_target_ref: "main", main_tracks_release: false
+        )
+        val forward_plan = plan_release_main_convergence(forward_port)
+        expect(forward_plan.valid).to_be(true)
+        expect(forward_plan.forward_port_required).to_be(true)
+        expect(forward_plan.forward_port_target_ref).to_equal("main")
+
+        step("Admit only an exhaustive receipt-bound release-first classification")
+        val convergence_admission = ConvergenceAdmissionRequest(
+            candidate_commit_sha: sha_c(), receipt_candidate_commit_sha: sha_c(),
+            release_ref: "release/1.4", main_head_sha: sha_a(), release_head_sha: sha_c(),
+            receipt_sha256: digest_a(), review_summary_sha256: digest_b(),
+            evidence_receipt_sha256: digest_c(), integration_receipt_sha256: digest_d(),
+            inventory_origin: "protected_integration", graph_independent: true,
+            main_to_release_inventory_shas: [], main_to_release_shared_fix_shas: [],
+            main_to_release_selected_shas: [], main_to_release_backported_shas: [],
+            main_to_release_backport_result_shas: [], main_to_release_backport_target_refs: [],
+            backport_receipt_sha256s: [], release_to_main_inventory_shas: [sha_b()],
+            release_to_main_classified_shas: [sha_b()],
+            release_to_main_classification_kinds: ["fix"],
+            release_to_main_classification_receipt_sha256s: [digest_e()],
+            release_to_main_forward_ported_shas: [sha_b()],
+            release_to_main_forward_port_result_shas: [sha_a()],
+            release_to_main_forward_port_target_refs: ["main"],
+            forward_port_receipt_sha256s: [digest_f()]
+        )
+        expect(check_convergence_admission(convergence_admission).valid).to_be(true)
+        var concealed = convergence_admission
+        concealed.release_to_main_classified_shas = []
+        concealed.release_to_main_classification_kinds = []
+        concealed.release_to_main_classification_receipt_sha256s = []
+        concealed.release_to_main_forward_ported_shas = []
+        concealed.release_to_main_forward_port_result_shas = []
+        concealed.release_to_main_forward_port_target_refs = []
+        concealed.forward_port_receipt_sha256s = []
+        expect(check_convergence_admission(concealed).reason).to_equal("every release-first inventory commit requires an exhaustive receipt-bound classification")
+
+        val unsafe_tracking = ConvergenceRequest(
+            last_scanned_main_sha: backport.last_scanned_main_sha,
+            current_main_sha: backport.current_main_sha,
+            release_ref: backport.release_ref,
+            release_head_sha: backport.release_head_sha,
+            last_scan_epoch_seconds: backport.last_scan_epoch_seconds,
+            current_epoch_seconds: backport.current_epoch_seconds,
+            scan_interval_seconds: backport.scan_interval_seconds,
+            eligible_reviewed_bug_fixes: [], selected_bug_fix_shas: [],
+            caller_selection_confirmed: false, direction: backport.direction,
+            forward_port_required: false, forward_port_target_ref: "",
+            main_tracks_release: true
+        )
+        expect(plan_release_main_convergence(unsafe_tracking).reason).to_equal("main must remain an independent trunk and never track a release branch")
+
+    it "admits exact-state self-attested review without claiming independent approval":
+        step("Self-attest the exact protected PR head/base/diff with the scoped gate")
+        val policy = parse_self_review_policy_db(setup_self_review_policy())
+        val manifest = parse_self_review_changed_manifest(setup_self_review_manifest())
+        val decision = evaluate_self_review(policy, manifest, setup_self_review_request(policy.sha256))
+        expect(decision.allowed).to_be(true)
+        expect(decision.head_sha).to_equal(sha_a())
+        expect(decision.review_evidence_mode).to_equal("self_attested")
+        expect(decision.provider_action).to_contain("separate_eligible_broker")
+        expect(decision.provider_approval_claimed).to_be(false)
+
+        step("Reject stale and secret-bearing evidence before the provider check")
+        var stale = setup_self_review_request(policy.sha256)
+        stale.head_sha = sha_b()
+        expect(evaluate_self_review(policy, manifest, stale).allowed).to_be(false)
+        val secret_manifest = parse_self_review_changed_manifest(
+            setup_self_review_manifest().replace("semantic_class: ordinary", "semantic_class: credential_secret")
+        )
+        expect(evaluate_self_review(policy, secret_manifest, setup_self_review_request(policy.sha256)).allowed).to_be(false)
+
+    it "freezes one complete candidate and rejects mutation":
+        step("Freeze and qualify the release candidate")
+        val candidate = setup_candidate_fixture()
+        expect(check_candidate_manifest(candidate).valid).to_be(true)
+        val identity = candidate_identity(candidate)
+        expect(identity.len()).to_equal(64)
+        expect(check_candidate_create_once(identity, candidate).valid).to_be(true)
+        expect(check_candidate_create_once("different-existing-identity", candidate).reason).to_equal("candidate identity is create-once and cannot be mutated")
+        val separator_candidate = CandidateManifest(
+            version: candidate.version,
+            attempt: candidate.attempt,
+            candidate_ref: candidate.candidate_ref,
+            commit_sha: sha_b(),
+            source_tree_sha256: digest_a(),
+            policy_sha256: candidate.policy_sha256,
+            version_manifest_sha256: candidate.version_manifest_sha256,
+            toolchain_manifest_sha256: candidate.toolchain_manifest_sha256,
+            support_manifest_sha256: candidate.support_manifest_sha256,
+            build_graph_sha256: candidate.build_graph_sha256,
+            creator_identity: candidate.creator_identity,
+            evidence_manifest_sha256: candidate.evidence_manifest_sha256
+        )
+        expect(candidate_identity(separator_candidate) == identity).to_be(false)
+        val qualification = QualificationReceipt(
+            candidate_identity: identity,
+            candidate_commit_sha: candidate.commit_sha,
+            build_graph_sha256: candidate.build_graph_sha256,
+            artifact_manifest_sha256: digest_b(),
+            evidence_manifest_sha256: candidate.evidence_manifest_sha256,
+            required_support_sha256: digest_c(),
+            required_support_passed: true
+        )
+        expect(check_qualification_receipt(candidate, qualification).valid).to_be(true)
+
+    it "promotes exact admitted artifacts without rebuilding or fallback":
+        step("Promote exact admitted artifacts")
+        val candidate = setup_candidate_fixture()
+        val admission = ReleaseAdmission(
+            candidate_version: candidate.version,
+            candidate_attempt: candidate.attempt,
+            candidate_ref: candidate.candidate_ref,
+            candidate_identity: candidate_identity(candidate),
+            candidate_commit_sha: candidate.commit_sha,
+            source_tree_sha256: candidate.source_tree_sha256,
+            policy_sha256: candidate.policy_sha256,
+            version_manifest_sha256: candidate.version_manifest_sha256,
+            toolchain_manifest_sha256: candidate.toolchain_manifest_sha256,
+            support_manifest_sha256: candidate.support_manifest_sha256,
+            build_graph_sha256: candidate.build_graph_sha256,
+            creator_identity: candidate.creator_identity,
+            artifact_manifest_sha256: digest_a(),
+            evidence_manifest_sha256: candidate.evidence_manifest_sha256,
+            qualification_receipt_sha256: digest_b(),
+            admission_receipt_schema: "spipe-review-admission/1",
+            admission_receipt_sha256: digest_c()
+        )
+        val plan = PromotionPlan(
+            candidate_identity: admission.candidate_identity,
+            tag: "v1.4.0-beta.2",
+            target_commit_sha: candidate.commit_sha,
+            candidate_commit_sha: candidate.commit_sha,
+            artifact_manifest_sha256: digest_a(),
+            admitted_artifact_manifest_sha256: digest_a(),
+            signed_tag: true,
+            annotated_tag: true,
+            exact_tag_push: true,
+            rebuild: false,
+            fallback_artifact: false
+        )
+        expect(check_promotion_plan(admission, plan).valid).to_be(true)
+        var self_review_only = admission
+        self_review_only.admission_receipt_schema = "spipe-self-review-decision/1"
+        expect(check_promotion_plan(self_review_only, plan).reason).to_contain("self-review decisions cannot authorize")
+        val rebuild = PromotionPlan(
+            candidate_identity: plan.candidate_identity,
+            tag: plan.tag,
+            target_commit_sha: plan.target_commit_sha,
+            candidate_commit_sha: plan.candidate_commit_sha,
+            artifact_manifest_sha256: plan.artifact_manifest_sha256,
+            admitted_artifact_manifest_sha256: plan.admitted_artifact_manifest_sha256,
+            signed_tag: plan.signed_tag,
+            annotated_tag: plan.annotated_tag,
+            exact_tag_push: plan.exact_tag_push,
+            rebuild: true,
+            fallback_artifact: false
+        )
+        expect(check_promotion_plan(admission, rebuild).reason).to_equal("promotion must not rebuild admitted artifacts")
+        val stale_candidate = PromotionPlan(
+            candidate_identity: "stale-candidate-identity",
+            tag: plan.tag,
+            target_commit_sha: plan.target_commit_sha,
+            candidate_commit_sha: plan.candidate_commit_sha,
+            artifact_manifest_sha256: plan.artifact_manifest_sha256,
+            admitted_artifact_manifest_sha256: plan.admitted_artifact_manifest_sha256,
+            signed_tag: plan.signed_tag,
+            annotated_tag: plan.annotated_tag,
+            exact_tag_push: plan.exact_tag_push,
+            rebuild: false,
+            fallback_artifact: false
+        )
+        expect(check_promotion_plan(admission, stale_candidate).reason).to_equal("promotion candidate identity does not match release admission")
+        val wrong_version = PromotionPlan(
+            candidate_identity: plan.candidate_identity,
+            tag: "v1.4.0-beta.3",
+            target_commit_sha: plan.target_commit_sha,
+            candidate_commit_sha: plan.candidate_commit_sha,
+            artifact_manifest_sha256: plan.artifact_manifest_sha256,
+            admitted_artifact_manifest_sha256: plan.admitted_artifact_manifest_sha256,
+            signed_tag: plan.signed_tag,
+            annotated_tag: plan.annotated_tag,
+            exact_tag_push: plan.exact_tag_push,
+            rebuild: false,
+            fallback_artifact: false
+        )
+        expect(check_promotion_plan(admission, wrong_version).reason).to_equal("promotion tag version does not match the admitted candidate version")
+
+    it "withdraws without rewriting published release identity":
+        step("Withdraw without rewriting release identity")
+        expect(check_withdrawal_plan(false, false, false, "1.3.9").valid).to_be(true)
+        expect(check_withdrawal_plan(true, false, false, "1.3.9").reason).to_equal("withdrawal must preserve published release identity")

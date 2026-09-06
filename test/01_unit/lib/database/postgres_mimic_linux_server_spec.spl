@@ -1,0 +1,45 @@
+"""Linux pgwire adapter bounds and backend encoding."""
+
+use std.spec
+use std.database.postgres_mimic.{
+    PostgresMimicServer, PgWireSslPolicy, PgWireLinuxLimits, PgWireLinuxServer,
+    pgwire_linux_limits, pgwire_limits_valid, pgwire_encode_startup, pgwire_encode_query
+}
+
+fn contains_tag(bytes: [u8], tag: i64) -> bool:
+    for byte in bytes:
+        if byte.to_i64() == tag: return true
+    false
+
+describe "Postgres mimic Linux server adapter":
+    it "encodes startup and simple query responses as PostgreSQL backend frames":
+        var database = PostgresMimicServer.memory().unwrap()
+        val id = database.startup("simple", "simple", "unit").unwrap()
+        val startup = pgwire_encode_startup(database.startup_responses(id), 4096).unwrap()
+        expect(startup[0].to_i64()).to_equal(82)
+        expect(contains_tag(startup, 83)).to_equal(true)
+        expect(contains_tag(startup, 90)).to_equal(true)
+        val query = pgwire_encode_query(database.simple_query(id, "SELECT 1"), 4096).unwrap()
+        expect(query[0].to_i64()).to_equal(84)
+        expect(contains_tag(query, 68)).to_equal(true)
+        expect(contains_tag(query, 67)).to_equal(true)
+        expect(query[query.len() - 6].to_i64()).to_equal(90)
+
+    it "rejects invalid bounds and unavailable advertised TLS capability":
+        val invalid = PgWireLinuxLimits(max_sessions: 0, read_chunk: 1, max_frame: 8,
+            max_parameters: 1, max_buffer: 8, max_response: 64,
+            read_timeout_ms: 1, write_timeout_ms: 1)
+        expect(pgwire_limits_valid(invalid)).to_equal(false)
+        var database = PostgresMimicServer.memory().unwrap()
+        expect(PgWireLinuxServer.create(database, PgWireSslPolicy.Required, false,
+            pgwire_linux_limits()).is_err()).to_equal(true)
+        expect(PgWireLinuxServer.create(database, PgWireSslPolicy.Optional, true,
+            pgwire_linux_limits()).is_err()).to_equal(true)
+
+    it "creates a bounded plaintext adapter and enters drain before accepting":
+        var database = PostgresMimicServer.memory().unwrap()
+        var server = PgWireLinuxServer.create(database, PgWireSslPolicy.Disabled).unwrap()
+        expect(server.active_sessions).to_equal(0)
+        expect(server.draining).to_equal(false)
+        server.begin_drain()
+        expect(server.draining).to_equal(true)

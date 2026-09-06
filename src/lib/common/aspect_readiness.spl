@@ -1,0 +1,162 @@
+# Aspect instrumentation readiness-level ladder
+#
+# Implements doc/01_research/compiler/startup_performance/startup_perf_architecture_2026-08-17.md
+# §7.4: a module declares ONE readiness level, a claim about what aspect
+# instrumentation it can be trusted to support:
+#
+#   none      no instrumentation sites; enabling requires recompilation/rebuild
+#   boundary  stable cold-boundary import slots exist for module/function
+#             lifecycle events; an aspect may activate without rebuilding
+#             inner loops
+#   full      instrumented variant contains patchable sites / ExecIR event
+#             opcodes; intended for debug/profile builds
+#
+# The ladder's whole point: instrumentation that is not ready must not be
+# silently treated as ready. A level is admitted only when EVIDENCE supports
+# it (declared slot/site counts), never on assertion alone — an overstated
+# claim fails closed at declare/promote time. Understating is always safe.
+#
+# Composes with std.facet_registry (same conventions: primitives-only API,
+# columnar module-level arrays, fully inline functions, typed closed-set
+# absence reasons) rather than duplicating its records: this module answers
+# "may an aspect activate against module M at level L", the catalog answers
+# "which facet does the request route to".
+
+# The three rungs (§7.4), ordered none < boundary < full.
+val READINESS_NONE = "none"
+val READINESS_BOUNDARY = "boundary"
+val READINESS_FULL = "full"
+
+# Closed-set answers from readiness_absence.
+val READINESS_READY = "ready"
+val READINESS_UNKNOWN_MODULE = "unknown_module"
+# level none: §7.4 — enabling requires recompilation/rebuild
+val READINESS_NEEDS_REBUILD = "needs_rebuild"
+# level boundary but full required: needs the instrumented (debug/profile) build
+val READINESS_NEEDS_INSTRUMENTED_BUILD = "needs_instrumented_build"
+
+# ---- module-global registry state (columnar, keyed by module name) ----
+var _r_module: [text] = []
+var _r_level: [text] = []          # verified level (evidence-backed)
+var _r_boundary_slots: [i64] = []  # evidence for boundary
+var _r_patchable_sites: [i64] = [] # evidence for full
+var _r_last_error: text = ""
+
+fn readiness_last_error() -> text:
+    """Explanation of the most recent failed readiness operation ("" after a
+    successful one)."""
+    _r_last_error
+
+fn readiness_declare(module: text, level: text, boundary_slots: i64, patchable_sites: i64) -> bool:
+    """Declare a module's readiness level with its evidence. Fails closed
+    (returns false, records why) when the level is not a rung, the module is
+    already declared, or the evidence does not support the claim:
+    boundary requires boundary_slots > 0; full additionally requires
+    patchable_sites > 0. Understating (e.g. declaring none while sites
+    exist) is always accepted — only OVERSTATING is rejected."""
+    if level != READINESS_NONE and level != READINESS_BOUNDARY and level != READINESS_FULL:
+        _r_last_error = "not a readiness rung: {level}"
+        return false
+    var i = 0
+    val n = _r_module.len()
+    while i < n:
+        if _r_module[i] == module:
+            _r_last_error = "module already declared: {module}"
+            return false
+        i = i + 1
+    if level == READINESS_BOUNDARY and boundary_slots <= 0:
+        _r_last_error = "claim '{level}' unsupported: no cold-boundary slots"
+        return false
+    if level == READINESS_FULL and (boundary_slots <= 0 or patchable_sites <= 0):
+        _r_last_error = "claim '{level}' unsupported: needs boundary slots and patchable sites"
+        return false
+    _r_module = _r_module.push(module)
+    _r_level = _r_level.push(level)
+    _r_boundary_slots = _r_boundary_slots.push(boundary_slots)
+    _r_patchable_sites = _r_patchable_sites.push(patchable_sites)
+    _r_last_error = ""
+    true
+
+fn readiness_promote(module: text, level: text, boundary_slots: i64, patchable_sites: i64) -> bool:
+    """Move a declared module UP the ladder. Requires fresh evidence meeting
+    the target rung's bar (same rules as readiness_declare); an assertion
+    without evidence, an unknown module, or a demotion via this path all
+    fail closed."""
+    var idx = -1
+    var i = 0
+    val n = _r_module.len()
+    while i < n:
+        if _r_module[i] == module:
+            idx = i
+        i = i + 1
+    if idx < 0:
+        _r_last_error = "unknown module: {module}"
+        return false
+    if level != READINESS_BOUNDARY and level != READINESS_FULL:
+        _r_last_error = "not a promotable rung: {level}"
+        return false
+    var cur_rank = 0
+    if _r_level[idx] == READINESS_BOUNDARY:
+        cur_rank = 1
+    if _r_level[idx] == READINESS_FULL:
+        cur_rank = 2
+    var new_rank = 1
+    if level == READINESS_FULL:
+        new_rank = 2
+    if new_rank <= cur_rank:
+        _r_last_error = "not a promotion: {module} already at {_r_level[idx]}"
+        return false
+    if boundary_slots <= 0 or (level == READINESS_FULL and patchable_sites <= 0):
+        _r_last_error = "promotion to '{level}' unsupported: insufficient evidence"
+        return false
+    _r_level[idx] = level
+    _r_boundary_slots[idx] = boundary_slots
+    _r_patchable_sites[idx] = patchable_sites
+    _r_last_error = ""
+    true
+
+fn readiness_level(module: text) -> text:
+    """The module's verified readiness level, or "" when never declared."""
+    var out = ""
+    var i = 0
+    val n = _r_module.len()
+    while i < n:
+        if _r_module[i] == module:
+            out = _r_level[i]
+        i = i + 1
+    out
+
+fn readiness_absence(module: text, required: text) -> text:
+    """Ladder check, reason axis: why (or that) an aspect needing `required`
+    instrumentation may not activate against `module`. Typed closed-set
+    answer — never a crash, never a silent default. An unknown module is NOT
+    ready (unknown_module): absence of a claim is not readiness."""
+    var idx = -1
+    var i = 0
+    val n = _r_module.len()
+    while i < n:
+        if _r_module[i] == module:
+            idx = i
+        i = i + 1
+    if idx < 0:
+        return READINESS_UNKNOWN_MODULE
+    var have = 0
+    if _r_level[idx] == READINESS_BOUNDARY:
+        have = 1
+    if _r_level[idx] == READINESS_FULL:
+        have = 2
+    var need = 0
+    if required == READINESS_BOUNDARY:
+        need = 1
+    if required == READINESS_FULL:
+        need = 2
+    if have >= need:
+        return READINESS_READY
+    if have == 0:
+        return READINESS_NEEDS_REBUILD
+    READINESS_NEEDS_INSTRUMENTED_BUILD
+
+fn readiness_admits(module: text, required: text) -> bool:
+    """Ladder check, presence axis: true iff the module's verified level is
+    at or above `required`. Rejection is a plain false, never a crash."""
+    readiness_absence(module, required) == READINESS_READY

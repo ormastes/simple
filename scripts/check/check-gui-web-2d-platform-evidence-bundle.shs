@@ -1,0 +1,977 @@
+#!/bin/sh
+# Non-launching rollup for the ten live GUI/Web/2D completion gates.
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${BUILD_DIR:-build/gui-web-2d-platform-evidence-bundle}"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/gui_web_2d_platform_evidence_bundle_$(date -u +%F).md}"
+OUT_ENV="$BUILD_DIR/evidence.env"
+
+NATIVE_ENV="${NATIVE_RENDER_LOG_PLATFORM_MATRIX_ENV:-build/gui_renderdoc_feature_coverage_status/evidence.env}"
+MOBILE_ENV="${TAURI_MOBILE_RENDERER_PARITY_ENV:-build/tauri_mobile_renderer_parity_evidence/evidence.env}"
+PERF_4K_ENV="${GUI_SHOWCASE_4K_PERF_ENV:-${GUI_SHOWCASE_4K_200FPS_ENV:-build/widget-showcase-4k-200fps/status.env}}"
+PERF_8K_ENV="${GUI_SHOWCASE_8K_PERF_ENV:-${GUI_SHOWCASE_8K_200FPS_ENV:-build/widget-showcase-8k-perf/status.env}}"
+HTML_CSS_ENV="${HTML_CSS_FULL_RENDERING_GOAL_ENV:-build/html_css_full_rendering_goal_status/evidence.env}"
+PRODUCTION_ENV="${PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV:-build/production_gui_web_renderer_parity_evidence/evidence.env}"
+FRESHNESS_ENV="${GUI_WEB_2D_PLATFORM_FRESHNESS_ENV:-build/gui-web-2d-platform-freshness/evidence.env}"
+WINDOWS_VULKAN_ENV="${WINDOWS_ELECTRON_VULKAN_WEB_PARITY_ENV:-$NATIVE_ENV}"
+
+# Honesty: upstream evidence is only trustworthy for a bounded window. A
+# stale evidence.env (e.g. from a run days ago, before an unrelated code
+# change) must not silently keep this rollup green. Mirrors
+# check-production-gui-web-renderer-parity-gate.shs.
+MAX_EVIDENCE_AGE_HOURS="${MAX_EVIDENCE_AGE_HOURS:-72}"
+
+mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
+
+value_of() {
+    key="$1"
+    file="$2"
+    sed -n "s/^${key}=//p" "$file" 2>/dev/null | tail -n 1
+}
+
+key_count() {
+    key="$1"
+    file="$2"
+    sed -n "s/^${key}=//p" "$file" 2>/dev/null | wc -l | tr -d ' '
+}
+
+is_positive_int() {
+    case "$1" in
+        ""|*[!0-9]*)
+            return 1
+            ;;
+        *)
+            [ "$1" -gt 0 ]
+            ;;
+    esac
+}
+
+is_uint32_dec() {
+    case "$1" in
+        ""|*[!0-9]*)
+            return 1
+            ;;
+        *)
+            [ "$1" -ge 0 ] && [ "$1" -le 4294967295 ]
+            ;;
+    esac
+}
+
+is_sha256_hex() {
+    [ "${#1}" -eq 64 ] || return 1
+    case "$1" in
+        *[!0-9a-f]*)
+            return 1
+            ;;
+        *)
+            return 0
+            ;;
+    esac
+}
+
+sha256_text() {
+    if command -v node >/dev/null 2>&1; then
+        printf '%s' "$1" | node -e "const fs=require('fs'),crypto=require('crypto');process.stdout.write(crypto.createHash('sha256').update(fs.readFileSync(0)).digest('hex'))"
+        return
+    fi
+    printf '%s' "$1" | sha256sum | sed 's/[[:space:]].*//'
+}
+
+launch_flag_present() {
+    flags="$1"
+    expected="$2"
+    case " $flags " in
+        *" $expected "*)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+file_mtime_epoch() {
+    if stat -f %m "$1" >/dev/null 2>&1; then
+        stat -f %m "$1"
+    else
+        stat -c %Y "$1" 2>/dev/null
+    fi
+}
+
+# file_state <file> [required_key ...]
+#   missing  — file absent or empty
+#   invalid  — file exists but one of the expected key=value lines is
+#              absent or empty (corrupt/truncated evidence is not evidence)
+#   stale    — file older than MAX_EVIDENCE_AGE_HOURS (or mtime unreadable)
+#   pass     — present, schema-valid, fresh
+file_state() {
+    state_file="$1"
+    shift
+    if [ ! -s "$state_file" ]; then
+        echo missing
+        return
+    fi
+    for state_key in "$@"; do
+        if [ "$(value_of "$state_key" "$state_file")" = "" ]; then
+            echo invalid
+            return
+        fi
+    done
+    state_mtime="$(file_mtime_epoch "$state_file")"
+    if [ -z "$state_mtime" ] || ! [ "$state_mtime" -gt 0 ] 2>/dev/null; then
+        echo stale
+        return
+    fi
+    state_age_hours=$(( ( $(date +%s) - state_mtime ) / 3600 ))
+    if [ "$state_age_hours" -gt "$MAX_EVIDENCE_AGE_HOURS" ] 2>/dev/null; then
+        echo stale
+        return
+    fi
+    echo pass
+}
+
+append_list() {
+    list="$1"
+    item="$2"
+    if [ "$list" = "" ]; then
+        printf '%s' "$item"
+    else
+        printf '%s|%s' "$list" "$item"
+    fi
+}
+
+gate_status_from_keys() {
+    file="$1"
+    shift
+    gate_file_state="$(file_state "$file" "$@")"
+    if [ "$gate_file_state" != "pass" ]; then
+        echo "$gate_file_state"
+        return
+    fi
+    for key in "$@"; do
+        if [ "$(key_count "$key" "$file")" != "1" ]; then
+            echo fail
+            return
+        fi
+        if [ "$(value_of "$key" "$file")" != "pass" ]; then
+            echo fail
+            return
+        fi
+        case "$key" in
+            *_status)
+                reason_key="${key%_status}_reason"
+                reason_count="$(key_count "$reason_key" "$file")"
+                if [ "$reason_count" != "0" ] && [ "$reason_count" != "1" ]; then
+                    echo fail
+                    return
+                fi
+                ;;
+        esac
+    done
+    echo pass
+}
+
+freshness_status() {
+    freshness_file_state="$(file_state "$FRESHNESS_ENV" gui_web_2d_platform_freshness_status)"
+    if [ "$freshness_file_state" != "pass" ]; then
+        echo "$freshness_file_state"
+        return
+    fi
+    for key in \
+        gui_web_2d_platform_freshness_status \
+        gui_web_2d_platform_freshness_reason \
+        gui_web_2d_platform_freshness_source_revision \
+        gui_web_2d_platform_freshness_runtime_build \
+        gui_web_2d_platform_freshness_browser_webview_electron_revision \
+        gui_web_2d_platform_freshness_graphics_sdk_driver \
+        gui_web_2d_platform_freshness_runbook_version
+    do
+        if [ "$(key_count "$key" "$FRESHNESS_ENV")" != "1" ]; then
+            echo fail
+            return
+        fi
+    done
+    if [ "$(value_of gui_web_2d_platform_freshness_status "$FRESHNESS_ENV")" != "pass" ]; then
+        echo fail
+        return
+    fi
+    if [ "$(value_of gui_web_2d_platform_freshness_reason "$FRESHNESS_ENV")" != "pass" ]; then
+        echo fail
+        return
+    fi
+    for key in \
+        gui_web_2d_platform_freshness_source_revision \
+        gui_web_2d_platform_freshness_runtime_build \
+        gui_web_2d_platform_freshness_browser_webview_electron_revision \
+        gui_web_2d_platform_freshness_graphics_sdk_driver \
+        gui_web_2d_platform_freshness_runbook_version
+    do
+        if [ "$(value_of "$key" "$FRESHNESS_ENV")" = "" ]; then
+            echo fail
+            return
+        fi
+    done
+    for key in \
+        gui_web_2d_platform_freshness_missing_evidence_lanes \
+        gui_web_2d_platform_freshness_duplicate_source_revision_lanes \
+        gui_web_2d_platform_freshness_missing_source_revision_lanes \
+        gui_web_2d_platform_freshness_mismatched_source_revision_lanes \
+        gui_web_2d_platform_freshness_missing_metadata \
+        gui_web_2d_platform_freshness_duplicate_metadata_lanes \
+        gui_web_2d_platform_freshness_mismatched_metadata_lanes
+    do
+        count="$(key_count "$key" "$FRESHNESS_ENV")"
+        if [ "$count" != "0" ] && [ "$count" != "1" ]; then
+            echo fail
+            return
+        fi
+        if [ "$count" = "1" ] && [ "$(value_of "$key" "$FRESHNESS_ENV")" != "" ]; then
+            echo fail
+            return
+        fi
+    done
+    echo pass
+}
+
+windows_vulkan_status() {
+    windows_vulkan_file_state="$(file_state "$WINDOWS_VULKAN_ENV" electron_vulkan_web_parity_windows_status)"
+    if [ "$windows_vulkan_file_state" != "pass" ]; then
+        echo "$windows_vulkan_file_state"
+        return
+    fi
+    for key in \
+        electron_vulkan_web_parity_windows_status \
+        electron_vulkan_web_parity_windows_reason \
+        electron_vulkan_web_parity_windows_host_os \
+        electron_vulkan_web_parity_windows_simple_bin \
+        electron_vulkan_web_parity_windows_simple_bin_source \
+        electron_vulkan_web_parity_windows_simple_bin_status \
+        electron_vulkan_web_parity_windows_simple_bin_kind \
+        electron_vulkan_web_parity_windows_simple_bin_probe_exit_code \
+        electron_vulkan_web_parity_windows_simple_bin_version \
+        electron_vulkan_web_parity_windows_simple_bin_sha256 \
+        electron_vulkan_web_parity_windows_width \
+        electron_vulkan_web_parity_windows_height \
+        electron_vulkan_web_parity_windows_bg_hex \
+        electron_vulkan_web_parity_windows_bg_dec \
+        electron_vulkan_web_parity_windows_electron_bin \
+        electron_vulkan_web_parity_windows_electron_bin_status \
+        electron_vulkan_web_parity_windows_electron_bin_kind \
+        electron_vulkan_web_parity_windows_electron_bin_sha256 \
+        electron_vulkan_web_parity_windows_vulkan_loader \
+        electron_vulkan_web_parity_windows_vulkan_loader_status \
+        electron_vulkan_web_parity_windows_vulkan_loader_sha256 \
+        electron_vulkan_web_parity_windows_source_html \
+        electron_vulkan_web_parity_windows_source_html_sha256 \
+        electron_vulkan_web_parity_windows_electron_launch_flags \
+        electron_vulkan_web_parity_windows_electron_remote_debugging_port \
+        electron_vulkan_web_parity_windows_electron_capture_exit_code \
+        electron_vulkan_web_parity_windows_simple_render_exit_code \
+        electron_vulkan_web_parity_windows_simple_render_env_width \
+        electron_vulkan_web_parity_windows_simple_render_env_height \
+        electron_vulkan_web_parity_windows_simple_render_env_bg_dec \
+        electron_vulkan_web_parity_windows_simple_render_env_output \
+        electron_vulkan_web_parity_windows_simple_render_env_run_id \
+        electron_vulkan_web_parity_windows_simple_render_env_execution_mode \
+        electron_vulkan_web_parity_windows_simple_render_stdout_status_line_count \
+        electron_vulkan_web_parity_windows_simple_render_stdout_proof \
+        electron_vulkan_web_parity_windows_simple_render_stdout_proof_sha256 \
+        electron_vulkan_web_parity_windows_simple_render_stdout_status \
+        electron_vulkan_web_parity_windows_simple_render_stdout_reason \
+        electron_vulkan_web_parity_windows_simple_render_stdout_backend \
+        electron_vulkan_web_parity_windows_simple_render_stdout_pixels \
+        electron_vulkan_web_parity_windows_simple_render_stdout_px0 \
+        electron_vulkan_web_parity_windows_simple_render_stdout_wrote \
+        electron_vulkan_web_parity_windows_compare_exit_code \
+        electron_vulkan_web_parity_windows_electron_json \
+        electron_vulkan_web_parity_windows_electron_json_sha256 \
+        electron_vulkan_web_parity_windows_electron_proof_json \
+        electron_vulkan_web_parity_windows_electron_proof_json_sha256 \
+        electron_vulkan_web_parity_windows_electron_png \
+        electron_vulkan_web_parity_windows_electron_png_sha256 \
+        electron_vulkan_web_parity_windows_vulkan_json \
+        electron_vulkan_web_parity_windows_vulkan_json_sha256 \
+        electron_vulkan_web_parity_windows_vulkan_json_status \
+        electron_vulkan_web_parity_windows_vulkan_json_reason \
+        electron_vulkan_web_parity_windows_vulkan_json_schema \
+        electron_vulkan_web_parity_windows_vulkan_json_producer \
+        electron_vulkan_web_parity_windows_vulkan_json_requested_backend \
+        electron_vulkan_web_parity_windows_vulkan_json_backend \
+        electron_vulkan_web_parity_windows_vulkan_json_execution_mode \
+        electron_vulkan_web_parity_windows_vulkan_json_entrypoint \
+        electron_vulkan_web_parity_windows_vulkan_json_run_id \
+        electron_vulkan_web_parity_windows_vulkan_json_width \
+        electron_vulkan_web_parity_windows_vulkan_json_height \
+        electron_vulkan_web_parity_windows_vulkan_json_pixel_count \
+        electron_vulkan_web_parity_windows_vulkan_json_pixels_len \
+        electron_vulkan_web_parity_windows_vulkan_json_px0 \
+        electron_vulkan_web_parity_windows_vulkan_json_uniform_argb \
+        electron_vulkan_web_parity_windows_artifact_manifest_proof \
+        electron_vulkan_web_parity_windows_artifact_manifest_proof_sha256 \
+        electron_vulkan_web_parity_windows_artifact_manifest_hash_algorithm \
+        electron_vulkan_web_parity_windows_artifact_manifest_producer \
+        electron_vulkan_web_parity_windows_artifact_manifest_schema \
+        electron_vulkan_web_parity_windows_artifact_manifest_keys \
+        electron_vulkan_web_parity_windows_artifact_manifest_field_count \
+        electron_vulkan_web_parity_windows_artifact_manifest_run_id \
+        electron_vulkan_web_parity_windows_compare_expected_width \
+        electron_vulkan_web_parity_windows_compare_expected_height \
+        electron_vulkan_web_parity_windows_compare_expected_argb \
+        electron_vulkan_web_parity_windows_compare_expected_remote_debugging_port \
+        electron_vulkan_web_parity_windows_compare_expected_captured_argb_path \
+        electron_vulkan_web_parity_windows_compare_expected_captured_argb_sha256 \
+        electron_vulkan_web_parity_windows_compare_expected_html_path \
+        electron_vulkan_web_parity_windows_compare_expected_html_sha256 \
+        electron_vulkan_web_parity_windows_compare_expected_png_path \
+        electron_vulkan_web_parity_windows_compare_expected_png_sha256 \
+        electron_vulkan_web_parity_windows_compare_expected_vulkan_run_id \
+        electron_vulkan_web_parity_windows_compare_expected_vulkan_json_path \
+        electron_vulkan_web_parity_windows_compare_expected_vulkan_json_sha256 \
+        electron_vulkan_web_parity_windows_compare_electron_producer \
+        electron_vulkan_web_parity_windows_compare_electron_width \
+        electron_vulkan_web_parity_windows_compare_electron_height \
+        electron_vulkan_web_parity_windows_compare_vulkan_width \
+        electron_vulkan_web_parity_windows_compare_vulkan_height \
+        electron_vulkan_web_parity_windows_compare_electron_pixels \
+        electron_vulkan_web_parity_windows_compare_vulkan_pixels \
+        electron_vulkan_web_parity_windows_compare_vulkan_status \
+        electron_vulkan_web_parity_windows_compare_vulkan_reason \
+        electron_vulkan_web_parity_windows_compare_vulkan_schema \
+        electron_vulkan_web_parity_windows_compare_vulkan_producer \
+        electron_vulkan_web_parity_windows_compare_vulkan_entrypoint \
+        electron_vulkan_web_parity_windows_compare_vulkan_requested_backend \
+        electron_vulkan_web_parity_windows_compare_vulkan_pixel_count \
+        electron_vulkan_web_parity_windows_vulkan_run_id \
+        electron_vulkan_web_parity_windows_compare_vulkan_run_id \
+        electron_vulkan_web_parity_windows_compare_vulkan_backend \
+        electron_vulkan_web_parity_windows_compare_vulkan_execution_mode \
+        electron_vulkan_web_parity_windows_compare_electron_vulkan_status \
+        electron_vulkan_web_parity_windows_compare_electron_vulkan_reason \
+        electron_vulkan_web_parity_windows_compare_electron_hardware_supports_vulkan \
+        electron_vulkan_web_parity_windows_compare_electron_proof \
+        electron_vulkan_web_parity_windows_compare_electron_proof_status \
+        electron_vulkan_web_parity_windows_compare_electron_proof_source \
+        electron_vulkan_web_parity_windows_compare_electron_proof_html_path \
+        electron_vulkan_web_parity_windows_compare_electron_proof_html_sha256 \
+        electron_vulkan_web_parity_windows_compare_electron_proof_captured_argb_path \
+        electron_vulkan_web_parity_windows_compare_electron_proof_captured_argb_sha256 \
+        electron_vulkan_web_parity_windows_compare_electron_proof_captured_argb_written \
+        electron_vulkan_web_parity_windows_compare_electron_proof_png_path \
+        electron_vulkan_web_parity_windows_compare_electron_proof_png_sha256 \
+        electron_vulkan_web_parity_windows_compare_electron_proof_png_written \
+        electron_vulkan_web_parity_windows_compare_electron_proof_blur_or_tolerance_used \
+        electron_vulkan_web_parity_windows_compare_electron_proof_gpu_feature_status_matches_capture \
+        electron_vulkan_web_parity_windows_compare_electron_proof_browser_gpu_info_matches_capture \
+        electron_vulkan_web_parity_windows_compare_electron_proof_width \
+        electron_vulkan_web_parity_windows_compare_electron_proof_height \
+        electron_vulkan_web_parity_windows_compare_electron_proof_native_width \
+        electron_vulkan_web_parity_windows_compare_electron_proof_native_height \
+        electron_vulkan_web_parity_windows_compare_electron_proof_downsampled \
+        electron_vulkan_web_parity_windows_compare_electron_proof_remote_debugging_port \
+        electron_vulkan_web_parity_windows_compare_electron_gpu_compositing \
+        electron_vulkan_web_parity_windows_compare_electron_browser_target_gpu_info_status \
+        electron_vulkan_web_parity_windows_compare_electron_vulkan \
+        electron_vulkan_web_parity_windows_compare_electron_display_type \
+        electron_vulkan_web_parity_windows_compare_electron_gl_implementation_parts \
+        electron_vulkan_web_parity_windows_compare_electron_skia_backend_type \
+        electron_vulkan_web_parity_windows_compare_electron_gl_renderer \
+        electron_vulkan_web_parity_windows_compare_px0_electron \
+        electron_vulkan_web_parity_windows_compare_px0_vulkan \
+        electron_vulkan_web_parity_windows_compare_mismatches
+    do
+        if [ "$(key_count "$key" "$WINDOWS_VULKAN_ENV")" != "1" ]; then
+            echo fail
+            return
+        fi
+    done
+    if [ "$(value_of electron_vulkan_web_parity_windows_status "$WINDOWS_VULKAN_ENV")" != "pass" ] ||
+       [ "$(value_of electron_vulkan_web_parity_windows_reason "$WINDOWS_VULKAN_ENV")" != "pixel-exact-vulkan" ] ||
+       [ "$(value_of electron_vulkan_web_parity_windows_host_os "$WINDOWS_VULKAN_ENV")" != "Windows_NT" ] ||
+       [ "$(value_of electron_vulkan_web_parity_windows_simple_bin_status "$WINDOWS_VULKAN_ENV")" != "pass" ] ||
+       [ "$(value_of electron_vulkan_web_parity_windows_simple_bin_kind "$WINDOWS_VULKAN_ENV")" != "windows-exe" ] ||
+       [ "$(value_of electron_vulkan_web_parity_windows_simple_bin_probe_exit_code "$WINDOWS_VULKAN_ENV")" != "0" ] ||
+       [ "$(value_of electron_vulkan_web_parity_windows_electron_bin_status "$WINDOWS_VULKAN_ENV")" != "pass" ] ||
+       [ "$(value_of electron_vulkan_web_parity_windows_vulkan_loader_status "$WINDOWS_VULKAN_ENV")" != "pass" ] ||
+       [ "$(value_of electron_vulkan_web_parity_windows_electron_capture_exit_code "$WINDOWS_VULKAN_ENV")" != "0" ] ||
+       [ "$(value_of electron_vulkan_web_parity_windows_simple_render_exit_code "$WINDOWS_VULKAN_ENV")" != "0" ] ||
+       [ "$(value_of electron_vulkan_web_parity_windows_simple_render_stdout_status_line_count "$WINDOWS_VULKAN_ENV")" != "1" ] ||
+       [ "$(value_of electron_vulkan_web_parity_windows_simple_render_stdout_status "$WINDOWS_VULKAN_ENV")" != "pass" ] ||
+       [ "$(value_of electron_vulkan_web_parity_windows_simple_render_stdout_reason "$WINDOWS_VULKAN_ENV")" != "pass" ] ||
+       [ "$(value_of electron_vulkan_web_parity_windows_simple_render_stdout_backend "$WINDOWS_VULKAN_ENV")" != "vulkan" ] ||
+       [ "$(value_of electron_vulkan_web_parity_windows_simple_render_stdout_wrote "$WINDOWS_VULKAN_ENV")" != "true" ] ||
+       [ "$(value_of electron_vulkan_web_parity_windows_compare_exit_code "$WINDOWS_VULKAN_ENV")" != "0" ] ||
+       [ "$(value_of electron_vulkan_web_parity_windows_compare_electron_producer "$WINDOWS_VULKAN_ENV")" != "electron-chromium-capture" ] ||
+       [ "$(value_of electron_vulkan_web_parity_windows_vulkan_json_status "$WINDOWS_VULKAN_ENV")" != "pass" ] ||
+       [ "$(value_of electron_vulkan_web_parity_windows_vulkan_json_reason "$WINDOWS_VULKAN_ENV")" != "pass" ] ||
+       [ "$(value_of electron_vulkan_web_parity_windows_compare_vulkan_status "$WINDOWS_VULKAN_ENV")" != "pass" ] ||
+       [ "$(value_of electron_vulkan_web_parity_windows_compare_vulkan_reason "$WINDOWS_VULKAN_ENV")" != "pass" ] ||
+       [ "$(value_of electron_vulkan_web_parity_windows_compare_vulkan_schema "$WINDOWS_VULKAN_ENV")" != "simple-engine2d-vulkan-parity-v1" ] ||
+       [ "$(value_of electron_vulkan_web_parity_windows_vulkan_json_schema "$WINDOWS_VULKAN_ENV")" != "simple-engine2d-vulkan-parity-v1" ] ||
+       [ "$(value_of electron_vulkan_web_parity_windows_vulkan_json_producer "$WINDOWS_VULKAN_ENV")" != "simple-engine2d-vulkan" ] ||
+       [ "$(value_of electron_vulkan_web_parity_windows_vulkan_json_requested_backend "$WINDOWS_VULKAN_ENV")" != "vulkan" ] ||
+       [ "$(value_of electron_vulkan_web_parity_windows_vulkan_json_backend "$WINDOWS_VULKAN_ENV")" != "vulkan" ] ||
+       [ "$(value_of electron_vulkan_web_parity_windows_vulkan_json_execution_mode "$WINDOWS_VULKAN_ENV")" != "interpret" ] ||
+       [ "$(value_of electron_vulkan_web_parity_windows_vulkan_json_entrypoint "$WINDOWS_VULKAN_ENV")" != "src/app/test/electron_vulkan_web_parity.spl" ] ||
+       [ "$(value_of electron_vulkan_web_parity_windows_compare_vulkan_producer "$WINDOWS_VULKAN_ENV")" != "simple-engine2d-vulkan" ] ||
+       [ "$(value_of electron_vulkan_web_parity_windows_compare_vulkan_entrypoint "$WINDOWS_VULKAN_ENV")" != "src/app/test/electron_vulkan_web_parity.spl" ] ||
+       [ "$(value_of electron_vulkan_web_parity_windows_compare_vulkan_requested_backend "$WINDOWS_VULKAN_ENV")" != "vulkan" ] ||
+       [ "$(value_of electron_vulkan_web_parity_windows_compare_vulkan_backend "$WINDOWS_VULKAN_ENV")" != "vulkan" ] ||
+       [ "$(value_of electron_vulkan_web_parity_windows_compare_vulkan_execution_mode "$WINDOWS_VULKAN_ENV")" != "interpret" ] ||
+       [ "$(value_of electron_vulkan_web_parity_windows_compare_electron_vulkan_status "$WINDOWS_VULKAN_ENV")" != "pass" ] ||
+       [ "$(value_of electron_vulkan_web_parity_windows_compare_electron_vulkan_reason "$WINDOWS_VULKAN_ENV")" != "electron-vulkan-backed" ] ||
+       [ "$(value_of electron_vulkan_web_parity_windows_compare_electron_hardware_supports_vulkan "$WINDOWS_VULKAN_ENV")" != "true" ] ||
+       [ "$(value_of electron_vulkan_web_parity_windows_compare_electron_proof_status "$WINDOWS_VULKAN_ENV")" != "pass" ] ||
+       [ "$(value_of electron_vulkan_web_parity_windows_compare_electron_proof_source "$WINDOWS_VULKAN_ENV")" != "tools/electron-live-bitmap/capture_html_argb.js" ] ||
+       [ "$(value_of electron_vulkan_web_parity_windows_compare_electron_proof_captured_argb_written "$WINDOWS_VULKAN_ENV")" != "true" ] ||
+       [ "$(value_of electron_vulkan_web_parity_windows_compare_electron_proof_png_written "$WINDOWS_VULKAN_ENV")" != "true" ] ||
+       [ "$(value_of electron_vulkan_web_parity_windows_compare_electron_proof_blur_or_tolerance_used "$WINDOWS_VULKAN_ENV")" != "false" ] ||
+       [ "$(value_of electron_vulkan_web_parity_windows_compare_electron_proof_gpu_feature_status_matches_capture "$WINDOWS_VULKAN_ENV")" != "true" ] ||
+       [ "$(value_of electron_vulkan_web_parity_windows_compare_electron_proof_browser_gpu_info_matches_capture "$WINDOWS_VULKAN_ENV")" != "true" ] ||
+       [ "$(value_of electron_vulkan_web_parity_windows_compare_electron_proof_downsampled "$WINDOWS_VULKAN_ENV")" != "false" ] ||
+       [ "$(value_of electron_vulkan_web_parity_windows_compare_electron_gpu_compositing "$WINDOWS_VULKAN_ENV")" != "enabled" ] ||
+       [ "$(value_of electron_vulkan_web_parity_windows_compare_electron_vulkan "$WINDOWS_VULKAN_ENV")" != "enabled" ] ||
+       [ "$(value_of electron_vulkan_web_parity_windows_compare_electron_browser_target_gpu_info_status "$WINDOWS_VULKAN_ENV")" != "pass" ] ||
+       [ "$(value_of electron_vulkan_web_parity_windows_compare_mismatches "$WINDOWS_VULKAN_ENV")" != "0" ]; then
+        echo fail
+        return
+    fi
+    simple_bin_path="$(value_of electron_vulkan_web_parity_windows_simple_bin "$WINDOWS_VULKAN_ENV")"
+    simple_bin_source="$(value_of electron_vulkan_web_parity_windows_simple_bin_source "$WINDOWS_VULKAN_ENV")"
+    simple_bin_kind="$(value_of electron_vulkan_web_parity_windows_simple_bin_kind "$WINDOWS_VULKAN_ENV")"
+    simple_bin_sha256="$(value_of electron_vulkan_web_parity_windows_simple_bin_sha256 "$WINDOWS_VULKAN_ENV")"
+    simple_bin_version="$(value_of electron_vulkan_web_parity_windows_simple_bin_version "$WINDOWS_VULKAN_ENV")"
+    electron_bin_path="$(value_of electron_vulkan_web_parity_windows_electron_bin "$WINDOWS_VULKAN_ENV")"
+    electron_bin_kind="$(value_of electron_vulkan_web_parity_windows_electron_bin_kind "$WINDOWS_VULKAN_ENV")"
+    electron_bin_sha256="$(value_of electron_vulkan_web_parity_windows_electron_bin_sha256 "$WINDOWS_VULKAN_ENV")"
+    vulkan_loader_path="$(value_of electron_vulkan_web_parity_windows_vulkan_loader "$WINDOWS_VULKAN_ENV")"
+    vulkan_loader_sha256="$(value_of electron_vulkan_web_parity_windows_vulkan_loader_sha256 "$WINDOWS_VULKAN_ENV")"
+    if [ "$simple_bin_path" = "" ] || [ "$simple_bin_source" = "" ] ||
+       [ "$electron_bin_path" = "" ] || [ "$vulkan_loader_path" = "" ]; then
+        echo fail
+        return
+    fi
+    case "$simple_bin_path" in
+        *.[eE][xX][eE])
+            ;;
+        *)
+            echo fail
+            return
+            ;;
+    esac
+    case "$simple_bin_path" in
+        src/compiler_rust/*|*/src/compiler_rust/*|./src/compiler_rust/*)
+            echo fail
+            return
+            ;;
+    esac
+    case "$simple_bin_source" in
+        explicit-env-rust-seed-forbidden|missing|*src/compiler_rust*)
+            echo fail
+            return
+            ;;
+    esac
+    if [ "$simple_bin_source" != "explicit-env" ] &&
+       [ "$simple_bin_source" != "self-hosted:$simple_bin_path" ]; then
+        echo fail
+        return
+    fi
+    case "$electron_bin_path" in
+        *.[cC][mM][dD]|*.[eE][xX][eE])
+            ;;
+        *)
+            echo fail
+            return
+            ;;
+    esac
+    case "$vulkan_loader_path" in
+        *[Vv][Uu][Ll][Kk][Aa][Nn]-1.[dD][lL][lL])
+            ;;
+        *)
+            echo fail
+            return
+            ;;
+    esac
+    case "$(value_of electron_vulkan_web_parity_windows_simple_bin_version "$WINDOWS_VULKAN_ENV")" in
+        *"Simple Language"*) ;;
+        *)
+            echo fail
+            return
+            ;;
+    esac
+    electron_launch_flags="$(value_of electron_vulkan_web_parity_windows_electron_launch_flags "$WINDOWS_VULKAN_ENV")"
+    if ! launch_flag_present "$electron_launch_flags" "--use-angle=vulkan" ||
+       ! launch_flag_present "$electron_launch_flags" "--use-vulkan" ||
+       ! launch_flag_present "$electron_launch_flags" "--enable-features=Vulkan,DefaultANGLEVulkan,VulkanFromANGLE" ||
+       ! launch_flag_present "$electron_launch_flags" "--disable-gpu-sandbox" ||
+       ! launch_flag_present "$electron_launch_flags" "--enable-gpu-rasterization"; then
+        echo fail
+        return
+    fi
+    electron_vulkan_metadata="$(value_of electron_vulkan_web_parity_windows_compare_electron_display_type "$WINDOWS_VULKAN_ENV") $(value_of electron_vulkan_web_parity_windows_compare_electron_gl_implementation_parts "$WINDOWS_VULKAN_ENV") $(value_of electron_vulkan_web_parity_windows_compare_electron_skia_backend_type "$WINDOWS_VULKAN_ENV") $(value_of electron_vulkan_web_parity_windows_compare_electron_gl_renderer "$WINDOWS_VULKAN_ENV")"
+    case "$electron_vulkan_metadata" in
+        *[Vv][Uu][Ll][Kk][Aa][Nn]*)
+            ;;
+        *)
+            echo fail
+            return
+            ;;
+    esac
+    for key in \
+        electron_vulkan_web_parity_windows_compare_expected_captured_argb_path \
+        electron_vulkan_web_parity_windows_source_html \
+        electron_vulkan_web_parity_windows_compare_expected_html_path \
+        electron_vulkan_web_parity_windows_compare_expected_png_path \
+        electron_vulkan_web_parity_windows_compare_expected_vulkan_run_id \
+        electron_vulkan_web_parity_windows_compare_expected_vulkan_json_path \
+        electron_vulkan_web_parity_windows_electron_json \
+        electron_vulkan_web_parity_windows_electron_proof_json \
+        electron_vulkan_web_parity_windows_electron_png \
+        electron_vulkan_web_parity_windows_vulkan_json \
+        electron_vulkan_web_parity_windows_compare_electron_proof \
+        electron_vulkan_web_parity_windows_compare_electron_proof_html_path \
+        electron_vulkan_web_parity_windows_compare_electron_proof_captured_argb_path \
+        electron_vulkan_web_parity_windows_compare_electron_proof_png_path \
+        electron_vulkan_web_parity_windows_compare_electron_proof_remote_debugging_port
+    do
+        if [ "$(value_of "$key" "$WINDOWS_VULKAN_ENV")" = "" ]; then
+            echo fail
+            return
+        fi
+    done
+    for key in \
+        electron_vulkan_web_parity_windows_simple_bin_sha256 \
+        electron_vulkan_web_parity_windows_electron_bin_sha256 \
+        electron_vulkan_web_parity_windows_vulkan_loader_sha256 \
+        electron_vulkan_web_parity_windows_electron_json_sha256 \
+        electron_vulkan_web_parity_windows_electron_proof_json_sha256 \
+        electron_vulkan_web_parity_windows_electron_png_sha256 \
+        electron_vulkan_web_parity_windows_vulkan_json_sha256 \
+        electron_vulkan_web_parity_windows_compare_expected_captured_argb_sha256 \
+        electron_vulkan_web_parity_windows_source_html_sha256 \
+        electron_vulkan_web_parity_windows_simple_render_stdout_proof_sha256 \
+        electron_vulkan_web_parity_windows_compare_expected_html_sha256 \
+        electron_vulkan_web_parity_windows_compare_expected_png_sha256 \
+        electron_vulkan_web_parity_windows_compare_expected_vulkan_json_sha256 \
+        electron_vulkan_web_parity_windows_compare_electron_proof_html_sha256 \
+        electron_vulkan_web_parity_windows_compare_electron_proof_captured_argb_sha256 \
+        electron_vulkan_web_parity_windows_compare_electron_proof_png_sha256 \
+        electron_vulkan_web_parity_windows_artifact_manifest_proof_sha256
+    do
+        if ! is_sha256_hex "$(value_of "$key" "$WINDOWS_VULKAN_ENV")"; then
+            echo fail
+            return
+        fi
+    done
+    proof_width="$(value_of electron_vulkan_web_parity_windows_compare_electron_proof_width "$WINDOWS_VULKAN_ENV")"
+    proof_height="$(value_of electron_vulkan_web_parity_windows_compare_electron_proof_height "$WINDOWS_VULKAN_ENV")"
+    proof_native_width="$(value_of electron_vulkan_web_parity_windows_compare_electron_proof_native_width "$WINDOWS_VULKAN_ENV")"
+    proof_native_height="$(value_of electron_vulkan_web_parity_windows_compare_electron_proof_native_height "$WINDOWS_VULKAN_ENV")"
+    requested_width="$(value_of electron_vulkan_web_parity_windows_width "$WINDOWS_VULKAN_ENV")"
+    requested_height="$(value_of electron_vulkan_web_parity_windows_height "$WINDOWS_VULKAN_ENV")"
+    requested_rgb="$(value_of electron_vulkan_web_parity_windows_bg_hex "$WINDOWS_VULKAN_ENV")"
+    requested_argb="$(value_of electron_vulkan_web_parity_windows_bg_dec "$WINDOWS_VULKAN_ENV")"
+    simple_env_width="$(value_of electron_vulkan_web_parity_windows_simple_render_env_width "$WINDOWS_VULKAN_ENV")"
+    simple_env_height="$(value_of electron_vulkan_web_parity_windows_simple_render_env_height "$WINDOWS_VULKAN_ENV")"
+    simple_env_bg_dec="$(value_of electron_vulkan_web_parity_windows_simple_render_env_bg_dec "$WINDOWS_VULKAN_ENV")"
+    simple_env_output="$(value_of electron_vulkan_web_parity_windows_simple_render_env_output "$WINDOWS_VULKAN_ENV")"
+    simple_env_run_id="$(value_of electron_vulkan_web_parity_windows_simple_render_env_run_id "$WINDOWS_VULKAN_ENV")"
+    simple_env_execution_mode="$(value_of electron_vulkan_web_parity_windows_simple_render_env_execution_mode "$WINDOWS_VULKAN_ENV")"
+    expected_width="$(value_of electron_vulkan_web_parity_windows_compare_expected_width "$WINDOWS_VULKAN_ENV")"
+    expected_height="$(value_of electron_vulkan_web_parity_windows_compare_expected_height "$WINDOWS_VULKAN_ENV")"
+    electron_width="$(value_of electron_vulkan_web_parity_windows_compare_electron_width "$WINDOWS_VULKAN_ENV")"
+    electron_height="$(value_of electron_vulkan_web_parity_windows_compare_electron_height "$WINDOWS_VULKAN_ENV")"
+    vulkan_width="$(value_of electron_vulkan_web_parity_windows_compare_vulkan_width "$WINDOWS_VULKAN_ENV")"
+    vulkan_height="$(value_of electron_vulkan_web_parity_windows_compare_vulkan_height "$WINDOWS_VULKAN_ENV")"
+    electron_pixels="$(value_of electron_vulkan_web_parity_windows_compare_electron_pixels "$WINDOWS_VULKAN_ENV")"
+    vulkan_pixels="$(value_of electron_vulkan_web_parity_windows_compare_vulkan_pixels "$WINDOWS_VULKAN_ENV")"
+    vulkan_pixel_count="$(value_of electron_vulkan_web_parity_windows_compare_vulkan_pixel_count "$WINDOWS_VULKAN_ENV")"
+    simple_stdout_pixels="$(value_of electron_vulkan_web_parity_windows_simple_render_stdout_pixels "$WINDOWS_VULKAN_ENV")"
+    expected_argb="$(value_of electron_vulkan_web_parity_windows_compare_expected_argb "$WINDOWS_VULKAN_ENV")"
+    simple_stdout_px0="$(value_of electron_vulkan_web_parity_windows_simple_render_stdout_px0 "$WINDOWS_VULKAN_ENV")"
+    simple_stdout_proof="$(value_of electron_vulkan_web_parity_windows_simple_render_stdout_proof "$WINDOWS_VULKAN_ENV")"
+    simple_stdout_proof_sha256="$(value_of electron_vulkan_web_parity_windows_simple_render_stdout_proof_sha256 "$WINDOWS_VULKAN_ENV")"
+    px0_electron="$(value_of electron_vulkan_web_parity_windows_compare_px0_electron "$WINDOWS_VULKAN_ENV")"
+    px0_vulkan="$(value_of electron_vulkan_web_parity_windows_compare_px0_vulkan "$WINDOWS_VULKAN_ENV")"
+    compare_exit_code="$(value_of electron_vulkan_web_parity_windows_compare_exit_code "$WINDOWS_VULKAN_ENV")"
+    expected_remote_debugging_port="$(value_of electron_vulkan_web_parity_windows_compare_expected_remote_debugging_port "$WINDOWS_VULKAN_ENV")"
+    electron_remote_debugging_port="$(value_of electron_vulkan_web_parity_windows_electron_remote_debugging_port "$WINDOWS_VULKAN_ENV")"
+    proof_remote_debugging_port="$(value_of electron_vulkan_web_parity_windows_compare_electron_proof_remote_debugging_port "$WINDOWS_VULKAN_ENV")"
+    expected_captured_argb_path="$(value_of electron_vulkan_web_parity_windows_compare_expected_captured_argb_path "$WINDOWS_VULKAN_ENV")"
+    proof_captured_argb_path="$(value_of electron_vulkan_web_parity_windows_compare_electron_proof_captured_argb_path "$WINDOWS_VULKAN_ENV")"
+    source_html_path="$(value_of electron_vulkan_web_parity_windows_source_html "$WINDOWS_VULKAN_ENV")"
+    expected_html_path="$(value_of electron_vulkan_web_parity_windows_compare_expected_html_path "$WINDOWS_VULKAN_ENV")"
+    proof_html_path="$(value_of electron_vulkan_web_parity_windows_compare_electron_proof_html_path "$WINDOWS_VULKAN_ENV")"
+    expected_png_path="$(value_of electron_vulkan_web_parity_windows_compare_expected_png_path "$WINDOWS_VULKAN_ENV")"
+    proof_png_path="$(value_of electron_vulkan_web_parity_windows_compare_electron_proof_png_path "$WINDOWS_VULKAN_ENV")"
+    proof_status="$(value_of electron_vulkan_web_parity_windows_compare_electron_proof_status "$WINDOWS_VULKAN_ENV")"
+    proof_source="$(value_of electron_vulkan_web_parity_windows_compare_electron_proof_source "$WINDOWS_VULKAN_ENV")"
+    proof_captured_argb_written="$(value_of electron_vulkan_web_parity_windows_compare_electron_proof_captured_argb_written "$WINDOWS_VULKAN_ENV")"
+    proof_png_written="$(value_of electron_vulkan_web_parity_windows_compare_electron_proof_png_written "$WINDOWS_VULKAN_ENV")"
+    proof_blur_or_tolerance_used="$(value_of electron_vulkan_web_parity_windows_compare_electron_proof_blur_or_tolerance_used "$WINDOWS_VULKAN_ENV")"
+    proof_gpu_feature_status_matches_capture="$(value_of electron_vulkan_web_parity_windows_compare_electron_proof_gpu_feature_status_matches_capture "$WINDOWS_VULKAN_ENV")"
+    proof_browser_gpu_info_matches_capture="$(value_of electron_vulkan_web_parity_windows_compare_electron_proof_browser_gpu_info_matches_capture "$WINDOWS_VULKAN_ENV")"
+    proof_downsampled="$(value_of electron_vulkan_web_parity_windows_compare_electron_proof_downsampled "$WINDOWS_VULKAN_ENV")"
+    electron_vulkan_status="$(value_of electron_vulkan_web_parity_windows_compare_electron_vulkan_status "$WINDOWS_VULKAN_ENV")"
+    electron_vulkan_reason="$(value_of electron_vulkan_web_parity_windows_compare_electron_vulkan_reason "$WINDOWS_VULKAN_ENV")"
+    electron_vulkan="$(value_of electron_vulkan_web_parity_windows_compare_electron_vulkan "$WINDOWS_VULKAN_ENV")"
+    electron_gpu_compositing="$(value_of electron_vulkan_web_parity_windows_compare_electron_gpu_compositing "$WINDOWS_VULKAN_ENV")"
+    electron_hardware_supports_vulkan="$(value_of electron_vulkan_web_parity_windows_compare_electron_hardware_supports_vulkan "$WINDOWS_VULKAN_ENV")"
+    electron_browser_target_gpu_info_status="$(value_of electron_vulkan_web_parity_windows_compare_electron_browser_target_gpu_info_status "$WINDOWS_VULKAN_ENV")"
+    electron_display_type="$(value_of electron_vulkan_web_parity_windows_compare_electron_display_type "$WINDOWS_VULKAN_ENV")"
+    electron_gl_implementation_parts="$(value_of electron_vulkan_web_parity_windows_compare_electron_gl_implementation_parts "$WINDOWS_VULKAN_ENV")"
+    electron_skia_backend_type="$(value_of electron_vulkan_web_parity_windows_compare_electron_skia_backend_type "$WINDOWS_VULKAN_ENV")"
+    electron_gl_renderer="$(value_of electron_vulkan_web_parity_windows_compare_electron_gl_renderer "$WINDOWS_VULKAN_ENV")"
+    electron_json_path="$(value_of electron_vulkan_web_parity_windows_electron_json "$WINDOWS_VULKAN_ENV")"
+    electron_proof_json_path="$(value_of electron_vulkan_web_parity_windows_electron_proof_json "$WINDOWS_VULKAN_ENV")"
+    compare_electron_proof_json_path="$(value_of electron_vulkan_web_parity_windows_compare_electron_proof "$WINDOWS_VULKAN_ENV")"
+    electron_png_path="$(value_of electron_vulkan_web_parity_windows_electron_png "$WINDOWS_VULKAN_ENV")"
+    vulkan_json_path="$(value_of electron_vulkan_web_parity_windows_vulkan_json "$WINDOWS_VULKAN_ENV")"
+    expected_vulkan_json_path="$(value_of electron_vulkan_web_parity_windows_compare_expected_vulkan_json_path "$WINDOWS_VULKAN_ENV")"
+    electron_json_sha256="$(value_of electron_vulkan_web_parity_windows_electron_json_sha256 "$WINDOWS_VULKAN_ENV")"
+    expected_captured_argb_sha256="$(value_of electron_vulkan_web_parity_windows_compare_expected_captured_argb_sha256 "$WINDOWS_VULKAN_ENV")"
+    proof_captured_argb_sha256="$(value_of electron_vulkan_web_parity_windows_compare_electron_proof_captured_argb_sha256 "$WINDOWS_VULKAN_ENV")"
+    source_html_sha256="$(value_of electron_vulkan_web_parity_windows_source_html_sha256 "$WINDOWS_VULKAN_ENV")"
+    expected_html_sha256="$(value_of electron_vulkan_web_parity_windows_compare_expected_html_sha256 "$WINDOWS_VULKAN_ENV")"
+    proof_html_sha256="$(value_of electron_vulkan_web_parity_windows_compare_electron_proof_html_sha256 "$WINDOWS_VULKAN_ENV")"
+    electron_png_sha256="$(value_of electron_vulkan_web_parity_windows_electron_png_sha256 "$WINDOWS_VULKAN_ENV")"
+    expected_png_sha256="$(value_of electron_vulkan_web_parity_windows_compare_expected_png_sha256 "$WINDOWS_VULKAN_ENV")"
+    proof_png_sha256="$(value_of electron_vulkan_web_parity_windows_compare_electron_proof_png_sha256 "$WINDOWS_VULKAN_ENV")"
+    vulkan_json_sha256="$(value_of electron_vulkan_web_parity_windows_vulkan_json_sha256 "$WINDOWS_VULKAN_ENV")"
+    vulkan_json_status="$(value_of electron_vulkan_web_parity_windows_vulkan_json_status "$WINDOWS_VULKAN_ENV")"
+    vulkan_json_reason="$(value_of electron_vulkan_web_parity_windows_vulkan_json_reason "$WINDOWS_VULKAN_ENV")"
+    vulkan_json_schema="$(value_of electron_vulkan_web_parity_windows_vulkan_json_schema "$WINDOWS_VULKAN_ENV")"
+    vulkan_json_producer="$(value_of electron_vulkan_web_parity_windows_vulkan_json_producer "$WINDOWS_VULKAN_ENV")"
+    vulkan_json_requested_backend="$(value_of electron_vulkan_web_parity_windows_vulkan_json_requested_backend "$WINDOWS_VULKAN_ENV")"
+    vulkan_json_backend="$(value_of electron_vulkan_web_parity_windows_vulkan_json_backend "$WINDOWS_VULKAN_ENV")"
+    vulkan_json_execution_mode="$(value_of electron_vulkan_web_parity_windows_vulkan_json_execution_mode "$WINDOWS_VULKAN_ENV")"
+    vulkan_json_entrypoint="$(value_of electron_vulkan_web_parity_windows_vulkan_json_entrypoint "$WINDOWS_VULKAN_ENV")"
+    vulkan_json_run_id="$(value_of electron_vulkan_web_parity_windows_vulkan_json_run_id "$WINDOWS_VULKAN_ENV")"
+    vulkan_json_width="$(value_of electron_vulkan_web_parity_windows_vulkan_json_width "$WINDOWS_VULKAN_ENV")"
+    vulkan_json_height="$(value_of electron_vulkan_web_parity_windows_vulkan_json_height "$WINDOWS_VULKAN_ENV")"
+    vulkan_json_pixel_count="$(value_of electron_vulkan_web_parity_windows_vulkan_json_pixel_count "$WINDOWS_VULKAN_ENV")"
+    vulkan_json_pixels_len="$(value_of electron_vulkan_web_parity_windows_vulkan_json_pixels_len "$WINDOWS_VULKAN_ENV")"
+    vulkan_json_px0="$(value_of electron_vulkan_web_parity_windows_vulkan_json_px0 "$WINDOWS_VULKAN_ENV")"
+    vulkan_json_uniform_argb="$(value_of electron_vulkan_web_parity_windows_vulkan_json_uniform_argb "$WINDOWS_VULKAN_ENV")"
+    expected_vulkan_json_sha256="$(value_of electron_vulkan_web_parity_windows_compare_expected_vulkan_json_sha256 "$WINDOWS_VULKAN_ENV")"
+    expected_vulkan_run_id="$(value_of electron_vulkan_web_parity_windows_compare_expected_vulkan_run_id "$WINDOWS_VULKAN_ENV")"
+    compare_vulkan_status="$(value_of electron_vulkan_web_parity_windows_compare_vulkan_status "$WINDOWS_VULKAN_ENV")"
+    compare_vulkan_reason="$(value_of electron_vulkan_web_parity_windows_compare_vulkan_reason "$WINDOWS_VULKAN_ENV")"
+    compare_vulkan_schema="$(value_of electron_vulkan_web_parity_windows_compare_vulkan_schema "$WINDOWS_VULKAN_ENV")"
+    compare_vulkan_producer="$(value_of electron_vulkan_web_parity_windows_compare_vulkan_producer "$WINDOWS_VULKAN_ENV")"
+    compare_vulkan_requested_backend="$(value_of electron_vulkan_web_parity_windows_compare_vulkan_requested_backend "$WINDOWS_VULKAN_ENV")"
+    compare_vulkan_backend="$(value_of electron_vulkan_web_parity_windows_compare_vulkan_backend "$WINDOWS_VULKAN_ENV")"
+    compare_vulkan_execution_mode="$(value_of electron_vulkan_web_parity_windows_compare_vulkan_execution_mode "$WINDOWS_VULKAN_ENV")"
+    compare_vulkan_entrypoint="$(value_of electron_vulkan_web_parity_windows_compare_vulkan_entrypoint "$WINDOWS_VULKAN_ENV")"
+    artifact_manifest_proof="$(value_of electron_vulkan_web_parity_windows_artifact_manifest_proof "$WINDOWS_VULKAN_ENV")"
+    artifact_manifest_proof_sha256="$(value_of electron_vulkan_web_parity_windows_artifact_manifest_proof_sha256 "$WINDOWS_VULKAN_ENV")"
+    artifact_manifest_hash_algorithm="$(value_of electron_vulkan_web_parity_windows_artifact_manifest_hash_algorithm "$WINDOWS_VULKAN_ENV")"
+    artifact_manifest_producer="$(value_of electron_vulkan_web_parity_windows_artifact_manifest_producer "$WINDOWS_VULKAN_ENV")"
+    artifact_manifest_schema="$(value_of electron_vulkan_web_parity_windows_artifact_manifest_schema "$WINDOWS_VULKAN_ENV")"
+    artifact_manifest_keys="$(value_of electron_vulkan_web_parity_windows_artifact_manifest_keys "$WINDOWS_VULKAN_ENV")"
+    artifact_manifest_field_count="$(value_of electron_vulkan_web_parity_windows_artifact_manifest_field_count "$WINDOWS_VULKAN_ENV")"
+    artifact_manifest_run_id="$(value_of electron_vulkan_web_parity_windows_artifact_manifest_run_id "$WINDOWS_VULKAN_ENV")"
+    if ! is_positive_int "$proof_width" ||
+       ! is_positive_int "$proof_height" ||
+       [ "$proof_width" != "$proof_native_width" ] ||
+       [ "$proof_height" != "$proof_native_height" ]; then
+        echo fail
+        return
+    fi
+    if ! is_positive_int "$expected_width" ||
+       ! is_positive_int "$expected_height" ||
+       ! is_positive_int "$electron_width" ||
+       ! is_positive_int "$electron_height" ||
+       ! is_positive_int "$vulkan_width" ||
+       ! is_positive_int "$vulkan_height" ||
+       ! is_positive_int "$electron_pixels" ||
+       ! is_positive_int "$vulkan_pixels" ||
+       ! is_positive_int "$vulkan_pixel_count" ||
+       ! is_positive_int "$simple_stdout_pixels" ||
+       [ "$requested_width" != "$expected_width" ] ||
+       [ "$requested_height" != "$expected_height" ] ||
+       [ "$simple_env_width" != "$requested_width" ] ||
+       [ "$simple_env_height" != "$requested_height" ] ||
+       [ "$expected_width" != "$electron_width" ] ||
+       [ "$expected_width" != "$vulkan_width" ] ||
+       [ "$expected_height" != "$electron_height" ] ||
+       [ "$expected_height" != "$vulkan_height" ] ||
+       [ "$electron_pixels" != "$vulkan_pixels" ] ||
+       [ "$vulkan_pixels" != "$vulkan_pixel_count" ] ||
+       [ "$simple_stdout_pixels" != "$vulkan_pixel_count" ] ||
+       [ "$proof_width" != "$expected_width" ] ||
+       [ "$proof_height" != "$expected_height" ]; then
+        echo fail
+        return
+    fi
+    expected_pixels=$((expected_width * expected_height))
+    expected_stdout_proof="status=pass;reason=pass;backend=vulkan;pixels=${vulkan_pixel_count};px0=${expected_argb};wrote=true"
+    expected_stdout_proof_sha256="$(sha256_text "$expected_stdout_proof")"
+    if [ "$electron_pixels" != "$expected_pixels" ] ||
+       [ "$requested_argb" != "$expected_argb" ] ||
+       [ "$simple_env_bg_dec" != "$requested_argb" ] ||
+       [ "$requested_rgb" != "224466" ] ||
+       [ "$simple_stdout_proof" != "$expected_stdout_proof" ] ||
+       [ "$simple_stdout_proof_sha256" != "$expected_stdout_proof_sha256" ] ||
+       [ "$simple_stdout_px0" != "$expected_argb" ] ||
+       [ "$px0_electron" != "$expected_argb" ] ||
+       [ "$px0_vulkan" != "$expected_argb" ] ||
+       ! is_uint32_dec "$requested_argb" ||
+       ! is_uint32_dec "$expected_argb" ||
+       ! is_uint32_dec "$simple_stdout_px0" ||
+       ! is_uint32_dec "$px0_electron" ||
+       ! is_uint32_dec "$px0_vulkan"; then
+        echo fail
+        return
+    fi
+    if ! is_positive_int "$expected_remote_debugging_port" ||
+       [ "$expected_remote_debugging_port" != "$electron_remote_debugging_port" ] ||
+       [ "$expected_remote_debugging_port" != "$proof_remote_debugging_port" ] ||
+       [ "$expected_captured_argb_path" != "$proof_captured_argb_path" ] ||
+       [ "$expected_captured_argb_path" != "$electron_json_path" ] ||
+       [ "$source_html_path" != "$expected_html_path" ] ||
+       [ "$expected_html_path" != "$proof_html_path" ] ||
+       [ "$expected_png_path" != "$proof_png_path" ] ||
+       [ "$expected_png_path" != "$electron_png_path" ] ||
+       [ "$expected_vulkan_json_path" != "$vulkan_json_path" ] ||
+       [ "$simple_env_output" != "$vulkan_json_path" ] ||
+       [ "$electron_proof_json_path" != "$compare_electron_proof_json_path" ]; then
+        echo fail
+        return
+    fi
+    if [ "$electron_json_sha256" != "$expected_captured_argb_sha256" ] ||
+       [ "$electron_json_sha256" != "$proof_captured_argb_sha256" ] ||
+       [ "$source_html_sha256" != "$expected_html_sha256" ] ||
+       [ "$expected_html_sha256" != "$proof_html_sha256" ] ||
+       [ "$electron_png_sha256" != "$expected_png_sha256" ] ||
+       [ "$electron_png_sha256" != "$proof_png_sha256" ] ||
+       [ "$vulkan_json_sha256" != "$expected_vulkan_json_sha256" ] ||
+       [ "$vulkan_json_status" != "$compare_vulkan_status" ] ||
+       [ "$vulkan_json_reason" != "$compare_vulkan_reason" ] ||
+       [ "$vulkan_json_schema" != "$compare_vulkan_schema" ] ||
+       [ "$vulkan_json_producer" != "$compare_vulkan_producer" ] ||
+       [ "$vulkan_json_requested_backend" != "$compare_vulkan_requested_backend" ] ||
+       [ "$vulkan_json_backend" != "$compare_vulkan_backend" ] ||
+       [ "$vulkan_json_execution_mode" != "$compare_vulkan_execution_mode" ] ||
+       [ "$vulkan_json_entrypoint" != "$compare_vulkan_entrypoint" ] ||
+       [ "$vulkan_json_width" != "$vulkan_width" ] ||
+       [ "$vulkan_json_height" != "$vulkan_height" ] ||
+       [ "$vulkan_json_pixel_count" != "$vulkan_pixel_count" ] ||
+       [ "$vulkan_json_pixels_len" != "$vulkan_pixel_count" ] ||
+       [ "$vulkan_json_px0" != "$px0_vulkan" ] ||
+       [ "$vulkan_json_uniform_argb" != "$expected_argb" ]; then
+        echo fail
+        return
+    fi
+    expected_artifact_manifest_proof="html_path=${source_html_path};html_sha256=${source_html_sha256};host_os=$(value_of electron_vulkan_web_parity_windows_host_os "$WINDOWS_VULKAN_ENV");wrapper_status=$(value_of electron_vulkan_web_parity_windows_status "$WINDOWS_VULKAN_ENV");wrapper_reason=$(value_of electron_vulkan_web_parity_windows_reason "$WINDOWS_VULKAN_ENV");request_width=${requested_width};request_height=${requested_height};request_bg_hex=${requested_rgb};request_bg_dec=${requested_argb};simple_bin=${simple_bin_path};simple_bin_source=${simple_bin_source};simple_bin_status=$(value_of electron_vulkan_web_parity_windows_simple_bin_status "$WINDOWS_VULKAN_ENV");simple_bin_kind=${simple_bin_kind};simple_bin_probe_exit_code=$(value_of electron_vulkan_web_parity_windows_simple_bin_probe_exit_code "$WINDOWS_VULKAN_ENV");simple_bin_sha256=${simple_bin_sha256};simple_bin_version=${simple_bin_version};electron_bin=${electron_bin_path};electron_bin_status=$(value_of electron_vulkan_web_parity_windows_electron_bin_status "$WINDOWS_VULKAN_ENV");electron_bin_kind=${electron_bin_kind};electron_bin_sha256=${electron_bin_sha256};vulkan_loader=${vulkan_loader_path};vulkan_loader_status=$(value_of electron_vulkan_web_parity_windows_vulkan_loader_status "$WINDOWS_VULKAN_ENV");vulkan_loader_sha256=${vulkan_loader_sha256};electron_launch_flags=${electron_launch_flags};electron_capture_exit_code=$(value_of electron_vulkan_web_parity_windows_electron_capture_exit_code "$WINDOWS_VULKAN_ENV");electron_remote_debugging_port=${electron_remote_debugging_port};electron_json_path=${electron_json_path};electron_json_sha256=${electron_json_sha256};electron_proof_json_path=${electron_proof_json_path};electron_proof_json_sha256=$(value_of electron_vulkan_web_parity_windows_electron_proof_json_sha256 "$WINDOWS_VULKAN_ENV");electron_proof_status=${proof_status};electron_proof_source=${proof_source};electron_proof_captured_argb_written=${proof_captured_argb_written};electron_proof_png_written=${proof_png_written};electron_proof_blur_or_tolerance_used=${proof_blur_or_tolerance_used};electron_proof_gpu_feature_status_matches_capture=${proof_gpu_feature_status_matches_capture};electron_proof_browser_gpu_info_matches_capture=${proof_browser_gpu_info_matches_capture};electron_proof_downsampled=${proof_downsampled};electron_proof_remote_debugging_port=${proof_remote_debugging_port};electron_vulkan_status=${electron_vulkan_status};electron_vulkan_reason=${electron_vulkan_reason};electron_vulkan=${electron_vulkan};electron_gpu_compositing=${electron_gpu_compositing};electron_hardware_supports_vulkan=${electron_hardware_supports_vulkan};electron_browser_target_gpu_info_status=${electron_browser_target_gpu_info_status};electron_display_type=${electron_display_type};electron_gl_implementation_parts=${electron_gl_implementation_parts};electron_skia_backend_type=${electron_skia_backend_type};electron_gl_renderer=${electron_gl_renderer};compare_exit_code=${compare_exit_code};compare_expected_captured_argb_path=${expected_captured_argb_path};compare_expected_captured_argb_sha256=${expected_captured_argb_sha256};compare_expected_html_path=${expected_html_path};compare_expected_html_sha256=${expected_html_sha256};compare_expected_png_path=${expected_png_path};compare_expected_png_sha256=${expected_png_sha256};compare_expected_vulkan_json_path=${expected_vulkan_json_path};compare_expected_vulkan_json_sha256=${expected_vulkan_json_sha256};compare_expected_vulkan_run_id=${expected_vulkan_run_id};compare_expected_width=${expected_width};compare_expected_height=${expected_height};compare_expected_argb=${expected_argb};compare_expected_pixel_count=${expected_pixels};compare_px0_electron=${px0_electron};compare_px0_vulkan=${px0_vulkan};compare_mismatches=$(value_of electron_vulkan_web_parity_windows_compare_mismatches "$WINDOWS_VULKAN_ENV");simple_render_exit_code=$(value_of electron_vulkan_web_parity_windows_simple_render_exit_code "$WINDOWS_VULKAN_ENV");simple_env_width=${simple_env_width};simple_env_height=${simple_env_height};simple_env_bg_dec=${simple_env_bg_dec};simple_env_output=${simple_env_output};simple_env_run_id=${simple_env_run_id};simple_env_execution_mode=${simple_env_execution_mode};simple_stdout_status_line_count=$(value_of electron_vulkan_web_parity_windows_simple_render_stdout_status_line_count "$WINDOWS_VULKAN_ENV");simple_stdout_proof=${simple_stdout_proof};simple_stdout_status=$(value_of electron_vulkan_web_parity_windows_simple_render_stdout_status "$WINDOWS_VULKAN_ENV");simple_stdout_reason=$(value_of electron_vulkan_web_parity_windows_simple_render_stdout_reason "$WINDOWS_VULKAN_ENV");simple_stdout_backend=$(value_of electron_vulkan_web_parity_windows_simple_render_stdout_backend "$WINDOWS_VULKAN_ENV");simple_stdout_pixels=${simple_stdout_pixels};simple_stdout_px0=${simple_stdout_px0};simple_stdout_wrote=$(value_of electron_vulkan_web_parity_windows_simple_render_stdout_wrote "$WINDOWS_VULKAN_ENV");simple_stdout_proof_sha256=${simple_stdout_proof_sha256};electron_png_path=${electron_png_path};electron_png_sha256=${electron_png_sha256};vulkan_json_path=${vulkan_json_path};vulkan_json_sha256=${vulkan_json_sha256};vulkan_json_status=${vulkan_json_status};vulkan_json_reason=${vulkan_json_reason};vulkan_json_schema=${vulkan_json_schema};vulkan_json_producer=${vulkan_json_producer};vulkan_json_backend=${vulkan_json_backend};vulkan_json_entrypoint=${vulkan_json_entrypoint};vulkan_json_requested_backend=${vulkan_json_requested_backend};vulkan_json_execution_mode=${vulkan_json_execution_mode};vulkan_json_run_id=$(value_of electron_vulkan_web_parity_windows_vulkan_json_run_id "$WINDOWS_VULKAN_ENV");vulkan_json_width=${vulkan_json_width};vulkan_json_height=${vulkan_json_height};vulkan_json_pixel_count=${vulkan_json_pixel_count};vulkan_json_pixels_len=${vulkan_json_pixels_len};vulkan_json_px0=${vulkan_json_px0};vulkan_json_uniform_argb=${vulkan_json_uniform_argb};run_id=$(value_of electron_vulkan_web_parity_windows_vulkan_run_id "$WINDOWS_VULKAN_ENV")"
+    expected_artifact_manifest_proof_sha256="$(sha256_text "$expected_artifact_manifest_proof")"
+    expected_artifact_manifest_keys="html_path|html_sha256|host_os|wrapper_status|wrapper_reason|request_width|request_height|request_bg_hex|request_bg_dec|simple_bin|simple_bin_source|simple_bin_status|simple_bin_kind|simple_bin_probe_exit_code|simple_bin_sha256|simple_bin_version|electron_bin|electron_bin_status|electron_bin_kind|electron_bin_sha256|vulkan_loader|vulkan_loader_status|vulkan_loader_sha256|electron_launch_flags|electron_capture_exit_code|electron_remote_debugging_port|electron_json_path|electron_json_sha256|electron_proof_json_path|electron_proof_json_sha256|electron_proof_status|electron_proof_source|electron_proof_captured_argb_written|electron_proof_png_written|electron_proof_blur_or_tolerance_used|electron_proof_gpu_feature_status_matches_capture|electron_proof_browser_gpu_info_matches_capture|electron_proof_downsampled|electron_proof_remote_debugging_port|electron_vulkan_status|electron_vulkan_reason|electron_vulkan|electron_gpu_compositing|electron_hardware_supports_vulkan|electron_browser_target_gpu_info_status|electron_display_type|electron_gl_implementation_parts|electron_skia_backend_type|electron_gl_renderer|compare_exit_code|compare_expected_captured_argb_path|compare_expected_captured_argb_sha256|compare_expected_html_path|compare_expected_html_sha256|compare_expected_png_path|compare_expected_png_sha256|compare_expected_vulkan_json_path|compare_expected_vulkan_json_sha256|compare_expected_vulkan_run_id|compare_expected_width|compare_expected_height|compare_expected_argb|compare_expected_pixel_count|compare_px0_electron|compare_px0_vulkan|compare_mismatches|simple_render_exit_code|simple_env_width|simple_env_height|simple_env_bg_dec|simple_env_output|simple_env_run_id|simple_env_execution_mode|simple_stdout_status_line_count|simple_stdout_proof|simple_stdout_status|simple_stdout_reason|simple_stdout_backend|simple_stdout_pixels|simple_stdout_px0|simple_stdout_wrote|simple_stdout_proof_sha256|electron_png_path|electron_png_sha256|vulkan_json_path|vulkan_json_sha256|vulkan_json_status|vulkan_json_reason|vulkan_json_schema|vulkan_json_producer|vulkan_json_backend|vulkan_json_entrypoint|vulkan_json_requested_backend|vulkan_json_execution_mode|vulkan_json_run_id|vulkan_json_width|vulkan_json_height|vulkan_json_pixel_count|vulkan_json_pixels_len|vulkan_json_px0|vulkan_json_uniform_argb|run_id"
+    expected_artifact_manifest_field_count="$(printf '%s\n' "$expected_artifact_manifest_keys" | awk -F'|' '{print NF}')"
+    if [ "$artifact_manifest_hash_algorithm" != "sha256" ] ||
+       [ "$artifact_manifest_producer" != "scripts/check/check-electron-vulkan-web-parity-windows.shs" ] ||
+       [ "$artifact_manifest_schema" != "windows-vulkan-artifact-manifest-v1" ] ||
+       [ "$artifact_manifest_keys" != "$expected_artifact_manifest_keys" ] ||
+       [ "$artifact_manifest_field_count" != "$expected_artifact_manifest_field_count" ] ||
+       [ "$artifact_manifest_proof" != "$expected_artifact_manifest_proof" ] ||
+       [ "$artifact_manifest_proof_sha256" != "$expected_artifact_manifest_proof_sha256" ]; then
+        echo fail
+        return
+    fi
+    case "$(value_of electron_vulkan_web_parity_windows_electron_bin_kind "$WINDOWS_VULKAN_ENV")" in
+        windows-cmd|windows-exe) ;;
+        *)
+            echo fail
+            return
+            ;;
+    esac
+    run_id="$(value_of electron_vulkan_web_parity_windows_vulkan_run_id "$WINDOWS_VULKAN_ENV")"
+    compare_run_id="$(value_of electron_vulkan_web_parity_windows_compare_vulkan_run_id "$WINDOWS_VULKAN_ENV")"
+    expected_run_id="$(value_of electron_vulkan_web_parity_windows_compare_expected_vulkan_run_id "$WINDOWS_VULKAN_ENV")"
+    if [ "$run_id" = "" ] || [ "$compare_run_id" = "" ] || [ "$expected_run_id" = "" ] ||
+       ! is_sha256_hex "$run_id" ||
+       [ "$run_id" != "$compare_run_id" ] || [ "$run_id" != "$expected_run_id" ] ||
+       [ "$vulkan_json_run_id" != "$run_id" ] ||
+       [ "$simple_env_run_id" != "$run_id" ] ||
+       [ "$artifact_manifest_run_id" != "$run_id" ] ||
+       [ "$simple_env_execution_mode" != "interpret" ]; then
+        echo fail
+        return
+    fi
+    echo pass
+}
+
+linux_status="$(gate_status_from_keys "$NATIVE_ENV" linux_vulkan_render_log_compare_status)"
+macos_status="$(gate_status_from_keys "$NATIVE_ENV" macos_metal_render_log_compare_status)"
+windows_status="$(gate_status_from_keys "$NATIVE_ENV" windows_d3d12_render_log_compare_status)"
+windows_vulkan_status="$(windows_vulkan_status)"
+ios_status="$(gate_status_from_keys "$MOBILE_ENV" \
+    tauri_mobile_renderer_parity_ios_status \
+    tauri_mobile_renderer_parity_ios_render_log_metal_marker_status \
+    tauri_mobile_renderer_parity_ios_mdi_proof_status \
+    tauri_mobile_renderer_parity_ios_screenshot_artifact_status)"
+android_status="$(gate_status_from_keys "$MOBILE_ENV" \
+    tauri_mobile_renderer_parity_android_status \
+    tauri_mobile_renderer_parity_android_render_log_vulkan_marker_status \
+    tauri_mobile_renderer_parity_android_render_log_foreground_marker_status \
+    tauri_mobile_renderer_parity_android_mdi_proof_status \
+    tauri_mobile_renderer_parity_android_screenshot_artifact_status)"
+perf_4k_status="$(gate_status_from_keys "$PERF_4K_ENV" \
+    gui_showcase_4k_200fps_status \
+    gui_showcase_4k_200fps_rss_status \
+    gui_showcase_4k_200fps_checksum_status \
+    gui_showcase_4k_200fps_retained_render_mode_status \
+    gui_showcase_4k_200fps_retained_redraw_status)"
+perf_8k_status="$(gate_status_from_keys "$PERF_8K_ENV" \
+    gui_showcase_8k_perf_status \
+    gui_showcase_8k_perf_rss_status \
+    gui_showcase_8k_perf_checksum_status \
+    gui_showcase_8k_perf_retained_render_mode_status \
+    gui_showcase_8k_perf_retained_redraw_status)"
+if [ "$perf_4k_status" = "pass" ] && [ "$perf_8k_status" = "pass" ]; then
+    retained_perf_status=pass
+elif [ "$perf_4k_status" = "fail" ] || [ "$perf_8k_status" = "fail" ]; then
+    retained_perf_status=fail
+else
+    retained_perf_status=missing
+fi
+html_css_status="$(gate_status_from_keys "$HTML_CSS_ENV" \
+    html_css_full_rendering_goal_status \
+    html_css_full_rendering_goal_all_html_elements_ready_status \
+    html_css_full_rendering_goal_all_css_properties_ready_status \
+    html_css_full_rendering_goal_animation_css_status)"
+production_status="$(gate_status_from_keys "$PRODUCTION_ENV" production_gui_web_renderer_parity_status)"
+fresh_status="$(freshness_status)"
+
+proven=""
+missing=""
+failed=""
+stale_gates=""
+invalid_gates=""
+record_gate() {
+    gate="$1"
+    gate_status="$2"
+    case "$gate_status" in
+        pass) proven="$(append_list "$proven" "$gate")" ;;
+        missing) missing="$(append_list "$missing" "$gate")" ;;
+        stale)
+            stale_gates="$(append_list "$stale_gates" "$gate")"
+            failed="$(append_list "$failed" "$gate")"
+            ;;
+        invalid)
+            invalid_gates="$(append_list "$invalid_gates" "$gate")"
+            failed="$(append_list "$failed" "$gate")"
+            ;;
+        *) failed="$(append_list "$failed" "$gate")" ;;
+    esac
+}
+
+record_gate linux-vulkan-renderdoc "$linux_status"
+record_gate macos-metal-xcode-gpu-capture "$macos_status"
+record_gate windows-d3d12-pix "$windows_status"
+record_gate windows-electron-vulkan-parity "$windows_vulkan_status"
+record_gate ios-tauri-wkwebview-metal "$ios_status"
+record_gate android-tauri-webview-vulkan "$android_status"
+record_gate retained-4k-8k-current-source "$retained_perf_status"
+record_gate full-html-css "$html_css_status"
+record_gate production-gui-web-parity "$production_status"
+record_gate cross-platform-freshness "$fresh_status"
+
+count_list() {
+    if [ "$1" = "" ]; then
+        echo 0
+    else
+        printf '%s\n' "$1" | awk -F'|' '{ print NF }'
+    fi
+}
+
+proven_count="$(count_list "$proven")"
+missing_count="$(count_list "$missing")"
+failed_count="$(count_list "$failed")"
+if [ "$missing" = "" ]; then
+    remaining="$failed"
+elif [ "$failed" = "" ]; then
+    remaining="$missing"
+else
+    remaining="$(append_list "$missing" "$failed")"
+fi
+remaining_count="$(count_list "$remaining")"
+
+status=pass
+reason=pass
+if [ "$failed_count" != "0" ]; then
+    status=fail
+    if [ "$failed" = "$stale_gates" ]; then
+        reason="stale-live-gates-exceed-${MAX_EVIDENCE_AGE_HOURS}h"
+    elif [ "$failed" = "$invalid_gates" ]; then
+        reason=invalid-live-gate-evidence
+    else
+        reason=failed-live-gates
+    fi
+elif [ "$missing_count" != "0" ]; then
+    status=incomplete
+    reason=missing-live-gates
+fi
+
+{
+    echo "gui_web_2d_platform_evidence_bundle_status=$status"
+    echo "gui_web_2d_platform_evidence_bundle_reason=$reason"
+    echo "gui_web_2d_platform_evidence_bundle_total_gate_count=10"
+    echo "gui_web_2d_platform_evidence_bundle_proven_gate_count=$proven_count"
+    echo "gui_web_2d_platform_evidence_bundle_missing_gate_count=$missing_count"
+    echo "gui_web_2d_platform_evidence_bundle_failed_gate_count=$failed_count"
+    echo "gui_web_2d_platform_evidence_bundle_remaining_gate_count=$remaining_count"
+    echo "gui_web_2d_platform_evidence_bundle_proven_gates=$proven"
+    echo "gui_web_2d_platform_evidence_bundle_missing_gates=$missing"
+    echo "gui_web_2d_platform_evidence_bundle_failed_gates=$failed"
+    echo "gui_web_2d_platform_evidence_bundle_stale_gates=$stale_gates"
+    echo "gui_web_2d_platform_evidence_bundle_invalid_gates=$invalid_gates"
+    echo "gui_web_2d_platform_evidence_bundle_max_evidence_age_hours=$MAX_EVIDENCE_AGE_HOURS"
+    echo "gui_web_2d_platform_evidence_bundle_remaining_gates=$remaining"
+    echo "gui_web_2d_platform_evidence_bundle_linux_vulkan_renderdoc_status=$linux_status"
+    echo "gui_web_2d_platform_evidence_bundle_macos_metal_xcode_gpu_capture_status=$macos_status"
+    echo "gui_web_2d_platform_evidence_bundle_windows_d3d12_pix_status=$windows_status"
+    echo "gui_web_2d_platform_evidence_bundle_windows_electron_vulkan_parity_status=$windows_vulkan_status"
+    echo "gui_web_2d_platform_evidence_bundle_ios_tauri_wkwebview_metal_status=$ios_status"
+    echo "gui_web_2d_platform_evidence_bundle_android_tauri_webview_vulkan_status=$android_status"
+    echo "gui_web_2d_platform_evidence_bundle_retained_4k_8k_current_source_status=$retained_perf_status"
+    echo "gui_web_2d_platform_evidence_bundle_full_html_css_status=$html_css_status"
+    echo "gui_web_2d_platform_evidence_bundle_production_gui_web_parity_status=$production_status"
+    echo "gui_web_2d_platform_evidence_bundle_cross_platform_freshness_status=$fresh_status"
+    echo "gui_web_2d_platform_evidence_bundle_native_env=$NATIVE_ENV"
+    echo "gui_web_2d_platform_evidence_bundle_mobile_env=$MOBILE_ENV"
+    echo "gui_web_2d_platform_evidence_bundle_perf_4k_env=$PERF_4K_ENV"
+    echo "gui_web_2d_platform_evidence_bundle_perf_8k_env=$PERF_8K_ENV"
+    echo "gui_web_2d_platform_evidence_bundle_html_css_env=$HTML_CSS_ENV"
+    echo "gui_web_2d_platform_evidence_bundle_production_env=$PRODUCTION_ENV"
+    echo "gui_web_2d_platform_evidence_bundle_freshness_env=$FRESHNESS_ENV"
+    echo "gui_web_2d_platform_evidence_bundle_windows_vulkan_env=$WINDOWS_VULKAN_ENV"
+    echo "gui_web_2d_platform_evidence_bundle_report=$REPORT_PATH"
+} >"$OUT_ENV"
+
+{
+    echo "# GUI/Web/2D Platform Evidence Bundle"
+    echo
+    echo "- Status: $status"
+    echo "- Reason: $reason"
+    echo "- Proven gates: $proven_count"
+    echo "- Missing gates: $missing_count"
+    echo "- Failed gates: $failed_count"
+    echo "- Stale gates (older than ${MAX_EVIDENCE_AGE_HOURS}h): $stale_gates"
+    echo "- Invalid (corrupt/truncated) gate evidence: $invalid_gates"
+    echo "- Remaining gates: $remaining"
+    echo
+    echo "This checker is non-launching. It consumes env files from the platform"
+    echo "render-log, mobile, retained performance, HTML/CSS, production parity, and"
+    echo "freshness checkers. Missing evidence remains incomplete; failed evidence"
+    echo "remains failed. Upstream env files must contain their expected keys"
+    echo "(otherwise: invalid) and be newer than MAX_EVIDENCE_AGE_HOURS=${MAX_EVIDENCE_AGE_HOURS}h"
+    echo "(otherwise: stale); both are treated as failures, never as proof."
+} >"$REPORT_PATH"
+
+cat "$OUT_ENV"
+if [ "$status" = "pass" ]; then
+    exit 0
+fi
+exit 1

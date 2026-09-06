@@ -1,0 +1,95 @@
+use std.spec.*
+use std.io_runtime.{file_read}
+use compiler.driver.driver_build.incremental.{
+    ChangeKind, IncrChange, IncrChangeSet, DependencyEntry, FileFingerprint,
+    incremental_append_deleted_changes,
+    incremental_propagate_dependency_changes
+}
+
+fn test_fingerprint(path: text) -> FileFingerprint:
+    FileFingerprint(path: path, content_hash: path, modified_time: 0, size: 0)
+
+fn test_entry(source: text, dependencies: [text]) -> DependencyEntry:
+    DependencyEntry(
+        source: source,
+        fingerprint: test_fingerprint(source),
+        dependencies: dependencies,
+        outputs: [],
+        deps_iface: ""
+    )
+
+fn initial_changes(paths: [text]) -> IncrChangeSet:
+    var result = IncrChangeSet.empty()
+    for path in paths:
+        result = result.add(path, ChangeKind.Modified)
+    result
+
+describe "incremental change membership indices":
+    it "preserves duplicate initial events and their order":
+        val result = incremental_propagate_dependency_changes(
+            initial_changes(["a.spl", "a.spl", "b.spl"]), {})
+        expect(result.changed_files()).to_equal(["a.spl", "a.spl", "b.spl"])
+
+    it "appends each dependent once after duplicate dependency edges":
+        val entries: {text: DependencyEntry} = {
+            "b.spl": test_entry("b.spl", ["a.spl", "a.spl"])
+        }
+        val result = incremental_propagate_dependency_changes(
+            initial_changes(["a.spl"]), entries)
+        expect(result.changed_files()).to_equal(["a.spl", "b.spl"])
+        expect(result.changes[1].kind).to_equal(ChangeKind.DependencyChanged)
+
+    it "keeps dependency invalidation one hop in append order":
+        val entries: {text: DependencyEntry} = {
+            "b.spl": test_entry("b.spl", ["a.spl"]),
+            "c.spl": test_entry("c.spl", ["b.spl"])
+        }
+        val result = incremental_propagate_dependency_changes(
+            initial_changes(["a.spl"]), entries)
+        expect(result.changed_files()).to_equal(["a.spl", "b.spl"])
+
+    it "adds only the initial source dependent in a dependency cycle":
+        val entries: {text: DependencyEntry} = {
+            "a.spl": test_entry("a.spl", ["b.spl"]),
+            "b.spl": test_entry("b.spl", ["a.spl"])
+        }
+        val result = incremental_propagate_dependency_changes(
+            initial_changes(["a.spl"]), entries)
+        expect(result.changed_files()).to_equal(["a.spl", "b.spl"])
+
+    it "does not propagate a deleted path through the dependency graph":
+        val entries: {text: DependencyEntry} = {
+            "b.spl": test_entry("b.spl", ["a.spl"])
+        }
+        val deleted = IncrChangeSet(
+            changes: [IncrChange(path: "a.spl", kind: ChangeKind.Deleted)])
+        val result = incremental_propagate_dependency_changes(deleted, entries)
+        expect(result.changed_files()).to_equal(["a.spl"])
+        expect(result.deleted()).to_equal(["a.spl"])
+
+    it "keeps cached-path order and ignores duplicate live source paths":
+        val result = incremental_append_deleted_changes(
+            IncrChangeSet.empty(),
+            ["live.spl", "live.spl"],
+            ["z.spl", "live.spl", "a.spl"]
+        )
+        expect(result.changed_files()).to_equal(["z.spl", "a.spl"])
+        expect(result.deleted()).to_equal(["z.spl", "a.spl"])
+
+    it "keeps empty inputs empty and compares complete path text":
+        val empty = incremental_append_deleted_changes(
+            IncrChangeSet.empty(), [], [])
+        expect(empty.is_empty()).to_equal(true)
+
+        val exact = incremental_append_deleted_changes(
+            IncrChangeSet.empty(), ["same.spl"], ["same.spl", "same.splx"])
+        expect(exact.changed_files()).to_equal(["same.splx"])
+
+    it "keeps membership indices local to one detection call":
+        val source = file_read("src/compiler/80.driver/driver_build/incremental.spl")
+        expect(source).to_contain("var source_paths: {text: bool} = {}")
+        expect(source).to_contain("var changed_paths: {text: bool} = {}")
+        expect(source.contains("self.source_paths")).to_equal(false)
+        expect(source.contains("self.changed_paths")).to_equal(false)
+        expect(source).to_contain("while change_index < result.changes.len()")
+        expect(source.contains("changes.changed_files().contains(src)")).to_equal(false)

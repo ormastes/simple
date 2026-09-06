@@ -1,0 +1,142 @@
+# codex-impl
+# Owner-local static-on MC/DC probe registry. The coordinator builds one frozen
+# owner table; worker hooks bind only, and begin/condition/end are allocation-free.
+
+use std.common.mcdc.model.{
+    McdcEvaluation, McdcMode, McdcPolicy, mcdc_default_policy
+}
+use std.nogc_sync_mut.mcdc.dynamic_aspect.{McdcDynamicAspect, mcdc_dynamic_storage_error}
+use std.nogc_sync_mut.mcdc.probe_registry.{
+    MCDC_PROBE_REGISTRY_BYTES_PER_OWNER, McdcProbeRegistry,
+    mcdc_probe_current_owner_id
+}
+use std.nogc_sync_mut.runtime.thread_local.{rt_thread_local_new, rt_thread_local_get, rt_thread_local_set}
+use std.nogc_sync_mut.atomic.{AtomicI64, MemoryOrdering, atomic_i64_new}
+
+var _mcdc_static_registry = McdcProbeRegistry.create(1, 1)
+var _mcdc_static_policy = mcdc_default_policy(McdcMode.StaticOn)
+var _mcdc_static_configured = false
+var _mcdc_static_published: AtomicI64 = atomic_i64_new(0)
+var _mcdc_static_tls = rt_thread_local_new()
+
+fn mcdc_static_bind_owner(owner_id: i64) -> bool:
+    val slot = _mcdc_static_registry.slot_of(owner_id)
+    if slot < 0: return false
+    rt_thread_local_set(_mcdc_static_tls, slot + 1)
+    true
+
+fn mcdc_static_local_aspect() -> McdcDynamicAspect?:
+    val encoded_slot = rt_thread_local_get(_mcdc_static_tls)
+    if encoded_slot <= 0: return nil
+    _mcdc_static_registry.aspect_at(encoded_slot - 1)
+
+pub fn mcdc_static_probe_configure_for_owners(
+    policy: McdcPolicy, owner_ids: [i64]
+) -> bool:
+    if policy.mode != McdcMode.StaticOn or owner_ids.len() == 0: return false
+    if _mcdc_static_configured:
+        return (policy.owner_bytes == _mcdc_static_policy.owner_bytes +
+                MCDC_PROBE_REGISTRY_BYTES_PER_OWNER and
+            policy.global_bytes == _mcdc_static_policy.global_bytes and
+            policy.max_conditions == _mcdc_static_policy.max_conditions and
+            policy.max_nesting == _mcdc_static_policy.max_nesting and
+            policy.retain_unique_cause == _mcdc_static_policy.retain_unique_cause and
+            policy.overflow == _mcdc_static_policy.overflow)
+    if policy.owner_bytes <= MCDC_PROBE_REGISTRY_BYTES_PER_OWNER: return false
+    var capsule_policy = policy
+    capsule_policy.owner_bytes = policy.owner_bytes - MCDC_PROBE_REGISTRY_BYTES_PER_OWNER
+    if mcdc_dynamic_storage_error(capsule_policy) != "": return false
+    var previous = 0
+    for owner_id in owner_ids:
+        if owner_id <= previous: return false
+        previous = owner_id
+    var replacement = McdcProbeRegistry.create(policy.global_bytes, policy.owner_bytes)
+    if owner_ids.len() > replacement.owner_limit: return false
+    for owner_id in owner_ids:
+        if not replacement.install(
+                McdcDynamicAspect.create_direct_static(owner_id, capsule_policy)):
+            return false
+    _mcdc_static_registry = replacement
+    _mcdc_static_policy = capsule_policy
+    _mcdc_static_configured = true
+    _mcdc_static_published.store(1, MemoryOrdering.Release)
+    # Binding is best-effort: a stopped/parked worker binds itself through its
+    # hook. Unknown execution owners remain safely dormant.
+    mcdc_static_bind_owner(mcdc_probe_current_owner_id())
+    true
+
+pub fn mcdc_static_probe_configure(policy: McdcPolicy) -> bool:
+    mcdc_static_probe_configure_for_owners(
+        policy, [mcdc_probe_current_owner_id()])
+
+pub fn mcdc_static_probe_configure_bytes(global_bytes: i64, owner_bytes: i64) -> bool:
+    if owner_bytes <= 0 or global_bytes < owner_bytes: return false
+    var policy = mcdc_default_policy(McdcMode.StaticOn)
+    policy.owner_bytes = owner_bytes
+    policy.global_bytes = global_bytes
+    mcdc_static_probe_configure(policy)
+
+pub fn mcdc_static_probe_register_owner(owner_id: i64) -> bool:
+    if not _mcdc_static_configured: return false
+    if _mcdc_static_published.load(MemoryOrdering.Acquire) == 0: return false
+    if owner_id != mcdc_probe_current_owner_id(): return false
+    # Publication freezes the owner table. Unknown workers fail closed; the
+    # parent-authoritative coordinator must predeclare every execution owner.
+    mcdc_static_bind_owner(owner_id)
+
+pub fn mcdc_static_probe_register_current_owner() -> bool:
+    mcdc_static_probe_register_owner(mcdc_probe_current_owner_id())
+
+pub fn mcdc_static_probe_worker_spawn_hook() -> bool:
+    mcdc_static_probe_register_current_owner()
+
+pub fn mcdc_static_probe_begin(decision_id: i64) -> i64:
+    if _mcdc_static_published.load(MemoryOrdering.Acquire) == 0: return 0
+    if val aspect = mcdc_static_local_aspect():
+        return aspect.begin_evaluation(aspect.owner_id, decision_id)
+    0
+
+pub fn mcdc_static_probe_condition(token: i64, ordinal: i64, result: bool):
+    if token == 0: return
+    if val aspect = mcdc_static_local_aspect():
+        aspect.observe_condition(aspect.owner_id, token, ordinal, result)
+
+pub fn mcdc_static_probe_mask_range(token: i64, start: i64, end: i64, result: bool, mask_when_true: bool):
+    if token == 0: return
+    if val aspect = mcdc_static_local_aspect():
+        aspect.mark_masked_range(aspect.owner_id, token, start, end, result == mask_when_true)
+
+pub fn mcdc_static_probe_end(token: i64, outcome: bool):
+    if token == 0: return
+    if val aspect = mcdc_static_local_aspect():
+        aspect.finish_evaluation(aspect.owner_id, token, outcome)
+
+pub fn mcdc_static_probe_abort(token: i64):
+    if token == 0: return
+    if val aspect = mcdc_static_local_aspect():
+        val stride = aspect.policy.max_nesting + 1
+        aspect.abort_decision(aspect.owner_id, token / stride)
+
+pub fn mcdc_static_probe_owner_recorded_count(owner_id: i64) -> i64:
+    if val aspect = _mcdc_static_registry.find(owner_id): return aspect.recorded_count()
+    0
+
+pub fn mcdc_static_probe_owner_dropped_count(owner_id: i64) -> i64:
+    if val aspect = _mcdc_static_registry.find(owner_id): return aspect.dropped_count()
+    0
+
+pub fn mcdc_static_probe_owner_overwritten_count(owner_id: i64) -> i64:
+    if val aspect = _mcdc_static_registry.find(owner_id): return aspect.overwritten_count()
+    0
+
+pub fn mcdc_static_probe_owner_evaluation_at(owner_id: i64, index: i64) -> McdcEvaluation:
+    _mcdc_static_registry.find(owner_id).?.recorder.?.evaluation_at(index)
+
+pub fn mcdc_static_probe_owner_saturated(owner_id: i64) -> bool:
+    if val aspect = _mcdc_static_registry.find(owner_id):
+        if aspect.recorder == nil: return true
+        return aspect.recorder.?.saturated()
+    true
+
+pub fn mcdc_static_probe_owner_ids() -> [i64]:
+    _mcdc_static_registry.sorted_owner_ids()

@@ -1,0 +1,48 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-LIB
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+# Datagram behavior mirror: one socket connected to a peer, exchanging
+# bytes through send/recv instead of send_to/recv_from, plus close
+# state observation. Exercises the eager-future contract end to end.
+
+use std.spec.step
+use std.nogc_async_mut.host_io.net.{AsyncUdpSocket}
+use std.async.poll.{Poll}
+
+describe "AsyncUdpSocket connected mode":
+    # @manual scenario evidence
+    it "connects to a peer and reports open":
+        # @req REQ-SSPEC-LIB
+        step("bind both ends and connect one to the other")
+        val peer = AsyncUdpSocket.bind("127.0.0.1:0").unwrap()
+        val client = AsyncUdpSocket.bind("127.0.0.1:0").unwrap()
+        expect(client.connect(peer.local_addr().unwrap()).is_ok()).to_equal(true)
+        expect(client.is_open()).to_equal(true)
+        client.close()
+        peer.close()
+
+    it "delivers a send to the connected peer with exact bytes":
+        # @req REQ-SSPEC-LIB
+        step("send three bytes, receive all three")
+        val peer = AsyncUdpSocket.bind("127.0.0.1:0").unwrap()
+        val client = AsyncUdpSocket.bind("127.0.0.1:0").unwrap()
+        client.connect(peer.local_addr().unwrap())
+        # oracle: ASCII "ok!" = [111, 107, 33]
+        match client.send([111, 107, 33]).poll():
+            case Poll.Ready(Ok(n)): expect(n).to_equal(3)
+            case _: expect(false).to_equal(true)
+        var data = match peer.recv_from(16).poll():
+            case Poll.Ready(Ok(pair)): pair[0]
+            case _: panic("recv failed")
+        expect(data.len()).to_equal(3)
+        expect(data[2]).to_equal(33)
+        client.close()
+        peer.close()
+
+    it "close flips is_open to false":
+        # @req REQ-SSPEC-LIB
+        step("bind, close, observe state")
+        val sock = AsyncUdpSocket.bind("127.0.0.1:0").unwrap()
+        sock.close()
+        expect(sock.is_open()).to_equal(false)

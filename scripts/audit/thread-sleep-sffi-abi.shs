@@ -1,0 +1,54 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT INT TERM
+
+find "$root/src" "$root/test" -type f -name '*.spl' \
+    ! -path '*/compiler_rust/vendor/*' ! -path '*/runtime/vendor/*' \
+    -exec grep -lZ -E '^[[:space:]]*((pub[[:space:]]+)?extern fn[[:space:]]+)?rt_thread_sleep[(]' {} + \
+    >"$work/targets" || true
+
+result=$(xargs -0 -r -n 1000 perl -ne '
+    if (!defined($last_file) || $ARGV ne $last_file) {
+        $previous = "";
+        $last_file = $ARGV;
+    }
+    if (/^\s*(?:pub\s+)?extern fn rt_thread_sleep\(/) {
+        $declarations += 1;
+        if ($previous !~ /\@unsafe\(.*capabilities:\s*\[ffi\]/) {
+            print STDERR "$ARGV:$.: declaration lacks FFI authority\n";
+            $bad = 1;
+        }
+        if (/->\s*/) {
+            print STDERR "$ARGV:$.: declaration fabricates a return value\n";
+            $bad = 1;
+        }
+    }
+    if (/^\s*rt_thread_sleep\(/) {
+        $calls += 1;
+        if ($previous !~ /unsafe\(capabilities:\s*\[ffi\]\):/) {
+            print STDERR "$ARGV:$.: call lacks minimal lexical FFI authority\n";
+            $bad = 1;
+        }
+    }
+    $previous = $_;
+    END {
+        print "$declarations $calls\n";
+        exit 1 if $bad;
+    }
+' <"$work/targets")
+
+declarations=$(printf '%s\n' "$result" | awk '{print $1}')
+calls=$(printf '%s\n' "$result" | awk '{print $2}')
+
+if [ "$declarations" -ne 40 ] || [ "$calls" -ne 55 ]; then
+    echo "thread sleep declaration/call inventory changed: declarations=$declarations calls=$calls" >&2
+    exit 1
+fi
+
+grep -q '^void rt_thread_sleep(int64_t millis)' "$root/src/runtime/runtime_thread.c"
+grep -q '^pub extern "C" fn rt_thread_sleep(millis: i64)' "$root/src/compiler_rust/runtime/src/executor.rs"
+
+echo "thread sleep SFFI ABI audit: PASS (40 void declarations and 55 calls carry explicit FFI authority; C/Rust providers agree)"

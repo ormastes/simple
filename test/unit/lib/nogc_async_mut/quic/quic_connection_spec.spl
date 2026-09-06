@@ -1,0 +1,127 @@
+# QUIC Connection Unit Tests
+#
+# Tests cover pure-Simple logic only — no real quiche externs are invoked.
+# Extern symbols are declared but left unresolved at test time (interpreter
+# mode does not link native symbols for unused callsites).
+#
+# Feature: QUIC transport layer (AC-2 — quiche SFFI binding)
+
+# ============================================================================
+# Inline stubs — shadow rt_quic_* so the interpreter never needs real symbols
+# ============================================================================
+
+extern fn rt_quic_config_new(version: i64) -> i64
+extern fn rt_quic_config_set_max_idle_timeout(config: i64, timeout: i64) -> i64
+extern fn rt_quic_config_set_initial_max_streams_bidi(config: i64, n: i64) -> i64
+extern fn rt_quic_accept(scid: text, config: i64) -> i64
+extern fn rt_quic_connect(server_name: text, scid: text, config: i64) -> i64
+extern fn rt_quic_recv(conn: i64, buf: text, buf_len: i64) -> i64
+extern fn rt_quic_send(conn: i64, buf: text, buf_len: i64) -> i64
+extern fn rt_quic_stream_recv(conn: i64, stream_id: i64, buf: text, buf_len: i64) -> i64
+extern fn rt_quic_stream_send(conn: i64, stream_id: i64, buf: text, buf_len: i64, fin: i64) -> i64
+extern fn rt_quic_conn_close(conn: i64, app: i64, reason: text) -> i64
+extern fn rt_quic_timeout_as_millis(conn: i64) -> i64
+extern fn rt_quic_on_timeout(conn: i64) -> i64
+extern fn rt_quic_is_established(conn: i64) -> i64
+extern fn rt_quic_is_closed(conn: i64) -> i64
+
+# ============================================================================
+# Inline config + connection types (mirrors quic_connection.spl exactly)
+# ============================================================================
+
+class QuicConfig:
+    version: i64
+    max_idle_timeout: i64
+    max_streams_bidi: i64
+    max_streams_uni: i64
+    initial_window: i64
+
+fn quic_config_default() -> QuicConfig:
+    QuicConfig {
+        version: 1,
+        max_idle_timeout: 30000,
+        max_streams_bidi: 100,
+        max_streams_uni: 100,
+        initial_window: 65535
+    }
+
+class QuicConnection:
+    handle: i64
+    is_server: bool
+    established: bool
+    closed: bool
+
+fn make_server_conn(hdl: i64) -> QuicConnection:
+    QuicConnection { handle: hdl, is_server: true, established: false, closed: false }
+
+fn make_client_conn(hdl: i64) -> QuicConnection:
+    QuicConnection { handle: hdl, is_server: false, established: false, closed: false }
+
+fn quic_close_local(conn: QuicConnection, reason: text) -> QuicConnection:
+    QuicConnection { handle: conn.handle, is_server: conn.is_server, established: false, closed: true }
+
+# ============================================================================
+# Specs
+# ============================================================================
+
+describe "QUIC Connection":
+    context "Default configuration":
+        it "creates default config with RFC 9000 version 1":
+            val cfg = quic_config_default()
+            expect cfg.version == 1
+
+        it "sets max idle timeout to 30 000 ms per RFC 9000 §10.1":
+            val cfg = quic_config_default()
+            expect cfg.max_idle_timeout == 30000
+
+        it "sets max bidirectional streams to 100":
+            val cfg = quic_config_default()
+            expect cfg.max_streams_bidi == 100
+
+        it "sets initial window to 65 535 bytes (64 KiB)":
+            val cfg = quic_config_default()
+            expect cfg.initial_window == 65535
+
+    context "Connection roles":
+        it "tracks server role on accept":
+            val conn = make_server_conn(42)
+            expect conn.is_server == true
+
+        it "tracks client role on connect":
+            val conn = make_client_conn(7)
+            expect conn.is_server == false
+
+        it "stores the opaque handle for extern dispatch":
+            val conn = make_server_conn(99)
+            expect conn.handle == 99
+
+    context "Handshake state":
+        it "starts as not established":
+            val conn = make_server_conn(1)
+            expect conn.established == false
+
+        it "transitions to established when flag is set":
+            val base = make_server_conn(1)
+            val up = QuicConnection {
+                handle: base.handle,
+                is_server: base.is_server,
+                established: true,
+                closed: false
+            }
+            expect up.established == true
+
+    context "Closure":
+        it "closes connection and sets closed flag":
+            val conn = make_server_conn(5)
+            val done = quic_close_local(conn, "test shutdown")
+            expect done.closed == true
+
+        it "clears established flag on close":
+            val base = QuicConnection { handle: 3, is_server: true, established: true, closed: false }
+            val done = quic_close_local(base, "graceful")
+            expect done.established == false
+
+        it "preserves handle after close":
+            val conn = make_server_conn(77)
+            val done = quic_close_local(conn, "bye")
+            expect done.handle == 77

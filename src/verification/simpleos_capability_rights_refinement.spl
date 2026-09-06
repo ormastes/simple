@@ -1,0 +1,226 @@
+# First implementation-linked SimpleOS FV2 slice.
+#
+# The real product function is executed for every pair in the complete 9-bit
+# rights domain. Raw Lean output can establish model_proven only. Promotion to
+# source_refined additionally requires a typed proof receipt and independent
+# replay closure bound to the exact product/model behavior hashes.
+
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.assurance.formal_receipt.{TrustManifestV1,
+    VerificationCacheKeyV1, ProofReceiptV1}
+use compiler.common.assurance.formal_status.{FormalStatus}
+use compiler.common.assurance.replay_receipt.{IndependentReplayClosureV1}
+use compiler.common.assurance.trust_audit.{audit_lean_axiom_report}
+use os.kernel.types.capability_types.{capability_rights_allow}
+
+val CAPABILITY_RIGHTS_DOMAIN_SIZE_V1: i64 = 512
+val CAPABILITY_RIGHTS_CASE_COUNT_V1: i64 = 262144
+val CAPABILITY_RIGHTS_HASH_CHUNK_V1: i64 = 4096
+
+fn capability_rights_spec_v1(held_rights: u32, required_rights: u32) -> bool:
+    if required_rights == 0u32: return false
+    if held_rights == 0u32: return false
+    (held_rights & required_rights) == required_rights
+
+fn capability_rights_mutant_v1(held_rights: u32, required_rights: u32) -> bool:
+    if held_rights == 0u32: return false
+    (held_rights & required_rights) == required_rights
+
+struct CapabilityRightsBehaviorEvidenceV1:
+    source_semantics_hash: text
+    model_semantics_hash: text
+    checked_case_count: i64
+    counterexample_count: i64
+    mutant_counterexample_count: i64
+
+fn capability_rights_behavior_evidence_v1() -> CapabilityRightsBehaviorEvidenceV1:
+    var source_chunks: [text] = []
+    var model_chunks: [text] = []
+    var source_bits = ""
+    var model_bits = ""
+    var checked = 0
+    var counterexamples = 0
+    var mutant_counterexamples = 0
+    for held in 0..CAPABILITY_RIGHTS_DOMAIN_SIZE_V1:
+        for required in 0..CAPABILITY_RIGHTS_DOMAIN_SIZE_V1:
+            val held_rights = held as u32
+            val required_rights = required as u32
+            val actual = capability_rights_allow(held_rights, required_rights)
+            val expected = capability_rights_spec_v1(held_rights, required_rights)
+            source_bits = source_bits + (if actual: "1" else: "0")
+            model_bits = model_bits + (if expected: "1" else: "0")
+            if actual != expected: counterexamples = counterexamples + 1
+            if capability_rights_mutant_v1(held_rights, required_rights) != expected:
+                mutant_counterexamples = mutant_counterexamples + 1
+            checked = checked + 1
+            if checked % CAPABILITY_RIGHTS_HASH_CHUNK_V1 == 0:
+                source_chunks.push(sha256_text(source_bits))
+                model_chunks.push(sha256_text(model_bits))
+                source_bits = ""
+                model_bits = ""
+    if source_bits != "": source_chunks.push(sha256_text(source_bits))
+    if model_bits != "": model_chunks.push(sha256_text(model_bits))
+    CapabilityRightsBehaviorEvidenceV1(
+        sha256_text("capability_rights_allow-product-v1|domain=9bit|" +
+            source_chunks.join(",")),
+        sha256_text("KernelCapabilities.rightsAllow9-v1|domain=9bit|" +
+            model_chunks.join(",")),
+        checked, counterexamples, mutant_counterexamples)
+
+pub struct SimpleOsCapabilityRefinementReceiptV1:
+    symbol_id: text
+    source_semantics_hash: text
+    model_semantics_hash: text
+    model_theorem_root: text
+    axiom_audit_hash: text
+    cache_key_hash: text
+    trust_manifest_hash: text
+    proof_receipt_hash: text
+    replay_closure_hash: text
+    checked_case_count: i64
+    counterexample_count: i64
+    mutant_counterexample_count: i64
+    status: FormalStatus
+    diagnostic: text
+
+impl SimpleOsCapabilityRefinementReceiptV1:
+    fn permits_model_evidence(current_key: VerificationCacheKeyV1) -> bool:
+        self.status == FormalStatus.ModelProven and self.diagnostic == "" and
+            current_key.diagnostic() == "" and
+            self.cache_key_hash == current_key.hash() and
+            self.source_semantics_hash != "" and self.model_semantics_hash != "" and
+            self.axiom_audit_hash != "" and self.trust_manifest_hash != "" and
+            self.checked_case_count == CAPABILITY_RIGHTS_CASE_COUNT_V1 and
+            self.counterexample_count == 0 and self.mutant_counterexample_count > 0
+
+    pub fn permits_source_refinement(current_key: VerificationCacheKeyV1) -> bool:
+        self.status == FormalStatus.SourceRefined and
+            self.permits_common_v1(current_key) and
+            self.proof_receipt_hash != "" and self.replay_closure_hash != ""
+
+    fn permits_common_v1(current_key: VerificationCacheKeyV1) -> bool:
+        self.diagnostic == "" and current_key.diagnostic() == "" and
+            self.cache_key_hash == current_key.hash() and
+            self.source_semantics_hash != "" and self.model_semantics_hash != "" and
+            self.axiom_audit_hash != "" and self.trust_manifest_hash != "" and
+            self.checked_case_count == CAPABILITY_RIGHTS_CASE_COUNT_V1 and
+            self.counterexample_count == 0 and self.mutant_counterexample_count > 0
+
+fn capability_rights_source_semantics_hash_v1() -> text:
+    capability_rights_behavior_evidence_v1().source_semantics_hash
+
+fn capability_rights_model_semantics_hash_v1() -> text:
+    capability_rights_behavior_evidence_v1().model_semantics_hash
+
+fn capability_rights_closed_trust_manifest_v1() -> TrustManifestV1:
+    TrustManifestV1(["propext", "Quot.sound"], [], [], [], [], [])
+
+fn capability_rights_verification_cache_key_from_behavior_v1(
+    behavior: CapabilityRightsBehaviorEvidenceV1
+) -> VerificationCacheKeyV1:
+    val trust = capability_rights_closed_trust_manifest_v1()
+    VerificationCacheKeyV1(
+        behavior.source_semantics_hash, behavior.model_semantics_hash,
+        sha256_text("canonical-weave:none"),
+        sha256_text("macro-expansion:none"),
+        [sha256_text("os.kernel.types.capability_types.CapabilityKind")],
+        "simple-effects-v1:pure", "source-refinement-validator-v2",
+        "simple-source:u32-9bit-domain", "4.33.0", "", [],
+        sha256_text("exhaustive-bit-extensionality-v2"),
+        sha256_text(trust.canonical_text()), "verified")
+
+pub fn capability_rights_verification_cache_key_v1() -> VerificationCacheKeyV1:
+    capability_rights_verification_cache_key_from_behavior_v1(
+        capability_rights_behavior_evidence_v1())
+
+fn capability_rights_failed_receipt_v1(
+    behavior: CapabilityRightsBehaviorEvidenceV1,
+    axiom_hash: text,
+    diagnostic: text
+) -> SimpleOsCapabilityRefinementReceiptV1:
+    val key = capability_rights_verification_cache_key_from_behavior_v1(behavior)
+    val trust_hash = sha256_text(
+        capability_rights_closed_trust_manifest_v1().canonical_text())
+    SimpleOsCapabilityRefinementReceiptV1(
+        "os.kernel.types.capability_types.capability_rights_allow",
+        behavior.source_semantics_hash, behavior.model_semantics_hash,
+        "KernelCapabilities.rights_allow9_sound", axiom_hash, key.hash(),
+        trust_hash, "", "", behavior.checked_case_count,
+        behavior.counterexample_count, behavior.mutant_counterexample_count,
+        FormalStatus.Failed, diagnostic)
+
+pub fn validate_simpleos_capability_rights_refinement_v1(
+    axiom_report: text
+) -> SimpleOsCapabilityRefinementReceiptV1:
+    val behavior = capability_rights_behavior_evidence_v1()
+    val theorem_root = "KernelCapabilities.rights_allow9_sound"
+    val audit = audit_lean_axiom_report(axiom_report, [theorem_root], [])
+    if not audit.permits_closed_verification():
+        return capability_rights_failed_receipt_v1(
+            behavior, "",
+            "FV2-E-SIMPLEOS-CAP-AUDIT: Lean theorem axiom audit is required")
+    val axiom_hash = sha256_text(axiom_report)
+    if behavior.checked_case_count != CAPABILITY_RIGHTS_CASE_COUNT_V1:
+        return capability_rights_failed_receipt_v1(
+            behavior, axiom_hash,
+            "FV2-E-SIMPLEOS-CAP-COVERAGE: finite rights domain was not fully explored")
+    if behavior.counterexample_count != 0:
+        return capability_rights_failed_receipt_v1(
+            behavior, axiom_hash,
+            "FV2-E-SIMPLEOS-CAP-REFINEMENT: product implementation differs from the independent specification")
+    if behavior.mutant_counterexample_count == 0:
+        return capability_rights_failed_receipt_v1(
+            behavior, axiom_hash,
+            "FV2-E-SIMPLEOS-CAP-MUTATION: specification did not reject the nonzero-request mutant")
+    val key = capability_rights_verification_cache_key_from_behavior_v1(behavior)
+    val trust_hash = sha256_text(
+        capability_rights_closed_trust_manifest_v1().canonical_text())
+    SimpleOsCapabilityRefinementReceiptV1(
+        "os.kernel.types.capability_types.capability_rights_allow",
+        behavior.source_semantics_hash, behavior.model_semantics_hash,
+        theorem_root, axiom_hash, key.hash(), trust_hash, "", "",
+        behavior.checked_case_count, 0, behavior.mutant_counterexample_count,
+        FormalStatus.ModelProven, "")
+
+pub fn promote_simpleos_capability_rights_refinement_v2(
+    model: SimpleOsCapabilityRefinementReceiptV1,
+    proof: ProofReceiptV1,
+    replay: IndependentReplayClosureV1
+) -> SimpleOsCapabilityRefinementReceiptV1:
+    val key = capability_rights_verification_cache_key_v1()
+    if not model.permits_model_evidence(key):
+        return capability_rights_promotion_failure_v2(model,
+            "FV2-E-SIMPLEOS-CAP-MODEL: closed model evidence is required")
+    if proof.proof_root != model.model_theorem_root or
+            proof.status != FormalStatus.ModelProven or proof.diagnostic() != "":
+        return capability_rights_promotion_failure_v2(model,
+            "FV2-E-SIMPLEOS-CAP-PROOF: exact model theorem receipt is required")
+    if proof.trust_manifest_hash != model.trust_manifest_hash:
+        return capability_rights_promotion_failure_v2(model,
+            "FV2-E-SIMPLEOS-CAP-TRUST: proof audit/trust identity differs from the model evidence")
+    if not proof.binds_independent_replay(replay):
+        return capability_rights_promotion_failure_v2(model,
+            "FV2-E-SIMPLEOS-CAP-REPLAY: exact independent replay closure is required")
+    if not proof.theorem_dependencies.contains(
+            "fv2-simpleos-source-semantics:" + model.source_semantics_hash) or
+            not proof.theorem_dependencies.contains(
+                "fv2-simpleos-model-semantics:" + model.model_semantics_hash):
+        return capability_rights_promotion_failure_v2(model,
+            "FV2-E-SIMPLEOS-CAP-DEPENDENCY: proof receipt omits exact source/model semantic identities")
+    SimpleOsCapabilityRefinementReceiptV1(
+        model.symbol_id, model.source_semantics_hash, model.model_semantics_hash,
+        model.model_theorem_root, proof.axiom_audit_hash, model.cache_key_hash,
+        model.trust_manifest_hash, proof.hash(), replay.hash(),
+        model.checked_case_count, model.counterexample_count,
+        model.mutant_counterexample_count, FormalStatus.SourceRefined, "")
+
+fn capability_rights_promotion_failure_v2(
+    model: SimpleOsCapabilityRefinementReceiptV1,
+    diagnostic: text
+) -> SimpleOsCapabilityRefinementReceiptV1:
+    SimpleOsCapabilityRefinementReceiptV1(
+        model.symbol_id, model.source_semantics_hash, model.model_semantics_hash,
+        model.model_theorem_root, model.axiom_audit_hash, model.cache_key_hash,
+        model.trust_manifest_hash, "", "", model.checked_case_count,
+        model.counterexample_count, model.mutant_counterexample_count,
+        FormalStatus.Failed, diagnostic)

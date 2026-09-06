@@ -1,0 +1,187 @@
+"""Pure typed contracts for WM and renderer access to SOSIX host services.
+
+This module owns validation only. Hosted and SimpleOS adapters perform actual
+display/input/timer operations and store backend handles privately.
+"""
+
+use os.sosix.core.operation.{SosixOperationId}
+use os.sosix.core.capability_ref.{
+    SosixCapabilityRef,
+    SosixBufferRef,
+    sosix_capability_ref_is_valid,
+    sosix_buffer_ref_is_valid
+}
+
+pub val SOSIX_HOST_DISPLAY_PRESENT: u32 = 0x1001
+pub val SOSIX_HOST_DISPLAY_READBACK: u32 = 0x1002
+pub val SOSIX_HOST_INPUT_NEXT: u32 = 0x1101
+pub val SOSIX_HOST_TIMER_DEADLINE: u32 = 0x1201
+
+pub struct SosixHostConfigurationSnapshot:
+    display_backend: text
+    input_backend: text
+    gpu_backend: text
+    evidence_enabled: bool
+    storage_root: text
+    engine2d_one_call_upload: text
+    engine2d_bulk_upload: text
+    engine2d_transfer_path: text
+    engine2d_one_call_readback: text
+
+pub struct SosixDisplayRequest:
+    operation: SosixOperationId
+    api_id: u32
+    surface: SosixCapabilityRef
+    surface_generation: u32
+    frame_sequence: u64
+    buffer: SosixBufferRef
+    deadline_ns: u64
+
+pub struct SosixDisplayRequestResult:
+    accepted: bool
+    reason: text
+    request: SosixDisplayRequest
+
+pub struct SosixDisplayCompletionKey:
+    surface: SosixCapabilityRef
+    surface_generation: u32
+    frame_sequence: u64
+
+pub struct SosixInputRequest:
+    operation: SosixOperationId
+    stream: SosixCapabilityRef
+    after_sequence: u64
+    deadline_ns: u64
+
+pub struct SosixInputRequestResult:
+    accepted: bool
+    reason: text
+    request: SosixInputRequest
+
+pub struct SosixTimerRequest:
+    operation: SosixOperationId
+    timer: SosixCapabilityRef
+    deadline_ns: u64
+
+pub struct SosixTimerRequestResult:
+    accepted: bool
+    reason: text
+    request: SosixTimerRequest
+
+export SOSIX_HOST_DISPLAY_PRESENT, SOSIX_HOST_DISPLAY_READBACK
+export SOSIX_HOST_INPUT_NEXT, SOSIX_HOST_TIMER_DEADLINE
+export SosixHostConfigurationSnapshot, SosixDisplayRequest, SosixDisplayRequestResult
+export SosixDisplayCompletionKey, SosixInputRequest, SosixInputRequestResult
+export SosixTimerRequest, SosixTimerRequestResult
+
+pub fn sosix_host_configuration_snapshot_create(
+    display_backend: text,
+    input_backend: text,
+    gpu_backend: text,
+    evidence_enabled: bool,
+    storage_root: text
+) -> SosixHostConfigurationSnapshot:
+    SosixHostConfigurationSnapshot(
+        display_backend: display_backend,
+        input_backend: input_backend,
+        gpu_backend: gpu_backend,
+        evidence_enabled: evidence_enabled,
+        storage_root: storage_root,
+        engine2d_one_call_upload: "",
+        engine2d_bulk_upload: "",
+        engine2d_transfer_path: "",
+        engine2d_one_call_readback: ""
+    )
+
+pub fn sosix_host_configuration_snapshot_create_with_engine2d_transfer(
+    display_backend: text,
+    input_backend: text,
+    gpu_backend: text,
+    evidence_enabled: bool,
+    storage_root: text,
+    one_call_upload: text,
+    bulk_upload: text,
+    transfer_path: text,
+    one_call_readback: text
+) -> SosixHostConfigurationSnapshot:
+    SosixHostConfigurationSnapshot(
+        display_backend: display_backend,
+        input_backend: input_backend,
+        gpu_backend: gpu_backend,
+        evidence_enabled: evidence_enabled,
+        storage_root: storage_root,
+        engine2d_one_call_upload: one_call_upload,
+        engine2d_bulk_upload: bulk_upload,
+        engine2d_transfer_path: transfer_path,
+        engine2d_one_call_readback: one_call_readback
+    )
+
+pub fn sosix_display_request_create(
+    operation: SosixOperationId,
+    api_id: u32,
+    surface: SosixCapabilityRef,
+    surface_generation: u32,
+    frame_sequence: u64,
+    buffer: SosixBufferRef,
+    deadline_ns: u64
+) -> SosixDisplayRequestResult:
+    val request = SosixDisplayRequest(
+        operation: operation,
+        api_id: api_id,
+        surface: surface,
+        surface_generation: surface_generation,
+        frame_sequence: frame_sequence,
+        buffer: buffer,
+        deadline_ns: deadline_ns
+    )
+    if api_id != SOSIX_HOST_DISPLAY_PRESENT and api_id != SOSIX_HOST_DISPLAY_READBACK:
+        return SosixDisplayRequestResult(accepted: false, reason: "unsupported-display-api", request: request)
+    if not sosix_capability_ref_is_valid(surface) or surface_generation == 0:
+        return SosixDisplayRequestResult(accepted: false, reason: "invalid-surface", request: request)
+    if not sosix_buffer_ref_is_valid(buffer):
+        return SosixDisplayRequestResult(accepted: false, reason: "invalid-frame-buffer", request: request)
+    if frame_sequence == 0:
+        return SosixDisplayRequestResult(accepted: false, reason: "invalid-frame-sequence", request: request)
+    SosixDisplayRequestResult(accepted: true, reason: "accepted", request: request)
+
+pub fn sosix_display_completion_matches(
+    expected: SosixDisplayCompletionKey,
+    actual: SosixDisplayCompletionKey
+) -> bool:
+    expected.surface.slot == actual.surface.slot and
+        expected.surface.generation == actual.surface.generation and
+        expected.surface_generation == actual.surface_generation and
+        expected.frame_sequence == actual.frame_sequence
+
+pub fn sosix_input_request_create(
+    operation: SosixOperationId,
+    stream: SosixCapabilityRef,
+    after_sequence: u64,
+    deadline_ns: u64
+) -> SosixInputRequestResult:
+    val request = SosixInputRequest(
+        operation: operation,
+        stream: stream,
+        after_sequence: after_sequence,
+        deadline_ns: deadline_ns
+    )
+    if not sosix_capability_ref_is_valid(stream):
+        return SosixInputRequestResult(accepted: false, reason: "invalid-input-stream", request: request)
+    SosixInputRequestResult(accepted: true, reason: "accepted", request: request)
+
+pub fn sosix_timer_request_create(
+    operation: SosixOperationId,
+    timer: SosixCapabilityRef,
+    deadline_ns: u64
+) -> SosixTimerRequestResult:
+    val request = SosixTimerRequest(operation: operation, timer: timer, deadline_ns: deadline_ns)
+    if not sosix_capability_ref_is_valid(timer):
+        return SosixTimerRequestResult(accepted: false, reason: "invalid-timer", request: request)
+    if deadline_ns == 0:
+        return SosixTimerRequestResult(accepted: false, reason: "missing-deadline", request: request)
+    SosixTimerRequestResult(accepted: true, reason: "accepted", request: request)
+
+export sosix_host_configuration_snapshot_create, sosix_display_request_create
+export sosix_host_configuration_snapshot_create_with_engine2d_transfer
+export sosix_display_completion_matches, sosix_input_request_create
+export sosix_timer_request_create

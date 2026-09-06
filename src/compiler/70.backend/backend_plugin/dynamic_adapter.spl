@@ -1,0 +1,178 @@
+# Dynamic backend adapter over the runtime-owned complete lifecycle bridge.
+
+use compiler.common.backend_plugin.model.{BackendPluginRequestV1}
+use compiler.mir.mir_data.{MirModule}
+use compiler.backend.codegen_types.{CodegenOutput}
+use compiler.backend.backend.backend_types.{BackendKind, CompiledModule,
+    CompileError, compileerror_backend_error}
+use compiler.backend.backend.aot_path_diagnostic.{backend_aot_write_diagnostic}
+use compiler.backend.backend_plugin.dynamic_loader.{DynamicBackendPluginLease}
+use compiler.backend.backend_plugin.transport.{backend_plugin_run_module_v1}
+use compiler.mir_opt.mir_opt.storage_projection_lowering.{MirStorageViewSiteBindingV1}
+use std.nogc_sync_mut.io.file_ops.{file_write_bytes, file_exists,
+    file_is_regular_no_follow, file_size_raw, secure_temp_dir_raw,
+    file_publish_noreplace_raw}
+use std.nogc_sync_mut.io.dir_ops.{dir_remove}
+use std.nogc_sync_mut.path.{dirname}
+
+val BACKEND_PLUGIN_FINAL_OBJECT_RESULT_KIND_V1: i64 = 2
+
+fn dynamic_object_path_fail_v1(
+    stage_dir: text, diagnostic_path: text, message: text
+) -> i64:
+    var final_message = message
+    if stage_dir != "" and not dir_remove(stage_dir, true):
+        final_message = "{message}; private staging cleanup failed"
+    backend_aot_write_diagnostic(diagnostic_path, final_message)
+    1
+
+fn dynamic_backend_publish_object_v1(
+    payload: [u8], object_path: text, diagnostic_path: text
+) -> i64:
+    """Publish copied provider bytes through private same-parent staging."""
+    if object_path == "":
+        backend_aot_write_diagnostic(
+            diagnostic_path, "dynamic backend object destination is empty")
+        return 1
+    if payload.len() == 0:
+        backend_aot_write_diagnostic(
+            diagnostic_path, "dynamic backend returned an empty final object")
+        return 1
+    if payload.len() < 4:
+        backend_aot_write_diagnostic(
+            diagnostic_path, "dynamic backend returned object without recognized magic")
+        return 1
+    val b0 = payload[0].to_i64()
+    val b1 = payload[1].to_i64()
+    val b2 = payload[2].to_i64()
+    val b3 = payload[3].to_i64()
+    val elf_magic = b0 == 0x7F and b1 == 0x45 and b2 == 0x4C and b3 == 0x46
+    val macho_magic = (
+        (b0 == 0xCF and b1 == 0xFA and b2 == 0xED and b3 == 0xFE) or
+        (b0 == 0xFE and b1 == 0xED and b2 == 0xFA and b3 == 0xCF) or
+        (b0 == 0xCE and b1 == 0xFA and b2 == 0xED and b3 == 0xFE) or
+        (b0 == 0xFE and b1 == 0xED and b2 == 0xFA and b3 == 0xCE))
+    val coff_magic = (
+        (b0 == 0x64 and b1 == 0x86) or (b0 == 0x4C and b1 == 0x01) or
+        (b0 == 0x64 and b1 == 0xAA))
+    if not elf_magic and not macho_magic and not coff_magic:
+        backend_aot_write_diagnostic(
+            diagnostic_path, "dynamic backend returned object without recognized magic")
+        return 1
+    val stage_dir = secure_temp_dir_raw(dirname(object_path),
+        "simple-dynamic-aot")
+    if stage_dir == "":
+        backend_aot_write_diagnostic(
+            diagnostic_path, "secure temporary directory creation failed")
+        return 1
+    val staged_object = stage_dir + "/module.o"
+    if not file_write_bytes(staged_object, payload):
+        return dynamic_object_path_fail_v1(stage_dir, diagnostic_path,
+            "Failed to write dynamic object to private staging")
+    if (not file_exists(staged_object)
+        or not file_is_regular_no_follow(staged_object)
+        or file_size_raw(staged_object) != payload.len()):
+        return dynamic_object_path_fail_v1(stage_dir, diagnostic_path,
+            "dynamic backend produced invalid private staged object")
+    val publish_status = file_publish_noreplace_raw(staged_object, object_path)
+    if publish_status == 1:
+        if not dir_remove(stage_dir, true):
+            backend_aot_write_diagnostic(diagnostic_path,
+                "warning: published object; private staging cleanup failed")
+        return 0
+    if publish_status == 0:
+        return dynamic_object_path_fail_v1(stage_dir, diagnostic_path,
+            "AOT object destination already exists")
+    dynamic_object_path_fail_v1(stage_dir, diagnostic_path,
+        "AOT object publication failed")
+
+class DynamicBackendAdapter:
+    """Retains the checked path lease while the runtime bridge owns each call."""
+    provider_path: text
+    request: BackendPluginRequestV1
+    lease: DynamicBackendPluginLease
+    closed: bool
+
+    fn compile_module(module: MirModule) -> Result<CodegenOutput, CompileError>:
+        if self.closed or not self.lease.is_open():
+            return Err(compileerror_backend_error(
+                BackendKind.Compiler, "dynamic backend session is closed"))
+        # The bridge owns open, compile, finalize, diagnostics, provider-buffer
+        # release, and close for this call. Only the copied final object escapes.
+        val envelope = backend_plugin_run_module_v1(
+            self.provider_path, self.request, module)
+        if not envelope.valid:
+            return Err(compileerror_backend_error(
+                BackendKind.Compiler,
+                "dynamic backend transport rejected response: {envelope.reason}"))
+        if envelope.status != 0:
+            val detail = if envelope.diagnostic == "":
+                "provider status {envelope.status}"
+            else:
+                envelope.diagnostic
+            return Err(compileerror_backend_error(BackendKind.Compiler, detail))
+        if envelope.result_kind != BACKEND_PLUGIN_FINAL_OBJECT_RESULT_KIND_V1:
+            return Err(compileerror_backend_error(
+                BackendKind.Compiler,
+                "dynamic backend returned non-final result kind {envelope.result_kind}"))
+        if envelope.payload.len() == 0:
+            return Err(compileerror_backend_error(
+                BackendKind.Compiler, "dynamic backend returned an empty final object"))
+        Ok(CodegenOutput.object(module.name, envelope.payload))
+
+    fn compile_aot_module(
+        module: MirModule,
+        is_release: bool,
+        opt_level: i64,
+        target_cpu: text,
+        storage_bindings: [MirStorageViewSiteBindingV1]
+    ) -> Result<CompiledModule, CompileError>:
+        val compiled = self.compile_module(module)
+        match compiled:
+            case Ok(output): Ok(output.to_compiled_module())
+            case Err(error): Err(error)
+
+    fn compile_aot_into_path(
+        module: MirModule, is_release: bool, opt_level: i64, target_cpu: text,
+        storage_bindings: [MirStorageViewSiteBindingV1], object_path: text,
+        diagnostic_path: text
+    ) -> i64:
+        if self.closed or not self.lease.is_open():
+            backend_aot_write_diagnostic(
+                diagnostic_path, "dynamic backend session is closed")
+            return 1
+        # Consume and copy the runtime-owned envelope while this provider call
+        # and its lease are live. Only scalar status and caller-owned diagnostic
+        # storage cross the session boundary.
+        val envelope = backend_plugin_run_module_v1(
+            self.provider_path, self.request, module)
+        if not envelope.valid:
+            backend_aot_write_diagnostic(diagnostic_path,
+                "dynamic backend transport rejected response: {envelope.reason}")
+            return 1
+        if envelope.status != 0:
+            if envelope.diagnostic == "":
+                backend_aot_write_diagnostic(
+                    diagnostic_path, "provider status {envelope.status}")
+            else:
+                backend_aot_write_diagnostic(
+                    diagnostic_path, envelope.diagnostic)
+            return 1
+        if envelope.result_kind != BACKEND_PLUGIN_FINAL_OBJECT_RESULT_KIND_V1:
+            backend_aot_write_diagnostic(diagnostic_path,
+                "dynamic backend returned non-final result kind {envelope.result_kind}")
+            return 1
+        dynamic_backend_publish_object_v1(
+            envelope.payload, object_path, diagnostic_path)
+
+    me close() -> bool:
+        if self.closed:
+            return true
+        var retained_lease = self.lease
+        val closed_ok = retained_lease.close()
+        self.lease = retained_lease
+        self.closed = true
+        closed_ok
+
+export BACKEND_PLUGIN_FINAL_OBJECT_RESULT_KIND_V1
+export dynamic_backend_publish_object_v1, DynamicBackendAdapter

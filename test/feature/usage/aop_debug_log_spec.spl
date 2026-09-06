@@ -1,0 +1,395 @@
+"""
+AOP Debug Logger
+
+**Feature ID:** #AOP-001
+**Category:** Compiler
+**Status:** Active
+
+## Overview
+
+Validates the AOP debug logging subsystem including enable/disable toggling,
+entry creation with depth tracking, group pairing of enter/exit calls,
+wildcard and prefix-based filter patterns, incremental entry querying,
+and ring buffer trimming when the entry limit is exceeded.
+
+## Syntax
+
+```simple
+debug_log_enable("parse_*")
+val gid = debug_log_enter("my_func", "app.mcp.main", "Server", 42, "path=\"/src\"")
+debug_log_exit("my_func", "app.mcp.main", gid, 0)
+val entries = debug_log_get_entries()
+```
+AOP Debug Logger Specification
+
+Self-contained implementation of AOP debug logging with depth tracking,
+group pairing, and ring buffer. No compiler imports needed.
+Uses array concat (items = items + [x]) instead of .push() because
+.push() does not persist on module-level arrays in the runtime.
+"""
+
+# ============================================================================
+# Local AOP Debug Log Implementation
+# ============================================================================
+
+struct DebugLogEntry:
+    entry_id: i64
+    group_id: i64
+    parent_group_id: i64
+    depth: i64
+    entry_type: text
+    package_path: text
+    class_name: text
+    function_name: text
+    line_number: i64
+    timestamp_ms: i64
+    duration_ms: i64
+    params_text: text
+    message: text
+
+# Module-level state
+# NOTE: use untyped [] instead of typed [DebugLogEntry] / [i64]
+# and use concat (var = var + [item]) instead of .push()
+var g_log_entries = []
+var g_log_depth = 0
+var g_log_next_entry_id = 1
+var g_log_next_group_id = 1
+var g_log_enabled = false
+var g_log_filter_pattern = "*"
+var g_log_max_entries = 10000
+var g_log_trim_count = 1000
+var g_log_group_stack = []
+
+# Filter matching: supports "*" wildcard, "prefix*", "*suffix", and exact match
+fn _matches_filter(fn_name: text, module_path: text) -> bool:
+    if g_log_filter_pattern == "*":
+        return true
+    val pattern = g_log_filter_pattern
+    if pattern.ends_with("*"):
+        val prefix = pattern[0:pattern.len() - 1]
+        val match_fn = fn_name.starts_with(prefix)
+        val match_mod = module_path.starts_with(prefix)
+        return match_fn or match_mod
+    if pattern.starts_with("*"):
+        val suffix = pattern[1:]
+        val match_fn = fn_name.ends_with(suffix)
+        val match_mod = module_path.ends_with(suffix)
+        return match_fn or match_mod
+    fn_name == pattern or module_path == pattern
+
+# Trim oldest entries when exceeding max
+fn _maybe_trim():
+    if g_log_entries.len() > g_log_max_entries:
+        var trimmed = []
+        val skip_count = g_log_trim_count
+        for i in range(skip_count, g_log_entries.len()):
+            trimmed = trimmed + [g_log_entries[i]]
+        g_log_entries = trimmed
+
+# Remove last element from group stack
+fn _group_stack_pop():
+    if g_log_group_stack.len() > 0:
+        var new_stack = []
+        for i in range(0, g_log_group_stack.len() - 1):
+            new_stack = new_stack + [g_log_group_stack[i]]
+        g_log_group_stack = new_stack
+
+fn debug_log_enter(fn_name: text, module_path: text, class_name: text, line_num: i64, params_text: text) -> i64:
+    if not g_log_enabled:
+        return -1
+    if not _matches_filter(fn_name, module_path):
+        return -1
+
+    val group_id = g_log_next_group_id
+    g_log_next_group_id = g_log_next_group_id + 1
+
+    var parent_gid = 0
+    if g_log_group_stack.len() > 0:
+        parent_gid = g_log_group_stack[g_log_group_stack.len() - 1]
+
+    val entry = DebugLogEntry(
+        entry_id: g_log_next_entry_id,
+        group_id: group_id,
+        parent_group_id: parent_gid,
+        depth: g_log_depth,
+        entry_type: "enter",
+        package_path: module_path,
+        class_name: class_name,
+        function_name: fn_name,
+        line_number: line_num,
+        timestamp_ms: 0,
+        duration_ms: 0,
+        params_text: params_text,
+        message: ""
+    )
+
+    g_log_next_entry_id = g_log_next_entry_id + 1
+    g_log_entries = g_log_entries + [entry]
+    g_log_group_stack = g_log_group_stack + [group_id]
+    g_log_depth = g_log_depth + 1
+
+    _maybe_trim()
+
+    group_id
+
+fn debug_log_exit(fn_name: text, module_path: text, group_id: i64, start_time_ms: i64):
+    if not g_log_enabled:
+        return
+    if group_id < 0:
+        return
+
+    if g_log_depth > 0:
+        g_log_depth = g_log_depth - 1
+
+    var parent_gid = 0
+    if g_log_group_stack.len() > 1:
+        parent_gid = g_log_group_stack[g_log_group_stack.len() - 2]
+
+    _group_stack_pop()
+
+    val entry = DebugLogEntry(
+        entry_id: g_log_next_entry_id,
+        group_id: group_id,
+        parent_group_id: parent_gid,
+        depth: g_log_depth,
+        entry_type: "exit",
+        package_path: module_path,
+        class_name: "",
+        function_name: fn_name,
+        line_number: 0,
+        timestamp_ms: 0,
+        duration_ms: 0,
+        params_text: "",
+        message: ""
+    )
+
+    g_log_next_entry_id = g_log_next_entry_id + 1
+    g_log_entries = g_log_entries + [entry]
+
+    _maybe_trim()
+
+fn debug_log_enable(pattern: text):
+    g_log_enabled = true
+    if pattern != "":
+        g_log_filter_pattern = pattern
+    else:
+        g_log_filter_pattern = "*"
+
+fn debug_log_disable():
+    g_log_enabled = false
+
+fn debug_log_clear():
+    g_log_entries = []
+    g_log_depth = 0
+    g_log_next_entry_id = 1
+    g_log_next_group_id = 1
+    g_log_group_stack = []
+
+fn debug_log_set_max_entries(max_count: i64):
+    if max_count > 0:
+        g_log_max_entries = max_count
+
+fn debug_log_get_entries():
+    g_log_entries
+
+fn debug_log_get_entries_since(since_id: i64):
+    var result = []
+    for entry in g_log_entries:
+        if entry.entry_id > since_id:
+            result = result + [entry]
+    result
+
+fn debug_log_get_status() -> (bool, text, i64, i64):
+    (g_log_enabled, g_log_filter_pattern, g_log_entries.len(), g_log_depth)
+
+fn debug_log_is_enabled() -> bool:
+    g_log_enabled
+
+# ============================================================================
+# Tests
+# ============================================================================
+
+describe "AOP Debug Logger":
+
+    context "enable and disable":
+        it "starts disabled by default":
+            debug_log_clear()
+            debug_log_disable()
+            val enabled = debug_log_is_enabled()
+            expect(enabled).to_equal(false)
+
+        it "enables with wildcard pattern":
+            debug_log_clear()
+            debug_log_enable("*")
+            expect(debug_log_is_enabled()).to_equal(true)
+            val (en, pat, cnt, dep) = debug_log_get_status()
+            expect(en).to_equal(true)
+            expect(pat).to_equal("*")
+            debug_log_disable()
+
+        it "enables with specific pattern":
+            debug_log_clear()
+            debug_log_enable("parse_*")
+            val (en, pat, cnt, dep) = debug_log_get_status()
+            expect(en).to_equal(true)
+            expect(pat).to_equal("parse_*")
+            debug_log_disable()
+
+        it "disables logging":
+            debug_log_enable("*")
+            debug_log_disable()
+            expect(debug_log_is_enabled()).to_equal(false)
+
+    context "entry creation":
+        it "creates enter entry with correct fields":
+            debug_log_clear()
+            debug_log_enable("*")
+            val gid = debug_log_enter("my_func", "app.mcp.main", "Server", 42, "path=\"/src\"")
+            val entries = debug_log_get_entries()
+            val e = entries[0]
+            expect(entries.len()).to_equal(1)
+            expect(e.entry_type).to_equal("enter")
+            expect(e.function_name).to_equal("my_func")
+            expect(e.package_path).to_equal("app.mcp.main")
+            expect(e.class_name).to_equal("Server")
+            expect(e.line_number).to_equal(42)
+            expect(e.params_text).to_equal("path=\"/src\"")
+            expect(e.depth).to_equal(0)
+            expect(e.group_id).to_equal(gid)
+            debug_log_disable()
+
+        it "creates exit entry paired with enter":
+            debug_log_clear()
+            debug_log_enable("*")
+            val gid = debug_log_enter("my_func", "app.mcp.main", "", 10, "")
+            debug_log_exit("my_func", "app.mcp.main", gid, 0)
+            val entries = debug_log_get_entries()
+            expect(entries[0].entry_type).to_equal("enter")
+            expect(entries.len()).to_equal(2)
+            expect(entries[1].entry_type).to_equal("exit")
+            expect(entries[0].group_id).to_equal(entries[1].group_id)
+            debug_log_disable()
+
+        it "skips entries when disabled":
+            debug_log_clear()
+            debug_log_disable()
+            val gid = debug_log_enter("my_func", "mod", "", 1, "")
+            expect(gid).to_equal(-1)
+            expect(debug_log_get_entries().len()).to_equal(0)
+
+    context "depth tracking":
+        it "tracks nested call depth":
+            debug_log_clear()
+            debug_log_enable("*")
+            val g1 = debug_log_enter("outer", "mod", "", 1, "")
+            val g2 = debug_log_enter("inner", "mod", "", 2, "")
+            val g3 = debug_log_enter("deep", "mod", "", 3, "")
+            debug_log_exit("deep", "mod", g3, 0)
+            debug_log_exit("inner", "mod", g2, 0)
+            debug_log_exit("outer", "mod", g1, 0)
+            val entries = debug_log_get_entries()
+            expect(entries.len()).to_equal(6)
+            # Enter depths: 0, 1, 2
+            expect(entries[0].depth).to_equal(0)
+            expect(entries[1].depth).to_equal(1)
+            expect(entries[2].depth).to_equal(2)
+            # Exit depths: 2, 1, 0
+            expect(entries[3].depth).to_equal(2)
+            expect(entries[4].depth).to_equal(1)
+            expect(entries[5].depth).to_equal(0)
+            debug_log_disable()
+
+    context "group pairing":
+        it "assigns unique group IDs":
+            debug_log_clear()
+            debug_log_enable("*")
+            val g1 = debug_log_enter("func_a", "mod", "", 1, "")
+            debug_log_exit("func_a", "mod", g1, 0)
+            val g2 = debug_log_enter("func_b", "mod", "", 2, "")
+            debug_log_exit("func_b", "mod", g2, 0)
+            expect(g1).to_be_greater_than(0)
+            expect(g2).to_be_greater_than(g1)
+            debug_log_disable()
+
+        it "tracks parent group IDs":
+            debug_log_clear()
+            debug_log_enable("*")
+            val g_outer = debug_log_enter("outer", "mod", "", 1, "")
+            val g_inner = debug_log_enter("inner", "mod", "", 2, "")
+            debug_log_exit("inner", "mod", g_inner, 0)
+            debug_log_exit("outer", "mod", g_outer, 0)
+            val entries = debug_log_get_entries()
+            # Inner enter should have outer as parent
+            expect(entries[1].parent_group_id).to_equal(g_outer)
+            # Outer enter should have 0 (no parent)
+            expect(entries[0].parent_group_id).to_equal(0)
+            debug_log_disable()
+
+    context "filter pattern":
+        it "filters by prefix pattern":
+            debug_log_clear()
+            debug_log_enable("parse_*")
+            val g1 = debug_log_enter("parse_expr", "mod", "", 1, "")
+            val g2 = debug_log_enter("eval_expr", "mod", "", 2, "")
+            expect(g1).to_be_greater_than(0)
+            expect(g2).to_equal(-1)
+            expect(debug_log_get_entries().len()).to_equal(1)
+            debug_log_disable()
+
+        it "filters by module path":
+            debug_log_clear()
+            debug_log_enable("app.mcp*")
+            val g1 = debug_log_enter("handle", "app.mcp.main", "", 1, "")
+            val g2 = debug_log_enter("handle", "app.cli.main", "", 2, "")
+            expect(g1).to_be_greater_than(0)
+            expect(g2).to_equal(-1)
+            debug_log_disable()
+
+        it "matches exact function name":
+            debug_log_clear()
+            debug_log_enable("my_exact_func")
+            val g1 = debug_log_enter("my_exact_func", "mod", "", 1, "")
+            val g2 = debug_log_enter("other_func", "mod", "", 2, "")
+            expect(g1).to_be_greater_than(0)
+            expect(g2).to_equal(-1)
+            debug_log_disable()
+
+    context "query entries":
+        it "returns entries since a given ID":
+            debug_log_clear()
+            debug_log_enable("*")
+            val g1 = debug_log_enter("a", "mod", "", 1, "")
+            debug_log_exit("a", "mod", g1, 0)
+            val entries_before = debug_log_get_entries()
+            val last_id = entries_before[entries_before.len() - 1].entry_id
+            val g2 = debug_log_enter("b", "mod", "", 2, "")
+            debug_log_exit("b", "mod", g2, 0)
+            val new_entries = debug_log_get_entries_since(last_id)
+            expect(new_entries[0].function_name).to_equal("b")
+            expect(new_entries.len()).to_equal(2)
+            debug_log_disable()
+
+    context "ring buffer":
+        it "trims entries when exceeding max":
+            debug_log_clear()
+            debug_log_enable("*")
+            debug_log_set_max_entries(20)
+            # Add 25 enter entries
+            for i in range(0, 25):
+                debug_log_enter("func", "mod", "", i, "")
+            val entries = debug_log_get_entries()
+            # Should have trimmed: 25 > 20, so oldest entries removed
+            expect(entries.len()).to_be_less_than(26)
+            # Reset max for other tests
+            debug_log_set_max_entries(10000)
+            debug_log_disable()
+
+    context "clear":
+        it "resets all state":
+            debug_log_enable("*")
+            debug_log_enter("func", "mod", "", 1, "")
+            debug_log_clear()
+            val (en, pat, cnt, dep) = debug_log_get_status()
+            expect(cnt).to_equal(0)
+            expect(dep).to_equal(0)
+            debug_log_disable()

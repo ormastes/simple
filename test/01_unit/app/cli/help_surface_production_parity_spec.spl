@@ -1,0 +1,170 @@
+"""
+## Purpose and audience
+
+Executable specification pinning the production CLI help surface: generated
+help text, completion candidates, registry rendering, provider routing, and
+the generated-payload hash that detects a stale codegen checkout. Maintained
+for CLI maintainers regenerating the surface and for operators verifying a
+deployed binary serves the admitted help.
+
+## Operator workflow
+
+Run `bin/simple test --no-session-daemon test/01_unit/app/cli/help_surface_production_parity_spec.spl`
+and read the Results line. Codegen scenarios compare live product output
+(`cli_generated_help_text_v1`, `cli_surface_codegen_extract_*`) against the
+checked-in generated constants; source-contract scenarios read the owning
+`src/app/cli` files to pin structural facts that have no runtime API.
+
+## Compatibility and limitations
+
+The generated-payload hash and codegen extraction run against the current
+tree, so regenerating the surface changes the expected constants by design.
+Source-contract scenarios assert shipped-source structure only where the
+product exposes no callable seam; they are not a substitute for the runtime
+assertions alongside them.
+
+## Verification guidance and troubleshooting
+
+If the payload-hash scenario fails, the generated data file is stale — rerun
+the help-surface codegen rather than editing the constant by hand. If a
+source-contract scenario fails, check whether the named structural anchor
+moved and update the anchor, not the product, only when the move is
+intentional.
+"""
+# Lifecycle: research doc/01_research/domain/sspec_documentization_maintenance.md ;
+# plan doc/03_plan/sspec_modernization_plan.md ;
+# architecture doc/04_architecture/sspec_documentization_maintenance.md ;
+# design doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+use std.spec
+use std.io_runtime.{file_read}
+use app.cli.cli_helpers.{
+    cli_generated_help_text_v1,
+    cli_generated_completion_candidates_v1,
+}
+use app.cli.help_surface_inventory.{
+    cli_surface_snapshot_v1, cli_surface_generated_payload_hash_v1,
+}
+use app.cli.help_surface_generated_data.{
+    CLI_SURFACE_GENERATED_PAYLOAD_SHA256_V1,
+}
+use app.cli.help_surface_codegen.{
+    cli_surface_codegen_extract_log_flags_v1,
+    cli_surface_codegen_extract_internal_flags_v1,
+}
+use app.cli.dispatch.{cli_dispatch_tail_args_v1}
+use app.io._CliCommands.run_commands.{cli_run_provider_entry_v1}
+use app.cli.command_registry.{
+    cli_registry_direct_script_target_v1,
+    cli_registry_provider_route_valid_v1,
+    cli_registry_app_path_v1,
+}
+
+# @manual_section: help-surface-parity
+describe "production CLI generated help, completion, and provider routing parity":
+    it "serves admitted core help and retains extension help":
+        # @req REQ-APP-CLI-HELP-SURFACE-001
+        # @capture(statistics): generated help text and payload hash for the served surface
+        step("Generate the production help text with an extension block")
+        expect(cli_surface_generated_payload_hash_v1()).to_equal(
+            CLI_SURFACE_GENERATED_PAYLOAD_SHA256_V1)
+        val extension_help = "extension namespaces:\n  --xsample-<key>[=<value>]  provider: sample\n"
+        val help = cli_generated_help_text_v1(extension_help)
+        expect(help).to_contain("simple provider")
+        expect(help).to_contain("Simple Language v1.0.0-RC")
+        expect(help).to_contain("Usage:")
+        expect(help).to_contain("Examples:")
+        expect(help).to_contain(extension_help)
+        expect(help.contains("generated CLI surface is stale")).to_equal(false)
+
+    it "renders structured registry records once in production":
+        # @req REQ-APP-CLI-HELP-SURFACE-001
+        # @capture(statistics): source-contract anchors for single registry rendering
+        step("Read the owning source files and pin their structural anchors")
+        val source = file_read("src/app/cli/cli_helpers.spl")
+        val report_source = file_read("src/app/cli/help_surface_report.spl")
+        val generated_source = file_read(
+            "src/app/cli/help_surface_generated_data.spl")
+        expect(source).to_contain("fn print_cli_help():\n    print_cli_help_with_extensions_v1(\"\")")
+        val drops_descriptive_extension_helper = source.contains("print_cli_help_descriptive_extension_v1()")
+        expect(drops_descriptive_extension_helper).to_equal(false)
+        expect(report_source).to_contain("cli_registry_render_help_v1")
+        expect(generated_source).to_contain("registry projections")
+        expect(generated_source.contains("simple compile <src>"))
+            .to_equal(false)
+        expect(source).to_contain("fn cli_help_legacy_migration_oracle_v1")
+
+    it "derives exact completion flags from their accepted-option owners":
+        # @req REQ-APP-CLI-HELP-SURFACE-001
+        # @capture(statistics): snapshot vs live-extracted flag rows
+        step("Extract flags from source and compare with the surface snapshot")
+        val dispatch_source = file_read("src/app/cli/_CliMain/main_and_help.spl")
+        val args_source = file_read("src/app/cli/_CliMain/args_and_os_commands.spl")
+        val snapshot = cli_surface_snapshot_v1()
+        expect(snapshot.log_flags).to_equal(
+            cli_surface_codegen_extract_log_flags_v1(dispatch_source))
+        expect(snapshot.internal_flags).to_equal(
+            cli_surface_codegen_extract_internal_flags_v1(args_source))
+        val gc = cli_generated_completion_candidates_v1("--gc", ["--xsample-"])
+        expect(gc).to_equal(["--gc-log", "--gc-off"])
+        expect(gc.contains("--gc")).to_equal(false)
+
+    it "keeps structured option rows in the established visible order":
+        # @req REQ-APP-CLI-HELP-SURFACE-001
+        # @capture(statistics): help-text option ordering index rows
+        step("Generate help text and compare option row positions")
+        val help = cli_generated_help_text_v1("")
+        expect(help.index_of("-h, --help")).to_be_less_than(
+            help.index_of("--notui"))
+        expect(help.index_of("--notui")).to_be_less_than(
+            help.index_of("--gc-log"))
+        expect(help.index_of("--gc-off")).to_be_less_than(
+            help.index_of("--low-memory"))
+        expect(help.index_of("--mem-infra=a,b,c[,auto] [--mem-infra-strict]")).to_be_less_than(
+            help.index_of("SIMPLE_EXECUTION_MODE env var"))
+
+    it "keeps provider and extension completions on the production adapter":
+        # @req REQ-APP-CLI-HELP-SURFACE-001
+        # @capture(statistics): completion candidate rows per query kind
+        step("Query completion candidates for provider and extension prefixes")
+        expect(cli_generated_completion_candidates_v1(
+            "provider", ["--xsample-"])).to_equal(["provider"])
+        expect(cli_generated_completion_candidates_v1(
+            "--x", ["--xsample-"])).to_equal(["--xsample-"])
+        val query_source = file_read("src/app/cli/query.spl")
+        expect(query_source).to_contain("if subcmd == \"cli-completions\"")
+        expect(query_source).to_contain(
+            "cli_generated_completion_candidates_v1(")
+
+    it "normalizes explicit and table provider argv to the same tail":
+        # @req REQ-APP-CLI-HELP-SURFACE-001
+        # @capture(statistics): dispatch tail argv rows for both entry forms
+        step("Normalize both provider argv forms through the dispatcher")
+        val full = cli_dispatch_tail_args_v1(
+            "provider", ["provider", "run", "fmt-leaf", "alpha.spl"])
+        val tail = cli_dispatch_tail_args_v1(
+            "provider", ["run", "fmt-leaf", "alpha.spl"])
+        expect(full).to_equal(["run", "fmt-leaf", "alpha.spl"])
+        expect(tail).to_equal(full)
+
+    it "preserves provider fallback exit statuses instead of collapsing to zero":
+        # @req REQ-APP-CLI-HELP-SURFACE-001
+        # @capture(statistics): provider entry exit-status rows
+        step("Run three provider entries and read their exit statuses")
+        expect(cli_run_provider_entry_v1(["metadata"])).to_equal(0)  # oracle: success is exit 0 by CLI convention
+        expect(cli_run_provider_entry_v1(["bad-subcommand"])).to_equal(2)  # oracle: usage errors exit 2 per the CLI error convention
+        expect(cli_run_provider_entry_v1(["query", "native"])).to_equal(3)  # oracle: missing subcommand dependency exits 3 per the CLI error convention
+
+    it "keeps the registry-owned provider route tail-preserving":
+        # @req REQ-APP-CLI-HELP-SURFACE-001
+        # @capture(statistics): registry route and source-wiring rows
+        step("Check the registry route target and its dispatch wiring")
+        val root_source = file_read("src/app/cli/_CliMain/main_and_help.spl")
+        val table_source = file_read("src/app/cli/dispatch/table.spl")
+        expect(cli_registry_direct_script_target_v1("provider")).to_equal(
+            "src/app/provider_cli/main.spl")
+        expect(cli_registry_provider_route_valid_v1()).to_equal(true)
+        expect(cli_registry_app_path_v1("provider")).to_equal(
+            "src/app/provider_cli/main.spl")
+        expect(root_source).to_contain("cli_registry_direct_script_target_v1")
+        expect(table_source).to_contain("cli_registry_command_names_v1()")

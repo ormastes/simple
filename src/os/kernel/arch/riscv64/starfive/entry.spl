@@ -1,0 +1,110 @@
+# StarFive JH7110 S-mode entry through existing OpenSBI/U-Boot firmware.
+
+use os.kernel.boot.riscv_noalloc_handoff.{riscv_noalloc_handoff, riscv_noalloc_boot_idle}
+use os.kernel.boot.riscv_noalloc_heap.{riscv_noalloc_heap_init}
+use os.kernel.boot.riscv_noalloc_log.{riscv_noalloc_log_init, riscv_noalloc_log_boot_ok}
+use os.kernel.boot.riscv_noalloc_services.{riscv_noalloc_services_init}
+use os.kernel.arch.riscv64.starfive.console.{starfive_serial_shell_main}
+use os.kernel.arch.riscv64.starfive_root.{starfive_mount_packaged_root}
+use os.kernel.arch.riscv64.starfive.nvme_probe.{starfive_find_nvme_read_only, starfive_pcie1_link_up}
+use os.kernel.arch.riscv64.starfive.nvme_storage.{starfive_nvme_identify, starfive_nvme_remember}
+use os.kernel.arch.riscv64.starfive.pcie_init.{starfive_jh7110_pcie1_initialize}
+use os.kernel.arch.riscv_topology_identity.{riscv_publish_boot_hart_identity_v1}
+
+extern fn log_raw_println(msg: text)
+extern fn __simple_call_module_inits()
+use os.kernel.arch.riscv.uart_runtime_owner.{riscv_uart_put}
+
+extern fn rt_riscv_noalloc_pmm_init(ram_base: u64, ram_size: u64, reserved_end: u64, heap_start: u64) -> bool
+extern fn rt_mem_read_u8(addr: u64) -> u64
+extern fn rt_starfive_resolve_dtb(candidate: u64) -> u64
+
+val STARFIVE_RAM_BASE: u64 = 0x40000000
+val STARFIVE_RAM_SIZE_MIN: u64 = 0x80000000
+val STARFIVE_RESERVED_END: u64 = 0x48000000
+val STARFIVE_HEAP_START: u64 = 0x70000000
+val STARFIVE_HEAP_SIZE: u64 = 0x01000000
+val STARFIVE_UBOOT_DTB: u64 = 0x42200000
+
+fn _put_text_entry():
+    riscv_uart_put(83)
+    riscv_uart_put(84)
+    riscv_uart_put(65)
+    riscv_uart_put(82)
+    riscv_uart_put(70)
+    riscv_uart_put(73)
+    riscv_uart_put(86)
+    riscv_uart_put(69)
+    riscv_uart_put(32)
+    riscv_uart_put(101)
+    riscv_uart_put(110)
+    riscv_uart_put(116)
+    riscv_uart_put(114)
+    riscv_uart_put(121)
+    riscv_uart_put(13)
+    riscv_uart_put(10)
+
+fn _starfive_dtb_valid(dtb_addr: u64) -> bool:
+    dtb_addr != 0 and
+        rt_mem_read_u8(dtb_addr) == 0xD0 and
+        rt_mem_read_u8(dtb_addr + 1) == 0x0D and
+        rt_mem_read_u8(dtb_addr + 2) == 0xFE and
+        rt_mem_read_u8(dtb_addr + 3) == 0xED
+
+@no_mangle
+fn starfive_boot_main(hart_id: u64, dtb_addr: u64):
+    _put_text_entry()
+    val active_dtb = rt_starfive_resolve_dtb(dtb_addr)
+    if active_dtb == 0:
+        riscv_noalloc_boot_idle()
+        return
+    val used_uboot_fallback = active_dtb != dtb_addr
+    riscv_noalloc_log_init()
+    if used_uboot_fallback:
+        log_raw_println("STARFIVE uboot-dtb-fallback")
+    # DTB source selection cannot alter the exact hart identity supplied by
+    # the firmware entry ABI.
+    riscv_noalloc_handoff(hart_id, active_dtb)
+    rt_riscv_noalloc_pmm_init(STARFIVE_RAM_BASE, STARFIVE_RAM_SIZE_MIN, STARFIVE_RESERVED_END, STARFIVE_HEAP_START)
+    riscv_noalloc_heap_init(STARFIVE_HEAP_START, STARFIVE_HEAP_SIZE)
+    __simple_call_module_inits()
+    if not riscv_publish_boot_hart_identity_v1(hart_id):
+        riscv_noalloc_boot_idle()
+        return
+    riscv_noalloc_services_init(true)
+    log_raw_println("STARFIVE console-ready")
+    val pcie_init = starfive_jh7110_pcie1_initialize()
+    if pcie_init.is_err():
+        log_raw_println("STARFIVE pcie1-init-blocked reason={pcie_init.unwrap_err()}")
+    else:
+        log_raw_println("STARFIVE pcie1-init-ready source={pcie_init.unwrap()}")
+    val pcie_link = starfive_pcie1_link_up()
+    log_raw_println("STARFIVE pcie1-link-up={pcie_link}")
+    if pcie_init.is_ok() and pcie_link:
+        val nvme_pci = starfive_find_nvme_read_only()
+        if nvme_pci.is_ok():
+            val identity = nvme_pci.unwrap()
+            log_raw_println("STARFIVE nvme-pci-ready domain={identity.domain} bdf={identity.bus}:{identity.device}.{identity.func} vendor={identity.vendor_id} device={identity.device_id} class={identity.class_code}:{identity.subclass}:{identity.prog_if} bar0={identity.bar0_raw} bar1={identity.bar1_raw} read_only=1")
+            val live_nvme = starfive_nvme_identify(identity)
+            if live_nvme.is_ok():
+                val device = live_nvme.unwrap()
+                log_raw_println("STARFIVE nvme-identify-ready model={device.model} serial={device.serial} firmware={device.firmware} nsid={device.nsid} lba_size={device.lba_size} lba_count={device.lba_count} bar0={device.bar0_cpu} bar_size={device.bar0_size} completion=polling media_writes=0")
+                starfive_nvme_remember(device)
+            else:
+                log_raw_println("STARFIVE nvme-identify-blocked reason={live_nvme.unwrap_err()} media_writes=0")
+        else:
+            log_raw_println("STARFIVE nvme-pci-blocked reason={nvme_pci.unwrap_err()} read_only=1")
+    else:
+        log_raw_println("STARFIVE nvme-pci-blocked reason=pcie-host-not-admitted read_only=1")
+    val root_r = starfive_mount_packaged_root()
+    if root_r.is_err():
+        log_raw_println("STARFIVE filesystem-failed: {root_r.unwrap_err()}")
+        riscv_noalloc_boot_idle()
+        return
+    log_raw_println("STARFIVE filesystem-ready entries={root_r.unwrap()}")
+    riscv_noalloc_log_boot_ok()
+    log_raw_println("STARFIVE shell-ready")
+    starfive_serial_shell_main()
+    riscv_noalloc_boot_idle()
+
+export starfive_boot_main

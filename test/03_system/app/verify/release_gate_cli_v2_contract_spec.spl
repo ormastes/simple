@@ -1,0 +1,62 @@
+# @cover src/app/verify/main.spl 0%
+# codex-system-test
+# @req REQ-FV2-RELEASE-001 NFR-FV2-RELEASE-003
+"""# FV2 release CLI V2 dispatch contract
+
+The release CLI is an evidence boundary.  A document declaring V2 must enter
+the policy-bound reducer directly; it must never be downgraded through the V1
+compatibility parser.  Both its signed artifact and every materialized receipt
+must be regular, no-follow files before their hashes are trusted.
+"""
+
+use std.spec.*
+use std.nogc_sync_mut.io.file_ops.{file_read}
+
+const RELEASE_CLI = "src/app/verify/release_gate_cli.spl"
+const VERIFY_MAIN = "src/app/verify/main.spl"
+
+fn _between(source: text, start: text, end: text) -> text:
+    val first = source.find(start)
+    if first < 0: return ""
+    val last = source.find(end, first + start.len())
+    if last < 0: return ""
+    source.slice(first, last)
+
+describe "REQ-FV2-RELEASE-001: V2 release CLI evidence boundary":
+    it "routes the public release command through the dedicated gate CLI":
+        val source = file_read(VERIFY_MAIN)
+        expect(source.contains("simple verify release BUNDLE.sdn")).to_equal(true)
+        expect(source.contains("src/app/verify/release_gate_cli.spl")).to_equal(true)
+        expect(source.contains('elif sub == "release":')).to_equal(true)
+        expect(source.contains("return run_release_gate(args[1:])")).to_equal(true)
+
+    it "dispatches a declared V2 bundle before V1 compatibility parsing":
+        val source = file_read(RELEASE_CLI)
+        val dispatch = source.find('if bundle_source.contains("simple.formal.release-bundle.v2"):')
+        val v2_return = source.find("return admit_v2_bundle(bundle_source, policy_source)")
+        val v1_parse = source.find("match parse_release_bundle_sdn_v1(bundle_source):")
+        expect(dispatch).to_be_greater_than(-1)
+        expect(v2_return).to_be_greater_than(dispatch)
+        expect(v1_parse).to_be_greater_than(v2_return)
+
+    it "keeps the V2 branch policy-bound and free of V1 admission":
+        val source = file_read(RELEASE_CLI)
+        val v2 = _between(source, "fn admit_v2_bundle(", "fn main() -> i64:")
+        expect(v2 == "").to_equal(false)
+        expect(v2.contains("parse_release_bundle_sdn_v2(bundle_source)")).to_equal(true)
+        expect(v2.contains("admit_loaded_release_delivery_v2(bundle,")).to_equal(true)
+        expect(v2.contains("FV2-RELEASE-ADMITTED-V2")).to_equal(true)
+        expect(v2.contains("parse_release_bundle_sdn_v1(")).to_equal(false)
+        expect(v2.contains("admit_loaded_release_delivery_v1(")).to_equal(false)
+
+    it "requires no-follow artifact and receipt materialization in both paths":
+        val source = file_read(RELEASE_CLI)
+        val v2 = _between(source, "fn admit_v2_bundle(", "fn main() -> i64:")
+        val v1_start = source.find("match parse_release_bundle_sdn_v1(bundle_source):")
+        val v1 = if v1_start < 0: "" else: source.slice(v1_start, source.len())
+        expect(v2.contains("file_is_regular_no_follow(artifact_path)")).to_equal(true)
+        expect(v2.contains("file_is_regular_no_follow(path)")).to_equal(true)
+        expect(v1.contains("file_is_regular_no_follow(artifact_path)")).to_equal(true)
+        expect(v1.contains("file_is_regular_no_follow(path)")).to_equal(true)
+        expect(v2.contains("validate_release_artifact_identity_v1(")).to_equal(true)
+        expect(v2.contains("required_release_receipt_hashes_v1(")).to_equal(true)

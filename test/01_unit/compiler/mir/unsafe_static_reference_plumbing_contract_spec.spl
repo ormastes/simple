@@ -1,0 +1,43 @@
+"""
+## Purpose and audience
+Purpose: Pin unsafe static-reference authority plumbing across HIR safety and MIR lowering.
+Audience: compiler maintainers changing unsafe-block or module-static semantics.
+"""
+# @req: REQ-COMPILER-MIR-001
+
+use std.spec.*
+use std.io_runtime.{file_read}
+
+describe "unsafe static-reference plumbing":
+    it "keeps imported constant mutability and typed diagnostics wired":
+        val safety = file_read("src/compiler/35.semantics/safety_checker.spl")
+        val expressions = file_read("src/compiler/35.semantics/safety_checker_expr.spl")
+        val imports = file_read("src/compiler/20.hir/hir_lowering/_Items/module_import_registration.spl")
+        val diagnostics_source = file_read("src/compiler/80.driver/driver_hir_pipeline_passes.spl")
+
+        expect(safety).to_contain("static_mutability: Dict<i64, bool>")
+        expect(safety).to_contain("fn safetychecker_flag_static_reference(")
+        expect(expressions).to_contain("safetychecker_flag_static_reference(self, op, operand, expr.span)")
+        expect(safety).to_contain("StaticReferenceOutsideUnsafe(span: Span)")
+        expect(safety).to_contain("MutableReferenceToImmutableStatic(span: Span)")
+        expect(imports).to_contain("imported_constant.is_mutable")
+        expect(diagnostics_source).to_contain("[safety static-reference-outside-unsafe]")
+        expect(diagnostics_source).to_contain("fix: wrap the reference-taking expression in the smallest valid `unsafe:` block")
+        expect(diagnostics_source).to_contain("[safety mutable-reference-to-immutable-static]")
+        expect(diagnostics_source).to_contain("fix: use `&STATIC`, or declare the static mutable when shared mutation is intended")
+
+    it "tracks and restores MIR unsafe depth without changing ref lowering":
+        val types = file_read("src/compiler/50.mir/mir_lowering_types.spl")
+        val module_lowering = file_read("src/compiler/50.mir/_MirLowering/module_lowering.spl")
+        val function_lowering = file_read("src/compiler/50.mir/_MirLowering/function_lowering.spl")
+        val expressions = file_read("src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl")
+
+        expect(types).to_contain("unsafe_depth: i64")
+        expect(module_lowering).to_contain("unsafe_depth: 0")
+        expect(module_lowering).to_contain("self.unsafe_depth = 0")
+        expect(function_lowering.split("self.unsafe_depth = 0").len()).to_be_greater_than(2)
+        expect(expressions).to_contain("val saved_unsafe_depth = self.unsafe_depth")
+        expect(expressions).to_contain("self.unsafe_depth = saved_unsafe_depth + 1")
+        expect(expressions).to_contain("self.unsafe_depth = saved_unsafe_depth")
+        expect(expressions).to_contain("val is_ref = op_disc == _sffi_enum_discriminant(HirUnaryOp.Ref)")
+        expect(expressions).to_contain("val is_ref_mut = op_disc == _sffi_enum_discriminant(HirUnaryOp.RefMut)")

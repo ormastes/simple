@@ -1,0 +1,243 @@
+# Canonical Simple Web standards-showcase runner.
+# Rendering stays on the production HTML/CSS -> Draw IR -> Engine2D path.
+
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
+    simple_web_render_html_to_readback_result_with_engine2d_backend,
+    simple_web_resolved_engine2d_backend_name}
+use std.gc_async_mut.gpu.browser_engine.web_renderable_feature_inventory.{
+    WEB_FEATURE_CSS, WEB_FEATURE_HTML, web_renderable_count_kind,
+    web_renderable_feature_inventory, web_renderable_feature_inventory_apply_to_showcase}
+use os.hosted.hosted_web_content_session.{HostedWebContentSession}
+use os.hosted.web_showcase_native_tabs.{web_showcase_native_pointer, web_showcase_native_key}
+use std.gc_async_mut.gpu.browser_engine.web_showcase_tabs.{web_showcase_state}
+use std.gc_async_mut.web.browser_session_runtime.*
+use common.ui.key_code.{winit_keycode_to_canon, CANON_SHIFT}
+use std.io.window_winit.{WinitLoop, WinitWindow, winit_loop_new, winit_loop_free, winit_window_new,
+    winit_window_free, winit_present_rgba_u32, winit_wait_input_into}
+use std.nogc_sync_mut.io.window_winit_input_event.{WinitInputEvent}
+use std.io_runtime.{read_file, file_exists, env_get, time_now_unix_micros}
+
+class ShowcaseResolution:
+    w: i32
+    h: i32
+
+pub fn showcase_resolution_dims() -> ShowcaseResolution:
+    val raw = (env_get("SHOWCASE_RESOLUTION") ?? "4k").trim().lower()
+    if raw == "8k":
+        return ShowcaseResolution(w: 7680, h: 4320)
+    if raw == "4k" or raw == "":
+        return ShowcaseResolution(w: 3840, h: 2160)
+    val parts = raw.split("x")
+    if parts.len() == 2:
+        val w = parts[0].parse_i64() ?? 0
+        val h = parts[1].parse_i64() ?? 0
+        if w > 0 and h > 0 and w <= 16384 and h <= 16384:
+            return ShowcaseResolution(w: w.to_i32(), h: h.to_i32())
+    ShowcaseResolution(w: 3840, h: 2160)
+
+pub fn showcase_dpi() -> i32:
+    val parsed = (env_get("SHOWCASE_DPI") ?? "300").trim().parse_i64() ?? 300
+    if parsed < 72 or parsed > 1200:
+        return 300
+    parsed.to_i32()
+
+fn showcase_backend() -> text:
+    val requested = (env_get("SIMPLE_GUI_BACKEND") ?? "vulkan").trim().lower()
+    if requested == "": "vulkan" else: requested
+
+fn varied_nonzero_count(pixels: [u32]) -> i64:
+    if pixels.len() == 0:
+        return 0
+    val first = pixels[0]
+    var varied = false
+    var nonzero: i64 = 0
+    var i = 0
+    while i < pixels.len():
+        if pixels[i] != first:
+            varied = true
+        if (pixels[i] & 0x00FFFFFFu32) != 0u32:
+            nonzero = nonzero + 1
+        i = i + 1
+    if varied: nonzero else: 0
+
+fn run_showcase_input(
+    lp: WinitLoop, win: WinitWindow, semantic: HostedWebContentSession,
+    dims: ShowcaseResolution, requested: text, initial_html: text
+) -> i64:
+    var shown_html = initial_html
+    var pointer_x = 0.0
+    var pointer_y = 0.0
+    var shift_down = false
+    var tabs = web_showcase_state()
+    var pressed_tab_id = ""
+    var event_id: i64 = 0
+    while true:
+        var events: [WinitInputEvent] = []
+        val input = winit_wait_input_into(lp, 100, events, pointer_x, pointer_y)
+        if not input.is_valid:
+            return 11
+        if input.close:
+            return 0
+        pointer_x = input.mouse_x
+        pointer_y = input.mouse_y
+        var click_index = 0
+        # Consume the ordered event records: grouping all keys before clicks
+        # would dispatch a key against the wrong focused DOM node.
+        for event in events:
+            event_id = event_id + 1
+            if event.kind == 6:
+                shift_down = false
+                pressed_tab_id = ""
+                semantic.clear_page_pointer_compatibility_state()
+            elif event.kind == 10:
+                val code = winit_keycode_to_canon(event.keycode)
+                if code == CANON_SHIFT:
+                    shift_down = event.pressed
+                val dispatched = semantic.dispatch_key_with_shift(
+                    event_id, code, event.pressed, shift_down)
+                match web_showcase_native_key(
+                    semantic, tabs, dispatched.semantic_target_id, code, event.pressed):
+                    Ok(next): tabs = next
+                    Err(_): return 14
+            elif event.kind == 11 and event.committed_text != "":
+                val _ = semantic.dispatch_text(event_id, event.committed_text)
+            elif event.kind == 20:
+                if input.click_buttons[click_index] == 0:
+                    val dispatched = semantic.dispatch_pointer_at(
+                        event_id, input.click_x[click_index].to_i32(),
+                        input.click_y[click_index].to_i32(),
+                        input.click_pressed[click_index])
+                    if input.click_pressed[click_index]:
+                        pressed_tab_id = if dispatched.reason == "pointer-pressed" or dispatched.reason == "":
+                            dispatched.semantic_target_id
+                        else: ""
+                    else:
+                        val activated = (pressed_tab_id != "" and
+                            dispatched.semantic_target_id == pressed_tab_id and
+                            (dispatched.reason == "" or dispatched.reason == "no-application-mutation"))
+                        pressed_tab_id = ""
+                        match web_showcase_native_pointer(
+                            semantic, tabs, dispatched.semantic_target_id, activated):
+                            Ok(next): tabs = next
+                            Err(_): return 14
+                click_index = click_index + 1
+        if events.len() == 0:
+            continue
+        val next_html = semantic.browser.render_html_document()
+        if next_html == shown_html:
+            continue
+        val changed = simple_web_render_html_to_readback_result_with_engine2d_backend(
+            next_html, dims.w, dims.h, requested)
+        val pixels = changed.readback
+        val count = dims.w.to_i64() * dims.h.to_i64()
+        if (changed.render_degraded or changed.resolved_backend != requested or
+            pixels.pixel_count != count or pixels.pixels.len().to_i64() != count or
+            pixels.checksum == 0 or varied_nonzero_count(pixels.pixels) == 0):
+            return 12
+        if requested == "vulkan" and (pixels.source != "device_readback" or
+            pixels.backend_handle <= 0 or pixels.device_identity <= 0):
+            return 12
+        if not winit_present_rgba_u32(win, dims.w.to_i64(), dims.h.to_i64(), pixels.pixels):
+            return 9
+        shown_html = next_html
+        print "web_standards_showcase status=measured event_id={event_id} mutation_revision={semantic.mutation_revision} checksum={pixels.checksum} presentation=submitted scanout_status=unverified comparison_admitted=false"
+    0
+
+pub fn run_web_standards_showcase(open_gui: bool, path: text) -> i64:
+    # Include setup, backend resolution, file IO, and inventory construction in
+    # the first-frame interval. Process startup remains an external measurement.
+    val started_us = time_now_unix_micros()
+    if not file_exists(path):
+        print "web_standards_showcase status=fail reason=html-not-found path={path}"
+        return 1
+
+    val dims = showcase_resolution_dims()
+    val requested = showcase_backend()
+    val resolved = simple_web_resolved_engine2d_backend_name(dims.w, dims.h, requested)
+    val source_html = read_file(path)
+    val inventory = web_renderable_feature_inventory()
+    val fixture_html = web_renderable_feature_inventory_apply_to_showcase(source_html, inventory)
+    var semantic = HostedWebContentSession.create_document(
+        1, "simple-showcase://web/standards", fixture_html, dims.w, dims.h)
+    if semantic.failure_reason != "":
+        print "web_standards_showcase status=fail reason=document-open detail={semantic.failure_reason}"
+        semantic.close()
+        return 13
+    val html = semantic.browser.render_html_document()
+    val render_started_us = time_now_unix_micros()
+    val result = simple_web_render_html_to_readback_result_with_engine2d_backend(
+        html, dims.w, dims.h, requested)
+    val rendered_us = time_now_unix_micros()
+    val readback = result.readback
+    val expected_pixels = dims.w.to_i64() * dims.h.to_i64()
+    val nonzero = varied_nonzero_count(readback.pixels)
+
+    if readback.pixel_count != expected_pixels or readback.pixels.len().to_i64() != expected_pixels:
+        print "web_standards_showcase status=fail reason=wrong-pixel-count expected={expected_pixels} actual={readback.pixel_count}"
+        semantic.close()
+        return 2
+    if nonzero == 0 or readback.checksum == 0:
+        print "web_standards_showcase status=fail reason=blank-or-uniform pixels={readback.pixel_count} checksum={readback.checksum}"
+        semantic.close()
+        return 3
+    if resolved != requested or result.resolved_backend != requested:
+        print "web_standards_showcase status=fail reason=backend-mismatch requested={requested} resolved={resolved} produced={result.resolved_backend}"
+        semantic.close()
+        return 6
+    if requested == "vulkan" and (readback.source != "device_readback" or readback.backend_handle <= 0 or readback.device_identity <= 0):
+        print "web_standards_showcase status=fail reason=vulkan-device-evidence source={readback.source} handle={readback.backend_handle} device={readback.device_identity}"
+        semantic.close()
+        return 7
+    if result.render_degraded:
+        print "web_standards_showcase status=fail reason=render-degraded"
+        semantic.close()
+        return 8
+
+    var presented_us: i64 = 0
+    if open_gui and (env_get("SIMPLE_GUI") ?? "") == "1":
+        val lp = winit_loop_new()
+        if not lp.is_valid:
+            print "web_standards_showcase status=fail reason=no-gui-runtime"
+            semantic.close()
+            return 4
+        val win = winit_window_new(lp, dims.w.to_i64(), dims.h.to_i64(),
+            "Simple Web Vulkan 4K Showcase")
+        if not win.is_valid:
+            winit_loop_free(lp)
+            print "web_standards_showcase status=fail reason=window-create"
+            semantic.close()
+            return 5
+        if not winit_present_rgba_u32(win, dims.w.to_i64(), dims.h.to_i64(), readback.pixels):
+            winit_window_free(win)
+            winit_loop_free(lp)
+            print "web_standards_showcase status=fail reason=present-failed"
+            semantic.close()
+            return 9
+        presented_us = time_now_unix_micros()
+        val submitted_frame_us = presented_us - started_us
+        if started_us <= 0 or submitted_frame_us <= 0 or submitted_frame_us > 1000000:
+            winit_window_free(win)
+            winit_loop_free(lp)
+            print "web_standards_showcase status=fail reason=first-frame-budget first_present_submitted_us={submitted_frame_us} first_complete_frame_under_1s=false"
+            semantic.close()
+            return 10
+        # The facade proves successful submission only: it provides no
+        # compositor/scanout timestamp. Emit this before the interactive loop
+        # and keep full first-visible-frame acceptance unverified.
+        print "web_standards_showcase status=measured first_present_submitted_us={submitted_frame_us} presentation=submitted scanout_status=unverified comparison_admitted=false"
+        val input_status = run_showcase_input(lp, win, semantic, dims, requested, html)
+        winit_window_free(win)
+        winit_loop_free(lp)
+        if input_status != 0:
+            semantic.close()
+            print "web_standards_showcase status=fail reason=interactive-frame code={input_status}"
+            return input_status
+
+    val submitted_frame_us = if presented_us > 0: presented_us - started_us else: 0
+    # Readback alone cannot prove presentation; submission cannot prove scanout.
+    print "web_standards_showcase status=measured path={path} html_bytes={html.len()} inventory_version={inventory.version} inventory_html_count={web_renderable_count_kind(inventory, WEB_FEATURE_HTML)} inventory_css_count={web_renderable_count_kind(inventory, WEB_FEATURE_CSS)} width={dims.w} height={dims.h} dpi={showcase_dpi()} pixels={readback.pixel_count} checksum={readback.checksum} nonzero={nonzero} requested={requested} resolved={result.resolved_backend} source={readback.source} backend_handle={readback.backend_handle} device_identity={readback.device_identity} render_us={rendered_us - render_started_us} first_present_submitted_us={submitted_frame_us} first_complete_frame_us=0 first_complete_frame_under_1s=false scanout_status=unverified comparison_admitted=false"
+    semantic.close()
+    0
+
+fn main() -> i64:
+    run_web_standards_showcase(true, "examples/06_io/ui/browser_common_elements_showcase.html")

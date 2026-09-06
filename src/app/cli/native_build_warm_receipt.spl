@@ -1,0 +1,696 @@
+# Exact-input receipt for native-build final-artifact reuse.
+#
+# The closure walker publishes a pid-private candidate during the real worker.
+# After a successful build the parent binds the final artifact to the compiler,
+# normalized argv/link environment, exact source closure, runtime/link inputs,
+# and the object/capsule receipts selected from build_cache.sdn.  A later exact
+# hit restores the cached artifact atomically and does not start the worker.
+
+use app.io.env_ops.{env_get, cwd}
+use compiler.common.structural_contracts.frontend_offload_switch.{frontend_offload_rows}
+use std.io_runtime.{
+    dir_create_all, dir_exists, dir_list, file_copy, file_delete, file_exists,
+    file_hash_sha256, file_read, file_rename, file_write, getpid,
+    host_os
+}
+
+val NATIVE_BUILD_WARM_RECEIPT_VERSION: text = "simple-native-warm-receipt-v3"
+val NATIVE_BUILD_WARM_CANDIDATE_VERSION: text = "simple-native-warm-candidate-v1"
+val NATIVE_BUILD_WARM_CANDIDATE_ENV: text = "SIMPLE_NATIVE_BUILD_WARM_CLOSURE_CANDIDATE"
+
+pub class NativeBuildWarmReceiptState:
+    eligible: bool
+    hit: bool
+    key: text
+    receipt_path: text
+    candidate_path: text
+    artifact_path: text
+    artifact_digest: text
+    output_path: text
+    args: [text]
+    closure_count: i64
+
+fn _warm_empty_state() -> NativeBuildWarmReceiptState:
+    NativeBuildWarmReceiptState(
+        eligible: false, hit: false, key: "", receipt_path: "",
+        candidate_path: "", artifact_path: "", artifact_digest: "",
+        output_path: "", args: [],
+        closure_count: 0)
+
+fn _warm_valid_digest(value: text) -> bool:
+    if value.len() != 64:
+        return false
+    for ch in value:
+        if not ((ch >= "0" and ch <= "9") or (ch >= "a" and ch <= "f")):
+            return false
+    true
+
+fn _warm_path_safe(path: text) -> bool:
+    (path != "" and not path.contains("\n") and not path.contains("\r") and
+        not path.contains("\t"))
+
+fn _warm_digest_text(value: text) -> text:
+    # The native file hasher is linear and does not materialize SHA-256's word
+    # schedule in the interpreted wrapper. The pid-private scratch contains
+    # metadata only (never source bodies) and is removed before returning.
+    if not dir_create_all("build"):
+        return ""
+    val scratch = "build/.native-warm-digest-" + getpid().to_text() + ".tmp"
+    if not file_write(scratch, value):
+        return ""
+    val digest = file_hash_sha256(scratch)
+    val _removed = file_delete(scratch)
+    if _warm_valid_digest(digest): digest else: ""
+
+fn _warm_sort_text(values: [text]) -> [text]:
+    # In-place heap sort: deterministic O(n log n), one array copy at the
+    # value-semantics boundary, and no per-level merge buffers.
+    var result = values
+    val n = result.len()
+    var start = n / 2 - 1
+    while start >= 0:
+        var root = start
+        while root * 2 + 1 < n:
+            var child = root * 2 + 1
+            if child + 1 < n and result[child] < result[child + 1]:
+                child = child + 1
+            if not (result[root] < result[child]):
+                break
+            val tmp = result[root]
+            result[root] = result[child]
+            result[child] = tmp
+            root = child
+        start = start - 1
+    var end = n - 1
+    while end > 0:
+        val tmp = result[0]
+        result[0] = result[end]
+        result[end] = tmp
+        var root = 0
+        while root * 2 + 1 < end:
+            var child = root * 2 + 1
+            if child + 1 < end and result[child] < result[child + 1]:
+                child = child + 1
+            if not (result[root] < result[child]):
+                break
+            val swap = result[root]
+            result[root] = result[child]
+            result[child] = swap
+            root = child
+        end = end - 1
+    result
+
+fn _warm_lexical_abs(path: text) -> text:
+    val windows = host_os() == "windows"
+    # Preserve every path byte and root form after cwd qualification. In
+    # particular: POSIX backslash is a filename byte, `//` may be a distinct
+    # implementation root, Windows UNC must retain both leading separators,
+    # and `..` cannot be collapsed across a symlink prefix. False misses for
+    # alternate spellings are safe; false exact hits are not.
+    if windows:
+        val drive_form = path.len() >= 2 and path.substring(1, 2) == ":"
+        val drive_absolute = (drive_form and path.len() >= 3 and
+            (path.substring(2, 3) == "\\" or path.substring(2, 3) == "/"))
+        val unc = (path.len() >= 2 and
+            ((path.substring(0, 1) == "\\" and path.substring(1, 2) == "\\") or
+             (path.substring(0, 1) == "/" and path.substring(1, 2) == "/")))
+        if unc or drive_absolute:
+            return path
+        # `C:foo` is drive-relative; `\foo` and `/foo` are current-drive-root
+        # relative. Without a drive-cwd facade their authority cannot be keyed
+        # exactly, so make the advisory receipt ineligible.
+        if drive_form or path.starts_with("\\") or path.starts_with("/"):
+            return ""
+        val here = cwd()
+        if here == "" or here == ".":
+            return ""
+        val separator = if here.ends_with("\\") or here.ends_with("/"): "" else: "\\"
+        return here + separator + path
+    if path.starts_with("/"):
+        return path
+    val here = cwd()
+    if here == "" or here == ".":
+        return ""
+    val separator = if here.ends_with("/"): "" else: "/"
+    here + separator + path
+
+fn _warm_arg_path_flag(flag: text) -> bool:
+    (flag == "--entry" or flag == "--source" or flag == "--cache-dir" or
+        flag == "--runtime-path" or flag == "--linker-script" or
+        flag == "--backend-plugin" or flag == "--output" or flag == "-o")
+
+fn _warm_args_paths_supported(args: [text]) -> bool:
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if _warm_arg_path_flag(arg) and i + 1 < args.len():
+            if _warm_lexical_abs(args[i + 1]) == "":
+                return false
+            i = i + 2
+            continue
+        var path_value = ""
+        if arg.starts_with("--entry="):
+            path_value = arg.substring(8)
+        elif arg.starts_with("--source="):
+            path_value = arg.substring(9)
+        elif arg.starts_with("--cache-dir="):
+            path_value = arg.substring(12)
+        elif arg.starts_with("--runtime-path="):
+            path_value = arg.substring(15)
+        elif arg.starts_with("--linker-script="):
+            path_value = arg.substring(16)
+        elif arg.starts_with("--backend-plugin="):
+            path_value = arg.substring(17)
+        elif arg.starts_with("--output="):
+            path_value = arg.substring(9)
+        elif arg.starts_with("-o") and arg.len() > 2:
+            path_value = arg.substring(2)
+        if path_value != "" and _warm_lexical_abs(path_value) == "":
+            return false
+        i = i + 1
+    true
+
+fn _warm_canonical_args(args: [text]) -> text:
+    # Canonicalize equivalent split/joined path options.  Preserve the order of
+    # all other options because it is safer to miss than to merge two command
+    # lines whose last-option-wins behavior may differ.
+    var normalized: [text] = []
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if _warm_arg_path_flag(arg) and i + 1 < args.len():
+            var flag = arg
+            if flag == "-o": flag = "--output"
+            normalized.push(flag + "=" + _warm_lexical_abs(args[i + 1]))
+            i = i + 2
+            continue
+        if arg.starts_with("--entry="):
+            normalized.push("--entry=" + _warm_lexical_abs(arg.substring(8)))
+        elif arg.starts_with("--source="):
+            normalized.push("--source=" + _warm_lexical_abs(arg.substring(9)))
+        elif arg.starts_with("--cache-dir="):
+            normalized.push("--cache-dir=" + _warm_lexical_abs(arg.substring(12)))
+        elif arg.starts_with("--runtime-path="):
+            normalized.push("--runtime-path=" + _warm_lexical_abs(arg.substring(15)))
+        elif arg.starts_with("--linker-script="):
+            normalized.push("--linker-script=" + _warm_lexical_abs(arg.substring(16)))
+        elif arg.starts_with("--backend-plugin="):
+            normalized.push("--backend-plugin=" + _warm_lexical_abs(arg.substring(17)))
+        elif arg.starts_with("--output="):
+            normalized.push("--output=" + _warm_lexical_abs(arg.substring(9)))
+        elif arg.starts_with("-o") and arg.len() > 2:
+            normalized.push("--output=" + _warm_lexical_abs(arg.substring(2)))
+        elif arg == "--jobs" or arg == "-j":
+            normalized.push("--threads")
+        elif arg.starts_with("--jobs="):
+            normalized.push("--threads=" + arg.substring(7))
+        elif arg == "--build-mode":
+            normalized.push("--mode")
+        elif arg.starts_with("--build-mode="):
+            normalized.push("--mode=" + arg.substring(13))
+        else:
+            normalized.push(arg)
+        i = i + 1
+    # Length-prefix every token. Raw argv may legally contain newlines, so a
+    # delimiter-only encoding would let distinct argv vectors hash identically.
+    var framed: [text] = [normalized.len().to_text(), ";"]
+    for value in normalized:
+        framed.push(value.len().to_text())
+        framed.push(":")
+        framed.push(value)
+    framed.join("")
+
+fn _warm_cache_dir(args: [text]) -> text:
+    var result = "build/native_cache"
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg == "--cache-dir" and i + 1 < args.len():
+            result = args[i + 1]
+            i = i + 2
+            continue
+        if arg.starts_with("--cache-dir="):
+            result = arg.substring(12)
+        i = i + 1
+    if result == "": result = "build/native_cache"
+    _warm_lexical_abs(result)
+
+fn _warm_has_entry_closure(args: [text]) -> bool:
+    for arg in args:
+        if (arg == "--entry-closure" or arg == "--emit-object" or
+                arg == "--emit-archive" or arg == "--emit-shared"):
+            return true
+    false
+
+fn _warm_has_explicit_output(args: [text]) -> bool:
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if (arg == "-o" or arg == "--output") and i + 1 < args.len():
+            return true
+        if arg.starts_with("--output=") or (arg.starts_with("-o") and arg.len() > 2):
+            return true
+        i = i + 1
+    false
+
+fn _warm_output_path(args: [text]) -> text:
+    var result = ""
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if (arg == "-o" or arg == "--output") and i + 1 < args.len():
+            result = args[i + 1]
+            i = i + 2
+            continue
+        if arg.starts_with("--output="):
+            result = arg.substring(9)
+        elif arg.starts_with("-o") and arg.len() > 2:
+            result = arg.substring(2)
+        i = i + 1
+    _warm_lexical_abs(result)
+
+fn _warm_reuse_forbidden(args: [text]) -> bool:
+    for arg in args:
+        if arg == "--clean" or arg == "--no-incremental":
+            return true
+    false
+
+fn _warm_frontend_identity(args: [text], simple_bin: text) -> text:
+    val binary_digest = file_hash_sha256(simple_bin)
+    if not _warm_valid_digest(binary_digest):
+        return ""
+    var rows = [
+        "binary=" + binary_digest,
+        "cache_scope=" + (env_get("SIMPLE_CACHE_SCOPE") ?? ""),
+        "frontend_scope=" + (env_get("SIMPLE_FRONTEND_CACHE_SCOPE") ?? ""),
+        "frontend_dir=" + (env_get("SIMPLE_FRONTEND_CACHE_DIR") ?? ""),
+        "hir_dir=" + (env_get("SIMPLE_HIR_CACHE_DIR") ?? ""),
+        "frontend_enabled=" + (env_get("SIMPLE_FRONTEND_CACHE") ?? ""),
+        "hir_enabled=" + (env_get("SIMPLE_HIR_CACHE") ?? ""),
+        "linker=" + (env_get("SIMPLE_LINKER") ?? ""),
+        "linker_flavor=" + (env_get("SIMPLE_LINKER_FLAVOR") ?? ""),
+        "linker_script=" + (env_get("SIMPLE_NATIVE_BUILD_LINKER_SCRIPT") ?? ""),
+        "sysroot=" + (env_get("SIMPLE_SYSROOT") ?? ""),
+        "path=" + (env_get("PATH") ?? ""),
+        "args=" + _warm_canonical_args(args)
+    ]
+    for row in _warm_frontend_offload_rows():
+        rows.push(row)
+    _warm_digest_text(rows.join("\n"))
+
+# The same env keys and the same `FRONTEND_OFFLOAD_GPU_PARSE_AVAILABLE` the
+# driver applies, so the receipt names the decision the build actually made.
+fn _warm_frontend_offload_rows() -> [text]:
+    frontend_offload_rows(
+        env_get("SIMPLE_FRONTEND_OFFLOAD") ?? "",
+        env_get("SIMPLE_FRONTEND_OFFLOAD_FALLBACK") ?? "")
+
+fn _warm_checked_payload(raw: text, version: text) -> text:
+    val marker = "\nchecksum="
+    val at = raw.last_index_of(marker)
+    if at <= 0:
+        return ""
+    val payload = raw.substring(0, at)
+    val checksum = raw.substring(at + marker.len()).trim()
+    if not payload.starts_with(version + "\n"):
+        return ""
+    if not _warm_valid_digest(checksum) or _warm_digest_text(payload) != checksum:
+        return ""
+    payload
+
+fn _warm_rows_from_payload(payload: text, first_row: i64) -> [text]:
+    val lines = payload.split("\n")
+    if lines.len() <= first_row:
+        return []
+    lines.slice(first_row, lines.len())
+
+fn _warm_rows_valid(rows: [text]) -> bool:
+    if rows.len() == 0:
+        return false
+    var previous = ""
+    for row in rows:
+        val tab = row.last_index_of("\t")
+        if tab <= 0:
+            return false
+        val path = row.substring(0, tab)
+        val digest = row.substring(tab + 1)
+        if not _warm_path_safe(path) or not _warm_valid_digest(digest):
+            return false
+        if previous != "" and path <= previous:
+            return false
+        if not file_exists(path) or file_hash_sha256(path) != digest:
+            return false
+        previous = path
+    true
+
+fn _warm_write_atomic(path: text, payload: text) -> bool:
+    val tmp = path + "." + getpid().to_text() + ".tmp"
+    val checksum = _warm_digest_text(payload)
+    if checksum == "":
+        return false
+    val raw = payload + "\nchecksum=" + checksum + "\n"
+    if not file_write(tmp, raw):
+        return false
+    if file_rename(tmp, path):
+        return true
+    val _removed = file_delete(tmp)
+    false
+
+fn _warm_parent_dir(path: text) -> text:
+    val slash = path.last_index_of("/")
+    val backslash = path.last_index_of("\\")
+    val at = if slash > backslash: slash else: backslash
+    if at <= 0: "" else: path.substring(0, at)
+
+fn _warm_copy_verified_atomic(source: text, destination: text, digest: text) -> bool:
+    if not _warm_valid_digest(digest) or not file_exists(source):
+        return false
+    val parent = _warm_parent_dir(destination)
+    if parent != "" and not dir_create_all(parent):
+        return false
+    val tmp = destination + "." + getpid().to_text() + ".tmp"
+    val _stale = file_delete(tmp)
+    if not file_copy(source, tmp):
+        return false
+    if file_hash_sha256(tmp) != digest:
+        val _corrupt = file_delete(tmp)
+        return false
+    if file_rename(tmp, destination):
+        return true
+    val _removed = file_delete(tmp)
+    false
+
+fn _warm_rows_for_paths(paths: [text]) -> [text]:
+    var normalized: [text] = []
+    for raw_path in paths:
+        val path = _warm_lexical_abs(raw_path)
+        if not _warm_path_safe(path) or not file_exists(path):
+            return []
+        normalized.push(path)
+    normalized = _warm_sort_text(normalized)
+    var rows: [text] = []
+    var previous = ""
+    for path in normalized:
+        if path == previous:
+            continue
+        val digest = file_hash_sha256(path)
+        if not _warm_valid_digest(digest):
+            return []
+        rows.push(path + "\t" + digest)
+        previous = path
+    rows
+
+fn _warm_candidate_paths(rows: [text]) -> [text]:
+    var paths: [text] = []
+    for row in rows:
+        val tab = row.last_index_of("\t")
+        if tab <= 0:
+            return []
+        paths.push(row.substring(0, tab))
+    paths
+
+fn _warm_extract_quoted(line: text, marker: text) -> text:
+    val start = line.index_of(marker)
+    if start < 0:
+        return ""
+    val value_start = start + marker.len()
+    val tail = line.substring(value_start)
+    val end = tail.index_of("\"")
+    if end < 0:
+        return ""
+    tail.substring(0, end)
+
+fn _warm_object_inputs(args: [text], source_rows: [text]) -> [text]:
+    # build_cache.sdn is the driver's existing object manifest. Parse it only
+    # after a successful cold build, select rows belonging to this exact source
+    # closure, then persist those bounded object/receipt paths in our receipt.
+    # Hot hits validate the selected files directly and never rescan cache dirs.
+    val manifest_path = _warm_cache_dir(args) + "/build_cache.sdn"
+    if not file_exists(manifest_path):
+        return []
+    var source_set: {text: bool} = {}
+    for path in _warm_candidate_paths(source_rows):
+        source_set[path] = true
+    var paths: [text] = [manifest_path]
+    var object_count = 0
+    for line in file_read(manifest_path).split("\n"):
+        val source_raw = _warm_extract_quoted(line, "source: \"")
+        if source_raw == "":
+            continue
+        val source_path = _warm_lexical_abs(source_raw)
+        if not source_set.contains_key(source_path):
+            continue
+        val outputs_at = line.index_of("outputs: [")
+        if outputs_at < 0:
+            continue
+        val output_tail = line.substring(outputs_at + 10)
+        val output_end = output_tail.index_of("]")
+        if output_end < 0:
+            return []
+        val encoded = output_tail.substring(0, output_end).trim()
+        if encoded == "":
+            continue
+        for token_raw in encoded.split(","):
+            val token = token_raw.trim()
+            if token.len() < 2 or not token.starts_with("\"") or not token.ends_with("\""):
+                return []
+            val object_path = _warm_lexical_abs(token.substring(1, token.len() - 1))
+            val receipt_path = object_path + ".capsule-receipt"
+            if (not _warm_path_safe(object_path) or not file_exists(object_path) or
+                    not file_exists(receipt_path)):
+                return []
+            paths.push(object_path)
+            paths.push(receipt_path)
+            object_count = object_count + 1
+    if object_count <= 0: [] else: paths
+
+fn _warm_arg_value(args: [text], flag: text) -> text:
+    var result = ""
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg == flag and i + 1 < args.len():
+            result = args[i + 1]
+            i = i + 2
+            continue
+        val prefix = flag + "="
+        if arg.starts_with(prefix):
+            result = arg.substring(prefix.len())
+        i = i + 1
+    result
+
+fn _warm_runtime_and_link_inputs(args: [text]) -> ([text], bool):
+    var paths: [text] = []
+    val backend_plugin = _warm_arg_value(args, "--backend-plugin")
+    if backend_plugin != "":
+        # The selected library is executable codegen authority. Bind its exact
+        # bytes into the warm receipt; argv/path identity alone is insufficient
+        # when a provider is replaced in place.
+        if not file_exists(backend_plugin) or dir_exists(backend_plugin):
+            return ([], false)
+        paths.push(backend_plugin)
+    val script = _warm_arg_value(args, "--linker-script")
+    if script != "":
+        if not file_exists(script): return ([], false)
+        paths.push(script)
+    val runtime = _warm_arg_value(args, "--runtime-path")
+    if runtime != "":
+        if file_exists(runtime) and not dir_exists(runtime):
+            paths.push(runtime)
+        elif dir_exists(runtime):
+            # Match the driver's runtime-provider fingerprint: linkable files
+            # directly under the configured provider, never recursive cache
+            # material beneath it.
+            for entry in _warm_sort_text(dir_list(runtime) ?? []):
+                val path = runtime + "/" + entry
+                if (not dir_exists(path) and (path.ends_with(".a") or
+                        path.ends_with(".o") or path.ends_with(".so") or
+                        path.ends_with(".dylib") or path.ends_with(".dll") or
+                        path.ends_with(".lib"))):
+                    paths.push(path)
+        else:
+            return ([], false)
+    (paths, true)
+
+pub fn native_build_warm_candidate_publish(paths: [text]) -> bool:
+    # Shard children must never author the candidate: it is evidence from the
+    # real worker's exact closure computation, not from a partial warm-up.
+    if ((env_get("SIMPLE_PARSE_SHARD") ?? "") != "" or
+            (env_get("SIMPLE_HIR_SHARD") ?? "") != ""):
+        return false
+    val path = env_get(NATIVE_BUILD_WARM_CANDIDATE_ENV) ?? ""
+    if path == "" or paths.len() == 0:
+        return false
+    var normalized: [text] = []
+    for raw_path in paths:
+        val normalized_path = _warm_lexical_abs(raw_path)
+        if not _warm_path_safe(normalized_path):
+            return false
+        normalized.push(normalized_path)
+    normalized = _warm_sort_text(normalized)
+    var rows: [text] = []
+    var previous = ""
+    for source_path in normalized:
+        if source_path == previous:
+            continue
+        val digest = file_hash_sha256(source_path)
+        if not _warm_valid_digest(digest):
+            return false
+        rows.push(source_path + "\t" + digest)
+        previous = source_path
+    val payload = NATIVE_BUILD_WARM_CANDIDATE_VERSION + "\ncount=" +
+        rows.len().to_text() + "\n" + rows.join("\n")
+    _warm_write_atomic(path, payload)
+
+fn _warm_receipt_hit(path: text, key: text, artifact_path: text) -> (i64, text):
+    if not file_exists(path):
+        return (0, "")
+    val payload = _warm_checked_payload(file_read(path), NATIVE_BUILD_WARM_RECEIPT_VERSION)
+    if payload == "":
+        return (0, "")
+    val lines = payload.split("\n")
+    if (lines.len() < 7 or lines[1] != "key=" + key or
+            not lines[2].starts_with("artifact=") or
+            not lines[3].starts_with("source_count=") or
+            not lines[4].starts_with("input_count=")):
+        return (0, "")
+    val artifact_row = lines[2].substring(9)
+    val artifact_tab = artifact_row.last_index_of("\t")
+    if artifact_tab <= 0:
+        return (0, "")
+    val recorded_artifact = artifact_row.substring(0, artifact_tab)
+    val artifact_digest = artifact_row.substring(artifact_tab + 1)
+    if (recorded_artifact != artifact_path or not _warm_valid_digest(artifact_digest) or
+            not file_exists(artifact_path) or file_hash_sha256(artifact_path) != artifact_digest):
+        return (0, "")
+    val source_count = lines[3].substring(13).to_i64() ?? -1
+    val input_count = lines[4].substring(12).to_i64() ?? -1
+    val rows = _warm_rows_from_payload(payload, 5)
+    if (source_count <= 0 or input_count <= 0 or
+            source_count + input_count != rows.len()):
+        return (0, "")
+    val source_rows = rows.slice(0, source_count)
+    val input_rows = rows.slice(source_count, rows.len())
+    if not _warm_rows_valid(source_rows) or not _warm_rows_valid(input_rows):
+        return (0, "")
+    (source_count, artifact_digest)
+
+pub fn native_build_warm_receipt_prepare(args: [text], simple_bin: text) -> NativeBuildWarmReceiptState:
+    # The lightweight parent cannot resolve compile_targets' default output
+    # without duplicating that policy. Explicit clean/no-incremental builds are
+    # also commands to run the real worker, not artifact-reuse requests.
+    if (not _warm_has_entry_closure(args) or not _warm_has_explicit_output(args) or
+            not _warm_args_paths_supported(args) or _warm_reuse_forbidden(args)):
+        return _warm_empty_state()
+    if ((env_get("SIMPLE_FRONTEND_CACHE") ?? "") == "0" or
+            (env_get("SIMPLE_HIR_CACHE") ?? "") == "0"):
+        return _warm_empty_state()
+    val key = _warm_frontend_identity(args, simple_bin)
+    if key == "":
+        return _warm_empty_state()
+    val output_path = _warm_output_path(args)
+    if output_path == "":
+        return _warm_empty_state()
+    val root = _warm_cache_dir(args) + "/warm-artifact-v2"
+    if not dir_create_all(root):
+        return _warm_empty_state()
+    val receipt_path = root + "/" + key + ".receipt"
+    val candidate_path = root + "/candidate-" + getpid().to_text() + ".receipt"
+    val artifact_path = root + "/" + key + ".artifact"
+    val _stale = file_delete(candidate_path)
+    val (closure_count, artifact_digest) = _warm_receipt_hit(
+        receipt_path, key, artifact_path)
+    NativeBuildWarmReceiptState(
+        eligible: true, hit: closure_count > 0, key: key,
+        receipt_path: receipt_path, candidate_path: candidate_path,
+        artifact_path: artifact_path, output_path: output_path, args: args,
+        artifact_digest: artifact_digest,
+        closure_count: closure_count)
+
+pub fn native_build_warm_artifact_restore(state: NativeBuildWarmReceiptState) -> bool:
+    if not state.eligible or not state.hit:
+        return false
+    if _warm_copy_verified_atomic(
+            state.artifact_path, state.output_path, state.artifact_digest):
+        return true
+    # TOCTOU, destination ambiguity, or any damaged artifact fails closed to
+    # the real worker. Removing the receipt prevents a second optimistic hit.
+    val _invalidated = file_delete(state.receipt_path)
+    false
+
+fn _warm_line_field_i64(line: text, field: text) -> i64:
+    val prefix = field + "="
+    for part in line.split(" "):
+        if part.starts_with(prefix):
+            return part.substring(prefix.len()).to_i64() ?? -1
+    -1
+
+fn _warm_last_tagged_line(output: text, tag: text) -> text:
+    var result = ""
+    for line in output.split("\n"):
+        if line.starts_with(tag):
+            result = line
+    result
+
+pub fn native_build_warm_output_complete(stdout: text, expected_count: i64) -> bool:
+    if expected_count <= 0:
+        return false
+    val frontend = _warm_last_tagged_line(stdout, "[frontend-cache]")
+    val hir = _warm_last_tagged_line(stdout, "[hir-cache]")
+    if frontend == "" or hir == "" or hir.starts_with("[hir-cache] disabled"):
+        return false
+    val frontend_hits = _warm_line_field_i64(frontend, "hits")
+    val hir_hits = _warm_line_field_i64(hir, "hits")
+    (frontend_hits >= expected_count and hir_hits >= expected_count and
+        _warm_line_field_i64(frontend, "misses") == 0 and
+        _warm_line_field_i64(frontend, "parses") == 0 and
+        _warm_line_field_i64(hir, "misses") == 0 and
+        _warm_line_field_i64(hir, "stores") == 0 and
+        _warm_line_field_i64(hir, "refused") == 0 and
+        _warm_line_field_i64(hir, "io_failed") == 0)
+
+pub fn native_build_warm_receipt_finish(
+    state: NativeBuildWarmReceiptState, stdout: text, worker_ok: bool,
+    output_ok: bool
+) -> bool:
+    if not state.eligible:
+        return false
+    var promoted = false
+    if worker_ok and output_ok and file_exists(state.candidate_path):
+        val candidate = _warm_checked_payload(
+            file_read(state.candidate_path), NATIVE_BUILD_WARM_CANDIDATE_VERSION)
+        if candidate != "":
+            val lines = candidate.split("\n")
+            if lines.len() >= 3 and lines[1].starts_with("count="):
+                val count = lines[1].substring(6).to_i64() ?? -1
+                val rows = _warm_rows_from_payload(candidate, 2)
+                if count > 0 and count == rows.len() and _warm_rows_valid(rows):
+                    val object_paths = _warm_object_inputs(state.args, rows)
+                    val (runtime_paths, runtime_ok) =
+                        _warm_runtime_and_link_inputs(state.args)
+                    var input_paths = object_paths
+                    for runtime_path in runtime_paths:
+                        input_paths.push(runtime_path)
+                    val input_rows = if runtime_ok: _warm_rows_for_paths(input_paths) else: []
+                    val output_digest = file_hash_sha256(state.output_path)
+                    if (object_paths.len() > 0 and input_rows.len() > 0 and
+                            _warm_valid_digest(output_digest) and
+                            _warm_copy_verified_atomic(state.output_path,
+                                state.artifact_path, output_digest)):
+                        val payload = NATIVE_BUILD_WARM_RECEIPT_VERSION + "\nkey=" +
+                            state.key + "\nartifact=" + state.artifact_path + "\t" +
+                            output_digest + "\nsource_count=" + count.to_text() +
+                            "\ninput_count=" + input_rows.len().to_text() + "\n" +
+                            rows.join("\n") + "\n" + input_rows.join("\n")
+                        promoted = _warm_write_atomic(state.receipt_path, payload)
+    # A build with misses, a corrupt candidate, or any failure cannot preserve
+    # an old authority.  The next invocation warms normally and the real worker
+    # remains the fallback regardless.
+    if not promoted:
+        val _invalidated = file_delete(state.receipt_path)
+        val _artifact_invalidated = file_delete(state.artifact_path)
+    val _cleaned = file_delete(state.candidate_path)
+    promoted
+
+export NATIVE_BUILD_WARM_RECEIPT_VERSION, NATIVE_BUILD_WARM_CANDIDATE_VERSION
+export NATIVE_BUILD_WARM_CANDIDATE_ENV

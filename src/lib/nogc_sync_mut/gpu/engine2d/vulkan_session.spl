@@ -1,0 +1,228 @@
+"""Vulkan Session — Instance, Device, Queue, Allocator, Command Pools, Caches
+
+@tag:stdlib
+@tag:gpu
+
+Owns the full Vulkan session lifetime: instance → device → queue → allocator →
+command pool(s) → pipeline cache → descriptor pool. SPIR-V only (no GLSL).
+
+Thread policy:
+  "single"  — one shared command pool for all frames
+  "multi"   — per-frame command pools created on begin_frame
+
+Usage:
+    val sess = VulkanComputeSession.create("2d", "single")
+    sess.init_device()
+    val cmd = sess.begin_frame(1920, 1080)
+    sess.submit_frame(cmd)
+    sess.release()
+"""
+
+# This compatibility session has no matching C/Rust provider. Keep its pure
+# cache/statistics surface available, but never publish a raw declaration or
+# fabricate a native handle. The maintained Vulkan ABI uses the distinct
+# rt_vk_device_create/rt_vk_command_buffer_* contract family.
+val VULKAN_SESSION_PROVIDER_ERROR: text = "error: Vulkan session provider unavailable"
+
+# ============================================================================
+# VulkanShaderCache — flat storage for up to 4 named SPIR-V module handles
+#
+# Mirrors CudaModuleCache / MetalPipelineCache exactly (same 4 slots, same
+# "cache full" sentinel return, same fail-closed find). Before this cache
+# existed, `VulkanComputeSession.load_shader()` re-invoked `rt_vk_load_spirv` on
+# every call for an already-loaded name, leaking one native VkShaderModule
+# per call -- the same leak class the CUDA/Metal caches close.
+# ============================================================================
+
+class VulkanShaderCache:
+    s0_name: text
+    s0_handle: i64
+    s1_name: text
+    s1_handle: i64
+    s2_name: text
+    s2_handle: i64
+    s3_name: text
+    s3_handle: i64
+    count: i64
+
+    static fn create() -> VulkanShaderCache:
+        VulkanShaderCache(
+            s0_name: "", s0_handle: 0,
+            s1_name: "", s1_handle: 0,
+            s2_name: "", s2_handle: 0,
+            s3_name: "", s3_handle: 0,
+            count: 0
+        )
+
+    me cache_shader(name: text, handle: i64) -> text:
+        if self.count == 0:
+            self.s0_name = name
+            self.s0_handle = handle
+            self.count = 1
+            return "ok"
+        if self.count == 1:
+            self.s1_name = name
+            self.s1_handle = handle
+            self.count = 2
+            return "ok"
+        if self.count == 2:
+            self.s2_name = name
+            self.s2_handle = handle
+            self.count = 3
+            return "ok"
+        if self.count == 3:
+            self.s3_name = name
+            self.s3_handle = handle
+            self.count = 4
+            return "ok"
+        "cache_full"
+
+    me find_shader(name: text) -> i64:
+        if self.s0_name == name:
+            return self.s0_handle
+        if self.s1_name == name:
+            return self.s1_handle
+        if self.s2_name == name:
+            return self.s2_handle
+        if self.s3_name == name:
+            return self.s3_handle
+        0
+
+# ============================================================================
+# VulkanComputeSession
+# ============================================================================
+
+class VulkanComputeSession:
+    instance_handle: i64
+    device_handle: i64
+    queue_handle: i64
+    queue_family: i64
+    allocator_handle: i64
+    cmd_pool_handle: i64
+    pipeline_cache_handle: i64
+    descriptor_pool_handle: i64
+    shader_count: i64
+    mode: text
+    thread_policy: text
+    initialized: bool
+    generation: i64
+    device_name: text
+    transient_cmd_pools: [i64]
+    transient_cmd_pool_created_count: i64
+    transient_cmd_pool_destroyed_count: i64
+    shader_cache: VulkanShaderCache
+    cache_reject_count: i64
+    last_cache_rejection: text
+
+    static fn create(mode: text, thread_policy: text) -> VulkanComputeSession:
+        VulkanComputeSession(
+            instance_handle: 0,
+            device_handle: 0,
+            queue_handle: 0,
+            queue_family: 0,
+            allocator_handle: 0,
+            cmd_pool_handle: 0,
+            pipeline_cache_handle: 0,
+            descriptor_pool_handle: 0,
+            shader_count: 0,
+            mode: mode,
+            thread_policy: thread_policy,
+            initialized: false,
+            generation: 0,
+            device_name: "",
+            transient_cmd_pools: [],
+            transient_cmd_pool_created_count: 0,
+            transient_cmd_pool_destroyed_count: 0,
+            shader_cache: VulkanShaderCache.create(),
+            cache_reject_count: 0,
+            last_cache_rejection: ""
+        )
+
+    static fn provider_available() -> bool:
+        false
+
+    me init_device() -> text:
+        VULKAN_SESSION_PROVIDER_ERROR
+
+    me create_command_pool() -> text:
+        if self.initialized == false:
+            return "error: device not initialized"
+        VULKAN_SESSION_PROVIDER_ERROR
+
+    me create_pipeline_cache() -> text:
+        if self.initialized == false:
+            return "error: device not initialized"
+        VULKAN_SESSION_PROVIDER_ERROR
+
+    me load_shader(name: text) -> i64:
+        if self.initialized == false:
+            return 0
+        val cached = self.shader_cache.find_shader(name)
+        if cached != 0:
+            return cached
+        0
+
+    # Extracted so the cache-and-count bookkeeping is directly testable
+    # without a native VkShaderModule. Always returns `handle` unchanged --
+    # bookkeeping, not a provider or admission gate.
+    me record_shader(name: text, handle: i64) -> i64:
+        val cache_result = self.shader_cache.cache_shader(name, handle)
+        if cache_result == "cache_full":
+            self.cache_reject_count = self.cache_reject_count + 1
+            self.last_cache_rejection = "shader:{name}"
+        handle
+
+    me begin_frame(width: i64, height: i64) -> i64:
+        if self.initialized == false:
+            return 0
+        0
+
+    fn submit_frame(cmd: i64) -> text:
+        if cmd <= 0:
+            return "error: invalid cmd buffer"
+        VULKAN_SESSION_PROVIDER_ERROR
+
+    fn present(cmd: i64) -> text:
+        if cmd == 0:
+            return "error: invalid cmd buffer"
+        VULKAN_SESSION_PROVIDER_ERROR
+
+    fn sync_readback(cmd: i64, x: i64, y: i64, w: i64, h: i64) -> text:
+        if cmd == 0:
+            return "error: invalid cmd buffer"
+        VULKAN_SESSION_PROVIDER_ERROR
+
+    # Extracted so the leaked-pool bookkeeping (previously nonexistent: a
+    # "multi"-policy pool created in `begin_frame()` was tracked nowhere)
+    # is directly testable without a real native pool handle.
+    me track_transient_pool(pool: i64):
+        self.transient_cmd_pools.push(pool)
+        self.transient_cmd_pool_created_count = self.transient_cmd_pool_created_count + 1
+
+    me release() -> text:
+        if self.initialized == false:
+            return "ok"
+        VULKAN_SESSION_PROVIDER_ERROR
+
+    fn transient_cmd_pool_created_count_get() -> i64:
+        self.transient_cmd_pool_created_count
+
+    fn transient_cmd_pool_destroyed_count_get() -> i64:
+        self.transient_cmd_pool_destroyed_count
+
+    fn cache_reject_count_get() -> i64:
+        self.cache_reject_count
+
+    fn last_cache_rejection_get() -> text:
+        self.last_cache_rejection
+
+    fn stats() -> text:
+        "device=" + self.device_name
+            + " mode=" + self.mode
+            + " policy=" + self.thread_policy
+            + " shaders=" + self.shader_count.to_text()
+            + " gen=" + self.generation.to_text()
+            + " init=" + self.initialized.to_text()
+            + " transient_pools_created=" + self.transient_cmd_pool_created_count.to_text()
+            + " transient_pools_destroyed=" + self.transient_cmd_pool_destroyed_count.to_text()
+            + " cache_rejects=" + self.cache_reject_count.to_text()

@@ -1,0 +1,206 @@
+# UP Squared Apollo Lake DCI session runbook
+
+This runbook records the steps that are public and safe. Intel's exact System
+Debug command/API documentation is NDA-controlled and bundled with the
+CNDA-controlled toolkit; do not invent commands from another debugger.
+
+## 1. Identify before connecting
+
+Record original-board part number, FAB, CPU SKU, RAM, BIOS vendor/version, and
+all storage model/serial/capacity values. Remove secrets. Confirm an external
+SPI recovery path before any separately authorized firmware work.
+
+Use an Intel SVT DCI DbC2/3 cable/probe or another cable explicitly qualified
+by Intel's target-connection documentation. Intel describes USB 3.x DCI as the
+target acting in the DFP/host role; original UP2 Type-A ports are host ports.
+The Micro-B OTG port is not assumed to be the DCI port. Determine the exact port
+through Target Connection Agent and board/tool documentation, not trial writes.
+
+## 2. Connect without mutation
+
+Launch `<install-dir>/iss_ide_eclipse-launcher.sh`. In Target Connection Agent,
+create a connection for the exact Apollo Lake target and select USB 3.x Debug
+Class. A USB enumeration or “connected” badge alone is insufficient: enumerate
+the expected CPU threads and retain target/tool/cable/firmware identity.
+
+Create `up2-dci-connection-v1` evidence with:
+
+```text
+schema=up2-dci-connection-v1
+status=pass
+target=original-up-squared-apollo-lake
+connection=usb3-dbc
+debug_interface=enabled-unlocked
+reset_policy=hardware-baseline-openrc-warm-reset-forbidden
+board_fab=...
+bios_version=...
+tool_version=...
+cable_identity=...
+timestamp_utc=...
+```
+
+Pass it to the local read-only gate:
+
+```sh
+UP2_DCI_CONNECTION_RECEIPT=/absolute/path/to/receipt \
+  scripts/check/check-up-squared-apl-dci.shs --inventory
+```
+
+## 3. Qualify run control and memory
+
+With no storage mutation configured, halt and resume once while CN16 UART is
+captured. Read a known public firmware code/data location and compare it with an
+independent firmware map or debugger symbol. Do not use an unverified address,
+write memory, or disconnect the cable while halted.
+
+OpenRC warm reset is forbidden on Apollo Lake because Intel documents a stranded
+core failure with no software workaround. Use physical reset for recovery. A
+Power-Good reset is an unqualified optional experiment until proven on this FAB.
+
+## 4. Load and boot software
+
+Preferred first boot: let UEFI/GRUB load the existing removable image while DCI
+provides breakpoints and inspection. Loading symbols into the debugger does not
+load executable bytes into target RAM.
+
+Preferred repeated RAM boot: first boot a reviewed resident UEFI loader. It
+allocates a staging buffer and publishes address, size, generation, and nonce.
+Write payload bytes first, then a descriptor containing exact length and SHA-256
+last. Resume target code; it validates the descriptor, parses every `PT_LOAD`,
+zeros `p_memsz - p_filesz`, obtains the current memory map, exits boot services,
+constructs Multiboot state, and transfers through the existing 32-bit shim.
+This loader is now `EFI/BOOT/BOOTX64.EFI`; the media fallback is
+`EFI/BOOT/GRUBX64.EFI`. It publishes wire-v1 at physical `0x0c000000`, payload
+capacity `0x0c100000+0x01000000`, and a per-boot nonce. The debugger must
+preserve the published schema/nonce/addresses, write the payload, write bytes
+0..123 of the descriptor, and write the aligned commit word at offset 124 last.
+Committed invalid input fails closed; no commit for ten seconds chainloads GRUB.
+Committed boot also requires the loader to report
+`nonce-source=firmware-or-rdrand`; a time/TSC diagnostic fallback cannot boot a
+RAM payload.
+UEFI's Debug Support Table can help image discovery but is not this mailbox.
+
+Free software-path proof (GDB stands in for the physical memory transport):
+
+```sh
+sh scripts/check/check-simpleos-up-squared-apollo-lake.shs --image-reproducibility
+sh scripts/check/check-simpleos-up-squared-apollo-lake.shs --ovmf-dci-admission
+sh scripts/check/check-simpleos-up-squared-apollo-lake.shs --ovmf-dci-rejection
+```
+
+The receipt requires nonce preservation, exact SimpleOS ELF SHA-256, stable
+mailbox/payload checks, final UEFI memory-map construction, embedded ELF32 shim
+entry, `_entry32`, kernel, console, filesystem, and shell markers, and no GRUB
+fallback. It is transport-neutral software evidence, not proof that Apollo Lake
+DCI enumerated or that application processors were parked on physical UP2.
+PI firmware, rather than a non-returning loader callback, owns the
+ExitBootServices AP-idle transition; retain firmware topology and kernel AP
+evidence on the board.
+The rejection companion uses the complete kernel with a deliberately wrong
+digest and requires fail-closed behavior before ELF load or fallback.
+The reproducibility receipt must precede physical media writing: it binds two
+fresh byte-identical images to SHA-256 `abffdd3f…de93fe`, epoch `1704067200`,
+fixed GPT identifiers, and FAT serial `5349-4D50`.
+
+Inspect the exact current ELF/receipt and obtain its segment manifest without
+touching hardware:
+
+```sh
+scripts/check/inspect-up-squared-apl-dci-elf.shs --inspect
+```
+
+Do not directly set RIP to `0x08000038`. Do not use debugger register writes to
+guess CR0/CR3/CR4/EFER, GDT, paging, stack, AP state, or firmware ownership.
+
+## 5. Read/write storage
+
+DCI physical-memory DMA is only transport into RAM. A resident provisioner must
+use a real target-side NVMe/eMMC/SATA/USB driver. Before write, display and confirm
+model, serial, transport, capacity, partition table, root/swap, mounts, holders,
+and byte bounds. Write, flush, re-enumerate, and hash exact readback. Never use
+debugger MMIO writes to operate a storage controller.
+
+The free SimpleOS NVMe path is executable for a controller that really
+enumerates as PCI class `01:08`. Run `nvme identify`, verify its PCI
+identity, model, serial, firmware, NSID, LBA size/count, and capacity, then enter
+only the exact printed `nvme format FORMAT:...` command. Successful output must
+report GPT/FAT32, flush, fresh-adapter readback, and `/nvme/proof.txt` from
+`ls /nvme`. The original board has no native M-key slot; an adapter is accepted
+only after live PCI class `01:08` and NVMe Identify, never by connector shape.
+
+For a complete raw disk image, use the separate image session. Values are
+decimal; hashes are lowercase SHA-256:
+
+```text
+nvme identify
+nvme image plan 0 <exact-image-bytes> <whole-image-sha256>
+nvme image confirm <copy-the-entire-printed-UP2-STORAGE-WRITE-challenge>
+```
+
+The confirmation contains SHA-256 of the canonical full identity rather than
+repeating long hex-rendered model/serial strings, so it fits the target line
+buffer. It remains bound to the full identity printed by `nvme identify`.
+
+For each ordered chunk (maximum 1 MiB), enter `gdb`, fill staging memory from
+`0x0a000000` using checksummed `M` packets of at most 1024 bytes, read back the
+last packet, and detach. Then run:
+
+```text
+nvme image chunk 0 <ordered-image-offset> <chunk-bytes> <chunk-sha256>
+```
+
+Repeat to the exact planned length and run `nvme image finish`. PASS requires
+the whole staged digest, NVMe Flush, a fresh adapter, and exact full-range
+readback SHA-256. `nvme image abort` clears session state but cannot undo
+sectors already written. Any chunk/write error requires a new plan. Never use
+this path against the development host NVMe, mounted media, or an unverified
+physical identity.
+
+Boot PASS still requires a fresh CN16 transcript through VFS-backed `ls /`.
+Storage PASS additionally requires the identity and readback receipt. A DCI
+connection, memory read, or debugger screenshot cannot substitute for either.
+
+## 6. Free fallback when Intel DCI is unavailable
+
+Install/use GNU GDB, OpenOCD, and picocom. Before opening a debug session,
+qualify the cable with `lsusb -v`: a usable Tigard must enumerate as FTDI
+`0403:6010`; CN16 UART must create a tty device; a DCI/DbC path must enumerate
+through the intended USB3 debug interface. A Smart KM Link `0ea0:2211` with
+mass-storage plus HID keyboard/mouse interfaces is not a UART, Tigard, or DCI
+cable. `openocd -f interface/ftdi/tigard.cfg -c init -c shutdown` returning
+`no device found` is a physical-transport BLOCKED result; do not retry it as a
+reset loop.
+
+Use CN16 pins 8/9/10 (GND/board-RX/board-TX), 3.3-V TTL, 115200 8N1, no flow
+control. Adapter RX connects to board pin 10; adapter TX connects to board pin
+9; adapter ground connects to pin 8. Never connect adapter VCC or CN16 5-V pins
+1/5. CN22 pin 4 is 1.8 V and its documented JTAG is FPGA service, not a CPU
+debug port; its full electrical thresholds are unpublished. Record Secure Boot
+state, use F7 for the one-time boot entry (DEL or ESC for setup), and retain the
+entire UART transcript. An EFI-shell launch is a separately recorded fallback.
+
+The current tree contains a bounded memory-only GDB RSP monitor: enter `gdb`,
+then use checksummed `M`/`m` packets only within
+`0x0a000000..0x0b000000`; detach returns to the shell. Registers, breakpoints,
+continue, step, reset, and binary `X` remain unsupported. The tree still lacks
+an xHCI DbC transport. Host KGDB, CHIPSEC, and EDK II debug agents become useful
+only after corresponding target software starts. Record such evidence as
+software-debug, not DCI run-control or external-memory evidence.
+
+Current OVMF status (2026-08-22): four consecutive maximum 1024-byte nonzero
+`M` packets, target SHA, scratch-NVMe write, Flush, fresh-adapter readback,
+independent host SHA, and unchanged adjacent ranges pass. Run:
+
+```sh
+sh scripts/check/check-simpleos-up-squared-apollo-lake.shs --ovmf-image-provision
+```
+
+The current board image also boots with no USB device when attached as the sole
+OVMF NVMe boot device and completes VFS-backed `ls /`:
+
+```sh
+sh scripts/check/check-simpleos-up-squared-apollo-lake.shs --ovmf-nvme-boot
+```
+
+These receipts qualify software paths only; physical CN16, DCI, SSD persistence,
+and boot-menu evidence remain separate gates.

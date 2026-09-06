@@ -1,0 +1,106 @@
+# @cover src/os/apps/sshd/ssh_server_transport_send.spl 90%
+use std.spipe.*
+use os.apps.sshd.ssh_server_transport_send.{
+    SSH_SERVER_SEND_RETRY_WINDOW,
+    SSH_SERVER_SEND_MAX_ATTEMPTS,
+    SshServerSendCursorV1,
+    ssh_server_send_offer_v1,
+    ssh_server_send_accept_v1,
+    ssh_server_committed_sequences_v1
+}
+extern fn rt_file_read_text(path: text) -> text
+
+describe "SSH server exact-send owner":
+    it "retains an exact bounded suffix across partial writes":
+        var cursor = SshServerSendCursorV1()
+        val first = ssh_server_send_offer_v1(cursor, 8193u64).unwrap()
+        expect(first.start).to_equal(0u64)
+        expect(first.len()).to_equal(8193u64)
+        expect(ssh_server_send_accept_v1(
+            cursor, 8193u64, first.len(), 1).unwrap()).to_be(false)
+        val second = ssh_server_send_offer_v1(cursor, 8193u64).unwrap()
+        expect(second.start).to_equal(1u64)
+        expect(second.len()).to_equal(1u64)
+        expect(ssh_server_send_accept_v1(
+            cursor, 8193u64, second.len(), 1).unwrap()).to_be(false)
+        val third = ssh_server_send_offer_v1(cursor, 8193u64).unwrap()
+        expect(third.start).to_equal(2u64)
+        expect(third.len()).to_equal(1u64)
+        expect(ssh_server_send_accept_v1(
+            cursor, 8193u64, third.len(), 1).unwrap()).to_be(false)
+        expect(cursor.sent).to_equal(3u64)
+
+    it "rejects zero negative oversized and mismatched write receipts":
+        var zero = SshServerSendCursorV1()
+        expect(ssh_server_send_accept_v1(zero, 8u64, 8u64, 0).is_err()).to_be(true)
+        expect(zero.sent).to_equal(0u64)
+        var negative = SshServerSendCursorV1()
+        expect(ssh_server_send_accept_v1(negative, 8u64, 8u64, -1).is_err()).to_be(true)
+        expect(negative.sent).to_equal(0u64)
+        var oversized = SshServerSendCursorV1()
+        expect(ssh_server_send_accept_v1(oversized, 8u64, 8u64, 9).is_err()).to_be(true)
+        expect(oversized.sent).to_equal(0u64)
+        var mismatch = SshServerSendCursorV1()
+        expect(ssh_server_send_accept_v1(mismatch, 8u64, 7u64, 1).is_err()).to_be(true)
+        expect(mismatch.sent).to_equal(0u64)
+
+        val malformed = ssh_server_send_offer_v1(
+            SshServerSendCursorV1(sent: 9u64, attempts: 1u64), 8u64)
+        expect(malformed.is_err()).to_be(true)
+
+        var exhausted = SshServerSendCursorV1(
+            sent: 1u64, attempts: SSH_SERVER_SEND_MAX_ATTEMPTS)
+        expect(ssh_server_send_offer_v1(
+            exhausted, 2u64).is_err()).to_be(true)
+        expect(exhausted.sent).to_equal(1u64)
+
+    it "copies only linear bytes after one-byte transport progress":
+        val total = SSH_SERVER_SEND_MAX_ATTEMPTS
+        var cursor = SshServerSendCursorV1()
+        val initial = ssh_server_send_offer_v1(cursor, total).unwrap()
+        expect(ssh_server_send_accept_v1(
+            cursor, total, initial.len(), 1).unwrap()).to_be(false)
+        var retry_bytes = 0u64
+        while cursor.sent < total:
+            val offered = ssh_server_send_offer_v1(cursor, total).unwrap()
+            retry_bytes = retry_bytes + offered.len()
+            _ = ssh_server_send_accept_v1(
+                cursor, total, offered.len(), 1).unwrap()
+        expect(retry_bytes).to_equal(total - 1u64)
+        expect(cursor.sent).to_equal(total)
+
+    it "bounds allocator churn from adversarial one-byte progress":
+        val total = SSH_SERVER_SEND_MAX_ATTEMPTS + 2u64
+        var cursor = SshServerSendCursorV1()
+        var accepted = 0u64
+        while accepted < SSH_SERVER_SEND_MAX_ATTEMPTS:
+            val offered = ssh_server_send_offer_v1(cursor, total).unwrap()
+            expect(ssh_server_send_accept_v1(
+                cursor, total, offered.len(), 1).is_ok()).to_be(true)
+            accepted = accepted + 1u64
+        expect(ssh_server_send_offer_v1(
+            cursor, total).is_err()).to_be(true)
+        expect(cursor.sent).to_equal(SSH_SERVER_SEND_MAX_ATTEMPTS)
+
+    it "commits packet sequences only after complete delivery":
+        expect(ssh_server_committed_sequences_v1(
+            7u32, 11u32, true, false)).to_equal((7u32, 11u32))
+        expect(ssh_server_committed_sequences_v1(
+            7u32, 11u32, false, true)).to_equal((8u32, 11u32))
+        expect(ssh_server_committed_sequences_v1(
+            7u32, 11u32, true, true)).to_equal((8u32, 12u32))
+        expect(ssh_server_committed_sequences_v1(
+            4294967295u32, 4294967295u32, true, true)).to_equal((0u32, 0u32))
+
+    it "gates production sequence commits on exact raw delivery":
+        val session = rt_file_read_text("src/os/apps/sshd/ssh_session.spl")
+        val lifecycle = rt_file_read_text(
+            "src/os/apps/sshd/ssh_session_lifecycle.spl")
+        expect(session).to_contain(
+            "if self.state == SshSessionState.Closed or")
+        expect(session).to_contain("if not self.raw_send(encrypted):")
+        expect(session).to_contain("if not self.raw_send(packet):")
+        expect(session).to_contain("ssh_server_committed_sequences_v1(")
+        expect(session).to_contain("self.transition_transport_failed()")
+        expect(lifecycle).to_contain("self.socket_fd = -1")
+        expect(lifecycle).to_contain("_ = rt_net_close(failed_fd)")

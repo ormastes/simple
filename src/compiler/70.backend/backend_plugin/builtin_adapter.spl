@@ -1,0 +1,129 @@
+# codex-impl: retained built-in CodegenFactory adapter for admitted sessions.
+
+use compiler.common.backend_plugin.model.{BackendPluginRequestV1}
+use compiler.common.backend_plugin.receipt.{BackendPluginError}
+use compiler.mir.mir_instructions.{MirModule}
+use compiler.backend.backend.backend_types.{
+    BackendKind, CodegenTarget, OptimizationLevel, BackendCompileOptions,
+    CompileError, CompiledModule,
+    compileoptions_default_options
+}
+use compiler.backend.codegen_types.{Codegen, CodegenOutput}
+use compiler.backend.codegen_factory.{CodegenFactory}
+use compiler.backend.backend.backend_helpers.{
+    compile_module_with_backend_target_cpu_storage_bindings,
+    compile_llvm_module_to_object_path
+}
+use compiler.mir_opt.mir_opt.storage_projection_lowering.{MirStorageViewSiteBindingV1}
+use compiler.backend.backend.aot_path_diagnostic.{backend_aot_write_diagnostic}
+
+class BuiltinBackendCompileAdapter:
+    """One factory-created Codegen object retained for a backend session."""
+    codegen: Codegen
+    kind: BackendKind
+
+    fn compile_module(module: MirModule) -> Result<CodegenOutput, CompileError>:
+        self.codegen.compile_module(module)
+
+    fn compile_aot_module(
+        module: MirModule,
+        is_release: bool,
+        opt_level: i64,
+        target_cpu: text,
+        storage_bindings: [MirStorageViewSiteBindingV1]
+    ) -> Result<CompiledModule, CompileError>:
+        # Keep the production AOT preparation semantics (typed-storage lowering,
+        # target optimization, debug policy, and direct LLVM/Cranelift emission)
+        # behind the admitted adapter while callers migrate to BackendSession.
+        compile_module_with_backend_target_cpu_storage_bindings(
+            self.kind.to_text(), module, is_release, opt_level, target_cpu,
+            storage_bindings)
+
+    fn compile_aot_into_path(
+        module: MirModule, is_release: bool, opt_level: i64, target_cpu: text,
+        storage_bindings: [MirStorageViewSiteBindingV1], object_path: text,
+        diagnostic_path: text
+    ) -> i64:
+        if self.kind != BackendKind.Llvm:
+            backend_aot_write_diagnostic(diagnostic_path,
+                "scalar object-path AOT is available only for builtin LLVM")
+            return 1
+        compile_llvm_module_to_object_path(
+            module, is_release, opt_level, target_cpu, storage_bindings,
+            object_path, diagnostic_path)
+
+fn builtin_backend_kind(provider_name: text) -> Result<BackendKind, BackendPluginError>:
+    match provider_name:
+        case "llvm": Ok(BackendKind.Llvm)
+        case "cranelift": Ok(BackendKind.Cranelift)
+        case _:
+            Err(BackendPluginError.NotFound(
+                "built-in backend provider not found: " + provider_name
+            ))
+
+fn builtin_backend_target(target_name: text) -> Result<CodegenTarget, BackendPluginError>:
+    match target_name:
+        case "host": Ok(CodegenTarget.Host)
+        case "native": Ok(CodegenTarget.Native)
+        case "x86_64": Ok(CodegenTarget.X86_64)
+        case "aarch64": Ok(CodegenTarget.AArch64)
+        case "riscv64": Ok(CodegenTarget.Riscv64)
+        case "x86": Ok(CodegenTarget.X86)
+        case "arm": Ok(CodegenTarget.Arm)
+        case "riscv32": Ok(CodegenTarget.Riscv32)
+        case _:
+            Err(BackendPluginError.TargetUnsupported(
+                "unsupported built-in backend target: " + target_name
+            ))
+
+fn builtin_backend_optimization(
+    optimization: text
+) -> Result<OptimizationLevel, BackendPluginError>:
+    match optimization:
+        case "none" | "o0": Ok(OptimizationLevel.None_)
+        case "debug": Ok(OptimizationLevel.Debug)
+        case "basic" | "o1": Ok(OptimizationLevel.Basic)
+        case "size" | "os": Ok(OptimizationLevel.Size)
+        case "standard": Ok(OptimizationLevel.Standard)
+        case "speed" | "o2": Ok(OptimizationLevel.Speed)
+        case "aggressive" | "o3": Ok(OptimizationLevel.Aggressive)
+        case _:
+            Err(BackendPluginError.ProviderRejected(
+                "unsupported built-in backend optimization: " + optimization
+            ))
+
+fn create_builtin_backend_compile_adapter(
+    request: BackendPluginRequestV1
+) -> Result<BuiltinBackendCompileAdapter, BackendPluginError>:
+    val kind = match builtin_backend_kind(request.backend_name):
+        case Ok(value): value
+        case Err(error): return Err(error)
+    val target = match builtin_backend_target(request.target):
+        case Ok(value): value
+        case Err(error): return Err(error)
+    val optimization = match builtin_backend_optimization(request.optimization):
+        case Ok(value): value
+        case Err(error): return Err(error)
+    val defaults = compileoptions_default_options()
+    val options = BackendCompileOptions(
+        target: target,
+        opt_level: optimization,
+        debug_info: optimization == OptimizationLevel.Debug,
+        emit_assembly: defaults.emit_assembly,
+        emit_llvm_ir: defaults.emit_llvm_ir,
+        emit_mir: defaults.emit_mir,
+        verify_output: defaults.verify_output,
+        target_opt_ctx: defaults.target_opt_ctx,
+        backend_kind: Some(request.backend_name),
+        allowed_families: defaults.allowed_families
+    )
+    val codegen = CodegenFactory.create(kind, options)
+    if not codegen.supports_target(target):
+        return Err(BackendPluginError.TargetUnsupported(
+            request.backend_name + " does not support target " + request.target
+        ))
+    Ok(BuiltinBackendCompileAdapter(codegen: codegen, kind: kind))
+
+export BuiltinBackendCompileAdapter
+export builtin_backend_kind, builtin_backend_target, builtin_backend_optimization
+export create_builtin_backend_compile_adapter

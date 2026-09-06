@@ -1,0 +1,83 @@
+#!/bin/sh
+# Qualified acceptance wrapper for the SOSIX FAT32 positioned-I/O lane.
+#
+# Positive admission requires a receipt-bound self-hosted Simple runtime and a
+# linked x86_64 kernel containing the strong positioned syscall leaves. The
+# Rust bootstrap seed is rejected by the canonical runtime-admission owner.
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+runtime_admission=$root/scripts/check/check-sosix-qemu-runtime-admission.shs
+linked_admission=$root/scripts/check/check-sosix-positioned-live-route.shs
+
+fail() { printf '%s\n' "sosix-fat32-positioned-io: $*" >&2; exit 1; }
+
+run_focused_spec() {
+    runtime=$1
+    spec=$2
+    marker=$3
+    log=${TMPDIR:-/tmp}/sosix-fat32-positioned-io.$$.log
+    if ! SIMPLE_LIB="$root/src" "$runtime" test "$root/$spec" --mode=interpreter >"$log" 2>&1; then
+        sed -n '1,80p' "$log" >&2
+        rm -f "$log"
+        fail "focused-spec-failed:$spec"
+    fi
+    if ! grep -Eq '([1-9][0-9]* examples?, 0 failures|test result: ok\. [1-9][0-9]* passed; 0 failed;)' "$log"; then
+        sed -n '1,80p' "$log" >&2
+        rm -f "$log"
+        fail "focused-spec-missing-pass-summary:$spec"
+    fi
+    rm -f "$log"
+    printf '%s=%s\n' "$marker" pass
+}
+
+admit() {
+    [ "$#" -eq 3 ] || fail 'usage: --admit RUNTIME RECEIPT KERNEL_ELF'
+    runtime=$1
+    receipt=$2
+    kernel=$3
+
+    identity=$(sh "$runtime_admission" --verify "$runtime" "$receipt") ||
+        fail 'runtime-admission-failed'
+    runtime_path=$(printf '%s\n' "$identity" | sed -n 's/^runtime_path=//p')
+    runtime_sha=$(printf '%s\n' "$identity" | sed -n 's/^runtime_sha256=//p')
+    [ -n "$runtime_path" ] || fail 'runtime-path-missing'
+    [ -n "$runtime_sha" ] || fail 'runtime-sha256-missing'
+
+    sh "$linked_admission" --admit "$kernel" >/dev/null ||
+        fail 'linked-route-admission-failed'
+    printf '%s\n' 'sosix_fat32_positioned_linked_route=pass'
+
+    run_focused_spec "$runtime_path" \
+        test/01_unit/os/kernel/fs/fat32_positioned_io_spec.spl \
+        sosix_fat32_positioned_primitives
+    run_focused_spec "$runtime_path" \
+        test/01_unit/os/kernel/fs/fat32_fd_table_spec.spl \
+        sosix_fat32_file_object_owner
+    run_focused_spec "$runtime_path" \
+        test/01_unit/os/sosix/fat32_positioned_vfs_backend_spec.spl \
+        sosix_fat32_positioned_backend
+
+    printf 'sosix_fat32_positioned_runtime_sha256=%s\n' "$runtime_sha"
+    printf '%s\n' 'sosix_fat32_positioned_acceptance=pass'
+}
+
+self_test() {
+    sh "$linked_admission" --self-test >/dev/null
+    sh "$runtime_admission" --self-test >/dev/null
+    printf '%s\n' 'sosix_fat32_positioned_source_contract=pass'
+    printf '%s\n' 'sosix_fat32_positioned_runtime_rejection=pass'
+    printf '%s\n' 'sosix_fat32_positioned_self_test=pass'
+}
+
+case "${1:-}" in
+    --admit)
+        [ "$#" -eq 4 ] || fail 'usage: --admit RUNTIME RECEIPT KERNEL_ELF'
+        admit "$2" "$3" "$4"
+        ;;
+    --self-test)
+        [ "$#" -eq 1 ] || fail 'usage: --self-test'
+        self_test
+        ;;
+    *) fail 'usage: --admit RUNTIME RECEIPT KERNEL_ELF | --self-test' ;;
+esac

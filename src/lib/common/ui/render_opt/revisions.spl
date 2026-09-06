@@ -1,0 +1,187 @@
+# Revision vocabulary + invalidation propagation (lane O0), per
+# `doc/03_plan/ui/perf/render_perf_redesign_plan_2026-08-06.md` §4 pass 1:
+# "separate semantic/style/layout/paint/transform/clip/resource/event
+# revisions; mutations mark minimal sets."
+#
+# The whole point of this module is the word MINIMAL. A mutation marks the
+# smallest affected dependency set and nothing else, so that downstream
+# passes can do damage-proportional work. The load-bearing rule is the
+# TRANSFORM row of the propagation matrix: moving a window marks TRANSFORM
+# and NOTHING ELSE — in particular it must never mark PAINT, because that is
+# exactly what forces a content re-rasterization the plan is trying to
+# eliminate.
+#
+# NO bitmasks. Dirty state is a flat `[u32]` of `node_count * REV_KIND_COUNT`
+# plain 0/1 flags, and propagation is an explicit 8x8 `[u32]` matrix. This is
+# deliberate: integer indexing behaves identically on every engine in this
+# tree, whereas enums have open match-divergence defects (filed 2026-08-06)
+# and bitwise operator coverage is not established here. The matrix also
+# makes the invariant auditable — you can read the TRANSFORM row and see that
+# it marks one column.
+#
+# Interpreter-divergence constraint (see
+# `doc/08_tracking/bug/class_field_reference_semantics_diverge_2026-08-06.md`):
+# under the tree-walk interpreter, storing a class into another class's field
+# VALUE-COPIES; only fn parameters alias. So every array here is a TOP-LEVEL
+# field of the one holder class, and mutation happens either through a method
+# on that holder or through a free function receiving it as a plain
+# parameter. Both patterns are proven to propagate. Nothing in this module
+# may depend on reference semantics through a nested field.
+#
+# This layer is backend-ignorant by contract: it must never import or name
+# Vulkan/Metal/D3D12/AVX2/NEON/RVV.
+
+# Revision kinds (integers, not enums — engine-portable).
+val REV_SEMANTIC: i64 = 0
+val REV_STYLE: i64 = 1
+val REV_LAYOUT: i64 = 2
+val REV_PAINT: i64 = 3
+val REV_TRANSFORM: i64 = 4
+val REV_CLIP: i64 = 5
+val REV_RESOURCE: i64 = 6
+val REV_EVENT: i64 = 7
+val REV_KIND_COUNT: i64 = 8
+
+# Verdict codes.
+val REV_OK: i64 = 0
+val REV_BAD_NODE: i64 = 1
+val REV_BAD_KIND: i64 = 2
+
+class RenderRevisions:
+    # one monotonic counter per kind
+    kind_rev: [u32]
+    # node_count * REV_KIND_COUNT plain 0/1 dirty flags
+    node_dirty: [u32]
+    node_count: i64
+    # REV_KIND_COUNT * REV_KIND_COUNT propagation matrix:
+    # prop[k * REV_KIND_COUNT + j] == 1  =>  marking kind k also marks kind j
+    prop: [u32]
+    # in-band accounting: how many (node, kind) flags this instance has
+    # raised. A regression that starts over-marking is observable without
+    # reading the flags themselves.
+    mark_count: u32
+
+    # `node_count` nodes, default propagation matrix.
+    #
+    # Matrix rows, read as "mutating ROW also marks COLUMN":
+    #
+    #             sem sty lay pai tra cli res evt
+    #   SEMANTIC   1   1   1   1   0   0   0   0
+    #   STYLE      0   1   1   1   0   0   0   0
+    #   LAYOUT     0   0   1   1   0   0   0   0
+    #   PAINT      0   0   0   1   0   0   0   0
+    #   TRANSFORM  0   0   0   0   1   0   0   0   <- one column. Load-bearing.
+    #   CLIP       0   0   0   1   0   1   0   0
+    #   RESOURCE   0   0   0   1   0   0   1   0
+    #   EVENT      0   0   0   0   0   0   0   1
+    #
+    # TRANSFORM marking only itself is what makes a transform-only window
+    # move cost a transform-node update plus damage, with no paint work.
+    # CLIP and RESOURCE do reach PAINT because both change how commands are
+    # grouped or what they sample; TRANSFORM does not, because the transform
+    # is re-read at draw time from the property tree.
+    static fn create(node_count: i64) -> RenderRevisions:
+        var revs: [u32] = []
+        var k: i64 = 0
+        while k < REV_KIND_COUNT:
+            revs.push(0)
+            k = k + 1
+        var flags: [u32] = []
+        var i: i64 = 0
+        val total = node_count * REV_KIND_COUNT
+        while i < total:
+            flags.push(0)
+            i = i + 1
+        val matrix: [u32] = [
+            1, 1, 1, 1, 0, 0, 0, 0,
+            0, 1, 1, 1, 0, 0, 0, 0,
+            0, 0, 1, 1, 0, 0, 0, 0,
+            0, 0, 0, 1, 0, 0, 0, 0,
+            0, 0, 0, 0, 1, 0, 0, 0,
+            0, 0, 0, 1, 0, 1, 0, 0,
+            0, 0, 0, 1, 0, 0, 1, 0,
+            0, 0, 0, 0, 0, 0, 0, 1
+        ]
+        RenderRevisions(
+            kind_rev: revs, node_dirty: flags, node_count: node_count,
+            prop: matrix, mark_count: 0)
+
+    # Mark `node` mutated in `kind`, propagating to exactly the kinds the
+    # matrix row names. Returns a typed verdict; never grows, never guesses.
+    me mark(node: i64, kind: i64) -> i64:
+        if node < 0 or node >= self.node_count:
+            return REV_BAD_NODE
+        if kind < 0 or kind >= REV_KIND_COUNT:
+            return REV_BAD_KIND
+        var j: i64 = 0
+        while j < REV_KIND_COUNT:
+            if self.prop[kind * REV_KIND_COUNT + j] == 1:
+                val slot = node * REV_KIND_COUNT + j
+                if self.node_dirty[slot] == 0:
+                    self.node_dirty[slot] = 1
+                    self.mark_count = self.mark_count + 1
+                self.kind_rev[j] = self.kind_rev[j] + 1
+            j = j + 1
+        REV_OK
+
+    me is_dirty(node: i64, kind: i64) -> bool:
+        if node < 0 or node >= self.node_count:
+            return false
+        if kind < 0 or kind >= REV_KIND_COUNT:
+            return false
+        self.node_dirty[node * REV_KIND_COUNT + kind] == 1
+
+    me revision(kind: i64) -> u32:
+        if kind < 0 or kind >= REV_KIND_COUNT:
+            return 0
+        self.kind_rev[kind]
+
+    # How many NODES are dirty in `kind`. Used by gates that must assert a
+    # positive count of the thing that should change, so a no-op
+    # implementation cannot pass by marking nothing.
+    me dirty_nodes(kind: i64) -> i64:
+        if kind < 0 or kind >= REV_KIND_COUNT:
+            return 0
+        var n: i64 = 0
+        var i: i64 = 0
+        while i < self.node_count:
+            if self.node_dirty[i * REV_KIND_COUNT + kind] == 1:
+                n = n + 1
+            i = i + 1
+        n
+
+    # Total raised flags across every node and kind. The "untouched set is
+    # genuinely untouched" assertion is this being exactly the expected
+    # number, not merely non-zero.
+    me total_dirty() -> i64:
+        var n: i64 = 0
+        var i: i64 = 0
+        val total = self.node_count * REV_KIND_COUNT
+        while i < total:
+            if self.node_dirty[i] == 1:
+                n = n + 1
+            i = i + 1
+        n
+
+    # Clear dirty flags at a frame boundary. Revision counters are monotonic
+    # and are deliberately NOT reset — they are what downstream cache keys
+    # compare against.
+    me clear_dirty():
+        var i: i64 = 0
+        val total = self.node_count * REV_KIND_COUNT
+        while i < total:
+            self.node_dirty[i] = 0
+            i = i + 1
+
+# Free-function form, exercising the other propagation pattern proven to work
+# under the interpreter (holder as a plain parameter). Callers that hold the
+# revisions in a local may use either form; both mutate the same instance.
+fn revisions_mark(revs: RenderRevisions, node: i64, kind: i64) -> i64:
+    revs.mark(node, kind)
+
+# Sum of the revisions that force paint-chunk REGROUPING. TRANSFORM is
+# deliberately excluded: a transform change moves a chunk, it does not
+# regroup it, so including it here would rebuild chunks on every window move
+# and defeat the whole lane. See `paint_chunks_sync` in property_trees.spl.
+fn revisions_chunk_grouping_rev(revs: RenderRevisions) -> u32:
+    revs.revision(REV_PAINT) + revs.revision(REV_CLIP) + revs.revision(REV_RESOURCE)

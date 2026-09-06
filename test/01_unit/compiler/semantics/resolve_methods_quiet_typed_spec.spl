@@ -1,0 +1,157 @@
+"""
+## Purpose and audience
+Purpose: Pin the SIMPLE_RESOLVE_METHODS=1 quiet method-resolution mechanism
+(resolve_methods_quiet): silent Unresolved on failure, receiver typing via
+attach_inferred_type, and unannotated-Let backfill from init expressions.
+Audience: compiler engineers working on
+doc/08_tracking/bug/resolve_methods_never_runs_on_real_compile_path_2026-09-01.md.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines;
+a failing scenario pinpoints the behavior that regressed.
+## Compatibility and limitations
+Covers the pinned behavior only; fixture data is local to this spec.
+Troubleshooting: a red scenario here means the pinned contract changed —
+check the Fix scoping section of the bug record before editing oracles.
+# @manual: primary
+REQ-COMPILER-SEMANTICS-001
+doc/01_research/local/REQ-COMPILER-SEMANTICS-001.md
+doc/03_plan/sys_test/REQ-COMPILER-SEMANTICS-001.md
+doc/04_architecture/REQ-COMPILER-SEMANTICS-001.md
+doc/05_design/REQ-COMPILER-SEMANTICS-001.md
+"""
+# @req: REQ-COMPILER-SEMANTICS-001
+
+use std.spec.*
+use std.spec.step
+
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_definitions.{HirBlock, HirExpr, HirExprKind, HirStmtKind}
+use compiler.hir.hir_types.{HirModule, HirType, HirTypeKind, MethodResolution}
+use compiler.common.config.{Logger}
+use compiler.semantics.resolve.{resolve_methods, resolve_methods_quiet}
+
+# The minimal reproduction from the bug record: `d` is a Var read of a
+# function-returned value — the provenance MIR's ad hoc local tracking does
+# not cover and resolve_call_result_type_raw does not reach.
+fn repro_source() -> text:
+    ("fn make_dict() -> Dict<text, i64>:\n" +
+     "    var d: Dict<text, i64> = {}\n" +
+     "    d[\"a\"] = 1\n" +
+     "    d[\"b\"] = 2\n" +
+     "    d\n" +
+     "\n" +
+     "fn main():\n" +
+     "    val d = make_dict()\n" +
+     "    for k in d.keys():\n" +
+     "        print k\n")
+
+fn lower_repro() -> HirModule:
+    val parsed = parse_full_frontend(repro_source(), "quiet_repro", "quiet_repro", Logger(level: 0))
+    var lowering = HirLowering.with_filename("quiet_repro.spl")
+    lowering.lower_module(parsed)
+
+# Find the receiver type_ of the first MethodCall named `wanted` anywhere in
+# the module. Returns "absent" when no such call exists, "nil" when the
+# receiver carries no type, else a coarse type-kind label.
+fn find_receiver_type_brief(m: HirModule, wanted: text) -> text:
+    var found = "absent"
+    for f in m.functions.values():
+        val got = scan_block_for_receiver(f.body, wanted)
+        if got != "absent" and found == "absent":
+            found = got
+    found
+
+fn type_brief(t: HirType) -> text:
+    if t == nil:
+        return "nil"
+    match t.kind:
+        case HirTypeKind.Dict(_, _): "Dict"
+        case HirTypeKind.Str: "text"
+        case HirTypeKind.Named(_, _): "named"
+        case HirTypeKind.Array(_, _): "array"
+        case _: "other"
+
+fn scan_expr_for_receiver(e: HirExpr, wanted: text) -> text:
+    if e == nil:
+        return "absent"
+    match e.kind:
+        case HirExprKind.MethodCall(receiver, method, _, _):
+            if method == wanted:
+                return type_brief(receiver.type_)
+            scan_expr_for_receiver(receiver, wanted)
+        case HirExprKind.Call(callee, _, _):
+            scan_expr_for_receiver(callee, wanted)
+        case HirExprKind.For(_, iter, body, _):
+            val from_iter = scan_expr_for_receiver(iter, wanted)
+            if from_iter != "absent":
+                return from_iter
+            scan_block_for_receiver(body, wanted)
+        case HirExprKind.While(_, body, _):
+            scan_block_for_receiver(body, wanted)
+        case HirExprKind.Loop(body, _):
+            scan_block_for_receiver(body, wanted)
+        case _: "absent"
+
+fn scan_block_for_receiver(b: HirBlock, wanted: text) -> text:
+    var found = "absent"
+    for s in b.stmts:
+        val got = match s.kind:
+            case HirStmtKind.Expr(e): scan_expr_for_receiver(e, wanted)
+            case HirStmtKind.Let(_, _, init): scan_expr_for_receiver(init, wanted)
+            case HirStmtKind.Assign(t2, _, v2):
+                val from_target = scan_expr_for_receiver(t2, wanted)
+                if from_target != "absent":
+                    from_target
+                else:
+                    scan_expr_for_receiver(v2, wanted)
+            case HirStmtKind.Block(inner): scan_block_for_receiver(inner, wanted)
+            case _: "absent"
+        if got != "absent" and found == "absent":
+            found = got
+    if found != "absent":
+        return found
+    if b.has:
+        return scan_expr_for_receiver(b.value, wanted)
+    found
+
+describe "resolve_methods quiet typed mode (SIMPLE_RESOLVE_METHODS experiment)":
+    it "loud pass errors on the untyped receiver (Gap B baseline)":
+        # @req: REQ-COMPILER-SEMANTICS-001
+        step("Verify: loud pass errors on the untyped receiver (Gap B baseline)")
+        val hir = lower_repro()
+        val (_, loud_errors) = resolve_methods(hir)
+        # The receiver `d` reaches resolve_method with type_ == nil, which the
+        # loud pass treats as a hard error. This is exactly why Gap A cannot
+        # be wired without Gap B (bug record, "Gap B").
+        expect(loud_errors.len() > 0).to_equal(true)
+
+    it "quiet pass records zero errors on the same module":
+        # @req: REQ-COMPILER-SEMANTICS-001
+        step("Verify: quiet pass records zero errors on the same module")
+        val hir = lower_repro()
+        val (_, quiet_errors) = resolve_methods_quiet(hir)
+        # Monotonicity guarantee: quiet mode NEVER records an error.
+        expect(quiet_errors.len()).to_equal(0)  # oracle: 0 — quiet mode records no errors by construction
+
+    it "quiet pass types the val-of-call receiver as Dict via Let backfill":
+        # @req: REQ-COMPILER-SEMANTICS-001
+        step("Verify: quiet pass types the val-of-call receiver as Dict via Let backfill")
+        val hir = lower_repro()
+        # Before the pass the receiver of d.keys() carries no type.
+        expect(find_receiver_type_brief(hir, "keys")).to_equal("nil")
+        val (quiet_module, _) = resolve_methods_quiet(hir)
+        # After: `val d = make_dict()` backfills d's type from make_dict's
+        # declared return type (symbol-table Function type), and
+        # attach_inferred_type stamps it onto the receiver node, where MIR's
+        # type-directed fallbacks (receiver_is_dict) can see it.
+        expect(find_receiver_type_brief(quiet_module, "keys")).to_equal("Dict")
+
+    it "loud pass behavior on the receiver node is unchanged (no default drift)":
+        # @req: REQ-COMPILER-SEMANTICS-001
+        step("Verify: loud pass behavior on the receiver node is unchanged (no default drift)")
+        val hir = lower_repro()
+        val (loud_module, _) = resolve_methods(hir)
+        # The default (quiet=false) walk must NOT stamp receiver types — the
+        # bootstrap flat-HIR caller's behavior stays byte-identical.
+        expect(find_receiver_type_brief(loud_module, "keys")).to_equal("nil")

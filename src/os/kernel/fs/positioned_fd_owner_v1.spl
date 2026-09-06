@@ -1,0 +1,366 @@
+"""Transactional bridge from MountTable positioned opens to fd/OFD owners.
+
+MountTable selects and seals the filesystem backend.  This capsule reserves a
+descriptor before opening, transfers exactly one new OFD reference on commit,
+and closes the MountTable binding on every pre-commit rollback.  It does not
+own syscall policy, task authentication, or filesystem boot mounts.
+"""
+
+use std.fs_driver.types.OpenFlags
+use os.services.vfs.vfs_positioned_ops.{
+    g_vfs_positioned_open_binding_v1,
+    g_vfs_positioned_binding_close_v1,
+    g_vfs_positioned_binding_read_at_v1,
+    g_vfs_positioned_binding_write_at_v1
+}
+use os.sosix.fs.driver_positioned_error_v1.sosix_driver_positioned_error_reason_v1
+use os.sosix.fs.open_file_description_sequencer.SOSIX_OFD_POSITION_BACKEND_APPEND
+use os.kernel.fs.fd_table_descriptor_owner_support_v1.{
+    FdTaskLifecycleKeyV1, FdDescriptorTransactionV1
+}
+use os.kernel.fs.fd_table_descriptor_owner_v1.{
+    fd_descriptor_reserve_install_lowest_v1,
+    fd_descriptor_commit_install_v1,
+    fd_descriptor_rollback_v1,
+    fd_descriptor_positioned_snapshot_v1,
+    fd_descriptor_pin_positioned_io_v1,
+    fd_descriptor_reserve_positioned_close_v1,
+    fd_descriptor_commit_v1
+}
+use os.kernel.fs.open_file_description_owner_v1.{
+    SIMPLEOS_OFD_STATUS_APPEND_V1,
+    SIMPLEOS_OFD_STATUS_NONBLOCK_V1,
+    OpenFileDescriptionAccessV1,
+    OpenFileDescriptionStateV1,
+    OpenFileDescriptionIoKindV1,
+    OpenFileDescriptionBackendCloseOutcomeV1,
+    OpenFileDescriptionCloseBeginV1,
+    OpenFileDescriptionCloseTicketV1,
+    OpenFileDescriptionRefV1,
+    OpenFileDescriptionPinV1,
+    open_file_description_create_positioned_v1,
+    open_file_description_begin_close_v1,
+    open_file_description_resolve_close_backend_v1,
+    open_file_description_finalize_close_v1,
+    open_file_description_resolve_io_dispatch_v1,
+    open_file_description_complete_io_v1,
+    open_file_description_complete_io_indeterminate_v1,
+    open_file_description_cancel_undispatched_io_v1,
+    open_file_description_access_allows_read_v1,
+    open_file_description_access_allows_write_v1
+}
+
+pub val POSITIONED_FD_MINIMUM_V1: i32 = 3
+pub val POSITIONED_FD_DESCRIPTOR_CLOEXEC_V1: u32 = 1u32
+
+pub struct PositionedFdOpenReceiptV1:
+    descriptor: i32
+    complete: bool
+    failure: text
+
+pub struct PositionedFdIoResultV1:
+    accepted: bool
+    reason: text
+    transferred: u64
+    shared_offset: u64
+    data: [u8]
+
+pub struct PositionedFdCloseReceiptV1:
+    descriptor: i32
+    complete: bool
+    failure: text
+
+export POSITIONED_FD_MINIMUM_V1, POSITIONED_FD_DESCRIPTOR_CLOEXEC_V1
+export PositionedFdOpenReceiptV1, PositionedFdIoResultV1
+export PositionedFdCloseReceiptV1
+
+fn _positioned_fd_empty_bytes_v1() -> [u8]:
+    val bytes: [u8] = []
+    bytes
+
+fn _positioned_fd_reject_io_v1(reason: text) -> PositionedFdIoResultV1:
+    PositionedFdIoResultV1(
+        accepted: false, reason: reason, transferred: 0u64,
+        shared_offset: 0u64, data: _positioned_fd_empty_bytes_v1())
+
+fn _positioned_fd_access_v1(
+    flags: OpenFlags
+) -> Result<OpenFileDescriptionAccessV1, text>:
+    val access_bits = flags.bits & 3u32
+    if access_bits == 0u32: return Ok(OpenFileDescriptionAccessV1.ReadOnly)
+    if access_bits == 1u32: return Ok(OpenFileDescriptionAccessV1.WriteOnly)
+    if access_bits == 2u32: return Ok(OpenFileDescriptionAccessV1.ReadWrite)
+    Err("invalid-open-access-mode")
+
+fn _positioned_fd_status_v1(flags: OpenFlags) -> u32:
+    flags.bits & (SIMPLEOS_OFD_STATUS_APPEND_V1 |
+        SIMPLEOS_OFD_STATUS_NONBLOCK_V1)
+
+fn _positioned_fd_close_ticket_v1(
+    ticket: OpenFileDescriptionCloseTicketV1
+) -> Result<(), text>:
+    val backend = open_file_description_resolve_close_backend_v1(ticket)
+    if backend.is_err(): return Err(backend.unwrap_err())
+    val positioned = backend.unwrap().positioned
+    if not positioned.?:
+        val quarantined = open_file_description_finalize_close_v1(
+            ticket, OpenFileDescriptionBackendCloseOutcomeV1.Indeterminate)
+        if quarantined.is_err():
+            return Err("positioned-close-backend-missing;" + quarantined.unwrap_err())
+        return Err("positioned-close-backend-missing")
+    val closed = g_vfs_positioned_binding_close_v1(positioned.unwrap())
+    val outcome = if closed.is_ok():
+        OpenFileDescriptionBackendCloseOutcomeV1.Confirmed
+    else:
+        OpenFileDescriptionBackendCloseOutcomeV1.Indeterminate
+    val finalized = open_file_description_finalize_close_v1(ticket, outcome)
+    if finalized.is_err(): return Err(finalized.unwrap_err())
+    if closed.is_err():
+        return Err(sosix_driver_positioned_error_reason_v1(
+            "mount-table", closed.unwrap_err()))
+    Ok(())
+
+fn _positioned_fd_close_begin_v1(
+    begin: OpenFileDescriptionCloseBeginV1
+) -> Result<(), text>:
+    if not begin.complete: return Err(begin.failure)
+    if not begin.ticket.?: return Ok(())
+    _positioned_fd_close_ticket_v1(begin.ticket.unwrap())
+
+fn _positioned_fd_abort_new_ofd_v1(
+    ofd: OpenFileDescriptionRefV1
+) -> Result<(), text>:
+    val begun = open_file_description_begin_close_v1(ofd)
+    if begun.is_err(): return Err(begun.unwrap_err())
+    _positioned_fd_close_begin_v1(begun.unwrap())
+
+fn _positioned_fd_rollback_open_reservation_v1(
+    transaction: FdDescriptorTransactionV1,
+    reason: text
+) -> text:
+    val rolled_back = fd_descriptor_rollback_v1(transaction)
+    if rolled_back.is_err(): reason + ";" + rolled_back.unwrap_err()
+    else: reason
+
+fn _positioned_fd_indeterminate_io_v1(
+    pin: OpenFileDescriptionPinV1,
+    reason: text
+) -> PositionedFdIoResultV1:
+    val completed = open_file_description_complete_io_indeterminate_v1(pin)
+    if completed.is_err():
+        return _positioned_fd_reject_io_v1(
+            reason + ";" + completed.unwrap_err())
+    if completed.unwrap().close_ready.?:
+        val closed = _positioned_fd_close_ticket_v1(
+            completed.unwrap().close_ready.unwrap())
+        if closed.is_err():
+            return _positioned_fd_reject_io_v1(
+                reason + ";" + closed.unwrap_err())
+    _positioned_fd_reject_io_v1(reason)
+
+pub fn positioned_fd_open_existing_v1(
+    key: FdTaskLifecycleKeyV1, path: text, flags: OpenFlags,
+    descriptor_flags: u32
+) -> Result<PositionedFdOpenReceiptV1, text>:
+    """Open an existing file and atomically publish its lowest available fd.
+
+    O_CREAT and O_TRUNC are rejected because close rollback cannot restore their
+    namespace/content side effects.  A later filesystem mutation transaction
+    must own those flags.
+    """
+    if (flags.bits & (64u32 | 512u32)) != 0u32:
+        return Err("mutating-open-requires-filesystem-transaction")
+    if (flags.bits & SIMPLEOS_OFD_STATUS_APPEND_V1) != 0u32:
+        return Err("atomic-append-backend-contract-unavailable")
+    if (descriptor_flags & ~POSITIONED_FD_DESCRIPTOR_CLOEXEC_V1) != 0u32:
+        return Err("invalid-descriptor-flags")
+    val access = _positioned_fd_access_v1(flags)?
+    val reserved = fd_descriptor_reserve_install_lowest_v1(
+        key, POSITIONED_FD_MINIMUM_V1, descriptor_flags)?
+    val opened = g_vfs_positioned_open_binding_v1(path, flags)
+    if opened.is_err():
+        return Err(_positioned_fd_rollback_open_reservation_v1(
+            reserved, sosix_driver_positioned_error_reason_v1(
+                "mount-table", opened.unwrap_err())))
+    val binding = opened.unwrap()
+    val created = open_file_description_create_positioned_v1(
+        access, _positioned_fd_status_v1(flags), binding, 0u64)
+    if created.is_err():
+        val closed = g_vfs_positioned_binding_close_v1(binding)
+        var reason = _positioned_fd_rollback_open_reservation_v1(
+            reserved, created.unwrap_err())
+        if closed.is_err():
+            reason = reason + ";" + sosix_driver_positioned_error_reason_v1(
+                "mount-table", closed.unwrap_err())
+        return Err(reason)
+    val ofd = created.unwrap()
+    val committed = fd_descriptor_commit_install_v1(reserved, ofd)
+    if committed.is_err():
+        val cleanup = _positioned_fd_abort_new_ofd_v1(ofd)
+        var reason = committed.unwrap_err()
+        if cleanup.is_err(): reason = reason + ";" + cleanup.unwrap_err()
+        return Err(reason)
+    val receipt = committed.unwrap()
+    Ok(PositionedFdOpenReceiptV1(
+        descriptor: receipt.descriptor,
+        complete: receipt.complete, failure: receipt.failure))
+
+fn _positioned_fd_read_common_v1(
+    key: FdTaskLifecycleKeyV1, fd: i32,
+    kind: OpenFileDescriptionIoKindV1,
+    explicit_offset: u64, length: u64
+) -> PositionedFdIoResultV1:
+    if length == 0u64:
+        val snapshot = fd_descriptor_positioned_snapshot_v1(key, fd)
+        if snapshot.is_err(): return _positioned_fd_reject_io_v1(snapshot.unwrap_err())
+        if snapshot.unwrap().ofd.state != OpenFileDescriptionStateV1.Active:
+            return _positioned_fd_reject_io_v1("open-file-description-quarantined")
+        if not open_file_description_access_allows_read_v1(
+            snapshot.unwrap().ofd.access):
+            return _positioned_fd_reject_io_v1("access-mode-denied")
+        return PositionedFdIoResultV1(
+            accepted: true, reason: "empty-read", transferred: 0u64,
+            shared_offset: snapshot.unwrap().ofd.shared_offset,
+            data: _positioned_fd_empty_bytes_v1())
+    val pinned = fd_descriptor_pin_positioned_io_v1(
+        key, fd, kind, explicit_offset, length)
+    if pinned.is_err(): return _positioned_fd_reject_io_v1(pinned.unwrap_err())
+    val pin = pinned.unwrap()
+    val resolved = open_file_description_resolve_io_dispatch_v1(pin)
+    if resolved.is_err():
+        val cancelled = open_file_description_cancel_undispatched_io_v1(pin)
+        if cancelled.is_ok() and cancelled.unwrap().close_ready.?:
+            _ = _positioned_fd_close_ticket_v1(
+                cancelled.unwrap().close_ready.unwrap())
+        return _positioned_fd_reject_io_v1(resolved.unwrap_err())
+    val dispatch = resolved.unwrap()
+    if not dispatch.backend.positioned.?:
+        return _positioned_fd_indeterminate_io_v1(
+            pin, "positioned-dispatch-backend-missing")
+    val read = g_vfs_positioned_binding_read_at_v1(
+        dispatch.backend.positioned.unwrap(), dispatch.ticket.file_offset, length)
+    if read.is_err():
+        return _positioned_fd_indeterminate_io_v1(
+            pin, sosix_driver_positioned_error_reason_v1(
+                "mount-table", read.unwrap_err()))
+    val bytes = read.unwrap()
+    val transferred = bytes.len() as u64
+    val completed = open_file_description_complete_io_v1(
+        pin, 0, transferred, 0u64, false)
+    if completed.is_err():
+        return _positioned_fd_indeterminate_io_v1(pin, completed.unwrap_err())
+    if completed.unwrap().close_ready.?:
+        val closed = _positioned_fd_close_ticket_v1(
+            completed.unwrap().close_ready.unwrap())
+        if closed.is_err(): return _positioned_fd_reject_io_v1(closed.unwrap_err())
+    PositionedFdIoResultV1(
+        accepted: true, reason: "read-complete", transferred: transferred,
+        shared_offset: completed.unwrap().shared_offset, data: bytes)
+
+fn _positioned_fd_write_common_v1(
+    key: FdTaskLifecycleKeyV1, fd: i32,
+    kind: OpenFileDescriptionIoKindV1,
+    explicit_offset: u64, data: [u8]
+) -> PositionedFdIoResultV1:
+    val length = data.len() as u64
+    if length == 0u64:
+        val snapshot = fd_descriptor_positioned_snapshot_v1(key, fd)
+        if snapshot.is_err(): return _positioned_fd_reject_io_v1(snapshot.unwrap_err())
+        if snapshot.unwrap().ofd.state != OpenFileDescriptionStateV1.Active:
+            return _positioned_fd_reject_io_v1("open-file-description-quarantined")
+        if not open_file_description_access_allows_write_v1(
+            snapshot.unwrap().ofd.access):
+            return _positioned_fd_reject_io_v1("access-mode-denied")
+        return PositionedFdIoResultV1(
+            accepted: true, reason: "empty-write", transferred: 0u64,
+            shared_offset: snapshot.unwrap().ofd.shared_offset,
+            data: _positioned_fd_empty_bytes_v1())
+    val pinned = fd_descriptor_pin_positioned_io_v1(
+        key, fd, kind, explicit_offset, length)
+    if pinned.is_err(): return _positioned_fd_reject_io_v1(pinned.unwrap_err())
+    val pin = pinned.unwrap()
+    val resolved = open_file_description_resolve_io_dispatch_v1(pin)
+    if resolved.is_err():
+        val cancelled = open_file_description_cancel_undispatched_io_v1(pin)
+        if cancelled.is_ok() and cancelled.unwrap().close_ready.?:
+            _ = _positioned_fd_close_ticket_v1(
+                cancelled.unwrap().close_ready.unwrap())
+        return _positioned_fd_reject_io_v1(resolved.unwrap_err())
+    val dispatch = resolved.unwrap()
+    if dispatch.ticket.position_kind == SOSIX_OFD_POSITION_BACKEND_APPEND:
+        val completed = open_file_description_complete_io_v1(
+            pin, -1, 0u64, 0u64, false)
+        if completed.is_ok() and completed.unwrap().close_ready.?:
+            _ = _positioned_fd_close_ticket_v1(
+                completed.unwrap().close_ready.unwrap())
+        return _positioned_fd_reject_io_v1(
+            "atomic-append-backend-contract-unavailable")
+    if not dispatch.backend.positioned.?:
+        return _positioned_fd_indeterminate_io_v1(
+            pin, "positioned-dispatch-backend-missing")
+    val written = g_vfs_positioned_binding_write_at_v1(
+        dispatch.backend.positioned.unwrap(), dispatch.ticket.file_offset, data)
+    if written.is_err():
+        return _positioned_fd_indeterminate_io_v1(
+            pin, sosix_driver_positioned_error_reason_v1(
+                "mount-table", written.unwrap_err()))
+    val transferred = written.unwrap()
+    val completed = open_file_description_complete_io_v1(
+        pin, 0, transferred, 0u64, false)
+    if completed.is_err():
+        return _positioned_fd_indeterminate_io_v1(pin, completed.unwrap_err())
+    if completed.unwrap().close_ready.?:
+        val closed = _positioned_fd_close_ticket_v1(
+            completed.unwrap().close_ready.unwrap())
+        if closed.is_err(): return _positioned_fd_reject_io_v1(closed.unwrap_err())
+    PositionedFdIoResultV1(
+        accepted: true, reason: "write-complete", transferred: transferred,
+        shared_offset: completed.unwrap().shared_offset,
+        data: _positioned_fd_empty_bytes_v1())
+
+pub fn positioned_fd_read_v1(
+    key: FdTaskLifecycleKeyV1, fd: i32, length: u64
+) -> PositionedFdIoResultV1:
+    _positioned_fd_read_common_v1(
+        key, fd, OpenFileDescriptionIoKindV1.Read, 0u64, length)
+
+pub fn positioned_fd_pread_v1(
+    key: FdTaskLifecycleKeyV1, fd: i32, offset: u64, length: u64
+) -> PositionedFdIoResultV1:
+    _positioned_fd_read_common_v1(
+        key, fd, OpenFileDescriptionIoKindV1.ReadAt, offset, length)
+
+pub fn positioned_fd_write_v1(
+    key: FdTaskLifecycleKeyV1, fd: i32, data: [u8]
+) -> PositionedFdIoResultV1:
+    _positioned_fd_write_common_v1(
+        key, fd, OpenFileDescriptionIoKindV1.Write, 0u64, data)
+
+pub fn positioned_fd_pwrite_v1(
+    key: FdTaskLifecycleKeyV1, fd: i32, offset: u64, data: [u8]
+) -> PositionedFdIoResultV1:
+    _positioned_fd_write_common_v1(
+        key, fd, OpenFileDescriptionIoKindV1.WriteAt, offset, data)
+
+pub fn positioned_fd_close_v1(
+    key: FdTaskLifecycleKeyV1, fd: i32
+) -> Result<PositionedFdCloseReceiptV1, text>:
+    val reserved = fd_descriptor_reserve_positioned_close_v1(key, fd)?
+    val committed = fd_descriptor_commit_v1(reserved)?
+    var complete = committed.complete
+    var failure = committed.failure
+    if committed.displaced_close.?:
+        val closed = _positioned_fd_close_begin_v1(
+            committed.displaced_close.unwrap())
+        if closed.is_err():
+            complete = false
+            failure = if failure == "": closed.unwrap_err()
+            else: failure + ";" + closed.unwrap_err()
+    Ok(PositionedFdCloseReceiptV1(
+        descriptor: committed.descriptor,
+        complete: complete, failure: failure))
+
+export positioned_fd_open_existing_v1
+export positioned_fd_read_v1, positioned_fd_pread_v1
+export positioned_fd_write_v1, positioned_fd_pwrite_v1
+export positioned_fd_close_v1

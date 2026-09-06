@@ -1,0 +1,48 @@
+# Environment/Scope Tests (real module)
+#
+# Task #191 guard: Scope.new() must produce a genuinely empty bindings
+# Dict (len()==0) rather than a phantom-loaded one. Exercises the REAL
+# environment.spl module (not a self-contained reimplementation) so the
+# {} sweep at core/environment.spl:51,58 is actually verified end to end.
+
+from environment import {Scope}
+from value import {Value, ValueKind, RuntimeValue}
+from symbol import {SymbolId}
+
+# NOTE: deliberately uses SymbolId(id: N) directly instead of intern() —
+# the global string interner has a pre-existing, unrelated stack-overflow
+# bug (confirmed independently; see symbol_spec.spl "Global interner"
+# section) that is out of scope for task #191. Constructing SymbolId
+# manually avoids that landmine while still exercising the real
+# Scope.define/get -> Dict.set/get path.
+
+describe "Scope":
+    it "starts with an empty bindings dict (red-on-Dict.new guard)":
+        val scope = Scope.new()
+        assert scope.bindings.len() == 0
+
+    it "with_parent also starts with an empty bindings dict":
+        val parent = Scope.new()
+        val child = Scope.with_parent(parent)
+        assert child.bindings.len() == 0
+
+    it "define then get round-trips a binding":
+        val scope = Scope.new()
+        val sym = SymbolId(id: 1)
+        val v42 = Value { kind: ValueKind.Int, data: RuntimeValue.Int(42) }
+        val scope2 = scope.define(sym, v42, false)
+        assert scope2.bindings.len() == 1
+        val found = scope2.get(sym)
+        assert found.?
+        assert found.unwrap().value.as_int() == Some(42)
+
+    it "set updates an existing mutable binding":
+        val scope = Scope.new()
+        val sym = SymbolId(id: 2)
+        val v7 = Value { kind: ValueKind.Int, data: RuntimeValue.Int(7) }
+        val v9 = Value { kind: ValueKind.Int, data: RuntimeValue.Int(9) }
+        val scope2 = scope.define(sym, v7, true)
+        val scope3 = scope2.set(sym, v9).unwrap()
+        val found = scope3.get(sym)
+        assert found.?
+        assert found.unwrap().value.as_int() == Some(9)

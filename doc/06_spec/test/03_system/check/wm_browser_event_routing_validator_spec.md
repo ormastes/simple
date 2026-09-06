@@ -1,0 +1,260 @@
+# WM browser event-routing proof validator
+
+> Validates the standalone WM browser event-routing proof validator. The validator consumes the raw Electron probe JSON and fails closed when a stale or forged `pass=true` row omits Chromium event, timing, animation, payload, or UI details.
+
+<!-- sdn-diagram:id=wm_browser_event_routing_validator_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=wm_browser_event_routing_validator_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+wm_browser_event_routing_validator_spec -> std
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=wm_browser_event_routing_validator_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
+| Tests | Active | Skipped | Pending |
+|-------|--------|---------|--------:|
+| 6 | 6 | 0 | 0 |
+
+<details>
+<summary>Full Scenario Manual</summary>
+
+# WM browser event-routing proof validator
+
+Validates the standalone WM browser event-routing proof validator. The validator consumes the raw Electron probe JSON and fails closed when a stale or forged `pass=true` row omits Chromium event, timing, animation, payload, or UI details.
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Other |
+| Status | Active |
+| Requirements | N/A |
+| Plan | doc/03_plan/ui/tui/production_gui_web_renderer_parity_hardening.md |
+| Design | doc/07_guide/tooling/renderdoc_capture_infra.md |
+| Research | N/A |
+| Source | `test/03_system/check/wm_browser_event_routing_validator_spec.spl` |
+| Updated | 2026-06-01 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+Validates the standalone WM browser event-routing proof validator. The
+validator consumes the raw Electron probe JSON and fails closed when a stale or
+forged `pass=true` row omits Chromium event, timing, animation, payload, or UI
+details.
+
+**Plan:** doc/03_plan/ui/tui/production_gui_web_renderer_parity_hardening.md
+**Requirements:** N/A
+**Research:** N/A
+**Design:** doc/07_guide/tooling/renderdoc_capture_infra.md
+
+## Syntax
+
+```sh
+SIMPLE_LIB=src bin/simple test test/03_system/check/wm_browser_event_routing_validator_spec.spl --mode=interpreter --clean --fail-fast
+```
+
+## Acceptance
+
+- Complete Electron WM event-routing JSON validates and emits normalized
+  `wm_browser_event_routing_*` rows.
+- `pass=true` JSON still fails when event counts, Chromium timing, animation,
+  payload details, or UI proof rows are missing or malformed.
+- The live shell evidence wrapper consumes the standalone validator instead of
+  trusting only the probe's top-level `pass` flag.
+
+## Scenarios
+
+### WM browser event-routing proof validator
+
+#### accepts complete event timing animation payload and UI proof
+
+-  fixture command
+   - Expected: code equals `0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 15 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val command = "rm -rf build/test-wm-browser-event-validator-pass && mkdir -p build/test-wm-browser-event-validator-pass && " +
+    _fixture_command("build/test-wm-browser-event-validator-pass/proof.json", "") +
+    " && node scripts/check/validate-wm-browser-event-routing-proof.js build/test-wm-browser-event-validator-pass/proof.json > build/test-wm-browser-event-validator-pass/evidence.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+val evidence = file_read("build/test-wm-browser-event-validator-pass/evidence.env")
+expect(evidence).to_contain("wm_browser_event_routing_validation_status=pass")
+expect(evidence).to_contain("wm_browser_event_routing_validation_reason=pass")
+expect(evidence).to_contain("wm_browser_event_routing_performance_now_delta_ms=16.7")
+expect(evidence).to_contain("wm_browser_event_routing_animation_frame_count=2")
+expect(evidence).to_contain("wm_browser_event_routing_css_animation_probe=true")
+expect(evidence).to_contain("wm_browser_event_routing_move_payload_source=native_event")
+expect(evidence).to_contain("wm_browser_event_routing_title_command_text=/tmp/project")
+expect(evidence).to_contain("wm_browser_event_routing_text_input_text=Hello Simple")
+```
+
+</details>
+
+#### rejects pass true proof when required event counts are missing
+
+-  fixture command
+   - Expected: code equals `1`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val command = "rm -rf build/test-wm-browser-event-validator-counts && mkdir -p build/test-wm-browser-event-validator-counts && " +
+    _fixture_command("build/test-wm-browser-event-validator-counts/proof.json", "p.focus_count=0") +
+    " && node scripts/check/validate-wm-browser-event-routing-proof.js build/test-wm-browser-event-validator-counts/proof.json > build/test-wm-browser-event-validator-counts/evidence.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val evidence = file_read("build/test-wm-browser-event-validator-counts/evidence.env")
+expect(evidence).to_contain("wm_browser_event_routing_validation_status=fail")
+expect(evidence).to_contain("wm_browser_event_routing_validation_reason=event-routing-contract-missing")
+expect(evidence).to_contain("wm_browser_event_routing_focus_count=0")
+```
+
+</details>
+
+#### rejects pass true proof when Chromium timing or animation is malformed
+
+-  fixture command
+   - Expected: code equals `1`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val command = "rm -rf build/test-wm-browser-event-validator-animation && mkdir -p build/test-wm-browser-event-validator-animation && " +
+    _fixture_command("build/test-wm-browser-event-validator-animation/proof.json", "p.performance_now_delta_ms=\"not-a-number\";p.animation_frame_count=1") +
+    " && node scripts/check/validate-wm-browser-event-routing-proof.js build/test-wm-browser-event-validator-animation/proof.json > build/test-wm-browser-event-validator-animation/evidence.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val evidence = file_read("build/test-wm-browser-event-validator-animation/evidence.env")
+expect(evidence).to_contain("wm_browser_event_routing_validation_status=fail")
+expect(evidence).to_contain("wm_browser_event_routing_validation_reason=event-routing-performance-animation-contract-missing")
+expect(evidence).to_contain("wm_browser_event_routing_performance_now_delta_ms=not-a-number")
+expect(evidence).to_contain("wm_browser_event_routing_animation_frame_count=1")
+```
+
+</details>
+
+#### rejects pass true proof when payload details do not match dispatched DOM events
+
+-  fixture command
+   - Expected: code equals `1`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val command = "rm -rf build/test-wm-browser-event-validator-payload && mkdir -p build/test-wm-browser-event-validator-payload && " +
+    _fixture_command("build/test-wm-browser-event-validator-payload/proof.json", "p.move_payload.source=\"synthetic\";p.text_payload.event.text=\"\"") +
+    " && node scripts/check/validate-wm-browser-event-routing-proof.js build/test-wm-browser-event-validator-payload/proof.json > build/test-wm-browser-event-validator-payload/evidence.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val evidence = file_read("build/test-wm-browser-event-validator-payload/evidence.env")
+expect(evidence).to_contain("wm_browser_event_routing_validation_status=fail")
+expect(evidence).to_contain("wm_browser_event_routing_validation_reason=event-routing-payload-contract-missing")
+expect(evidence).to_contain("wm_browser_event_routing_move_payload_source=synthetic")
+```
+
+</details>
+
+#### rejects pass true proof when UI readback details are missing
+
+-  fixture command
+   - Expected: code equals `1`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val command = "rm -rf build/test-wm-browser-event-validator-ui && mkdir -p build/test-wm-browser-event-validator-ui && " +
+    _fixture_command("build/test-wm-browser-event-validator-ui/proof.json", "p.titlebar_display=\"block\";p.traffic_button_count=2") +
+    " && node scripts/check/validate-wm-browser-event-routing-proof.js build/test-wm-browser-event-validator-ui/proof.json > build/test-wm-browser-event-validator-ui/evidence.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val evidence = file_read("build/test-wm-browser-event-validator-ui/evidence.env")
+expect(evidence).to_contain("wm_browser_event_routing_validation_status=fail")
+expect(evidence).to_contain("wm_browser_event_routing_validation_reason=event-routing-ui-contract-missing")
+expect(evidence).to_contain("wm_browser_event_routing_titlebar_display=block")
+```
+
+</details>
+
+#### keeps the live shell wrapper wired to the validator result
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val script = file_read("scripts/check/check-wm-browser-event-routing-evidence.shs")
+expect(script).to_contain("validate-wm-browser-event-routing-proof.js")
+expect(script).to_contain("validator_code")
+expect(script).to_contain("wm_browser_event_routing_validation_status")
+expect(script).to_contain("wm_browser_event_routing_validation_reason")
+```
+
+</details>
+
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 6 |
+| Active scenarios | 6 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
+
+
+## Related Documentation
+
+- **Plan:** [doc/03_plan/ui/tui/production_gui_web_renderer_parity_hardening.md](doc/03_plan/ui/tui/production_gui_web_renderer_parity_hardening.md)
+- **Design:** [doc/07_guide/tooling/renderdoc_capture_infra.md](doc/07_guide/tooling/renderdoc_capture_infra.md)
+
+
+</details>

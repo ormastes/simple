@@ -1,0 +1,150 @@
+# @cover src/lib/scv/parser_session.spl
+# SCV-IMPL-P-03 — persistent ParserSession: open / apply_edit /
+# changed_ranges / checkpoint, exact TSInputEdit records, differential
+# full-vs-incremental equivalence, fuzzed edit sequence.
+#
+# HONEST STATUS: true parse-with-old-tree (retained TSTree + ts_tree_edit +
+# ts_tree_get_changed_ranges) is blocked — the shim has no
+# wasm_rt_parse_incremental and this host has no wasmtime/tree-sitter dev
+# headers.  The session runs the plan-authorized bounded fallback
+# (mode=fallback-full-reparse, full reparse + structural node dedup) and
+# says so; the TSInputEdit records asserted here are exact and feed the
+# real API unchanged when it lands.
+
+use app.io.mod (file_exists)
+use std.nogc_sync_mut.io.time_ops.{current_time_ms}
+use std.scv.store.{scv_init_repo}
+use std.scv.core.{scv_object_path}
+use std.scv.wasm_executor.{scv_wasm_parse}
+use std.scv.parser_session.{scv_parser_session_open, scv_parser_session_apply_edit,
+    scv_parser_session_changed_ranges, scv_parser_session_checkpoint,
+    scv_point_at, scv_input_edit_record, scv_session_source,
+    scv_session_tree_root, scv_session_mode, scv_session_edit_count,
+    scv_session_last_edit}
+
+fn _fresh_root() -> text:
+    val root = "/tmp/scv-p03-spec-{current_time_ms()}"
+    scv_init_repo(root)
+    root
+
+describe "scv true incremental parse session (SCV-IMPL-P-03)":
+
+    it "TSInputEdit: exact bytes and row,col points for a mid-line replacement":
+        val old_src = "alpha\nbeta\ngamma\n"
+        # replace "beta" (bytes 6..10) with "BETAX"
+        val new_src = "alpha\nBETAX\ngamma\n"
+        val rec = scv_input_edit_record(old_src, new_src, 6, 10, "BETAX")
+        expect(rec).to_contain("start_byte=6")
+        expect(rec).to_contain("old_end_byte=10")
+        expect(rec).to_contain("new_end_byte=11")
+        expect(rec).to_contain("start_point=1,0")
+        expect(rec).to_contain("old_end_point=1,4")
+        expect(rec).to_contain("new_end_point=1,5")
+
+    it "TSInputEdit: points cross newlines correctly":
+        val (r0, c0) = scv_point_at("ab\ncd\nef", 0)
+        expect(r0).to_equal(0)
+        expect(c0).to_equal(0)
+        val (r1, c1) = scv_point_at("ab\ncd\nef", 4)
+        expect(r1).to_equal(1)
+        expect(c1).to_equal(1)
+        val (r2, c2) = scv_point_at("ab\ncd\nef", 8)
+        expect(r2).to_equal(2)
+        expect(c2).to_equal(2)
+        # insertion of a newline moves the new_end point to the next row
+        val rec = scv_input_edit_record("ab", "a\nb", 1, 1, "\n")
+        expect(rec).to_contain("new_end_byte=2")
+        expect(rec).to_contain("new_end_point=1,0")
+
+    it "session open retains a parse tree and reports honest fallback mode":
+        val root = _fresh_root()
+        val s = scv_parser_session_open(root, "text", "fallback", "0", "none",
+                                        "one\ntwo\n")
+        expect(scv_session_tree_root(s) == "").to_equal(false)
+        expect(scv_session_mode(s)).to_equal("fallback-full-reparse")
+        expect(scv_session_edit_count(s)).to_equal(0)
+        expect(scv_session_source(s)).to_equal("one\ntwo\n")
+
+    it "apply_edit splices source, logs the exact TSInputEdit, reparses":
+        val root = _fresh_root()
+        val s0 = scv_parser_session_open(root, "text", "fallback", "0", "none",
+                                         "one\ntwo\nthree\n")
+        # replace "two" (bytes 4..7) with "2"
+        val s1 = scv_parser_session_apply_edit(root, s0, 4, 7, "2")
+        expect(scv_session_source(s1)).to_equal("one\n2\nthree\n")
+        expect(scv_session_edit_count(s1)).to_equal(1)
+        expect(scv_session_last_edit(s1)).to_contain("start_byte=4")
+        expect(scv_session_last_edit(s1)).to_contain("old_end_byte=7")
+        expect(scv_session_last_edit(s1)).to_contain("new_end_byte=5")
+        expect(scv_session_tree_root(s1) == scv_session_tree_root(s0)).to_equal(false)
+
+    it "out-of-bounds edits are refused, session unchanged":
+        val root = _fresh_root()
+        val s0 = scv_parser_session_open(root, "text", "fallback", "0", "none", "abc")
+        expect(scv_parser_session_apply_edit(root, s0, -1, 2, "x")).to_equal(s0)
+        expect(scv_parser_session_apply_edit(root, s0, 2, 1, "x")).to_equal(s0)
+        expect(scv_parser_session_apply_edit(root, s0, 0, 99, "x")).to_equal(s0)
+
+    it "differential equivalence: session tree == full reparse tree after every edit":
+        val root = _fresh_root()
+        var s = scv_parser_session_open(root, "text", "fallback", "0", "none",
+                                        "aaa\nbbb\nccc\n")
+        # (start, old_end, replacement) sequence
+        val edits = [(4, 7, "BB"), (0, 3, "A"), (5, 5, "zz\n")]
+        var i = 0
+        while i < edits.len():
+            val (st, oe, tx) = edits[i]
+            s = scv_parser_session_apply_edit(root, s, st, oe, tx)
+            val (full_root, err) = scv_wasm_parse(root, "text", "fallback", "0",
+                                                  "none", scv_session_source(s))
+            expect(err).to_equal("")
+            expect(scv_session_tree_root(s)).to_equal(full_root)
+            i = i + 1
+
+    it "fuzzed edit sequence: session source tracks a reference splice model":
+        val root = _fresh_root()
+        var reference = "line0\nline1\nline2\nline3\n"
+        var s = scv_parser_session_open(root, "text", "fallback", "0", "none", reference)
+        # deterministic pseudo-random edit generator (LCG seed 42)
+        var seed: i64 = 42
+        var k = 0
+        while k < 12:
+            seed = (seed * 1103515245 + 12345) % 2147483648
+            val len = reference.len()
+            val st = if len == 0: 0 else: seed % len
+            seed = (seed * 1103515245 + 12345) % 2147483648
+            val span = seed % 4
+            val oe = if st + span > len: len else: st + span
+            val tx = "x{k}\n"
+            reference = reference.slice(0, st) + tx + reference.slice(oe, reference.len())
+            s = scv_parser_session_apply_edit(root, s, st, oe, tx)
+            expect(scv_session_source(s)).to_equal(reference)
+            k = k + 1
+        expect(scv_session_edit_count(s)).to_equal(12)
+        # final tree agrees with a from-scratch parse of the reference text
+        val (full_root, _e) = scv_wasm_parse(root, "text", "fallback", "0",
+                                             "none", reference)
+        expect(scv_session_tree_root(s)).to_equal(full_root)
+
+    it "changed_ranges names the edited bytes, not the whole file":
+        val root = _fresh_root()
+        val s0 = scv_parser_session_open(root, "text", "fallback", "0", "none",
+                                         "one\ntwo\nthree\n")
+        val s1 = scv_parser_session_apply_edit(root, s0, 4, 7, "2")
+        val ranges = scv_parser_session_changed_ranges(root, s1)
+        expect(ranges == "").to_equal(false)
+        expect(ranges).to_contain("4..5")
+        # unchanged first line's range is not reported
+        expect(ranges.contains("0..3")).to_equal(false)
+
+    it "checkpoint persists session state and is content-addressed":
+        val root = _fresh_root()
+        val s0 = scv_parser_session_open(root, "text", "fallback", "0", "none",
+                                         "one\ntwo\n")
+        val ck1 = scv_parser_session_checkpoint(root, s0)
+        expect(ck1 == "").to_equal(false)
+        expect(file_exists(scv_object_path(root, "session", ck1))).to_equal(true)
+        # same state => same checkpoint id; different state => different id
+        expect(scv_parser_session_checkpoint(root, s0)).to_equal(ck1)
+        val s1 = scv_parser_session_apply_edit(root, s0, 0, 3, "ONE")
+        expect(scv_parser_session_checkpoint(root, s1) == ck1).to_equal(false)

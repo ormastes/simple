@@ -1,0 +1,36 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+module="$root/src/lib/nogc_sync_mut/sffi/ast.spl"
+registry="$root/src/compiler_rust/compiler/src/codegen/runtime_sffi.rs"
+interpreter="$root/src/compiler_rust/compiler/src/interpreter_extern/mod.rs"
+
+[ "$(grep -c '^extern fn ' "$module")" -eq 29 ]
+[ "$(grep -c '^@always_inline$' "$module")" -eq 29 ]
+[ "$(grep -c 'unsafe(capabilities: \[ffi\]):' "$module")" -eq 2 ]
+[ "$(( $(grep -c '^@unsafe(' "$module") - 29 ))" -eq 27 ]
+
+symbols=$(sed -n 's/^extern fn \([A-Za-z0-9_]*\)(.*/\1/p' "$module")
+both=0
+one=0
+none=0
+for symbol in $symbols; do
+    providers=0
+    grep -q "RuntimeFuncSpec::new(\"$symbol\"" "$registry" && providers=$((providers + 1))
+    grep -q "insert_simple!(\"$symbol\"" "$interpreter" && providers=$((providers + 1))
+    case "$providers" in
+        2) both=$((both + 1)) ;;
+        1) one=$((one + 1)) ;;
+        0) none=$((none + 1)) ;;
+    esac
+done
+[ "$both" -eq 0 ]
+[ "$one" -eq 29 ]
+[ "$none" -eq 0 ]
+
+# Semantic projections remain typed; raw handles do not become safe values.
+grep -q '^fn ast_expr_bool_value(handle: i64) -> bool:' "$module"
+grep -q '^fn ast_arg_name(handle: i64) -> text?:' "$module"
+
+echo "AST SFFI authority audit: PASS (29 declarations; 27 unsafe raw-handle facades + 2 lexical registry owners; all one-lane providers; mandatory-inline)"

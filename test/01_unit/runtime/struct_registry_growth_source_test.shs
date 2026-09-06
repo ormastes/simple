@@ -1,0 +1,53 @@
+#!/bin/sh
+set -eu
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)
+memory="$repo_root/src/runtime/runtime_memory.c"
+native="$repo_root/src/runtime/runtime_native.c"
+work=$(mktemp -d "${TMPDIR:-/tmp}/simple-struct-registry-source.XXXXXX")
+trap 'rm -rf "$work"' EXIT INT TERM
+
+extract_growth_helpers() {
+  awk '
+    /static size_t rt_struct_alloc_load_limit/ { emit = 1 }
+    /static int rt_struct_alloc_insert_raw/ { emit = 0 }
+    emit { print }
+  ' "$1"
+}
+
+extract_growth_helpers "$memory" > "$work/memory.helpers"
+extract_growth_helpers "$native" > "$work/native.helpers"
+cmp "$work/memory.helpers" "$work/native.helpers"
+
+extract_insert() {
+  awk '
+    /static int rt_struct_alloc_insert_raw/ { emit = 1 }
+    /static int rt_struct_alloc_resize/ { emit = 0 }
+    emit { print }
+  ' "$1"
+}
+
+extract_insert "$memory" > "$work/memory.insert"
+extract_insert "$native" > "$work/native.insert"
+cmp "$work/memory.insert" "$work/native.insert"
+
+for source in "$memory" "$native"; do
+  ! grep -Fq 'RT_STRUCT_ALLOC_MAX_CAP' "$source"
+  grep -Fq 'const size_t max_entries = SIZE_MAX / sizeof(RtStructAllocation);' "$source"
+  grep -Fq 'current > max_entries / 2' "$source"
+  grep -Fq 'for (size_t probes = 0; probes < rt_struct_alloc_cap; probes++)' "$source"
+  grep -Fq 'if (first_tomb != SIZE_MAX)' "$source"
+  grep -Fq 'size_t remaining = limit - rt_struct_alloc_len;' "$source"
+  grep -Fq 'rt_struct_alloc_tombs >= remaining - 1' "$source"
+  grep -Fq 'rt_struct_alloc_failures != SIZE_MAX' "$source"
+  grep -Fq 'free(fresh);' "$source"
+  grep -Fq 'rt_struct_allocs = old;' "$source"
+  grep -Fq 'rt_struct_alloc_len = old_len;' "$source"
+  grep -Fq 'rt_struct_alloc_tombs = old_tombs;' "$source"
+  grep -Fq 'size_t bytes = size == 0 ? sizeof(int64_t) : (size_t)size;' "$source"
+  grep -Fq 'if (tag != 0 && tag != 1) return 0;' "$source"
+  grep -Fq '#if defined(SIMPLE_RUNTIME_STRUCT_REGISTRY_TESTING)' "$source"
+  grep -Fq 'int64_t rt_struct_registry_failures(void)' "$source"
+done
+
+echo 'PASS struct registry growth and authority parity source contract'

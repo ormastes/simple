@@ -1,0 +1,80 @@
+# @feature mcdc_hal_runtime_hardening
+# @req REQ-011 REQ-013 REQ-014 NFR-006
+
+use std.spec.*
+use std.common.structural.hal_provider.*
+
+fn config_capacity() -> HalCapacityV1:
+    hal_capacity_v1(64, 64, 8, 512, 4, 512, 512, 100)
+
+fn config_operation(mask: i64 = 7) -> HalOperationV1:
+    hal_operation_v1_default_critical(
+        101, mask, 0, 11, 12, HalSideEffectPolicy.PlanThenCommit,
+        config_capacity(), 13, 14, HalProviderKind.PureSimple)
+
+describe "bounded rt(hal) runtime provider configuration":
+    it "uses safe deterministic no-config defaults":
+        val config = hal_runtime_config_parse_v1("")
+        expect(config.valid).to_be(true)
+        expect(config.mode).to_equal(HalRunMode.AlphaCompare)
+        expect(config.preferred_provider).to_equal(
+            HalProviderKind.PureSimple)
+        expect(config.enabled_providers_mask).to_equal(7)
+
+    it "parses normal alpha and beta policies into fixed fields":
+        val normal = hal_runtime_config_parse_v1(
+            "mode: normal\npreferred: rust\nenabled: pure,rust\n")
+        val alpha = hal_runtime_config_parse_v1(
+            "mode: alpha\npreferred: pure\nenabled: pure,c,rust\n")
+        val beta = hal_runtime_config_parse_v1(
+            "mode: beta\npreferred: c\nenabled: pure,c\n")
+        expect(normal.valid).to_be(true)
+        expect(normal.mode).to_equal(HalRunMode.NormalPreferred)
+        expect(normal.enabled_providers_mask).to_equal(5)
+        expect(alpha.mode).to_equal(HalRunMode.AlphaCompare)
+        expect(alpha.enabled_providers_mask).to_equal(7)
+        expect(beta.mode).to_equal(HalRunMode.BetaCompare)
+        expect(beta.enabled_providers_mask).to_equal(3)
+
+    it "fails closed on unknown duplicate or malformed policy":
+        val unknown = hal_runtime_config_parse_v1("fallback: c\n")
+        val duplicate = hal_runtime_config_parse_v1(
+            "mode: normal\nmode: beta\n")
+        val malformed = hal_runtime_config_parse_v1("mode normal\n")
+        expect(unknown.valid).to_be(false)
+        expect(unknown.error).to_equal(HalRuntimeConfigErrorV1.UnknownKey)
+        expect(duplicate.error).to_equal(
+            HalRuntimeConfigErrorV1.DuplicateKey)
+        expect(malformed.error).to_equal(
+            HalRuntimeConfigErrorV1.MalformedLine)
+
+    it "rejects disabled preferred and single-lane compare policies":
+        val disabled = hal_runtime_config_parse_v1(
+            "mode: normal\npreferred: rust\nenabled: pure,c\n")
+        val single_compare = hal_runtime_config_parse_v1(
+            "mode: alpha\npreferred: pure\nenabled: pure\n")
+        expect(disabled.error).to_equal(
+            HalRuntimeConfigErrorV1.PreferredDisabled)
+        expect(single_compare.error).to_equal(
+            HalRuntimeConfigErrorV1.InvalidEnabledSet)
+
+    it "applies policy once without changing the explicit operation API":
+        val config = hal_runtime_config_parse_v1(
+            "mode: normal\npreferred: rust\nenabled: pure,rust\n")
+        val applied = hal_runtime_config_apply_v1(
+            config_operation(), config)
+        expect(applied.valid).to_be(true)
+        expect(applied.mode).to_equal(HalRunMode.NormalPreferred)
+        expect(applied.operation.providers_mask).to_equal(5)
+        expect(applied.operation.preferred_provider).to_equal(
+            HalProviderKind.Rust)
+        expect(config_operation().providers_mask).to_equal(7)
+
+    it "does not enable a provider excluded by the operation contract":
+        val config = hal_runtime_config_parse_v1(
+            "mode: beta\npreferred: c\nenabled: pure,c\n")
+        val applied = hal_runtime_config_apply_v1(
+            config_operation(1), config)
+        expect(applied.valid).to_be(false)
+        expect(applied.error).to_equal(
+            HalRuntimeConfigErrorV1.OperationProviderMismatch)

@@ -1,0 +1,66 @@
+# RFC 8446 §4.1.3 downgrade-protection sentinel.
+#
+# A TLS 1.3-capable server that ends up negotiating TLS 1.2 (or lower) MUST set
+# the last 8 bytes of ServerHello.random to a fixed sentinel:
+#
+#   TLS 1.2 negotiated:      44 4F 57 4E 47 52 44 01   ("DOWNGRD" 0x01)
+#   TLS 1.1 or below:        44 4F 57 4E 47 52 44 00   ("DOWNGRD" 0x00)
+#
+# The sentinel is inside the server's signed transcript, so an attacker who
+# strips `supported_versions` from the ClientHello to force a downgrade cannot
+# remove it without breaking the server's signature. A TLS 1.3 client that finds
+# the sentinel MUST abort with illegal_parameter.
+#
+# This client only ever completes a TLS 1.3 handshake, so a successful downgrade
+# attack cannot reach the application here — but the check is still worth having
+# and is cheap: it converts a silent, confusing failure further down the state
+# machine into a precise, attributable "downgrade attempt detected" at the first
+# message the server sends. It also means the check is already in place if a
+# version-negotiating path is ever added.
+#
+# Deliberately checked against BOTH sentinels unconditionally on every
+# ServerHello. There is no legitimate reason for a genuine TLS 1.3 ServerHello to
+# carry either value in its trailing 8 random bytes (probability 2^-64), so
+# treating any occurrence as hostile costs nothing and needs no version state.
+#
+# HelloRetryRequest is unaffected: its special random (CF 21 AD 74 ...) does not
+# collide with either sentinel, and this check runs on the HRR-carrying
+# ServerHello as well as the final one.
+
+enum Tls13DowngradeSentinel:
+    None
+    Tls12
+    Tls11OrBelow
+
+fn tls13_downgrade_sentinel(server_random: [u8]) -> Tls13DowngradeSentinel:
+    """Classify the trailing 8 bytes of a ServerHello.random (RFC 8446 §4.1.3).
+
+    A random shorter than 32 bytes carries no sentinel by definition; the
+    malformed-ServerHello case is the caller's to report.
+    """
+    if server_random.len().to_u64() < 32u64:
+        return Tls13DowngradeSentinel.None
+    val prefix: [i64] = [0x44, 0x4F, 0x57, 0x4E, 0x47, 0x52, 0x44]
+    var matched: bool = true
+    var i: u64 = 0u64
+    while i < 7u64:
+        if server_random[24u64 + i].to_u64().to_i64() != prefix[i]:
+            matched = false
+        i = i + 1u64
+    if not matched:
+        return Tls13DowngradeSentinel.None
+    val last = server_random[31u64].to_u64().to_i64()
+    if last == 1:
+        return Tls13DowngradeSentinel.Tls12
+    if last == 0:
+        return Tls13DowngradeSentinel.Tls11OrBelow
+    Tls13DowngradeSentinel.None
+
+fn tls13_downgrade_reason(server_random: [u8]) -> text:
+    """Abort reason for a sentinel-bearing ServerHello, or "" when clean."""
+    val s = tls13_downgrade_sentinel(server_random)
+    if val Tls13DowngradeSentinel.Tls12 = s:
+        return "illegal_parameter: RFC 8446 4.1.3 downgrade sentinel DOWNGRD\\x01 in ServerHello.random (server negotiated TLS 1.2 while we require TLS 1.3)"
+    if val Tls13DowngradeSentinel.Tls11OrBelow = s:
+        return "illegal_parameter: RFC 8446 4.1.3 downgrade sentinel DOWNGRD\\x00 in ServerHello.random (server negotiated TLS 1.1 or below while we require TLS 1.3)"
+    ""

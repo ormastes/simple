@@ -1,0 +1,141 @@
+# Pure routing boundary between fixed CLI-0 commands and SCI provider plans.
+# This module returns immutable data. It does not load or invoke providers.
+
+use std.nogc_sync_mut.composition.types.{CompositionReadResultV1}
+use app.cli_composition.{CliActivationRequestV1, resolve_cli_activation_v1,
+    resolve_cli_extension_activation_v1}
+use std.nogc_sync_mut.composition.codec.{admitted_composition_cli_option_route_section_v1}
+use std.nogc_sync_mut.composition.sci_extension_router.{sci_route_admitted_extension_token_v1}
+use app.simple_core.command_resolver.{
+    SIMPLE_CORE_INVALID_COMMAND,
+    SimpleCoreCommandReceiptV1,
+    simple_core_resolve_v1,
+}
+
+val SIMPLE_CORE_ROUTE_CORE: i32 = 1
+val SIMPLE_CORE_ROUTE_PROVIDER: i32 = 2
+val SIMPLE_CORE_ROUTE_REJECTED: i32 = 3
+
+class SimpleCoreRouteV1:
+    kind: i32
+    core: SimpleCoreCommandReceiptV1
+    activation: CliActivationRequestV1
+
+fn _empty_core() -> SimpleCoreCommandReceiptV1:
+    SimpleCoreCommandReceiptV1(
+        status: SIMPLE_CORE_INVALID_COMMAND,
+        command_id: "",
+        output: "",
+        diagnostic: "",
+    )
+
+fn _activation_error(code: text, subject: text, requested: text) -> CliActivationRequestV1:
+    CliActivationRequestV1(
+        ok: false,
+        diagnostic_code: code,
+        diagnostic_subject: subject,
+        requested_command: requested,
+        canonical_command: "",
+        summary: "",
+        args: [],
+        binding_service_id: "",
+        interface_group_id: "",
+        interface_major: 0,
+        interface_minor: 0,
+        interface_abi_digest: "",
+        provider_id: "",
+        provider_artifact_path: "",
+        provider_artifact_kind: "",
+        provider_artifact_digest: "",
+        requested_capability_bits: 0,
+        extension_availability: 0,
+        extension_missing_policy: 0,
+    )
+
+fn _is_core_request(args: [text]) -> bool:
+    if args.len() == 0:
+        return true
+    (args[0] == "--help" or args[0] == "--version" or args[0] == "doctor" or
+        args[0] == "config" or args[0] == "provider")
+
+fn simple_core_route_with_routes_v1(
+    args: [text],
+    config: CompositionReadResultV1,
+    version: text,
+    cli_option_routes: [u8],
+) -> SimpleCoreRouteV1:
+    if _is_core_request(args):
+        return SimpleCoreRouteV1(
+            kind: SIMPLE_CORE_ROUTE_CORE,
+            core: simple_core_resolve_v1(args, config, version),
+            activation: _activation_error("CLI_NOT_ACTIVATED", "simple-core", ""),
+        )
+
+    val requested = args[0]
+    if not config.ok:
+        return SimpleCoreRouteV1(
+            kind: SIMPLE_CORE_ROUTE_REJECTED,
+            core: _empty_core(),
+            activation: _activation_error(config.diagnostic.code, config.diagnostic.subject, requested),
+        )
+
+    # One decoder-admitted view is reused for every extension token.  The
+    # lookup routine receives a validated handle, never raw bytes to reopen.
+    val section = config.image.cli_option_route_view
+    var extension_provider = ""
+    var extension_namespace = ""
+    var extension_binding_index = -1
+    var extension_availability = 0
+    var extension_missing_policy = 0
+    var i = 0
+    var terminated = false
+    while i < args.len():
+        if args[i] == "--":
+            terminated = true
+        elif not terminated and args[i].starts_with("--x"):
+            if not section.handle.ok:
+                return SimpleCoreRouteV1(SIMPLE_CORE_ROUTE_REJECTED, _empty_core(), _activation_error("CLI_EXTENSION_SECTION", "section 10 is missing", args[i]))
+            val route = sci_route_admitted_extension_token_v1(section, args[i])
+            if not route.ok:
+                return SimpleCoreRouteV1(SIMPLE_CORE_ROUTE_REJECTED, _empty_core(), _activation_error("CLI_EXTENSION_ROUTE", route.error, args[i]))
+            if extension_provider != "" and extension_provider != route.provider_id:
+                return SimpleCoreRouteV1(SIMPLE_CORE_ROUTE_REJECTED, _empty_core(), _activation_error("CLI_EXTENSION_MIXED_PROVIDER", route.provider_id, args[i]))
+            extension_provider = route.provider_id
+            extension_namespace = route.namespace
+            extension_binding_index = route.flags - 1
+            extension_availability = route.availability
+            extension_missing_policy = route.missing_policy
+        i = i + 1
+    if extension_provider != "":
+        if extension_binding_index < 0 or extension_binding_index >= config.image.bindings.len():
+            return SimpleCoreRouteV1(SIMPLE_CORE_ROUTE_REJECTED, _empty_core(), _activation_error("CLI_EXTENSION_BINDING", extension_namespace, extension_namespace))
+        val binding = config.image.bindings[extension_binding_index]
+        if binding.provider_id != extension_provider:
+            return SimpleCoreRouteV1(SIMPLE_CORE_ROUTE_REJECTED, _empty_core(), _activation_error("CLI_EXTENSION_BINDING", binding.service_id, extension_namespace))
+        val activation = resolve_cli_extension_activation_bound_v1(config.image, extension_namespace, args,
+            extension_provider, binding.service_id, extension_availability, extension_missing_policy)
+        return SimpleCoreRouteV1(if activation.ok: SIMPLE_CORE_ROUTE_PROVIDER else: SIMPLE_CORE_ROUTE_REJECTED, _empty_core(), activation)
+
+    var provider_args: [text] = []
+    i = 1
+    while i < args.len():
+        provider_args.push(args[i])
+        i = i + 1
+    val activation = resolve_cli_activation_v1(config.image, requested, provider_args)
+    SimpleCoreRouteV1(
+        kind: if activation.ok: SIMPLE_CORE_ROUTE_PROVIDER else: SIMPLE_CORE_ROUTE_REJECTED,
+        core: _empty_core(),
+        activation: activation,
+    )
+
+fn simple_core_route_v1(args: [text], config: CompositionReadResultV1,
+        version: text) -> SimpleCoreRouteV1:
+    val routes = if config.ok:
+        match admitted_composition_cli_option_route_section_v1(config.image):
+            case Ok(value): value
+            case Err(_): []
+    else: []
+    simple_core_route_with_routes_v1(args, config, version, routes)
+
+export SIMPLE_CORE_ROUTE_CORE, SIMPLE_CORE_ROUTE_PROVIDER, SIMPLE_CORE_ROUTE_REJECTED
+export SimpleCoreRouteV1, simple_core_route_v1, simple_core_route_with_routes_v1

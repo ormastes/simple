@@ -1,0 +1,67 @@
+#!/bin/sh
+# cache-publish-branch — OPTIONAL trusted-branch-CI namespace publisher.
+#
+# This lane is structurally unable to write main. That is not enforced here by
+# an if-statement; it follows from three independent facts:
+#
+#   1. cache-preflight refuses `trusted_main_ci` on any ref other than
+#      refs/heads/main, so this lane can never obtain a write-main verdict.
+#   2. The branch credential is enrolled with requested_role=trusted_branch_ci,
+#      and `policy_may_write_remote_main` returns false for that role with no
+#      parameter that widens it.
+#   3. The gateway derives the namespace path from the credential, so asking
+#      for kind "main" with this token still resolves to a policy that
+#      `remote_put_action` rejects.
+#
+# Branch entries carry the C3 branch TTL and are accounted against the branch
+# quota, never main's.
+#
+# BEST EFFORT: exits 0 on any publish failure. Read the VERDICT line.
+#
+# Usage: sh scripts/ci/cache-publish-branch.shs <mappings-file>
+
+set -eu
+
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || echo '')"
+if [ -z "$REPO_ROOT" ]; then
+    echo "cache-publish-branch: not a git repository"
+    echo "VERDICT: skipped (no repository)"
+    exit 0
+fi
+
+MAPPINGS="${1:-}"
+if [ -z "$MAPPINGS" ]; then
+    echo "usage: cache-publish-branch.shs <mappings-file>" >&2
+    exit 2
+fi
+
+PREFLIGHT="$(sh "$REPO_ROOT/scripts/ci/cache-preflight.shs" trusted_branch_ci || true)"
+printf '%s\n' "$PREFLIGHT"
+VERDICT="$(printf '%s\n' "$PREFLIGHT" | tail -1)"
+if [ "$VERDICT" != "VERDICT: write-branch" ]; then
+    echo "VERDICT: skipped (preflight did not grant branch-write)"
+    exit 0
+fi
+
+if [ ! -f "$MAPPINGS" ]; then
+    echo "VERDICT: skipped (no mappings)"
+    exit 0
+fi
+
+PUBLISHED=0
+FAILED=0
+while read -r ACTION MANIFEST _rest; do
+    [ -n "${ACTION:-}" ] || continue
+    case "$ACTION" in \#*) continue ;; esac
+    if CACHE_BRANCH_IDENTITY="${GITHUB_REF_NAME}" \
+       CACHE_NOW_EPOCH="$(date +%s)" \
+       bin/simple run "$REPO_ROOT/src/app/cache_gateway/main.spl" publish-branch \
+        --action "$ACTION" --manifest "$MANIFEST" >/dev/null 2>&1; then
+        PUBLISHED=$((PUBLISHED + 1))
+    else
+        FAILED=$((FAILED + 1))
+    fi
+done < "$MAPPINGS"
+
+echo "cache-publish-branch: published=${PUBLISHED} failed=${FAILED} ttl=branch"
+echo "VERDICT: published ${PUBLISHED} branch mapping(s), ${FAILED} failed (build unaffected)"

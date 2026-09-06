@@ -1,0 +1,39 @@
+#!/bin/sh
+set -eu
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)
+resume_script="$repo_root/scripts/bootstrap/resume-stage3-from-admitted.sh"
+bootstrap_script="$repo_root/scripts/bootstrap/bootstrap-from-scratch.sh"
+sanity_module="$repo_root/scripts/check/lib/bootstrap-stage3/sanity.shs"
+real_body_spec="$repo_root/test/03_system/compiler/bootstrap_stage3_real_body_spec.spl"
+
+fail() {
+  echo "FAIL: $*" >&2
+  exit 1
+}
+
+for producer in "$bootstrap_script" "$resume_script"; do
+  grep -Fq 'CANDIDATE_FRONTEND_BOOTSTRAP=0' "$producer" ||
+    fail "sanity producer omits SIMPLE_BOOTSTRAP=0 sweep: $producer"
+  grep -Fq 'CANDIDATE_FRONTEND_BOOTSTRAP=1' "$producer" ||
+    fail "sanity producer omits SIMPLE_BOOTSTRAP=1 sweep: $producer"
+  grep -Fq 'frontend_smoke_bootstrap_mode_status=' "$producer" ||
+    fail "sanity producer omits mode-1 evidence: $producer"
+done
+
+grep -Fq 'frontend_smoke_bootstrap_mode_status' "$sanity_module" ||
+  fail "sanity verifier does not require mode-1 evidence"
+grep -Fq 'CANDIDATE_FRONTEND_BOOTSTRAP=0' "$sanity_module" ||
+  fail "sanity verifier does not replay mode 0"
+grep -Fq 'CANDIDATE_FRONTEND_BOOTSTRAP=1' "$sanity_module" ||
+  fail "sanity verifier does not replay mode 1"
+grep -Fq 'bootstrap_stage3_sanity_frontend_bootstrap_status" = 0' \
+  "$sanity_module" || fail "sanity verifier does not require a passing mode-1 replay"
+
+grep -Fq '"SIMPLE_BOOTSTRAP=1"' "$real_body_spec" ||
+  fail "Stage 3 real-body proof does not run in bootstrap mode"
+if grep -Fq '"-u", "SIMPLE_BOOTSTRAP"' "$real_body_spec"; then
+  fail "Stage 3 real-body proof explicitly unsets bootstrap mode"
+fi
+
+echo "bootstrap_stage3_mode1_admission_contract=true"

@@ -1,0 +1,48 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+owner="$root/src/lib/nogc_sync_mut/spec/evidence/counterpart/host_vulkan_lavapipe_provider.spl"
+
+if [ "$(grep -c '^[[:space:]]*@unsafe(.*capabilities: \[.*ffi' "$owner")" -ne 2 ]; then
+    echo "host Vulkan provider authority inventory changed without review" >&2
+    exit 1
+fi
+
+awk '
+    function indent(line, copy) {
+        copy = line
+        sub(/[^ ].*$/, "", copy)
+        return length(copy)
+    }
+    /^[[:space:]]*@unsafe\(.*capabilities: \[.*ffi.*\]\)$/ {
+        next_function_unsafe = 1
+        next
+    }
+    /^[[:space:]]*(pub )?(static fn|fn|me) / {
+        function_indent = indent($0)
+        function_unsafe = next_function_unsafe
+        next_function_unsafe = 0
+        inside_function = 1
+        next
+    }
+    inside_function && NF && indent($0) <= function_indent && !/^[[:space:]]*[A-Za-z0-9_]+:/ && !/^\)/ {
+        function_unsafe = 0
+        inside_function = 0
+    }
+    /rt_vulkan_[A-Za-z0-9_]+\(/ && !/^[[:space:]]*#/ && !function_unsafe {
+        print "unscoped host Vulkan call at line " FNR ": " $0 > "/dev/stderr"
+        failed = 1
+    }
+    END { if (failed) exit 1 }
+' "$owner"
+
+grep -q 'width <= 0 or height <= 0 or width > 8192 or height > 8192' "$owner"
+grep -q 'r < 0 or r > 255' "$owner"
+grep -q 'if depth <= 0:' "$owner"
+if [ "$(grep -c 'rt_vulkan_destroy_image(depth)' "$owner")" -ne 6 ]; then
+    echo "host Vulkan depth-image cleanup coverage changed without review" >&2
+    exit 1
+fi
+
+echo "host Vulkan/lavapipe SFFI contract audit: PASS (2 public provider entries unsafe; bounded RGBA readback; depth-image failure and cleanup covered)"

@@ -1,0 +1,367 @@
+use std.spec
+use compiler.hir.hir_types.{SymbolId}
+use compiler.mir.mir_instructions.{
+    BlockId, LocalId, LocalKind, MirBlock, MirConstValue, MirInst, MirInstKind,
+    MirFunction, MirLocal, MirOperand, MirOperandKind, MirSignature,
+    MirTerminator, MirType
+}
+use compiler.mir.mir_json.{serialize_mir_inst_kind}
+use compiler.mir.mir_coverage_probe_admission.{
+    mir_coverage_probe_admission_diagnostic_inst_v1
+}
+use compiler.mir_opt.mir_opt.dce.{dce_instruction_is_mandatory_observation}
+use compiler.mir_opt.mir_opt.mir_visitor.{MirVisitor, mir_visitor_walk_inst}
+use compiler.mir_opt.mir_opt.var_reassign_ssa.{ssa_var_transform_blocks}
+use compiler.mir_opt.mir_opt._Inline.policy.{FunctionInliner}
+use compiler.mir_opt.optimization_passes.{OptimizationEngine, OptimizationLevel}
+use compiler.interp.mir_interpreter.{MirInterpreter}
+
+fn probe_bool_local() -> MirLocal:
+    MirLocal(LocalId(id: 0), "condition", MirType.bool(), LocalKind.Var, false)
+
+fn probe_result() -> MirOperand:
+    MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0)))
+
+fn probe_mask() -> MirOperand:
+    MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(1), MirType.i64()))
+
+fn decision_probe(runtime_id: i64 = 7, path: text = "src/example.spl") -> MirInst:
+    MirInst(kind: MirInstKind.DecisionProbe(
+        runtime_id, "decision:sha256", 99, 1, probe_mask(), probe_mask(),
+        probe_result(), path, 12, 0
+    ), span: nil)
+
+fn condition_probe() -> MirInst:
+    MirInst(kind: MirInstKind.ConditionProbe(
+        8, "condition:sha256", 7, "decision:sha256", probe_result(),
+        "src/example.spl", 12, 4
+    ), span: nil)
+
+class ProbeOperandVisitor:
+    operands: i64
+
+impl MirVisitor for ProbeOperandVisitor:
+    me visit_inst(inst: MirInst):
+        mir_visitor_walk_inst(self, inst)
+
+    me visit_operand(_operand: MirOperand):
+        self.operands = self.operands + 1
+
+describe "typed MIR coverage opcode admission":
+    it "serializes decision and condition probes without UnsupportedInst":
+        val decision_json = serialize_mir_inst_kind(decision_probe().kind)
+        val condition_json = serialize_mir_inst_kind(condition_probe().kind)
+        expect(decision_json).to_contain("\"DecisionProbe\"")
+        expect(decision_json).to_contain("\"runtime_id\":7")
+        expect(decision_json).to_contain("\"semantic_id\":\"decision:sha256\"")
+        expect(decision_json).to_contain("\"authored_path\":\"src/example.spl\"")
+        expect(condition_json).to_contain("\"ConditionProbe\"")
+        expect(condition_json).to_contain("\"parent_runtime_id\":7")
+        expect(condition_json).to_contain("\"parent_semantic_id\":\"decision:sha256\"")
+        expect(decision_json.contains("UnsupportedInst")).to_equal(false)
+        expect(condition_json.contains("UnsupportedInst")).to_equal(false)
+
+    it "walks the boolean operand and treats both probes as mandatory observations":
+        var visitor = ProbeOperandVisitor(operands: 0)
+        visitor.visit_inst(decision_probe())
+        visitor.visit_inst(condition_probe())
+        expect(visitor.operands).to_equal(2)
+        expect(dce_instruction_is_mandatory_observation(decision_probe())).to_equal(true)
+        expect(dce_instruction_is_mandatory_observation(condition_probe())).to_equal(true)
+
+    it "keeps definitions used only by probes through compatibility optimization":
+        val condition_local = MirLocal(
+            LocalId(id: 1), "atomic_condition", MirType.bool(),
+            LocalKind.Var, false
+        )
+        val block = MirBlock(
+            id: BlockId.entry(), label: "entry",
+            instructions: [
+                MirInst(kind: MirInstKind.Const(
+                    LocalId(id: 0), MirConstValue.Bool(true), MirType.bool()
+                ), span: nil),
+                decision_probe(),
+                MirInst(kind: MirInstKind.Const(
+                    LocalId(id: 1), MirConstValue.Bool(false), MirType.bool()
+                ), span: nil),
+                MirInst(kind: MirInstKind.ConditionProbe(
+                    8, "condition:sha256", 7, "decision:sha256",
+                    MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1))),
+                    "src/example.spl", 12, 4
+                ), span: nil)
+            ],
+            terminator: MirTerminator.Ret(nil)
+        )
+        val function = MirFunction(
+            symbol: SymbolId(id: 0), name: "probe_liveness",
+            signature: MirSignature(
+                params: [], return_type: MirType.unit(), is_variadic: false
+            ),
+            locals: [probe_bool_local(), condition_local], blocks: [block],
+            entry_block: BlockId.entry(), span: nil, generic_params: [],
+            is_generic_template: false, specialization_of: nil,
+            type_bindings: {}
+        )
+        val engine = OptimizationEngine.create(OptimizationLevel.Standard)
+        val optimized = engine.optimize_function(function)
+        expect(optimized.blocks[0].instructions.len()).to_equal(4)
+        match optimized.blocks[0].instructions[0].kind:
+            case Const(local, Bool(true), _): expect(local.id).to_equal(0)
+            case _: expect(false).to_equal(true)
+        match optimized.blocks[0].instructions[2].kind:
+            case Const(local, Bool(false), _): expect(local.id).to_equal(1)
+            case _: expect(false).to_equal(true)
+
+    it "keeps transitive cast inputs used only by decision and condition probes":
+        val locals = [
+            MirLocal(LocalId(id: 0), "decision_source", MirType.bool(), LocalKind.Var, false),
+            MirLocal(LocalId(id: 1), "decision_result", MirType.bool(), LocalKind.Var, false),
+            MirLocal(LocalId(id: 2), "condition_source", MirType.bool(), LocalKind.Var, false),
+            MirLocal(LocalId(id: 3), "condition_result", MirType.bool(), LocalKind.Var, false)
+        ]
+        val block = MirBlock(
+            id: BlockId.entry(), label: "entry",
+            instructions: [
+                MirInst(kind: MirInstKind.Const(
+                    LocalId(id: 0), MirConstValue.Bool(true), MirType.bool()
+                ), span: nil),
+                MirInst(kind: MirInstKind.Cast(
+                    LocalId(id: 1),
+                    MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0))),
+                    MirType.bool()
+                ), span: nil),
+                MirInst(kind: MirInstKind.DecisionProbe(
+                    7, "decision:sha256",
+                    99, 1, probe_mask(), probe_mask(),
+                    MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1))),
+                    "src/example.spl", 12, 0
+                ), span: nil),
+                MirInst(kind: MirInstKind.Const(
+                    LocalId(id: 2), MirConstValue.Bool(false), MirType.bool()
+                ), span: nil),
+                MirInst(kind: MirInstKind.Cast(
+                    LocalId(id: 3),
+                    MirOperand(kind: MirOperandKind.Copy(LocalId(id: 2))),
+                    MirType.bool()
+                ), span: nil),
+                MirInst(kind: MirInstKind.ConditionProbe(
+                    8, "condition:sha256", 7, "decision:sha256",
+                    MirOperand(kind: MirOperandKind.Copy(LocalId(id: 3))),
+                    "src/example.spl", 12, 4
+                ), span: nil)
+            ],
+            terminator: MirTerminator.Ret(nil)
+        )
+        val function = MirFunction(
+            symbol: SymbolId(id: 0), name: "transitive_probe_liveness",
+            signature: MirSignature(
+                params: [], return_type: MirType.unit(), is_variadic: false
+            ),
+            locals: locals, blocks: [block], entry_block: BlockId.entry(),
+            span: nil, generic_params: [], is_generic_template: false,
+            specialization_of: nil, type_bindings: {}
+        )
+        val engine = OptimizationEngine.create(OptimizationLevel.Standard)
+        val optimized = engine.optimize_function(function)
+        expect(optimized.blocks[0].instructions.len()).to_equal(6)
+        match optimized.blocks[0].instructions[0].kind:
+            case Const(local, Bool(true), _): expect(local.id).to_equal(0)
+            case _: expect(false).to_equal(true)
+        match optimized.blocks[0].instructions[1].kind:
+            case Copy(dest, source):
+                expect(dest.id).to_equal(1)
+                expect(source.id).to_equal(0)
+            case _: expect(false).to_equal(true)
+        match optimized.blocks[0].instructions[3].kind:
+            case Const(local, Bool(false), _): expect(local.id).to_equal(2)
+            case _: expect(false).to_equal(true)
+        match optimized.blocks[0].instructions[4].kind:
+            case Copy(dest, source):
+                expect(dest.id).to_equal(3)
+                expect(source.id).to_equal(2)
+            case _: expect(false).to_equal(true)
+
+    it "keeps a bitcast input used only through a coverage probe":
+        val locals = [
+            MirLocal(LocalId(id: 0), "source", MirType.bool(), LocalKind.Var, false),
+            MirLocal(LocalId(id: 1), "observed", MirType.bool(), LocalKind.Var, false)
+        ]
+        val block = MirBlock(
+            id: BlockId.entry(), label: "entry",
+            instructions: [
+                MirInst(kind: MirInstKind.Const(
+                    LocalId(id: 0), MirConstValue.Bool(true), MirType.bool()
+                ), span: nil),
+                MirInst(kind: MirInstKind.Bitcast(
+                    LocalId(id: 1),
+                    MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0))),
+                    MirType.bool()
+                ), span: nil),
+                MirInst(kind: MirInstKind.DecisionProbe(
+                    7, "decision:sha256",
+                    99, 1, probe_mask(), probe_mask(),
+                    MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1))),
+                    "src/example.spl", 12, 0
+                ), span: nil)
+            ],
+            terminator: MirTerminator.Ret(nil)
+        )
+        val function = MirFunction(
+            symbol: SymbolId(id: 0), name: "bitcast_probe_liveness",
+            signature: MirSignature(
+                params: [], return_type: MirType.unit(), is_variadic: false
+            ),
+            locals: locals, blocks: [block], entry_block: BlockId.entry(),
+            span: nil, generic_params: [], is_generic_template: false,
+            specialization_of: nil, type_bindings: {}
+        )
+        val optimized = OptimizationEngine.create(
+            OptimizationLevel.Standard).optimize_function(function)
+
+        expect(optimized.blocks[0].instructions.len()).to_equal(3)
+        match optimized.blocks[0].instructions[0].kind:
+            case Const(local, Bool(true), _): expect(local.id).to_equal(0)
+            case _: expect(false).to_equal(true)
+        match optimized.blocks[0].instructions[1].kind:
+            case Bitcast(dest, operand, _):
+                expect(dest.id).to_equal(1)
+                match operand.kind:
+                    case Copy(source): expect(source.id).to_equal(0)
+                    case _: expect(false).to_equal(true)
+            case _: expect(false).to_equal(true)
+
+    it "does not fabricate local zero for an inline-constant no-op cast":
+        val block = MirBlock(
+            id: BlockId.entry(), label: "entry",
+            instructions: [
+                MirInst(kind: MirInstKind.Cast(
+                    LocalId(id: 7),
+                    MirOperand(kind: MirOperandKind.Const(
+                        MirConstValue.Bool(true), MirType.bool())),
+                    MirType.bool()
+                ), span: nil),
+                MirInst(kind: MirInstKind.DecisionProbe(
+                    7, "decision:sha256",
+                    99, 1, probe_mask(), probe_mask(),
+                    MirOperand(kind: MirOperandKind.Copy(LocalId(id: 7))),
+                    "src/example.spl", 12, 0
+                ), span: nil)
+            ],
+            terminator: MirTerminator.Ret(nil)
+        )
+        val function = MirFunction(
+            symbol: SymbolId(id: 0), name: "inline_constant_cast",
+            signature: MirSignature(
+                params: [], return_type: MirType.unit(), is_variadic: false
+            ),
+            locals: [MirLocal(LocalId(id: 7), "observed", MirType.bool(),
+                LocalKind.Var, false)],
+            blocks: [block], entry_block: BlockId.entry(), span: nil,
+            generic_params: [], is_generic_template: false,
+            specialization_of: nil, type_bindings: {}
+        )
+        val optimized = OptimizationEngine.create(
+            OptimizationLevel.Standard).optimize_function(function)
+
+        expect(optimized.blocks[0].instructions.len()).to_equal(2)
+        match optimized.blocks[0].instructions[0].kind:
+            case Cast(dest, operand, _):
+                expect(dest.id).to_equal(7)
+                match operand.kind:
+                    case Const(Bool(true), _): expect(true).to_equal(true)
+                    case _: expect(false).to_equal(true)
+            case _: expect(false).to_equal(true)
+
+    it "preserves a producer consumed only by a terminator":
+        val block = MirBlock(
+            id: BlockId.entry(), label: "entry",
+            instructions: [MirInst(kind: MirInstKind.Const(
+                LocalId(id: 9), MirConstValue.Int(42), MirType.i64()
+            ), span: nil)],
+            terminator: MirTerminator.Ret(Some(MirOperand(
+                kind: MirOperandKind.Copy(LocalId(id: 9)))))
+        )
+        val function = MirFunction(
+            symbol: SymbolId(id: 0), name: "terminator_liveness",
+            signature: MirSignature(
+                params: [], return_type: MirType.i64(), is_variadic: false
+            ),
+            locals: [MirLocal(LocalId(id: 9), "result", MirType.i64(),
+                LocalKind.Var, false)],
+            blocks: [block], entry_block: BlockId.entry(), span: nil,
+            generic_params: [], is_generic_template: false,
+            specialization_of: nil, type_bindings: {}
+        )
+        val optimized = OptimizationEngine.create(
+            OptimizationLevel.Standard).optimize_function(function)
+
+        expect(optimized.blocks[0].instructions.len()).to_equal(1)
+        match optimized.blocks[0].instructions[0].kind:
+            case Const(local, Int(42), _): expect(local.id).to_equal(9)
+            case _: expect(false).to_equal(true)
+
+    it "validates IDs paths positions and boolean operands before rejecting unlowered probes":
+        val locals = [probe_bool_local()]
+        expect(mir_coverage_probe_admission_diagnostic_inst_v1(
+            decision_probe().kind, locals
+        )).to_equal("")
+        expect(mir_coverage_probe_admission_diagnostic_inst_v1(
+            decision_probe(0).kind, locals
+        )).to_contain("RUNTIME-ID")
+        expect(mir_coverage_probe_admission_diagnostic_inst_v1(
+            decision_probe(4294967296).kind, locals
+        )).to_contain("RUNTIME-ID")
+        expect(mir_coverage_probe_admission_diagnostic_inst_v1(
+            decision_probe(7, "../escape.spl").kind, locals
+        )).to_contain("PATH")
+        val non_bool = MirInstKind.DecisionProbe(
+            7, "decision:bad", 99, 1, probe_mask(), probe_mask(),
+            MirOperand(kind: MirOperandKind.Const(
+                MirConstValue.Int(1), MirType.i64()
+            )), "src/example.spl", 12, 0
+        )
+        expect(mir_coverage_probe_admission_diagnostic_inst_v1(
+            non_bool, locals
+        )).to_contain("OPERAND")
+
+    it "makes SSA and inlining reject probe-bearing blocks":
+        val block = MirBlock(
+            id: BlockId.entry(), label: "entry",
+            instructions: [
+                MirInst(kind: MirInstKind.Const(LocalId(id: 0), MirConstValue.Bool(true), MirType.bool()), span: nil),
+                MirInst(kind: MirInstKind.Const(LocalId(id: 0), MirConstValue.Bool(false), MirType.bool()), span: nil),
+                decision_probe()
+            ],
+            terminator: MirTerminator.Ret(nil)
+        )
+        val ssa = ssa_var_transform_blocks([block])
+        expect(ssa.applied).to_equal(false)
+        expect(ssa.reason).to_equal("unsupported instruction")
+        var inliner = FunctionInliner.new(10)
+        expect(inliner.can_inline_block(block)).to_equal(false)
+
+    it "makes the MIR interpreter reject probes explicitly":
+        var interpreter = MirInterpreter.create()
+        val decision_error = interpreter.execute_instruction(decision_probe())
+        val condition_error = interpreter.execute_instruction(condition_probe())
+        expect(decision_error != nil).to_equal(true)
+        expect(condition_error != nil).to_equal(true)
+        expect(decision_error.unwrap().message()).to_contain("runtime status")
+        expect(condition_error.unwrap().message()).to_contain("unlowered ConditionProbe")
+
+    it "guards both LLVM translation paths before any probe can be skipped":
+        extern fn rt_file_read_text(path: text) -> text
+        val text_llvm = rt_file_read_text(
+            "src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl"
+        ) ?? ""
+        val lib_backend = rt_file_read_text(
+            "src/compiler/70.backend/backend/llvm_lib_backend.spl"
+        ) ?? ""
+        val lib_translate = rt_file_read_text(
+            "src/compiler/70.backend/backend/llvm_lib_translate_expr.spl"
+        ) ?? ""
+        expect(text_llvm).to_contain("mir_coverage_probe_admission_diagnostic_module_v1(module)")
+        expect(text_llvm).to_contain("unlowered DecisionProbe")
+        expect(lib_backend).to_contain("mir_coverage_probe_admission_diagnostic_module_v1(module)")
+        expect(lib_backend).to_contain("return Err(compileerror_backend_error")
+        expect(lib_translate).to_contain("unlowered ConditionProbe")

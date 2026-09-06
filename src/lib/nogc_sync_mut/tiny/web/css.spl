@@ -1,0 +1,150 @@
+# codex-impl
+
+use std.tiny.common.status.{TinyStatus, TINY_ERR_CAPACITY, TINY_ERR_MALFORMED, TINY_ERR_UNSUPPORTED}
+use std.tiny.web.model.{TinyWebNode, TINY_WEB_A, TINY_WEB_HEAD, TINY_WEB_LABEL, TINY_WEB_SPAN, TINY_WEB_STYLE, TINY_WEB_TEXT, TINY_WEB_TITLE}
+
+const TINY_CSS_SELECTOR_TAG: i32 = 1
+const TINY_CSS_SELECTOR_CLASS: i32 = 2
+const TINY_CSS_SELECTOR_ID: i32 = 3
+
+const TINY_CSS_DISPLAY_NONE: i32 = 0
+const TINY_CSS_DISPLAY_BLOCK: i32 = 1
+const TINY_CSS_DISPLAY_INLINE: i32 = 2
+
+class TinyCssDeclaration:
+    selector_kind: i32
+    selector_value: text
+    property_name: text
+    property_value: text
+
+class TinyCssReceipt:
+    status: TinyStatus
+    declarations: [TinyCssDeclaration]
+    unsupported_count: i32
+
+class TinyWebComputedStyle:
+    display: i32
+    width: i32
+    height: i32
+    margin: i32
+    padding: i32
+    border: i32
+    background_color: text
+    color: text
+    font_size: i32
+    line_height: i32
+
+    static fn for_node(node: TinyWebNode) -> TinyWebComputedStyle:
+        var display = TINY_CSS_DISPLAY_BLOCK
+        if node.kind == TINY_WEB_SPAN or node.kind == TINY_WEB_TEXT or node.kind == TINY_WEB_A or node.kind == TINY_WEB_LABEL:
+            display = TINY_CSS_DISPLAY_INLINE
+        if node.kind == TINY_WEB_HEAD or node.kind == TINY_WEB_TITLE or node.kind == TINY_WEB_STYLE:
+            display = TINY_CSS_DISPLAY_NONE
+        TinyWebComputedStyle(
+            display: display, width: -1, height: -1, margin: 0, padding: 0, border: 0,
+            background_color: "", color: "black", font_size: 16, line_height: -1,
+        )
+
+fn _tiny_css_selector_kind(selector: text) -> i32:
+    if selector.starts_with("."): return TINY_CSS_SELECTOR_CLASS
+    if selector.starts_with("#"): return TINY_CSS_SELECTOR_ID
+    TINY_CSS_SELECTOR_TAG
+
+fn _tiny_css_selector_value(selector: text) -> text:
+    if selector.starts_with(".") or selector.starts_with("#"): return selector.slice(1, selector.len())
+    selector.lower()
+
+fn tiny_css_property_supported(name: text) -> bool:
+    name == "display" or name == "width" or name == "height" or name == "margin" or name == "padding" or name == "border" or name == "background-color" or name == "color" or name == "font-size" or name == "line-height"
+
+fn _tiny_css_length(value: text) -> i32:
+    var raw = value.trim().lower()
+    if raw.ends_with("px"): raw = raw.slice(0, raw.len() - 2)
+    if raw.len() == 0: return -1
+    var result = 0
+    var index = 0
+    while index < raw.len():
+        val digit_text = raw.slice(index, index + 1)
+        if not "0123456789".contains(digit_text): return -1
+        val digit = digit_text.to_i32()
+        if result > (2147483647 - digit) / 10: return -1
+        result = result * 10 + digit
+        index = index + 1
+    result
+
+fn _tiny_css_value_supported(name: text, value: text) -> bool:
+    if name == "display": return value == "none" or value == "block" or value == "inline"
+    if name == "width" or name == "height" or name == "margin" or name == "padding" or name == "border" or name == "font-size" or name == "line-height":
+        return _tiny_css_length(value) >= 0
+    if name == "background-color" or name == "color":
+        return value == "white" or value == "black" or value == "red" or value == "green" or value == "blue" or value == "gray" or value == "grey" or value == "transparent"
+    value.len() > 0
+
+fn _tiny_css_class_matches(classes: text, wanted: text) -> bool:
+    for item in classes.split_whitespace():
+        if item == wanted: return true
+    false
+
+fn _tiny_css_matches(node: TinyWebNode, declaration: TinyCssDeclaration) -> bool:
+    if declaration.selector_kind == TINY_CSS_SELECTOR_TAG: return node.tag_name == declaration.selector_value
+    if declaration.selector_kind == TINY_CSS_SELECTOR_CLASS: return _tiny_css_class_matches(node.class_value, declaration.selector_value)
+    if declaration.selector_kind == TINY_CSS_SELECTOR_ID: return node.id_value == declaration.selector_value
+    false
+
+fn tiny_css_apply(node: TinyWebNode, receipt: TinyCssReceipt, base: TinyWebComputedStyle) -> TinyWebComputedStyle:
+    var style = base
+    for declaration in receipt.declarations:
+        if not _tiny_css_matches(node, declaration): continue
+        val name = declaration.property_name
+        val value = declaration.property_value
+        if name == "display":
+            if value == "none": style.display = TINY_CSS_DISPLAY_NONE
+            elif value == "inline": style.display = TINY_CSS_DISPLAY_INLINE
+            else: style.display = TINY_CSS_DISPLAY_BLOCK
+        elif name == "width": style.width = _tiny_css_length(value)
+        elif name == "height": style.height = _tiny_css_length(value)
+        elif name == "margin": style.margin = _tiny_css_length(value)
+        elif name == "padding": style.padding = _tiny_css_length(value)
+        elif name == "border": style.border = _tiny_css_length(value)
+        elif name == "background-color": style.background_color = value
+        elif name == "color": style.color = value
+        elif name == "font-size": style.font_size = _tiny_css_length(value)
+        elif name == "line-height": style.line_height = _tiny_css_length(value)
+    style
+
+fn tiny_css_compute(node: TinyWebNode, receipt: TinyCssReceipt) -> TinyWebComputedStyle:
+    tiny_css_apply(node, receipt, TinyWebComputedStyle.for_node(node))
+
+fn tiny_css_parse(source: text, max_rules: i32, max_declarations: i32) -> TinyCssReceipt:
+    var declarations: [TinyCssDeclaration] = []
+    var unsupported = 0
+    val rules = source.split("}")
+    var rule_count = 0
+    for raw_rule in rules:
+        val rule = raw_rule.trim()
+        if rule.len() == 0: continue
+        rule_count = rule_count + 1
+        if rule_count > max_rules: return TinyCssReceipt(status: TinyStatus.error(TINY_ERR_CAPACITY, rule_count), declarations: declarations, unsupported_count: unsupported)
+        val halves = rule.split("{")
+        if halves.len() != 2: return TinyCssReceipt(status: TinyStatus.error(TINY_ERR_MALFORMED, rule_count), declarations: declarations, unsupported_count: unsupported)
+        val selector = halves[0].trim()
+        if selector.len() == 0 or selector.contains(" ") or selector.contains(">") or selector.contains(","):
+            unsupported = unsupported + 1
+            continue
+        for raw_declaration in halves[1].split(";"):
+            val declaration = raw_declaration.trim()
+            if declaration.len() == 0: continue
+            val pair = declaration.split(":")
+            if pair.len() != 2: return TinyCssReceipt(status: TinyStatus.error(TINY_ERR_MALFORMED, rule_count), declarations: declarations, unsupported_count: unsupported)
+            val property_name = pair[0].trim().lower()
+            val property_value = pair[1].trim().lower()
+            if not tiny_css_property_supported(property_name):
+                unsupported = unsupported + 1
+                continue
+            if not _tiny_css_value_supported(property_name, property_value):
+                unsupported = unsupported + 1
+                continue
+            if declarations.len() >= max_declarations: return TinyCssReceipt(status: TinyStatus.error(TINY_ERR_CAPACITY, declarations.len()), declarations: declarations, unsupported_count: unsupported)
+            declarations.push(TinyCssDeclaration(selector_kind: _tiny_css_selector_kind(selector), selector_value: _tiny_css_selector_value(selector), property_name: property_name, property_value: property_value))
+    val status = if unsupported > 0: TinyStatus.error(TINY_ERR_UNSUPPORTED, unsupported) else: TinyStatus.ok()
+    TinyCssReceipt(status: status, declarations: declarations, unsupported_count: unsupported)

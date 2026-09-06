@@ -1,0 +1,74 @@
+# EVERY name below is imported through the `std.nogc_async_mut.simd` FACADE,
+# never from simd_crypto directly. That is the point of the file.
+use std.nogc_async_mut.simd.{Vec16u8, Vec2u64, simd_add_u8x16, simd_xor_u8x16, simd_aes_round, simd_aes_round_last, simd_clmul_lo_u64, simd_clmul_hi_u64, simd_xor_u64x2}
+
+# REPRODUCER for b7e87a91507.
+#
+# Defect CLASS: `simd.spl` NAMED these nine symbols in its own export list as if
+# it owned them. Their real owner is std.nogc_sync_mut.simd_crypto, so every
+# live entry point emitted nine [use-warning]s -- and the seed warns while still
+# exiting 0, which is exactly why it stayed invisible for as long as it did.
+#
+# Red-first: on the pre-fix tree the import line above resolves to nothing, so
+# this file cannot run. A spec that imported from simd_crypto directly would
+# pass in both worlds and prove nothing -- the facade is the whole subject.
+#
+# Similar case: the census that found this counted 307 module-level and 444
+# symbol-level dangling edges tree-wide (both upper bounds, ~93% false-positive
+# on the sampled residue). This spec fences the one confirmed live cluster; the
+# dead 32-edge app.mcp_jj cluster is filed separately.
+
+describe "the simd facade re-exports the crypto vectors from their real owner":
+
+    it "constructs both vector types through the facade":
+        # If the re-export regresses, this line is what stops resolving.
+        val a = Vec16u8.splat(1)
+        val v = Vec2u64.new(2, 3)
+        expect(a.u0).to_equal(1)
+        expect(v.lo).to_equal(2)
+        expect(v.hi).to_equal(3)
+
+    it "adds and xors u8x16 lanes":
+        val a = Vec16u8.splat(3)
+        val b = Vec16u8.splat(4)
+        expect(simd_add_u8x16(a, b).u0).to_equal(7)
+        # 3 xor 4 = 7 too, so check a pair where add and xor DIFFER.
+        val c = Vec16u8.splat(6)
+        expect(simd_add_u8x16(a, c).u0).to_equal(9)
+        expect(simd_xor_u8x16(a, c).u0).to_equal(5)
+
+    it "xors a u8x16 vector with itself to zero":
+        val a = Vec16u8.splat(0xAB)
+        expect(simd_xor_u8x16(a, a).u0).to_equal(0)
+        expect(simd_xor_u8x16(a, a).u15).to_equal(0)
+
+    it "runs both AES round intrinsics through the facade":
+        # Value-agnostic: the subject is that the names RESOLVE and return a
+        # Vec16u8. The rounds' own algebra is simd_crypto's spec, not this one.
+        val state = Vec16u8.splat(0x11)
+        val key = Vec16u8.splat(0x22)
+        val full = simd_aes_round(state, key)
+        val last = simd_aes_round_last(state, key)
+        expect(full.u0 >= 0).to_equal(true)
+        expect(last.u0 >= 0).to_equal(true)
+
+    it "xors u64x2 lanes":
+        val a = Vec2u64.new(0b1100, 0b1010)
+        val b = Vec2u64.new(0b1010, 0b0110)
+        val r = simd_xor_u64x2(a, b)
+        expect(r.lo).to_equal(0b0110)
+        expect(r.hi).to_equal(0b1100)
+
+    it "xors a u64x2 vector with itself to zero":
+        val a = Vec2u64.new(123456789, 987654321)
+        expect(simd_xor_u64x2(a, a).lo).to_equal(0)
+        expect(simd_xor_u64x2(a, a).hi).to_equal(0)
+
+    it "runs both carry-less multiply intrinsics through the facade":
+        val a = Vec2u64.new(2, 4)
+        val b = Vec2u64.new(3, 5)
+        # clmul of 2 (0b10) and 3 (0b11) is 0b110 = 6 -- no carries to lose.
+        expect(simd_clmul_lo_u64(a, b).lo).to_equal(6)
+        # The HI variant must read the OTHER lane pair: 4 (0b100) x 5 (0b101)
+        # = 0b10100 = 20. A hi/lo mix-up is the likeliest regression here.
+        expect(simd_clmul_hi_u64(a, b).lo).to_equal(20)

@@ -1,0 +1,177 @@
+# Critical-mode capability manifest
+#
+# Import path: `std.critical.capability_manifest`
+#
+# Two jobs, both belonging to design 4 ("Critical mode: warn now, error later"):
+#
+# 1. Read `critical.*` out of the project config (SDN) so both the
+#    `dynamic_capability_acquire` lint and the runtime agree on one source of
+#    truth for the mode.
+# 2. Provide the boot-time probe-vs-manifest gate. In critical mode the GPU
+#    backend is pinned in the manifest; at boot the real probe must agree with
+#    the pin, and when it does not the process REFUSES TO START with a
+#    manifest-mismatch report. This is a promoted fault path, not a fallback:
+#    the gate never silently downgrades to whatever the probe found.
+
+use std.io_runtime.{read_file, file_exists}
+
+# ============================================================================
+# Config
+# ============================================================================
+
+pub struct CriticalModeConfig:
+    """Resolved `critical.*` settings.
+
+    `loaded` distinguishes "the file said allow" from "there was no file", which
+    matters when reporting why a lint produced nothing."""
+    enabled: bool
+    dynamic_acquire: text
+    gpu_backend: text
+    loaded: bool
+
+pub fn default_critical_mode_config() -> CriticalModeConfig:
+    """Defaults for a project with no `critical:` section.
+
+    Outside critical mode the acquisition lint is `allow` and the GPU backend is
+    `auto` — the normal, correct settings for a non-critical build."""
+    CriticalModeConfig(
+        enabled: false,
+        dynamic_acquire: "allow",
+        gpu_backend: "auto",
+        loaded: false
+    )
+
+fn _cm_value_after(trimmed: text, key: text) -> text:
+    """Return the value following `key:` on a `key: value` line, else ""."""
+    if not trimmed.starts_with(key):
+        return ""
+    trimmed.substring(key.len(), trimmed.len()).trim()
+
+pub fn parse_critical_mode_config(content: text) -> CriticalModeConfig:
+    """Parse the `critical:` section of an SDN config.
+
+    Only lines inside `critical:` are read, so this can be pointed at a shared
+    project config without colliding with sections other streams own (the `gpu:`
+    section nested under `critical:` is this module's own, and is distinct from
+    a top-level `gpu:` section)."""
+    var enabled = false
+    var dynamic_acquire = "allow"
+    var gpu_backend = "auto"
+    var in_critical = false
+    var saw_any = false
+
+    val lines = content.split("\n")
+    var i = 0
+    while i < lines.len():
+        val raw = lines[i]
+        val trimmed = raw.trim()
+        i = i + 1
+
+        if trimmed == "" or trimmed.starts_with("#"):
+            continue
+
+        if trimmed == "critical:":
+            in_critical = true
+            saw_any = true
+            continue
+
+        # A new top-level (unindented) key ends the critical section.
+        if in_critical and raw.len() > 0 and not (raw.starts_with(" ") or raw.starts_with("\t")):
+            in_critical = false
+
+        if not in_critical:
+            continue
+
+        val en = _cm_value_after(trimmed, "enabled:")
+        if en != "":
+            enabled = en == "true"
+            continue
+        val da = _cm_value_after(trimmed, "dynamic_acquire:")
+        if da != "":
+            dynamic_acquire = da
+            continue
+        val bk = _cm_value_after(trimmed, "backend:")
+        if bk != "":
+            gpu_backend = bk
+            continue
+
+    if not saw_any:
+        return default_critical_mode_config()
+
+    CriticalModeConfig(
+        enabled: enabled,
+        dynamic_acquire: dynamic_acquire,
+        gpu_backend: gpu_backend,
+        loaded: true
+    )
+
+pub fn load_critical_mode_config(config_path: text) -> CriticalModeConfig:
+    """Load `critical.*` from an SDN file; missing file yields the defaults."""
+    if not file_exists(config_path):
+        return default_critical_mode_config()
+    parse_critical_mode_config(read_file(config_path))
+
+# ============================================================================
+# Boot-time probe-vs-manifest gate
+# ============================================================================
+
+pub struct ManifestCheck:
+    """Outcome of the boot gate.
+
+    `ok == false` means the process must not continue. `report` is the
+    operator-facing refusal text; it is empty when `ok` is true."""
+    ok: bool
+    code: text
+    report: text
+    manifest_backend: text
+    probed_backend: text
+
+pub fn manifest_check_ok() -> ManifestCheck:
+    """A passing gate result."""
+    ManifestCheck(ok: true, code: "", report: "", manifest_backend: "", probed_backend: "")
+
+pub fn verify_gpu_manifest_pin(
+    manifest_backend: text,
+    probed_backend: text,
+    critical: bool
+) -> ManifestCheck:
+    """Boot gate: the probe must match the pinned manifest backend.
+
+    Outside critical mode this always passes — an `auto` backend resolving to
+    whatever the probe found is the intended behaviour there.
+
+    Inside critical mode there are two refusals:
+
+    - DCA002 the manifest is not pinned at all (`auto` / unset). The gate cannot
+      be enforced, so the process refuses rather than proceeding unguarded.
+    - DCA003 the manifest is pinned but the probe disagrees. The process refuses
+      with a report naming both sides. It does NOT fall back to the probed
+      backend: silently running on hardware the build was not validated against
+      is the failure this gate exists to prevent."""
+    if not critical:
+        return manifest_check_ok()
+
+    val pinned = manifest_backend.trim()
+    val probed = probed_backend.trim()
+
+    if pinned == "" or pinned == "auto":
+        val shown = if pinned == "": "<unset>" else: pinned
+        return ManifestCheck(
+            ok: false,
+            code: "DCA002",
+            report: "REFUSING TO START: critical mode requires a manifest-pinned gpu.backend, found `{shown}`. Set an explicit backend (e.g. `backend: cuda(sm80)`) in the manifest.",
+            manifest_backend: pinned,
+            probed_backend: probed
+        )
+
+    if pinned == probed:
+        return manifest_check_ok()
+
+    val shown_probe = if probed == "": "<no backend detected>" else: probed
+    ManifestCheck(
+        ok: false,
+        code: "DCA003",
+        report: "REFUSING TO START: gpu backend manifest mismatch. Manifest pins `{pinned}` but the boot probe found `{shown_probe}`. Critical mode does not fall back to the probed backend; run on hardware matching the manifest, or re-pin and re-validate the build.",
+        manifest_backend: pinned,
+        probed_backend: probed
+    )

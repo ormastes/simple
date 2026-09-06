@@ -1,0 +1,45 @@
+#!/bin/sh
+set -eu
+
+rust_provider=src/compiler_rust/compiler/src/interpreter_extern/memory.rs
+registry=src/compiler_rust/compiler/src/codegen/runtime_sffi.rs
+native_header=src/runtime/runtime.h
+
+check_registry() {
+    module=$1
+    owner=$2
+    calls=$3
+
+    test "$(rg -c '^extern fn rt_transient_heap_promote' "$module")" -eq 1
+    test "$(rg -c '^fn .*_promote_raw\(value: Any\) -> bool:' "$module")" -eq 1
+    test "$(rg -c 'unsafe\(capabilities: \[ffi\]\):' "$module")" -eq 1
+    test "$(rg -c 'rt_transient_heap_promote\(' "$module")" -eq 2
+    test "$(rg -c "${owner}\\(" "$module")" -eq "$calls"
+}
+
+check_registry src/compiler/10.frontend/aspect_registry.spl \
+    _aspect_registry_promote_raw 8
+check_registry src/compiler/10.frontend/effect_registry.spl \
+    _effect_registry_promote_raw 4
+check_registry src/compiler/10.frontend/layer_eq_registry.spl \
+    _layer_eq_registry_promote_raw 4
+check_registry src/compiler/10.frontend/rt_criticality_registry.spl \
+    _rt_criticality_promote_raw 6
+
+# Missing ABI arguments are errors, never fabricated boolean failure values.
+provider_body="$(sed -n '/^pub fn rt_transient_heap_promote/,/^pub fn rt_transient_array_scope_end/p' "$rust_provider")"
+printf '%s\n' "$provider_body" | rg -q 'if args.len\(\) != 1'
+printf '%s\n' "$provider_body" | rg -q 'return Err\(CompileError::runtime\('
+! printf '%s\n' "$provider_body" | rg -q 'return Ok\(Value::Bool\(false\)\)'
+rg -q 'RuntimeFuncSpec::new\("rt_transient_heap_promote", &\[I64\], &\[I8\]\)' "$registry"
+rg -q '^int8_t rt_transient_heap_promote\(int64_t value\);$' "$native_header"
+
+# Zero-argument scope operations reject extras before provider mutation and
+# retain their genuine boolean result ABI for valid calls.
+for suffix in begin pause end; do
+    body="$(sed -n "/^pub fn rt_transient_array_scope_${suffix}/,/^}/p" "$rust_provider")"
+    printf '%s\n' "$body" | rg -q 'if !args.is_empty\(\)'
+    printf '%s\n' "$body" | rg -q 'return Err\(CompileError::runtime\('
+    rg -q "RuntimeFuncSpec::new\(\"rt_transient_array_scope_${suffix}\", &\[\], &\[I8\]\)" "$registry"
+    rg -q "^int8_t rt_transient_array_scope_${suffix}\(void\);$" "$native_header"
+done

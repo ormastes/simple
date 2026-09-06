@@ -1,0 +1,183 @@
+# Layer call-direction checker (M1 of doc/03_plan/compiler/forwarding/
+# zero_cost_layers_c0_c5_staged_implementation_plan_2026-08-07.md).
+#
+# A call from module A (tagged layer X) to a symbol resolved into module B
+# (tagged layer Y) is legal only when Y == X, or X can reach Y via a
+# downward `uses` edge in the already-landed layer DAG
+# (layer_dag_checker.LayerDagRegistry). Anything else — no `uses` path from
+# X to Y at all — is an upward or cross-branch call and is rejected.
+#
+# Shape mirrors noalloc_checker.spl exactly: this checker takes its
+# caller->callee edge map as an INPUT PARAMETER (built by
+# compiler.tools.verify.layer_call_scan's text scan) rather than computing
+# it itself, same as check_all_noalloc_fns takes fn_bodies/fn_callees as
+# parameters instead of scanning source itself.
+#
+# SCOPE: standalone, spec-proven pair with layer_call_scan.spl. NOT wired
+# into the live compile pipeline here — that requires the module->layer
+# tagging half (a parallel, separately-landing M1 slice) to exist for real;
+# this checker only assumes that slice's natural output SHAPE
+# ({module_path: layer_name}), not any of its actual code.
+
+use compiler.semantics.layer_dag_checker.{LayerDagRegistry}
+
+# ============================================================================
+# Violation
+# ============================================================================
+
+struct LayerCallViolation:
+    """A single illegal cross-layer call edge.
+
+    Fields:
+        caller_module: Source module path making the call.
+        caller_layer:  Layer tag of the caller module.
+        callee_module: Resolved module path of the call target.
+        callee_layer:  Layer tag of the callee module.
+        detail:        Human-readable reason (always "no downward `uses` path").
+    """
+    caller_module: text
+    caller_layer: text
+    callee_module: text
+    callee_layer: text
+    detail: text
+
+# ============================================================================
+# Reachability — is callee_layer reachable from caller_layer via `uses`?
+# ============================================================================
+
+fn layer_reaches(dag: LayerDagRegistry, from_layer: text, to_layer: text) -> bool:
+    """True when `to_layer` is reachable from `from_layer` by following zero
+    or more `uses` edges (same-layer is always reachable via zero edges).
+    BFS with a visited set so a cyclic/malformed DAG cannot loop forever —
+    this checker does not itself assume the DAG passed in is acyclic.
+
+    sdoctest:
+        val dag = LayerDagRegistry.new()
+        dag.declare("draw")
+        dag.declare("gui")
+        dag.declare("web")
+        dag.uses("gui", "draw")
+        dag.uses("web", "gui")
+        expect(layer_reaches(dag, "web", "draw")).to_equal(true)
+        expect(layer_reaches(dag, "draw", "web")).to_equal(false)
+        expect(layer_reaches(dag, "gui", "gui")).to_equal(true)
+    """
+    if from_layer == to_layer:
+        return true
+    var visited: {text: bool} = {}
+    var queue: [text] = [from_layer]
+    var head = 0
+    visited[from_layer] = true
+    while head < queue.len():
+        val current = queue[head]
+        head = head + 1
+        for target in dag.edges_from(current):
+            if target == to_layer:
+                return true
+            if not visited.has(target) or not visited[target]:
+                visited[target] = true
+                queue.push(target)
+    false
+
+# ============================================================================
+# Checker — Main Entry Point
+# ============================================================================
+
+fn _lookup_layer(module_layers: [{text: text}], module_path: text) -> text:
+    """Lookup a module's layer tag in the array-of-single-key-maps shape.
+    Returns "" when the module has no known layer tag."""
+    for entry in module_layers:
+        if entry.has(module_path):
+            return entry[module_path]
+    ""
+
+fn _has_layer(module_layers: [{text: text}], module_path: text) -> bool:
+    for entry in module_layers:
+        if entry.has(module_path):
+            return true
+    false
+
+fn check_layer_call_edge(caller_module: text, callee_module: text, module_layers: [{text: text}], dag: LayerDagRegistry) -> [LayerCallViolation]:
+    """Check one caller-module -> callee-module edge for same-layer-or-downward
+    legality. Returns [] when either module has no known layer tag (nothing
+    to check yet), when the layers are equal, or when the caller's layer can
+    reach the callee's layer via a downward `uses` edge. Returns a single
+    violation otherwise.
+
+    sdoctest:
+        val dag = LayerDagRegistry.new()
+        dag.declare("draw")
+        dag.declare("gui")
+        dag.uses("gui", "draw")
+        var layers: [{text: text}] = []
+        var la: {text: text} = {}
+        la["a.spl"] = "gui"
+        layers.push(la)
+        var lb: {text: text} = {}
+        lb["b.spl"] = "draw"
+        layers.push(lb)
+        expect(check_layer_call_edge("a.spl", "b.spl", layers, dag).len()).to_equal(0)
+        expect(check_layer_call_edge("b.spl", "a.spl", layers, dag).len()).to_equal(1)
+    """
+    var violations: [LayerCallViolation] = []
+    if not _has_layer(module_layers, caller_module):
+        return violations
+    if not _has_layer(module_layers, callee_module):
+        return violations
+    val caller_layer = _lookup_layer(module_layers, caller_module)
+    val callee_layer = _lookup_layer(module_layers, callee_module)
+    if layer_reaches(dag, caller_layer, callee_layer):
+        return violations
+    violations.push(LayerCallViolation(
+        caller_module: caller_module,
+        caller_layer: caller_layer,
+        callee_module: callee_module,
+        callee_layer: callee_layer,
+        detail: "no downward `uses` path from '{caller_layer}' to '{callee_layer}'"
+    ))
+    violations
+
+fn check_all_layer_calls(call_edges: [{text: [text]}], module_layers: [{text: text}], dag: LayerDagRegistry) -> [LayerCallViolation]:
+    """Check every caller-module -> callee-module edge in `call_edges`
+    (as produced by compiler.tools.verify.layer_call_scan.layer_call_edges)
+    against `module_layers` and `dag`. Returns all violations found.
+
+    Shape mirrors noalloc_checker.check_all_noalloc_fns exactly: both the
+    edge map and the tag map are taken as INPUT PARAMETERS (array-of-
+    single-key-maps, same convention as noalloc_manifest_scan's
+    fn_bodies/fn_callees), not computed by this checker itself."""
+    var all_violations: [LayerCallViolation] = []
+    for call_entry in call_edges:
+        for caller_module in call_entry.keys():
+            for callee_module in call_entry[caller_module]:
+                val violations = check_layer_call_edge(caller_module, callee_module, module_layers, dag)
+                for v in violations:
+                    all_violations.push(v)
+    all_violations
+
+# ============================================================================
+# Formatting
+# ============================================================================
+
+fn format_layer_call_violation(v: LayerCallViolation) -> text:
+    """Format a single violation as a compiler diagnostic string.
+
+    sdoctest:
+        val v = LayerCallViolation(caller_module: "a.spl", caller_layer: "draw", callee_module: "b.spl", callee_layer: "gui", detail: "no downward `uses` path from 'draw' to 'gui'")
+        expect(format_layer_call_violation(v).starts_with("error[layer_call]")).to_equal(true)
+    """
+    "error[layer_call]: '{v.caller_module}' (layer '{v.caller_layer}') calls '{v.callee_module}' (layer '{v.callee_layer}'): {v.detail}"
+
+fn format_layer_call_violations(violations: [LayerCallViolation]) -> [text]:
+    """Format all violations as diagnostic strings.
+
+    sdoctest:
+        expect(format_layer_call_violations([]).len()).to_equal(0)
+    """
+    var messages: [text] = []
+    for v in violations:
+        messages.push(format_layer_call_violation(v))
+    messages
+
+export LayerCallViolation, layer_reaches, check_layer_call_edge, check_all_layer_calls,
+    format_layer_call_violation, format_layer_call_violations

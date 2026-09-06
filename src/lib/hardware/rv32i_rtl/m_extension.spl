@@ -1,0 +1,260 @@
+# ============================================================================
+# RV32M Arithmetic Owner
+# ============================================================================
+
+val RV32M_MUL: i64    = 0
+val RV32M_MULH: i64   = 1
+val RV32M_MULHSU: i64 = 2
+val RV32M_MULHU: i64  = 3
+val RV32M_DIV: i64    = 4
+val RV32M_DIVU: i64   = 5
+val RV32M_REM: i64    = 6
+val RV32M_REMU: i64   = 7
+
+val RV32M_MASK: i64 = 0xFFFF_FFFF
+val RV32M_SIGN: i64 = 0x8000_0000
+val RV32M_INT_MIN: i64 = -2147483648
+
+struct Rv32MDecode:
+    matched: bool
+    operation: i64
+
+struct Rv32MProduct:
+    low: i64
+    high: i64
+
+struct Rv32MState:
+    """Synthesizable iterative RV32M unit state."""
+    busy: bool
+    result_valid: bool
+    result: i64
+    operation: i64
+    lhs: i64
+    rhs: i64
+    step: u32
+    accumulator_low: i64
+    accumulator_high: i64
+    multiplicand_low: i64
+    multiplicand_high: i64
+    multiplier: i64
+    dividend: i64
+    divisor: i64
+    quotient: i64
+    remainder: i64
+
+@hardware
+fn rv32m_u32(value: i64) -> i64:
+    value & RV32M_MASK
+
+@hardware
+fn rv32m_s32(value: i64) -> i64:
+    val word = rv32m_u32(value)
+    if (word & RV32M_SIGN) != 0:
+        return word - 0x1_0000_0000
+    word
+
+@hardware
+fn rv32m_unsigned_product(lhs: i64, rhs: i64) -> Rv32MProduct:
+    """Return the full 64-bit product as two 32-bit words without i64 overflow."""
+    val a = rv32m_u32(lhs)
+    val b = rv32m_u32(rhs)
+    val a0 = a & 0xFFFF
+    val a1 = a >> 16
+    val b0 = b & 0xFFFF
+    val b1 = b >> 16
+    val p0 = a0 * b0
+    val p1 = a0 * b1
+    val p2 = a1 * b0
+    val p3 = a1 * b1
+    val middle = (p0 >> 16) + (p1 & 0xFFFF) + (p2 & 0xFFFF)
+    Rv32MProduct(low: (p0 & 0xFFFF) | ((middle & 0xFFFF) << 16),
+        high: rv32m_u32(p3 + (p1 >> 16) + (p2 >> 16) + (middle >> 16)))
+
+fn rv32m_signed_div(lhs: i64, rhs: i64) -> i64:
+    val a = rv32m_s32(lhs)
+    val b = rv32m_s32(rhs)
+    if b == 0:
+        return RV32M_MASK
+    if a == RV32M_INT_MIN and b == -1:
+        return RV32M_SIGN
+    val a_abs = if a < 0: -a else: a
+    val b_abs = if b < 0: -b else: b
+    val quotient = a_abs / b_abs
+    if (a < 0) != (b < 0):
+        return rv32m_u32(-quotient)
+    rv32m_u32(quotient)
+
+fn rv32m_signed_rem(lhs: i64, rhs: i64) -> i64:
+    val a = rv32m_s32(lhs)
+    val b = rv32m_s32(rhs)
+    if b == 0:
+        return rv32m_u32(a)
+    if a == RV32M_INT_MIN and b == -1:
+        return 0
+    val a_abs = if a < 0: -a else: a
+    val b_abs = if b < 0: -b else: b
+    val remainder = a_abs - (a_abs / b_abs) * b_abs
+    if a < 0:
+        return rv32m_u32(-remainder)
+    rv32m_u32(remainder)
+
+@hardware
+fn rv32m_decode(instruction: u32) -> Rv32MDecode:
+    """Recognize only RV32M's OP/funct7 encoding; operation is funct3."""
+    val matched = (instruction & 0x7F) == 0x33 and ((instruction >> 25) & 0x7F) == 1
+    Rv32MDecode(matched: matched, operation: (instruction >> 12) & 7)
+
+@hardware
+fn rv32m_create() -> Rv32MState:
+    Rv32MState(busy: false, result_valid: false, result: 0, operation: RV32M_MUL,
+        lhs: 0, rhs: 0, step: 0, accumulator_low: 0, accumulator_high: 0,
+        multiplicand_low: 0, multiplicand_high: 0, multiplier: 0,
+        dividend: 0, divisor: 0, quotient: 0, remainder: 0)
+
+@hardware
+fn rv32m_start(state: Rv32MState, operation: i64, lhs: i64, rhs: i64) -> Rv32MState:
+    """Latch one operation. The caller starts only an idle unit."""
+    val a = rv32m_u32(lhs)
+    val b = rv32m_u32(rhs)
+    var dividend = a
+    var divisor = b
+    if operation == RV32M_DIV or operation == RV32M_REM:
+        val signed_a = rv32m_s32(a)
+        val signed_b = rv32m_s32(b)
+        dividend = if signed_a < 0: -signed_a else: signed_a
+        divisor = if signed_b < 0: -signed_b else: signed_b
+    Rv32MState(busy: true, result_valid: false, result: state.result,
+        operation: operation, lhs: a, rhs: b, step: 0, accumulator_low: 0,
+        accumulator_high: 0, multiplicand_low: a, multiplicand_high: 0,
+        multiplier: b, dividend: dividend, divisor: divisor, quotient: 0,
+        remainder: 0)
+
+@hardware
+fn rv32m_multiply_result(state: Rv32MState, low: i64, high: i64) -> i64:
+    if state.operation == RV32M_MUL:
+        return low
+    if state.operation == RV32M_MULHU:
+        return high
+    if state.operation == RV32M_MULHSU:
+        val correction = if (state.lhs & RV32M_SIGN) != 0: state.rhs else: 0
+        return rv32m_u32(high - correction)
+    val lhs_correction = if (state.lhs & RV32M_SIGN) != 0: state.rhs else: 0
+    val rhs_correction = if (state.rhs & RV32M_SIGN) != 0: state.lhs else: 0
+    rv32m_u32(high - lhs_correction - rhs_correction)
+
+@hardware
+fn rv32m_divide_result(state: Rv32MState, quotient: i64, remainder: i64) -> i64:
+    if state.operation == RV32M_DIVU:
+        return quotient
+    if state.operation == RV32M_REMU:
+        return remainder
+    val lhs_negative = (state.lhs & RV32M_SIGN) != 0
+    val rhs_negative = (state.rhs & RV32M_SIGN) != 0
+    if state.operation == RV32M_DIV:
+        if lhs_negative != rhs_negative:
+            return rv32m_u32(-quotient)
+        return quotient
+    if lhs_negative:
+        return rv32m_u32(-remainder)
+    remainder
+
+@hardware
+fn rv32m_tick(state: Rv32MState) -> Rv32MState:
+    """Advance one shift/add or restoring shift/subtract hardware step."""
+    if not state.busy:
+        return state
+
+    if state.operation <= RV32M_MULHU:
+        var low = state.accumulator_low
+        var high = state.accumulator_high
+        if (state.multiplier & 1) != 0:
+            val sum = low + state.multiplicand_low
+            val carry = if sum > RV32M_MASK: 1 else: 0
+            low = sum & RV32M_MASK
+            high = rv32m_u32(high + state.multiplicand_high + carry)
+        val next_high = rv32m_u32((state.multiplicand_high << 1) |
+            (state.multiplicand_low >> 31))
+        val next_low = rv32m_u32(state.multiplicand_low << 1)
+        val next_multiplier = state.multiplier >> 1
+        if state.step == 31:
+            return Rv32MState(busy: false, result_valid: true,
+                result: rv32m_multiply_result(state, low, high), operation: state.operation,
+                lhs: state.lhs, rhs: state.rhs, step: 32, accumulator_low: low,
+                accumulator_high: high, multiplicand_low: next_low,
+                multiplicand_high: next_high, multiplier: next_multiplier,
+                dividend: state.dividend, divisor: state.divisor, quotient: state.quotient,
+                remainder: state.remainder)
+        var out = state
+        out.step = state.step + 1
+        out.accumulator_low = low
+        out.accumulator_high = high
+        out.multiplicand_low = next_low
+        out.multiplicand_high = next_high
+        out.multiplier = next_multiplier
+        return out
+
+    if state.divisor == 0:
+        val special = if state.operation == RV32M_DIV or state.operation == RV32M_DIVU:
+            RV32M_MASK
+        else:
+            state.lhs
+        var out = state
+        out.busy = false
+        out.result_valid = true
+        out.result = special
+        return out
+
+    val dividend_bit = (state.dividend >> (31 - state.step)) & 1
+    var remainder = (state.remainder << 1) | dividend_bit
+    var quotient = state.quotient << 1
+    if remainder >= state.divisor:
+        remainder = remainder - state.divisor
+        quotient = quotient | 1
+    if state.step == 31:
+        var out = state
+        out.busy = false
+        out.result_valid = true
+        out.result = rv32m_divide_result(state, rv32m_u32(quotient), remainder)
+        out.step = 32
+        out.quotient = rv32m_u32(quotient)
+        out.remainder = remainder
+        return out
+    var out = state
+    out.step = state.step + 1
+    out.quotient = rv32m_u32(quotient)
+    out.remainder = remainder
+    out
+
+fn rv32m_execute(operation: i64, lhs: i64, rhs: i64) -> i64:
+    """Reference-only RV32M evaluator; the sequential unit never calls this."""
+    val a = rv32m_u32(lhs)
+    val b = rv32m_u32(rhs)
+    val product = rv32m_unsigned_product(a, b)
+    if operation == RV32M_MUL:
+        return product.low
+    if operation == RV32M_MULHU:
+        return product.high
+    if operation == RV32M_MULHSU:
+        val correction = if (a & RV32M_SIGN) != 0: b else: 0
+        return rv32m_u32(product.high - correction)
+    if operation == RV32M_MULH:
+        val lhs_correction = if (a & RV32M_SIGN) != 0: b else: 0
+        val rhs_correction = if (b & RV32M_SIGN) != 0: a else: 0
+        return rv32m_u32(product.high - lhs_correction - rhs_correction)
+    if operation == RV32M_DIV:
+        return rv32m_signed_div(a, b)
+    if operation == RV32M_DIVU:
+        if b == 0: return RV32M_MASK
+        return a / b
+    if operation == RV32M_REM:
+        return rv32m_signed_rem(a, b)
+    if operation == RV32M_REMU:
+        if b == 0: return a
+        return a - (a / b) * b
+    0
+
+export Rv32MDecode
+export Rv32MState, rv32m_decode, rv32m_create, rv32m_start, rv32m_tick
+export rv32m_execute
+export RV32M_MUL, RV32M_MULH, RV32M_MULHSU, RV32M_MULHU
+export RV32M_DIV, RV32M_DIVU, RV32M_REM, RV32M_REMU

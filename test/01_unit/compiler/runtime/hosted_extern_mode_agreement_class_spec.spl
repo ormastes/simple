@@ -1,0 +1,84 @@
+# Hosted optional-backend externs — similar-problem DETECTION spec (defect CLASS)
+#
+# Class: an `extern fn` that is backed by a REAL implementation in one execution
+# engine and by a zero-returning stub in another, so the same source answers a
+# different number depending purely on how it was run — with no diagnostic. The
+# caller sees a plausible value and concludes "no GPU present" when a GPU is
+# present, or vice versa.
+#
+# Filed instance:
+#   doc/08_tracking/bug/rt_vulkan_only_executes_under_classic_interpret_2026-06-17.md
+#     `rt_vulkan_*` had a real dlopen-based impl only in the classic interpreter
+#     extern table; the JIT/AOT symbol table resolved to
+#     `src/runtime/runtime_native.c`'s hardcoded `return 0`, and
+#     `interpret-optimized` registered nothing at all. Measured then:
+#       interpret -> 1 / 3 devices   jit -> 0 / 0   interpret-optimized -> 0 / 0
+#
+# WHY THIS IS A SUBPROCESS SPEC. A spec body executes on ONE engine. A defect
+# whose whole shape is "engine A disagrees with engine B" is structurally
+# invisible from inside a single engine, so an in-process example here would be
+# vacuous no matter what it asserted. The oracle is the sibling run-path probe
+# `probe_hosted_extern_mode_agreement.spl`, run once per SIMPLE_EXECUTION_MODE
+# as a child process, and compared.
+#
+# WHY "AGREEMENT" IS THE RIGHT ORACLE HERE, UNUSUALLY. Elsewhere in this suite
+# cross-engine agreement is a WEAK oracle, because both engines can be wrong in
+# the same way. It is the correct one for this class only because the property
+# under test IS agreement: 0 devices and 3 devices are each a legitimate answer
+# for some host, and this spec must stay green on a machine with no GPU at all.
+# What is never legitimate is one host answering two different numbers to two
+# engines. Absolute-value oracles for these externs belong in a host-gated spec,
+# not here.
+#
+# The spec generalises past the one filed extern to the whole optional-backend
+# family (Vulkan and CUDA, availability and device-count), so the next extern
+# wired into one engine and forgotten in another fails here instead of shipping.
+
+use std.spec.*
+use std.io_runtime.{process_run, env_get}
+
+val PROBE_PATH: text = "test/01_unit/compiler/runtime/probe_hosted_extern_mode_agreement.spl"
+
+fn simple_bin() -> text:
+    # SIMPLE_BIN lets a lane point this at a freshly built candidate; the
+    # default is whatever bin/simple currently resolves to, which is what ships.
+    var bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    bin
+
+# Collapse the probe's output to a single comparable key. The probe prints one
+# `MODE_PROBE <name>=<value>` token per extern; whitespace between tokens is
+# engine-print-detail and must not make two identical answers look different.
+fn probe_key(mode: text) -> text:
+    val cmd = "SIMPLE_RUST_SEED_WARNING=0 SIMPLE_EXECUTION_MODE=" + mode + " " +
+        simple_bin() + " run " + PROBE_PATH + " 2>/dev/null"
+    val out = process_run("sh", ["-c", cmd])
+    var key = ""
+    for part in out.0.split_whitespace():
+        key = key + part + "|"
+    key
+
+describe "hosted optional-backend externs answer the same in every execution mode":
+    it "gives every execution mode the same answers for every optional-backend extern":
+        step("Run the probe once per engine. All three arms are collected in ONE example: each run is a full subprocess compile+execute, and re-running the control arm per example tripled the cost for no extra coverage.")
+        val interp = probe_key("interpret")
+        val jit = probe_key("jit")
+        val opt = probe_key("interpret-optimized")
+
+        step("No arm may be empty — two empty strings compare equal and would pass vacuously, which is exactly how a killed subprocess launders into a false green")
+        expect(interp).to_contain("MODE_PROBE|DONE|")
+        expect(jit).to_contain("MODE_PROBE|DONE|")
+        expect(opt).to_contain("MODE_PROBE|DONE|")
+
+        step("The probe must have reported every extern in the family, not exited after the first")
+        expect(interp).to_contain("vulkan_is_available|=|")
+        expect(interp).to_contain("vulkan_device_count|=|")
+        expect(interp).to_contain("cuda_available|=|")
+        expect(interp).to_contain("cuda_device_count|=|")
+
+        step("JIT vs classic interpreter — the exact split the bug reported (1/3 devices vs 0/0)")
+        expect(jit).to_equal(interp)
+
+        step("interpret-optimized vs classic interpreter — the third divergent arm, which registered no real externs at all")
+        expect(opt).to_equal(interp)

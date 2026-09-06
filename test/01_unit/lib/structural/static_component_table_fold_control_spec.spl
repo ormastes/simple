@@ -1,0 +1,87 @@
+# @cover src/lib/common/structural/static_component_table.spl 60%
+"""
+# Static Table Fold Discrimination (defect-class, positive control)
+
+## Overview
+
+The generator must DISCRIMINATE, not fold everything or nothing: within one
+catalog, a placement=dynamic component must never appear folded-static
+while a placement=static sibling in the SAME generated table does fold, and
+a placement=auto component with a STALE digest must fall to dynamic while
+an identical sibling with a matching digest folds. Each assertion pairs a
+must-fold positive control with a must-not-fold subject, so a
+fold-everything generator and a fold-nothing generator both fail.
+
+## Examples
+
+Catalog {static.sib, dynamic.sub, auto.fresh, auto.stale}: with
+auto.fresh's digests matching and auto.stale's mismatched, the folded set
+is exactly {static.sib, auto.fresh} and the dynamic set exactly
+{dynamic.sub, auto.stale}.
+
+**Plan:** doc/03_plan/compiler/startup_performance/startup_perf_plan_2026-08-17.md (Phase B §5.3)
+"""
+
+use std.spec
+use std.common.structural.static_component_table.{
+    static_component_table_verdict,
+    static_component_table_module_source
+}
+
+fn control_catalog() -> text:
+    "component:\n" +
+    "  id: static.sib\n" +
+    "  version: 1\n" +
+    "  presence: on\n" +
+    "  placement: static\n" +
+    "  activation: startup\n" +
+    "component:\n" +
+    "  id: dynamic.sub\n" +
+    "  version: 1\n" +
+    "  presence: on\n" +
+    "  placement: dynamic\n" +
+    "  activation: first_use\n" +
+    "component:\n" +
+    "  id: auto.fresh\n" +
+    "  version: 1\n" +
+    "  presence: auto\n" +
+    "  placement: auto\n" +
+    "  activation: command\n" +
+    "component:\n" +
+    "  id: auto.stale\n" +
+    "  version: 1\n" +
+    "  presence: auto\n" +
+    "  placement: auto\n" +
+    "  activation: command\n"
+
+fn control_digests() -> [text]:
+    var d: [text] = []
+    d.push("static.sib|hs|hs")
+    # dynamic.sub digests MATCH on purpose: matching digests must still not fold it.
+    d.push("dynamic.sub|hd|hd")
+    d.push("auto.fresh|h1|h1")
+    # stale: embedded != configured -> must fall to dynamic.
+    d.push("auto.stale|h1|h2")
+    d
+
+describe "fold discrimination with positive controls":
+
+    it "folds the static sibling AND keeps the dynamic component external in one table":
+        val v = static_component_table_verdict(control_catalog(), control_digests())
+        expect(v).to_equal("ok:folded=static.sib,auto.fresh:dynamic=dynamic.sub,auto.stale:absent=")
+
+    it "never emits a dynamic component as a folded row even with matching digests":
+        val src = static_component_table_module_source(control_catalog(), control_digests())
+        # positive control: the static sibling IS folded in this very module
+        expect(src.contains("rows.push(\"static.sib|1|static|")).to_be(true)
+        # subject: matching-digest dynamic component must NOT be folded
+        expect(src.contains("rows.push(\"dynamic.sub")).to_be(false)
+        expect(src.contains("ids.push(\"dynamic.sub\")")).to_be(true)
+
+    it "drops a stale-digest auto component to dynamic while its fresh twin folds":
+        val src = static_component_table_module_source(control_catalog(), control_digests())
+        # positive control: identical descriptor, matching digest -> folded
+        expect(src.contains("rows.push(\"auto.fresh|1|static|")).to_be(true)
+        # subject: same descriptor, stale digest -> external, never folded
+        expect(src.contains("rows.push(\"auto.stale")).to_be(false)
+        expect(src.contains("ids.push(\"auto.stale\")")).to_be(true)

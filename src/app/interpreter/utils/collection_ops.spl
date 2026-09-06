@@ -1,0 +1,221 @@
+# Collection Operations
+#
+# Functional operations on collections: map, filter, reduce, find, any, all.
+# These are the pure-logic helpers used by the interpreter for array/dict methods.
+#
+# Port of rust/compiler/src/interpreter_helpers/collections.rs (306 lines)
+
+from ..core import {Interpreter, Value, InterpreterError}
+from ..expr import {evaluate}
+from .args import {apply_lambda_to_vec, apply_lambda_with_two_args}
+from .slicing import {iter_to_vec}
+
+export eval_array_map, eval_array_filter, eval_array_reduce
+export eval_array_find, eval_array_any, eval_array_all
+export eval_dict_map_values, eval_dict_filter
+export bind_lambda_param
+
+# ============================================================================
+# Helper: Bind lambda parameter
+# ============================================================================
+
+fn bind_lambda_param(interp: Interpreter, lambda_val: Value, value: Value):
+    """Setup environment with single parameter binding for a lambda."""
+    val params = lambda_val.lambda_params()
+    val captured_env = lambda_val.lambda_env()
+
+    for (name, val) in captured_env:
+        interp.env.define(name, val)
+    if params.len() > 0:
+        interp.env.define(params[0], value)
+
+# ============================================================================
+# Array Operations
+# ============================================================================
+
+# Array map: apply lambda to each element
+fn eval_array_map(interp: Interpreter, arr: [Value], func: Value) -> Result<Value, InterpreterError>:
+    val results = apply_lambda_to_vec(interp, arr, func)?
+    Ok(Value.array(results))
+
+# Array filter: keep elements where lambda returns truthy
+fn eval_array_filter(interp: Interpreter, arr: [Value], func: Value) -> Result<Value, InterpreterError>:
+    if not func.is_lambda():
+        return Err(InterpreterError.TypeError("filter requires a lambda expression"))
+
+    val params = func.lambda_params()
+    val body = func.lambda_body()
+    val captured_env = func.lambda_env()
+
+    var results = []
+    for item in arr:
+        interp.check_execution_limit()?
+        interp.env.push_scope()
+        bind_lambda_param(interp, func, item)
+
+        val cond = evaluate(interp, body)?
+        if cond.is_truthy():
+            results = results.push(item)
+        interp.env.pop_scope()
+
+    Ok(Value.array(results))
+
+# Array reduce: fold over elements with accumulator
+fn eval_array_reduce(interp: Interpreter, arr: [Value], init: Value,
+                     func: Value) -> Result<Value, InterpreterError>:
+    if not func.is_lambda():
+        return Err(InterpreterError.TypeError("reduce requires a lambda expression"))
+
+    var acc = init
+    for item in arr:
+        interp.check_execution_limit()?
+        acc = apply_lambda_with_two_args(interp, func, acc, item)?
+
+    Ok(acc)
+
+# Array find: return first element where lambda is truthy, or nil
+fn eval_array_find(interp: Interpreter, arr: [Value], func: Value) -> Result<Value, InterpreterError>:
+    if not func.is_lambda():
+        return Err(InterpreterError.TypeError("find requires a lambda expression"))
+
+    val params = func.lambda_params()
+    val body = func.lambda_body()
+
+    for item in arr:
+        interp.check_execution_limit()?
+        interp.env.push_scope()
+        bind_lambda_param(interp, func, item)
+
+        val cond = evaluate(interp, body)?
+        interp.env.pop_scope()
+        if cond.is_truthy():
+            return Ok(item)
+
+    Ok(Value.nil())
+
+# Array any: return true if any element satisfies lambda
+fn eval_array_any(interp: Interpreter, arr: [Value], func: Value) -> Result<Value, InterpreterError>:
+    if not func.is_lambda():
+        return Err(InterpreterError.TypeError("any requires a lambda expression"))
+
+    val params = func.lambda_params()
+    val body = func.lambda_body()
+
+    for item in arr:
+        interp.check_execution_limit()?
+        interp.env.push_scope()
+        bind_lambda_param(interp, func, item)
+
+        val cond = evaluate(interp, body)?
+        interp.env.pop_scope()
+        if cond.is_truthy():
+            return Ok(Value.bool(true))
+
+    Ok(Value.bool(false))
+
+# Array all: return true if all elements satisfy lambda
+fn eval_array_all(interp: Interpreter, arr: [Value], func: Value) -> Result<Value, InterpreterError>:
+    if not func.is_lambda():
+        return Err(InterpreterError.TypeError("all requires a lambda expression"))
+
+    val params = func.lambda_params()
+    val body = func.lambda_body()
+
+    for item in arr:
+        interp.check_execution_limit()?
+        interp.env.push_scope()
+        bind_lambda_param(interp, func, item)
+
+        val cond = evaluate(interp, body)?
+        interp.env.pop_scope()
+        if not cond.is_truthy():
+            return Ok(Value.bool(false))
+
+    Ok(Value.bool(true))
+
+# ============================================================================
+# Dict Operations
+# ============================================================================
+
+# Dict map_values: apply lambda to each value
+fn eval_dict_map_values(interp: Interpreter, dict: Value, func: Value) -> Result<Value, InterpreterError>:
+    if not func.is_lambda():
+        return Err(InterpreterError.TypeError("map_values requires a lambda expression"))
+
+    val entries = dict.dict_entries() ?? return Err(InterpreterError.TypeError("expected dict"))
+    val params = func.lambda_params()
+    val body = func.lambda_body()
+
+    var new_dict = {}
+    for (key, value) in entries:
+        interp.check_execution_limit()?
+        interp.env.push_scope()
+        bind_lambda_param(interp, func, value)
+
+        val new_val = evaluate(interp, body)?
+        new_dict[key] = new_val
+        interp.env.pop_scope()
+
+    Ok(Value.dict(new_dict))
+
+# Dict filter: keep entries where lambda returns truthy
+fn eval_dict_filter(interp: Interpreter, dict: Value, func: Value) -> Result<Value, InterpreterError>:
+    if not func.is_lambda():
+        return Err(InterpreterError.TypeError("filter requires a lambda expression"))
+
+    val entries = dict.dict_entries() ?? return Err(InterpreterError.TypeError("expected dict"))
+    val params = func.lambda_params()
+    val body = func.lambda_body()
+    val captured_env = func.lambda_env()
+
+    var new_dict = {}
+    for (key, value) in entries:
+        interp.check_execution_limit()?
+        interp.env.push_scope()
+
+        for (name, val) in captured_env:
+            interp.env.define(name, val)
+
+        # Bind key and value if 2 params, otherwise just value
+        if params.len() >= 2:
+            interp.env.define(params[0], Value.string(key))
+            interp.env.define(params[1], value)
+        elif params.len() == 1:
+            interp.env.define(params[0], value)
+
+        val cond = evaluate(interp, body)?
+        if cond.is_truthy():
+            new_dict[key] = value
+        interp.env.pop_scope()
+
+    Ok(Value.dict(new_dict))
+
+# ============================================================================
+# Sequence Pattern Binding (for comprehensions)
+# ============================================================================
+
+# Bind sequence patterns (Tuple and Array) during comprehensions
+fn bind_sequence_pattern(value: Value, patterns: [Pattern], env: Env, allow_tuple: bool) -> bool:
+    val values = match value.type_name():
+        case "Tuple" if allow_tuple: value.as_tuple() ?? return false
+        case "Array": value.as_array() ?? return false
+        case _: return false
+
+    if patterns.len() != values.len():
+        return false
+
+    for i in 0..patterns.len():
+        if not bind_pattern_simple(patterns[i], values[i], env):
+            return false
+    true
+
+# Simple pattern binding (identifier only, for comprehension iteration)
+fn bind_pattern_simple(pattern: Pattern, value: Value, env: Env) -> bool:
+    match pattern:
+        case Pattern.Identifier(name):
+            env.define(name, value)
+            true
+        case Pattern.Wildcard:
+            true
+        case _:
+            false

@@ -1,0 +1,145 @@
+# Tests for app.ui_manifest.main (typed UI interface manifest generator v1).
+# Covers descriptor parsing, the text-level builder-call scanner, manifest
+# render/parse round trip, and the compat diff (breaking vs additive).
+
+use app.ui_manifest.main.{
+    BuilderDescriptor,
+    UiNode,
+    parse_descriptors,
+    scan_source,
+    dedup_nodes,
+    render_manifest,
+    parse_manifest,
+    diff_breaking,
+    diff_additions
+}
+
+fn fixture_descriptors() -> [BuilderDescriptor]:
+    val sdn = "descriptors:\n" +
+        "    button:\n" +
+        "        id_argument: 0\n" +
+        "        kind: button\n" +
+        "        actions: activate\n" +
+        "    text_field:\n" +
+        "        id_argument: 0\n" +
+        "        kind: text_input\n" +
+        "        actions: input, submit\n" +
+        "    label:\n" +
+        "        id_argument: 0\n" +
+        "        kind: label\n" +
+        "        actions:\n"
+    parse_descriptors(sdn)
+
+describe "app.ui_manifest.main":
+
+    describe "parse_descriptors":
+
+        it "parses fn name, kind, and split actions":
+            val ds = fixture_descriptors()
+            expect(ds.len()).to_equal(3)
+            expect(ds[0].fn_name).to_equal("button")
+            expect(ds[0].kind).to_equal("button")
+            expect(ds[0].actions.len()).to_equal(1)
+            expect(ds[0].actions[0]).to_equal("activate")
+            expect(ds[1].actions.len()).to_equal(2)
+            expect(ds[1].actions[1]).to_equal("submit")
+
+        it "parses empty actions as empty list":
+            val ds = fixture_descriptors()
+            expect(ds[2].fn_name).to_equal("label")
+            expect(ds[2].actions.len()).to_equal(0)
+
+    describe "scan_source":
+
+        it "finds builder calls with literal first-arg ids":
+            val src = "val b = button(\"btn_save\", \"Save\", \"save\")\n" +
+                "val f = text_field(\"name_input\", \"\", \"Name\")\n"
+            val nodes = scan_source(src, "fixture.spl", fixture_descriptors())
+            expect(nodes.len()).to_equal(2)
+            expect(nodes[0].id).to_equal("btn_save")
+            expect(nodes[0].kind).to_equal("button")
+            expect(nodes[0].source_line).to_equal(1)
+            expect(nodes[1].id).to_equal("name_input")
+            expect(nodes[1].source_line).to_equal(2)
+
+        it "does not match a longer identifier ending in a builder name":
+            val src = "val x = my_button(\"not_a_widget\", \"X\", \"x\")\n"
+            val nodes = scan_source(src, "fixture.spl", fixture_descriptors())
+            expect(nodes.len()).to_equal(0)
+
+        it "matches qualified calls like builder.button(...)":
+            val src = "val x = builder.button(\"ok_btn\", \"OK\", \"ok\")\n"
+            val nodes = scan_source(src, "fixture.spl", fixture_descriptors())
+            expect(nodes.len()).to_equal(1)
+            expect(nodes[0].id).to_equal("ok_btn")
+
+        it "skips comment lines and non-literal ids":
+            val src = "# button(\"commented\", \"X\", \"x\")\n" +
+                "val x = button(some_id, \"X\", \"x\")\n"
+            val nodes = scan_source(src, "fixture.spl", fixture_descriptors())
+            expect(nodes.len()).to_equal(0)
+
+        it "skips runtime-built ids (literal prefix followed by +)":
+            val src = "var cell = button(\"cell_\" + ref, display, \"select\")\n"
+            val nodes = scan_source(src, "fixture.spl", fixture_descriptors())
+            expect(nodes.len()).to_equal(0)
+
+    describe "dedup_nodes":
+
+        it "keeps first occurrence per id and sorts by id":
+            val src = "val a = button(\"zz_btn\", \"Z\", \"z\")\n" +
+                "val b = button(\"aa_btn\", \"A\", \"a\")\n" +
+                "val c = button(\"zz_btn\", \"Z2\", \"z2\")\n"
+            val nodes = dedup_nodes(scan_source(src, "fixture.spl", fixture_descriptors()))
+            expect(nodes.len()).to_equal(2)
+            expect(nodes[0].id).to_equal("aa_btn")
+            expect(nodes[1].id).to_equal("zz_btn")
+            expect(nodes[1].source_line).to_equal(1)
+
+    describe "manifest round trip":
+
+        it "render_manifest then parse_manifest preserves id/kind/actions":
+            val src = "val b = button(\"btn_save\", \"Save\", \"save\")\n" +
+                "val f = text_field(\"name_input\", \"\", \"Name\")\n"
+            val nodes = dedup_nodes(scan_source(src, "fixture.spl", fixture_descriptors()))
+            val rendered = render_manifest(nodes, "app.test.fixture")
+            expect(rendered).to_contain("app_id: app.test.fixture")
+            val back = parse_manifest(rendered)
+            expect(back.len()).to_equal(2)
+            expect(back[0].id).to_equal("btn_save")
+            expect(back[0].kind).to_equal("button")
+            expect(back[0].actions.len()).to_equal(1)
+            expect(back[1].id).to_equal("name_input")
+            expect(back[1].actions.len()).to_equal(2)
+
+    describe "compat diff":
+
+        it "flags removed id, kind change, and removed action as breaking":
+            val committed = [
+                UiNode(id: "gone", kind: "button", actions: ["activate"], source_file: "", source_line: 0),
+                UiNode(id: "morph", kind: "button", actions: ["activate"], source_file: "", source_line: 0),
+                UiNode(id: "lost_action", kind: "text_input", actions: ["input", "submit"], source_file: "", source_line: 0)
+            ]
+            val regenerated = [
+                UiNode(id: "morph", kind: "label", actions: [], source_file: "", source_line: 0),
+                UiNode(id: "lost_action", kind: "text_input", actions: ["input"], source_file: "", source_line: 0)
+            ]
+            val breaks = diff_breaking(committed, regenerated)
+            expect(breaks.len()).to_equal(4)
+            expect(breaks[0]).to_contain("removed id: gone")
+            expect(breaks[1]).to_contain("kind change: morph")
+            expect(breaks[2]).to_contain("removed action: morph.activate")
+            expect(breaks[3]).to_contain("removed action: lost_action.submit")
+
+        it "reports pure additions as non-breaking":
+            val committed = [
+                UiNode(id: "btn", kind: "button", actions: ["activate"], source_file: "", source_line: 0)
+            ]
+            val regenerated = [
+                UiNode(id: "btn", kind: "button", actions: ["activate"], source_file: "", source_line: 0),
+                UiNode(id: "extra", kind: "label", actions: [], source_file: "", source_line: 0)
+            ]
+            expect(diff_breaking(committed, regenerated).len()).to_equal(0)
+            val adds = diff_additions(committed, regenerated)
+            expect(adds.len()).to_equal(1)
+            expect(adds[0]).to_contain("added id: extra")

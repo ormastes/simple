@@ -1,0 +1,47 @@
+# Fixed workload for test/01_unit/lib/mem_infra/gpu_device_leak_spec.spl
+# (M7 GPU lane, plan exit "seeded device leak ... fixtures caught").
+#
+# Exercises the real CUDA driver-API choke points
+# (src/compiler_rust/compiler/src/interpreter_extern/gpu.rs
+# rt_cuda_mem_alloc_fn/rt_cuda_mem_free_fn) on whatever GPU is present, and
+# prints the live/peak device-byte counters before, after a BALANCED
+# alloc+free pair (control), and after a DELIBERATELY LEAKED allocation (the
+# seeded defect), so the parent spec can confirm the counters actually
+# detect a real leak rather than only exercising counter arithmetic in
+# isolation (test/01_unit/lib/gpu/mem_profile_device_counters_spec.spl
+# already covers the arithmetic-only, GPU-less case).
+#
+# Prints "gpu_device_leak_workload: no_cuda" and exits cleanly when no CUDA
+# device is available, so this fixture is safe to attempt on a GPU-less box
+# (the parent spec treats that path as an explicit skip, not a failure).
+
+use std.nogc_sync_mut.cuda.mod.*
+
+extern fn rt_gpu_mem_live_bytes() -> i64
+extern fn rt_gpu_mem_peak_bytes() -> i64
+
+val ALLOC_SIZE = 1048576
+
+fn main() -> i64:
+    if not cuda_available() or cuda_device_count() < 1:
+        print "gpu_device_leak_workload: no_cuda"
+        return 0
+
+    cuda_init()
+    val dev = cuda_device_get(0)
+    val ctx = cuda_ctx_create(dev)
+
+    print "gpu_device_leak_workload: live_before={rt_gpu_mem_live_bytes()}"
+
+    # Control: a balanced alloc+free pair must leave live bytes unchanged.
+    val balanced_ptr = cuda_mem_alloc(ALLOC_SIZE)
+    cuda_mem_free(balanced_ptr)
+    print "gpu_device_leak_workload: live_after_balanced={rt_gpu_mem_live_bytes()}"
+
+    # Seeded defect: allocate and deliberately never free.
+    val leaked_ptr = cuda_mem_alloc(ALLOC_SIZE)
+    print "gpu_device_leak_workload: live_after_leak={rt_gpu_mem_live_bytes()}"
+    print "gpu_device_leak_workload: peak_after_leak={rt_gpu_mem_peak_bytes()}"
+
+    cuda_ctx_destroy(ctx)
+    0

@@ -1,0 +1,292 @@
+# SimpleOS TTY Service (G8)
+#
+# Provides POSIX-style terminal (TTY/PTY) management for SimpleOS.
+# Supports console TTYs, PTY master/slave pairs, canonical and raw input
+# modes, Termios control, and SIGINT delivery via ECS internals.
+#
+# ECS internals: entities are TTY instances; components live in per-type
+# ComponentStore<T> columns owned by TtyWorld.
+
+use std.ecs.entity.{Entity, EntityAllocator}
+use std.ecs.component_store.{ComponentStore}
+use std.ecs.world.{WorldBase}
+
+# ============================================================================
+# TTY kind constants
+# ============================================================================
+
+val TTY_CONSOLE: u32 = 0
+val TTY_PTY_MASTER: u32 = 1
+val TTY_PTY_SLAVE: u32 = 2
+
+# ============================================================================
+# Termios lflag bit constants
+# ============================================================================
+
+val ISIG: u32 = 1        # 1 << 0 — enable signal generation
+val ICANON: u32 = 2      # 1 << 1 — canonical (line) mode
+val ECHO: u32 = 8        # 1 << 3 — echo input characters
+
+# ============================================================================
+# Control character indices (POSIX cc[] array)
+# ============================================================================
+
+val VINTR: i32 = 0       # Ctrl-C → SIGINT
+val VERASE: i32 = 2      # Ctrl-H / backspace
+val VKILL: i32 = 3       # Ctrl-U — kill line
+val VEOF: i32 = 4        # Ctrl-D — end of file
+
+# ============================================================================
+# Signal number
+# ============================================================================
+
+val SIGINT: i32 = 2
+
+# ============================================================================
+# Components (per MDSOC+ ECS spec)
+# ============================================================================
+
+struct LineBuf:
+    """Pending input line buffer for canonical mode accumulation."""
+    bytes: [u8]
+    cap: i32
+
+struct Termios:
+    """POSIX termios control structure for a TTY entity."""
+    iflag: u32
+    oflag: u32
+    lflag: u32
+    cc: [u8]
+
+struct ForegroundPgid:
+    """Process group ID of the foreground process group for this TTY."""
+    value: u32
+
+struct InputSource:
+    """Opaque endpoint identifier for the keyboard or serial input source."""
+    endpoint: u64
+
+struct OutputSink:
+    """Opaque endpoint identifier for the framebuffer or serial output sink."""
+    endpoint: u64
+
+struct TtyKind:
+    """TTY_CONSOLE=0 | TTY_PTY_MASTER=1 | TTY_PTY_SLAVE=2"""
+    kind: u32
+
+# ============================================================================
+# TtyWorld — ECS world for all TTY state
+# ============================================================================
+
+struct TtyWorld:
+    """ECS world that owns all TTY entities and their component data."""
+    base: WorldBase
+    line_bufs:      ComponentStore<LineBuf>
+    termios:        ComponentStore<Termios>
+    fg_pgids:       ComponentStore<ForegroundPgid>
+    input_sources:  ComponentStore<InputSource>
+    output_sinks:   ComponentStore<OutputSink>
+    kinds:          ComponentStore<TtyKind>
+
+# ============================================================================
+# Extern — kernel wires these at boot
+# ============================================================================
+
+extern fn signal_deliver(target_pid: u64, signo: i32) -> i32
+
+# ============================================================================
+# TtyService — public API
+# ============================================================================
+
+class TtyService:
+    """POSIX TTY/PTY service for SimpleOS.
+
+    Owns a TtyWorld (ECS world) and exposes a simple API for creating
+    TTY entities, configuring Termios, processing input, and reading lines.
+    PTY pair creation links master/slave endpoint IDs symmetrically.
+    """
+    world: TtyWorld
+    initialized: bool
+    default_cc: [u8]
+
+impl TtyService:
+    static fn new() -> TtyService:
+        """Create a fresh TtyService with default control characters."""
+        # Default cc array: 8 entries, VINTR=3(ETX), VERASE=127, VKILL=21, VEOF=4
+        val cc: [u8] = [3, 0, 127, 21, 4, 0, 0, 0]
+        TtyService(
+            world: TtyWorld(
+                base:           WorldBase.new(),
+                line_bufs:      ComponentStore.new(),
+                termios:        ComponentStore.new(),
+                fg_pgids:       ComponentStore.new(),
+                input_sources:  ComponentStore.new(),
+                output_sinks:   ComponentStore.new(),
+                kinds:          ComponentStore.new()
+            ),
+            initialized: true,
+            default_cc: cc
+        )
+
+    me tty_create(kind: u32, input_ep: u64, output_ep: u64) -> Entity:
+        """Spawn a new TTY entity with the given kind and endpoints.
+
+        Default termios: ICANON | ECHO | ISIG enabled, fg_pgid=0.
+        Returns the new entity handle.
+        """
+        val e = self.world.base.spawn()
+        val t = self.world.base.now()
+        val cc: [u8] = [3, 0, 127, 21, 4, 0, 0, 0]
+        self.world.line_bufs.insert(e,
+            LineBuf(bytes: [], cap: 4096), t)
+        self.world.termios.insert(e,
+            Termios(iflag: 0, oflag: 0, lflag: ICANON | ECHO | ISIG, cc: cc), t)
+        self.world.fg_pgids.insert(e,
+            ForegroundPgid(value: 0), t)
+        self.world.input_sources.insert(e,
+            InputSource(endpoint: input_ep), t)
+        self.world.output_sinks.insert(e,
+            OutputSink(endpoint: output_ep), t)
+        self.world.kinds.insert(e,
+            TtyKind(kind: kind), t)
+        e
+
+    me tty_set_termios(tty: Entity, iflag: u32, oflag: u32, lflag: u32):
+        """Update the Termios flags for a TTY, preserving existing cc array."""
+        val slot = self.world.termios.get_slot(tty)
+        if slot >= 0:
+            val old_cc = self.world.termios.dense[slot].cc
+            val t = self.world.base.now()
+            self.world.termios.insert(tty,
+                Termios(iflag: iflag, oflag: oflag, lflag: lflag, cc: old_cc), t)
+
+    fn tty_get_termios(tty: Entity) -> Termios?:
+        """Return the Termios for a TTY, or nil if entity not found."""
+        val slot = self.world.termios.get_slot(tty)
+        if slot < 0:
+            return nil
+        self.world.termios.dense[slot]
+
+    me tty_set_fg_pgid(tty: Entity, pgid: u32) -> bool:
+        """Set the foreground process group ID for this TTY.
+
+        Returns true if the TTY entity exists, false otherwise.
+        """
+        val slot = self.world.fg_pgids.get_slot(tty)
+        if slot < 0:
+            return false
+        val t = self.world.base.now()
+        self.world.fg_pgids.insert(tty, ForegroundPgid(value: pgid), t)
+        true
+
+    fn tty_fg_pgid(tty: Entity) -> u32:
+        """Return the foreground pgid for this TTY (0 if not set or not found)."""
+        val slot = self.world.fg_pgids.get_slot(tty)
+        if slot < 0:
+            return 0
+        self.world.fg_pgids.dense[slot].value
+
+    me tty_input_char(tty: Entity, ch: u8) -> i32:
+        """Process one input byte through the TTY line discipline.
+
+        Returns:
+          >0  — character should be delivered to the reader
+           0  — character swallowed (e.g. Ctrl-C triggered SIGINT, Ctrl-D in canonical)
+          <0  — error (TTY entity not found)
+
+        In ICANON|ISIG mode, the byte matching cc[VINTR] causes signal_deliver
+        to be called with SIGINT for the foreground pgid, and the byte is swallowed.
+        In ICANON mode, printable bytes accumulate in LineBuf; '\\n' delivers the line.
+        In raw mode (ICANON off), every byte is immediately delivered.
+        """
+        val tios_slot = self.world.termios.get_slot(tty)
+        if tios_slot < 0:
+            return -1
+        val tios = self.world.termios.dense[tios_slot]
+        val is_canon = (tios.lflag & ICANON) != 0
+        val is_sig   = (tios.lflag & ISIG) != 0
+
+        # Check VINTR (Ctrl-C = ETX = 3 by default)
+        if is_canon and is_sig:
+            val vintr_char = tios.cc[VINTR]
+            if ch == vintr_char:
+                val pgid_slot = self.world.fg_pgids.get_slot(tty)
+                if pgid_slot >= 0:
+                    val pgid = self.world.fg_pgids.dense[pgid_slot].value
+                    signal_deliver(pgid as u64, SIGINT)
+                return 0
+
+        if is_canon:
+            # Accumulate into line buffer
+            val buf_slot = self.world.line_bufs.get_slot(tty)
+            if buf_slot < 0:
+                return -1
+            val old_buf = self.world.line_bufs.dense[buf_slot]
+            val new_bytes = old_buf.bytes.push(ch)
+            val t = self.world.base.now()
+            self.world.line_bufs.insert(tty,
+                LineBuf(bytes: new_bytes, cap: old_buf.cap), t)
+            # Deliver only when newline arrives
+            if ch == 10:
+                return 1
+            return 0
+        else:
+            # Raw mode: deliver immediately
+            return 1
+
+    me tty_read_line(tty: Entity) -> [u8]:
+        """Drain the LineBuf and return its contents if a newline is present.
+
+        In ICANON mode, returns the accumulated line (including '\\n') and clears
+        the buffer. Returns an empty array if no newline yet or TTY not found.
+        """
+        val buf_slot = self.world.line_bufs.get_slot(tty)
+        if buf_slot < 0:
+            return []
+        val old_buf = self.world.line_bufs.dense[buf_slot]
+        # Check if a newline is present
+        val len = old_buf.bytes.len()
+        var has_newline = false
+        var i = 0
+        while i < len:
+            if old_buf.bytes[i] == 10:
+                has_newline = true
+            i = i + 1
+        if not has_newline:
+            return []
+        # Drain the buffer
+        val result = old_buf.bytes
+        val t = self.world.base.now()
+        self.world.line_bufs.insert(tty,
+            LineBuf(bytes: [], cap: old_buf.cap), t)
+        result
+
+    me tty_write(tty: Entity, bytes: [u8]) -> i32:
+        """Write bytes to the TTY output sink.
+
+        Returns the number of bytes accepted (len of input array), or -1 if
+        the TTY entity does not exist.
+        """
+        val sink_slot = self.world.output_sinks.get_slot(tty)
+        if sink_slot < 0:
+            return -1
+        bytes.len() as i32
+
+    me tty_create_pty_pair(self) -> (Entity, Entity):
+        """Create a linked PTY master/slave pair.
+
+        The master's InputSource endpoint is used as the slave's OutputSink
+        endpoint and vice versa, forming a bidirectional pipe.
+        Returns (master_entity, slave_entity).
+        """
+        # Endpoint IDs: use world tick to generate unique values
+        val t = self.world.base.now()
+        val master_ep: u64 = (t + 1) as u64
+        val slave_ep: u64  = (t + 2) as u64
+        val master = self.tty_create(TTY_PTY_MASTER, master_ep, slave_ep)
+        val slave  = self.tty_create(TTY_PTY_SLAVE,  slave_ep,  master_ep)
+        (master, slave)
+
+    fn tty_count(self) -> i32:
+        """Return the number of live TTY entities (tracked via kinds store)."""
+        self.world.kinds.len()

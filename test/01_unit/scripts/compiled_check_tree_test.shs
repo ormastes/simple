@@ -1,0 +1,56 @@
+#!/bin/sh
+set -eu
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)
+work_dir=$(mktemp -d "${TMPDIR:-/tmp}/compiled-check-tree-test.XXXXXX")
+trap 'rm -rf -- "$work_dir"' EXIT HUP INT TERM
+mkdir -p "$work_dir/sources"
+
+printf 'fn ok_one() -> i64:\n    1\n' > "$work_dir/sources/a.spl"
+printf 'fn ok_two() -> i64:\n    2\n' > "$work_dir/sources/b.spl"
+printf 'INVALID\n' > "$work_dir/sources/c.spl"
+printf 'fn ok_four() -> i64:\n    4\n' > "$work_dir/sources/d.spl"
+printf 'fn ok_five() -> i64:\n    5\n' > "$work_dir/sources/e.spl"
+
+fake_checker="$work_dir/fake-checker"
+cat > "$fake_checker" <<'SH'
+#!/bin/sh
+status=0
+for arg in "$@"; do
+    case "$arg" in
+        --progress|count) continue ;;
+    esac
+    if grep -q INVALID "$arg"; then
+        echo "$arg: error[E-FAKE]: invalid fixture"
+        status=1
+    fi
+done
+exit "$status"
+SH
+chmod +x "$fake_checker"
+
+set +e
+python3 "$repo_root/scripts/check/compiled-check-tree.py" \
+    --checker="$fake_checker" \
+    --root="$work_dir/sources" \
+    --output-dir="$work_dir/evidence" \
+    --workers=2 \
+    --batch-size=2 \
+    --timeout=10 > "$work_dir/summary.out"
+status=$?
+set -e
+test "$status" -eq 1
+
+python3 - "$work_dir/evidence/summary.json" <<'PY'
+import json
+import sys
+
+summary = json.load(open(sys.argv[1], encoding="utf-8"))
+assert summary["source_count"] == 5
+assert summary["passed_files"] == 4
+assert summary["failing_files"] == 1
+assert summary["error_families"] == {"E-FAKE": 1}
+assert summary["complete_per_file_outcomes"] is True
+PY
+
+echo "compiled check tree: PASS"

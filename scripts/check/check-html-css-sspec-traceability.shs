@@ -1,0 +1,334 @@
+#!/bin/sh
+# Trace WHATWG HTML elements and W3C CSS property inventory to SSpec coverage.
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${BUILD_DIR:-build/html_css_sspec_traceability}"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/html_css_sspec_traceability_$(date -u +%F).md}"
+OUT_ENV="$BUILD_DIR/evidence.env"
+
+python3 - "$ROOT_DIR" "$BUILD_DIR" "$REPORT_PATH" "$OUT_ENV" <<'PY'
+from pathlib import Path
+import sys
+
+root = Path(sys.argv[1]).resolve()
+for label, raw in (
+    ("BUILD_DIR", sys.argv[2]),
+    ("REPORT_PATH", sys.argv[3]),
+    ("OUT_ENV", sys.argv[4]),
+):
+    path = Path(raw)
+    resolved = path.resolve() if path.is_absolute() else (root / path).resolve()
+    try:
+        resolved.relative_to(root)
+    except ValueError:
+        raise SystemExit(f"error: {label} must resolve inside the repository")
+PY
+
+mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
+tmp_env="$(mktemp "$BUILD_DIR/evidence.env.tmp.XXXXXX")"
+trap 'rm -f "$tmp_env"' EXIT HUP INT TERM
+
+set +e
+HTML_CSS_SSPEC_BEHAVIOR_EVIDENCE="${HTML_CSS_SSPEC_BEHAVIOR_EVIDENCE:-$BUILD_DIR/behavior.env}" \
+HTML_CSS_SSPEC_FETCH="${HTML_CSS_SSPEC_FETCH:-1}" \
+HTML_CSS_SSPEC_HTML_INVENTORY_PATH="${HTML_CSS_SSPEC_HTML_INVENTORY_PATH:-}" \
+HTML_CSS_SSPEC_CSS_INVENTORY_PATH="${HTML_CSS_SSPEC_CSS_INVENTORY_PATH:-}" \
+python3 - <<'PY' >"$tmp_env"
+from pathlib import Path
+from urllib.request import Request, urlopen
+import os
+import re
+import sys
+
+ROOT = Path.cwd()
+HTML_URL = "https://html.spec.whatwg.org/multipage/indices.html"
+CSS_URL = "https://www.w3.org/TR/CSS/"
+
+BEHAVIOR_EVIDENCE = Path(os.environ["HTML_CSS_SSPEC_BEHAVIOR_EVIDENCE"])
+FETCH_INVENTORY = os.environ["HTML_CSS_SSPEC_FETCH"] != "0"
+HTML_INVENTORY_PATH = os.environ["HTML_CSS_SSPEC_HTML_INVENTORY_PATH"]
+CSS_INVENTORY_PATH = os.environ["HTML_CSS_SSPEC_CSS_INVENTORY_PATH"]
+DECLARATION_SOURCE = ROOT / "src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_declarations.spl"
+
+BEHAVIOR_KEYS = [
+    "runner_path", "runner_sha256", "source_revision", "matrix_path",
+    "matrix_sha256",
+]
+HTML_REQUIRED_EXTRA = {"h1", "h2", "h3", "h4", "h5", "h6", "sub", "sup"}
+
+CSS_IMPLEMENTED_SPEC = "test/01_unit/lib/gc_async_mut/gpu/browser_engine/simple_web_generated_html_css_combinations_spec.spl"
+CSS_INVENTORY_SPEC = "test/01_unit/lib/gc_async_mut/gpu/browser_engine/simple_web_css_inventory_traceability_spec.spl"
+
+CSS_SUPPORTED = {
+    "accent-color",
+    "align-content", "align-items", "align-self",
+    "animation", "animation-delay", "animation-direction", "animation-duration", "animation-fill-mode", "animation-iteration-count", "animation-name", "animation-play-state", "animation-timing-function",
+    "aspect-ratio",
+    "transform-box", "transform-origin", "transform-style",
+    "backface-visibility", "background", "background-attachment", "background-blend-mode", "background-clip", "background-color", "background-origin", "background-image", "background-position", "background-repeat", "background-size", "border", "border-collapse", "border-spacing", "border-bottom", "border-bottom-color",
+    "border-bottom-style", "border-bottom-width", "border-color", "border-left", "border-left-color",
+    "border-left-style", "border-left-width", "border-right", "border-right-color", "border-right-style",
+    "border-right-width", "border-style", "border-top", "border-top-color", "border-top-style",
+    "border-top-width", "border-width", "border-radius", "border-bottom-left-radius",
+    "border-bottom-right-radius", "border-top-left-radius", "border-top-right-radius",
+    "border-start-start-radius", "border-start-end-radius", "border-end-start-radius", "border-end-end-radius",
+    "border-block", "border-block-color", "border-block-end", "border-block-end-color",
+    "border-block-end-style", "border-block-end-width", "border-block-start",
+    "border-block-start-color", "border-block-start-style", "border-block-start-width",
+    "border-block-style", "border-block-width",
+    "border-inline", "border-inline-color", "border-inline-end", "border-inline-end-color",
+    "border-inline-end-style", "border-inline-end-width", "border-inline-start",
+    "border-inline-start-color", "border-inline-start-style", "border-inline-start-width",
+    "border-inline-style", "border-inline-width",
+    "box-shadow", "box-sizing",
+    "caption-side", "caret-color", "clear", "clip", "clip-path", "color", "color-adjust", "color-scheme", "column-count", "column-width", "columns", "column-rule", "column-rule-color", "column-rule-style", "column-rule-width", "column-gap", "content", "content-visibility", "contain", "cursor", "direction", "display", "empty-cells", "filter", "flex", "flex-basis", "forced-color-adjust", "flex-direction", "flex-flow",
+    "flex-grow", "flex-shrink", "flex-wrap", "font", "font-family", "font-feature-settings", "font-language-override", "font-variation-settings", "font-variant", "font-variant-alternates", "font-variant-caps", "font-variant-east-asian", "font-variant-emoji", "font-variant-ligatures", "font-variant-numeric", "font-variant-position", "font-kerning", "font-optical-sizing", "font-palette", "font-stretch", "font-width", "font-size", "font-size-adjust", "font-style", "font-synthesis", "font-synthesis-small-caps", "font-synthesis-position", "font-synthesis-style", "font-synthesis-weight", "font-weight", "gap", "grid", "grid-area", "grid-auto-flow", "grid-column", "grid-column-gap", "grid-column-start", "grid-gap", "grid-row", "grid-row-gap", "grid-row-start", "grid-template", "grid-template-areas", "grid-template-columns", "grid-template-rows",
+    "float", "height", "image-rendering", "inline-size", "inset", "inset-block", "inset-block-end", "inset-block-start", "inset-inline", "inset-inline-end", "inset-inline-start", "justify-content", "justify-items", "justify-self", "left", "letter-spacing", "line-height", "line-break", "hyphens", "list-style", "list-style-image", "list-style-position", "list-style-type", "bottom", "margin", "margin-block", "margin-block-end", "margin-block-start", "margin-bottom",
+    "margin-inline", "margin-inline-end", "margin-inline-start", "margin-left", "margin-right", "margin-top", "max-block-size", "max-height", "max-inline-size", "max-width",
+    "min-block-size", "min-height", "min-inline-size", "min-width", "object-fit", "object-position", "opacity", "order", "orphans", "outline", "outline-color",
+    "outline-offset", "outline-style", "outline-width", "overflow", "overflow-wrap", "overflow-x",
+    "overflow-y", "padding", "padding-block", "padding-block-end", "padding-block-start", "padding-bottom", "padding-inline", "padding-inline-end", "padding-inline-start", "padding-left", "padding-right",
+    "padding-top", "place-content", "place-items", "place-self", "position", "print-color-adjust", "quotes", "resize", "rotate", "scale", "scrollbar-color", "scrollbar-width", "right", "row-gap", "tab-size", "table-layout", "text-align", "text-align-all", "text-decoration",
+    "text-align-last", "text-decoration-color", "text-decoration-line", "text-decoration-style", "text-decoration-thickness", "text-emphasis", "text-emphasis-color", "text-emphasis-position", "text-emphasis-style", "text-indent", "text-combine-upright", "text-justify", "text-orientation", "text-overflow", "text-shadow", "text-transform", "text-underline-offset", "text-underline-position", "top", "transform",
+    "transition", "transition-delay", "transition-duration", "transition-property", "transition-timing-function", "translate",
+    "unicode-bidi", "vertical-align", "visibility", "white-space", "widows", "width", "block-size", "will-change", "word-break", "word-spacing", "word-wrap", "writing-mode", "z-index",
+}
+
+CSS_NAME_RE = re.compile(
+    r"^(accent|align|all|animation|appearance|aspect|azimuth|backdrop|backface|"
+    r"background|block|border|bottom|box|break|caption|caret|clear|clip|color|"
+    r"column|contain|container|content|counter|cursor|direction|display|empty|"
+    r"field|filter|flex|float|font|gap|grid|height|hyphen|image|initial|inline|"
+    r"inset|isolation|justify|left|letter|line|list|margin|marker|mask|max|min|"
+    r"mix|object|offset|opacity|order|orphans|outline|overflow|overscroll|padding|"
+    r"page|paint|perspective|pitch|place|play|pointer|position|print|property|"
+    r"quotes|resize|rest|richness|right|rotate|row|ruby|scale|scroll|shape|speak|"
+    r"tab|table|text|top|touch|transform|transition|translate|unicode|user|"
+    r"vertical|view|visibility|voice|white|widows|width|will|word|writing|z-index)"
+)
+
+
+def fetch(url: str) -> str:
+    req = Request(url, headers={"User-Agent": "simple-html-css-traceability"})
+    with urlopen(req, timeout=30) as response:
+        return response.read().decode("utf-8", "replace")
+
+
+def html_tags(source: str) -> list[str]:
+    tags = set()
+    for match in re.finditer(r"<code id=elements-3:the-([a-z0-9-]+)-element><a [^>]*>([a-z0-9-]+)</a></code>", source):
+        tags.add(match.group(2))
+    # The current index groups these shared-definition elements outside the
+    # per-element anchors matched above. Keep them in the inventory explicitly.
+    return sorted(tags | HTML_REQUIRED_EXTRA)
+
+
+def css_properties(source: str) -> list[str]:
+    props = set()
+    for match in re.finditer(r"<a[^>]*href=\"[^\"]*#(?:propdef-|propertydef-)([a-zA-Z0-9_-]+)\"[^>]*>(--[a-zA-Z0-9_-]+|[a-zA-Z-]+)</a>", source):
+        props.add(match.group(2))
+    for match in re.finditer(r"<code[^>]*>([a-zA-Z-]{2,})</code>", source):
+        name = match.group(1)
+        if CSS_NAME_RE.match(name):
+            props.add(name)
+    # W3C prose placeholder, not a CSS property.
+    props.discard("property-name")
+    return sorted(props)
+
+
+def emit(key: str, value) -> None:
+    text = "" if value is None else str(value)
+    print(f"{key}={text.replace(chr(10), ' ')}")
+
+
+def read_env(path: Path) -> dict[str, str]:
+    values = {}
+    if not path.is_file():
+        return values
+    for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        if "=" not in raw or raw.startswith("#"):
+            continue
+        key, value = raw.split("=", 1)
+        values[key.strip()] = value.strip()
+    return values
+
+
+def repo_path(value: str) -> Path | None:
+    path = Path(value)
+    if path.is_absolute():
+        return None
+    resolved = (ROOT / path).resolve()
+    try:
+        resolved.relative_to(ROOT.resolve())
+    except ValueError:
+        return None
+    return resolved
+
+
+def inventory_source(path_text: str, url: str) -> str:
+    if not path_text:
+        return fetch(url)
+    path = repo_path(path_text)
+    if path is None or not path.is_file():
+        raise ValueError("invalid-inventory-path")
+    return path.read_text(encoding="utf-8", errors="replace")
+
+
+def validate_behavior() -> tuple[bool, str, dict[str, str]]:
+    raw = read_env(BEHAVIOR_EVIDENCE)
+    values = {key: raw.get(f"html_css_behavior_{key}", "") for key in BEHAVIOR_KEYS}
+    values.update({
+        "execution_log_path": "",
+        "execution_log_sha256": "",
+        "executed_count": "0",
+        "passed_count": "0",
+        "failed_count": "0",
+        "empty_count": "",
+        "stub_count": "",
+        "spec_count": "",
+        "manual_count": "",
+        "receipt_sha256": "",
+    })
+    if not raw:
+        return False, "missing-behavior-evidence", values
+    if any(values[key] == "" for key in BEHAVIOR_KEYS):
+        return False, "incomplete-behavior-evidence", values
+    # Caller-authored path/SHA/revision/matrix fields are not provenance.
+    # Remain closed until an independently owned build workflow publishes a
+    # reviewed admission format.
+    return False, "trusted-runner-admission-unavailable", values
+
+
+def main() -> int:
+    inventory_status = "pass"
+    inventory_reason = "pass"
+    html = []
+    css = []
+    local_inventory = bool(HTML_INVENTORY_PATH or CSS_INVENTORY_PATH)
+    if local_inventory and not (HTML_INVENTORY_PATH and CSS_INVENTORY_PATH):
+        inventory_status = "evidence-blocked"
+        inventory_reason = "incomplete-local-inventory"
+    elif FETCH_INVENTORY or local_inventory:
+        try:
+            html = html_tags(inventory_source(HTML_INVENTORY_PATH, HTML_URL))
+            css = css_properties(inventory_source(CSS_INVENTORY_PATH, CSS_URL))
+        except Exception as exc:
+            inventory_status = "evidence-blocked"
+            inventory_reason = f"inventory-fetch-failed:{type(exc).__name__}"
+    else:
+        inventory_status = "evidence-blocked"
+        inventory_reason = "inventory-fetch-disabled"
+
+    declaration_source = DECLARATION_SOURCE.read_text(encoding="utf-8", errors="replace")
+    recognized_css = set(re.findall(
+        r'decl_tbl_get\([A-Za-z_][A-Za-z0-9_]*, "([a-z-]+)"\)',
+        declaration_source
+    ))
+    claimed_unrecognized_css = sorted(CSS_SUPPORTED - recognized_css)
+
+    if inventory_status == "pass" and len(html) != 113:
+        inventory_status = "fail"
+        inventory_reason = "unexpected-html-tag-count"
+    elif inventory_status == "pass" and len(css) < 390:
+        inventory_status = "fail"
+        inventory_reason = "unexpected-css-property-count"
+
+    behavior_valid, behavior_reason, behavior = validate_behavior()
+    status = "evidence-blocked"
+    reason = behavior_reason
+
+    emit("html_css_sspec_traceability_status", status)
+    emit("html_css_sspec_traceability_reason", reason)
+    emit("html_css_sspec_traceability_inventory_status", inventory_status)
+    emit("html_css_sspec_traceability_inventory_reason", inventory_reason)
+    emit("html_css_sspec_traceability_behavior_evidence", BEHAVIOR_EVIDENCE)
+    emit("html_css_sspec_traceability_behavior_evidence_valid", str(behavior_valid).lower())
+    emit("html_css_sspec_traceability_html_url", HTML_URL)
+    emit("html_css_sspec_traceability_css_url", CSS_URL)
+    emit("html_css_sspec_traceability_html_tag_count", len(html))
+    emit("html_css_sspec_traceability_required_html_tag_count", 113)
+    emit("html_css_sspec_traceability_html_tag_missing", "")
+    emit("html_css_sspec_traceability_css_property_count", len(css))
+    emit("html_css_sspec_traceability_required_css_property_min_count", 390)
+    emit("html_css_sspec_traceability_css_property_missing_count", "")
+    emit("html_css_sspec_traceability_css_property_missing", "")
+    emit("html_css_sspec_traceability_implemented_css_property_count", 0)
+    emit("html_css_sspec_traceability_implemented_css_property_indexed_count", 0)
+    emit("html_css_sspec_traceability_implemented_css_property_missing_count", "")
+    emit("html_css_sspec_traceability_implemented_css_property_missing", "")
+    emit("html_css_sspec_traceability_claimed_unrecognized_css_properties", ",".join(claimed_unrecognized_css))
+    emit("html_css_sspec_traceability_unsupported_css_property_count", 0)
+    emit("html_css_sspec_traceability_unsupported_css_properties", "")
+    emit("html_css_sspec_traceability_unsupported_css_property_missing_count", "")
+    emit("html_css_sspec_traceability_unsupported_css_property_missing", "")
+    emit("html_css_sspec_traceability_implemented_css_subset_spec", CSS_IMPLEMENTED_SPEC)
+    emit("html_css_sspec_traceability_unsupported_css_inventory_spec", CSS_INVENTORY_SPEC)
+    emit("html_css_sspec_traceability_runner_path", behavior.get("runner_path", ""))
+    emit("html_css_sspec_traceability_runner_sha256", behavior.get("runner_sha256", ""))
+    emit("html_css_sspec_traceability_source_revision", behavior.get("source_revision", ""))
+    emit("html_css_sspec_traceability_matrix_path", behavior.get("matrix_path", ""))
+    emit("html_css_sspec_traceability_matrix_sha256", behavior.get("matrix_sha256", ""))
+    emit("html_css_sspec_traceability_execution_log_path", behavior.get("execution_log_path", ""))
+    emit("html_css_sspec_traceability_execution_log_sha256", behavior.get("execution_log_sha256", ""))
+    emit("html_css_sspec_traceability_executed_count", behavior.get("executed_count", "0"))
+    emit("html_css_sspec_traceability_passed_count", behavior.get("passed_count", "0"))
+    emit("html_css_sspec_traceability_failed_count", behavior.get("failed_count", "0"))
+    emit("html_css_sspec_traceability_empty_count", behavior.get("empty_count", ""))
+    emit("html_css_sspec_traceability_stub_count", behavior.get("stub_count", ""))
+    emit("html_css_sspec_traceability_spec_count", behavior.get("spec_count", ""))
+    emit("html_css_sspec_traceability_manual_count", behavior.get("manual_count", ""))
+    emit("html_css_sspec_traceability_receipt_sha256", behavior.get("receipt_sha256", ""))
+    return 1
+
+
+try:
+    sys.exit(main())
+except Exception as exc:
+    emit("html_css_sspec_traceability_status", "evidence-blocked")
+    emit("html_css_sspec_traceability_reason", "traceability-exception")
+    emit("html_css_sspec_traceability_error", f"{type(exc).__name__}:{exc}")
+    emit("html_css_sspec_traceability_html_url", HTML_URL)
+    emit("html_css_sspec_traceability_css_url", CSS_URL)
+    emit("html_css_sspec_traceability_required_html_tag_count", 113)
+    emit("html_css_sspec_traceability_required_css_property_min_count", 390)
+    sys.exit(1)
+PY
+code=$?
+set -e
+
+mv "$tmp_env" "$OUT_ENV"
+trap - EXIT HUP INT TERM
+
+status="$(sed -n 's/^html_css_sspec_traceability_status=//p' "$OUT_ENV" | tail -n 1)"
+reason="$(sed -n 's/^html_css_sspec_traceability_reason=//p' "$OUT_ENV" | tail -n 1)"
+html_count="$(sed -n 's/^html_css_sspec_traceability_html_tag_count=//p' "$OUT_ENV" | tail -n 1)"
+css_count="$(sed -n 's/^html_css_sspec_traceability_css_property_count=//p' "$OUT_ENV" | tail -n 1)"
+implemented_css_count="$(sed -n 's/^html_css_sspec_traceability_implemented_css_property_count=//p' "$OUT_ENV" | tail -n 1)"
+implemented_css_spec="$(sed -n 's/^html_css_sspec_traceability_implemented_css_subset_spec=//p' "$OUT_ENV" | tail -n 1)"
+inventory_css_spec="$(sed -n 's/^html_css_sspec_traceability_unsupported_css_inventory_spec=//p' "$OUT_ENV" | tail -n 1)"
+
+{
+    echo "# HTML/CSS SSpec Traceability"
+    echo
+    echo "- status: $status"
+    echo "- reason: $reason"
+    echo "- WHATWG HTML elements: $html_count/113"
+    echo "- W3C CSS property-like entries: $css_count >= 390"
+    echo "- implemented Simple Web CSS properties: $implemented_css_count"
+    echo "- implemented CSS subset spec: $implemented_css_spec"
+    echo "- unsupported CSS inventory spec: $inventory_css_spec"
+    echo "- qualified executed scenarios: $(sed -n 's/^html_css_sspec_traceability_executed_count=//p' "$OUT_ENV" | tail -n 1)"
+    echo "- qualified passed scenarios: $(sed -n 's/^html_css_sspec_traceability_passed_count=//p' "$OUT_ENV" | tail -n 1)"
+    echo "- qualified failed scenarios: $(sed -n 's/^html_css_sspec_traceability_failed_count=//p' "$OUT_ENV" | tail -n 1)"
+    echo "- qualified runner SHA-256: $(sed -n 's/^html_css_sspec_traceability_runner_sha256=//p' "$OUT_ENV" | tail -n 1)"
+    echo "- matrix SHA-256: $(sed -n 's/^html_css_sspec_traceability_matrix_sha256=//p' "$OUT_ENV" | tail -n 1)"
+    echo
+    echo "## Raw Evidence"
+    sed 's/^/- /' "$OUT_ENV"
+} >"$REPORT_PATH"
+
+cat "$OUT_ENV"
+exit "$code"

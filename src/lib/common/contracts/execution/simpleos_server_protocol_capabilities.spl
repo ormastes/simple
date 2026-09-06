@@ -1,0 +1,106 @@
+# Canonical reachability projection for SimpleOS production servers.
+#
+# This module contains policy and manifest construction only.  Wire parsing,
+# HTTP dispatch, SSH sessions, and SFTP remain owned by their existing stacks.
+
+use std.common.contracts.execution.simpleos_capability_v1.{
+    ProtocolCapabilityManifestV1,
+    protocol_capability_manifest_v1_new,
+    protocol_capability_manifest_v1_with_probe
+}
+
+pub fn simpleos_http_protocol_reachable(protocol: text) -> bool:
+    # These names must match worker_owner.dispatch_by_alpn.  WebSocket is an
+    # HTTP/1.1 route capability, not a TLS ALPN protocol.  H3/QUIC and
+    # WebTransport have framing modules but no reachable production transport.
+    protocol == "http/1.1" or protocol == "h2"
+
+pub fn simpleos_http_alpn_protocols() -> [text]:
+    ["h2", "http/1.1"]
+
+pub fn simpleos_http_select_alpn(offered: text) -> text:
+    if simpleos_http_protocol_reachable(offered): offered else: ""
+
+fn _http_manifest(protocol: text, tls_enabled: bool, probe_id: text, evidence_id: text) -> ProtocolCapabilityManifestV1:
+    var manifest = protocol_capability_manifest_v1_new(
+        "simpleos-http-production-v1", protocol, if tls_enabled: "tcp+tls" else: "tcp"
+    )
+    manifest.tls_required = tls_enabled
+    manifest.tls_versions = if tls_enabled: ["TLS-1.2"] else: []
+    manifest.alpn = [if tls_enabled: protocol else: "cleartext-http/1.1"]
+    manifest.auth_methods = [if tls_enabled: "server-certificate" else: "none"]
+    manifest.algorithms = [if tls_enabled: "AES-128-GCM-SHA256" else: "none"]
+    manifest.operations = ["request", "response", "bounded-close"]
+    protocol_capability_manifest_v1_with_probe(
+        manifest, probe_id, evidence_id, probe_id != "" and evidence_id != "", probe_id != "" and evidence_id != ""
+    )
+
+pub fn simpleos_http_capability_manifests(tls_enabled: bool, h1_request_response_verified: bool, h2_request_response_verified: bool, probe_id: text, evidence_id: text) -> [ProtocolCapabilityManifestV1]:
+    # Do not add h3, quic, webtransport, or websocket here without a reachable
+    # production dispatch owner and its own live evidence.
+    var manifests: [ProtocolCapabilityManifestV1] = []
+    if h1_request_response_verified:
+        manifests.push(_http_manifest("http/1.1", tls_enabled, probe_id, evidence_id))
+    if tls_enabled and h2_request_response_verified:
+        manifests.push(_http_manifest("h2", true, probe_id, evidence_id))
+    manifests
+
+pub struct ServerProtocolProbeHandle:
+    generation: i64
+    sequence: i64
+    authority: text
+    authenticated: bool
+    channel_opened: bool
+    sftp_subsystem_opened: bool
+
+pub fn server_protocol_probe_handle_admitted(
+    handle: ServerProtocolProbeHandle,
+    expected_generation: i64,
+    expected_sequence: i64,
+    expected_authority: text,
+    consumed_sequence: i64
+) -> bool:
+    handle.generation == expected_generation and handle.sequence > 0 and
+        handle.sequence == expected_sequence and handle.sequence != consumed_sequence and
+        handle.authority != "" and handle.authority == expected_authority and
+        handle.authenticated and handle.channel_opened
+
+pub fn simpleos_ssh_protocol_reachable(protocol: text, daemon_ready: bool, sftp_owner_ready: bool) -> bool:
+    if protocol == "ssh":
+        return daemon_ready
+    if protocol == "sftp-v3":
+        return daemon_ready and sftp_owner_ready
+    false
+
+fn _ssh_manifest(protocol: text, probe_id: text, evidence_id: text) -> ProtocolCapabilityManifestV1:
+    var manifest = protocol_capability_manifest_v1_new("simpleos-sshd-production-v1", protocol, "tcp")
+    manifest.tls_required = false
+    manifest.tls_versions = []
+    manifest.alpn = [if protocol == "ssh": "ssh-2.0" else: "sftp-v3"]
+    manifest.auth_methods = ["public-key"]
+    manifest.algorithms = ["curve25519-sha256", "ssh-ed25519"]
+    manifest.operations = if protocol == "ssh":
+        ["authenticate", "session-channel", "exec", "shell", "bounded-close"]
+    else:
+        ["authenticated-subsystem", "init-v3", "bounded-framing", "close"]
+    protocol_capability_manifest_v1_with_probe(
+        manifest, probe_id, evidence_id, probe_id != "" and evidence_id != "", probe_id != "" and evidence_id != ""
+    )
+
+pub fn simpleos_ssh_capability_manifests(
+    daemon_ready: bool,
+    sftp_owner_ready: bool,
+    probe_id: text,
+    evidence_id: text
+) -> [ProtocolCapabilityManifestV1]:
+    var manifests: [ProtocolCapabilityManifestV1] = []
+    if simpleos_ssh_protocol_reachable("ssh", daemon_ready, sftp_owner_ready):
+        manifests.push(_ssh_manifest("ssh", probe_id, evidence_id))
+    if simpleos_ssh_protocol_reachable("sftp-v3", daemon_ready, sftp_owner_ready):
+        manifests.push(_ssh_manifest("sftp-v3", probe_id, evidence_id))
+    manifests
+
+export simpleos_http_protocol_reachable, simpleos_http_alpn_protocols
+export simpleos_http_select_alpn, simpleos_http_capability_manifests
+export simpleos_ssh_protocol_reachable, simpleos_ssh_capability_manifests
+export ServerProtocolProbeHandle, server_protocol_probe_handle_admitted

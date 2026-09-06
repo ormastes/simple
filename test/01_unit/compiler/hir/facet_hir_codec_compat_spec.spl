@@ -1,0 +1,108 @@
+"""HIR typed-facet codec and generated-schema compatibility regression."""
+
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.core.parser_decls.{parser_set_aspect_context, parser_clear_aspect_context}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.statements.*
+use compiler.hir.hir_codec.{hir_module_encode, hir_module_decode}
+use compiler.hir.hir_definitions.{HirExprKind, HirFacetAcquireMode}
+use compiler.hir.hir_types.{HirExpr, HirType, HirTypeKind}
+use compiler.common.diagnostics.span.{Span}
+use common.facet_abi.{FacetInterfaceId, ConcreteTypeId}
+
+describe "typed facet HIR codec compatibility":
+    it "round trips facet collections on a lowered module":
+        step("Lower and encode a module containing all declaration families")
+        val source = "aspect a:\n" +
+            "    facet interface Readable:\n" +
+            "        fn read(self) -> i64\n" +
+            "    facet impl ReadableImpl:\n" +
+            "        for File\n" +
+            "        implements Readable\n" +
+            "        public readonly:\n" +
+            "        fn read(self) -> i64:\n" +
+            "            1\n" +
+            "    bind facet Readable to pc{type File} using ReadableImpl\n" +
+            "    require facet Readable on pc{type File}\n"
+        parser_set_aspect_context("a", 1,
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        val parsed = parse_full_frontend(source, "facet_hir.spl", "facet_hir", Logger(level: 0))
+        parser_clear_aspect_context()
+        var lowering = HirLowering.with_filename("facet_hir.spl")
+        val module = lowering.lower_module(parsed)
+        val blob = hir_module_encode(module)
+        expect(blob != "").to_equal(true)
+        val decoded = hir_module_decode(blob)
+        expect(decoded != nil).to_equal(true)
+        val back = decoded.unwrap()
+        expect(back.facet_interfaces.len()).to_equal(1)
+        expect(back.facet_impls.len()).to_equal(1)
+        expect(back.facet_bindings.len()).to_equal(1)
+        expect(back.facet_requirements.len()).to_equal(1)
+        expect(hir_module_encode(back)).to_equal(blob)
+
+    it "keeps MethodCall ABI while retaining semantic-stage generic arguments":
+        step("Inspect generated codec, visitor, and hash outputs")
+        val defs = read_file("src/compiler/20.hir/hir_definitions.spl")
+        val codec = read_file("src/compiler/20.hir/generated/hir_codec.spl")
+        val visitor = read_file("src/compiler/20.hir/generated/hir_visitor.spl")
+        val hash = read_file("src/compiler/20.hir/generated/hir_hash.spl")
+        expect(defs).to_contain("resolution: MethodResolution, type_args: [HirType]")
+        expect(codec).to_contain("case MethodCall(b_receiver, b_method, b_args, b_resolution, b_type_args):")
+        expect(codec).to_contain(
+            "return HirExprKind.MethodCall(f_receiver, f_method, f_args, f_resolution, f_type_args)")
+        expect(visitor).to_contain("case FacetAcquire(b_receiver, b_interface_type, b_interface_id, b_static_concrete_type_hint, b_mode):")
+        expect(hash).to_contain("case FacetAcquire(b_receiver, b_interface_type, b_interface_id, b_static_concrete_type_hint, b_mode):")
+        expect(codec).to_contain("return HirExprKind.FacetAcquire(f_receiver, f_interface_type, f_interface_id, f_static_concrete_type_hint, f_mode)")
+
+    it "round trips appended MethodCall type arguments in the v3 HIR wire":
+        val parsed = parse_full_frontend(
+            "class Counter:\n" +
+            "    fn facet<T>(self) -> i64: 7\n" +
+            "fn use_counter(value: Counter) -> i64: value.facet<i64>()\n",
+            "method_type_args.spl", "method_type_args", Logger(level: 0))
+        val lowered = HirLowering.with_filename("method_type_args.spl").lower_module(parsed)
+        val decoded = hir_module_decode(hir_module_encode(lowered))
+        expect(decoded != nil).to_equal(true)
+        var retained = false
+        for function in decoded.unwrap().functions.values():
+            if function.name == "use_counter" and function.body.has:
+                match function.body.value.kind:
+                    case HirExprKind.MethodCall(_, "facet", _, _, type_args):
+                        retained = type_args.len() == 1
+                    case _: pass
+        expect(retained).to_equal(true)
+
+    it "round trips every FacetAcquire identity and mode field":
+        val parsed = parse_full_frontend(
+            "fn acquire() -> i64: 0\n", "facet_acquire_codec.spl",
+            "facet_acquire_codec", Logger(level: 0))
+        var lowered = HirLowering.with_filename("facet_acquire_codec.spl").lower_module(parsed)
+        val span = Span.empty()
+        val scalar = HirType(kind: HirTypeKind.Int(64, true), span: span)
+        for symbol in lowered.functions.keys():
+            var function = lowered.functions[symbol]
+            function.body.value = HirExpr(kind: HirExprKind.FacetAcquire(
+                HirExpr(kind: HirExprKind.IntLit(7, nil), has_type_: true,
+                    type_: scalar, span: span),
+                scalar, FacetInterfaceId(value: "iface/digest"),
+                Some(ConcreteTypeId(value: "concrete/digest")),
+                HirFacetAcquireMode.LoadRequired),
+                has_type_: false, type_: scalar, span: span)
+            function.body.has = true
+            lowered.functions[symbol] = function
+        val decoded = hir_module_decode(hir_module_encode(lowered)).unwrap()
+        var retained = false
+        for function in decoded.functions.values():
+            if function.body.has:
+                match function.body.value.kind:
+                    case HirExprKind.FacetAcquire(_, _, interface_id,
+                            static_hint, HirFacetAcquireMode.LoadRequired):
+                        retained = interface_id.value == "iface/digest" and
+                            static_hint != nil and
+                            static_hint.unwrap().value == "concrete/digest"
+                    case _: pass
+        expect(retained).to_equal(true)

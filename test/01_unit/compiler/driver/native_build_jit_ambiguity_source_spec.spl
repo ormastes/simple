@@ -1,0 +1,171 @@
+"""
+# Contract spec: test/01_unit/compiler/driver/native_build_jit_ambiguity_source_spec.spl
+
+## Purpose and Audience
+
+Audience: engineers owning the pinned repository sources. Purpose: keep the pinned observable
+contracts red-visible, so a regression in the owned code fails this spec
+instead of shipping silently.
+
+## Scope and Preconditions
+
+Precondition: the repository working tree holds the subject code under test.
+Each scenario exercises the subject and asserts its observable contract; no
+behavior outside the named subject is claimed.
+
+## Primary Workflow
+
+Run the scenarios; each one drives the subject through its pinned contract
+and asserts the expected observable outcome with an executed oracle.
+
+## Unsupported / Limitations
+
+Only the pinned contracts are asserted here; end-to-end and integration
+behavior of the surrounding system is covered by companion specs.
+
+## Verification and Recovery
+
+A red scenario names the contract that regressed. Recover by restoring the
+pinned behavior in the subject; verify with
+`bin/simple test test/01_unit/compiler/driver/native_build_jit_ambiguity_source_spec.spl` and a green Results line.
+"""
+
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+
+
+use std.spec.step
+
+use std.spec
+use std.spec.step
+use std.io_runtime.{file_read}
+
+
+describe "native-build JIT ambiguity source guards":
+    # @manual scenario evidence
+    it "keeps codegen cleanup owner-specific until seed receiver typing is retired":
+        # @req REQ-SSPEC-UNIT
+        step("keeps codegen cleanup owner-specific until seed receiver typing is retired")
+        val backend_src = file_read("src/compiler/70.backend/backend/compiler.spl")
+        val codegen_src = file_read("src/compiler/70.backend/codegen.spl")
+        val driver_src = file_read("src/compiler/80.driver/driver_pipeline.spl")
+        expect(backend_src).to_contain("compiled.release_codegen_module()")
+        expect(codegen_src).to_contain("fn release_codegen_module():")
+        expect(driver_src).to_contain("compiled.release_codegen_module()")
+        expect(backend_src).to_not_contain("rt_jit_cleanup")        expect(codegen_src).to_not_contain("rt_jit_cleanup")        expect(driver_src).to_not_contain("rt_jit_cleanup")
+    it "keeps template instantiation progress tracking off Set mutation assignment":
+        # @req REQ-SSPEC-UNIT
+        step("keeps template instantiation progress tracking off Set mutation assignment")
+        val src = file_read("src/compiler/40.mono/instantiation.spl")
+        expect(src).to_contain("in_progress: [text]")
+        expect(src).to_contain("self.in_progress = self.in_progress.push(key)")
+        expect(src).to_contain("_template_remove_text(self.in_progress, key)")
+        expect(src.contains("in_progress: Set<text>")).to_equal(false)
+        expect(src.contains("self.in_progress = self.in_progress.insert(key)")).to_equal(false)
+        expect(src.contains("self.in_progress = self.in_progress.remove(key)")).to_equal(false)
+
+    it "keeps lazy linker instantiation progress tracking off Set mutation assignment":
+        # @req REQ-SSPEC-UNIT
+        step("keeps lazy linker instantiation progress tracking off Set mutation assignment")
+        val src = file_read("src/compiler/70.backend/linker/lazy_instantiator.spl")
+        expect(src).to_contain("in_progress: [text]")
+        expect(src).to_contain("self.in_progress = self.in_progress.push(symbol)")
+        expect(src).to_contain("_lazy_remove_text(self.in_progress, symbol)")
+        expect(src.contains("in_progress: Set<text>")).to_equal(false)
+        expect(src.contains("self.in_progress = self.in_progress.insert(symbol)")).to_equal(false)
+        expect(src.contains("self.in_progress = self.in_progress.remove(symbol)")).to_equal(false)
+
+    it "keeps compatibility JIT progress tracking off Set mutation assignment":
+        step("Verify: keeps compatibility JIT progress tracking off Set mutation assignment")
+        # @req: REQ-SSPEC-LOCAL-001
+        val src = file_read("src/compiler/99.loader/jit_instantiator.spl")
+        expect(src).to_contain("in_progress: [text]")
+        expect(src).to_contain("self.in_progress = self.in_progress.push(name)")
+        expect(src).to_contain("_jit_remove_text(self.in_progress, name)")
+        expect(src.contains("in_progress: Set<text>")).to_equal(false)
+        expect(src.contains("self.in_progress = self.in_progress.insert(name)")).to_equal(false)
+        expect(src.contains("self.in_progress = self.in_progress.remove(name)")).to_equal(false)
+
+    it "keeps linker symbol collection and unresolved tracking receiver-explicit":
+        # @req REQ-SSPEC-UNIT
+        step("keeps linker symbol collection and unresolved tracking receiver-explicit")
+        val src = file_read("src/compiler/70.backend/linker/link.spl")
+        expect(src).to_contain("unresolved: [text]")
+        expect(src).to_contain("val smf_reader: SmfReaderImpl = reader")
+        expect(src).to_contain("for symbol in smf_reader.exported_symbols():")
+        expect(src).to_contain("not self.unresolved.contains(symbol.name)")
+        expect(src).to_contain("self.unresolved = self.unresolved.push(symbol.name)")
+        expect(src).to_not_contain("unresolved: Set<text>")        expect(src).to_not_contain("for symbol in reader.exported_symbols():")        expect(src).to_not_contain("\n                        self.unresolved.push(symbol.name)")
+    it "removes the dead generic backend run_module ambiguity surface":
+        # @req REQ-SSPEC-UNIT
+        step("removes the dead generic backend run_module ambiguity surface")
+        val src = file_read("src/compiler/80.driver/driver.spl")
+        expect(src).to_not_contain("fn run_module(backend: Backend, module: HirModule)")        expect(src).to_not_contain("backend.process_module(module)")
+    it "keeps SFFI process spec generation off the generic process_module name":
+        # @req REQ-SSPEC-UNIT
+        step("keeps SFFI process spec generation off the generic process_module name")
+        val workspace_src = file_read("src/compiler/90.tools/sffi_gen/sffi_gen_workspace.spl")
+        val process_src = file_read("src/compiler/90.tools/sffi_gen/specs/process_mod.spl")
+        val init_src = file_read("src/compiler/90.tools/sffi_gen/specs/__init__.spl")
+        expect(workspace_src).to_contain("sffi_process_module()")
+        expect(process_src).to_contain("fn sffi_process_module() -> ModuleSpec:")
+        expect(init_src).to_contain("export sffi_process_module")
+        expect(workspace_src).to_not_contain("process_module()")        expect(process_src).to_not_contain("fn process_module() -> ModuleSpec:")
+    it "keeps VHDL codegen helpers off ambiguous array push calls":
+        # @req REQ-SSPEC-UNIT
+        step("keeps VHDL codegen helpers off ambiguous array push calls")
+        val src = file_read("src/compiler/80.driver/driver_compile_vhdl_codegen.spl")
+        expect(src).to_contain("body_lines = body_lines + [raw_line]")
+        expect(src).to_contain("ports = ports + [clock_port]")
+        expect(src).to_contain("sanitized = sanitized + [port_name]")
+        expect(src).to_not_contain("body_lines = body_lines.push(raw_line)")        expect(src).to_not_contain("ports = ports.push(clock_port)")        expect(src).to_not_contain("ports = ports.push(\"        ")        expect(src).to_not_contain("sanitized = sanitized.push(port_name)")
+    it "keeps EffectEnv dirty tracking off Set insert and clear":
+        # @req REQ-SSPEC-UNIT
+        step("keeps EffectEnv dirty tracking off Set insert and clear")
+        val src = file_read("src/compiler/00.common/effects.spl")
+        expect(src).to_contain("dirty: [Symbol]")
+        expect(src).to_contain("_effect_symbol_append_unique(self.dirty, sym)")
+        expect(src).to_contain("self.dirty = []")
+        expect(src).to_not_contain("dirty: Set<Symbol>")        expect(src).to_not_contain("self.dirty.insert(sym)")        expect(src).to_not_contain("self.dirty.clear()")
+    it "passes native-build driver inputs through fixed bootstrap slots":
+        val cli_src = file_read("src/app/io/_CliCompile/compile_targets.spl")
+        val driver_src = file_read("src/compiler/80.driver/driver.spl")
+        expect(cli_src).to_contain("fn cli_native_build_add_bootstrap_input")
+        expect(cli_src).to_contain("options = cli_native_build_add_bootstrap_input(options, cf)")
+        expect(cli_src).to_contain("options = cli_native_build_add_bootstrap_input(options, source_dir)")
+        expect(cli_src).to_contain("options = cli_native_build_add_bootstrap_input(options, entry_point)")
+        expect(cli_src).to_contain("normalized = normalized.push(arg)")
+        expect(cli_src).to_contain("normalized = normalized.push(\"simple-core\")")
+        expect(cli_src).to_not_contain("bootstrap_input_0 = inputs[0]")        expect(cli_src).to_not_contain("cli_native_build_with_bootstrap_inputs")        expect(cli_src).to_not_contain("\n            normalized.push(")        expect(cli_src).to_not_contain("\n        normalized.push(arg)")        expect(driver_src).to_contain("if self.ctx.options.bootstrap_input_count > 0:")
+        expect(driver_src).to_contain("driver_inputs = driver_inputs + [self.ctx.options.bootstrap_input_0]")
+        expect(driver_src).to_contain("self.ctx.options.bootstrap_input_count <= 6")
+        expect(driver_src).to_contain("val input_len = driver_inputs.len()")
+        expect(driver_src).to_contain("val input_path = driver_inputs[i]")
+
+    it "parses the explicit native-build entry from fixed bootstrap inputs":
+        val driver_src = file_read("src/compiler/80.driver/driver.spl")
+        expect(driver_src).to_contain("val requested_entry_match = native_entry != \"\"")
+        expect(driver_src).to_contain("if native_entry_closure or requested_entry_match or _driver_is_bootstrap_entry_source")
+        expect(driver_src).to_contain("if not requested_entry_match:")
+
+    it "assigns driver source arrays after push for native JIT":
+        val driver_src = file_read("src/compiler/80.driver/driver.spl")
+        val loading_src = file_read("src/compiler/80.driver/driver_source_loading.spl")
+        expect(driver_src).to_contain("all_sources = all_sources.push(s)")
+        expect(driver_src).to_contain("entry_sources = entry_sources.push(source)")
+        expect(loading_src).to_contain("aliases = aliases.push(SourceFile")
+        expect(loading_src).to_contain("result = result.push(s)")
+        expect(driver_src.contains("\n                    all_sources.push(s)")).to_equal(false)
+        expect(driver_src.contains("\n                    entry_sources.push(source)")).to_equal(false)
+        expect(loading_src.contains("\n        aliases.push(SourceFile")).to_equal(false)
+        expect(loading_src.contains("\n                result.push(s)")).to_equal(false)
+
+    it "assigns native-build entrypoint argv arrays after push for native JIT":
+        # @req REQ-SSPEC-UNIT
+        step("assigns native-build entrypoint argv arrays after push for native JIT")
+        val src = file_read("src/app/cli/native_build_main.spl")
+        expect(src).to_contain("args = args.push(raw_args[i])")
+        expect(src).to_not_contain("worker_args = worker_args.push(\"--mode=interpreter\")")        expect(src).to_contain("worker_args = worker_args.push(arg)")
+        expect(src).to_not_contain("\n        args.push(raw_args[i])")        expect(src).to_not_contain("\n        worker_args.push(arg)")

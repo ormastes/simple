@@ -1,0 +1,252 @@
+# SFFI Signature Validation
+#
+# Manifest-based validation for dynamically loaded libraries.
+# Verifies expected functions exist and match declared arg counts.
+
+use std.sffi.dynamic.{DynI64FnSlot, SignatureVerifiedExactArtifactDynLib}
+use std.sffi.dynamic_versioned.{VersionedDynLib}
+use std.sffi.admission.{SffiAdmissionReceiptV1}
+
+# ============================================================================
+# Signature Declaration
+# ============================================================================
+
+struct FfiSignature:
+    name: text
+    arg_count: i64
+    return_type: text
+
+# ============================================================================
+# Manifest
+# ============================================================================
+
+class FfiManifest:
+    entries: {text: FfiSignature}
+
+impl FfiManifest:
+    static fn create() -> FfiManifest:
+        FfiManifest(entries: {})
+
+    me add(name: text, arg_count: i64, return_type: text):
+        self.entries[name] = FfiSignature(name: name, arg_count: arg_count, return_type: return_type)
+
+    fn get(name: text) -> FfiSignature?:
+        if self.entries.contains(name):
+            return self.entries[name]
+        nil
+
+    fn count() -> i64:
+        self.entries.len()
+
+    fn names() -> [text]:
+        var result: [text] = []
+        for key in self.entries:
+            result.push(key)
+        result
+
+# ============================================================================
+# Validation Result
+# ============================================================================
+
+struct FfiValidationResult:
+    total: i64
+    found: i64
+    missing: [text]
+    present: [text]
+
+fn validation_summary(result: FfiValidationResult) -> text:
+    "{result.found}/{result.total} functions found, {result.missing.len()} missing"
+
+# ============================================================================
+# Validation Functions
+# ============================================================================
+
+fn validate_library(lib: VersionedDynLib, manifest: FfiManifest) -> FfiValidationResult:
+    var found: i64 = 0
+    var missing: [text] = []
+    var present: [text] = []
+    val names = manifest.names()
+    var i = 0
+    while i < names.len():
+        if lib.has_symbol(names[i]):
+            found = found + 1
+            present.push(names[i])
+        else:
+            missing.push(names[i])
+        i = i + 1
+    FfiValidationResult(total: manifest.count(), found: found, missing: missing, present: present)
+
+fn validate_subset(lib: VersionedDynLib, manifest: FfiManifest, required_names: [text]) -> FfiValidationResult:
+    var found: i64 = 0
+    var missing: [text] = []
+    var present: [text] = []
+    var i = 0
+    while i < required_names.len():
+        if lib.has_symbol(required_names[i]):
+            found = found + 1
+            present.push(required_names[i])
+        else:
+            missing.push(required_names[i])
+        i = i + 1
+    FfiValidationResult(total: required_names.len(), found: found, missing: missing, present: present)
+
+fn has_required_symbols(lib: VersionedDynLib, required_names: [text]) -> bool:
+    var i = 0
+    while i < required_names.len():
+        if not lib.has_symbol(required_names[i]):
+            return false
+        i = i + 1
+    true
+
+fn classify_api_groups(lib: VersionedDynLib, groups: {text: [text]}) -> [text]:
+    var supported: [text] = []
+    for group_name in groups:
+        val funcs: [text] = groups[group_name]
+        var all_present = true
+        var i = 0
+        while i < funcs.len():
+            if not lib.has_symbol(funcs[i]):
+                all_present = false
+                i = funcs.len()
+            i = i + 1
+        if all_present:
+            supported.push(group_name)
+    supported
+
+# Atomically resolved integer-only manifest. Construction resolves every
+# symbol once; callers may retain a slot and invoke it without per-call dlsym.
+class ResolvedI64Manifest:
+    slots: {text: DynI64FnSlot}
+
+impl ResolvedI64Manifest:
+    fn count() -> i64:
+        self.slots.len()
+
+    fn get(name: text) -> DynI64FnSlot?:
+        if self.slots.contains(name):
+            return self.slots[name]
+        nil
+
+    @unsafe(reason: "cached integer slots remain unverified foreign ABI calls", capabilities: [ffi, raw_ptr])
+    fn call_checked(name: text, args: [i64]) -> Result<i64, text>:
+        if not self.slots.contains(name):
+            return Err("E-SFFI-001: symbol was not admitted into the resolved manifest: {name}")
+        self.slots[name].call_checked(args)
+
+struct EvidenceBoundI64SignatureV1:
+    name: text
+    arg_count: i64
+    source_signature_sha256: text
+
+class EvidenceBoundI64ManifestV1:
+    provider_id: text
+    target: text
+    artifact_sha256: text
+    abi_registry_sha256: text
+    entries: {text: EvidenceBoundI64SignatureV1}
+
+impl EvidenceBoundI64ManifestV1:
+    static fn create(
+        provider_id: text,
+        target: text,
+        artifact_sha256: text,
+        abi_registry_sha256: text,
+    ) -> EvidenceBoundI64ManifestV1:
+        EvidenceBoundI64ManifestV1(
+            provider_id: provider_id,
+            target: target,
+            artifact_sha256: artifact_sha256,
+            abi_registry_sha256: abi_registry_sha256,
+            entries: {},
+        )
+
+    me add(name: text, arg_count: i64, source_signature_sha256: text):
+        self.entries[name] = EvidenceBoundI64SignatureV1(
+            name: name,
+            arg_count: arg_count,
+            source_signature_sha256: source_signature_sha256,
+        )
+
+    fn count() -> i64:
+        self.entries.len()
+
+# Pure admission-identity validation. This does not grant authority or touch a
+# foreign handle; it only proves that the parsed receipt, expected manifest,
+# and already-observed artifact digest agree exactly.
+fn validate_evidence_bound_i64_identity(
+    manifest: EvidenceBoundI64ManifestV1,
+    receipt: SffiAdmissionReceiptV1,
+    open_artifact_sha256: text,
+) -> Result<bool, text>:
+    if receipt.provider_identity() != manifest.provider_id or
+       receipt.target_identity() != manifest.target:
+        return Err("E-SFFI-005: provider admission identity mismatch")
+    if receipt.artifact_digest() != manifest.artifact_sha256:
+        return Err("E-SFFI-004: provider artifact admission mismatch")
+    if open_artifact_sha256 != receipt.artifact_digest():
+        return Err("E-SFFI-004: open provider object does not match admitted artifact")
+    if receipt.abi_registry_digest() != manifest.abi_registry_sha256:
+        return Err("E-SFFI-003: provider ABI registry admission mismatch")
+    if receipt.source_signature_count() != manifest.count():
+        return Err("E-SFFI-006: admitted symbol closure size mismatch")
+
+    for name in manifest.entries:
+        val signature = manifest.entries[name]
+        match receipt.source_signature(name):
+            case Some(admitted_signature):
+                if admitted_signature != signature.source_signature_sha256:
+                    return Err("E-SFFI-006: stale admitted signature for {name}")
+            case nil:
+                return Err("E-SFFI-006: missing admitted signature for {name}")
+        if signature.arg_count < 0 or signature.arg_count > 8:
+            return Err("E-SFFI-003: {name} arity {signature.arg_count} is outside 0..8")
+    Ok(true)
+
+@unsafe(
+    reason: "signed exact-artifact admission authenticates identity but generic integer calls cannot prove semantic or memory safety",
+    capabilities: [ffi, raw_ptr],
+)
+fn resolve_evidence_bound_i64_manifest(
+    lib: SignatureVerifiedExactArtifactDynLib,
+    manifest: EvidenceBoundI64ManifestV1,
+) -> Result<ResolvedI64Manifest, text>:
+    val receipt = lib.verified_admission().verified_receipt()
+    match validate_evidence_bound_i64_identity(
+        manifest, receipt, lib.artifact_digest()):
+        case Err(error): return Err(error)
+        case Ok(_): pass
+
+    var slots: {text: DynI64FnSlot} = {}
+    for name in manifest.entries:
+        val signature = manifest.entries[name]
+        match lib.resolve_i64_checked(name, signature.arg_count):
+            case Ok(slot):
+                slots[name] = slot
+            case Err(error):
+                return Err(error)
+
+    # Publish only after every identity, signature, arity, and symbol resolves.
+    Ok(ResolvedI64Manifest(slots: slots))
+
+@unsafe(reason: "resolves unverified provider symbols into integer-only ABI slots", capabilities: [ffi, raw_ptr])
+fn resolve_i64_manifest(lib: VersionedDynLib, manifest: FfiManifest) -> Result<ResolvedI64Manifest, text>:
+    var slots: {text: DynI64FnSlot} = {}
+    val names = manifest.names()
+    var i = 0
+    while i < names.len():
+        val name = names[i]
+        match manifest.get(name):
+            case Some(signature):
+                if signature.return_type != "i64":
+                    return Err("E-SFFI-003: {name} return type is {signature.return_type}; resolved i64 manifest requires i64")
+                if signature.arg_count < 0 or signature.arg_count > 8:
+                    return Err("E-SFFI-003: {name} arity {signature.arg_count} is outside 0..8")
+                match lib.lib.resolve_i64_checked(name, signature.arg_count):
+                    case Ok(slot):
+                        slots[name] = slot
+                    case Err(error):
+                        return Err(error)
+            case nil:
+                return Err("E-SFFI-003: manifest lost signature for {name}")
+        i = i + 1
+    Ok(ResolvedI64Manifest(slots: slots))

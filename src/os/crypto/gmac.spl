@@ -1,0 +1,74 @@
+# GMAC — Authentication-only AES-GCM (NIST SP 800-38D §4)
+#
+# GMAC is GCM with empty plaintext.  The authentication tag is:
+#   T = GHASH_H(AAD, []) XOR AES_K(J0)
+# which is exactly what aes128_gcm_encrypt returns when plaintext = [].
+#
+# Delegates to os.crypto.aes128_gcm.aes128_gcm_encrypt so there is no
+# duplicated GHASH or GCTR logic.  Only AES-128 keys (16 bytes) are
+# supported; the fast-path extern (rt_tls13_aes128_gcm_encrypt) is
+# transparently used when available.
+#
+# Reference: NIST SP 800-38D §4, §6.5
+
+use os.crypto.aes128_gcm.{aes128_gcm_encrypt}
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+fn _ct_eq_bytes(a: [u8], b: [u8]) -> bool:
+    """Constant-time byte-slice equality using XOR accumulator + black_box."""
+    if a.len() != b.len():
+        return false
+    var diff: u8 = 0u8
+    var i: u64 = 0
+    while i < a.len():
+        diff = diff | (a[i] ^ b[i])
+        i = i + 1
+    diff == 0u8
+
+fn _last16(buf: [u8]) -> [u8]:
+    """Extract the last 16 bytes of buf (the GCM tag)."""
+    var tag: [u8] = []
+    val start = buf.len() - 16
+    var i: u64 = start
+    while i < buf.len():
+        tag.push(buf[i])
+        i = i + 1
+    tag
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+pub fn gmac_compute(key: [u8], iv: [u8], aad: [u8]) -> [u8]:
+    """Compute a 16-byte GMAC tag over AAD with an empty plaintext.
+
+    Args:
+        key: 16-byte AES-128 key.
+        iv:  12-byte initialization vector (nonce).
+        aad: Additional authenticated data to authenticate (not encrypted).
+
+    Returns: 16-byte authentication tag.
+
+    GMAC = GCM encrypt with empty plaintext; the result of
+    aes128_gcm_encrypt is just the 16-byte tag when plaintext = [].
+    """
+    val empty: [u8] = []
+    val result = aes128_gcm_encrypt(key, iv, empty, aad)
+    _last16(result)
+
+pub fn gmac_verify(key: [u8], iv: [u8], aad: [u8], tag: [u8]) -> bool:
+    """Verify a 16-byte GMAC tag in constant time.
+
+    Args:
+        key: 16-byte AES-128 key.
+        iv:  12-byte initialization vector (nonce).
+        aad: Additional authenticated data.
+        tag: 16-byte tag to verify.
+
+    Returns: true iff tag matches the computed GMAC tag.
+    """
+    val expected = gmac_compute(key, iv, aad)
+    _ct_eq_bytes(expected, tag)

@@ -1,0 +1,792 @@
+# HTTP Client and URL Parsing
+#
+# HTTP/HTTPS client implementation and URL parsing utilities.
+# Provides high-level HTTP operations and URL manipulation.
+#
+# Components:
+# - HttpMethod: HTTP request methods (GET, POST, etc.)
+# - HttpRequest: HTTP request builder
+# - HttpResponse: HTTP response with status and body
+# - HttpClient: HTTP/HTTPS client
+# - Url: URL parser and accessor
+# - UrlBuilder: Programmatic URL construction
+#
+# Features:
+# - GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS
+# - Request/response headers
+# - Timeout support
+# - Redirect following
+# - URL parsing and encoding
+# - Query parameter handling
+
+use std.error.{SimpleError, error}
+use std.net.sffi.{bytes_to_string, file_write_bytes, url_decode, url_encode}
+use std.nogc_sync_mut.io.http_sffi.{http_request_v2_raw}
+use std.nogc_sync_mut.http_client.types.{parse_url as parse_url_parts,
+    url_default_port}
+
+# ============================================================================
+# HttpMethod - HTTP Request Methods
+# ============================================================================
+
+enum HttpMethod:
+    """HTTP request method."""
+    GET
+    POST
+    PUT
+    DELETE
+    HEAD
+    OPTIONS
+    PATCH
+
+impl HttpMethod:
+    fn to_string() -> text:
+        """Convert to string."""
+        match self:
+            case HttpMethod.GET: "GET"
+            case HttpMethod.POST: "POST"
+            case HttpMethod.PUT: "PUT"
+            case HttpMethod.DELETE: "DELETE"
+            case HttpMethod.HEAD: "HEAD"
+            case HttpMethod.OPTIONS: "OPTIONS"
+            case HttpMethod.PATCH: "PATCH"
+
+# ============================================================================
+# HttpRequest - HTTP Request Builder
+# ============================================================================
+
+class HttpRequest:
+    """HTTP request.
+
+    Example:
+        val req = HttpRequest.new(HttpMethod.GET, "/api/users")
+            .header("Accept", "application/json")
+            .header("User-Agent", "SimpleHTTP/1.0")
+    """
+    method: HttpMethod
+    path: text
+    headers: {text: text}
+    body: [u8]?
+
+    static fn new(method: HttpMethod, path: text) -> HttpRequest:
+        """Create HTTP request.
+
+        Args:
+            method: HTTP method
+            path: Request path
+
+        Returns:
+            HttpRequest
+        """
+        HttpRequest(
+            method: method,
+            path: path,
+            headers: {},
+            body: nil
+        )
+
+    me header(name: text, value: text) -> HttpRequest:
+        """Add header.
+
+        Args:
+            name: Header name
+            value: Header value
+
+        Returns:
+            Self (for chaining)
+        """
+        self.headers[name] = value
+        self
+
+    me body_text(text: text) -> HttpRequest:
+        """Set text body.
+
+        Args:
+            text: Body text
+
+        Returns:
+            Self (for chaining)
+        """
+        self.body = Some(text.as_bytes())
+        self
+
+    me body_bytes(bytes: [u8]) -> HttpRequest:
+        """Set binary body.
+
+        Args:
+            bytes: Body bytes
+
+        Returns:
+            Self (for chaining)
+        """
+        self.body = Some(bytes)
+        self
+
+# ============================================================================
+# HttpResponse - HTTP Response
+# ============================================================================
+
+class HttpResponse:
+    """HTTP response.
+
+    Example:
+        val resp = client.get("https://api.example.com/users")?
+        print "Status: {resp.status}"
+        print "Body: {resp.body_text()}"
+    """
+    status: i64
+    reason: text
+    headers: {text: text}
+    body: [u8]
+
+    fn is_success() -> bool:
+        """Check if response is successful (2xx).
+
+        Returns:
+            true if status 200-299
+        """
+        self.status >= 200 and self.status < 300
+
+    fn is_redirect() -> bool:
+        """Check if response is redirect (3xx).
+
+        Returns:
+            true if status 300-399
+        """
+        self.status >= 300 and self.status < 400
+
+    fn is_client_error() -> bool:
+        """Check if response is client error (4xx).
+
+        Returns:
+            true if status 400-499
+        """
+        self.status >= 400 and self.status < 500
+
+    fn is_server_error() -> bool:
+        """Check if response is server error (5xx).
+
+        Returns:
+            true if status 500-599
+        """
+        self.status >= 500 and self.status < 600
+
+    fn body_text() -> text:
+        """Get body as text.
+
+        Returns:
+            Body decoded as UTF-8
+        """
+        bytes_to_string(self.body)
+
+    fn header(name: text) -> text?:
+        """Get header value.
+
+        Args:
+            name: Header name (case-insensitive)
+
+        Returns:
+            Some(value) or nil
+        """
+        self.headers.get(name.lower())
+
+# ============================================================================
+# HttpClient - HTTP/HTTPS Client
+# ============================================================================
+
+class HttpClient:
+    """HTTP/HTTPS client.
+
+    Supports GET, POST, PUT, DELETE, etc.
+
+    Example:
+        val client = HttpClient.new()
+        val resp = client.get("https://api.example.com/users")?
+        if resp.is_success():
+            print resp.body_text()
+    """
+    timeout_ms: i64?
+    follow_redirects: bool
+    max_redirects: i64
+
+    static fn new() -> HttpClient:
+        """Create HTTP client with defaults.
+
+        Returns:
+            HttpClient
+        """
+        HttpClient(
+            timeout_ms: Some(30000),  # 30 second default
+            follow_redirects: true,
+            max_redirects: 10
+        )
+
+    me set_timeout(timeout_ms: i64?) -> HttpClient:
+        """Set request timeout.
+
+        Args:
+            timeout_ms: Timeout in ms or nil for no timeout
+
+        Returns:
+            Self (for chaining)
+        """
+        self.timeout_ms = timeout_ms
+        self
+
+    me set_follow_redirects(follow: bool) -> HttpClient:
+        """Set redirect following.
+
+        Args:
+            follow: true to follow redirects
+
+        Returns:
+            Self (for chaining)
+        """
+        self.follow_redirects = follow
+        self
+
+    fn get(url: text) -> Result<HttpResponse, SimpleError>:
+        """Send GET request.
+
+        Args:
+            url: Full URL
+
+        Returns:
+            Result with HttpResponse or error
+
+        Example:
+            val resp = client.get("https://example.com")?
+        """
+        val req = HttpRequest.new(HttpMethod.GET, "/")
+        self.request(url, req)
+
+    fn post(url: text, body: [u8]) -> Result<HttpResponse, SimpleError>:
+        """Send POST request.
+
+        Args:
+            url: Full URL
+            body: Request body
+
+        Returns:
+            Result with HttpResponse or error
+        """
+        val req = HttpRequest.new(HttpMethod.POST, "/")
+            .body_bytes(body)
+        self.request(url, req)
+
+    fn put(url: text, body: [u8]) -> Result<HttpResponse, SimpleError>:
+        """Send PUT request.
+
+        Args:
+            url: Full URL
+            body: Request body
+
+        Returns:
+            Result with HttpResponse or error
+        """
+        val req = HttpRequest.new(HttpMethod.PUT, "/")
+            .body_bytes(body)
+        self.request(url, req)
+
+    fn delete(url: text) -> Result<HttpResponse, SimpleError>:
+        """Send DELETE request.
+
+        Args:
+            url: Full URL
+
+        Returns:
+            Result with HttpResponse or error
+        """
+        val req = HttpRequest.new(HttpMethod.DELETE, "/")
+        self.request(url, req)
+
+    fn request(url: text, request: HttpRequest) -> Result<HttpResponse, SimpleError>:
+        """Send custom request.
+
+        Args:
+            url: Full URL
+            request: HttpRequest
+
+        Returns:
+            Result with HttpResponse or error
+        """
+        var current_url = url
+        var current_request = request
+        var redirect_count = 0
+        while true:
+            val response = self._request_once(current_url, current_request)?
+            if not self.follow_redirects or not _http_redirect_status(response.status):
+                return Ok(response)
+            match response.header("location"):
+                nil:
+                    return Ok(response)
+                Some(location):
+                    if redirect_count >= self.max_redirects:
+                        return Err(error("HTTP redirect limit exceeded"))
+                    match _resolve_http_redirect(current_url, location):
+                        nil:
+                            return Err(error("invalid HTTP redirect location"))
+                        Some(next_url):
+                            val same_origin = _http_same_origin(current_url, next_url)
+                            current_url = next_url
+                            val next_headers = _http_redirect_headers(
+                                current_request.headers, same_origin)
+                            if response.status == 303 or
+                                ((response.status == 301 or response.status == 302) and
+                                 current_request.method == HttpMethod.POST):
+                                current_request = HttpRequest(
+                                    method: HttpMethod.GET,
+                                    path: current_request.path,
+                                    headers: next_headers,
+                                    body: nil
+                                )
+                            else:
+                                current_request = HttpRequest(
+                                    method: current_request.method,
+                                    path: current_request.path,
+                                    headers: next_headers,
+                                    body: current_request.body
+                                )
+                    redirect_count = redirect_count + 1
+
+    fn _request_once(url: text, request: HttpRequest) -> Result<HttpResponse, SimpleError>:
+        var raw_headers: [text] = []
+        for pair in request.headers:
+            val name = pair.0
+            val value = pair.1
+            if name.len() == 0 or name != name.trim() or name.contains(":") or
+                    name.contains(" ") or name.contains("\t") or
+                    name.contains("\r") or name.contains("\n") or
+                    value.contains("\r") or value.contains("\n"):
+                return Err(error("invalid HTTP request header"))
+            raw_headers.push("{name}: {value}")
+        val body = match request.body:
+            case Some(bytes): bytes
+            case nil: []
+        val timeout = match self.timeout_ms:
+            case Some(ms): ms
+            case nil: 0
+        val result = http_request_v2_raw(
+            request.method.to_string(), url, raw_headers, body, timeout)
+        if result.0 < 0:
+            val message = if result.4.len() > 0: result.4 else: "HTTP transport failed"
+            return Err(error(message))
+        Ok(HttpResponse(
+            status: result.0,
+            reason: result.1,
+            headers: _parse_http_response_headers(result.2),
+            body: result.3
+        ))
+
+fn _parse_http_response_headers(raw: text) -> {text: text}:
+    var headers: {text: text} = {}
+    for raw_line in raw.split("\n"):
+        val line = if raw_line.ends_with("\r"):
+            raw_line.substring(0, raw_line.len() - 1)
+        else:
+            raw_line
+        val separator = line.index_of(":")
+        if separator > 0:
+            val name = line.substring(0, separator).trim().lower()
+            val value = line.substring(separator + 1, line.len()).trim()
+            if name.len() > 0:
+                headers[name] = value
+    headers
+
+fn _http_redirect_status(status: i64) -> bool:
+    status == 301 or status == 302 or status == 303 or
+        status == 307 or status == 308
+
+fn _http_same_origin(left: text, right: text) -> bool:
+    match (Url.parse(left), Url.parse(right)):
+        case (Ok(a), Ok(b)):
+            a.scheme == b.scheme and a.host == b.host and a.port == b.port
+        case _:
+            false
+
+fn _http_redirect_headers(headers: {text: text}, same_origin: bool) -> {text: text}:
+    var result: {text: text} = {}
+    for pair in headers:
+        val name = pair.0.lower()
+        if name != "host" and name != "content-length" and
+                (same_origin or (name != "authorization" and name != "cookie" and
+                                  name != "proxy-authorization")):
+            result[pair.0] = pair.1
+    result
+
+fn _resolve_http_redirect(base_url: text, location: text) -> text?:
+    if location.len() == 0:
+        return Some(base_url)
+    if location.starts_with("http://") or location.starts_with("https://"):
+        match Url.parse(location):
+            case Ok(_): return Some(location)
+            case Err(_): return nil
+    match Url.parse(base_url):
+        case Err(_): nil
+        case Ok(base):
+            val port_text = match base.port:
+                case Some(port): ":{port}"
+                case nil: ""
+            val origin = "{base.scheme}://{base.host}{port_text}"
+            if location.starts_with("//"):
+                val candidate = "{base.scheme}:{location}"
+                match Url.parse(candidate):
+                    case Ok(_): Some(candidate)
+                    case Err(_): nil
+            elif location.starts_with("/"):
+                Some("{origin}{location}")
+            elif location.starts_with("?"):
+                Some("{origin}{base.path}{location}")
+            elif location.starts_with("#"):
+                val fragment = base_url.index_of("#")
+                val without_fragment = if fragment >= 0:
+                    base_url.substring(0, fragment)
+                else:
+                    base_url
+                Some("{without_fragment}{location}")
+            else:
+                val slash = base.path.last_index_of("/")
+                val directory = if slash >= 0:
+                    base.path.substring(0, slash + 1)
+                else:
+                    "/"
+                Some("{origin}{directory}{location}")
+
+# ============================================================================
+# Url - URL Parsing and Manipulation
+# ============================================================================
+
+class Url:
+    """URL parser and builder.
+
+    Parses and manipulates URLs.
+
+    Example:
+        val url = Url.parse("https://example.com:8080/path?key=value")?
+        print url.host()      # "example.com"
+        print url.port()      # Some(8080)
+        print url.path()      # "/path"
+    """
+    scheme: text
+    host: text
+    port: i64?
+    path: text
+    query: text?
+    fragment: text?
+
+    static fn parse(url: text) -> Result<Url, SimpleError>:
+        """Parse URL from string.
+
+        Args:
+            url: URL string
+
+        Returns:
+            Result with Url or error
+
+        Example:
+            val url = Url.parse("https://example.com/path")?
+        """
+        match parse_url_parts(url):
+            Some(parts):
+                if parts.opaque:
+                    return Err(error("URL must use an authority"))
+                var port: i64? = nil
+                if parts.port != 0 and parts.port != url_default_port(parts.scheme):
+                    port = Some(parts.port)
+                val query = if parts.query.len() > 0: Some(parts.query) else: nil
+                val fragment = if parts.fragment.len() > 0: Some(parts.fragment) else: nil
+                Ok(Url(scheme: parts.scheme, host: parts.host, port: port,
+                    path: parts.path, query: query, fragment: fragment))
+            nil:
+                Err(error("invalid absolute URL"))
+
+    fn scheme() -> text:
+        """Get URL scheme.
+
+        Returns:
+            Scheme (e.g., "http", "https")
+        """
+        self.scheme
+
+    fn host() -> text:
+        """Get host.
+
+        Returns:
+            Host (domain or IP)
+        """
+        self.host
+
+    fn port() -> i64?:
+        """Get port.
+
+        Returns:
+            Some(port) or nil if default
+        """
+        self.port
+
+    fn path() -> text:
+        """Get path.
+
+        Returns:
+            Path (e.g., "/api/users")
+        """
+        self.path
+
+    fn query() -> text?:
+        """Get query string.
+
+        Returns:
+            Some(query) or nil
+        """
+        self.query
+
+    fn fragment() -> text?:
+        """Get fragment.
+
+        Returns:
+            Some(fragment) or nil
+        """
+        self.fragment
+
+    fn query_params() -> {text: text}:
+        """Parse query parameters.
+
+        Returns:
+            Dict of key-value pairs
+
+        Example:
+            val params = url.query_params()
+            val value = params.get("key")?
+        """
+        val query = match self.query:
+            Some(value):
+                value
+            nil:
+                return {}
+        var params: {text: text} = {}
+
+        for pair in query.split("&"):
+            val parts = pair.split("=")
+            if parts.len() == 2:
+                val key = url_decode(parts[0])
+                val value = url_decode(parts[1])
+                params[key] = value
+
+        params
+
+    fn to_string() -> text:
+        """Convert to string.
+
+        Returns:
+            Full URL string
+        """
+        var result = "{self.scheme}://{self.host}"
+
+        if val Some(p) = self.port:
+            result = result + ":{p}"
+
+        result = result + self.path
+
+        if val Some(q) = self.query:
+            result = result + "?{q}"
+
+        if val Some(f) = self.fragment:
+            result = result + "#{f}"
+
+        result
+
+# ============================================================================
+# UrlBuilder - URL Construction
+# ============================================================================
+
+class UrlBuilder:
+    """URL builder.
+
+    Construct URLs programmatically.
+
+    Example:
+        val url = UrlBuilder.new()
+            .scheme("https")
+            .host("example.com")
+            .path("/api/users")
+            .query_param("page", "1")
+            .build()
+    """
+    scheme: text
+    host: text
+    port: i64?
+    path: text
+    query_params: [(text, text)]
+    fragment: text?
+
+    static fn new() -> UrlBuilder:
+        """Create URL builder.
+
+        Returns:
+            UrlBuilder
+        """
+        UrlBuilder(
+            scheme: "http",
+            host: "",
+            port: nil,
+            path: "/",
+            query_params: [],
+            fragment: nil
+        )
+
+    me scheme(scheme: text) -> UrlBuilder:
+        """Set scheme.
+
+        Args:
+            scheme: URL scheme (e.g., "https")
+
+        Returns:
+            Self (for chaining)
+        """
+        self.scheme = scheme
+        self
+
+    me host(host: text) -> UrlBuilder:
+        """Set host.
+
+        Args:
+            host: Host (domain or IP)
+
+        Returns:
+            Self (for chaining)
+        """
+        self.host = host
+        self
+
+    me port(port: i64) -> UrlBuilder:
+        """Set port.
+
+        Args:
+            port: Port number
+
+        Returns:
+            Self (for chaining)
+        """
+        self.port = Some(port)
+        self
+
+    me path(path: text) -> UrlBuilder:
+        """Set path.
+
+        Args:
+            path: URL path
+
+        Returns:
+            Self (for chaining)
+        """
+        self.path = path
+        self
+
+    me query_param(key: text, value: text) -> UrlBuilder:
+        """Add query parameter.
+
+        Args:
+            key: Parameter name
+            value: Parameter value
+
+        Returns:
+            Self (for chaining)
+        """
+        self.query_params = self.query_params.push((key, value))
+        self
+
+    me fragment(fragment: text) -> UrlBuilder:
+        """Set fragment.
+
+        Args:
+            fragment: URL fragment
+
+        Returns:
+            Self (for chaining)
+        """
+        self.fragment = Some(fragment)
+        self
+
+    fn build() -> text:
+        """Build URL string.
+
+        Returns:
+            Complete URL
+        """
+        var result = "{self.scheme}://{self.host}"
+
+        if val Some(p) = self.port:
+            result = result + ":{p}"
+
+        result = result + self.path
+
+        if self.query_params.len() > 0:
+            var query_parts: [text] = []
+            for (key, value) in self.query_params:
+                val encoded_key = url_encode(key)
+                val encoded_value = url_encode(value)
+                query_parts = query_parts.push("{encoded_key}={encoded_value}")
+            result = result + "?" + query_parts.join("&")
+
+        if val Some(f) = self.fragment:
+            result = result + "#{f}"
+
+        result
+
+# ============================================================================
+# Convenience Functions
+# ============================================================================
+
+fn get(url: text) -> Result<HttpResponse, SimpleError>:
+    """Send GET request.
+
+    Args:
+        url: Full URL
+
+    Returns:
+        Result with HttpResponse or error
+
+    Example:
+        val resp = get("https://example.com")?
+        print resp.body_text()
+    """
+    HttpClient.new().get(url)
+
+fn post(url: text, body: [u8]) -> Result<HttpResponse, SimpleError>:
+    """Send POST request.
+
+    Args:
+        url: Full URL
+        body: Request body
+
+    Returns:
+        Result with HttpResponse or error
+    """
+    HttpClient.new().post(url, body)
+
+fn download(url: text, path: text) -> Result<(), SimpleError>:
+    """Download file from URL.
+
+    Args:
+        url: File URL
+        path: Destination path
+
+    Returns:
+        Result or error
+
+    Example:
+        download("https://example.com/file.zip", "file.zip")?
+    """
+    val resp = get(url)?
+    if not resp.is_success():
+        return Err(error("HTTP {resp.status}: {resp.reason}"))
+
+    file_write_bytes(path, resp.body)?
+    Ok(())
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export HttpMethod, HttpRequest, HttpResponse, HttpClient
+export Url, UrlBuilder, get, post, download

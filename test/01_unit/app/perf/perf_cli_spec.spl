@@ -1,0 +1,65 @@
+"""
+## Performance evidence CLI validation
+
+The CLI rejects malformed evidence before touching persistence and exposes one
+explicit baseline-promotion route. Behavioral database scenarios separately
+prove that the route operates on the same cohort-keyed timing records.
+"""
+
+use std.spec.{step, expect}
+use app.perf.main.{run_perf_cli}
+use app.io.process_ops.{process_run_timeout}
+
+describe "Performance evidence CLI":
+    # @req: REQ-014
+    it "rejects malformed record compare and promotion requests":
+        step("Reject a non-numeric record duration before opening the evidence database")
+        expect(run_perf_cli(["record", "subject-a", "cohort-a", "not-a-number"])).to_equal(2)
+
+        step("Reject a non-numeric comparison duration before opening the evidence database")
+        expect(run_perf_cli(["compare", "subject-a", "cohort-a", "not-a-number"])).to_equal(2)
+
+        step("Reject an empty stable subject")
+        expect(run_perf_cli(["record", "", "cohort-a", "10"])).to_equal(2)
+
+        step("Reject a non-positive candidate observation")
+        expect(run_perf_cli(["compare", "subject-a", "cohort-a", "0"])).to_equal(2)
+
+        step("Reject an empty promotion cohort")
+        expect(run_perf_cli(["baseline", "promote", "subject-a", ""])).to_equal(2)
+
+    # @req: REQ-014
+    it "parses numeric durations instead of aborting on a missing text method":
+        step("Reject a non-numeric record duration without a method-resolution abort")
+        expect(run_perf_cli(["record", "subject-a", "cohort-a", "not-a-number"])).to_equal(2)
+
+        step("Reject a non-numeric compare candidate the same way")
+        expect(run_perf_cli(["compare", "subject-a", "cohort-a", "abc"])).to_equal(2)
+
+        step("Accept a fractional duration and still reject it as non-positive at zero")
+        expect(run_perf_cli(["compare", "subject-a", "cohort-a", "0.0"])).to_equal(2)
+
+    # @req: REQ-014
+    it "rejects unknown commands without mutating evidence":
+        step("Route an unknown command to usage")
+        expect(run_perf_cli(["unknown"])).to_equal(2)
+
+    # @req: REQ-014
+    # Executes the module through its real process entry point rather than
+    # importing `run_perf_cli` directly. The direct-import assertions above pass
+    # even when `main` is absent, which is how a missing entry point reached
+    # review: the dispatch target exited 0 with no output at all. This scenario
+    # fails closed on that exact shape.
+    it "prints usage through the real process entry point":
+        step("Invoke the perf module the way `simple perf` dispatch invokes it")
+        val (stdout, _stderr, exit_code) = process_run_timeout(
+            "bin/simple", ["run", "src/app/perf/main.spl", "explain"], 300000)
+
+        step("Reject the silent-no-op shape: entry point must produce output")
+        expect(stdout.trim().len()).to_be_greater_than(0)
+
+        step("Verify the usage text reaches stdout")
+        expect(stdout).to_contain("Usage: simple perf")
+
+        step("Verify the entry point propagates the usage exit code")
+        expect(exit_code).to_equal(2)

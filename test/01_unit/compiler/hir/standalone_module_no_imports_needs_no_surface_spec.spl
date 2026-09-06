@@ -1,0 +1,66 @@
+# Standalone module with no imports must lower without a registered surface
+#
+# Bug (found by the SimpleOS riscv64 in-guest interpreter row, goal item 1):
+# `HirLowering.with_filename(path).lower_module(parsed)` is the public
+# single-module entry — it is what an embedder that drives the frontend
+# directly, without the module loader, calls. The in-guest interpreter rows
+# (examples/09_embedded/simple_os/arch/riscv64/interpreter_hello_entry.spl and
+# its buildrun sibling) use exactly that entry.
+#
+# `resolve_import_symbols` looked its OWN module up in `self.module_surfaces`
+# and emitted "missing importing module surface for <name>" when it was not
+# there. Nothing registers a surface on that path, so a self-contained hello
+# world — which imports nothing at all and therefore has nothing to resolve —
+# failed HIR lowering outright. In-guest this printed
+# `[interp] FAIL hir lowering error: missing importing module surface`.
+#
+# The surface is read only to index this module's own import items, and the
+# loop that reads it does not run when there are no imports, so a module with
+# zero imports must lower cleanly.
+#
+# @cover src/compiler/20.hir/hir_lowering/_Items/module_import_resolution.spl 5%
+
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.core.parser_preprocessor.{_pp_preprocess_conditionals}
+use compiler.hir.hir_types.{HirModule}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+
+describe "HirLowering.lower_module on a self-contained module":
+    it "lowers a hello world that imports nothing without a surface error":
+        val path = "standalone_no_imports_hello.spl"
+        val source = "fn main():\n" +
+            "    print \"hello\"\n"
+
+        val parsed = parse_and_build_module(_pp_preprocess_conditionals(source), path)
+        var lowering: HirLowering = HirLowering.with_filename(path)
+        val hir: HirModule = lowering.lower_module(parsed)
+
+        # RED before the fix: errors.len() == 1 with
+        # "missing importing module surface for standalone_no_imports_hello.spl".
+        var first_error = ""
+        if lowering.errors.len() > 0:
+            first_error = lowering.errors[0].message
+        expect(first_error).to_equal("")
+        expect(lowering.errors.len()).to_equal(0)
+        expect(hir.functions.len() > 0).to_equal(true)
+
+    it "still lowers a self-contained module that defines and calls a helper":
+        val path = "standalone_no_imports_add.spl"
+        val source = "fn add(a: i64, b: i64) -> i64:\n" +
+            "    a + b\n" +
+            "\n" +
+            "fn main():\n" +
+            "    val total = add(40, 2)\n" +
+            "    if total == 42:\n" +
+            "        print \"ok\"\n"
+
+        val parsed = parse_and_build_module(_pp_preprocess_conditionals(source), path)
+        var lowering: HirLowering = HirLowering.with_filename(path)
+        val hir: HirModule = lowering.lower_module(parsed)
+
+        var first_error = ""
+        if lowering.errors.len() > 0:
+            first_error = lowering.errors[0].message
+        expect(first_error).to_equal("")
+        expect(hir.functions.len() > 0).to_equal(true)

@@ -1,0 +1,147 @@
+#!/bin/sh
+# check-fork-capture-complete.shs -- fail-closed guard on capture completeness
+# of rt_fork_parent_wait_bounded() (src/runtime/runtime_fork.c).
+#
+# WHY: a read loop that exits early produces plausible-looking PARTIAL evidence
+# with nothing saying it was cut. That is how "the log didn't say" defects are
+# manufactured. This guard writes a KNOWN byte count from a child and asserts
+# either an EXACT match, or a bounded capture that ANNOUNCES what it dropped.
+# A short capture with no marker is always FAIL.
+#
+# Verdict is the LAST line of stdout:
+#   PASS  -- <n> capture case(s) checked ...      exit 0
+#   FAIL  -- ...                                  exit 1
+#   ERROR -- nothing was checked                  exit 2
+# 0 cases checked is ERROR, never a pass. --selftest is fatal and includes a
+# NEGATIVE CONTROL: with the incompleteness marker ablated, the guard must FAIL.
+
+set -u
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+RUNTIME_C="$ROOT/src/runtime/runtime_fork.c"
+FIXTURES="$ROOT/scripts/check/fixtures"
+PROBE="$FIXTURES/fork_capture_probe.c"
+STUB="$FIXTURES/fork_capture_memtrack_stub.c"
+LIMIT=4194304   # FORK_CAPTURE_LIMIT: 4 MiB retained per stream
+MARKER_SLACK=256
+
+CC_BIN=""
+for c in "${CC:-}" clang cc gcc; do
+    [ -n "$c" ] || continue
+    if command -v "$c" >/dev/null 2>&1; then CC_BIN="$c"; break; fi
+done
+
+WORK=$(mktemp -d 2>/dev/null) || WORK=""
+cleanup() { [ -n "${WORK:-}" ] && [ -z "${KEEP_BUILD_DIR:-}" ] && rm -rf "$WORK"; }
+trap cleanup EXIT
+
+CHECKED=0
+FAILURES=""
+
+fail() { FAILURES="$FAILURES; $1"; }
+
+# build_probe <source.c> <outbin>
+build_probe() {
+    "$CC_BIN" -O1 -w -I "$ROOT/src/runtime" -o "$2" "$PROBE" "$1" "$STUB" >"$WORK/cc.log" 2>&1
+}
+
+field() { printf '%s\n' "$2" | tr ' ' '\n' | grep "^$1=" | cut -d= -f2; }
+
+# run_case <bin> <mode> <bytes> -> echoes the probe line
+run_case() {
+    timeout 120 "$1" "$2" "$3" 2>/dev/null
+}
+
+# assert_case <bin> <mode> <bytes> <expectation>
+# expectation: exact | bound | announced
+assert_case() {
+    _bin=$1; _mode=$2; _bytes=$3; _want=$4
+    _line=$(run_case "$_bin" "$_mode" "$_bytes")
+    if [ -z "$_line" ]; then fail "$_mode: probe produced no output"; return 1; fi
+    CHECKED=$((CHECKED + 1))
+    _w=$(field WRITTEN "$_line"); _o=$(field OUT "$_line"); _e=$(field ERR "$_line")
+    _ot=$(field OUT_TRUNC "$_line"); _oi=$(field OUT_INCOMPLETE "$_line")
+    case "$_want" in
+    exact)
+        if [ "$_o" != "$_w" ] || [ "$_e" != "$_w" ]; then
+            fail "$_mode: wrote $_w bytes/stream but captured stdout=$_o stderr=$_e"; return 1; fi
+        if [ "$_ot" != "0" ] || [ "$_oi" != "0" ]; then
+            fail "$_mode: complete capture wrongly carries a truncation marker"; return 1; fi
+        ;;
+    bound)
+        if [ "$_ot" != "1" ]; then
+            fail "$_mode: wrote $_w bytes, captured $_o, but NO truncation marker (silent truncation)"; return 1; fi
+        if [ "$_o" -gt $((LIMIT + MARKER_SLACK)) ]; then
+            fail "$_mode: capture $_o exceeds the announced bound $LIMIT"; return 1; fi
+        ;;
+    announced)
+        if [ "$_oi" != "1" ]; then
+            fail "$_mode: wrote $_w bytes, captured $_o, and the capture does NOT announce it is incomplete"; return 1; fi
+        ;;
+    esac
+    return 0
+}
+
+run_selftest() {
+    # Positive control: the real runtime must satisfy all three expectations.
+    build_probe "$RUNTIME_C" "$WORK/probe_real" || {
+        printf 'selftest: probe failed to build against the real runtime\n'; cat "$WORK/cc.log"; return 1; }
+
+    # NEGATIVE CONTROL: ablate the incompleteness announcement and the bounded
+    # truncation marker; the guard's assertions must then FAIL. A control that
+    # fails to fail means the test is broken, not the code.
+    sed -e 's/\[capture incomplete: /[XX ablated XX: /' \
+        -e 's/\[output truncated: /[XX ablated XX: /' \
+        "$RUNTIME_C" > "$WORK/ablated.c"
+    if cmp -s "$RUNTIME_C" "$WORK/ablated.c"; then
+        printf 'selftest: ablation changed nothing -- markers not found in %s\n' "$RUNTIME_C"; return 1; fi
+    build_probe "$WORK/ablated.c" "$WORK/probe_ablated" || {
+        printf 'selftest: ablated probe failed to build\n'; cat "$WORK/cc.log"; return 1; }
+
+    _saved_failures=$FAILURES; _saved_checked=$CHECKED
+    FAILURES=""; CHECKED=0
+    assert_case "$WORK/probe_ablated" early 524288 announced
+    _neg_early=$FAILURES; FAILURES=""
+    assert_case "$WORK/probe_ablated" bound $((LIMIT + 1048576)) bound
+    _neg_bound=$FAILURES
+    _neg_checked=$CHECKED
+    FAILURES=$_saved_failures; CHECKED=$_saved_checked
+
+    if [ "$_neg_checked" -eq 0 ]; then
+        printf 'selftest: negative control checked 0 cases\n'; return 1; fi
+    if [ -z "$_neg_early" ]; then
+        printf 'selftest: NEGATIVE CONTROL DID NOT FAIL for the early-exit case\n'; return 1; fi
+    if [ -z "$_neg_bound" ]; then
+        printf 'selftest: NEGATIVE CONTROL DID NOT FAIL for the bounded case\n'; return 1; fi
+    printf 'selftest: 2 negative-control case(s) failed as required\n'
+    return 0
+}
+
+if [ -z "$CC_BIN" ]; then
+    printf 'ERROR — nothing was checked (no C compiler: tried $CC, clang, cc, gcc)\n'; exit 2
+fi
+if [ -z "$WORK" ] || [ ! -d "$WORK" ]; then
+    printf 'ERROR — nothing was checked (could not create a work directory)\n'; exit 2
+fi
+for f in "$RUNTIME_C" "$PROBE" "$STUB"; do
+    if [ ! -f "$f" ]; then printf 'ERROR — nothing was checked (missing %s)\n' "$f"; exit 2; fi
+done
+
+if ! run_selftest; then
+    printf 'FAIL — selftest failed; guard is not trustworthy\n'; exit 1
+fi
+if [ "${1:-}" = "--selftest" ]; then
+    printf 'PASS — selftest only: 2 negative-control case(s) checked, guard fails as required\n'; exit 0
+fi
+
+assert_case "$WORK/probe_real" exact  1048576 exact
+assert_case "$WORK/probe_real" bound  $((LIMIT + 1048576)) bound
+assert_case "$WORK/probe_real" early  524288 announced
+
+if [ "$CHECKED" -eq 0 ]; then
+    printf 'ERROR — nothing was checked\n'; exit 2
+fi
+if [ -n "$FAILURES" ]; then
+    printf 'FAIL — %d capture case(s) checked%s\n' "$CHECKED" "$FAILURES"; exit 1
+fi
+printf 'PASS — %d capture case(s) checked, capture is byte-exact or bounded-and-announced\n' "$CHECKED"
+exit 0

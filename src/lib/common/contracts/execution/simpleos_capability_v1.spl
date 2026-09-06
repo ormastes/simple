@@ -1,0 +1,330 @@
+# Frozen SimpleOS protocol capability manifest contract.
+#
+# A manifest is descriptive until a live probe and an evidence identity are
+# attached.  Callers must validate before advertising; unsupported mandatory
+# features and unsafe downgrade policy fail closed.
+
+pub struct ProtocolFramingBounds:
+    max_frame_bytes: i64
+    max_header_bytes: i64
+    max_message_bytes: i64
+    max_streams: i64
+
+pub struct ProtocolResourceLimits:
+    max_connections: i64
+    max_inflight: i64
+    max_body_bytes: i64
+    max_response_bytes: i64
+    max_queue_bytes: i64
+
+pub struct ProtocolTimeouts:
+    handshake_ms: i64
+    read_ms: i64
+    write_ms: i64
+    idle_ms: i64
+    drain_ms: i64
+
+pub struct ProtocolProbeEvidence:
+    live_probe_id: text
+    evidence_id: text
+    probe_ok: bool
+    evidence_ok: bool
+
+pub struct ProtocolCapabilityRequiredExtension:
+    name: text
+    mandatory: bool
+
+pub struct ProtocolCapabilityManifestV1:
+    schema_version: i64
+    profile: text
+    protocol: text
+    transport: text
+    tls_required: bool
+    tls_versions: [text]
+    alpn: [text]
+    auth_methods: [text]
+    algorithms: [text]
+    operations: [text]
+    framing: ProtocolFramingBounds
+    limits: ProtocolResourceLimits
+    timeouts: ProtocolTimeouts
+    backpressure: text
+    extensions: [text]
+    supported_extensions: [text]
+    required_extensions: [ProtocolCapabilityRequiredExtension]
+    downgrade_policy: text
+    probe: ProtocolProbeEvidence
+    advertised: bool
+
+pub enum ProtocolCapabilityError:
+    InvalidSchemaVersion
+    MissingProfile
+    MissingProtocol
+    MissingTransport
+    MissingTlsVersion
+    MissingAlpn
+    MissingAuthentication
+    MissingAlgorithm
+    MissingOperation
+    InvalidFramingBounds
+    InvalidResourceLimits
+    InvalidTimeouts
+    MissingBackpressure
+    InvalidDowngradePolicy
+    MissingLiveProbe
+    MissingEvidence
+    UnverifiedEvidenceAuthority
+    AlreadyAdvertised
+    InvalidExtensions
+    InvalidSupportedExtensions
+    UnsupportedMandatoryExtension
+
+val MAX_CAPABILITY_TEXT_BYTES: i64 = 256
+val MAX_CAPABILITY_LIST_ITEMS: i64 = 256
+val MAX_CAPABILITY_FRAME_BYTES: i64 = 67108864
+val MAX_CAPABILITY_HEADER_BYTES: i64 = 16777216
+val MAX_CAPABILITY_MESSAGE_BYTES: i64 = 268435456
+val MAX_CAPABILITY_STREAMS: i64 = 1048576
+val MAX_CAPABILITY_CONNECTIONS: i64 = 65536
+val MAX_CAPABILITY_INFLIGHT: i64 = 65536
+val MAX_CAPABILITY_BODY_BYTES: i64 = 268435456
+val MAX_CAPABILITY_RESPONSE_BYTES: i64 = 268435456
+val MAX_CAPABILITY_QUEUE_BYTES: i64 = 268435456
+val MAX_CAPABILITY_TIMEOUT_MS: i64 = 3600000
+
+pub fn protocol_capability_default_framing() -> ProtocolFramingBounds:
+    ProtocolFramingBounds(
+        max_frame_bytes: 1048576,
+        max_header_bytes: 65536,
+        max_message_bytes: 8388608,
+        max_streams: 256
+    )
+
+pub fn protocol_capability_default_limits() -> ProtocolResourceLimits:
+    ProtocolResourceLimits(
+        max_connections: 1024,
+        max_inflight: 256,
+        max_body_bytes: 16777216,
+        max_response_bytes: 16777216,
+        max_queue_bytes: 16777216
+    )
+
+pub fn protocol_capability_default_timeouts() -> ProtocolTimeouts:
+    ProtocolTimeouts(
+        handshake_ms: 5000,
+        read_ms: 5000,
+        write_ms: 5000,
+        idle_ms: 30000,
+        drain_ms: 5000
+    )
+
+pub fn protocol_capability_default_probe() -> ProtocolProbeEvidence:
+    ProtocolProbeEvidence(
+        live_probe_id: "",
+        evidence_id: "",
+        probe_ok: false,
+        evidence_ok: false
+    )
+
+pub fn protocol_capability_manifest_v1_new(
+    profile: text,
+    protocol: text,
+    transport: text
+) -> ProtocolCapabilityManifestV1:
+    ProtocolCapabilityManifestV1(
+        schema_version: 1,
+        profile: profile,
+        protocol: protocol,
+        transport: transport,
+        tls_required: true,
+        tls_versions: [],
+        alpn: [],
+        auth_methods: [],
+        algorithms: [],
+        operations: [],
+        framing: protocol_capability_default_framing(),
+        limits: protocol_capability_default_limits(),
+        timeouts: protocol_capability_default_timeouts(),
+        backpressure: "bounded-reject",
+        extensions: [],
+        supported_extensions: [],
+        required_extensions: [],
+        downgrade_policy: "reject",
+        probe: protocol_capability_default_probe(),
+        advertised: false
+    )
+
+fn _capability_text_valid(value: text) -> bool:
+    val trimmed = value.trim()
+    trimmed != "" and trimmed.len() <= MAX_CAPABILITY_TEXT_BYTES and
+        not value.contains("\0") and not value.contains("\n") and
+        not value.contains("\r")
+
+fn _capability_text_list_valid(values: [text], required: bool) -> bool:
+    if values.len() > MAX_CAPABILITY_LIST_ITEMS:
+        return false
+    if required and values.len() == 0:
+        return false
+    var i = 0
+    while i < values.len():
+        if not _capability_text_valid(values[i]):
+            return false
+        var j = i + 1
+        while j < values.len():
+            if values[i].trim() == values[j].trim():
+                return false
+            j = j + 1
+        i = i + 1
+    true
+
+fn _capability_text_list_contains(values: [text], wanted: text) -> bool:
+    var i = 0
+    while i < values.len():
+        if values[i].trim() == wanted.trim():
+            return true
+        i = i + 1
+    false
+
+fn _positive_framing(bounds: ProtocolFramingBounds) -> bool:
+    bounds.max_frame_bytes > 0 and bounds.max_frame_bytes <= MAX_CAPABILITY_FRAME_BYTES and
+    bounds.max_header_bytes > 0 and bounds.max_header_bytes <= MAX_CAPABILITY_HEADER_BYTES and
+    bounds.max_header_bytes <= bounds.max_frame_bytes and
+    bounds.max_message_bytes >= bounds.max_frame_bytes and bounds.max_message_bytes <= MAX_CAPABILITY_MESSAGE_BYTES and
+    bounds.max_streams > 0 and bounds.max_streams <= MAX_CAPABILITY_STREAMS
+
+fn _positive_limits(limits: ProtocolResourceLimits) -> bool:
+    limits.max_connections > 0 and limits.max_connections <= MAX_CAPABILITY_CONNECTIONS and
+    limits.max_inflight > 0 and limits.max_inflight <= MAX_CAPABILITY_INFLIGHT and
+    limits.max_body_bytes > 0 and limits.max_body_bytes <= MAX_CAPABILITY_BODY_BYTES and
+    limits.max_response_bytes > 0 and limits.max_response_bytes <= MAX_CAPABILITY_RESPONSE_BYTES and
+    limits.max_queue_bytes > 0 and limits.max_queue_bytes <= MAX_CAPABILITY_QUEUE_BYTES
+
+fn _positive_timeouts(timeouts: ProtocolTimeouts) -> bool:
+    timeouts.handshake_ms > 0 and timeouts.handshake_ms <= MAX_CAPABILITY_TIMEOUT_MS and
+    timeouts.read_ms > 0 and timeouts.read_ms <= MAX_CAPABILITY_TIMEOUT_MS and
+    timeouts.write_ms > 0 and timeouts.write_ms <= MAX_CAPABILITY_TIMEOUT_MS and
+    timeouts.idle_ms > 0 and timeouts.idle_ms <= MAX_CAPABILITY_TIMEOUT_MS and
+    timeouts.drain_ms > 0 and timeouts.drain_ms <= MAX_CAPABILITY_TIMEOUT_MS
+
+fn _required_extensions_valid(
+    required: [ProtocolCapabilityRequiredExtension],
+    supported: [text]
+) -> bool:
+    if required.len() > MAX_CAPABILITY_LIST_ITEMS:
+        return false
+    var i = 0
+    while i < required.len():
+        if not _capability_text_valid(required[i].name):
+            return false
+        if required[i].mandatory and not _capability_text_list_contains(supported, required[i].name):
+            return false
+        var j = i + 1
+        while j < required.len():
+            if required[i].name.trim() == required[j].name.trim():
+                return false
+            j = j + 1
+        i = i + 1
+    true
+
+pub fn protocol_capability_manifest_v1_validate(
+    manifest: ProtocolCapabilityManifestV1
+) -> Result<(), ProtocolCapabilityError>:
+    if manifest.advertised:
+        # The field is retained for wire compatibility, but no caller may
+        # manufacture an admitted state by setting a public value field.
+        return Err(ProtocolCapabilityError.UnverifiedEvidenceAuthority)
+    if manifest.schema_version != 1:
+        return Err(ProtocolCapabilityError.InvalidSchemaVersion)
+    if not _capability_text_valid(manifest.profile):
+        return Err(ProtocolCapabilityError.MissingProfile)
+    if not _capability_text_valid(manifest.protocol):
+        return Err(ProtocolCapabilityError.MissingProtocol)
+    if not _capability_text_valid(manifest.transport):
+        return Err(ProtocolCapabilityError.MissingTransport)
+    if not _capability_text_list_valid(manifest.tls_versions, manifest.tls_required):
+        return Err(ProtocolCapabilityError.MissingTlsVersion)
+    if not _capability_text_list_valid(manifest.alpn, true):
+        return Err(ProtocolCapabilityError.MissingAlpn)
+    if not _capability_text_list_valid(manifest.auth_methods, true):
+        return Err(ProtocolCapabilityError.MissingAuthentication)
+    if not _capability_text_list_valid(manifest.algorithms, true):
+        return Err(ProtocolCapabilityError.MissingAlgorithm)
+    if not _capability_text_list_valid(manifest.operations, true):
+        return Err(ProtocolCapabilityError.MissingOperation)
+    if not _capability_text_list_valid(manifest.extensions, false):
+        return Err(ProtocolCapabilityError.InvalidExtensions)
+    if not _capability_text_list_valid(manifest.supported_extensions, false):
+        return Err(ProtocolCapabilityError.InvalidSupportedExtensions)
+    if not _required_extensions_valid(manifest.required_extensions, manifest.supported_extensions):
+        return Err(ProtocolCapabilityError.UnsupportedMandatoryExtension)
+    if not _positive_framing(manifest.framing):
+        return Err(ProtocolCapabilityError.InvalidFramingBounds)
+    if not _positive_limits(manifest.limits):
+        return Err(ProtocolCapabilityError.InvalidResourceLimits)
+    if not _positive_timeouts(manifest.timeouts):
+        return Err(ProtocolCapabilityError.InvalidTimeouts)
+    if not _capability_text_valid(manifest.backpressure) or
+        (manifest.backpressure != "bounded-reject" and
+         manifest.backpressure != "bounded-wait"):
+        return Err(ProtocolCapabilityError.MissingBackpressure)
+    if not _capability_text_valid(manifest.downgrade_policy) or manifest.downgrade_policy != "reject":
+        return Err(ProtocolCapabilityError.InvalidDowngradePolicy)
+    if not _capability_text_valid(manifest.probe.live_probe_id) or not manifest.probe.probe_ok:
+        return Err(ProtocolCapabilityError.MissingLiveProbe)
+    if not _capability_text_valid(manifest.probe.evidence_id) or not manifest.probe.evidence_ok:
+        return Err(ProtocolCapabilityError.MissingEvidence)
+    Ok(())
+
+pub fn protocol_capability_manifest_v1_can_advertise(
+    manifest: ProtocolCapabilityManifestV1
+) -> bool:
+    # Structural validation and caller-provided probe booleans are not an
+    # authority boundary. Advertisement is performed only by the evidence
+    # service after it consumes a verifier-owned, replay-protected handle.
+    if manifest.advertised:
+        return false
+    false
+
+pub fn protocol_capability_manifest_v1_with_probe(
+    manifest: ProtocolCapabilityManifestV1,
+    live_probe_id: text,
+    evidence_id: text,
+    probe_ok: bool,
+    evidence_ok: bool
+) -> ProtocolCapabilityManifestV1:
+    var next = manifest
+    next.probe = ProtocolProbeEvidence(
+        live_probe_id: live_probe_id,
+        evidence_id: evidence_id,
+        probe_ok: probe_ok,
+        evidence_ok: evidence_ok
+    )
+    next
+
+pub fn protocol_capability_manifest_v1_advertised(
+    manifest: ProtocolCapabilityManifestV1
+) -> Result<ProtocolCapabilityManifestV1, ProtocolCapabilityError>:
+    if manifest.advertised:
+        return Err(ProtocolCapabilityError.UnverifiedEvidenceAuthority)
+    val checked = protocol_capability_manifest_v1_validate(manifest)
+    match checked:
+        Ok(_): Err(ProtocolCapabilityError.UnverifiedEvidenceAuthority)
+        Err(error): Err(error)
+
+export ProtocolFramingBounds, ProtocolResourceLimits, ProtocolTimeouts
+export ProtocolProbeEvidence, ProtocolCapabilityRequiredExtension
+export ProtocolCapabilityManifestV1
+export ProtocolCapabilityError
+export protocol_capability_default_framing, protocol_capability_default_limits
+export protocol_capability_default_timeouts, protocol_capability_default_probe
+export protocol_capability_manifest_v1_new
+export protocol_capability_manifest_v1_validate
+export protocol_capability_manifest_v1_can_advertise
+export protocol_capability_manifest_v1_with_probe
+export protocol_capability_manifest_v1_advertised
+export MAX_CAPABILITY_TEXT_BYTES, MAX_CAPABILITY_LIST_ITEMS
+export MAX_CAPABILITY_FRAME_BYTES, MAX_CAPABILITY_HEADER_BYTES
+export MAX_CAPABILITY_MESSAGE_BYTES, MAX_CAPABILITY_STREAMS
+export MAX_CAPABILITY_CONNECTIONS, MAX_CAPABILITY_INFLIGHT
+export MAX_CAPABILITY_BODY_BYTES, MAX_CAPABILITY_RESPONSE_BYTES
+export MAX_CAPABILITY_QUEUE_BYTES, MAX_CAPABILITY_TIMEOUT_MS

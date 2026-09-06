@@ -1,0 +1,70 @@
+#!/bin/sh
+set -eu
+
+arch=$1
+timeout=$2
+out=$3
+image_path=$4
+image=$5
+nonce=$6
+case_name=${SIMPLEOS_COMPILER_FS_FAKE_CASE:-pass}
+sha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+binary=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+version_hex=53696d706c652076312e302e302d626574610a
+version_sha=$(printf 'Simple v1.0.0-beta\n' | sha256sum | awk '{print $1}')
+hello_hex=48656c6c6f2066726f6d2053696d706c654f530a
+hello_sha=$(printf 'Hello from SimpleOS\n' | sha256sum | awk '{print $1}')
+drive_arg="file=$image_path,if=none,id=cfsexecns1,format=raw"
+
+{
+    echo "SIMPLEOS_COMPILER_FS_BEGIN arch=$arch timeout=$timeout nonce=$nonce protocol=2"
+    marker_path=$image_path
+    marker_sha=$image
+    marker_drive=$drive_arg
+    [ "$case_name" = image-mismatch ] && marker_path=/tmp/not-the-selected-image
+    [ "$case_name" = image-arg-mismatch ] && marker_drive="file=/tmp/other.img,if=none,id=cfsexecns1,format=raw"
+    echo "SIMPLEOS_COMPILER_FS_QEMU_IMAGE path=$marker_path sha256=$marker_sha drive_arg=$marker_drive"
+    for path in /usr/bin/simple /usr/bin/simple.smf /bin/simple /bin/simple.smf /sys/apps/simple /sys/apps/simple.smf /sys/apps/simple_compiler /sys/apps/simple_compiler.smf /sys/apps/simple_interpreter /sys/apps/simple_interpreter.smf /sys/apps/simple_loader /sys/apps/simple_loader.smf /SYS/SIMPLETOOL.SDN; do
+        [ "$case_name" = missing-role ] && [ "$path" = /bin/simple ] && continue
+        role_sha=$sha
+        [ "$case_name" = malformed-hash ] && [ "$path" = /bin/simple ] && role_sha=xyz
+        [ "$case_name" = role-version-mismatch ] && [ "$path" = /usr/bin/simple ] && role_sha=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+        kind=exec_alias
+        canonical=/usr/bin/simple
+        if [ "$path" = /SYS/SIMPLETOOL.SDN ]; then
+            kind=manifest
+            canonical=/SYS/SIMPLETOOL.SDN
+            [ "$case_name" = manifest-role-hash-mismatch ] && role_sha=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+        fi
+        [ "$case_name" = role-kind-mismatch ] && [ "$path" = /SYS/SIMPLETOOL.SDN ] && kind=exec_alias
+        echo "SIMPLEOS_COMPILER_FS_ROLE path=$path kind=$kind canonical=$canonical sha256=$role_sha"
+    done
+    [ "$case_name" = extra-role ] && echo "SIMPLEOS_COMPILER_FS_ROLE path=/EXTRA kind=manifest canonical=/EXTRA sha256=$sha"
+    echo "SIMPLEOS_COMPILER_FS_FWCFG name=opt/simpleos.cfs.nonce nonce=$nonce status=pass"
+    [ "$case_name" = nonce-mismatch ] && version_nonce=ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff || version_nonce=$nonce
+    duplicate_nonce=
+    [ "$case_name" = duplicate-field ] && duplicate_nonce=" nonce=$nonce"
+    emitted_version_sha=$version_sha
+    emitted_version_hex=$version_hex
+    [ "$case_name" = version-output-hash-mismatch ] && emitted_version_sha=$sha
+    [ "$case_name" = version-output-payload-mismatch ] && emitted_version_hex=426f6775730a
+    manifest_sha=$sha
+    [ "$case_name" = manifest-hash-mismatch ] && manifest_sha=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+    echo "SIMPLEOS_COMPILER_FS_VERSION path=/usr/bin/simple simple_sha256=$sha stdout_hex=$emitted_version_hex version_output_sha256=$emitted_version_sha manifest_sha256=$manifest_sha nonce=$version_nonce$duplicate_nonce exit=0 status=pass"
+    echo "SIMPLEOS_COMPILER_FS_COMPILE compiler=/usr/bin/simple source=/HELLO.SPL source_sha256=$version_sha artifact=/TMP/HELLO artifact_sha256=$binary nonce=$nonce status=pass"
+    exec_stdout=$hello_sha
+    exec_hex=$hello_hex
+    [ "$case_name" = stdout-mismatch ] && exec_stdout=$sha
+    [ "$case_name" = stdout-payload-mismatch ] && exec_hex=426f6775730a
+    exec_artifact=$binary
+    [ "$case_name" = role-version-mismatch ] && exec_artifact=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+    echo "SIMPLEOS_COMPILER_FS_EXEC path=/TMP/HELLO artifact_sha256=$exec_artifact exit=0 stdout_hex=$exec_hex stdout_sha256=$exec_stdout nonce=$nonce status=pass"
+    [ "$case_name" = guest-skip ] && echo "TRIVIAL_SELFHOST_SKIP reason=no-exec"
+    pass_nonce=$nonce
+    echo "SIMPLEOS_COMPILER_FS_PASS arch=$arch nonce=$pass_nonce status=pass"
+    [ "$case_name" = duplicate-pass ] && echo "SIMPLEOS_COMPILER_FS_PASS arch=$arch nonce=$pass_nonce status=pass"
+} >"$out"
+
+if [ "$case_name" = runner-fail ]; then
+    exit 9
+fi

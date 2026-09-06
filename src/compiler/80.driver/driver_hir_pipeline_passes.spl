@@ -1,0 +1,445 @@
+# CompilerDriver HIR resolution, type checking, and monomorphization passes.
+
+use compiler.driver.driver_compiler_type.{CompilerDriver}
+use std.env.{env_get}
+use compiler.driver.driver_types.{CompileContext}
+use compiler.hir.hir.*
+use compiler.driver.driver_log_helpers.{log_debug}
+use compiler.semantics.resolve.{resolve_methods, resolve_methods_quiet}
+use std.nogc_sync_mut.io.process_ops.{eprint}
+use compiler.mono.monomorphize_integration.*
+use compiler.driver.driver_safety_severity.{
+    SafetyPassSeverity,
+    safety_pass_severity_phased
+}
+use compiler.driver.driver_typecheck_severity.{
+    TypecheckPassSeverity,
+    typecheck_pass_severity
+}
+use compiler.types.type_infer_types.{HmInferContext}
+use compiler.semantics.visibility_integration.{check_module_visibility}
+use compiler.semantics.safety_checker.{
+    SafetyChecker,
+    safetychecker_check_module,
+    safetychecker_check_transfer_module_with_policy
+}
+use compiler.common.parallel_policy.policy_schema.{ResolvedParallelPolicyV1}
+use compiler.driver.driver_source_loading.{_format_type_infer_error}
+use compiler.common.assurance.policy_schema.{AssuranceStrictness}
+use compiler.driver.driver_pass_receipt.{PassReceipt, record_pass_receipt}
+use compiler.semantics.any_escape.{AnyEscapeProfile, any_escape_check}
+use compiler.semantics.enum_contract.{enum_contract_check}
+use compiler.mono.verify.post_mono_verify.{
+    post_mono_verify_modules,
+    post_mono_report_total,
+    post_mono_report_diagnostics
+}
+
+
+impl CompilerDriver:
+    fn resolve_methods_impl() -> (CompileContext, bool):
+        var ctx = self.ctx
+
+        for name in ctx.hir_modules.keys():
+            val hir_module = ctx.hir_modules[name]
+            val (resolved_module, resolve_errors) = resolve_methods(hir_module)
+
+            # Update the module with resolved method calls (direct mutation)
+            ctx.hir_modules[name] = resolved_module
+
+            # Collect errors
+            for err in resolve_errors:
+                ctx.add_error(
+                    "Method resolution error in {name}: {err.message}")
+
+        (ctx, not ctx.has_errors())
+
+    me run_resolve_methods_quiet_gated():
+        """SIMPLE_RESOLVE_METHODS=1 experiment (default OFF, 2026-09-01).
+
+        Runs the QUIET method-resolution pass over every assembled HIR module
+        — the pass real multi-source builds structurally never ran (see
+        doc/08_tracking/bug/resolve_methods_never_runs_on_real_compile_path_2026-09-01.md,
+        Fix scoping). Called from compile orchestration AFTER phase 3
+        succeeds, so it covers both the streaming and the non-streaming
+        lowering branches, and runs after every hir_cache store/load — the
+        cache therefore carries unresolved modules on both flag settings and
+        cannot be poisoned by the flag. Quiet mode records zero errors by
+        construction (MethodResolver.add_error early-returns), so a build
+        with the flag on can only gain resolved calls, never new failures."""
+        val quiet_module_names = self.ctx.hir_modules.keys()
+        var quiet_resolved_count = 0
+        for quiet_name in quiet_module_names:
+            val quiet_hir_module = self.ctx.hir_modules[quiet_name]
+            val (quiet_resolved_module, quiet_errors) = resolve_methods_quiet(quiet_hir_module)
+            self.ctx.hir_modules[quiet_name] = quiet_resolved_module
+            quiet_resolved_count = quiet_resolved_count + 1
+            if quiet_errors.len() > 0:
+                # Cannot happen (quiet add_error is a no-op); loud if it does,
+                # because silent error loss is this repo's worst failure class.
+                eprint("[resolve-methods-quiet] INVARIANT BREAK: {quiet_errors.len()} error(s) recorded in quiet mode for module {quiet_name}")
+        print "[resolve-methods-quiet] SIMPLE_RESOLVE_METHODS=1: {quiet_resolved_count} module(s) re-resolved"
+
+    fn type_check_impl() -> (CompileContext, bool):
+        var ctx = self.ctx
+        # Type inference runs inside lower_and_check_impl() for Check mode.
+        # This standalone method is kept for API compatibility but is a no-op.
+        (ctx, not ctx.has_errors())
+
+    me monomorphize_impl(hir_phase_admitted: bool) -> bool:
+        self.monomorphize_with_policy(hir_phase_admitted, true)
+
+    me monomorphize_for_explicit_compilation(hir_phase_admitted: bool) -> bool:
+        self.monomorphize_with_policy(hir_phase_admitted, false)
+
+    me monomorphize_with_policy(
+        hir_phase_admitted: bool,
+        allow_ambient_bootstrap_policy: bool
+    ) -> bool:
+        """Run monomorphization pass on all HIR modules.
+
+        This creates specialized versions of generic functions, structs, and
+        classes by substituting concrete type arguments. Call sites are
+        rewritten to use the mangled names of specialized definitions.
+        """
+        log_debug("running monomorphization")
+        # Phase admission is produced only after HIR lowering and every
+        # post-HIR validator succeeds. Do not reconstruct that authority by
+        # rereading CompileContext.error_count_value after a 609-module
+        # aggregate return boundary: the Stage-3 native value ABI can corrupt
+        # that adjacent scalar even though the canonical owner completed with
+        # zero errors.
+        if not hir_phase_admitted:
+            return false
+        val skip_mono = if allow_ambient_bootstrap_policy:
+            env_get("SIMPLE_BOOTSTRAP_SKIP_MONO")
+        else:
+            ""
+        # SIMPLE_BOOTSTRAP=1 used to skip the pass too. That was only safe while
+        # HIR lowering refused every generic fn; with that gate open (#158
+        # Phase B, 2026-08-22) a skipped pass would hand generic templates to
+        # MIR. Only the explicit SIMPLE_BOOTSTRAP_SKIP_MONO=1 escape remains.
+        if skip_mono == "1":
+            print "[bootstrap] skipping monomorphization (SIMPLE_BOOTSTRAP_SKIP_MONO=1)"
+            return true
+        val (mono_modules, mono_stats, mono_diags) =
+            run_monomorphization_with_diagnostics(self.ctx.hir_modules)
+        # Phase B receipt: printed so a stage log proves the pass ran and what
+        # it did (the pass was a no-op for months while looking wired).
+        print "[mono] generic_fns={mono_stats.generic_functions_found} call_sites={mono_stats.call_sites_found} specializations={mono_stats.specializations_created} unresolved={mono_stats.unresolved_generic_calls}"
+        # BUG-001 diagnostic: verify module count survives monomorphization
+        log_debug("monomorphization output ready")
+        self.ctx.hir_modules = mono_modules
+        # Phase 3 (critical_hardening_plan_2026-08-21): the mono pass emits a
+        # loud, coded diagnostic (E-MONO-030 / E-MONO-032) for every generic
+        # call site it could NOT rewrite. Those used to be dropped on the floor
+        # by `run_monomorphization`, so a non-monomorphic HIR reached MIR at
+        # rc=0. They are errors now: an unspecialized generic call is not a
+        # style nit, it is a program the backend cannot lower correctly.
+        var mono_pass_errors = 0
+        for md in mono_diags:
+            mono_pass_errors = mono_pass_errors + 1
+            self.ctx.add_error(md)
+        val _mono_pass_receipt = record_pass_receipt(PassReceipt(
+            pass_name: "monomorphize",
+            profile: self.ctx.assurance_policy.strictness.name(),
+            executed: true,
+            modules_checked: self.ctx.hir_modules.len(),
+            diagnostics: mono_diags.len(),
+            errors_raised: mono_pass_errors
+        ))
+        if mono_pass_errors > 0:
+            print "error[E-MONO-033]: monomorphization left {mono_pass_errors} generic call site(s) unspecialized; refusing to lower non-monomorphic HIR to MIR"
+            return false
+        # Section 9.5 post-monomorphization invariants (E-MONO-031). Runs on
+        # the MONOMORPHIZED modules -- the whole point is that nothing generic,
+        # unsubstituted, or type-erased survived, so it cannot run before this
+        # assignment. Under `critical` ANY non-zero counter is fatal; every
+        # other profile warns, so the inventory is visible during migration.
+        val mono_report = post_mono_verify_modules(self.ctx.hir_modules)
+        val mono_total = post_mono_report_total(mono_report)
+        val mono_strictness = self.ctx.assurance_policy.strictness
+        # Phase 3: enforcement now starts at `robust`, not only `critical`.
+        # This RAISES the bar (robust used to warn); no gate is relaxed.
+        val mono_critical = mono_strictness.at_least(AssuranceStrictness.Robust)
+        var mono_errors = 0
+        for d in post_mono_report_diagnostics(mono_report):
+            # `d` already carries its own E-MONO-031 code (section 17.5).
+            val mmsg = d
+            if mono_critical:
+                mono_errors = mono_errors + 1
+                self.ctx.add_error(mmsg)
+            else:
+                self.ctx.add_warning(mmsg)
+        val _mono_receipt = record_pass_receipt(PassReceipt(
+            pass_name: "post_mono_verify",
+            profile: mono_strictness.name(),
+            executed: true,
+            modules_checked: self.ctx.hir_modules.len(),
+            diagnostics: mono_total,
+            errors_raised: mono_errors
+        ))
+        log_debug("monomorphization done")
+        if mono_critical and mono_total > 0:
+            print "error[E-MONO-031]: post-monomorphization invariants violated: {mono_total} diagnostic(s) across {self.ctx.hir_modules.len()} module(s) under profile {mono_strictness.name()}; refusing to lower to MIR"
+            return false
+        true
+
+pub fn run_typecheck_warn_pass(
+    ctx: CompileContext,
+    hir_modules: Dict<text, HirModule>
+) -> [text]:
+    """Type-inference + visibility diagnostics, profile-gated for enforcement.
+
+    This pass is where declared return types actually get checked: the check
+    itself lives at 30.types/type_infer/inference_control.spl:564-574, where an
+    annotated function's body is inferred in Check mode and `subsume(body_ty,
+    fn_.return_type)` compares it against the declaration. Those errors land in
+    `ictx.errors` and arrive here.
+
+    Until 2026-08-17 this function returned them as strings and the caller only
+    `log_warn`ed them, so a `fn f() -> bool` returning a text literal produced a
+    genuine, correct diagnostic that was then thrown away — the build stayed
+    green and both engines returned different wrong values at rc=0. That is a
+    FAIL-OPEN, the same shape as `[use-warning]` reporting an unresolved import
+    at rc=0.
+
+    `severity` now decides whether the diagnostic also reaches `ctx`:
+    Advisory (default, unchanged) log-only; Warn -> ctx.add_warning; Deny ->
+    ctx.add_error, which fails the build. The default is deliberately Advisory
+    because the true violation count over the full module set has never been
+    measured — see the bug doc's step 2. Promote via SIMPLE_TYPECHECK_PROFILE
+    only after a census.
+    """
+    val severity = typecheck_pass_severity()
+    var out: [text] = []
+    for name in hir_modules.keys():
+        val m = hir_modules[name]
+        # Type inference diagnostics (unification / occurs-check / mismatch),
+        # including declared-vs-actual return type mismatches.
+        var ictx = HmInferContext.with_builtins()
+        ictx.infer_module(m)
+        var e_idx = 0
+        while e_idx < ictx.errors.len():
+            val msg = "[typecheck] {name}: " +
+                _format_type_infer_error(ictx.errors[e_idx])
+            out = out.push(msg)
+            match severity:
+                case TypecheckPassSeverity.Advisory:
+                    val _ = 0
+                case TypecheckPassSeverity.Warn:
+                    ctx.add_warning(msg)
+                case TypecheckPassSeverity.Deny:
+                    ctx.add_error(msg)
+            e_idx = e_idx + 1
+        # Visibility diagnostics (cross-module private/friend/package access).
+        val vwarnings = check_module_visibility(m, name)
+        var v_idx = 0
+        while v_idx < vwarnings.len():
+            val vw = vwarnings[v_idx]
+            val vmsg = "[visibility {vw.code}] {name}: {vw.message}"
+            out = out.push(vmsg)
+            match severity:
+                case TypecheckPassSeverity.Advisory:
+                    val _ = 0
+                case TypecheckPassSeverity.Warn:
+                    ctx.add_warning(vmsg)
+                case TypecheckPassSeverity.Deny:
+                    ctx.add_error(vmsg)
+            v_idx = v_idx + 1
+    out
+
+pub fn run_safety_warn_pass(
+    ctx: CompileContext,
+    hir_modules: Dict<text, HirModule>
+) -> [text]:
+    # Phased: under SIMPLE_ASSURANCE_WARNING_PHASE a critical Deny becomes
+    # Warn, so a mission-critical tree keeps building while every violation
+    # stays visible (allocatable-MC migration step 1, 2026-08-28).
+    val severity = safety_pass_severity_phased()
+    val parallel_policy = ResolvedParallelPolicyV1.for_assurance(
+        ctx.assurance_policy.strictness)
+    var out: [text] = []
+    for name in hir_modules.keys():
+        val m = hir_modules[name]
+        val checker = SafetyChecker.create()
+        val serrors = safetychecker_check_module(checker, m)
+        # Use the same checker so the transfer walk sees class symbols collected
+        # by the primary module check.
+        val transfer_errors = safetychecker_check_transfer_module_with_policy(
+            checker, m, parallel_policy)
+        var s_idx = 0
+        while s_idx < serrors.len():
+            match serrors[s_idx]:
+                case InlineAsmOutsideUnsafe(span):
+                    val msg = "[safety inline-asm-outside-unsafe] {name}: inline asm used outside an `unsafe:` block at {span.line}:{span.col}"
+                    out = out.push(msg)
+                    match severity:
+                        case SafetyPassSeverity.Advisory:
+                            val _ = 0
+                        case SafetyPassSeverity.Warn:
+                            ctx.add_warning(msg)
+                        case SafetyPassSeverity.Deny:
+                            ctx.add_error(msg)
+                case UnsafeFfiOutsideUnsafe(span):
+                    val msg = "[safety unsafe-ffi-outside-unsafe] {name}: unsafe FFI call used outside an `unsafe:` block at {span.line}:{span.col}"
+                    out = out.push(msg)
+                    match severity:
+                        case SafetyPassSeverity.Advisory:
+                            val _ = 0
+                        case SafetyPassSeverity.Warn:
+                            ctx.add_warning(msg)
+                        case SafetyPassSeverity.Deny:
+                            ctx.add_error(msg)
+                case RawPointerOutsideUnsafe(span):
+                    val msg = "[safety raw-pointer-outside-unsafe] {name}: raw pointer operation used outside an `unsafe:` block at {span.line}:{span.col}"
+                    out = out.push(msg)
+                    match severity:
+                        case SafetyPassSeverity.Advisory:
+                            val _ = 0
+                        case SafetyPassSeverity.Warn:
+                            ctx.add_warning(msg)
+                        case SafetyPassSeverity.Deny:
+                            ctx.add_error(msg)
+                case StaticReferenceOutsideUnsafe(span):
+                    val msg = "[safety static-reference-outside-unsafe] {name}: reference to module static taken outside an `unsafe:` block at {span.line}:{span.col}; fix: wrap the reference-taking expression in the smallest valid `unsafe:` block"
+                    out = out.push(msg)
+                    match severity:
+                        case SafetyPassSeverity.Advisory:
+                            val _ = 0
+                        case SafetyPassSeverity.Warn:
+                            ctx.add_warning(msg)
+                        case SafetyPassSeverity.Deny:
+                            ctx.add_error(msg)
+                case MutableReferenceToImmutableStatic(span):
+                    val msg = "[safety mutable-reference-to-immutable-static] {name}: mutable reference requested for an immutable module static at {span.line}:{span.col}; fix: use `&STATIC`, or declare the static mutable when shared mutation is intended"
+                    out = out.push(msg)
+                    match severity:
+                        case SafetyPassSeverity.Advisory:
+                            val _ = 0
+                        case SafetyPassSeverity.Warn:
+                            ctx.add_warning(msg)
+                        case SafetyPassSeverity.Deny:
+                            ctx.add_error(msg)
+                case Other(message, span):
+                    val msg = "[safety other] {name}: {message} at {span.line}:{span.col}"
+                    out = out.push(msg)
+                    match severity:
+                        case SafetyPassSeverity.Advisory:
+                            val _ = 0
+                        case SafetyPassSeverity.Warn:
+                            ctx.add_warning(msg)
+                        case SafetyPassSeverity.Deny:
+                            ctx.add_error(msg)
+            s_idx = s_idx + 1
+        var t_idx = 0
+        while t_idx < transfer_errors.len():
+            match transfer_errors[t_idx]:
+                case Other(message, span):
+                    val msg = "[safety other] {name}: {message} at {span.line}:{span.col}"
+                    out = out.push(msg)
+                    match severity:
+                        case SafetyPassSeverity.Advisory:
+                            val _ = 0
+                        case SafetyPassSeverity.Warn:
+                            ctx.add_warning(msg)
+                        case SafetyPassSeverity.Deny:
+                            ctx.add_error(msg)
+                case _:
+                    pass
+            t_idx = t_idx + 1
+    out
+
+# ---------------------------------------------------------------------------
+# Hardening passes (integrator I0, 2026-08-21)
+#
+# Both follow `run_safety_warn_pass` exactly: walk `hir_modules`, turn each
+# checker diagnostic into a message, and route it to ctx.add_warning /
+# ctx.add_error by profile. `critical` denies; every other profile warns.
+# Unlike the safety pass there is no Advisory (log-only) rung: these checkers
+# exist because the corresponding defect class was shipping silently, so the
+# quietest setting they have is a visible warning.
+#
+# Every invocation records a receipt (driver_pass_receipt.spl), including the
+# zero-diagnostic case, so "the checker is advisory because it never ran" is
+# distinguishable from "it ran and found nothing".
+# ---------------------------------------------------------------------------
+
+pub fn run_any_escape_pass(
+    ctx: CompileContext,
+    hir_modules: Dict<text, HirModule>
+) -> [text]:
+    """REQ-MC-ANY-001: `Any` origin/escape analysis over every HIR module."""
+    val strictness = ctx.assurance_policy.strictness
+    val is_critical = match strictness:
+        case AssuranceStrictness.Critical: true
+        case _: false
+    # No HIR node carries `@unsafe(capabilities: [type_erasure])` yet
+    # (unsafe_capabilities_not_carried_into_hir_2026-08-21), so no function can
+    # be granted the capability from here. An empty grant list is the
+    # fail-CLOSED direction: it can only produce findings, never hide one.
+    val profile = if is_critical:
+        AnyEscapeProfile.critical([])
+    else:
+        AnyEscapeProfile.census([])
+    var out: [text] = []
+    var errors_raised = 0
+    var modules_checked = 0
+    for name in hir_modules.keys():
+        modules_checked = modules_checked + 1
+        for d in any_escape_check(hir_modules[name], profile):
+            var msg = "[{d.code}] {name}::{d.function_name}: {d.message} at {d.span.line}:{d.span.col}"
+            if d.origin_note != "":
+                msg = msg + " (" + d.origin_note + ")"
+            out = out.push(msg)
+            if is_critical:
+                errors_raised = errors_raised + 1
+                ctx.add_error(msg)
+            else:
+                ctx.add_warning(msg)
+    val _receipt = record_pass_receipt(PassReceipt(
+        pass_name: "any_escape",
+        profile: strictness.name(),
+        executed: true,
+        modules_checked: modules_checked,
+        diagnostics: out.len(),
+        errors_raised: errors_raised
+    ))
+    out
+
+pub fn run_enum_contract_pass(
+    ctx: CompileContext,
+    hir_modules: Dict<text, HirModule>
+) -> [text]:
+    """S2/S3: `@closed` / `@evolving` enum declaration contracts.
+
+    Match-coverage half (`enum_contract_check_matches`) is driven from MIR
+    lowering, which is where ResolvedMatchCoverage records are built; this pass
+    owns the DECLARATION half, which only needs HIR."""
+    val strictness = ctx.assurance_policy.strictness
+    val is_critical = match strictness:
+        case AssuranceStrictness.Critical: true
+        case _: false
+    var out: [text] = []
+    var errors_raised = 0
+    var modules_checked = 0
+    for name in hir_modules.keys():
+        modules_checked = modules_checked + 1
+        for d in enum_contract_check(hir_modules[name], strictness):
+            val msg = "[{d.code}] {name}: {d.message} ({d.enum_name}: {d.detail})"
+            out = out.push(msg)
+            if is_critical:
+                errors_raised = errors_raised + 1
+                ctx.add_error(msg)
+            else:
+                ctx.add_warning(msg)
+    val _receipt = record_pass_receipt(PassReceipt(
+        pass_name: "enum_contract",
+        profile: strictness.name(),
+        executed: true,
+        modules_checked: modules_checked,
+        diagnostics: out.len(),
+        errors_raised: errors_raised
+    ))
+    out
+use compiler.common.diagnostics.span.{Span}

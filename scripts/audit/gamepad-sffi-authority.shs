@@ -1,0 +1,41 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+module="$root/src/lib/nogc_sync_mut/io/gamepad_sffi.spl"
+registry="$root/src/compiler_rust/compiler/src/codegen/runtime_sffi.rs"
+interpreter="$root/src/compiler_rust/compiler/src/interpreter_extern/mod.rs"
+app_facade="$root/src/app/io/gamepad_sffi.spl"
+
+[ "$(grep -c '^extern fn rt_gamepad_' "$module")" -eq 20 ]
+[ "$(grep -c '^fn gamepad_' "$module")" -eq 21 ]
+[ "$(grep -c '^@unsafe(reason:' "$module")" -eq 39 ]
+[ "$(grep -c '^@unsafe(reason: "transitively uses' "$module")" -eq 4 ]
+
+calls=$(perl -0ne '
+    s/""".*?"""//sg; s/#.*//mg; s/^\s*extern fn .*\n//mg;
+    while (/\brt_gamepad_[A-Za-z0-9_]*\s*\(/g) { $n++ }
+    END { print $n + 0 }
+' "$module")
+[ "$calls" -eq 20 ]
+
+symbols=$(sed -n 's/^extern fn \(rt_gamepad_[A-Za-z0-9_]*\).*/\1/p' "$module")
+for symbol in $symbols; do
+    ! grep -q "RuntimeFuncSpec::new(\"$symbol\"" "$registry"
+    ! grep -q "insert_simple!(\"$symbol\"" "$interpreter"
+done
+
+# Pure deadzone math remains safe; authority annotations add no runtime work.
+! grep -B1 '^fn gamepad_apply_deadzone' "$module" | grep -q '^@unsafe'
+! grep -B1 '^fn gamepad_stick_with_deadzone' "$module" | grep -q '^@unsafe'
+! grep -q '^@always_inline$' "$module"
+! grep -q 'unsafe(capabilities:' "$module"
+
+# The app compatibility path must not recreate the unbacked raw boundary or
+# duplicate polling/rumble logic. Export resolution is compile-time only.
+grep -q '^export use std.nogc_sync_mut.io.gamepad_sffi.{' "$app_facade"
+! grep -q '^extern fn ' "$app_facade"
+! grep -q '\brt_gamepad_[A-Za-z0-9_]*(' "$app_facade"
+! grep -q '^fn gamepad_' "$app_facade"
+
+echo "Gamepad SFFI authority audit: PASS (one canonical owner; app path is export-only; 20 raw declarations/15 direct and 4 transitive operation wrappers unsafe; 2 Pure Simple deadzone helpers safe; 0/20 providers registered; no runtime work added)"

@@ -1,0 +1,152 @@
+# SAML spec coverage discovery — sees real sspec unit tests, not just
+# in-.saml `test` blocks.
+#
+# Pure over pre-read sources (no fs access; `common/` tier stays pure).
+# Callers (CLI / MCP / IDE) walk `test/**/*_spec.spl`, read the files, and
+# pass paths + sources here.
+#
+# Match rule: inside the body of an `it "<title>":` block (sspec syntax —
+# runs until the next `it`/`describe` line, a dedent back to the `it`'s own
+# indent level or shallower, or end of file), a call-site token `FnName(`
+# binds iff it appears at a word boundary (not preceded by an identifier
+# character), outside a `#` comment, and outside a quoted string literal.
+#
+# Behavior is specified by test/01_unit/lib/saml/spec_coverage_spec.spl.
+
+fn _is_ident_char(ch: text) -> bool:
+    if ch >= "a" and ch <= "z":
+        return true
+    if ch >= "A" and ch <= "Z":
+        return true
+    if ch >= "0" and ch <= "9":
+        return true
+    ch == "_"
+
+# Strip a trailing `#` comment, but only one that starts outside any quoted
+# string on the line (single-line strings only — sspec source doesn't need
+# multi-line string tracking for this purpose).
+fn _strip_comment_outside_strings(line: text) -> text:
+    var in_single = false
+    var in_double = false
+    var i = 0
+    val n = line.len()
+    while i < n:
+        val ch = line.slice(i, i + 1)
+        if ch == "\"" and not in_single:
+            in_double = not in_double
+        else:
+            if ch == "'" and not in_double:
+                in_single = not in_single
+            else:
+                if ch == "#" and not in_single and not in_double:
+                    return line.slice(0, i)
+        i = i + 1
+    line
+
+# Blank out the contents of quoted string literals (single or double line),
+# leaving delimiters, so a call-site scan never matches text inside a string.
+fn _blank_strings(line: text) -> text:
+    var out = ""
+    var in_single = false
+    var in_double = false
+    var i = 0
+    val n = line.len()
+    while i < n:
+        val ch = line.slice(i, i + 1)
+        if ch == "\"" and not in_single:
+            in_double = not in_double
+            out = out + ch
+        else:
+            if ch == "'" and not in_double:
+                in_single = not in_single
+                out = out + ch
+            else:
+                if in_single or in_double:
+                    out = out + " "
+                else:
+                    out = out + ch
+        i = i + 1
+    out
+
+# Does `clean` (comment-stripped, string-blanked) contain a word-boundary
+# call site `name(`?
+fn _has_call_site(clean: text, name: text) -> bool:
+    val needle = name + "("
+    val needle_len = needle.len()
+    val n = clean.len()
+    var pos = 0
+    while pos <= n - needle_len:
+        if clean.slice(pos, pos + needle_len) == needle:
+            var boundary_ok = true
+            if pos > 0:
+                val before = clean.slice(pos - 1, pos)
+                if _is_ident_char(before):
+                    boundary_ok = false
+            if boundary_ok:
+                return true
+        pos = pos + 1
+    false
+
+# Extract the quoted title from a line like `it "Some title":`. Returns ""
+# if no quoted text is found.
+fn _it_title(line: text) -> text:
+    val open = line.index_of("\"")
+    if open < 0:
+        return ""
+    val rest = line.slice(open + 1, line.len())
+    val close = rest.index_of("\"")
+    if close < 0:
+        return ""
+    rest.slice(0, close)
+
+fn _indent_of(line: text) -> i64:
+    var n = 0
+    for ch in line.chars():
+        if ch == " ":
+            n = n + 1
+        else:
+            break
+    n
+
+fn _is_blank(line: text) -> bool:
+    line.trim() == ""
+
+# Scan one spec source file for `it "..."` block bodies and return
+# "fn_name\texternal:<path>:<it_title>" entries for every binding found.
+fn _discover_in_file(fn_names: [text], path: text, source: text) -> [text]:
+    var out: [text] = []
+    val lines = source.split("\n")
+    var in_it = false
+    var it_title = ""
+    var it_indent = 0
+    for raw_line in lines:
+        val trimmed = raw_line.trim()
+        val stripped_indent = _indent_of(raw_line)
+        if trimmed.starts_with("it \"") or trimmed.starts_with("it \'"):
+            in_it = true
+            it_title = _it_title(raw_line)
+            it_indent = stripped_indent
+            continue
+        if in_it:
+            if not _is_blank(raw_line) and stripped_indent <= it_indent:
+                in_it = false
+        if in_it:
+            val clean = _blank_strings(_strip_comment_outside_strings(raw_line))
+            for name in fn_names:
+                if _has_call_site(clean, name):
+                    out.push(name + "\texternal:" + path + ":" + it_title)
+    out
+
+fn discover_spec_coverage(fn_names: [text], spec_paths: [text], spec_sources: [text]) -> [text]:
+    var out: [text] = []
+    var i = 0
+    val n = spec_paths.len()
+    while i < n:
+        val path = spec_paths[i]
+        val source = spec_sources[i]
+        for entry in _discover_in_file(fn_names, path, source):
+            out.push(entry)
+        i = i + 1
+    out
+
+export discover_spec_coverage

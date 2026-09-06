@@ -1,0 +1,189 @@
+#!/bin/sh
+# check-mir-backend-coverage.shs — ratchet the MIR -> backend lowering contract.
+#
+# WHY THIS EXISTS
+# ---------------
+# Five backend dispatch sites end their `match inst_kind:` in a `case _:` that
+# emits NOTHING and NO diagnostic. A MirInstKind construct outside such a
+# backend's handled set is silently deleted from the generated code -- a wrong
+# answer, not an error. The five *modelled* backends have transition tables
+# under spec/compiler_schema/transitions/ and can be ratcheted; the five
+# fail-open ones are modelled nowhere, which is exactly why they stayed silent.
+# This guard is the missing ratchet: it re-derives every backend's handled set
+# FROM SOURCE and fails when one shrinks, or when a new MirInstKind variant is
+# added that no backend lowers at all.
+#
+# It does NOT convert any fail-open site to a hard failure -- a sibling lane
+# owns that, and it needs its own commit.
+#
+# Verdict line is always the LAST line of stdout:
+#   PASS  — <n> (backend,construct) pair(s) checked, 0 regressions        exit 0
+#   FAIL  — ...                                                            exit 1
+#   ERROR — nothing was checked (<reason>)                                 exit 2
+# A run that checked 0 pairs is ERROR, never a pass.
+#
+# Map:      doc/09_report/mir_construct_coverage_matrix_2026-08-23.md
+# Baseline: scripts/check/mir_backend_coverage_baseline.txt
+# Universe: scripts/check/mir_instkind_universe.txt
+
+set -u
+ROOT=${MIR_COV_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}
+BASELINE="$ROOT/scripts/check/mir_backend_coverage_baseline.txt"
+UNIVERSE="$ROOT/scripts/check/mir_instkind_universe.txt"
+KINDS="src/compiler/50.mir/mir_instruction_kinds.spl"
+
+backend_paths() {
+  cat <<'EOT'
+cranelift_codegen_adapter	src/compiler/70.backend/backend/cranelift_codegen_adapter.spl
+common/mir_text_codegen	src/compiler/70.backend/backend/common/mir_text_codegen.spl
+llvm_lib_translate_expr	src/compiler/70.backend/backend/llvm_lib_translate_expr.spl
+wasm/wat_codegen	src/compiler/70.backend/backend/wasm/wat_codegen.spl
+opencl_backend	src/compiler/70.backend/backend/opencl_backend.spl
+C_backend	src/compiler/70.backend/backend/_CBackendTranslate/instruction_lowering.spl
+MirToLlvm_core	src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl
+isel_x86_64	src/compiler/70.backend/backend/native/isel_x86_64.spl
+isel_aarch64	src/compiler/70.backend/backend/native/isel_aarch64.spl
+mir_interpreter	src/compiler/95.interp/mir_interpreter.spl
+EOT
+}
+
+# Emit "<variant>" for every `case X(` / `case X:` arm at exactly match-indent+4
+# inside the largest `match ...kind...:` block of a file. Mirrors the census.
+derive_handled() { # $1 = file, $2 = universe file
+  awk -v UNIV="$2" '
+    BEGIN{ while((getline l < UNIV) > 0){ if(l !~ /^#/ && l != "") U[l]=1 } }
+    {
+      line[NR]=$0
+    }
+    END{
+      best=0; bestk=""
+      for(i=1;i<=NR;i++){
+        s=line[i]
+        if(match(s,/^[ ]*match[ ]+[^:]*:[ ]*$/)==0) continue
+        sub(/^[ ]*match[ ]+/,"",s); sub(/:[ ]*$/,"",s)
+        if(s !~ /\.kind|inst_kind|instr\.kind/) continue
+        m=line[i]; match(m,/[^ ]/); ind=RSTART-1
+        delete H; n=0
+        for(j=i+1;j<=NR;j++){
+          t=line[j]
+          if(t ~ /^(fn |struct |enum |impl |trait )/) break
+          if(match(t,/^([ ]*)case[ ]+([A-Za-z_][A-Za-z0-9_]*)[ ]*[(:]/)==0) continue
+          ci=0; while(substr(t,ci+1,1)==" ") ci++
+          if(ci != ind+4) continue
+          v=t; sub(/^[ ]*case[ ]+/,"",v); sub(/[ ]*[(:].*$/,"",v)
+          if(v in U && !(v in H)){ H[v]=1; n++ }
+        }
+        if(n>best){ best=n; bestk=""; for(v in H) bestk=bestk v "\n" }
+      }
+      printf "%s", bestk
+    }
+  ' "$1" | sort
+}
+
+selftest() {
+  d=$(mktemp -d) || { echo "ERROR — nothing was checked (mktemp failed)"; exit 2; }
+  fails=0
+  mkdir -p "$d/u"
+  printf '# u\nAlpha\nBeta\nGamma\n' > "$d/u/univ.txt"
+  # fixture 1: two handled arms + a catch-all
+  cat > "$d/f1.spl" <<'F1'
+fn lower(inst_kind: MirInstKind):
+    match inst_kind:
+        case Alpha(a):
+            emit(a)
+        case Beta(b):
+            emit(b)
+        case _:
+            ()
+F1
+  got=$(derive_handled "$d/f1.spl" "$d/u/univ.txt" | tr '\n' ',')
+  [ "$got" = "Alpha,Beta," ] || { echo "SELFTEST FAIL f1: got '$got'"; fails=$((fails+1)); }
+  # fixture 2: neuter Beta -> must drop to Alpha only (proves discrimination)
+  sed 's/case Beta(b):/case _Beta(b):/' "$d/f1.spl" > "$d/f2.spl"
+  got=$(derive_handled "$d/f2.spl" "$d/u/univ.txt" | tr '\n' ',')
+  [ "$got" = "Alpha," ] || { echo "SELFTEST FAIL f2 (neuter not detected): got '$got'"; fails=$((fails+1)); }
+  # fixture 3: nested match at deeper indent must NOT contribute arms
+  cat > "$d/f3.spl" <<'F3'
+fn lower(inst_kind: MirInstKind):
+    match inst_kind:
+        case Alpha(a):
+            match a.kind:
+                case Gamma(g):
+                    emit(g)
+F3
+  got=$(derive_handled "$d/f3.spl" "$d/u/univ.txt" | tr '\n' ',')
+  [ "$got" = "Alpha," ] || { echo "SELFTEST FAIL f3 (nested arm leaked): got '$got'"; fails=$((fails+1)); }
+  # fixture 4: a file with no kind-match yields nothing (forces caller to ERROR)
+  printf 'fn f():\n    return 1\n' > "$d/f4.spl"
+  got=$(derive_handled "$d/f4.spl" "$d/u/univ.txt" | tr -d '\n')
+  [ -z "$got" ] || { echo "SELFTEST FAIL f4: got '$got'"; fails=$((fails+1)); }
+  # fixture 5: variant not in the universe is ignored (no false positive)
+  cat > "$d/f5.spl" <<'F5'
+fn lower(inst_kind: MirInstKind):
+    match inst_kind:
+        case Alpha(a):
+            emit(a)
+        case NotAVariant(x):
+            emit(x)
+F5
+  got=$(derive_handled "$d/f5.spl" "$d/u/univ.txt" | tr '\n' ',')
+  [ "$got" = "Alpha," ] || { echo "SELFTEST FAIL f5: got '$got'"; fails=$((fails+1)); }
+  rm -rf "$d"
+  if [ "$fails" -ne 0 ]; then
+    echo "ERROR — nothing was checked (selftest failed: $fails fixture(s))"
+    exit 2
+  fi
+}
+
+selftest
+[ "${1:-}" = "--selftest" ] && { echo "PASS — 5 selftest fixture(s) checked, 0 regressions"; exit 0; }
+
+cd "$ROOT" 2>/dev/null || { echo "ERROR — nothing was checked (cannot cd to $ROOT)"; exit 2; }
+[ -f "$BASELINE" ] || { echo "ERROR — nothing was checked (missing baseline $BASELINE)"; exit 2; }
+[ -f "$UNIVERSE" ] || { echo "ERROR — nothing was checked (missing universe $UNIVERSE)"; exit 2; }
+[ -f "$KINDS" ]    || { echo "ERROR — nothing was checked (missing $KINDS)"; exit 2; }
+
+TMP=$(mktemp -d) || { echo "ERROR — nothing was checked (mktemp failed)"; exit 2; }
+trap 'rm -rf "$TMP"' EXIT
+CUR="$TMP/current.txt"; : > "$CUR"
+
+nb=0
+backend_paths | while IFS='	' read -r name path; do
+  [ -n "$name" ] || continue
+  if [ ! -f "$path" ]; then echo "MISSINGFILE	$name	$path" >> "$TMP/err"; continue; fi
+  derive_handled "$path" "$UNIVERSE" | while read -r v; do
+    [ -n "$v" ] && printf '%s\t%s\n' "$name" "$v" >> "$CUR"
+  done
+done
+
+if [ -s "$TMP/err" ]; then
+  echo "ERROR — nothing was checked (backend source file(s) missing: $(cut -f2 "$TMP/err" | tr '\n' ' '))"
+  exit 2
+fi
+
+grep -v '^#' "$BASELINE" | grep -v '^$' | sort > "$TMP/base.txt"
+sort "$CUR" > "$TMP/cur.txt"
+PAIRS=$(wc -l < "$TMP/cur.txt" | tr -d ' ')
+BPAIRS=$(wc -l < "$TMP/base.txt" | tr -d ' ')
+if [ "$PAIRS" -eq 0 ] || [ "$BPAIRS" -eq 0 ]; then
+  echo "ERROR — nothing was checked (derived $PAIRS pair(s), baseline $BPAIRS)"
+  exit 2
+fi
+
+LOST=$(comm -23 "$TMP/base.txt" "$TMP/cur.txt")
+NLOST=$(printf '%s' "$LOST" | grep -c . )
+
+# New MirInstKind variants that NO backend lowers at all.
+awk '!/^#/ && NF' "$UNIVERSE" | sort > "$TMP/univ.txt"
+cut -f2 "$TMP/cur.txt" | sort -u > "$TMP/lowered.txt"
+ORPHAN=$(comm -23 "$TMP/univ.txt" "$TMP/lowered.txt")
+NORPH=$(printf '%s' "$ORPHAN" | grep -c . )
+
+if [ "$NLOST" -ne 0 ] || [ "$NORPH" -ne 0 ]; then
+  [ "$NLOST" -ne 0 ] && echo "regressed (case arm removed): $(printf '%s' "$LOST" | tr '\n' ' ')"
+  [ "$NORPH" -ne 0 ] && echo "lowered by NO backend: $(printf '%s' "$ORPHAN" | tr '\n' ' ')"
+  echo "FAIL — $PAIRS (backend,construct) pair(s) checked, $NLOST regression(s), $NORPH orphan construct(s)"
+  exit 1
+fi
+echo "PASS — $PAIRS (backend,construct) pair(s) checked across 10 backend(s), 0 regressions, 0 orphans"
+exit 0

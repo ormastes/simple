@@ -1,0 +1,88 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+BOOTSTRAP_STAGE3_FACADE_PATH="$root/scripts/check/lib/bootstrap-stage3-provenance.shs"
+export BOOTSTRAP_STAGE3_FACADE_PATH
+. "$BOOTSTRAP_STAGE3_FACADE_PATH"
+
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/hosted-runtime-authority.XXXXXX")
+trap 'chmod -R u+w "$tmp" 2>/dev/null || true; rm -rf "$tmp"' EXIT INT TERM
+
+make_source() {
+    source_dir=$1
+    mkdir -p "$source_dir/deps"
+    printf '#!/bin/sh\nexit 0\n' >"$source_dir/simple"
+    chmod 755 "$source_dir/simple"
+    printf native >"$source_dir/libsimple_native_all.a"
+    printf backfill >"$source_dir/libsimple_compiler_backfill.a"
+    printf runtime >"$source_dir/deps/libsimple_runtime.a"
+    printf hosted >"$source_dir/deps/libspl_hosted_runtime-canonical.rlib"
+}
+
+copy_one() {
+    bootstrap_stage3_copy_seed_tuple "$1" "$2" simple \
+        libsimple_native_all.a libsimple_compiler_backfill.a
+}
+
+make_source "$tmp/source"
+copy_one "$tmp/source" "$tmp/frozen"
+bootstrap_stage3_verify_hosted_runtime_authority "$tmp/frozen"
+[ "$BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH" = \
+    deps/libspl_hosted_runtime-canonical.rlib ]
+
+exec 9<"$tmp/frozen"
+BOOTSTRAP_STAGE3_DESCRIPTOR_CAPSULE=1
+export BOOTSTRAP_STAGE3_DESCRIPTOR_CAPSULE
+bootstrap_stage3_verify_hosted_runtime_authority "/proc/$$/fd/9"
+! bootstrap_stage3_verify_hosted_runtime_authority "/proc/$$/fd/9/deps"
+chmod 700 "$tmp/frozen/deps"
+ln -s libspl_hosted_runtime-canonical.rlib \
+    "$tmp/frozen/deps/rejected-descendant-link"
+chmod 500 "$tmp/frozen/deps"
+! bootstrap_stage3_verify_hosted_runtime_authority "/proc/$$/fd/9"
+chmod 700 "$tmp/frozen/deps"
+rm "$tmp/frozen/deps/rejected-descendant-link"
+chmod 500 "$tmp/frozen/deps"
+unset BOOTSTRAP_STAGE3_DESCRIPTOR_CAPSULE
+exec 9<&-
+
+make_source "$tmp/missing"
+rm "$tmp/missing/deps/libspl_hosted_runtime-canonical.rlib"
+! copy_one "$tmp/missing" "$tmp/missing-output"
+
+make_source "$tmp/duplicate"
+printf duplicate >"$tmp/duplicate/deps/libspl_hosted_runtime-other.rlib"
+! copy_one "$tmp/duplicate" "$tmp/duplicate-output"
+
+make_source "$tmp/symlink"
+mv "$tmp/symlink/deps/libspl_hosted_runtime-canonical.rlib" \
+    "$tmp/symlink/deps/hosted.real"
+ln -s hosted.real "$tmp/symlink/deps/libspl_hosted_runtime-canonical.rlib"
+! copy_one "$tmp/symlink" "$tmp/symlink-output"
+
+cp -a "$tmp/frozen" "$tmp/writable"
+chmod 600 "$tmp/writable/deps/libspl_hosted_runtime-canonical.rlib"
+! bootstrap_stage3_verify_hosted_runtime_authority "$tmp/writable"
+
+cp -a "$tmp/frozen" "$tmp/tampered"
+chmod 600 "$tmp/tampered/deps/libspl_hosted_runtime-canonical.rlib"
+printf tamper >>"$tmp/tampered/deps/libspl_hosted_runtime-canonical.rlib"
+chmod 400 "$tmp/tampered/deps/libspl_hosted_runtime-canonical.rlib"
+! bootstrap_stage3_verify_hosted_runtime_authority "$tmp/tampered"
+
+cp -a "$tmp/frozen" "$tmp/stale"
+chmod 700 "$tmp/stale"
+chmod 600 "$tmp/stale/hosted-runtime.env"
+sed 's/^sha256=.*/sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/' \
+    "$tmp/stale/hosted-runtime.env" >"$tmp/stale/hosted-runtime.env.new"
+mv "$tmp/stale/hosted-runtime.env.new" "$tmp/stale/hosted-runtime.env"
+chmod 400 "$tmp/stale/hosted-runtime.env"
+chmod 500 "$tmp/stale"
+! bootstrap_stage3_verify_hosted_runtime_authority "$tmp/stale"
+
+# No env/latest/Cargo target selector participates in resolution.
+SIMPLE_RUNTIME_PATH="$tmp/tampered" CARGO_TARGET_DIR="$tmp/tampered" \
+    bootstrap_stage3_verify_hosted_runtime_authority "$tmp/frozen"
+
+echo 'PASS: hosted runtime authority projection is unique, immutable, and receipt-bound'

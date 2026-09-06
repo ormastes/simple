@@ -1,0 +1,198 @@
+# Spec-to-SPipe evidence extension (Lane E6, additive-only).
+#
+# This module defines the versioned extension-namespace payload that
+# spec-to-spipe importers attach to `SpecLedgerEntry` / `SpecImportManifest`
+# extension fields (`SpecExtensionField`, frozen in
+# doc/05_design/app/spec_to_spipe_ir.md). It does NOT define or touch any
+# Phase-0 frozen record — it only defines the shape of the opaque payload the
+# core carries without interpreting.
+#
+# Design: doc/05_design/app/spec_to_spipe_evidence_extension.md
+# Sibling: src/lib/common/spec/evidence/model.spl owns the pinned, separately
+#          test-covered runtime schema constant EVIDENCE_MANIFEST_SCHEMA =
+#          "simple.sspec.evidence.v1" (a different record, EvidenceManifest).
+#          This module deliberately uses a DISTINCT namespace,
+#          "simple.sspec.evidence.ext.v1", so the two never collide — see the
+#          design doc's "naming collision" section for the full rationale.
+
+pub val SPIPE_EVIDENCE_EXTENSION_NAMESPACE: text = "simple.sspec.evidence.ext.v1"
+pub val SPIPE_EVIDENCE_EXTENSION_VERSION: text = "1"
+
+# ---------------------------------------------------------------------------
+# Node kinds
+# ---------------------------------------------------------------------------
+
+# One entry per new semantic node kind this extension introduces. Kept as a
+# discriminator on one node shape (SpipeEvidenceNode) rather than nine record
+# types, so the frozen core still sees a single opaque namespaced field list
+# regardless of how many kinds an importer emits (spec_to_spipe_ir.md: "the
+# core does not interpret extension values").
+pub enum SpipeEvidenceNodeKind:
+    interaction_case
+    action_step
+    evidence_profile_ref
+    evidence_oracle
+    evidence_selector
+    protocol_grammar_ref
+    binary_layout_ref
+    comparison_check
+    manual_projection_hint
+
+pub fn spipe_evidence_node_kind_name(kind: SpipeEvidenceNodeKind) -> text:
+    match kind:
+        case SpipeEvidenceNodeKind.interaction_case: "interaction_case"
+        case SpipeEvidenceNodeKind.action_step: "action_step"
+        case SpipeEvidenceNodeKind.evidence_profile_ref: "evidence_profile_ref"
+        case SpipeEvidenceNodeKind.evidence_oracle: "evidence_oracle"
+        case SpipeEvidenceNodeKind.evidence_selector: "evidence_selector"
+        case SpipeEvidenceNodeKind.protocol_grammar_ref: "protocol_grammar_ref"
+        case SpipeEvidenceNodeKind.binary_layout_ref: "binary_layout_ref"
+        case SpipeEvidenceNodeKind.comparison_check: "comparison_check"
+        case SpipeEvidenceNodeKind.manual_projection_hint: "manual_projection_hint"
+
+# ---------------------------------------------------------------------------
+# Node
+# ---------------------------------------------------------------------------
+
+# One evidence-extension node. Mirrors the identity/provenance fields every
+# core semantic node already carries (spec_to_spipe_ir.md: "Every semantic
+# node carries a stable identity, source spans, adapter rule ID, confidence,
+# and disposition") so an extension node can be diffed and source-mapped with
+# the same machinery as core nodes, without becoming a core node itself.
+#
+# `payload` is a flat text blob (kind-specific, e.g. an OracleCheck selector
+# path, a profile id, a grammar production name). It is intentionally opaque
+# text rather than a nested record: the extension envelope must stay
+# serializable through the same deterministic length-prefixed text scheme the
+# core uses, and a flat payload avoids inventing a second nested encoding.
+pub struct SpipeEvidenceNode:
+    semantic_id: text
+    kind: SpipeEvidenceNodeKind
+    span_start: i64
+    span_end: i64
+    requirement_id: text
+    adapter_rule_id: text
+    disposition: text
+    payload: text
+
+pub fn spipe_evidence_node(
+    semantic_id: text,
+    kind: SpipeEvidenceNodeKind,
+    span_start: i64,
+    span_end: i64,
+    requirement_id: text,
+    adapter_rule_id: text,
+    disposition: text,
+    payload: text
+) -> SpipeEvidenceNode:
+    SpipeEvidenceNode(
+        semantic_id: semantic_id,
+        kind: kind,
+        span_start: span_start,
+        span_end: span_end,
+        requirement_id: requirement_id,
+        adapter_rule_id: adapter_rule_id,
+        disposition: disposition,
+        payload: payload
+    )
+
+# ---------------------------------------------------------------------------
+# Extension envelope
+# ---------------------------------------------------------------------------
+
+# The full payload one importer attaches as a `SpecExtensionField` value.
+# `namespace_id`/`version` are carried inside the envelope (not just in the
+# outer `SpecExtensionField.namespace` key) so the payload is self-describing
+# even if it is copied or diffed outside its original field.
+pub struct SpipeEvidenceExtension:
+    namespace_id: text
+    version: text
+    nodes: [SpipeEvidenceNode]
+
+pub fn spipe_evidence_extension(nodes: [SpipeEvidenceNode]) -> SpipeEvidenceExtension:
+    SpipeEvidenceExtension(
+        namespace_id: SPIPE_EVIDENCE_EXTENSION_NAMESPACE,
+        version: SPIPE_EVIDENCE_EXTENSION_VERSION,
+        nodes: nodes
+    )
+
+# ---------------------------------------------------------------------------
+# Deterministic serialization
+# ---------------------------------------------------------------------------
+
+# Fixed field order per node, and nodes emitted in list order (callers are
+# responsible for stable-ordering `nodes` before calling this, matching the
+# core's "Producer arrays must already be stable-ordered" rule,
+# spec_to_spipe_ir.md:65-66). Two runs over unchanged source bytes must
+# produce byte-identical output, or a real change cannot be told apart from
+# nondeterministic emission order.
+pub fn extension_lines(extension: SpipeEvidenceExtension) -> [text]:
+    var lines: [text] = [
+        "namespace_id: " + extension.namespace_id,
+        "version: " + extension.version,
+        "node_count: " + "{extension.nodes.len()}"
+    ]
+    for node in extension.nodes:
+        lines.push("node.semantic_id: " + node.semantic_id)
+        lines.push("node.kind: " + spipe_evidence_node_kind_name(node.kind))
+        lines.push("node.span_start: " + "{node.span_start}")
+        lines.push("node.span_end: " + "{node.span_end}")
+        lines.push("node.requirement_id: " + node.requirement_id)
+        lines.push("node.adapter_rule_id: " + node.adapter_rule_id)
+        lines.push("node.disposition: " + node.disposition)
+        lines.push("node.payload: " + node.payload)
+    lines
+
+# ---------------------------------------------------------------------------
+# Validation
+# ---------------------------------------------------------------------------
+
+# Fails on the four defects that would make the extension unsafe to trust:
+#
+# - wrong namespace: a payload under the wrong namespace string would be
+#   silently misattributed to this extension by any consumer that trusts the
+#   inner `namespace_id` field instead of re-deriving it.
+# - empty semantic id: every downstream consumer (source map, semantic diff,
+#   overlay `# overlay-of:` reference) keys off `semantic_id`; an empty id
+#   cannot be distinguished from "no id assigned yet" and would collide with
+#   every other empty-id node.
+# - span_end <= span_start: a zero-or-negative-width span cannot cover any
+#   source bytes, so it can never satisfy the "100% source disposition" gate
+#   and would silently pass as if it did.
+# - missing adapter rule id: without it, a failing/malformed node cannot be
+#   traced back to the importer rule that produced it, which is required for
+#   the same reason core `SpecLedgerEntry`/diagnostic entries require one
+#   (spec_to_spipe_ir.md:51-54).
+#
+# NOTE: under the current bootstrap-seed engine, this bool-returning function
+# was observed to print as `nil` at a call site even though it evaluated
+# correctly internally; prefer `extension_wellformed_reason(...) == ""` at
+# call sites until that seed quirk is independently confirmed fixed. See the
+# design doc's "Known engine quirk" section.
+pub fn extension_is_wellformed(extension: SpipeEvidenceExtension) -> bool:
+    if extension.namespace_id != SPIPE_EVIDENCE_EXTENSION_NAMESPACE:
+        return false
+    for node in extension.nodes:
+        if node.semantic_id == "":
+            return false
+        if node.span_end <= node.span_start:
+            return false
+        if node.adapter_rule_id == "":
+            return false
+    true
+
+# Same checks as `extension_is_wellformed`, but returns the first violation
+# reason instead of a bare bool, so an importer can fail closed with an
+# actionable message rather than a silent false. Prefer this at call sites
+# (see the NOTE above `extension_is_wellformed`).
+pub fn extension_wellformed_reason(extension: SpipeEvidenceExtension) -> text:
+    if extension.namespace_id != SPIPE_EVIDENCE_EXTENSION_NAMESPACE:
+        return "wrong namespace: " + extension.namespace_id
+    for node in extension.nodes:
+        if node.semantic_id == "":
+            return "empty semantic id (kind=" + spipe_evidence_node_kind_name(node.kind) + ")"
+        if node.span_end <= node.span_start:
+            return "non-positive span for " + node.semantic_id
+        if node.adapter_rule_id == "":
+            return "missing adapter rule id for " + node.semantic_id
+    ""

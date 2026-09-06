@@ -1,0 +1,82 @@
+use std.spec.*
+use compiler.mir.hwir.types.{CoreConfig, HwPort}
+use compiler.mir.hwir.combinational_composition.{HwCombBinding, HwCombChildInstance,
+    strict_comb_composition}
+use compiler.mir.hwir.riscv_scalar_runtime_control_datapath.{
+    strict_riscv_scalar_runtime_control_datapath}
+
+describe "typed combinational HWIR composition":
+    it "closes a runtime control datapath passthrough child and hashes its exact graph":
+        val config = CoreConfig.rv32()
+        val child = strict_riscv_scalar_runtime_control_datapath(
+            "control_datapath_child", config).unwrap()
+        var top_ports: [HwPort] = []
+        var bindings: [HwCombBinding] = []
+        for port in child.ports:
+            top_ports.push(if port.direction == "in":
+                HwPort.input(port.name, "Bits", port.bit_width)
+            else: HwPort.output(port.name, "Bits", port.bit_width))
+            bindings.push(if port.direction == "in": HwCombBinding(
+                source_owner: "composition", source_port: port.name,
+                destination_owner: "datapath", destination_port: port.name,
+                bit_width: port.bit_width)
+            else: HwCombBinding(source_owner: "datapath", source_port: port.name,
+                destination_owner: "composition", destination_port: port.name,
+                bit_width: port.bit_width))
+        val first = strict_comb_composition("control_datapath_composed", config,
+            top_ports, [HwCombChildInstance(owner: "datapath", module: child)], bindings)
+        val second = strict_comb_composition("control_datapath_composed", config,
+            top_ports, [HwCombChildInstance(owner: "datapath", module: child)], bindings)
+        expect(first.is_ok()).to_be(true)
+        expect(second.is_ok()).to_be(true)
+        if first.is_ok() and second.is_ok():
+            expect(first.ok().unwrap().structural_sha256()).to_equal(
+                second.ok().unwrap().structural_sha256())
+            expect(first.ok().unwrap().structural_sha256().len()).to_equal(64)
+
+    it "rejects a missing child input driver and duplicate destination":
+        val config = CoreConfig.rv32()
+        val child = strict_riscv_scalar_runtime_control_datapath(
+            "control_datapath_bad_child", config).unwrap()
+        val top = [HwPort.input("instruction", "Bits", 32)]
+        val one = HwCombBinding(source_owner: "composition", source_port: "instruction",
+            destination_owner: "datapath", destination_port: "canonical_instruction", bit_width: 32)
+        expect(strict_comb_composition("missing_inputs", config, top,
+            [HwCombChildInstance(owner: "datapath", module: child)], [one]).is_err()).to_be(true)
+        expect(strict_comb_composition("duplicate_driver", config, top,
+            [HwCombChildInstance(owner: "datapath", module: child)], [one, one]).is_err()).to_be(true)
+
+    it "rejects direct combinational child feedback":
+        val config = CoreConfig.rv32()
+        val child = strict_riscv_scalar_runtime_control_datapath(
+            "control_datapath_feedback_child", config).unwrap()
+        val feedback = HwCombBinding(source_owner: "datapath",
+            source_port: "jump_immediate", destination_owner: "datapath",
+            destination_port: "canonical_instruction", bit_width: 32)
+        val result = strict_comb_composition("control_feedback", config, [],
+            [HwCombChildInstance(owner: "datapath", module: child)], [feedback])
+        expect(result.is_err()).to_be(true)
+        if result.is_err(): expect(result.err().unwrap()).to_contain("self-feedback")
+
+    it "rejects a top port colliding with a generated interconnect":
+        val config = CoreConfig.rv32()
+        val child = strict_riscv_scalar_runtime_control_datapath(
+            "control_datapath_namespace_child", config).unwrap()
+        var top_ports: [HwPort] = [HwPort.input(
+            "source_o8_datapath_p14_jump_immediate", "Bits", 1)]
+        var bindings: [HwCombBinding] = []
+        for port in child.ports:
+            top_ports.push(if port.direction == "in":
+                HwPort.input(port.name, "Bits", port.bit_width)
+            else: HwPort.output(port.name, "Bits", port.bit_width))
+            bindings.push(if port.direction == "in": HwCombBinding(
+                source_owner: "composition", source_port: port.name,
+                destination_owner: "datapath", destination_port: port.name,
+                bit_width: port.bit_width)
+            else: HwCombBinding(source_owner: "datapath", source_port: port.name,
+                destination_owner: "composition", destination_port: port.name,
+                bit_width: port.bit_width))
+        val result = strict_comb_composition("namespace_collision", config,
+            top_ports, [HwCombChildInstance(owner: "datapath", module: child)], bindings)
+        expect(result.is_err()).to_be(true)
+        if result.is_err(): expect(result.err().unwrap()).to_contain("generated interconnects")

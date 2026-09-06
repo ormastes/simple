@@ -1,0 +1,48 @@
+"""
+# `spawn(...)` call expressions survive the flat-AST -> tree-AST bridge
+
+Reproducing spec for
+`doc/08_tracking/bug/spawn_call_expr_silently_becomes_nillit_2026-07-29.md`.
+
+`src/compiler/10.frontend/_FlatAstBridge/convert_nodes.spl`'s
+`convert_flat_expr` has no dispatch arm for `EXPR_SPAWN` (tag 39), so a real
+`spawn(w)` call expression falls through to the generic fallback and becomes
+a bare `ExprKind.NilLit` -- callee and every argument discarded.
+
+Expected shape is `ExprKind.Call(Ident("spawn"), [w])`, NOT
+`ExprKind.Spawn(...)`: every live consumer of a spawn site in this compiler
+matches the callee NAME on an ordinary `Call`
+(`30.types/type_system/checker.spl`, `builtin_registry.spl`,
+`50.mir/mir_effects.spl`, and rule E1049 in
+`35.semantics/safety_checker.spl:907`), and `20.hir/hir_lowering/
+expressions.spl`'s `lower_hir_expr` has NO `case ExprKind.Spawn` arm -- it
+would hard-error "unsupported expression kind". So the bridge must rebuild
+the plain-call shape.
+"""
+
+use std.spec
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.frontend.parser_types_expr.*
+
+describe "flat AST bridge preserves spawn(...) call expressions":
+    it "lowers `spawn(w)` to a Call with callee `spawn` and argument `w`, not NilLit":
+        val src = "fn boot(w: i64):\n" +
+            "    spawn(w)\n"
+        val parsed = parse_full_frontend(src, "testdata/fixture_spawn_bridge.spl", "fixture_spawn_bridge", Logger(level: 0))
+        val boot = parsed.functions["boot"]
+        var label = "missing"
+        if boot.?:
+            val fn_ = boot!
+            if fn_.body.stmts.len() > 0:
+                match fn_.body.stmts[0].kind:
+                    case StmtKind.Expr(e):
+                        match e.kind:
+                            case ExprKind.NilLit: label = "NilLit"
+                            case ExprKind.Call(callee, args):
+                                match callee.kind:
+                                    case ExprKind.Ident(nm): label = "Call(" + nm + "," + args.len().to_text() + ")"
+                                    case _: label = "Call(non-ident)"
+                            case _: label = "other-expr"
+                    case _: label = "other-stmt"
+        assert_equal(label, "Call(spawn,1)")

@@ -1,0 +1,100 @@
+# Reproduce probe: seed native codegen enum-dispatch wall (2026-08-28).
+#
+# Shape: an enum variant carrying an OPTIONAL enum payload
+# (`payload: PPayload?`), unwrapped with `if val pl = payload:` and then
+# matched with a bare variant pattern (`case Tuple(patterns)`), while a DECOY
+# enum shares the variant name `Tuple` with a different payload shape.
+#
+# Pre-fix (seed HIR lowering, get_enum_variant_field_types_with_hint):
+#   - the expected-type branch unwrapped `Pointer` (T?) only for `Some`, so
+#     `case Tuple(...)` fell into the wildcard "_" search;
+#   - that search iterated a HashMap and returned the FIRST enum owning a
+#     variant named `Tuple` — the decoy — typing `patterns` ANY;
+#   - `pat.kind` on the ANY element was index-guessed against an unrelated
+#     struct ("most fields wins"; in the compiler closure: HirSymbol, kind@2),
+#     so the compiled binary read a garbage slot and dispatched `case _`.
+# Observable: this program, NATIVE-BUILT by the pre-fix seed
+#   (`simple native-build --backend llvm --runtime-bundle core-c-bootstrap
+#    --entry <this file> ...`), printed "BAD disc=-1 9" and exited 1
+#   (deterministically single-file; per-process-randomly in the two-module
+#   split). Post-fix it prints 2 and exits 0. This is the minimized form of
+#   the stage2 `nested match pattern kind not supported inside an enum
+#   payload` wall (match_desugaring.spl:721) and its dead-extern heisenbug.
+# The interpreter is correct for this class either way.
+extern fn rt_enum_discriminant(v: i64) -> i64
+
+struct SymbolId:
+    id: i64
+
+struct Span:
+    line: i64
+    col: i64
+
+struct HirType:
+    name: text
+
+# DECOY: more fields than Pat, `kind` at a different index (2)
+struct DecoyNode:
+    alpha: i64
+    beta: i64
+    kind: i64
+    gamma: i64
+    delta: i64
+    epsilon: i64
+
+# DECOY enum with same-named variant `Tuple`, different payload shape
+enum DecoyPayload:
+    Tuple(a: i64, b: text)
+    Other
+
+enum PPayload:
+    Tuple(pats: [Pat])
+    Struct(fields: [(text, Pat)])
+
+enum PKind:
+    Wildcard
+    Binding(s: SymbolId, m: bool)
+    Enum(type_: HirType, variant: text, payload: PPayload?)
+    Error
+
+struct Pat:
+    kind: PKind
+    has_type_: bool
+    type_: HirType
+    span: Span
+
+fn use_decoy(d: DecoyNode, p: DecoyPayload) -> i64:
+    match p:
+        case DecoyPayload.Other: d.kind
+        case _: 0
+
+fn mk_arm_pat() -> Pat:
+    val sp = Span(line: 1, col: 2)
+    val inner = Pat(kind: PKind.Binding(SymbolId(id: 7), false), type_: nil, span: sp)
+    val pl: PPayload? = PPayload.Tuple([inner])
+    Pat(kind: PKind.Enum(HirType(name: "Shape"), "Circle", pl), type_: nil, span: sp)
+
+fn scan(top: Pat) -> i64:
+    match top.kind:
+        case Enum(etype, variant, payload):
+            var out = 0
+            if val pl = payload:
+                match pl:
+                    case Tuple(patterns):
+                        for pat in patterns:
+                            match pat.kind:
+                                case PKind.Wildcard: out = out * 10 + 1
+                                case Binding(_, _): out = out * 10 + 2
+                                case Enum(_, _, _): out = out * 10 + 3
+                                case _:
+                                    print "BAD disc={rt_enum_discriminant(pat.kind)}"
+                                    out = out * 10 + 9
+                    case _: out = -5
+            out
+        case _: -1
+
+fn main() -> i64:
+    val d = use_decoy(DecoyNode(alpha:1,beta:2,kind:3,gamma:4,delta:5,epsilon:6), DecoyPayload.Other)
+    val r = scan(mk_arm_pat())
+    print r
+    if r == 2: 0 else: 1

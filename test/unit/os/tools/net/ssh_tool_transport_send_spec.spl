@@ -1,0 +1,114 @@
+# @cover src/os/tools/net/_SshTool/transport.spl 25%
+use std.spipe.*
+use os.tools.net.ssh_tool.{
+    SSH_SEND_RETRY_WINDOW,
+    SshSendCursor,
+    ssh_send_offer_range,
+    ssh_send_accept
+}
+
+class SendModelReport:
+    emitted: [u8]
+    retry_offered: u64
+    max_retry: u64
+
+fn _payload(total: u64) -> [u8]:
+    var payload: [u8] = []
+    var i: u64 = 0
+    while i < total:
+        payload.push((i % 251).to_u8())
+        i = i + 1
+    payload
+
+fn _model_partial_writes(payload: [u8], writes: [i64]) -> SendModelReport:
+    var cursor = SshSendCursor()
+    var emitted: [u8] = []
+    var retry_offered: u64 = 0
+    var max_retry: u64 = 0
+    var step: u64 = 0
+    while cursor.sent < payload.len():
+        val offered_range = ssh_send_offer_range(cursor, payload.len()).unwrap()
+        val offered = offered_range.len()
+        if cursor.attempts > 0:
+            retry_offered = retry_offered + offered
+            if offered > max_retry:
+                max_retry = offered
+        val wrote = writes[step]
+        var i = offered_range.start
+        val accepted_end = offered_range.start + wrote.to_u64()
+        while i < accepted_end:
+            emitted.push(payload[i])
+            i = i + 1
+        val accepted = ssh_send_accept(cursor, payload.len(), offered, wrote)
+        if accepted.is_err():
+            panic(accepted.unwrap_err())
+        step = step + 1
+    expect(step).to_equal(writes.len())
+    SendModelReport(emitted: emitted, retry_offered: retry_offered, max_retry: max_retry)
+
+describe "SSH client partial-write cursor":
+    it "uses exact bounded ranges across a 4096-byte payload":
+        val payload = _payload(4096)
+        val report = _model_partial_writes(payload, [1, 4095])
+        expect(report.emitted).to_equal(payload)
+        expect(report.retry_offered).to_equal(4095)
+        expect(report.max_retry).to_equal(4095)
+
+    it "uses exact bounded ranges across a 4097-byte payload":
+        val payload = _payload(4097)
+        val report = _model_partial_writes(payload, [1, 4095, 1])
+        expect(report.emitted).to_equal(payload)
+        expect(report.retry_offered).to_equal(4097)
+        expect(report.max_retry).to_equal(SSH_SEND_RETRY_WINDOW)
+
+    it "uses exact bounded ranges across an 8193-byte payload":
+        val payload = _payload(8193)
+        val report = _model_partial_writes(payload, [1, 4095, 1, 4096])
+        expect(report.emitted).to_equal(payload)
+        expect(report.retry_offered).to_equal(12288)
+        expect(report.max_retry).to_equal(SSH_SEND_RETRY_WINDOW)
+
+    it "keeps one-byte-write copied volume linear in the fixed retry window":
+        val payload = _payload(4097)
+        var writes: [i64] = []
+        var i: u64 = 0
+        while i < payload.len():
+            writes.push(1)
+            i = i + 1
+        val report = _model_partial_writes(payload, writes)
+        expect(report.emitted).to_equal(payload)
+        expect(report.retry_offered).to_equal(8390656)
+        expect(report.retry_offered <= (payload.len() - 1) * SSH_SEND_RETRY_WINDOW).to_equal(true)
+
+    it "does not advance after zero negative or oversized writes":
+        var zero_cursor = SshSendCursor()
+        val zero = ssh_send_accept(zero_cursor, 8, 8, 0)
+        expect(zero.err().unwrap()).to_equal("write returned 0")
+        expect(zero_cursor.sent).to_equal(0)
+
+        var negative_cursor = SshSendCursor()
+        val negative = ssh_send_accept(negative_cursor, 8, 8, -7)
+        expect(negative.err().unwrap()).to_equal("write failed: -7")
+        expect(negative_cursor.sent).to_equal(0)
+
+        var oversized_cursor = SshSendCursor()
+        val oversized = ssh_send_accept(oversized_cursor, 8, 8, 9)
+        expect(oversized.err().unwrap()).to_equal("write returned oversized count: 9 > 8")
+        expect(oversized_cursor.sent).to_equal(0)
+
+    it "rejects malformed cursors and mismatched offers":
+        val malformed = ssh_send_offer_range(SshSendCursor(sent: 9, attempts: 1), 8)
+        expect(malformed.err().unwrap()).to_equal("write cursor exceeded buffer length")
+
+        var mismatch_cursor = SshSendCursor()
+        val mismatch = ssh_send_accept(mismatch_cursor, 8, 7, 1)
+        expect(mismatch.err().unwrap()).to_equal("write offer did not match cursor")
+        expect(mismatch_cursor.sent).to_equal(0)
+
+    it "fails closed when the progress-derived attempt bound is exhausted":
+        var cursor = SshSendCursor(sent: 1, attempts: 2)
+        val offered_range = ssh_send_offer_range(cursor, 2).unwrap()
+        val offered = offered_range.len()
+        val result = ssh_send_accept(cursor, 2, offered, 1)
+        expect(result.err().unwrap()).to_equal("write attempt limit exceeded")
+        expect(cursor.sent).to_equal(1)

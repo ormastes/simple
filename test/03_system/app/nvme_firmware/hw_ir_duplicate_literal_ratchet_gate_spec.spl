@@ -1,0 +1,107 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-SYSTEM
+# plan: doc/03_plan/hardware/nvme_ssd_firmware_hardening_design_plan.md
+
+# @tag: system, nvme, hardware, register-ir, ratchet, gate
+# @req REQ-SSPEC-SYSTEM
+"""
+Aperture addresses must have exactly one home.
+
+Once the Cosmos NFC apertures live in the RegisterIR, every hardcoded copy of one
+of those literals elsewhere in the tree is a second source of truth that can
+silently diverge from the first. The tree already carries 28 such occurrences, so
+they cannot be made fatal at once;
+`scripts/check/check-hw-ir-no-duplicate-literals.shs` freezes them in a baseline
+and fails any change that ADDS one — and, symmetrically, fails a baseline that has
+gone stale, because a ratchet describing a tree that no longer exists has quietly
+stopped ratcheting.
+
+This scenario pins that contract. A passing run must STATE how many files it
+scanned, so a run that scanned nothing cannot look like a clean tree; pointing the
+gate at a root with no baseline must produce ERROR and exit 2 rather than a pass;
+and the gate must be shown capable of turning red.
+
+The red is demonstrated through the gate's OWN `--selftest`, which carries the
+sabotage fixtures — one of them adds a duplicate literal and asserts the count
+rises, another checks that a comment-only mention does NOT. Using the built-in
+fixtures rather than sabotaging the real tree is deliberate: no tracked file is
+touched, and the fixtures are the same ones every invocation of the gate runs
+before it scans anything.
+"""
+
+use std.spec.step
+
+use std.spec.*
+use std.io_runtime.{process_run}
+
+val GATE: text = "scripts/check/check-hw-ir-no-duplicate-literals.shs"
+
+fn _run(cmd: text) -> (text, text, i64):
+    process_run("/bin/sh", ["-c", cmd])
+
+describe "Hardcoded aperture literal ratchet gate":
+
+    # @manual scenario evidence
+    it "should report a PASS that states a non-zero scanned count and its baseline":
+        # @req REQ-SSPEC-SYSTEM
+        step("should report a PASS that states a non-zero scanned count and its baseline")
+
+        step("Run the ratchet over the repository")
+        val (out, err, rc) = _run("out=$(sh " + GATE + " 2>&1); rc=$?; last=$(printf '%s\\n' \"$out\" | tail -1); printf 'VERDICT %s\\n' \"$last\"; printf 'GATE_RC %s\\n' \"$rc\"; printf '%s\\n' \"$last\" | grep -Eq 'PASS — [1-9][0-9]* file\\(s\\) checked' && printf 'COUNT NONZERO\\n' || printf 'COUNT VACUOUS\\n'")
+        val log: text = out + err
+
+        step("The verdict is the LAST line of stdout and announces a PASS")
+        expect(log).to_contain("VERDICT PASS")
+
+        step("The PASS names a NON-ZERO file count — a vacuous run cannot masquerade as a pass")
+        # `to_contain("0")` would be satisfied by "10", so the shape is decided
+        # by a regex in the shell and reported as a distinct token instead.
+        expect(log).to_contain("COUNT NONZERO")
+
+        step("The PASS also names the occurrence count and the baseline it is held to")
+        expect(log).to_contain("occurrence(s) (baseline")
+
+        step("A PASS carries exit 0, captured before any pipe")
+        expect(log).to_contain("GATE_RC 0")
+
+    # @manual scenario evidence
+    it "should refuse with ERROR and exit 2 when there is nothing to check":
+        # @req REQ-SSPEC-SYSTEM
+        step("should refuse with ERROR and exit 2 when there is nothing to check")
+
+        step("Point the gate at a root that does not exist")
+        val (out, err, rc) = _run("out=$(ROOT=/nonexistent/simple-gate-probe sh " + GATE + " 2>&1); rc=$?; last=$(printf '%s\\n' \"$out\" | tail -1); printf 'VERDICT %s\\n' \"$last\"; printf 'GATE_RC %s\\n' \"$rc\"")
+        val log: text = out + err
+
+        step("The verdict is ERROR — nothing was checked, never PASS")
+        expect(log).to_contain("VERDICT ERROR — nothing was checked")
+
+        step("And the exit code is 2")
+        expect(log).to_contain("GATE_RC 2")
+
+    # @manual scenario evidence
+    it "should run its fatal selftest unconditionally and report the fixture count":
+        # @req REQ-SSPEC-SYSTEM
+        step("should run its fatal selftest unconditionally and report the fixture count")
+
+        step("The selftest runs even on the ordinary scan path, before any verdict")
+        val (aout, aerr, arc) = _run("sh " + GATE + " 2>&1 | head -40")
+        expect(aout + aerr).to_contain("selftest: 6 fixture assertion(s) passed")
+
+        step("It also runs on the ERROR path, so a broken gate cannot fail silently")
+        val (eout, eerr, erc) = _run("ROOT=/nonexistent/simple-gate-probe sh " + GATE + " 2>&1")
+        expect(eout + eerr).to_contain("selftest: 6 fixture assertion(s) passed")
+
+        step("--selftest alone reports the same fixture count and evaluates no baseline")
+        val (sout, serr, src) = _run("out=$(sh " + GATE + " --selftest 2>&1); rc=$?; last=$(printf '%s\\n' \"$out\" | tail -1); printf 'VERDICT %s\\n' \"$last\"; printf 'GATE_RC %s\\n' \"$rc\"")
+        val slog: text = sout + serr
+        expect(slog).to_contain("VERDICT PASS — selftest only, 6 fixture assertion(s) passed")
+        expect(slog).to_contain("GATE_RC 0")
+
+        step("Those fixtures include the sabotage that proves the gate can turn RED")
+        # Fixture 2 adds a NEW duplicate literal and asserts the count rises;
+        # fixture 3 asserts a comment-only mention does NOT. Both are must-FAIL
+        # style assertions, so a gate that could never go red fails its own
+        # selftest and is reported as ERROR rather than PASS.
+        val (fout, ferr, frc) = _run("grep -c 'did not raise the count\\|comment-only mentions changed the count' " + GATE + " | { read n; if [ \"$n\" -ge 2 ]; then echo MUTATION_FIXTURES_PRESENT; else echo MUTATION_FIXTURES_ABSENT; fi; }")
+        expect(fout + ferr).to_contain("MUTATION_FIXTURES_PRESENT")

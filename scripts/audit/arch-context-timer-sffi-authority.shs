@@ -1,0 +1,47 @@
+#!/bin/sh
+# Static source/performance-shape ratchet. It is not context/hardware proof.
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+arm32_ctx="$root/src/os/kernel/arch/arm32/context.spl"
+arm64_ctx="$root/src/os/kernel/arch/arm64/context.spl"
+rv32_ctx="$root/src/os/kernel/arch/riscv32/context.spl"
+arm32_timer="$root/src/os/kernel/arch/arm32/timer.spl"
+arm64_timer="$root/src/os/kernel/arch/arm64/timer.spl"
+example_stubs="$root/examples/09_embedded/simple_os/arch/x86_64/boot/auto_stubs.c"
+example_extras="$root/examples/09_embedded/simple_os/arch/x86_64/boot/rt_extras.c"
+
+# Context transfer remains raw and unverified, so every declaration and every
+# caller-visible operation must carry both FFI and raw-pointer authority.
+for file in "$arm32_ctx" "$arm64_ctx" "$rv32_ctx"; do
+    test "$(grep -Ec '^extern fn rt_(arm32|arm64|rv32)_context_(save|restore|switch)' "$file")" -eq 3
+    test "$(grep -Ec '^[[:space:]]*@unsafe\(.*capabilities: \[ffi, raw_ptr\]\)' "$file")" -eq 6
+    test "$(grep -Ec 'unsafe\(capabilities: \[ffi, raw_ptr\]\):' "$file")" -eq 3
+done
+grep -q 'by-value context ABI is not yet proven' "$arm32_ctx"
+grep -q 'by-value context ABI is not yet proven' "$arm64_ctx"
+grep -q 'by-value context ABI is not yet proven' "$rv32_ctx"
+grep -q 'stack & 0xFFFFFFF8' "$arm32_ctx"
+grep -q 'stack & 0xFFFFFFFFFFFFFFF0' "$arm64_ctx"
+grep -q '(stack_top as u32) & 0xFFFFFFF0' "$rv32_ctx"
+grep -q 'panic("RV32 context restore received a non-RV32 context")' "$rv32_ctx"
+
+# Timer operations are exact direct instructions: no raw timer SFFI remains,
+# and ARM32 obtains both counter halves in one MRRC observation.
+! grep -Eq '^extern fn rt_arm(32|64)_.*cnt' "$arm32_timer" "$arm64_timer"
+! grep -Eq 'rt_arm(32|64)_.*cnt' "$arm32_timer" "$arm64_timer"
+test "$(grep -c 'unsafe(capabilities: \[inline_asm\])' "$arm32_timer")" -eq 5
+test "$(grep -c 'unsafe(capabilities: \[inline_asm\])' "$arm64_timer")" -eq 5
+test "$(grep -c 'mrrc p15, 0, {lo}, {hi}, c14' "$arm32_timer")" -eq 1
+! grep -q 'asm volatile:' "$arm32_timer" "$arm64_timer"
+
+for file in "$example_stubs" "$example_extras"; do
+    ! grep -Eq 'rt_arm32_(mrc_cnt|mrrc_cnt|mcr_cnt)' "$file"
+    ! grep -Eq 'rt_arm64_(mrs_cnt|msr_cnt)' "$file"
+done
+
+# No new dynamic work in either bounded hot-path family.
+! grep -Ei 'alloc|malloc|calloc|realloc|free\(|hash|signature|dlsym|lookup|mutex|retry|rt_sffi_call' \
+    "$arm32_timer" "$arm64_timer"
+
+echo 'architecture context/timer authority: PASS (9 context declarations explicitly unsafe; 13 timer declarations removed; 10 direct timer instructions; unsigned and unverified)'

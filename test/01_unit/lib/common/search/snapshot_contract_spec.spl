@@ -1,0 +1,20 @@
+use std.spec
+use lib.common.search.document.{ScopedFieldV1, ScopedSearchDocumentV1}
+use lib.common.search.snapshot.{IndexOperationV1, OperationReceiptV1, ReplayRecordV1}
+
+fn scoped_doc() -> ScopedSearchDocumentV1:
+    ScopedSearchDocumentV1.of("a", "r2", [ScopedFieldV1.of("body", "x")], [], "sha256:v", "sha256:new", "sha256:s")
+
+describe "CAS-bound index operations and replay":
+    it "requires paired replace/delete preconditions":
+        step("Validate closed precondition choices")
+        expect(IndexOperationV1.replace("r1", "sha256:old", scoped_doc()).has_closed_preconditions()).to_equal(true)
+        expect(IndexOperationV1.delete_absent("missing").has_closed_preconditions()).to_equal(true)
+
+    it "accepts byte-identical replay and rejects operation conflicts":
+        step("Validate replay operation and payload binding")
+        val receipt = OperationReceiptV1(operation_id: "op", payload_hash: "sha256:p", scope_digest: "sha256:s", outcome: "applied", result_hash: "sha256:r", signature: "sig")
+        val replay = ReplayRecordV1(operation_id: "op", payload_hash: "sha256:p", result_bytes_hash: "sha256:r", receipt: receipt)
+        expect(replay.accepts("op", "sha256:p").is_ok()).to_equal(true)
+        expect(replay.accepts("op", "sha256:other").is_ok()).to_equal(false)
+

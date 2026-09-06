@@ -1,0 +1,177 @@
+#!/usr/bin/env bash
+set -uo pipefail
+
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+TOOL=$ROOT/scripts/check/stage4-diagnostic-two-phase.shs
+TMP=$(mktemp -d "${TMPDIR:-/tmp}/stage4-diagnostic-two-phase-test.XXXXXX")
+trap 'rm -rf -- "$TMP"' EXIT
+
+fail() {
+    printf 'FAIL: %s\n' "$*" >&2
+    exit 1
+}
+
+assert_summary() {
+    local file=$1 key=$2 expected=$3 actual
+    actual=$(awk -F '\t' -v key="$key" '$1==key {print $2}' "$file")
+    [[ $actual == "$expected" ]] || fail "$key=$actual, expected $expected"
+}
+
+make_runner() {
+    local path=$1 phase=$2
+    cp "$TMP/fake-runner-template" "$path"
+    sed -i "s/^PHASE=.*/PHASE=$phase/" "$path"
+    chmod +x "$path"
+}
+
+cat > "$TMP/fake-runner-template" <<'RUNNER'
+#!/usr/bin/env bash
+set -uo pipefail
+PHASE=template
+manifest=
+result=
+compiler_digest=
+mode=
+artifact_manifest=
+for arg in "$@"; do
+    case $arg in
+        --manifest=*) manifest=${arg#*=} ;;
+        --result=*) result=${arg#*=} ;;
+        --compiler-digest=*) compiler_digest=${arg#*=} ;;
+        --mode=*) mode=${arg#*=} ;;
+        --artifact-manifest=*) artifact_manifest=${arg#*=} ;;
+    esac
+done
+IFS=$'\t' read -r id source_digest path < "$manifest"
+printf '%s\t%s\t%s\n' "$PHASE" "$id" "$path" >> "$FAKE_STAGE4_CALL_LOG"
+printf '1\tstart\t%s\t%s\t%s\t%s\t%s\trunning\t-1\t0\tpending\t-\n' "$id" "$path" "$source_digest" "$compiler_digest" "$mode" >> "$result"
+start=$(date +%s%3N)
+case $PHASE:$path in
+    compile:*compile_fail.spl)
+        printf '1\tresult\t%s\t%s\t%s\t%s\t%s\tfail\t1\t1\thir\t-\n' "$id" "$path" "$source_digest" "$compiler_digest" "$mode" >> "$result"
+        exit 1
+        ;;
+    compile:*parseonly.spl)
+        printf '1\tresult\t%s\t%s\t%s\t%s\t%s\tpass\t0\t1\tcheck\t-\n' "$id" "$path" "$source_digest" "$compiler_digest" "$mode" >> "$result"
+        exit 0
+        ;;
+    compile:*timeout.spl)
+        (trap '' TERM; sleep 30) &
+        printf '%s\n' "$!" > "$FAKE_STAGE4_CHILD_PID"
+        wait
+        ;;
+    semantic:*semantic_fail.spl)
+        printf '1\tresult\t%s\t%s\t%s\t%s\t%s\tfail\t1\t1\tsemantic\t-\n' "$id" "$path" "$source_digest" "$compiler_digest" "$mode" >> "$result"
+        exit 1
+        ;;
+esac
+if [[ $PHASE == compile ]]; then
+    artifact="$FAKE_STAGE4_ARTIFACT_DIR/$id.bin"
+    printf 'compiled:%s\n' "$source_digest" > "$artifact"
+    class=compile_hir_mir_codegen
+elif [[ $PHASE == semantic ]]; then
+    artifact=-
+    class=semantic_artifact
+else
+    artifact=-
+    if [[ $path == *_spec.spl ]]; then class=spec_eval; else class=runtime_eval; fi
+fi
+end=$(date +%s%3N)
+printf '1\tresult\t%s\t%s\t%s\t%s\t%s\tpass\t0\t%s\t%s\t%s\n' "$id" "$path" "$source_digest" "$compiler_digest" "$mode" "$((end-start))" "$class" "$artifact" >> "$result"
+RUNNER
+
+mkdir -p "$TMP/artifacts" "$TMP/input"
+export FAKE_STAGE4_ARTIFACT_DIR=$TMP/artifacts
+export FAKE_STAGE4_CALL_LOG=$TMP/calls.tsv
+export FAKE_STAGE4_CHILD_PID=$TMP/child.pid
+: > "$FAKE_STAGE4_CALL_LOG"
+
+make_runner "$TMP/fake-compile" compile
+make_runner "$TMP/fake-semantic" semantic
+make_runner "$TMP/fake-eval" eval
+
+printf 'fn helper() -> i64:\n    1\n' > "$TMP/input/01_lib.spl"
+printf 'fn main():\n    print "ok"\n' > "$TMP/input/02_main.spl"
+printf 'describe "sample":\n    it "runs":\n        expect(1).to_equal(1)\n' > "$TMP/input/03_sample_spec.spl"
+printf 'fn semantic_problem():\n    missing_name\n' > "$TMP/input/04_semantic_fail.spl"
+printf 'fn compile_problem(:\n' > "$TMP/input/05_compile_fail.spl"
+
+set +e
+"$TOOL" --workers 3 --timeout 10 \
+    --compile-runner "$TMP/fake-compile" \
+    --semantic-runner "$TMP/fake-semantic" \
+    --eval-runner "$TMP/fake-eval" \
+    --cache-dir "$TMP/cache" --result-dir "$TMP/result-a" "$TMP/input" > "$TMP/run-a.log" 2>&1
+rc=$?
+set -e
+[[ $rc -eq 1 ]] || fail "mixed corpus exit=$rc, expected 1"
+assert_summary "$TMP/result-a/summary.tsv" selected 5
+assert_summary "$TMP/result-a/summary.tsv" compile_pass 4
+assert_summary "$TMP/result-a/summary.tsv" compile_fail 1
+assert_summary "$TMP/result-a/summary.tsv" semantic_required 4
+assert_summary "$TMP/result-a/summary.tsv" semantic_pass 3
+assert_summary "$TMP/result-a/summary.tsv" semantic_fail 1
+assert_summary "$TMP/result-a/summary.tsv" eval_required 2
+assert_summary "$TMP/result-a/summary.tsv" eval_pass 2
+assert_summary "$TMP/result-a/summary.tsv" total_failures 2
+[[ $(wc -l < "$TMP/result-a/compile.tsv") -eq 5 ]] || fail "compile attribution count"
+[[ $(wc -l < "$TMP/result-a/semantic.tsv") -eq 4 ]] || fail "semantic attribution count"
+[[ $(wc -l < "$TMP/result-a/eval.tsv") -eq 2 ]] || fail "eval attribution count"
+[[ $(awk -F '\t' '$1=="eval" {print $3}' "$FAKE_STAGE4_CALL_LOG" | sort | tr '\n' ' ') == *"02_main.spl"* ]] || fail "main not evaluated"
+[[ $(awk -F '\t' '$1=="eval" {print $3}' "$FAKE_STAGE4_CALL_LOG" | sort | tr '\n' ' ') == *"03_sample_spec.spl"* ]] || fail "spec not evaluated"
+[[ $(awk -F '\t' '$1=="eval" {print $3}' "$FAKE_STAGE4_CALL_LOG" | sort | tr '\n' ' ') != *"01_lib.spl"* ]] || fail "library was unnecessarily evaluated"
+[[ $(cut -f2-3 "$TMP/result-a/failures.tsv") == $'hir\t'"$TMP/input/05_compile_fail.spl"$'\nsemantic\t'"$TMP/input/04_semantic_fail.spl" ]] || fail "failure grouping is not deterministic by class/path"
+
+# A second identical sweep must consume source/compiler/artifact-hashed cache
+# without calling any runner again.
+calls_before=$(wc -l < "$FAKE_STAGE4_CALL_LOG")
+set +e
+"$TOOL" --workers 2 --timeout 10 \
+    --compile-runner "$TMP/fake-compile" \
+    --semantic-runner "$TMP/fake-semantic" \
+    --eval-runner "$TMP/fake-eval" \
+    --cache-dir "$TMP/cache" --result-dir "$TMP/result-b" "$TMP/input" > "$TMP/run-b.log" 2>&1
+rc=$?
+set -e
+[[ $rc -eq 1 ]] || fail "cached corpus exit=$rc, expected 1"
+calls_after=$(wc -l < "$FAKE_STAGE4_CALL_LOG")
+[[ $calls_after -eq $calls_before ]] || fail "cache miss: calls $calls_before -> $calls_after"
+assert_summary "$TMP/result-b/summary.tsv" compile_cache_hits 5
+assert_summary "$TMP/result-b/summary.tsv" semantic_cache_hits 4
+assert_summary "$TMP/result-b/summary.tsv" eval_cache_hits 2
+cmp "$TMP/result-a/failures.tsv" "$TMP/result-b/failures.tsv" || fail "cached failure groups changed"
+
+# A parse-only phase-A pass is a harness/coverage failure, not a compiled pass.
+mkdir "$TMP/parseonly-input"
+printf 'fn main():\n    print "no compile"\n' > "$TMP/parseonly-input/parseonly.spl"
+set +e
+"$TOOL" --workers 1 --timeout 10 \
+    --compile-runner "$TMP/fake-compile" \
+    --semantic-runner "$TMP/fake-semantic" \
+    --eval-runner "$TMP/fake-eval" \
+    --cache-dir "$TMP/parse-cache" --result-dir "$TMP/parse-result" "$TMP/parseonly-input" > "$TMP/parse.log" 2>&1
+rc=$?
+set -e
+[[ $rc -eq 2 ]] || fail "parse-only compile row exit=$rc, expected coverage-contract exit 2"
+assert_summary "$TMP/parse-result/summary.tsv" harness_failures 1
+
+# Timeout must become an attributed terminal row, and the runner process group
+# (including a TERM-ignoring descendant) must be gone afterward.
+mkdir "$TMP/timeout-input"
+printf 'fn main():\n    print "timeout"\n' > "$TMP/timeout-input/timeout.spl"
+set +e
+"$TOOL" --workers 1 --timeout 1 \
+    --compile-runner "$TMP/fake-compile" \
+    --semantic-runner "$TMP/fake-semantic" \
+    --eval-runner "$TMP/fake-eval" \
+    --cache-dir "$TMP/timeout-cache" --result-dir "$TMP/timeout-result" "$TMP/timeout-input" > "$TMP/timeout.log" 2>&1
+rc=$?
+set -e
+[[ $rc -eq 1 ]] || fail "timeout exit=$rc, expected 1"
+assert_summary "$TMP/timeout-result/summary.tsv" timeouts 1
+child_pid=$(<"$FAKE_STAGE4_CHILD_PID")
+if kill -0 "$child_pid" 2>/dev/null; then
+    fail "timeout descendant survived: $child_pid"
+fi
+
+printf 'PASS: stage4 diagnostic two-phase scheduler, cache, classification, attribution, and timeout cleanup\n'

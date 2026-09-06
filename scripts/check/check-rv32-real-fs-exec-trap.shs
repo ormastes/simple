@@ -1,0 +1,43 @@
+#!/bin/sh
+set -eu
+
+fail() { echo "rv32-real-fs-exec-trap: $*" >&2; exit 1; }
+owner=examples/09_embedded/simple_os/arch/riscv32/boot/baremetal_stubs.c
+entry=examples/09_embedded/simple_os/arch/riscv32/smoke_entry.spl
+
+[ "$(grep -Fc 'li t0, 6144' "$owner")" -eq 2 ] || fail "exit/fault MPP=M restoration absent"
+[ "$(grep -Fc 'csrw mstatus, t1' "$owner")" -eq 2 ] || fail "recovery mstatus commits absent"
+grep -Fq 'g_rv32_child_exit_status != 37U' "$owner" || fail "exit-37 validation absent"
+grep -Fq 'FS_PROGRAM_END rc=37 reaped=true' "$owner" || fail "reap receipt absent"
+grep -Fq 'if rt_riscv32_fs_exec() != 1:' "$entry" || fail "live entry is not fail closed"
+grep -Fq ': "t0", "t1", "a0", "a7", "s1", "s2", "memory");' "$owner" || \
+    fail "non-ABI child register clobber contract absent"
+
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/rv32-real-fs-exec-trap.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+sed '0,/li t0, 6144/s//li t0, 0/' "$owner" >"$tmp/sabotaged.c"
+if [ "$(grep -Fc 'li t0, 6144' "$tmp/sabotaged.c")" -eq 2 ]; then
+    fail "sabotage did not remove one MPP restoration"
+fi
+sed 's/, "s2", "memory"/, "memory"/' "$owner" >"$tmp/clobber-sabotaged.c"
+if grep -Fq ': "t0", "t1", "a0", "a7", "s1", "s2", "memory");' \
+        "$tmp/clobber-sabotaged.c"; then
+    fail "clobber sabotage did not remove s2"
+fi
+if [ "$(grep -Fc 'li t0, 6144' "$tmp/sabotaged.c")" -ge 2 ]; then
+    fail "sabotaged owner would satisfy the MPP oracle"
+fi
+
+clang --target=riscv32-unknown-none-elf -march=rv32imac -mabi=ilp32 \
+    -ffreestanding -c "$owner" -o "$tmp/owner.o"
+llvm-objdump -d "$tmp/owner.o" >"$tmp/owner.asm"
+[ "$(grep -Ec 'csrw[[:space:]]+mstatus' "$tmp/owner.asm")" -ge 3 ] || \
+    fail "assembled transition/recovery mstatus writes absent"
+grep -Eq 'mret' "$tmp/owner.asm" || fail "assembled mret absent"
+clang --target=riscv32-unknown-none-elf -march=rv32imac -mabi=ilp32 \
+    -ffreestanding -S -emit-llvm "$owner" -o "$tmp/owner.ll"
+for reg in x10 x17 x9 x18; do
+    grep -Fq "~{$reg}" "$tmp/owner.ll" || fail "LLVM clobber metadata absent: $reg"
+done
+
+echo "PASS rv32 real filesystem execution trap ownership"

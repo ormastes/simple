@@ -1,0 +1,330 @@
+# Pure-Simple VirtIO-snd MMIO service for QEMU virtio-sound-device.
+
+use os.drivers.virtio.virtio_snd_mmio.{
+    VIRTIO_SND_QUEUE_CONTROL, VIRTIO_SND_QUEUE_EVENT, VIRTIO_SND_QUEUE_TX, VIRTIO_SND_QUEUE_RX,
+    VirtioSndMmioTransport, VirtioSndUsedReceipt
+}
+use os.drivers.virtio.virtio_snd_dma_resources.{
+    VirtioSndDmaResources,
+    VIRTIO_SND_CONTROL_REQUEST_OFFSET, VIRTIO_SND_CONTROL_RESPONSE_OFFSET,
+    VIRTIO_SND_EVENT_BUFFER_OFFSET, VIRTIO_SND_XFER_OFFSET, VIRTIO_SND_STATUS_OFFSET,
+    VIRTIO_SND_TX_PCM_OFFSET, VIRTIO_SND_RX_PCM_OFFSET, VIRTIO_SND_PERIOD_BYTES_MAX,
+    virtio_snd_dma_create, virtio_snd_dma_destroy, virtio_snd_dma_queue, virtio_snd_dma_resources_valid,
+    virtio_snd_dma_cpu_address, virtio_snd_dma_device_address,
+    virtio_snd_dma_sync_for_device, virtio_snd_dma_sync_for_cpu,
+    virtio_snd_dma_write_bytes, virtio_snd_dma_write_pcm_i16, virtio_snd_dma_zero_range,
+    virtio_snd_dma_read_u32, virtio_snd_dma_write_u32, virtio_snd_dma_read_pcm_sample_i16
+}
+use os.drivers.virtio.virtio_snd_protocol.{
+    VIRTIO_SND_S_OK, VIRTIO_SND_PCM_FMT_S16, VIRTIO_SND_PCM_RATE_48000,
+    VIRTIO_SND_R_PCM_PREPARE, VIRTIO_SND_R_PCM_START, VIRTIO_SND_R_PCM_STOP, VIRTIO_SND_R_PCM_RELEASE,
+    virtio_snd_pcm_command, virtio_snd_status_name,
+    virtio_snd_decode_event
+}
+
+struct VirtioSndServiceReceipt:
+    status: text
+    reason: text
+    frames: i64
+    bytes: i64
+    interrupts: u64
+
+# A capture receipt is created only after the RX used ring confirms completion.
+# Its hash is calculated from the DMA buffer after CPU synchronization, so it
+# correlates a bounded device-written period rather than a host-side fixture.
+struct VirtioSndCaptureReceipt:
+    status: text
+    reason: text
+    session: u64
+    generation: u64
+    frames: i64
+    samples: i64
+    sample_hash: i64
+    non_silent: bool
+    interrupts: u64
+
+class VirtioSndService:
+    transport: VirtioSndMmioTransport
+    dma: VirtioSndDmaResources
+    ready: bool
+    start_reason: text
+    stream_id: u32
+    period_frames: i64
+    channels: i64
+    direction: text
+    tx_used: u16
+    rx_used: u16
+    event_used: u16
+    interrupt_count: u64
+    capture_session: u64
+    capture_generation: u64
+
+impl VirtioSndService:
+    static fn start(base: u64) -> VirtioSndService:
+        val dma = virtio_snd_dma_create()
+        var transport = VirtioSndMmioTransport.create(
+            base,
+            virtio_snd_dma_queue(dma, VIRTIO_SND_QUEUE_CONTROL),
+            virtio_snd_dma_queue(dma, VIRTIO_SND_QUEUE_EVENT),
+            virtio_snd_dma_queue(dma, VIRTIO_SND_QUEUE_TX),
+            virtio_snd_dma_queue(dma, VIRTIO_SND_QUEUE_RX)
+        )
+        var transport_ready = false
+        var start_reason = "DMA allocation failed"
+        if virtio_snd_dma_resources_valid(dma):
+            val probe = transport.probe_and_start()
+            transport_ready = transport.ready
+            start_reason = probe.reason
+        elif dma.handle == -1:
+            start_reason = "DMA allocation failed"
+        elif dma.handle == -2:
+            start_reason = "DMA mapping invalid cpu={dma.cpu_base} device={dma.device_base}"
+        var service = VirtioSndService(
+            transport: transport, dma: dma, ready: transport_ready, start_reason: start_reason,
+            stream_id: 0u32, period_frames: 0, channels: 0, direction: "closed",
+            tx_used: 0u16, rx_used: 0u16, event_used: 0u16, interrupt_count: 0u64,
+            capture_session: 0u64, capture_generation: 0u64
+        )
+        if service.ready:
+            val posted = service.transport.post_event(
+                0u16,
+                virtio_snd_dma_device_address(dma, VIRTIO_SND_EVENT_BUFFER_OFFSET),
+                8u32
+            )
+            if not posted:
+                service.ready = false
+        if not service.ready:
+            service.transport.reset()
+            virtio_snd_dma_destroy(service.dma)
+            service.dma = VirtioSndDmaResources(handle: -1, cpu_base: 0u64, device_base: 0u64)
+        service
+
+    me control(request: [u8], response_bytes: u32, spin_limit: i64) -> VirtioSndServiceReceipt:
+        if not self.ready or request.len() == 0 or request.len() > 256 or response_bytes < 4u32 or response_bytes > 256u32:
+            return self.receipt("invalid", "control bounds rejected", 0, 0)
+        if not virtio_snd_dma_write_bytes(self.dma, VIRTIO_SND_CONTROL_REQUEST_OFFSET, request):
+            return self.receipt("failed", "control request write failed", 0, 0)
+        if not virtio_snd_dma_write_bytes(self.dma, VIRTIO_SND_CONTROL_RESPONSE_OFFSET, [0u8, 0u8, 0u8, 0u8]):
+            return self.receipt("failed", "control response clear failed", 0, 0)
+        virtio_snd_dma_sync_for_device(self.dma)
+        if not self.transport.submit_control(
+            0u16,
+            virtio_snd_dma_device_address(self.dma, VIRTIO_SND_CONTROL_REQUEST_OFFSET), request.len().to_u32(),
+            virtio_snd_dma_device_address(self.dma, VIRTIO_SND_CONTROL_RESPONSE_OFFSET), response_bytes
+        ):
+            return self.receipt("failed", "control queue submission failed", 0, 0)
+        self.finish_control(spin_limit)
+
+    fn finish_control(spin_limit: i64) -> VirtioSndServiceReceipt:
+        var spins: i64 = 0
+        var used = self.transport.poll_used(VIRTIO_SND_QUEUE_CONTROL, self.transport.control_used)
+        while used.status == "pending" and spins < spin_limit:
+            virtio_snd_dma_sync_for_cpu(self.dma)
+            used = self.transport.poll_used(VIRTIO_SND_QUEUE_CONTROL, self.transport.control_used)
+            spins = spins + 1
+        if used.status != "completed":
+            return self.receipt("timeout", "control completion unavailable", 0, 0)
+        self.transport.control_used = used.next_used
+        virtio_snd_dma_sync_for_cpu(self.dma)
+        val status = virtio_snd_dma_read_u32(self.dma, VIRTIO_SND_CONTROL_RESPONSE_OFFSET)
+        if status != VIRTIO_SND_S_OK:
+            return self.receipt("rejected", virtio_snd_status_name(status), 0, used.bytes.to_i64())
+        self.receipt("completed", "control accepted", 0, used.bytes.to_i64())
+
+    me configure_stream(stream_id: u32, direction: text, period_frames: i64, channels: i64, spin_limit: i64) -> VirtioSndServiceReceipt:
+        val period_bytes = period_frames * channels * 2
+        if (direction != "playback" and direction != "capture") or period_frames < 16 or channels < 1 or channels > 16 or period_bytes > VIRTIO_SND_PERIOD_BYTES_MAX:
+            return self.receipt("invalid", "PCM geometry rejected", 0, 0)
+        if self.direction != "closed":
+            val closed = self.close_stream(spin_limit)
+            if closed.status != "completed": return closed
+        val request_base = VIRTIO_SND_CONTROL_REQUEST_OFFSET
+        val format_word = channels.to_u32() |
+            (VIRTIO_SND_PCM_FMT_S16.to_u32() << 8u32) |
+            (VIRTIO_SND_PCM_RATE_48000.to_u32() << 16u32)
+        val request_written =
+            virtio_snd_dma_write_u32(self.dma, request_base, 0x0101u32) and
+            virtio_snd_dma_write_u32(self.dma, request_base + 4, stream_id) and
+            virtio_snd_dma_write_u32(self.dma, request_base + 8, (period_bytes * 2).to_u32()) and
+            virtio_snd_dma_write_u32(self.dma, request_base + 12, period_bytes.to_u32()) and
+            virtio_snd_dma_write_u32(self.dma, request_base + 16, 0u32) and
+            virtio_snd_dma_write_u32(self.dma, request_base + 20, format_word) and
+            virtio_snd_dma_write_u32(self.dma, VIRTIO_SND_CONTROL_RESPONSE_OFFSET, 0u32)
+        if not request_written:
+            return self.receipt("failed", "PCM parameter write failed", 0, 0)
+        virtio_snd_dma_sync_for_device(self.dma)
+        if not self.transport.submit_control(
+            0u16,
+            virtio_snd_dma_device_address(self.dma, request_base), 24u32,
+            virtio_snd_dma_device_address(self.dma, VIRTIO_SND_CONTROL_RESPONSE_OFFSET), 4u32
+        ):
+            return self.receipt("failed", "PCM parameter submission failed", 0, 0)
+        val configured = self.finish_control(spin_limit)
+        if configured.status != "completed": return configured
+        val prepared = self.control(virtio_snd_pcm_command(VIRTIO_SND_R_PCM_PREPARE, stream_id), 4u32, spin_limit)
+        if prepared.status != "completed": return prepared
+        val started = self.control(virtio_snd_pcm_command(VIRTIO_SND_R_PCM_START, stream_id), 4u32, spin_limit)
+        if started.status == "completed":
+            self.stream_id = stream_id
+            self.period_frames = period_frames
+            self.channels = channels
+            self.direction = direction
+            if direction == "capture":
+                self.capture_session = self.capture_session + 1u64
+                self.capture_generation = 0u64
+        started
+
+    me configure_playback(stream_id: u32, period_frames: i64, channels: i64, spin_limit: i64) -> VirtioSndServiceReceipt:
+        self.configure_stream(stream_id, "playback", period_frames, channels, spin_limit)
+
+    me configure_capture(stream_id: u32, period_frames: i64, channels: i64, spin_limit: i64) -> VirtioSndServiceReceipt:
+        self.configure_stream(stream_id, "capture", period_frames, channels, spin_limit)
+
+    me submit_playback(samples: [i64]) -> VirtioSndServiceReceipt:
+        if not self.ready or self.direction != "playback" or self.period_frames <= 0 or samples.len() != self.period_frames * self.channels:
+            return self.receipt("invalid", "playback period geometry mismatch", 0, 0)
+        if not virtio_snd_dma_write_pcm_i16(self.dma, VIRTIO_SND_TX_PCM_OFFSET, samples):
+            return self.receipt("invalid", "PCM sample rejected", 0, 0)
+        virtio_snd_dma_write_u32(self.dma, VIRTIO_SND_XFER_OFFSET, self.stream_id)
+        virtio_snd_dma_zero_range(self.dma, VIRTIO_SND_STATUS_OFFSET, 8)
+        virtio_snd_dma_sync_for_device(self.dma)
+        val submitted = self.transport.submit_pcm(
+            VIRTIO_SND_QUEUE_TX, 0u16,
+            virtio_snd_dma_device_address(self.dma, VIRTIO_SND_XFER_OFFSET),
+            virtio_snd_dma_device_address(self.dma, VIRTIO_SND_TX_PCM_OFFSET),
+            (samples.len() * 2).to_u32(),
+            virtio_snd_dma_device_address(self.dma, VIRTIO_SND_STATUS_OFFSET), false
+        )
+        if not submitted: return self.receipt("failed", "playback queue submission failed", 0, 0)
+        self.receipt("submitted", "playback period queued", self.period_frames, samples.len() * 2)
+
+    me submit_capture() -> VirtioSndServiceReceipt:
+        if not self.ready or self.direction != "capture" or self.period_frames <= 0:
+            return self.receipt("invalid", "capture stream unavailable", 0, 0)
+        val sample_count = self.period_frames * self.channels
+        if not virtio_snd_dma_zero_range(self.dma, VIRTIO_SND_RX_PCM_OFFSET, sample_count * 2):
+            return self.receipt("failed", "capture buffer clear failed", 0, 0)
+        virtio_snd_dma_write_u32(self.dma, VIRTIO_SND_XFER_OFFSET, self.stream_id)
+        virtio_snd_dma_zero_range(self.dma, VIRTIO_SND_STATUS_OFFSET, 8)
+        virtio_snd_dma_sync_for_device(self.dma)
+        val submitted = self.transport.submit_pcm(
+            VIRTIO_SND_QUEUE_RX, 0u16,
+            virtio_snd_dma_device_address(self.dma, VIRTIO_SND_XFER_OFFSET),
+            virtio_snd_dma_device_address(self.dma, VIRTIO_SND_RX_PCM_OFFSET),
+            (sample_count * 2).to_u32(),
+            virtio_snd_dma_device_address(self.dma, VIRTIO_SND_STATUS_OFFSET), true
+        )
+        if not submitted: return self.receipt("failed", "capture queue submission failed", 0, 0)
+        self.capture_generation = self.capture_generation + 1u64
+        self.receipt("submitted", "capture period queued", self.period_frames, sample_count * 2)
+
+    me poll_playback() -> VirtioSndServiceReceipt:
+        virtio_snd_dma_sync_for_cpu(self.dma)
+        val used = self.transport.poll_used(VIRTIO_SND_QUEUE_TX, self.tx_used)
+        if used.status != "completed": return self.receipt(used.status, "playback completion", 0, used.bytes.to_i64())
+        self.tx_used = used.next_used
+        val status = virtio_snd_dma_read_u32(self.dma, VIRTIO_SND_STATUS_OFFSET)
+        if status != VIRTIO_SND_S_OK: return self.receipt("rejected", virtio_snd_status_name(status), 0, used.bytes.to_i64())
+        self.receipt("completed", "playback period", self.period_frames, used.bytes.to_i64())
+
+    me poll_capture() -> VirtioSndServiceReceipt:
+        virtio_snd_dma_sync_for_cpu(self.dma)
+        val used = self.transport.poll_used(VIRTIO_SND_QUEUE_RX, self.rx_used)
+        if used.status != "completed": return self.receipt(used.status, "capture completion", 0, used.bytes.to_i64())
+        self.rx_used = used.next_used
+        val status = virtio_snd_dma_read_u32(self.dma, VIRTIO_SND_STATUS_OFFSET)
+        if status != VIRTIO_SND_S_OK: return self.receipt("rejected", virtio_snd_status_name(status), 0, used.bytes.to_i64())
+        self.receipt("completed", "capture period", self.period_frames, used.bytes.to_i64())
+
+    me poll_capture_receipt() -> VirtioSndCaptureReceipt:
+        val completion = self.poll_capture()
+        if completion.status != "completed":
+            return self.capture_receipt(completion.status, completion.reason, 0, 0, 0, false)
+        self.capture_snapshot()
+
+    fn capture_snapshot() -> VirtioSndCaptureReceipt:
+        val sample_count = self.period_frames * self.channels
+        if not self.ready or self.direction != "capture" or self.capture_session == 0u64 or self.capture_generation == 0u64 or sample_count <= 0:
+            return self.capture_receipt("invalid", "capture receipt unavailable", 0, 0, 0, false)
+        var index: i64 = 0
+        var sample_hash: i64 = 17
+        var non_silent = false
+        while index < sample_count:
+            val sample = self.capture_sample(index)
+            if sample != 0: non_silent = true
+            # Keep the receipt hash bounded and stable across targets while
+            # folding every signed PCM sample from the synchronized RX region.
+            sample_hash = (sample_hash * 65599 + sample + 32768) % 2147483647
+            index = index + 1
+        self.capture_receipt("completed", "capture period", self.period_frames, sample_count, sample_hash, non_silent)
+
+    fn capture_sample(index: i64) -> i64:
+        if not self.ready or self.direction != "capture" or self.period_frames <= 0:
+            return 0
+        virtio_snd_dma_read_pcm_sample_i16(
+            self.dma, VIRTIO_SND_RX_PCM_OFFSET, index, self.period_frames * self.channels
+        )
+
+    me close_stream(spin_limit: i64) -> VirtioSndServiceReceipt:
+        if not self.ready or self.period_frames <= 0 or self.direction == "closed":
+            return self.receipt("completed", "stream already closed", 0, 0)
+        val stopped = self.control(virtio_snd_pcm_command(VIRTIO_SND_R_PCM_STOP, self.stream_id), 4u32, spin_limit)
+        if stopped.status != "completed": return stopped
+        val released = self.control(virtio_snd_pcm_command(VIRTIO_SND_R_PCM_RELEASE, self.stream_id), 4u32, spin_limit)
+        if released.status == "completed":
+            self.period_frames = 0
+            self.channels = 0
+            self.direction = "closed"
+        released
+
+    me acknowledge_interrupt() -> u32:
+        val pending = self.transport.acknowledge_interrupt()
+        if pending != 0:
+            self.interrupt_count = self.interrupt_count + 1u64
+        pending
+
+    me poll_event() -> VirtioSndServiceReceipt:
+        if not self.ready:
+            return self.receipt("disconnected", "event queue unavailable", 0, 0)
+        virtio_snd_dma_sync_for_cpu(self.dma)
+        val used = self.transport.poll_used(VIRTIO_SND_QUEUE_EVENT, self.event_used)
+        if used.status != "completed":
+            return self.receipt(used.status, "event completion", 0, used.bytes.to_i64())
+        self.event_used = used.next_used
+        val code = virtio_snd_dma_read_u32(self.dma, VIRTIO_SND_EVENT_BUFFER_OFFSET)
+        val data = virtio_snd_dma_read_u32(self.dma, VIRTIO_SND_EVENT_BUFFER_OFFSET + 4)
+        val event = virtio_snd_decode_event(code, data)
+        virtio_snd_dma_zero_range(self.dma, VIRTIO_SND_EVENT_BUFFER_OFFSET, 8)
+        virtio_snd_dma_sync_for_device(self.dma)
+        val reposted = self.transport.post_event(
+            0u16,
+            virtio_snd_dma_device_address(self.dma, VIRTIO_SND_EVENT_BUFFER_OFFSET),
+            8u32
+        )
+        if not reposted:
+            self.ready = false
+            return self.receipt("failed", "event descriptor repost failed", 0, used.bytes.to_i64())
+        self.receipt(event.status, event.kind, event.target_id, used.bytes.to_i64())
+
+    me shutdown(spin_limit: i64) -> VirtioSndServiceReceipt:
+        var result = self.receipt("completed", "already stopped", 0, 0)
+        if self.ready:
+            result = self.close_stream(spin_limit)
+        self.ready = false
+        self.direction = "closed"
+        self.transport.reset()
+        virtio_snd_dma_destroy(self.dma)
+        self.dma = VirtioSndDmaResources(handle: -1, cpu_base: 0u64, device_base: 0u64)
+        result
+
+    fn receipt(status: text, reason: text, frames: i64, bytes: i64) -> VirtioSndServiceReceipt:
+        VirtioSndServiceReceipt(status: status, reason: reason, frames: frames, bytes: bytes, interrupts: self.interrupt_count)
+
+    fn capture_receipt(status: text, reason: text, frames: i64, samples: i64, sample_hash: i64, non_silent: bool) -> VirtioSndCaptureReceipt:
+        VirtioSndCaptureReceipt(
+            status: status, reason: reason, session: self.capture_session,
+            generation: self.capture_generation, frames: frames, samples: samples,
+            sample_hash: sample_hash, non_silent: non_silent, interrupts: self.interrupt_count
+        )
+
+export VirtioSndServiceReceipt, VirtioSndCaptureReceipt, VirtioSndService

@@ -1,0 +1,383 @@
+# Mach-O 64-bit Parser
+# Full Mach-O parser: segments, sections, symbols, relocations, string tables.
+# Uses BinaryReader ([u8]) and builds on macho_inspect for header/load-command parsing.
+
+use std.binary_io.{BinaryReader, ByteOrder}
+use compiler.linker.macho_inspect.{
+    MachOHeader, MachOLoadCommand, MachOInspector,
+    macho_inspect, macho_detect_byte_order, macho_find_load_command,
+    LC_SEGMENT_64, LC_SYMTAB, LC_DYSYMTAB, LC_UUID,
+    MACHO_HEADER_SIZE, SEGMENT_CMD_SIZE, SECTION_64_SIZE, NLIST_64_SIZE,
+}
+
+# ============================================================================
+# Data Structures
+# ============================================================================
+
+struct MachOSectionInfo:
+    sectname: text
+    segname: text
+    addr: i64
+    size: i64
+    offset: i64
+    align_val: i64
+    reloff: i64
+    nreloc: i64
+    flags: i64
+
+struct MachOSegment:
+    segname: text
+    vmaddr: i64
+    vmsize: i64
+    fileoff: i64
+    filesize: i64
+    maxprot: i64
+    initprot: i64
+    nsects: i64
+    flags: i64
+    sections: [MachOSectionInfo]
+
+struct MachOSymbolEntry:
+    name: text
+    n_type: i64
+    n_sect: i64
+    n_desc: i64
+    n_value: i64
+
+struct MachORelocationEntry:
+    r_address: i64
+    r_symbolnum: i64
+    r_pcrel: bool
+    r_length: i64
+    r_extern: bool
+    r_type: i64
+
+struct MachOUuid:
+    bytes: [u8]
+
+    fn to_string() -> text:
+        var parts: [text] = []
+        for b in self.bytes:
+            var hex = ""
+            val hi = b / 16
+            val lo = b % 16
+            hex = hex + _hex_digit(hi) + _hex_digit(lo)
+            parts = parts.push(hex)
+        parts.join("")
+
+struct MachOObject:
+    header: MachOHeader
+    segments: [MachOSegment]
+    symbols: [MachOSymbolEntry]
+    uuid: MachOUuid?
+    raw: [u8]
+    byte_order: ByteOrder
+
+# ============================================================================
+# Internal Helpers
+# ============================================================================
+
+fn _hex_digit(v: i64) -> text:
+    if v < 10:
+        return "{v}"
+    if v == 10: return "a"
+    if v == 11: return "b"
+    if v == 12: return "c"
+    if v == 13: return "d"
+    if v == 14: return "e"
+    return "f"
+
+fn _read_fixed_string(data: [u8], offset: i64, max_len: i64) -> text:
+    var result = ""
+    var i = 0
+    while i < max_len:
+        val idx = offset + i
+        if idx >= data.len():
+            break
+        val b = data[idx]
+        if b == 0:
+            break
+        result = result + text.from_char_code(b)
+        i = i + 1
+    result
+
+# ============================================================================
+# Segment + Section Parsing
+# ============================================================================
+
+fn macho_parse_segment(data: [u8], lc: MachOLoadCommand, order: ByteOrder) -> MachOSegment:
+    var reader = BinaryReader.new(data)
+    val base = lc.offset + 8
+
+    reader.skip(base)
+
+    val segname = _read_fixed_string(data, base, 16)
+    reader.skip(16)
+    val vmaddr = reader.read_u64(order) ?? 0
+    val vmsize = reader.read_u64(order) ?? 0
+    val fileoff = reader.read_u64(order) ?? 0
+    val filesize = reader.read_u64(order) ?? 0
+    val maxprot = reader.read_u32(order) ?? 0
+    val initprot = reader.read_u32(order) ?? 0
+    val nsects = reader.read_u32(order) ?? 0
+    val seg_flags = reader.read_u32(order) ?? 0
+
+    var sections: [MachOSectionInfo] = []
+    var s = 0
+    while s < nsects:
+        val sec_base = base + SEGMENT_CMD_SIZE - 8 + (s * SECTION_64_SIZE)
+        val sec = _parse_section_64(data, sec_base, order)
+        sections = sections.push(sec)
+        s = s + 1
+
+    MachOSegment(
+        segname: segname,
+        vmaddr: vmaddr,
+        vmsize: vmsize,
+        fileoff: fileoff,
+        filesize: filesize,
+        maxprot: maxprot,
+        initprot: initprot,
+        nsects: nsects,
+        flags: seg_flags,
+        sections: sections,
+    )
+
+fn _parse_section_64(data: [u8], offset: i64, order: ByteOrder) -> MachOSectionInfo:
+    val sectname = _read_fixed_string(data, offset, 16)
+    val segname = _read_fixed_string(data, offset + 16, 16)
+
+    var reader = BinaryReader.new(data)
+    reader.skip(offset + 32)
+
+    val addr = reader.read_u64(order) ?? 0
+    val size = reader.read_u64(order) ?? 0
+    val sec_offset = reader.read_u32(order) ?? 0
+    val align_val = reader.read_u32(order) ?? 0
+    val reloff = reader.read_u32(order) ?? 0
+    val nreloc = reader.read_u32(order) ?? 0
+    val flags = reader.read_u32(order) ?? 0
+
+    MachOSectionInfo(
+        sectname: sectname,
+        segname: segname,
+        addr: addr,
+        size: size,
+        offset: sec_offset,
+        align_val: align_val,
+        reloff: reloff,
+        nreloc: nreloc,
+        flags: flags,
+    )
+
+# ============================================================================
+# Symbol Table Parsing
+# ============================================================================
+
+fn macho_parse_symbols(data: [u8], inspector: MachOInspector) -> [MachOSymbolEntry]:
+    val symtab_lc = macho_find_load_command(inspector, LC_SYMTAB)
+    if symtab_lc.? == false:
+        return []
+
+    val lc = symtab_lc!
+    val order = inspector.byte_order
+
+    var reader = BinaryReader.new(data)
+    reader.skip(lc.offset + 8)
+
+    val symoff = reader.read_u32(order) ?? 0
+    val nsyms = reader.read_u32(order) ?? 0
+    val stroff = reader.read_u32(order) ?? 0
+    val strsize = reader.read_u32(order) ?? 0
+
+    var symbols: [MachOSymbolEntry] = []
+    var i = 0
+    while i < nsyms:
+        val entry_off = symoff + (i * NLIST_64_SIZE)
+        var sym_reader = BinaryReader.new(data)
+        sym_reader.skip(entry_off)
+
+        val n_strx = sym_reader.read_u32(order) ?? 0
+        val n_type = sym_reader.read_u8() ?? 0
+        val n_sect = sym_reader.read_u8() ?? 0
+        val n_desc = sym_reader.read_u16(order) ?? 0
+        val n_value = sym_reader.read_u64(order) ?? 0
+
+        val name = _read_strtab_entry(data, stroff, n_strx)
+
+        symbols = symbols.push(MachOSymbolEntry(
+            name: name,
+            n_type: n_type,
+            n_sect: n_sect,
+            n_desc: n_desc,
+            n_value: n_value,
+        ))
+        i = i + 1
+
+    symbols
+
+fn _read_strtab_entry(data: [u8], stroff: i64, index: i64) -> text:
+    val start = stroff + index
+    if start >= data.len():
+        return ""
+    var result = ""
+    var pos = start
+    while pos < data.len():
+        val b = data[pos]
+        if b == 0:
+            break
+        result = result + text.from_char_code(b)
+        pos = pos + 1
+    result
+
+# ============================================================================
+# Relocation Parsing
+# ============================================================================
+
+fn macho_parse_relocations(data: [u8], section: MachOSectionInfo, order: ByteOrder) -> [MachORelocationEntry]:
+    if section.nreloc == 0:
+        return []
+
+    var relocs: [MachORelocationEntry] = []
+    var i = 0
+    while i < section.nreloc:
+        val base = section.reloff + (i * 8)
+        var reader = BinaryReader.new(data)
+        reader.skip(base)
+
+        val r_address = reader.read_u32(order) ?? 0
+        val r_info = reader.read_u32(order) ?? 0
+
+        val r_symbolnum = r_info & 0x00ffffff
+        val r_pcrel = ((r_info >> 24) & 1) != 0
+        val r_length = (r_info >> 25) & 3
+        val r_extern = ((r_info >> 27) & 1) != 0
+        val r_type = (r_info >> 28) & 0xf
+
+        relocs = relocs.push(MachORelocationEntry(
+            r_address: r_address,
+            r_symbolnum: r_symbolnum,
+            r_pcrel: r_pcrel,
+            r_length: r_length,
+            r_extern: r_extern,
+            r_type: r_type,
+        ))
+        i = i + 1
+
+    relocs
+
+# ============================================================================
+# UUID Parsing
+# ============================================================================
+
+fn macho_parse_uuid(data: [u8], inspector: MachOInspector) -> MachOUuid?:
+    val uuid_lc = macho_find_load_command(inspector, LC_UUID)
+    if uuid_lc.? == false:
+        return nil
+
+    val lc = uuid_lc!
+    val uuid_offset = lc.offset + 8
+    if uuid_offset + 16 > data.len():
+        return nil
+
+    var uuid_bytes: [u8] = []
+    var i = 0
+    while i < 16:
+        uuid_bytes = uuid_bytes.push(data[uuid_offset + i])
+        i = i + 1
+
+    MachOUuid(bytes: uuid_bytes)
+
+# ============================================================================
+# Section Data Extraction
+# ============================================================================
+
+fn macho_section_data(data: [u8], section: MachOSectionInfo) -> [u8]:
+    if section.offset + section.size > data.len():
+        return []
+    var result: [u8] = []
+    var i = 0
+    while i < section.size:
+        result = result.push(data[section.offset + i])
+        i = i + 1
+    result
+
+# ============================================================================
+# High-Level Parser
+# ============================================================================
+
+fn macho_parse_object(data: [u8]) -> Result<MachOObject, text>:
+    val inspect_result = macho_inspect(data)
+    if inspect_result.is_err():
+        return Err(inspect_result.err()!)
+
+    val inspector = inspect_result.ok()!
+    val order = inspector.byte_order
+
+    var segments: [MachOSegment] = []
+    for lc in inspector.load_commands:
+        if lc.cmd == LC_SEGMENT_64:
+            val seg = macho_parse_segment(data, lc, order)
+            segments = segments.push(seg)
+
+    val symbols = macho_parse_symbols(data, inspector)
+    val uuid = macho_parse_uuid(data, inspector)
+
+    Ok(MachOObject(
+        header: inspector.header,
+        segments: segments,
+        symbols: symbols,
+        uuid: uuid,
+        raw: data,
+        byte_order: order,
+    ))
+
+# ============================================================================
+# Query Helpers
+# ============================================================================
+
+fn macho_find_section(obj: MachOObject, segname: text, sectname: text) -> MachOSectionInfo?:
+    for seg in obj.segments:
+        for sec in seg.sections:
+            if sec.segname == segname and sec.sectname == sectname:
+                return sec
+    return nil
+
+fn macho_find_segment(obj: MachOObject, segname: text) -> MachOSegment?:
+    for seg in obj.segments:
+        if seg.segname == segname:
+            return seg
+    return nil
+
+fn macho_defined_symbols(obj: MachOObject) -> [MachOSymbolEntry]:
+    var result: [MachOSymbolEntry] = []
+    for sym in obj.symbols:
+        if (sym.n_type & 0xe) != 0:
+            result = result.push(sym)
+    result
+
+fn macho_undefined_symbols(obj: MachOObject) -> [MachOSymbolEntry]:
+    var result: [MachOSymbolEntry] = []
+    for sym in obj.symbols:
+        if (sym.n_type & 0xe) == 0 and sym.name.len() > 0:
+            result = result.push(sym)
+    result
+
+fn macho_global_symbols(obj: MachOObject) -> [MachOSymbolEntry]:
+    var result: [MachOSymbolEntry] = []
+    for sym in obj.symbols:
+        if (sym.n_type & 0x01) != 0:
+            result = result.push(sym)
+    result
+
+fn macho_debug_sections(obj: MachOObject) -> [MachOSectionInfo]:
+    var result: [MachOSectionInfo] = []
+    for seg in obj.segments:
+        if seg.segname == "__DWARF":
+            for sec in seg.sections:
+                result = result.push(sec)
+    result
+
+fn macho_has_debug_info(obj: MachOObject) -> bool:
+    val debug_secs = macho_debug_sections(obj)
+    debug_secs.len() > 0

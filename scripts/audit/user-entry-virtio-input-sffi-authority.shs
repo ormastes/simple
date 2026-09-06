@@ -1,0 +1,36 @@
+#!/bin/sh
+# Static authority/performance-shape ratchet. It is not artifact verification.
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+arm32_user="$root/src/os/kernel/arch/arm32/user_entry.spl"
+arm64_user="$root/src/os/kernel/arch/arm64/user_entry.spl"
+arm64_input="$root/src/os/kernel/arch/arm64/virtio_input.spl"
+rv64_input="$root/src/os/kernel/arch/riscv64/virtio_input.spl"
+
+test "$(grep -c '^extern fn rt_arm32_' "$arm32_user")" -eq 3
+test "$(grep -Ec '^[[:space:]]*@unsafe\(.*capabilities: \[ffi\]\)' "$arm32_user")" -eq 4
+test "$(grep -c 'unsafe(capabilities: \[ffi\]):' "$arm32_user")" -eq 3
+grep -q 'entry == 0 or user_sp == 0 or token == 0 or generation == 0' "$arm32_user"
+grep -q 'raw_status != consumed' "$arm32_user"
+
+test "$(grep -c '^extern fn rt_arm64_' "$arm64_user")" -eq 3
+test "$(grep -Ec '^[[:space:]]*@unsafe\(.*capabilities: \[ffi\]\)' "$arm64_user")" -eq 6
+test "$(grep -c 'unsafe(capabilities: \[ffi\]):' "$arm64_user")" -eq 5
+
+for file in "$arm64_input" "$rv64_input"; do
+    test "$(grep -Ec '^extern fn rt_(arm64|riscv64)_virtio_input_' "$file")" -eq 7
+    test "$(grep -Ec '^[[:space:]]*@unsafe\(.*capabilities: \[ffi\]\)' "$file")" -eq 9
+    test "$(grep -c 'unsafe(capabilities: \[ffi\]):' "$file")" -eq 3
+    grep -q 'if polled != 1:' "$file"
+    # One poll plus five projections: do not add more hot-path dispatch while
+    # the atomic status/out ABI remains an open migration.
+    test "$(grep -Ec 'rt_(arm64|riscv64)_virtio_input_(poll|event_)' "$file")" -eq 12
+done
+
+# Authority annotations and exact status comparisons add no allocation, copy,
+# lookup, hash, lock, signature work, retry, or extra provider call.
+! grep -Ei 'alloc|malloc|calloc|realloc|free\(|hash|signature|dlsym|lookup|mutex|retry|rt_sffi_call' \
+    "$arm32_user" "$arm64_user" "$arm64_input" "$rv64_input"
+
+echo 'user-entry/VirtIO input authority: PASS (6 privilege-transfer and 14 input declarations tagged; calls scoped; provider-global event snapshot remains unsafe, unsigned, and unverified)'

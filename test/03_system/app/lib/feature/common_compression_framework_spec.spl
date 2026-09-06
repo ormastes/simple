@@ -1,0 +1,232 @@
+"""
+# Spec Plan — `common_compression_framework`
+
+This planning spec replaces the subset contract with the full pure-Simple target.
+The implementation work must convert the scenarios below into executable `describe` / `it`
+coverage with real assertions in compiled mode.
+
+Describe REQ-001 through REQ-008A: façade and API semantics — planned
+  Scenario REQ-001/REQ-002/REQ-006/REQ-007: `std.common.compress` round-trips LZ4, Zstd, and XZ/LZMA2 through the shared façade — planned
+    Given supported payload classes for each codec
+    When callers use `compress_bytes` and `decompress_bytes`
+    Then original payload bytes are restored and codec auto-detect or explicit hint behavior matches the request
+
+  Scenario REQ-003/REQ-004: option fields affect real behavior rather than placeholders — planned
+    Given callers vary `level`, `checksum`, `content_size`, `block_mode`, `dictionary_bytes`, and `dictionary_id`
+    When encoding is requested
+    Then supported codecs emit and validate the corresponding framed behavior and unsupported combinations fail explicitly
+
+  Scenario REQ-006A/REQ-008A/REQ-012: checked encode entrypoints preserve typed option failures — planned
+    Given invalid or unsupported option combinations
+    When callers use `try_compress_bytes` or `encoder_finish_checked`
+    Then the API returns typed `CompressionError.UnsupportedFeature` or other specific failures instead of silently normalizing the request
+
+  Scenario REQ-006/REQ-006A/REQ-008/REQ-008A: fail-fast and checked streaming APIs stay aligned — planned
+    Given the same buffered input is encoded via single-shot and streaming entrypoints
+    When checked and fail-fast wrappers are compared
+    Then success outputs match byte-for-byte and failure behavior differs only in typed-result versus unwrap semantics
+
+Describe REQ-009: full LZ4 coverage — planned
+  Scenario REQ-009A: raw LZ4 block decode requires an explicit codec hint — planned
+    Given a raw LZ4 block without frame magic
+    When the caller passes `CompressionCodec.lz4`
+    Then decode succeeds and auto-detect alone does not misclassify it
+
+  Scenario REQ-009B: framed LZ4 supports multi-block payloads and frame flags — planned
+    Given LZ4 frames carrying block checksum, content checksum, and content size
+    When the shared decoder and encoder process them
+    Then payload bytes, checksums, and size metadata are preserved and verified
+
+  Scenario REQ-009C: host interoperability holds for emitted and ingested frames — planned
+    Given host-generated standard LZ4 frames and Simple-generated frames
+    When both directions are decoded by the opposite implementation
+    Then payload bytes match exactly
+
+  Scenario REQ-009D: LZ4 corruption fails closed with typed errors — planned
+    Given bad headers, malformed tokens, bad lengths, checksum mismatches, and truncation
+    When decoding runs
+    Then `CompressionError` reports a typed failure instead of partial or normalized output
+
+Describe REQ-010: full Zstd coverage — planned
+  Scenario REQ-010A: normal host-generated frame variants decode successfully — planned
+    Given Zstd frames covering frame-header variants, window/content-size combinations, raw blocks, RLE blocks, compressed blocks, repeated FSE tables, compressed Huffman weights, treeless literals, and 4-stream literals
+    When `common.compress` decodes them
+    Then the original payload is restored and frame constraints are validated
+
+  Scenario REQ-010B: the pure-Simple encoder emits interoperable standard frames — planned
+    Given small, medium, large, repetitive, incompressible, and mixed payloads
+    When the Simple encoder emits Zstd frames
+    Then host `zstd` decodes them successfully and content checksum/content size fields validate
+
+  Scenario REQ-010C: framed dictionary support honors both dictionary bytes and dictionary id — planned
+    Given matching and mismatching `dictionary_bytes` plus `dictionary_id` combinations
+    When encoding and decoding dictionary-backed frames
+    Then matching inputs round-trip and invalid dictionary metadata fails explicitly
+
+  Scenario REQ-010D: multi-block, multi-frame, corruption, and truncation paths fail truthfully — planned
+    Given concatenated or repeated Zstd frame content plus malformed entropy tables, bad checksums, impossible sizes, and truncated inputs
+    When decoding runs
+    Then results are either successful full restoration or the correct typed failure category
+
+Describe REQ-011: full XZ/LZMA2 coverage — planned
+  Scenario REQ-011A: LZMA2 compressed chunks decode successfully inside `.xz` — planned
+    Given host-generated and Simple-generated `.xz` streams using the LZMA2-only filter chain
+    When decoding runs
+    Then compressed chunks, not only uncompressed passthrough chunks, restore the original payload
+
+  Scenario REQ-011B: `.xz` container validation covers block, index, footer, CRC, and concatenation behavior — planned
+    Given multi-block streams, concatenated streams, and valid CRC-protected metadata
+    When the shared decoder processes the stream
+    Then all blocks are restored in order and integrity checks are enforced
+
+  Scenario REQ-011C: the pure-Simple encoder emits canonical `.xz` streams for host decode — planned
+    Given representative payload classes
+    When the Simple encoder emits `.xz`
+    Then host `xz` decodes the output and the payload bytes match exactly
+
+  Scenario REQ-011D: unsupported filter chains and malformed tails fail explicitly — planned
+    Given non-LZMA2 filter chains, bad index/footer tails, bad CRCs, and truncation
+    When decoding runs
+    Then the API reports `UnsupportedFeature`, `InvalidHeader`, `ChecksumMismatch`, `TruncatedInput`, or `CorruptStream` as appropriate
+
+Describe REQ-013: kernel adapter parity — planned
+  Scenario REQ-013A: kernel Zstd adapter matches shared decoder output — planned
+    Given valid Zstd frames from the common fixture matrix
+    When both the kernel adapter and `common.compress` decode them
+    Then returned payload bytes are identical
+
+  Scenario REQ-013B: kernel adapter preserves its legacy error contract while delegating to `common.compress` — planned
+    Given invalid Zstd inputs covering every relevant typed compression failure
+    When the kernel adapter is called
+    Then it translates the shared `CompressionError` result into the expected `Result<[u8], text>` failure text deterministically
+
+Describe REQ-014: shared-helper and forced-tier parity — planned
+  Scenario REQ-014A: scalar, AVX2, and NEON helper paths produce identical checksum and copy results — planned
+    Given shared helper inputs for CRC32, XXH32, match extension, literal copy, and overlap-safe match copy
+    When each forced tier is called directly
+    Then helper outputs match the scalar oracle exactly
+
+  Scenario REQ-014B: codec behavior remains byte-for-byte identical across forced tiers — planned
+    Given the same representative payloads and codec options
+    When encode and decode operations are forced through scalar, AVX2, and NEON helper seams
+    Then compressed outputs and restored payloads remain identical across tiers
+
+Describe corruption matrices across REQ-005/REQ-009/REQ-010/REQ-011/REQ-012 — planned
+  Scenario CORR-001: bad header and magic handling
+  Scenario CORR-002: truncated block, frame, index, and footer tails
+  Scenario CORR-003: checksum corruption for LZ4, Zstd, and XZ structures
+  Scenario CORR-004: malformed LZ4 token and length state
+  Scenario CORR-005: malformed Zstd entropy tables and invalid dictionary metadata
+  Scenario CORR-006: unsupported XZ filter chain metadata
+  Scenario CORR-007: size-limit and impossible content-size failures
+
+Implementation note
+  The finished executable spec should group these scenarios into `describe` blocks per requirement family,
+  use deterministic fixtures, and assert typed success and failure results without subset-only caveats.
+"""
+
+use std.spec.step
+
+use std.spec.{describe, it, expect}
+use std.common.compress.{
+    CompressionCodec,
+    CompressionError,
+    CompressionOptions,
+    default_compression_options,
+    compress_bytes,
+    decompress_bytes
+}
+
+fn _payload(count: i64) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < count:
+        out.push((((i * 31) + (i / 3) + 11) % 253).to_u8())
+        if (i % 5) < 2:
+            out.push(0x41u8 + (i % 7).to_u8())
+        i = i + 1
+    out
+
+fn _options_with(codec: CompressionCodec, checksum: bool) -> CompressionOptions:
+    val base = default_compression_options(codec)
+    CompressionOptions(
+        codec: base.codec,
+        level: base.level,
+        checksum: checksum,
+        block_mode: base.block_mode,
+        dictionary_bytes: base.dictionary_bytes,
+        dictionary_id: base.dictionary_id,
+        content_size: base.content_size
+    )
+
+describe "common compression framework facade semantics":
+    # @manual scenario evidence
+    # Façade semantics: the shared facade round-trips every
+    # supported codec and honors codec hints.
+
+    it "round-trips zstd payloads through the shared facade with auto-detect":
+        # @req REQ-COMPRESSION-001
+        step("round-trips zstd payloads through the shared facade with auto-detect")
+        val payload = _payload(2048)
+        val encoded = compress_bytes(payload, default_compression_options(CompressionCodec.zstd))
+        val decoded = decompress_bytes(encoded, Option<CompressionCodec>.None())
+        expect(decoded.is_err()).to_equal(false)
+        expect(decoded.unwrap()).to_equal(payload)
+
+    it "round-trips lz4 payloads with an explicit codec hint":
+        # @req REQ-COMPRESSION-001
+        step("round-trips lz4 payloads with an explicit codec hint")
+        val payload = _payload(1024)
+        val encoded = compress_bytes(payload, default_compression_options(CompressionCodec.lz4))
+        val decoded = decompress_bytes(encoded, Some(CompressionCodec.lz4))
+        expect(decoded.is_err()).to_equal(false)
+        expect(decoded.unwrap()).to_equal(payload)
+
+    it "round-trips gzip payloads through the shared facade":
+        # @req REQ-COMPRESSION-001
+        step("round-trips gzip payloads through the shared facade")
+        val payload = _payload(512)
+        val encoded = compress_bytes(payload, default_compression_options(CompressionCodec.gzip))
+        val decoded = decompress_bytes(encoded, Option<CompressionCodec>.None())
+        expect(decoded.is_err()).to_equal(false)
+        expect(decoded.unwrap()).to_equal(payload)
+
+    it "preserves payload bytes across checksum-enabled zstd frames":
+        # @req REQ-COMPRESSION-003
+        step("preserves payload bytes across checksum-enabled zstd frames")
+        val payload = _payload(4096)
+        val encoded = compress_bytes(payload, _options_with(CompressionCodec.zstd, true))
+        val decoded = decompress_bytes(encoded, Some(CompressionCodec.zstd))
+        expect(decoded.is_err()).to_equal(false)
+        expect(decoded.unwrap()).to_equal(payload)
+
+    it "fails closed on corrupted checksum frames with a typed error":
+        # @req REQ-COMPRESSION-005
+        step("fails closed on corrupted checksum frames with a typed error")
+        val payload = _payload(256)
+        var encoded = compress_bytes(payload, _options_with(CompressionCodec.zstd, true))
+        encoded[encoded.len() - 1] = encoded[encoded.len() - 1] ^ 0x01u8
+        val decoded = decompress_bytes(encoded, Some(CompressionCodec.zstd))
+        expect(decoded.is_err()).to_equal(true)
+        val err = decoded.unwrap_err()
+        val typed = match err:
+            CompressionError.ChecksumMismatch(message): true
+            CompressionError.CorruptStream(message): true
+            CompressionError.TruncatedInput(message): true
+            CompressionError.InvalidHeader(message): true
+            CompressionError.UnsupportedFeature(message): true
+            CompressionError.SizeLimitExceeded(limit): true
+        expect(typed).to_equal(true)
+
+    it "fails closed on truncated zstd frames with a typed error":
+        # @req REQ-COMPRESSION-005
+        step("fails closed on truncated zstd frames with a typed error")
+        val payload = _payload(1024)
+        var encoded = compress_bytes(payload, default_compression_options(CompressionCodec.zstd))
+        var truncated: [u8] = []
+        var i = 0
+        while i < encoded.len() / 2:
+            truncated.push(encoded[i])
+            i = i + 1
+        val decoded = decompress_bytes(truncated, Some(CompressionCodec.zstd))
+        expect(decoded.is_err()).to_equal(true)

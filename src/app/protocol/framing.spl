@@ -1,0 +1,100 @@
+# Canonical JSON-RPC Content-Length framing primitives.
+#
+# These are the PURE parts of the LSP/MCP/DAP stdio framing that were
+# reimplemented verbatim in several servers. The stdin-reading loops stay in
+# each server (they differ in their read primitive and in their JSON-lines
+# auto-detect policy -- see
+# doc/08_tracking/bug/jsonrpc_framing_divergence_2026-08-11.md), but the header
+# parsing and the frame encoder are shared here.
+#
+# Behaviour is fixed by test/01_unit/app/protocol/jsonrpc_framing_spec.spl.
+
+# Strip a single trailing line terminator (CRLF, LF, or bare CR).
+# Only one terminator is removed; interior newlines are preserved.
+fn frame_strip_line_end(line: text) -> text:
+    val n = line.len()
+    if n >= 2 and line.substring(n - 2, n) == "\r\n":
+        return line.substring(0, n - 2)
+    if n >= 1 and line.substring(n - 1, n) == "\n":
+        return line.substring(0, n - 1)
+    if n >= 1 and line.substring(n - 1, n) == "\r":
+        return line.substring(0, n - 1)
+    line
+
+# Parse a leading run of ASCII decimal digits. Stops at the first non-digit and
+# returns what was accumulated so far; a string with no leading digit yields 0.
+# Deliberately total: framing must never abort the server on a bad header.
+fn frame_parse_decimal(s: text) -> i64:
+    var result: i64 = 0
+    var i = 0
+    while i < s.len():
+        val ch = s.substring(i, i + 1)
+        var digit: i64 = -1
+        if ch == "0":
+            digit = 0
+        elif ch == "1":
+            digit = 1
+        elif ch == "2":
+            digit = 2
+        elif ch == "3":
+            digit = 3
+        elif ch == "4":
+            digit = 4
+        elif ch == "5":
+            digit = 5
+        elif ch == "6":
+            digit = 6
+        elif ch == "7":
+            digit = 7
+        elif ch == "8":
+            digit = 8
+        elif ch == "9":
+            digit = 9
+        else:
+            return result
+        # Fail closed before signed i64 arithmetic can wrap. A wrapped positive
+        # length could otherwise make a stdio server read or retain an
+        # attacker-controlled amount of input.
+        if result > 922337203685477580 or (
+            result == 922337203685477580 and digit > 7):
+            return 0
+        result = result * 10 + digit
+        i = i + 1
+    result
+
+# Return the declared body length for a header line, or -1 when the line is not
+# a Content-Length header. Callers ignore -1 so that unrelated headers
+# (Content-Type, vendor extensions) are tolerated rather than fatal.
+fn frame_content_length_of(line: text) -> i64:
+    val stripped = frame_strip_line_end(line)
+    if not stripped.starts_with("Content-Length:"):
+        return -1
+    frame_parse_decimal(stripped.replace("Content-Length:", "").trim())
+
+# Canonical header-part policy (LSP 3.17 / MCP stdio): scan the header lines of
+# ONE message and return the declared body length, or -1 when no Content-Length
+# was present. Unrecognized header fields -- Content-Type, vendor extensions --
+# are SKIPPED, never treated as payload and never fatal. An empty line ends the
+# header part; anything after it is body and is not scanned.
+#
+# This is the behaviour every stdio server's read loop must implement. The loops
+# themselves cannot share code (they differ in their read primitive: `input()`
+# vs `stdin_read_char()`), so this function is the specified oracle they are
+# checked against. See
+# doc/08_tracking/bug/jsonrpc_framing_divergence_2026-08-11.md
+fn frame_scan_headers(lines: [text]) -> i64:
+    var declared: i64 = -1
+    var i = 0
+    while i < lines.len():
+        val stripped = frame_strip_line_end(lines[i])
+        if stripped == "":
+            return declared
+        val n = frame_content_length_of(lines[i])
+        if n >= 0:
+            declared = n
+        i = i + 1
+    declared
+
+# Encode a body as a complete Content-Length framed message.
+fn frame_encode(body: text) -> text:
+    "Content-Length: " + str(body.len()) + "\r\n\r\n" + body

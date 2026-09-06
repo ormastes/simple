@@ -1,0 +1,281 @@
+# Frozen cross-lane Formal Verification 2.0 interfaces.
+
+use std.common.crypto.sha256.{sha256_text}
+use std.common.encoding.sha256_contract.{sha256_lower_hex_valid}
+use compiler.common.assurance.formal_status.{FormalStatus}
+
+fn _formal_interface_frame_v1(value: text) -> text:
+    value.len().to_string() + ":" + value
+
+fn _formal_interface_frames_v1(values: [text]) -> text:
+    var framed: [text] = []
+    for value in values: framed.push(_formal_interface_frame_v1(value))
+    values.len().to_string() + ":[" + framed.join("") + "]"
+
+struct WeaveJoinPointV1:
+    symbol_id: text
+    ordered_advice_ids: [text]
+
+impl WeaveJoinPointV1:
+    fn canonical_text() -> text:
+        # Advice order is semantic and must never be sorted here.
+        _formal_interface_frame_v1(self.symbol_id) +
+            _formal_interface_frames_v1(self.ordered_advice_ids)
+
+struct WeaveManifestV1:
+    base_program_hash: text
+    macro_expansion_hash: text
+    join_points: [WeaveJoinPointV1]
+    introduced_symbol_ids: [text]
+    woven_program_hash: text
+
+impl WeaveManifestV1:
+    fn diagnostic() -> text:
+        if self.base_program_hash == "": return "FV2-E-WEAVE-BASE: base program hash is required"
+        if self.macro_expansion_hash == "": return "FV2-E-WEAVE-MACRO: macro expansion hash is required"
+        if self.woven_program_hash == "": return "FV2-E-WEAVE-OUTPUT: woven program hash is required"
+        var previous = ""
+        for point in self.join_points:
+            if point.symbol_id == "": return "FV2-E-WEAVE-SYMBOL: join point SymbolId is required"
+            if previous != "" and point.symbol_id <= previous:
+                return "FV2-E-WEAVE-ORDER: join points must be unique and sorted by SymbolId"
+            previous = point.symbol_id
+            var seen_advice: [text] = []
+            for advice_id in point.ordered_advice_ids:
+                if advice_id == "":
+                    return "FV2-E-WEAVE-ADVICE: advice identity is required"
+                if seen_advice.contains(advice_id):
+                    return "FV2-E-WEAVE-ADVICE-DUPLICATE: advice cannot occur twice at one join point"
+                seen_advice.push(advice_id)
+        previous = ""
+        for symbol_id in self.introduced_symbol_ids:
+            if symbol_id == "": return "FV2-E-WEAVE-INTRODUCED: introduced SymbolId is required"
+            if previous != "" and symbol_id <= previous:
+                return "FV2-E-WEAVE-INTRODUCED-ORDER: introduced symbols must be unique and sorted"
+            previous = symbol_id
+        ""
+
+    fn canonical_text() -> text:
+        var points: [text] = []
+        for point in self.join_points:
+            points = points.push(point.canonical_text())
+        "WeaveManifestV1" +
+            _formal_interface_frame_v1(self.base_program_hash) +
+            _formal_interface_frame_v1(self.macro_expansion_hash) +
+            _formal_interface_frames_v1(points) +
+            _formal_interface_frames_v1(self.introduced_symbol_ids) +
+            _formal_interface_frame_v1(self.woven_program_hash)
+
+    fn hash() -> text:
+        sha256_text(self.canonical_text())
+
+enum AspectEvidenceClassV1:
+    GhostNoninterference
+    BoundedRuntimeMonitor
+    BehaviorRefinement
+
+struct AspectCertificateV1:
+    advice_id: text
+    evidence_class: AspectEvidenceClassV1
+    base_program_hash: text
+    woven_program_hash: text
+    proof_receipt_hash: text
+    bounded_runtime: bool
+    proceed_exactly_once: bool
+
+impl AspectCertificateV1:
+    fn diagnostic() -> text:
+        if self.advice_id == "": return "FV2-E-ASPECT-ID: advice identity is required"
+        if self.base_program_hash == "" or self.woven_program_hash == "": return "FV2-E-ASPECT-PROGRAM: base and woven hashes are required"
+        if self.proof_receipt_hash == "": return "FV2-E-ASPECT-PROOF: aspect proof receipt is required"
+        match self.evidence_class:
+            case AspectEvidenceClassV1.BoundedRuntimeMonitor:
+                if not self.bounded_runtime: return "FV2-E-ASPECT-BOUND: runtime monitor must prove bounded execution"
+            case AspectEvidenceClassV1.BehaviorRefinement:
+                if not self.proceed_exactly_once: return "FV2-E-ASPECT-PROCEED: behavior-changing around advice requires exactly-once proceed"
+            case AspectEvidenceClassV1.GhostNoninterference:
+                pass_do_nothing("ghost evidence has no runtime-bound fields")
+        ""
+
+    fn canonical_text() -> text:
+        val class_name = match self.evidence_class:
+            case AspectEvidenceClassV1.GhostNoninterference:
+                "ghost_noninterference"
+            case AspectEvidenceClassV1.BoundedRuntimeMonitor:
+                "bounded_runtime_monitor"
+            case AspectEvidenceClassV1.BehaviorRefinement:
+                "behavior_refinement"
+        "AspectCertificateV1" + _formal_interface_frame_v1(self.advice_id) +
+            _formal_interface_frame_v1(class_name) +
+            _formal_interface_frame_v1(self.base_program_hash) +
+            _formal_interface_frame_v1(self.woven_program_hash) +
+            _formal_interface_frame_v1(self.proof_receipt_hash) +
+            _formal_interface_frame_v1(if self.bounded_runtime: "true" else: "false") +
+            _formal_interface_frame_v1(if self.proceed_exactly_once: "true" else: "false")
+
+    fn hash() -> text:
+        sha256_text(self.canonical_text())
+
+# This receipt is deliberately separate from AspectCertificateV1.  The legacy
+# monitor certificate cannot describe an environmental assumption, the exact
+# executable artifact, or what happens when a check fails, so it is not a
+# safe compatibility target for a release-grade monitor.
+enum RuntimeMonitorFailStopV1:
+    Trap
+    ReturnError
+    TerminateProcess
+
+impl RuntimeMonitorFailStopV1:
+    fn name() -> text:
+        match self:
+            case Trap: "trap"
+            case ReturnError: "return_error"
+            case TerminateProcess: "terminate_process"
+
+struct RuntimeAssumptionMonitorReceiptV1:
+    advice_id: text
+    assumption_id: text
+    vir_semantic_hash: text
+    artifact_hash: text
+    monitor_binary_hash: text
+    proof_receipt_hash: text
+    max_steps: i64
+    fail_stop: RuntimeMonitorFailStopV1
+
+impl RuntimeAssumptionMonitorReceiptV1:
+    fn diagnostic() -> text:
+        if self.advice_id == "" or self.assumption_id == "":
+            return "FV2-E-MONITOR-IDENTITY: advice and environmental assumption identities are required"
+        if not sha256_lower_hex_valid(self.vir_semantic_hash) or
+                not sha256_lower_hex_valid(self.artifact_hash) or
+                not sha256_lower_hex_valid(self.monitor_binary_hash) or
+                not sha256_lower_hex_valid(self.proof_receipt_hash):
+            return "FV2-E-MONITOR-HASH: VIR artifact monitor and proof identities must be canonical SHA-256"
+        if self.max_steps <= 0:
+            return "FV2-E-MONITOR-BOUND: runtime monitor requires a positive bounded step count"
+        ""
+
+    fn canonical_text() -> text:
+        "RuntimeAssumptionMonitorReceiptV1" +
+            _formal_interface_frame_v1(self.advice_id) +
+            _formal_interface_frame_v1(self.assumption_id) +
+            _formal_interface_frame_v1(self.vir_semantic_hash) +
+            _formal_interface_frame_v1(self.artifact_hash) +
+            _formal_interface_frame_v1(self.monitor_binary_hash) +
+            _formal_interface_frame_v1(self.proof_receipt_hash) +
+            _formal_interface_frame_v1(self.max_steps.to_string()) +
+            _formal_interface_frame_v1(self.fail_stop.name())
+
+    fn hash() -> text:
+        if self.diagnostic() != "": return ""
+        sha256_text(self.canonical_text())
+
+enum ProofObligationKindV1:
+    TypeRepresentationWellFormed
+    PreconditionsSatisfiable
+    TerminationOrBoundedExecution
+    MemoryOwnershipSafety
+    EffectFrameCompliance
+    NormalPostcondition
+    ErrorPostcondition
+    InvariantInitialization
+    InvariantPreservation
+    CallContractCompatibility
+    NonVacuityWitness
+    BackendLoweringCoverage
+    TrustClosure
+
+enum ExpectedEvidenceClassV1:
+    KernelReplayedCertificate
+    ApprovedExternalTcb
+    CounterexampleExpected
+
+struct ProofObligationV1:
+    obligation_id: text
+    symbol_id: text
+    kind: ProofObligationKindV1
+    proposition_hash: text
+    dependency_ids: [text]
+    expected_evidence: ExpectedEvidenceClassV1
+    source_span: text
+
+impl ProofObligationV1:
+    fn diagnostic() -> text:
+        if self.obligation_id == "": return "FV2-E-VC-ID: obligation id is required"
+        if self.symbol_id == "": return "FV2-E-VC-SYMBOL: SymbolId is required"
+        if self.proposition_hash == "": return "FV2-E-VC-PROP: typed proposition hash is required"
+        if self.source_span == "": return "FV2-E-VC-SPAN: source mapping is required"
+        ""
+
+enum CompilerRefinementRelationV1:
+    BehaviorInclusion
+    ObservationalEquivalence
+
+struct CompilerCertificateV1:
+    pass_id: text
+    before_semantic_hash: text
+    after_semantic_hash: text
+    relation: CompilerRefinementRelationV1
+    validator_version: text
+    certificate_hash: text
+    independently_checked: bool
+
+impl CompilerCertificateV1:
+    fn evidence_payload() -> text:
+        val relation_name = match self.relation:
+            case CompilerRefinementRelationV1.BehaviorInclusion: "behavior_inclusion"
+            case CompilerRefinementRelationV1.ObservationalEquivalence: "observational_equivalence"
+        "CompilerCertificateV1" + _formal_interface_frame_v1(self.pass_id) +
+            _formal_interface_frame_v1(self.before_semantic_hash) +
+            _formal_interface_frame_v1(self.after_semantic_hash) +
+            _formal_interface_frame_v1(relation_name) +
+            _formal_interface_frame_v1(self.validator_version)
+
+    fn expected_certificate_hash() -> text:
+        sha256_text(self.evidence_payload())
+
+    fn is_self_consistent() -> bool:
+        self.certificate_hash == self.expected_certificate_hash()
+
+    fn matches_edge(pass_id: text, before_hash: text, after_hash: text) -> bool:
+        self.pass_id == pass_id and self.before_semantic_hash == before_hash and
+            self.after_semantic_hash == after_hash and self.diagnostic() == ""
+
+    fn diagnostic() -> text:
+        if self.pass_id == "": return "FV2-E-CERT-PASS: compiler pass id is required"
+        if self.before_semantic_hash == "" or self.after_semantic_hash == "": return "FV2-E-CERT-SEMANTICS: before/after semantic hashes are required"
+        if self.validator_version == "": return "FV2-E-CERT-VALIDATOR: validator identity is required"
+        if self.certificate_hash == "": return "FV2-E-CERT-EVIDENCE: checked certificate is required"
+        if not self.independently_checked: return "FV2-E-CERT-CHECK: independent certificate checking is required"
+        if not self.is_self_consistent(): return "FV2-E-CERT-HASH: certificate evidence does not match the compiler edge"
+        ""
+
+struct HardwareProofReceiptV1:
+    hwir_hash: text
+    rtl_hash: text
+    netlist_hash: text
+    rvfi_contract_hash: text
+    property_ids: [text]
+    cover_ids: [text]
+    mutation_ids: [text]
+    engine_versions: [text]
+    evidence_receipt_hashes: [text]
+    assumption_manifest_hash: text
+    status: FormalStatus
+
+impl HardwareProofReceiptV1:
+    fn diagnostic() -> text:
+        if self.hwir_hash == "" or self.rtl_hash == "": return "FV2-E-HW-ARTIFACT: HWIR and RTL hashes are required"
+        if self.rvfi_contract_hash == "": return "FV2-E-HW-RVFI: RVFI contract hash is required"
+        if self.property_ids.is_empty(): return "FV2-E-HW-PROPERTY: property evidence is required"
+        if self.cover_ids.is_empty(): return "FV2-E-HW-COVER: reachability cover evidence is required"
+        if self.mutation_ids.is_empty(): return "FV2-E-HW-MUTATION: mutation evidence is required"
+        if self.engine_versions.is_empty(): return "FV2-E-HW-ENGINE: proof engine identity is required"
+        if self.evidence_receipt_hashes.is_empty(): return "FV2-E-HW-EVIDENCE: checked job receipt identities are required"
+        if self.assumption_manifest_hash == "": return "FV2-E-HW-TRUST: assumption manifest is required"
+        if self.status == FormalStatus.ArtifactVerified and self.netlist_hash == "":
+            return "FV2-E-HW-NETLIST: artifact verification requires a checked netlist identity"
+        ""
+
+    fn permits_verified_release() -> bool:
+        self.status == FormalStatus.ArtifactVerified and self.diagnostic() == ""

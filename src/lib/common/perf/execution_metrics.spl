@@ -1,0 +1,451 @@
+# Portable execution evidence and abnormality decisions.
+#
+# This module is deliberately pure: platform providers collect evidence, while
+# these value types classify, budget, compare, and explain it. No live process,
+# cgroup, Job Object, or runtime handle crosses this boundary.
+
+use std.common.math.statistics.{median}
+use std.common.math.special.{ln_f64}
+
+pub enum ResourceEvidenceQuality:
+    ExactTree
+    ExactDirectChild
+    SampledTree
+    ProcessOnly
+    Unavailable
+
+pub enum TerminationCause:
+    Exited
+    WallTimeout
+    NoProgressTimeout
+    CpuLimit
+    MemoryHigh
+    MemoryMax
+    ProcessLimit
+    OutputLimit
+    Signal
+    ExternalTermination
+    InfrastructureFailure
+
+pub enum BaselineState:
+    Provisional
+    Approved
+    Suspect
+    Superseded
+
+pub enum DecisionStatus:
+    Pass
+    Warning
+    Failure
+    Incomplete
+
+pub enum BuildPhaseId:
+    Startup
+    ConfigResolution
+    SourceClosure
+    LoadSources
+    Parse
+    SourceReclaim
+    HirLower
+    TypeCheck
+    EffectCheck
+    Monomorphize
+    MirLower
+    BorrowCheck
+    AsyncTransform
+    MirOptimize
+    AopWeave
+    DebugTrace
+    BackendCodegen
+    Assemble
+    Link
+    SmfPackage
+    ManifestWrite
+    ArtifactValidation
+
+pub struct WorkCounter:
+    name: text
+    value: i64
+
+pub struct ExecutionSpan:
+    run_id: text
+    span_id: text
+    parent_span_id: text
+    phase_id: BuildPhaseId
+    unit_id: text
+    started_micros: i64
+    ended_micros: i64
+    status: text
+    memory_at_start_bytes: i64
+    memory_at_end_bytes: i64
+    peak_memory_during_span_bytes: i64
+    heap_live_at_start_bytes: i64
+    heap_live_at_end_bytes: i64
+    heap_peak_during_span_bytes: i64
+    work_counters: [WorkCounter]
+
+pub struct ResourceUsage:
+    wall_ms: i64
+    user_cpu_ms: i64
+    system_cpu_ms: i64
+    peak_tree_charge_bytes: i64
+    peak_direct_child_rss_bytes: i64
+    heap_live_end_bytes: i64
+    heap_peak_bytes: i64
+    io_read_bytes: i64
+    io_write_bytes: i64
+    pids_peak: i64
+    evidence_quality: ResourceEvidenceQuality
+    termination: TerminationCause
+    signal: i64
+    exit_code: i64
+
+pub struct TerminationEvidence:
+    infrastructure_failed: bool
+    wall_watchdog_fired: bool
+    no_progress_watchdog_fired: bool
+    cpu_limit_event: bool
+    memory_high_event: bool
+    memory_max_event: bool
+    process_limit_event: bool
+    output_limit_event: bool
+    externally_terminated: bool
+    signal: i64
+    exit_code: i64
+
+pub struct ResourceBudget:
+    max_wall_ms: i64
+    max_cpu_ms: i64
+    max_tree_charge_bytes: i64
+    max_direct_child_rss_bytes: i64
+    max_io_read_bytes: i64
+    max_io_write_bytes: i64
+    max_pids: i64
+    max_fds: i64 = 0
+
+pub struct BudgetDecision:
+    status: DecisionStatus
+    reason: text
+
+pub struct AnomalyPolicy:
+    warning_relative_percent: i64
+    warning_mad_multiplier: f64
+    failure_relative_percent: i64
+    failure_mad_multiplier: f64
+    absolute_floor: f64
+
+pub struct ApprovedBaseline:
+    cohort_id: text
+    state: BaselineState
+    samples: [f64]
+    generation: i64
+
+pub struct AnomalyDecision:
+    status: DecisionStatus
+    reason: text
+    baseline_median: f64
+    candidate_median: f64
+    delta: f64
+    relative_percent: f64
+    mad: f64
+
+pub struct ExecutionCohort:
+    scenario: text
+    semantic_configuration_id: text
+    machine_environment_id: text
+    workload_id: text
+    ordered_aspect_plan_id: text
+    execution_mode: text = ""
+    target: text = ""
+    optimization: text = ""
+    cache_state: text = ""
+    bootstrap_stage: text = ""
+    concurrency: i64 = 0
+    compiler_digest: text = ""
+    runtime_digest: text = ""
+    schema_digest: text = ""
+
+pub struct DriftState:
+    ewma: f64
+    positive_cusum: f64
+    consecutive_above: i64
+    sample_count: i64
+
+pub struct DriftPolicy:
+    ewma_alpha: f64
+    cusum_allowance: f64
+    cusum_threshold: f64
+    consecutive_threshold: i64
+
+pub struct TailEvidence:
+    sample_count: i64
+    maximum: f64
+    outlier_count: i64
+
+fn _abs_f64(value: f64) -> f64:
+    if value < 0.0:
+        return 0.0 - value
+    value
+
+pub fn median_absolute_deviation(values: [f64]) -> f64:
+    """Median absolute deviation from the sample median."""
+    if values.len() == 0:
+        return 0.0
+    val center = median(values)
+    var deviations: [f64] = []
+    for value in values:
+        deviations.push(_abs_f64(value - center))
+    median(deviations)
+
+pub fn tail_evidence(values: [f64], mad_multiplier: f64, absolute_floor: f64) -> TailEvidence:
+    """Retain every sample while exposing robust upper-tail spikes."""
+    if values.len() == 0:
+        return TailEvidence(sample_count: 0, maximum: 0.0, outlier_count: 0)
+    val center = median(values)
+    val mad_value = median_absolute_deviation(values)
+    val noise_floor = if mad_value > 0.0: mad_value * mad_multiplier else: absolute_floor
+    val threshold = center + (if noise_floor > absolute_floor: noise_floor else: absolute_floor)
+    var maximum = values[0]
+    var outliers = 0
+    for value in values:
+        if value > maximum:
+            maximum = value
+        if value > threshold:
+            outliers = outliers + 1
+    TailEvidence(sample_count: values.len(), maximum: maximum, outlier_count: outliers)
+
+pub fn incremental_invalidation_evidence_valid(cache_hits: i64, cache_misses: i64, invalidation_reason: text) -> bool:
+    cache_hits >= 0 and cache_misses > 0 and invalidation_reason.trim() != ""
+
+pub fn classify_termination(evidence: TerminationEvidence) -> TerminationCause:
+    """Classify only affirmative evidence; exit 137/139 never imply a cause."""
+    if evidence.infrastructure_failed:
+        return TerminationCause.InfrastructureFailure
+    if evidence.wall_watchdog_fired:
+        return TerminationCause.WallTimeout
+    if evidence.no_progress_watchdog_fired:
+        return TerminationCause.NoProgressTimeout
+    if evidence.memory_max_event:
+        return TerminationCause.MemoryMax
+    if evidence.memory_high_event:
+        return TerminationCause.MemoryHigh
+    if evidence.process_limit_event:
+        return TerminationCause.ProcessLimit
+    if evidence.cpu_limit_event:
+        return TerminationCause.CpuLimit
+    if evidence.output_limit_event:
+        return TerminationCause.OutputLimit
+    if evidence.externally_terminated:
+        return TerminationCause.ExternalTermination
+    if evidence.signal > 0:
+        return TerminationCause.Signal
+    TerminationCause.Exited
+
+pub fn evaluate_resource_budget(usage: ResourceUsage, budget: ResourceBudget) -> BudgetDecision:
+    """Evaluate declared limits without consulting historical observations."""
+    val total_cpu_ms = usage.user_cpu_ms + usage.system_cpu_ms
+    if budget.max_wall_ms > 0 and usage.wall_ms > budget.max_wall_ms:
+        return BudgetDecision(status: DecisionStatus.Failure, reason: "wall budget exceeded")
+    if budget.max_cpu_ms > 0 and total_cpu_ms > budget.max_cpu_ms:
+        return BudgetDecision(status: DecisionStatus.Failure, reason: "cpu budget exceeded")
+    if budget.max_tree_charge_bytes > 0 and usage.peak_tree_charge_bytes > budget.max_tree_charge_bytes:
+        return BudgetDecision(status: DecisionStatus.Failure, reason: "tree memory budget exceeded")
+    if budget.max_direct_child_rss_bytes > 0 and usage.peak_direct_child_rss_bytes > budget.max_direct_child_rss_bytes:
+        return BudgetDecision(status: DecisionStatus.Failure, reason: "direct child memory budget exceeded")
+    if budget.max_io_read_bytes > 0 and usage.io_read_bytes > budget.max_io_read_bytes:
+        return BudgetDecision(status: DecisionStatus.Failure, reason: "read I/O budget exceeded")
+    if budget.max_io_write_bytes > 0 and usage.io_write_bytes > budget.max_io_write_bytes:
+        return BudgetDecision(status: DecisionStatus.Failure, reason: "write I/O budget exceeded")
+    if budget.max_pids > 0 and usage.pids_peak > budget.max_pids:
+        return BudgetDecision(status: DecisionStatus.Failure, reason: "process budget exceeded")
+    BudgetDecision(status: DecisionStatus.Pass, reason: "declared budgets satisfied")
+
+pub fn cohorts_compatible(left: ExecutionCohort, right: ExecutionCohort) -> bool:
+    (left.scenario == right.scenario and
+        left.semantic_configuration_id == right.semantic_configuration_id and
+        left.machine_environment_id == right.machine_environment_id and
+        left.workload_id == right.workload_id and
+        left.ordered_aspect_plan_id == right.ordered_aspect_plan_id and
+        left.execution_mode == right.execution_mode and
+        left.target == right.target and
+        left.optimization == right.optimization and
+        left.cache_state == right.cache_state and
+        left.bootstrap_stage == right.bootstrap_stage and
+        left.concurrency == right.concurrency and
+        left.compiler_digest == right.compiler_digest and
+        left.runtime_digest == right.runtime_digest and
+        left.schema_digest == right.schema_digest)
+
+pub fn approved_baseline_promote(candidate: ApprovedBaseline, next_generation: i64) -> ApprovedBaseline:
+    """Explicit promotion is the only API that creates an Approved baseline."""
+    ApprovedBaseline(
+        cohort_id: candidate.cohort_id,
+        state: BaselineState.Approved,
+        samples: candidate.samples,
+        generation: next_generation
+    )
+
+pub fn approved_baseline_supersede(baseline: ApprovedBaseline) -> ApprovedBaseline:
+    """Retain the prior generation as immutable superseded history."""
+    ApprovedBaseline(
+        cohort_id: baseline.cohort_id,
+        state: BaselineState.Superseded,
+        samples: baseline.samples,
+        generation: baseline.generation
+    )
+
+pub fn approved_baseline_mark_suspect(baseline: ApprovedBaseline) -> ApprovedBaseline:
+    """Flag an approved generation for review without changing its evidence."""
+    ApprovedBaseline(
+        cohort_id: baseline.cohort_id,
+        state: BaselineState.Suspect,
+        samples: baseline.samples,
+        generation: baseline.generation
+    )
+
+fn _relative_percent(delta: f64, baseline_value: f64) -> f64:
+    if baseline_value <= 0.0:
+        return 0.0
+    delta * 100.0 / baseline_value
+
+fn _exceeds_noise(delta: f64, mad_value: f64, multiplier: f64, absolute_floor: f64) -> bool:
+    if delta <= absolute_floor:
+        return false
+    if mad_value <= 0.0:
+        return true
+    delta > mad_value * multiplier
+
+pub fn compare_approved_baseline(baseline: ApprovedBaseline, candidate_samples: [f64], candidate_cohort_id: text, confirmed: bool, policy: AnomalyPolicy) -> AnomalyDecision:
+    """Robust triple-floor comparison against a frozen approved baseline."""
+    if baseline.state != BaselineState.Approved:
+        return AnomalyDecision(status: DecisionStatus.Incomplete, reason: "baseline is not approved", baseline_median: 0.0, candidate_median: 0.0, delta: 0.0, relative_percent: 0.0, mad: 0.0)
+    if baseline.cohort_id != candidate_cohort_id:
+        return AnomalyDecision(status: DecisionStatus.Incomplete, reason: "cohort mismatch", baseline_median: 0.0, candidate_median: 0.0, delta: 0.0, relative_percent: 0.0, mad: 0.0)
+    if baseline.samples.len() == 0 or candidate_samples.len() == 0:
+        return AnomalyDecision(status: DecisionStatus.Incomplete, reason: "missing samples", baseline_median: 0.0, candidate_median: 0.0, delta: 0.0, relative_percent: 0.0, mad: 0.0)
+
+    val baseline_center = median(baseline.samples)
+    val candidate_center = median(candidate_samples)
+    val delta = candidate_center - baseline_center
+    val relative = _relative_percent(delta, baseline_center)
+    val mad_value = median_absolute_deviation(baseline.samples)
+    val failure_noise = _exceeds_noise(delta, mad_value, policy.failure_mad_multiplier, policy.absolute_floor)
+    val warning_noise = _exceeds_noise(delta, mad_value, policy.warning_mad_multiplier, policy.absolute_floor)
+
+    if confirmed and relative >= policy.failure_relative_percent.to_f64() and failure_noise:
+        return AnomalyDecision(status: DecisionStatus.Failure, reason: "confirmed regression exceeds absolute, relative, and MAD floors", baseline_median: baseline_center, candidate_median: candidate_center, delta: delta, relative_percent: relative, mad: mad_value)
+    if relative >= policy.warning_relative_percent.to_f64() and warning_noise:
+        return AnomalyDecision(status: DecisionStatus.Warning, reason: "regression exceeds absolute, relative, and MAD warning floors", baseline_median: baseline_center, candidate_median: candidate_center, delta: delta, relative_percent: relative, mad: mad_value)
+    AnomalyDecision(status: DecisionStatus.Pass, reason: "no robust regression", baseline_median: baseline_center, candidate_median: candidate_center, delta: delta, relative_percent: relative, mad: mad_value)
+
+pub fn required_spans_present(observed_phase_ids: [text], required_phase_ids: [text]) -> bool:
+    for required in required_phase_ids:
+        if not observed_phase_ids.contains(required):
+            return false
+    true
+
+pub fn work_normalized_duration(duration_ms: f64, completed_work: i64) -> f64:
+    """Return milliseconds per completed unit, or -1 when normalization is impossible."""
+    if duration_ms < 0.0 or completed_work <= 0:
+        return -1.0
+    duration_ms / completed_work.to_f64()
+
+pub fn suspicious_apparent_speedup(
+    baseline_duration_ms: f64,
+    candidate_duration_ms: f64,
+    baseline_completed_work: i64,
+    candidate_completed_work: i64,
+    minimum_retained_work_percent: i64
+) -> bool:
+    """Flag a faster candidate whose completed work collapsed beyond policy.
+
+    A missing/zero candidate counter is evidence of collapse, not a miraculous
+    speedup. Invalid baseline evidence cannot prove a comparison.
+    """
+    if baseline_duration_ms <= 0.0 or candidate_duration_ms < 0.0 or
+            baseline_completed_work <= 0 or minimum_retained_work_percent < 0:
+        return false
+    if candidate_duration_ms >= baseline_duration_ms:
+        return false
+    candidate_completed_work * 100 < baseline_completed_work * minimum_retained_work_percent
+
+fn _identity_part(value: text) -> text:
+    "{value.len()}:{value}"
+
+pub fn execution_cohort_key(cohort: ExecutionCohort) -> text:
+    "{_identity_part(cohort.scenario)}|{_identity_part(cohort.semantic_configuration_id)}|{_identity_part(cohort.machine_environment_id)}|{_identity_part(cohort.workload_id)}|{_identity_part(cohort.ordered_aspect_plan_id)}|{_identity_part(cohort.execution_mode)}|{_identity_part(cohort.target)}|{_identity_part(cohort.optimization)}|{_identity_part(cohort.cache_state)}|{_identity_part(cohort.bootstrap_stage)}|{cohort.concurrency}|{_identity_part(cohort.compiler_digest)}|{_identity_part(cohort.runtime_digest)}|{_identity_part(cohort.schema_digest)}"
+
+pub fn estimate_doubling_exponent(samples: [f64]) -> f64:
+    """Estimate p for samples at N,2N,4N... using median log2 ratios."""
+    if samples.len() < 2:
+        return 0.0
+    var exponents: [f64] = []
+    var i = 1
+    while i < samples.len():
+        val previous = samples[i - 1]
+        val current = samples[i]
+        if previous > 0.0 and current > 0.0:
+            exponents.push(ln_f64(current / previous) / ln_f64(2.0))
+        i = i + 1
+    median(exponents)
+
+pub fn complexity_regression(samples: [f64], maximum_exponent: f64) -> bool:
+    samples.len() >= 2 and estimate_doubling_exponent(samples) > maximum_exponent
+
+pub fn retention_slope(post_cleanup_samples: [f64]) -> f64:
+    """Endpoint slope of post-cleanup live memory per persistent iteration."""
+    if post_cleanup_samples.len() < 2:
+        return 0.0
+    val intervals = (post_cleanup_samples.len() - 1).to_f64()
+    (post_cleanup_samples[post_cleanup_samples.len() - 1] - post_cleanup_samples[0]) / intervals
+
+pub fn drift_state_initial() -> DriftState:
+    DriftState(ewma: 0.0, positive_cusum: 0.0, consecutive_above: 0, sample_count: 0)
+
+pub fn drift_state_update(state: DriftState, sample: f64, approved_center: f64, policy: DriftPolicy) -> DriftState:
+    val next_count = state.sample_count + 1
+    val next_ewma = if state.sample_count == 0: sample else: policy.ewma_alpha * sample + (1.0 - policy.ewma_alpha) * state.ewma
+    val excess = sample - approved_center - policy.cusum_allowance
+    val raw_cusum = state.positive_cusum + excess
+    val next_cusum = if raw_cusum > 0.0: raw_cusum else: 0.0
+    val next_consecutive = if sample > approved_center + policy.cusum_allowance: state.consecutive_above + 1 else: 0
+    DriftState(ewma: next_ewma, positive_cusum: next_cusum, consecutive_above: next_consecutive, sample_count: next_count)
+
+pub fn drift_detected(state: DriftState, policy: DriftPolicy) -> bool:
+    state.positive_cusum > policy.cusum_threshold or state.consecutive_above >= policy.consecutive_threshold
+
+pub fn resource_evidence_quality_name(value: ResourceEvidenceQuality) -> text:
+    match value:
+        case ResourceEvidenceQuality.ExactTree: "exact_tree"
+        case ResourceEvidenceQuality.ExactDirectChild: "exact_direct_child"
+        case ResourceEvidenceQuality.SampledTree: "sampled_tree"
+        case ResourceEvidenceQuality.ProcessOnly: "process_only"
+        case ResourceEvidenceQuality.Unavailable: "unavailable"
+
+pub fn termination_cause_name(value: TerminationCause) -> text:
+    match value:
+        case TerminationCause.Exited: "exited"
+        case TerminationCause.WallTimeout: "wall_timeout"
+        case TerminationCause.NoProgressTimeout: "no_progress_timeout"
+        case TerminationCause.CpuLimit: "cpu_limit"
+        case TerminationCause.MemoryHigh: "memory_high"
+        case TerminationCause.MemoryMax: "memory_max"
+        case TerminationCause.ProcessLimit: "process_limit"
+        case TerminationCause.OutputLimit: "output_limit"
+        case TerminationCause.Signal: "signal"
+        case TerminationCause.ExternalTermination: "external_termination"
+        case TerminationCause.InfrastructureFailure: "infrastructure_failure"
+
+pub fn decision_status_name(value: DecisionStatus) -> text:
+    match value:
+        case DecisionStatus.Pass: "pass"
+        case DecisionStatus.Warning: "warning"
+        case DecisionStatus.Failure: "failure"
+        case DecisionStatus.Incomplete: "incomplete"
+
+pub fn baseline_state_name(value: BaselineState) -> text:
+    match value:
+        case BaselineState.Provisional: "provisional"
+        case BaselineState.Approved: "approved"
+        case BaselineState.Suspect: "suspect"
+        case BaselineState.Superseded: "superseded"

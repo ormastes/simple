@@ -1,0 +1,411 @@
+#!/bin/sh
+# Standalone origin-health watchdog. NOT a pre-push guard.
+#
+# ---------------------------------------------------------------------------
+# WHY THIS EXISTS
+# ---------------------------------------------------------------------------
+# `main` has been wiped to a near-empty tree four times. The five/seven pre-push
+# guards in scripts/check/ exist to block exactly that, and on paper they do.
+# But doc/08_tracking/bug/fourth_tree_wipe_6f86ff32a7d_guard_not_enforced_2026-08-11.md
+# found the failure mode the guards structurally cannot cover: a stale
+# `core.hooksPath` plus a non-executable hook file silently downgraded EVERY
+# guard to advisory for a real push. Nothing errored. Nothing was skipped
+# loudly. The wipe reached origin and was found by luck.
+#
+# Detection of a wipe must therefore NOT depend on the pusher's hooks having
+# run. This watchdog is that independent path. It differs in KIND from the
+# guards:
+#
+#   * it never runs on push, and can never block one;
+#   * it never mutates a ref, never writes to the object store beyond a
+#     read-only fetch, and never checks anything out;
+#   * it inspects whatever tip is ACTUALLY at origin right now, no matter how
+#     it got there or which hooks did or did not fire;
+#   * on a bad tip it PRINTS the restore recipe and never runs it.
+#
+# ---------------------------------------------------------------------------
+# THRESHOLDS
+# ---------------------------------------------------------------------------
+# scripts/check/check-tree-size-push.shs is the SOURCE OF TRUTH for every
+# threshold below. This file duplicates the literals so it can run standalone,
+# and --selftest cross-checks the two files' literal values so they cannot
+# drift apart silently. If you change a number, change it there first.
+#
+# ---------------------------------------------------------------------------
+# VERDICT CONVENTION (last line of stdout, same as the pre-push guards)
+# ---------------------------------------------------------------------------
+#   PASS  — <n> invariant(s) checked, origin/main healthy (<files> files)  exit 0
+#   FAIL  — ...                                                            exit 1
+#   ERROR — nothing was checked                                            exit 2
+#
+# A run that checked 0 invariants is ERROR, never a pass. Absence of a tool
+# (git) is ERROR, never a pass.
+#
+# USAGE
+#   sh scripts/check/watch-origin-tree-health.shs --once
+#   sh scripts/check/watch-origin-tree-health.shs --once --rev <sha>   # no fetch
+#   sh scripts/check/watch-origin-tree-health.shs --watch [interval_s]  # default 300
+#   sh scripts/check/watch-origin-tree-health.shs --selftest
+#
+# ENV: WATCH_REMOTE / WATCH_BRANCH override what is fetched. When origin's
+# HTTPS token is dead (see .claude/rules/vcs.md) the fetch fails and this
+# reports ERROR, never a pass; run it against the SSH URL instead:
+#   GIT_SSH_COMMAND="ssh -o BatchMode=yes -i ~/.ssh/id_ed25519_this_mac" \
+#     WATCH_REMOTE=git@github.com:ormastes/simple.git sh scripts/check/watch-origin-tree-health.shs --once
+
+set -u
+
+SELF_DIR=$(dirname "$0")
+SIZE_GUARD="$SELF_DIR/check-tree-size-push.shs"
+
+# --- thresholds (mirror of check-tree-size-push.shs; cross-checked by selftest)
+CFG_ABS_MIN=90000
+CFG_ABS_MAX=150000
+CFG_SRC_MIN=13
+CFG_SRC_MAX=25
+CFG_PATHS='src/runtime:150 src/os:1200 src/lib:5000 src/compiler:1200 src/app:2000 scripts:500 doc:1000'
+
+REMOTE=${WATCH_REMOTE:-origin}
+BRANCH=${WATCH_BRANCH:-main}
+
+EV_CHECKED=0
+EV_FAILS=''
+
+note() { printf '%s\n' "$*"; }
+
+verdict_error() {
+    note "ERROR — nothing was checked${1:+: $1}"
+    exit 2
+}
+
+# ---------------------------------------------------------------------------
+# evaluate_invariants
+#
+# Pure decision function over already-measured numbers, so --selftest can drive
+# it with synthetic values without needing a 109k-file fixture repository.
+#
+#   $1 total files
+#   $2 src/ entry count
+#   $3 duplicate-path count
+#   $4.. list of "path:floor:actual" triples
+#
+# Sets EV_CHECKED (number of invariants actually evaluated) and EV_FAILS.
+# ---------------------------------------------------------------------------
+evaluate_invariants() {
+    ev_total=$1
+    ev_src=$2
+    ev_dups=$3
+    shift 3
+
+    EV_CHECKED=0
+    EV_FAILS=''
+
+    # 1. absolute file-count band
+    case "$ev_total" in
+        ''|*[!0-9]*) ;;
+        *)
+            EV_CHECKED=$((EV_CHECKED + 1))
+            if [ "$ev_total" -lt "$CFG_ABS_MIN" ]; then
+                EV_FAILS="$EV_FAILS
+  file count $ev_total is below the absolute floor $CFG_ABS_MIN (tree wipe)"
+            elif [ "$ev_total" -gt "$CFG_ABS_MAX" ]; then
+                EV_FAILS="$EV_FAILS
+  file count $ev_total is above the absolute ceiling $CFG_ABS_MAX (tree corruption)"
+            fi
+            ;;
+    esac
+
+    # 2. duplicate recursive paths
+    case "$ev_dups" in
+        ''|*[!0-9]*) ;;
+        *)
+            EV_CHECKED=$((EV_CHECKED + 1))
+            if [ "$ev_dups" -gt 0 ]; then
+                EV_FAILS="$EV_FAILS
+  $ev_dups duplicate path(s) in the recursive listing (a tree entry appears twice)"
+            fi
+            ;;
+    esac
+
+    # 3. src/ entry band
+    case "$ev_src" in
+        ''|*[!0-9]*) ;;
+        *)
+            EV_CHECKED=$((EV_CHECKED + 1))
+            if [ "$ev_src" -lt "$CFG_SRC_MIN" ] || [ "$ev_src" -gt "$CFG_SRC_MAX" ]; then
+                EV_FAILS="$EV_FAILS
+  src/ has $ev_src entries, outside the band $CFG_SRC_MIN..$CFG_SRC_MAX"
+            fi
+            ;;
+    esac
+
+    # 4. load-bearing path floors
+    for triple in "$@"; do
+        [ -n "$triple" ] || continue
+        tp_path=${triple%%:*}
+        tp_rest=${triple#*:}
+        tp_floor=${tp_rest%%:*}
+        tp_actual=${tp_rest#*:}
+        case "$tp_actual" in
+            ''|*[!0-9]*) continue ;;
+        esac
+        EV_CHECKED=$((EV_CHECKED + 1))
+        if [ "$tp_actual" -lt "$tp_floor" ]; then
+            EV_FAILS="$EV_FAILS
+  $tp_path holds $tp_actual file(s), below the floor $tp_floor"
+        fi
+    done
+}
+
+print_restore_recipe() {
+    bad=$1
+    note ''
+    note '--- RESTORE RECIPE (printed only; this script never runs it) ---------'
+    note '# 1. Find the last healthy ancestor and confirm its file count by hand:'
+    note "#      git rev-list --max-count=20 $bad | while read c; do \\"
+    note '#        printf "%s %s\n" "$c" "$(git ls-tree -r --name-only $c | wc -l)"; done'
+    note '# 2. Build a tree from that healthy commit in a TEMP index (never the'
+    note '#    shared working copy):'
+    note '#      export GIT_INDEX_FILE=$(mktemp)'
+    note '#      git read-tree <HEALTHY>'
+    note '#      TREE=$(git write-tree)'
+    note "# 3. Fast-forward: a new commit whose PARENT is the bad tip $bad,"
+    note '#    so history is preserved and nothing is force-pushed:'
+    note "#      NEW=\$(git commit-tree \$TREE -p $bad -m 'fix(repo): restore tree wiped at $bad')"
+    note '# 4. Re-verify BEFORE pushing, then push non-forced:'
+    note "#      git ls-tree -r --name-only \$NEW | wc -l   # must be >= $CFG_ABS_MIN"
+    note "#      sh scripts/check/check-tree-size-push.shs $bad..\$NEW"
+    note "#      git push git@github.com:ormastes/simple.git \$NEW:refs/heads/$BRANCH"
+    note '----------------------------------------------------------------------'
+    note ''
+}
+
+# ---------------------------------------------------------------------------
+# selftest — FATAL, runs before every scan
+# ---------------------------------------------------------------------------
+st_fail=0
+st_ran=0
+st_case() {
+    st_name=$1; st_want=$2; st_got=$3
+    st_ran=$((st_ran + 1))
+    if [ "$st_want" = "$st_got" ]; then
+        note "  selftest ok   : $st_name"
+    else
+        note "  selftest FAIL : $st_name (want '$st_want', got '$st_got')"
+        st_fail=$((st_fail + 1))
+    fi
+}
+
+# Pull a literal `NAME=value` assignment out of the size guard, for the
+# cross-check. Returns the empty string if absent (which is itself a failure).
+guard_literal() {
+    sed -n "s|^$1=||p" "$SIZE_GUARD" 2>/dev/null | head -1 | sed -e 's|#.*||' -e 's|[[:space:]]*$||'
+}
+
+run_selftest() {
+    note 'watch-origin-tree-health: selftest'
+
+    # --- 1..5: threshold cross-check against the source of truth -------------
+    if [ ! -f "$SIZE_GUARD" ]; then
+        note "  selftest FAIL : source-of-truth guard missing at $SIZE_GUARD"
+        note 'FAIL — selftest failed (1 of 1)'
+        exit 1
+    fi
+    st_case 'CFG_ABS_MIN matches check-tree-size-push.shs' "$CFG_ABS_MIN" "$(guard_literal CFG_ABS_MIN)"
+    st_case 'CFG_ABS_MAX matches check-tree-size-push.shs' "$CFG_ABS_MAX" "$(guard_literal CFG_ABS_MAX)"
+    st_case 'CFG_SRC_MIN matches check-tree-size-push.shs' "$CFG_SRC_MIN" "$(guard_literal CFG_SRC_MIN)"
+    st_case 'CFG_SRC_MAX matches check-tree-size-push.shs' "$CFG_SRC_MAX" "$(guard_literal CFG_SRC_MAX)"
+    st_case 'CFG_PATHS matches check-tree-size-push.shs' "'$CFG_PATHS'" "$(guard_literal CFG_PATHS)"
+
+    # --- 6: healthy tree must PASS -------------------------------------------
+    evaluate_invariants 109557 15 0 'src/runtime:150:185' 'src/os:1200:1622' 'src/lib:5000:7456'
+    st_case 'healthy numbers -> no failures' '' "$EV_FAILS"
+    st_case 'healthy numbers -> 6 invariants checked' '6' "$EV_CHECKED"
+
+    # --- 7: the real wipe (118c636ead8: 109,375 -> 4) must FAIL --------------
+    evaluate_invariants 4 0 0 'src/runtime:150:0'
+    st_case 'wipe to 4 files -> fails' 'yes' "$([ -n "$EV_FAILS" ] && echo yes || echo no)"
+
+    # --- 8: the duplicate-entry corruption must FAIL -------------------------
+    # 109,815 files — HIGHER than healthy — with src/ at 9 and src/runtime at 0.
+    evaluate_invariants 109815 9 272 'src/runtime:150:0'
+    st_case 'duplicate-entry corruption -> fails' 'yes' "$([ -n "$EV_FAILS" ] && echo yes || echo no)"
+
+    # --- 9: each signal must fire ALONE (no masking) --------------------------
+    evaluate_invariants 109557 9 0 'src/runtime:150:185'
+    st_case 'src/ entry band fires alone' 'yes' "$([ -n "$EV_FAILS" ] && echo yes || echo no)"
+    evaluate_invariants 109557 15 0 'src/runtime:150:0'
+    st_case 'src/runtime canary fires alone' 'yes' "$([ -n "$EV_FAILS" ] && echo yes || echo no)"
+    evaluate_invariants 109557 15 1 'src/runtime:150:185'
+    st_case 'duplicate-path check fires alone' 'yes' "$([ -n "$EV_FAILS" ] && echo yes || echo no)"
+
+    # --- 10: a run that measured nothing must be non-vacuous-detectable -------
+    evaluate_invariants '' '' '' ''
+    st_case 'unmeasurable tree -> 0 invariants (caller must ERROR)' '0' "$EV_CHECKED"
+
+    # --- 11: git must exist; absence of the tool is ERROR, never a pass -------
+    command -v git >/dev/null 2>&1
+    st_case 'git is available' '0' "$?"
+
+    if [ "$st_ran" -eq 0 ]; then
+        note 'ERROR — nothing was checked (selftest ran 0 cases)'
+        exit 2
+    fi
+    if [ "$st_fail" -ne 0 ]; then
+        note "FAIL — selftest failed ($st_fail of $st_ran)"
+        exit 1
+    fi
+    note "  selftest: $st_ran/$st_ran cases ok"
+    note ''
+}
+
+# ---------------------------------------------------------------------------
+# measure + verdict for one revision
+# ---------------------------------------------------------------------------
+check_rev() {
+    rev=$1
+
+    total=$(git ls-tree -r --name-only "$rev" 2>/dev/null | wc -l | tr -d ' ')
+    rc=$?
+    if [ "$rc" -ne 0 ] || [ -z "$total" ] || [ "$total" -eq 0 ] 2>/dev/null; then
+        verdict_error "could not list the tree at $rev"
+    fi
+
+    src_entries=$(git ls-tree --name-only "$rev:src" 2>/dev/null | wc -l | tr -d ' ')
+    dups=$(git ls-tree -r --name-only "$rev" 2>/dev/null | sort | uniq -d | wc -l | tr -d ' ')
+
+    triples=''
+    for spec in $CFG_PATHS; do
+        p=${spec%%:*}
+        floor=${spec#*:}
+        actual=$(git ls-tree -r --name-only "$rev" -- "$p" 2>/dev/null | wc -l | tr -d ' ')
+        triples="$triples $p:$floor:$actual"
+    done
+
+    # shellcheck disable=SC2086
+    evaluate_invariants "$total" "$src_entries" "$dups" $triples
+
+    if [ "$EV_CHECKED" -eq 0 ]; then
+        verdict_error "measured 0 invariants at $rev"
+    fi
+
+    note "$REMOTE/$BRANCH tip     : $rev"
+    note "  total files      : $total   (band $CFG_ABS_MIN..$CFG_ABS_MAX)"
+    note "  src/ entries     : $src_entries   (band $CFG_SRC_MIN..$CFG_SRC_MAX)"
+    note "  duplicate paths  : $dups"
+    for t in $triples; do
+        note "  ${t%%:*} -> ${t##*:} (floor $(x=${t#*:}; echo "${x%%:*}"))"
+    done
+
+    if [ -n "$EV_FAILS" ]; then
+        note ''
+        note 'Violations:'
+        note "$EV_FAILS"
+        print_restore_recipe "$rev"
+        note "FAIL — $EV_CHECKED invariant(s) checked, $REMOTE/$BRANCH is UNHEALTHY at $rev ($total files)"
+        return 1
+    fi
+
+    note "PASS — $EV_CHECKED invariant(s) checked, $REMOTE/$BRANCH healthy ($total files)"
+    return 0
+}
+
+resolve_tip() {
+    # Read-only fetch. Never mutates a local ref, never checks anything out.
+    git fetch --quiet "$REMOTE" "$BRANCH" >/dev/null 2>&1
+    fr=$?
+    if [ "$fr" -ne 0 ]; then
+        return 1
+    fi
+    git rev-parse FETCH_HEAD 2>/dev/null
+}
+
+# ---------------------------------------------------------------------------
+# main
+# ---------------------------------------------------------------------------
+MODE=''
+REV=''
+INTERVAL=300
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --selftest) MODE=selftest ;;
+        --once)     MODE=once ;;
+        --watch)
+            MODE=watch
+            case "${2:-}" in
+                ''|-*) ;;
+                *) INTERVAL=$2; shift ;;
+            esac
+            ;;
+        --rev)
+            REV=${2:-}
+            [ -n "$REV" ] || verdict_error '--rev needs an argument'
+            shift
+            ;;
+        -h|--help)
+            sed -n '46,53p' "$0"
+            exit 0
+            ;;
+        *) verdict_error "unknown argument '$1'" ;;
+    esac
+    shift
+done
+
+[ -n "$MODE" ] || MODE=once
+
+command -v git >/dev/null 2>&1
+have_git=$?
+if [ "$have_git" -ne 0 ]; then
+    verdict_error 'git is not available (absence of a tool is ERROR, never a pass)'
+fi
+
+run_selftest
+[ "$MODE" = selftest ] && exit 0
+
+git rev-parse --git-dir >/dev/null 2>&1
+in_repo=$?
+if [ "$in_repo" -ne 0 ]; then
+    verdict_error 'not inside a git repository (run from the repo root of a real clone)'
+fi
+
+case "$MODE" in
+    once)
+        if [ -n "$REV" ]; then
+            tip=$(git rev-parse --verify "$REV^{commit}" 2>/dev/null)
+            [ -n "$tip" ] || verdict_error "could not resolve --rev '$REV'"
+        else
+            tip=$(resolve_tip)
+            [ -n "$tip" ] || verdict_error "could not fetch $REMOTE/$BRANCH"
+        fi
+        check_rev "$tip"
+        exit $?
+        ;;
+    watch)
+        case "$INTERVAL" in
+            ''|*[!0-9]*) verdict_error "bad --watch interval '$INTERVAL'" ;;
+        esac
+        note "watching $REMOTE/$BRANCH every ${INTERVAL}s; alerting on state CHANGE only"
+        last_state=''
+        last_tip=''
+        while :; do
+            tip=$(resolve_tip)
+            if [ -z "$tip" ]; then
+                state=ERROR
+            else
+                out=$(check_rev "$tip" 2>&1)
+                rc=$?
+                if [ "$rc" -eq 0 ]; then state=PASS; else state=FAIL; fi
+            fi
+            if [ "$state" != "$last_state" ] || [ "$tip" != "$last_tip" ] && [ "$state" != PASS ]; then
+                note "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] state=$state tip=${tip:-<unresolved>}"
+                [ "$state" = PASS ] || note "${out:-could not fetch $REMOTE/$BRANCH}"
+                last_state=$state
+            fi
+            last_tip=$tip
+            sleep "$INTERVAL"
+        done
+        ;;
+esac
+
+verdict_error 'no mode selected'

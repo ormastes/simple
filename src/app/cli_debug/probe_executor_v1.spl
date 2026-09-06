@@ -1,0 +1,139 @@
+# Profile-backed executable probe lifecycle over mcpgdb's existing durable
+# debugger process/FIFO owner.  No debugger transport is created here.
+
+use std.io_runtime.{file_exists, file_read, file_write}
+use app.mcpgdb.state_loader.{load_persisted_state_safe}
+use app.mcpgdb.state.{DebugSession, current_or_named_session}
+use app.mcpgdb.debug_backend_common.{ps_is_alive, run_session_command}
+use std.common.debug.capability.{CapLevel}
+use std.common.debug.contracts_v1.{
+    DebugSessionId, DebugTargetNodeV1, DebugCapabilityV1,
+    DebugVerificationV1, DebugPerturbationV1, DebugRootOperationV1,
+    DebugProbeKindV1,
+}
+use std.common.debug.service_v1.{
+    debug_policy_development_v1,
+    central_debug_service_v1_open, central_debug_service_v1_add_target,
+    central_debug_service_v1_authorize, central_debug_service_v1_record,
+    central_debug_service_v1_apply_probe,
+}
+
+pub struct CliDebugProbeProfileV1:
+    session_id: text
+    build_id: text
+    kind: text
+    source_anchor: text
+    perturbation: text
+    expires_at_ns: i64
+
+pub struct CliDebugProbeResultV1:
+    action: text
+    probe_id: text
+    summary: text
+
+fn _profile_value(source: text, key: text) -> text:
+    for raw in source.split("\n"):
+        val line = raw.trim()
+        if line.starts_with(key + ":"):
+            return line[(key.len() + 1):].trim().replace("\"", "")
+    ""
+
+pub fn load_cli_debug_probe_profile_v1(path: text) -> Result<CliDebugProbeProfileV1, text>:
+    if not path.ends_with(".sdn") or not file_exists(path):
+        return Err("debug probe profile not found or not .sdn: " + path)
+    val source = file_read(path) ?? ""
+    if _profile_value(source, "schema") != "simple.debug-probe-profile/v1":
+        return Err("debug probe profile schema must be simple.debug-probe-profile/v1")
+    val session_id = _profile_value(source, "session_id")
+    val build_id = _profile_value(source, "build_id")
+    val kind = _profile_value(source, "kind")
+    val anchor = _profile_value(source, "source_anchor")
+    val perturbation = _profile_value(source, "perturbation")
+    val expiry_raw = _profile_value(source, "expires_at_ns")
+    val expiry = expiry_raw.to_i64()
+    if session_id == "" or build_id == "" or kind == "" or anchor == "" or perturbation == "" or expiry == nil:
+        return Err("debug probe profile requires session_id, build_id, kind, source_anchor, perturbation, and expires_at_ns")
+    if kind != "stop":
+        return Err("mcpgdb CLI currently verifies only native stop probes; requested kind=" + kind)
+    if perturbation != "stopping":
+        return Err("native stop probes require perturbation=stopping")
+    Ok(CliDebugProbeProfileV1(session_id, build_id, kind, anchor, perturbation, expiry ?? -1))
+
+fn _binding_path(profile_path: text) -> text:
+    profile_path + ".binding-v1"
+
+fn _live_session(profile: CliDebugProbeProfileV1) -> Result<DebugSession, text>:
+    load_persisted_state_safe()
+    val session = current_or_named_session(profile.session_id)
+    match session:
+        case nil: return Err("debug probe target session is unavailable: " + profile.session_id)
+        case Some(value):
+            if not ps_is_alive(value.process_pid):
+                return Err("debug probe target session is unavailable: process is not alive")
+            val evidence = run_session_command(value, "info program", false)
+            if evidence.contains("\"status\":\"error\""):
+                return Err("debug probe target is unverified: live inspection failed")
+            Ok(value)
+
+fn _bind_live_context(profile: CliDebugProbeProfileV1, session: DebugSession) -> Result<DebugSessionId, text>:
+    val id = central_debug_service_v1_open(profile.build_id, debug_policy_development_v1())?
+    val target_id = "mcpgdb://session/" + session.session_id
+    central_debug_service_v1_add_target(id,
+        DebugTargetNodeV1(target_id, "", "native." + session.backend, "mcpgdb " + session.session_id),
+        DebugCapabilityV1(target_id, CapLevel.Native, DebugVerificationV1.LiveVerified,
+            DebugPerturbationV1.Stopping, "process alive and info program completed"))?
+    Ok(id)
+
+fn _backend_ok(output: text) -> bool:
+    not output.contains("\"status\":\"error\"")
+
+pub fn execute_cli_debug_probe_v1(action: text, profile_path: text) -> Result<CliDebugProbeResultV1, text>:
+    val profile = load_cli_debug_probe_profile_v1(profile_path)?
+    val live = _live_session(profile)?
+    val debug_session_id = _bind_live_context(profile, live)?
+    val target_id = "mcpgdb://session/" + live.session_id
+    val binding_path = _binding_path(profile_path)
+
+    if action == "apply":
+        if file_exists(binding_path) and (file_read(binding_path) ?? "").trim() != "":
+            return Err("debug probe profile already has an applied probe")
+        val authorization = central_debug_service_v1_authorize(debug_session_id, DebugRootOperationV1.Probe,
+            DebugPerturbationV1.Stopping, "cli.probe.apply.backend")
+        if not authorization.allowed: return Err(authorization.reason)
+        val backend = run_session_command(live, "break " + profile.source_anchor, false)
+        if not _backend_ok(backend):
+            central_debug_service_v1_record(debug_session_id, DebugRootOperationV1.Probe,
+                DebugPerturbationV1.Stopping, "cli.probe.apply.outcome", false, false, backend)
+            return Err("backend rejected stop probe")
+        val probe = central_debug_service_v1_apply_probe(debug_session_id, DebugProbeKindV1.Stop,
+            target_id, profile.source_anchor, DebugPerturbationV1.Stopping, profile.expires_at_ns)?
+        if not file_write(binding_path, probe.probe_id + "|" + profile.source_anchor + "\n"):
+            return Err("failed to persist debug probe binding")
+        central_debug_service_v1_record(debug_session_id, DebugRootOperationV1.Probe,
+            DebugPerturbationV1.Stopping, "cli.probe.apply.outcome", true, true, "")
+        return Ok(CliDebugProbeResultV1("apply", probe.probe_id, "applied " + probe.probe_id))
+
+    if action == "list":
+        val authorization = central_debug_service_v1_authorize(debug_session_id, DebugRootOperationV1.Probe,
+            DebugPerturbationV1.Passive, "cli.probe.list")
+        if not authorization.allowed: return Err(authorization.reason)
+        if not file_exists(binding_path) or (file_read(binding_path) ?? "").trim() == "":
+            return Ok(CliDebugProbeResultV1("list", "", "listed 0 applied probes"))
+        val id = (file_read(binding_path) ?? "").trim().split("|")[0]
+        return Ok(CliDebugProbeResultV1("list", id, "listed 1 applied probe: " + id))
+
+    if action == "remove":
+        if not file_exists(binding_path): return Err("debug probe profile has no applied probe")
+        val parts = (file_read(binding_path) ?? "").trim().split("|")
+        if parts.len() != 2 or parts[0] == "": return Err("debug probe binding is invalid")
+        val authorization = central_debug_service_v1_authorize(debug_session_id, DebugRootOperationV1.Probe,
+            DebugPerturbationV1.Stopping, "cli.probe.remove.backend")
+        if not authorization.allowed: return Err(authorization.reason)
+        val backend = run_session_command(live, "clear " + parts[1], false)
+        if not _backend_ok(backend): return Err("backend rejected stop probe removal")
+        if not file_write(binding_path, ""): return Err("failed to clear debug probe binding")
+        central_debug_service_v1_record(debug_session_id, DebugRootOperationV1.Probe,
+            DebugPerturbationV1.Stopping, "cli.probe.remove.outcome", true, true, "")
+        return Ok(CliDebugProbeResultV1("remove", parts[0], "removed " + parts[0]))
+
+    Err("unsupported debug probe action: " + action)

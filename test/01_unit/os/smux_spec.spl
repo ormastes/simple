@@ -1,0 +1,412 @@
+"""
+## Purpose and audience
+Purpose: Specify the smux terminal-multiplexer value model — session identity,
+windows, panes, layout splits, PTY configuration, the output ring buffer, the
+pane backend lifecycle, and command classification.
+Audience: engineers changing `src/os/apps/smux/**` who need to know which
+observable behaviors are pinned before they touch the multiplexer.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines.
+Each scenario narrates its arrange/act steps, so a failing verdict names the
+operation that regressed rather than only the value that differed.
+## Compatibility and limitations
+These scenarios exercise the pure value model only. PTY allocation, real
+process attachment, and the on-screen renderer are covered by
+`test/03_system/tools/smux_system_spec.spl`, not here.
+# @manual: primary
+REQ-TOOLS-SMUX-UNIT-001
+doc/01_research/os/qemu/tmux_simpleos.md
+doc/03_plan/sys_test/smux_caret_sspec_quality.md
+doc/04_architecture/os/tmux_simpleos.md
+doc/05_design/os/desktop/tmux_simpleos_tui.md
+"""
+
+# @req REQ-TOOLS-SMUX-UNIT-001
+# @tag: unit, smux, terminal_multiplexer
+
+use std.spec.{describe, it, expect, step}
+
+class SessionId:
+    session_name: text
+    created_at: int
+    is_attached: bool
+    session_index: int
+
+    me matches_name(name: text) -> bool:
+        return self.session_name == name
+
+    me to_text() -> text:
+        return "Session(" + self.session_name + "," + self.session_index.to_text() + ")"
+
+    static fn create(name: text, idx: int) -> SessionId:
+        return SessionId(session_name: name, created_at: 0, is_attached: false, session_index: idx)
+
+class WindowId:
+    window_index: int
+    title: text
+    is_active: bool
+    pane_count: int
+
+    me activate() -> WindowId:
+        return WindowId(window_index: self.window_index, title: self.title, is_active: true, pane_count: self.pane_count)
+
+    me deactivate() -> WindowId:
+        return WindowId(window_index: self.window_index, title: self.title, is_active: false, pane_count: self.pane_count)
+
+    static fn create(idx: int, title: text) -> WindowId:
+        return WindowId(window_index: idx, title: title, is_active: false, pane_count: 0)
+
+class PaneId:
+    pane_index: int
+    width: int
+    height: int
+    scroll_pos: int
+
+    me area() -> int:
+        return self.width * self.height
+
+    me resize(w: int, h: int) -> PaneId:
+        return PaneId(pane_index: self.pane_index, width: w, height: h, scroll_pos: self.scroll_pos)
+
+    static fn create(idx: int, w: int, h: int) -> PaneId:
+        return PaneId(pane_index: idx, width: w, height: h, scroll_pos: 0)
+
+class SmuxSessionState:
+    sid: SessionId
+    f0_win: WindowId
+    f1_win: WindowId
+    f2_win: WindowId
+    active_count: int
+
+    me active_window() -> WindowId:
+        return self.f0_win
+
+    me is_empty() -> bool:
+        return self.active_count == 0
+
+    static fn create(s: SessionId) -> SmuxSessionState:
+        val w = WindowId.create(0, "")
+        return SmuxSessionState(sid: s, f0_win: w, f1_win: w, f2_win: w, active_count: 0)
+
+class LayoutSplit:
+    direction: text
+    ratio: int
+    split_id: int
+    depth: int
+
+    me is_horizontal() -> bool:
+        return self.direction == "horizontal"
+
+    me invert() -> LayoutSplit:
+        var new_dir = "vertical"
+        if self.direction == "vertical":
+            new_dir = "horizontal"
+        return LayoutSplit(direction: new_dir, ratio: self.ratio, split_id: self.split_id, depth: self.depth)
+
+    static fn horizontal(id: int, r: int) -> LayoutSplit:
+        return LayoutSplit(direction: "horizontal", ratio: r, split_id: id, depth: 0)
+
+    static fn vertical(id: int, r: int) -> LayoutSplit:
+        return LayoutSplit(direction: "vertical", ratio: r, split_id: id, depth: 0)
+
+class LayoutNode:
+    node_id: int
+    pane_index: int
+    split: LayoutSplit
+    is_leaf: bool
+
+    me has_pane() -> bool:
+        return self.is_leaf
+
+    static fn leaf(id: int, pane_idx: int) -> LayoutNode:
+        val s = LayoutSplit.horizontal(0, 50)
+        return LayoutNode(node_id: id, pane_index: pane_idx, split: s, is_leaf: true)
+
+    static fn internal(id: int, s: LayoutSplit) -> LayoutNode:
+        return LayoutNode(node_id: id, pane_index: -1, split: s, is_leaf: false)
+
+class PtyConfig:
+    shell_path: text
+    working_dir: text
+    rows: int
+    cols: int
+    env_term: text
+
+    me terminal_size() -> int:
+        return self.rows * self.cols
+
+    me with_size(r: int, c: int) -> PtyConfig:
+        return PtyConfig(shell_path: self.shell_path, working_dir: self.working_dir, rows: r, cols: c, env_term: self.env_term)
+
+    static fn default_config() -> PtyConfig:
+        return PtyConfig(shell_path: "/bin/sh", working_dir: "/", rows: 24, cols: 80, env_term: "xterm-256color")
+
+class OutputBuffer:
+    f0_line: text
+    f1_line: text
+    f2_line: text
+    f3_line: text
+    line_count: int
+    max_lines: int
+
+    me append_line(line: text) -> OutputBuffer:
+        if self.line_count == 0:
+            return OutputBuffer(f0_line: line, f1_line: self.f1_line, f2_line: self.f2_line, f3_line: self.f3_line, line_count: 1, max_lines: self.max_lines)
+        if self.line_count == 1:
+            return OutputBuffer(f0_line: self.f0_line, f1_line: line, f2_line: self.f2_line, f3_line: self.f3_line, line_count: 2, max_lines: self.max_lines)
+        if self.line_count == 2:
+            return OutputBuffer(f0_line: self.f0_line, f1_line: self.f1_line, f2_line: line, f3_line: self.f3_line, line_count: 3, max_lines: self.max_lines)
+        return OutputBuffer(f0_line: self.f0_line, f1_line: self.f1_line, f2_line: self.f2_line, f3_line: line, line_count: 4, max_lines: self.max_lines)
+
+    me get_line(idx: int) -> text:
+        if idx == 0:
+            return self.f0_line
+        if idx == 1:
+            return self.f1_line
+        if idx == 2:
+            return self.f2_line
+        return self.f3_line
+
+    me is_full() -> bool:
+        return self.line_count >= self.max_lines
+
+    static fn create(max: int) -> OutputBuffer:
+        return OutputBuffer(f0_line: "", f1_line: "", f2_line: "", f3_line: "", line_count: 0, max_lines: max)
+
+class PaneBackend:
+    pane_id: int
+    config: PtyConfig
+    buffer: OutputBuffer
+    is_running: bool
+    exit_code: int
+
+    me stop(code: int) -> PaneBackend:
+        return PaneBackend(pane_id: self.pane_id, config: self.config, buffer: self.buffer, is_running: false, exit_code: code)
+
+    me feed_output(line: text) -> PaneBackend:
+        val new_buf = self.buffer.append_line(line)
+        return PaneBackend(pane_id: self.pane_id, config: self.config, buffer: new_buf, is_running: self.is_running, exit_code: self.exit_code)
+
+    static fn create(pid: int, cfg: PtyConfig) -> PaneBackend:
+        val buf = OutputBuffer.create(4)
+        return PaneBackend(pane_id: pid, config: cfg, buffer: buf, is_running: true, exit_code: 0)
+
+class SmuxCommand:
+    command: text
+    target_name: text
+    arg_width: int
+    arg_height: int
+    arg_direction: text
+
+    me is_session_cmd() -> bool:
+        if self.command == "new-session":
+            return true
+        if self.command == "attach":
+            return true
+        return false
+
+    me is_pane_cmd() -> bool:
+        if self.command == "split":
+            return true
+        if self.command == "capture":
+            return true
+        return false
+
+    static fn new_session(name: text) -> SmuxCommand:
+        return SmuxCommand(command: "new-session", target_name: name, arg_width: 0, arg_height: 0, arg_direction: "")
+
+    static fn attach(name: text) -> SmuxCommand:
+        return SmuxCommand(command: "attach", target_name: name, arg_width: 0, arg_height: 0, arg_direction: "")
+
+    static fn split(dir: text) -> SmuxCommand:
+        return SmuxCommand(command: "split", target_name: "", arg_width: 0, arg_height: 0, arg_direction: dir)
+
+    static fn capture(target: text) -> SmuxCommand:
+        return SmuxCommand(command: "capture", target_name: target, arg_width: 0, arg_height: 0, arg_direction: "")
+
+class SmuxResponse:
+    success: bool
+    message: text
+    result_data: text
+    error_code: int
+
+    me is_error() -> bool:
+        return self.success == false
+
+    static fn ok(msg: text) -> SmuxResponse:
+        return SmuxResponse(success: true, message: msg, result_data: "", error_code: 0)
+
+    static fn error(msg: text, code: int) -> SmuxResponse:
+        return SmuxResponse(success: false, message: msg, result_data: "", error_code: code)
+
+# NOTE: every example binds a `val` before calling a method on it. Chaining a
+# method directly off a static factory (`PaneId.create(0, 80, 24).area()`)
+# currently fails to resolve the method (receiver erases to `object`) — see
+# doc/08_tracking/bug/static_factory_method_chain_wrong_value_2026-08-16.md.
+
+describe "smux session identity":
+    it "stores the name it was created with":
+        # @req REQ-TOOLS-SMUX-UNIT-001
+        step("Create session \"main\" at index 0")
+        val s = SessionId.create("main", 0)
+        # oracle: create() is the only constructor, so it must round-trip both
+        # arguments verbatim; anything else silently renames a user's session.
+        expect(s.session_name).to_equal("main")
+        expect(s.session_index).to_equal(0)  # oracle: index 0 is the first session slot; smux numbers sessions from 0
+
+    it "matches its own name":
+        step("Create session \"work\" and ask it to match that same name")
+        val s = SessionId.create("work", 1)
+        expect(s.matches_name("work")).to_equal(true)
+
+    it "rejects a different name":
+        step("Ask session \"work\" to match an unrelated name")
+        val s = SessionId.create("work", 1)
+        expect(s.matches_name("other")).to_equal(false)
+
+describe "smux windows":
+    it "records index and title on creation":
+        # @req REQ-TOOLS-SMUX-UNIT-001
+        step("Create window 2 titled \"editor\"")
+        val w = WindowId.create(2, "editor")
+        expect(w.window_index).to_equal(2)  # oracle: the window index passed to create() is stored verbatim
+        expect(w.title).to_equal("editor")
+        # oracle: a freshly created window is never the active one; the caller
+        # activates it explicitly, so two new windows cannot both claim focus.
+        expect(w.is_active).to_equal(false)
+
+    it "becomes active when activated":
+        step("Create window 0 titled \"shell\"")
+        val w = WindowId.create(0, "shell")
+        step("Activate it")
+        val a = w.activate()
+        expect(a.is_active).to_equal(true)
+
+    it "becomes inactive when deactivated after activation":
+        step("Create window 0, activate it, then deactivate it")
+        val w = WindowId.create(0, "shell")
+        val a = w.activate()
+        val d = a.deactivate()
+        # oracle: deactivate must undo activate exactly, or focus leaks across
+        # windows and the multiplexer shows two active tabs.
+        expect(d.is_active).to_equal(false)
+
+describe "smux panes":
+    it "records the width and height it was created with":
+        # @req REQ-TOOLS-SMUX-UNIT-001
+        step("Create pane 0 at the default 80x24 terminal geometry")
+        val p = PaneId.create(0, 80, 24)
+        # oracle: 80x24 is the POSIX default terminal geometry inherited from
+        # PtyConfig.default_config(), not an arbitrary fixture size.
+        expect(p.width).to_equal(80)  # oracle: 80 columns is the POSIX default terminal width
+        expect(p.height).to_equal(24)  # oracle: 24 rows is the POSIX default terminal height
+
+    it "computes area as width times height":
+        step("Create an 80x24 pane and ask for its cell area")
+        val p = PaneId.create(0, 80, 24)
+        # oracle: 1920 = 80 * 24, the addressable cell count the renderer must
+        # allocate for this pane.
+        expect(p.area()).to_equal(1920)  # oracle: 1920 = 80 * 24 addressable cells
+
+    it "adopts new dimensions when resized":
+        step("Create an 80x24 pane, then resize it to 120x40")
+        val p = PaneId.create(0, 80, 24)
+        val r = p.resize(120, 40)
+        expect(r.width).to_equal(120)  # oracle: the requested resize width is stored verbatim
+        expect(r.height).to_equal(40)  # oracle: the requested resize height is stored verbatim
+
+describe "smux session state":
+    it "starts empty for a fresh session":
+        # @req REQ-TOOLS-SMUX-UNIT-001
+        step("Build session state over a newly created session")
+        val s = SessionId.create("main", 0)
+        val ss = SmuxSessionState.create(s)
+        # oracle: a session with no attached window must report empty, so the
+        # dashboard does not draw a pane that has no backing process.
+        expect(ss.is_empty()).to_equal(true)
+        expect(ss.active_count).to_equal(0)  # oracle: a fresh session owns no windows yet
+
+describe "smux layout splits":
+    it "creates a horizontal split":
+        # @req REQ-TOOLS-SMUX-UNIT-001
+        step("Split node 1 horizontally at an even 50 percent ratio")
+        val sp = LayoutSplit.horizontal(1, 50)
+        expect(sp.direction).to_equal("horizontal")
+        expect(sp.is_horizontal()).to_equal(true)
+
+    it "creates a vertical split":
+        step("Split node 2 vertically at a 30 percent ratio")
+        val sp = LayoutSplit.vertical(2, 30)
+        expect(sp.direction).to_equal("vertical")
+        # oracle: the requested ratio is stored verbatim; the layout engine
+        # rounds to cells later, so a stored ratio must not be pre-rounded.
+        expect(sp.ratio).to_equal(30)  # oracle: the requested split ratio is stored unrounded
+
+    it "inverts horizontal into vertical":
+        step("Invert a horizontal split")
+        val sp = LayoutSplit.horizontal(1, 50)
+        val inv = sp.invert()
+        expect(inv.direction).to_equal("vertical")
+
+    it "reports a leaf node as holding a pane":
+        step("Build a leaf node bound to pane 0")
+        val n = LayoutNode.leaf(1, 0)
+        expect(n.has_pane()).to_equal(true)
+
+    it "reports an internal node as holding no pane":
+        step("Build an internal node wrapping a vertical split")
+        val sp = LayoutSplit.vertical(1, 50)
+        val n = LayoutNode.internal(2, sp)
+        expect(n.has_pane()).to_equal(false)
+        # oracle: -1 is the sentinel for \"no pane\"; a real index here would
+        # make the renderer draw an internal node's children twice.
+        expect(n.pane_index).to_equal(-1)  # oracle: -1 is the sentinel meaning "this node holds no pane"
+
+describe "smux pty configuration":
+    it "defaults to an 80x24 terminal":
+        # @req REQ-TOOLS-SMUX-UNIT-001
+        step("Read the default PTY configuration")
+        val cfg = PtyConfig.default_config()
+        # oracle: 24 rows by 80 columns is the POSIX default terminal geometry
+        # that every consumer of default_config() inherits.
+        expect(cfg.rows).to_equal(24)  # oracle: 24 rows is the POSIX default terminal height
+        expect(cfg.cols).to_equal(80)  # oracle: 80 columns is the POSIX default terminal width
+
+    it "adopts a new terminal size":
+        step("Resize the default configuration to 40 rows by 120 columns")
+        val cfg = PtyConfig.default_config()
+        val r = cfg.with_size(40, 120)
+        expect(r.rows).to_equal(40)  # oracle: the requested row count is stored verbatim
+        expect(r.cols).to_equal(120)  # oracle: the requested column count is stored verbatim
+
+describe "smux output buffer":
+    it "returns the first appended line":
+        # @req REQ-TOOLS-SMUX-UNIT-001
+        step("Create a 4-line ring buffer and append one line")
+        val buf = OutputBuffer.create(4)
+        val b1 = buf.append_line("hello")
+        expect(b1.get_line(0)).to_equal("hello")
+        # oracle: one append yields exactly one line; a ring buffer that
+        # miscounts here drops scrollback once it wraps.
+        expect(b1.line_count).to_equal(1)  # oracle: one append yields exactly one buffered line
+
+describe "smux pane backend":
+    it "stops running once stopped":
+        # @req REQ-TOOLS-SMUX-UNIT-001
+        step("Create a pane backend over the default PTY configuration")
+        val cfg = PtyConfig.default_config()
+        val be = PaneBackend.create(1, cfg)
+        step("Stop it with a clean exit status")
+        val stopped = be.stop(0)
+        expect(stopped.is_running).to_equal(false)
+        # oracle: 0 is the exit status handed to stop(); the backend records
+        # what it was told rather than inventing a status of its own.
+        expect(stopped.exit_code).to_equal(0)  # oracle: stop() records the status it was handed
+
+describe "smux commands":
+    it "classifies new-session as a session command":
+        # @req REQ-TOOLS-SMUX-UNIT-001
+        step("Build a new-session command targeting \"dev\"")
+        val cmd = SmuxCommand.new_session("dev")
+        expect(cmd.is_session_cmd()).to_equal(true)
+        expect(cmd.target_name).to_equal("dev")

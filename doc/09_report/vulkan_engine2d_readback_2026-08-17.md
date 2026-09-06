@@ -1,0 +1,427 @@
+# Vulkan Engine2D Readback Evidence
+
+- status: fail
+- reason: native-interpreter-fallback
+- spec status: not_run
+- probe status: Initialized
+- available: true
+- backend: 
+- present exercised: 
+- readback exercised: 
+- clear status: 
+- clear pixels: 
+- clear expected checksum: 
+- clear actual checksum: 
+- clear mismatches: 
+- clear source: 
+- clear backend handle: 
+- clear device identity: 
+- clear expected pixels: 
+- clear actual pixels: 
+- rect status: 
+- rect pixels: 
+- rect expected checksum: 
+- rect actual checksum: 
+- rect mismatches: 
+- rect source: 
+- rect backend handle: 
+- rect device identity: 
+- rect expected pixels: 
+- rect actual pixels: 
+- blur/tolerance used: false
+- vulkan strict exit code: 
+- cpu/vulkan parity exit code: 
+- execution mode: native
+- Vulkan ICD: 
+
+## Raw Evidence
+- vulkan_engine2d_readback_status=fail
+- vulkan_engine2d_readback_reason=native-interpreter-fallback
+- vulkan_engine2d_readback_spec_status=not_run
+- vulkan_engine2d_readback_probe_status=Initialized
+- vulkan_engine2d_readback_available=true
+- vulkan_engine2d_readback_backend_name=
+- vulkan_engine2d_readback_present_exercised=
+- vulkan_engine2d_readback_readback_exercised=
+- vulkan_engine2d_readback_clear_status=
+- vulkan_engine2d_readback_clear_pixels=
+- vulkan_engine2d_readback_clear_expected_checksum=
+- vulkan_engine2d_readback_clear_actual_checksum=
+- vulkan_engine2d_readback_clear_mismatches=
+- vulkan_engine2d_readback_clear_source=
+- vulkan_engine2d_readback_clear_backend_handle=
+- vulkan_engine2d_readback_clear_device_identity=
+- vulkan_engine2d_readback_clear_expected_pixels_path=
+- vulkan_engine2d_readback_clear_actual_pixels_path=
+- vulkan_engine2d_readback_rect_status=
+- vulkan_engine2d_readback_rect_pixels=
+- vulkan_engine2d_readback_rect_expected_checksum=
+- vulkan_engine2d_readback_rect_actual_checksum=
+- vulkan_engine2d_readback_rect_mismatches=
+- vulkan_engine2d_readback_rect_source=
+- vulkan_engine2d_readback_rect_backend_handle=
+- vulkan_engine2d_readback_rect_device_identity=
+- vulkan_engine2d_readback_rect_expected_pixels_path=
+- vulkan_engine2d_readback_rect_actual_pixels_path=
+- vulkan_engine2d_readback_blur_or_tolerance_used=false
+- vulkan_engine2d_readback_vulkan_strict_exit_code=
+- vulkan_engine2d_readback_cpu_vulkan_parity_exit_code=
+- vulkan_engine2d_readback_execution_mode=native
+- vulkan_engine2d_readback_icd_path=
+- vulkan_engine2d_readback_evidence_log=build/vulkan-engine2d-readback/evidence.log
+- vulkan_engine2d_readback_vulkan_strict_log=build/vulkan-engine2d-readback/vulkan_strict.json
+- vulkan_engine2d_readback_cpu_vulkan_parity_log=build/vulkan-engine2d-readback/engine2d_cpu_vulkan_parity.json
+
+## Evidence Log
+- WARNING: this Rust-built Simple binary is a bootstrap seed only; do not use it as the normal tool.
+- Build and use the pure-Simple bin/simple instead.
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /mnt/data/worktrees/simple-main/src/lib/gc_async_mut/gpu/engine2d/sffi_vulkan.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.gpu.engine2d.sffi_vulkan.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /mnt/data/worktrees/simple-main/src/lib/gc_async_mut/io/vulkan_sffi.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.io.vulkan_sffi.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /mnt/data/worktrees/simple-main/src/lib/gc_async_mut/env/platform.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.env.platform.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /mnt/data/worktrees/simple-main/src/lib/nogc_async_mut/path.spl:7:1
+-    |
+-   7 | export use std.nogc_sync_mut.path.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: '#[runtime_intrinsics]' uses deprecated syntax, use '@runtime_intrinsics' instead
+-   --> /mnt/data/worktrees/simple-main/src/lib/nogc_sync_mut/gpu/engine2d/sffi_directx.spl:6:1
+-    |
+-   6 | #[runtime_intrinsics]
+-    | ^
+- 
+- Replace '#[runtime_intrinsics]' with '@runtime_intrinsics'
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /mnt/data/worktrees/simple-main/src/lib/gc_async_mut/gpu/engine2d/sffi_opencl.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.gpu.engine2d.sffi_opencl.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: '#[runtime_intrinsics]' uses deprecated syntax, use '@runtime_intrinsics' instead
+-   --> /mnt/data/worktrees/simple-main/src/lib/gc_async_mut/gpu/engine2d/backend_metal_runtime_ops.spl:1:1
+-    |
+-   1 | #[runtime_intrinsics]
+-    | ^
+- 
+- Replace '#[runtime_intrinsics]' with '@runtime_intrinsics'
+- 
+- [33mwarning[0m: '#[runtime_intrinsics]' uses deprecated syntax, use '@runtime_intrinsics' instead
+-   --> /mnt/data/worktrees/simple-main/src/lib/nogc_sync_mut/io/metal_ptr.spl:1:1
+-    |
+-   1 | #[runtime_intrinsics]
+-    | ^
+- 
+- Replace '#[runtime_intrinsics]' with '@runtime_intrinsics'
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /mnt/data/worktrees/simple-main/src/lib/gc_async_mut/io/metal_sffi.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.io.metal_sffi.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /mnt/data/worktrees/simple-main/src/lib/gc_async_mut/gpu/engine2d/sffi_rocm.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.gpu.engine2d.sffi_rocm.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: '#[runtime_intrinsics]' uses deprecated syntax, use '@runtime_intrinsics' instead
+-   --> /mnt/data/worktrees/simple-main/src/lib/gc_async_mut/gpu/engine2d/backend_rocm_runtime_ops.spl:1:1
+-    |
+-   1 | #[runtime_intrinsics]
+-    | ^
+- 
+- Replace '#[runtime_intrinsics]' with '@runtime_intrinsics'
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /mnt/data/worktrees/simple-main/src/lib/gc_async_mut/io/oneapi_ffi.spl:3:1
+-    |
+-   3 | export use std.gc_async_mut.io.oneapi_sffi.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /mnt/data/worktrees/simple-main/src/lib/gc_async_mut/io/oneapi_sffi.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.io.oneapi_sffi.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: '#[runtime_intrinsics]' uses deprecated syntax, use '@runtime_intrinsics' instead
+-   --> /mnt/data/worktrees/simple-main/src/lib/gc_async_mut/gpu/engine2d/host_ops.spl:4:1
+-    |
+-   4 | #[runtime_intrinsics]
+-    | ^
+- 
+- Replace '#[runtime_intrinsics]' with '@runtime_intrinsics'
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /mnt/data/worktrees/simple-main/src/lib/gc_async_mut/io/env_ops.spl:7:1
+-    |
+-   7 | export use std.nogc_async_mut.io.env_ops.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /mnt/data/worktrees/simple-main/src/lib/gc_async_mut/io/process_ops.spl:7:1
+-    |
+-   7 | export use std.nogc_async_mut.io.process_ops.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- warning: public function `dir_remove_all` has 3 co-compiled definitions with 2 differing signatures ((text)->bool vs (text)->i64); JIT call sites resolve by exact arg-type match (mangled `$dupN` variants), falling back to the last definition when types are ambiguous — a fallback hit may still dispatch to the wrong one. Rename the conflicting helper(s) to a unique name. [compiler_cross_module_private_symbol_collision]
+- warning: public function `file_read_bytes` has 3 co-compiled definitions with 2 differing signatures ((text)->[i64] vs (text)->[u8]); JIT call sites resolve by exact arg-type match (mangled `$dupN` variants), falling back to the last definition when types are ambiguous — a fallback hit may still dispatch to the wrong one. Rename the conflicting helper(s) to a unique name. [compiler_cross_module_private_symbol_collision]
+- warning: public function `file_read_lines` has 2 co-compiled definitions with 2 differing signatures ((text)->Optional([text]) vs (text)->[text]); JIT call sites resolve by exact arg-type match (mangled `$dupN` variants), falling back to the last definition when types are ambiguous — a fallback hit may still dispatch to the wrong one. Rename the conflicting helper(s) to a unique name. [compiler_cross_module_private_symbol_collision]
+- warning: public function `path_join` has 2 co-compiled definitions with 2 differing signatures (([text])->text vs (text,text)->text); JIT call sites resolve by exact arg-type match (mangled `$dupN` variants), falling back to the last definition when types are ambiguous — a fallback hit may still dispatch to the wrong one. Rename the conflicting helper(s) to a unique name. [compiler_cross_module_private_symbol_collision]
+- warning: public function `shell` has 2 co-compiled definitions with 2 differing signatures ((text)->ProcessResult vs (text)->ShellResult); JIT call sites resolve by exact arg-type match (mangled `$dupN` variants), falling back to the last definition when types are ambiguous — a fallback hit may still dispatch to the wrong one. Rename the conflicting helper(s) to a unique name. [compiler_cross_module_private_symbol_collision]
+- [jit-fallback] HIR lowering error: Unsupported feature: cannot infer field type while lowering Engine2D.cancel_vulkan_present_source: struct 'VulkanBackend' field 'fenced_submission_generation' [in build/vulkan-engine2d-readback/vulkan_engine2d_readback_evidence.spl]: whole module dropped to the interpreter (expect ~100-1000x slowdown). Set SIMPLE_JIT_STRICT=1 to turn this into a hard error.
+- [INFO] JIT compilation failed, falling back to interpreter: HIR lowering error: Unsupported feature: cannot infer field type while lowering Engine2D.cancel_vulkan_present_source: struct 'VulkanBackend' field 'fenced_submission_generation' [in build/vulkan-engine2d-readback/vulkan_engine2d_readback_evidence.spl]
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /mnt/data/worktrees/simple-main/src/lib/gc_async_mut/gpu/engine2d/sffi_vulkan.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.gpu.engine2d.sffi_vulkan.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /mnt/data/worktrees/simple-main/src/lib/gc_async_mut/io/vulkan_sffi.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.io.vulkan_sffi.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /mnt/data/worktrees/simple-main/src/lib/gc_async_mut/env/platform.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.env.platform.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /mnt/data/worktrees/simple-main/src/lib/nogc_async_mut/path.spl:7:1
+-    |
+-   7 | export use std.nogc_sync_mut.path.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: '#[runtime_intrinsics]' uses deprecated syntax, use '@runtime_intrinsics' instead
+-   --> /mnt/data/worktrees/simple-main/src/lib/nogc_sync_mut/gpu/engine2d/sffi_directx.spl:6:1
+-    |
+-   6 | #[runtime_intrinsics]
+-    | ^
+- 
+- Replace '#[runtime_intrinsics]' with '@runtime_intrinsics'
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /mnt/data/worktrees/simple-main/src/lib/gc_async_mut/gpu/engine2d/sffi_opencl.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.gpu.engine2d.sffi_opencl.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: '#[runtime_intrinsics]' uses deprecated syntax, use '@runtime_intrinsics' instead
+-   --> /mnt/data/worktrees/simple-main/src/lib/gc_async_mut/gpu/engine2d/backend_metal_runtime_ops.spl:1:1
+-    |
+-   1 | #[runtime_intrinsics]
+-    | ^
+- 
+- Replace '#[runtime_intrinsics]' with '@runtime_intrinsics'
+- 
+- [33mwarning[0m: '#[runtime_intrinsics]' uses deprecated syntax, use '@runtime_intrinsics' instead
+-   --> /mnt/data/worktrees/simple-main/src/lib/nogc_sync_mut/io/metal_ptr.spl:1:1
+-    |
+-   1 | #[runtime_intrinsics]
+-    | ^
+- 
+- Replace '#[runtime_intrinsics]' with '@runtime_intrinsics'
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /mnt/data/worktrees/simple-main/src/lib/gc_async_mut/io/metal_sffi.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.io.metal_sffi.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /mnt/data/worktrees/simple-main/src/lib/gc_async_mut/gpu/engine2d/sffi_rocm.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.gpu.engine2d.sffi_rocm.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: '#[runtime_intrinsics]' uses deprecated syntax, use '@runtime_intrinsics' instead
+-   --> /mnt/data/worktrees/simple-main/src/lib/gc_async_mut/gpu/engine2d/backend_rocm_runtime_ops.spl:1:1
+-    |
+-   1 | #[runtime_intrinsics]
+-    | ^
+- 
+- Replace '#[runtime_intrinsics]' with '@runtime_intrinsics'
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /mnt/data/worktrees/simple-main/src/lib/gc_async_mut/io/oneapi_ffi.spl:3:1
+-    |
+-   3 | export use std.gc_async_mut.io.oneapi_sffi.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /mnt/data/worktrees/simple-main/src/lib/gc_async_mut/io/oneapi_sffi.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.io.oneapi_sffi.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: '#[runtime_intrinsics]' uses deprecated syntax, use '@runtime_intrinsics' instead
+-   --> /mnt/data/worktrees/simple-main/src/lib/gc_async_mut/gpu/engine2d/host_ops.spl:4:1
+-    |
+-   4 | #[runtime_intrinsics]
+-    | ^
+- 
+- Replace '#[runtime_intrinsics]' with '@runtime_intrinsics'
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /mnt/data/worktrees/simple-main/src/lib/gc_async_mut/io/env_ops.spl:7:1
+-    |
+-   7 | export use std.nogc_async_mut.io.env_ops.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /mnt/data/worktrees/simple-main/src/lib/gc_async_mut/io/process_ops.spl:7:1
+-    |
+-   7 | export use std.nogc_async_mut.io.process_ops.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [memory-guard] SIMPLE_LIB=src contains 600+ .spl files — consider narrowing scope to avoid memory bloat
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.simd_provider' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.simd_kernels' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.sffi_cuda' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.sffi.dynamic' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.text_layout.font_renderer' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.simd' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [use-warning] 'Vec16u8' is named in `use std.nogc_sync_mut.simd.{...}` but module '/mnt/data/worktrees/simple-main/src/std/nogc_sync_mut/simd.spl' does not provide it (imported from /mnt/data/worktrees/simple-main/src/std/nogc_async_mut/simd.spl)
+- [use-warning] 'Vec2u64' is named in `use std.nogc_sync_mut.simd.{...}` but module '/mnt/data/worktrees/simple-main/src/std/nogc_sync_mut/simd.spl' does not provide it (imported from /mnt/data/worktrees/simple-main/src/std/nogc_async_mut/simd.spl)
+- [use-warning] 'simd_add_u8x16' is named in `use std.nogc_sync_mut.simd.{...}` but module '/mnt/data/worktrees/simple-main/src/std/nogc_sync_mut/simd.spl' does not provide it (imported from /mnt/data/worktrees/simple-main/src/std/nogc_async_mut/simd.spl)
+- [use-warning] 'simd_xor_u8x16' is named in `use std.nogc_sync_mut.simd.{...}` but module '/mnt/data/worktrees/simple-main/src/std/nogc_sync_mut/simd.spl' does not provide it (imported from /mnt/data/worktrees/simple-main/src/std/nogc_async_mut/simd.spl)
+- [use-warning] 'simd_aes_round' is named in `use std.nogc_sync_mut.simd.{...}` but module '/mnt/data/worktrees/simple-main/src/std/nogc_sync_mut/simd.spl' does not provide it (imported from /mnt/data/worktrees/simple-main/src/std/nogc_async_mut/simd.spl)
+- [use-warning] 'simd_aes_round_last' is named in `use std.nogc_sync_mut.simd.{...}` but module '/mnt/data/worktrees/simple-main/src/std/nogc_sync_mut/simd.spl' does not provide it (imported from /mnt/data/worktrees/simple-main/src/std/nogc_async_mut/simd.spl)
+- [use-warning] 'simd_clmul_lo_u64' is named in `use std.nogc_sync_mut.simd.{...}` but module '/mnt/data/worktrees/simple-main/src/std/nogc_sync_mut/simd.spl' does not provide it (imported from /mnt/data/worktrees/simple-main/src/std/nogc_async_mut/simd.spl)
+- [use-warning] 'simd_clmul_hi_u64' is named in `use std.nogc_sync_mut.simd.{...}` but module '/mnt/data/worktrees/simple-main/src/std/nogc_sync_mut/simd.spl' does not provide it (imported from /mnt/data/worktrees/simple-main/src/std/nogc_async_mut/simd.spl)
+- [use-warning] 'simd_xor_u64x2' is named in `use std.nogc_sync_mut.simd.{...}` but module '/mnt/data/worktrees/simple-main/src/std/nogc_sync_mut/simd.spl' does not provide it (imported from /mnt/data/worktrees/simple-main/src/std/nogc_async_mut/simd.spl)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.sffi_vulkan' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.vulkan_sffi' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [use-warning] 'vulkan_submitted_framebuffer_handle' is named in `use std.gpu.engine2d.backend_vulkan.{...}` but module '/mnt/data/worktrees/simple-main/src/std/gc_async_mut/gpu/engine2d/backend_vulkan.spl' does not provide it (imported from /mnt/data/worktrees/simple-main/src/std/gc_async_mut/gpu/engine2d/engine.spl)
+- [use-warning] 'vulkan_submitted_device_identity' is named in `use std.gpu.engine2d.backend_vulkan.{...}` but module '/mnt/data/worktrees/simple-main/src/std/gc_async_mut/gpu/engine2d/backend_vulkan.spl' does not provide it (imported from /mnt/data/worktrees/simple-main/src/std/gc_async_mut/gpu/engine2d/engine.spl)
+- [use-warning] 'vulkan_submitted_generation' is named in `use std.gpu.engine2d.backend_vulkan.{...}` but module '/mnt/data/worktrees/simple-main/src/std/gc_async_mut/gpu/engine2d/backend_vulkan.spl' does not provide it (imported from /mnt/data/worktrees/simple-main/src/std/gc_async_mut/gpu/engine2d/engine.spl)
+- [use-warning] 'vulkan_framebuffer_ownership_handle' is named in `use std.gpu.engine2d.backend_vulkan.{...}` but module '/mnt/data/worktrees/simple-main/src/std/gc_async_mut/gpu/engine2d/backend_vulkan.spl' does not provide it (imported from /mnt/data/worktrees/simple-main/src/std/gc_async_mut/gpu/engine2d/engine.spl)
+- [use-warning] 'vulkan_cancel_submitted_present_source' is named in `use std.gpu.engine2d.backend_vulkan.{...}` but module '/mnt/data/worktrees/simple-main/src/std/gc_async_mut/gpu/engine2d/backend_vulkan.spl' does not provide it (imported from /mnt/data/worktrees/simple-main/src/std/gc_async_mut/gpu/engine2d/engine.spl)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.env.types' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.path' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.sffi_opencl' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.opengl_sffi' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.metal_ptr' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.metal_sffi' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.sffi_rocm' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.rocm_sffi' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.oneapi_sffi' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.env_ops' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.process_ops' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [use-warning] 'shell_output' is named in `use std.nogc_sync_mut.io.process_ops.{...}` but module '/mnt/data/worktrees/simple-main/src/std/nogc_sync_mut/io/process_ops.spl' does not provide it (imported from /mnt/data/worktrees/simple-main/src/std/nogc_async_mut/io/process_ops.spl)
+- [use-warning] 'font_execution_plan_into' is named in `use std.gc_async_mut.text_layout.font_renderer.{...}` but module '/mnt/data/worktrees/simple-main/src/std/gc_async_mut/text_layout/font_renderer.spl' does not provide it (imported from /mnt/data/worktrees/simple-main/src/std/gc_async_mut/gpu/engine2d/engine.spl)
+- evidence_program=engine2d_vulkan_readback
+- vulkan_probe_status=Initialized
+- vulkan_probe_available=true
+- vulkan_probe_diagnostic=requested=vulkan;selected=vulkan;status=Initialized;api=vulkan;gate=vulkan_runtime;shader=spirv;compute=true;graphics=true;present=false;reason=Vulkan initialized
+- vulkan_available=true
+- strict_create_status=pass
+- error: semantic: method `backend_name` not found on type `dict` (receiver value: {ADRENO_PREFERRED_WORKGROUP: 64, ADRENO_SUBGROUP_SIZE: 64, BACKEND_CPU: cpu, BACKEND_CPU_SIMD: cpu_simd, BACKEND_CUDA: cuda, BACKEND_HIP: hip, BACKEND_METAL: metal, BACKEND_OPENCL: opencl, BACKEND_ROC)

@@ -1,0 +1,170 @@
+# @cover src/lib/common/ui/render_opt/chunk_occlusion.spl 80%
+
+use std.spec.{describe, it, expect}
+use common.ui.render_opt.property_trees.PaintChunks
+use common.ui.render_opt.paint_chunk_rasterizer.{PaintChunkRects, ChunkRasterBuffer, paint_rect}
+use common.ui.render_opt.chunk_occlusion.{
+    ChunkVisibility, OcclusionWorkspace, occlusion_prepare,
+    CHUNK_OPAQUE_UNKNOWN, CHUNK_OPAQUE_EXACT_RECT
+}
+
+fn add_chunk(chunks: PaintChunks, rects: PaintChunkRects,
+             visibility: ChunkVisibility, surface: u32,
+             x: i64, y: i64, w: i64, h: i64, color: i64, proof: u32):
+    chunks.add_chunk(1u32, 0, 0, 0, surface, 0u32,
+                     chunks.chunk_count as u32)
+    rects.add_rect(x, y, w, h, color)
+    visibility.add(true, proof)
+
+fn raster(chunks: PaintChunks, rects: PaintChunkRects,
+          workspace: OcclusionWorkspace, optimized: bool) -> [u32]:
+    var out = ChunkRasterBuffer.create(4, 4)
+    var i: i64 = 0
+    while i < chunks.chunk_count:
+        if not optimized or workspace.chunk_visible[i] != 0u32:
+            paint_rect(out, rects.rect_x[i], rects.rect_y[i],
+                       rects.rect_w[i], rects.rect_h[i], rects.colour[i])
+        i = i + 1
+    out.pixels
+
+describe "bounded conservative paint-chunk occlusion":
+    it "culls a lower chunk covered by the union of later exact opaque chunks":
+        var chunks = PaintChunks.create()
+        var rects = PaintChunkRects.create()
+        var visible = ChunkVisibility.create()
+        add_chunk(chunks, rects, visible, 1u32, 0, 0, 4, 4,
+                  0xFFDC2626, CHUNK_OPAQUE_EXACT_RECT)
+        add_chunk(chunks, rects, visible, 1u32, 0, 0, 2, 4,
+                  0xFF16A34A, CHUNK_OPAQUE_EXACT_RECT)
+        add_chunk(chunks, rects, visible, 1u32, 2, 0, 2, 4,
+                  0xFF2563EB, CHUNK_OPAQUE_EXACT_RECT)
+        var ws = OcclusionWorkspace.create(3, 16)
+        occlusion_prepare(chunks, rects, visible, 4, 4, ws)
+        expect(ws.chunk_visible).to_equal([0u32, 1u32, 1u32])
+        expect(ws.chunks_occluded).to_equal(1)
+        expect(raster(chunks, rects, ws, true)).to_equal(
+            raster(chunks, rects, ws, false))
+
+    it "does not use uncertain alpha or a different surface as coverage":
+        var chunks = PaintChunks.create()
+        var rects = PaintChunkRects.create()
+        var visible = ChunkVisibility.create()
+        add_chunk(chunks, rects, visible, 1u32, 0, 0, 4, 4,
+                  0xFF111827, CHUNK_OPAQUE_EXACT_RECT)
+        add_chunk(chunks, rects, visible, 1u32, 0, 0, 4, 4,
+                  0x8016A34A, CHUNK_OPAQUE_UNKNOWN)
+        add_chunk(chunks, rects, visible, 2u32, 0, 0, 4, 4,
+                  0xFF2563EB, CHUNK_OPAQUE_EXACT_RECT)
+        var ws = OcclusionWorkspace.create(3, 16)
+        occlusion_prepare(chunks, rects, visible, 4, 4, ws)
+        expect(ws.chunk_visible).to_equal([1u32, 1u32, 1u32])
+        expect(ws.chunks_occluded).to_equal(0)
+
+    it "rejects disjoint opaque candidates before rectangle subtraction":
+        var chunks = PaintChunks.create()
+        var rects = PaintChunkRects.create()
+        var visible = ChunkVisibility.create()
+        add_chunk(chunks, rects, visible, 1u32, 0, 0, 4, 4,
+                  0xFF111827, CHUNK_OPAQUE_EXACT_RECT)
+        var x: i64 = 16
+        while x < 80:
+            add_chunk(chunks, rects, visible, 1u32, x, 0, 4, 4,
+                      0xFF16A34A, CHUNK_OPAQUE_EXACT_RECT)
+            x = x + 8
+        add_chunk(chunks, rects, visible, 1u32, 0, 0, 4, 4,
+                  0xFF2563EB, CHUNK_OPAQUE_EXACT_RECT)
+        var ws = OcclusionWorkspace.create(chunks.chunk_count, 16)
+        occlusion_prepare(chunks, rects, visible, 96, 8, ws)
+        expect(ws.chunk_visible[0]).to_equal(0u32)
+        expect(ws.occluders_examined).to_equal(45)
+        expect(ws.subtractions_executed).to_equal(1)
+
+    it "indexes later opaque proofs instead of scanning transparent chunks quadratically":
+        var chunks = PaintChunks.create()
+        var rects = PaintChunkRects.create()
+        var visible = ChunkVisibility.create()
+        var i: i64 = 0
+        while i < 64:
+            add_chunk(chunks, rects, visible, 1u32, 0, 0, 4, 4,
+                      0x8016A34A, CHUNK_OPAQUE_UNKNOWN)
+            i = i + 1
+        add_chunk(chunks, rects, visible, 1u32, 0, 0, 4, 4,
+                  0xFF2563EB, CHUNK_OPAQUE_EXACT_RECT)
+        var ws = OcclusionWorkspace.create(chunks.chunk_count, 16)
+        occlusion_prepare(chunks, rects, visible, 4, 4, ws)
+        # Each uncertain candidate visits the one proven opaque chunk. The old
+        # all-later-chunks scan examined 2,080 slots for this scene.
+        expect(ws.chunk_slots_examined).to_equal(64)
+        expect(ws.chunks_occluded).to_equal(64)
+        expect(raster(chunks, rects, ws, true)).to_equal(
+            raster(chunks, rects, ws, false))
+
+    it "builds surface-local opaque chains for independent render targets":
+        var chunks = PaintChunks.create()
+        var rects = PaintChunkRects.create()
+        var visible = ChunkVisibility.create()
+        var i: i64 = 0
+        while i < 32:
+            val surface = if i % 2 == 0: 1u32 else: 2u32
+            add_chunk(chunks, rects, visible, surface, i * 4, 0, 2, 2,
+                      0xFF2563EB, CHUNK_OPAQUE_EXACT_RECT)
+            i = i + 1
+        var ws = OcclusionWorkspace.create(chunks.chunk_count, 8)
+        occlusion_prepare(chunks, rects, visible, 128, 4, ws)
+        # The two surface-local suffix unions are wholly right of every prior
+        # disjoint candidate, so no individual chain node is visited. A single
+        # global chain would have examined 32 * 31 / 2 = 496 slots.
+        expect(ws.chunk_slots_examined).to_equal(0)
+        expect(ws.disjoint_chains_rejected).to_equal(30)
+        expect(ws.chunks_occluded).to_equal(0)
+        i = 0
+        while i < chunks.chunk_count:
+            val next = ws.next_occluder[i]
+            if next >= 0:
+                expect(chunks.surface[next]).to_equal(chunks.surface[i])
+            i = i + 1
+
+    it "culls hidden and off-viewport chunks independently":
+        var chunks = PaintChunks.create()
+        var rects = PaintChunkRects.create()
+        var visible = ChunkVisibility.create()
+        add_chunk(chunks, rects, visible, 1u32, 8, 8, 2, 2,
+                  0xFFFFFFFF, CHUNK_OPAQUE_EXACT_RECT)
+        chunks.add_chunk(2u32, 0, 0, 0, 1u32, 0u32, 1u32)
+        rects.add_rect(0, 0, 4, 4, 0xFFFFFFFF)
+        visible.add(false, CHUNK_OPAQUE_EXACT_RECT)
+        var ws = OcclusionWorkspace.create(2, 4)
+        occlusion_prepare(chunks, rects, visible, 4, 4, ws)
+        expect(ws.chunk_visible).to_equal([0u32, 0u32])
+        expect(ws.chunks_hidden).to_equal(2)
+
+    it "fails open when exact subtraction exceeds fixed workspace capacity":
+        var chunks = PaintChunks.create()
+        var rects = PaintChunkRects.create()
+        var visible = ChunkVisibility.create()
+        add_chunk(chunks, rects, visible, 1u32, 0, 0, 4, 4,
+                  0xFF111827, CHUNK_OPAQUE_EXACT_RECT)
+        add_chunk(chunks, rects, visible, 1u32, 1, 1, 2, 2,
+                  0xFF2563EB, CHUNK_OPAQUE_EXACT_RECT)
+        var ws = OcclusionWorkspace.create(2, 1)
+        occlusion_prepare(chunks, rects, visible, 4, 4, ws)
+        expect(ws.proof_incomplete).to_equal(true)
+        expect(ws.overflow_count).to_equal(1)
+        expect(ws.chunk_visible).to_equal([1u32, 1u32])
+
+    it "fails open rather than truncating a malformed lockstep visibility set":
+        var chunks = PaintChunks.create()
+        var rects = PaintChunkRects.create()
+        var visible = ChunkVisibility.create()
+        add_chunk(chunks, rects, visible, 1u32, 0, 0, 4, 4,
+                  0xFF111827, CHUNK_OPAQUE_EXACT_RECT)
+        # Deliberately make the producer columns inconsistent. A short
+        # visibility list must not leave this second later chunk at the
+        # workspace's default hidden value.
+        chunks.add_chunk(2u32, 0, 0, 0, 1u32, 0u32, 1u32)
+        rects.add_rect(0, 0, 4, 4, 0xFF2563EB)
+        var ws = OcclusionWorkspace.create(2, 4)
+        occlusion_prepare(chunks, rects, visible, 4, 4, ws)
+        expect(ws.proof_incomplete).to_equal(true)
+        expect(ws.overflow_count).to_equal(1)
+        expect(ws.chunk_visible).to_equal([1u32, 1u32])

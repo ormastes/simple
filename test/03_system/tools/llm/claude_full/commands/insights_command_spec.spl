@@ -1,0 +1,118 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-SYSTEM
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+# codex-system-test
+"""
+# Claude Full Insights Command
+
+Focused parity for upstream `commands/insights.ts`.
+"""
+
+use std.spec.*
+use std.io_runtime.{file_read}
+use app.llm_caret.claude_full.commands.insights.*
+
+fn countLines(text_value: text) -> i64:
+    var count = 0
+    var i = 0
+    while i < text_value.len():
+        if text_value[i] == "\n":
+            count = count + 1
+        i = i + 1
+    count
+
+describe "Claude full insights command":
+    describe "REQ-LLM-CARET-HIDDEN-008: descriptor and enablement":
+        it "should keep command metadata and source parity floor":
+        # @req REQ-LLM-CARET-HIDDEN-008
+            # @req REQ-SSPEC-SYSTEM
+            step("should keep command metadata and source parity floor")
+            step("Check insights command metadata and source parity")
+            val command = insightsCommand(true)
+            expect(command.typeName).to_equal("local-jsx")
+            expect(command.name).to_equal("insights")
+            expect(command.description).to_contain("usage")
+            expect(command.argumentHint).to_equal("")
+            expect(command.isHidden).to_equal(false)
+            expect(command.enabled).to_equal(true)
+            expect(command.supportsNonInteractive).to_equal(false)
+            expect(insightsCommandName()).to_equal("insights")
+            expect(insightsLookbackDays()).to_equal(30)
+            expect(insightsReportPath()).to_contain("report.html")
+
+        val source = file_read("src/app/llm_caret/claude_full/commands/insights.spl") ?? ""
+        expect(countLines(source)).to_be_greater_than(3199)
+        expect(insightsCommandSourceLinesModeled()).to_equal(3200)
+
+    describe "Supporting parts-bin summary and report mechanics":
+        it "should summarize only the last thirty days of local sessions":
+            # @req REQ-SSPEC-SYSTEM
+            step("should summarize only the last thirty days of local sessions")
+            step("Summarize sessions from the last thirty days")
+            val metrics = summarizeInsightsSessions(InsightsState.sample().sessions)
+            expect(metrics.sessionsAnalyzed).to_equal(2)
+            expect(metrics.messages).to_equal(20)
+            expect(metrics.inputTokens).to_equal(13200)
+            expect(metrics.outputTokens).to_equal(2100)
+            expect(metrics.totalTokens).to_equal(15300)
+            expect(metrics.filesTouched).to_equal(8)
+            expect(metrics.toolCalls).to_equal(24)
+            expect(metrics.firstAttemptSuccesses).to_equal(1)
+            expect(metrics.firstAttemptFailures).to_equal(1)
+            expect(metrics.topTaskKind).to_equal("debugging")
+            expect(insightSuccessRatePercent(metrics)).to_equal(50)
+
+    it "generates report HTML and models browser outcomes":
+        var state = InsightsState.sample()
+        var result = runInsights(state)
+        expect(result.typeName).to_equal("report")
+        expect(result.reportPath).to_equal("~/.claude/usage-data/report.html")
+        expect(result.openedBrowser).to_equal(true)
+        expect(result.message).to_contain("opened")
+        expect(insightsReportContainsCoreSections(result.html)).to_equal(true)
+        expect(result.html).to_contain("sessions=2")
+        expect(result.html).to_contain("tokens=15300")
+
+        it "should generate report HTML and handle browser fallback":
+            # @req REQ-SSPEC-SYSTEM
+            step("should generate report HTML and handle browser fallback")
+            step("Generate the insights report and handle browser fallback")
+            var state = InsightsState.sample()
+            var result = runInsights(state)
+            expect(result.typeName).to_equal("report")
+            expect(result.reportPath).to_equal("~/.claude/usage-data/report.html")
+            expect(result.openedBrowser).to_equal(true)
+            expect(result.message).to_contain("opened")
+            expect(insightsReportContainsCoreSections(result.html)).to_equal(true)
+            expect(result.html).to_contain("sessions=2")
+            expect(result.html).to_contain("tokens=15300")
+
+    it "models no-data, noninteractive, and write-failure branches":
+        expect(runInsights(InsightsState.empty()).message).to_contain("No Claude Code sessions")
+
+    describe "REQ-LLM-CARET-HIDDEN-008: rejections and admission":
+        it "should reject no-data noninteractive and write-failure states":
+            # @req REQ-SSPEC-SYSTEM
+            step("should reject no-data noninteractive and write-failure states")
+            step("Reject no-data noninteractive and write-failure states")
+            val noData = runInsights(InsightsState.empty())
+            expect(noData.typeName).to_equal("message")
+            expect(noData.message).to_contain("No Claude Code sessions")
+            expect(noData.reportPath).to_equal("")
+            expect(noData.html).to_equal("")
+            expect(noData.openedBrowser).to_be(false)
+            expect(noData.metrics.sessionsAnalyzed).to_equal(0)
+            expect(noData.metrics.messages).to_equal(0)
+            expect(noData.metrics.inputTokens).to_equal(0)
+            expect(noData.metrics.outputTokens).to_equal(0)
+            expect(noData.metrics.totalTokens).to_equal(0)
+            expect(noData.metrics.filesTouched).to_equal(0)
+            expect(noData.metrics.toolCalls).to_equal(0)
+            expect(noData.metrics.firstAttemptSuccesses).to_equal(0)
+            expect(noData.metrics.firstAttemptFailures).to_equal(0)
+            expect(noData.metrics.topTaskKind).to_equal("")
+
+        state = InsightsState.sample()
+        state.writeReportFails = true
+        expect(runInsights(state).message).to_contain("Failed to write")

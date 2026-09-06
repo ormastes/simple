@@ -1,0 +1,51 @@
+# ============================================================================
+# game_net/reconciler.spl — rewind-and-replay reconciliation
+#
+# Netcode plan P2: on an authoritative Snapshot@T, set the owned entity to
+# the authoritative state, trim every input the server already acked, then
+# replay the remaining buffered inputs (T+1..now) through the SAME
+# deterministic `sim_step` used for prediction. Because the sim is pure and
+# deterministic, replay converges to the exact server position — no
+# smoothing, no interpolation, no residual error.
+#
+# Stale/reordered snapshots (tick <= the last-applied server tick) are
+# ignored outright: newer state always wins, older state is a no-op.
+# ============================================================================
+
+use std.nogc_sync_mut.game_net.demo_sim.{SimState, sim_step}
+use std.nogc_sync_mut.game_net.wire.{Snapshot, EntityState}
+use std.nogc_sync_mut.game_net.predictor.{Predictor}
+
+fn _entity_state_to_sim(e: EntityState) -> SimState:
+    SimState(entity_id: e.entity_id, pos_x: e.pos_x, pos_y: e.pos_y, vel_x: e.vel_x, vel_y: e.vel_y)
+
+fn _find_owned(entity_id: u32, entities: [EntityState]) -> EntityState?:
+    var i: u64 = 0
+    while i < entities.len().to_u64():
+        val e = entities[i]
+        if e.entity_id == entity_id:
+            return e
+        i = i + 1
+    nil
+
+fn reconcile(predictor: Predictor, snap: Snapshot, dt: f32) -> bool:
+    """Apply an authoritative Snapshot to `predictor` in place. Returns true
+    if the snapshot was applied, false if it was stale/reordered and ignored
+    (its tick is not newer than the last-applied server tick)."""
+    if snap.tick <= predictor.server_tick and predictor.server_tick > 0u32:
+        return false
+    val owned = _find_owned(predictor.state.entity_id, snap.entities)
+    if val authoritative = owned:
+        predictor.inputs.ack_trim(snap.ack_input_seq)
+        predictor.server_tick = snap.tick
+        var state = _entity_state_to_sim(authoritative)
+        val replay = predictor.inputs.unacked()
+        var i: u64 = 0
+        while i < replay.len().to_u64():
+            state = sim_step(state, replay[i].move_x, replay[i].move_y, dt)
+            i = i + 1
+        predictor.state = state
+        return true
+    false
+
+export reconcile

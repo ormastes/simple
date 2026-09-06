@@ -1,0 +1,60 @@
+"""Gemini CLI lifecycle adapter with BeforeAgent context injection."""
+
+use app.llm_caret.messaging.domain.model.{AgentBinding, RoomMessage}
+use app.llm_caret.messaging.port.contracts.{AgentControlPort}
+use app.llm_caret.messaging.adapter.agent.session_registry.{AgentSessionRegistry, control_command}
+
+class GeminiHooksAdapter:
+    registry: AgentSessionRegistry
+
+impl GeminiHooksAdapter:
+    static fn new() -> GeminiHooksAdapter:
+        GeminiHooksAdapter(registry: AgentSessionRegistry.new())
+
+    me attach_session(binding: AgentBinding) -> text:
+        self.registry.attach("gemini", binding)
+
+    me accept_hook(session_id: text, hook_name: text, payload: text) -> text:
+        if hook_name == "BeforeAgent":
+            return self.registry.inject_context(session_id, payload)
+        val state = _gemini_state(hook_name)
+        if state == "":
+            return "error:unknown_gemini_hook"
+        self.registry.transition(session_id, state, payload)
+
+impl AgentControlPort for GeminiHooksAdapter:
+    fn capabilities() -> [text]:
+        ["hooks", "before_agent_context", "tool_policy", "task_updates"]
+
+    fn attach(binding: AgentBinding) -> text:
+        control_command("gemini", "attach", binding.agent_id.value, binding.binding_id.value)
+
+    fn resume(session_id: text) -> text:
+        control_command("gemini", "resume", session_id, "")
+
+    fn inject_context(session_id: text, context_manifest_id: text) -> text:
+        control_command("gemini", "before_agent", session_id, context_manifest_id)
+
+    fn submit(session_id: text, message: RoomMessage) -> text:
+        control_command("gemini", "submit", session_id, message.message_id.value)
+
+    fn steer(session_id: text, message: RoomMessage) -> text:
+        control_command("gemini", "steer", session_id, message.message_id.value)
+
+    fn cancel(session_id: text, task_id: text) -> text:
+        control_command("gemini", "cancel", session_id, task_id)
+
+    fn close(session_id: text) -> text:
+        control_command("gemini", "close", session_id, "")
+
+fn _gemini_state(hook_name: text) -> text:
+    match hook_name:
+        "SessionStart": "idle"
+        "BeforeToolSelection": "running"
+        "BeforeTool": "running"
+        "AfterModel": "running"
+        "AfterAgent": "completed"
+        "SessionEnd": "idle"
+        _: ""
+
+export GeminiHooksAdapter

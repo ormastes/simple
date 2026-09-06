@@ -1,0 +1,398 @@
+"""
+ANSI parser parity model for ink/termio/parser.ts.
+
+The model keeps the source contract small: grapheme width classification,
+CSI/OSC/ESC sequence interpretation, SGR style state, and incremental parser
+state for text, BEL, and links.
+"""
+
+class Grapheme:
+    value: text
+    width: i64
+
+impl Grapheme:
+    static fn new(value: text, width: i64) -> Grapheme:
+        Grapheme(value: value, width: width)
+
+class TextStyle:
+    params: text
+
+impl TextStyle:
+    static fn default() -> TextStyle:
+        TextStyle(params: "")
+
+    me apply(params: text) -> TextStyle:
+        if params == "0" or params == "":
+            return TextStyle.default()
+        TextStyle(params: params)
+
+class ParserAction:
+    type: text
+    actionType: text
+    direction: text
+    count: i64
+    row: i64
+    col: i64
+    region: text
+    sequence: text
+    textValue: text
+    styleParams: text
+    url: text
+    enabled: bool
+
+impl ParserAction:
+    static fn textAction(value: text, style: TextStyle) -> ParserAction:
+        ParserAction(type: "text", actionType: "", direction: "", count: graphemeWidth(value), row: 0, col: 0, region: "", sequence: "", textValue: value, styleParams: style.params, url: "", enabled: false)
+
+    static fn bell() -> ParserAction:
+        ParserAction(type: "bell", actionType: "", direction: "", count: 0, row: 0, col: 0, region: "", sequence: "", textValue: "", styleParams: "", url: "", enabled: false)
+
+    static fn sgr(params: text) -> ParserAction:
+        ParserAction(type: "sgr", actionType: "", direction: "", count: 0, row: 0, col: 0, region: "", sequence: "", textValue: "", styleParams: params, url: "", enabled: false)
+
+    static fn cursor(actionType: text, direction: text, count: i64, row: i64, col: i64) -> ParserAction:
+        ParserAction(type: "cursor", actionType: actionType, direction: direction, count: count, row: row, col: col, region: "", sequence: "", textValue: "", styleParams: "", url: "", enabled: false)
+
+    static fn erase(actionType: text, region: text, count: i64) -> ParserAction:
+        ParserAction(type: "erase", actionType: actionType, direction: "", count: count, row: 0, col: 0, region: region, sequence: "", textValue: "", styleParams: "", url: "", enabled: false)
+
+    static fn scroll(actionType: text, count: i64, row: i64, col: i64) -> ParserAction:
+        ParserAction(type: "scroll", actionType: actionType, direction: "", count: count, row: row, col: col, region: "", sequence: "", textValue: "", styleParams: "", url: "", enabled: false)
+
+    static fn mode(actionType: text, enabled: bool) -> ParserAction:
+        ParserAction(type: "mode", actionType: actionType, direction: "", count: 0, row: 0, col: 0, region: "", sequence: "", textValue: "", styleParams: "", url: "", enabled: enabled)
+
+    static fn link(actionType: text, url: text) -> ParserAction:
+        ParserAction(type: "link", actionType: actionType, direction: "", count: 0, row: 0, col: 0, region: "", sequence: "", textValue: "", styleParams: "", url: url, enabled: false)
+
+    static fn unknown(sequence: text) -> ParserAction:
+        ParserAction(type: "unknown", actionType: "", direction: "", count: 0, row: 0, col: 0, region: "", sequence: sequence, textValue: "", styleParams: "", url: "", enabled: false)
+
+fn isEmoji(codePoint: i64) -> bool:
+    (codePoint >= 9728 and codePoint <= 9983) or (codePoint >= 9984 and codePoint <= 10175) or (codePoint >= 127744 and codePoint <= 129535) or (codePoint >= 129536 and codePoint <= 130815) or (codePoint >= 127462 and codePoint <= 127487)
+
+fn isEastAsianWide(codePoint: i64) -> bool:
+    (codePoint >= 4352 and codePoint <= 4447) or (codePoint >= 11904 and codePoint <= 40959) or (codePoint >= 44032 and codePoint <= 55203) or (codePoint >= 63744 and codePoint <= 64255) or (codePoint >= 65040 and codePoint <= 65055) or (codePoint >= 65072 and codePoint <= 65135) or (codePoint >= 65280 and codePoint <= 65376) or (codePoint >= 65504 and codePoint <= 65510) or (codePoint >= 131072 and codePoint <= 196605) or (codePoint >= 196608 and codePoint <= 262141)
+
+fn hasMultipleCodepoints(value: text) -> bool:
+    value.len() > 1
+
+fn graphemeWidth(value: text) -> i64:
+    if hasMultipleCodepoints(value):
+        return 2
+    if value == "":
+        return 1
+    val codePoint = value.char_code_at(0)
+    if isEmoji(codePoint) or isEastAsianWide(codePoint):
+        return 2
+    1
+
+fn segmentGraphemes(value: text) -> [Grapheme]:
+    var out: [Grapheme] = []
+    var i = 0
+    while i < value.len():
+        val ch = value.slice(i, i + 1)
+        out.push(Grapheme.new(ch, graphemeWidth(ch)))
+        i = i + 1
+    out
+
+fn parseCSIParams(paramStr: text) -> [i64]:
+    if paramStr == "":
+        return []
+    var out: [i64] = []
+    val parts = splitCSIParamText(paramStr)
+    var i = 0
+    while i < parts.len():
+        if parts[i] == "":
+            out.push(0)
+        else:
+            out.push(parsePositiveI64(parts[i]))
+        i = i + 1
+    out
+
+fn parsePositiveI64(value: text) -> i64:
+    var out = 0
+    var i = 0
+    while i < value.len():
+        val ch = value.slice(i, i + 1)
+        out = (out * 10) + digitValue(ch)
+        i = i + 1
+    out
+
+fn digitValue(ch: text) -> i64:
+    if ch == "1":
+        return 1
+    if ch == "2":
+        return 2
+    if ch == "3":
+        return 3
+    if ch == "4":
+        return 4
+    if ch == "5":
+        return 5
+    if ch == "6":
+        return 6
+    if ch == "7":
+        return 7
+    if ch == "8":
+        return 8
+    if ch == "9":
+        return 9
+    0
+
+fn splitCSIParamText(value: text) -> [text]:
+    var out: [text] = []
+    var current = ""
+    var i = 0
+    while i < value.len():
+        val ch = value.slice(i, i + 1)
+        if ch == ";" or ch == ":":
+            out.push(current)
+            current = ""
+        else:
+            current = current + ch
+        i = i + 1
+    out.push(current)
+    out
+
+fn parseCSI(rawSequence: text) -> ParserAction:
+    if rawSequence.len() < 3:
+        return ParserAction.unknown(rawSequence)
+    val finalByte = rawSequence.slice(rawSequence.len() - 1, rawSequence.len())
+    var beforeFinal = rawSequence.slice(2, rawSequence.len() - 1)
+    var privateMode = ""
+    var intermediate = ""
+    if beforeFinal.starts_with("?") or beforeFinal.starts_with(">") or beforeFinal.starts_with("="):
+        privateMode = beforeFinal.slice(0, 1)
+        beforeFinal = beforeFinal.slice(1, beforeFinal.len())
+    if beforeFinal.ends_with(" "):
+        intermediate = " "
+        beforeFinal = beforeFinal.slice(0, beforeFinal.len() - 1)
+    val params = parseCSIParams(beforeFinal)
+    var p0 = 1
+    var p1 = 1
+    if params.len() > 0:
+        p0 = params[0]
+    if params.len() > 1:
+        p1 = params[1]
+    if finalByte == "m" and privateMode == "":
+        return ParserAction.sgr(beforeFinal)
+    if finalByte == "A":
+        return ParserAction.cursor("move", "up", p0, 0, 0)
+    if finalByte == "B":
+        return ParserAction.cursor("move", "down", p0, 0, 0)
+    if finalByte == "C":
+        return ParserAction.cursor("move", "forward", p0, 0, 0)
+    if finalByte == "D":
+        return ParserAction.cursor("move", "back", p0, 0, 0)
+    if finalByte == "E":
+        return ParserAction.cursor("nextLine", "", p0, 0, 0)
+    if finalByte == "F":
+        return ParserAction.cursor("prevLine", "", p0, 0, 0)
+    if finalByte == "G":
+        return ParserAction.cursor("column", "", 0, 0, p0)
+    if finalByte == "H" or finalByte == "f":
+        return ParserAction.cursor("position", "", 0, p0, p1)
+    if finalByte == "d":
+        return ParserAction.cursor("row", "", 0, p0, 0)
+    if finalByte == "J":
+        return ParserAction.erase("display", eraseDisplayRegion(p0), 0)
+    if finalByte == "K":
+        return ParserAction.erase("line", eraseLineRegion(p0), 0)
+    if finalByte == "X":
+        return ParserAction.erase("chars", "", p0)
+    if finalByte == "S":
+        return ParserAction.scroll("up", p0, 0, 0)
+    if finalByte == "T":
+        return ParserAction.scroll("down", p0, 0, 0)
+    if finalByte == "r":
+        return ParserAction.scroll("setRegion", 0, p0, p1)
+    if finalByte == "s":
+        return ParserAction.cursor("save", "", 0, 0, 0)
+    if finalByte == "u":
+        return ParserAction.cursor("restore", "", 0, 0, 0)
+    if finalByte == "q" and intermediate == " ":
+        return ParserAction.cursor("style", cursorStyle(p0), 0, 0, 0)
+    if privateMode == "?" and (finalByte == "h" or finalByte == "l"):
+        val enabled = finalByte == "h"
+        if p0 == 25:
+            if enabled:
+                return ParserAction.cursor("show", "", 0, 0, 0)
+            return ParserAction.cursor("hide", "", 0, 0, 0)
+        if p0 == 47 or p0 == 1049:
+            return ParserAction.mode("alternateScreen", enabled)
+        if p0 == 2004:
+            return ParserAction.mode("bracketedPaste", enabled)
+        if p0 == 1000:
+            return ParserAction.mode("mouseTracking:normal", enabled)
+        if p0 == 1002:
+            return ParserAction.mode("mouseTracking:button", enabled)
+        if p0 == 1003:
+            return ParserAction.mode("mouseTracking:any", enabled)
+        if p0 == 1004:
+            return ParserAction.mode("focusEvents", enabled)
+    ParserAction.unknown(rawSequence)
+
+fn identifySequence(seq: text) -> text:
+    if seq.len() < 2:
+        return "unknown"
+    if not seq.starts_with("\u001B"):
+        return "unknown"
+    val second = seq.slice(1, 2)
+    if second == "[":
+        return "csi"
+    if second == "]":
+        return "osc"
+    if second == "O":
+        return "ss3"
+    "esc"
+
+class Parser:
+    style: TextStyle
+    inLink: bool
+    linkUrl: text
+    pending: text
+
+impl Parser:
+    static fn new() -> Parser:
+        Parser(style: TextStyle.default(), inLink: false, linkUrl: "", pending: "")
+
+    me reset() -> ():
+        me.style = TextStyle.default()
+        me.inLink = false
+        me.linkUrl = ""
+        me.pending = ""
+
+    me feed(input: text) -> [ParserAction]:
+        val data = me.pending + input
+        me.pending = ""
+        me.parseComplete(data)
+
+    me parseComplete(data: text) -> [ParserAction]:
+        var out: [ParserAction] = []
+        var textBuf = ""
+        var i = 0
+        while i < data.len():
+            val ch = data.slice(i, i + 1)
+            if ch == "\u0007":
+                out = flushText(out, textBuf, me.style)
+                textBuf = ""
+                out.push(ParserAction.bell())
+                i = i + 1
+            else if ch == "\u001B":
+                out = flushText(out, textBuf, me.style)
+                textBuf = ""
+                val end = findSequenceEnd(data, i)
+                if end < 0:
+                    me.pending = data.slice(i, data.len())
+                    return out
+                val seq = data.slice(i, end)
+                out = appendActions(out, me.processSequence(seq))
+                i = end
+            else:
+                textBuf = textBuf + ch
+                i = i + 1
+        flushText(out, textBuf, me.style)
+
+    me processSequence(seq: text) -> [ParserAction]:
+        val kind = identifySequence(seq)
+        if kind == "csi":
+            val action = parseCSI(seq)
+            if action.type == "sgr":
+                me.style = me.style.apply(action.styleParams)
+                return []
+            return [action]
+        if kind == "osc":
+            val action = parseOSCSequence(seq)
+            if action.type == "link":
+                if action.actionType == "start":
+                    me.inLink = true
+                    me.linkUrl = action.url
+                else:
+                    me.inLink = false
+                    me.linkUrl = ""
+                return [action]
+            return []
+        if kind == "esc":
+            return [ParserAction.unknown(seq)]
+        [ParserAction.unknown(seq)]
+
+fn eraseDisplayRegion(value: i64) -> text:
+    if value == 1:
+        return "toStart"
+    if value == 2:
+        return "all"
+    if value == 3:
+        return "saved"
+    "toEnd"
+
+fn eraseLineRegion(value: i64) -> text:
+    if value == 1:
+        return "toStart"
+    if value == 2:
+        return "all"
+    "toEnd"
+
+fn cursorStyle(value: i64) -> text:
+    if value == 1 or value == 2:
+        return "block"
+    if value == 3 or value == 4:
+        return "underline"
+    if value == 5 or value == 6:
+        return "bar"
+    "default"
+
+fn parseOSCSequence(seq: text) -> ParserAction:
+    var content = seq.slice(2, seq.len())
+    if content.ends_with("\u0007"):
+        content = content.slice(0, content.len() - 1)
+    if content.ends_with("\u001B\\"):
+        content = content.slice(0, content.len() - 2)
+    if content.starts_with("8;;"):
+        val url = content.slice(3, content.len())
+        if url == "":
+            return ParserAction.link("end", "")
+        return ParserAction.link("start", url)
+    ParserAction.unknown(seq)
+
+fn findSequenceEnd(data: text, start: i64) -> i64:
+    if start + 1 >= data.len():
+        return -1
+    val kind = data.slice(start + 1, start + 2)
+    if kind == "[":
+        var i = start + 2
+        while i < data.len():
+            val code = data.char_code_at(i)
+            if code >= 64 and code <= 126:
+                return i + 1
+            i = i + 1
+        return -1
+    if kind == "]":
+        var i = start + 2
+        while i < data.len():
+            if data.slice(i, i + 1) == "\u0007":
+                return i + 1
+            if i + 1 < data.len() and data.slice(i, i + 2) == "\u001B\\":
+                return i + 2
+            i = i + 1
+        return -1
+    if kind == "O":
+        if start + 3 <= data.len():
+            return start + 3
+        return -1
+    start + 2
+
+fn flushText(out: [ParserAction], textBuf: text, style: TextStyle) -> [ParserAction]:
+    if textBuf != "":
+        out.push(ParserAction.textAction(textBuf, style))
+    out
+
+fn appendActions(out: [ParserAction], values: [ParserAction]) -> [ParserAction]:
+    var i = 0
+    while i < values.len():
+        out.push(values[i])
+        i = i + 1
+    out
+
+fn parserSourceLinesModeled() -> i64:
+    394

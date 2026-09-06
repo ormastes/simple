@@ -1,0 +1,247 @@
+# Scalar support boundaries for the CompilerDriver HIR pipeline.
+
+use compiler.driver.driver_types.{CompileContext}
+use compiler.driver.driver_mem_snapshot.{mem_snapshot_record, mem_snapshot_record_promotion}
+use compiler.hir.hir.*
+use compiler.hir.hir_lowering.items.{
+    bootstrap_hir_module_count,
+    bootstrap_hir_modules_rollback_last,
+    bootstrap_hir_module_names_outer_len,
+    bootstrap_hir_module_symbols_outer_len,
+    bootstrap_hir_module_functions_outer_len,
+    bootstrap_hir_module_constants_outer_len,
+    bootstrap_hir_module_enums_outer_len,
+    bootstrap_hir_module_structs_outer_len,
+    bootstrap_hir_module_classes_outer_len
+}
+use compiler.hir.hir_lowering.types.{LoweringError, LoweringErrorKind}
+use compiler.frontend.aspect_registry.{aspect_registry_reset}
+use compiler.frontend.effect_registry.{effect_registry_reset}
+use compiler.frontend.layer_eq_registry.{layer_eq_registry_reset}
+use compiler.driver.driver_source_pipeline_impl.{driver_end_transient_parse_scope, driver_promote_frontend_registry_owners}
+use compiler.semantics.value_struct_layout.{validate_value_struct_layouts}
+use compiler.semantics.layer_eq_validation.{validate_layer_eq_types}
+use compiler.semantics.effect_validation.{validate_effect_contracts}
+use compiler.semantics.aspect_validation.{validate_aspect_contracts}
+use compiler.semantics.aspect_weave.{weave_forward_advice}
+use std.nogc_sync_mut.io.process_ops.{eprint}
+use compiler.driver.driver_log_helpers.{log_phase}
+use compiler.hir.hir_types.{HirModule}  # explicit: a glob is not an import-origin for surface projection
+use compiler.hir.hir_lowering.module_surface.{module_surface_canonical_path}
+
+extern fn rt_transient_array_scope_pause() -> bool
+extern fn rt_exit(code: i64)
+extern fn rt_heap_ref_wellformed(value: Any) -> bool
+
+pub fn driver_rollback_flat_hir_row_or_abort(expected_count: i64):
+    val actual_count = bootstrap_hir_module_count()
+    if actual_count == expected_count:
+        return
+    if actual_count == expected_count + 1:
+        if bootstrap_hir_modules_rollback_last(expected_count):
+            return
+    rt_exit(1)
+
+fn reset_frontend_registries_after_scope():
+    aspect_registry_reset()
+    effect_registry_reset()
+    layer_eq_registry_reset()
+
+pub fn driver_finish_failed_parse_scope(source_path: text) -> text:
+    if not rt_transient_array_scope_pause():
+        val _ended = driver_end_transient_parse_scope()
+        reset_frontend_registries_after_scope()
+        return "parse error in {source_path} (see [parser_error] output above); transient parser scope pause failed"
+    if not driver_promote_frontend_registry_owners():
+        val _ended = driver_end_transient_parse_scope()
+        reset_frontend_registries_after_scope()
+        rt_exit(1)
+        return "parse error in {source_path} (see [parser_error] output above); frontend registry promotion failed"
+    if not driver_end_transient_parse_scope():
+        reset_frontend_registries_after_scope()
+        return "parse error in {source_path} (see [parser_error] output above); transient parser scope end failed"
+    "parse error in {source_path} (see [parser_error] output above)"
+
+fn driver_normalized_source_path(source_path: text) -> text:
+    # The surface side of every identity/content comparison below stores
+    # `module_surface_canonical_path(source.path)`. Both sides MUST go through
+    # the one canonical mapping: a private near-copy here diverged on Windows,
+    # where `rt_path_absolute` returns extended-length `\\?\C:\...` paths that
+    # the canonicalizer rewrites (`C:/...`) but the old copy left as `//?/C:/...`,
+    # failing every Stage-3 surface identity check.
+    module_surface_canonical_path(source_path)
+
+pub fn driver_stage3_surface_identity_matches(
+    surface_source_index: i64,
+    surface_canonical_path: text,
+    surface_module_name: text,
+    surface_content_length: i64,
+    surface_content_hash: i64,
+    source_index: i64,
+    source_path: text,
+    source_module_name: text,
+    source_content_length: i64,
+    source_content_hash: i64
+) -> bool:
+    val normalized_source_path = driver_normalized_source_path(source_path)
+    surface_source_index == source_index and
+        surface_canonical_path == normalized_source_path and
+        surface_module_name == source_module_name and
+        surface_content_length == source_content_length and
+        surface_content_hash == source_content_hash
+
+pub fn driver_stage3_surface_content_matches(
+    surface_canonical_path: text,
+    surface_content_length: i64,
+    surface_content_hash: i64,
+    source_path: text,
+    source_content_length: i64,
+    source_content_hash: i64
+) -> bool:
+    val normalized_source_path = driver_normalized_source_path(source_path)
+    surface_canonical_path == normalized_source_path and
+        surface_content_length == source_content_length and
+        surface_content_hash == source_content_hash
+
+pub fn driver_stage3_surface_identity_mismatch(
+    surface_source_index: i64,
+    surface_canonical_path: text,
+    surface_module_name: text,
+    surface_content_length: i64,
+    surface_content_hash: i64,
+    source_index: i64,
+    source_path: text,
+    source_module_name: text,
+    source_content_length: i64,
+    source_content_hash: i64
+) -> text:
+    val normalized_source_path = driver_normalized_source_path(source_path)
+    "surface/source identity mismatch: " +
+        "index={surface_source_index}/{source_index} " +
+        "path='{surface_canonical_path}'/'{normalized_source_path}' " +
+        "module='{surface_module_name}'/'{source_module_name}' " +
+        "length={surface_content_length}/{source_content_length} " +
+        "hash={surface_content_hash}/{source_content_hash}"
+
+pub fn driver_hir_mem_snapshot(
+    boundary: text,
+    source_index: i64,
+    source_path: text,
+    retained_modules: i64,
+    validation_keys: i64,
+    validation_values: i64,
+    shared_traits: i64
+) -> bool:
+    mem_snapshot_record(
+        boundary, source_index, source_path, retained_modules,
+        validation_keys, validation_values, shared_traits,
+        bootstrap_hir_module_names_outer_len(),
+        bootstrap_hir_module_symbols_outer_len(),
+        bootstrap_hir_module_functions_outer_len(),
+        bootstrap_hir_module_constants_outer_len(),
+        bootstrap_hir_module_enums_outer_len(),
+        bootstrap_hir_module_structs_outer_len(),
+        bootstrap_hir_module_classes_outer_len())
+
+pub fn driver_hir_promotion_snapshot(
+    phase: text, source_index: i64, source_path: text,
+    promoted_nodes: i64, promoted_bytes: i64
+) -> bool:
+    mem_snapshot_record_promotion(
+        phase, source_index, source_path, promoted_nodes, promoted_bytes)
+
+fn format_hir_lowering_error(name: text, err: LoweringError) -> text:
+    if err.span.file != "":
+        "HIR lowering error in {name} ({err.span.file}:{err.span.line}:{err.span.col}): {err.message}"
+    else:
+        "HIR lowering error in {name}: {err.message}"
+
+pub fn driver_shown_fatal_count(total: i64, unbounded: bool) -> i64:
+    if unbounded:
+        return total
+    if total > 10:
+        return 10
+    total
+
+pub fn driver_collect_hir_errors(ctx: CompileContext, name: text, errors: [LoweringError]):
+    for err in errors:
+        if err.kind == LoweringErrorKind.Recovered:
+            ctx.add_warning(format_hir_lowering_error(name, err))
+        else:
+            val formatted = format_hir_lowering_error(name, err)
+            eprint("[hir-fatal] {formatted}")
+            ctx.add_error(formatted)
+
+# Concrete because the native build path has no generic monomorphization.
+pub fn driver_dict_entry_count(entries: Dict<SymbolId, HirFunction>) -> i64:
+    val keys: [SymbolId] = entries.keys()
+    keys.len()
+
+# Keys of `hir_modules` whose stored value is not a well-formed heap
+# aggregate. `validate_value_struct_layouts` was moved off this Dict because
+# "native bootstrap can retain a dictionary key while dropping its aggregate
+# HIR value"; the three validators and the weaver below still index it, and a
+# dropped value dereferenced there is a bare SIGSEGV with no diagnostic. The
+# bit test never dereferences, so the census itself cannot fault on a bad
+# value.
+fn driver_hir_module_dict_dropped_values(hir_modules: Dict<text, HirModule>) -> [text]:
+    var dropped: [text] = []
+    for key in hir_modules.keys():
+        val module_value: HirModule = hir_modules[key]
+        if not rt_heap_ref_wellformed(module_value):
+            dropped = dropped.push(key)
+    dropped
+
+pub fn driver_validate_value_struct_layouts(
+    module_keys: [text],
+    module_values: [HirModule],
+    hir_modules: Dict<text, HirModule>
+) -> [text]:
+    var errors: [text] = []
+    # One receipt per sub-pass: the Stage-3 worker died between the last
+    # hir:file:done and streaming_source_reclaim:done four times on
+    # 2026-09-05 without naming a step. Gated like every other log_phase
+    # (SIMPLE_COMPILER_PHASE_PROFILE=1 / SIMPLE_COMPILER_TRACE=1).
+    log_phase("phase3:hir:validate:value_struct_layouts:start")
+    for error in validate_value_struct_layouts(module_keys, module_values):
+        errors = errors.push(error)
+    log_phase("phase3:hir:validate:value_struct_layouts:done errors={errors.len()}")
+    log_phase("phase3:hir:validate:dict_census:start")
+    val dropped = driver_hir_module_dict_dropped_values(hir_modules)
+    val census_total: i64 = hir_modules.keys().len()
+    log_phase("phase3:hir:validate:dict_census:done dropped={dropped.len()} total={census_total}")
+    if dropped.len() > 0 and dropped.len() == census_total:
+        # Every module rejected is not a plausible loss; it is the predicate
+        # disagreeing with how struct values travel under this codegen. Say so
+        # and keep the old behaviour rather than fail a healthy build.
+        eprint("[post-hir-validation] well-formedness test rejected all {census_total} HIR module value(s); the test is unreliable for this value representation, running the Dict validators unguarded")
+    elif dropped.len() > 0:
+        # Genuine error path that used to print nothing: say it unconditionally,
+        # then fail closed instead of handing the dropped values to passes
+        # that dereference them.
+        eprint("[post-hir-validation-fatal] {dropped.len()} module(s) in the Dict<text, HirModule> view carry no well-formed HIR aggregate; layer-eq, effect, aspect validation and advice weaving are SKIPPED rather than dereferencing them")
+        var dropped_shown = 0
+        for dropped_key in dropped:
+            if dropped_shown < 10:
+                eprint("[post-hir-validation-fatal]   dropped HIR aggregate: {dropped_key}")
+            dropped_shown = dropped_shown + 1
+        errors = errors.push("internal error: {dropped.len()} HIR module(s) lost their aggregate value in Dict<text, HirModule> before post-HIR validation (first: {dropped[0]})")
+        return errors
+    log_phase("phase3:hir:validate:layer_eq:start")
+    for layer_eq_error in validate_layer_eq_types(hir_modules):
+        errors = errors.push(layer_eq_error)
+    log_phase("phase3:hir:validate:layer_eq:done errors={errors.len()}")
+    log_phase("phase3:hir:validate:effects:start")
+    for effect_error in validate_effect_contracts(hir_modules):
+        errors = errors.push(effect_error)
+    log_phase("phase3:hir:validate:effects:done errors={errors.len()}")
+    log_phase("phase3:hir:validate:aspects:start")
+    val aspect_errors = validate_aspect_contracts(hir_modules)
+    for aspect_error in aspect_errors:
+        errors = errors.push(aspect_error)
+    log_phase("phase3:hir:validate:aspects:done errors={errors.len()}")
+    if aspect_errors.len() == 0:
+        log_phase("phase3:hir:validate:weave:start")
+        val _woven = weave_forward_advice(hir_modules)
+        log_phase("phase3:hir:validate:weave:done")
+    errors

@@ -1,0 +1,440 @@
+# SLH-DSA-SHA2-192s / 256s Round-Trip + Invariant Spec (FIPS 205)
+#
+# Exercises the parameterized SLH-DSA-SHA2-192s and 256s implementations
+# (src/os/crypto/slh_dsa*.spl) at multiple layers using the tag-dispatched
+# _p variants added in the 2026-05-10 Option B refactor.
+#
+# Parameter comparison (FIPS 205 §11 Table 2):
+#   128s: n=16, h=63, d=7, h'=9, a=12, k=14, m=30, hash=SHA-256
+#   192s: n=24, h=63, d=7, h'=9, a=14, k=17, m=39, hash=SHA-512
+#   256s: n=32, h=64, d=8, h'=8, a=14, k=22, m=47, hash=SHA-512
+#
+# Tests per parameter set:
+#   1. WOTS+ round-trip — wots_pkFromSig(sign(m)) == wots_pk_gen via _p variant.
+#   2. XMSS subtree round-trip at h_prime=2 (4-leaf tree).
+#   3. FORS round-trip at reduced (k=4, a=2) — 4 trees of 4 leaves each.
+#   4. HT round-trip at reduced (d=2, h_prime=2).
+#   5. End-to-end slh_*_internal_p at reduced (d=2, h_prime=2, k=4, a=2):
+#      KeyGen-Sign-Verify plus tamper-rejection.
+#   6. Public API smoke — confirm 192s/256s keygen/sign/verify symbols link.
+#
+# PERFORMANCE BUDGET (interpreter mode)
+# --------------------------------------
+# SHA-512 invocations are approximately 2x slower than SHA-256 calls and
+# require 128-byte block construction vs 64-byte. To stay inside the
+# pre-commit hook budget, both 192s and 256s use (d=2, h_prime=2, k=4, a=2)
+# reduced parameters — smaller k and a than the 128s reduced spec to
+# compensate for the SHA-512 overhead. SHA-512-based hash chains are
+# otherwise structurally identical to SHA-256 chains.
+#
+# Full-parameter 192s / 256s round-trips (which would require SHA-512 chains
+# of width wots_len(n) = 2n+3 at full d/h'/k/a) are gated behind the
+# SLH_DSA_FULL_KAT environment variable, same pattern as the 128s spec.
+# KAT vectors against the NIST CCTV reference are deferred until a
+# compiled-mode runner is available (cf. slh_dsa_128s_spec.spl header).
+
+use std.spipe.*
+use os.crypto.slh_dsa_wots.{
+    adrs_new, adrs_set_layer, adrs_set_tree_address,
+    adrs_set_type, adrs_set_keypair_address,
+    adrs_type_wots_hash,
+    _slh_hash_sha512,
+    wots_pk_gen_p, wots_sign_p, wots_pk_from_sig_p,
+    _slh_wots_len,
+}
+use os.crypto.slh_dsa_xmss.{
+    xmss_node_p, xmss_sign_p, xmss_pk_from_sig_p, xmss_sig_len_p,
+}
+use os.crypto.slh_dsa_fors.{
+    fors_pk_gen_p, fors_sign_p, fors_pk_from_sig_p, fors_sig_len_p,
+}
+use os.crypto.slh_dsa_hypertree.{
+    ht_sign_p, ht_verify_p, ht_pk_root_p, ht_sig_len_p,
+}
+use os.crypto.slh_dsa.{
+    slh_keygen_internal_p, slh_sign_internal_p, slh_verify_internal_p,
+    slh_dsa_192s_keygen, slh_dsa_192s_sign, slh_dsa_192s_verify,
+    slh_dsa_256s_keygen, slh_dsa_256s_sign, slh_dsa_256s_verify,
+}
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn _filled_p(n: u64, b: i64) -> [u8]:
+    var out: [u8] = [0u8; 0]
+    var i: u64 = 0u64
+    while i < n:
+        out.push((b & 0xff).to_u8())
+        i = i + 1
+    out
+
+fn _bytes_eq_p(a: [u8], b: [u8]) -> bool:
+    if a.len() != b.len(): return false
+    var i: u64 = 0u64
+    while i < a.len():
+        if a[i] != b[i]: return false
+        i = i + 1
+    true
+
+fn _wots_adrs_p() -> [u8]:
+    var a = adrs_new()
+    a = adrs_set_layer(a, 0)
+    a = adrs_set_tree_address(a, 0)
+    a = adrs_set_type(a, adrs_type_wots_hash())
+    a = adrs_set_keypair_address(a, 7)
+    a
+
+fn _xmss_adrs_p() -> [u8]:
+    var a = adrs_new()
+    a = adrs_set_layer(a, 0)
+    a = adrs_set_tree_address(a, 0)
+    a
+
+fn _fors_adrs_p() -> [u8]:
+    var a = adrs_new()
+    a = adrs_set_layer(a, 0)
+    a = adrs_set_tree_address(a, 0)
+    a = adrs_set_keypair_address(a, 0)
+    a
+
+# Builds a tampered copy of `sig` with bit 0 of byte 0 flipped. Kept at
+# module scope to avoid it-block var-mutation hazard under interpreter mode
+# (cf. .claude/memory/feedback_it_block_var_mutation.md).
+fn _tamper_first_byte_p(sig: [u8]) -> [u8]:
+    var out: [u8] = [0u8; 0]
+    var i: u64 = 0u64
+    while i < sig.len():
+        out.push(sig[i])
+        i = i + 1
+    out[0u64] = (out[0u64].to_i64() ^ 1).to_u8()
+    out
+
+# Build tamper fixture for 192s end-to-end test.
+fn _build_tamper_fixture_192s() -> tuple:
+    val n: u64 = 24u64
+    val hash_id = _slh_hash_sha512()
+    val sk_seed = _filled_p(n, 0x42)
+    val sk_prf  = _filled_p(n, 0x12)
+    val pk_seed = _filled_p(n, 0xA5)
+    val keys = slh_keygen_internal_p(sk_seed, sk_prf, pk_seed, 2, 2, n, hash_id)
+    val pk = keys.0
+    val sk = keys.1
+    val msg = _filled_p(n, 0x33)
+    # m_len=3: ceil(k*a/8) + ceil((h-h')/8) + ceil(h'/8) = 1+1+1 for d=2,h'=2,k=4,a=2
+    val sig = slh_sign_internal_p(msg, sk, pk_seed, 2, 2, 2, 4, n, 3, hash_id)
+    val tampered = _tamper_first_byte_p(sig)
+    (pk, msg, sig, tampered)
+
+# Build tamper fixture for 256s end-to-end test.
+fn _build_tamper_fixture_256s() -> tuple:
+    val n: u64 = 32u64
+    val hash_id = _slh_hash_sha512()
+    val sk_seed = _filled_p(n, 0x42)
+    val sk_prf  = _filled_p(n, 0x12)
+    val pk_seed = _filled_p(n, 0xA5)
+    val keys = slh_keygen_internal_p(sk_seed, sk_prf, pk_seed, 2, 2, n, hash_id)
+    val pk = keys.0
+    val sk = keys.1
+    val msg = _filled_p(n, 0x33)
+    # m_len=3: ceil(k*a/8) + ceil((h-h')/8) + ceil(h'/8) = 1+1+1 for d=2,h'=2,k=4,a=2
+    val sig = slh_sign_internal_p(msg, sk, pk_seed, 2, 2, 2, 4, n, 3, hash_id)
+    val tampered = _tamper_first_byte_p(sig)
+    (pk, msg, sig, tampered)
+
+# ============================================================================
+# SLH-DSA-SHA2-192s (n=24, SHA-512)
+# ============================================================================
+
+describe "SLH-DSA-SHA2-192s WOTS+ — n=24 SHA-512 parameters":
+    """
+    ## WOTS+ Round-Trip — SHA2-192s
+
+    Exercises the _p variants of wots_pk_gen / sign / pkFromSig with
+    n=24 and hash_id=SHA-512. Verifies that wots_pkFromSig(sign(m))
+    equals wots_pk_gen for the same ADRS and seeds.
+    """
+
+    it "wots_pkFromSig(wots_sign(m)) equals wots_pk_gen at SHA2-192s params":
+        val n: u64 = 24u64
+        val hash_id = _slh_hash_sha512()
+        val sk = _filled_p(n, 0x42)
+        val pk = _filled_p(n, 0xA5)
+        val msg = _filled_p(n, 0x33)
+        val adrs = _wots_adrs_p()
+        val pk_direct = wots_pk_gen_p(sk, pk, adrs, n, hash_id)
+        val sig = wots_sign_p(msg, sk, pk, adrs, n, hash_id)
+        val pk_recovered = wots_pk_from_sig_p(msg, sig, pk, adrs, n, hash_id)
+        expect(pk_direct.len()).to_equal(24)
+        expect(sig.len()).to_equal(_slh_wots_len(n).to_u64() * n)
+        expect(_bytes_eq_p(pk_direct, pk_recovered)).to_equal(true)
+
+describe "SLH-DSA-SHA2-192s XMSS subtree — h_prime=2 n=24":
+    """
+    ## XMSS Subtree Round-Trip — SHA2-192s
+
+    Exercises xmss_node_p / xmss_sign_p / xmss_pk_from_sig_p on a
+    4-leaf subtree with n=24 and SHA-512.
+    """
+
+    it "xmss_pkFromSig(xmss_sign(m)) equals xmss_node root at n=24 SHA-512":
+        val n: u64 = 24u64
+        val hash_id = _slh_hash_sha512()
+        val sk = _filled_p(n, 0x42)
+        val pk = _filled_p(n, 0xA5)
+        val msg = _filled_p(n, 0x33)
+        val adrs = _xmss_adrs_p()
+        val h_prime = 2
+        val idx = 1
+        val root_direct = xmss_node_p(sk, 0, h_prime, pk, adrs, n, hash_id)
+        val sig = xmss_sign_p(msg, sk, idx, h_prime, pk, adrs, n, hash_id)
+        val root_recovered = xmss_pk_from_sig_p(idx, sig, msg, h_prime, pk, adrs, n, hash_id)
+        expect(root_direct.len()).to_equal(24)
+        expect(sig.len()).to_equal(xmss_sig_len_p(h_prime, n))
+        expect(_bytes_eq_p(root_direct, root_recovered)).to_equal(true)
+
+describe "SLH-DSA-SHA2-192s FORS — reduced (k=4, a=2) n=24":
+    """
+    ## FORS Round-Trip — SHA2-192s
+
+    Exercises fors_pk_gen_p / fors_sign_p / fors_pk_from_sig_p with
+    k=4 trees of height a=2 (4 leaves each) using n=24 and SHA-512.
+    Full parameters are k=17, a=14 at SHA2-192s.
+    """
+
+    it "fors_pkFromSig(fors_sign(md)) equals fors_pk_gen at n=24 SHA-512":
+        val n: u64 = 24u64
+        val hash_id = _slh_hash_sha512()
+        val sk = _filled_p(n, 0x42)
+        val pk = _filled_p(n, 0xA5)
+        # md needs k*a = 4*2 = 8 bits = 1 byte for (k=4, a=2).
+        val md = _filled_p(1u64, 0xC3)
+        val adrs = _fors_adrs_p()
+        val pk_direct = fors_pk_gen_p(sk, pk, adrs, 4, 2, n, hash_id)
+        val sig = fors_sign_p(md, sk, pk, adrs, 4, 2, n, hash_id)
+        val pk_recovered = fors_pk_from_sig_p(sig, md, pk, adrs, 4, 2, n, hash_id)
+        expect(pk_direct.len()).to_equal(24)
+        expect(sig.len()).to_equal(fors_sig_len_p(4, 2, n))
+        expect(_bytes_eq_p(pk_direct, pk_recovered)).to_equal(true)
+
+describe "SLH-DSA-SHA2-192s Hypertree — reduced (d=2, h_prime=2) n=24":
+    """
+    ## Hypertree Round-Trip — SHA2-192s
+
+    Exercises ht_sign_p / ht_verify_p / ht_pk_root_p over a 2-layer
+    hypertree of height 4 with n=24 and SHA-512.
+    """
+
+    it "ht_verify accepts ht_sign signature at n=24 SHA-512":
+        val n: u64 = 24u64
+        val hash_id = _slh_hash_sha512()
+        val sk = _filled_p(n, 0x42)
+        val pk = _filled_p(n, 0xA5)
+        val msg = _filled_p(n, 0x33)
+        val d = 2
+        val h_prime = 2
+        val pk_root = ht_pk_root_p(sk, pk, d, h_prime, n, hash_id)
+        val idx_tree = 1
+        val idx_leaf = 2
+        val sig = ht_sign_p(msg, sk, pk, idx_tree, idx_leaf, d, h_prime, n, hash_id)
+        expect(pk_root.len()).to_equal(24)
+        expect(sig.len()).to_equal(ht_sig_len_p(d, h_prime, n))
+        val ok = ht_verify_p(msg, sig, pk, idx_tree, idx_leaf, pk_root, d, h_prime, n, hash_id)
+        expect(ok).to_equal(true)
+
+describe "SLH-DSA-SHA2-192s — end-to-end at reduced (d=2, h'=2, k=4, a=2)":
+    """
+    ## End-to-End KeyGen / Sign / Verify — SHA2-192s
+
+    Drives slh_keygen_internal_p -> slh_sign_internal_p ->
+    slh_verify_internal_p with n=24 and SHA-512 at reduced parameters.
+    End-to-end signature length: 24 + 4*(1+2)*24 + 2*(51+2)*24 = 2856 bytes.
+    """
+
+    it "slh_verify_internal_p accepts a fresh slh_sign_internal_p signature (192s)":
+        val fixture = _build_tamper_fixture_192s()
+        val pk = fixture.0
+        val msg = fixture.1
+        val sig = fixture.2
+        val n: u64 = 24u64
+        val hash_id = _slh_hash_sha512()
+        val ok = slh_verify_internal_p(msg, sig, pk, 2, 2, 2, 4, n, 3, hash_id)
+        expect(pk.len()).to_equal(48)
+        expect(sig.len()).to_equal(2856)
+        expect(ok).to_equal(true)
+
+    it "slh_verify_internal_p rejects a tampered signature (192s)":
+        val fixture = _build_tamper_fixture_192s()
+        val pk = fixture.0
+        val msg = fixture.1
+        val tampered = fixture.3
+        val n: u64 = 24u64
+        val hash_id = _slh_hash_sha512()
+        val ok = slh_verify_internal_p(msg, tampered, pk, 2, 2, 2, 4, n, 3, hash_id)
+        expect(ok).to_equal(false)
+
+# ============================================================================
+# SLH-DSA-SHA2-256s (n=32, SHA-512)
+# ============================================================================
+
+describe "SLH-DSA-SHA2-256s WOTS+ — n=32 SHA-512 parameters":
+    """
+    ## WOTS+ Round-Trip — SHA2-256s
+
+    Exercises the _p variants of wots_pk_gen / sign / pkFromSig with
+    n=32 and hash_id=SHA-512. wots_len(32) = 67 chains.
+    """
+
+    it "wots_pkFromSig(wots_sign(m)) equals wots_pk_gen at SHA2-256s params":
+        val n: u64 = 32u64
+        val hash_id = _slh_hash_sha512()
+        val sk = _filled_p(n, 0x42)
+        val pk = _filled_p(n, 0xA5)
+        val msg = _filled_p(n, 0x33)
+        val adrs = _wots_adrs_p()
+        val pk_direct = wots_pk_gen_p(sk, pk, adrs, n, hash_id)
+        val sig = wots_sign_p(msg, sk, pk, adrs, n, hash_id)
+        val pk_recovered = wots_pk_from_sig_p(msg, sig, pk, adrs, n, hash_id)
+        expect(pk_direct.len()).to_equal(32)
+        expect(sig.len()).to_equal(_slh_wots_len(n).to_u64() * n)
+        expect(_bytes_eq_p(pk_direct, pk_recovered)).to_equal(true)
+
+describe "SLH-DSA-SHA2-256s XMSS subtree — h_prime=2 n=32":
+    """
+    ## XMSS Subtree Round-Trip — SHA2-256s
+
+    Exercises xmss_node_p / xmss_sign_p / xmss_pk_from_sig_p on a
+    4-leaf subtree with n=32 and SHA-512.
+    """
+
+    it "xmss_pkFromSig(xmss_sign(m)) equals xmss_node root at n=32 SHA-512":
+        val n: u64 = 32u64
+        val hash_id = _slh_hash_sha512()
+        val sk = _filled_p(n, 0x42)
+        val pk = _filled_p(n, 0xA5)
+        val msg = _filled_p(n, 0x33)
+        val adrs = _xmss_adrs_p()
+        val h_prime = 2
+        val idx = 1
+        val root_direct = xmss_node_p(sk, 0, h_prime, pk, adrs, n, hash_id)
+        val sig = xmss_sign_p(msg, sk, idx, h_prime, pk, adrs, n, hash_id)
+        val root_recovered = xmss_pk_from_sig_p(idx, sig, msg, h_prime, pk, adrs, n, hash_id)
+        expect(root_direct.len()).to_equal(32)
+        expect(sig.len()).to_equal(xmss_sig_len_p(h_prime, n))
+        expect(_bytes_eq_p(root_direct, root_recovered)).to_equal(true)
+
+describe "SLH-DSA-SHA2-256s FORS — reduced (k=4, a=2) n=32":
+    """
+    ## FORS Round-Trip — SHA2-256s
+
+    Exercises fors_pk_gen_p / fors_sign_p / fors_pk_from_sig_p with
+    k=4 trees of height a=2 using n=32 and SHA-512.
+    Full parameters are k=22, a=14 at SHA2-256s.
+    """
+
+    it "fors_pkFromSig(fors_sign(md)) equals fors_pk_gen at n=32 SHA-512":
+        val n: u64 = 32u64
+        val hash_id = _slh_hash_sha512()
+        val sk = _filled_p(n, 0x42)
+        val pk = _filled_p(n, 0xA5)
+        # md needs k*a = 4*2 = 8 bits = 1 byte for (k=4, a=2).
+        val md = _filled_p(1u64, 0xC3)
+        val adrs = _fors_adrs_p()
+        val pk_direct = fors_pk_gen_p(sk, pk, adrs, 4, 2, n, hash_id)
+        val sig = fors_sign_p(md, sk, pk, adrs, 4, 2, n, hash_id)
+        val pk_recovered = fors_pk_from_sig_p(sig, md, pk, adrs, 4, 2, n, hash_id)
+        expect(pk_direct.len()).to_equal(32)
+        expect(sig.len()).to_equal(fors_sig_len_p(4, 2, n))
+        expect(_bytes_eq_p(pk_direct, pk_recovered)).to_equal(true)
+
+describe "SLH-DSA-SHA2-256s Hypertree — reduced (d=2, h_prime=2) n=32":
+    """
+    ## Hypertree Round-Trip — SHA2-256s
+
+    Exercises ht_sign_p / ht_verify_p / ht_pk_root_p over a 2-layer
+    hypertree of height 4 with n=32 and SHA-512.
+    """
+
+    it "ht_verify accepts ht_sign signature at n=32 SHA-512":
+        val n: u64 = 32u64
+        val hash_id = _slh_hash_sha512()
+        val sk = _filled_p(n, 0x42)
+        val pk = _filled_p(n, 0xA5)
+        val msg = _filled_p(n, 0x33)
+        val d = 2
+        val h_prime = 2
+        val pk_root = ht_pk_root_p(sk, pk, d, h_prime, n, hash_id)
+        val idx_tree = 1
+        val idx_leaf = 2
+        val sig = ht_sign_p(msg, sk, pk, idx_tree, idx_leaf, d, h_prime, n, hash_id)
+        expect(pk_root.len()).to_equal(32)
+        expect(sig.len()).to_equal(ht_sig_len_p(d, h_prime, n))
+        val ok = ht_verify_p(msg, sig, pk, idx_tree, idx_leaf, pk_root, d, h_prime, n, hash_id)
+        expect(ok).to_equal(true)
+
+describe "SLH-DSA-SHA2-256s — end-to-end at reduced (d=2, h'=2, k=4, a=2)":
+    """
+    ## End-to-End KeyGen / Sign / Verify — SHA2-256s
+
+    Drives slh_keygen_internal_p -> slh_sign_internal_p ->
+    slh_verify_internal_p with n=32 and SHA-512 at reduced parameters.
+    End-to-end signature length: 32 + 4*(1+2)*32 + 2*(67+2)*32 = 4832 bytes.
+    """
+
+    it "slh_verify_internal_p accepts a fresh slh_sign_internal_p signature (256s)":
+        val fixture = _build_tamper_fixture_256s()
+        val pk = fixture.0
+        val msg = fixture.1
+        val sig = fixture.2
+        val n: u64 = 32u64
+        val hash_id = _slh_hash_sha512()
+        val ok = slh_verify_internal_p(msg, sig, pk, 2, 2, 2, 4, n, 3, hash_id)
+        expect(pk.len()).to_equal(64)
+        expect(sig.len()).to_equal(4832)
+        expect(ok).to_equal(true)
+
+    it "slh_verify_internal_p rejects a tampered signature (256s)":
+        val fixture = _build_tamper_fixture_256s()
+        val pk = fixture.0
+        val msg = fixture.1
+        val tampered = fixture.3
+        val n: u64 = 32u64
+        val hash_id = _slh_hash_sha512()
+        val ok = slh_verify_internal_p(msg, tampered, pk, 2, 2, 2, 4, n, 3, hash_id)
+        expect(ok).to_equal(false)
+
+# ============================================================================
+# Public API smoke — confirm 192s/256s wrappers compile and link
+# ============================================================================
+#
+# The full-parameter 192s / 256s round-trips are not invoked here:
+# at SHA-512 rates and full h/d/k/a values they exceed interpreter-mode
+# budgets. This block confirms the public API symbols are reachable.
+# Gate full-parameter runs behind SLH_DSA_FULL_KAT as with 128s.
+
+describe "SLH-DSA-SHA2-192s/256s — public API surface":
+    """
+    ## Public API Symbols
+
+    Verifies that slh_dsa_192s_* and slh_dsa_256s_* keygen/sign/verify
+    symbols are reachable. Full-parameter execution is gated behind
+    SLH_DSA_FULL_KAT (see file header).
+    """
+
+    it "exposes the FIPS 205 §11 Table 2 SHA2-192s public API":
+        val ref_keygen = slh_dsa_192s_keygen
+        val ref_sign = slh_dsa_192s_sign
+        val ref_verify = slh_dsa_192s_verify
+        val pk = _filled_p(48u64, 0xA5)
+        val msg = _filled_p(24u64, 0x33)
+        val short_sig = _filled_p(1u64, 0x00)
+        expect(ref_verify(pk, msg, short_sig)).to_equal(false)
+
+    it "exposes the FIPS 205 §11 Table 2 SHA2-256s public API":
+        val ref_keygen = slh_dsa_256s_keygen
+        val ref_sign = slh_dsa_256s_sign
+        val ref_verify = slh_dsa_256s_verify
+        val pk = _filled_p(64u64, 0xA5)
+        val msg = _filled_p(32u64, 0x33)
+        val short_sig = _filled_p(1u64, 0x00)
+        expect(ref_verify(pk, msg, short_sig)).to_equal(false)

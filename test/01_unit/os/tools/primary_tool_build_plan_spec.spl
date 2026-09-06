@@ -1,0 +1,104 @@
+use std.spec
+use std.fs
+use std.common.contracts.execution.simpleos_target_v1.{
+    SIMPLEOS_TARGET_V1_X86_64_TRIPLE,
+    SIMPLEOS_TARGET_V1_AARCH64_TRIPLE,
+    SIMPLEOS_TARGET_V1_RISCV64GC_TRIPLE,
+    SIMPLEOS_TARGET_V1_I686_TRIPLE,
+    SIMPLEOS_TARGET_V1_ARMV7_TRIPLE,
+    SIMPLEOS_TARGET_V1_RISCV32IMAC_TRIPLE,
+}
+use os.tools.primary_tool_build_plan.{
+    primary_tool_all_target_build_plans_v1,
+    primary_tool_entry_manifests_v1,
+    primary_tool_supported_targets_v1,
+    primary_tool_unsupported_32bit_targets_v1,
+    primary_tool_target_build_plan_v1,
+    PRIMARY_TOOL_BUILD_PLAN_TOOL_COUNT_V1,
+    PRIMARY_TOOL_BUILD_PLAN_TARGET_COUNT_V1,
+}
+
+describe "standalone primary tool build-plan contract":
+    it "owns four distinct standalone main entries":
+        val entries = primary_tool_entry_manifests_v1()
+        expect(entries.len()).to_equal(PRIMARY_TOOL_BUILD_PLAN_TOOL_COUNT_V1)
+        expect(entries[0].command).to_equal("sha256sum")
+        expect(entries[1].command).to_equal("md5sum")
+        expect(entries[2].command).to_equal("grep")
+        expect(entries[3].command).to_equal("ps")
+        expect(entries[0].entry_symbol).to_equal("main")
+        expect(entries[0].canonical_path).to_equal("/usr/bin/sha256sum")
+        expect(entries[1].canonical_path).to_equal("/usr/bin/md5sum")
+        expect(entries[2].canonical_path).to_equal("/usr/bin/grep")
+        expect(entries[3].canonical_path).to_equal("/usr/bin/ps")
+
+    it "links each adapter to its canonical owner with the zero-argument convention":
+        val entries = primary_tool_entry_manifests_v1()
+        for entry in entries:
+            val source = fs.read_file(entry.entry_source)
+            expect(source).to_contain("use std.io_runtime.{get_args}")
+            expect(source).to_contain("fn main() -> i32:")
+            expect(source).to_contain("get_args()[1:]")
+        expect(fs.read_file(entries[0].entry_source)).to_contain("main_sha256sum")
+        expect(fs.read_file(entries[1].entry_source)).to_contain("main_md5sum")
+        expect(fs.read_file(entries[2].entry_source)).to_contain("main_grep")
+        expect(fs.read_file(entries[3].entry_source)).to_contain("main_ps")
+
+    it "isolates every command output for every canonical target":
+        expect(primary_tool_supported_targets_v1()).to_equal([
+            SIMPLEOS_TARGET_V1_X86_64_TRIPLE,
+            SIMPLEOS_TARGET_V1_AARCH64_TRIPLE,
+            SIMPLEOS_TARGET_V1_RISCV64GC_TRIPLE,
+        ])
+        val plans = primary_tool_all_target_build_plans_v1()
+        expect(plans.len()).to_equal(
+            PRIMARY_TOOL_BUILD_PLAN_TOOL_COUNT_V1 *
+                PRIMARY_TOOL_BUILD_PLAN_TARGET_COUNT_V1)
+        expect(plans[0].output_path).to_contain(plans[0].target_triple)
+        expect(plans[0].native_build_argv).to_contain("--entry-closure")
+        expect(plans[0].native_build_argv).to_contain(plans[0].target_triple)
+        var outputs: [text] = []
+        for plan in plans:
+            expect(plan.output_path).to_equal(
+                "build/os/primary-tools/{plan.target_triple}/usr/bin/{plan.command}")
+            expect(outputs.contains(plan.output_path)).to_equal(false)
+            outputs.push(plan.output_path)
+            expect(plan.artifact_built).to_equal(false)
+            expect(plan.artifact_admitted).to_equal(false)
+            expect(plan.loader_ready).to_equal(false)
+            expect(plan.native_build_argv).to_equal([
+                "native-build", "--backend", "llvm",
+                "--source", "src/os", "--source", "src/lib",
+                "--entry", plan.entry_source, "--entry-closure",
+                "--target", plan.target_triple,
+                "--linker-script", "build/os/sysroot/share/simpleos/simpleos.ld",
+                "-o", plan.output_path,
+            ])
+
+    it "does not claim artifact production admission or readiness":
+        val result = primary_tool_target_build_plan_v1(
+            "sha256sum", SIMPLEOS_TARGET_V1_X86_64_TRIPLE)
+        match result:
+            case Ok(plan):
+                expect(plan.artifact_built).to_equal(false)
+                expect(plan.artifact_admitted).to_equal(false)
+                expect(plan.loader_ready).to_equal(false)
+            case Err(_): expect(false).to_equal(true)
+
+    it "rejects commands and targets outside the closed manifests":
+        expect(primary_tool_target_build_plan_v1(
+            "tar", SIMPLEOS_TARGET_V1_X86_64_TRIPLE).is_err()).to_equal(true)
+        expect(primary_tool_target_build_plan_v1(
+            "grep", "x86_64-unknown-linux-gnu").is_err()).to_equal(true)
+
+    it "reports all 32-bit targets unsupported and emits no plan for them":
+        val unsupported = primary_tool_unsupported_32bit_targets_v1()
+        expect(unsupported).to_equal([
+            SIMPLEOS_TARGET_V1_I686_TRIPLE,
+            SIMPLEOS_TARGET_V1_ARMV7_TRIPLE,
+            SIMPLEOS_TARGET_V1_RISCV32IMAC_TRIPLE,
+        ])
+        expect(primary_tool_supported_targets_v1().contains(
+            SIMPLEOS_TARGET_V1_I686_TRIPLE)).to_equal(false)
+        for target in unsupported:
+            expect(primary_tool_target_build_plan_v1("grep", target).is_err()).to_equal(true)

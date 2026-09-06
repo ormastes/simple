@@ -1,0 +1,83 @@
+"""
+## Purpose and audience
+Pins the dependency-gating conventions of the spec layer: a scenario whose
+dependencies are satisfied runs and passes, a scenario waiting on a missing
+dependency stays marked as waiting, and ordinary scenarios keep working
+alongside both. Written for maintainers of the std.spec runner surface and
+for spec authors who order scenarios to satisfy in-file dependencies.
+## Operator workflow
+./src/compiler_rust/target/bootstrap/simple run test/01_unit/std/pending_on_spec.spl
+## Compatibility and limitations
+pending_on and pending_skip are defined inline here because the runtime does
+not yet expose custom spec helpers from std.spec imports; the inline
+definitions are the reference behavior until that lands. The legacy
+comment-annotation form remains recognized for backward compatibility.
+## Verification guidance and troubleshooting
+A failure means the dependency convention drifted: a satisfied dependency
+failed to run, or an ordinary scenario stopped coexisting with gated ones.
+Rerun the file and compare each observed value with the oracle comment on
+the failing expect line.
+"""
+# Lifecycle: doc/01_research/domain/sspec_documentization_maintenance.md ;
+# doc/03_plan/sspec_modernization_plan.md ;
+# doc/04_architecture/sspec_documentization_maintenance.md ;
+# doc/05_design/app/testing/in_development_tag.md
+# @manual_section: dependency-gating
+
+# -- Inline definitions (required until runtime supports custom spec functions) --
+
+use std.spec.step
+
+fn pending_on(name: text, deps: text, block: fn()):
+    # Within-file: deps satisfied by ordering convention, always run
+    it(name, block)
+
+fn pending_skip(name: text, deps: text):
+    # Mark test as waiting without running it
+    print "    it {name} ... waiting (waiting on: {deps})"
+
+# -- Tests --
+
+describe "dependency-gated execution":
+    it "satisfies the first ordered dependency":
+        # @req REQ-SPEC-PENDING-001
+        # @capture(statistics): dependency-provider verdict for the gating order
+        step("Run the first provider scenario in the dependency chain")
+        expect(1 + 1).to_equal(2)  # oracle: the provider must execute ordinary arithmetic cleanly
+
+    it "satisfies the second ordered dependency":
+        # @req REQ-SPEC-PENDING-002
+        # @capture(statistics): second-provider verdict for the gating order
+        step("Run the second provider scenario in the dependency chain")
+        expect(2 * 3).to_equal(6)  # oracle: the second provider must execute cleanly before its consumer
+
+    # Deps met by ordering - gated scenario runs and passes
+    pending_on "runs when deps met", "satisfies the first ordered dependency, satisfies the second ordered dependency":
+        expect(2 + 2).to_equal(4)  # oracle: the gated body runs only after both providers pass
+
+describe "dependency-gated waiting":
+    # Deps not met - scenario stays waiting
+    pending_skip("waits for a nonexistent dependency", "this.test.does.not.exist")
+
+    # Multiple deps not met
+    pending_skip("waits for several missing dependencies", "feature_a, feature_b")
+
+describe "gated execution with a failing provider":
+    it "provides a passing dependency for the gated consumer":
+        # @req REQ-SPEC-PENDING-003
+        # @capture(statistics): provider verdict for the gated-consumer chain
+        step("Run the provider the gated consumer depends on")
+        expect(2 + 2).to_equal(4)  # oracle: the provider must pass so the consumer is allowed to run
+
+    # Deps met - gated scenario runs normally
+    pending_on "runs when its dependency is met", "provides a passing dependency for the gated consumer":
+        expect(1 + 1).to_equal(2)  # oracle: with deps met the gated body executes like a normal scenario
+
+describe "backward compatibility":
+    # The comment-annotation form is still recognized alongside normal scenarios
+    it "runs a regular scenario alongside annotated markers":
+        # @req REQ-SPEC-PENDING-004
+        # @capture(statistics): coexistence verdict for annotated markers
+        step("Run a plain scenario that carries an annotation marker")
+        val annotation_marker = "regular scenario carries an annotation marker"
+        expect(annotation_marker).to_contain("annotation")

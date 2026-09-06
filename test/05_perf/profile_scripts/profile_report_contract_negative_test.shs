@@ -1,0 +1,809 @@
+#!/bin/sh
+set -eu
+
+# Negative coverage for the cross-language profile report contract. This keeps
+# the Go-vs-C, Simple-vs-C, and runtime-pool evidence rules from silently
+# becoming no-ops.
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)"
+cd "$ROOT_DIR"
+
+contract="test/05_perf/profile_scripts/profile_report_contract_test.shs"
+script_path="scripts/check/check-cross-language-perf.shs"
+source_report="doc/09_report/cross_language_perf_2026-06-11_thread_fix_refresh_freshbin.md"
+report_index="doc/09_report/README.md"
+tmp_report="doc/09_report/.profile_contract_negative_$$.md"
+tmp_edit="${tmp_report}.tmp"
+tmp_index="${report_index}.profile_contract_negative_$$.bak"
+
+cleanup() {
+    rm -f "$tmp_report" "$tmp_edit"
+    if [ -f "$tmp_index" ]; then
+        cp "$tmp_index" "$report_index"
+        rm -f "$tmp_index"
+    fi
+}
+trap cleanup EXIT INT TERM
+
+fail() {
+    echo "profile_report_contract_negative=false"
+    echo "error=$1"
+    exit 1
+}
+
+cp "$source_report" "$tmp_report"
+
+awk '
+    /\*\*Fanout workers:\*\*/ {
+        sub(/\*\*Fanout workers:\*\* [0-9]+/, "**Fanout workers:** 1000")
+    }
+    /^## / {
+        in_fanout = ($0 ~ /^## Large Fanout Scheduling/)
+    }
+    in_fanout && /\| Simple multicore green \(native\)/ {
+        sub(/\|[ \t]*[0-9]+\.[0-9]+[ \t]*\|/, "|      999.999 |")
+    }
+    { print }
+' "$tmp_report" >"$tmp_edit"
+mv "$tmp_edit" "$tmp_report"
+
+set +e
+output="$(sh "$contract" cross_language "$script_path" "$tmp_report" 2>&1)"
+code=$?
+set -e
+
+if [ "$code" -eq 0 ]; then
+    fail "mutated large Simple multicore-green fanout row unexpectedly passed"
+fi
+
+printf '%s\n' "$output" | grep -Fq "large Simple multicore-green fanout row must be faster than C pthread fanout row" ||
+    fail "missing expected large-fanout failure message"
+
+cp "$source_report" "$tmp_report"
+
+awk '
+    /\*\*Fanout workers:\*\*/ {
+        sub(/\*\*Fanout workers:\*\* [0-9]+/, "**Fanout workers:** 1000")
+    }
+    /^## / {
+        in_fanout = ($0 ~ /^## Large Fanout Scheduling/)
+    }
+    in_fanout && /\| Go[ \t]*\|/ {
+        sub(/\|[ \t]*[0-9]+\.[0-9]+[ \t]*\|/, "|      999.999 |")
+    }
+    { print }
+' "$tmp_report" >"$tmp_edit"
+mv "$tmp_edit" "$tmp_report"
+
+set +e
+output="$(sh "$contract" cross_language "$script_path" "$tmp_report" 2>&1)"
+code=$?
+set -e
+
+if [ "$code" -eq 0 ]; then
+    fail "mutated large Go fanout row unexpectedly passed"
+fi
+
+printf '%s\n' "$output" | grep -Fq "large Go fanout row must be faster than C pthread fanout row" ||
+    fail "missing expected large Go fanout failure message"
+
+cp "$source_report" "$tmp_report"
+
+awk '
+    /^## / {
+        in_stress = ($0 ~ /^## Simple vs Go vs C Large Fanout Stress/)
+    }
+    in_stress && /\| Simple multicore green \(native\)/ {
+        sub(/\|[ \t]*[0-9]+\.[0-9]+[ \t]*\|/, "|      999.999 |")
+    }
+    { print }
+' "$tmp_report" >"$tmp_edit"
+mv "$tmp_edit" "$tmp_report"
+
+set +e
+output="$(sh "$contract" cross_language "$script_path" "$tmp_report" 2>&1)"
+code=$?
+set -e
+
+if [ "$code" -eq 0 ]; then
+    fail "mutated Simple multicore-green stress row unexpectedly passed"
+fi
+
+printf '%s\n' "$output" | grep -Fq "Simple multicore-green stress fanout row must be faster than C pthread stress row" ||
+    fail "missing expected stress failure message"
+
+cp "$source_report" "$tmp_report"
+
+awk '
+    /^## / {
+        in_stress = ($0 ~ /^## Simple vs Go vs C Large Fanout Stress/)
+    }
+    in_stress && /\| Go[ \t]*\|/ {
+        sub(/\|[ \t]*[0-9]+\.[0-9]+[ \t]*\|/, "|      999.999 |")
+    }
+    { print }
+' "$tmp_report" >"$tmp_edit"
+mv "$tmp_edit" "$tmp_report"
+
+set +e
+output="$(sh "$contract" cross_language "$script_path" "$tmp_report" 2>&1)"
+code=$?
+set -e
+
+if [ "$code" -eq 0 ]; then
+    fail "mutated Go stress row unexpectedly passed"
+fi
+
+printf '%s\n' "$output" | grep -Fq "Go stress fanout row must be faster than C pthread stress row" ||
+    fail "missing expected Go stress failure message"
+
+cp "$source_report" "$tmp_report"
+
+awk '
+    /^## / {
+        in_parallel = ($0 ~ /^## OS Thread Parallel Workers/)
+    }
+    in_parallel && /\| Simple multicore green / {
+        next
+    }
+    { print }
+' "$tmp_report" >"$tmp_edit"
+mv "$tmp_edit" "$tmp_report"
+
+set +e
+output="$(sh "$contract" cross_language "$script_path" "$tmp_report" 2>&1)"
+code=$?
+set -e
+
+if [ "$code" -eq 0 ]; then
+    fail "removed Simple multicore-green worker rows unexpectedly passed"
+fi
+
+printf '%s\n' "$output" | grep -Fq "missing 'multicore_green runtime pool candidate'" ||
+    fail "missing expected Simple multicore-green worker-row presence failure message"
+
+cp "$source_report" "$tmp_report"
+
+awk '
+    /^## / {
+        in_fanout = ($0 ~ /^## Large Fanout Scheduling/)
+    }
+    in_fanout && /\| Simple multicore green \(SMF\)/ {
+        next
+    }
+    { print }
+' "$tmp_report" >"$tmp_edit"
+mv "$tmp_edit" "$tmp_report"
+
+set +e
+output="$(sh "$contract" cross_language "$script_path" "$tmp_report" 2>&1)"
+code=$?
+set -e
+
+if [ "$code" -eq 0 ]; then
+    fail "removed Simple multicore-green SMF fanout row unexpectedly passed"
+fi
+
+printf '%s\n' "$output" | grep -Fq "invalid Simple multicore green evidence row" ||
+    fail "missing expected Simple multicore-green SMF fanout-row presence failure message"
+
+cp "$source_report" "$tmp_report"
+
+awk '
+    /^## / {
+        in_fanout = ($0 ~ /^## Large Fanout Scheduling/)
+    }
+    in_fanout && /\| Simple multicore green \(native\)/ {
+        sub(/queue_model=work_stealing/, "queue_model=global_fifo")
+    }
+    { print }
+' "$tmp_report" >"$tmp_edit"
+mv "$tmp_edit" "$tmp_report"
+
+set +e
+output="$(sh "$contract" cross_language "$script_path" "$tmp_report" 2>&1)"
+code=$?
+set -e
+
+if [ "$code" -eq 0 ]; then
+    fail "mutated Simple multicore-green queue model unexpectedly passed"
+fi
+
+printf '%s\n' "$output" | grep -Fq "invalid Simple multicore green evidence row" ||
+    fail "missing expected runtime-pool evidence failure message"
+
+cp "$source_report" "$tmp_report"
+
+awk '
+    /^## / {
+        in_fanout = ($0 ~ /^## Large Fanout Scheduling/)
+    }
+    in_fanout && /\| Simple multicore green \(native\)/ {
+        sub(/pool_used=[0-9]+\/[0-9]+/, "pool_used=999/1000")
+    }
+    { print }
+' "$tmp_report" >"$tmp_edit"
+mv "$tmp_edit" "$tmp_report"
+
+set +e
+output="$(sh "$contract" cross_language "$script_path" "$tmp_report" 2>&1)"
+code=$?
+set -e
+
+if [ "$code" -eq 0 ]; then
+    fail "mutated Simple multicore-green pool usage unexpectedly passed"
+fi
+
+printf '%s\n' "$output" | grep -Fq "invalid Simple multicore green evidence row" ||
+    fail "missing expected pool-used evidence failure message"
+
+cp "$source_report" "$tmp_report"
+
+awk '
+    /^## / {
+        in_fanout = ($0 ~ /^## Large Fanout Scheduling/)
+    }
+    in_fanout && /\| Simple multicore green \(native\)/ {
+        sub(/pool_used=[0-9]+\/[0-9]+/, "pool_used=0/0")
+    }
+    { print }
+' "$tmp_report" >"$tmp_edit"
+mv "$tmp_edit" "$tmp_report"
+
+set +e
+output="$(sh "$contract" cross_language "$script_path" "$tmp_report" 2>&1)"
+code=$?
+set -e
+
+if [ "$code" -eq 0 ]; then
+    fail "mutated Simple multicore-green zero pool usage unexpectedly passed"
+fi
+
+printf '%s\n' "$output" | grep -Fq "invalid Simple multicore green evidence row" ||
+    fail "missing expected zero pool-used evidence failure message"
+
+cp "$source_report" "$tmp_report"
+
+awk '
+    /^## / {
+        in_fanout = ($0 ~ /^## Large Fanout Scheduling/)
+    }
+    in_fanout && /\| Simple multicore green \(native\)/ {
+        sub(/, parallelism=[0-9]+\/[0-9]+/, "")
+    }
+    { print }
+' "$tmp_report" >"$tmp_edit"
+mv "$tmp_edit" "$tmp_report"
+
+set +e
+output="$(sh "$contract" cross_language "$script_path" "$tmp_report" 2>&1)"
+code=$?
+set -e
+
+if [ "$code" -eq 0 ]; then
+    fail "mutated Simple multicore-green parallelism evidence unexpectedly passed"
+fi
+
+printf '%s\n' "$output" | grep -Fq "invalid Simple multicore green evidence row" ||
+    fail "missing expected parallelism evidence failure message"
+
+cp "$source_report" "$tmp_report"
+
+awk '
+    /^## / {
+        in_fanout = ($0 ~ /^## Large Fanout Scheduling/)
+    }
+    in_fanout && /\| Simple multicore green \(native\)/ {
+        sub(/, counter_delta=[0-9]+\/[0-9]+,pending=0,busy=0,blocked=0/, "")
+    }
+    { print }
+' "$tmp_report" >"$tmp_edit"
+mv "$tmp_edit" "$tmp_report"
+
+set +e
+output="$(sh "$contract" cross_language "$script_path" "$tmp_report" 2>&1)"
+code=$?
+set -e
+
+if [ "$code" -eq 0 ]; then
+    fail "mutated Simple multicore-green counter evidence unexpectedly passed"
+fi
+
+printf '%s\n' "$output" | grep -Fq "invalid Simple multicore green evidence row" ||
+    fail "missing expected counter evidence failure message"
+
+cp "$source_report" "$tmp_report"
+
+awk '
+    /Go scheduler: `GOMAXPROCS=/ {
+        sub(/GOMAXPROCS=[0-9]+/, "GOMAXPROCS=32")
+    }
+    { print }
+' "$tmp_report" >"$tmp_edit"
+mv "$tmp_edit" "$tmp_report"
+
+set +e
+output="$(sh "$contract" cross_language "$script_path" "$tmp_report" 2>&1)"
+code=$?
+set -e
+
+if [ "$code" -eq 0 ]; then
+    fail "mutated Go scheduler width unexpectedly passed"
+fi
+
+printf '%s\n' "$output" | grep -Fq "Go scheduler GOMAXPROCS must match CPU workers" ||
+    fail "missing expected Go scheduler width failure message"
+
+cp "$source_report" "$tmp_report"
+
+awk '
+    /^## Hosted Fairness Evidence/ {
+        skip = 1
+        next
+    }
+    skip && /^## / {
+        skip = 0
+    }
+    !skip { print }
+' "$tmp_report" >"$tmp_edit"
+mv "$tmp_edit" "$tmp_report"
+
+set +e
+output="$(sh "$contract" cross_language "$script_path" "$tmp_report" 2>&1)"
+code=$?
+set -e
+
+if [ "$code" -eq 0 ]; then
+    fail "removed hosted sliced-fairness section unexpectedly passed"
+fi
+
+printf '%s\n' "$output" | grep -Fq "missing 'Hosted Fairness Evidence'" ||
+    fail "missing expected hosted fairness section failure message"
+
+cp "$source_report" "$tmp_report"
+
+awk '
+    /multicore_green_spawn_sliced used_runtime_pool=true, quick_done=true, parallelism=1, total=9/ {
+        sub(/quick_done=true/, "quick_done=false")
+    }
+    { print }
+' "$tmp_report" >"$tmp_edit"
+mv "$tmp_edit" "$tmp_report"
+
+set +e
+output="$(sh "$contract" cross_language "$script_path" "$tmp_report" 2>&1)"
+code=$?
+set -e
+
+if [ "$code" -eq 0 ]; then
+    fail "mutated hosted sliced-fairness evidence unexpectedly passed"
+fi
+
+printf '%s\n' "$output" | grep -Fq "missing 'multicore_green_spawn_sliced used_runtime_pool=true, quick_done=true, parallelism=1, total=9'" ||
+    fail "missing expected hosted sliced-fairness evidence failure message"
+
+cp "$source_report" "$tmp_report"
+
+awk '
+    /explicit scalar-state fairness contract/ {
+        sub(/explicit scalar-state fairness contract/, "ordinary closure preemption")
+    }
+    { print }
+' "$tmp_report" >"$tmp_edit"
+mv "$tmp_edit" "$tmp_report"
+
+set +e
+output="$(sh "$contract" cross_language "$script_path" "$tmp_report" 2>&1)"
+code=$?
+set -e
+
+if [ "$code" -eq 0 ]; then
+    fail "mutated hosted sliced-fairness explanation unexpectedly passed"
+fi
+
+printf '%s\n' "$output" | grep -Fq "missing 'explicit scalar-state fairness contract'" ||
+    fail "missing expected hosted sliced-fairness explanation failure message"
+
+cp "$source_report" "$tmp_report"
+
+awk '
+    /Simple loop safepoint/ {
+        next
+    }
+    /multicore_green_spawn loop_safepoint used_runtime_pool=true/ {
+        next
+    }
+    { print }
+' "$tmp_report" >"$tmp_edit"
+mv "$tmp_edit" "$tmp_report"
+
+set +e
+output="$(sh "$contract" cross_language "$script_path" "$tmp_report" 2>&1)"
+code=$?
+set -e
+
+if [ "$code" -eq 0 ]; then
+    fail "removed loop-safepoint fairness evidence unexpectedly passed"
+fi
+
+printf '%s\n' "$output" | grep -Fq "missing 'Simple loop safepoint (source)'" ||
+    fail "missing expected loop-safepoint fairness evidence failure message"
+
+cp "$source_report" "$tmp_report"
+
+awk '
+    /Pure Simple `multicore_green_spawn` facade over runtime-seed/ {
+        sub(/Pure Simple `multicore_green_spawn` facade over runtime-seed/, "Pure Simple `multicore_green_spawn`\\/`rt_pool_*` candidate row")
+    }
+    { print }
+' "$tmp_report" >"$tmp_edit"
+mv "$tmp_edit" "$tmp_report"
+
+set +e
+output="$(sh "$contract" cross_language "$script_path" "$tmp_report" 2>&1)"
+code=$?
+set -e
+
+if [ "$code" -eq 0 ]; then
+    fail "mutated Pure Simple runtime-seed boundary unexpectedly passed"
+fi
+
+printf '%s\n' "$output" | grep -Fq "missing 'Pure Simple \`multicore_green_spawn\` facade over runtime-seed'" ||
+    fail "missing expected Pure Simple runtime-seed boundary failure message"
+
+cp "$source_report" "$tmp_report"
+
+awk '
+    /not a Go M:N goroutine equivalent/ {
+        sub(/not a Go M:N goroutine equivalent/, "a Go M:N goroutine equivalent")
+    }
+    { print }
+' "$tmp_report" >"$tmp_edit"
+mv "$tmp_edit" "$tmp_report"
+
+set +e
+output="$(sh "$contract" cross_language "$script_path" "$tmp_report" 2>&1)"
+code=$?
+set -e
+
+if [ "$code" -eq 0 ]; then
+    fail "mutated cooperative-green explanation unexpectedly passed"
+fi
+
+printf '%s\n' "$output" | grep -Fq "missing 'not a Go M:N goroutine equivalent'" ||
+    fail "missing expected cooperative-green explanation failure message"
+
+cp "$source_report" "$tmp_report"
+
+awk '
+    !changed && /\| Simple cooperative green \(native\)/ {
+        sub(/cooperative_green_spawn cooperative queue/, "cooperative_green_spawn M:N runtime pool pool_used=1/1")
+        changed = 1
+    }
+    { print }
+' "$tmp_report" >"$tmp_edit"
+mv "$tmp_edit" "$tmp_report"
+
+set +e
+output="$(sh "$contract" cross_language "$script_path" "$tmp_report" 2>&1)"
+code=$?
+set -e
+
+if [ "$code" -eq 0 ]; then
+    fail "mutated cooperative-green M:N row unexpectedly passed"
+fi
+
+printf '%s\n' "$output" | grep -Fq "invalid Simple cooperative green evidence row" ||
+    fail "missing expected cooperative-green row failure message"
+
+cp "$source_report" "$tmp_report"
+
+awk '
+    /\| Simple cooperative green / {
+        gsub(/ on current OS thread/, "")
+    }
+    { print }
+' "$tmp_report" >"$tmp_edit"
+mv "$tmp_edit" "$tmp_report"
+
+set +e
+output="$(sh "$contract" cross_language "$script_path" "$tmp_report" 2>&1)"
+code=$?
+set -e
+
+if [ "$code" -eq 0 ]; then
+    fail "mutated cooperative-green current-thread wording unexpectedly passed"
+fi
+
+printf '%s\n' "$output" | grep -Fq "invalid Simple cooperative green evidence row" ||
+    fail "missing expected cooperative-green current-thread row failure message"
+
+cp "$source_report" "$tmp_report"
+
+awk '
+    /\| Simple cooperative green / {
+        next
+    }
+    { print }
+' "$tmp_report" >"$tmp_edit"
+mv "$tmp_edit" "$tmp_report"
+
+set +e
+output="$(sh "$contract" cross_language "$script_path" "$tmp_report" 2>&1)"
+code=$?
+set -e
+
+if [ "$code" -eq 0 ]; then
+    fail "removed cooperative-green rows unexpectedly passed"
+fi
+
+printf '%s\n' "$output" | grep -Fq "missing 'cooperative queue fanout'" ||
+    fail "missing expected cooperative-green missing-row failure message"
+
+cp "$source_report" "$tmp_report"
+
+awk '
+    !changed && /\| Simple \(native\)/ && /thread_spawn fork-join OS threads/ {
+        sub(/thread_spawn fork-join OS threads/, "thread_spawn fork-join OS threads via thread_spawn_with_args ABI smoke")
+        changed = 1
+    }
+    { print }
+' "$tmp_report" >"$tmp_edit"
+mv "$tmp_edit" "$tmp_report"
+
+set +e
+output="$(sh "$contract" cross_language "$script_path" "$tmp_report" 2>&1)"
+code=$?
+set -e
+
+if [ "$code" -eq 0 ]; then
+    fail "mutated OS-thread profile row unexpectedly passed"
+fi
+
+printf '%s\n' "$output" | grep -Fq "invalid Simple OS-thread evidence row" ||
+    fail "missing expected OS-thread row failure message"
+
+cp "$source_report" "$tmp_report"
+
+awk '
+    /^## / {
+        in_parallel = ($0 ~ /^## OS Thread Parallel Workers/)
+    }
+    in_parallel && /\| Simple \(native\)/ {
+        next
+    }
+    { print }
+' "$tmp_report" >"$tmp_edit"
+mv "$tmp_edit" "$tmp_report"
+
+set +e
+output="$(sh "$contract" cross_language "$script_path" "$tmp_report" 2>&1)"
+code=$?
+set -e
+
+if [ "$code" -eq 0 ]; then
+    fail "removed OS-thread native row unexpectedly passed"
+fi
+
+printf '%s\n' "$output" | grep -Fq "missing 'thread_spawn fork-join OS threads'" ||
+    fail "missing expected OS-thread missing-row failure message"
+
+cp "$source_report" "$tmp_report"
+
+awk '
+    /^## / {
+        in_fanout = ($0 ~ /^## Large Fanout Scheduling/)
+    }
+    in_fanout && /\| Simple \(native\)/ {
+        sub(/\|[ \t]*[0-9]+\.[0-9]+[ \t]*\|/, "|      fail |")
+    }
+    { print }
+' "$tmp_report" >"$tmp_edit"
+mv "$tmp_edit" "$tmp_report"
+
+set +e
+output="$(sh "$contract" cross_language "$script_path" "$tmp_report" 2>&1)"
+code=$?
+set -e
+
+if [ "$code" -eq 0 ]; then
+    fail "mutated OS-thread native timing unexpectedly passed"
+fi
+
+printf '%s\n' "$output" | grep -Fq "Simple OS-thread evidence rows must have positive timings" ||
+    fail "missing expected OS-thread positive-timing failure message"
+
+cp "$source_report" "$tmp_report"
+
+awk '
+    /simpleos_multicore_green_evidence_2026-06-07.md/ {
+        next
+    }
+    { print }
+' "$report_index" >"$tmp_edit"
+cp "$report_index" "$tmp_index"
+mv "$tmp_edit" "$report_index"
+
+set +e
+output="$(sh "$contract" 2>&1)"
+code=$?
+set -e
+
+cp "$tmp_index" "$report_index"
+rm -f "$tmp_index"
+
+if [ "$code" -eq 0 ]; then
+    fail "mutated SimpleOS report-index row unexpectedly passed"
+fi
+
+printf '%s\n' "$output" | grep -Fq "simpleos_multicore_green_evidence_2026-06-07.md" ||
+    fail "missing expected SimpleOS report-index failure message"
+
+cp "$source_report" "$tmp_report"
+
+awk '
+    {
+        gsub(/ with sliced-handle `used_runtime_pool=true`/, "")
+        print
+    }
+' "$report_index" >"$tmp_edit"
+cp "$report_index" "$tmp_index"
+mv "$tmp_edit" "$report_index"
+
+set +e
+output="$(sh "$contract" 2>&1)"
+code=$?
+set -e
+
+cp "$tmp_index" "$report_index"
+rm -f "$tmp_index"
+
+if [ "$code" -eq 0 ]; then
+    fail "mutated hosted sliced-fairness report-index wording unexpectedly passed"
+fi
+
+printf '%s\n' "$output" | grep -Fq "sliced-handle" ||
+    fail "missing expected hosted sliced-fairness report-index failure message"
+
+cp "$source_report" "$tmp_report"
+
+awk '
+    /Generates equivalent hello, recursive fib, in-process warm fib, worker, and fanout workloads/ {
+        next
+    }
+    { print }
+' "$tmp_report" >"$tmp_edit"
+mv "$tmp_edit" "$tmp_report"
+
+set +e
+output="$(sh "$contract" cross_language "$script_path" "$tmp_report" 2>&1)"
+code=$?
+set -e
+
+if [ "$code" -eq 0 ]; then
+    fail "mutated workload-variety methodology unexpectedly passed"
+fi
+
+printf '%s\n' "$output" | grep -Fq "Generates equivalent hello, recursive fib, in-process warm fib, worker, and fanout workloads" ||
+    fail "missing expected workload-variety methodology failure message"
+
+cp "$source_report" "$tmp_report"
+
+awk '
+    /Optional language inventory is explicit: Python participates when available; Bun, Java, and Erlang rows are emitted when their toolchains exist/ {
+        next
+    }
+    { print }
+' "$tmp_report" >"$tmp_edit"
+mv "$tmp_edit" "$tmp_report"
+
+set +e
+output="$(sh "$contract" cross_language "$script_path" "$tmp_report" 2>&1)"
+code=$?
+set -e
+
+if [ "$code" -eq 0 ]; then
+    fail "mutated optional-language inventory methodology unexpectedly passed"
+fi
+
+printf '%s\n' "$output" | grep -Fq "Optional language inventory is explicit" ||
+    fail "missing expected optional-language inventory failure message"
+
+cp "$source_report" "$tmp_report"
+
+awk '
+    /Docker CPU quota is containment metadata, not the scheduler-width proof/ {
+        next
+    }
+    { print }
+' "$tmp_report" >"$tmp_edit"
+mv "$tmp_edit" "$tmp_report"
+
+set +e
+output="$(sh "$contract" cross_language "$script_path" "$tmp_report" 2>&1)"
+code=$?
+set -e
+
+if [ "$code" -eq 0 ]; then
+    fail "mutated Docker CPU quota scheduler-width wording unexpectedly passed"
+fi
+
+printf '%s\n' "$output" | grep -Fq "Docker CPU quota is containment metadata" ||
+    fail "missing expected Docker CPU quota scheduler-width failure message"
+
+cp "$source_report" "$tmp_report"
+
+awk '
+    {
+        gsub(/probes each auto-selected Simple binary with `--version`, /, "")
+        gsub(/ or stale/, "")
+        gsub(/ over a runnable release path/, "")
+        print
+    }
+' "$tmp_report" >"$tmp_edit"
+mv "$tmp_edit" "$tmp_report"
+
+set +e
+output="$(sh "$contract" cross_language "$script_path" "$tmp_report" 2>&1)"
+code=$?
+set -e
+
+if [ "$code" -eq 0 ]; then
+    fail "mutated Docker Simple binary probe wording unexpectedly passed"
+fi
+
+printf '%s\n' "$output" | grep -Fq 'probes each auto-selected Simple binary with `--version`' ||
+    fail "missing expected Docker Simple binary probe wording failure message"
+
+cp "$source_report" "$tmp_report"
+
+{
+    cat "$tmp_report"
+    printf '\nForbidden API-name probe: %s%s must never appear in profile evidence.\n' "multicore_green_spawn" "3"
+} >"$tmp_edit"
+mv "$tmp_edit" "$tmp_report"
+
+set +e
+output="$(sh "$contract" cross_language "$script_path" "$tmp_report" 2>&1)"
+code=$?
+set -e
+
+if [ "$code" -eq 0 ]; then
+    fail "mutated forbidden number-suffix API name unexpectedly passed"
+fi
+
+printf '%s\n' "$output" | grep -Fq "forbidden number-suffix API name" ||
+    fail "missing expected forbidden number-suffix API-name failure message"
+
+echo "profile_report_contract_negative=true"
+echo "case=large_simple_multicore_fanout_slower_than_c"
+echo "case=large_go_fanout_slower_than_c"
+echo "case=simple_multicore_stress_slower_than_c"
+echo "case=go_stress_slower_than_c"
+echo "case=simple_multicore_worker_rows_missing"
+echo "case=simple_multicore_smf_fanout_row_missing"
+echo "case=simple_multicore_queue_model_global_fifo"
+echo "case=simple_multicore_pool_used_partial"
+echo "case=simple_multicore_pool_used_zero"
+echo "case=simple_multicore_parallelism_missing"
+echo "case=simple_multicore_counter_evidence_missing"
+echo "case=go_scheduler_width_mismatch"
+echo "case=hosted_sliced_fairness_section_missing"
+echo "case=hosted_sliced_fairness_marker_corrupt"
+echo "case=hosted_sliced_fairness_explanation_corrupt"
+echo "case=hosted_loop_safepoint_fairness_missing"
+echo "case=pure_simple_runtime_seed_boundary_corrupt"
+echo "case=cooperative_green_explanation_corrupt"
+echo "case=cooperative_green_mn_runtime_pool_label"
+echo "case=cooperative_green_current_thread_wording_missing"
+echo "case=cooperative_green_profile_row_missing"
+echo "case=os_thread_profile_row_thread_spawn_with_args"
+echo "case=os_thread_profile_row_missing"
+echo "case=os_thread_profile_timing_fail"
+echo "case=workload_variety_methodology_missing"
+echo "case=optional_language_inventory_missing"
+echo "case=docker_cpu_quota_scheduler_width_missing"
+echo "case=simpleos_report_index_row_missing"
+echo "case=hosted_sliced_fairness_report_index_marker_missing"
+echo "case=docker_simple_binary_probe_wording_corrupt"
+echo "case=forbidden_number_suffix_api_name"

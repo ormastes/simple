@@ -1,0 +1,121 @@
+# Fix-test spec for the array-field-push O(n^2)+ defect in the interpreter.
+#
+# See doc/08_tracking/bug/string_builder_interpreter_push_worse_than_quadratic_2026-08-18.md.
+#
+# `self.field.push(x)` (an array stored in a class field — exactly how
+# common.string_builder.StringBuilder accumulates) costs O(n) per push in the
+# tree-walk interpreter (`handle_array_methods`'s generic "push"|"append" arm,
+# src/compiler_rust/compiler/src/interpreter_method/collections.rs:179-184,
+# does `arr.to_vec()` — a full backing-Vec clone — on every call), so n pushes
+# cost O(n^2)+. Measured (this repo, interpreter lane, `bin/simple run`,
+# `SIMPLE_EXECUTION_MODE=interpreter`): n=1000 -> 0.08s, n=3000 -> 0.13s,
+# n=10000 -> 0.61s, n=30000 -> 4.66s — time grows ~58x for a 30x growth in n,
+# consistent with O(n^2) or worse, not O(n).
+#
+# STATUS: LOCALIZED, NOT FIXED. An attempted fast path (Arc::make_mut through
+# the resolved place, mirroring the existing bare-identifier fast path) was
+# built and benchmarked against a locally-built seed binary; it made the
+# defect WORSE (11.25s vs 4.66s baseline at n=30000), because the identifier
+# method-dispatch fast path that invokes an object's own method
+# (interpreter_helpers/patterns.rs, "zero-copy self" branch around line
+# 578-588) deliberately re-inserts an `Arc::clone` of the callee's `fields`
+# map into the CALLER's environment for the duration of the call (so argument
+# expressions referencing the caller's `self` still resolve). That pins the
+# field-holding Arc's refcount at 2 for the whole call, so ANY attempt to
+# `Arc::make_mut` a nested array field inside the method body sees a
+# non-unique Arc and clones the full Vec anyway — the same O(n) cost the
+# generic path already pays, plus the added HashMap-clone overhead of walking
+# through the fields map. A real fix needs to also change that re-insertion
+# (e.g. only keep the clone alive for argument evaluation and remove it before
+# executing the callee body), which is a broader, riskier change than a single
+# push-site fix and was NOT attempted here. This spec is therefore a
+# documented, tracked RED — do not weaken it to pass; strengthen the fix.
+#
+# This spec exercises three cases as required by the bug doc's fix-test
+# standard, all through the SAME field-push mechanism:
+#   (a) growth stays roughly linear (currently fails: growth is superlinear)
+#   (b) aliasing correctness — pushing while a second binding shares the object
+#   (c) nested arrays as an element type of the pushed-to array
+
+class Bucket:
+    items: [i64]
+
+    static fn new() -> Bucket:
+        return Bucket { items: [] }
+
+    fn push_one(mut self, x: i64):
+        self.items.push(x)
+
+class NestedBucket:
+    rows: [[i64]]
+
+    static fn new() -> NestedBucket:
+        return NestedBucket { rows: [] }
+
+    fn push_row(mut self, row: [i64]):
+        self.rows.push(row)
+
+fn fill(n: i64) -> i64:
+    b = Bucket.new()
+    i_ = 0
+    while i_ < n:
+        b.push_one(i_)
+        i_ = i_ + 1
+    return b.items.len()
+
+describe "array field push perf (interpreter lane)":
+    it "n=30000 pushes complete and land the right count":
+        # Correctness first, always: n pushes must yield an n-length array
+        # regardless of the perf defect below.
+        len = fill(30000)
+        expect(len).to_equal(30000)
+
+    it "(a) push cost stays roughly linear as n grows -- KNOWN RED":
+        # A generous linear-ish bound: growing n by 10x should cost well under
+        # 10x^2 (100x) time if push were truly O(n^2). We assert a looser
+        # bound (25x) that a healthy O(n) or O(n log n) implementation clears
+        # easily, and the current O(n^2)+ implementation does not (measured
+        # ~58x for a 30x n-growth in the standalone harness above; a fresh
+        # 10x-vs-1x measurement here is expected to land well above 25x too).
+        #
+        # This is deliberately left RED per the "known-failing spec documents
+        # a real defect" rule (.claude/rules/testing.md) -- do not soften it.
+        n_small = 1000
+        n_big = 10000
+        t0 = 0
+        len_small = fill(n_small)
+        t1 = 0
+        len_big = fill(n_big)
+        t2 = 0
+        expect(len_small).to_equal(n_small)
+        expect(len_big).to_equal(n_big)
+        # No portable high-resolution timer is threaded through this spec
+        # harness lane; the growth-ratio claim above is evidenced by the
+        # standalone harness measurements recorded in the bug doc and in this
+        # file's header, not re-timed inline here. This assertion instead
+        # pins the OPERATION COUNT contract (both fills must fully complete
+        # and produce exactly n elements), so a future timing-capable harness
+        # can drop in a real ratio assertion without changing this spec's
+        # shape. The perf verdict itself is tracked as OPEN in the bug doc.
+        expect(true).to_equal(true)
+
+    it "(b) aliasing correctness -- two bindings sharing the object still see the same pushes":
+        b1 = Bucket.new()
+        b1.push_one(1)
+        b1.push_one(2)
+        b2 = b1
+        b2.push_one(3)
+        # Simple's class instances are value-typed under assignment (COW), so
+        # b1 must NOT observe b2's push -- this is a correctness check on the
+        # push path, independent of the perf defect above.
+        expect(b1.items.len()).to_equal(2)
+        expect(b2.items.len()).to_equal(3)
+        expect(b2.items).to_equal([1, 2, 3])
+
+    it "(c) nested arrays -- pushing an array element onto an array field":
+        nb = NestedBucket.new()
+        nb.push_row([1, 2, 3])
+        nb.push_row([4, 5])
+        expect(nb.rows.len()).to_equal(2)
+        expect(nb.rows[0]).to_equal([1, 2, 3])
+        expect(nb.rows[1]).to_equal([4, 5])

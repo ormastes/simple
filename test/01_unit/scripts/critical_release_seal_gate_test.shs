@@ -1,0 +1,57 @@
+#!/bin/sh
+# Exercises scripts/check/check-critical-release-seal.shs and the receipt
+# writer it consumes (scripts/check/lib/emit_receipt.shs):
+#   1. the gate's own --selftest passes (fatal, 7 fixtures);
+#   2. an unknown flag is ERROR exit 2;
+#   3. an EMPTY required-receipt list is ERROR, never a pass (non-vacuity);
+#   4. a hand-built evidence dir with a fresh, bound receipt PASSes;
+#   5. the same dir with the artifact swapped FAILs naming artifact-mismatch —
+#      i.e. the binding is live, not decoration.
+# Cases 4 and 5 together are the load-bearing pair: without 4, a gate that
+# rejected everything would pass 5; without 5, a gate that accepted everything
+# would pass 4.
+set -eu
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)"
+cd "$ROOT_DIR"
+CHECK="scripts/check/check-critical-release-seal.shs"
+fails=0
+
+check() { # check <name> <expected-rc> <expected-last-line-substr> <args...>
+    _n=$1; _erc=$2; _sub=$3; shift 3
+    set +e; _out=$(sh "$CHECK" "$@" 2>/dev/null); _rc=$?; set -e
+    _last=$(printf '%s\n' "$_out" | tail -1)
+    case "$_last" in *"$_sub"*) _ok=1 ;; *) _ok=0 ;; esac
+    if [ "$_rc" -eq "$_erc" ] && [ "$_ok" -eq 1 ]; then
+        echo "ok   $_n"
+    else
+        echo "FAIL $_n: rc=$_rc last=$_last"
+        fails=$((fails+1))
+    fi
+}
+
+check selftest 0 "selftest only" --selftest
+check badflag 2 "ERROR — nothing was checked" --bogus
+
+WORK=$(mktemp -d)
+trap 'rm -rf "$WORK"' EXIT HUP INT TERM
+
+: > "$WORK/empty.list"
+check vacuous 2 "ERROR — nothing was checked" --require-list "$WORK/empty.list"
+
+printf 'artifact\n' > "$WORK/art.bin"
+printf 'other\n' > "$WORK/other.bin"
+printf 'seal\n' > "$WORK/seal.sdn"
+printf 'gate-under-test\n' > "$WORK/req.list"
+mkdir -p "$WORK/evid"
+
+# Mint a receipt through the REAL writer, exactly as a gate would.
+( . "$ROOT_DIR/scripts/check/lib/emit_receipt.shs"
+  EVIDENCE_DIR="$WORK/evid"
+  emit_receipt "gate-under-test" "PASS — 5 thing(s) checked, bad=0" "$WORK/art.bin" "$WORK/seal.sdn" )
+
+check bound 0 "all fresh and bound to artifact+seal hash" \
+    --dir "$WORK/evid" --artifact "$WORK/art.bin" --seal "$WORK/seal.sdn" --require-list "$WORK/req.list"
+check rebound 1 "artifact-mismatch" \
+    --dir "$WORK/evid" --artifact "$WORK/other.bin" --seal "$WORK/seal.sdn" --require-list "$WORK/req.list"
+
+[ "$fails" -eq 0 ] && echo "PASS — 5 case(s) checked" || { echo "FAIL — $fails case(s) failed"; exit 1; }

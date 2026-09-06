@@ -1,0 +1,178 @@
+# Run-path probe for optional PAYLOAD EXTRACTION across every consumption form.
+#
+# Executed as a SUBPROCESS by
+# native_optional_payload_extraction_class_spec.spl under both
+# SIMPLE_EXECUTION_MODE=interpreter and =jit. A spec body runs interpreted, so
+# an in-process example can never observe the JIT/native defect this covers.
+#
+# Every oracle is an ABSOLUTE literal, never "the two engines agree".
+#
+# Defect class: a cross-function `T?` is produced in the "raw migration form"
+# (bare payload) rather than a boxed Some enum. The BINDING side used to call
+# rt_enum_payload unconditionally, which returns NIL for a non-heap-enum value,
+# and NIL is TAG_SPECIAL = 0b011 = 3 -- so every corrupted payload read as 3.
+# See doc/08_tracking/bug/native_optional_tuple_payload_extraction_broken_2026-07-29.md
+
+fn opt_pair_i64(flag: i64) -> (i64, i64)?:
+    if flag == 0:
+        return nil
+    (5, 9)
+
+fn opt_pair_mixed(flag: i64) -> (text, i64)?:
+    if flag == 0:
+        return nil
+    ("x", 7)
+
+fn opt_i64(flag: i64) -> i64?:
+    if flag == 0:
+        return nil
+    41
+
+fn opt_text(flag: i64) -> text?:
+    if flag == 0:
+        return nil
+    "hello"
+
+fn opt_bool(flag: i64) -> bool?:
+    if flag == 0:
+        return nil
+    true
+
+fn opt_f64(flag: i64) -> f64?:
+    if flag == 0:
+        return nil
+    2.5
+
+fn boxed_literal() -> i64?:
+    Some(99)
+
+var failures: i64 = 0
+
+fn check_i64(name: text, got: i64, want: i64):
+    if got == want:
+        print "PASS " + name
+    else:
+        failures = failures + 1
+        print "FAIL " + name + " got=" + got.to_string() + " want=" + want.to_string()
+
+fn check_text(name: text, got: text, want: text):
+    if got == want:
+        print "PASS " + name
+    else:
+        failures = failures + 1
+        print "FAIL " + name + " got=" + got + " want=" + want
+
+fn main():
+    # --- if val Some(...) binding, tuple payload -------------------------
+    if val p = opt_pair_i64(1):
+        check_i64("ifval_pair_i64_f0", p.0, 5)
+        check_i64("ifval_pair_i64_f1", p.1, 9)
+    else:
+        failures = failures + 1
+        print "FAIL ifval_pair_i64 took the none arm on a genuine Some"
+
+    if val q = opt_pair_mixed(1):
+        check_text("ifval_pair_mixed_f0", q.0, "x")
+    else:
+        failures = failures + 1
+        print "FAIL ifval_pair_mixed took the none arm on a genuine Some"
+
+    # --- match arm binding, tuple payload --------------------------------
+    match opt_pair_i64(1):
+        Some(t):
+            check_i64("match_pair_i64_f0", t.0, 5)
+            check_i64("match_pair_i64_f1", t.1, 9)
+        nil:
+            failures = failures + 1
+            print "FAIL match_pair_i64 took the nil arm on a genuine Some"
+
+    # --- CLASS GENERALISATION: every scalar payload type ------------------
+    # The tuple case is one member of the family; a raw-form payload of ANY
+    # type hits the same extraction path.
+    if val a = opt_i64(1):
+        check_i64("ifval_scalar_i64", a, 41)
+    else:
+        failures = failures + 1
+        print "FAIL ifval_scalar_i64 took the none arm"
+
+    if val b = opt_text(1):
+        check_text("ifval_scalar_text", b, "hello")
+    else:
+        failures = failures + 1
+        print "FAIL ifval_scalar_text took the none arm"
+
+    if val c = opt_bool(1):
+        if c:
+            print "PASS ifval_scalar_bool"
+        else:
+            failures = failures + 1
+            print "FAIL ifval_scalar_bool payload false, want true"
+    else:
+        failures = failures + 1
+        print "FAIL ifval_scalar_bool took the none arm"
+
+    if val d = opt_f64(1):
+        if d > 2.4 and d < 2.6:
+            print "PASS ifval_scalar_f64"
+        else:
+            failures = failures + 1
+            print "FAIL ifval_scalar_f64 got=" + d.to_string() + " want=2.5"
+    else:
+        failures = failures + 1
+        print "FAIL ifval_scalar_f64 took the none arm"
+
+    match opt_i64(1):
+        Some(v):
+            check_i64("match_scalar_i64", v, 41)
+        nil:
+            failures = failures + 1
+            print "FAIL match_scalar_i64 took the nil arm"
+
+    # --- the BOXED form must not regress ---------------------------------
+    # A literal Some(99) is a real heap enum; swapping the extraction builtin
+    # for a raw passthrough regressed this to 792 = 99<<3.
+    #
+    # THREE consumption spellings, deliberately separated: they lower through
+    # DIFFERENT code. The `Some(x)` pattern spellings go through
+    # `build_pattern_binding_stmts` (stmt_lowering.rs); the bare `if val x =`
+    # sugar and `??` go through `expr/control.rs`'s `rt_unwrap_or_self`, which
+    # has no BoxInt/UnboxInt post-processing for the boxed arm. Measured on the
+    # JIT lane 2026-08-17: pattern spellings correct, sugar spellings wrong.
+    match boxed_literal():
+        Some(e):
+            check_i64("boxed_match_some", e, 99)
+        nil:
+            failures = failures + 1
+            print "FAIL boxed_match_some took the nil arm"
+
+    if val Some(e2) = boxed_literal():
+        check_i64("boxed_ifval_some_pattern", e2, 99)
+    else:
+        failures = failures + 1
+        print "FAIL boxed_ifval_some_pattern took the none arm"
+
+    if val e3 = boxed_literal():
+        check_i64("boxed_ifval_sugar", e3, 99)
+    else:
+        failures = failures + 1
+        print "FAIL boxed_ifval_sugar took the none arm"
+
+    check_i64("boxed_coalesce", boxed_literal() ?? 0, 99)
+
+    # --- nil detection must still work -----------------------------------
+    if val f = opt_pair_i64(0):
+        failures = failures + 1
+        print "FAIL nil_pair_took_some_arm"
+    else:
+        print "PASS nil_pair_none_arm"
+
+    if val g = opt_i64(0):
+        failures = failures + 1
+        print "FAIL nil_scalar_took_some_arm"
+    else:
+        print "PASS nil_scalar_none_arm"
+
+    if failures == 0:
+        print "OPTIONAL_PAYLOAD PROBE: ALL PASS"
+    else:
+        print "OPTIONAL_PAYLOAD PROBE: FAILURES=" + failures.to_string()

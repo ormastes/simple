@@ -1,0 +1,74 @@
+#!/bin/sh
+# The advanced scalar math facade has a fixed f64 ABI and must stay explicit.
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+owner="$root/src/lib/nogc_sync_mut/io/math.spl"
+provider="$root/src/compiler_rust/runtime/src/value/sffi/math.rs"
+
+declarations=$(grep -c '^extern fn rt_math_' "$owner")
+if [ "$declarations" -ne 12 ]; then
+    echo 'advanced math SFFI declaration inventory changed without ABI review' >&2
+    exit 1
+fi
+
+tagged=$(awk '
+    /^@unsafe\(.*capabilities: \[ffi\]\)$/ { previous_is_ffi = 1; next }
+    /^extern fn rt_math_/ { if (previous_is_ffi) tagged += 1 }
+    { previous_is_ffi = 0 }
+    END { print tagged + 0 }
+' "$owner")
+if [ "$tagged" -ne "$declarations" ]; then
+    echo 'advanced math declaration lacks unsafe(ffi)' >&2
+    exit 1
+fi
+
+calls=$(awk '
+    !/^[[:space:]]*#/ && !/^[[:space:]]*extern fn / {
+        line = $0
+        while (match(line, /rt_math_[A-Za-z0-9_]+[(]/)) {
+            calls += 1
+            line = substr(line, RSTART + RLENGTH)
+        }
+    }
+    END { print calls + 0 }
+' "$owner")
+if [ "$calls" -ne 13 ]; then
+    echo 'advanced math raw-call inventory changed without ABI review' >&2
+    exit 1
+fi
+
+awk '
+    function indent(line, copy) {
+        copy = line
+        sub(/[^ ].*$/, "", copy)
+        return length(copy)
+    }
+    NF && unsafe_indent >= 0 &&
+    $0 !~ /unsafe\(capabilities: \[ffi\]\):$/ && indent($0) <= unsafe_indent {
+        unsafe_indent = -1
+    }
+    /unsafe\(capabilities: \[ffi\]\):$/ {
+        unsafe_indent = indent($0)
+        next
+    }
+    !/^[[:space:]]*#/ && !/^[[:space:]]*extern fn / && /rt_math_[A-Za-z0-9_]+[(]/ {
+        if (unsafe_indent < 0 || indent($0) <= unsafe_indent) {
+            print "advanced math raw call lacks lexical FFI authority: " NR ":" $0 > "/dev/stderr"
+            failed = 1
+        }
+    }
+    BEGIN { unsafe_indent = -1 }
+    END { if (failed) exit 1 }
+' "$owner"
+
+for symbol in log log10 log2 asin acos atan atan2 sinh cosh tanh ceil floor; do
+    grep -q "pub extern \"C\" fn rt_math_${symbol}" "$provider"
+done
+
+if grep -E '^[[:space:]]*(sha256|verify_signature|dlsym|registry_lookup|ffi_call)\(' "$owner" >/dev/null; then
+    echo 'advanced math operation gained per-call admission or generic dispatch' >&2
+    exit 1
+fi
+
+echo 'advanced math SFFI authority: PASS (12 f64 declarations, 13 lexical raw calls, no per-call admission work)'

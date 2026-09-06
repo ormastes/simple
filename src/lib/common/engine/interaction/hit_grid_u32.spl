@@ -1,0 +1,107 @@
+# hit_grid_u32.spl — Unified 2D interaction core: GPU ID-buffer hit-test grid.
+#
+# Lane L4 Stage B (D6, unified_2d_event_panel_offload_2026-07-30.md): CPU
+# software-backend reference for the GPU ID-buffer kernel
+# `simple_2d_hit_grid_u32`. Rasterizes each HitProxy2D's node id into a grid
+# texel in paint order (bottom-to-front stamping, later overwrites earlier),
+# so a hit query becomes a single grid read instead of a walk over
+# hit_stack's candidate list. The GPU kernel (Vulkan/CUDA compute shader,
+# untouched here -- no device is present in this sandbox) reproduces this
+# exact texel-write order; this CPU rasterizer is its executable
+# specification (parity spec: host_gpu_hit_query_grid_parity_spec.spl).
+#
+# Grid coordinates use the SAME half-open convention as HitProxy2D: a proxy
+# covering [left, right) x [top, bottom) stamps grid cells left..right-1 and
+# top..bottom-1. Cells never touched by any proxy read back as the miss
+# sentinel, matching ENGINE2D_HOST_GPU_HIT_QUERY_MISS (-1) so Stage A's
+# hit_stack path and this Stage B grid path share one "nothing here" value.
+
+use std.common.engine.interaction.hit_proxy.{HitProxy2D, paint_key_less}
+
+val SIMPLE_2D_HIT_GRID_MISS: i64 = -1
+
+struct HitGridU32:
+    """Rasterized node-id grid. `cells` is row-major width*height, one i64
+    node id (or SIMPLE_2D_HIT_GRID_MISS) per texel. Grid origin is (0, 0) --
+    callers translate proxy-space absolute coordinates onto this origin
+    before rasterizing when a scene does not already start at (0, 0)."""
+    width: i32
+    height: i32
+    cells: [i64]
+
+fn _sort_back_to_front(proxies: [HitProxy2D]) -> [HitProxy2D]:
+    """Insertion sort ascending by paint key (bottom-most first). This is
+    the rasterization order a painter's-algorithm ID buffer needs: stamping
+    in this order makes each later stamp overwrite an earlier one at any
+    shared cell, landing on the exact same winner hit_stack's descending
+    front-to-back sort would pick as the topmost candidate -- without
+    re-sorting per query."""
+    var out: [HitProxy2D] = []
+    var i = 0
+    while i < proxies.len():
+        out.push(proxies[i])
+        i = i + 1
+    var j = 1
+    while j < out.len():
+        val key = out[j]
+        var k = j - 1
+        while k >= 0 and paint_key_less(key, out[k]):
+            out[k + 1] = out[k]
+            k = k - 1
+        out[k + 1] = key
+        j = j + 1
+    out
+
+fn simple_2d_hit_grid_rasterize(proxies: [HitProxy2D], width: i32, height: i32) -> HitGridU32:
+    """CPU software-backend rasterizer for the GPU ID-buffer hit-test kernel
+    `simple_2d_hit_grid_u32`. Every visible, enabled, hit-testable proxy
+    (pointer_policy != None, per HitProxy2D.hit_tests_by_bounds) stamps its
+    node id across its half-open AABB clipped to the grid extent, processed
+    bottom-to-front so overlapping proxies resolve to the topmost by the
+    core's flattened paint key -- the same rule hit_stack applies."""
+    var cells: [i64] = []
+    val total = (width * height) as i64
+    var fill_i: i64 = 0
+    while fill_i < total:
+        cells.push(SIMPLE_2D_HIT_GRID_MISS)
+        fill_i = fill_i + 1
+
+    val ordered = _sort_back_to_front(proxies)
+    var oi = 0
+    while oi < ordered.len():
+        val p = ordered[oi]
+        if p.enabled and p.visible and p.hit_tests_by_bounds():
+            var left = p.left
+            if left < 0:
+                left = 0
+            var top = p.top
+            if top < 0:
+                top = 0
+            var right = p.right
+            if right > width:
+                right = width
+            var bottom = p.bottom
+            if bottom > height:
+                bottom = height
+            var py = top
+            while py < bottom:
+                var px = left
+                while px < right:
+                    cells[(py * width + px) as i64] = p.node_id
+                    px = px + 1
+                py = py + 1
+        oi = oi + 1
+    HitGridU32(width: width, height: height, cells: cells)
+
+fn simple_2d_hit_grid_query(grid: HitGridU32, x: i32, y: i32) -> i64:
+    """Single texel read: the Stage B replacement for hit_stack's proxy
+    walk. Out-of-bounds coordinates and untouched cells both read back as
+    SIMPLE_2D_HIT_GRID_MISS."""
+    if x < 0 or x >= grid.width or y < 0 or y >= grid.height:
+        return SIMPLE_2D_HIT_GRID_MISS
+    grid.cells[(y * grid.width + x) as i64]
+
+export SIMPLE_2D_HIT_GRID_MISS
+export HitGridU32
+export simple_2d_hit_grid_rasterize
+export simple_2d_hit_grid_query

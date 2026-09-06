@@ -1,0 +1,255 @@
+# Deterministic validation/order step for parent-authoritative commit.
+# Snapshot application stays in the owning domain/runtime; this pure common
+# step prevents an adapter from treating completion order as commit order.
+
+use std.common.structural.parallel_commit.commit_contracts.{
+    ParallelCommitOrder,
+    ParallelConflictPolicy,
+    ResultEnvelopeV1,
+    parallel_conflict_policy_to_u8,
+    parallel_result_kind_to_u8,
+    parallel_result_before,
+    parallel_results_conflict,
+    result_envelope_v1_well_formed
+}
+
+struct ParallelCommitValidationV1:
+    ok: bool
+    ordered: [ResultEnvelopeV1]
+    reason: text
+
+struct ParallelCommitStateV1:
+    revision: i64
+    snapshot_token: i64
+
+struct ParallelCommitReceiptV1:
+    ok: bool
+    base_revision: i64
+    published_revision: i64
+    input_snapshot_token: i64
+    output_snapshot_token: i64
+    applied_count: i64
+    ordered_task_ids: [i64]
+    ordered_sequences: [i64]
+    ordered_payload_tokens: [i64]
+    reason: text
+
+struct ParallelCommitOutcomeV1:
+    state: ParallelCommitStateV1
+    receipt: ParallelCommitReceiptV1
+
+val PARALLEL_COMMIT_RECEIPT_MAX_ITEMS: i64 = 65535
+val PARALLEL_COMMIT_RECEIPT_MAX_REASON_BYTES: i64 = 256
+
+fn parallel_commit_state_v1(revision: i64,
+                            snapshot_token: i64) -> ParallelCommitStateV1:
+    ParallelCommitStateV1(revision: revision,
+        snapshot_token: snapshot_token)
+
+fn parallel_commit_state_v1_well_formed(state: ParallelCommitStateV1) -> bool:
+    state.revision >= 0 and state.snapshot_token > 0
+
+fn parallel_commit_receipt(ok: bool, base_revision: i64,
+                           published_revision: i64,
+                           input_snapshot_token: i64,
+                           output_snapshot_token: i64,
+                           applied_count: i64,
+                           ordered_task_ids: [i64], ordered_sequences: [i64],
+                           ordered_payload_tokens: [i64],
+                           reason: text) -> ParallelCommitReceiptV1:
+    ParallelCommitReceiptV1(ok: ok, base_revision: base_revision,
+        published_revision: published_revision,
+        input_snapshot_token: input_snapshot_token,
+        output_snapshot_token: output_snapshot_token,
+        applied_count: applied_count,
+        ordered_task_ids: ordered_task_ids,
+        ordered_sequences: ordered_sequences,
+        ordered_payload_tokens: ordered_payload_tokens, reason: reason)
+
+fn parallel_commit_receipt_v1_well_formed(value: ParallelCommitReceiptV1) -> bool:
+    if not value.ok and value.reason == "invalid-owner-state":
+        return value.published_revision == value.base_revision
+            and value.output_snapshot_token == value.input_snapshot_token
+            and value.applied_count == 0 and value.ordered_task_ids.len() == 0
+            and value.ordered_sequences.len() == 0
+            and value.ordered_payload_tokens.len() == 0
+    if value.base_revision < 0 or value.published_revision < value.base_revision:
+        return false
+    if value.input_snapshot_token <= 0 or value.output_snapshot_token <= 0
+        or value.applied_count < 0:
+        return false
+    if value.ordered_task_ids.len() != value.applied_count
+        or value.ordered_sequences.len() != value.applied_count
+        or value.ordered_payload_tokens.len() != value.applied_count:
+        return false
+    if value.applied_count > PARALLEL_COMMIT_RECEIPT_MAX_ITEMS
+        or value.reason.len() > PARALLEL_COMMIT_RECEIPT_MAX_REASON_BYTES:
+        return false
+    var i = 0
+    while i < value.applied_count:
+        if value.ordered_task_ids[i] <= 0 or value.ordered_sequences[i] < 0
+            or value.ordered_payload_tokens[i] <= 0:
+            return false
+        i = i + 1
+    if value.ok:
+        if value.reason.len() != 0:
+            return false
+        if value.applied_count == 0:
+            return value.published_revision == value.base_revision
+                and value.output_snapshot_token == value.input_snapshot_token
+        if value.base_revision == 9223372036854775807:
+            return false
+        return value.published_revision == value.base_revision + 1
+            and value.output_snapshot_token != value.input_snapshot_token
+    value.reason.len() > 0 and value.applied_count == 0
+        and value.published_revision == value.base_revision
+        and value.output_snapshot_token == value.input_snapshot_token
+
+fn parallel_commit_publication_failure(state: ParallelCommitStateV1,
+                                       reason: text) -> ParallelCommitOutcomeV1:
+    ParallelCommitOutcomeV1(state: state,
+        receipt: parallel_commit_receipt(false, state.revision, state.revision,
+            state.snapshot_token, state.snapshot_token, 0, [], [], [], reason))
+
+fn parallel_commit_validation_failure(reason: text) -> ParallelCommitValidationV1:
+    ParallelCommitValidationV1(ok: false, ordered: [], reason: reason)
+
+fn parallel_commit_order_results(results: [ResultEnvelopeV1],
+                                 order: ParallelCommitOrder) -> [ResultEnvelopeV1]:
+    """Stable O(n log n) bottom-up merge order for bounded result batches.
+
+    The prior repeated-selection implementation was deterministic but O(n²),
+    which made the 65,535-item admission limit impractical. Equal ordering
+    keys retain their input order by selecting the left run unless the right
+    value is strictly before it.
+    """
+    if results.len() <= 1:
+        return results
+    var current = results
+    var width: i64 = 1
+    while width < current.len():
+        var next: [ResultEnvelopeV1] = []
+        var start: i64 = 0
+        while start < current.len():
+            var left = start
+            var middle = start + width
+            if middle > current.len():
+                middle = current.len()
+            var right = middle
+            var end = middle + width
+            if end > current.len():
+                end = current.len()
+            while left < middle or right < end:
+                if left >= middle:
+                    next.push(current[right])
+                    right = right + 1
+                else if right >= end:
+                    next.push(current[left])
+                    left = left + 1
+                else if parallel_result_before(current[right], current[left], order):
+                    next.push(current[right])
+                    right = right + 1
+                else:
+                    next.push(current[left])
+                    left = left + 1
+            start = end
+        current = next
+        width = width * 2
+    current
+
+fn parallel_commit_batch_has_duplicate_identity(results: [ResultEnvelopeV1]) -> bool:
+    var i = 0
+    while i < results.len():
+        var j = i + 1
+        while j < results.len():
+            if results[i].task_id == results[j].task_id
+                and results[i].sequence == results[j].sequence:
+                return true
+            if results[i].payload_token == results[j].payload_token:
+                return true
+            j = j + 1
+        i = i + 1
+    false
+
+fn parallel_commit_validate(results: [ResultEnvelopeV1],
+                            order: ParallelCommitOrder,
+                            conflict: ParallelConflictPolicy) -> ParallelCommitValidationV1:
+    if results.len() > PARALLEL_COMMIT_RECEIPT_MAX_ITEMS:
+        return parallel_commit_validation_failure("result-batch-too-large")
+    for result in results:
+        if not result_envelope_v1_well_formed(result):
+            return parallel_commit_validation_failure("invalid-result-envelope")
+    if parallel_commit_batch_has_duplicate_identity(results):
+        return parallel_commit_validation_failure("duplicate-result-identity")
+    val ordered = parallel_commit_order_results(results, order)
+    var i = 0
+    while i < ordered.len():
+        var j = i + 1
+        while j < ordered.len():
+            val left_reduce = parallel_result_kind_to_u8(ordered[i].kind) == 3
+            val right_reduce = parallel_result_kind_to_u8(ordered[j].kind) == 3
+            if ordered[i].write_region == ordered[j].write_region
+                and left_reduce and right_reduce
+                and parallel_conflict_policy_to_u8(conflict) != 2:
+                return parallel_commit_validation_failure(
+                    "reduction-requires-reduce-policy")
+            if parallel_results_conflict(ordered[i], ordered[j]):
+                # Rebase requires payload-aware application owned by a later
+                # runtime adapter; common validation therefore fails closed.
+                if parallel_conflict_policy_to_u8(conflict) != 2:
+                    return parallel_commit_validation_failure("overlapping-write-region")
+                return parallel_commit_validation_failure("reduce-policy-requires-reduction-results")
+            j = j + 1
+        i = i + 1
+    ParallelCommitValidationV1(ok: true, ordered: ordered, reason: "")
+
+fn parallel_commit_publish_envelopes(state: ParallelCommitStateV1,
+                                     results: [ResultEnvelopeV1],
+                                     candidate_snapshot_token: i64,
+                                     order: ParallelCommitOrder,
+                                     conflict: ParallelConflictPolicy) -> ParallelCommitOutcomeV1:
+    """Build an all-or-nothing owner publication transition.
+
+    Payload interpretation/application belongs to the owner adapter. This
+    function establishes the revision, deterministic order, and constant-size
+    final root assignment. Every failure returns the original state. A runtime
+    owner adapter must serialize/CAS this transition against the live root;
+    transfer registries enforce payload adoption separately."""
+    if not parallel_commit_state_v1_well_formed(state):
+        return parallel_commit_publication_failure(state, "invalid-owner-state")
+    if state.revision == 9223372036854775807:
+        return parallel_commit_publication_failure(state, "owner-revision-exhausted")
+    for result in results:
+        if result.base_revision != state.revision:
+            return parallel_commit_publication_failure(state, "stale-base-revision")
+    val validated = parallel_commit_validate(results, order, conflict)
+    if not validated.ok:
+        return parallel_commit_publication_failure(state, validated.reason)
+    if validated.ordered.len() == 0:
+        if candidate_snapshot_token != state.snapshot_token:
+            return parallel_commit_publication_failure(state,
+                "empty-commit-cannot-replace-snapshot")
+        return ParallelCommitOutcomeV1(state: state,
+            receipt: parallel_commit_receipt(true, state.revision,
+                state.revision, state.snapshot_token, state.snapshot_token,
+                0, [], [], [], ""))
+    if candidate_snapshot_token <= 0
+        or candidate_snapshot_token == state.snapshot_token:
+        return parallel_commit_publication_failure(state,
+            "invalid-candidate-snapshot")
+
+    val next_revision = state.revision + 1
+    var ordered_task_ids: [i64] = []
+    var ordered_sequences: [i64] = []
+    var ordered_payload_tokens: [i64] = []
+    for result in validated.ordered:
+        ordered_task_ids.push(result.task_id)
+        ordered_sequences.push(result.sequence)
+        ordered_payload_tokens.push(result.payload_token)
+    val next_state = ParallelCommitStateV1(revision: next_revision,
+        snapshot_token: candidate_snapshot_token)
+    ParallelCommitOutcomeV1(state: next_state,
+        receipt: parallel_commit_receipt(true, state.revision, next_revision,
+            state.snapshot_token, candidate_snapshot_token,
+            validated.ordered.len(), ordered_task_ids, ordered_sequences,
+            ordered_payload_tokens, ""))

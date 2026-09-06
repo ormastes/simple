@@ -1,0 +1,283 @@
+# Expand ordinary string tokens into the canonical flat interpolated-string AST
+# after a module parse has finished and the lexer is idle.
+
+use compiler.core.ast.{
+    EXPR_IDENT,
+    EXPR_STRING_LIT,
+    expr_count,
+    expr_get_int,
+    expr_get_str,
+    expr_get_tag,
+    expr_mark_string_processed,
+    expr_promote_interpolated_string
+}
+use compiler.core.tokens.{TOK_EOF}
+use compiler.core.parser.{
+    par_kind_get,
+    parser_advance,
+    parser_diagnostics_suppressed_get,
+    parser_diagnostics_suppressed_set,
+    parser_has_errors,
+    parser_set_had_error
+}
+use compiler.frontend.core.lexer.{lex_init_with_path}
+use compiler.frontend.core.parser_expr.{parse_expr}
+use compiler.core.ast_expr.{
+    EXPR_CALL,
+    EXPR_METHOD_CALL
+}
+use compiler.core.ast.{expr_get_args}
+use compiler.frontend.desugar.placeholder_lambda.{
+    expr_has_placeholder,
+    placeholder_ident_name,
+    set_placeholder_transform_suppressed,
+    transform_interpolated_placeholder_args
+}
+
+use std.nogc_sync_mut.io_runtime.{env_get, time_now_unix_micros}
+
+# Level-gated operation counters (DEFAULT OFF; SIMPLE_PARSE_PHASE_PROFILE=1).
+# These count OPERATIONS, not milliseconds: how many string literals each pass
+# looks at, and how many of them pay a real lex+parse SUB-PARSE. That ratio is
+# the mechanism this file's performance work is pinned on -- a timing number
+# alone cannot tell a slow machine from a pass doing avoidable work.
+# NOT a throwaway probe -- do not delete.
+var _si_prof_cached: i64 = -1
+var si_stat_literals_seen: i64 = 0
+var si_stat_subparses: i64 = 0
+var si_stat_ph_args_seen: i64 = 0
+var si_stat_nodes_walked: i64 = 0
+var si_stat_subparse_us: i64 = 0
+
+fn si_prof_enabled() -> bool:
+    if _si_prof_cached < 0:
+        _si_prof_cached = if (env_get("SIMPLE_PARSE_PHASE_PROFILE") ?? "") == "1": 1 else: 0
+    _si_prof_cached == 1
+
+pub fn si_stats_reset():
+    si_stat_literals_seen = 0
+    si_stat_subparses = 0
+    si_stat_ph_args_seen = 0
+    si_stat_nodes_walked = 0
+    si_stat_subparse_us = 0
+
+pub fn si_stat_subparse_count() -> i64: si_stat_subparses
+pub fn si_stat_literal_count() -> i64: si_stat_literals_seen
+
+pub fn si_stats_report(tag: text):
+    if si_prof_enabled():
+        print("PARSESTAT\t{tag}\tliterals\t{si_stat_literals_seen}\tsubparses\t{si_stat_subparses}\tph_args\t{si_stat_ph_args_seen}\tnodes_walked\t{si_stat_nodes_walked}\tsubparse_us\t{si_stat_subparse_us}")
+
+fn interpolation_fragment_is_brace_literal(inner: text) -> bool:
+    """Bug interp_brace_literal_collides_with_string_interpolation: a `{...}`
+    region whose whole content is ITSELF a brace-enclosed literal is literal
+    text, never an interpolation.
+
+    Such a fragment (`{inner}`, `{a: 1}`, `{1, 2}`) is accepted by `parse_expr`
+    as a dict/set literal, so the region was recorded as a clean interpolation
+    and then lowered to nothing -- the whole span silently vanished instead of
+    falling back to the verbatim literal text the interpreter oracle prints.
+    Measured 2026-08-17: the WHITESPACE-PADDED spellings (`" {inner} "`) were
+    already rejected because the padding fails to parse, but the unpadded
+    spelling was accepted -- the class was handled inconsistently, and only the
+    padded half of it was safe. Reject the whole class here so the fallback is
+    uniform.
+
+    Leading whitespace is skipped explicitly rather than via `.trim()`: the
+    padded-vs-unpadded split above is evidence the trim does not normalise these
+    fragments, and this predicate must not depend on that.
+    """
+    var i = 0
+    val n = inner.len()
+    while i < n and (inner[i:i + 1] == " " or inner[i:i + 1] == "\t"):
+        i = i + 1
+    if i >= n:
+        return false
+    if inner[i:i + 1] != "{":
+        return false
+    # A bare "{" with nothing after it is not a literal; leave it to the parser.
+    i + 1 < n
+
+fn parse_interpolation_fragment(inner: text) -> i64:
+    # The enclosing module parse is complete, so the lexer can be reused while
+    # new expression nodes append to the same AST arena.
+    if interpolation_fragment_is_brace_literal(inner):
+        return -1
+    si_stat_subparses = si_stat_subparses + 1
+    val _sp_t0 = if si_prof_enabled(): time_now_unix_micros() else: 0
+    val had_error_before = parser_has_errors()
+    val diagnostics_before = parser_diagnostics_suppressed_get()
+    val placeholder_before = set_placeholder_transform_suppressed(true)
+    parser_diagnostics_suppressed_set(true)
+    lex_init_with_path(inner.trim(), "")
+    parser_advance()
+    val idx = parse_expr()
+    val clean = (
+        idx >= 0 and
+        par_kind_get() == TOK_EOF and
+        not parser_has_errors()
+    )
+    parser_set_had_error(had_error_before)
+    parser_diagnostics_suppressed_set(diagnostics_before)
+    set_placeholder_transform_suppressed(placeholder_before)
+    if si_prof_enabled():
+        si_stat_subparse_us = si_stat_subparse_us + (time_now_unix_micros() - _sp_t0)
+    if not clean:
+        return -1
+    idx
+
+fn decode_interpolation_brace_escapes(value: text) -> text:
+    # Fast path (perf, exact): this function only ever rewrites `{{` -> `{` and
+    # `}}` -> `}`. A value carrying neither doubled brace decodes to itself, so
+    # entering the scanner is pure waste for the overwhelming majority of
+    # string literals. Measured 2026-08-21: the old loop ran over every plain
+    # literal and grew `result + ch` once per character. The slow path below
+    # keeps untouched source spans and joins once, so brace-bearing inputs no
+    # longer retain that quadratic accumulator-copy term. See
+    # doc/08_tracking/bug/frontend_parse_per_file_cost_2026-08-21.md
+    if not (value.contains("{{") or value.contains("}}")):
+        return value
+    var chunks: [text] = []
+    var copied_until = 0
+    var i = 0
+    while i < value.len():
+        val ch = value[i:i + 1]
+        val next = if i + 1 < value.len(): value[i + 1:i + 2] else: ""
+        if ch == "{" and next == "{":
+            chunks.push(value.substring(copied_until, i))
+            chunks.push("{")
+            i = i + 2
+            copied_until = i
+        elif ch == "}" and next == "}":
+            chunks.push(value.substring(copied_until, i))
+            chunks.push("}")
+            i = i + 2
+            copied_until = i
+        else:
+            i = i + 1
+    chunks.push(value.substring(copied_until, value.len()))
+    chunks.join("")
+
+fn parse_string_interpolation_parts(value: text) -> [i64]:
+    # Fast path (perf, exact): every branch of the scanner below is gated on
+    # seeing a `{` or a `}`. A literal with neither cannot produce a part and
+    # cannot leave `depth != 0`, so it always returns `[]` -- reached here
+    # without the per-character `value[i:i+1]` substring allocations.
+    if not (value.contains("{") or value.contains("}")):
+        return []
+    var parts: [i64] = []
+    var depth = 0
+    var inner_start = -1
+    var i = 0
+    while i < value.len():
+        val ch = value[i:i + 1]
+        val next = if i + 1 < value.len(): value[i + 1:i + 2] else: ""
+        if depth == 0 and ch == "{" and next == "{":
+            i = i + 1
+        elif depth == 0 and ch == "}" and next == "}":
+            i = i + 1
+        elif depth == 0 and ch == "{":
+            depth = 1
+            inner_start = i + 1
+        elif depth > 0 and ch == "{":
+            depth = depth + 1
+        elif depth > 0 and ch == "}":
+            depth = depth - 1
+            if depth == 0:
+                # The old scanner appended one one-character substring at a
+                # time (`inner = inner + ch`), reallocating/copying the growing
+                # fragment quadratically. The matching indices already delimit
+                # the exact same text, including nested braces, so materialize
+                # it once at the completed-region boundary.
+                val inner = value.substring(inner_start, i)
+                val part = parse_interpolation_fragment(inner)
+                if part < 0:
+                    return []
+                parts.push(part)
+        i = i + 1
+    if depth != 0:
+        return []
+    parts
+
+fn expand_interpolated_placeholder_call_args(start_expr: i64):
+    """Driver/native-build counterpart of expand_string_interpolations() +
+    transform_interpolated_placeholder_args().
+
+    The driver path (parse_full_frontend -> parse_and_build_module_scoped) never
+    calls expand_string_interpolations(); it leaves every string literal opaque
+    and sub-parses interpolation regions much later in the flat->rich bridge
+    (flat_bridge_build_string_interps). That means a call argument like
+    `params.map("({_.0} : {_.1})")` never becomes an EXPR_INTERPOLATED_STRING
+    while the placeholder transform can still see it, so the `_` identifiers
+    minted for its regions survive into HIR as `unresolved name: _`.
+    See doc/08_tracking/bug/placeholder_lambda_fix_missed_driver_native_build_parse_path_2026-08-09.md
+
+    Promote ONLY those string literals that are (a) direct call arguments and
+    (b) contain a placeholder in an interpolation region, then run the existing
+    transform over them. Every other string literal is left untouched so the
+    broad StringLit-with-Interpolation-parts representation the bridge relies on
+    is not disturbed.
+    """
+    var promoted = false
+    var idx = start_expr
+    while idx < expr_count():
+        val tag = expr_get_tag(idx)
+        if (tag == EXPR_CALL or tag == EXPR_METHOD_CALL):
+            val args = expr_get_args(idx)
+            var i = 0
+            while i < args.len():
+                val a = args[i]
+                if (a >= 0 and expr_get_tag(a) == EXPR_STRING_LIT and
+                        expr_get_int(a) == 0 and expr_get_str(a).contains("_")):
+                    si_stat_ph_args_seen = si_stat_ph_args_seen + 1
+                    val value = expr_get_str(a)
+                    # PERF (exact): the ONLY outcome this walk acts on is
+                    # `expr_has_placeholder(part)`, and a placeholder is spelled
+                    # `_`, `_1`, `_2`, ... -- it cannot exist in a literal that
+                    # contains no `_` character at all. Without this guard every
+                    # plain call-argument string literal in the module paid a
+                    # full `lex_init_with_path` + `parse_expr` SUB-PARSE per
+                    # `{...}` region, whose freshly minted nodes then extended
+                    # `expr_count()` and were themselves re-walked by this very
+                    # loop -- the superlinear term measured 2026-08-21 (a 34x
+                    # larger file cost 176x more in this phase). See
+                    # doc/08_tracking/bug/frontend_parse_per_file_cost_2026-08-21.md
+                    val parts = parse_string_interpolation_parts(value)
+                    if parts.len() > 0:
+                        var has_ph = false
+                        var p = 0
+                        while p < parts.len():
+                            if expr_has_placeholder(parts[p]):
+                                has_ph = true
+                            p = p + 1
+                        if has_ph:
+                            expr_promote_interpolated_string(a, value, parts)
+                            promoted = true
+                i = i + 1
+        idx = idx + 1
+    if promoted:
+        transform_interpolated_placeholder_args(start_expr)
+
+fn expand_string_interpolations_with_placeholder_receipt(start_expr: i64) -> bool:
+    var has_placeholder_ident = false
+    var idx = start_expr
+    while idx < expr_count():
+        si_stat_nodes_walked = si_stat_nodes_walked + 1
+        val tag = expr_get_tag(idx)
+        if not has_placeholder_ident and tag == EXPR_IDENT and placeholder_ident_name(expr_get_str(idx)):
+            has_placeholder_ident = true
+        elif tag == EXPR_STRING_LIT and expr_get_int(idx) == 0:
+            si_stat_literals_seen = si_stat_literals_seen + 1
+            val value = expr_get_str(idx)
+            val parts = parse_string_interpolation_parts(value)
+            if parts.len() > 0:
+                expr_promote_interpolated_string(idx, value, parts)
+            else:
+                expr_mark_string_processed(
+                    idx, decode_interpolation_brace_escapes(value)
+                )
+        idx = idx + 1
+    has_placeholder_ident
+
+fn expand_string_interpolations(start_expr: i64):
+    val _has_placeholder = expand_string_interpolations_with_placeholder_receipt(start_expr)

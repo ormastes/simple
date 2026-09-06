@@ -1,0 +1,282 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+# @cover src/lib/gc_async_mut/gpu/engine2d/engine.spl 70%
+# @tag: unit, gpu, engine2d, facade, backend, simd
+"""
+# Engine2D Facade Backend Mutation Specification
+
+## Overview
+
+Verifies that the public Engine2D facade delegates clear, filled-rectangle,
+image blits, clip/mask state, present, and readback through requested software
+and CPU SIMD backends.
+
+This closes the local, non-platform-specific half of the Engine2D facade
+mutation feature request: the production facade must preserve backend pixel
+mutations instead of callers reaching into concrete backend implementations.
+
+The scenarios render a reduced 16x16 scene through
+`Engine2D.create_with_backend`, read the final framebuffer through
+`Engine2D.read_pixels`, and assert concrete pixel values at clear, inside-rect,
+and outside-rect coordinates. The CPU SIMD scenario also proves the facade path
+reaches the SIMD fill provider by checking the fill hit counter.
+
+## Evidence Model
+
+The spec intentionally avoids direct `SoftwareBackend` or `CpuBackend` calls.
+All rendering commands go through `Engine2D.clear`,
+`Engine2D.draw_rect_filled`, `Engine2D.draw_image`,
+`Engine2D.draw_image_scaled`, `Engine2D.draw_image_transform`,
+`Engine2D.set_clip`, `Engine2D.set_mask`, `Engine2D.present`, and
+`Engine2D.read_pixels`.
+
+**Requirements:** N/A
+
+**Plan:** doc/08_tracking/feature/engine2d_trait_facade_backend_execution_2026-06-02.md
+
+**Design:** doc/04_architecture/ui/engine_2d.md
+
+**Research:** doc/09_report/linux_renderdoc_simpleos_hardening_evidence_current_2026-07-02.md
+
+## Syntax
+
+Use `std.spec` examples with built-in matchers only. Pixel assertions compare
+exact framebuffer values; the SIMD scenario uses `to_be_greater_than(0)` for
+the recorded fill hit count.
+"""
+
+use std.spec.step
+
+use std.spec.{describe, it, expect}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.gc_async_mut.gpu.engine2d.backend_software.{SoftwareBackend}
+use std.gpu.engine2d.backend_emu.{emu_draw_rect_blend_mode}
+use std.gpu.engine2d.simd_provider.{reset_simd_hits, simd_hit_counts}
+
+val WIDTH: i32 = 16
+val HEIGHT: i32 = 16
+val BG: u32 = 0xFF102030u32
+val FG: u32 = 0xFF010204u32
+
+fn render_facade_pixels(backend: text) -> [u32]:
+    var engine = Engine2D.create_with_backend(WIDTH, HEIGHT, backend)
+    engine.clear(BG)
+    engine.draw_rect_filled(4, 5, 6, 4, FG)
+    engine.present()
+    val pixels = engine.read_pixels()
+    engine.shutdown()
+    pixels
+
+fn expect_draw_image_clip_mask(backend: text):
+    var engine = Engine2D.create_with_backend(6, 5, backend)
+    val src = [
+        0xFF010203u32, 0xFF112233u32, 0xFF223344u32,
+        0xFFAABBCCu32, 0xFFBBCCDDu32, 0xFFDDEEFFu32
+    ]
+    val mask = [
+        1u8, 1u8, 1u8, 1u8, 1u8, 1u8,
+        1u8, 1u8, 1u8, 1u8, 1u8, 1u8,
+        1u8, 0u8, 1u8, 1u8, 1u8, 1u8,
+        1u8, 1u8, 1u8, 1u8, 1u8, 1u8,
+        1u8, 1u8, 1u8, 1u8, 1u8, 1u8
+    ]
+
+    engine.clear(BG)
+    engine.set_clip(1, 2, 1, 1)
+    engine.draw_image(-1, 2, 3, 2, src)
+    var pixels = engine.read_pixels()
+    expect(pixels[2 * 6 + 0]).to_equal(BG)
+    expect(pixels[2 * 6 + 1]).to_equal(src[2])
+    expect(pixels[3 * 6 + 1]).to_equal(BG)
+
+    engine.clear_clip()
+    engine.set_mask(mask, 6, 5)
+    engine.clear(BG)
+    engine.draw_image(-1, 2, 3, 2, src)
+    pixels = engine.read_pixels()
+    engine.shutdown()
+    expect(pixels[2 * 6 + 0]).to_equal(src[1])
+    expect(pixels[2 * 6 + 1]).to_equal(BG)
+
+fn expect_draw_image_scaled_clip_mask(backend: text):
+    var engine = Engine2D.create_with_backend(6, 5, backend)
+    val src = [
+        0xFF010203u32, 0xFF112233u32,
+        0xFFAABBCCu32, 0xFFDDEEFFu32
+    ]
+    val mask = [
+        1u8, 1u8, 1u8, 1u8, 1u8, 1u8,
+        1u8, 1u8, 1u8, 1u8, 1u8, 1u8,
+        1u8, 0u8, 1u8, 1u8, 1u8, 1u8,
+        1u8, 1u8, 1u8, 1u8, 1u8, 1u8,
+        1u8, 1u8, 1u8, 1u8, 1u8, 1u8
+    ]
+
+    engine.clear(BG)
+    engine.set_clip(1, 2, 1, 1)
+    engine.draw_image_scaled(0, 2, 2, 2, 2, 2, src)
+    var pixels = engine.read_pixels()
+    expect(pixels[2 * 6 + 0]).to_equal(BG)
+    expect(pixels[2 * 6 + 1]).to_equal(src[1])
+    expect(pixels[3 * 6 + 1]).to_equal(BG)
+
+    engine.clear_clip()
+    engine.set_mask(mask, 6, 5)
+    engine.clear(BG)
+    engine.draw_image_scaled(0, 2, 2, 2, 2, 2, src)
+    pixels = engine.read_pixels()
+    engine.shutdown()
+    expect(pixels[2 * 6 + 0]).to_equal(src[0])
+    expect(pixels[2 * 6 + 1]).to_equal(BG)
+
+fn expect_draw_image_transform_clip_mask(backend: text):
+    var engine = Engine2D.create_with_backend(6, 5, backend)
+    val src = [
+        0xFF010203u32, 0xFF112233u32,
+        0xFFAABBCCu32, 0xFFDDEEFFu32
+    ]
+    val mask = [
+        1u8, 1u8, 1u8, 1u8, 1u8, 1u8,
+        1u8, 1u8, 1u8, 1u8, 1u8, 1u8,
+        1u8, 0u8, 1u8, 1u8, 1u8, 1u8,
+        1u8, 1u8, 1u8, 1u8, 1u8, 1u8,
+        1u8, 1u8, 1u8, 1u8, 1u8, 1u8
+    ]
+
+    engine.clear(BG)
+    engine.set_clip(1, 2, 1, 1)
+    engine.draw_image_transform(0, 2, 2, 2, 256, 0, 0, 256, 0, 0, src)
+    var pixels = engine.read_pixels()
+    expect(pixels[2 * 6 + 0]).to_equal(BG)
+    expect(pixels[2 * 6 + 1]).to_equal(src[1])
+    expect(pixels[3 * 6 + 1]).to_equal(BG)
+
+    engine.clear_clip()
+    engine.set_mask(mask, 6, 5)
+    engine.clear(BG)
+    engine.draw_image_transform(0, 2, 2, 2, 256, 0, 0, 256, 0, 0, src)
+    pixels = engine.read_pixels()
+    engine.shutdown()
+    expect(pixels[2 * 6 + 0]).to_equal(src[0])
+    expect(pixels[2 * 6 + 1]).to_equal(BG)
+
+describe "Engine2D facade backend mutation":
+    it "software blend-mode rectangles match the emulation oracle for every mode":
+        var mode = 0
+        while mode <= 5:
+            var direct = SoftwareBackend.create()
+            var oracle = SoftwareBackend.create()
+            expect(direct.init(7, 4)).to_equal(true)
+            expect(oracle.init(7, 4)).to_equal(true)
+            var seed: [u32] = [0u32; 28]
+            var i = 0
+            while i < seed.len():
+                seed[i] = 0x40201008u32 + ((i as u32) * 0x0003070Bu32)
+                i = i + 1
+            direct.draw_image(0, 0, 7, 4, seed)
+            oracle.draw_image(0, 0, 7, 4, seed)
+            direct.present()
+            oracle.present()
+            direct.draw_rect_blend_mode(-2, 1, 7, 4, 0x80D05020u32, mode)
+            emu_draw_rect_blend_mode(oracle, -2, 1, 7, 4, 0x80D05020u32, mode)
+            expect(direct.read_pixels()).to_equal(oracle.read_pixels())
+            expect(direct.damage_rects(16)).to_equal(oracle.damage_rects(16))
+            direct.shutdown()
+            oracle.shutdown()
+            mode = mode + 1
+
+    it "software blend-mode rectangle preserves clip mask and zero-alpha damage":
+        var direct = SoftwareBackend.create()
+        var oracle = SoftwareBackend.create()
+        expect(direct.init(6, 4)).to_equal(true)
+        expect(oracle.init(6, 4)).to_equal(true)
+        direct.clear(0x60402010u32)
+        oracle.clear(0x60402010u32)
+        direct.present()
+        oracle.present()
+        var mask: [u8] = [0u8; 24]
+        var i = 0
+        while i < mask.len():
+            if (i % 2) == 0: mask[i] = 255u8
+            i = i + 1
+        direct.set_clip(1, 1, 4, 2)
+        oracle.set_clip(1, 1, 4, 2)
+        direct.set_mask(mask, 6, 4)
+        oracle.set_mask(mask, 6, 4)
+        direct.draw_rect_blend_mode(0, 0, 6, 4, 0x00D05020u32, 3)
+        emu_draw_rect_blend_mode(oracle, 0, 0, 6, 4, 0x00D05020u32, 3)
+        expect(direct.read_pixels()).to_equal(oracle.read_pixels())
+        expect(direct.damage_rects(16)).to_equal(oracle.damage_rects(16))
+        direct.shutdown()
+        oracle.shutdown()
+
+    it "software scaled image snapshots an aliased framebuffer source":
+        var backend = SoftwareBackend.create()
+        expect(backend.init(3, 2)).to_equal(true)
+        backend.buf = [
+            0xFF010203u32, 0xFF111213u32, 0xFF212223u32,
+            0xFF313233u32, 0xFF414243u32, 0xFF515253u32
+        ]
+        backend.draw_image_scaled(0, 0, 3, 2, 6, 1, backend.buf)
+        expect(backend.read_pixels()).to_equal([
+            0xFF010203u32, 0xFF212223u32, 0xFF414243u32,
+            0xFF010203u32, 0xFF212223u32, 0xFF414243u32
+        ])
+        backend.shutdown()
+
+
+    it "software backend preserves clear and filled rectangle pixels":
+        # @req REQ-SSPEC-UNIT
+        step("software backend preserves clear and filled rectangle pixels")
+        val pixels = render_facade_pixels("software")
+
+        expect(pixels.len()).to_equal(WIDTH * HEIGHT)
+        expect(pixels[0]).to_equal(BG)
+        expect(pixels[5 * WIDTH + 4]).to_equal(FG)
+        expect(pixels[8 * WIDTH + 9]).to_equal(FG)
+        expect(pixels[8 * WIDTH + 10]).to_equal(BG)
+
+    it "software backend draw_image honors facade clip and mask state":
+        # @req REQ-SSPEC-UNIT
+        step("software backend draw_image honors facade clip and mask state")
+        expect_draw_image_clip_mask("software")
+
+    it "software backend draw_image_scaled honors facade clip and mask state":
+        # @req REQ-SSPEC-UNIT
+        step("software backend draw_image_scaled honors facade clip and mask state")
+        expect_draw_image_scaled_clip_mask("software")
+
+    it "software backend draw_image_transform honors facade clip and mask state":
+        # @req REQ-SSPEC-UNIT
+        step("software backend draw_image_transform honors facade clip and mask state")
+        expect_draw_image_transform_clip_mask("software")
+
+    it "cpu_simd backend preserves pixels and records SIMD fill use":
+        # @req REQ-SSPEC-UNIT
+        step("cpu_simd backend preserves pixels and records SIMD fill use")
+        reset_simd_hits()
+        val pixels = render_facade_pixels("cpu_simd")
+
+        expect(pixels.len()).to_equal(WIDTH * HEIGHT)
+        expect(pixels[0]).to_equal(BG)
+        expect(pixels[5 * WIDTH + 4]).to_equal(FG)
+        expect(pixels[8 * WIDTH + 9]).to_equal(FG)
+        expect(pixels[8 * WIDTH + 10]).to_equal(BG)
+        expect(simd_hit_counts().fill_hits).to_be_greater_than(0)
+
+    it "cpu_simd backend draw_image honors facade clip and mask state":
+        # @req REQ-SSPEC-UNIT
+        step("cpu_simd backend draw_image honors facade clip and mask state")
+        expect_draw_image_clip_mask("cpu_simd")
+
+    it "cpu_simd backend draw_image_scaled honors facade clip and mask state":
+        # @req REQ-SSPEC-UNIT
+        step("cpu_simd backend draw_image_scaled honors facade clip and mask state")
+        expect_draw_image_scaled_clip_mask("cpu_simd")
+
+    it "cpu_simd backend draw_image_transform honors facade clip and mask state":
+        # @req REQ-SSPEC-UNIT
+        step("cpu_simd backend draw_image_transform honors facade clip and mask state")
+        expect_draw_image_transform_clip_mask("cpu_simd")

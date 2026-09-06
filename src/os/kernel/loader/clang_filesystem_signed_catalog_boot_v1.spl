@@ -1,0 +1,187 @@
+"""Loader-owned signed-catalog bridge for the native Clang hello pipeline."""
+
+use os.kernel.scheduler.scheduler_types.{
+    Scheduler, SchedulerCurrentTaskAdmissionV1
+}
+use os.kernel.types.capability_types.{CapabilitySet, CapabilityToken}
+use os.kernel.loader.executable_authority_registry.{
+    ExecutableAuthorityRegistryV1, executable_authority_owner_valid
+}
+use os.kernel.loader.executable_admission_pipeline.{executable_loader_revoke}
+use os.kernel.loader.authenticated_fs_exec_submission_service_v1.{
+    AuthenticatedFsExecSubmissionV1,
+    authenticated_fs_exec_prepare_installed_artifact_online_v1
+}
+use os.kernel.loader.clang_filesystem_pipeline_owner_v1.{
+    ClangFilesystemPipelineRequestV1,
+    ClangFilesystemPipelineFilesystemV1,
+    ClangFilesystemTerminalReceiptV1,
+    clang_filesystem_pipeline_mark_outcome_unknown_v1
+}
+use os.kernel.loader.clang_filesystem_pipeline_caller_v1.{
+    clang_filesystem_pipeline_prepare_scheduler_backend_v1,
+    clang_filesystem_pipeline_submit_authenticated_v1
+}
+use os.kernel.loader.installed_artifact_manifest_execution_policy_v1.{
+    installed_artifact_active_target_v1
+}
+use os.kernel.loader.installed_artifact_catalog_v1.{
+    installed_artifact_catalog_lookup_target_v1
+}
+use os.kernel.loader.spawn_recipes.{
+    SPAWN_RECIPE_CLANG_COMPILE_DBFS, SPAWN_RECIPE_LLD_LINK_DBFS,
+    SPAWN_RECIPE_CLANG_HELLO_DBFS, SPAWN_RECIPE_CLANG_COMPILE_NVFS,
+    SPAWN_RECIPE_LLD_LINK_NVFS, SPAWN_RECIPE_CLANG_HELLO_NVFS,
+    spawn_recipe_seed_parent_caps
+}
+use os.services.vfs.vfs_boot_state.{
+    vfs_state_mount_table_owner_handle_v1,
+    vfs_state_mount_table_lease_begin_v1,
+    vfs_state_mount_table_lease_restore_v1
+}
+use std.fs_driver.mount_table.{MountTable}
+
+pub struct ClangFilesystemSignedCatalogBootResultV1:
+    catalog_present: bool
+    launched: bool
+    reason: text
+    receipt: ClangFilesystemTerminalReceiptV1?
+    scheduler: Scheduler
+
+fn _result_v1(
+    scheduler: Scheduler,
+    present: bool,
+    launched: bool,
+    reason: text,
+    receipt: ClangFilesystemTerminalReceiptV1? = nil
+) -> ClangFilesystemSignedCatalogBootResultV1:
+    ClangFilesystemSignedCatalogBootResultV1(
+        catalog_present: present, launched: launched,
+        reason: reason, receipt: receipt, scheduler: scheduler)
+
+fn _catalog_triplet_present_v1() -> bool:
+    val target = installed_artifact_active_target_v1()
+    if not target.?: return false
+    installed_artifact_catalog_lookup_target_v1(
+        "/usr/bin/clang", target.unwrap()).? and
+        installed_artifact_catalog_lookup_target_v1(
+            "/usr/bin/ld.lld", target.unwrap()).? and
+        installed_artifact_catalog_lookup_target_v1(
+            "/work/hello.elf", target.unwrap()).?
+
+fn _recipes_v1(
+    filesystem: ClangFilesystemPipelineFilesystemV1
+) -> [i64]:
+    match filesystem:
+        ClangFilesystemPipelineFilesystemV1.Dbfs:
+            [SPAWN_RECIPE_CLANG_COMPILE_DBFS,
+             SPAWN_RECIPE_LLD_LINK_DBFS,
+             SPAWN_RECIPE_CLANG_HELLO_DBFS]
+        ClangFilesystemPipelineFilesystemV1.Nvfs:
+            [SPAWN_RECIPE_CLANG_COMPILE_NVFS,
+             SPAWN_RECIPE_LLD_LINK_NVFS,
+             SPAWN_RECIPE_CLANG_HELLO_NVFS]
+        ClangFilesystemPipelineFilesystemV1.Fat32:
+            []
+
+fn _pipeline_parent_caps_v1(recipes: [i64], owner: u64) -> CapabilitySet:
+    """Union all stage roots and rebase provenance IDs into one concrete pouch."""
+    var tokens: [CapabilityToken] = []
+    var next_token_id = 1u64
+    for recipe in recipes:
+        val seeded = spawn_recipe_seed_parent_caps(recipe, owner)
+        for token in seeded.caps:
+            tokens.push(CapabilityToken(
+                kind: token.kind,
+                generation: token.generation,
+                owner: token.owner,
+                token_id: next_token_id,
+                parent_token_id: 0u64,
+                depth: token.depth))
+            next_token_id = next_token_id + 1u64
+    CapabilitySet(caps: tokens, is_pledged: true)
+
+fn _revoke_v1(
+    table: MountTable,
+    submission: AuthenticatedFsExecSubmissionV1
+) -> bool:
+    executable_loader_revoke(
+        table, submission.authorities, submission.token).is_ok()
+
+pub(package) fn clang_filesystem_signed_catalog_boot_launch_v1(
+    scheduler: Scheduler,
+    authorities: ExecutableAuthorityRegistryV1,
+    caller: i64,
+    request: ClangFilesystemPipelineRequestV1,
+    caps: CapabilitySet,
+    admission: SchedulerCurrentTaskAdmissionV1
+) -> ClangFilesystemSignedCatalogBootResultV1:
+    """Run compile, link, and generated hello under one VFS-owner lease."""
+    if not _catalog_triplet_present_v1():
+        return _result_v1(scheduler, false, false, "signed-clang-catalog-absent")
+    if caller <= 0 or caller as u64 != request.actor.task_id:
+        return _result_v1(scheduler, true, false, "invalid-parent-task")
+    if not executable_authority_owner_valid(authorities):
+        return _result_v1(scheduler, true, false, "authority-owner-unavailable")
+    val recipes = _recipes_v1(request.filesystem)
+    if recipes.len() != 3:
+        return _result_v1(scheduler, true, false, "filesystem-identity-unsupported")
+    # Include-tree proof reads through the canonical VFS, so complete owner
+    # preparation before moving the mount table into the exclusive lease.
+    val plan = clang_filesystem_pipeline_prepare_scheduler_backend_v1(
+        request, caps, admission)
+    if plan.is_err(): return _result_v1(scheduler, true, false, plan.unwrap_err())
+    val launch = plan.unwrap()
+    val owner = vfs_state_mount_table_owner_handle_v1()
+    if not owner.?:
+        val retired = clang_filesystem_pipeline_mark_outcome_unknown_v1(
+            launch.command.dispatch)
+        return _result_v1(scheduler, true, false,
+            if retired.is_ok(): "vfs-owner-unavailable"
+            else: "clang-pipeline-cleanup-indeterminate")
+    val leased = vfs_state_mount_table_lease_begin_v1(owner.unwrap())
+    if not leased.?:
+        val retired = clang_filesystem_pipeline_mark_outcome_unknown_v1(
+            launch.command.dispatch)
+        return _result_v1(scheduler, true, false,
+            if retired.is_ok(): "vfs-owner-busy"
+            else: "clang-pipeline-cleanup-indeterminate")
+    val lease = leased.unwrap()
+    val clang = authenticated_fs_exec_prepare_installed_artifact_online_v1(
+        lease.table, authorities, caller, launch.compile_path, recipes[0])
+    if clang.is_err():
+        val pipeline_retired = clang_filesystem_pipeline_mark_outcome_unknown_v1(
+            launch.command.dispatch)
+        val restored = vfs_state_mount_table_lease_restore_v1(lease)
+        return _result_v1(scheduler, true, false,
+            if pipeline_retired.is_ok() and restored: "clang-admission-failed"
+            else: "clang-pipeline-cleanup-indeterminate")
+    val lld = authenticated_fs_exec_prepare_installed_artifact_online_v1(
+        lease.table, authorities, caller, launch.link_path, recipes[1])
+    if lld.is_err():
+        val retired = _revoke_v1(lease.table, clang.unwrap())
+        val pipeline_retired = clang_filesystem_pipeline_mark_outcome_unknown_v1(
+            launch.command.dispatch)
+        val restored = vfs_state_mount_table_lease_restore_v1(lease)
+        return _result_v1(scheduler, true, false,
+            if retired and pipeline_retired.is_ok() and restored:
+                "lld-admission-failed"
+            else: "clang-pipeline-cleanup-indeterminate")
+    val receipt = clang_filesystem_pipeline_submit_authenticated_v1(
+        scheduler,
+        _pipeline_parent_caps_v1(recipes, caller.to_u64()),
+        lease.table, launch, clang.unwrap(), lld.unwrap(),
+        authorities, recipes[2], "/work/hello.elf")
+    val restored = vfs_state_mount_table_lease_restore_v1(lease)
+    if not restored:
+        val restore_scheduler = if receipt.is_ok():
+            receipt.unwrap().scheduler
+        else:
+            receipt.unwrap_err().scheduler
+        return _result_v1(
+            restore_scheduler, true, false, "vfs-restore-failed")
+    if receipt.is_err():
+        val failed = receipt.unwrap_err()
+        return _result_v1(failed.scheduler, true, false, failed.reason)
+    val completed = receipt.unwrap()
+    _result_v1(completed.scheduler, true, true, "", Some(completed.receipt))

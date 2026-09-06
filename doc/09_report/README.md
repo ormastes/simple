@@ -1,0 +1,32 @@
+# Reports
+
+Implementation reports, completion logs, and session transcripts from development work.
+
+## Directories
+
+| Directory | Purpose | Files |
+|-----------|---------|-------|
+| 2025/ | 2025 completion and implementation reports | 320 |
+| 2026/ | 2026 reports | 5 |
+| session/ | Raw session logs from development sessions | 31 |
+| misc/ | Miscellaneous reports and analyses | 792 |
+
+## Current Root Reports
+
+| Report | Status | Notes |
+|--------|--------|-------|
+| [cross_language_perf_2026-06-11_thread_fix_refresh_freshbin.md](cross_language_perf_2026-06-11_thread_fix_refresh_freshbin.md) | Pass | Current contract-passing Docker-isolated cross-language profile from `scripts/check/check-cross-language-perf.shs`; preserves the broad workload inventory (artifact footprint, cold startup, warm throughput, OS-thread workers, cooperative-green, multicore-green runtime-pool, C pthread, Go goroutine, large fanout, stress fanout, hosted sliced fairness, ordinary loop-safepoint fairness, parallel artifact footprint, and peak RSS), with optional Python/Bun/Java/Erlang rows documented when those toolchains exist; pins Go `GOMAXPROCS` to `CPU_WORKERS`; requires `used_runtime_pool()` / `pool_used=N/N` plus `counter_delta=submitted/completed,pending=0,busy=0,blocked=0` evidence for the multicore-green rows; includes `Hosted Fairness Evidence` for `multicore_green_spawn_sliced` with sliced-handle `used_runtime_pool=true` as the explicit scalar-state fairness contract and native `multicore_green_spawn loop_safepoint` evidence for compiler-inserted runtime-pool polls; source rows are interpreter-inline semantic checks; keeps raw `thread_yield()` alone is still not counted as Go-like preemption evidence; and proves Go plus Simple multicore green beat C pthreads in the 1000-task stress gate with the refreshed green/cooperative runner. |
+| [simpleos_multicore_green_evidence_2026-06-07.md](simpleos_multicore_green_evidence_2026-06-07.md) | Pass | Current SimpleOS green-carrier evidence; includes the 2026-06-14 interpreter-run refresh for cooperative, multicore scheduler, green-channel wake, and final handoff blocker specs from `/tmp/simple-pherallel-continue-jj`, plus the 2026-06-14 opt-in final AP ring/user QEMU refresh from `/tmp/simple-pherallel-loop-jj`. The release-visible gate remains the fast `simpleos_green_hardware_handoff_blocker_spec.spl` contract, while fresh AP ring/user proof remains opt-in through `SIMPLEOS_GREEN_CARRIER_QEMU_HW_HANDOFF_LIVE=1`. The x86_64 freestanding runtime ABI now exports `rt_string_char_code_at`, `rt_for_iterable`, and no-op `rt_pool_safepoint`; the linker preserves the boot `_entry32` ELF entry instead of overriding it with `spl_start`; and the probe-only final handoff clears IF while keeping IOPL=3 so the minimal final CR3 can emit COM1 markers before syscall return. The current-source Cranelift build links `build/os/simpleos_green_carrier_probe.elf`; direct QEMU boot reaches `[BOOT32]`, `[BOOT64]`, `[smp] AP reached 64-bit entry`, `PASS=true`, `PREEMPT_PASS=true`, `SCHED_HANDOFF_PASS=true`, `USER_CR3_READY=true`, `HW_HANDOFF_PASS=true`, `USER_ENTRY_PASS=true`, and `USER_SYSCALL_PASS=true`; the non-final live SSpec wrapper passed 3 scenarios in 64532ms; and the opt-in final live SSpec wrapper passed 3 scenarios in 74244ms. The LLVM backend is unavailable in this driver build. The scheduler-only live lane must not emit the final triplet; those final markers remain exclusive to the `SIMPLEOS_GREEN_CARRIER_QEMU_HW_HANDOFF_LIVE=1` AP ring/user path. |
+| [cross_language_perf_2026-06-08_docker_contract.md](cross_language_perf_2026-06-08_docker_contract.md) | Historical | Earlier Docker-isolated contract-passing cross-language profile; retained for chronology but superseded by `cross_language_perf_2026-06-11_thread_fix_refresh_freshbin.md` for current green/cooperative SSpec-runner and multicore-green evidence. |
+| [cross_language_perf_parallel_smoke.md](cross_language_perf_parallel_smoke.md) | Historical | Earlier contract-passing cross-language profile smoke; retained for chronology but superseded by the Docker contract report because it predates the `GOMAXPROCS=CPU_WORKERS` fairness gate. |
+| [cross_language_perf_parallel_large_2026-06-07.md](cross_language_perf_parallel_large_2026-06-07.md) | Historical | Earlier large-profile evidence covering 2000-worker stress fanout; retained for chronology, but the active large-profile gate now checks `cross_language_perf_2026-06-11_thread_fix_refresh_freshbin.md` so current contract evidence, Docker isolation metadata, pinned Go scheduler width, and OS-thread row naming stay aligned. |
+| [cross_language_perf_2026-06-07_smoke.md](cross_language_perf_2026-06-07_smoke.md) | Historical | Dated pre-work-stealing-contract smoke; retained for chronology but superseded by the parallel smoke and large-profile reports for current profile-contract checks because it lacks fail-closed `queue_model=work_stealing` evidence. |
+| [cross_language_perf_2026-06-06.md](cross_language_perf_2026-06-06.md) | Historical | Older pre-cooperative/multicore split report from `scripts/check/check-cross-language-perf.shs`; retained as dated evidence but superseded by the parallel smoke and large-profile reports for current gated multicore-green checks. |
+| [gui_perf_benchmark_2026-06-06.md](gui_perf_benchmark_2026-06-06.md) | Generated | GUI/backend profile report from `tools/gui_perf_bench/run_all_benchmarks.shs`. |
+| [qemu_gtk_wm_capture_evidence_2026-06-01.md](qemu_gtk_wm_capture_evidence_2026-06-01.md) | Pass | QEMU GTK WM capture evidence. Auto QMP launch passed with a socket, and live QMP screendump capture passed with zero sample/scene mismatches. |
+
+## Related
+
+- [Tracking](../08_tracking/) — bug, test, and todo databases
+- [Metrics](../10_metrics/) — dashboards and coverage
+- [Plans](../03_plan/) — planning docs that precede reports

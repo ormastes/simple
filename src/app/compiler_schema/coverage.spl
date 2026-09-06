@@ -1,0 +1,115 @@
+# Compiler coverage report printer — src/app/compiler_schema/coverage.spl
+#
+# Hardening plan §11.8 (`simple compiler coverage`) and §11.9: the report is
+# rendered from the generated registry plus declared transition tables. It is
+# never hand-maintained, and it states `transitions: none declared` rather than
+# implying coverage that nobody declared.
+#
+# Transition tables are owned by agent A3 and are read from
+# spec/compiler_schema/transitions/*.sdn as rows of the shape:
+#   transition:
+#     from: <owner>
+#     to: <owner>
+#     state: covered|unsupported|missing
+#     reason: <text>
+#     test: <path>
+
+use std.io_runtime.{read_file_text, is_dir, dir_list}
+use app.compiler_schema.registry.{EnumResult, extract_all}
+
+struct TransitionRow:
+    """One declared stage transition."""
+    from_owner: text
+    to_owner: text
+    state: text
+    reason: text
+    test: text
+
+fn _field(line: text, key: text) -> text:
+    val t = line.trim()
+    if not t.starts_with(key + ":"):
+        return ""
+    t.substring(key.len() + 1, t.len()).trim()
+
+fn parse_transitions(source: text) -> [TransitionRow]:
+    """Parse the A3 transition SDN shape. Unknown keys are ignored."""
+    var rows: [TransitionRow] = []
+    var open = false
+    var from_owner = ""
+    var to_owner = ""
+    var state = ""
+    var reason = ""
+    var test = ""
+    for raw in source.split("\n"):
+        val t = raw.trim()
+        if t == "transition:":
+            if open:
+                rows.push(TransitionRow(from_owner, to_owner, state, reason, test))
+            open = true
+            from_owner = ""
+            to_owner = ""
+            state = ""
+            reason = ""
+            test = ""
+            continue
+        if not open:
+            continue
+        if t.starts_with("from:"):
+            from_owner = _field(t, "from")
+        elif t.starts_with("to:"):
+            to_owner = _field(t, "to")
+        elif t.starts_with("state:"):
+            state = _field(t, "state")
+        elif t.starts_with("reason:"):
+            reason = _field(t, "reason")
+        elif t.starts_with("test:"):
+            test = _field(t, "test")
+    if open:
+        rows.push(TransitionRow(from_owner, to_owner, state, reason, test))
+    rows
+
+fn load_transitions(repo_root: text) -> [TransitionRow]:
+    val dir = repo_root + "/spec/compiler_schema/transitions"
+    var rows: [TransitionRow] = []
+    if not is_dir(dir):
+        return rows
+    for name in dir_list(dir):
+        if name.ends_with(".sdn"):
+            for row in parse_transitions(read_file_text(dir + "/" + name)):
+                rows.push(row)
+    rows
+
+fn _pad(s: text, width: i64) -> text:
+    var out = s
+    while out.len() < width:
+        out = out + " "
+    out
+
+fn render_coverage(results: [EnumResult], transitions: [TransitionRow]) -> text:
+    var out = "Compiler completeness seal candidate\n\nStatic variants\n"
+    var total = 0
+    for r in results:
+        val owner = r.source.module_id + "." + r.source.enum_name
+        out = out + "  " + _pad(owner, 34) + "{r.rows.len()}/{r.rows.len()}\n"
+        total = total + r.rows.len()
+    out = out + "  " + _pad("TOTAL", 34) + "{total}/{total}\n"
+    out = out + "\nTransitions\n"
+    if transitions.len() == 0:
+        out = out + "  transitions: none declared\n"
+    else:
+        var missing = 0
+        var unsupported = 0
+        for t in transitions:
+            out = out + "  " + _pad(t.from_owner + " -> " + t.to_owner, 44) + t.state + "\n"
+            if t.state == "missing":
+                missing = missing + 1
+            elif t.state == "unsupported":
+                unsupported = unsupported + 1
+        out = out + "\n  Explicit unsupported                  {unsupported}\n"
+        out = out + "  Missing                               {missing}\n"
+    out
+
+fn coverage_report(repo_root: text) -> text:
+    render_coverage(extract_all(repo_root), load_transitions(repo_root))
+
+export TransitionRow, parse_transitions, load_transitions, render_coverage, coverage_report

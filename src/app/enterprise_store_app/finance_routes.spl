@@ -1,0 +1,135 @@
+"""
+# Enterprise Web App — finance back-office route family (/fin/*)
+
+Dispatched from `main.store_app_handle` AFTER the hardened prelude
+(limits -> path safety -> session auth). Executes ONLY the frozen guarded
+commands and pure reports of `std.enterprise_finance`; every rendered
+business value goes through `esc()`, every response through `secured()`,
+every numeric form field through the digit-checking `form_int()`.
+
+Routes:
+- GET  /fin/trial-balance  — per-account debit/credit + balanced flag
+- GET  /fin/ar             — open receivables (placed-but-unpaid orders)
+- GET  /fin/ap             — open payables
+- POST /fin/period/close   — end, now, idem
+- GET  /fin/period/status  — latest closed period end + captured totals
+
+## Read authorization
+Reads reuse the FROZEN `role_allows` policy with an action that already
+exists in it — `finance.period.close`, the vertical's back-office tier
+(admin or `finance`). No new auth scheme and no new action string.
+
+## AP is journal-derived (fixed 2026-08-16)
+`fin_ap_open` previously gated on a migration id `proc_001_payables` that no
+module ever applied, so `GET /fin/ap` always rendered an empty line list
+while a real payable existed. It now derives lines from the shared journal's
+`accounts_payable` account, and this page's total is simply the sum of those
+lines — one source of truth, lines and total cannot disagree.
+"""
+
+use std.common.net.http_core.{match_route_pattern}
+use std.nogc_sync_mut.http_server.types.{HttpResponse, HttpStatus}
+use std.nogc_sync_mut.enterprise_store.store.{EnterpriseStore}
+use std.nogc_sync_mut.enterprise_sale.foundation.{
+    TenantContext, ActorContext, SessionContext, CommandEnvelope, role_allows
+}
+use std.nogc_sync_mut.enterprise_finance.finance.{
+    fin_trial_balance, fin_ar_open, fin_ap_open,
+    fin_period_status, fin_close_report, fin_period_close
+}
+use app.enterprise_store_app.web_common.{esc, form_value, form_int, secured, deny}
+
+# fin_balanced is the dashboard roll-up flag: the tenant's journal balances.
+fn fin_balanced(store: EnterpriseStore, tenant_id: text) -> bool:
+    fin_trial_balance(store, tenant_id).balanced
+
+fn page_trial_balance(store: EnterpriseStore, tenant_id: text) -> text:
+    val tb = fin_trial_balance(store, tenant_id)
+    var body = "<h1>Trial Balance</h1><table class=\"trial-balance\">"
+    body = body + "<tr><th>Account</th><th>Debit</th><th>Credit</th></tr>"
+    for line in tb.lines:
+        body = body + "<tr data-account=\"" + esc(line.account) + "\">"
+        body = body + "<td class=\"account\">" + esc(line.account) + "</td>"
+        body = body + "<td class=\"debit\">" + esc("{line.debit_cents}") + "</td>"
+        body = body + "<td class=\"credit\">" + esc("{line.credit_cents}") + "</td>"
+        body = body + "</tr>"
+    body = body + "</table><ul class=\"totals\">"
+    body = body + "<li>Debit total: <span class=\"debit-total\">" + esc("{tb.debit_total}") + "</span></li>"
+    body = body + "<li>Credit total: <span class=\"credit-total\">" + esc("{tb.credit_total}") + "</span></li>"
+    val flag = if tb.balanced:
+        "true"
+    else:
+        "false"
+    body = body + "<li>Balanced: <span class=\"balanced\">" + flag + "</span></li>"
+    body + "</ul>"
+
+fn page_ar(store: EnterpriseStore, tenant_id: text) -> text:
+    var total: i64 = 0
+    var body = "<h1>Accounts Receivable</h1><ul class=\"ar\">"
+    for entry in fin_ar_open(store, tenant_id):
+        total = total + entry.1
+        body = body + "<li data-ref=\"" + esc(entry.0) + "\">"
+        body = body + "<span class=\"ref\">" + esc(entry.0) + "</span>"
+        body = body + " — <span class=\"amount\">" + esc("{entry.1}") + "</span></li>"
+    body = body + "</ul><p>Open total: <span class=\"ar-total\">" + esc("{total}") + "</span></p>"
+    body
+
+# page_ap mirrors page_ar: line items plus their own total. Both come from
+# `fin_ap_open`, which derives them from the authoritative journal, so the
+# total can never disagree with the lines. (It used to be computed separately
+# via `proc_payable_total` because `fin_ap_open` always returned empty; that
+# compensation is gone with the bug, and with it the dependency of the
+# finance route family on the procurement module.)
+fn page_ap(store: EnterpriseStore, tenant_id: text) -> text:
+    var total: i64 = 0
+    var body = "<h1>Accounts Payable</h1><ul class=\"ap\">"
+    for entry in fin_ap_open(store, tenant_id):
+        total = total + entry.1
+        body = body + "<li data-ref=\"" + esc(entry.0) + "\">"
+        body = body + "<span class=\"ref\">" + esc(entry.0) + "</span>"
+        body = body + " — <span class=\"amount\">" + esc("{entry.1}") + "</span></li>"
+    body = body + "</ul><p>Payable total (journal): <span class=\"ap-total\">" + esc("{total}") + "</span></p>"
+    body
+
+fn page_period_status(store: EnterpriseStore, tenant_id: text) -> text:
+    val latest = fin_period_status(store, tenant_id)
+    val snapshot = fin_close_report(store, tenant_id)
+    var body = "<h1>Period Status</h1><ul class=\"period\">"
+    body = body + "<li>Latest closed period end: <span class=\"period-end\">" + esc("{latest}") + "</span></li>"
+    body = body + "<li>Debit total at close: <span class=\"close-debit\">" + esc("{snapshot.0}") + "</span></li>"
+    body = body + "<li>Credit total at close: <span class=\"close-credit\">" + esc("{snapshot.1}") + "</span></li>"
+    body + "</ul>"
+
+fn command_page(reason: text, detail: text) -> HttpResponse:
+    secured(HttpResponse.html("<p class=\"result\">" + esc(reason) + ": " + esc(detail) + "</p>"))
+
+# finance_routes_handle serves every /fin/* route; unknown subpaths 404.
+fn finance_routes_handle(store: EnterpriseStore, session: SessionContext, tenant: TenantContext, who: ActorContext, method: text, path: text, body: text) -> HttpResponse:
+    if method == "GET" and match_route_pattern("/fin/trial-balance", path):
+        if not role_allows(who.role, "finance.period.close"):
+            return deny("forbidden", who.actor_id)
+        return secured(HttpResponse.html(page_trial_balance(store, tenant.tenant_id)))
+    if method == "GET" and match_route_pattern("/fin/ar", path):
+        if not role_allows(who.role, "finance.period.close"):
+            return deny("forbidden", who.actor_id)
+        return secured(HttpResponse.html(page_ar(store, tenant.tenant_id)))
+    if method == "GET" and match_route_pattern("/fin/ap", path):
+        if not role_allows(who.role, "finance.period.close"):
+            return deny("forbidden", who.actor_id)
+        return secured(HttpResponse.html(page_ap(store, tenant.tenant_id)))
+    if method == "GET" and match_route_pattern("/fin/period/status", path):
+        if not role_allows(who.role, "finance.period.close"):
+            return deny("forbidden", who.actor_id)
+        return secured(HttpResponse.html(page_period_status(store, tenant.tenant_id)))
+    if method == "POST" and match_route_pattern("/fin/period/close", path):
+        val period_end = form_int(body, "end")
+        val env = CommandEnvelope(request_id: "req-close-" + "{period_end}", idempotency_key: form_value(body, "idem"), action: "finance.period.close", payload: body)
+        val r = fin_period_close(store, session, tenant, who, env, period_end, form_int(body, "now"))
+        if not r.ok:
+            return deny(r.reason, r.detail)
+        return command_page(r.reason, r.detail)
+    secured(HttpResponse.error(HttpStatus.NotFound, "no such route"))
+
+export fin_balanced
+export page_trial_balance, page_ar, page_ap, page_period_status
+export finance_routes_handle

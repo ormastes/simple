@@ -1,0 +1,139 @@
+# @cover src/lib/gc_async_mut/gpu/engine2d/draw_ir_adv.spl 2%
+
+"""
+## Purpose and audience
+Executable contract for the DrawIR tiled opaque-barrier occlusion pass in
+`std.gpu.engine2d.draw_ir_adv`: a later fully opaque rectangle must retire
+earlier work on the tiles it covers, translucency and partial clips must keep
+earlier work, the optimized tile replay must stay pixel-identical to the
+unculled oracle, and the shipped renderer must keep its indexed submission
+path without a per-tile command array. Owned by the engine2d rendering team;
+reviewers of tile-culling changes are the audience.
+## Operator workflow
+Run `simple run test/01_unit/lib/gc_async_mut/gpu/engine2d/draw_ir_tiled_occlusion_spec.spl`.
+Each scenario builds a software Engine2D, replays a DrawIR command list
+through `engine2d_draw_ir_render_tiled`, and compares occlusion counters or
+readback pixels against the value justified in the oracle comment.
+## Compatibility and limitations
+Scenarios drive the "software" backend only; GPU backends carry their own
+specs. The closing scenario inspects shipped source text, which is a contract
+check on the implementation shape, not runtime pixel evidence.
+## Verification guidance and troubleshooting
+A barrier-scenario failure means culling retired or kept the wrong commands:
+compare `ops_occluded`/`ops_rendered` first, then the readback. Pixel-parity
+failing while counters match means tile replay reordered draws. The
+source-contract scenario failing means the indexed submission helper was
+renamed or a per-tile allocation came back.
+"""
+# Lifecycle: doc/01_research/ui/rendering/tile_render_culling_chrome.md ;
+# doc/01_research/ui/rendering/draw_ir_multibackend_research.md ;
+# doc/03_plan/ui/gpu_full_render_offload_mdsoc_plus_plan.md ;
+# doc/04_architecture/ui/engine_2d.md ;
+# doc/05_design/ui/draw_ir_packed_production_owner_v3.md
+# @manual_section: DrawIR tiled occlusion
+
+use std.spec.{describe, it, expect}
+use std.io_runtime.{file_read}
+use std.gpu.engine2d.engine.Engine2D
+use common.ui.draw_ir.{draw_ir_rect, draw_ir_rect_clipped, draw_ir_rect_bounds}
+use std.gpu.engine2d.draw_ir_adv.{
+    engine2d_draw_ir_render_tiled,
+    engine2d_draw_ir_render_tiled_unculled
+}
+
+describe "DrawIR tiled exact opaque barrier":
+    it "skips commands before a later solid rectangle covering the tile":
+        step("Replay an underlay rect and a full-tile opaque barrier over it")
+        # @req REQ-GPU-DRAWIR-001
+        # @capture(gui_image): 4x4 readback after the opaque barrier replaces the underlay
+        var engine = Engine2D.create_with_backend(4, 4, "software")
+        val commands = [
+            draw_ir_rect("under", 0, 0, 4, 4, 0xFFDC2626u32),
+            draw_ir_rect("barrier", 0, 0, 4, 4, 0xFF2563EBu32)
+        ]
+        val outcome = engine2d_draw_ir_render_tiled(
+            engine, commands, [0], [0], [4], [4], [true], [0, 2], [0, 1])
+        expect(outcome.ops_occluded).to_equal(1)  # oracle: the barrier fully covers the tile, so the underlay command is retired
+        expect(outcome.ops_rendered).to_equal(1)  # oracle: only the barrier command is replayed
+        expect(outcome.readback.pixels).to_equal([0xFF2563EBu32; 16])  # oracle: every pixel shows the barrier color
+        outcome.engine.shutdown()
+
+    it "keeps earlier work when the later rectangle is translucent":
+        step("Replay an underlay rect and an alpha-blended rectangle over it")
+        # @req REQ-GPU-DRAWIR-002
+        # @capture(statistics): occlusion counters proving translucency blocks retirement
+        var engine = Engine2D.create_with_backend(4, 4, "software")
+        val commands = [
+            draw_ir_rect("under", 0, 0, 4, 4, 0xFFDC2626u32),
+            draw_ir_rect("blend", 0, 0, 4, 4, 0x802563EBu32)
+        ]
+        val outcome = engine2d_draw_ir_render_tiled(
+            engine, commands, [0], [0], [4], [4], [true], [0, 2], [0, 1])
+        expect(outcome.ops_occluded).to_equal(0)  # oracle: an alpha rect cannot hide the underlay, so nothing is retired
+        expect(outcome.ops_rendered).to_equal(2)  # oracle: both commands must be replayed in order
+        outcome.engine.shutdown()
+
+    it "keeps earlier work when an opaque command clip covers only part of the tile":
+        step("Clip the opaque rectangle to the left half of the tile")
+        # @req REQ-GPU-DRAWIR-003
+        # @capture(gui_image): 4x4 readback showing the clipped barrier and the surviving underlay pixels
+        var engine = Engine2D.create_with_backend(4, 4, "software")
+        val commands = [
+            draw_ir_rect("under", 0, 0, 4, 4, 0xFFDC2626u32),
+            draw_ir_rect_clipped("partial", 0, 0, 4, 4, 0xFF2563EBu32,
+                                 draw_ir_rect_bounds(0, 0, 2, 4))
+        ]
+        val outcome = engine2d_draw_ir_render_tiled(
+            engine, commands, [0], [0], [4], [4], [true], [0, 2], [0, 1])
+        expect(outcome.ops_occluded).to_equal(0)  # oracle: a half-tile clip never proves the underlay is hidden
+        expect(outcome.ops_rendered).to_equal(2)  # oracle: both commands are replayed when coverage is partial
+        expect(outcome.readback.pixels[3]).to_equal(0xFFDC2626u32)  # oracle: pixel 3 lies outside the clip, so it keeps the underlay color
+        outcome.engine.shutdown()
+
+    it "matches uncullled pixels across tiles while replaying fewer operations":
+        step("Render the same three-rect frame tiled and unculled, then diff pixels")
+        # @req REQ-GPU-DRAWIR-004
+        # @capture(statistics): rendered/occluded counters for optimized vs unculled replay
+        val commands = [
+            draw_ir_rect("background", 0, 0, 8, 4, 0xFF111827u32),
+            draw_ir_rect("left", 0, 0, 4, 4, 0xFF16A34Au32),
+            draw_ir_rect("right", 4, 0, 4, 4, 0xFF2563EBu32)
+        ]
+        var optimized_engine = Engine2D.create_with_backend(8, 4, "software")
+        val optimized = engine2d_draw_ir_render_tiled(
+            optimized_engine, commands, [0, 4], [0, 0], [4, 4], [4, 4],
+            [true, true], [0, 2, 4], [0, 1, 0, 2])
+        var oracle_engine = Engine2D.create_with_backend(8, 4, "software")
+        val oracle = engine2d_draw_ir_render_tiled_unculled(
+            oracle_engine, commands, [0, 4], [0, 0], [4, 4], [4, 4],
+            [true, true], [0, 2, 4], [0, 1, 0, 2])
+        expect(optimized.readback.pixels).to_equal(oracle.readback.pixels)  # oracle: the unculled render is the pixel ground truth for this frame
+        expect(optimized.ops_rendered).to_equal(2)  # oracle: the background is retired once per covered tile, leaving the two top rects
+        expect(oracle.ops_rendered).to_equal(4)  # oracle: the unculled path replays every command on both tiles
+        expect(optimized.ops_occluded).to_equal(2)  # oracle: exactly the two background instances are culled
+        optimized.engine.shutdown()
+        oracle.engine.shutdown()
+
+    it "rejects malformed tile indices without raster or submission":
+        step("Feed a tile plan whose index points past the command list")
+        # @req REQ-GPU-DRAWIR-005
+        # @capture(statistics): zero-render outcome and empty readback for the malformed plan
+        var engine = Engine2D.create_with_backend(4, 4, "software")
+        val commands = [draw_ir_rect("only", 0, 0, 4, 4, 0xFFFFFFFFu32)]
+        val outcome = engine2d_draw_ir_render_tiled(
+            engine, commands, [0], [0], [4], [4], [true], [0, 1], [7])
+        expect(outcome.unsupported_kinds).to_equal("invalid-tile-plan")  # oracle: the renderer names the malformed plan instead of guessing
+        expect(outcome.ops_rendered).to_equal(0)  # oracle: no command may be submitted for an invalid plan
+        expect(outcome.readback.pixels.len()).to_equal(0)  # oracle: no raster output is produced for an invalid plan
+        outcome.engine.shutdown()
+
+    it "does not allocate a command array for each live tile":
+        step("Inspect the shipped tiled renderer source for the allocation contract")
+        # @req REQ-GPU-DRAWIR-006
+        # @capture(statistics): source-contract booleans for the indexed submission helper
+        val tiled_renderer_source = file_read(
+            "src/lib/gc_async_mut/gpu/engine2d/draw_ir_adv.spl")
+        val drops_per_tile_array_literal = tiled_renderer_source.contains("var tile_commands: [DrawIrCommand] = []")
+        val keeps_indexed_submission_helper = tiled_renderer_source.contains("_engine2d_draw_ir_render_commands_indexed")
+        expect(drops_per_tile_array_literal).to_equal(false)  # oracle: the per-tile array was removed in favor of indexed replay
+        expect(keeps_indexed_submission_helper).to_equal(true)  # oracle: the indexed replay helper is the retained submission path

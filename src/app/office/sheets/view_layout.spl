@@ -1,0 +1,157 @@
+# Sheet View / Print Layout
+#
+# FREEZE PANES and PRINT AREA. Both are VIEW state, not cell data: nothing
+# here reads or writes Sheet.cells, and a Sheet is only ever consulted for
+# its col_count/row_count bounds. That keeps the layout state separable from
+# the document model (it can be dropped, defaulted, or persisted on its own
+# without touching a single cell).
+#
+# FREEZE PANES: `frozen_rows` leading rows and `frozen_cols` leading columns
+# stay pinned while the rest of the grid scrolls. 0/0 means nothing frozen.
+# A freeze must leave at least one scrollable row and one scrollable column,
+# so freezing ALL rows of a sheet is rejected rather than silently clamped —
+# a fully-frozen grid cannot scroll and is always a caller mistake.
+#
+# PRINT AREA: a single A1 range ("" when unset) limiting what is printed.
+# The stored form is always NORMALIZED — an inverted or corner-swapped input
+# like "C3:A1" is accepted and stored as "A1:C3" — so a consumer can rely on
+# start <= end on both axes without re-normalizing.
+#
+# CEILINGS (documented, not bugs): one print area per sheet, not Excel's
+# multi-area list; no print titles / repeat-rows; no page-break or scaling
+# state. Freeze is the leading-rows/leading-cols form only, not an arbitrary
+# split at a scroll position.
+
+use app.office.sheets.spreadsheet.{Sheet}
+use app.office.sheets.cell.{parse_cell_ref, cell_ref_to_string, CellRef}
+use app.office.sheets.cell_ref.{CellRange, parse_range, range_to_string, expand_range_refs}
+
+struct SheetViewLayout:
+    frozen_rows: i32
+    frozen_cols: i32
+    print_area: text   # normalized A1 range, "" when unset
+
+struct ViewLayoutResult:
+    ok: bool
+    reason: text        # "" when ok
+    layout: SheetViewLayout
+
+# =========================================================================
+# Construction
+# =========================================================================
+
+fn default_view_layout() -> SheetViewLayout:
+    """A layout with nothing frozen and no print area."""
+    SheetViewLayout(frozen_rows: 0, frozen_cols: 0, print_area: "")
+
+# =========================================================================
+# Freeze Panes
+# =========================================================================
+
+fn freeze_panes(sheet: Sheet, layout: SheetViewLayout, rows: i32, cols: i32) -> ViewLayoutResult:
+    """Freeze `rows` leading rows and `cols` leading columns.
+
+    Rejects negative counts, and any count that would leave no scrollable
+    row or column (rows must stay below sheet.row_count, cols below
+    sheet.col_count). Freezing 0/0 is accepted and is equivalent to
+    unfreezing."""
+    if rows < 0 or cols < 0:
+        return _reject(layout, "negative freeze count")
+    if rows >= sheet.row_count:
+        return _reject(layout, "frozen rows {rows} leaves no scrollable row (sheet has {sheet.row_count})")
+    if cols >= sheet.col_count:
+        return _reject(layout, "frozen cols {cols} leaves no scrollable column (sheet has {sheet.col_count})")
+    _accept(SheetViewLayout(frozen_rows: rows, frozen_cols: cols, print_area: layout.print_area))
+
+fn unfreeze_panes(layout: SheetViewLayout) -> SheetViewLayout:
+    """Clear the frozen extent, keeping the print area. Safe when nothing
+    is frozen (returns an equivalent layout)."""
+    SheetViewLayout(frozen_rows: 0, frozen_cols: 0, print_area: layout.print_area)
+
+fn has_frozen_panes(layout: SheetViewLayout) -> bool:
+    """True when any row or column is frozen."""
+    layout.frozen_rows > 0 or layout.frozen_cols > 0
+
+fn frozen_extent(layout: SheetViewLayout) -> text:
+    """The frozen extent as "R<rows>C<cols>" — "R0C0" when nothing is frozen."""
+    "R{layout.frozen_rows}C{layout.frozen_cols}"
+
+fn is_frozen_ref(layout: SheetViewLayout, ref_str: text) -> bool:
+    """True when the cell at `ref_str` sits in a frozen row or column, i.e.
+    it stays pinned while the grid scrolls. An unparseable reference is
+    never frozen."""
+    val parsed = parse_cell_ref(ref_str)
+    if parsed == nil:
+        return false
+    parsed.row < layout.frozen_rows or parsed.col < layout.frozen_cols
+
+# =========================================================================
+# Print Area
+# =========================================================================
+
+fn set_print_area(sheet: Sheet, layout: SheetViewLayout, range_str: text) -> ViewLayoutResult:
+    """Set the print area from an A1 range like "A1:C10".
+
+    Rejects a malformed range and any range extending past the sheet's
+    col_count/row_count. An inverted range ("C3:A1") is accepted and stored
+    normalized ("A1:C3")."""
+    val range = parse_range(range_str)
+    if range == nil:
+        return _reject(layout, "malformed range: {range_str}")
+    val normalized = _normalize_range(range)
+    if normalized.end_ref.col >= sheet.col_count:
+        return _reject(layout, "range exceeds sheet columns ({sheet.col_count})")
+    if normalized.end_ref.row >= sheet.row_count:
+        return _reject(layout, "range exceeds sheet rows ({sheet.row_count})")
+    _accept(SheetViewLayout(
+        frozen_rows: layout.frozen_rows,
+        frozen_cols: layout.frozen_cols,
+        print_area: range_to_string(normalized),
+    ))
+
+fn clear_print_area(layout: SheetViewLayout) -> SheetViewLayout:
+    """Clear the print area, keeping the frozen extent. Safe when none is
+    set (returns an equivalent layout)."""
+    SheetViewLayout(frozen_rows: layout.frozen_rows, frozen_cols: layout.frozen_cols, print_area: "")
+
+fn has_print_area(layout: SheetViewLayout) -> bool:
+    """True when a print area is set."""
+    layout.print_area.len() > 0
+
+fn print_area_refs(layout: SheetViewLayout) -> [text]:
+    """Every cell reference inside the print area, or an empty list when no
+    print area is set."""
+    if layout.print_area.len() == 0:
+        return []
+    val range = parse_range(layout.print_area)
+    if range == nil:
+        return []
+    expand_range_refs(range)
+
+# =========================================================================
+# Internals
+# =========================================================================
+
+fn _accept(layout: SheetViewLayout) -> ViewLayoutResult:
+    ViewLayoutResult(ok: true, reason: "", layout: layout)
+
+fn _reject(layout: SheetViewLayout, reason: text) -> ViewLayoutResult:
+    ViewLayoutResult(ok: false, reason: reason, layout: layout)
+
+fn _normalize_range(range: CellRange) -> CellRange:
+    """Reorder a range's corners so start is the top-left and end the
+    bottom-right, per axis independently ("C1:A3" -> "A1:C3")."""
+    var min_col = range.start.col
+    var max_col = range.end_ref.col
+    if min_col > max_col:
+        min_col = range.end_ref.col
+        max_col = range.start.col
+    var min_row = range.start.row
+    var max_row = range.end_ref.row
+    if min_row > max_row:
+        min_row = range.end_ref.row
+        max_row = range.start.row
+    CellRange(
+        start: CellRef(col: min_col, row: min_row),
+        end_ref: CellRef(col: max_col, row: max_row),
+    )

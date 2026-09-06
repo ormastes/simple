@@ -1,0 +1,142 @@
+# ============================================================================
+# common/structural/digest/hash256_codec.spl — CPU reference serializers for
+# the frozen Hash256 wire contract v1.
+#
+# Contract document:
+#   doc/05_design/platform/structural_compute/hash256_contract_v1.md
+# Golden vectors:
+#   test/fixtures/structural/hash256_golden_v1.{spl,sdn}
+# Gate:
+#   test/01_unit/common/structural/hash256_contract_spec.spl
+#
+# LAYOUT (frozen):
+#
+#   Hash256   32   b0 b1 b2 ... b31
+#
+#   where byte *i* is characters 2i and 2i+1 of the 64-character lowercase hex
+#   host spelling, high nibble first. No envelope, no length prefix, no
+#   padding, no alignment. `Hash256` is a FIELD type: it inherits the envelope
+#   and the schema version of the record that embeds it.
+#
+# There is deliberately no `wire_put_u64` in this file. A digest is a byte
+# string, not a number, so it is written as bytes; running it through the
+# little-endian integer writers would reverse the spelling inside each 8-byte
+# group and give one hash two readings depending on which side wrote it.
+# ============================================================================
+
+use std.common.structural.wire.{wire_has, wire_to_hex}
+use std.common.structural.digest.hash256.{
+    HASH256_HEX_LEN,
+    HASH256_LEN,
+    hash256_byte,
+    hash256_hex_valid
+}
+
+# ----------------------------------------------------------------------------
+# Field primitives — for records that EMBED a Hash256
+#
+# These mirror `hash128_put` / `hash128_read` in identity/identity_codec.spl:
+# unchecked, fixed width, no framing. An embedder validates with
+# `hash256_hex_valid` in its own `_valid` predicate and only then encodes, which
+# is the pattern `place_put_hash` already established for `receipt_seed`.
+# ----------------------------------------------------------------------------
+
+fn hash256_put(out: [u8], digest: text) -> [u8]:
+    """Append the 32 wire bytes of `digest`.
+
+    UNCHECKED: the caller MUST have passed `hash256_hex_valid(digest)` first.
+    An invalid character encodes as 0x00 for that nibble pair, which is a
+    corrupt record — that is why validation is a precondition and not a silent
+    fallback. `encode_hash256` is the checked entry point."""
+    var b = out
+    var i = 0
+    while i < HASH256_LEN:
+        val v = hash256_byte(digest, i)
+        if v < 0:
+            b.push(0)
+        else:
+            b.push(v)
+        i = i + 1
+    b
+
+fn hash256_read(data: [u8], off: i64) -> text:
+    """Read 32 bytes at `off` and render the frozen 64-character lowercase hex
+    spelling.
+
+    UNCHECKED bounds: the embedding record's decoder has already established
+    that its own buffer is long enough. `decode_hash256` is the checked entry
+    point.
+
+    Renders through the ID-TAG port's `wire_to_hex` rather than open-coding the
+    spelling, so the digest's host form and the golden-vector interchange form
+    are produced by ONE function. Two hex renderers is how two lanes come to
+    disagree about a case rule."""
+    var window: [u8] = []
+    var i = 0
+    while i < HASH256_LEN:
+        window.push(data[off + i])
+        i = i + 1
+    wire_to_hex(window)
+
+# ----------------------------------------------------------------------------
+# Checked entry points — for a bare digest
+# ----------------------------------------------------------------------------
+
+struct Hash256EncodeResult:
+    """`ok` false means the digest was not 64 lowercase hex characters and
+    `bytes` is EMPTY. An empty buffer is the same refusal signal
+    `encode_query_program` uses; it can never be mistaken for a 32-byte
+    record."""
+    ok: bool
+    bytes: [u8]
+
+struct Hash256DecodeResult:
+    """`ok` false means the buffer was not exactly 32 bytes and `value` is the
+    empty text. The empty text is not a legal digest spelling, so a caller that
+    ignores `ok` still cannot smuggle the failure into a record."""
+    ok: bool
+    value: text
+
+fn encode_hash256(digest: text) -> Hash256EncodeResult:
+    """Encode a bare digest. Refuses anything that is not exactly 64 lowercase
+    hex characters — including the empty text and the uppercase spelling of an
+    otherwise valid digest."""
+    val empty: [u8] = []
+    if not hash256_hex_valid(digest):
+        return Hash256EncodeResult(ok: false, bytes: empty)
+    Hash256EncodeResult(ok: true, bytes: hash256_put(empty, digest))
+
+fn decode_hash256(data: [u8]) -> Hash256DecodeResult:
+    """Decode a bare digest.
+
+    Requires EXACTLY 32 bytes. A trailing byte is a hard reject, not a
+    truncating read: silent extension is silent divergence, which is the rule
+    every other record in this freeze applies to its own trailing bytes."""
+    if data.len() != HASH256_LEN:
+        return Hash256DecodeResult(ok: false, value: "")
+    if not wire_has(data, 0, HASH256_LEN):
+        return Hash256DecodeResult(ok: false, value: "")
+    Hash256DecodeResult(ok: true, value: hash256_read(data, 0))
+
+# ----------------------------------------------------------------------------
+# Region check — for an embedder sizing a record
+#
+# Computed in i64 throughout. `off + HASH256_LEN` on two u32 fields evaluated
+# at 32-bit width wraps, and a wrapped bound reads as "fits"; that trap has
+# already been hit once in this freeze, in a set-size computation.
+# ----------------------------------------------------------------------------
+
+fn hash256_region_valid(data: [u8], off: i64) -> bool:
+    """True when `data` holds a full 32-byte digest starting at `off`."""
+    if off < 0:
+        return false
+    if off > data.len():
+        return false
+    if data.len() - off < HASH256_LEN:
+        return false
+    wire_has(data, off, HASH256_LEN)
+
+fn hash256_hex_len() -> i64:
+    """The frozen host-spelling length. A function rather than a bare re-export
+    so a bridge can query it without importing the constants module."""
+    HASH256_HEX_LEN

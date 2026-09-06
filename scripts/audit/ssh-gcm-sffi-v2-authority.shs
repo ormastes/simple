@@ -1,0 +1,31 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+simple="$root/src/os/apps/sshd/ssh_cipher_live.spl"
+native="$root/src/compiler_rust/runtime/src/value/aes.rs"
+interp="$root/src/compiler_rust/compiler/src/interpreter_extern/simd.rs"
+dispatch="$root/src/compiler_rust/compiler/src/interpreter_extern/mod.rs"
+codegen="$root/src/compiler_rust/compiler/src/codegen/runtime_sffi.rs"
+symbols="$root/src/compiler_rust/common/src/runtime_symbols.rs"
+
+grep -q '^@unsafe(reason: "raw SSH AES-256-GCM packet provider; tagged v2 response is lifted immediately", capabilities: \[ffi\])$' "$simple"
+grep -q '^extern fn rt_ssh_aes256_gcm_decrypt_packet_v2' "$simple"
+grep -q 'raw.pop()' "$simple"
+! grep -q 'rt_ssh_aes256_gcm_decrypt_packet(' "$simple"
+
+grep -q '^pub unsafe extern "C" fn rt_ssh_aes256_gcm_decrypt_packet_v2' "$native"
+grep -q 'SshAesGcmDecryptOutcome::AuthenticationFailed' "$native"
+grep -q '^[[:space:]]*payload.push(0x02);$' "$native"
+grep -q '^[[:space:]]*runtime_array_from_bytes(&payload)$' "$native"
+
+grep -q 'pub fn rt_ssh_aes256_gcm_decrypt_packet_v2' "$interp"
+! grep -q 'pub fn rt_ssh_aes256_gcm_decrypt_packet(args' "$interp"
+! grep -q 'pub fn rt_ssh_aes256_gcm_decrypt_packet_payload_len(args' "$interp"
+grep -q '"rt_ssh_aes256_gcm_decrypt_packet_v2"' "$dispatch"
+! grep -q '"rt_ssh_aes256_gcm_decrypt_packet",' "$dispatch"
+! grep -q '"rt_ssh_aes256_gcm_decrypt_packet_payload_len",' "$dispatch"
+grep -q 'RuntimeFuncSpec::new("rt_ssh_aes256_gcm_decrypt_packet_v2", \&\[I64, I64, I64, I64\], \&\[I64\])' "$codegen"
+grep -q '"rt_ssh_aes256_gcm_decrypt_packet_v2"' "$symbols"
+
+echo 'SSH GCM SFFI v2 authority: PASS (tagged one-pass carrier; legacy interpreter dispatch removed)'

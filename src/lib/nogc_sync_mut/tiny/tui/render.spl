@@ -1,0 +1,81 @@
+# codex-impl
+
+use std.tiny.gui.component.{TINY_COMPONENT_BORDER, TINY_COMPONENT_BUTTON, TINY_COMPONENT_CHECKBOX, TINY_COMPONENT_DIVIDER, TINY_COMPONENT_LIST, TINY_COMPONENT_PROGRESS, TINY_COMPONENT_SCROLL_PANE, TINY_COMPONENT_TEXT, TINY_COMPONENT_TEXT_INPUT}
+use std.tiny.gui.state.{TinyGuiState}
+use std.tiny.common.types.{TinyPoint, TinyRect, tiny_contains}
+use std.tiny.tui.cell.{TinyCellBuffer}
+
+fn _tiny_tui_put(buffer: TinyCellBuffer, clip: TinyRect, x: i32, y: i32, glyph: text, attributes: i32):
+    if tiny_contains(clip, TinyPoint(x: x, y: y)):
+        buffer.put(x, y, glyph, 7, 0, attributes)
+
+fn _tiny_tui_text(buffer: TinyCellBuffer, clip: TinyRect, x: i32, y: i32, value: text, max_width: i32, attributes: i32):
+    var index = 0
+    val glyphs = value.chars()
+    while index < glyphs.len() and index < max_width:
+        _tiny_tui_put(buffer, clip, x + index, y, glyphs[index], attributes)
+        index = index + 1
+
+fn _tiny_tui_border(buffer: TinyCellBuffer, clip: TinyRect, x: i32, y: i32, width: i32, height: i32):
+    if width <= 1 or height <= 1: return
+    var dx = 0
+    while dx < width:
+        _tiny_tui_put(buffer, clip, x + dx, y, "-", 0)
+        _tiny_tui_put(buffer, clip, x + dx, y + height - 1, "-", 0)
+        dx = dx + 1
+    var dy = 0
+    while dy < height:
+        _tiny_tui_put(buffer, clip, x, y + dy, "|", 0)
+        _tiny_tui_put(buffer, clip, x + width - 1, y + dy, "|", 0)
+        dy = dy + 1
+
+fn tiny_tui_render(state: TinyGuiState, width: i32, height: i32) -> TinyCellBuffer:
+    var buffer = TinyCellBuffer.create(width, height)
+    val viewport = TinyRect(x: 0, y: 0, width: buffer.width, height: buffer.height)
+    val panes = state.resolved_panes(viewport)
+    for index in 0..state.nodes.len():
+        val node = state.nodes[index]
+        val bounds = panes[index].absolute
+        val clip = panes[index].effective_clip
+        val focused = if index == state.focused_index: 1 else: 0
+        if node.class_id == TINY_COMPONENT_TEXT:
+            _tiny_tui_text(buffer, clip, bounds.x, bounds.y, node.text_value, bounds.width, focused)
+        if node.class_id == TINY_COMPONENT_BORDER:
+            _tiny_tui_border(buffer, clip, bounds.x, bounds.y, bounds.width, bounds.height)
+        if node.class_id == TINY_COMPONENT_BUTTON:
+            _tiny_tui_border(buffer, clip, bounds.x, bounds.y, bounds.width, bounds.height)
+            _tiny_tui_text(buffer, clip, bounds.x + 1, bounds.y + 1, node.text_value, bounds.width - 2, focused)
+        if node.class_id == TINY_COMPONENT_TEXT_INPUT:
+            _tiny_tui_border(buffer, clip, bounds.x, bounds.y, bounds.width, bounds.height)
+            _tiny_tui_text(buffer, clip, bounds.x + 1, bounds.y + 1, node.text_value, bounds.width - 2, focused)
+        if node.class_id == TINY_COMPONENT_CHECKBOX:
+            val mark = if node.value == 0: "[ ]" else: "[x]"
+            _tiny_tui_text(buffer, clip, bounds.x, bounds.y, mark + node.text_value, bounds.width, focused)
+        if node.class_id == TINY_COMPONENT_DIVIDER:
+            var dx = 0
+            while dx < bounds.width:
+                _tiny_tui_put(buffer, clip, bounds.x + dx, bounds.y, "-", 0)
+                dx = dx + 1
+        if node.class_id == TINY_COMPONENT_PROGRESS:
+            var dx = 0
+            while dx < bounds.width:
+                val glyph = if dx * 100 < node.value * bounds.width: "#" else: "."
+                _tiny_tui_put(buffer, clip, bounds.x + dx, bounds.y, glyph, 0)
+                dx = dx + 1
+        if node.class_id == TINY_COMPONENT_LIST:
+            var ordinal = 0
+            var child_index = 0
+            while child_index < state.nodes.len():
+                val parent = state.nodes[child_index].parent
+                if parent.is_valid() and parent.index == index and parent.generation == node.id.generation:
+                    if ordinal == node.value:
+                        _tiny_tui_put(buffer, clip, bounds.x, panes[child_index].absolute.y, ">", focused)
+                    ordinal = ordinal + 1
+                child_index = child_index + 1
+        if node.class_id == TINY_COMPONENT_SCROLL_PANE:
+            val maximum = state.direct_child_extent_y(index) - bounds.height
+            if node.value > 0:
+                _tiny_tui_put(buffer, clip, bounds.x + bounds.width - 1, bounds.y, "^", focused)
+            if maximum > node.value:
+                _tiny_tui_put(buffer, clip, bounds.x + bounds.width - 1, bounds.y + bounds.height - 1, "v", focused)
+    buffer

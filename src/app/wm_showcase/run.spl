@@ -1,0 +1,165 @@
+# WM Showcase scripted run — the business layer over the WM session.
+#
+# One scripted session drives the whole demonstration so that every claim in
+# the gate is a receipt from the SAME run:
+#
+#   1. open five windows (GUI widget / web render / Simple Browser /
+#      Simple Terminal / 2D surface)
+#   2. capture the desktop            -> `base`
+#   3. close the web window           -> `closed`   (taskbar entry must vanish)
+#   4. re-open the web window         -> `restored` (taskbar entry must return)
+#   5. move the 2D scene              -> `mutated`  (capture must change)
+#
+# Steps 3 and 5 are the sabotage arms: a taskbar that renders the same picture
+# regardless of window state, or a capture that is insensitive to the scene,
+# fails here rather than passing decoratively.
+
+use app.wm_showcase.session.{
+    WM_SHOWCASE_2D_HOME_X,
+    WM_SHOWCASE_2D_HOME_Y,
+    WM_SHOWCASE_DESKTOP_H,
+    WM_SHOWCASE_DESKTOP_W,
+    WM_SHOWCASE_KEY_WEB,
+    WmShowcaseCapture,
+    WmShowcaseProvenance,
+    WmShowcaseSession,
+    wm_showcase_probe_provenance,
+    wm_showcase_window_specs,
+}
+use app.wm_showcase.capture_artifact.{
+    wm_showcase_ppm_path,
+    wm_showcase_provenance_path,
+    wm_showcase_write_ppm,
+    wm_showcase_write_provenance,
+}
+
+val WM_SHOWCASE_ARTIFACT_NAME: text = "wm_showcase_desktop"
+val WM_SHOWCASE_MUTATED_2D_X: i32 = 150
+val WM_SHOWCASE_MUTATED_2D_Y: i32 = 55
+
+struct WmShowcaseRunResult:
+    """Every receipt the gate checks, from one scripted session."""
+    provenance: WmShowcaseProvenance
+    declared_windows: i32
+    opened_windows: i32
+    accepted_frames: i32
+    reject_reasons: text
+    base: WmShowcaseCapture
+    closed: WmShowcaseCapture
+    restored: WmShowcaseCapture
+    mutated: WmShowcaseCapture
+    web_title: text
+    web_reopened: bool
+    scene_moved: bool
+    ppm_written: bool
+    ppm_path: text
+    provenance_written: bool
+    provenance_path: text
+
+fn _web_spec_title() -> text:
+    for spec in wm_showcase_window_specs():
+        if spec.key == WM_SHOWCASE_KEY_WEB:
+            return spec.title
+    ""
+
+fn _stage(name: text):
+    """Stage marker. The scripted session runs interpreted and each stage costs
+    minutes, so a run with no output is indistinguishable from a hang without
+    these. Kept (not deleted as noise) for exactly that reason."""
+    print "wm_showcase_stage {name}"
+
+fn wm_showcase_run() -> WmShowcaseRunResult:
+    _stage("start")
+    var session = WmShowcaseSession.start(
+        WM_SHOWCASE_DESKTOP_W, WM_SHOWCASE_DESKTOP_H
+    )
+    val accepted = session.open_all()
+    _stage("opened")
+    var reject_reasons = ""
+    for entry in session.opened:
+        if not entry.frame_accepted:
+            val item = "{entry.key}={entry.reject_reason}"
+            reject_reasons = if reject_reasons == "": item
+                else: reject_reasons + "|" + item
+    val base = session.capture()
+    _stage("captured_base")
+
+    # Sabotage arm 1 — close a window. The taskbar is a projection of the
+    # compositor's live window list, so this must remove the entry, and the
+    # window's content must leave the composited frame.
+    session.close_window(WM_SHOWCASE_KEY_WEB)
+    val closed = session.capture()
+    _stage("captured_closed")
+
+    # Restore.
+    var web_reopened = false
+    for spec in wm_showcase_window_specs():
+        if spec.key == WM_SHOWCASE_KEY_WEB:
+            web_reopened = session.open_window(spec)
+    val restored = session.capture()
+    _stage("captured_restored")
+
+    # Sabotage arm 2 — change the scene without touching window state.
+    val scene_moved = session.move_2d_scene(
+        WM_SHOWCASE_MUTATED_2D_X, WM_SHOWCASE_MUTATED_2D_Y
+    )
+    val mutated = session.capture()
+    _stage("captured_mutated")
+
+    val provenance = wm_showcase_probe_provenance(64, 64)
+    _stage("probed_lane")
+    val ppm_written = wm_showcase_write_ppm(WM_SHOWCASE_ARTIFACT_NAME, restored)
+    val provenance_written = wm_showcase_write_provenance(
+        WM_SHOWCASE_ARTIFACT_NAME, restored, provenance
+    )
+    _stage("wrote_artifact")
+
+    WmShowcaseRunResult(
+        provenance: provenance,
+        declared_windows: wm_showcase_window_specs().len(),
+        opened_windows: base.open_windows,
+        accepted_frames: accepted,
+        reject_reasons: reject_reasons,
+        base: base,
+        closed: closed,
+        restored: restored,
+        mutated: mutated,
+        web_title: _web_spec_title(),
+        web_reopened: web_reopened,
+        scene_moved: scene_moved,
+        ppm_written: ppm_written,
+        ppm_path: wm_showcase_ppm_path(WM_SHOWCASE_ARTIFACT_NAME),
+        provenance_written: provenance_written,
+        provenance_path: wm_showcase_provenance_path(WM_SHOWCASE_ARTIFACT_NAME)
+    )
+
+fn wm_showcase_run_report(result: WmShowcaseRunResult) -> text:
+    """One line per receipt. Printed by the CLI entry and by the gate so a
+    reader never has to infer what the run measured."""
+    var out = ""
+    out = out + "wm_showcase_lane lane={result.provenance.lane} " +
+        "resolved={result.provenance.resolved_backend} " +
+        "readback_source={result.provenance.readback_source} " +
+        "device_proven={result.provenance.device_proven} " +
+        "degraded={result.provenance.render_degraded} " +
+        "degrade_reason={result.provenance.degrade_reason}\n"
+    out = out + "wm_showcase_windows declared={result.declared_windows} " +
+        "open={result.opened_windows} accepted={result.accepted_frames} " +
+        "rendered={result.base.rendered_windows} " +
+        "rejects={result.reject_reasons}\n"
+    out = out + "wm_showcase_taskbar_base entries={result.base.taskbar_entries} " +
+        "titles={result.base.taskbar_titles}\n"
+    out = out + "wm_showcase_taskbar_closed entries={result.closed.taskbar_entries} " +
+        "titles={result.closed.taskbar_titles}\n"
+    out = out + "wm_showcase_taskbar_restored entries={result.restored.taskbar_entries} " +
+        "titles={result.restored.taskbar_titles}\n"
+    out = out + "wm_showcase_capture base_checksum={result.base.checksum} " +
+        "closed_checksum={result.closed.checksum} " +
+        "restored_checksum={result.restored.checksum} " +
+        "mutated_checksum={result.mutated.checksum} " +
+        "distinct_colors={result.base.distinct_colors}\n"
+    out = out + "wm_showcase_artifact ppm={result.ppm_path} " +
+        "ppm_written={result.ppm_written} " +
+        "provenance={result.provenance_path} " +
+        "provenance_written={result.provenance_written}\n"
+    out

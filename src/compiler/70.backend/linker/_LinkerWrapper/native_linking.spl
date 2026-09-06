@@ -1,0 +1,1029 @@
+# Native + SMF-bundle linking — link_to_native and cc/windows/msvc backends.
+use compiler.backend.linker.linker_wrapper.*
+# Direct import from the concrete defining sibling module — the seed mangler
+# bare-externs calls whose import chain crosses the facade wildcard re-export.
+# See doc/08_tracking/bug/mangler_bare_extern_sibling_split_part_2026-07-30.md
+use compiler.backend.linker._LinkerWrapper.shared_linking.{_link_native_mingw}
+# Linker Wrapper - Unified Linking API
+#
+# This module provides a single entry point for all linking operations,
+# replacing the hardcoded `cc` calls in driver.spl with platform-aware
+# linker selection and adding self-contained executable SMF support.
+#
+# Three linking modes:
+#   link_to_native()         - Platform-detected native binary (mold/lld/ld)
+#   link_to_smf()            - SMF module file
+#   link_to_self_contained() - Runtime + SMF data in one executable
+#
+# Self-contained binary format (trailer-based):
+#   [Runtime Binary] [SMF Data] [32-byte Trailer]
+#   Trailer: "SMFE"(4) + smf_offset(8) + smf_size(8) + checksum(8) + version(4)
+#
+# Interpreter-safe: no generics (<>) used.
+#
+# Split into modules:
+#   linker_wrapper_helpers.spl — SMF linking, self-contained linking, binary helpers
+
+use std.io_runtime.{ShellResult, shell, shell_output, file_exists, file_copy, file_delete, file_size_raw, file_read_bytes, env_get, process_run, cwd}
+use std.platform.{host_os, host_arch}
+use std.log.{debug, info}
+use std.string_builder.{StringBuilder}
+
+use compiler.backend.linker.lld_sffi.{LldResult, lld_elf_link}
+use compiler.backend.linker.mold.{MoldBackend, MoldConfig, find_linker, LinkerType, execute_linker, create_temp_dir, cleanup_temp_dir, linker_file_size}
+use compiler.backend.linker.object_provider.{ObjectProvider, ObjectProviderConfig}
+use compiler.backend.linker.object_code_unit.{ObjectCodeUnit}
+use compiler.backend.linker.object_emitter.{assemble_code_units}
+use compiler.backend.linker.smf_getter.{SmfGetter}
+use compiler.backend.linker.smf_enums.{Platform, Arch}
+use compiler.backend.linker.obj_taker.{ObjTaker, ObjTakeResult, objtaker_with_defaults, objtaker_take_object}
+use compiler.backend.linker.platform_defaults.{elf_emulation}
+use compiler.backend.backend.runtime_compiler.{find_c_compiler, hosted_c_compiler_plan}
+
+# Re-export CRT discovery (extracted to crt_discovery.spl)
+use compiler.backend.linker.crt_discovery.*
+
+# Import helpers (SMF linking, self-contained, binary utils)
+use compiler.backend.linker.linker_wrapper_helpers.{SelfContainedConfig}
+use compiler.backend.linker.msvc.{MsvcConfig, MsvcLinker, find_visual_studio, find_link_exe, find_msvc_crt_paths}
+use compiler.backend.linker.linker_wrapper_helpers.{SMFE_MAGIC, SMFE_TRAILER_SIZE, SMFE_VERSION}
+use compiler.backend.linker.linker_wrapper_helpers.{link_to_smf, link_to_self_contained}
+use compiler.backend.linker.linker_wrapper_helpers.{detect_self_contained, find_runtime_binary, find_runtime_lib_dir}
+use compiler.backend.linker.linker_wrapper_helpers.{build_trailer, fnv1a_hash_i64}
+use compiler.backend.linker.linker_wrapper_helpers.{write_bytes_to_file, write_elf_bytes_to_file}
+
+# ============================================================================
+# Configuration Structs
+# ============================================================================
+
+struct NativeLinkConfig:
+    libraries: [text]
+    library_paths: [text]
+    runtime_path: text       # Path to libsimple_compiler (empty = auto-detect)
+    target_triple: text = ""
+    linker_abi: text = ""
+    pie: bool
+    debug: bool
+    verbose: bool
+    allow_duplicate_definitions: bool
+    allow_cc_fallback: bool
+    retained_symbols: [text]
+    extra_flags: [text]
+    runtime_bundle: text = "" # Named runtime authority selected by the bootstrap owner
+
+impl NativeLinkConfig:
+    static fn default() -> NativeLinkConfig:
+        NativeLinkConfig(
+            libraries: [],
+            library_paths: [],
+            runtime_path: "",
+            pie: true,
+            debug: false,
+            verbose: false,
+            allow_duplicate_definitions: true,
+            allow_cc_fallback: true,
+            retained_symbols: [],
+            extra_flags: [],
+            target_triple: "",
+            linker_abi: "",
+            runtime_bundle: ""
+        )
+
+# ponytail: CrtFiles has ONE terminal declaration, in
+# compiler.backend.linker.crt_discovery (crt_discovery.spl:10). The copy that used
+# to live here had the same 8 fields in the same order and differed only in
+# trailing comments - and it was never constructed: every CrtFiles value in this
+# file comes from crt_discovery's find_crt_files(), which line 44 above already
+# wildcard-imports. So the local copy shadowed the real type inside its own module
+# for no benefit.
+
+fn is_simpleos_target() -> bool:
+    val t = env_get("SIMPLE_TARGET")
+    if t == nil:
+        return false
+    t.ends_with("-simpleos")
+
+fn detect_preferred_backend(extra_flags: [text]) -> text:
+    for flag in extra_flags:
+        if flag == "--fixed-be":
+            return "llvm"
+        elif flag.starts_with("--fixed-be="):
+            val backend = flag.substring(11)
+            if backend != "":
+                return backend
+    ""
+
+fn unresolved_symbol_flags_for_unix_linker(os: text) -> [text]:
+    if os == "linux" or os == "freebsd":
+        return ["--allow-multiple-definition"]
+    []
+
+fn unresolved_symbol_flags_for_cc(os_name: text) -> [text]:
+    if os_name == "Linux" or os_name == "FreeBSD":
+        return ["-Wl,--allow-multiple-definition"]
+    []
+
+fn msvc_duplicate_symbol_flag() -> text:
+    "/FORCE:MULTIPLE"
+
+fn macos_homebrew_prefix(configured: text, arch: text) -> text:
+    if configured != "":
+        return configured
+    if arch == "aarch64":
+        return "/opt/homebrew"
+    "/usr/local"
+
+fn linker_trace_enabled() -> bool:
+    (env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1"
+
+fn hosted_native_link_os_supported(os: text) -> bool:
+    os == "linux" or os == "macos" or os == "darwin" or os == "windows" or
+        os == "windows-mingw" or os == "windows-msvc" or os == "freebsd"
+
+fn hosted_native_link_arch_supported(os: text, arch: text) -> bool:
+    val x64 = arch == "x86_64" or arch == "amd64"
+    val arm64 = arch == "aarch64" or arch == "arm64"
+    if os == "windows" or os == "windows-mingw" or os == "windows-msvc":
+        return x64
+    if os == "macos" or os == "darwin" or os == "freebsd":
+        return x64 or arm64
+    if os == "linux":
+        return x64 or arm64 or arch == "riscv64" or arch == "rv64"
+    false
+
+fn hosted_native_link_unsupported_error(os: text) -> text:
+    "Native linking is unsupported on host OS '" + os + "'"
+
+fn hosted_native_link_unsupported_arch_error(os: text, arch: text) -> text:
+    if os == "windows" and (arch == "aarch64" or arch == "arm64"):
+        return "Windows ARM64 native linking unsupported: MSVC linker and CRT discovery are x64-only"
+    "Native linking is unsupported on host architecture '" + arch + "' for OS '" + os + "'"
+
+fn native_linker_abi_for_target(target: text) -> text:
+    if target.ends_with("-pc-windows-gnu"): return "windows-gnu"
+    if target.ends_with("-pc-windows-msvc"): return "windows-msvc"
+    if target.ends_with("-apple-darwin"): return "darwin"
+    if target.ends_with("-linux-gnu") or target.ends_with("-unknown-freebsd"): return "elf"
+    ""
+
+fn native_effective_link_os(host: text, target: text, linker_abi: text) -> text:
+    if linker_abi == "windows-gnu" or target.ends_with("-pc-windows-gnu"):
+        return "windows-mingw"
+    if linker_abi == "windows-msvc" or target.ends_with("-pc-windows-msvc"):
+        return "windows-msvc"
+    host
+
+# ============================================================================
+# Native Linking
+# ============================================================================
+
+fn link_to_native(object_files: [text], output: text, config: NativeLinkConfig) -> Result:
+    val trace = linker_trace_enabled()
+    if trace:
+        print "[LINKER] link_to_native: {object_files.len()} files, output={output}"
+    if object_files.len() == 0:
+        return Err("No object files to link")
+
+    val os = native_effective_link_os(host_os(), config.target_triple, config.linker_abi)
+    if trace:
+        print "[LINKER] os={os}"
+    if not hosted_native_link_os_supported(os):
+        return Err(hosted_native_link_unsupported_error(os))
+    val arch = host_arch()
+    if not hosted_native_link_arch_supported(os, arch):
+        return Err(hosted_native_link_unsupported_arch_error(os, arch))
+
+    # Validate named runtime authority before SMF or platform dispatch. SMF
+    # ultimately materializes native objects and re-enters this linker; doing
+    # the check here also prevents Windows MinGW/MSVC from bypassing it.
+    val msvc_runtime = os == "windows" and not _is_mingw_env()
+    val provider_error = native_runtime_provider_selection_error_for_config_platform(
+        config, msvc_runtime)
+    if provider_error != "":
+        return Err(provider_error)
+
+    # If inputs are SMF/LSM, build a self-contained binary instead of raw native link.
+    val smf_inputs = filter_smf_inputs(object_files)
+    if trace:
+        print "[LINKER] smf_inputs={smf_inputs.len()}"
+    if smf_inputs.len() > 0:
+        val mixed = smf_inputs.len() != object_files.len()
+        if mixed:
+            return Err("Cannot mix SMF and object inputs; convert all to SMF or all to objects")
+        return link_smf_bundle(smf_inputs, output, config)
+
+    # Platform-specific linking
+    if os == "windows-mingw":
+        return _link_native_mingw(object_files, output, config)
+    if os == "windows-msvc" or os == "windows":
+        return link_native_windows(object_files, output, config)
+
+    # Unix-like: Linux, macOS, FreeBSD
+    if trace:
+        print "[LINKER] calling link_native_unix..."
+    link_native_unix(object_files, output, config)
+
+fn link_native_unix(object_files: [text], output: text, config: NativeLinkConfig) -> Result:
+    val os = host_os()
+    val arch = host_arch()
+    val trace = linker_trace_enabled()
+    if trace:
+        print "[LINKER] link_native_unix: os={os}, arch={arch}"
+
+    val target = env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
+    if hosted_cross_cc_required(target, os, arch):
+        return link_native_cc(object_files, output, config)
+
+    # Try to find platform linker (mold > lld > ld)
+    if trace:
+        print "[LINKER] calling find_linker..."
+    val linker_result = find_linker()
+    if trace:
+        print "[LINKER] find_linker returned, is_err={linker_result.is_err()}"
+    if linker_result.is_err():
+        if not config.allow_cc_fallback:
+            return Err("Direct native linker is required by the strict link profile")
+        if trace:
+            print "[LINKER] No direct linker found, falling back to cc"
+        return link_native_cc(object_files, output, config)
+
+    val linker_info = linker_result.unwrap()
+    if trace:
+        print "[LINKER] linker_info unwrapped"
+    val linker_path = linker_info[0]
+    if trace:
+        print "[LINKER] got linker_path={linker_path}"
+    val linker_type = linker_info[1]
+    if trace:
+        print "[LINKER] got linker_type"
+
+    # Discover CRT files needed for direct linker invocation
+    if trace:
+        print "[LINKER] calling find_crt_files..."
+    val crt = find_crt_files(config.pie, config.verbose)
+    if trace:
+        print "[LINKER] crt.found={crt.found}"
+    if not crt.found:
+        if not config.allow_cc_fallback:
+            return Err("Direct native linker CRT discovery is required by the strict link profile")
+        debug("linker", "CRT files not found, falling back to cc")
+        if config.verbose:
+            print "[linker-wrapper] CRT files not found, falling back to cc"
+        return link_native_cc(object_files, output, config)
+
+    if config.verbose:
+        print "[linker-wrapper] Using {linker_type.to_string()} at {linker_path}"
+
+    # Build linker arguments in correct order
+    var args: [text] = []
+
+    # Output file
+    args.push("-o")
+    args.push(output)
+
+    # Emulation mode
+    if os == "linux":
+        val emulation = elf_emulation(arch)
+        if emulation != "":
+            args.push("-m")
+            args.push(emulation)
+
+    # Dynamic linker
+    if crt.dynamic_linker != "":
+        args.push("-dynamic-linker")
+        args.push(crt.dynamic_linker)
+
+    for flag in native_direct_platform_flags(os, linker_type.to_string()):
+        args.push(flag)
+    if config.allow_duplicate_definitions:
+        for flag in unresolved_symbol_flags_for_unix_linker(os):
+            args.push(flag)
+
+    # PIE
+    if config.pie:
+        args.push("-pie")
+
+    # CRT prologue: crt1.o, crti.o, crtbegin.o (before user objects)
+    args.push(crt.crt1)
+    args.push(crt.crti)
+    args.push(crt.crtbegin)
+
+    # Explicit roots must precede archives. This retains only the member that
+    # owns each requested symbol and preserves ordinary archive quarantine.
+    for flag in native_retained_symbol_direct_args(config.retained_symbols, os):
+        args.push(flag)
+
+    # User object files
+    for obj in object_files:
+        args.push(obj)
+
+    # Library search paths from CRT discovery
+    for dir in crt.lib_dirs:
+        args.push("-L")
+        args.push(dir)
+
+    # Library paths from config
+    for lp in config.library_paths:
+        args.push("-L")
+        args.push(lp)
+
+    # Auto-detect runtime library if not specified
+    # "none" means skip runtime library entirely (e.g., LLVM pipeline provides runtime objects directly)
+    var runtime_dir = config.runtime_path
+    if runtime_dir == "":
+        runtime_dir = find_runtime_lib_dir()
+    var runtime_archives: [text] = []
+    if runtime_dir != "" and runtime_dir != "none":
+        runtime_archives = native_runtime_archive_inputs(runtime_dir, config.runtime_bundle)
+        for arg in native_runtime_archive_link_args(
+                runtime_dir, config.runtime_bundle, runtime_archives, false, true, true):
+            args.push(arg)
+
+    # Standard libraries (no -lgcc/-lgcc_s — clang provides compiler-rt)
+    # On Linux/FreeBSD wrap optional libs with --as-needed so they are only
+    # recorded in DT_NEEDED when actually referenced by the linked objects.
+    if os == "linux":
+        args.push("-lc")
+        args.push("-lpthread")
+        args.push("-ldl")
+        args.push("--as-needed")
+        args.push("-lm")
+        args.push("-lSDL2")
+        args.push("--no-as-needed")
+    elif os == "macos":
+        # sdl2-compat installs into the Homebrew lib dir, which is not on the
+        # default linker search path — add it before -lSDL2 resolves.
+        # /opt/homebrew/lib covers Apple Silicon brew; /usr/local/lib covers
+        # Intel brew. Both are harmless no-ops when absent.
+        args.push("-L")
+        args.push("/opt/homebrew/lib")
+        args.push("-L")
+        args.push("/usr/local/lib")
+        args.push("-lc")
+        args.push("-lpthread")
+        args.push("-lm")
+        args.push("-lSystem")
+        args.push("-lSDL2")
+    elif os == "freebsd":
+        args.push("-lc")
+        args.push("-lpthread")
+        args.push("--as-needed")
+        args.push("-lm")
+        args.push("-lSDL2")
+        args.push("--no-as-needed")
+
+    val brew_prefix = macos_homebrew_prefix(env_get("HOMEBREW_PREFIX") ?? "", host_arch())
+    var native_support_inputs = object_files
+    for archive in runtime_archives:
+        native_support_inputs.push(archive)
+    for flag in native_all_gnu_support_args(native_support_inputs, os, brew_prefix):
+        args.push(flag)
+
+    # Libraries from config
+    for lib in config.libraries:
+        args.push("-l")
+        args.push(lib)
+
+    # Debug info
+    if config.debug:
+        args.push("-g")
+
+    # Extra flags
+    for flag in config.extra_flags:
+        args.push(flag)
+
+    # CRT epilogue: crtend.o, crtn.o (after libs)
+    args.push(crt.crtend)
+    args.push(crt.crtn)
+
+    # SimpleOS: link in-process via LLD SFFI — no fork/exec available on guest.
+    if is_simpleos_target():
+        var lld_args: [text] = ["ld.lld"]
+        for a in args:
+            lld_args.push(a)
+        val lld_res = lld_elf_link(lld_args)
+        if lld_res.exit_code != 0:
+            return Err("in-process lld failed: {lld_res.stderr_text}")
+        if config.verbose:
+            val size = linker_file_size(output)
+            print "[linker-wrapper] Native binary (in-process lld): {output} ({size} bytes)"
+        return Ok(output)
+
+    # Execute linker
+    val exec_result = execute_linker(linker_path, args)
+    if exec_result.is_err():
+        if not config.allow_cc_fallback:
+            return Err("Strict direct native link failed: " + exec_result.unwrap_err())
+        # Fallback to cc on failure
+        if config.verbose:
+            print "[linker-wrapper] Direct linker failed, falling back to cc: {exec_result.unwrap_err()}"
+        return link_native_cc(object_files, output, config)
+
+    if config.verbose:
+        val size = linker_file_size(output)
+        print "[linker-wrapper] Native binary: {output} ({size} bytes)"
+
+    Ok(output)
+
+# Build self-contained binary when given SMF inputs
+fn link_smf_bundle(smf_inputs: [text], output: text, config: NativeLinkConfig) -> Result:
+    if smf_inputs.len() == 0:
+        return Err("No SMF inputs")
+
+    val verbose = config.verbose
+    val prefer_backend = detect_preferred_backend(config.extra_flags)
+    val provider = create_default_provider(verbose, prefer_backend)
+    val strict_preference = prefer_backend != nil and prefer_backend != ""
+
+    # Create shared ObjTaker for extraction/instantiation across all inputs
+    var obj_taker = objtaker_with_defaults()
+
+    # Support multiple SMF inputs
+    if smf_inputs.len() > 1 or smf_inputs[0].ends_with(".lsm"):
+        # Multi-SMF or .lsm library mode
+        val tmp_dir = create_temp_dir()
+        if tmp_dir == "":
+            return Err("Failed to create temp dir for SMF objects")
+
+        var objs: [text] = []
+
+        for path in smf_inputs:
+            if path.ends_with(".lsm"):
+                # .lsm library: extract objects and link
+                val add_res = provider.add_library(path)
+                if add_res.is_err():
+                    cleanup_temp_dir(tmp_dir)
+                    return Err(add_res.unwrap_err())
+
+                val modules = provider.list_modules()
+                for m in modules:
+                    val obj_res = provider.get_object(m)
+                    if obj_res.is_ok():
+                        val obj_bytes = obj_res.unwrap()
+                        val safe = m.replace("/", "_")
+                        val obj_path = "{tmp_dir}/{safe}.o"
+                        if write_bytes_to_file(obj_path, obj_bytes):
+                            objs.push(obj_path)
+                        continue
+
+                    val code_res = provider.get_exported_code(m)
+                    if code_res.is_err():
+                        if strict_preference:
+                            cleanup_temp_dir(tmp_dir)
+                            return Err(code_res.unwrap_err())
+                        if verbose:
+                            print "[linker-wrapper] missing object for {m}: {code_res.unwrap_err()}"
+                        continue
+                    val obj_paths = materialize_code_units(code_res.unwrap(), tmp_dir, verbose)
+                    for p in obj_paths:
+                        objs.push(p)
+            else:
+                # Single SMF file: try ObjectProvider extraction
+                val obj_res = provider.get_object(path)
+                if obj_res.is_ok():
+                    val safe = path.replace("/", "_").replace(".smf", "")
+                    val obj_path = "{tmp_dir}/{safe}.o"
+                    if write_bytes_to_file(obj_path, obj_res.unwrap()):
+                        objs.push(obj_path)
+                    continue
+
+                val code_res = provider.get_exported_code(path)
+                if code_res.is_ok():
+                    val code_objs = materialize_code_units(code_res.unwrap(), tmp_dir, verbose)
+                    for p in code_objs:
+                        objs.push(p)
+                elif strict_preference:
+                    cleanup_temp_dir(tmp_dir)
+                    return Err(code_res.unwrap_err())
+
+        if objs.len() == 0:
+            cleanup_temp_dir(tmp_dir)
+            return Err("No object data available in SMF inputs")
+
+        val link_res = link_native_unix(objs, output, config)
+        cleanup_temp_dir(tmp_dir)
+        return link_res
+
+    # Single SMF file path
+    val path = smf_inputs[0]
+
+    # Try to convert single SMF to object via ObjectProvider
+    val obj_result = provider.get_object(path)
+    if obj_result.is_ok():
+        val tmp_dir = create_temp_dir()
+        if tmp_dir == "":
+            return Err("Failed to create temp dir for SMF objects")
+        val obj_path = "{tmp_dir}/input.o"
+        val write_ok = write_bytes_to_file(obj_path, obj_result.unwrap())
+        if not write_ok:
+            cleanup_temp_dir(tmp_dir)
+            return Err("Failed to write object from SMF")
+        val link_res = link_native_unix([obj_path], output, config)
+        cleanup_temp_dir(tmp_dir)
+        return link_res
+
+    # Fallback: generate objects from exported code
+    val code_result = provider.get_exported_code(path)
+    if code_result.is_ok():
+        val tmp_dir = create_temp_dir()
+        if tmp_dir == "":
+            return Err("Failed to create temp dir for SMF code")
+        val obj_paths = materialize_code_units(code_result.unwrap(), tmp_dir, verbose)
+        if obj_paths.len() > 0:
+            val link_res = link_native_unix(obj_paths, output, config)
+            cleanup_temp_dir(tmp_dir)
+            return link_res
+        cleanup_temp_dir(tmp_dir)
+    elif strict_preference:
+        return Err(code_result.unwrap_err())
+
+    # Fallback: self-contained binary
+    val data = file_read_bytes(path)
+    if data.len() == 0:
+        return Err("Failed to read SMF data from {path}")
+
+    val sc_config = SelfContainedConfig(
+        runtime_binary: config.runtime_path,
+        verbose: config.verbose,
+        strip: false
+    )
+    link_to_self_contained(data, output, sc_config)
+
+fn create_default_provider(verbose: bool, prefer_backend: text) -> ObjectProvider:
+    ObjectProvider.new(ObjectProviderConfig(
+        search_paths: ["/usr/lib/simple", "/usr/local/lib/simple"],
+        libraries: [],
+        enable_cache: true,
+        verbose: verbose,
+        prefer_backend: prefer_backend
+    ))
+
+fn materialize_code_units(units: [ObjectCodeUnit], tmp_dir: text, verbose: bool) -> [text]:
+    """Convert exported code units into temporary .o files."""
+    var paths: [text] = []
+    for code_unit in units:
+        val safe = code_unit.name.replace("/", "_")
+        val obj_path = "{tmp_dir}/{safe}.o"
+        val asm_res = assemble_code_units([code_unit], obj_path, verbose)
+        if asm_res.is_ok():
+            paths.push(obj_path)
+        elif verbose:
+            print "[linker-wrapper] failed to assemble {code_unit.name}: {asm_res.unwrap_err()}"
+    paths
+
+fn filter_smf_inputs(files: [text]) -> [text]:
+    var smfs: [text] = []
+    for f in files:
+        if f.ends_with(".smf") or f.ends_with(".lsm"):
+            smfs.push(f)
+    smfs
+
+fn _cc_fallback_runtime_lib_args(config: NativeLinkConfig) -> [text]:
+    """Runtime library link args for the cc fallback path.
+
+    The direct-linker path links -lsimple_compiler for runtime symbols
+    (rt_getpid, rt_cli_get_args, rt_platform_name, ...); the fallback must
+    stay complete too or entry closures referencing io_runtime externs fail
+    with undefined rt_* symbols. Prefer the static archive: the shared
+    library's dynamic export list is incomplete (e.g. rt_time_now_unix_micros
+    is absent) and static linking avoids an rpath into the build tree."""
+    var runtime_dir = config.runtime_path
+    if runtime_dir == "":
+        runtime_dir = find_runtime_lib_dir()
+    if runtime_dir == "" or runtime_dir == "none":
+        return []
+    val archives = native_runtime_archive_inputs(runtime_dir, config.runtime_bundle)
+    native_runtime_archive_link_args(runtime_dir, config.runtime_bundle, archives, true, true, true)
+
+fn native_runtime_archive_link_args(runtime_dir: text, runtime_bundle: text,
+        archives: [text], cc_fallback: bool, rescan_core_pair: bool,
+        emit_rpath: bool) -> [text]:
+    """Render only validated runtime-provider arguments for the final command."""
+    if not archives.is_empty():
+        var selected: [text] = []
+        for archive in archives:
+            selected.push(archive)
+        # The admitted aggregate pair has references in both directions. A second
+        # scan of the first archive resolves members first requested while the
+        # native-all archive is scanned, without platform-specific group flags.
+        if rescan_core_pair and archives.len() == 2:
+            selected.push(archives[0])
+        if emit_rpath:
+            if cc_fallback:
+                selected.push("-Wl,-rpath," + runtime_dir)
+            else:
+                selected.push("-rpath")
+                selected.push(runtime_dir)
+        return selected
+    if runtime_bundle != "" and runtime_bundle != "auto":
+        return []
+    if cc_fallback:
+        var fallback = ["-L", runtime_dir, "-lsimple_compiler"]
+        if emit_rpath:
+            fallback.push("-Wl,-rpath," + runtime_dir)
+        return fallback
+    var fallback = ["-L", runtime_dir, "-lsimple_compiler"]
+    if emit_rpath:
+        fallback.push("-rpath")
+        fallback.push(runtime_dir)
+    fallback
+
+fn native_runtime_archive_inputs(runtime_dir: text, runtime_bundle: text) -> [text]:
+    native_runtime_archive_inputs_for_platform(runtime_dir, runtime_bundle, false)
+
+fn native_runtime_archive_inputs_for_platform(runtime_dir: text, runtime_bundle: text,
+        msvc: bool) -> [text]:
+    if runtime_dir == "" or runtime_dir == "none":
+        return []
+    val compiler_name = if msvc: "simple_compiler.lib" else: "libsimple_compiler.a"
+    val backfill_name = if msvc: "simple_compiler_backfill.lib" else: "libsimple_compiler_backfill.a"
+    val native_all_name = if msvc: "simple_native_all.lib" else: "libsimple_native_all.a"
+    val names = native_runtime_archive_names_for_platform(
+        runtime_bundle,
+        msvc,
+        file_exists(runtime_dir + "/" + compiler_name),
+        file_exists(runtime_dir + "/" + backfill_name),
+        file_exists(runtime_dir + "/" + native_all_name)
+    )
+    var inputs: [text] = []
+    for name in names:
+        inputs.push(runtime_dir + "/" + name)
+    inputs
+
+fn native_runtime_provider_selection_error(runtime_dir: text, runtime_bundle: text) -> text:
+    "runtime bundle '{runtime_bundle}' has no complete admitted provider set in '{runtime_dir}'"
+
+fn native_runtime_provider_selection_error_for(runtime_dir: text, runtime_bundle: text,
+        has_compiler: bool, has_backfill: bool, has_native_all: bool) -> text:
+    if runtime_bundle == "" or runtime_bundle == "auto":
+        return ""
+    if not native_runtime_bundle_is_known(runtime_bundle):
+        return "unknown runtime bundle '" + runtime_bundle + "'"
+    if runtime_dir == "":
+        return "runtime bundle '" + runtime_bundle + "' requires a discovered runtime directory"
+    if runtime_dir == "none":
+        return "runtime bundle '" + runtime_bundle + "' cannot use runtime path 'none'"
+    if native_runtime_archive_names(runtime_bundle, has_compiler, has_backfill, has_native_all).is_empty():
+        return native_runtime_provider_selection_error(runtime_dir, runtime_bundle)
+    ""
+
+fn native_runtime_provider_selection_error_for_config(config: NativeLinkConfig) -> text:
+    native_runtime_provider_selection_error_for_config_platform(config, false)
+
+fn native_runtime_provider_selection_error_for_config_platform(
+        config: NativeLinkConfig, msvc: bool) -> text:
+    var runtime_dir = config.runtime_path
+    if runtime_dir == "":
+        runtime_dir = find_runtime_lib_dir()
+    val compiler_name = if msvc: "simple_compiler.lib" else: "libsimple_compiler.a"
+    val backfill_name = if msvc: "simple_compiler_backfill.lib" else: "libsimple_compiler_backfill.a"
+    val native_all_name = if msvc: "simple_native_all.lib" else: "libsimple_native_all.a"
+    native_runtime_provider_selection_error_for(
+        runtime_dir, config.runtime_bundle,
+        file_exists(runtime_dir + "/" + compiler_name),
+        file_exists(runtime_dir + "/" + backfill_name),
+        file_exists(runtime_dir + "/" + native_all_name)
+    )
+
+fn native_runtime_archive_inputs(runtime_dir: text) -> [text]:
+    if runtime_dir == "" or runtime_dir == "none":
+        return []
+    val names = native_runtime_archive_names(
+        file_exists("{runtime_dir}/libsimple_compiler.a"),
+        file_exists("{runtime_dir}/libsimple_compiler_backfill.a"),
+        file_exists("{runtime_dir}/libsimple_native_all.a")
+    )
+    var inputs: [text] = []
+    for name in names:
+        inputs.push(runtime_dir + "/" + name)
+    inputs
+
+fn cc_fallback_object_args(object_files: [text]) -> [text]:
+    var args: [text] = []
+    for obj in object_files:
+        args.push(obj)
+    args
+
+fn native_msvc_runtime_libraries(configured: [text], selected: [text]) -> [text]:
+    """Append selected MSVC providers once, comparing normalized basenames."""
+    var result = configured
+    for archive in selected:
+        val normalized = archive.replace("\\", "/")
+        val parts = normalized.split("/")
+        val name = parts[parts.len() - 1].lower()
+        var present = false
+        for existing in result:
+            val existing_normalized = existing.replace("\\", "/")
+            val existing_parts = existing_normalized.split("/")
+            if existing_parts[existing_parts.len() - 1].lower() == name:
+                present = true
+        if not present:
+            result.push(archive)
+    result
+
+fn native_msvc_configured_libraries(existing: [text], configured: [text]) -> [text]:
+    """Preserve configured paths/case; append .lib only when truly absent."""
+    var rendered = existing
+    for library in configured:
+        val value = if library.lower().ends_with(".lib"):
+            library
+        else:
+            library + ".lib"
+        rendered = native_msvc_runtime_libraries(rendered, [value])
+    rendered
+
+fn native_msvc_runtime_selection(runtime_bundle: text, archives: [text]) -> [text]:
+    """Render MSVC providers without Unix archive rescans."""
+    if not archives.is_empty():
+        return native_runtime_archive_link_args(
+            "", runtime_bundle, archives, true, false, false)
+    if runtime_bundle == "" or runtime_bundle == "auto":
+        return ["simple_compiler.lib"]
+    []
+
+fn cc_fallback_extra_flags(extra_flags: [text]) -> [text]:
+    # NativeLinkConfig uses direct-linker rpath pairs because the normal Unix
+    # path invokes ld/lld itself. Preserve those rpaths when that path falls
+    # back to cc/clang instead of silently dropping them.
+    var result: [text] = []
+    var index = 0
+    while index < extra_flags.len():
+        val flag = extra_flags[index]
+        if flag == "-rpath" and index + 1 < extra_flags.len():
+            result = result.push("-Wl,-rpath," + extra_flags[index + 1])
+            index = index + 2
+        else:
+            result = result.push(flag)
+            index = index + 1
+    result
+
+fn hosted_cross_cc_required(target: text, os: text, arch: text) -> bool:
+    val plan = hosted_c_compiler_plan(target, os, arch)
+    plan.requires_cross and plan.supported
+
+fn native_direct_platform_flags(os: text, linker_type: text) -> [text]:
+    if os == "linux" or os == "freebsd":
+        var flags = ["--eh-frame-hdr", "--build-id", "--hash-style=gnu",
+            "-z", "relro", "-z", "now", "--gc-sections"]
+        if linker_type == "mold" or linker_type == "lld": flags.push("--icf=all")
+        elif linker_type == "gold": flags.push("--icf=safe")
+        return flags
+    if os == "macos" or os == "darwin": return ["-dead_strip"]
+    []
+
+fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) -> Result:
+    # SimpleOS targets must NEVER reach this function. SimpleOS has no
+    # fork/exec, so subprocess cc is unavailable — in-process LLD is the
+    # only supported path. Reaching here means find_linker() or
+    # find_crt_files() failed upstream; surface a hard error rather than
+    # silently shelling out (which would ENOSYS on the guest).
+    if is_simpleos_target():
+        print "[linker-wrapper] ERROR: CC fallback path reached on SimpleOS target."
+        print "[linker-wrapper] This usually means find_linker() or find_crt_files() failed."
+        print "[linker-wrapper] SimpleOS builds must use in-process LLD — subprocess cc is unavailable."
+        return Err("SimpleOS target: cc subprocess fallback unsupported (check sysroot + CRT files)")
+    # Fallback: use cc (gcc/clang) for linking.
+    # Avoid structured logging here: stage1-generated compilers can crash in
+    # the log backend before the fallback command is assembled.
+    if object_files.len() == 0:
+        return Err("cc fallback requires at least one object file")
+
+    val provider_error = native_runtime_provider_selection_error_for_config(config)
+    if provider_error != "":
+        return Err(provider_error)
+
+    val target = env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
+    val os_name = host_os()
+    val arch_name = host_arch()
+    val compiler_plan = hosted_c_compiler_plan(target, os_name, arch_name)
+    if not compiler_plan.supported:
+        return Err("hosted C target '" + target + "' is unsupported on '" + arch_name + "-" + os_name + "'")
+    val hosted_cross = compiler_plan.requires_cross
+    var cc = env_get("SIMPLE_CC") ?? ""
+    if cc == "":
+        if hosted_cross:
+            cc = find_c_compiler()
+            if cc == "":
+                return Err("required cross C compiler '" + compiler_plan.command + "' was not found")
+        else:
+            cc = "cc"
+
+    # Keep the fallback complete: native-build links user objects, runtime
+    # objects, and a generated entry object. Truncating this list produces a
+    # binary with an unresolved main.
+    if os_name == "macos" or os_name == "darwin":
+        # External libs/frameworks referenced by libsimple_native_all.a (see
+        # link_native macos branch). Respect the bootstrap-exported Homebrew
+        # prefix so Intel and custom installations resolve zstd.
+        # Link ALL object files (user objects + compiled runtime objects +
+        # generated entry shim). Passing only obj0 dropped the entry-point
+        # object -> "Undefined symbols: _main" on Mach-O.
+        var args = native_retained_symbol_cc_args(config.retained_symbols, os_name)
+        for obj in cc_fallback_object_args(object_files):
+            args.push(obj)
+        val brew_prefix = macos_homebrew_prefix(env_get("HOMEBREW_PREFIX") ?? "", host_arch())
+        # sdl2-compat lives in the Homebrew lib dir, which cc does not search
+        # by default — add it before -lSDL2 resolves.
+        args.push("-L")
+        args.push("/opt/homebrew/lib")
+        args.push("-L")
+        args.push("/usr/local/lib")
+        for flag in ["-lc", "-lpthread", "-lm", "-lSystem", "-lSDL2"]:
+            args.push(flag)
+        val runtime_args = _cc_fallback_runtime_lib_args(config)
+        for flag in runtime_args:
+            args.push(flag)
+        var support_inputs = object_files
+        for runtime_arg in runtime_args:
+            support_inputs.push(runtime_arg)
+        for flag in native_all_gnu_support_args(support_inputs, os_name, brew_prefix):
+            args.push(flag)
+        for flag in cc_fallback_extra_flags(config.extra_flags):
+            args.push(flag)
+        for flag in ["-Wl,-dead_strip", "-o", output]:
+            args.push(flag)
+        val (stdout, stderr, code) = process_run(cc, args)
+        if code == 0:
+            return Ok(output)
+        val err_msg = if stderr != "": stderr else: "Unknown linking error"
+        return Err("cc linking failed: {err_msg}")
+    elif os_name == "freebsd":
+        var args = native_retained_symbol_cc_args(config.retained_symbols, os_name)
+        for obj in cc_fallback_object_args(object_files):
+            args.push(obj)
+        if not config.pie:
+            args.push("-no-pie")
+        val runtime_args = _cc_fallback_runtime_lib_args(config)
+        for flag in runtime_args:
+            args.push(flag)
+        args.push("-lc")
+        args.push("-lpthread")
+        args.push("-Wl,--as-needed")
+        args.push("-lm")
+        args.push("-lSDL2")
+        args.push("-Wl,--no-as-needed")
+        var support_inputs = object_files
+        for runtime_arg in runtime_args:
+            support_inputs.push(runtime_arg)
+        for flag in native_all_gnu_support_args(support_inputs, os_name, ""):
+            args.push(flag)
+        for flag in cc_fallback_extra_flags(config.extra_flags):
+            args.push(flag)
+        if config.allow_duplicate_definitions:
+            args.push("-Wl,--allow-multiple-definition")
+        args.push("-Wl,--gc-sections")
+        args.push("-o")
+        args.push(output)
+        val (stdout, stderr, code) = process_run(cc, args)
+        if code == 0:
+            return Ok(output)
+        val err_msg = if stderr != "": stderr else: "Unknown linking error"
+        return Err("cc linking failed: {err_msg}")
+    else:
+        var args: [text] = []
+        if not hosted_cross:
+            args.push("-fuse-ld=lld")
+        if not config.pie:
+            args.push("-no-pie")
+        for flag in native_retained_symbol_cc_args(config.retained_symbols, os_name):
+            args.push(flag)
+        for obj in object_files:
+            args.push(obj)
+        val runtime_args = _cc_fallback_runtime_lib_args(config)
+        for flag in runtime_args:
+            args.push(flag)
+        args.push("-lc")
+        args.push("-lpthread")
+        args.push("-ldl")
+        var support_inputs = object_files
+        for runtime_arg in runtime_args:
+            support_inputs.push(runtime_arg)
+        for flag in native_all_gnu_support_args(support_inputs, os_name, ""):
+            args.push(flag)
+        for flag in cc_fallback_extra_flags(config.extra_flags):
+            args.push(flag)
+        args.push("-Wl,--as-needed")
+        args.push("-lm")
+        if not hosted_cross:
+            args.push("-lSDL2")
+        args.push("-Wl,--no-as-needed")
+        if config.allow_duplicate_definitions:
+            args.push("-Wl,--allow-multiple-definition")
+        args.push("-Wl,--gc-sections")
+        if not hosted_cross:
+            args.push("-Wl,--icf=safe")
+        args.push("-o")
+        args.push(output)
+        val (stdout, stderr, code) = process_run(cc, args)
+        if code == 0:
+            return Ok(output)
+        val err_msg = if stderr != "": stderr else: "Unknown linking error"
+        return Err("cc linking failed: {err_msg}")
+
+fn _is_mingw_env() -> bool:
+    """Check if running under MinGW/MSYS2.
+    SIMPLE_LINKER_FLAVOR=msvc overrides MSYSTEM detection so that
+    MSVC toolchain is used even inside MSYS2/Git Bash."""
+    val linker_flavor = env_get("SIMPLE_LINKER_FLAVOR")
+    if linker_flavor == "msvc":
+        return false
+    val msystem = env_get("MSYSTEM")
+    if msystem != "" and msystem != nil:
+        return true
+    linker_flavor == "gnu"
+
+fn link_native_windows(object_files: [text], output: text, config: NativeLinkConfig) -> Result:
+    # MinGW: use gcc driver (Unix-style linking)
+    if _is_mingw_env():
+        return _link_native_mingw(object_files, output, config)
+
+    # MSVC: delegate to MsvcLinker with proper CRT paths
+    return _link_native_msvc(object_files, output, config)
+
+fn _link_native_msvc(object_files: [text], output: text, config: NativeLinkConfig) -> Result:
+    """Link using MSVC toolchain (link.exe or lld-link)."""
+    var msvc_config: MsvcConfig = MsvcConfig.default()
+    msvc_config.debug = config.debug
+
+    # Populate CRT library paths from VS/SDK detection
+    val crt_paths = _find_msvc_lib_paths()
+    for p in crt_paths:
+        msvc_config.lib_paths.push(p)
+
+    # Add user library paths
+    for lp in config.library_paths:
+        msvc_config.lib_paths.push(lp)
+
+    # Add user libraries. Suffix recognition is case-insensitive while the
+    # caller's raw path and spelling remain intact for link.exe diagnostics.
+    msvc_config.libs = native_msvc_configured_libraries(
+        msvc_config.libs, config.libraries)
+
+    # Add essential Windows libraries
+    # SDL2.lib is deliberately ABSENT. src/runtime/runtime_sdl2.c binds every
+    # SDL entry point through function pointers resolved at RUNTIME
+    # (SDL2_BIND_REQUIRED -> spl_dlopen), so no SDL import library is needed
+    # to link, and SDL2 is a third-party SDK that is not part of the Windows
+    # SDK: measured 2026-09-02 on this lane, d3d11.lib and dxgi.lib are both
+    # present under Windows Kits 10 um/x64 while SDL2.lib exists nowhere on
+    # the machine -- an unconditional SDL2.lib is a guaranteed LNK1181 on any
+    # host without SDL2 installed. Every sibling list agrees: neither
+    # native_all_msvc_support_libraries nor the mingw/linux/macos lists in
+    # native_all_support.spl names SDL2 at all. A program that genuinely
+    # wants SDL2 statically still gets it via config.libraries above.
+    # CROSS-PLATFORM: this list is inside _link_native_msvc and is reached
+    # only on the Windows/MSVC link path; Linux, macOS and mingw are
+    # byte-unaffected.
+    val win_libs = ["kernel32.lib", "ws2_32.lib", "bcrypt.lib", "userenv.lib", "ntdll.lib", "advapi32.lib", "d3d11.lib", "dxgi.lib"]
+    for wlib in win_libs:
+        if not msvc_config.libs.contains(wlib):
+            msvc_config.libs.push(wlib)
+    for wlib in native_all_msvc_support_libraries(object_files):
+        if not msvc_config.libs.contains(wlib):
+            msvc_config.libs.push(wlib)
+
+    # Auto-detect runtime library
+    var runtime_dir = config.runtime_path
+    if runtime_dir == "":
+        runtime_dir = find_runtime_lib_dir()
+    if runtime_dir != "" and runtime_dir != "none":
+        val runtime_archives = native_runtime_archive_inputs_for_platform(
+            runtime_dir, config.runtime_bundle, true)
+        msvc_config.lib_paths.push(runtime_dir)
+        val selected_runtime_libs = native_msvc_runtime_selection(
+            config.runtime_bundle, runtime_archives)
+        msvc_config.libs = native_msvc_runtime_libraries(
+            msvc_config.libs, selected_runtime_libs)
+        for wlib in native_all_msvc_support_libraries(msvc_config.libs):
+            if not msvc_config.libs.contains(wlib):
+                msvc_config.libs.push(wlib)
+
+    # Extra flags
+    var extra = native_retained_symbol_msvc_args(config.retained_symbols)
+    for flag in config.extra_flags:
+        extra.push(flag)
+    # Size optimization: remove unreferenced data + fold identical COMDATs
+    if not config.debug:
+        extra.push("/OPT:REF,ICF")
+    # Runtime library and compiled objects may define the same symbol.
+    # Missing symbols remain fatal.
+    if config.allow_duplicate_definitions:
+        extra.push(msvc_duplicate_symbol_flag())
+    msvc_config.extra_args = extra
+
+    if config.verbose:
+        print "[linker-wrapper] MSVC linking: {object_files.len()} objects -> {output}"
+        print "[linker-wrapper] lib_paths: {msvc_config.lib_paths.join(', ')}"
+
+    val linker = MsvcLinker.new(msvc_config)
+    val result = linker.link(output, object_files)
+    match result:
+        case Ok(_):
+            Ok(output)
+        case Err(e):
+            Err("Windows MSVC linking failed: {e.message}")
+
+fn _find_msvc_lib_paths() -> [text]:
+    """Find MSVC CRT and Windows SDK library paths."""
+    use compiler.backend.linker.msvc.{find_msvc_crt_paths}
+    find_msvc_crt_paths()

@@ -1,0 +1,111 @@
+# Time Functions - Pure Simple I/O
+# Extracted from mod.spl for modularity
+
+use common.time_utils.{timestamp_get_year, timestamp_get_month, timestamp_get_day, timestamp_get_hour, timestamp_get_minute, timestamp_get_second}
+
+# Raw clock providers reserve every negative value as a failure sentinel.
+# Successful calls return non-negative scalar timestamps and transfer no
+# pointer, allocation, or ownership. Safe wrappers below lift the sentinel by
+# failing closed while retaining exactly one provider call.
+@unsafe(reason: "raw wall-clock provider; negative sentinel is failure", capabilities: [ffi])
+extern fn rt_time_now_unix_micros() -> i64
+@unsafe(reason: "raw monotonic-clock provider; negative sentinel is failure", capabilities: [ffi])
+extern fn rt_time_now_nanos() -> i64
+@unsafe(reason: "raw monotonic-clock provider; negative sentinel is failure", capabilities: [ffi])
+extern fn rt_time_now_micros() -> i64
+@unsafe(reason: "raw wall-clock second provider", capabilities: [ffi])
+extern fn rt_time_now_seconds() -> i64
+extern fn rt_time_format(ts: i64, fmt: text) -> text
+
+# ============================================================================
+# Time Functions
+# ============================================================================
+
+fn time_format(ts: i64, fmt: text) -> text:
+    """Format a Unix timestamp (ts, unit per provider contract) using fmt."""
+    rt_time_format(ts, fmt)
+
+fn time_now_unix_micros() -> i64:
+    var value: i64 = -1
+    unsafe(capabilities: [ffi]):
+        value = rt_time_now_unix_micros()
+    if value < 0:
+        panic("E-SFFI-TIME-001: wall clock provider failed")
+    value
+
+fn current_time_unix() -> i64:
+    time_now_unix_micros() / 1_000_000
+
+fn current_time_ms() -> i64:
+    time_now_unix_micros() / 1_000
+
+fn timestamp_year(micros: i64) -> i64:
+    timestamp_get_year(micros)
+
+fn timestamp_month(micros: i64) -> i64:
+    timestamp_get_month(micros)
+
+fn timestamp_day(micros: i64) -> i64:
+    timestamp_get_day(micros)
+
+fn timestamp_hour(micros: i64) -> i64:
+    timestamp_get_hour(micros)
+
+fn timestamp_minute(micros: i64) -> i64:
+    timestamp_get_minute(micros)
+
+fn timestamp_second(micros: i64) -> i64:
+    timestamp_get_second(micros)
+
+# --- High-Resolution Time (Monotonic) ---
+
+fn time_now_nanos() -> i64:
+    """
+    Get current monotonic time in nanoseconds.
+
+    Uses CLOCK_MONOTONIC_RAW on Unix, QueryPerformanceCounter on Windows.
+    Fails closed on provider error. Suitable for high-precision benchmarking.
+    """
+    var value: i64 = -1
+    unsafe(capabilities: [ffi]):
+        value = rt_time_now_nanos()
+    if value < 0:
+        panic("E-SFFI-TIME-002: monotonic nanosecond clock provider failed")
+    value
+
+fn time_now_micros() -> i64:
+    """
+    Get current monotonic time in microseconds.
+
+    Uses CLOCK_MONOTONIC_RAW on Unix, QueryPerformanceCounter on Windows.
+    Fails closed on provider error. Suitable for profiling and performance measurement.
+    """
+    var value: i64 = -1
+    unsafe(capabilities: [ffi]):
+        value = rt_time_now_micros()
+    if value < 0:
+        panic("E-SFFI-TIME-003: monotonic microsecond clock provider failed")
+    value
+
+@always_inline
+fn time_now_seconds() -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_time_now_seconds()
+
+# --- Timestamp string helper ---
+
+fn timestamp_now() -> i64:
+    time_now_unix_micros()
+
+# Compatibility spelling retained for the app-level I/O facade. This is a
+# checked wrapper over the wall-clock provider, not a second raw runtime ABI.
+pub fn rt_timestamp_now() -> i64:
+    timestamp_now()
+
+# --- Sleep ---
+
+use std.io_runtime.{thread_sleep}
+
+fn sleep_ms(milliseconds: i64):
+    if milliseconds > 0:
+        thread_sleep(milliseconds)

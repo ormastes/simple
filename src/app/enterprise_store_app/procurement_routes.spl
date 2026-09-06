@@ -1,0 +1,168 @@
+"""
+# Enterprise Web App — procurement back-office route family (/proc/*)
+
+Dispatched from `main.store_app_handle` AFTER the hardened prelude
+(limits -> path safety -> session auth). Executes ONLY the frozen guarded
+commands of `std.enterprise_procurement`; every rendered business value goes
+through `esc()`, every response through `secured()`, every numeric form field
+through the digit-checking `form_int()`.
+
+Routes:
+- GET  /proc/pos                  — open purchase orders (received < ordered)
+- POST /proc/requisition          — req, sku, qty, idem
+- POST /proc/requisition/approve  — req, idem
+- POST /proc/po                   — po, req, supplier, cost, currency, idem
+- POST /proc/receive              — po, qty, idem
+- POST /proc/invoice              — po, invoice, qty, idem
+- GET  /proc/reconcile            — three-way reconciliation report
+
+## Read authorization
+Reads reuse the FROZEN `role_allows` policy with an action that already
+exists in it — `proc.requisition.approve`, the vertical's back-office tier
+(admin or `procurement`). No new auth scheme and no new action string.
+
+Supplier names are business data supplied by a user and are rendered ONLY
+through `esc()`.
+"""
+
+use std.common.net.http_core.{match_route_pattern}
+use std.nogc_sync_mut.http_server.types.{HttpResponse, HttpStatus}
+use std.nogc_sync_mut.io.sqlite_sffi.{sqlite_row_get}
+use std.nogc_sync_mut.enterprise_store.store.{
+    EnterpriseStore, store_rows, store_migration_applied
+}
+use std.nogc_sync_mut.enterprise_sale.foundation.{
+    TenantContext, ActorContext, SessionContext, CommandEnvelope, Money, role_allows
+}
+use std.nogc_sync_mut.enterprise_procurement.procurement.{
+    proc_po_received, proc_po_invoiced, proc_payable_total, proc_reconcile,
+    proc_requisition_create, proc_requisition_approve,
+    proc_po_create, proc_receive, proc_invoice_record
+}
+use app.enterprise_store_app.web_common.{esc, form_value, form_int, secured, deny}
+
+# proc_supplier_name resolves a supplier's display name ("" when unknown).
+fn proc_supplier_name(store: EnterpriseStore, tenant_id: text, supplier_id: text) -> text:
+    var name = ""
+    if not store_migration_applied(store, "proc_001_suppliers"):
+        return name
+    for row in store_rows(store, "proc_suppliers", "id, tenant_id, supplier_id, name"):
+        if sqlite_row_get(row, "tenant_id") == tenant_id and sqlite_row_get(row, "supplier_id") == supplier_id:
+            name = sqlite_row_get(row, "name")
+    name
+
+# proc_open_po_count counts POs whose received quantity is below ordered.
+# Returns 0 when the procurement schema was never applied to this store.
+fn proc_open_po_count(store: EnterpriseStore, tenant_id: text) -> i64:
+    var open: i64 = 0
+    if not store_migration_applied(store, "proc_003_po_rows"):
+        return open
+    for row in store_rows(store, "proc_po_rows", "id, tenant_id, po_id, req_id, supplier_id, sku, qty, unit_cost_cents"):
+        if sqlite_row_get(row, "tenant_id") != tenant_id:
+            continue
+        val po_id = sqlite_row_get(row, "po_id")
+        if proc_po_received(store, tenant_id, po_id) < int(sqlite_row_get(row, "qty")):
+            open = open + 1
+    open
+
+# proc_payable_total_safe is the dashboard-safe payable roll-up: the journal
+# always exists (sale schema), so this is a direct delegation.
+fn proc_payable_total_safe(store: EnterpriseStore, tenant_id: text) -> i64:
+    proc_payable_total(store, tenant_id)
+
+fn page_open_pos(store: EnterpriseStore, tenant_id: text) -> text:
+    var body = "<h1>Open Purchase Orders</h1><ul class=\"open-pos\">"
+    if store_migration_applied(store, "proc_003_po_rows"):
+        for row in store_rows(store, "proc_po_rows", "id, tenant_id, po_id, req_id, supplier_id, sku, qty, unit_cost_cents"):
+            if sqlite_row_get(row, "tenant_id") != tenant_id:
+                continue
+            val po_id = sqlite_row_get(row, "po_id")
+            val ordered = int(sqlite_row_get(row, "qty"))
+            val received = proc_po_received(store, tenant_id, po_id)
+            if received >= ordered:
+                continue
+            val invoiced = proc_po_invoiced(store, tenant_id, po_id)
+            val supplier_id = sqlite_row_get(row, "supplier_id")
+            val supplier = proc_supplier_name(store, tenant_id, supplier_id)
+            body = body + "<li data-po=\"" + esc(po_id) + "\">"
+            body = body + "<span class=\"po-id\">" + esc(po_id) + "</span>"
+            body = body + " — <span class=\"po-supplier\">" + esc(supplier) + "</span>"
+            body = body + " — <span class=\"po-sku\">" + esc(sqlite_row_get(row, "sku")) + "</span>"
+            body = body + " — ordered <span class=\"po-ordered\">" + esc("{ordered}") + "</span>"
+            body = body + " — received <span class=\"po-received\">" + esc("{received}") + "</span>"
+            body = body + " — invoiced <span class=\"po-invoiced\">" + esc("{invoiced}") + "</span>"
+            body = body + "</li>"
+    body + "</ul>"
+
+# page_reconcile renders the three-way (ordered/received/invoiced) report the
+# library produces as a machine-readable data line, as escaped key/value rows.
+fn page_reconcile(store: EnterpriseStore, tenant_id: text) -> text:
+    var body = "<h1>Procurement Reconciliation</h1><ul class=\"reconcile\">"
+    if store_migration_applied(store, "proc_003_po_rows"):
+        for field in proc_reconcile(store, tenant_id).split(";"):
+            val kv = field.split("=")
+            if kv.len() != 2:
+                continue
+            body = body + "<li>" + esc(kv[0]) + ": <span class=\"" + esc(kv[0]) + "\">" + esc(kv[1]) + "</span></li>"
+    body + "</ul>"
+
+fn command_page(reason: text, detail: text) -> HttpResponse:
+    secured(HttpResponse.html("<p class=\"result\">" + esc(reason) + ": " + esc(detail) + "</p>"))
+
+# procurement_routes_handle serves every /proc/* route; unknown subpaths 404.
+fn procurement_routes_handle(store: EnterpriseStore, session: SessionContext, tenant: TenantContext, who: ActorContext, method: text, path: text, body: text) -> HttpResponse:
+    if method == "GET" and match_route_pattern("/proc/pos", path):
+        if not role_allows(who.role, "proc.requisition.approve"):
+            return deny("forbidden", who.actor_id)
+        return secured(HttpResponse.html(page_open_pos(store, tenant.tenant_id)))
+    if method == "GET" and match_route_pattern("/proc/reconcile", path):
+        if not role_allows(who.role, "proc.requisition.approve"):
+            return deny("forbidden", who.actor_id)
+        return secured(HttpResponse.html(page_reconcile(store, tenant.tenant_id)))
+    if method == "POST" and match_route_pattern("/proc/requisition", path):
+        val req_id = form_value(body, "req")
+        val env = CommandEnvelope(request_id: "req-requisition-" + req_id, idempotency_key: form_value(body, "idem"), action: "proc.requisition.create", payload: body)
+        val r = proc_requisition_create(store, session, tenant, who, env, req_id,
+            form_value(body, "sku"), form_int(body, "qty"))
+        if not r.ok:
+            return deny(r.reason, r.detail)
+        return command_page(r.reason, r.detail)
+    if method == "POST" and match_route_pattern("/proc/requisition/approve", path):
+        val req_id = form_value(body, "req")
+        val env = CommandEnvelope(request_id: "req-approve-" + req_id, idempotency_key: form_value(body, "idem"), action: "proc.requisition.approve", payload: body)
+        val r = proc_requisition_approve(store, session, tenant, who, env, req_id)
+        if not r.ok:
+            return deny(r.reason, r.detail)
+        return command_page(r.reason, r.detail)
+    if method == "POST" and match_route_pattern("/proc/po", path):
+        val po_id = form_value(body, "po")
+        var currency = form_value(body, "currency")
+        if currency == "":
+            currency = "USD"
+        val cost = Money(amount_cents: form_int(body, "cost"), currency: currency)
+        val env = CommandEnvelope(request_id: "req-po-" + po_id, idempotency_key: form_value(body, "idem"), action: "proc.po.create", payload: body)
+        val r = proc_po_create(store, session, tenant, who, env, po_id,
+            form_value(body, "req"), form_value(body, "supplier"), cost)
+        if not r.ok:
+            return deny(r.reason, r.detail)
+        return command_page(r.reason, r.detail)
+    if method == "POST" and match_route_pattern("/proc/receive", path):
+        val po_id = form_value(body, "po")
+        val env = CommandEnvelope(request_id: "req-receive-" + po_id, idempotency_key: form_value(body, "idem"), action: "proc.po.receive", payload: body)
+        val r = proc_receive(store, session, tenant, who, env, po_id, form_int(body, "qty"))
+        if not r.ok:
+            return deny(r.reason, r.detail)
+        return command_page(r.reason, r.detail)
+    if method == "POST" and match_route_pattern("/proc/invoice", path):
+        val po_id = form_value(body, "po")
+        val env = CommandEnvelope(request_id: "req-invoice-" + po_id, idempotency_key: form_value(body, "idem"), action: "proc.invoice.record", payload: body)
+        val r = proc_invoice_record(store, session, tenant, who, env, po_id,
+            form_value(body, "invoice"), form_int(body, "qty"))
+        if not r.ok:
+            return deny(r.reason, r.detail)
+        return command_page(r.reason, r.detail)
+    secured(HttpResponse.error(HttpStatus.NotFound, "no such route"))
+
+export proc_supplier_name, proc_open_po_count, proc_payable_total_safe
+export page_open_pos, page_reconcile
+export procurement_routes_handle

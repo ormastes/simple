@@ -1,0 +1,204 @@
+# Pure change classification and structural build-work receipts.
+# No filesystem access, scheduler calls, cache lookup, or compilation occurs.
+
+use app.build.targets.build_explain.{
+    CompatibilityResult, BootstrapReason, bootstrap_reason_name
+}
+
+enum ChangeClassV1:
+    NoChange
+    ConfigurationOnly
+    ProviderImplementation
+    CompileInterface
+    AbiInterface
+    CompileSemantic
+    ToolBehavior
+    CoreAbi
+    TrustVerification
+    UnknownCompatibility
+
+struct ChangeClassifierInputV1:
+    requested_target: text
+    changed_files: [text]
+    changed_config_sections: [text]
+    implementation_changed: bool
+    compile_interface_changed: bool
+    abi_changed: bool
+    compile_semantic_changed: bool
+    tool_behavior_changed: bool
+    core_abi_changed: bool
+    admitted_compiler_compatibility: CompatibilityResult
+    explicit_trust_reason: BootstrapReason
+    provider_target: text
+    core_target: text
+    sci_target: text
+
+struct BuildWorkCountersV1:
+    modules_parsed: i64
+    modules_typed: i64
+    modules_lowered: i64
+    objects_generated: i64
+    providers_packaged: i64
+    links_performed: i64
+    sci_sections_regenerated: i64
+    cache_hits: i64
+    cache_misses: i64
+
+struct ChangeDecisionV1:
+    classes: [ChangeClassV1]
+    affected_targets: [text]
+    core_binary_changed: bool
+    bootstrap_reason: BootstrapReason
+    bootstrap_required: bool
+    planned_work: BuildWorkCountersV1
+    errors: [text]
+
+fn _has(values: [text], value: text) -> bool:
+    var i = 0
+    while i < values.len():
+        if values[i] == value:
+            return true
+        i = i + 1
+    false
+
+fn _add_target(values: [text], value: text) -> [text]:
+    var out = values
+    if value.len() > 0 and not _has(out, value):
+        out.push(value)
+    out
+
+fn _is_bootstrap_target(value: text) -> bool:
+    value.starts_with("//bootstrap:") or value.starts_with("//release:")
+
+fn _without_bootstrap_targets(values: [text]) -> [text]:
+    var out: [text] = []
+    var i = 0
+    while i < values.len():
+        if not _is_bootstrap_target(values[i]):
+            out.push(values[i])
+        i = i + 1
+    out
+
+fn _unknown_work() -> BuildWorkCountersV1:
+    BuildWorkCountersV1(-1, -1, -1, -1, -1, -1, -1, -1, -1)
+
+fn _config_work(section_count: i64) -> BuildWorkCountersV1:
+    BuildWorkCountersV1(0, 0, 0, 0, 0, 0, section_count, 0, 0)
+
+fn change_class_name(cls: ChangeClassV1) -> text:
+    match cls:
+        case ChangeClassV1.NoChange: "no-change"
+        case ChangeClassV1.ConfigurationOnly: "configuration-only"
+        case ChangeClassV1.ProviderImplementation: "provider-implementation"
+        case ChangeClassV1.CompileInterface: "compile-interface"
+        case ChangeClassV1.AbiInterface: "abi-interface"
+        case ChangeClassV1.CompileSemantic: "compile-semantic"
+        case ChangeClassV1.ToolBehavior: "tool-behavior"
+        case ChangeClassV1.CoreAbi: "core-abi"
+        case ChangeClassV1.TrustVerification: "trust-verification"
+        case ChangeClassV1.UnknownCompatibility: "unknown-compatibility"
+
+fn classify_change(input: ChangeClassifierInputV1) -> ChangeDecisionV1:
+    var classes: [ChangeClassV1] = []
+    var targets: [text] = []
+    var errors: [text] = []
+    var core_changed = false
+    var reason = BootstrapReason.None
+    var bootstrap = false
+    var work = _unknown_work()
+
+    val config_only = input.changed_config_sections.len() > 0 and
+        not input.implementation_changed and not input.compile_interface_changed and
+        not input.abi_changed and not input.compile_semantic_changed and
+        not input.tool_behavior_changed and not input.core_abi_changed
+
+    if input.explicit_trust_reason != BootstrapReason.None:
+        classes.push(ChangeClassV1.TrustVerification)
+        reason = input.explicit_trust_reason
+        bootstrap = true
+        targets = _add_target(targets, input.requested_target)
+    elif input.core_abi_changed:
+        classes.push(ChangeClassV1.CoreAbi)
+        core_changed = true
+        reason = BootstrapReason.BootstrapCoreInterfaceMajorChanged
+        bootstrap = true
+        targets = _add_target(targets, input.core_target)
+    elif config_only:
+        classes.push(ChangeClassV1.ConfigurationOnly)
+        targets = _add_target(targets, input.sci_target)
+        work = _config_work(input.changed_config_sections.len())
+    else:
+        if input.implementation_changed and not input.compile_interface_changed and
+                not input.abi_changed and not input.compile_semantic_changed and
+                not input.tool_behavior_changed:
+            classes.push(ChangeClassV1.ProviderImplementation)
+            targets = _add_target(targets, input.provider_target)
+            work = BuildWorkCountersV1(-1, -1, -1, -1, 1, 0, 0, -1, -1)
+        if input.compile_interface_changed:
+            classes.push(ChangeClassV1.CompileInterface)
+        if input.abi_changed:
+            classes.push(ChangeClassV1.AbiInterface)
+        if input.compile_semantic_changed:
+            classes.push(ChangeClassV1.CompileSemantic)
+        if input.tool_behavior_changed:
+            classes.push(ChangeClassV1.ToolBehavior)
+        if classes.len() > 0 and targets.len() == 0:
+            targets = _add_target(targets, input.requested_target)
+
+    if input.admitted_compiler_compatibility == CompatibilityResult.Unknown:
+        classes.push(ChangeClassV1.UnknownCompatibility)
+        targets = _add_target(targets, input.requested_target)
+        # Unknown compatibility is never cache evidence.
+        work.cache_hits = 0
+        work.cache_misses = -1
+    elif input.admitted_compiler_compatibility == CompatibilityResult.Incompatible and not bootstrap:
+        targets = _add_target(targets, input.requested_target)
+
+    if classes.len() == 0:
+        classes.push(ChangeClassV1.NoChange)
+        work = BuildWorkCountersV1(0, 0, 0, 0, 0, 0, 0, 0, 0)
+
+    # Hard invariant: a bootstrap action is impossible without a typed reason.
+    if bootstrap and reason == BootstrapReason.None:
+        errors.push("change-classifier-error: bootstrap-reason-required")
+        bootstrap = false
+    if reason == BootstrapReason.None and bootstrap:
+        errors.push("change-classifier-error: bootstrap-with-none")
+    if reason == BootstrapReason.None:
+        var saw_bootstrap_target = false
+        var target_index = 0
+        while target_index < targets.len():
+            if _is_bootstrap_target(targets[target_index]):
+                saw_bootstrap_target = true
+            target_index = target_index + 1
+        if saw_bootstrap_target:
+            errors.push("change-classifier-error: bootstrap-target-with-none")
+            targets = _without_bootstrap_targets(targets)
+
+    ChangeDecisionV1(classes, targets, core_changed, reason, bootstrap, work, errors)
+
+fn format_change_decision(decision: ChangeDecisionV1) -> text:
+    var classes = ""
+    var i = 0
+    while i < decision.classes.len():
+        classes = if i == 0: change_class_name(decision.classes[i]) else: classes + "," + change_class_name(decision.classes[i])
+        i = i + 1
+    var targets = ""
+    i = 0
+    while i < decision.affected_targets.len():
+        targets = if i == 0: decision.affected_targets[i] else: targets + "," + decision.affected_targets[i]
+        i = i + 1
+    "change-decision: classes=[" + classes + "] targets=[" + targets + "]" +
+        " core-binary-changed=" + decision.core_binary_changed.to_text() +
+        " bootstrap-required=" + decision.bootstrap_required.to_text() +
+        " bootstrap-reason=" + bootstrap_reason_name(decision.bootstrap_reason) +
+        " evidence=planned" +
+        " modules-parsed=" + decision.planned_work.modules_parsed.to_text() +
+        " modules-typed=" + decision.planned_work.modules_typed.to_text() +
+        " modules-lowered=" + decision.planned_work.modules_lowered.to_text() +
+        " objects-generated=" + decision.planned_work.objects_generated.to_text() +
+        " providers-packaged=" + decision.planned_work.providers_packaged.to_text() +
+        " links-performed=" + decision.planned_work.links_performed.to_text() +
+        " sci-sections-regenerated=" + decision.planned_work.sci_sections_regenerated.to_text() +
+        " cache-hits=" + decision.planned_work.cache_hits.to_text() +
+        " cache-misses=" + decision.planned_work.cache_misses.to_text()

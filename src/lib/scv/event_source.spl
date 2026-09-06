@@ -1,0 +1,51 @@
+# SCV EventSource protocol (SCV-IMPL-E-02).
+#
+# Cursor {source, opaque_token, fresh_instance, overflowed} over the E-01
+# polling watcher. All watchers are HINTS: a fresh instance or an overflow
+# makes the mandatory invalidate/rescan path the only way forward — pull
+# returns no events and needs_rescan=true until scv_event_source_rescan runs.
+
+use std.nogc_async_mut.file_system.event_watch.{FsWatchEvent, FsWatchState, fswatch_open, fswatch_poll, fswatch_scan}
+
+struct ScvEventCursor:
+    source: text          # "poll" (later: "notify", "watchman")
+    opaque_token: text    # opaque resume token; never parsed by consumers
+    fresh_instance: bool  # source has no history for this consumer
+    overflowed: bool      # events were lost; incremental view is invalid
+
+struct ScvEventPull:
+    events: [FsWatchEvent]
+    cursor: ScvEventCursor
+    needs_rescan: bool
+
+fn scv_event_source_token(state: FsWatchState) -> text:
+    "s{state.next_seq}"
+
+fn scv_event_source_open(root: text) -> (FsWatchState, ScvEventCursor):
+    val state = fswatch_open(root, [".scv/", ".git/"])
+    (state, ScvEventCursor(source: "poll", opaque_token: scv_event_source_token(state),
+                           fresh_instance: true, overflowed: false))
+
+# Pull events. A cursor that is fresh or overflowed MUST rescan first — the
+# incremental stream is refused, never silently resumed.
+fn scv_event_source_pull(state: FsWatchState, cursor: ScvEventCursor) -> (FsWatchState, ScvEventPull):
+    if cursor.fresh_instance or cursor.overflowed:
+        return (state, ScvEventPull(events: [], cursor: cursor, needs_rescan: true))
+    if state.overflowed:
+        val marked = ScvEventCursor(source: cursor.source, opaque_token: cursor.opaque_token,
+                                    fresh_instance: false, overflowed: true)
+        return (state, ScvEventPull(events: [], cursor: marked, needs_rescan: true))
+    val (next, events) = fswatch_poll(state)
+    val advanced = ScvEventCursor(source: cursor.source, opaque_token: scv_event_source_token(next),
+                                  fresh_instance: false, overflowed: false)
+    (next, ScvEventPull(events: events, cursor: advanced, needs_rescan: false))
+
+# Mandatory invalidate/rescan path: authoritative resnapshot of the tree,
+# clearing fresh_instance/overflowed; sequence tokens stay monotonic.
+fn scv_event_source_rescan(state: FsWatchState, cursor: ScvEventCursor) -> (FsWatchState, ScvEventCursor):
+    var next = state
+    next.snapshot = fswatch_scan(next.root, next.ignores)
+    next.overflowed = false
+    next.pending = []
+    (next, ScvEventCursor(source: cursor.source, opaque_token: scv_event_source_token(next),
+                          fresh_instance: false, overflowed: false))

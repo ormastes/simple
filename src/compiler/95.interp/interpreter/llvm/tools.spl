@@ -1,0 +1,264 @@
+# LLVM Tool Invocations
+#
+# Shared LLVM tool discovery and invocation functions.
+# Used by both Full Simple and Core Simple LLVM backends.
+#
+# Bootstrap-compatible subset: no generics and no Option types in shared bootstrap-sensitive code.
+# Portable: uses `where` on Windows, `command -v` on Unix.
+
+use compiler.backend.backend.io_compat.{backend_shell_tuple}
+use std.nogc_sync_mut.io.file_ops.{file_write, file_delete, file_read_bytes, file_exists}
+use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
+use std.nogc_sync_mut.io.process_ops.{process_run}
+
+extern fn rt_env_get(key: text) -> text
+
+# ============================================================================
+# Portable Tool Finder (shared helper)
+# ============================================================================
+
+# Homebrew installs LLVM keg-only (not linked onto PATH) so `command -v` never
+# finds it there. These absolute prefixes are checked as a last resort after
+# the PATH probe fails. They are no-ops on non-macOS hosts since the paths
+# simply don't exist.
+fn _macos_homebrew_llvm_prefixes() -> [text]:
+    [
+        "/opt/homebrew/opt/llvm",
+        "/opt/homebrew/opt/llvm@25", "/opt/homebrew/opt/llvm@24", "/opt/homebrew/opt/llvm@23",
+        "/opt/homebrew/opt/llvm@22", "/opt/homebrew/opt/llvm@21", "/opt/homebrew/opt/llvm@20",
+        "/opt/homebrew/opt/llvm@19", "/opt/homebrew/opt/llvm@18", "/opt/homebrew/opt/llvm@17",
+        "/opt/homebrew/opt/llvm@16", "/opt/homebrew/opt/llvm@15", "/opt/homebrew/opt/llvm@14",
+        "/usr/local/opt/llvm",
+        "/usr/local/opt/llvm@25", "/usr/local/opt/llvm@24", "/usr/local/opt/llvm@23",
+        "/usr/local/opt/llvm@22", "/usr/local/opt/llvm@21", "/usr/local/opt/llvm@20",
+        "/usr/local/opt/llvm@19", "/usr/local/opt/llvm@18", "/usr/local/opt/llvm@17",
+        "/usr/local/opt/llvm@16",
+    ]
+
+pub fn tool_probe_locations(base_name: text) -> [text]:
+    """Absolute paths that _find_tool checks for `base_name` beyond PATH."""
+    var out: [text] = []
+    for prefix in _macos_homebrew_llvm_prefixes():
+        out.push("{prefix}/bin/{base_name}")
+    out
+
+fn _tool_runs(cmd: text) -> bool:
+    """Execute the candidate and require exit 0 from `--version`.
+
+    Existence on PATH is NOT proof a tool can run: on MSYS2 Windows the
+    mingw64 `llc.exe` exists and is found by `where`, but exits 127 with
+    "error while loading shared libraries" the moment it is executed
+    (2026-08-31). Any probe here must run the binary, never just stat it.
+    Uses process_run directly (no shell) to avoid cmd.exe quoting issues.
+    """
+    val (out, err, code) = process_run(cmd, ["--version"])
+    code == 0
+
+fn _env_tool_dirs() -> [text]:
+    """Explicit LLVM bin dirs from the environment, highest priority.
+
+    SIMPLE_LLVM_BIN points at a bin directory; LLVM_SYS_180_PREFIX (the
+    var the Windows MSVC bootstrap lane already sets for the known-good
+    LLVM 18 toolchain) points at an install prefix whose bin/ is used.
+    Both unset => empty list => no behavior change (Unix no-op).
+    """
+    var dirs: [text] = []
+    val explicit = rt_env_get("SIMPLE_LLVM_BIN") ?? ""
+    if explicit != "":
+        dirs.push(explicit)
+    val prefix = rt_env_get("LLVM_SYS_180_PREFIX") ?? ""
+    if prefix != "":
+        dirs.push(prefix + "/bin")
+    dirs
+
+fn _find_tool(candidates: [text]) -> text:
+    """Find a WORKING tool using platform-appropriate detection.
+
+    Priority: env-provided LLVM bin dirs (SIMPLE_LLVM_BIN,
+    LLVM_SYS_180_PREFIX/bin) -> /usr/bin -> `command -v` (Unix) ->
+    `where` (Windows, every listed path tried in order) -> Homebrew
+    keg-only prefixes (macOS). Every hit is verified by EXECUTING the
+    candidate (`--version`, exit 0) before it is returned — a bare
+    existence probe selected a DLL-broken mingw64 llc on Windows and
+    produced "Bootstrap LLVM llc failed" far downstream.
+    Bootstrap-safe.
+    """
+    # Env-provided dirs first (see _env_tool_dirs docstring).
+    for dir in _env_tool_dirs():
+        for candidate in candidates:
+            for path in [dir + "/" + candidate, dir + "/" + candidate + ".exe"]:
+                if file_exists(path) and _tool_runs(path):
+                    return path
+    for candidate in candidates:
+        if file_exists("/usr/bin/{candidate}") and _tool_runs("/usr/bin/{candidate}"):
+            return "/usr/bin/{candidate}"
+        val (out, err, code) = backend_shell_tuple("command -v {candidate} >/dev/null 2>&1")
+        if code == 0 and _tool_runs(candidate):
+            return candidate
+        # Windows fallback: `where` can list several installs and the FIRST
+        # can be broken (mingw64 llc missing its own DLLs) while a later one
+        # works (e.g. an LLVM MSVC release install). Try each resolved path
+        # and return the first that actually executes. Note: paths with
+        # spaces (e.g. C:\Program Files\LLVM) would need quoting at the
+        # invocation sites that build shell strings from this result.
+        val (wout, werr, wcode) = backend_shell_tuple("where {candidate}")
+        if wcode == 0:
+            for line in wout.split("\n"):
+                # `where` output is CRLF-terminated; strip \r explicitly.
+                val p = line.replace("\r", "").trim()
+                if p != "" and _tool_runs(p):
+                    return p
+    # Homebrew keg-only fallback (macOS): probe absolute prefixes for the
+    # unversioned tool name (last candidate in the fallback chain).
+    if candidates.len() > 0:
+        val base_name = candidates[candidates.len() - 1]
+        for path in tool_probe_locations(base_name):
+            if file_exists(path) and _tool_runs(path):
+                return path
+    ""
+
+# ============================================================================
+# LLVM Tool Discovery
+# ============================================================================
+
+fn find_llc() -> text:
+    """
+    Find llc binary with fallback chain: llc-19 → llc-18 → llc-17 → llc-16 → llc.
+
+    Returns the command name if found, otherwise empty string.
+    Bootstrap-safe: Returns text (not text?) with "" for not found.
+    """
+    _find_tool(["llc-20", "llc-19", "llc-18", "llc-17", "llc-16", "llc"])
+
+fn find_llvm_as() -> text:
+    """Find the LLVM textual-IR assembler for replayable bitcode debugging."""
+    _find_tool(["llvm-as-20", "llvm-as-19", "llvm-as-18", "llvm-as-17", "llvm-as-16", "llvm-as"])
+
+fn find_opt() -> text:
+    """
+    Find LLVM opt binary with fallback chain: opt-19 → opt-18 → opt-17 → opt-16 → opt.
+
+    Returns the command name if found, otherwise empty string.
+    Bootstrap-safe: Returns text (not text?) with "" for not found.
+    """
+    _find_tool(["opt-20", "opt-19", "opt-18", "opt-17", "opt-16", "opt"])
+
+fn find_clang() -> text:
+    """
+    Find clang binary with fallback chain: clang-19 → clang-18 → clang-17 → clang-16 → clang.
+
+    Returns the command name if found, otherwise empty string.
+    Bootstrap-safe: Returns text (not text?) with "" for not found.
+    """
+    _find_tool(["clang-19", "clang-18", "clang-17", "clang-16", "clang"])
+
+# ============================================================================
+# WASM Tool Discovery
+# ============================================================================
+
+fn find_wasm_ld() -> text:
+    """
+    Find wasm-ld binary with fallback chain: wasm-ld-19 -> wasm-ld-18 -> wasm-ld-17 -> wasm-ld-16 -> wasm-ld.
+
+    Returns the command name if found, otherwise empty string.
+    """
+    _find_tool(["wasm-ld-19", "wasm-ld-18", "wasm-ld-17", "wasm-ld-16", "wasm-ld"])
+
+fn find_wasm_opt() -> text:
+    """
+    Find wasm-opt binary (from Binaryen).
+
+    Returns the command name if found, otherwise empty string.
+    """
+    _find_tool(["wasm-opt"])
+
+fn find_wat2wasm() -> text:
+    """
+    Find wat2wasm binary (from WABT).
+
+    Returns the command name if found, otherwise empty string.
+    """
+    _find_tool(["wat2wasm"])
+
+fn find_wasi_sysroot() -> text:
+    """
+    Find WASI sysroot directory.
+
+    Checks WASI_SYSROOT env var, then probes common locations.
+    Returns the path if found, otherwise empty string.
+    """
+    # Check env var first
+    val (env_out, env_err, env_code) = backend_shell_tuple("echo $WASI_SYSROOT")
+    if env_code == 0:
+        val env_path = env_out.trim()
+        if env_path != "":
+            val (chk_out, chk_err, chk_code) = backend_shell_tuple("test -d '{env_path}' && echo ok")
+            if chk_code == 0:
+                return env_path
+
+    # Probe common locations (Unix)
+    val probe_paths = [
+        "/opt/wasi-sdk/share/wasi-sysroot",
+        "/usr/share/wasi-sysroot",
+        "/usr/local/share/wasi-sysroot",
+        "/opt/wasi-sysroot"
+    ]
+    for probe in probe_paths:
+        val (p_out, p_err, p_code) = backend_shell_tuple("test -d '{probe}' && echo ok")
+        if p_code == 0:
+            return probe
+
+    # Windows: check WASI_SDK_PATH
+    val (ws_out, ws_err, ws_code) = backend_shell_tuple("echo %WASI_SDK_PATH%")
+    if ws_code == 0:
+        val ws_path = ws_out.trim()
+        if ws_path != "" and ws_path != "%WASI_SDK_PATH%":
+            return "{ws_path}/share/wasi-sysroot"
+    ""
+
+# ============================================================================
+# WASM Tool Availability Checks
+# ============================================================================
+
+fn wasm_ld_available() -> bool:
+    """Check if wasm-ld is available on PATH."""
+    val tool = find_wasm_ld()
+    tool != ""
+
+fn wasm_opt_available() -> bool:
+    """Check if wasm-opt (Binaryen optimizer) is available on PATH."""
+    val tool = find_wasm_opt()
+    tool != ""
+
+fn wat2wasm_available() -> bool:
+    """Check if wat2wasm (WABT) is available on PATH."""
+    val tool = find_wat2wasm()
+    tool != ""
+
+# ============================================================================
+# Tool Availability Checks
+# ============================================================================
+
+fn opt_available() -> bool:
+    """Check if opt (LLVM optimizer) is available on PATH."""
+    val tool = find_opt()
+    tool != ""
+
+fn llc_available() -> bool:
+    """Check if llc (LLVM static compiler) is available on PATH."""
+    val tool = find_llc()
+    tool != ""
+
+fn llvm_as_available() -> bool:
+    """Check if llvm-as (textual IR to bitcode) is available on PATH."""
+    val tool = find_llvm_as()
+    tool != ""
+
+fn clang_available() -> bool:
+    """Check if clang (C compiler with LLVM backend) is available on PATH."""
+    val tool = find_clang()
+    tool != ""
+
+# ============================================================================
+# Exports
+# ============================================================================

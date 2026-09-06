@@ -1,0 +1,181 @@
+# RV64 Scheduler Context Bridge
+#
+# The generic scheduler predates ArchContext and stores the x86-shaped
+# TaskContext record. A timer trap must never squeeze an RV64GC trap frame
+# through that record: doing so drops live caller-saved GPRs, supervisor CSRs,
+# and the complete F/D register file. This bounded owner keeps the native
+# frame authoritative and gives Scheduler only an opaque scheduling token.
+
+use os.kernel.arch.arch_context.{Riscv64Context}
+use os.kernel.arch.riscv64.trap_model.{create_rv64_kernel_context, create_rv64_user_context}
+use os.kernel.arch.riscv64.cpu.{csrw_satp, sfence_vma}
+use os.kernel.arch.riscv64.paging.{vmm_switch_address_space}
+use os.kernel.scheduler.scheduler.{Scheduler}
+use os.kernel.scheduler.scheduler_types.{MAX_TASKS}
+use os.kernel.types.task_types.{TaskContext, TaskId}
+
+val RV64_SCHEDULER_CONTEXT_TOKEN: u64 = 0x5256363443545854
+
+struct Rv64SchedulerPreemption:
+    context: Riscv64Context
+    previous_task_id: u64
+    selected_task_id: u64
+
+class Rv64SchedulerContextBridge:
+    task_ids: [u64]
+    frames: [Riscv64Context?]
+    idle_frame: Riscv64Context?
+    kernel_satp: u64
+
+impl Rv64SchedulerContextBridge:
+    static fn new() -> Rv64SchedulerContextBridge:
+        var task_ids: [u64] = []
+        var frames: [Riscv64Context?] = []
+        var i = 0
+        while i < MAX_TASKS:
+            task_ids.push(0)
+            frames.push(nil)
+            i = i + 1
+        Rv64SchedulerContextBridge(
+            task_ids: task_ids,
+            frames: frames,
+            idle_frame: nil,
+            kernel_satp: 0
+        )
+
+    me install_kernel_satp(satp: u64) -> bool:
+        """Pin the supervisor page-table identity used by kernel tasks."""
+        if satp == 0:
+            return false
+        self.kernel_satp = satp
+        true
+
+    fn _slot_for(task_id: u64) -> i64:
+        if task_id == 0 or self.task_ids.len() == 0:
+            return -1
+        val capacity = self.task_ids.len()
+        val start = (task_id % (capacity as u64)) as i64
+        var first_empty: i64 = -1
+        var probe: i64 = 0
+        while probe < capacity:
+            val slot = (start + probe) % capacity
+            val stored_id = self.task_ids[slot]
+            # Reclamation can leave a hole before another colliding identity.
+            # Keep probing for the exact owner so bind cannot create a
+            # duplicate entry and frame cannot lose a still-live context.
+            if stored_id == task_id:
+                return slot
+            if stored_id == 0 and first_empty < 0:
+                first_empty = slot
+            probe = probe + 1
+        first_empty
+
+    me bind(task_id: u64, frame: Riscv64Context) -> bool:
+        """Publish the complete native frame for one live scheduler task."""
+        if task_id == 0:
+            self.idle_frame = Some(frame)
+            return true
+        val slot = self._slot_for(task_id)
+        if slot < 0:
+            return false
+        self.task_ids[slot] = task_id
+        self.frames[slot] = Some(frame)
+        true
+
+    fn frame(task_id: u64) -> Riscv64Context?:
+        if task_id == 0:
+            return self.idle_frame
+        val slot = self._slot_for(task_id)
+        if slot < 0 or self.task_ids[slot] != task_id:
+            return nil
+        self.frames[slot]
+
+    me reclaim_terminal_tasks(scheduler: &Scheduler):
+        """Release slots whose exact task identity no longer exists."""
+        var slot = 0
+        while slot < self.task_ids.len():
+            val task_id = self.task_ids[slot]
+            if task_id != 0 and scheduler.get_task(TaskId(id: task_id)) == nil:
+                self.task_ids[slot] = 0
+                self.frames[slot] = nil
+            slot = slot + 1
+
+fn _rv64_scheduler_token(task_id: u64, frame: Riscv64Context) -> TaskContext:
+    """Create the non-authoritative token consumed by Scheduler.timer_tick."""
+    TaskContext(
+        rax: task_id, rbx: RV64_SCHEDULER_CONTEXT_TOKEN,
+        rcx: 0, rdx: 0, rsi: 0, rdi: 0, rbp: 0, rsp: frame.sp,
+        r8: 0, r9: 0, r10: 0, r11: 0, r12: 0, r13: 0, r14: 0, r15: 0,
+        rip: frame.sepc, rflags: frame.sstatus,
+        cs: 0, ss: 0, fpu_state: task_id
+    )
+
+fn _rv64_initial_frame_from_task_context(
+    scheduler: &Scheduler,
+    task_id: u64,
+    portable: TaskContext
+) -> Result<Riscv64Context, text>:
+    """Lift a never-run task's portable entry contract into a native frame."""
+    if portable.rip == 0 or portable.rsp == 0:
+        return Err("selected RV64 task has no native frame or initial entry context")
+    val task = scheduler.get_task(TaskId(id: task_id))
+    if task == nil:
+        return Err("selected RV64 scheduler task no longer exists")
+    if task.unwrap().is_user:
+        return Ok(create_rv64_user_context(portable.rip, portable.rsp, 0))
+    Ok(create_rv64_kernel_context(portable.rip, portable.rsp, portable.rax))
+
+fn rv64_scheduler_preempt(
+    bridge: &mut Rv64SchedulerContextBridge,
+    scheduler: &mut Scheduler,
+    interrupted: Riscv64Context
+) -> Result<Rv64SchedulerPreemption, text>:
+    """Account one timer tick and return the exact selected RV64 frame."""
+    val previous_id = scheduler.get_current().id
+    if not bridge.bind(previous_id, interrupted):
+        # Reclamation is deliberately outside the hot path. It performs
+        # bounded scheduler lookups only after the fixed table is saturated.
+        bridge.reclaim_terminal_tasks(scheduler)
+        if not bridge.bind(previous_id, interrupted):
+            return Err("RV64 scheduler context table is full")
+
+    val portable_next = scheduler.timer_tick(_rv64_scheduler_token(previous_id, interrupted))
+    val selected_id = scheduler.get_current().id
+
+    val stored = bridge.frame(selected_id)
+    if stored != nil:
+        return Ok(Rv64SchedulerPreemption(
+            context: stored.unwrap(),
+            previous_task_id: previous_id,
+            selected_task_id: selected_id
+        ))
+
+    val initial = _rv64_initial_frame_from_task_context(scheduler, selected_id, portable_next)?
+    if not bridge.bind(selected_id, initial):
+        return Err("RV64 scheduler context table is full")
+    Ok(Rv64SchedulerPreemption(
+        context: initial,
+        previous_task_id: previous_id,
+        selected_task_id: selected_id
+    ))
+
+fn rv64_scheduler_activate_selected_address_space(
+    bridge: &Rv64SchedulerContextBridge,
+    scheduler: &Scheduler,
+    task_id: u64
+) -> Result<(), text>:
+    """Activate the selected task's Sv39 root before trap-frame restore."""
+    val task = scheduler.get_task(TaskId(id: task_id))
+    if task == nil:
+        return Err("selected RV64 scheduler task no longer exists")
+    val root = task.unwrap().address_space
+    if root != 0:
+        if (root & 0xFFF) != 0:
+            return Err("selected RV64 task has an unaligned address-space root")
+        vmm_switch_address_space(root)
+        return Ok(())
+    if bridge.kernel_satp == 0:
+        return Err("RV64 kernel SATP identity is not installed")
+    csrw_satp(bridge.kernel_satp)
+    sfence_vma()
+    Ok(())

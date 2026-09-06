@@ -1,0 +1,27 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+owner="$root/src/lib/nogc_async_mut/io/regex_simple.spl"
+facade="$root/src/app/io/regex_simple.spl"
+registry="$root/src/compiler_rust/compiler/src/codegen/runtime_sffi.rs"
+interpreter="$root/src/compiler_rust/compiler/src/interpreter_extern/mod.rs"
+symbols='sffi_regex_is_match sffi_regex_find sffi_regex_find_all sffi_regex_captures sffi_regex_replace sffi_regex_replace_all sffi_regex_split sffi_regex_split_n'
+
+[ "$(grep -c '^@unsafe(reason: .*capabilities: \[ffi\])$' "$owner")" -eq 8 ]
+[ "$(grep -c '^    unsafe(capabilities: \[ffi\]):$' "$owner")" -eq 9 ]
+for symbol in $symbols; do
+    grep -q "RuntimeFuncSpec::new(\"$symbol\"" "$registry"
+    grep -q "insert_simple!(\"$symbol\"" "$interpreter"
+done
+
+# Find-all must retain amortized-linear accumulation, not repeated array
+# concatenation. The app compatibility path must remain raw-free.
+grep -q 'result.push(match_group\[0\])' "$owner"
+! grep -q 'result = result + \[match_group\[0\]\]' "$owner"
+grep -q '^export use std.nogc_async_mut.io.regex_simple.{' "$facade"
+! grep -q '^extern fn ' "$facade"
+! grep -q '\bsffi_regex_[A-Za-z0-9_]*(' "$facade"
+! grep -q '^fn ' "$facade"
+
+echo 'Legacy regex SFFI authority audit: PASS (one 8-declaration/9-call owner; app facade raw-free; native+interpreter registry present; linear find-all accumulation preserved)'

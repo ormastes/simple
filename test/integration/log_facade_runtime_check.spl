@@ -1,0 +1,210 @@
+# log-lib-drivers Phase 7 — executable verification of the log facade.
+#
+# Bypasses the spec-runner (which has the 0-ms-skip false-green pattern
+# in interpreter mode and the AC-impacting pass-claim pattern in compiled
+# mode — see feedback_compile_mode_false_greens.md and
+# feedback_interpreter_test_limits.md).
+#
+# Runs as a plain top-level program with explicit assertions and PASS /
+# FAIL println output that Phase 7 (and Phase 8 ship review) can read.
+#
+# What this proves (real, exec-checked):
+#   * AC-3 / AC-6a runtime side: log_set_level, log_set_subsys_level and
+#     log_init_from_config produce the expected effective_level() and
+#     is_enabled() decisions — i.e. the level-filter predicate that
+#     gates every dispatch path actually filters.
+#   * AC-3 EnvFilter:   "net=debug,vfs=warn,*=info" parses to the right
+#                       per-subsys overrides + global level.
+#   * AC-5 lite path:   panic_mode_active() flips on log_panic_flush().
+#   * Submodule resolution: imports under std.log.ring.* and
+#                           std.log.panic.* resolve (Gap-1 wrappers).
+#
+# What this does NOT prove (covered or deferred — see Phase 7 §state):
+#   * AC-3 compile-time STATIC_MAX_LEVEL: deferred (bug B-LOG-CTL).
+#   * AC-6b backend swap with RingBackend sink: blocked by interpreter-
+#     mode semantic limitation on `arr[i].field = v` and `obj.f1.f2 = v`
+#     (the Phase 5b ring_backend_new + log_register_backend bodies hit
+#     this exact pattern). This is a real interpreter bug — not a Phase 7
+#     scope item; recorded in the Phase 7 verify report. The level-filter
+#     half of AC-3 is independent of the backend slot and is verified
+#     here.
+#   * AC-5 audit hash chain: covered by audit_chain spec, commit
+#     b07ec5a6e3; the executable surface there needs SecurityEvent +
+#     file I/O setup which is broader than this proof's blast radius.
+#
+# Entry point: bin/simple test/integration/log_facade_runtime_check.spl
+
+use std.log.{
+    LOG_TRACE, LOG_DEBUG, LOG_INFO, LOG_WARN, LOG_ERROR, LOG_FATAL, LOG_OFF,
+    SUBSYS_KERN, SUBSYS_VFS, SUBSYS_NET, SUBSYS_IRQ,
+    log_set_level, log_set_subsys_level, log_init_from_config,
+    effective_level, is_enabled,
+    MAX_BACKENDS
+}
+use std.log.panic.{log_panic_flush, panic_mode_active}
+use std.log.ring.{record_size_bytes, record_offset_seq, record_offset_level, record_offset_flags}
+
+var failures: i64 = 0
+var checks:   i64 = 0
+
+# ---------------------------------------------------------------------------
+# AC-3 / AC-6a — global level filter
+# ---------------------------------------------------------------------------
+print("---- AC-3 / AC-6a: global level filter ----")
+
+log_set_level(LOG_WARN)
+
+val eff_kern_warn = effective_level(SUBSYS_KERN)
+checks = checks + 1
+if eff_kern_warn == LOG_WARN:
+    print("[PASS] effective_level(SUBSYS_KERN) == LOG_WARN after log_set_level(WARN)")
+else:
+    failures = failures + 1
+    print("[FAIL] effective_level(SUBSYS_KERN) — expected " + LOG_WARN.to_text() + ", got " + eff_kern_warn.to_text())
+
+val info_enabled_warn = is_enabled(LOG_INFO, "kern")
+checks = checks + 1
+if not info_enabled_warn:
+    print("[PASS] is_enabled(INFO, 'kern') == false at level=WARN")
+else:
+    failures = failures + 1
+    print("[FAIL] is_enabled(INFO, 'kern') — expected false")
+
+val warn_enabled_warn = is_enabled(LOG_WARN, "kern")
+checks = checks + 1
+if warn_enabled_warn:
+    print("[PASS] is_enabled(WARN, 'kern') == true at level=WARN")
+else:
+    failures = failures + 1
+    print("[FAIL] is_enabled(WARN, 'kern') — expected true")
+
+val error_enabled_warn = is_enabled(LOG_ERROR, "kern")
+checks = checks + 1
+if error_enabled_warn:
+    print("[PASS] is_enabled(ERROR, 'kern') == true at level=WARN")
+else:
+    failures = failures + 1
+    print("[FAIL] is_enabled(ERROR, 'kern') — expected true")
+
+# ---------------------------------------------------------------------------
+# AC-3 — per-subsystem level override (Linux dyndbg / Zephyr per-module)
+# ---------------------------------------------------------------------------
+print("---- AC-3: per-subsystem level override ----")
+
+log_set_subsys_level(SUBSYS_VFS, LOG_TRACE)
+val eff_vfs = effective_level(SUBSYS_VFS)
+val eff_kern_keep = effective_level(SUBSYS_KERN)
+
+checks = checks + 1
+if eff_vfs == LOG_TRACE:
+    print("[PASS] per-subsys override: SUBSYS_VFS == LOG_TRACE")
+else:
+    failures = failures + 1
+    print("[FAIL] per-subsys override: SUBSYS_VFS — expected " + LOG_TRACE.to_text() + ", got " + eff_vfs.to_text())
+
+checks = checks + 1
+if eff_kern_keep == LOG_WARN:
+    print("[PASS] per-subsys override does not bleed: SUBSYS_KERN still == LOG_WARN")
+else:
+    failures = failures + 1
+    print("[FAIL] per-subsys override leaked into SUBSYS_KERN — got " + eff_kern_keep.to_text())
+
+# ---------------------------------------------------------------------------
+# AC-3 — EnvFilter-style config string
+# ---------------------------------------------------------------------------
+print("---- AC-3: EnvFilter-style config parser ----")
+
+log_init_from_config("net=debug,vfs=warn,*=info")
+val eff_net = effective_level(SUBSYS_NET)
+val eff_vfs_cfg = effective_level(SUBSYS_VFS)
+val eff_kern_cfg = effective_level(SUBSYS_KERN)
+
+checks = checks + 1
+if eff_net == LOG_DEBUG:
+    print("[PASS] EnvFilter: SUBSYS_NET == LOG_DEBUG (from 'net=debug')")
+else:
+    failures = failures + 1
+    print("[FAIL] EnvFilter: SUBSYS_NET — expected " + LOG_DEBUG.to_text() + ", got " + eff_net.to_text())
+
+checks = checks + 1
+if eff_vfs_cfg == LOG_WARN:
+    print("[PASS] EnvFilter: SUBSYS_VFS == LOG_WARN (from 'vfs=warn')")
+else:
+    failures = failures + 1
+    print("[FAIL] EnvFilter: SUBSYS_VFS — expected " + LOG_WARN.to_text() + ", got " + eff_vfs_cfg.to_text())
+
+checks = checks + 1
+if eff_kern_cfg == LOG_INFO:
+    print("[PASS] EnvFilter: SUBSYS_KERN falls through to '*=info' == LOG_INFO")
+else:
+    failures = failures + 1
+    print("[FAIL] EnvFilter: SUBSYS_KERN fall-through — expected " + LOG_INFO.to_text() + ", got " + eff_kern_cfg.to_text())
+
+# ---------------------------------------------------------------------------
+# AC-5 lite path — panic_mode_active toggles on log_panic_flush
+# ---------------------------------------------------------------------------
+print("---- AC-5 lite path: panic-mode flag ----")
+
+val pm_before = panic_mode_active()
+checks = checks + 1
+if not pm_before:
+    print("[PASS] panic_mode_active() is initially false")
+else:
+    failures = failures + 1
+    print("[FAIL] panic_mode_active() is initially false — got " + pm_before.to_text())
+
+log_panic_flush()
+val pm_after = panic_mode_active()
+checks = checks + 1
+if pm_after:
+    print("[PASS] panic_mode_active() is true after log_panic_flush()")
+else:
+    failures = failures + 1
+    print("[FAIL] panic_mode_active() is true after log_panic_flush() — got " + pm_after.to_text())
+
+# ---------------------------------------------------------------------------
+# Submodule resolution sanity (Gap-1 fix)
+# ---------------------------------------------------------------------------
+print("---- Gap-1: std.log.ring + std.log.panic re-exports ----")
+
+# If we got here, the imports above already resolved.
+# Pin a couple of constants so the ring sub-module is genuinely linked.
+val rsz = record_size_bytes()
+checks = checks + 1
+if rsz == 40:
+    print("[PASS] std.log.ring.record_size_bytes() == 40 (Phase-3 §C lock)")
+else:
+    failures = failures + 1
+    print("[FAIL] std.log.ring.record_size_bytes() — expected 40, got " + rsz.to_text())
+
+val seq_off = record_offset_seq()
+val lvl_off = record_offset_level()
+val flg_off = record_offset_flags()
+checks = checks + 1
+if seq_off == 0 and lvl_off == 38 and flg_off == 39:
+    print("[PASS] std.log.ring record offsets match Phase-3 §C lock")
+else:
+    failures = failures + 1
+    print("[FAIL] ring offsets — got seq=" + seq_off.to_text() + " level=" + lvl_off.to_text() + " flags=" + flg_off.to_text())
+
+# ---------------------------------------------------------------------------
+# AC-3 sanity — slot capacity is 4
+# ---------------------------------------------------------------------------
+print("---- AC-3: backend slot capacity ----")
+checks = checks + 1
+if MAX_BACKENDS == 4:
+    print("[PASS] MAX_BACKENDS == 4")
+else:
+    failures = failures + 1
+    print("[FAIL] MAX_BACKENDS — expected 4, got " + MAX_BACKENDS.to_text())
+
+# ---------------------------------------------------------------------------
+# Summary
+# ---------------------------------------------------------------------------
+print("")
+print("=================================================================")
+if failures == 0:
+    print("RESULT: PASS  (" + checks.to_text() + " checks, 0 failures)")
+else:
+    print("RESULT: FAIL  (" + checks.to_text() + " checks, " + failures.to_text() + " failures)")
+print("=================================================================")

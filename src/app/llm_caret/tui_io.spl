@@ -1,0 +1,131 @@
+# LLM Caret terminal I/O seam.
+#
+# The production adapter is deliberately the only place where the chat loop
+# reaches terminal and stdin owners. Tests can provide a CaretIo made from
+# deterministic functions without declaring app-leaf runtime externs.
+
+use std.tui.terminal.{
+    TerminalSize, terminal_get_size,
+    terminal_enter_raw_mode, terminal_exit_raw_mode,
+    terminal_enter_alt_screen, terminal_exit_alt_screen,
+    terminal_hide_cursor, terminal_show_cursor,
+    terminal_clear_screen, terminal_draw_at, terminal_flush,
+    terminal_read_byte, terminal_install_recovery, terminal_resize_pending
+}
+use std.nogc_sync_mut.io.pipe.{Stdin}
+use app.llm_caret.tui_input.{caret_is_tty}
+
+struct CaretIo:
+    is_tty: fn() -> bool
+    terminal_size: fn() -> TerminalSize
+    begin_tui: fn() -> CaretTerminalResult
+    end_tui: fn() -> CaretTerminalResult
+    clear_screen: fn()
+    draw_at: fn(i64, i64, text)
+    flush: fn()
+    read_byte: fn() -> i64
+    read_line: fn() -> text?
+    emit: fn(text)
+
+# Terminal lifecycle state belongs to the production adapter, not the chat
+# loop.  The adapter is process-local because a terminal can only have one
+# active raw/alternate-screen session at a time.
+var PRODUCTION_RAW_ACQUIRED = false
+var PRODUCTION_ALT_ACQUIRED = false
+var PRODUCTION_CURSOR_HIDDEN = false
+
+struct CaretTerminalResult:
+    ok: bool
+    phase: text
+    error: text
+
+fn caret_terminal_ok(phase: text) -> CaretTerminalResult:
+    CaretTerminalResult(ok: true, phase: phase, error: "")
+
+fn caret_terminal_error(phase: text, error: text) -> CaretTerminalResult:
+    CaretTerminalResult(ok: false, phase: phase, error: error)
+
+struct CaretLoopResult:
+    mode: text
+    ok: bool
+    exit_reason: text
+    error: text
+
+fn _production_is_tty() -> bool:
+    caret_is_tty()
+
+fn _production_terminal_size() -> TerminalSize:
+    terminal_resize_pending()
+    terminal_get_size()
+
+fn _production_enter_raw() -> bool:
+    if not terminal_install_recovery():
+        return false
+    terminal_enter_raw_mode()
+
+fn _production_begin_tui() -> CaretTerminalResult:
+    if not _production_enter_raw():
+        return caret_terminal_error("raw-mode", "failed to enter raw mode")
+    PRODUCTION_RAW_ACQUIRED = true
+
+    terminal_enter_alt_screen()
+    PRODUCTION_ALT_ACQUIRED = true
+
+    terminal_hide_cursor()
+    PRODUCTION_CURSOR_HIDDEN = true
+    caret_terminal_ok("cursor-hide")
+
+fn _production_end_tui() -> CaretTerminalResult:
+    # Reverse the portions actually acquired.  The stdout-only terminal
+    # primitives have no failure return; raw restoration is the observable
+    # cleanup failure and must still leave the remaining state untouched for a
+    # later idempotent retry.
+    if PRODUCTION_CURSOR_HIDDEN:
+        terminal_show_cursor()
+        PRODUCTION_CURSOR_HIDDEN = false
+
+    if PRODUCTION_ALT_ACQUIRED:
+        terminal_exit_alt_screen()
+        PRODUCTION_ALT_ACQUIRED = false
+
+    if PRODUCTION_RAW_ACQUIRED:
+        if not terminal_exit_raw_mode():
+            return caret_terminal_error("raw-mode", "failed to exit raw mode")
+        PRODUCTION_RAW_ACQUIRED = false
+
+    caret_terminal_ok("terminal-cleanup")
+
+fn _production_clear_screen():
+    terminal_clear_screen()
+
+fn _production_draw_at(row: i64, col: i64, content: text):
+    terminal_draw_at(row, col, content)
+
+fn _production_flush():
+    terminal_flush()
+
+fn _production_read_byte() -> i64:
+    terminal_read_byte()
+
+fn _production_read_line() -> text?:
+    val input = Stdin.new()
+    match input.read_line():
+        case Ok(line): line
+        case Err(_): nil
+
+fn _production_emit(content: text):
+    print_raw(content)
+
+fn production_caret_io() -> CaretIo:
+    CaretIo(
+        is_tty: _production_is_tty,
+        terminal_size: _production_terminal_size,
+        begin_tui: _production_begin_tui,
+        end_tui: _production_end_tui,
+        clear_screen: _production_clear_screen,
+        draw_at: _production_draw_at,
+        flush: _production_flush,
+        read_byte: _production_read_byte,
+        read_line: _production_read_line,
+        emit: _production_emit
+    )

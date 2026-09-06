@@ -1,0 +1,27 @@
+#!/bin/sh
+set -eu
+fail() { echo "FAIL rv64 authenticated media contract: $*" >&2; exit 1; }
+builder=scripts/os/build_rv64_authenticated_hello.shs
+rebuild=scripts/check/rebuild-sosix-qemu-media.shs
+adapter=src/os/kernel/loader/riscv64_authenticated_media_fixture.spl
+pipeline=src/os/kernel/loader/executable_admission_pipeline.spl
+elf=src/os/kernel/loader/elf_loader.spl
+entry=examples/09_embedded/simple_os/arch/riscv64/smoke_entry.spl
+
+grep -q 'SIMPLEOS_RV64_AUTH_CONTRACT_TOOL' "$builder" || fail 'host builder bypasses Simple canonical body'
+grep -q 'simpleos-executable-admission-v1' src/os/kernel/loader/executable_crypto_authority.spl || fail 'canonical domain absent'
+if grep -q 'append 4294967297\|range_count=3\|entry_point=' "$builder"; then fail 'hardcoded binding/layout authority remains'; fi
+grep -q 'elf_authenticated_layout_v1(source.unwrap(), layout_arch)' "$pipeline" || fail 'loader does not parse authenticated ELF layout'
+grep -q 'ranges.len() >= 64' "$elf" || fail 'variable PT_LOAD bound absent'
+grep -q 'rv64_authenticated_pinned_public_key_hex_v1' "$adapter" || fail 'immutable root pin absent'
+grep -q 'generated_dir/rv64_auth_trust_config.spl' "$rebuild" || fail 'kernel trust config not isolated/generated'
+for binding_env in AUTH_MOUNT_ID AUTH_MOUNT_GENERATION AUTH_FILE_ID AUTH_FILE_GENERATION; do
+    grep -Fq "SIMPLEOS_RV64_${binding_env}=\"\$auth_" "$rebuild" || fail "builder invocation misses $binding_env"
+done
+grep -q 'media_file_id.unwrap() != binding.file_handle.id' "$adapter" || fail 'guest does not check actual execute-open file identity'
+grep -q 'open_for_execute("/SYS/APPS/AUTHHELLO.ELF"' "$adapter" || fail 'immutable execute binding absent'
+if grep -q '__SIMPLEOS_FS_EXEC_NONCE_SLOT_V1__' "$builder"; then fail 'signed ELF remains nonce mutable'; fi
+fail_exits=$(grep -c '^[[:space:]]*rt_qemu_exit_failure()' "$entry")
+success_exits=$(grep -c '^[[:space:]]*rt_qemu_exit_success()' "$entry")
+[ "$fail_exits" -eq 9 ] && [ "$success_exits" -eq 1 ] || fail 'smoke failure/success exit contract'
+echo 'PASS rv64 authenticated media contract'

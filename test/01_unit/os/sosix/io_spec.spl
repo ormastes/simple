@@ -1,0 +1,102 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+# @cover src/os/sosix/io_state.spl 80%
+"""
+# SOSIX Async I/O Specification
+
+SOSIX owns the async file I/O request pool and backend routing. POSIX keeps
+compatibility wrappers over these APIs.
+"""
+
+use std.spec.step
+
+use std.spec
+use os.posix.errno.{EIO}
+use os.posix.fd_table.{fd_table_init, fd_get_type, FD_TYPE_FILE, FD_TYPE_SERIAL, FD_TYPE_PIPE_READ, FD_TYPE_PIPE_WRITE, FD_TYPE_FREE}
+use os.sosix.io_rw.{sosix_async_write, sosix_sync_read, sosix_sync_write}
+use os.sosix.io_state.{
+
+    SOSIX_IO_BACKEND_INVALID,
+    SOSIX_IO_BACKEND_SERIAL,
+    SOSIX_IO_BACKEND_VFS,
+    SOSIX_MAX_ASYNC_REQUESTS,
+    sosix_io_backend_for_fd_type,
+    sosix_io_init,
+    sosix_async_alloc_request,
+    sosix_async_free_request,
+    sosix_async_is_complete,
+    sosix_async_get_result
+}
+
+describe "SOSIX async I/O backend ownership":
+    # @manual scenario evidence
+    it "owns serial descriptors":
+        # @req REQ-SSPEC-UNIT
+        step("owns serial descriptors")
+        expect(sosix_io_backend_for_fd_type(FD_TYPE_SERIAL)).to_equal(SOSIX_IO_BACKEND_SERIAL)
+
+    it "owns VFS-backed file descriptors":
+        # @req REQ-SSPEC-UNIT
+        step("owns VFS-backed file descriptors")
+        expect(sosix_io_backend_for_fd_type(FD_TYPE_FILE)).to_equal(SOSIX_IO_BACKEND_VFS)
+
+    it "does not own pipe descriptors":
+        # @req REQ-SSPEC-UNIT
+        step("does not own pipe descriptors")
+        expect(sosix_io_backend_for_fd_type(FD_TYPE_PIPE_READ)).to_equal(SOSIX_IO_BACKEND_INVALID)
+        expect(sosix_io_backend_for_fd_type(FD_TYPE_PIPE_WRITE)).to_equal(SOSIX_IO_BACKEND_INVALID)
+
+    it "rejects free descriptors":
+        # @req REQ-SSPEC-UNIT
+        step("rejects free descriptors")
+        expect(sosix_io_backend_for_fd_type(FD_TYPE_FREE)).to_equal(SOSIX_IO_BACKEND_INVALID)
+
+describe "SOSIX async I/O request lifecycle":
+    it "allocates pending requests and frees them for reuse":
+        # @req REQ-SSPEC-UNIT
+        step("allocates pending requests and frees them for reuse")
+        sosix_io_init()
+
+        val req = sosix_async_alloc_request()
+        expect(req).to_be_less_than(SOSIX_MAX_ASYNC_REQUESTS)
+        expect(sosix_async_is_complete(req)).to_equal(false)
+
+        sosix_async_free_request(req)
+        val reused = sosix_async_alloc_request()
+        expect(reused).to_equal(req)
+
+    it "treats invalid request handles as completed EIO":
+        # @req REQ-SSPEC-UNIT
+        step("treats invalid request handles as completed EIO")
+        expect(sosix_async_is_complete(SOSIX_MAX_ASYNC_REQUESTS)).to_equal(true)
+        expect(sosix_async_get_result(SOSIX_MAX_ASYNC_REQUESTS)).to_equal(0 - EIO as i64)
+
+describe "SOSIX legacy fd route behavior":
+    it "reports an invalid descriptor as EBADF without touching a request slot":
+        # @req REQ-SOSIX-IO-ROUTE
+        step("Reject a stale generation and a full queue")
+        fd_table_init()
+        expect(sosix_sync_read(200, 0u64, 4u64)).to_equal(-9)
+        expect(sosix_sync_write(200, 0u64, 4u64)).to_equal(-9)
+
+    it "completes a zero-length serial request without backend traffic":
+        step("Emit serial bytes from SimpleOS and observe them")
+        fd_table_init()
+        expect(fd_get_type(0)).to_equal(FD_TYPE_SERIAL)
+        expect(sosix_sync_write(0, 0u64, 0u64)).to_equal(0)
+        expect(sosix_sync_read(0, 0u64, 0u64)).to_equal(0)
+
+    it "distinguishes request-slot exhaustion from a bad descriptor":
+        step("Fill every legacy request slot with completed zero-length writes")
+        fd_table_init()
+        var issued: i64 = 0
+        var last: u64 = 0u64
+        while issued < 128:
+            last = sosix_async_write(0, 0u64, 0u64)
+            issued = issued + 1
+        expect(last).to_be_less_than(128u64)
+        step("The next request is EAGAIN-shaped, not EBADF")
+        expect(sosix_async_write(0, 0u64, 0u64)).to_equal(128u64)
+        expect(sosix_sync_write(0, 0u64, 0u64)).to_equal(-11)

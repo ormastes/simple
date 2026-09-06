@@ -1,0 +1,27 @@
+# Generalization spec for the @export("C", name: ...) symbol-name fix
+# (doc/08_tracking/bug/export_c_custom_name_ignored_under_no_mangle_2026-08-14.md):
+# the requested export name is authoritative in BOTH mangling modes, applies
+# per-function, and never disturbs the entry-point `main` symbol contract.
+
+use std.spec.*
+use compiler.backend.llvm_ir_builder.{MirToLlvm, MirToLlvm__create}
+use compiler.backend.backend_api.CodegenTarget
+
+describe "export_c custom name generalization":
+    it "honours the requested name in the default (mangle) mode too":
+        var tr = MirToLlvm__create("test", CodegenTarget.X86_64, nil)
+        tr.no_mangle = false
+        tr.export_symbol_names["my_fn"] = "custom_abi_name_v1"
+        expect(tr.llvm_function_symbol_name("my_fn")).to_equal("custom_abi_name_v1")
+
+    it "applies per-function, leaving sibling functions untouched":
+        var tr = MirToLlvm__create("test", CodegenTarget.X86_64, nil)
+        tr.no_mangle = true
+        tr.export_symbol_names["exported_one"] = "abi_one"
+        expect(tr.llvm_function_symbol_name("exported_one")).to_equal("abi_one")
+        expect(tr.llvm_function_symbol_name("exported_two")).to_equal("exported_two")
+
+    it "does not override the entry main symbol contract":
+        var tr = MirToLlvm__create("test", CodegenTarget.X86_64, nil)
+        tr.export_symbol_names["main"] = "should_not_win"
+        expect(tr.llvm_function_symbol_name("main")).to_equal("__simple_main")

@@ -1,0 +1,134 @@
+#!/bin/sh
+# Immutable LLVM receiver admission for a self-hosted Stage-2 compiler.
+#
+# This is intentionally separate from check-bootstrap-stage2-struct-receiver:
+# that older smoke keeps its copied, minimal runtime input.  This probe binds
+# the emitted LLVM IR, its unresolved object import, and the runnable linked
+# executable to the frozen Stage-2 runtime authority used by Stage 3.
+set -eu
+
+if [ "$#" -lt 3 ] || [ "$#" -gt 4 ]; then
+    echo "usage: $0 <stage2-compiler> <frozen-runtime-dir> <evidence-dir> [target]" >&2
+    exit 2
+fi
+
+compiler=$1
+runtime=$2
+evidence=$3
+target=${4:-x86_64-unknown-linux-gnu}
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+entry="$root/test/04_smoke/bootstrap_llvm_struct_receiver_guard.spl"
+
+fail() { echo "error: $1" >&2; exit 1; }
+hash_file() {
+    if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}'
+    else openssl dgst -sha256 "$1" | awk '{print $NF}'; fi
+}
+canonical_file() {
+    [ -f "$1" ] && [ ! -L "$1" ] || return 1
+    parent=$(CDPATH= cd -- "$(dirname -- "$1")" && pwd -P) || return 1
+    printf '%s/%s\n' "$parent" "$(basename -- "$1")"
+}
+canonical_dir() {
+    [ -d "$1" ] && [ ! -L "$1" ] || return 1
+    CDPATH= cd -- "$1" && pwd -P
+}
+
+[ -x "$compiler" ] && [ ! -L "$compiler" ] || fail "compiler is not an executable regular file"
+[ "$(canonical_file "$compiler")" = "$compiler" ] || fail "compiler path is not canonical"
+[ -f "$entry" ] && [ ! -L "$entry" ] || fail "receiver fixture is not a regular file"
+[ "$(canonical_file "$entry")" = "$entry" ] || fail "receiver fixture path is not canonical"
+[ -d "$runtime" ] && [ ! -L "$runtime" ] || fail "frozen runtime directory is invalid"
+[ "$(canonical_dir "$runtime")" = "$runtime" ] || fail "frozen runtime path is not canonical"
+
+case "$target" in *windows*) runtime_archive="$runtime/simple_native_all.lib" ;; *) runtime_archive="$runtime/libsimple_native_all.a" ;; esac
+[ -f "$runtime_archive" ] && [ ! -L "$runtime_archive" ] || fail "frozen runtime lacks exact native archive"
+[ "$(canonical_file "$runtime_archive")" = "$runtime_archive" ] || fail "runtime archive path is not canonical"
+[ ! -e "$evidence" ] || fail "refusing to overwrite prior receiver evidence"
+evidence_parent=$(dirname -- "$evidence")
+[ -d "$evidence_parent" ] && [ ! -L "$evidence_parent" ] || fail "evidence parent is invalid"
+mkdir "$evidence" || fail "could not create evidence directory"
+[ "$(canonical_dir "$evidence")" = "$evidence" ] || fail "evidence path is not canonical"
+
+log="$evidence/llvm-native-build.log"
+probe_bin="$evidence/receiver-probe"
+stdout="$evidence/receiver-probe.stdout"
+receipt="$evidence/receipt.env"
+cache="$evidence/cache"
+
+if ! env -u SIMPLE_BINARY -u SIMPLE_BIN -u SIMPLE_FRONTEND_DELEGATE \
+    -u SIMPLE_FRONTEND_DELEGATED -u SIMPLE_BOOTSTRAP_DRIVER \
+    -u SIMPLE_BOOTSTRAP_DELEGATE -u SIMPLE_RUNTIME_PATH \
+    SIMPLE_BOOTSTRAP=1 SIMPLE_NO_DEPRECATED_WARNINGS=1 \
+    SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_LLVM_BITCODE_DEBUG=1 \
+    SIMPLE_KEEP_LLVM_IR=1 \
+    "$compiler" native-build --target "$target" --backend llvm \
+    --runtime-bundle core-c-bootstrap \
+    --source src/compiler --source src/app --source src/lib --entry-closure \
+    --threads 1 --cache-dir "$cache" --mode dynload --entry "$entry" \
+    --runtime-path "$runtime" -o "$probe_bin" >"$log" 2>&1; then
+    fail "Stage2 LLVM receiver native-build failed"
+fi
+[ -x "$probe_bin" ] && [ ! -L "$probe_bin" ] || fail "LLVM probe produced no executable"
+
+ir_source=$(sed -n 's/^\[llvm-bitcode-debug\] ir //p' "$log" | tail -n 1)
+[ -n "$ir_source" ] && [ -s "$ir_source" ] && [ ! -L "$ir_source" ] || fail "generated LLVM IR receipt missing"
+ir="$evidence/receiver.ll"
+cp -p "$ir_source" "$ir" || fail "could not retain generated LLVM IR"
+grep -Fq 'declare i8 @rt_struct_receiver_valid(i64, i64, i64)' "$ir" || fail "LLVM IR does not import rt_struct_receiver_valid"
+grep -Eq 'call i8 @rt_struct_receiver_valid\(i64 ' "$ir" || fail "LLVM IR does not call rt_struct_receiver_valid"
+
+object_source=$(find "$cache" -type f -name '*.o' -print | while IFS= read -r candidate; do
+    if nm -u "$candidate" 2>/dev/null | grep -Eq '[[:space:]]rt_struct_receiver_valid$'; then
+        printf '%s\n' "$candidate"
+        break
+    fi
+done)
+[ -n "$object_source" ] && [ -s "$object_source" ] || fail "no emitted object imports rt_struct_receiver_valid"
+object="$evidence/receiver.o"
+cp -p "$object_source" "$object" || fail "could not retain emitted receiver object"
+nm -u "$object" 2>/dev/null | grep -Eq '[[:space:]]rt_struct_receiver_valid$' || fail "retained object lost receiver import"
+nm -g --defined-only "$probe_bin" 2>/dev/null | grep -Eq '[[:space:]]rt_struct_receiver_valid$' || fail "linked executable lacks receiver provider"
+if command -v timeout >/dev/null 2>&1; then
+    timeout 30 "$probe_bin" >"$stdout"
+else
+    "$probe_bin" >"$stdout"
+fi
+[ "$(cat "$stdout")" = "bootstrap llvm struct receiver guard" ] || fail "unexpected LLVM receiver probe output"
+
+compiler_sha=$(hash_file "$compiler")
+runtime_sha=$(hash_file "$runtime_archive")
+entry_sha=$(hash_file "$entry")
+ir_sha=$(hash_file "$ir")
+object_sha=$(hash_file "$object")
+binary_sha=$(hash_file "$probe_bin")
+stdout_sha=$(hash_file "$stdout")
+umask 077
+{
+    echo "schema=simple-bootstrap-stage2-llvm-receiver-evidence-v1"
+    echo "status=pass"
+    echo "backend=llvm"
+    echo "entry_closure=1"
+    echo "compiler_path=$compiler"
+    echo "compiler_sha256=$compiler_sha"
+    echo "runtime_path=$runtime"
+    echo "runtime_archive_path=$runtime_archive"
+    echo "runtime_archive_sha256=$runtime_sha"
+    echo "entry_path=$entry"
+    echo "entry_sha256=$entry_sha"
+    echo "ir_path=$ir"
+    echo "ir_sha256=$ir_sha"
+    echo "ir_import=pass"
+    echo "ir_call=pass"
+    echo "object_path=$object"
+    echo "object_sha256=$object_sha"
+    echo "object_import=pass"
+    echo "executable_path=$probe_bin"
+    echo "executable_sha256=$binary_sha"
+    echo "executable_provider=pass"
+    echo "stdout_path=$stdout"
+    echo "stdout_sha256=$stdout_sha"
+    echo "executable_run=pass"
+} >"$receipt"
+echo "bootstrap_stage2_llvm_struct_receiver=PASS"

@@ -1,0 +1,38 @@
+# @cover src/app/debug/__init__.spl 0%
+# @req REQ-001 REQ-005 REQ-006 REQ-009 REQ-015
+use std.spec.{describe, it, expect}
+use std.common.debug.contracts_v1.{DebugVerificationV1}
+use std.common.debug.service_v1.{
+    central_debug_service_v1_graph, central_debug_service_v1_receipts,
+}
+use app.debug.interpreter_service_adapter_v1.{InterpreterDebugServiceAdapterV1}
+
+val INTERPRETER_SYSTEM_FIXTURE = "test/fixtures/debug/interpreter_vertical_slice.spl"
+
+describe "REQ-015 Simple interpreter vertical slice":
+    it "uses the landed semantic interpreter behind one build-bound service session":
+        var adapter = InterpreterDebugServiceAdapterV1.create()
+        val session_id = adapter.launch(INTERPRETER_SYSTEM_FIXTURE, [])?
+        adapter.run()?
+        val breakpoint = adapter.set_semantic_breakpoint(INTERPRETER_SYSTEM_FIXTURE, 5, "fixture.main.answer")?
+        expect(breakpoint.symbol_id).to_equal("fixture.main.answer")
+        val graph = central_debug_service_v1_graph(session_id)?
+        expect(graph.build_id).to_start_with("sha256:")
+        expect(graph.capabilities[0].verification).to_equal(DebugVerificationV1.LiveVerified)
+        val receipts = central_debug_service_v1_receipts(session_id)
+        expect(receipts.len()).to_be_greater_than(5)
+        expect(receipts[0].build_id).to_equal(graph.build_id)
+        adapter.close()?
+
+    it "denies impure evaluation and reports unavailable async ownership truthfully":
+        var adapter = InterpreterDebugServiceAdapterV1.create()
+        adapter.launch(INTERPRETER_SYSTEM_FIXTURE, [])?
+        match adapter.evaluate_pure("answer = 0"):
+            case Ok(_): expect(false).to_equal(true)
+            case Err(reason): expect(reason).to_contain("impure")
+        val snapshot = adapter.concurrency_snapshot()
+        expect(snapshot.tasks_available).to_equal(false)
+        expect(snapshot.actors_available).to_equal(false)
+        expect(snapshot.queues_available).to_equal(false)
+        expect(snapshot.verification).to_equal(DebugVerificationV1.Blocked)
+        adapter.close()?

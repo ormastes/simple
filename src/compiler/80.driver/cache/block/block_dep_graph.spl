@@ -1,0 +1,60 @@
+# Block dependency graph + worklist invalidation (C5 first slice).
+#
+# Edges are within one module: (dependent, dependency) — `dependent` reads the
+# interface of `dependency`, so when `dependency` is dirty, `dependent` is too.
+#
+# Invalidation is a monotone worklist: the dirty set only grows, so it
+# terminates in at most |nodes| passes. Iterations are bounded by node count;
+# if the bound is ever exceeded (a graph bug), the answer FAILS CLOSED to
+# "all blocks dirty". A changed block that is not a known node also fails
+# closed to all-dirty — false miss OK, false hit forbidden.
+
+struct BlockEdge:
+    dependent: text     # block id (block_ref_id) that depends on...
+    dependency: text    # ...this block id
+
+struct BlockDepGraph:
+    nodes: [text]
+    edges: [BlockEdge]
+
+fn block_graph_has_node(g: BlockDepGraph, id: text) -> bool:
+    for n in g.nodes:
+        if n == id:
+            return true
+    false
+
+fn block_dirty_contains(dirty: [text], id: text) -> bool:
+    for d in dirty:
+        if d == id:
+            return true
+    false
+
+# Transitive dirty set for a set of changed blocks. Returns ALL nodes (fail
+# closed) when a changed id is unknown or the pass bound is exceeded.
+fn block_dirty_set(g: BlockDepGraph, changed: [text]) -> [text]:
+    var dirty: [text] = []
+    for c in changed:
+        if not block_graph_has_node(g, c):
+            return g.nodes
+        if not block_dirty_contains(dirty, c):
+            dirty.push(c)
+    # Monotone worklist: each pass adds dependents of dirty blocks.
+    # A fixpoint needs at most |nodes| passes; one extra pass proves stability.
+    val bound = g.nodes.len() + 1
+    var pass_count = 0
+    var grew = true
+    while grew:
+        if pass_count >= bound:
+            # Bound exceeded — graph is inconsistent. Fail closed.
+            return g.nodes
+        grew = false
+        for e in g.edges:
+            if block_dirty_contains(dirty, e.dependency):
+                if not block_dirty_contains(dirty, e.dependent):
+                    dirty.push(e.dependent)
+                    grew = true
+        pass_count = pass_count + 1
+    dirty
+
+export BlockEdge, BlockDepGraph
+export block_graph_has_node, block_dirty_contains, block_dirty_set

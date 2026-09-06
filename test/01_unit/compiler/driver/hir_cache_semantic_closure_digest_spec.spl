@@ -1,0 +1,94 @@
+"""
+# HIR cache semantic closure digest specification
+
+Exercises the real parser -> frozen ModuleSurface registry -> driver closure
+digest path. Importer cache eligibility survives dependency body/comment edits,
+while every dependency interface edit misses. Opaque/custom projections remain
+fail-closed on whole-file identity.
+"""
+
+use std.spec.*
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName, module_surfaces_from_modules}
+use compiler.driver.driver_hir_cache.{hir_cache_closure_digest}
+
+fn importer_closure(provider_source: text) -> ModuleSurfacesByName:
+    val importer_source = "use pkg.provider.\{answer\}\nfn consume() -> i64:\n    answer()\n"
+    val provider = parse_and_build_module(provider_source, "pkg/provider.spl")
+    val importer = parse_and_build_module(importer_source, "pkg/importer.spl")
+    val result = module_surfaces_from_modules(
+        {"pkg.provider": provider, "pkg.importer": importer},
+        [SourceFile(path: "pkg/provider.spl", content: provider_source,
+                    module_name: "pkg.provider"),
+         SourceFile(path: "pkg/importer.spl", content: importer_source,
+                    module_name: "pkg.importer")])
+    expect(result.is_ok()).to_equal(true)
+    result.unwrap()
+
+fn importer_digest(provider_source: text) -> text:
+    hir_cache_closure_digest(importer_closure(provider_source))
+
+fn aliased_provider_closure(alias: text) -> ModuleSurfacesByName:
+    val source = "pub fn answer() -> i64:\n    1\n"
+    val provider = parse_and_build_module(source, "pkg/provider.spl")
+    var modules = {"pkg.provider": provider}
+    modules[alias] = provider
+    val result = module_surfaces_from_modules(
+        modules,
+        [SourceFile(path: "pkg/provider.spl", content: source,
+                    module_name: "pkg.provider")])
+    expect(result.is_ok()).to_equal(true)
+    result.unwrap()
+
+describe "HIR closure dependency identity":
+    it "keeps an importer hit eligible after dependency body and comment edits":
+        val base = "pub fn answer() -> i64:\n    1\n"
+        val body_comment = "# implementation note\npub fn answer() -> i64:\n    99\n"
+        expect(importer_digest(base)).to_equal(importer_digest(body_comment))
+
+    it "misses after dependency callable interface edits":
+        val base = "pub fn answer() -> i64:\n    1\n"
+        val changed = "pub fn answer(value: i64) -> i64:\n    value\n"
+        expect(importer_digest(base) == importer_digest(changed)).to_equal(false)
+
+    it "misses after dependency data interface edits":
+        val base = "pub struct Packet:\n    value: i64\n"
+        val changed = "pub struct Packet:\n    value: text\n"
+        expect(importer_digest(base) == importer_digest(changed)).to_equal(false)
+
+    it "misses after an alias-only registry remap":
+        val alpha = aliased_provider_closure("pkg.alpha")
+        val beta = aliased_provider_closure("pkg.beta")
+        expect(hir_cache_closure_digest(alpha) ==
+               hir_cache_closure_digest(beta)).to_equal(false)
+
+    it "rejects construction-time and generation-misaligned surfaces":
+        expect(hir_cache_closure_digest(ModuleSurfacesByName.empty())).to_equal("")
+        val malformed = importer_closure("pub fn answer() -> i64:\n    1\n")
+        var first = malformed.surfaces[0]
+        first.generation = malformed.generation + 1
+        malformed.surfaces[0] = first
+        expect(hir_cache_closure_digest(malformed)).to_equal("")
+
+    it "uses whole-file identity for an uncacheable custom projection":
+        # A generated semantic encoder marks Custom BlockValue payloads backed
+        # by Any uncacheable. Force that already-published state here so this
+        # driver-level spec isolates the required fallback branch without a
+        # process-global custom-block registry dependency.
+        val left = importer_closure("pub fn answer() -> i64:\n    1\n")
+        val right = importer_closure("pub fn answer() -> i64:\n    2\n")
+        var li = 0
+        while li < left.surfaces.len():
+            var left_surface = left.surfaces[li]
+            left_surface.semantic_cacheable = false
+            left.surfaces[li] = left_surface
+            li = li + 1
+        var ri = 0
+        while ri < right.surfaces.len():
+            var right_surface = right.surfaces[ri]
+            right_surface.semantic_cacheable = false
+            right.surfaces[ri] = right_surface
+            ri = ri + 1
+        expect(hir_cache_closure_digest(left) ==
+               hir_cache_closure_digest(right)).to_equal(false)

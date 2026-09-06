@@ -1,0 +1,53 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+provider="$root/src/runtime/spl_winit/src/lib.rs"
+interpreter="$root/src/compiler_rust/compiler/src/interpreter_extern/winit_sffi/winit_sffi_window.rs"
+wrapper="$root/src/lib/nogc_sync_mut/io/window_winit.spl"
+
+for symbol in rt_winit_window_staging_ptr rt_winit_window_present_staged rt_write_u32s_to_raw; do
+    if ! grep -B1 -F "extern fn $symbol" "$wrapper" | grep -Eq 'sentinel|capacity'; then
+        echo "FAIL: $symbol lacks pointer/length/status contract metadata" >&2
+        exit 1
+    fi
+done
+
+body=$(sed -n '/^fn winit_present_rgba(/,/^$/p' "$wrapper")
+for symbol in rt_winit_window_staging_ptr rt_write_u32s_to_raw rt_winit_window_present_staged; do
+    if [ "$(printf '%s\n' "$body" | grep -c "$symbol" || true)" -ne 1 ]; then
+        echo "FAIL: present wrapper must call $symbol exactly once" >&2
+        exit 1
+    fi
+done
+if ! printf '%s\n' "$body" | grep -Fq 'w > 9223372036854775807 / h'; then
+    echo 'FAIL: Simple pixel-count multiplication is not overflow-guarded' >&2
+    exit 1
+fi
+if [ "$(printf '%s\n' "$body" | grep -c 'var native_pixels: \[u32\] = \[\]' || true)" -ne 1 ]; then
+    echo 'FAIL: present wrapper changed its single conversion-buffer allocation shape' >&2
+    exit 1
+fi
+if printf '%s\n' "$body" | grep -Eq 'mutex|hash|dlsym|last_error|retry'; then
+    echo 'FAIL: present wrapper gained lookup, lock, hash, error-query, or retry work' >&2
+    exit 1
+fi
+
+if ! grep -Fq 'checked_mul(staging_h as usize)' "$provider" ||
+   ! grep -Fq 'checked_mul(height as usize)' "$interpreter"; then
+    echo 'FAIL: staging extent multiplication is unchecked' >&2
+    exit 1
+fi
+if ! grep -Fq 'size_of::<u32>()' "$provider" ||
+   ! grep -Fq 'size_of::<u32>()' "$interpreter"; then
+    echo 'FAIL: staging byte capacity is unchecked' >&2
+    exit 1
+fi
+
+if ! grep -Fq 'i64::from(slot.staging_w) != w' "$provider" ||
+   ! grep -Fq 'i64::from(slot.width) != expected_width' "$interpreter"; then
+    echo 'FAIL: staged present does not bind dimensions to the borrowed buffer' >&2
+    exit 1
+fi
+
+echo 'PASS: Winit staging binds pointer extent and present dimensions without extra copies or calls'

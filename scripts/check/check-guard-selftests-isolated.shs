@@ -1,0 +1,167 @@
+#!/bin/sh
+# check-guard-selftests-isolated.shs
+#
+# A guard script (and above all its --selftest) must NEVER mutate the
+# repository it is invoked from. Fixtures belong in a private repo created with
+# `git init` under $TMPDIR, exactly as check-tree-size-push.shs and
+# check-seed-builds-push.shs already do.
+#
+# Incident 2026-08-21
+# (doc/08_tracking/bug/pre_push_hook_selftest_commits_fixtures_into_invoking_repo_2026-08-21.md):
+# a wired guard's --selftest created fixture commits in the invoking landing
+# worktree, moving HEAD off the real landing commit. The seed-build guard then
+# evaluated the *fixture* commit and reported a bogus FAIL, and the push had to
+# be made with --no-verify. Every other guard passed, because every other guard
+# inspects trees and ranges -- none of them looks at what a guard does to the
+# working repo.
+#
+# This check is STATIC and cheap (sub-second): it flags a guard that issues a
+# repo-mutating git verb (commit / add / checkout / reset / rm / stash /
+# update-ref / cherry-pick / rebase / merge) while never calling `git init`,
+# i.e. it has no private repo to mutate and therefore mutates the caller's.
+# `git -C <dir>` and `git --git-dir=` forms are treated as isolated, since they
+# name their target explicitly.
+#
+# Deliberately NOT dynamic: actually running several hundred wired --selftests
+# in a scratch clone costs hours. The pre-push hook carries the dynamic half --
+# it snapshots HEAD around every guard invocation and blocks, naming the guard,
+# if HEAD moved. Static here, dynamic there; together they close the class.
+#
+# Verdict is the LAST line of stdout:
+#   PASS  — <n> guard script(s) checked, 0 mutate the invoking repo   (exit 0)
+#   FAIL  — <n> guard script(s) checked, <k> mutate ...: <names>      (exit 1)
+#   ERROR — nothing was checked (<reason>)                            (exit 2)
+# A run that examined 0 scripts is ERROR, never a pass.
+#
+# --selftest runs before every scan and is fatal.
+
+set -u
+
+MUTATING_RE='git[[:space:]]+(commit|add|checkout|reset|rm|stash|update-ref|cherry-pick|rebase|merge)([[:space:]]|$)'
+ISOLATED_RE='git[[:space:]]+(-C[[:space:]]|--git-dir)'
+
+# Allowlist: scripts that legitimately mutate the invoking repo because that IS
+# their job (the landing wrapper), or that only quote the verbs in prose.
+# normalize-line-endings.shs is a FIXER, not a guard: rewriting tracked files
+# and staging them is its stated purpose, not a selftest leak.
+ALLOWLIST='land.shs
+sync.shs
+watch-origin-tree-health.shs
+normalize-line-endings.shs'
+
+# scan_tree <dir> -> prints one offending basename per line; sets nothing.
+# Counting is done by the caller so a zero-file scan can be classified ERROR.
+scan_tree() {
+    _dir=$1
+    _wd=$2
+    : > "$_wd/files"
+    [ -d "$_dir" ] || return 0
+    find "$_dir" -type f \( -name '*.shs' -o -name '*.sh' \) -print > "$_wd/files"
+    : > "$_wd/offenders"
+    while IFS= read -r _f; do
+        [ -n "$_f" ] || continue
+        _b=$(basename "$_f")
+        case "
+$ALLOWLIST
+" in
+            *"
+$_b
+"*) continue ;;
+        esac
+        # Strip comment lines: a header that merely *describes* the recipe (the
+        # watchdog prints a restore recipe it never runs) is not a mutation.
+        sed 's/#.*//' "$_f" > "$_wd/code"
+        grep -Eq "$MUTATING_RE" "$_wd/code" || continue
+        # Has a private repo? `git init` anywhere, or every git call is -C /
+        # --git-dir scoped.
+        grep -Eq 'git[[:space:]]+(-C[[:space:]][^ ]*[[:space:]]+)?init' "$_wd/code" && continue
+        grep -Eq "$MUTATING_RE" "$_wd/code" | true
+        # If every mutating line is explicitly directed elsewhere, accept.
+        if ! grep -E "$MUTATING_RE" "$_wd/code" | grep -qvE "$ISOLATED_RE"; then
+            continue
+        fi
+        echo "$_b"
+    done < "$_wd/files" >> "$_wd/offenders"
+    cat "$_wd/offenders"
+}
+
+selftest() {
+    _wd=$(mktemp -d) || return 1
+    _n=0
+
+    mk() { mkdir -p "$1"; printf '%s\n' "$3" > "$1/$2"; }
+
+    # 1. Clean guard: mutates only inside a temp repo it created. Must NOT flag.
+    mk "$_wd/f1/scripts/check" clean.shs 'd=$(mktemp -d); git init "$d"; cd "$d"; git add .; git commit -m x'
+    _o=$(scan_tree "$_wd/f1/scripts/check" "$_wd")
+    [ -z "$_o" ] || { echo "selftest FAIL: clean fixture flagged: $_o"; return 1; }
+    _n=$((_n + 1))
+
+    # 2. Incident replay: commits into the invoking repo. Must flag.
+    mk "$_wd/f2/scripts/check" dirty.shs 'git add fixture.txt
+git commit -m "selftest fixture"'
+    _o=$(scan_tree "$_wd/f2/scripts/check" "$_wd")
+    [ "$_o" = "dirty.shs" ] || { echo "selftest FAIL: incident replay not flagged (got '$_o')"; return 1; }
+    _n=$((_n + 1))
+
+    # 3. Prose-only mention in a comment. Must NOT flag.
+    mk "$_wd/f3/scripts/check" prose.shs '# recover with: git reset --hard $sha
+echo hi'
+    _o=$(scan_tree "$_wd/f3/scripts/check" "$_wd")
+    [ -z "$_o" ] || { echo "selftest FAIL: prose fixture flagged: $_o"; return 1; }
+    _n=$((_n + 1))
+
+    # 4. Explicitly-directed git -C into another dir. Must NOT flag.
+    mk "$_wd/f4/scripts/check" scoped.shs 'git -C "$other" commit -m x'
+    _o=$(scan_tree "$_wd/f4/scripts/check" "$_wd")
+    [ -z "$_o" ] || { echo "selftest FAIL: git -C fixture flagged: $_o"; return 1; }
+    _n=$((_n + 1))
+
+    # 5. Empty tree must yield 0 files so the caller is forced to ERROR.
+    mkdir -p "$_wd/f5/scripts/check"
+    scan_tree "$_wd/f5/scripts/check" "$_wd" >/dev/null
+    [ ! -s "$_wd/files" ] || { echo "selftest FAIL: empty tree reported files"; return 1; }
+    _n=$((_n + 1))
+
+    rm -rf "$_wd"
+    echo "check-guard-selftests-isolated: selftest $_n/5 fixtures correct"
+    return 0
+}
+
+selftest || { echo "ERROR — nothing was checked (selftest failed)"; exit 2; }
+[ "${1:-}" = "--selftest" ] && exit 0
+
+repo_root=${SIMPLE_REPO_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null)}
+[ -n "$repo_root" ] || { echo "ERROR — nothing was checked (not a git repo)"; exit 2; }
+
+WD=$(mktemp -d) || { echo "ERROR — nothing was checked (mktemp failed)"; exit 2; }
+trap 'rm -rf "$WD"' EXIT INT TERM
+
+: > "$WD/all_offenders"
+n_files=0
+for d in "$repo_root/scripts/check" "$repo_root/scripts/audit"; do
+    [ -d "$d" ] || continue
+    scan_tree "$d" "$WD" >> "$WD/all_offenders"
+    n_files=$((n_files + $(wc -l < "$WD/files")))
+done
+
+if [ "$n_files" -eq 0 ]; then
+    echo "ERROR — nothing was checked (no guard scripts found under $repo_root/scripts)"
+    exit 2
+fi
+
+sort -u "$WD/all_offenders" -o "$WD/all_offenders"
+n_bad=$(grep -c . "$WD/all_offenders" 2>/dev/null)
+[ -n "$n_bad" ] || n_bad=0
+
+if [ "$n_bad" -gt 0 ]; then
+    echo "== guard scripts that mutate the invoking repository =="
+    cat "$WD/all_offenders"
+    echo ""
+    echo "Move each script's fixtures into a private repo: d=\$(mktemp -d); git init \"\$d\""
+    echo "FAIL — $n_files guard script(s) checked, $n_bad mutate the invoking repo: $(tr '\n' ' ' < "$WD/all_offenders")"
+    exit 1
+fi
+
+echo "PASS — $n_files guard script(s) checked, 0 mutate the invoking repo"
+exit 0

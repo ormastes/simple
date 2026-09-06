@@ -1,0 +1,50 @@
+"""Linux-only peak-RSS probe for the bounded staged GPU MMU ring.
+
+The probe reports an explicit unsupported record when `/proc` VmHWM evidence is
+unavailable. It never promotes the deterministic allocation model to measured
+RSS evidence.
+"""
+
+use std.cli.cli_util.{get_cli_args}
+use std.io_runtime.{getpid, file_read, time_now_unix_micros}
+use std.gpu.placement_backends.{staged_exercise_corpus}
+
+val SLOT_COUNT = 4
+val SLOT_BYTES = 65536
+val STAGING_BUDGET_BYTES = SLOT_COUNT * SLOT_BYTES
+val DRIVER_QUEUE_BUDGET_BYTES = 8 * 1024 * 1024
+val MANIFEST_CACHE_BYTES = 1024 * 1024
+
+fn _vm_hwm_bytes() -> i64:
+    val status = file_read("/proc/{getpid()}/status")
+    for line in status.split("\n"):
+        if line.starts_with("VmHWM:"):
+            for field in line.split(" "):
+                val value = field.trim().to_i64() ?? 0
+                if value > 0: return value * 1024
+    0
+
+fn _chunk() -> [u8]:
+    var bytes: [u8] = []
+    var index = 0
+    while index < SLOT_BYTES:
+        bytes.push((index & 255).to_u8())
+        index = index + 1
+    bytes
+
+val args = get_cli_args()
+val corpus_count = if args.len() == 1: args[0].to_i64() ?? 0 else: 0
+val chunk = _chunk()
+val runtime_base_bytes = _vm_hwm_bytes()
+val started_us = time_now_unix_micros()
+val exercise = staged_exercise_corpus(
+    SLOT_COUNT, SLOT_BYTES, STAGING_BUDGET_BYTES, chunk, corpus_count
+)
+val elapsed_us = time_now_unix_micros() - started_us
+val peak_host_rss_bytes = _vm_hwm_bytes()
+val supported = runtime_base_bytes > 0 and peak_host_rss_bytes > 0
+val passed = supported and exercise.bounded and exercise.completed_chunks == corpus_count
+val status = if passed: "pass" elif not supported: "unsupported" else: "fail"
+val reason = if passed: "pass" elif not supported: "linux-proc-vmhwm-unavailable" elif exercise.error != "": exercise.error elif not exercise.bounded: "staging-ring-unbounded" else: "incomplete-corpus"
+
+print "gpu-mmu-rss/v1 status={status} corpus_count={corpus_count} runtime_base_bytes={runtime_base_bytes} peak_host_rss_bytes={peak_host_rss_bytes} staging_high_water={exercise.high_water_bytes} staging_budget_bytes={STAGING_BUDGET_BYTES} driver_queue_budget_bytes={DRIVER_QUEUE_BUDGET_BYTES} manifest_cache_bytes={MANIFEST_CACHE_BYTES} elapsed_us={elapsed_us} reason={reason}"

@@ -1,0 +1,76 @@
+# LLM Fine-Tune Acceptance Evidence
+
+- status: `fail`
+- reason: `BLOCKED_RETRY6_NOT_READY`
+- attempt: `llm_backed_app_server_dry_run_retry7`
+- required_gates: `retry6_training_eval,training_allowed,model_manifest,eval_result,target_eval,decision,license,safety,deployment,app_handoff`
+- blocked_gates: `retry6_training_eval|training_allowed|model_manifest|eval_result|target_eval|decision|license|safety|deployment|app_handoff`
+- primary_blocked_gate: `retry6_training_eval`
+- gate_status: `WARN retry7-acceptance-gate`
+- gate_log: `build/llm_finetune_acceptance/retry7_acceptance_gate.log`
+- gate_log_artifact_status: `ready`
+- gate_log_sha256: `05fd3bf2fc1c210b445e62a01cee639c6457221ebf3837bf0c69ac132d0cac18`
+- gate_log_size: `2040`
+- surface_manifest: `build/llm_finetune_acceptance/finetune_acceptance_surface_manifest.tsv`
+- surface_manifest_count: `18`
+- surface_manifest_size: `2230`
+- surface_manifest_sha256: `568e230798b89ae42fe587e4c9ff469bc0cf43f179a6b4976ed6cae85c5509b1`
+- acceptance_allowed: `false`
+- training_allowed: `false`
+- upstream_retry6_result: `BLOCKED_UPSTREAM_LICENSED_DATA_NOT_READY`
+- upstream_attempt_record: `/home/ormastes/dev/pub/simple-llm-runtime-workspace-20260629/.spipe/llm-finetune-process/attempts/llm_backed_app_server_dry_run_retry5.sdn`
+- upstream_attempt_record_artifact_status: `ready`
+- upstream_attempt_record_sha256: `2ec3d84ab4d641ea3d5a2e5adb4748b933b3473207945e665b89654e693da5c8`
+- upstream_attempt_record_size: `4725`
+- upstream_cache_manifest: `/home/ormastes/dev/pub/simple-llm-runtime-workspace-20260629/.spipe/llm-finetune-process/data/llm_backed_app_server_dry_run_retry5_cache_manifest.sdn`
+- upstream_cache_manifest_artifact_status: `missing`
+- upstream_cache_manifest_sha256: `missing`
+- upstream_cache_manifest_size: `0`
+- attempt_record: `/home/ormastes/dev/pub/simple-llm-runtime-workspace-20260629/.spipe/llm-finetune-process/attempts/llm_backed_app_server_dry_run_retry7.sdn`
+- attempt_record_artifact_status: `ready`
+- attempt_record_sha256: `c3cc16e60bec5e2099b9e3a1924bcda319d7f3ee92f592a2af65298685038dee`
+- model_manifest: `/home/ormastes/dev/pub/simple-llm-runtime-workspace-20260629/.spipe/llm-finetune-process/artifacts/llm_backed_app_server_dry_run_retry6/model_manifest.json`
+- model_manifest_exists: `false`
+- model_manifest_artifact_status: `missing`
+- model_manifest_sha256: `missing`
+- model_manifest_schema_version: `missing`
+- model_manifest_attempt_id: `missing`
+- base_model: `missing`
+- base_model_revision: `missing`
+- model_artifact_path: `missing`
+- model_artifact_status: `missing`
+- model_artifact_sha256: `missing`
+- model_manifest_deployable: `missing`
+- eval_result: `/home/ormastes/dev/pub/simple-llm-runtime-workspace-20260629/.spipe/llm-finetune-process/artifacts/llm_backed_app_server_dry_run_retry6/eval_result.json`
+- eval_result_exists: `false`
+- eval_result_artifact_status: `missing`
+- eval_result_sha256: `missing`
+- eval_result_schema_version: `missing`
+- eval_result_status: `missing`
+- eval_metric_name: `missing`
+- eval_metric_value: `missing`
+- eval_metric_target: `90.0`
+- eval_dataset_id: `missing`
+- eval_dataset_split: `missing`
+- eval_dataset_checksum: `missing`
+- eval_samples: `missing`
+- target_eval_reached: `false`
+- target_accuracy: `missing`
+- required_accuracy: `90.0`
+- retry6_next_action: `complete retry5 licensed cache/checksum review before retry6 training`
+- attempt_record_status: `PASS llm-finetune-attempt-record`
+- decision_status: `retry-implementation`
+- license_constraints: `pending`
+- safety_eval: `not-run`
+- deployment_evidence: `not-deployable`
+- handoff_doc: `doc/04_architecture/app/spipe/spipe_llm_finetune_model_architecture.md`
+- handoff_doc_artifact_status: `ready`
+- handoff_doc_sha256: `baa73e9781adbd30c97de0082e7d6ca611ca11df616d89bb06c951bba739531e`
+- handoff_usage: `do not deploy; retry7 has no accepted retry6 model/eval/safety/deployment evidence`
+- app_handoff_doc_ready: `false`
+- pass_integrity_status: `not_applicable`
+- pass_integrity_reason: `not_applicable`
+- next_action: `complete retry6 training/eval gate before normal acceptance review`
+- env: `build/llm_finetune_acceptance/evidence.env`
+
+This evidence consumes the retry7 normal acceptance gate. It only passes when retry7 itself passes with `acceptance_allowed=true`, every normalized required gate is unblocked, and local non-empty attempt, model manifest, model artifact, eval result, and handoff artifacts can be hashed for pass integrity. PASS integrity also requires a deployable model manifest, passing eval result, metric target, dataset checksum, eval sample count, and deployable handoff usage. Otherwise it records the required gate list, compact blocked-gates list, gate-log and upstream retry5 artifact provenance hashes, model/eval/license/safety/deployment/app-handoff fields, and next action while keeping strict fine-tune readiness failed.

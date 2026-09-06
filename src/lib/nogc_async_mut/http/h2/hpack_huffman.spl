@@ -1,0 +1,139 @@
+# HPACK Huffman codec — RFC 7541 section 5.2 and Appendix B
+# Immutable tables live in dedicated sibling modules; this owner implements
+# encoded-length calculation and bounded encode/decode behavior only.
+
+use std.http.h2.hpack_huffman_code_table.{hpack_huffman_table_codes}
+use std.http.h2.hpack_huffman_length_table.{hpack_huffman_table_lengths}
+
+val HPACK_HUFFMAN_CODES = hpack_huffman_table_codes()
+val HPACK_HUFFMAN_LENGTHS = hpack_huffman_table_lengths()
+
+# ============================================================================
+# Encode
+# ============================================================================
+
+pub fn hpack_huffman_encoded_length(input: [u8]) -> i64:
+    """Calculate the byte length of Huffman-encoding `input` without encoding it.
+
+    Returns the ceiling of total bits divided by 8.
+    Useful for deciding whether Huffman encoding saves space.
+    """
+    var total_bits: i64 = 0
+    var i = 0
+    while i < input.len():
+        val sym = input[i] & 0xff
+        total_bits = total_bits + HPACK_HUFFMAN_LENGTHS[sym]
+        i = i + 1
+    # Ceiling division: round up to next byte
+    (total_bits + 7) / 8
+
+pub fn hpack_huffman_encode(input: [u8]) -> [u8]:
+    """Huffman-encode `input` bytes per RFC 7541 Appendix B.
+
+    Bits are packed left-to-right (MSB first). The output is padded to an
+    octet boundary using the most significant bits of the EOS code (all 1s).
+    Returns the encoded byte sequence.
+    """
+    # Bit accumulator: we accumulate up to 64 bits then flush bytes
+    var acc: i64 = 0      # current bit buffer (MSB = next bit to emit)
+    var acc_bits: i64 = 0 # how many valid bits are in acc (from the top)
+    var out: [u8] = []
+
+    var i = 0
+    while i < input.len():
+        val sym = input[i] & 0xff
+        val code = HPACK_HUFFMAN_CODES[sym]
+        val nbits = HPACK_HUFFMAN_LENGTHS[sym]
+
+        # Shift code left so its MSB aligns with the top of a 64-bit word,
+        # then OR into accumulator at position acc_bits from the top.
+        # We use 64-bit space; safe as long as acc_bits + nbits <= 64.
+        # Max code length is 30 bits; acc_bits is at most 7 before flush loop,
+        # so max sum is 37 bits — fits comfortably in 63 bits.
+        val shift = 64 - nbits - acc_bits
+        acc = acc | (code << shift)
+        acc_bits = acc_bits + nbits
+
+        # Flush complete bytes
+        while acc_bits >= 8:
+            val byte_val = (acc >> 56) & 0xff
+            out.push(byte_val)
+            acc = (acc << 8) & 0xffffffffffffffff
+            acc_bits = acc_bits - 8
+
+        i = i + 1
+
+    # Flush remaining partial byte, padded with high bits of EOS (all 1s)
+    if acc_bits > 0:
+        val pad_bits = 8 - acc_bits
+        # Fill low `pad_bits` with 1s (EOS prefix padding)
+        val pad_mask = (1 << pad_bits) - 1
+        val last_byte = ((acc >> 56) & 0xff) | pad_mask
+        out.push(last_byte)
+
+    out
+
+# ============================================================================
+# Decode
+# ============================================================================
+
+class HpackHuffmanTrie:
+    left: [i64]
+    right: [i64]
+    symbol: [i64]
+
+fn _hpack_huffman_build_trie() -> HpackHuffmanTrie:
+    var left: [i64] = [-1]
+    var right: [i64] = [-1]
+    var symbol: [i64] = [-1]
+    var sym = 0
+    while sym < 257:
+        var node = 0
+        var bit_index = HPACK_HUFFMAN_LENGTHS[sym] - 1
+        while bit_index >= 0:
+            val bit = (HPACK_HUFFMAN_CODES[sym] >> bit_index) & 1
+            var child = if bit == 0: left[node] else: right[node]
+            if child < 0:
+                child = left.len()
+                left.push(-1)
+                right.push(-1)
+                symbol.push(-1)
+                if bit == 0:
+                    left[node] = child
+                else:
+                    right[node] = child
+            node = child
+            bit_index = bit_index - 1
+        symbol[node] = sym
+        sym = sym + 1
+    HpackHuffmanTrie(left: left, right: right, symbol: symbol)
+
+val HPACK_HUFFMAN_TRIE = _hpack_huffman_build_trie()
+
+pub fn hpack_huffman_decode(input: [u8], bit_count: i64) -> [u8]:
+    """Decode Huffman-encoded `input` bytes, consuming exactly `bit_count` bits.
+
+    Uses one immutable prefix trie, making decode work linear in input bits.
+    The EOS padding bits at the end are consumed but produce no output.
+    Returns the decoded byte sequence.
+    """
+    var out: [u8] = []
+    if bit_count < 0 or bit_count > input.len() * 8:
+        return out
+    var bit_pos: i64 = 0
+    var node: i64 = 0
+    while bit_pos < bit_count:
+        val byte_idx = bit_pos / 8
+        val bit_in_byte = 7 - (bit_pos & 7)
+        val bit = (input[byte_idx] >> bit_in_byte) & 1
+        node = if bit == 0: HPACK_HUFFMAN_TRIE.left[node] else: HPACK_HUFFMAN_TRIE.right[node]
+        if node < 0:
+            break
+        val sym = HPACK_HUFFMAN_TRIE.symbol[node]
+        if sym >= 0:
+            if sym < 256:
+                out.push(sym & 0xff)
+            node = 0
+        bit_pos = bit_pos + 1
+
+    out

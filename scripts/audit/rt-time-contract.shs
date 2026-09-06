@@ -1,0 +1,73 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+binding="$root/src/lib/nogc_sync_mut/io/time_ops.spl"
+rust="$root/src/compiler_rust/runtime/src/value/sffi/time.rs"
+runtime_value_mod="$root/src/compiler_rust/runtime/src/value/mod.rs"
+interpreter="$root/src/compiler_rust/compiler/src/interpreter_extern/time.rs"
+interpreter_registry="$root/src/compiler_rust/compiler/src/interpreter_extern/mod.rs"
+runtime_c="$root/src/runtime/runtime.c"
+context_manager="$root/src/compiler_rust/lib/std/src/context_manager.spl"
+test_runner="$root/src/compiler_rust/lib/std/src/tooling/testing/runner.spl"
+bootstrap_time="$root/src/compiler_rust/lib/std/src/sys/sffi/time.spl"
+progress="$root/src/compiler_rust/lib/std/src/spec/progress.spl"
+timestamp_c="$root/src/runtime/runtime_timestamp.c"
+
+for symbol in rt_time_now_unix_micros rt_time_now_nanos rt_time_now_micros; do
+    grep -B1 -F "extern fn $symbol" "$binding" |
+        grep -q 'negative sentinel is failure'
+    test "$(grep -c "$symbol()" "$binding")" -eq 2
+done
+
+test "$(grep -c 'unsafe(capabilities: \[ffi\]):' "$binding")" -eq 3
+test "$(grep -c 'E-SFFI-TIME-00[123]' "$binding")" -eq 3
+for wrapper in try_rt_time_now_unix_micros try_rt_time_now_nanos try_rt_time_now_micros; do
+    grep -q "pub fn $wrapper() -> Option<i64>" "$rust"
+done
+# `rt_time_now_seconds` is the legacy C integer ABI.  The separately named
+# fractional clock prevents a native/interpreter return-representation split.
+grep -q 'int64_t rt_time_now_seconds(void)' "$runtime_c"
+grep -q 'pub(super) fn rt_time_now_seconds() -> i64;' "$rust"
+grep -q 'pub fn rt_time_now_seconds() -> i64' "$rust"
+grep -q 'pub fn rt_time_now_seconds_f64() -> f64' "$rust"
+grep -q 'pub fn try_rt_time_now_seconds_f64() -> Option<f64>' "$rust"
+grep -q 'pub use sffi::{fractional_seconds_to_millis, rt_time_now_seconds, rt_time_now_seconds_f64};' "$runtime_value_mod"
+grep -A1 'pub fn rt_time_now_seconds(_args: \&\[Value\])' "$interpreter" |
+    grep -q 'Value::Int'
+grep -A1 'pub fn rt_time_now_seconds_f64(_args: \&\[Value\])' "$interpreter" |
+    grep -q 'Value::Float'
+for clock in rt_current_time_ms rt_time_now_ms; do
+    grep -A2 "pub fn $clock(_args: \&\[Value\])" "$interpreter" |
+        grep -q 'rt_time_now_seconds_f64()'
+done
+grep -q 'fractional_seconds_to_millis_preserves_subsecond_precision' "$rust"
+grep -q 'insert_simple!("rt_time_now_seconds_f64", time::rt_time_now_seconds_f64);' "$interpreter_registry"
+for source in "$context_manager" "$test_runner"; do
+    grep -q '@unsafe(reason: "raw fractional wall-clock provider; negative f64 sentinel is failure", capabilities: \[ffi\])' "$source"
+    grep -q 'extern fn rt_time_now_seconds_f64() -> f64' "$source"
+    grep -q 'unsafe(capabilities: \[ffi\]):' "$source"
+    ! grep -q 'extern fn rt_time_now_seconds() -> f64' "$source"
+    ! grep -Eq 'rt_alloc|dlsym|CString|HashMap|mutex' "$source"
+done
+test "$(grep -c '^@unsafe(' "$bootstrap_time")" -eq 4
+grep -q 'legacy raw millisecond clock has no owned provider admission' "$bootstrap_time"
+grep -q 'legacy raw sleep provider has no owned provider admission' "$bootstrap_time"
+grep -q 'pub fn rt_progress_init() -> bool' "$rust"
+grep -q 'pub fn rt_progress_reset() -> bool' "$rust"
+test "$(grep -c 'unsafe(capabilities: \[ffi\]):' "$progress")" -eq 3
+test "$(grep -c 'E-SFFI-TIME-00[456]' "$progress")" -eq 3
+grep -q 'RT_TIME_THREAD_LOCAL bool g_progress_initialized' "$timestamp_c"
+
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT INT TERM
+${CC:-cc} -std=gnu11 -O2 -Wall -Wextra -Werror \
+    "$root/src/runtime/test/runtime_time_failure_selfcheck.c" \
+    -o "$tmp/runtime_time_failure_selfcheck"
+"$tmp/runtime_time_failure_selfcheck"
+${CC:-cc} -std=gnu11 -O2 -Wall -Wextra -Werror \
+    "$root/src/runtime/test/runtime_timestamp_failure_selfcheck.c" \
+    -o "$tmp/runtime_timestamp_failure_selfcheck"
+"$tmp/runtime_timestamp_failure_selfcheck"
+
+echo 'rt time contract: PASS'

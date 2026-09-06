@@ -1,0 +1,53 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+
+# Test: tree-sitter CLI tools
+# Feature: PARSER-TREESITTER-CLI - language detection and error-tolerant outline parsing
+# @cover compiler/10.frontend/treesitter/
+
+use std.spec.step
+
+use std.spec
+use compiler.frontend.treesitter.language_detect.{LanguageDetector}
+use compiler.frontend.treesitter.outline_lexer.{treesitter_new}
+use compiler.frontend.treesitter.heuristic.*
+use compiler.frontend.treesitter_types.{OutlineModule}
+
+describe "TreeSitter CLI":
+    # @manual scenario evidence
+    context "language detection":
+        it "detects simple, python, rust, and unknown sources":
+            # @req REQ-SSPEC-COMPILER
+            step("run LanguageDetector.detect over four source samples")
+            val det = LanguageDetector.new()
+            expect(det.detect("fn main():\n    0\n").language).to_equal("simple")
+            expect(det.detect("def f():\n    pass\n").language).to_equal("python")
+            expect(det.detect("let x = 1;\n").language).to_equal("rust")
+            expect(det.detect("+++???\n").language).to_equal("unknown")
+
+    context "grammar parsing":
+        it "parses a grammar-like source into an outline":
+            # @req REQ-SSPEC-COMPILER
+            step("run treesitter_new + parse_outline_heuristic on a fixture")
+            val src = "fn alpha(a: i64) -> i64:\n    a\n\nfn beta():\n    0\n"
+            val mod: OutlineModule = treesitter_new(src).parse_outline_heuristic()
+            expect(mod.functions.len()).to_equal(2)
+            expect(mod.functions[0].name).to_equal("alpha")
+            expect(mod.functions[1].name).to_equal("beta")
+
+        it "stays error-tolerant on malformed input":
+            # @req REQ-SSPEC-COMPILER
+            step("parse a syntactically broken fixture, assert no crash")
+            val broken = "fn broken( <<< !!\n"
+            val mod: OutlineModule = treesitter_new(broken).parse_outline_heuristic()
+            expect(mod.functions[0].name).to_equal("broken")
+
+    context "grammar validation":
+        it "distinguishes detected languages from unknown by confidence":
+            # @req REQ-SSPEC-COMPILER
+            step("check DetectionResult confidence for known vs unknown")
+            val det = LanguageDetector.new()
+            expect(det.detect("fn x():\n    0\n").confidence).to_be_greater_than(0.5)
+            expect(det.detect("+++").confidence).to_equal(0.0)

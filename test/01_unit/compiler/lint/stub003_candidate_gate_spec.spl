@@ -1,0 +1,111 @@
+"""
+## Purpose and audience
+Executable contract for the STUB003 virtual-whitespace lint check in
+src/compiler/90.tools/lint/_LintMain/lint_checks.spl: the allocation-free
+candidate gate that recognizes the legacy ASCII space/tab projection of
+`pass_todo`, the production versus test-path suppression split, the check's
+ordering before adjacent TODO diagnostics, and the gate-before-normalize
+sequence. Written for the compiler engineers who own the lint pipeline.
+## Operator workflow
+Run the file with the pure-Simple CLI:
+./src/compiler_rust/target/bootstrap/simple run test/01_unit/compiler/lint/stub003_candidate_gate_spec.spl
+## Compatibility and limitations
+The source-contract scenario reads the shipped lint_checks.spl from the
+repository checkout; the Linter scenarios run the real lint pipeline
+in-process and need no repository state beyond that file.
+## Verification guidance and troubleshooting
+A candidate-gate failure means the ASCII projection spelling drifted and
+virtual-whitespace pass_todo calls stop being detected; an ordering or
+suppression failure changes which diagnostics users see first. Rerun the
+single file above after any lint_checks.spl edit.
+"""
+# Lifecycle: doc/01_research/domain/field_wrapper_cache_and_lint.md ;
+# doc/03_plan/compiler/reliable_mode/reliable_mode_plan.md ;
+# doc/04_architecture/sspec_documentization_maintenance.md ;
+# doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+# @manual_section: stub003-candidate-gate
+
+use std.spec
+use std.io_runtime.{file_read}
+use compiler.tools.lint.main.{Linter}
+use compiler.tools.lint._LintMain.lint_checks.{
+    lint_line_may_contain_pass_todo}
+
+describe "STUB003 virtual-whitespace candidate gate":
+    it "recognizes the exact legacy ASCII space and tab projection":
+        # @req REQ-LINT-STUB003-001
+        # @capture(bit_table): accepted and rejected candidate spellings through the gate
+        step("Drive the candidate gate with projected and corrupted pass_todo spellings")
+        expect(lint_line_may_contain_pass_todo("pass_todo")).to_be(true)
+        expect(lint_line_may_contain_pass_todo(
+            "p a s s _ t o d o")).to_be(true)
+        expect(lint_line_may_contain_pass_todo(
+            "x:\tp a s s _ t o d o(value)")).to_be(true)
+        expect(lint_line_may_contain_pass_todo("pass_tod")).to_be(false)
+        expect(lint_line_may_contain_pass_todo("pass\u{00a0}_todo")).to_be(false)
+
+    it "preserves production detection and test-path suppression":
+        # @req REQ-LINT-STUB003-002
+        # @capture(statistics): STUB003 counts for production sources, shape variants, and a test path
+        step("Lint a production path, a shape battery, and a test path with the real Linter")
+        var production = Linter.new(false)
+        val production_results = production.lint_source(
+            "/tmp/stub_candidate.spl", "p a s s _ t o d o\n")
+        var production_count = 0
+        for result in production_results:
+            if result.lint.code == "STUB003":
+                production_count = production_count + 1
+        expect(production_count).to_equal(1)  # oracle: exactly one STUB003 finding for the single projected call
+
+        var shapes = Linter.new(false)
+        val shape_results = shapes.lint_source(
+            "/tmp/stub_shapes.spl",
+            "pass_todo(\"why\")\nlabel: pass_todo\nval x = pass_todo\n" +
+            "\u{e9}: pass_todo\nxpass_todo\nval text_value = \"xpass_todo\"\n")
+        var shape_count = 0
+        for result in shape_results:
+            if result.lint.code == "STUB003":
+                shape_count = shape_count + 1
+        expect(shape_count).to_equal(4)  # oracle: the battery holds four genuine stub shapes; the identifier lookalikes must not match
+
+        var test_linter = Linter.new(false)
+        val test_results = test_linter.lint_source(
+            "/tmp/stub_candidate_spec.spl", "p a s s _ t o d o\n")
+        var test_count = 0
+        for result in test_results:
+            if result.lint.code == "STUB003":
+                test_count = test_count + 1
+        expect(test_count).to_equal(0)  # oracle: test paths suppress STUB003 entirely
+
+    it "keeps STUB003 before adjacent TODO diagnostics":
+        # @req REQ-LINT-STUB003-003
+        # @capture(statistics): emission positions of STUB003 and T001 on one line
+        step("Lint a TODO line that also carries a projected stub and compare positions")
+        var linter = Linter.new(false)
+        val results = linter.lint_source(
+            "/tmp/stub_order.spl", "# TODO: pass_todo\n")
+        var stub_position = -1
+        var todo_position = -1
+        var position = 0
+        for result in results:
+            if result.lint.code == "STUB003": stub_position = position
+            if result.lint.code == "T001": todo_position = position
+            position = position + 1
+        expect(stub_position).to_be_greater_than(-1)
+        expect(todo_position).to_be_greater_than(stub_position)
+
+    it "normalizes only after the allocation-free candidate gate":
+        # @req REQ-LINT-STUB003-004
+        # @capture(protocol_json): the shipped gate-before-normalize ordering fragments
+        step("Read the shipped lint_checks.spl and verify gate precedes normalization")
+        val source = file_read(
+            "src/compiler/90.tools/lint/_LintMain/lint_checks.spl")
+        val gate = source.index_of(
+            "if lint_line_may_contain_pass_todo(trimmed):")
+        val normalization = source.index_of(
+            "var normalized = trimmed.replace(\" \", \"\")", gate)
+        expect(gate).to_be_greater_than(-1)
+        expect(normalization).to_be_greater_than(gate)
+        expect(source).to_contain("value.byte_at(source_at)")
+        expect(source).to_contain("val target_first = target.byte_at(0)")
+        expect(source).to_contain("value.byte_at(start) == target_first")

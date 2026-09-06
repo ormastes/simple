@@ -1,0 +1,147 @@
+# Focused correctness contract for approved MC/DC exclusions and exact gate.
+
+use compiler.common.assurance.policy_schema.{AssuranceStrictness}
+use compiler.common.mcdc_coverage_gate.{
+    McdcConditionResult, enforce_mcdc_exact_coverage
+}
+use compiler.driver.driver_mcdc_report_gate.{
+    McdcRuntimeCoverageEvidence, driver_complete_mcdc_report
+}
+use compiler.core.ast_coverage_inventory.{
+    compiler_coverage_inventory_reset, compiler_mcdc_obligation_manifest_sdn
+}
+use std.test_runner.test_runner_mcdc_report.{test_runner_finalize_mcdc_report}
+use std.common.mcdc.model.{McdcExclusion}
+use std.spec.{describe, it, expect}
+
+fn condition(id: text, version: text, ordinal: i64, covered: bool) -> McdcConditionResult:
+    McdcConditionResult(
+        semantic_id: id,
+        identity_version: version,
+        condition_ordinal: ordinal,
+        covered: covered
+    )
+
+fn exclusion(id: text, version: text, ordinal: i64, reason: text) -> McdcExclusion:
+    McdcExclusion(
+        semantic_id: id,
+        condition_ordinal: ordinal,
+        whole_decision: false,
+        reason: reason,
+        reviewer: "safety-reviewer",
+        review_id: "SR-42",
+        expires_or_version: version
+    )
+
+describe "MC/DC exact coverage gate":
+    it "accepts exact coverage after one narrow reviewed exclusion":
+        val report = enforce_mcdc_exact_coverage(
+            AssuranceStrictness.Moderate,
+            [condition("app.logic#decision-7", "sha256:abc", 0, true),
+             condition("app.logic#decision-7", "sha256:abc", 1, false)],
+            [exclusion("app.logic#decision-7", "sha256:abc", 1,
+                       "hardware fault input cannot be produced outside destructive qualification")],
+            false
+        )
+        expect(report.accepted).to_equal(true)
+        expect(report.required).to_equal(1)
+        expect(report.covered).to_equal(1)
+        expect(report.excluded).to_equal(1)
+        expect(report.diagnostics.len()).to_equal(0)
+
+    it "rejects reasonless broad and stale exclusions":
+        val current = [condition("app.logic#decision-7", "sha256:new", 0, false)]
+        val broad = McdcExclusion(
+            semantic_id: "app.logic#decision-7",
+            condition_ordinal: 0,
+            whole_decision: true,
+            reason: "not producible",
+            reviewer: "safety-reviewer",
+            review_id: "SR-43",
+            expires_or_version: "sha256:new"
+        )
+        val report = enforce_mcdc_exact_coverage(
+            AssuranceStrictness.Critical,
+            current,
+            [exclusion("app.logic#decision-7", "sha256:new", 0, ""),
+             broad,
+             exclusion("app.logic#decision-7", "sha256:old", 0, "fault injector is unavailable")],
+            false
+        )
+        expect(report.accepted).to_equal(false)
+        expect(report.machine_report().contains("MCDC-E-EXCLUSION-REASON")).to_equal(true)
+        expect(report.machine_report().contains("MCDC-E-EXCLUSION-SCOPE")).to_equal(true)
+        expect(report.machine_report().contains("MCDC-E-EXCLUSION-STALE")).to_equal(true)
+
+    it "rejects incomplete or saturated evidence with stable dual diagnostics":
+        val report = enforce_mcdc_exact_coverage(
+            AssuranceStrictness.Robust,
+            [condition("pkg.control#decision-2", "v3", 0, false)],
+            [],
+            true
+        )
+        expect(report.accepted).to_equal(false)
+        expect(report.covered).to_equal(0)
+        expect(report.required).to_equal(1)
+        expect(report.machine_report()).to_contain("MCDC-E-MISSING-PAIR|pkg.control#decision-2|0|")
+        expect(report.human_report()).to_contain("MCDC-E-BUFFER-SATURATED")
+
+    it "rejects duplicate decision identities and duplicate exclusions":
+        val row = condition("pkg.control#decision-3", "v1", 0, true)
+        val waiver = exclusion("pkg.control#decision-3", "v1", 0, "input is physically destructive")
+        val report = enforce_mcdc_exact_coverage(
+            AssuranceStrictness.Strict,
+            [row, row],
+            [waiver, waiver],
+            false
+        )
+        expect(report.accepted).to_equal(false)
+        expect(report.machine_report()).to_contain("MCDC-E-IDENTITY-DUPLICATE")
+        expect(report.machine_report()).to_contain("MCDC-E-EXCLUSION-DUPLICATE")
+
+    it "fails closed at the driver boundary when enabled evidence is absent":
+        val missing = driver_complete_mcdc_report(
+            "dynamic", AssuranceStrictness.Moderate, nil)
+        expect(missing.requested).to_equal(true)
+        expect(missing.accepted).to_equal(false)
+        expect(missing.machine_diagnostic).to_equal(
+            "MCDC-E-EVIDENCE-MISSING|mode=dynamic")
+
+    it "accepts typed exact runtime evidence at the driver boundary":
+        val evidence = McdcRuntimeCoverageEvidence(
+            conditions: [condition("pkg.safe#decision-1", "v1", 0, true)],
+            exclusions: [],
+            recorder_saturated: false
+        )
+        val complete = driver_complete_mcdc_report(
+            "on", AssuranceStrictness.Critical, Some(evidence))
+        expect(complete.requested).to_equal(true)
+        expect(complete.accepted).to_equal(true)
+        expect(complete.machine_diagnostic).to_contain(
+            "MCDC-GATE-v1|accepted=true|covered=1|required=1")
+
+    it "rejects oversized identity metadata before indexing it":
+        val oversized_id = "x" * 513
+        val report = enforce_mcdc_exact_coverage(
+            AssuranceStrictness.Moderate,
+            [condition(oversized_id, "v1", 0, true)],
+            [],
+            false
+        )
+        expect(report.accepted).to_equal(false)
+        expect(report.machine_report()).to_contain("MCDC-E-IDENTITY")
+
+    it "labels the compiler manifest as obligations rather than evidence":
+        compiler_coverage_inventory_reset(true)
+        val manifest = compiler_mcdc_obligation_manifest_sdn()
+        expect(manifest).to_contain("schema: simple-mcdc-obligations-v1")
+        expect(manifest).to_contain("evidence_state: obligations-only")
+        expect(manifest).to_contain(
+            "exclusion_identity_version: runtime-source-digest-required")
+
+    it "exposes the exact gate at the runner report boundary":
+        val completion = test_runner_finalize_mcdc_report(
+            "on", AssuranceStrictness.Moderate, nil)
+        expect(completion.accepted).to_equal(false)
+        expect(completion.machine_diagnostic).to_equal(
+            "MCDC-E-EVIDENCE-MISSING|mode=on")

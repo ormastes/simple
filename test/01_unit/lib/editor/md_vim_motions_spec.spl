@@ -1,0 +1,94 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-EDITOR-MD-009
+# plan: doc/03_plan/app/editor/editor_markdown_editing_subsystem.md
+
+# Vim word, line, paragraph and heading motions over markdown content.
+
+use std.spec
+use std.spec.step
+use std.editor.view.md_editing.{md_dispatch_motion}
+
+describe "markdown vim motions":
+
+    it "gg lands on the first line and G on the last":
+        # @req REQ-EDITOR-MD-009
+        step("Dispatch gg and G over a three-line document")
+        val content = "# heading\nsecond line\nthird line"
+        val gg = md_dispatch_motion("g", "g", content, 2, 4)
+        expect(gg.found).to_equal(true)
+        expect(gg.line).to_equal(0)
+        expect(gg.col).to_equal(0)
+        val cap_g = md_dispatch_motion("", "G", content, 0, 0)
+        expect(cap_g.found).to_equal(true)
+        expect(cap_g.line).to_equal(2)
+
+    it "0, ^ and $ move within the cursor line":
+        # @req REQ-EDITOR-MD-009
+        step("Hand-count the columns of the indented line `  hello`")
+        # "  hello" -- first non-blank at index 2, end-of-line at index 7.
+        val content = "  hello"
+        expect(md_dispatch_motion("", "0", content, 0, 5).col).to_equal(0)
+        expect(md_dispatch_motion("", "^", content, 0, 5).col).to_equal(2)
+        expect(md_dispatch_motion("", "$", content, 0, 0).col).to_equal(7)
+
+    it "w, b and e move by word inside a line":
+        # @req REQ-EDITOR-MD-009
+        step("Hand-count the word boundaries of `alpha beta gamma`")
+        # indices: alpha 0..4, beta 6..9, gamma 11..15
+        val content = "alpha beta gamma"
+        val w = md_dispatch_motion("", "w", content, 0, 0)
+        expect(w.found).to_equal(true)
+        expect(w.col).to_equal(6)
+        val e = md_dispatch_motion("", "e", content, 0, 0)
+        expect(e.found).to_equal(true)
+        expect(e.col).to_equal(4)
+        val b = md_dispatch_motion("", "b", content, 0, 11)
+        expect(b.found).to_equal(true)
+        expect(b.col).to_equal(6)
+
+    it "W treats punctuation as part of the WORD where w does not":
+        # @req REQ-EDITOR-MD-009
+        step("Hand-count `a.b c` -- w stops at the dot, W skips to the space")
+        # "a.b c" -- '.' at index 1, 'b' at 2, 'c' at 4.
+        val content = "a.b c"
+        expect(md_dispatch_motion("", "w", content, 0, 0).col).to_equal(2)
+        expect(md_dispatch_motion("", "W", content, 0, 0).col).to_equal(4)
+
+    it "w crosses to the next line at end of line":
+        # @req REQ-EDITOR-MD-009
+        step("From the last word of line 0, w must land on line 1")
+        val content = "alpha\nbeta"
+        val w = md_dispatch_motion("", "w", content, 0, 0)
+        expect(w.found).to_equal(true)
+        expect(w.line).to_equal(1)
+        expect(w.col).to_equal(0)
+
+    it "{ and } move to the surrounding blank lines":
+        # @req REQ-EDITOR-MD-009
+        step("Hand-count a 5-line document whose blank lines are 1 and 3")
+        val content = "one\n\ntwo\n\nthree"
+        val forward = md_dispatch_motion("", "}", content, 2, 0)
+        expect(forward.found).to_equal(true)
+        expect(forward.line).to_equal(3)
+        val backward = md_dispatch_motion("", "{", content, 2, 0)
+        expect(backward.found).to_equal(true)
+        expect(backward.line).to_equal(1)
+
+    it "[[ and ]] move between headings":
+        # @req REQ-EDITOR-MD-009
+        step("Hand-count a document whose headings are lines 0 and 3")
+        val content = "# One\nbody\n\n## Two\nmore"
+        val next = md_dispatch_motion("]", "]", content, 0, 0)
+        expect(next.found).to_equal(true)
+        expect(next.line).to_equal(3)
+        val prev = md_dispatch_motion("[", "[", content, 4, 0)
+        expect(prev.found).to_equal(true)
+        expect(prev.line).to_equal(3)
+
+    it "an unbound key reports no motion":
+        # @req REQ-EDITOR-MD-009
+        step("A key with no binding must leave the cursor where it was")
+        val motion = md_dispatch_motion("z", "z", "one\ntwo", 1, 2)
+        expect(motion.found).to_equal(false)
+        expect(motion.line).to_equal(1)
+        expect(motion.col).to_equal(2)

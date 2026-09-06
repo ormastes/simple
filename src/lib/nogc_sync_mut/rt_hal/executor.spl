@@ -1,0 +1,90 @@
+# codex-impl
+# Deterministic cooperative owner-result executor. Foreign adapters never
+# receive an effect-capable callback: effectful cases are replay-only.
+
+use std.common.rt_hal.model.*
+use std.nogc_sync_mut.rt_hal.coordinator.{RtHalCoordinator}
+
+pub struct RtHalPureAdapter:
+    provider_id: text
+    query_fn: fn(RtHalWorkItem) -> RtHalOutcome
+    effect_fn: fn(RtHalWorkItem) -> RtHalOutcome
+
+pub struct RtHalComparatorAdapter:
+    provider_id: text
+    query_fn: fn(RtHalWorkItem) -> RtHalOutcome
+    replay_fn: fn(RtHalWorkItem) -> RtHalOutcome
+
+fn rt_hal_unsupported_outcome(code: text) -> RtHalOutcome:
+    RtHalOutcome(
+        status: RtHalOutcomeStatus.Unsupported, code: code,
+        value_hash: "", effect_hash: ""
+    )
+
+fn rt_hal_timeout_outcome() -> RtHalOutcome:
+    RtHalOutcome(
+        status: RtHalOutcomeStatus.TimedOut, code: "RTHAL-E-TIMEOUT",
+        value_hash: "", effect_hash: ""
+    )
+
+fn rt_hal_find_comparator(adapters: [RtHalComparatorAdapter], provider_id: text) -> i64:
+    var index = 0
+    while index < adapters.len():
+        if adapters[index].provider_id == provider_id:
+            return index
+        index = index + 1
+    -1
+
+fn rt_hal_dispatch_one(item: RtHalWorkItem, pure: RtHalPureAdapter, comparators: [RtHalComparatorAdapter]) -> RtHalOutcome:
+    if not item.supported:
+        return rt_hal_unsupported_outcome(item.admission_code)
+    if item.provider_ordinal == 0:
+        if item.provider_id != pure.provider_id:
+            return rt_hal_unsupported_outcome("RTHAL-E-PROVIDER-ID")
+        if item.mode == RtHalWorkMode.ExecuteEffect:
+            return pure.effect_fn(item)
+        if item.mode == RtHalWorkMode.ExecuteQuery:
+            return pure.query_fn(item)
+        return rt_hal_unsupported_outcome("RTHAL-E-PURE-OWNER")
+    val adapter_index = rt_hal_find_comparator(comparators, item.provider_id)
+    if adapter_index < 0:
+        return rt_hal_unsupported_outcome("RTHAL-W-UNSUPPORTED")
+    val adapter = comparators[adapter_index]
+    if item.mode == RtHalWorkMode.ReplayTrace:
+        return adapter.replay_fn(item)
+    if item.mode == RtHalWorkMode.ExecuteQuery:
+        return adapter.query_fn(item)
+    rt_hal_unsupported_outcome("RTHAL-E-UNSAFE-REPLAY")
+
+# A round models at most worker_count isolated child jobs. Results may complete
+# concurrently in a future task adapter; parent commit order remains slot-based.
+pub fn rt_hal_execute_cooperative(comparison: RtHalComparison, requests: [RtHalRequest], pure: RtHalPureAdapter, comparators: [RtHalComparatorAdapter]) -> RtHalCoordinator:
+    var coordinator = RtHalCoordinator.create(comparison, requests)
+    if coordinator.configuration_error() != "":
+        return coordinator
+    val work = rt_hal_build_work_items(comparison, requests)
+    var next_index = 0
+    var round = 0
+    while next_index < work.len():
+        var round_width = 0
+        while round_width < comparison.worker_count and next_index < work.len():
+            val item = work[next_index]
+            val outcome = if round >= comparison.timeout_ticks:
+                rt_hal_timeout_outcome()
+            else:
+                rt_hal_dispatch_one(item, pure, comparators)
+            val submit_error = coordinator.submit(RtHalChildResult(
+                provider_ordinal: item.provider_ordinal,
+                case_index: item.case_index, case_id: item.case_id,
+                provider_id: item.provider_id, mode: item.mode,
+                outcome: outcome
+            ))
+            if submit_error != "" and coordinator.dispatch_error == "":
+                coordinator.dispatch_error = submit_error
+            next_index = next_index + 1
+            round_width = round_width + 1
+        if round_width > coordinator.max_parallel_width:
+            coordinator.max_parallel_width = round_width
+        round = round + 1
+    coordinator.dispatch_rounds = round
+    coordinator

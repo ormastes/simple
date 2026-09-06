@@ -1,0 +1,108 @@
+"""
+Negative-space checker (hardening plan section 11.4).
+
+    Missing = ProducerUniverse - Implemented - Normalized
+                               - Unsupported - NotApplicable
+
+Build invariant: `Missing = {}`.
+
+The validator returns the missing SET, never a bare bool: a checker that can
+only say "no" cannot name the variant that was forgotten, and naming it is the
+entire point of the negative-space proof.
+"""
+
+use compiler.common.transition.coverage_state.{CoverageState, coverage_state_is_handled}
+use compiler.common.transition.transition_table.{TransitionTable, variant_name_of}
+
+"""Result of validating one table against its declared producer universe."""
+struct CoverageReport:
+    table_name: text
+    universe_size: i64
+    declared: i64
+    # ProducerUniverse - declared. Non-empty => FAIL.
+    missing: [text]
+    # Declared rows naming a variant that is not in the universe. Non-empty
+    # => FAIL: either the universe is stale or the row is a typo, and both are
+    # silent-coverage bugs.
+    unknown: [text]
+    # A variant declared more than once: two states for one edge is ambiguous.
+    duplicated: [text]
+    # Parse/shape problems inherited from the loader.
+    errors: [text]
+
+"""True when this table proves total coverage of its boundary."""
+fn coverage_report_is_clean(report: CoverageReport) -> bool:
+    if report.missing.len() > 0:
+        return false
+    if report.unknown.len() > 0:
+        return false
+    if report.duplicated.len() > 0:
+        return false
+    if report.errors.len() > 0:
+        return false
+    return true
+
+"""Count of variants whose state means the consumer really handles them."""
+fn coverage_report_handled(table: TransitionTable) -> i64:
+    var n = 0
+    for row in table.rows:
+        if coverage_state_is_handled(row.state):
+            n = n + 1
+    return n
+
+"""
+Validate one table. `Missing` is computed here and nowhere else.
+
+An empty universe is reported as an error rather than a vacuous pass: a table
+that checks zero variants is exactly the shape a broken generator produces.
+"""
+fn validate_transition_table(table: TransitionTable) -> CoverageReport:
+    var report = CoverageReport(
+        table_name: table.name,
+        universe_size: 0,
+        declared: table.rows.len(),
+        missing: [],
+        unknown: [],
+        duplicated: [],
+        errors: []
+    )
+
+    for err in table.errors:
+        report.errors.push(err)
+
+    var seen: [text] = []
+    for row in table.rows:
+        val name = variant_name_of(row.from_id)
+        if seen.contains(name):
+            if not report.duplicated.contains(name):
+                report.duplicated.push(name)
+        else:
+            seen.push(name)
+
+    # A table with an explicit `universe:` is checked against it. A table
+    # WITHOUT one is its own universe, which makes Missing empty by
+    # construction — a green verdict that proves nothing. That is recorded as
+    # an error rather than tolerated: every checked-in table declares a
+    # universe today, and a boundary that cannot state its producer universe
+    # cannot state that it covers it.
+    var universe = table.universe
+    if not table.universe_declared:
+        universe = seen
+        report.errors.push(
+            "table '{table.name}' declares no 'universe:' block, so totality is unprovable (Missing would be empty by construction)")
+    report.universe_size = universe.len()
+
+    if universe.len() == 0:
+        report.errors.push("table '{table.name}' has an empty producer universe")
+
+    if table.universe_declared:
+        for name in seen:
+            if not universe.contains(name):
+                if not report.unknown.contains(name):
+                    report.unknown.push(name)
+
+    for variant in universe:
+        if not seen.contains(variant):
+            report.missing.push(variant)
+
+    return report

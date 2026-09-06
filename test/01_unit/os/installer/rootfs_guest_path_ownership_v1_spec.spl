@@ -1,0 +1,178 @@
+use std.spec
+use os.installer.rootfs_guest_path_ownership_v1.{
+    ROOTFS_GUEST_PATH_MAX_ROWS_V1, ROOTFS_PRIMARY_BUNDLE_OWNER_V1,
+    ROOTFS_PRIMARY_BUNDLE_PROVENANCE_V1, ROOTFS_ROLE_BYTE_OWNER_V1,
+    ROOTFS_ROLE_PACKAGE_PROVISION_V1, RootfsGuestPathClaimV1,
+    rootfs_guest_path_canonical_v1, rootfs_guest_path_preflight_v1,
+    rootfs_primary_signed_bundle_claims_v1,
+}
+
+fn _owner(path: text, owner: text, provenance: text) -> RootfsGuestPathClaimV1:
+    RootfsGuestPathClaimV1(
+        guest_path: path, source_owner: owner, provenance: provenance,
+        role: ROOTFS_ROLE_BYTE_OWNER_V1, package_name: "", provided_by: "",
+        provided_by_provenance: "", installs_bytes: true)
+
+fn _reference(path: text, owner: text, package_name: text,
+    provider: text, provider_provenance: text) -> RootfsGuestPathClaimV1:
+    RootfsGuestPathClaimV1(
+        guest_path: path, source_owner: owner, provenance: "package-manifest-v1",
+        role: ROOTFS_ROLE_PACKAGE_PROVISION_V1, package_name: package_name,
+        provided_by: provider, provided_by_provenance: provider_provenance,
+        installs_bytes: false)
+
+fn _legacy(path: text, package_name: text) -> RootfsGuestPathClaimV1:
+    RootfsGuestPathClaimV1(
+        guest_path: path, source_owner: "package:{package_name}",
+        provenance: "package-manifest-v1", role: ROOTFS_ROLE_BYTE_OWNER_V1,
+        package_name: package_name, provided_by: "",
+        provided_by_provenance: "", installs_bytes: true)
+
+fn _repeat(value: text, count: i64) -> text:
+    var out = ""
+    var index: i64 = 0
+    while index < count:
+        out = out + value
+        index = index + 1
+    out
+
+describe "rootfs guest-path ownership preflight v1":
+    it "accepts only already-absolute canonical bounded printable paths":
+        val max_path = "/" + _repeat("a", 254)
+        expect(rootfs_guest_path_canonical_v1("/usr/bin/grep").unwrap()).to_equal("/usr/bin/grep")
+        expect(rootfs_guest_path_canonical_v1(max_path).is_ok()).to_be(true)
+        expect(rootfs_guest_path_canonical_v1("usr/bin/grep").is_err()).to_be(true)
+        expect(rootfs_guest_path_canonical_v1("/usr//bin/grep").is_err()).to_be(true)
+        expect(rootfs_guest_path_canonical_v1("/usr/bin/../grep").is_err()).to_be(true)
+        expect(rootfs_guest_path_canonical_v1("/bad\npath").is_err()).to_be(true)
+        expect(rootfs_guest_path_canonical_v1(max_path + "a").is_err()).to_be(true)
+
+    it "requires the exact five primary signed bundle byte owners":
+        val exact = rootfs_guest_path_preflight_v1(rootfs_primary_signed_bundle_claims_v1(), true)
+        expect(exact.ok).to_be(true)
+        expect(exact.plan.len()).to_equal(5)
+        for row in exact.plan:
+            expect(row.source_owner).to_equal(ROOTFS_PRIMARY_BUNDLE_OWNER_V1)
+            expect(row.provenance).to_equal(ROOTFS_PRIMARY_BUNDLE_PROVENANCE_V1)
+            expect(row.role).to_equal(ROOTFS_ROLE_BYTE_OWNER_V1)
+            expect(row.installs_bytes).to_be(true)
+
+    it "rejects missing extra duplicate disabled and spoofed primary claims":
+        val primary = rootfs_primary_signed_bundle_claims_v1()
+        var missing: [RootfsGuestPathClaimV1] = []
+        var missing_index: i64 = 0
+        while missing_index < 4:
+            missing.push(primary[missing_index])
+            missing_index = missing_index + 1
+        expect(rootfs_guest_path_preflight_v1(missing, true).error_code).to_equal("primary-claim-set-incomplete")
+        var extra = rootfs_primary_signed_bundle_claims_v1()
+        extra.push(_owner("/usr/bin/extra", ROOTFS_PRIMARY_BUNDLE_OWNER_V1, ROOTFS_PRIMARY_BUNDLE_PROVENANCE_V1))
+        expect(rootfs_guest_path_preflight_v1(extra, true).error_code).to_equal("primary-claim-contract")
+        var duplicate = rootfs_primary_signed_bundle_claims_v1()
+        duplicate.push(primary[0])
+        expect(rootfs_guest_path_preflight_v1(duplicate, true).error_code).to_equal("primary-claim-duplicate")
+        expect(rootfs_guest_path_preflight_v1(primary, false).error_code).to_equal("primary-claim-disabled")
+        var spoofed = rootfs_primary_signed_bundle_claims_v1()
+        spoofed[2] = _owner("/usr/bin/md5sum", ROOTFS_PRIMARY_BUNDLE_OWNER_V1, "unsigned-spoof")
+        expect(rootfs_guest_path_preflight_v1(spoofed, true).error_code).to_equal("primary-claim-contract")
+
+    it "converts every exact legacy tool claim to non-byte provision metadata":
+        var claims = rootfs_primary_signed_bundle_claims_v1()
+        claims.push(_legacy("/bin/simplebox", "simplebox"))
+        claims.push(_legacy("/usr/bin/sha256sum", "simpleos-tools"))
+        claims.push(_legacy("/usr/bin/md5sum", "simpleos-tools"))
+        claims.push(_legacy("/usr/bin/grep", "simpleos-tools"))
+        claims.push(_legacy("/usr/bin/ps", "simpleos-tools"))
+        val result = rootfs_guest_path_preflight_v1(claims, true)
+        expect(result.ok).to_be(true)
+        var references: i64 = 0
+        for row in result.plan:
+            if row.role == ROOTFS_ROLE_PACKAGE_PROVISION_V1:
+                references = references + 1
+                expect(row.installs_bytes).to_be(false)
+                expect(row.provided_by).to_equal(ROOTFS_PRIMARY_BUNDLE_OWNER_V1)
+                expect(row.provided_by_provenance).to_equal(ROOTFS_PRIMARY_BUNDLE_PROVENANCE_V1)
+        expect(references).to_equal(5)
+
+    it "rejects malformed or already-converted legacy claims":
+        var malformed = rootfs_primary_signed_bundle_claims_v1()
+        malformed.push(_owner("/usr/bin/grep", "wrong-owner", "package-manifest-v1"))
+        malformed[5].package_name = "simpleos-tools"
+        expect(rootfs_guest_path_preflight_v1(malformed, true).error_code).to_equal("legacy-claim-malformed")
+        var already = rootfs_primary_signed_bundle_claims_v1()
+        already.push(_reference("/usr/bin/grep", "package:simpleos-tools", "simpleos-tools",
+            ROOTFS_PRIMARY_BUNDLE_OWNER_V1, ROOTFS_PRIMARY_BUNDLE_PROVENANCE_V1))
+        expect(rootfs_guest_path_preflight_v1(already, true).error_code).to_equal("legacy-claim-malformed")
+
+    it "requires exact different provider identity and provenance":
+        val accepted = rootfs_guest_path_preflight_v1([
+            _owner("/opt/tool", "bundle-a", "signed-a"),
+            _reference("/opt/tool", "package:a", "a", "bundle-a", "signed-a"),
+        ], false)
+        val wrong_provenance = rootfs_guest_path_preflight_v1([
+            _owner("/opt/tool", "bundle-a", "signed-a"),
+            _reference("/opt/tool", "package:a", "a", "bundle-a", "signed-b"),
+        ], false)
+        val self = rootfs_guest_path_preflight_v1([
+            _reference("/opt/tool", "package:a", "a", "package:a", "package-manifest-v1"),
+        ], false)
+        expect(accepted.ok).to_be(true)
+        expect(wrong_provenance.error_code).to_equal("provided-by-owner-mismatch")
+        expect(self.error_code).to_equal("provided-by-self")
+
+    it "rejects provider cycles duplicate references and conflicting package roles":
+        val cycle = rootfs_guest_path_preflight_v1([
+            _reference("/opt/tool", "package:a", "a", "package:b", "package-manifest-v1"),
+            _reference("/opt/tool", "package:b", "b", "package:a", "package-manifest-v1"),
+        ], false)
+        val duplicate = rootfs_guest_path_preflight_v1([
+            _owner("/opt/tool", "bundle", "signed"),
+            _reference("/opt/tool", "package:a", "a", "bundle", "signed"),
+            _reference("/opt/tool", "package:a-copy", "a", "bundle", "signed"),
+        ], false)
+        var conflict = _owner("/opt/tool", "package:a", "package-manifest-v1")
+        conflict.package_name = "a"
+        val conflicting = rootfs_guest_path_preflight_v1([
+            conflict, _reference("/opt/tool", "package:a-ref", "a", "package:a", "package-manifest-v1"),
+        ], false)
+        expect(cycle.error_code).to_equal("provided-by-cycle")
+        expect(duplicate.error_code).to_equal("duplicate-package-reference")
+        expect(conflicting.error_code).to_equal("conflicting-package-role")
+
+    it "enforces role and installs_bytes semantics":
+        var false_owner = _owner("/opt/tool", "bundle", "signed")
+        false_owner.installs_bytes = false
+        var byte_reference = _reference("/opt/tool", "package:a", "a", "bundle", "signed")
+        byte_reference.installs_bytes = true
+        expect(rootfs_guest_path_preflight_v1([false_owner], false).error_code).to_equal("role-semantics-invalid")
+        expect(rootfs_guest_path_preflight_v1([byte_reference], false).error_code).to_equal("role-semantics-invalid")
+
+    it "accepts 64 rows and rejects 65 rows":
+        var claims: [RootfsGuestPathClaimV1] = []
+        var index: i64 = 0
+        while index < ROOTFS_GUEST_PATH_MAX_ROWS_V1:
+            claims.push(_owner("/usr/share/item-{index}", "owner-{index}", "fixture"))
+            index = index + 1
+        expect(rootfs_guest_path_preflight_v1(claims, false).ok).to_be(true)
+        claims.push(_owner("/usr/share/item-64", "owner-64", "fixture"))
+        expect(rootfs_guest_path_preflight_v1(claims, false).error_code).to_equal("row-limit-exceeded")
+
+    it "bounds printable metadata at 128 bytes":
+        val accepted = _owner("/opt/a", _repeat("a", 128), "fixture")
+        val too_long = _owner("/opt/b", _repeat("a", 129), "fixture")
+        val control = _owner("/opt/c", "owner\tname", "fixture")
+        expect(rootfs_guest_path_preflight_v1([accepted], false).ok).to_be(true)
+        expect(rootfs_guest_path_preflight_v1([too_long], false).error_code).to_equal("invalid-claim-metadata")
+        expect(rootfs_guest_path_preflight_v1([control], false).error_code).to_equal("invalid-claim-metadata")
+
+    it "returns deterministic sorted plans for input permutations":
+        val a = _owner("/z/tool", "z-owner", "z-prov")
+        val b = _owner("/a/tool", "a-owner", "a-prov")
+        val first = rootfs_guest_path_preflight_v1([a, b], false)
+        val second = rootfs_guest_path_preflight_v1([b, a], false)
+        expect(first.ok).to_be(true)
+        expect(second.ok).to_be(true)
+        expect(first.plan[0].guest_path).to_equal(second.plan[0].guest_path)
+        expect(first.plan[0].source_owner).to_equal(second.plan[0].source_owner)
+        expect(first.plan[1].guest_path).to_equal(second.plan[1].guest_path)
+        expect(first.plan[1].source_owner).to_equal(second.plan[1].source_owner)

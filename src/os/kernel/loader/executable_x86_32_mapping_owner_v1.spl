@@ -1,0 +1,158 @@
+# Non-authorizing x86-32 process-image mapping readiness owner.
+# Re-hashes and re-parses bytes from an authenticated image handle before any
+# loader authority is reserved or consumed. It maps no pages and publishes no task.
+
+use std.common.contracts.execution.simpleos_executable_admission_v1.{
+    ExecutableImageHandleV1, ExecutableLoadRangeV1,
+    executable_image_handle_validate
+}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use os.kernel.arch.arch_context.{Architecture}
+use os.kernel.loader.elf_loader.{elf_authenticated_layout_v1}
+use os.kernel.loader.executable_target_dispatch_v1.{
+    executable_target_dispatch_policy_v1,
+    executable_target_dispatch_matches_architecture_v1
+}
+
+pub enum ExecutableX8632MappingReadinessErrorV1:
+    None
+    InvalidAuthenticatedHandle
+    TargetMismatch
+    SourceSizeInvalid
+    DigestMismatch
+    ElfRejected
+    LayoutMismatch
+    EntryPointInvalid
+    AddressOutOfRange
+    PageAlignmentInvalid
+    PageOverlap
+    PageLimitExceeded
+    StackCollision
+
+pub struct ExecutableX8632MappingReadinessV1:
+    ready: bool
+    error: ExecutableX8632MappingReadinessErrorV1
+    entry_point: u64
+    segment_count: i64
+    planned_pages: u64
+    admission_id: text
+    image_hash: text
+    authority_consumed: bool
+
+pub fn executable_x86_32_mapping_max_source_bytes_v1() -> u64: 67108864u64
+pub fn executable_x86_32_mapping_page_size_v1() -> u64: 4096u64
+pub fn executable_x86_32_mapping_max_pages_v1() -> u64: 65536u64
+
+fn _x86_32_reject(error: ExecutableX8632MappingReadinessErrorV1
+) -> ExecutableX8632MappingReadinessV1:
+    ExecutableX8632MappingReadinessV1(
+        ready: false, error: error, entry_point: 0u64,
+        segment_count: 0, planned_pages: 0u64, admission_id: "",
+        image_hash: "", authority_consumed: false)
+
+fn _x86_32_range_equal(a: ExecutableLoadRangeV1, b: ExecutableLoadRangeV1) -> bool:
+    a.file_offset == b.file_offset and a.file_size == b.file_size and
+        a.virtual_address == b.virtual_address and a.memory_size == b.memory_size and
+        a.writable == b.writable and a.executable == b.executable
+
+fn _x86_32_page_start(value: u64) -> u64:
+    value & 0xFFFFFFFFFFFFF000u64
+
+fn _x86_32_page_end(value: u64) -> u64:
+    val size = executable_x86_32_mapping_page_size_v1()
+    if value % size == 0u64: return value
+    value + (size - value % size)
+
+fn _x86_32_ranges_share_page(a: ExecutableLoadRangeV1, b: ExecutableLoadRangeV1) -> bool:
+    val a_start = _x86_32_page_start(a.virtual_address)
+    val b_start = _x86_32_page_start(b.virtual_address)
+    val a_end = _x86_32_page_end(a.virtual_address + a.memory_size)
+    val b_end = _x86_32_page_end(b.virtual_address + b.memory_size)
+    a_start < b_end and b_start < a_end
+
+pub fn executable_x86_32_mapping_readiness_v1(
+    handle: ExecutableImageHandleV1,
+    authenticated_source: [u8]
+) -> ExecutableX8632MappingReadinessV1:
+    """Validate copy-only i386 mapping evidence without touching authority."""
+    if not executable_image_handle_validate(handle).ok:
+        return _x86_32_reject(ExecutableX8632MappingReadinessErrorV1.InvalidAuthenticatedHandle)
+    val policy = executable_target_dispatch_policy_v1(handle.target)
+    if (not policy.? or not executable_target_dispatch_matches_architecture_v1(
+        handle.target, Architecture.X86)):
+        return _x86_32_reject(ExecutableX8632MappingReadinessErrorV1.TargetMismatch)
+    val selected = policy.unwrap()
+    if selected.pointer_bits != 32 or selected.stack_alignment != 16u64:
+        return _x86_32_reject(ExecutableX8632MappingReadinessErrorV1.TargetMismatch)
+    val source_size = authenticated_source.len() as u64
+    if source_size == 0u64 or source_size > executable_x86_32_mapping_max_source_bytes_v1() or
+        source_size != handle.size_bytes:
+        return _x86_32_reject(ExecutableX8632MappingReadinessErrorV1.SourceSizeInvalid)
+    if sha256_u8_hex(authenticated_source) != handle.image_hash:
+        return _x86_32_reject(ExecutableX8632MappingReadinessErrorV1.DigestMismatch)
+    val parsed = elf_authenticated_layout_v1(authenticated_source, Architecture.X86)
+    if parsed.is_err():
+        return _x86_32_reject(ExecutableX8632MappingReadinessErrorV1.ElfRejected)
+    val layout = parsed.unwrap()
+    if layout.load_ranges.len() != handle.verified_load_ranges.len():
+        return _x86_32_reject(ExecutableX8632MappingReadinessErrorV1.LayoutMismatch)
+
+    val page_size = executable_x86_32_mapping_page_size_v1()
+    val stack_top = 0x00000000BFFFF000u64
+    val stack_start = stack_top - 134217728u64
+    var planned_pages = 0u64
+    var entry_covered = false
+    var i = 0
+    while i < layout.load_ranges.len():
+        val actual = layout.load_ranges[i]
+        if not _x86_32_range_equal(actual, handle.verified_load_ranges[i]):
+            return _x86_32_reject(ExecutableX8632MappingReadinessErrorV1.LayoutMismatch)
+        # Keep all range arithmetic bounded before forming an end address.  An
+        # authenticated layout is still untrusted at this mapping boundary.
+        if (actual.memory_size == 0u64 or
+            actual.file_size > actual.memory_size or
+            actual.virtual_address > selected.user_address_max or
+            actual.memory_size > selected.user_address_max - actual.virtual_address):
+            return _x86_32_reject(ExecutableX8632MappingReadinessErrorV1.AddressOutOfRange)
+        if actual.file_offset % page_size != actual.virtual_address % page_size:
+            return _x86_32_reject(ExecutableX8632MappingReadinessErrorV1.PageAlignmentInvalid)
+        val raw_end = actual.virtual_address + actual.memory_size
+        val page_start = _x86_32_page_start(actual.virtual_address)
+        val page_end = _x86_32_page_end(raw_end)
+        if page_start < page_size or page_end == 0u64 or
+            page_end - 1u64 > selected.user_address_max:
+            return _x86_32_reject(ExecutableX8632MappingReadinessErrorV1.AddressOutOfRange)
+        if page_start < stack_top and stack_start < page_end:
+            return _x86_32_reject(ExecutableX8632MappingReadinessErrorV1.StackCollision)
+        var earlier = 0
+        while earlier < i:
+            if _x86_32_ranges_share_page(actual, layout.load_ranges[earlier]):
+                return _x86_32_reject(ExecutableX8632MappingReadinessErrorV1.PageOverlap)
+            earlier = earlier + 1
+        val pages = (page_end - page_start) / page_size
+        if pages == 0u64 or pages > 32768u64 or
+            planned_pages > executable_x86_32_mapping_max_pages_v1() - pages:
+            return _x86_32_reject(ExecutableX8632MappingReadinessErrorV1.PageLimitExceeded)
+        planned_pages = planned_pages + pages
+        # CPL3 must never start in a non-executable mapping (or in an
+        # unmapped hole), even when the ELF header and digest are authentic.
+        if (actual.executable and layout.entry_point >= actual.virtual_address and
+            layout.entry_point < raw_end):
+            entry_covered = true
+        i = i + 1
+    if layout.entry_point == 0u64 or not entry_covered:
+        return _x86_32_reject(ExecutableX8632MappingReadinessErrorV1.EntryPointInvalid)
+    ExecutableX8632MappingReadinessV1(
+        ready: true, error: ExecutableX8632MappingReadinessErrorV1.None,
+        entry_point: layout.entry_point, segment_count: layout.load_ranges.len(),
+        planned_pages: planned_pages, admission_id: handle.admission_id,
+        image_hash: handle.image_hash, authority_consumed: false)
+
+pub(package) fn executable_x86_32_process_image_ready_v1() -> bool:
+    """Global readiness stays false until stack, mapper, and rollback owners join."""
+    false
+
+export ExecutableX8632MappingReadinessErrorV1, ExecutableX8632MappingReadinessV1
+export executable_x86_32_mapping_max_source_bytes_v1
+export executable_x86_32_mapping_page_size_v1, executable_x86_32_mapping_max_pages_v1
+export executable_x86_32_mapping_readiness_v1

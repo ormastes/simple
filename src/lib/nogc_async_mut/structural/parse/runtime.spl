@@ -1,0 +1,85 @@
+# parser runtime facade in the default-tier lane.
+#
+# Wave-1: CPU reference execution only. This module exposes the frozen public
+# runtime seams now, with explicit fail-closed handling for runtime-level
+# contract violations and future-mode scaffolding.
+
+use std.common.structural.parse.parse_types.{
+    PARSE_MODE_CPU_REFERENCE,
+    PARSE_MODE_HYBRID_VECTOR_GPU,
+    PARSE_MODE_RESIDENT_GPU,
+    PARSE_REJECT_UNKNOWN_MODE,
+    ParseDialect,
+    ParseRequest,
+    ParseResult
+}
+use std.common.structural.parse.parse_cpu_reference.{
+    parse_run,
+    parse_run_cpu_reference
+}
+use std.common.structural.parse.dialect.{validate_parse_dialect}
+
+struct ParseRuntime:
+    dialect: ParseDialect
+    runtime_version: i64
+
+val PARSE_RUNTIME_VERSION: i64 = 1
+
+fn parse_runtime(dialect: ParseDialect) -> Result<ParseRuntime, text>:
+    match validate_parse_dialect(dialect):
+        Ok(()) -> Ok(ParseRuntime(dialect: dialect, runtime_version: PARSE_RUNTIME_VERSION))
+        Err(error) -> Err("parse_runtime_invalid_dialect: " + error.message)
+
+fn parse_request(runtime: ParseRuntime, request: ParseRequest) -> Result<ParseResult, text>:
+    # Existing wave-1 behavior: the request executes through the existing
+    # compatibility dispatcher, including fallback-reason captures for unimplemented
+    # accelerated modes.
+    if request.mode == PARSE_MODE_CPU_REFERENCE:
+        return Ok(parse_run_cpu_reference(runtime.dialect, request))
+    if request.mode == PARSE_MODE_HYBRID_VECTOR_GPU:
+        return Ok(parse_run(runtime.dialect, request))
+    if request.mode == PARSE_MODE_RESIDENT_GPU:
+        return Ok(parse_run(runtime.dialect, request))
+    if request.mode == "":
+        return Err("parse_request_missing_mode")
+    Err("parse_request_unknown_mode: " + request.mode + ":" + PARSE_REJECT_UNKNOWN_MODE)
+
+fn parse_request_cpu_reference(runtime: ParseRuntime, request: ParseRequest) -> ParseResult:
+    parse_run_cpu_reference(runtime.dialect, request)
+
+fn parse_runtime_with_mode(dialect: ParseDialect, _mode: text) -> ParseRuntime:
+    # Back-compat helper: stores requested mode on the request, not in the runtime.
+    # Returns a no-op runtime to avoid breaking existing call sites.
+    match parse_runtime(dialect):
+        Ok(runtime) -> runtime
+        Err(_) -> ParseRuntime(dialect: dialect, runtime_version: PARSE_RUNTIME_VERSION)
+
+fn parse_result_fingerprint(result: ParseResult) -> text:
+    val tags = result.tags_emitted
+    val input_hash = result.receipt.input_hash
+    val output_hash = result.receipt.output_hash
+    val deterministic = result.receipt.deterministic_hash
+    val count_in = result.receipt.item_count_in
+    val count_out = result.receipt.item_count_out
+    val bytes_read = result.receipt.bytes_read
+    val malformed = result.receipt.malformed_count
+    val overflow = result.receipt.overflow_flags
+    val ok = if result.ok: "1" else "0"
+    "p2f|"
+        + input_hash + "|" + output_hash + "|" + deterministic + "|"
+        + count_in.to_text() + "|" + count_out.to_text() + "|" + bytes_read.to_text() + "|"
+        + malformed.to_text() + "|" + overflow.to_text() + "|" + tags.to_text() + "|" + ok
+
+fn parse_results_equal(left: ParseResult, right: ParseResult) -> bool:
+    if left.schema_id != right.schema_id:
+        return false
+    if left.ok != right.ok:
+        return false
+    if left.tags_emitted != right.tags_emitted:
+        return false
+    return parse_result_fingerprint(left) == parse_result_fingerprint(right)
+
+export PARSE_RUNTIME_VERSION
+export ParseRuntime
+export parse_runtime, parse_request, parse_request_cpu_reference, parse_runtime_with_mode
+export parse_result_fingerprint, parse_results_equal

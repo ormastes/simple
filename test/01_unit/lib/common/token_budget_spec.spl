@@ -1,0 +1,49 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-LIB
+
+"""
+## Purpose and audience
+Purpose: prove the token-budget elision keeps output under a byte cap while
+preserving both the head and the tail on line boundaries, and names what it
+dropped.
+Audience: engineers capping tool output before it reaches a model's context
+window (spipe, ponytail, codebase-search surfaces).
+"""
+
+use std.spec.step
+use std.spec
+
+use lib.common.token_budget.{smart_truncate_bytes}
+
+fn _numbered(count: i64) -> text:
+    var parts: [text] = []
+    var i: i64 = 0
+    while i < count:
+        parts.push("line-" + str(i))
+        i = i + 1
+    parts.join("\n")
+
+describe "token budget: smart_truncate_bytes":
+    it "returns short input unchanged":
+        step("elide a source already inside the budget")
+        expect(smart_truncate_bytes("abc\ndef", 1000)).to_equal("abc\ndef")
+        return ()
+
+    it "keeps both the first and the last lines when it elides":
+        step("elide 500 numbered lines into a 200-byte budget")
+        val out = smart_truncate_bytes(_numbered(500), 200)
+        expect(out.contains("line-0")).to_equal(true)
+        expect(out.contains("line-499")).to_equal(true)
+        expect(out.contains("truncated")).to_equal(true)
+        return ()
+
+    it "drops the middle rather than the tail":
+        step("the interior of the range must be gone")
+        val out = smart_truncate_bytes(_numbered(500), 200)
+        expect(out.contains("line-250")).to_equal(false)
+        return ()
+
+    it "leaves input untouched when the budget is non-positive":
+        step("a zero budget is a disabled budget, not an empty result")
+        expect(smart_truncate_bytes("abc\ndef", 0)).to_equal("abc\ndef")
+        return ()

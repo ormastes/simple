@@ -1,0 +1,364 @@
+# fe_p256 — Constant-time field arithmetic modulo the NIST P-256 prime.
+#
+#   p = 2^256 - 2^224 + 2^192 + 2^96 - 1
+#     = ffffffff00000001000000000000000000000000ffffffffffffffffffffffff
+#
+# This module is the field layer under `os.crypto.ecdh_p256` and
+# `os.crypto.p256`. Both imported `std.common.math.field.fe_p256` while the
+# module did not exist anywhere in the tree, so the whole P-256 / ECDH stack
+# was unloadable behind a public API that advertised it
+# (`doc/08_tracking/bug/`, P1). This is a real implementation, deliberately
+# NOT a placeholder: the consumers' contract is *constant-time* field
+# arithmetic (their spec is `p256_ct_property_spec`), and a stub that merely
+# made the module load would convert an honest RED into a GREEN that leaks
+# private keys by timing.
+#
+# Representation: 4 x u64 little-endian limbs, always fully reduced into
+# [0, p). Byte conversions are big-endian (SEC1 / RFC 5903 wire order).
+#
+# Constant-time discipline:
+#   * No branch anywhere depends on a field element's value. Every
+#     conditional subtract/add is a mask-select over `0 - bit`.
+#   * `fe_eq` folds all limbs with OR and reduces to a single bit, so it
+#     does not short-circuit on the first differing limb.
+#   * `fe_inv` exponentiates by the fixed, PUBLIC constant p-2. Its branch
+#     structure depends only on that constant, never on the base.
+#
+# References:
+#   * FIPS 186-4 Appendix D.2.3 (fast reduction modulo the P-256 prime)
+#   * SEC 2 v2.0 section 2.4.2 (curve parameters)
+
+val _FE_MASK32: u64 = 0xFFFFFFFFu64
+
+struct FeP256:
+    l0: u64
+    l1: u64
+    l2: u64
+    l3: u64
+
+# --- p and p-2 as limbs -----------------------------------------------------
+
+fn _fe_p_l0() -> u64:
+    0xFFFFFFFFFFFFFFFFu64
+
+fn _fe_p_l1() -> u64:
+    0x00000000FFFFFFFFu64
+
+fn _fe_p_l2() -> u64:
+    0u64
+
+fn _fe_p_l3() -> u64:
+    0xFFFFFFFF00000001u64
+
+fn fe_zero() -> FeP256:
+    FeP256(l0: 0u64, l1: 0u64, l2: 0u64, l3: 0u64)
+
+fn fe_one() -> FeP256:
+    FeP256(l0: 1u64, l1: 0u64, l2: 0u64, l3: 0u64)
+
+# --- Primitive add/sub with carry -------------------------------------------
+
+fn _fe_addc(a: u64, b: u64, carry_in: u64) -> (u64, u64):
+    """Return (sum, carry_out) for a + b + carry_in over u64, wrapping."""
+    val s1 = a + b
+    val c1 = if s1 < a: 1u64 else: 0u64
+    val s2 = s1 + carry_in
+    val c2 = if s2 < s1: 1u64 else: 0u64
+    (s2, c1 + c2)
+
+fn _fe_subb(a: u64, b: u64, borrow_in: u64) -> (u64, u64):
+    """Return (diff, borrow_out) for a - b - borrow_in over u64, wrapping."""
+    val d1 = a - b
+    val b1 = if a < b: 1u64 else: 0u64
+    val d2 = d1 - borrow_in
+    val b2 = if d1 < borrow_in: 1u64 else: 0u64
+    (d2, b1 + b2)
+
+fn fe_cond_select(a: FeP256, b: FeP256, choose_b: u64) -> FeP256:
+    """Constant-time select: b when choose_b == 1, else a.
+
+    XOR-mask form (`out = a ^ (mask & (a ^ b))`) with `mask = 0 - choose_b`.
+    Arithmetic only, so there is nothing for a compiler to branch-fold.
+    """
+    val mask: u64 = 0u64 - choose_b
+    FeP256(
+        l0: a.l0 ^ (mask & (a.l0 ^ b.l0)),
+        l1: a.l1 ^ (mask & (a.l1 ^ b.l1)),
+        l2: a.l2 ^ (mask & (a.l2 ^ b.l2)),
+        l3: a.l3 ^ (mask & (a.l3 ^ b.l3))
+    )
+
+fn fe_eq(a: FeP256, b: FeP256) -> bool:
+    """Constant-time equality: folds every limb, never short-circuits."""
+    var acc: u64 = a.l0 ^ b.l0
+    acc = acc | (a.l1 ^ b.l1)
+    acc = acc | (a.l2 ^ b.l2)
+    acc = acc | (a.l3 ^ b.l3)
+    val is_zero = ((acc | (0u64 - acc)) >> 63) ^ 1u64
+    is_zero == 1u64
+
+fn fe_is_zero(a: FeP256) -> bool:
+    fe_eq(a, fe_zero())
+
+# --- Reduction helpers ------------------------------------------------------
+
+fn _fe_sub_p_once(a: FeP256) -> FeP256:
+    """Subtract p when a >= p, otherwise return a. Constant time."""
+    val (d0, b0) = _fe_subb(a.l0, _fe_p_l0(), 0u64)
+    val (d1, b1) = _fe_subb(a.l1, _fe_p_l1(), b0)
+    val (d2, b2) = _fe_subb(a.l2, _fe_p_l2(), b1)
+    val (d3, b3) = _fe_subb(a.l3, _fe_p_l3(), b2)
+    # b3 == 1 means a < p, so keep a; b3 == 0 means the difference is valid.
+    val took = b3 ^ 1u64
+    fe_cond_select(a, FeP256(l0: d0, l1: d1, l2: d2, l3: d3), took)
+
+fn fe_add(a: FeP256, b: FeP256) -> FeP256:
+    """(a + b) mod p, for a, b already in [0, p)."""
+    val (s0, c0) = _fe_addc(a.l0, b.l0, 0u64)
+    val (s1, c1) = _fe_addc(a.l1, b.l1, c0)
+    val (s2, c2) = _fe_addc(a.l2, b.l2, c1)
+    val (s3, c3) = _fe_addc(a.l3, b.l3, c2)
+    # The sum is < 2p < 2^257, so at most one subtraction is needed, but an
+    # out-of-word carry forces it unconditionally.
+    val (d0, e0) = _fe_subb(s0, _fe_p_l0(), 0u64)
+    val (d1, e1) = _fe_subb(s1, _fe_p_l1(), e0)
+    val (d2, e2) = _fe_subb(s2, _fe_p_l2(), e1)
+    val (d3, e3) = _fe_subb(s3, _fe_p_l3(), e2)
+    # Take the reduced value when there was a carry out (c3 == 1) or the
+    # subtraction did not borrow (e3 == 0).
+    val take = c3 | (e3 ^ 1u64)
+    fe_cond_select(
+        FeP256(l0: s0, l1: s1, l2: s2, l3: s3),
+        FeP256(l0: d0, l1: d1, l2: d2, l3: d3),
+        take & 1u64
+    )
+
+fn fe_sub(a: FeP256, b: FeP256) -> FeP256:
+    """(a - b) mod p, for a, b already in [0, p)."""
+    val (d0, b0) = _fe_subb(a.l0, b.l0, 0u64)
+    val (d1, b1) = _fe_subb(a.l1, b.l1, b0)
+    val (d2, b2) = _fe_subb(a.l2, b.l2, b1)
+    val (d3, b3) = _fe_subb(a.l3, b.l3, b2)
+    # On borrow the wrapped result is short by 2^256; adding p back corrects
+    # it modulo p (2^256 - p is folded away by the same wraparound).
+    val (r0, c0) = _fe_addc(d0, _fe_p_l0(), 0u64)
+    val (r1, c1) = _fe_addc(d1, _fe_p_l1(), c0)
+    val (r2, c2) = _fe_addc(d2, _fe_p_l2(), c1)
+    val (r3, c3) = _fe_addc(d3, _fe_p_l3(), c2)
+    fe_cond_select(
+        FeP256(l0: d0, l1: d1, l2: d2, l3: d3),
+        FeP256(l0: r0, l1: r1, l2: r2, l3: r3),
+        b3 & 1u64
+    )
+
+fn fe_neg(a: FeP256) -> FeP256:
+    fe_sub(fe_zero(), a)
+
+# --- 32-bit word views ------------------------------------------------------
+
+fn _fe_to_words(a: FeP256) -> [u64]:
+    """Split into 8 little-endian 32-bit words, each held in a u64."""
+    [
+        a.l0 & _FE_MASK32, (a.l0 >> 32) & _FE_MASK32,
+        a.l1 & _FE_MASK32, (a.l1 >> 32) & _FE_MASK32,
+        a.l2 & _FE_MASK32, (a.l2 >> 32) & _FE_MASK32,
+        a.l3 & _FE_MASK32, (a.l3 >> 32) & _FE_MASK32
+    ]
+
+fn _fe_from_words(w: [u64]) -> FeP256:
+    FeP256(
+        l0: (w[0] & _FE_MASK32) | ((w[1] & _FE_MASK32) << 32),
+        l1: (w[2] & _FE_MASK32) | ((w[3] & _FE_MASK32) << 32),
+        l2: (w[4] & _FE_MASK32) | ((w[5] & _FE_MASK32) << 32),
+        l3: (w[6] & _FE_MASK32) | ((w[7] & _FE_MASK32) << 32)
+    )
+
+fn _fe_p_words() -> [u64]:
+    """p as 9 little-endian 32-bit words (top word 0)."""
+    [
+        0xFFFFFFFFu64, 0xFFFFFFFFu64, 0xFFFFFFFFu64, 0u64,
+        0u64, 0u64, 1u64, 0xFFFFFFFFu64, 0u64
+    ]
+
+fn _fe_acc_add(acc: [u64], term: [u64], times: u64) -> [u64]:
+    """acc += times * term, over 9 little-endian 32-bit words. No wraparound."""
+    var out: [u64] = []
+    var carry: u64 = 0u64
+    var i: u64 = 0
+    while i < 9:
+        val t = if i < term.len(): term[i] else: 0u64
+        val cur = acc[i] + t * times + carry
+        out.push(cur & _FE_MASK32)
+        carry = cur >> 32
+        i = i + 1
+    out
+
+fn _fe_acc_sub(acc: [u64], term: [u64]) -> [u64]:
+    """acc -= term, over 9 little-endian 32-bit words. Caller keeps acc >= term."""
+    var out: [u64] = []
+    var borrow: u64 = 0u64
+    var i: u64 = 0
+    while i < 9:
+        val t = if i < term.len(): term[i] else: 0u64
+        val cur = acc[i] - t - borrow
+        out.push(cur & _FE_MASK32)
+        borrow = (cur >> 32) & 1u64
+        i = i + 1
+    out
+
+fn _fe_reduce_words(acc_in: [u64]) -> FeP256:
+    """Reduce a 9-word value known to be < 16*p down into [0, p).
+
+    Performs a FIXED 16 conditional subtractions of p, each one mask-selected
+    on the final borrow, so the work done is identical for every input.
+    """
+    var acc = acc_in
+    val pw = _fe_p_words()
+    var round: u64 = 0
+    while round < 16:
+        # Trial subtraction acc - p.
+        var trial: [u64] = []
+        var borrow: u64 = 0u64
+        var i: u64 = 0
+        while i < 9:
+            val cur = acc[i] - pw[i] - borrow
+            trial.push(cur & _FE_MASK32)
+            borrow = (cur >> 32) & 1u64
+            i = i + 1
+        # borrow == 1 means acc < p: keep acc. Otherwise take the difference.
+        val mask: u64 = 0u64 - (borrow ^ 1u64)
+        var next: [u64] = []
+        var j: u64 = 0
+        while j < 9:
+            next.push(acc[j] ^ (mask & (acc[j] ^ trial[j])))
+            j = j + 1
+        acc = next
+        round = round + 1
+    _fe_from_words(acc)
+
+fn fe_mul(a: FeP256, b: FeP256) -> FeP256:
+    """(a * b) mod p via schoolbook 32-bit multiply plus Solinas reduction.
+
+    The reduction is the FIPS 186-4 D.2.3 table for the P-256 prime; each
+    S-term is a pure permutation of the product words, so nothing about the
+    control flow depends on the operand values.
+    """
+    val aw = _fe_to_words(a)
+    val bw = _fe_to_words(b)
+
+    var t: [u64] = []
+    var z: u64 = 0
+    while z < 16:
+        t.push(0u64)
+        z = z + 1
+
+    var i: u64 = 0
+    while i < 8:
+        var carry: u64 = 0u64
+        var j: u64 = 0
+        while j < 8:
+            val cur = t[i + j] + aw[i] * bw[j] + carry
+            t[i + j] = cur & _FE_MASK32
+            carry = cur >> 32
+            j = j + 1
+        t[i + 8] = t[i + 8] + carry
+        i = i + 1
+
+    val c = t
+    # S-terms, little-endian words (FIPS 186-4 Appendix D.2.3).
+    val s1: [u64] = [c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7], 0u64]
+    val s2: [u64] = [0u64, 0u64, 0u64, c[11], c[12], c[13], c[14], c[15], 0u64]
+    val s3: [u64] = [0u64, 0u64, 0u64, c[12], c[13], c[14], c[15], 0u64, 0u64]
+    val s4: [u64] = [c[8], c[9], c[10], 0u64, 0u64, 0u64, c[14], c[15], 0u64]
+    val s5: [u64] = [c[9], c[10], c[11], c[13], c[14], c[15], c[13], c[8], 0u64]
+    val s6: [u64] = [c[11], c[12], c[13], 0u64, 0u64, 0u64, c[8], c[10], 0u64]
+    val s7: [u64] = [c[12], c[13], c[14], c[15], 0u64, 0u64, c[9], c[11], 0u64]
+    val s8: [u64] = [c[13], c[14], c[15], c[8], c[9], c[10], 0u64, c[12], 0u64]
+    val s9: [u64] = [c[14], c[15], 0u64, c[9], c[10], c[11], 0u64, c[13], 0u64]
+
+    # r = s1 + 2*s2 + 2*s3 + s4 + s5 - (s6 + s7 + s8 + s9)
+    # Bias by 5*p first so the four subtractions can never go negative: each
+    # negative term is below 2^256 and 5*p > 4*2^256. The biased total stays
+    # below 11*2^256 < 16*p, which _fe_reduce_words is sized for.
+    var acc: [u64] = [0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64]
+    acc = _fe_acc_add(acc, _fe_p_words(), 5u64)
+    acc = _fe_acc_add(acc, s1, 1u64)
+    acc = _fe_acc_add(acc, s2, 2u64)
+    acc = _fe_acc_add(acc, s3, 2u64)
+    acc = _fe_acc_add(acc, s4, 1u64)
+    acc = _fe_acc_add(acc, s5, 1u64)
+    acc = _fe_acc_sub(acc, s6)
+    acc = _fe_acc_sub(acc, s7)
+    acc = _fe_acc_sub(acc, s8)
+    acc = _fe_acc_sub(acc, s9)
+    _fe_reduce_words(acc)
+
+fn fe_sq(a: FeP256) -> FeP256:
+    fe_mul(a, a)
+
+fn fe_inv(a: FeP256) -> FeP256:
+    """a^(p-2) mod p — the modular inverse for a != 0; returns 0 for a == 0.
+
+    Square-and-multiply over the bits of the FIXED public constant p-2, most
+    significant bit first. The exponent is a compile-time constant of the
+    curve, so its bit pattern is public; nothing here branches on `a`.
+    """
+    # p - 2 = ffffffff00000001000000000000000000000000fffffffffffffffffffffffd
+    val e0: u64 = 0xFFFFFFFFFFFFFFFDu64
+    val e1: u64 = 0x00000000FFFFFFFFu64
+    val e2: u64 = 0u64
+    val e3: u64 = 0xFFFFFFFF00000001u64
+    val exp: [u64] = [e0, e1, e2, e3]
+
+    var result = fe_one()
+    var limb_idx: i64 = 3
+    while limb_idx >= 0:
+        val limb = exp[limb_idx.to_u64()]
+        var bit: i64 = 63
+        while bit >= 0:
+            result = fe_sq(result)
+            val b = (limb >> bit.to_u64()) & 1u64
+            val multiplied = fe_mul(result, a)
+            result = fe_cond_select(result, multiplied, b)
+            bit = bit - 1
+        limb_idx = limb_idx - 1
+    result
+
+# --- Byte conversion (big-endian, SEC1 wire order) ---------------------------
+
+fn _fe_be_load_u64(bytes: [u8], offset: u64) -> u64:
+    var acc: u64 = 0u64
+    var i: u64 = 0
+    while i < 8:
+        acc = (acc << 8) | bytes[offset + i].to_u64()
+        i = i + 1
+    acc
+
+fn fe_from_bytes(bytes: [u8]) -> FeP256:
+    """Load a 32-byte big-endian integer, reduced into [0, p).
+
+    Inputs at or above p are folded with a single conditional subtraction,
+    which is enough because any 256-bit value is below 2p.
+    """
+    val l3 = _fe_be_load_u64(bytes, 0u64)
+    val l2 = _fe_be_load_u64(bytes, 8u64)
+    val l1 = _fe_be_load_u64(bytes, 16u64)
+    val l0 = _fe_be_load_u64(bytes, 24u64)
+    _fe_sub_p_once(FeP256(l0: l0, l1: l1, l2: l2, l3: l3))
+
+fn _fe_be_store_u64(out: [u8], value: u64) -> [u8]:
+    var res = out
+    var i: i64 = 7
+    while i >= 0:
+        res.push(((value >> (i.to_u64() * 8)) & 0xFFu64).to_u8())
+        i = i - 1
+    res
+
+fn fe_to_bytes(a: FeP256) -> [u8]:
+    """Serialize as 32 big-endian bytes."""
+    var out: [u8] = []
+    out = _fe_be_store_u64(out, a.l3)
+    out = _fe_be_store_u64(out, a.l2)
+    out = _fe_be_store_u64(out, a.l1)
+    out = _fe_be_store_u64(out, a.l0)
+    out

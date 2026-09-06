@@ -1,0 +1,170 @@
+"""
+# Dict.get() miss/hit decoding under a NAMED engine — executable probe
+
+**Feature IDs:** #MIR-DICT-GET-MISS
+**Category:** Compiler / MIR lowering
+**Status:** Implemented (one documented OPEN gap, see below)
+**Research:** doc/08_tracking/bug/native_dict_get_miss_returns_zero_not_nil_2026-07-28.md
+             doc/07_guide/language/dict_native_pitfalls.md
+
+## Why this is a runnable program and not an sspec `describe`
+
+`test/01_unit/compiler/dict_get_miss_returns_nil_spec.spl` asserts exactly
+these contracts, but an sspec body physically cannot execute under the
+Cranelift JIT: `describe` / `it` / `expect` are Rust interpreter intrinsics
+with no codegen lowering, and a spec file has no `fn main`, so the driver
+routes it to `evaluate_module` regardless of `SIMPLE_EXECUTION_MODE`. See
+`scripts/check/check-engine-claiming-specs-use-probe.shs` for the four
+stacked layers, and `doc/07_guide/infra/testing/spec_engine_reach.md` for
+the pattern.
+
+That spec's own header said so in prose ("this spec is green on the
+interpreter both before and after the MIR fix and is NOT an active gate for
+the native lane"). This file is the gate that prose was asking for.
+
+Run directly, once per engine:
+
+    SIMPLE_EXECUTION_MODE=interpret <simple> run <this file>
+    SIMPLE_EXECUTION_MODE=jit       <simple> run <this file>
+
+Score the `PROBE VERDICT:` LINE, never the exit code.
+
+## What it pins
+
+`d.get(k)` must yield `nil` for an absent key while keeping a STORED zero /
+empty-text / `false` distinguishable from that miss. The miss is signalled by
+the flat-Option nil sentinel (`RT_NIL == 3`); every decode arm that transforms
+the raw word used to destroy it on the compiled lane, so a stored `0` and an
+absent key became indistinguishable.
+
+## The deliberate f64 exclusion — this probe's own non-vacuity canary
+
+`V = f64` is a still-OPEN gap: `rt_value_as_float` cannot round-trip the
+`RT_NIL == 3` sentinel through a float bit pattern, so
+`dict_get_preserve_flat_nil` (src/compiler/50.mir/_MirLoweringExpr/
+expr_dispatch.spl:991) deliberately does NOT guard the F64 decode arm.
+
+MEASURED 2026-08-09 on this binary, same source, both engines:
+
+    interpret :  f64 miss == nil  ->  true   (correct)
+    jit       :  f64 miss == nil  ->  false  (the open gap)
+
+That divergence is load-bearing here. It is reported on its own
+`PROBE F64MISS:` line rather than folded into the pass/fail count, so the
+calling spec can assert BOTH engines' answers. If the "jit" arm ever silently
+stopped reaching the JIT — an unrecognised engine name, a de-JIT fallback, a
+harness regression — that line would flip to `true` and the spec goes RED.
+The probe therefore cannot quietly become vacuous the way the spec it
+replaces did.
+"""
+
+struct Pt:
+    x: i64
+    y: i64
+
+var failures = 0
+
+fn check_bool(name: text, got: bool, want: bool) -> void:
+    if got == want:
+        print("  ok   " + name)
+    else:
+        print("  FAIL " + name + " (got " + got.to_text() + ", want " + want.to_text() + ")")
+        failures = failures + 1
+
+fn check_i64(name: text, got: i64, want: i64) -> void:
+    if got == want:
+        print("  ok   " + name)
+    else:
+        print("  FAIL " + name + " (got " + got.to_text() + ", want " + want.to_text() + ")")
+        failures = failures + 1
+
+fn check_text(name: text, got: text, want: text) -> void:
+    if got == want:
+        print("  ok   " + name)
+    else:
+        print("  FAIL " + name + " (got " + got + ", want " + want + ")")
+        failures = failures + 1
+
+# Receiver via PARAMETER: the shape that loses static type info on the way to
+# codegen, which is where the decode arms actually differ.
+fn dict_len_of(d: Dict<text, i64>) -> i64:
+    d.len()
+
+fn keys_len_of(d: Dict<text, i64>) -> i64:
+    d.keys().len()
+
+fn main() -> void:
+    print("dict get-miss / len probe")
+
+    # --- i64 values: a stored 0 must not look like a miss -------------------
+    var d: Dict<text, i64> = {}
+    d["a"] = 7
+    d["zero"] = 0
+    check_bool("i64 miss == nil", d.get("zz") == nil, true)
+    check_bool("i64 stored-zero == nil", d.get("zero") == nil, false)
+    check_bool("i64 hit == nil", d.get("a") == nil, false)
+
+    # `??` is the user-visible consequence: it must fire ONLY on a miss.
+    val i_miss: i64 = d.get("zz") ?? -77
+    val i_zero: i64 = d.get("zero") ?? -77
+    val i_hit: i64 = d.get("a") ?? -77
+    check_i64("i64 miss ?? default", i_miss, -77)
+    check_i64("i64 stored-zero ?? default keeps 0", i_zero, 0)
+    check_i64("i64 hit ?? default keeps 7", i_hit, 7)
+
+    # --- text values: a stored empty text must not look like a miss ---------
+    var t: Dict<text, text> = {}
+    t["k"] = "yes"
+    t["empty"] = ""
+    check_bool("text miss == nil", t.get("zz") == nil, true)
+    check_bool("text hit == nil", t.get("k") == nil, false)
+    check_bool("text stored-empty == nil", t.get("empty") == nil, false)
+    val t_miss: text = t.get("zz") ?? "DEFAULT"
+    val t_hit: text = t.get("k") ?? "DEFAULT"
+    val t_empty: text = t.get("empty") ?? "DEFAULT"
+    check_text("text miss ?? default", t_miss, "DEFAULT")
+    check_text("text hit ?? default keeps value", t_hit, "yes")
+    check_text("text stored-empty ?? default keeps empty", t_empty, "")
+
+    # --- bool values: a stored false must not look like a miss --------------
+    var b: Dict<text, bool> = {}
+    b["t"] = true
+    b["f"] = false
+    check_bool("bool stored-true == nil", b.get("t") == nil, false)
+    check_bool("bool stored-false == nil", b.get("f") == nil, false)
+    check_bool("bool miss == nil", b.get("zz") == nil, true)
+
+    # --- struct values --------------------------------------------------
+    # dict_native_pitfalls.md: never call .get() on a struct-valued dict on the
+    # compiled lane -- the payload segfaults. contains_key + index read is the
+    # supported shape, so that is what this probe pins.
+    var s: Dict<i64, Pt> = {}
+    s[1] = Pt(x: 3, y: 4)
+    check_bool("struct-valued contains_key hit", s.contains_key(1), true)
+    check_bool("struct-valued contains_key miss", s.contains_key(99), false)
+    val hit = s[1]
+    check_i64("struct-valued index read .x", hit.x, 3)
+    check_i64("struct-valued index read .y", hit.y, 4)
+
+    # --- entry counting -----------------------------------------------------
+    # `.len()` returned -1 on the compiled lane for a while
+    # (doc/08_tracking/bug/native_dict_len_returns_minus_one_2026-07-27.md).
+    # keys().len() is the documented safe replacement; both are pinned so a
+    # future regression in either is visible.
+    check_i64("keys().len() local", d.keys().len(), 2)
+    check_i64("keys().len() via parameter", keys_len_of(d), 2)
+    check_i64("len() local", d.len(), 2)
+    check_i64("len() via parameter", dict_len_of(d), 2)
+
+    if failures == 0:
+        print("PROBE VERDICT: PASS")
+    else:
+        print("PROBE VERDICT: FAIL (" + failures.to_text() + " checks wrong)")
+
+    # Reported OUTSIDE the pass/fail count on purpose -- see the module
+    # docstring. This line is the engine-reach canary: it reads `true` on the
+    # interpreter and `false` under the JIT, so the calling spec asserting both
+    # answers proves each arm reached the engine it names.
+    var f: Dict<text, f64> = {}
+    f["pi"] = 3.5
+    print("PROBE F64MISS: " + (f.get("zz") == nil).to_text())

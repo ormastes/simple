@@ -1,0 +1,76 @@
+# @cover src/app/test/chrome_component_renderer_parity/performance.spl
+use std.spec.*
+use app.test.chrome_component_renderer_parity.performance.*
+
+fn evidence_content(command: text, revision: text, rss_kb: i64 = 4096) -> text:
+    "PARITY_PERF_SCHEMA=" + PARITY_PERF_EVIDENCE_SCHEMA + "\n" +
+        "PARITY_SOURCE_REVISION=" + revision + "\n" +
+        "PARITY_WORKER_COMMAND_SHA256=" + parity_performance_command_hash(command) + "\n" +
+        "Command being timed: \"" + command + "\"\n" +
+        "Maximum resident set size (kbytes): " + rss_kb.to_text() + "\n"
+
+fn measured_sample(elapsed_us: i64, warm: bool = true) -> ParityPerformanceSample:
+    val command = "bin/simple chrome-component-renderer-parity --backend cpu --fixture box"
+    val revision = "simple-rev-abc"
+    val content = evidence_content(command, revision)
+    val rss = parse_parity_performance_rss_evidence(content,
+        "build/test-artifacts/parity/perf/cpu.time-v.txt",
+        parity_performance_artifact_hash(content), revision, command)
+    parity_performance_sample_from_measurement(PARITY_PERF_PRODUCER, revision,
+        "box", "simple_cpu", warm, elapsed_us, 1, rss)
+
+describe "Chrome component renderer parity measured performance evidence":
+    it "parses command revision hash and RSS from one retained time-v artifact":
+        val command = "bin/simple chrome-component-renderer-parity --backend simd --fixture text"
+        val revision = "simple-rev-123"
+        val content = evidence_content(command, revision, rss_kb: 8192)
+        val parsed = parse_parity_performance_rss_evidence(content,
+            "build/test-artifacts/parity/perf/simd.time-v.txt",
+            parity_performance_artifact_hash(content), revision, command)
+        expect(parsed.valid).to_equal(true)
+        expect(parsed.max_rss_bytes).to_equal(8388608)
+        expect(parsed.worker_command_hash).to_equal(parity_performance_command_hash(command))
+
+    it "computes nearest-rank warm p95 and aggregate throughput from measurements":
+        val report = validate_parity_performance_samples([
+            measured_sample(1000), measured_sample(2000), measured_sample(3000),
+            measured_sample(4000), measured_sample(5000), measured_sample(6000),
+            measured_sample(7000), measured_sample(8000), measured_sample(9000),
+            measured_sample(10000), measured_sample(90000, warm: false)])
+        expect(report.status).to_equal("pass")
+        expect(report.warm_p95_us).to_equal(10000)
+        expect(report.throughput_milli).to_be_greater_than(PARITY_PERF_MIN_THROUGHPUT_MILLI)
+        expect(report.max_rss_bytes).to_equal(4194304)
+
+    it "rejects tampered retained output and claimed-only RSS":
+        val command = "bin/simple chrome-component-renderer-parity --backend gpu --fixture alpha"
+        val revision = "simple-rev-456"
+        val content = evidence_content(command, revision)
+        val tampered = parse_parity_performance_rss_evidence(content + "tampered\n",
+            "build/test-artifacts/parity/perf/gpu.time-v.txt",
+            parity_performance_artifact_hash(content), revision, command)
+        expect(tampered.valid).to_equal(false)
+        val claimed = ParityPerformanceSample(producer_identity: PARITY_PERF_PRODUCER,
+            source_revision: revision, fixture_id: "alpha", backend: "simple_gpu",
+            measured: false, warm: true, elapsed_us: 10, cases: 100,
+            throughput_milli: 10000000000, max_rss_bytes: 1024,
+            artifact_source: "claimed-only", artifact_hash: "caller-hash",
+            retained_rss_content: "",
+            worker_command: command, worker_command_hash: parity_performance_command_hash(command))
+        val report = validate_parity_performance_samples([claimed])
+        expect(report.status).to_equal("fail")
+        expect(report.blockers[0]).to_contain("caller-only or unmeasured")
+
+    it "rejects zero samples forged throughput and excessive measured limits":
+        expect(validate_parity_performance_samples([]).status).to_equal("fail")
+        val base = measured_sample(1000)
+        val forged = ParityPerformanceSample(producer_identity: base.producer_identity,
+            source_revision: base.source_revision, fixture_id: base.fixture_id,
+            backend: base.backend, measured: true, warm: true, elapsed_us: 1000,
+            cases: 1, throughput_milli: 999999999, max_rss_bytes: 1073741825,
+            artifact_source: base.artifact_source, artifact_hash: base.artifact_hash,
+            retained_rss_content: base.retained_rss_content,
+            worker_command: base.worker_command, worker_command_hash: base.worker_command_hash)
+        val report = validate_parity_performance_samples([forged])
+        expect(report.status).to_equal("fail")
+        expect(report.blockers.len()).to_be_greater_than(1)

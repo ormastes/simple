@@ -1,0 +1,59 @@
+use std.spec.{describe, it, expect}
+use app.io.provider_byte_stream_ops.{AppByteReadV1, AppByteWriteV1, AppByteStreamPort}
+use app.spipe_knowledge_provider.transport_types.{provider_transport_limits_v1, provider_transport_limits_valid_v1}
+use app.spipe_knowledge_provider.byte_stream.{ProviderAppIoByteStreamV1, provider_byte_read_normalize, provider_byte_write_normalize}
+
+class ScriptedAppByteStreamV1 with AppByteStreamPort:
+    read_result: AppByteReadV1
+    write_result: AppByteWriteV1
+
+    me read_some(maximum_bytes: i64, deadline_at_ms: i64) -> AppByteReadV1:
+        self.read_result
+
+    me write_some(bytes: [u8], offset: i64, maximum_bytes: i64,
+                  deadline_at_ms: i64) -> AppByteWriteV1:
+        self.write_result
+
+describe "SPipe provider byte stream ownership":
+    it "accepts bounded positive read and short-write progress":
+        val read = provider_byte_read_normalize("data", [65_u8, 66_u8], "", 4)
+        expect(read.status).to_equal("data")
+        expect(read.bytes.len()).to_equal(2)
+        val write = provider_byte_write_normalize("data", 2, "", 1, 3, 4)
+        expect(write.status).to_equal("data")
+        expect(write.written_bytes).to_equal(2)
+
+    it "preserves the closed timeout eof and error states":
+        val blocked = provider_byte_read_normalize("timeout", [], "would_block", 8)
+        expect(blocked.status).to_equal("timeout")
+        expect(blocked.detail).to_equal("would_block")
+        val deadline = provider_byte_write_normalize("timeout", 0, "deadline", 0, 1, 1)
+        expect(deadline.status).to_equal("timeout")
+        expect(deadline.detail).to_equal("deadline")
+        expect(provider_byte_read_normalize("eof", [], "ignored", 8).status).to_equal("eof")
+        expect(provider_byte_write_normalize("error", 0, "broken_pipe", 0, 1, 1).status).to_equal("error")
+
+    it "fails closed on zero data oversized progress and unknown states":
+        expect(provider_byte_read_normalize("data", [], "", 8).detail).to_equal("internal_error")
+        expect(provider_byte_read_normalize("data", [1_u8, 2_u8], "", 1).status).to_equal("error")
+        expect(provider_byte_read_normalize("unknown", [], "", 8).status).to_equal("error")
+        expect(provider_byte_write_normalize("data", 0, "", 0, 1, 1).status).to_equal("error")
+        expect(provider_byte_write_normalize("data", 2, "", 0, 1, 1).status).to_equal("error")
+        expect(provider_byte_write_normalize("timeout", 1, "would_block", 0, 1, 1).status).to_equal("error")
+
+    it "validates offsets bounds deadlines and frozen transport maxima":
+        expect(provider_byte_write_normalize("data", 1, "", -1, 1, 1).status).to_equal("error")
+        expect(provider_byte_write_normalize("data", 1, "", 1, 2, 2).status).to_equal("error")
+        val limits = provider_transport_limits_v1()
+        expect(provider_transport_limits_valid_v1(limits)).to_equal(true)
+        expect(limits.max_frame_bytes).to_equal(1048576)
+        expect(limits.max_queued_requests).to_equal(16)
+
+    it "normalizes host results without leaf runtime access":
+        val host = ScriptedAppByteStreamV1(
+            read_result: AppByteReadV1(status: "timeout", bytes: [], detail: "would_block"),
+            write_result: AppByteWriteV1(status: "data", written_bytes: 1, detail: ""))
+        var stream = ProviderAppIoByteStreamV1.configured(host)
+        expect(stream.read_some(16, 100).detail).to_equal("would_block")
+        expect(stream.write_some([7_u8], 0, 1, 100).written_bytes).to_equal(1)
+        expect(stream.read_some(16, -1).detail).to_equal("internal_error")

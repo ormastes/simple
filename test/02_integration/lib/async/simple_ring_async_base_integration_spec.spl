@@ -1,0 +1,201 @@
+use std.spec.{describe, it, expect}
+use std.common.contracts.execution.async_profile_v1.{
+    async_profile_common_v1, async_profile_script_v1, async_profile_server_v1,
+    async_profile_mission_pool_v1
+}
+use std.common.contracts.execution.simple_ring_async_v1.{
+    RingMappingGrade, RingTerminalKind
+}
+use std.nogc_async_mut.async_ring.simple_ring.{SimpleRing, SimpleRingError}
+use std.nogc_async_mut.async_ring.software_provider.{
+    SoftwareRingProvider, SoftwareProviderAdmissionStatus
+}
+
+describe "SimpleRing software provider integration":
+    it "records bounded provider kicks and caller-clock completion latency":
+        val ring = match SimpleRing<i64, i64>.create(303u64, 33u64, 1):
+            case Ok(value): value
+            case Err(_): fail("timed ring construction failed")
+        val provider = match SoftwareRingProvider<i64, i64>.create(703u64, 1):
+            case Ok(value): value
+            case Err(_): fail("timed provider construction failed")
+        val held = match ring.reserve(33u64, 3001u64):
+            case Ok(value): value
+            case Err(_): fail("timed reservation failed")
+        match ring.commit(33u64, held, 7):
+            case Ok(_): ()
+            case Err(_): fail("timed commit failed")
+        val submission = match provider.take_one_at(ring, 100u64):
+            case Ok(Some(value)): value
+            case Ok(nil): fail("timed submission missing")
+            case Err(_): fail("timed take failed")
+        match provider.complete_success_at(ring, submission, 8, 99u64):
+            case Err(error): expect(error).to_equal(SimpleRingError.InvalidTimestamp)
+            case Ok(_): fail("backward completion timestamp accepted")
+        match provider.complete_success_at(ring, submission, 8, 150u64):
+            case Ok(wake): expect(wake.wake_key).to_equal(3001u64)
+            case Err(_): fail("timed completion failed")
+        val telemetry = ring.telemetry()
+        expect(telemetry.completion_latency_samples).to_equal(1u64)
+        expect(telemetry.completion_latency_total).to_equal(50u64)
+        expect(telemetry.completion_latency_max).to_equal(50u64)
+        expect(provider.counters().kicks).to_equal(1u64)
+
+    it "keeps typed rings bounded, FIFO, exactly woken, and independently progressing":
+        val primary = match SimpleRing<i64, text>.create(101u64, 11u64, 2):
+            case Ok(value): value
+            case Err(_): fail("primary ring construction failed")
+        val primary_provider = match SoftwareRingProvider<i64, text>.create(701u64, 2):
+            case Ok(value): value
+            case Err(_): fail("primary provider construction failed")
+
+        val common_admission = primary_provider.admit(async_profile_common_v1())
+        match common_admission.status:
+            case SoftwareProviderAdmissionStatus.Admitted:
+                expect(common_admission.mapping).to_equal(RingMappingGrade.Software)
+                expect(common_admission.bounded).to_be(true)
+                expect(common_admission.provider_depth).to_equal(2)
+                expect(common_admission.requested_depth).to_equal(2)
+                expect(common_admission.fallback_fact).to_equal("software-grade-selected")
+                expect(common_admission.fallback_reason).to_equal("software ring provider selected")
+            case SoftwareProviderAdmissionStatus.Rejected: fail("common profile rejected")
+        val depth_rejection = primary_provider.admit_for_depth(async_profile_common_v1(), 3)
+        match depth_rejection.status:
+            case SoftwareProviderAdmissionStatus.Rejected:
+                expect(depth_rejection.fallback_reason).to_equal(
+                    "requested ring depth exceeds provider bound")
+                expect(depth_rejection.provider_depth).to_equal(2)
+                expect(depth_rejection.requested_depth).to_equal(3)
+            case SoftwareProviderAdmissionStatus.Admitted:
+                fail("provider admitted a ring deeper than its bound")
+        match primary_provider.admit(async_profile_script_v1()).status:
+            case SoftwareProviderAdmissionStatus.Admitted: ()
+            case SoftwareProviderAdmissionStatus.Rejected: fail("script profile rejected")
+        match primary_provider.admit(async_profile_server_v1()).status:
+            case SoftwareProviderAdmissionStatus.Admitted: ()
+            case SoftwareProviderAdmissionStatus.Rejected: fail("server profile rejected")
+        val mission_admission = primary_provider.admit(async_profile_mission_pool_v1())
+        match mission_admission.status:
+            case SoftwareProviderAdmissionStatus.Rejected:
+                expect(mission_admission.fallback_reason).to_equal("direct ring mapping required")
+            case SoftwareProviderAdmissionStatus.Admitted: fail("direct-required mission profile admitted")
+
+        val first_reservation = match primary.reserve(11u64, 1001u64):
+            case Ok(value): value
+            case Err(_): fail("first primary reservation failed")
+        val second_reservation = match primary.reserve(11u64, 1002u64):
+            case Ok(value): value
+            case Err(_): fail("second primary reservation failed")
+        match primary.reserve(11u64, 1003u64):
+            case Err(error): expect(error).to_equal(SimpleRingError.Full)
+            case Ok(_): fail("full primary ring admitted work")
+        match primary.commit(11u64, first_reservation, 10):
+            case Ok(_): ()
+            case Err(_): fail("first primary commit failed")
+        match primary.commit(11u64, second_reservation, 20):
+            case Ok(_): ()
+            case Err(_): fail("second primary commit failed")
+        val first_submission = match primary_provider.take_one(primary):
+            case Ok(Some(value)): value
+            case Ok(nil): fail("first primary submission missing")
+            case Err(_): fail("first primary take failed")
+        expect(first_submission.operation).to_equal(10)
+        expect(first_submission.task_key).to_equal(1001u64)
+
+        val secondary = match SimpleRing<text, i64>.create(202u64, 22u64, 2):
+            case Ok(value): value
+            case Err(_): fail("secondary ring construction failed")
+        val secondary_provider = match SoftwareRingProvider<text, i64>.create(702u64, 2):
+            case Ok(value): value
+            case Err(_): fail("secondary provider construction failed")
+        val failure_reservation = match secondary.reserve(22u64, 2001u64):
+            case Ok(value): value
+            case Err(_): fail("failure reservation failed")
+        val cancelled_reservation = match secondary.reserve(22u64, 2002u64):
+            case Ok(value): value
+            case Err(_): fail("cancelled reservation failed")
+        match secondary.commit(22u64, failure_reservation, "fail"):
+            case Ok(_): ()
+            case Err(_): fail("failure commit failed")
+        match secondary.commit(22u64, cancelled_reservation, "cancel"):
+            case Ok(_): ()
+            case Err(_): fail("cancelled commit failed")
+        val failure_submission = match secondary_provider.take_one(secondary):
+            case Ok(Some(value)): value
+            case Ok(nil): fail("failure submission missing")
+            case Err(_): fail("failure take failed")
+        match secondary_provider.complete_failure(secondary, failure_submission, "device fault"):
+            case Ok(wake):
+                expect(wake.wake_key).to_equal(2001u64)
+                expect(wake.kind).to_equal(RingTerminalKind.Failure)
+            case Err(_): fail("failure completion failed")
+        val cancelled_submission = match secondary_provider.take_one(secondary):
+            case Ok(Some(value)): value
+            case Ok(nil): fail("cancelled submission missing")
+            case Err(_): fail("cancelled take failed")
+        match secondary_provider.complete_cancelled(secondary, cancelled_submission, "caller cancelled"):
+            case Ok(wake):
+                expect(wake.wake_key).to_equal(2002u64)
+                expect(wake.kind).to_equal(RingTerminalKind.Cancelled)
+            case Err(_): fail("cancelled completion failed")
+        val failure_completion = match secondary.take_completion(22u64):
+            case Ok(Some(value)): value
+            case Ok(nil): fail("failure completion missing")
+            case Err(_): fail("failure completion take failed")
+        expect(failure_completion.task_key).to_equal(2001u64)
+        expect(failure_completion.kind).to_equal(RingTerminalKind.Failure)
+        expect(failure_completion.error).to_equal("device fault")
+        val cancelled_completion = match secondary.take_completion(22u64):
+            case Ok(Some(value)): value
+            case Ok(nil): fail("cancelled completion missing")
+            case Err(_): fail("cancelled completion take failed")
+        expect(cancelled_completion.task_key).to_equal(2002u64)
+        expect(cancelled_completion.kind).to_equal(RingTerminalKind.Cancelled)
+        expect(cancelled_completion.error).to_equal("caller cancelled")
+
+        val second_submission = match primary_provider.take_one(primary):
+            case Ok(Some(value)): value
+            case Ok(nil): fail("second primary submission missing")
+            case Err(_): fail("second primary take failed")
+        expect(second_submission.operation).to_equal(20)
+        expect(second_submission.task_key).to_equal(1002u64)
+        match primary_provider.complete_success(primary, first_submission, "first"):
+            case Ok(wake):
+                expect(wake.provider_id).to_equal(701u64)
+                expect(wake.wake_key).to_equal(1001u64)
+                expect(wake.kind).to_equal(RingTerminalKind.Success)
+            case Err(_): fail("first success completion failed")
+        match primary_provider.complete_success(primary, second_submission, "second"):
+            case Ok(wake): expect(wake.wake_key).to_equal(1002u64)
+            case Err(_): fail("second success completion failed")
+        val first_completion = match primary.take_completion(11u64):
+            case Ok(Some(value)): value
+            case Ok(nil): fail("first primary completion missing")
+            case Err(_): fail("first primary completion take failed")
+        expect(first_completion.task_key).to_equal(1001u64)
+        expect(first_completion.kind).to_equal(RingTerminalKind.Success)
+        if val value = first_completion.value:
+            expect(value).to_equal("first")
+        else:
+            fail("first completion value missing")
+        val second_completion = match primary.take_completion(11u64):
+            case Ok(Some(value)): value
+            case Ok(nil): fail("second primary completion missing")
+            case Err(_): fail("second primary completion take failed")
+        expect(second_completion.task_key).to_equal(1002u64)
+        expect(second_completion.kind).to_equal(RingTerminalKind.Success)
+        if val value = second_completion.value:
+            expect(value).to_equal("second")
+        else:
+            fail("second completion value missing")
+        expect(primary_provider.counters().admissions).to_equal(3u64)
+        expect(primary_provider.counters().rejections).to_equal(2u64)
+        expect(primary_provider.counters().kicks).to_equal(2u64)
+        expect(primary_provider.counters().takes).to_equal(2u64)
+        expect(primary_provider.counters().successes).to_equal(2u64)
+        expect(primary_provider.counters().wakes).to_equal(2u64)
+        expect(secondary_provider.counters().takes).to_equal(2u64)
+        expect(secondary_provider.counters().kicks).to_equal(2u64)
+        expect(secondary_provider.counters().failures).to_equal(1u64)
+        expect(secondary_provider.counters().cancellations).to_equal(1u64)
+        expect(secondary_provider.counters().wakes).to_equal(2u64)

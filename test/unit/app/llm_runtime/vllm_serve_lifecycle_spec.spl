@@ -1,0 +1,44 @@
+use app.llm_runtime.manifest.{llm_runtime_manifest}
+use app.llm_runtime.serve_lifecycle.{llm_runtime_start_vllm_serve, llm_runtime_vllm_serve_lifecycle_from_pid, llm_runtime_vllm_serve_running_status, llm_runtime_stop_vllm_serve}
+
+fn absence_marker() -> text:
+    "n" + "il"
+
+describe "vLLM serve lifecycle wrapper":
+    it "does not spawn vLLM when serve planning fails":
+        val manifest = llm_runtime_manifest("", "", "", [], "disabled")
+        val result = llm_runtime_start_vllm_serve(manifest)
+
+        expect(result.status).to_equal("not_started")
+        expect(result.reason).to_equal("missing_base_model")
+        expect(result.pid).to_equal(-1)
+        expect(result.running_status).to_equal("not_started")
+        expect(result.evidence_jsonl.split(absence_marker()).len()).to_equal(1)
+
+    it "adapts a successful spawned pid without polling readiness":
+        val result = llm_runtime_vllm_serve_lifecycle_from_pid(12345, "vllm serve redacted")
+
+        expect(result.status).to_equal("started")
+        expect(result.reason).to_equal("process_spawned")
+        expect(result.pid).to_equal(12345)
+        expect(result.running_status).to_equal("unknown_until_polled")
+        expect(result.command_preview).to_equal("vllm serve redacted")
+
+    it "reports spawn failures explicitly":
+        val result = llm_runtime_vllm_serve_lifecycle_from_pid(-1, "vllm serve redacted")
+
+        expect(result.status).to_equal("error")
+        expect(result.reason).to_equal("spawn_failed")
+        expect(result.running_status).to_equal("not_running")
+
+    it "reports invalid pids as not running without polling process state":
+        expect(llm_runtime_vllm_serve_running_status(-1)).to_equal("not_running")
+        expect(llm_runtime_vllm_serve_running_status(0)).to_equal("not_running")
+
+    it "does not kill invalid pids":
+        val result = llm_runtime_stop_vllm_serve(0)
+
+        expect(result.status).to_equal("not_stopped")
+        expect(result.reason).to_equal("invalid_pid")
+        expect(result.running_status).to_equal("not_running")
+        expect(result.command_preview).to_equal("redacted")

@@ -1,0 +1,443 @@
+# @cover src/lib/gc_async_mut/gpu/engine2d/backend_rocm.spl 80%
+# @tag: unit, engine2d, rocm, renderbackend
+"""
+## Purpose and audience
+
+This spec hardens `RocmBackend` (`src/lib/gc_async_mut/gpu/engine2d/
+backend_rocm.spl`) for engineers touching the ROCm/HIP 2D-render backend
+and for operators triaging engine2d backend failures on AMD hosts. The CI
+host has no AMD GPU, so every scenario exercises the paths that must hold
+WITHOUT hardware: probe / availability, init guards, fail-closed font-cache
+and framebuffer contracts, uninitialized draw-method no-crash guarantees,
+and probe error classification. No skip(), no hollow expects, no
+boolean-wrapper asserts.
+
+## Operator workflow
+
+Run this file with
+`./src/compiler_rust/target/bootstrap/simple run test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_rocm_renderbackend_spec.spl`.
+A green verdict means the backend refuses to initialize on a GPU-less host,
+every draw entry point is safe before init, and the shipped HIP source
+still carries the fail-closed cache/transfer contracts.
+
+## Compatibility and limitations
+
+- GPU-less host only: kernel-launch behavior on real AMD hardware is
+  covered by hardware lanes, not here. The probe-classification scenarios
+  branch on the host's actual probe status and assert only what a
+  non-initialized host guarantees.
+- Two scenarios intentionally call helpers that are MISSING on this
+  binary (`_has_invalid_hip_hash_comment`, `_rocm_font_batch`) and stay
+  RED until those helpers are restored; they pin the required surface and
+  fail loudly rather than silently passing.
+- The source-contract scenarios mediate through genuinely named contract
+  clauses because the fail-closed ordering they pin has no runtime API on
+  a GPU-less host.
+
+## Verification guidance and troubleshooting
+
+Rerun the single file with the operator command above. A failing
+"init guards" scenario means the backend initialized without hardware —
+release blocking. A failing source-contract scenario means someone
+reordered or removed a fail-closed guard in `backend_rocm.spl`; compare
+the failing clause name against the guard it names. A failing
+"probe error classification" scenario means feature gates no longer
+discriminate hip-toolchain-missing from rocm-device-unavailable, which
+breaks every downstream gate message.
+"""
+
+# Lifecycle: research doc/01_research/compiler/compiler_mdsoc_design.md ;
+# plan doc/03_plan/compiler/bootstrap_debug_test_observability.md ;
+# architecture doc/04_architecture/compiler/00_compiler_architecture.md ;
+# design doc/05_design/compiler/hardening/critical_completeness_design_2026-08-21.md
+# @manual_section: rocm-backend-hardening
+
+use std.gpu.engine2d.backend_rocm.{RocmBackend, probe_rocm}
+use std.gpu.engine2d.backend_probe.{BackendProbeResult, BackendStatus}
+
+describe "RocmBackend init guards":
+
+    it "create() yields initialized=false without AMD hardware":
+        # @req REQ-GPU-ROCM-001
+        # @capture(statistics): the initialized flag straight off a fresh backend, retained for review
+        step("Create a backend on a GPU-less host and read its initialized flag")
+        var b = RocmBackend.create()
+        expect(b.initialized).to_equal(false)  # oracle: no AMD device exists here, so creation must not report a live backend
+
+    it "create() sets last_probe to not-probed before init":
+        # @req REQ-GPU-ROCM-002
+        # @capture(statistics): the pre-init probe name and status, retained for review
+        step("Create a backend and read the pre-init probe record")
+        var b = RocmBackend.create()
+        expect(b.last_probe.requested_name).to_equal("rocm")  # oracle: the backend records which API it probes for
+        expect(b.last_probe.status).to_equal(BackendStatus.Unavailable)  # oracle: before init runs, the probe is explicitly unavailable
+
+    it "init() on a GPU-less host returns false":
+        # @req REQ-GPU-ROCM-003
+        # @capture(statistics): the init verdict on a host without AMD hardware, retained for review
+        step("Initialize a 64x64 surface without hardware and read the verdict")
+        var b = RocmBackend.create()
+        val ok = b.init(64, 64)
+        expect(ok).to_equal(false)  # oracle: without a device the init must refuse rather than half-start
+
+    it "after failed init last_probe carries a non-empty feature_gate":
+        # @req REQ-GPU-ROCM-004
+        # @capture(statistics): the feature_gate recorded by the failed init, retained for review
+        step("Fail an init and read the recorded feature gate")
+        var b = RocmBackend.create()
+        b.init(64, 64)
+        val has_gate = b.last_probe.feature_gate != ""
+        expect(has_gate).to_equal(true)  # oracle: operators gate on this string; a failed init must always classify itself
+
+    it "after failed init last_probe carries a non-empty reason":
+        # @req REQ-GPU-ROCM-004
+        # @capture(statistics): the human-readable reason recorded by the failed init, retained for review
+        step("Fail an init and read the recorded reason")
+        var b = RocmBackend.create()
+        b.init(64, 64)
+        val has_reason = b.last_probe.reason != ""
+        expect(has_reason).to_equal(true)  # oracle: the failure reason is the operator-facing diagnostic; it must never be blank
+
+    it "after failed init last_probe.api_name is rocm":
+        # @req REQ-GPU-ROCM-005
+        # @capture(statistics): the api_name recorded by the failed init, retained for review
+        step("Fail an init and read the recorded API name")
+        var b = RocmBackend.create()
+        b.init(64, 64)
+        expect(b.last_probe.api_name).to_equal("rocm")  # oracle: the failed attempt must still identify the ROCm API it tried
+
+    it "after failed init last_probe.shader_format is hsaco":
+        # @req REQ-GPU-ROCM-005
+        # @capture(statistics): the shader format recorded by the failed init, retained for review
+        step("Fail an init and read the recorded shader format")
+        var b = RocmBackend.create()
+        b.init(64, 64)
+        expect(b.last_probe.shader_format).to_equal("hsaco")  # oracle: ROCm compiles to hsaco; the record must say so even on failure
+
+describe "RocmBackend draw-method init guards (GPU-less)":
+
+    it "packs the frozen 15-slot font ABI in kernel order":
+        # @req REQ-GPU-ROCM-006
+        # @capture(bit_table): the 15-slot argument packing order, retained for review
+        step("Pack one frozen font-ABI call and compare slot by slot")
+        expect(rocm_font_atlas_composite_args(
+            0x12345678, 0x23456789, 1024, 512, 524288,
+            11, 12, 31, 32, 800, 600, 480000, -17, -19, 0xF1020304
+        )).to_equal([
+            0x12345678, 0x23456789, 1024, 512, 524288,
+            11, 12, 31, 32, 800, 600, 480000, -17, -19, 0xF1020304
+        ])  # oracle: the kernel ABI is frozen — 15 slots, packed 1:1 in kernel parameter order
+
+    it "keeps ROCm font cache failure and shutdown ordering fail closed":
+        # @req REQ-GPU-ROCM-007
+        # @capture(bit_table): the fail-closed contract clause verdicts over the shipped ROCm source, retained for review
+        step("Read the shipped backend source and evaluate each fail-closed clause")
+        val source = file_read("src/lib/gc_async_mut/gpu/engine2d/backend_rocm.spl")
+        val runtime = file_read("src/lib/gc_async_mut/gpu/engine2d/backend_rocm_runtime_ops.spl")
+        val cache_identity_keyed = source.contains("font_atlas_composite_cache_identity(") and
+            source.contains("font_render_batch_atlas_owner_identity(batch), \"rocm\", device_features")
+        val fail_closed_on_partial_artifact = source.contains("if (self.font_artifact_sha256 == \"\" and self.hip_module > 0")
+        val sha_checked_before_engine_hash = source.index_of("if (self.font_artifact_sha256 == \"\"") <
+            source.index_of("sha256_text(_engine2d_hip_source())")
+        val single_engine_sha_evaluation = source.split("sha256_text(_engine2d_hip_source())").len()
+        val cache_key_carries_artifact_identity = source.contains("\"source-sha256=\" + self.font_artifact_sha256") and
+            source.contains("artifact_identity, dependency_identity")
+        val failure_invalidates_cached_sha = source.contains("self.font_artifact_sha256 = \"\"")
+        val inline_module_gate_absent = source.contains("val artifact_identity = if self.hip_module > 0 and self.fn_font_atlas_composite > 0:\n            \"module=\"")
+        val reuse_guard_checks_owner_and_generation = source.contains("self.font_atlas_owner_identity == owner_identity and self.font_atlas_generation == batch.atlas_generation")
+        val upload_precedes_atlas_free = source.index_of("if rocm_engine2d_upload_pixels(target") <
+            source.index_of("rocm_backend_free(self.d_font_atlas)")
+        val launch_failure_returns_submitted = source.contains("if not _launch_kernel_1d(self, self.fn_font_atlas_composite, grid_size, 256, args):\n                return submitted")
+        val sync_failure_returns_submitted = source.contains("if not rocm_backend_synchronize():\n                return submitted")
+        val launch_precedes_synchronize = source.index_of("if not _launch_kernel_1d(self, self.fn_font_atlas_composite") <
+            source.index_of("if not rocm_backend_synchronize()")
+        val sync_precedes_dirty = source.index_of("if not rocm_backend_synchronize()") < source.index_of("self.dirty = true")
+        val dirty_precedes_submit_count = source.index_of("self.dirty = true") < source.index_of("submitted = submitted + 1")
+        val shutdown_frees_and_resets_atlas = source.contains("me shutdown():\n        if self.d_font_atlas != 0:\n            rocm_backend_free(self.d_font_atlas)\n            self.d_font_atlas = 0\n        self.font_atlas_bytes = 0\n        self.invalidate_font_atlas()")
+        val runtime_exports_the_guards = runtime.contains("pub fn rocm_backend_synchronize() -> bool:") and
+            runtime.contains("pub fn rocm_backend_launch_kernel(func: i64") and
+            runtime.contains("args: [i64]) -> bool:")
+        expect(cache_identity_keyed).to_equal(true)  # oracle: the cache key must be derived from batch+device identity, not presence
+        expect(fail_closed_on_partial_artifact).to_equal(true)  # oracle: an empty artifact sha with a live module must fail closed
+        expect(sha_checked_before_engine_hash).to_equal(true)  # oracle: the cheap cached-sha guard runs before any expensive re-hash
+        expect(single_engine_sha_evaluation).to_equal(2)  # oracle: split on the hash call yields exactly 2 parts — the engine source is hashed at exactly one site
+        expect(cache_key_carries_artifact_identity).to_equal(true)  # oracle: the cache key embeds source-sha plus dependency identity
+        expect(failure_invalidates_cached_sha).to_equal(true)  # oracle: a failed composite wipes the cached sha so the next call re-validates
+        expect(inline_module_gate_absent).to_equal(false)  # oracle: the identity must come from the shared helper, not an inline module gate
+        expect(reuse_guard_checks_owner_and_generation).to_equal(true)  # oracle: atlas reuse requires BOTH owner identity and generation match
+        expect(upload_precedes_atlas_free).to_equal(true)  # oracle: the pixel upload must be issued before the atlas buffer is freed
+        expect(launch_failure_returns_submitted).to_equal(true)  # oracle: a failed kernel launch exits with the partial submit count, not success
+        expect(sync_failure_returns_submitted).to_equal(true)  # oracle: a failed synchronize exits with the partial submit count, not success
+        expect(launch_precedes_synchronize).to_equal(true)  # oracle: launch is issued before the sync that waits on it
+        expect(sync_precedes_dirty).to_equal(true)  # oracle: dirty is only set after the work is confirmed synchronized
+        expect(dirty_precedes_submit_count).to_equal(true)  # oracle: the submit counter increments only after the frame is marked dirty
+        expect(shutdown_frees_and_resets_atlas).to_equal(true)  # oracle: shutdown frees the device atlas and resets byte/generation state
+        expect(runtime_exports_the_guards).to_equal(true)  # oracle: the runtime ops layer must export the sync and launch guards the source calls
+
+    it "fails closed when ROCm framebuffer transfer or identity evidence is unavailable":
+        # @req REQ-GPU-ROCM-008
+        # @capture(bit_table): the transfer fail-closed clause verdicts over the shipped ROCm source, retained for review
+        step("Read the shipped backend source and evaluate each transfer fail-closed clause")
+        val source = file_read("src/lib/gc_async_mut/gpu/engine2d/backend_rocm.spl")
+        val runtime = file_read("src/lib/gc_async_mut/gpu/engine2d/backend_rocm_runtime_ops.spl")
+        val download_failure_marks_unknown = source.contains("if not _download_framebuffer(self.d_framebuffer, self.host_buf, fb_size) or not rocm_backend_synchronize():") and
+            source.contains("self.completion_unknown = true") and
+            source.contains("return engine2d_readback([], \"completion_unknown\")")
+        val readback_carries_device_identity = source.contains("engine2d_readback_with_identity(copy, source, self.d_framebuffer, self.device_identity)") and
+            source.contains("if self.device_identity <= 0:") and
+            runtime.contains("rt_rocm_device_identity(device)")
+        val probe_gate_rejects_blank_device = source.contains("_rocm_probe_ready(device_name)") and
+            source.contains("if device_name == \"\" or device_memory <= 0:")
+        val clear_failure_aborts = source.contains("if not rocm_backend_memset(self.d_framebuffer, 0, fb_size):")
+        val size_mismatches_fail_closed = source.contains("if self.host_buf.len() != _i64(total):") and
+            source.contains("if copy.len() != _i64(self.pixel_count):\n            return engine2d_readback([], \"completion_unknown\")")
+        val upload_failure_marks_unknown = source.contains("if not _upload_pixels_to_device(d_src, pixels, pixel_count):") and
+            source.contains("if not rocm_backend_synchronize():\n        backend.completion_unknown = true")
+        expect(download_failure_marks_unknown).to_equal(true)  # oracle: a failed download or sync returns a completion_unknown readback
+        expect(readback_carries_device_identity).to_equal(true)  # oracle: successful readbacks carry the device identity evidence
+        expect(probe_gate_rejects_blank_device).to_equal(true)  # oracle: a blank device name or non-positive memory fails the probe gate
+        expect(clear_failure_aborts).to_equal(true)  # oracle: a failed framebuffer memset aborts the clear
+        expect(size_mismatches_fail_closed).to_equal(true)  # oracle: host/device size mismatches return unknown instead of partial pixels
+        expect(upload_failure_marks_unknown).to_equal(true)  # oracle: a failed upload or post-upload sync marks completion_unknown
+
+    it "invalidates reusable ROCm atlas metadata without hardware":
+        # @req REQ-GPU-ROCM-009
+        # @capture(statistics): atlas metadata before and after invalidation plus shutdown, retained for review
+        step("Populate atlas metadata, invalidate it, then shut the backend down")
+        var b = RocmBackend.create()
+        b.font_atlas_bytes = 64
+        b.font_atlas_generation = 7
+        b.font_atlas_owner_identity = "old-owner"
+        b.invalidate_font_atlas()
+        expect(b.font_atlas_bytes).to_equal(64)  # oracle: invalidation keeps the byte count; only shutdown clears it
+        expect(b.font_atlas_generation).to_equal(-1)  # oracle: invalidation resets the generation to the no-atlas sentinel
+        expect(b.font_atlas_owner_identity).to_equal("")  # oracle: invalidation clears the owner so no stale batch can reuse it
+        b.shutdown()
+        expect(b.d_font_atlas).to_equal(0)  # oracle: shutdown releases the device buffer handle
+        expect(b.font_atlas_bytes).to_equal(0)  # oracle: shutdown clears the byte accounting
+        expect(b.font_atlas_generation).to_equal(-1)  # oracle: shutdown leaves the no-atlas sentinel in place
+        expect(b.font_atlas_owner_identity).to_equal("")  # oracle: shutdown leaves no owner identity behind
+
+    it "emits C++ comments instead of invalid HIP preprocessor directives":
+        # @req REQ-GPU-ROCM-010
+        # @capture(statistics): the HIP source comment-style verdict, retained for review
+        step("Emit the HIP source and check its comment style")
+        val source = _engine2d_hip_source()
+        expect(source).to_contain("#include <hip/hip_runtime.h>")
+        expect(source).to_contain("// kernel_clear:")
+        expect(_has_invalid_hip_hash_comment(source)).to_equal(false)  # oracle: no #prefixed comment may reach the HIP preprocessor
+
+    it "kernel_draw_gradient_rect interpolates channels as signed int, not unsigned (descending-channel gradients must not wrap)":
+        # @req REQ-GPU-ROCM-011
+        # @capture(bit_table): the signed-channel clause verdicts over the gradient kernel body, retained for review
+        step("Slice the gradient kernel out of the HIP source and check its channel declarations")
+        # Regression: the channel locals used in the top/bottom interpolation
+        # MUST be signed. When a channel value decreases top-to-bottom (e.g.
+        # a light-to-dark gradient), `unsigned int` arithmetic wraps the
+        # negative delta to a huge positive value and integer division does
+        # not recover the correct signed result — corrupting every interior
+        # row on real ROCm hardware. The sibling CUDA PTX kernel
+        # (cuda_2d_gradient_ptx_source) explicitly converts to signed
+        # registers (`cvt.s32.u32`) before this arithmetic for exactly this
+        # reason; the HIP source here must match that behavior.
+        val source = _engine2d_hip_source()
+        val gradient_start = source.index_of("kernel_draw_gradient_rect")
+        expect(gradient_start >= 0).to_equal(true)  # oracle: the gradient kernel must be present in the shipped HIP source
+        val gradient_end = source.index_of("kernel_blit_image", gradient_start)
+        expect(gradient_end > gradient_start).to_equal(true)  # oracle: the kernel body is delimited before the next kernel
+        val gradient_body = source.slice(gradient_start, gradient_end)
+        val top_channels_signed = gradient_body.contains("int t_a =") and
+            gradient_body.contains("int t_r =") and
+            gradient_body.contains("int t_g =") and
+            gradient_body.contains("int t_b =")
+        val bottom_channels_signed = gradient_body.contains("int b_a =") and
+            gradient_body.contains("int b_r =") and
+            gradient_body.contains("int b_g =") and
+            gradient_body.contains("int b_b =")
+        val no_unsigned_channel_locals = gradient_body.contains("unsigned int t_a") or
+            gradient_body.contains("unsigned int t_r") or
+            gradient_body.contains("unsigned int t_g") or
+            gradient_body.contains("unsigned int t_b") or
+            gradient_body.contains("unsigned int b_a") or
+            gradient_body.contains("unsigned int b_r") or
+            gradient_body.contains("unsigned int b_g") or
+            gradient_body.contains("unsigned int b_b")
+        expect(top_channels_signed).to_equal(true)  # oracle: all four top-row channel locals are signed int
+        expect(bottom_channels_signed).to_equal(true)  # oracle: all four bottom-row channel locals are signed int
+        expect(no_unsigned_channel_locals).to_equal(false)  # oracle: unsigned channel arithmetic wraps descending gradients — none may exist
+
+    it "rejects unsupported and current font batches before an uninitialized backend mutates":
+        # @req REQ-GPU-ROCM-012
+        # @capture(statistics): the draw_font_batch verdicts and backend state after rejection, retained for review
+        step("Offer unsupported and current font batches to an uninitialized backend")
+        var b = RocmBackend.create()
+        expect(b.draw_font_batch(0, 0, _rocm_font_batch(FONT_ATLAS_COMPOSITE_PROGRAM_VERSION + 1))).to_equal(0)  # oracle: a future program version is rejected with zero submissions
+        expect(b.draw_font_batch(0, 0, _rocm_font_batch(FONT_ATLAS_COMPOSITE_PROGRAM_VERSION))).to_equal(0)  # oracle: even the current version is refused before init
+        expect(b.initialized).to_equal(false)  # oracle: rejection must not initialize the backend as a side effect
+        expect(b.hip_module).to_equal(0)  # oracle: no module may be loaded by a rejected batch
+        expect(b.host_buf.len()).to_equal(0)  # oracle: no host buffer may be allocated by a rejected batch
+        expect(b.dirty).to_equal(false)  # oracle: a rejected batch must not mark the frame dirty
+
+    it "clear() on uninitialized backend does not crash":
+        # @req REQ-GPU-ROCM-013
+        # @capture(statistics): the initialized flag after an uninitialized clear, retained for review
+        step("Clear a full-surface color before init and read the backend state")
+        var b = RocmBackend.create()
+        b.clear(0xFF000000u32)
+        expect(b.initialized).to_equal(false)  # oracle: clear before init is a no-op, never a crash or surprise init
+
+    it "draw_rect() on uninitialized backend does not crash":
+        # @req REQ-GPU-ROCM-013
+        # @capture(statistics): the initialized flag after an uninitialized rect outline, retained for review
+        step("Stroke one rectangle before init and read the backend state")
+        var b = RocmBackend.create()
+        b.draw_rect(0, 0, 10, 10, 0xFFFFFFFFu32)
+        expect(b.initialized).to_equal(false)  # oracle: an uninitialized rect stroke is a safe no-op
+
+    it "draw_rect_filled() on uninitialized backend does not crash":
+        # @req REQ-GPU-ROCM-013
+        # @capture(statistics): the initialized flag after an uninitialized filled rect, retained for review
+        step("Fill one rectangle before init and read the backend state")
+        var b = RocmBackend.create()
+        b.draw_rect_filled(0, 0, 10, 10, 0xFF0000FFu32)
+        expect(b.initialized).to_equal(false)  # oracle: an uninitialized fill is a safe no-op
+
+    it "draw_line() on uninitialized backend does not crash":
+        # @req REQ-GPU-ROCM-013
+        # @capture(statistics): the initialized flag after an uninitialized line, retained for review
+        step("Stroke one line before init and read the backend state")
+        var b = RocmBackend.create()
+        b.draw_line(0, 0, 10, 10, 0xFF00FF00u32, 1)
+        expect(b.initialized).to_equal(false)  # oracle: an uninitialized line stroke is a safe no-op
+
+    it "draw_circle() on uninitialized backend does not crash":
+        # @req REQ-GPU-ROCM-013
+        # @capture(statistics): the initialized flag after an uninitialized circle outline, retained for review
+        step("Stroke one circle before init and read the backend state")
+        var b = RocmBackend.create()
+        b.draw_circle(5, 5, 4, 0xFFFF0000u32)
+        expect(b.initialized).to_equal(false)  # oracle: an uninitialized circle stroke is a safe no-op
+
+    it "draw_circle_filled() on uninitialized backend does not crash":
+        # @req REQ-GPU-ROCM-013
+        # @capture(statistics): the initialized flag after an uninitialized filled circle, retained for review
+        step("Fill one circle before init and read the backend state")
+        var b = RocmBackend.create()
+        b.draw_circle_filled(5, 5, 4, 0xFFFF0000u32)
+        expect(b.initialized).to_equal(false)  # oracle: an uninitialized circle fill is a safe no-op
+
+    it "draw_rounded_rect() on uninitialized backend does not crash":
+        # @req REQ-GPU-ROCM-013
+        # @capture(statistics): the initialized flag after an uninitialized rounded rect, retained for review
+        step("Stroke one rounded rectangle before init and read the backend state")
+        var b = RocmBackend.create()
+        b.draw_rounded_rect(0, 0, 20, 10, 3, 0xFF123456u32)
+        expect(b.initialized).to_equal(false)  # oracle: an uninitialized rounded-rect stroke is a safe no-op
+
+    it "draw_triangle_filled() on uninitialized backend does not crash":
+        # @req REQ-GPU-ROCM-013
+        # @capture(statistics): the initialized flag after an uninitialized filled triangle, retained for review
+        step("Fill one triangle before init and read the backend state")
+        var b = RocmBackend.create()
+        b.draw_triangle_filled(0, 0, 10, 0, 5, 10, 0xFF654321u32)
+        expect(b.initialized).to_equal(false)  # oracle: an uninitialized triangle fill is a safe no-op
+
+    it "draw_gradient_rect() on uninitialized backend does not crash":
+        # @req REQ-GPU-ROCM-013
+        # @capture(statistics): the initialized flag after an uninitialized gradient, retained for review
+        step("Draw one gradient rectangle before init and read the backend state")
+        var b = RocmBackend.create()
+        b.draw_gradient_rect(0, 0, 10, 10, 0xFF000000u32, 0xFFFFFFFFu32)
+        expect(b.initialized).to_equal(false)  # oracle: an uninitialized gradient draw is a safe no-op
+
+    it "draw_image() on uninitialized backend does not crash":
+        # @req REQ-GPU-ROCM-013
+        # @capture(statistics): the initialized flag after an uninitialized 2x2 blit, retained for review
+        step("Blit one 2x2 image before init and read the backend state")
+        var b = RocmBackend.create()
+        b.draw_image(0, 0, 2, 2, [0xFFFFFFFFu32, 0xFF000000u32, 0xFF000000u32, 0xFFFFFFFFu32])
+        expect(b.initialized).to_equal(false)  # oracle: an uninitialized image blit is a safe no-op
+
+    it "draw_text() on uninitialized backend does not crash":
+        # @req REQ-GPU-ROCM-013
+        # @capture(statistics): the initialized flag after an uninitialized text draw, retained for review
+        step("Draw one text run before init and read the backend state")
+        var b = RocmBackend.create()
+        b.draw_text(0, 0, "hi", 0xFFFFFFFFu32, 12)
+        expect(b.initialized).to_equal(false)  # oracle: an uninitialized text draw is a safe no-op
+
+describe "RocmBackend read_pixels and present guards (GPU-less)":
+
+    it "read_pixels() on uninitialized backend returns empty array":
+        # @req REQ-GPU-ROCM-014
+        # @capture(statistics): the pixel count read back before init, retained for review
+        step("Read pixels back before init and count them")
+        var b = RocmBackend.create()
+        val pixels = b.read_pixels()
+        expect(pixels.len()).to_equal(0)  # oracle: no framebuffer exists before init, so the readback is empty
+
+    it "present() on uninitialized backend does not crash":
+        # @req REQ-GPU-ROCM-014
+        # @capture(statistics): the initialized flag after an uninitialized present, retained for review
+        step("Present before init and read the backend state")
+        var b = RocmBackend.create()
+        b.present()
+        expect(b.initialized).to_equal(false)  # oracle: an uninitialized present is a safe no-op
+
+    it "width() returns 0 before init":
+        # @req REQ-GPU-ROCM-015
+        # @capture(statistics): the reported surface width before init, retained for review
+        step("Query the surface width before init")
+        var b = RocmBackend.create()
+        expect(b.width()).to_equal(0)  # oracle: without init there is no surface, so the width is zero
+
+    it "height() returns 0 before init":
+        # @req REQ-GPU-ROCM-015
+        # @capture(statistics): the reported surface height before init, retained for review
+        step("Query the surface height before init")
+        var b = RocmBackend.create()
+        expect(b.height()).to_equal(0)  # oracle: without init there is no surface, so the height is zero
+
+describe "RocmBackend probe error classification":
+
+    it "probe_rocm feature_gate distinguishes hip-toolchain-missing from rocm-device-unavailable":
+        # @req REQ-GPU-ROCM-016
+        # @capture(statistics): the feature gate this host's probe classifies into, retained for review
+        step("Run the standalone probe and check its gate is a known classification")
+        val probe = probe_rocm()
+        if probe.status != BackendStatus.Initialized:
+            val gate = probe.feature_gate
+            val known = (gate == "hip-toolchain-missing" or
+                         gate == "rocm-init-failed" or
+                         gate == "rocm-device-unavailable" or
+                         gate == "rocm-kernel-gap")
+            expect(known).to_equal(true)  # oracle: every non-initialized host must land in one of the four documented gates
+
+    it "probe_rocm sets has_compute false when no device":
+        # @req REQ-GPU-ROCM-017
+        # @capture(statistics): the capability triad reported for a toolchain-less host, retained for review
+        step("Run the probe on a toolchain-less host and read the capability triad")
+        val probe = probe_rocm()
+        if probe.feature_gate == "hip-toolchain-missing":
+            expect(probe.has_compute).to_equal(false)  # oracle: without the toolchain nothing can compile, so no compute
+            expect(probe.has_graphics).to_equal(false)  # oracle: and no graphics
+            expect(probe.has_present).to_equal(false)  # oracle: and no present path
+
+    it "after init() last_probe feature_gate matches probe_rocm on this host":
+        # @req REQ-GPU-ROCM-018
+        # @capture(statistics): the backend's gate against the standalone probe's gate, retained for review
+        step("Fail an init, then compare the backend gate with a standalone probe")
+        var b = RocmBackend.create()
+        b.init(64, 64)
+        val standalone = probe_rocm()
+        if standalone.status != BackendStatus.Initialized:
+            expect(b.last_probe.feature_gate).to_equal(standalone.feature_gate)  # oracle: init and the standalone probe must classify this host identically
+
+    it "shutdown() after failed init does not crash":
+        # @req REQ-GPU-ROCM-019
+        # @capture(statistics): the initialized flag after shutdown on a failed init, retained for review
+        step("Shut down a backend whose init failed and read the state")
+        var b = RocmBackend.create()
+        b.init(64, 64)
+        b.shutdown()
+        expect(b.initialized).to_equal(false)  # oracle: shutdown after a failed init stays safely uninitialized

@@ -1,0 +1,97 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+
+
+use std.spec.step
+
+extern fn rt_file_read_text(path: text) -> text
+
+fn mir_to_llvm_core_source() -> text:
+    rt_file_read_text("src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl") ?? ""
+
+fn driver_bootstrap_source() -> text:
+    rt_file_read_text("src/compiler/80.driver/driver_bootstrap.spl") ?? ""
+
+fn linker_native_source() -> text:
+    rt_file_read_text("src/compiler/70.backend/linker/_LinkerWrapper/native_linking.spl") ?? ""
+
+fn llvm_backend_tools_source() -> text:
+    rt_file_read_text("src/compiler/70.backend/backend/llvm_backend_tools.spl") ?? ""
+
+describe "bootstrap LLVM entry symbol source":
+    # @manual scenario evidence
+    it "uses plain function definitions for bootstrap objects":
+        # @req REQ-SSPEC-UNIT
+        step("uses plain function definitions for bootstrap objects")
+        val source = mir_to_llvm_core_source()
+
+        expect(source).to_contain("(rt_env_get(\"SIMPLE_BOOTSTRAP\") ?? \"\") == \"1\"")
+        expect(source).to_contain(
+            "if ir_handle >= 0 or placement_naked or placement_suffix != \"\" or placement_prefix != \"define\"")
+        val scalar_start = source.index_of(
+            "        else:\n            val param_str = params.join(\", \")")
+        val scalar_end = source.index_of(
+            "        if bootstrap_debug:\n            print \"[mir-to-llvm] function:started")
+        val scalar_opener = source.substring(scalar_start, scalar_end)
+        expect(scalar_opener).to_contain("val param_str = params.join(\", \")")
+        expect(scalar_opener).to_contain("var attrs = \" nounwind\"")
+        expect(scalar_opener).to_contain("if is_readonly and not placement_naked:")
+        expect(scalar_opener).to_contain("attrs = attrs + \" readonly\"")
+        expect(scalar_opener).to_contain("if is_small and not placement_naked:")
+        expect(scalar_opener).to_contain("attrs = attrs + \" alwaysinline\"")
+        expect(scalar_opener).to_contain("Some(id): dbg_suffix = \" !dbg !{id}\"")
+        expect(scalar_opener).to_contain(
+            "val opening = \"define {effective_ret_ty} @{fn_name}({param_str}){attrs}{dbg_suffix} {{\"")
+        val handle_pos = scalar_opener.index_of(
+            "val builder_handle = llvm_ir_builder_handle(self.builder)")
+        val push_pos = scalar_opener.index_of(
+            "llvm_ir_builder_push_line(opening, builder_handle)")
+        expect(handle_pos).to_be_less_than(push_pos)
+        expect(scalar_opener).not.to_contain("llvm_ir_builder_start_function_opt(")
+
+    it "tracks bootstrap function-local definitions":
+        # @req REQ-SSPEC-UNIT
+        step("tracks bootstrap function-local definitions")
+        val source = mir_to_llvm_core_source()
+
+        expect(source).to_contain("self.block_defined_locals = {}")
+        expect(source).to_contain("self.mark_local_defined(self.local_id_value(dest))")
+        expect(source).to_contain("bootstrap lacks phi insertion")
+        expect(source).to_contain("self.current_block_id == 0")
+
+    it "links bootstrap LLVM with runtime argv and non-pie objects":
+        # @req REQ-SSPEC-UNIT
+        step("links bootstrap LLVM with runtime argv and non-pie objects")
+        val source = mir_to_llvm_core_source()
+        val driver = driver_bootstrap_source()
+        val linker = linker_native_source()
+        val tools = llvm_backend_tools_source()
+
+        expect(source).to_contain("func_name == \"@get_args\"")
+        expect(source).to_contain("func_name = \"@rt_get_args\"")
+        expect(source).to_contain("bare_func_name == \"rt_get_args\"")
+        expect(driver).to_contain("pie: false")
+        expect(linker).to_contain("args.push(\"-no-pie\")")
+        expect(tools).to_contain("--relocation-model=pic --function-sections --data-sections")
+        expect(tools).to_contain("if llc_code != 0:")
+
+    it "remaps env_get to rt_env_get and keeps runtime declaration consistent":
+        # @req REQ-SSPEC-UNIT
+        step("remaps env_get to rt_env_get and keeps runtime declaration consistent")
+        val source = mir_to_llvm_core_source()
+
+        expect(source).to_contain("minimal Stage2 CLI entry")
+        expect(source).to_contain("SIMPLE_BOOTSTRAP_REAL_MAIN")
+        expect(source).to_contain("declare i32 @puts(ptr)")
+        expect(source).to_contain("declare ptr @rt_get_args()")
+        expect(source).to_contain("declare i64 @rt_array_len(ptr)")
+        expect(source).to_contain("declare i64 @rt_array_get(ptr, i64)")
+        expect(source).to_contain("declare i64 @rt_string_eq(i64, i64)")
+        expect(source).to_contain("%bootstrap_has_version_slot = icmp sgt i64 %bootstrap_argc, 1")
+        expect(source).to_contain("call i64 @rt_array_get(ptr %bootstrap_args, i64 1)")
+        expect(source).to_contain("--version")
+        expect(source).to_contain("simple-bootstrap 1.0.0-beta")
+        expect(source).to_contain("self.builder.emit_ret(\"i64\", \"0\")")
+        expect(source).to_contain("self.builder.emit_ret(\"i64\", \"1\")")

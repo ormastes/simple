@@ -1,0 +1,196 @@
+"""
+prp_wire_witness_check — THE PRP NON-VACUITY WITNESS (plan D11).
+
+The question this file exists to answer: does a command submitted OVER THE WIRE
+PATH move a real 4096-byte page, addressed by PRP, out of host memory?
+
+Every earlier payload test could pass with PRP ignored entirely, because the
+payload rode in a field of the command struct: hand the device the struct and
+it has the data whether or not it ever looked at an address. Section B closes
+that hole and cannot be passed that way.
+
+  THE DECISIVE STEP (section B)
+    1. host places page data in the DMA region and builds the SQE  (submit_prp)
+    2. *** the host CHANGES the bytes at the PRP address ***       (dma_poke_word)
+    3. only THEN is the doorbell rung                              (ring_sq_doorbell)
+    4. the device must have stored the NEW bytes, not the old ones
+
+  A device that read the payload out of the command struct — or out of a copy
+  taken at submit time — stores the OLD bytes and section B goes red. The only
+  implementation that passes is one that fetches from memory at doorbell time.
+
+MUTATION PROOF (recorded 2026-09-01, re-runnable): breaking the fetch in
+`nvme_mmio.sqe_fetch_pages` so it reads from address 0 instead of the PRP
+address turns this file RED at exactly the witness assertions in section B;
+a second mutation (making `prp_page_addr` always return PRP1, i.e. block 0 N
+times) turns section C red. Both restored green.
+
+Note on which assertions discriminate: under the address-0 mutation the two
+negative "the STALE word is NOWHERE" assertions still PASS — reading garbage
+is not reading the stale page. It is the POSITIVE assertions ("stored the NEW
+word") that catch it. The negatives are kept because they pin the other half
+of the claim, but they are not the load-bearing ones.
+
+Run from the REPO ROOT — `nvme_transport_config.spl` holds a cwd-relative SDN
+path (doc/08_tracking/bug/transport_profile_sdn_path_cwd_dependent_2026-09-01.md).
+"""
+
+use nvme_types.*
+use nvme_payload.*
+use nvme_mmio.*
+use nvme_host_driver.*
+use nvme_transport_config.*
+use nvme_admin_types.*
+
+# A page whose content is a FUNCTION OF THE BLOCK INDEX at four widely spaced
+# word positions — so "block 0 copied N times" and "only word 0 moved" are both
+# detectable failures.
+fn wp(base: i64, i: i64) -> PageData:
+    var p = page_zero()
+    p.words[0]   = base + i
+    p.words[1]   = base + 0x1000 + i * 7
+    p.words[255] = base + 0x2000 + i * 13
+    p.words[511] = base + 0x3000 + i * 29
+    p
+
+fn wpages(base: i64, n: i64) -> [PageData]:
+    var ps: [PageData] = []
+    var i: i64 = 0
+    while i < n:
+        # fresh binding per iteration: a reused var can alias `words` and make
+        # every page identical, which would corrupt this fixture toward passing.
+        val p: PageData = wp(base, i)
+        ps.push(p)
+        i = i + 1
+    ps
+
+fn expect_wp(got: PageData, base: i64, i: i64, label: text) -> i64:
+    var f: i64 = 0
+    f = f + expect_eq(page_word(got, 0),   base + i,               "{label}[{i}]: word 0")
+    f = f + expect_eq(page_word(got, 1),   base + 0x1000 + i * 7,  "{label}[{i}]: word 1")
+    f = f + expect_eq(page_word(got, 255), base + 0x2000 + i * 13, "{label}[{i}]: word 255")
+    f = f + expect_eq(page_word(got, 511), base + 0x3000 + i * 29, "{label}[{i}]: word 511 (last)")
+    f
+
+fn open_ready() -> HostNvme:
+    var h = host_nvme_open(BACKEND_EMU)
+    h.attach()
+    h.bringup()
+    h
+
+fn main():
+    var fail: i64 = 0
+
+    print "-- 0. the fixture is non-vacuous: the blocks really do differ --"
+    val ps: [PageData] = wpages(0x700, 4)
+    fail = fail + expect_eq(ps.len(), 4, "the fixture supplies 4 pages")
+    fail = fail + expect_eq(bool_to_int(page_eq(ps[0], ps[1])), 0, "block 0 and block 1 are DIFFERENT pages")
+    fail = fail + expect_eq(bool_to_int(page_eq(ps[2], ps[3])), 0, "adjacent middle blocks differ too")
+    fail = fail + expect_eq(bool_to_int(page_is_well_formed(ps[0])), 1, "a fixture page is a FULL {PAGE_WORDS}-word page")
+
+    print "-- A. the payload really is in MEMORY, and the SQE carries only ADDRESSES --"
+    var a = open_ready()
+    fail = fail + expect_eq(bool_to_int(a.controller_ready()), 1, "controller is ready")
+    fail = fail + expect_eq(bool_to_int(a.submit_prp(cmd_make(1, OP_WRITE, 10, 1, 0), wpages(0x100, 1))), 1, "a 1-block PRP write is accepted")
+    # The SQE that is now sitting in queue memory.
+    val sqe_base: i64 = a.sq_entry_addr(0)
+    fail = fail + expect_eq(bool_to_int(sqe_is_prp(a.mem, sqe_base)), 1, "the SQE in queue memory is flagged PRP-addressed")
+    val prp1: i64 = mmio_rd64(a.mem, sqe_base + SQE_OFF_PRP1)
+    fail = fail + expect_eq(prp1, a.dma_page_addr(0), "PRP1 holds the ADDRESS of the host page buffer")
+    fail = fail + expect_eq(bool_to_int(prp1 >= a.dma_base()), 1, "and that address is in the host DMA region, outside the queue window")
+    fail = fail + expect_eq(mmio_rd64(a.mem, sqe_base + SQE_OFF_PRP2), 0, "a 1-block transfer leaves PRP2 unused")
+    # The DATA is at that address, not in the SQE.
+    fail = fail + expect_eq(a.dma_peek_word(0, 511), 0x100 + 0x3000, "the page's LAST word is live in memory at the PRP address")
+    fail = fail + expect_eq(mmio_rd64(a.mem, sqe_base + 8), 0, "the 64-byte SQE itself carries no payload words")
+    a.ring_sq_doorbell()
+    val ac = a.poll_cq()
+    fail = fail + expect_eq(ac.status, SC_SUCCESS, "the PRP write completes")
+    fail = fail + expect_eq(a.serviced, 1, "the device fetched exactly 1 SQE")
+
+    print "-- B. *** THE WITNESS: change the data at the PRP address BEFORE the doorbell *** --"
+    # This is the assertion a struct-carried payload cannot pass.
+    var b = open_ready()
+    val stale: [PageData] = wpages(0xAA00, 1)
+    fail = fail + expect_eq(bool_to_int(b.submit_prp(cmd_make(2, OP_WRITE, 20, 1, 0), stale)), 1, "SQE built, pointing at the STALE page")
+    fail = fail + expect_eq(b.dma_peek_word(0, 0),   0xAA00,          "host memory holds the STALE word 0 ...")
+    fail = fail + expect_eq(b.dma_peek_word(0, 511), 0xAA00 + 0x3000, "... and the STALE last word")
+    fail = fail + expect_eq(b.serviced, 0, "and the device has NOT been notified yet")
+    # ---- mutate host memory. The SQE is untouched; only the bytes it points at change.
+    b.dma_poke_word(0, 0,   0xBB00)
+    b.dma_poke_word(0, 1,   0xBB11)
+    b.dma_poke_word(0, 255, 0xBB55)
+    b.dma_poke_word(0, 511, 0xBBFF)
+    fail = fail + expect_eq(mmio_rd64(b.mem, b.sq_entry_addr(0) + SQE_OFF_PRP1), b.dma_page_addr(0), "the SQE's PRP1 is unchanged by the mutation")
+    # ---- NOW notify the device.
+    b.ring_sq_doorbell()
+    val bc = b.poll_cq()
+    fail = fail + expect_eq(bc.status, SC_SUCCESS, "the write completes")
+    fail = fail + expect_eq(b.serviced, 1, "the device fetched the SQE")
+    # Read LBA 20 back over the same wire path and see which bytes landed.
+    val rb = b.exec_io_prp(cmd_make(3, OP_READ, 20, 1, 0), wpages(0, 0))
+    fail = fail + expect_eq(rb.status, SC_SUCCESS, "the read-back completes")
+    val got: PageData = cpl_page_at(rb, 0)
+    fail = fail + expect_eq(page_word(got, 0),   0xBB00, "WITNESS: the device stored the NEW word 0 (0xBB00), not the stale 0xAA00")
+    fail = fail + expect_eq(page_word(got, 1),   0xBB11, "WITNESS: the device stored the NEW word 1")
+    fail = fail + expect_eq(page_word(got, 255), 0xBB55, "WITNESS: the device stored the NEW word 255")
+    fail = fail + expect_eq(page_word(got, 511), 0xBBFF, "WITNESS: the device stored the NEW last word (0xBBFF)")
+    # The negative half, stated explicitly: NONE of the stale bytes survived.
+    fail = fail + expect_eq(bool_to_int(page_word(got, 0) == 0xAA00), 0, "WITNESS: the STALE word 0 is NOWHERE in the result")
+    fail = fail + expect_eq(bool_to_int(page_word(got, 511) == 0xAA00 + 0x3000), 0, "WITNESS: the STALE last word is NOWHERE in the result")
+
+    print "-- C. multi-block over the wire: 4 pages via a PRP LIST, distinct content each --"
+    var m = open_ready()
+    val N: i64 = 4
+    val mw = m.exec_io_prp(cmd_make(4, OP_WRITE, 100, N, 0), wpages(0x700, N))
+    fail = fail + expect_eq(mw.status, SC_SUCCESS, "the {N}-block PRP write completes")
+    # PRP2 must be a LIST address, and the list must name blocks 1..N-1.
+    val lb: i64 = m.sq_entry_addr(0)
+    val plist: i64 = mmio_rd64(m.mem, lb + SQE_OFF_PRP2)
+    fail = fail + expect_eq(plist, m.prp_list_addr(), "a >2-block transfer puts a PRP LIST address in PRP2")
+    fail = fail + expect_eq(mmio_rd64(m.mem, plist), m.dma_page_addr(1), "PRP list entry 0 addresses block 1")
+    fail = fail + expect_eq(mmio_rd64(m.mem, plist + 16), m.dma_page_addr(3), "PRP list entry 2 addresses block 3")
+    fail = fail + expect_eq(prp_page_addr(m.mem, m.dma_page_addr(0), plist, N, 3), m.dma_page_addr(3), "prp_page_addr resolves block 3 through the list")
+    # Each LBA read back INDIVIDUALLY: fails if block 0 was written N times.
+    var i: i64 = 0
+    while i < N:
+        val r1 = m.exec_io_prp(cmd_make(10 + i, OP_READ, 100 + i, 1, 0), wpages(0, 0))
+        fail = fail + expect_eq(r1.status, SC_SUCCESS, "single-block read-back of LBA {100 + i}")
+        fail = fail + expect_wp(cpl_page_at(r1, 0), 0x700, i, "per-LBA PRP read-back")
+        i = i + 1
+    # And one multi-block read that DMAs all N pages back into host memory.
+    val mr = m.exec_io_prp(cmd_make(20, OP_READ, 100, N, 0), wpages(0, 0))
+    fail = fail + expect_eq(mr.status, SC_SUCCESS, "the {N}-block PRP read completes")
+    fail = fail + expect_eq(cpl_blocks_transferred(mr), N, "WITNESS: the completion carries all {N} blocks")
+    i = 0
+    while i < N:
+        fail = fail + expect_wp(cpl_page_at(mr, i), 0x700, i, "multi-block PRP read")
+        # The device wrote them into HOST MEMORY, not just into the completion.
+        fail = fail + expect_eq(m.dma_peek_word(i, 511), 0x700 + 0x3000 + i * 29, "block {i}'s last word was DMA'd into host memory")
+        i = i + 1
+
+    print "-- D. MDTS: an over-MDTS PRP transfer is refused PRE-TRANSFER, not truncated --"
+    var d = open_ready()
+    val over: i64 = MDTS_BLOCKS + 1
+    val tail0: i64 = d.serviced
+    fail = fail + expect_eq(bool_to_int(d.submit_prp(cmd_make(30, OP_WRITE, 200, over, 0), wpages(0xC00, over))), 0, "a {over}-block PRP write is REFUSED at submit")
+    d.ring_sq_doorbell()
+    fail = fail + expect_eq(d.serviced, tail0, "WITNESS: the device fetched NOTHING (no SQE was written)")
+    # NOT TRUNCATED: if it had clipped to MDTS_BLOCKS, LBAs 200.. would hold data.
+    var j: i64 = 0
+    while j < MDTS_BLOCKS:
+        val rz = d.exec_io_prp(cmd_make(40 + j, OP_READ, 200 + j, 1, 0), wpages(0, 0))
+        fail = fail + expect_eq(page_word(cpl_page_at(rz, 0), 0), 0, "WITNESS: over-MDTS write moved NO data to LBA {200 + j}")
+        j = j + 1
+    # Exactly MDTS_BLOCKS is accepted, so the bound is the real one.
+    val okc = d.exec_io_prp(cmd_make(60, OP_WRITE, 300, MDTS_BLOCKS, 0), wpages(0xD00, MDTS_BLOCKS))
+    fail = fail + expect_eq(okc.status, SC_SUCCESS, "a transfer of exactly MDTS_BLOCKS is accepted")
+    val okr = d.exec_io_prp(cmd_make(61, OP_READ, 300, MDTS_BLOCKS, 0), wpages(0, 0))
+    fail = fail + expect_eq(cpl_blocks_transferred(okr), MDTS_BLOCKS, "and reads back all MDTS_BLOCKS blocks")
+    fail = fail + expect_wp(cpl_page_at(okr, MDTS_BLOCKS - 1), 0xD00, MDTS_BLOCKS - 1, "MDTS-sized PRP read, last block")
+
+    print ""
+    if fail == 0:
+        print "PRP WIRE WITNESS OK"
+    else:
+        print "PRP WIRE WITNESS FAILED: {fail}"
+    return ()

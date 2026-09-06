@@ -1,0 +1,186 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+. "$root/scripts/check/lib/bootstrap-stage3/authority.shs"
+. "$root/scripts/check/lib/bootstrap-stage3/command-snapshot.shs"
+
+scratch=$(mktemp -d "${TMPDIR:-/tmp}/stage3-descriptor-map.XXXXXX")
+trap 'rm -rf "$scratch"' EXIT HUP INT TERM
+
+printf '%s\n' 'schema=sentinel-schema' >"$scratch/manifest-value.env"
+bootstrap_stage3_key=outer-key-sentinel
+bootstrap_stage3_manifest=outer-manifest-sentinel
+[ "$(bootstrap_stage3_manifest_value schema \
+    "$scratch/manifest-value.env")" = sentinel-schema ] || {
+    echo 'manifest value direct lookup failed' >&2
+    exit 1
+}
+[ "$bootstrap_stage3_key" = outer-key-sentinel ] &&
+    [ "$bootstrap_stage3_manifest" = outer-manifest-sentinel ] || {
+    echo 'manifest value clobbered caller variables' >&2
+    exit 1
+}
+mkdir "$scratch/authority" "$scratch/display-parent"
+printf 'immutable authority\n' >"$scratch/authority/input"
+exec 7<"$scratch/authority"
+exec 8<"$scratch/authority/input"
+
+owner=$$
+owner_start=$(perl -e '
+    open(my $fh, "<", "/proc/$ARGV[0]/stat") or exit 1;
+    my $text = <$fh>; my $right = rindex($text, ")");
+    my @field = split / /, substr($text, $right + 2);
+    print "$field[19]\n";
+' "$owner")
+root_dev=$(perl -e '@s=stat($ARGV[0]); print "$s[0]\n"' "/proc/$owner/fd/7")
+root_ino=$(perl -e '@s=stat($ARGV[0]); print "$s[1]\n"' "/proc/$owner/fd/7")
+root_mode=$(perl -e '@s=stat($ARGV[0]); print "$s[2]\n"' "/proc/$owner/fd/7")
+input_dev=$(perl -e '@s=stat($ARGV[0]); print "$s[0]\n"' "/proc/$owner/fd/8")
+input_ino=$(perl -e '@s=stat($ARGV[0]); print "$s[1]\n"' "/proc/$owner/fd/8")
+input_mode=$(perl -e '@s=stat($ARGV[0]); print "$s[2]\n"' "/proc/$owner/fd/8")
+input_sha=$(bootstrap_stage3_hash_file "/proc/$owner/fd/8")
+roles='root bootstrap_script compiler_backfill'
+rows="$scratch/rows"
+{
+    echo "root_descriptor=/proc/$owner/fd/7"
+    echo "root_display_token=$scratch/display-parent/root"
+    echo "root_dev=$root_dev"
+    echo "root_ino=$root_ino"
+    echo "root_mode=$root_mode"
+    echo 'root_sha256=identity-only'
+    echo "bootstrap_script_descriptor=/proc/$owner/fd/8"
+    echo "bootstrap_script_display_token=$scratch/display-parent/input"
+    echo "bootstrap_script_dev=$input_dev"
+    echo "bootstrap_script_ino=$input_ino"
+    echo "bootstrap_script_mode=$input_mode"
+    echo "bootstrap_script_sha256=$input_sha"
+    echo 'compiler_backfill_descriptor=descriptor-absent'
+    echo "$scratch/display-parent/backfill" |
+        sed 's/^/compiler_backfill_display_token=/'
+    echo 'compiler_backfill_dev=absent'
+    echo 'compiler_backfill_ino=absent'
+    echo 'compiler_backfill_mode=absent'
+    echo 'compiler_backfill_sha256=absent'
+} >"$rows"
+vector=$(perl -MDigest::SHA -e '
+    use bytes;
+    my ($file, @roles) = @ARGV;
+    open(my $fh, "<", $file) or exit 1;
+    my %v; while (<$fh>) { chomp; /\A([^=]+)=(.*)\z/ or exit 1; $v{$1}=$2 }
+    my $bytes="";
+    for my $role (@roles) {
+        for my $item ($role, map {$v{"${role}_$_"}}
+                qw(descriptor display_token dev ino mode sha256)) {
+            $bytes .= pack("Q>", length($item)).$item;
+        }
+    }
+    print Digest::SHA::sha256_hex($bytes), "\n";
+' "$rows" $roles)
+map="$scratch/map.env"
+{
+    echo 'schema=simple-stage3-authority-descriptors-v2'
+    echo 'status=ready'
+    echo 'run_id=descriptor-map-test'
+    echo 'architecture=x86_64-unknown-linux-gnu'
+    echo "descriptor_owner_pid=$owner"
+    echo "descriptor_owner_start_ticks=$owner_start"
+    echo 'entry_count=3'
+    echo "map_vector_sha256=$vector"
+    sed -n '1,18p' "$rows"
+} >"$map"
+exec 9<"$map"
+map_descriptor="/proc/$owner/fd/9"
+map_sha=$(bootstrap_stage3_hash_file "$map_descriptor")
+
+bootstrap_stage3_validate_descriptor_map "$map_descriptor" "$map_sha" \
+    simple-stage3-authority-descriptors-v2 descriptor-map-test \
+    x86_64-unknown-linux-gnu "$roles"
+
+# Leaf and ancestor display replacements cannot redirect authority because the
+# validator never opens a display token.
+printf 'attacker\n' >"$scratch/display-parent/input"
+mv "$scratch/display-parent" "$scratch/display-parent.old"
+mkdir "$scratch/display-parent"
+printf 'new attacker\n' >"$scratch/display-parent/input"
+bootstrap_stage3_validate_descriptor_map "$map_descriptor" "$map_sha" \
+    simple-stage3-authority-descriptors-v2 descriptor-map-test \
+    x86_64-unknown-linux-gnu "$roles"
+
+# A consumer still binds the audit spelling exactly, without reopening it.
+[ "$(bootstrap_stage3_descriptor_map_value "$map_descriptor" \
+    bootstrap_script display_token)" = "$scratch/display-parent/input" ]
+if [ "$(bootstrap_stage3_descriptor_map_value "$map_descriptor" \
+    bootstrap_script display_token)" = "$scratch/display-parent/other" ]; then
+    echo 'FAIL: descriptor/display mismatch admitted' >&2
+    exit 1
+fi
+
+# A missing display proves validation has no hidden canonicalize/reopen path.
+rm -f "$scratch/display-parent/input"
+bootstrap_stage3_validate_descriptor_map "$map_descriptor" "$map_sha" \
+    simple-stage3-authority-descriptors-v2 descriptor-map-test \
+    x86_64-unknown-linux-gnu "$roles"
+
+# Tuple mutation remains fail closed even though the held descriptor is live.
+bad="$scratch/bad.env"
+sed "s/bootstrap_script_ino=$input_ino/bootstrap_script_ino=1/" "$map" >"$bad"
+exec 6<"$bad"
+if bootstrap_stage3_validate_descriptor_map "/proc/$owner/fd/6" \
+    "$(bootstrap_stage3_hash_file "/proc/$owner/fd/6")" \
+    simple-stage3-authority-descriptors-v2 descriptor-map-test \
+    x86_64-unknown-linux-gnu "$roles"; then
+    echo 'FAIL: mutated descriptor tuple admitted' >&2
+    exit 1
+fi
+
+reject_map() {
+    reject_name=$1
+    reject_file=$2
+    exec 6<"$reject_file"
+    if bootstrap_stage3_validate_descriptor_map "/proc/$owner/fd/6" \
+        "$(bootstrap_stage3_hash_file "/proc/$owner/fd/6")" \
+        simple-stage3-authority-descriptors-v2 descriptor-map-test \
+        x86_64-unknown-linux-gnu "$roles"; then
+        echo "FAIL: $reject_name admitted" >&2
+        exit 1
+    fi
+    exec 6<&-
+}
+
+if bootstrap_stage3_validate_descriptor_map "$map_descriptor" '' \
+    simple-stage3-authority-descriptors-v2 descriptor-map-test \
+    x86_64-unknown-linux-gnu "$roles"; then
+    echo 'FAIL: empty outer hash admitted' >&2; exit 1
+fi
+if bootstrap_stage3_validate_descriptor_map "$map" "$map_sha" \
+    simple-stage3-authority-descriptors-v2 descriptor-map-test \
+    x86_64-unknown-linux-gnu "$roles"; then
+    echo 'FAIL: non-proc map path admitted' >&2; exit 1
+fi
+for mutation in owner-pid owner-start vector order duplicate; do
+    mutated="$scratch/$mutation.env"
+    case "$mutation" in
+        owner-pid) sed "s/descriptor_owner_pid=$owner/descriptor_owner_pid=1/" "$map" >"$mutated" ;;
+        owner-start) sed "s/descriptor_owner_start_ticks=$owner_start/descriptor_owner_start_ticks=1/" "$map" >"$mutated" ;;
+        vector) sed 's/map_vector_sha256=./map_vector_sha256=0/' "$map" >"$mutated" ;;
+        order) sed 's/root_descriptor=/root_display_token=/' "$map" >"$mutated" ;;
+        duplicate) sed 's/bootstrap_script_descriptor=/root_descriptor=/' "$map" >"$mutated" ;;
+    esac
+    reject_map "$mutation mutation" "$mutated"
+done
+if bootstrap_stage3_descriptor_map_value "$map_descriptor" \
+    missing_role display_token >/dev/null 2>&1; then
+    echo 'FAIL: empty/missing display admitted' >&2; exit 1
+fi
+
+# The map remains unchanged but its retained regular-file content no longer
+# matches the map-bound digest.
+printf 'mutated authority\n' >"$scratch/authority/input"
+if bootstrap_stage3_validate_descriptor_map "$map_descriptor" "$map_sha" \
+    simple-stage3-authority-descriptors-v2 descriptor-map-test \
+    x86_64-unknown-linux-gnu "$roles"; then
+    echo 'FAIL: bound content mutation admitted' >&2; exit 1
+fi
+
+echo 'PASS: Stage3 descriptor map holds authority independently of displays'

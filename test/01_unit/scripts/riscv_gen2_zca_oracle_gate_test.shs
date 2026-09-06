@@ -1,0 +1,78 @@
+#!/bin/sh
+# Contract tests for the fail-closed exhaustive external-oracle gate.
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)
+gate="$root/scripts/check/check-riscv-gen2-zca-oracle.shs"
+fixture="$root/test/fixtures/hardware/riscv_gen2/zca_sail_oracle"
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/simple-zca-gate-test.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+
+cp -R "$fixture" "$tmp/absent"
+sed -i 's/^status=.*/status=absent/' "$tmp/absent/oracle.lock"
+if "$gate" "$tmp/absent" >"$tmp/absent.out" 2>&1; then
+    echo "FAIL: absent checked-in oracle fixture passed" >&2
+    exit 1
+fi
+grep -q 'truth is absent' "$tmp/absent.out"
+
+mkdir -p "$tmp/valid"
+awk 'BEGIN { for (i = 0; i < 65536; i++) printf "%04X\tnot-compressed\t--------\t4\tnot-compressed\n", i }' > "$tmp/valid/rv32-zca.tsv"
+cp "$tmp/valid/rv32-zca.tsv" "$tmp/valid/rv64-zca.tsv"
+generator_sha=$(sha256sum "$root/scripts/tool/generate-riscv-gen2-zca-oracle.shs" | awk '{print $1}')
+adapter_sha=$(sha256sum "$root/scripts/tool/build-riscv-gen2-zca-sail-classifier.shs" | awk '{print $1}')
+rv32_prelude_sha=$(sha256sum "$root/scripts/tool/riscv-gen2-zca-sail-classifier-prelude-rv32.sail" | awk '{print $1}')
+rv64_prelude_sha=$(sha256sum "$root/scripts/tool/riscv-gen2-zca-sail-classifier-prelude-rv64.sail" | awk '{print $1}')
+postlude_sha=$(sha256sum "$root/scripts/tool/riscv-gen2-zca-sail-classifier-postlude.sail" | awk '{print $1}')
+rv32_sha=$(sha256sum "$tmp/valid/rv32-zca.tsv" | awk '{print $1}')
+rv64_sha=$(sha256sum "$tmp/valid/rv64-zca.tsv" | awk '{print $1}')
+cat > "$tmp/valid/oracle.lock" <<EOF
+schema=simple-riscv-zca-oracle-v2
+status=generated
+qualification=false
+evidence_scope=classification-only
+canonical_expansion=false
+exhaustive_equivalence=false
+simple_classifier_comparison=not-run
+comparison_reason=canonical-simple-classifier-api-unavailable
+oracle_repository=https://github.com/riscv/sail-riscv.git
+oracle_revision=a33475aeb80090127433b5a8b30e717edaa19e71
+oracle_archive_sha256=665822b80f1f0ad2dd33709673a5fb92980ea051d9f977d50c70d587d2f0cdc8
+oracle_zca_source_sha256=b6dee98f5fa917dfcf37452f3f475eefd59215f949c21dda541c54f14a5de039
+adapter_sha256=$adapter_sha
+generator_sha256=$generator_sha
+rv32_prelude_sha256=$rv32_prelude_sha
+rv64_prelude_sha256=$rv64_prelude_sha
+postlude_sha256=$postlude_sha
+rv32_fixture_sha256=$rv32_sha
+rv64_fixture_sha256=$rv64_sha
+EOF
+
+"$gate" "$tmp/valid" > "$tmp/valid.out"
+grep -q '^PASS:' "$tmp/valid.out"
+
+cp -R "$tmp/valid" "$tmp/corrupt"
+sed -i '1s/^0000/0001/' "$tmp/corrupt/rv32-zca.tsv"
+if "$gate" "$tmp/corrupt" >"$tmp/corrupt.out" 2>&1; then
+    echo "FAIL: corrupt exhaustive fixture passed" >&2
+    exit 1
+fi
+grep -Eq 'SHA-256 mismatch|table validation failed' "$tmp/corrupt.out"
+
+cp -R "$tmp/valid" "$tmp/unpinned"
+sed -i 's/^oracle_revision=.*/oracle_revision=HEAD/' "$tmp/unpinned/oracle.lock"
+if "$gate" "$tmp/unpinned" >"$tmp/unpinned.out" 2>&1; then
+    echo "FAIL: unpinned oracle revision passed" >&2
+    exit 1
+fi
+grep -q 'revision is missing or unpinned' "$tmp/unpinned.out"
+
+cp -R "$tmp/valid" "$tmp/claim"
+sed -i 's/^qualification=false/qualification=true/' "$tmp/claim/oracle.lock"
+if "$gate" "$tmp/claim" >"$tmp/claim.out" 2>&1; then
+    echo "FAIL: fixture-level qualification claim passed" >&2
+    exit 1
+fi
+grep -q 'may never assert product qualification' "$tmp/claim.out"
+
+echo "PASS: Zca oracle gate rejects absent, corrupt, unpinned, and qualification-claiming fixtures"

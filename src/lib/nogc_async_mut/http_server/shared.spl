@@ -1,0 +1,137 @@
+"""
+# Shared HTTP Utilities
+
+Common HTTP request parsing, response serialization, and route matching
+logic used by both the full async server and the embedded server.
+
+Thin wrappers around the existing parser, response, and router modules
+so both server variants share a single implementation.
+
+## Usage
+
+```simple
+use std.http_server.shared.{parse_http_request, serialize_http_response, match_route, RouteMatch}
+
+# Parse raw HTTP data into HttpRequestData
+val req = parse_http_request(data)
+if req.?:
+    val request = req as HttpRequestData
+    # ...
+
+# Serialize a response
+val wire = serialize_http_response(200, "Hello", [("Content-Type", "text/plain")])
+
+# Match a route
+val result = match_route("GET", "/api/health", routes)
+match result:
+    RouteMatch.Found(idx): handle(idx)
+    RouteMatch.MethodNotAllowed: send_405()
+    RouteMatch.NotFound: send_404()
+```
+"""
+
+use std.http_server.parser.{HttpRequestParser}
+use std.http_server.response.{serialize_response, status_reason}
+use std.http_server.types.{HttpRequestData, HttpResponseData}
+
+# ============================================================================
+# Shared Request Parser
+# ============================================================================
+
+fn parse_http_request(data: text) -> HttpRequestData?:
+    """Parse a complete HTTP request from raw data.
+
+    Wraps the incremental HttpRequestParser for one-shot parsing.
+    Returns nil if the data is malformed or incomplete.
+
+    Args:
+        data: Raw HTTP request bytes as text
+
+    Returns:
+        Parsed HttpRequestData or nil
+    """
+    var parser = HttpRequestParser.new()
+    val result = parser.feed(data)
+    match result:
+        Ok(_):
+            if not parser.is_complete():
+                return nil
+            parser.to_request("")
+        Err(_):
+            return nil
+
+# ============================================================================
+# Shared Response Serializer
+# ============================================================================
+
+fn serialize_http_response(status: i64, body: text, headers: [(text, text)]) -> text:
+    """Serialize an HTTP/1.1 response to wire format.
+
+    Constructs an HttpResponseData from the arguments and delegates
+    to serialize_response for consistent Content-Length handling.
+
+    Args:
+        status: HTTP status code (e.g. 200, 404)
+        body: Response body text
+        headers: List of (name, value) header pairs
+
+    Returns:
+        Complete HTTP response as text
+    """
+    val reason = status_reason(status)
+    val resp = HttpResponseData(
+        status: status,
+        reason: reason,
+        headers: headers,
+        body: body,
+        body_bytes: [],
+        body_file: "",
+        body_offset: 0,
+        body_length: 0,
+        chunked: false
+    )
+    serialize_response(resp)
+
+# ============================================================================
+# Shared Route Matching
+# ============================================================================
+
+enum RouteMatch:
+    """Result of matching a request against a route table."""
+    Found(i64)
+    MethodNotAllowed
+    NotFound
+
+struct SimpleRoute:
+    """A route entry for simple method + path matching."""
+    method: text
+    path: text
+
+fn match_route(method: text, path: text, routes: [SimpleRoute]) -> RouteMatch:
+    """Match a request method and path against a list of routes.
+
+    Returns Found(index) if both method and path match,
+    MethodNotAllowed if the path matches but method does not,
+    NotFound if no path matches at all.
+
+    Args:
+        method: HTTP method (GET, POST, etc.)
+        path: Request path
+        routes: List of route entries to match against
+
+    Returns:
+        RouteMatch indicating the result
+    """
+    var path_matched = false
+    var idx = 0
+    for route in routes:
+        if route.path == path:
+            path_matched = true
+            if route.method == method:
+                return RouteMatch.Found(idx)
+        idx = idx + 1
+
+    if path_matched:
+        return RouteMatch.MethodNotAllowed
+
+    RouteMatch.NotFound

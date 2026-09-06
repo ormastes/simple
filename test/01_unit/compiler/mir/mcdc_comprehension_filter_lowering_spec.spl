@@ -1,0 +1,90 @@
+"""REQ-001 production MIR instrumentation for comprehension filters."""
+
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+
+fn lower_comprehension_source(policy: text, source: text, target: text) -> (text, [text]):
+    val path = "src/mcdc_comprehension_fixture.spl"
+    val parsed = parse_full_frontend(source, path, path, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(path)
+    val hir = hir_lowering.lower_module(parsed)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    mir_lowering.mcdc_policy = policy
+    mir_lowering.mcdc_source_digest = 707
+    val mir = mir_lowering.lower_module(hir)
+    for function in mir.functions.values():
+        if function.name == target or function.name.ends_with("." + target):
+            return (serialize_mir_function(function), mir_lowering.mcdc_manifest_semantic_ids)
+    ("", mir_lowering.mcdc_manifest_semantic_ids)
+
+fn lower_comprehension(policy: text) -> (text, [text]):
+    lower_comprehension_source(policy,
+        "fn selected(values: [i64], a: bool, b: bool) -> [i64]:\n    [for value in values if a and b: value]\n",
+        "selected")
+
+fn has_comprehension_id(ids: [text]) -> bool:
+    for id in ids:
+        if id.contains(":comprehension-filter:decision"): return true
+    false
+
+describe "MC/DC comprehension filter MIR lowering", tag: ["only-compiled"]:
+    it "erases all filter instrumentation in static-off mode":
+        val (mir, ids) = lower_comprehension("off")
+        expect(mir.contains("rt_mcdc_")).to_equal(false)
+        expect(has_comprehension_id(ids)).to_equal(false)
+        expect(mir).to_contain("comprehension_cond")
+
+    it "records one stable filter decision in static mode":
+        val (mir, ids) = lower_comprehension("static")
+        expect(mir).to_contain("rt_mcdc_record_compiled_vector_v1")
+        expect(has_comprehension_id(ids)).to_equal(true)
+        expect(mir).to_contain("logic_rhs")
+
+    it "uses the dormant patchpoint in dynamic mode":
+        val (mir, ids) = lower_comprehension("dynamic")
+        expect(mir).to_contain("rt_mcdc_dynamic_vector_patchpoint_v1")
+        expect(has_comprehension_id(ids)).to_equal(true)
+        expect(mir).to_contain("comprehension_accept")
+
+    it "allocates range counter state after lowering a non-constant bound":
+        val (mir, ids) = lower_comprehension_source("static",
+            "fn selected_range(limit: i64, enabled: bool) -> [i64]:\n    [for value in 0..limit if enabled: value]\n",
+            "selected_range")
+        expect(mir).to_contain("comprehension_cond")
+        expect(mir).to_contain("comprehension_inc")
+        expect(mir).to_contain("rt_mcdc_record_compiled_vector_v1")
+        expect(has_comprehension_id(ids)).to_equal(true)
+
+    it "rejects the HIR-only explicit-step form instead of adding hot-loop dispatch":
+        val path = "src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl"
+        if not file_exists(path):
+            fail("comprehension lowering source not found")
+            return
+        val lowering = file_read(path)
+        expect(lowering).to_contain("E-MIR-EXPR-ComprehensionRangeStep")
+        expect(lowering).to_contain("list comprehension with an explicit range step")
+        expect(lowering.contains("comprehension_direction")).to_equal(false)
+
+    it "restores a shadowed outer local after lowering the comprehension":
+        val (mir, _) = lower_comprehension_source("off",
+            "fn shadow(values: [i64]) -> i64:\n    val value = 41\n    val selected = [for value in values if value > 0: value]\n    value\n",
+            "shadow")
+        expect(mir).to_contain("41")
+        val hir_path = "src/compiler/20.hir/hir_lowering/_Expressions/expression_core.spl"
+        val mir_path = "src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl"
+        if not file_exists(hir_path) or not file_exists(mir_path):
+            fail("comprehension scope owner source not found")
+            return
+        val hir_lowering = file_read(hir_path)
+        val mir_lowering = file_read(mir_path)
+        expect(hir_lowering).to_contain("self.symbols.push_scope(ScopeKind.Block)")
+        expect(hir_lowering).to_contain("val hir_iter = self.lower_hir_expr(iter)")
+        expect(hir_lowering).to_contain("self.symbols.pop_scope()")
+        expect(mir_lowering).to_contain("val saved_local_map = self.local_map")
+        expect(mir_lowering).to_contain("self.local_map = saved_local_map")
+        expect(mir_lowering).to_contain("self.local_symbol_ids = saved_local_symbol_ids")
+        expect(mir_lowering).to_contain("self.local_symbol_values = saved_local_symbol_values")

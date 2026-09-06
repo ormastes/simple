@@ -1,0 +1,678 @@
+# FixedVec<T> — Compile-time fixed-lane SIMD vector
+#
+# C2 §1.2: FixedVec additional methods on top of the Vector trait.
+# C2 §2.1: lanes must be in {2,4,8,16,32,64}; else E_SIMD_BAD_LANES.
+# C2 §7:   Interpreter mode uses element-wise scalar loops (no MIR ops).
+#
+# Note: Simple does not yet parse `const N: usize` generics (see
+# src/compiler/00.common/simd_types.spl).  "Fixed-ness" is enforced as a
+# runtime invariant on the `lanes` field, not as a type-level parameter.
+#
+# Back-compat aliases (vec4f_splat etc.) live in aliases.spl.
+# Construction API: fixedvec_splat(), fixedvec_zero(), fixedvec_from_array(),
+# fixedvec_from_slice() — standalone fns because static dispatch on generic
+# classes is unsupported in interpreter mode.
+#
+# @tag:stdlib
+# @tag:simd
+
+use std.simd.vector.{Vector, SimdElementType, LaneIter}
+use std.simd.mask.{Mask}
+
+# ============================================================================
+# Helper: validate lanes at construction (C2 §2.1)
+# ============================================================================
+
+fn simd_check_lanes(n: i32):
+    # E_SIMD_BAD_LANES: lanes must be power-of-two in [2, 64]
+    if (n == 2 or n == 4 or n == 8 or n == 16 or n == 32 or n == 64):
+        pass_dn
+    else:
+        panic("E_SIMD_BAD_LANES: lanes={n} is not in {2,4,8,16,32,64}")
+
+# ============================================================================
+# FixedVec<T> — class body contains only instance methods (fn self)
+# ============================================================================
+
+class FixedVec<T: SimdElementType> with Vector:
+    """Compile-time fixed-lane SIMD vector.
+
+    Interpreter backing: a plain [T] slice of length `lanes`.
+    Backend lowering (MirSimdSplat etc.) added in M1+.
+
+    lanes invariant (C2 §2.1): must be in {2,4,8,16,32,64}.
+    Enforced at construction via simd_check_lanes; raises E_SIMD_BAD_LANES.
+
+    Note: Simple does not yet support `const N: usize` generics.
+    Construction: use fixedvec_splat(val, n) / fixedvec_from_array(arr).
+    """
+    elements: [T]
+    lanes: i32
+
+    # — Vector trait: lane count — (C2 §1.1)
+
+    fn lanes(self) -> usize:
+        self.lanes
+
+    fn len(self) -> usize:
+        self.lanes
+
+    # — Vector trait: lane access — (C2 §1.1)
+
+    fn lane(self, i: usize) -> T:
+        if i >= self.lanes:
+            panic("E_SIMD_LANE_OOB: lane index {i} >= {self.lanes}")
+        self.elements[i]
+
+    fn set_lane(self, i: usize, v: T) -> Self:
+        if i >= self.lanes:
+            panic("E_SIMD_LANE_OOB: lane index {i} >= {self.lanes}")
+        var new_elems: [T] = []
+        var j = 0
+        while j < self.lanes:
+            if j == i:
+                new_elems.push(v)
+            else:
+                new_elems.push(self.elements[j])
+            j = j + 1
+        FixedVec(elements: new_elems, lanes: self.lanes)
+
+    # — Vector trait: Arithmetic — (C2 §1.1)
+
+    fn add(self, rhs: Self) -> Self:
+        val n = self.lanes
+        var out: [T] = []
+        var i = 0
+        while i < n:
+            out.push(self.elements[i] + rhs.elements[i])
+            i = i + 1
+        FixedVec(elements: out, lanes: n)
+
+    fn sub(self, rhs: Self) -> Self:
+        val n = self.lanes
+        var out: [T] = []
+        var i = 0
+        while i < n:
+            out.push(self.elements[i] - rhs.elements[i])
+            i = i + 1
+        FixedVec(elements: out, lanes: n)
+
+    fn mul(self, rhs: Self) -> Self:
+        val n = self.lanes
+        var out: [T] = []
+        var i = 0
+        while i < n:
+            out.push(self.elements[i] * rhs.elements[i])
+            i = i + 1
+        FixedVec(elements: out, lanes: n)
+
+    fn div(self, rhs: Self) -> Self:
+        val n = self.lanes
+        var out: [T] = []
+        var i = 0
+        while i < n:
+            out.push(self.elements[i] / rhs.elements[i])
+            i = i + 1
+        FixedVec(elements: out, lanes: n)
+
+    fn neg(self) -> Self:
+        val n = self.lanes
+        var out: [T] = []
+        var i = 0
+        while i < n:
+            out.push(-self.elements[i])
+            i = i + 1
+        FixedVec(elements: out, lanes: n)
+
+    fn min(self, rhs: Self) -> Self:
+        val n = self.lanes
+        var out: [T] = []
+        var i = 0
+        while i < n:
+            val a = self.elements[i]
+            val b = rhs.elements[i]
+            if a < b:
+                out.push(a)
+            else:
+                out.push(b)
+            i = i + 1
+        FixedVec(elements: out, lanes: n)
+
+    fn max(self, rhs: Self) -> Self:
+        val n = self.lanes
+        var out: [T] = []
+        var i = 0
+        while i < n:
+            val a = self.elements[i]
+            val b = rhs.elements[i]
+            if a > b:
+                out.push(a)
+            else:
+                out.push(b)
+            i = i + 1
+        FixedVec(elements: out, lanes: n)
+
+    # — Vector trait: Float-only arithmetic — (C2 §1.1; E_SIMD_FLOAT_ONLY enforced by type checker)
+
+    fn fma(self, b: Self, c: Self) -> Self:
+        val n = self.lanes
+        var out: [T] = []
+        var i = 0
+        while i < n:
+            out.push(self.elements[i] * b.elements[i] + c.elements[i])
+            i = i + 1
+        FixedVec(elements: out, lanes: n)
+
+    fn fnmadd(self, b: Self, c: Self) -> Self:
+        val n = self.lanes
+        var out: [T] = []
+        var i = 0
+        while i < n:
+            out.push(-(self.elements[i] * b.elements[i]) + c.elements[i])
+            i = i + 1
+        FixedVec(elements: out, lanes: n)
+
+    fn abs(self) -> Self:
+        val n = self.lanes
+        var out: [T] = []
+        var i = 0
+        while i < n:
+            val v = self.elements[i]
+            val zero = v - v
+            if v < zero:
+                out.push(-v)
+            else:
+                out.push(v)
+            i = i + 1
+        FixedVec(elements: out, lanes: n)
+
+    fn recip(self) -> Self:
+        val n = self.lanes
+        var out: [T] = []
+        var i = 0
+        while i < n:
+            out.push(1 as T / self.elements[i])
+            i = i + 1
+        FixedVec(elements: out, lanes: n)
+
+    fn sqrt(self) -> Self:
+        val n = self.lanes
+        var out: [T] = []
+        var i = 0
+        while i < n:
+            out.push(rt_sqrt(self.elements[i]))
+            i = i + 1
+        FixedVec(elements: out, lanes: n)
+
+    fn recip_sqrt(self) -> Self:
+        val n = self.lanes
+        var out: [T] = []
+        var i = 0
+        while i < n:
+            out.push(1 as T / rt_sqrt(self.elements[i]))
+            i = i + 1
+        FixedVec(elements: out, lanes: n)
+
+    # — Vector trait: Integer-only bitwise — (C2 §1.1; E_SIMD_INT_ONLY enforced by type checker)
+
+    fn and(self, rhs: Self) -> Self:
+        val n = self.lanes
+        var out: [T] = []
+        var i = 0
+        while i < n:
+            out.push(self.elements[i] & rhs.elements[i])
+            i = i + 1
+        FixedVec(elements: out, lanes: n)
+
+    fn or(self, rhs: Self) -> Self:
+        val n = self.lanes
+        var out: [T] = []
+        var i = 0
+        while i < n:
+            out.push(self.elements[i] | rhs.elements[i])
+            i = i + 1
+        FixedVec(elements: out, lanes: n)
+
+    fn xor(self, rhs: Self) -> Self:
+        val n = self.lanes
+        var out: [T] = []
+        var i = 0
+        while i < n:
+            out.push(self.elements[i] ^ rhs.elements[i])
+            i = i + 1
+        FixedVec(elements: out, lanes: n)
+
+    fn andnot(self, rhs: Self) -> Self:
+        val n = self.lanes
+        var out: [T] = []
+        var i = 0
+        while i < n:
+            out.push((~self.elements[i]) & rhs.elements[i])
+            i = i + 1
+        FixedVec(elements: out, lanes: n)
+
+    fn shl(self, count: u32) -> Self:
+        val n = self.lanes
+        var out: [T] = []
+        var i = 0
+        while i < n:
+            out.push(self.elements[i] << count)
+            i = i + 1
+        FixedVec(elements: out, lanes: n)
+
+    fn shr_logical(self, count: u32) -> Self:
+        val n = self.lanes
+        var out: [T] = []
+        var i = 0
+        while i < n:
+            # True logical (zero-fill) shift on signed types: arithmetic-shift
+            # by 1 then mask the top bit, which zeroes the sign; further
+            # arithmetic shifts on the now-positive value are equivalent to
+            # logical.  count==0 skips all shifts (identity).
+            if count == 0:
+                out.push(self.elements[i])
+            else:
+                val shifted1 = self.elements[i] >> 1
+                val masked = shifted1 & 0x7FFFFFFF
+                out.push(masked >> (count - 1))
+            i = i + 1
+        FixedVec(elements: out, lanes: n)
+
+    fn shr_arith(self, count: u32) -> Self:
+        val n = self.lanes
+        var out: [T] = []
+        var i = 0
+        while i < n:
+            out.push(self.elements[i] >> count)
+            i = i + 1
+        FixedVec(elements: out, lanes: n)
+
+    # — Vector trait: Comparison → Mask — (C2 §1.1)
+
+    fn cmp_eq(self, rhs: Self) -> Mask<FixedVec<T>>:
+        val n = self.lanes
+        var bits: u64 = 0
+        var i = 0
+        while i < n:
+            if self.elements[i] == rhs.elements[i]:
+                bits = bits | (1 as u64 << (i as u64))
+            i = i + 1
+        Mask(bits: bits, lane_count: n)
+
+    fn cmp_ne(self, rhs: Self) -> Mask<FixedVec<T>>:
+        val n = self.lanes
+        var bits: u64 = 0
+        var i = 0
+        while i < n:
+            if self.elements[i] != rhs.elements[i]:
+                bits = bits | (1 as u64 << (i as u64))
+            i = i + 1
+        Mask(bits: bits, lane_count: n)
+
+    fn cmp_lt(self, rhs: Self) -> Mask<FixedVec<T>>:
+        val n = self.lanes
+        var bits: u64 = 0
+        var i = 0
+        while i < n:
+            if self.elements[i] < rhs.elements[i]:
+                bits = bits | (1 as u64 << (i as u64))
+            i = i + 1
+        Mask(bits: bits, lane_count: n)
+
+    fn cmp_le(self, rhs: Self) -> Mask<FixedVec<T>>:
+        val n = self.lanes
+        var bits: u64 = 0
+        var i = 0
+        while i < n:
+            if self.elements[i] <= rhs.elements[i]:
+                bits = bits | (1 as u64 << (i as u64))
+            i = i + 1
+        Mask(bits: bits, lane_count: n)
+
+    fn cmp_gt(self, rhs: Self) -> Mask<FixedVec<T>>:
+        val n = self.lanes
+        var bits: u64 = 0
+        var i = 0
+        while i < n:
+            if self.elements[i] > rhs.elements[i]:
+                bits = bits | (1 as u64 << (i as u64))
+            i = i + 1
+        Mask(bits: bits, lane_count: n)
+
+    fn cmp_ge(self, rhs: Self) -> Mask<FixedVec<T>>:
+        val n = self.lanes
+        var bits: u64 = 0
+        var i = 0
+        while i < n:
+            if self.elements[i] >= rhs.elements[i]:
+                bits = bits | (1 as u64 << (i as u64))
+            i = i + 1
+        Mask(bits: bits, lane_count: n)
+
+    # — Vector trait: Selection / blend — (C2 §1.1)
+
+    fn mask_select(mask: Mask<FixedVec<T>>, t: Self, f: Self) -> Self:
+        val n = t.lanes
+        var out: [T] = []
+        var i = 0
+        while i < n:
+            if mask.lane_active(i):
+                out.push(t.elements[i])
+            else:
+                out.push(f.elements[i])
+            i = i + 1
+        FixedVec(elements: out, lanes: n)
+
+    # — Vector trait: Reductions — (C2 §1.1)
+
+    fn reduce_sum(self) -> T:
+        var acc = self.elements[0]
+        var i = 1
+        while i < self.lanes:
+            acc = acc + self.elements[i]
+            i = i + 1
+        acc
+
+    fn reduce_min(self) -> T:
+        var acc = self.elements[0]
+        var i = 1
+        while i < self.lanes:
+            val v = self.elements[i]
+            if v < acc:
+                acc = v
+            i = i + 1
+        acc
+
+    fn reduce_max(self) -> T:
+        var acc = self.elements[0]
+        var i = 1
+        while i < self.lanes:
+            val v = self.elements[i]
+            if v > acc:
+                acc = v
+            i = i + 1
+        acc
+
+    fn reduce_and(self) -> T:
+        var acc = self.elements[0]
+        var i = 1
+        while i < self.lanes:
+            acc = acc & self.elements[i]
+            i = i + 1
+        acc
+
+    fn reduce_or(self) -> T:
+        var acc = self.elements[0]
+        var i = 1
+        while i < self.lanes:
+            acc = acc | self.elements[i]
+            i = i + 1
+        acc
+
+    # — Vector trait: Permutation / shuffle — (C2 §1.1)
+
+    fn shuffle(self, indices: Self) -> Self:
+        val n = self.lanes
+        var out: [T] = []
+        var i = 0
+        while i < n:
+            val idx = indices.elements[i]
+            if idx >= n:
+                panic("E_SIMD_LANE_OOB: shuffle index {idx} >= {n}")
+            out.push(self.elements[idx])
+            i = i + 1
+        FixedVec(elements: out, lanes: n)
+
+    fn permute(self, ctrl: Self) -> Self:
+        self.shuffle(ctrl)
+
+    fn broadcast_lane(self, lane: u32) -> Self:
+        val idx = lane
+        if idx >= self.lanes:
+            panic("E_SIMD_LANE_OOB: broadcast_lane {lane} >= {self.lanes}")
+        val v = self.elements[idx]
+        fixedvec_splat(v, self.lanes)
+
+    fn interleave_lo(self, rhs: Self) -> Self:
+        val n = self.lanes
+        val half = n / 2
+        var out: [T] = []
+        var i = 0
+        while i < half:
+            out.push(self.elements[i])
+            out.push(rhs.elements[i])
+            i = i + 1
+        FixedVec(elements: out, lanes: n)
+
+    fn interleave_hi(self, rhs: Self) -> Self:
+        val n = self.lanes
+        val half = n / 2
+        var out: [T] = []
+        var i = 0
+        while i < half:
+            out.push(self.elements[(half + i)])
+            out.push(rhs.elements[(half + i)])
+            i = i + 1
+        FixedVec(elements: out, lanes: n)
+
+    # — Vector trait: Memory — (C2 §1.1)
+    # Pointer ops require compiled mode; interpreter stubs panic.
+
+    fn load_unaligned(ptr: *T) -> Self:
+        panic("E_SIMD_COMPILE_ONLY: load_unaligned requires compiled mode")
+
+    fn store_unaligned(self, ptr: *mut T):
+        panic("E_SIMD_COMPILE_ONLY: store_unaligned requires compiled mode")
+
+    fn load_aligned(ptr: *T) -> Self:
+        panic("E_SIMD_COMPILE_ONLY: load_aligned requires compiled mode")
+
+    fn store_aligned(self, ptr: *mut T):
+        panic("E_SIMD_COMPILE_ONLY: store_aligned requires compiled mode")
+
+    fn gather(base: *T, indices: Self) -> Self:
+        panic("E_SIMD_COMPILE_ONLY: gather requires compiled mode")
+
+    fn scatter(self, base: *mut T, indices: Self):
+        panic("E_SIMD_COMPILE_ONLY: scatter requires compiled mode")
+
+    # — Vector trait: Conversion — (C2 §1.1)
+
+    fn from_array(arr: [T]) -> Self:
+        # no-self factory; delegates to module-level fixedvec_from_array
+        val n = arr.len() as i32
+        simd_check_lanes(n)
+        FixedVec(elements: arr, lanes: n)
+
+    fn to_array(self) -> [T]:
+        self.elements
+
+    # — Vector trait: Debug / iteration — (C2 §1.1)
+
+    fn fmt(self) -> text:
+        var s = "FixedVec["
+        var i = 0
+        while i < self.lanes:
+            if i > 0:
+                s = s + ", "
+            s = s + "{self.elements[i]}"
+            i = i + 1
+        s + "]"
+
+    fn to_string(self) -> text:
+        self.fmt()
+
+    fn iter(self) -> LaneIter<T>:
+        LaneIter.new(self.elements)
+
+    # — C2 §1.2 own instance methods —
+
+    fn cast<U: SimdElementType>(self) -> FixedVec<U>:
+        val n = self.lanes
+        var out: [U] = []
+        var i = 0
+        while i < n:
+            out.push(self.elements[i] as U)
+            i = i + 1
+        FixedVec(elements: out, lanes: n)
+
+    fn zip_lo(self, rhs: Self) -> Self:
+        self.interleave_lo(rhs)
+
+    fn zip_hi(self, rhs: Self) -> Self:
+        self.interleave_hi(rhs)
+
+    fn lane_count(self) -> i32:
+        self.lanes
+
+    fn preferred_lanes_for_target(self) -> i32:
+        self.lanes
+
+    fn to_slice_into(self, output: [T]):
+        if output.len() < self.lanes:
+            panic("E_SIMD_BAD_LANES: to_slice output buffer too small")
+        var i = 0
+        while i < self.lanes:
+            output[i] = self.elements[i]
+            i = i + 1
+
+# ============================================================================
+# Module-level constructor functions (C2 §1.2)
+# Static methods on generic classes don't dispatch correctly in interpreter;
+# these standalone functions are the public construction API.
+# ============================================================================
+
+fn fixedvec_splat<T: SimdElementType>(value: T, n: i32) -> FixedVec<T>:
+    """Create a FixedVec with all lanes set to value. n must be in {2,4,8,16,32,64}."""
+    simd_check_lanes(n)
+    var out: [T] = []
+    var i = 0
+    while i < n:
+        out.push(value)
+        i = i + 1
+    FixedVec(elements: out, lanes: n)
+
+fn fixedvec_zero<T: SimdElementType>(n: i32) -> FixedVec<T>:
+    """Create a zero-filled FixedVec of n lanes."""
+    simd_check_lanes(n)
+    var out: [T] = []
+    var i = 0
+    while i < n:
+        out.push(0 as T)
+        i = i + 1
+    FixedVec(elements: out, lanes: n)
+
+fn fixedvec_from_array<T: SimdElementType>(arr: [T]) -> FixedVec<T>:
+    """Create a FixedVec from an array. arr.len() must be in {2,4,8,16,32,64}."""
+    val n = arr.len() as i32
+    simd_check_lanes(n)
+    FixedVec(elements: arr, lanes: n)
+
+fn fixedvec_from_slice<T: SimdElementType>(s: [T], n: i32) -> FixedVec<T>:
+    """Create a FixedVec from first n elements of slice s."""
+    simd_check_lanes(n)
+    if s.len() < n:
+        panic("E_SIMD_BAD_LANES: from_slice requires >= {n} elements, got {s.len()}")
+    var out: [T] = []
+    var i = 0
+    while i < n:
+        out.push(s[i])
+        i = i + 1
+    FixedVec(elements: out, lanes: n)
+
+# ============================================================================
+# Per-width shr_logical helpers (I1 lane-width sweep)
+#
+# The generic FixedVec<T>.shr_logical uses mask 0x7FFFFFFF (i32 sign bit).
+# For i8/i16/i64 we need width-correct masks.  Standalone functions avoid
+# the generic method dispatch limitation in interpreter mode.
+#
+# Mask-trick (same as G1 fix for i32):
+#   1. Arithmetic-shift right by 1  → top bit becomes copy of sign in bit N-2
+#   2. AND with 0x7F/0x7FFF/0x7FFFFFFFFFFFFFFF → zero the (now sign-filled) top bit
+#   3. Arithmetic-shift right by (count-1) → remaining shifts are logical (positive input)
+#   count==0 is identity; count==1 collapses steps 1+3 to a single masked shift.
+# ============================================================================
+
+fn fixedvec_shr_logical_i8(v: FixedVec<i8>, count: u32) -> FixedVec<i8>:
+    """Logical (zero-fill) right shift for FixedVec<i8>. Mask: 0x7F."""
+    val n = v.lanes
+    var out: [i8] = []
+    var i = 0
+    while i < n:
+        if count == 0:
+            out.push(v.elements[i])
+        else:
+            val shifted1 = v.elements[i] >> 1
+            val masked = shifted1 & 0x7F
+            out.push(masked >> (count - 1))
+        i = i + 1
+    FixedVec(elements: out, lanes: n)
+
+fn fixedvec_shr_logical_i16(v: FixedVec<i16>, count: u32) -> FixedVec<i16>:
+    """Logical (zero-fill) right shift for FixedVec<i16>. Mask: 0x7FFF."""
+    val n = v.lanes
+    var out: [i16] = []
+    var i = 0
+    while i < n:
+        if count == 0:
+            out.push(v.elements[i])
+        else:
+            val shifted1 = v.elements[i] >> 1
+            val masked = shifted1 & 0x7FFF
+            out.push(masked >> (count - 1))
+        i = i + 1
+    FixedVec(elements: out, lanes: n)
+
+fn fixedvec_shr_logical_i64(v: FixedVec<i64>, count: u32) -> FixedVec<i64>:
+    """Logical (zero-fill) right shift for FixedVec<i64>. Mask: 0x7FFFFFFFFFFFFFFF."""
+    val n = v.lanes
+    var out: [i64] = []
+    var i = 0
+    while i < n:
+        if count == 0:
+            out.push(v.elements[i])
+        else:
+            val shifted1 = v.elements[i] >> 1
+            val masked = shifted1 & 0x7FFFFFFFFFFFFFFF
+            out.push(masked >> (count - 1))
+        i = i + 1
+    FixedVec(elements: out, lanes: n)
+
+# ============================================================================
+# Per-width shl helpers (I1 lane-width sweep)
+#
+# The generic FixedVec<T>.shl uses << on T directly (no sign concern — shl is
+# always fill-from-right with zeros in Simple).  These standalones expose the
+# operation for the new per-width spec without touching the generic class body.
+# ============================================================================
+
+fn fixedvec_shl_i8(v: FixedVec<i8>, count: u32) -> FixedVec<i8>:
+    """Left shift for FixedVec<i8>."""
+    val n = v.lanes
+    var out: [i8] = []
+    var i = 0
+    while i < n:
+        out.push(v.elements[i] << count)
+        i = i + 1
+    FixedVec(elements: out, lanes: n)
+
+fn fixedvec_shl_i16(v: FixedVec<i16>, count: u32) -> FixedVec<i16>:
+    """Left shift for FixedVec<i16>."""
+    val n = v.lanes
+    var out: [i16] = []
+    var i = 0
+    while i < n:
+        out.push(v.elements[i] << count)
+        i = i + 1
+    FixedVec(elements: out, lanes: n)
+
+fn fixedvec_shl_i64(v: FixedVec<i64>, count: u32) -> FixedVec<i64>:
+    """Left shift for FixedVec<i64>."""
+    val n = v.lanes
+    var out: [i64] = []
+    var i = 0
+    while i < n:
+        out.push(v.elements[i] << count)
+        i = i + 1
+    FixedVec(elements: out, lanes: n)

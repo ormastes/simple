@@ -1,0 +1,243 @@
+#!/bin/sh
+# check-core-bare-sanity.shs — fail-closed guard: `core.bare` must not be true
+# on a repository whose layout is provably NON-bare.
+#
+# WHY THIS EXISTS
+# ---------------
+# `core.bare = true` has been written into this repo's shared `.git/config`
+# repeatedly (>=3 times on 2026-08-17 alone), silently. While it is set:
+#   - every working-tree command dies with
+#     "fatal: this operation must be run in a work tree", despite an intact
+#     ~115,000-file working tree (this is NOT a tree wipe, and was misdiagnosed
+#     as one);
+#   - `git rev-parse --is-inside-work-tree` is false in EVERY worktree, so the
+#     content-dependent pre-push guards either refuse to run or, worse, resolve
+#     a DIFFERENT toplevel and report clean on a tree nobody is pushing.
+#
+# PROVEN MECHANISM (reproduced in a throwaway repo, git 2.43.0):
+#   `git init <somedir>` with an inherited GIT_DIR that ends in a slash
+#   ('<repo>/.git/') or in '/.' RE-INITIALISES the repo GIT_DIR names and,
+#   being unable to infer an adjacent work tree, writes core.bare = true.
+#   Matrix:
+#       GIT_DIR unset                 -> core.bare stays false
+#       GIT_DIR=<abs>/.git            -> core.bare stays false
+#       GIT_DIR=<abs>/.git/  (slash)  -> core.bare becomes TRUE
+#       GIT_DIR=<abs>/.git/.          -> core.bare becomes TRUE
+#   `git -C <dir>` does NOT override an inherited GIT_DIR, which is why fixture
+#   builders that look local are not.
+#
+# RULED OUT (also reproduced): `git worktree add` racing `git gc --auto` /
+# `git repack -ad` / `git worktree prune`. 40 concurrent rounds against a repo
+# carrying 200 stale worktree entries left core.bare = false every time.
+#
+# DETECTION RULE — repair/complain only on a PROVABLE contradiction, never on a
+# guess. A genuinely bare repository's config does not live in a directory
+# literally named `.git` that sits inside a populated working tree. So:
+#     common git dir basename == ".git"  AND  its parent holds a checkout
+#     AND core.bare == true              =>  FAIL
+# A real bare repo (config at `foo.git/` or at the repo root) does not match
+# this test and is reported as a legitimately-bare repo, never failed.
+#
+# USAGE
+#   sh scripts/check/check-core-bare-sanity.shs [--root DIR]
+#   sh scripts/check/check-core-bare-sanity.shs --selftest
+#   sh scripts/check/check-core-bare-sanity.shs --quiet     # exit code only
+#
+# SAFE TO CALL FROM OTHER GUARDS: it is read-only (it never writes any config),
+# takes no locks, walks no objects, and completes in milliseconds.
+#
+# VERDICT (always the LAST line of stdout):
+#   PASS  — <n> repository/repositories checked, ...        exit 0
+#   FAIL  — ...                                             exit 1
+#   ERROR — nothing was checked                             exit 2
+# A run that checked 0 repositories is ERROR, never a pass.
+
+set -u
+
+QUIET=0
+ROOT=""
+DO_SELFTEST=0
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --selftest) DO_SELFTEST=1 ;;
+        --quiet)    QUIET=1 ;;
+        --root)     shift; [ $# -gt 0 ] || { echo "ERROR — nothing was checked"; exit 2; }; ROOT="$1" ;;
+        --root=*)   ROOT="${1#--root=}" ;;
+        -h|--help)  sed -n '2,50p' "$0"; exit 0 ;;
+        *)          echo "unknown argument: $1" >&2
+                    echo "ERROR — nothing was checked"; exit 2 ;;
+    esac
+    shift
+done
+
+say() { [ "$QUIET" -eq 1 ] || echo "$@"; }
+
+# ---------------------------------------------------------------------------
+# core check. Echoes one of: ok-nonbare | ok-realbare | bad | unknown
+# ---------------------------------------------------------------------------
+classify_repo() {
+    cbs_dir=$1
+
+    cbs_common=$(git -C "$cbs_dir" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || cbs_common=""
+    [ -n "$cbs_common" ] || { echo "unknown"; return; }
+
+    # Read the effective value. Unset counts as false.
+    cbs_bare=$(git -C "$cbs_dir" config --get core.bare 2>/dev/null) || cbs_bare=""
+    [ -n "$cbs_bare" ] || cbs_bare=false
+
+    case "$cbs_common" in
+        */.git|*/.git/)
+            cbs_parent=${cbs_common%/}
+            cbs_parent=${cbs_parent%/.git}
+            if [ -d "$cbs_parent" ] && [ -e "$cbs_common/HEAD" ]; then
+                # Provably a non-bare layout.
+                if [ "$cbs_bare" = "true" ]; then echo "bad"; else echo "ok-nonbare"; fi
+                return
+            fi
+            ;;
+    esac
+
+    # Not a provably-non-bare layout: a genuinely bare repo, or something we
+    # cannot adjudicate. Either way it is not this guard's business to fail it.
+    echo "ok-realbare"
+}
+
+# ---------------------------------------------------------------------------
+# selftest — FATAL. Fixtures are built with every relocating GIT_* stripped, so
+# the selftest can never escape into the repo it is protecting (that escape is
+# literally the bug this guard exists for).
+# ---------------------------------------------------------------------------
+run_selftest() {
+    st_tmp=$(mktemp -d 2>/dev/null) || { echo "selftest: mktemp failed" >&2; return 1; }
+    st_fail=0
+    st_n=0
+
+    st_git() {
+        env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_OBJECT_DIRECTORY \
+            -u GIT_ALTERNATE_OBJECT_DIRECTORIES -u GIT_COMMON_DIR -u GIT_NAMESPACE \
+            -u GIT_CONFIG -u GIT_CONFIG_COUNT -u GIT_CEILING_DIRECTORIES \
+            git "$@"
+    }
+
+    st_expect() {
+        st_name=$1; st_dir=$2; st_want=$3
+        st_n=$((st_n + 1))
+        st_got=$(classify_repo "$st_dir")
+        if [ "$st_got" = "$st_want" ]; then
+            say "  selftest ok   : $st_name (=$st_got)"
+        else
+            echo "  selftest FAIL : $st_name — expected '$st_want', got '$st_got'" >&2
+            st_fail=1
+        fi
+    }
+
+    # 1. healthy non-bare repo with a checkout -> ok-nonbare
+    st_git init -q "$st_tmp/healthy"
+    ( cd "$st_tmp/healthy" && echo x > x && st_git add x >/dev/null 2>&1 \
+      && st_git -c user.email=s@l -c user.name=s commit -qm i >/dev/null 2>&1 )
+    st_expect "healthy non-bare" "$st_tmp/healthy" "ok-nonbare"
+
+    # 2. THE INCIDENT: same repo with core.bare = true -> MUST fail
+    cp -a "$st_tmp/healthy" "$st_tmp/poisoned"
+    st_git -C "$st_tmp/poisoned" config core.bare true
+    st_expect "core.bare=true on non-bare layout (MUST FAIL)" "$st_tmp/poisoned" "bad"
+
+    # 3. a genuinely bare repo -> must NOT be failed
+    st_git init -q --bare "$st_tmp/real.git"
+    st_expect "genuinely bare repo" "$st_tmp/real.git" "ok-realbare"
+
+    # 4. core.bare explicitly false -> ok
+    st_git -C "$st_tmp/poisoned" config core.bare false
+    st_expect "explicit core.bare=false" "$st_tmp/poisoned" "ok-nonbare"
+
+    # 5. not a repo at all -> unknown (caller must ERROR, never pass)
+    mkdir -p "$st_tmp/notarepo"
+    st_expect "non-repository directory" "$st_tmp/notarepo" "unknown"
+
+    # 6. live reproduction of the PROVEN writer: git init under a trailing-slash
+    #    GIT_DIR flips core.bare on the victim. Proves the fixture is real, and
+    #    proves the guard catches what that writer produces.
+    st_git init -q "$st_tmp/victim"
+    ( cd "$st_tmp/victim" && echo y > y && st_git add y >/dev/null 2>&1 \
+      && st_git -c user.email=s@l -c user.name=s commit -qm i >/dev/null 2>&1 )
+    st_before=$(classify_repo "$st_tmp/victim")
+    ( GIT_DIR="$st_tmp/victim/.git/"; export GIT_DIR; git init -q "$st_tmp/collateral" >/dev/null 2>&1 )
+    st_after=$(classify_repo "$st_tmp/victim")
+    st_n=$((st_n + 1))
+    if [ "$st_before" = "ok-nonbare" ] && [ "$st_after" = "bad" ]; then
+        say "  selftest ok   : trailing-slash GIT_DIR reproduction (ok-nonbare -> bad)"
+    else
+        # Not fatal on a git version that no longer has the defect — but say so
+        # loudly rather than silently claiming the reproduction still holds.
+        say "  selftest note : trailing-slash GIT_DIR did NOT flip core.bare on $(git --version) ('$st_before' -> '$st_after'); detection fixtures 1-5 still authoritative"
+    fi
+
+    rm -rf "$st_tmp"
+
+    if [ "$st_n" -eq 0 ]; then
+        echo "selftest: 0 fixtures ran" >&2
+        return 1
+    fi
+    [ "$st_fail" -eq 0 ] || return 1
+    say "selftest: $st_n fixture(s) passed"
+    return 0
+}
+
+if [ "$DO_SELFTEST" -eq 1 ]; then
+    if run_selftest; then
+        echo "PASS — selftest fixtures checked, guard behaves correctly"
+        exit 0
+    fi
+    echo "FAIL — selftest did not pass"
+    exit 1
+fi
+
+# selftest is fatal before every real scan.
+if ! run_selftest >/dev/null 2>&1; then
+    echo "guard selftest failed — refusing to report on real repositories" >&2
+    run_selftest >&2
+    echo "FAIL — guard selftest did not pass"
+    exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# real scan
+# ---------------------------------------------------------------------------
+[ -n "$ROOT" ] || ROOT=$(pwd)
+
+if [ ! -d "$ROOT" ]; then
+    echo "ERROR — nothing was checked"
+    exit 2
+fi
+
+verdict=$(classify_repo "$ROOT")
+common=$(git -C "$ROOT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || common="<unresolved>"
+
+case "$verdict" in
+    ok-nonbare)
+        echo "PASS — 1 repository checked, core.bare is false/unset on non-bare layout ($common)"
+        exit 0
+        ;;
+    ok-realbare)
+        echo "PASS — 1 repository checked, genuinely bare layout ($common), core.bare not applicable"
+        exit 0
+        ;;
+    bad)
+        echo "core.bare = true on a repository whose layout is provably NON-bare." >&2
+        echo "  git common dir : $common" >&2
+        echo "  working tree   : ${common%/.git}" >&2
+        echo "  every working-tree command and every content-dependent push guard" >&2
+        echo "  is misdirected while this holds." >&2
+        echo "  repair:  git -C ${common%/.git} config core.bare false" >&2
+        echo "  writer:  a 'git init' run with an inherited GIT_DIR ending in '/' or '/.'" >&2
+        echo "           (see doc/08_tracking/bug/core_bare_flip_recurring_2026-08-17.md)" >&2
+        echo "FAIL — 1 repository checked, core.bare=true on a non-bare layout ($common)"
+        exit 1
+        ;;
+    *)
+        echo "'$ROOT' is not inside a git repository, or the git dir could not be resolved." >&2
+        echo "ERROR — nothing was checked"
+        exit 2
+        ;;
+esac

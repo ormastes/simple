@@ -1,0 +1,363 @@
+# Property trees + retained paint chunks (lane O1), per
+# `doc/03_plan/ui/perf/render_perf_redesign_plan_2026-08-06.md` §4 passes 2-3:
+# "transform/clip/effect/scroll; window move = one transform-node update" and
+# "retained paint chunks grouped by owner/transform/clip/effect/surface/
+# resources/order; cache key = component_generation + paint/property/theme/
+# scale/viewport/capability generations."
+#
+# The target this module exists to make reachable: a transform-only window
+# move emits ONE transform-node update plus damage for the vacated and newly
+# occupied rectangles, and rebuilds ZERO paint chunks.
+#
+# That falls out of one decision, stated here because it is the thing a
+# future reader is most likely to undo by accident: the paint-chunk cache key
+# EXCLUDES the transform tree revision. A transform change moves a chunk; it
+# does not change which commands belong together. Clip, effect and scroll DO
+# regroup, so they are in the key. Folding the transform revision into the
+# key would look tidier and would silently restore per-move repainting.
+#
+# Interpreter-divergence constraint (see
+# `doc/08_tracking/bug/class_field_reference_semantics_diverge_2026-08-06.md`):
+# class-into-field assignment VALUE-COPIES under the tree-walk interpreter;
+# only fn parameters alias. Every array is therefore a TOP-LEVEL field, and
+# cross-object work (`paint_chunks_sync`) is a FREE FUNCTION taking both
+# holders as plain parameters rather than a method reaching through a stored
+# reference. Integer constants, not enums (open match-divergence defects).
+#
+# Backend-ignorant by contract: never imports or names Vulkan/Metal/D3D12/
+# AVX2/NEON/RVV.
+
+use common.ui.render_opt.revisions.{
+    RenderRevisions,
+    revisions_chunk_grouping_rev
+}
+
+# Property tree ids.
+val PT_TRANSFORM: i64 = 0
+val PT_CLIP: i64 = 1
+val PT_EFFECT: i64 = 2
+val PT_SCROLL: i64 = 3
+val PT_TREE_COUNT: i64 = 4
+
+# Verdict codes.
+val PT_OK: i64 = 0
+val PT_BAD_NODE: i64 = 1
+val PT_BAD_TREE: i64 = 2
+val PT_WRONG_TREE: i64 = 3
+
+class PropertyTrees:
+    # parallel node columns; `node_tree` says which of the four trees a node
+    # belongs to, `node_parent` is an index into these same columns (a root
+    # stores its own index).
+    node_tree: [u32]
+    node_parent: [u32]
+    # payload: translate for TRANSFORM, origin for CLIP/SCROLL, opacity in
+    # `node_x` for EFFECT.
+    node_x: [u32]
+    node_y: [u32]
+    # bounds, used to compute damage when a transform node moves
+    node_w: [u32]
+    node_h: [u32]
+    node_rev: [u32]
+    node_count: i64
+    # one monotonic counter per tree
+    tree_rev: [u32]
+    # damage rectangles accumulated this frame (parallel arrays)
+    damage_x: [u32]
+    damage_y: [u32]
+    damage_w: [u32]
+    damage_h: [u32]
+    damage_len: i64
+
+    static fn create() -> PropertyTrees:
+        var revs: [u32] = []
+        var t: i64 = 0
+        while t < PT_TREE_COUNT:
+            revs.push(0)
+            t = t + 1
+        PropertyTrees(
+            node_tree: [], node_parent: [], node_x: [], node_y: [],
+            node_w: [], node_h: [], node_rev: [], node_count: 0,
+            tree_rev: revs,
+            damage_x: [], damage_y: [], damage_w: [], damage_h: [],
+            damage_len: 0)
+
+    # Add a node to `tree`. `parent` < 0 makes it a root (stores its own
+    # index). Returns the node index, or -1 on a bad tree id.
+    me add_node(tree: i64, parent: i64, x: u32, y: u32, w: u32, h: u32) -> i64:
+        if tree < 0 or tree >= PT_TREE_COUNT:
+            return -1
+        val idx = self.node_count
+        self.node_tree.push(tree as u32)
+        if parent < 0 or parent >= idx:
+            self.node_parent.push(idx as u32)
+        else:
+            self.node_parent.push(parent as u32)
+        self.node_x.push(x)
+        self.node_y.push(y)
+        self.node_w.push(w)
+        self.node_h.push(h)
+        self.node_rev.push(0)
+        self.node_count = idx + 1
+        idx
+
+    me tree_of(node: i64) -> i64:
+        if node < 0 or node >= self.node_count:
+            return -1
+        self.node_tree[node] as i64
+
+    me revision(tree: i64) -> u32:
+        if tree < 0 or tree >= PT_TREE_COUNT:
+            return 0
+        self.tree_rev[tree]
+
+    me node_revision(node: i64) -> u32:
+        if node < 0 or node >= self.node_count:
+            return 0
+        self.node_rev[node]
+
+    # Move a TRANSFORM node. This is the whole point of the module: it
+    # updates ONE node, bumps ONE tree revision, and records damage for the
+    # vacated and the newly occupied rectangle. It does not touch paint
+    # state, and it does not walk descendants — descendant device positions
+    # are derived by composing parents at draw time, so a subtree move is
+    # still one node write.
+    me set_translate(node: i64, x: u32, y: u32) -> i64:
+        if node < 0 or node >= self.node_count:
+            return PT_BAD_NODE
+        if (self.node_tree[node] as i64) != PT_TRANSFORM:
+            return PT_WRONG_TREE
+        val old_x = self.node_x[node]
+        val old_y = self.node_y[node]
+        if old_x == x and old_y == y:
+            return PT_OK
+        val w = self.node_w[node]
+        val h = self.node_h[node]
+        self.push_damage(old_x, old_y, w, h)
+        self.node_x[node] = x
+        self.node_y[node] = y
+        self.push_damage(x, y, w, h)
+        self.node_rev[node] = self.node_rev[node] + 1
+        self.tree_rev[PT_TRANSFORM] = self.tree_rev[PT_TRANSFORM] + 1
+        PT_OK
+
+    # Change a CLIP/EFFECT/SCROLL node payload. Unlike a transform move,
+    # these DO force regrouping downstream, which is why the chunk key
+    # includes their revisions. Same no-op guard as `set_translate`: setting
+    # the payload to its current value must not bump the revision, or a
+    # caller that re-applies an unchanged clip/effect/scroll value every
+    # frame would force paint-chunk regrouping every frame too, defeating
+    # `paint_chunks_property_rev` the same way an unguarded transform-move
+    # would defeat the TRANSFORM row (see module doc).
+    me set_payload(node: i64, x: u32, y: u32) -> i64:
+        if node < 0 or node >= self.node_count:
+            return PT_BAD_NODE
+        val tree = self.node_tree[node] as i64
+        if tree == PT_TRANSFORM:
+            return PT_WRONG_TREE
+        if self.node_x[node] == x and self.node_y[node] == y:
+            return PT_OK
+        self.node_x[node] = x
+        self.node_y[node] = y
+        self.node_rev[node] = self.node_rev[node] + 1
+        self.tree_rev[tree] = self.tree_rev[tree] + 1
+        PT_OK
+
+    me push_damage(x: u32, y: u32, w: u32, h: u32):
+        if w == 0 or h == 0:
+            return
+        self.damage_x.push(x)
+        self.damage_y.push(y)
+        self.damage_w.push(w)
+        self.damage_h.push(h)
+        self.damage_len = self.damage_len + 1
+
+    me clear_damage():
+        self.damage_x = []
+        self.damage_y = []
+        self.damage_w = []
+        self.damage_h = []
+        self.damage_len = 0
+
+    # Total damaged area, so a gate can assert damage is not merely present
+    # but covers the expected pixels.
+    me damage_area() -> i64:
+        var a: i64 = 0
+        var i: i64 = 0
+        while i < self.damage_len:
+            a = a + (self.damage_w[i] as i64) * (self.damage_h[i] as i64)
+            i = i + 1
+        a
+
+class PaintChunks:
+    # grouping identity (plan §4 pass 3)
+    owner: [u32]
+    transform_node: [u32]
+    clip_node: [u32]
+    effect_node: [u32]
+    surface: [u32]
+    resource_set: [u32]
+    order: [u32]
+    # cache key as captured at the last build of each chunk
+    key_component_gen: [u32]
+    key_grouping_rev: [u32]
+    key_property_rev: [u32]
+    key_theme_rev: [u32]
+    key_scale_rev: [u32]
+    key_viewport_gen: [u32]
+    key_capability_gen: [u32]
+    # raster cost proxy for this chunk (e.g. bytes/pixels its content covers).
+    # Set by the caller at add_chunk time; used only to size the skip proof,
+    # never to decide staleness.
+    chunk_area: [i64]
+    chunk_count: i64
+    # in-band regression counter: total chunk rebuilds over this instance's
+    # life. The transform-move gate asserts this does not move at all.
+    rebuild_count: u32
+
+    static fn create() -> PaintChunks:
+        PaintChunks(
+            owner: [], transform_node: [], clip_node: [], effect_node: [],
+            surface: [], resource_set: [], order: [],
+            key_component_gen: [], key_grouping_rev: [], key_property_rev: [],
+            key_theme_rev: [], key_scale_rev: [], key_viewport_gen: [],
+            key_capability_gen: [], chunk_area: [],
+            chunk_count: 0, rebuild_count: 0)
+
+    me add_chunk(owner_id: u32, transform: i64, clip: i64, effect: i64,
+                 surface_id: u32, resources: u32, paint_order: u32) -> i64:
+        self.add_chunk_sized(owner_id, transform, clip, effect, surface_id,
+                              resources, paint_order, 0)
+
+    me add_chunk_sized(owner_id: u32, transform: i64, clip: i64, effect: i64,
+                 surface_id: u32, resources: u32, paint_order: u32,
+                 area: i64) -> i64:
+        val idx = self.chunk_count
+        self.owner.push(owner_id)
+        self.transform_node.push(transform as u32)
+        self.clip_node.push(clip as u32)
+        self.effect_node.push(effect as u32)
+        self.surface.push(surface_id)
+        self.resource_set.push(resources)
+        self.order.push(paint_order)
+        self.key_component_gen.push(0)
+        self.key_grouping_rev.push(0)
+        self.key_property_rev.push(0)
+        self.key_theme_rev.push(0)
+        self.key_scale_rev.push(0)
+        self.key_viewport_gen.push(0)
+        self.key_capability_gen.push(0)
+        self.chunk_area.push(area)
+        self.chunk_count = idx + 1
+        idx
+
+# The property-tree component of the chunk cache key.
+#
+# EXCLUDES `PT_TRANSFORM` on purpose. Adding it here is the single edit that
+# would restore per-window-move repainting, which is why it is a named
+# function rather than an inline sum.
+fn paint_chunks_property_rev(trees: PropertyTrees) -> u32:
+    trees.revision(PT_CLIP) + trees.revision(PT_EFFECT) + trees.revision(PT_SCROLL)
+
+# Re-key every chunk against current state, rebuilding only those whose key
+# actually changed. Returns the number of chunks rebuilt this call.
+#
+# Free function taking both holders as plain parameters: the aliasing pattern
+# proven to propagate under the tree-walk interpreter. Do not turn this into
+# a method that reaches through a stored reference to the other holder.
+fn paint_chunks_sync(chunks: PaintChunks, trees: PropertyTrees,
+                     revs: RenderRevisions, component_gen: u32,
+                     theme_rev: u32, scale_rev: u32, viewport_gen: u32,
+                     capability_gen: u32) -> i64:
+    val grouping = revisions_chunk_grouping_rev(revs)
+    val prop = paint_chunks_property_rev(trees)
+    var rebuilt: i64 = 0
+    var i: i64 = 0
+    while i < chunks.chunk_count:
+        var stale = false
+        if chunks.key_component_gen[i] != component_gen:
+            stale = true
+        if chunks.key_grouping_rev[i] != grouping:
+            stale = true
+        if chunks.key_property_rev[i] != prop:
+            stale = true
+        if chunks.key_theme_rev[i] != theme_rev:
+            stale = true
+        if chunks.key_scale_rev[i] != scale_rev:
+            stale = true
+        if chunks.key_viewport_gen[i] != viewport_gen:
+            stale = true
+        if chunks.key_capability_gen[i] != capability_gen:
+            stale = true
+        if stale:
+            chunks.key_component_gen[i] = component_gen
+            chunks.key_grouping_rev[i] = grouping
+            chunks.key_property_rev[i] = prop
+            chunks.key_theme_rev[i] = theme_rev
+            chunks.key_scale_rev[i] = scale_rev
+            chunks.key_viewport_gen[i] = viewport_gen
+            chunks.key_capability_gen[i] = capability_gen
+            chunks.rebuild_count = chunks.rebuild_count + 1
+            rebuilt = rebuilt + 1
+        i = i + 1
+    rebuilt
+
+# LANE O2: the retained-scene raster-skip gate. Consumes the same
+# cache-key vocabulary as `paint_chunks_sync` but, instead of only
+# resyncing keys, reports what a chunk-rasterizer would actually have
+# to do this frame: `rastered_count`/`bytes_painted` cover only chunks
+# whose key changed since the last call, `skipped_count` covers the
+# rest. This function owns no external pixel buffer and reads no
+# aliased state outside `chunks`/`trees`/`revs` — it is a pure
+# accounting layer a real rasterizer can gate on, not a rasterizer
+# itself, so it carries none of the live-alias hazard documented for
+# the compositor present path (see
+# `doc/03_plan/os/simpleos/screens/ws_d3_damage_present_investigation.md`
+# §9).
+class RasterStats:
+    rastered_count: i64
+    skipped_count: i64
+    bytes_painted: i64
+
+fn paint_chunks_raster(chunks: PaintChunks, trees: PropertyTrees,
+                       revs: RenderRevisions, component_gen: u32,
+                       theme_rev: u32, scale_rev: u32, viewport_gen: u32,
+                       capability_gen: u32) -> RasterStats:
+    val grouping = revisions_chunk_grouping_rev(revs)
+    val prop = paint_chunks_property_rev(trees)
+    var rastered: i64 = 0
+    var skipped: i64 = 0
+    var bytes_painted: i64 = 0
+    var i: i64 = 0
+    while i < chunks.chunk_count:
+        var stale = false
+        if chunks.key_component_gen[i] != component_gen:
+            stale = true
+        if chunks.key_grouping_rev[i] != grouping:
+            stale = true
+        if chunks.key_property_rev[i] != prop:
+            stale = true
+        if chunks.key_theme_rev[i] != theme_rev:
+            stale = true
+        if chunks.key_scale_rev[i] != scale_rev:
+            stale = true
+        if chunks.key_viewport_gen[i] != viewport_gen:
+            stale = true
+        if chunks.key_capability_gen[i] != capability_gen:
+            stale = true
+        if stale:
+            chunks.key_component_gen[i] = component_gen
+            chunks.key_grouping_rev[i] = grouping
+            chunks.key_property_rev[i] = prop
+            chunks.key_theme_rev[i] = theme_rev
+            chunks.key_scale_rev[i] = scale_rev
+            chunks.key_viewport_gen[i] = viewport_gen
+            chunks.key_capability_gen[i] = capability_gen
+            chunks.rebuild_count = chunks.rebuild_count + 1
+            rastered = rastered + 1
+            bytes_painted = bytes_painted + chunks.chunk_area[i]
+        else:
+            skipped = skipped + 1
+        i = i + 1
+    RasterStats(rastered_count: rastered, skipped_count: skipped,
+                bytes_painted: bytes_painted)

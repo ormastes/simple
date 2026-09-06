@@ -1,0 +1,718 @@
+# Simple App Startup Launch Metadata
+#
+# Pure policy helpers shared by CLI, build metadata checks, and SimpleOS launch
+# tests. Startup should read metadata once, then include arg parsing, mmap/cache,
+# and dynlib loading only when the launch mode and target need them.
+
+# load_policy axis (Phase A of startup_perf_plan_2026-08-17): public metadata
+# expresses loading INTENT; providers pick the mechanism (mmap/pread/read/...).
+# Val-constant dispatch by repo convention (no payload enums).
+#
+# Restored 2026-08-28 (bug native_len_nil_fix): the tournament merge commit
+# a8244005f9b deleted this whole load_policy block (constants, the three
+# helper functions below, and the LaunchMetadata/StartupLaunchPlan
+# `load_policy` fields) while leaving call sites in this file
+# (render_launch_metadata_sidecar, the strict-retained-metadata parser) that
+# still reference them, producing `error[E1002]: function
+# 'load_policy_implies_mmap_hint' not found` on any native-build. Restored
+# verbatim from fa625b2a83c (the commit that introduced it), which was the
+# last version where definitions and call sites agreed.
+pub val LOAD_POLICY_NORMAL: text = "normal"
+pub val LOAD_POLICY_INDEX_ONLY: text = "index_only"
+pub val LOAD_POLICY_MAP_SELECTED_SEGMENTS: text = "map_selected_segments"
+pub val LOAD_POLICY_READ_AHEAD_SELECTED: text = "read_ahead_selected"
+pub val LOAD_POLICY_DIRECT_EXEC: text = "direct_exec"
+pub val LOAD_POLICY_AUTO: text = "auto"
+# Fail-closed sentinel: an unknown declared policy parses to this, and any plan
+# built from it is unsupported. Never a valid input value.
+pub val LOAD_POLICY_INVALID: text = "invalid"
+
+pub fn load_policy_is_valid(value: text) -> bool:
+    value == LOAD_POLICY_NORMAL or
+        value == LOAD_POLICY_INDEX_ONLY or
+        value == LOAD_POLICY_MAP_SELECTED_SEGMENTS or
+        value == LOAD_POLICY_READ_AHEAD_SELECTED or
+        value == LOAD_POLICY_DIRECT_EXEC or
+        value == LOAD_POLICY_AUTO
+
+# Compat mapping, old -> new: legacy mmap_hint=true means "map the selected
+# segments"; false means plain reads.
+pub fn load_policy_from_mmap_hint(mmap_hint: bool) -> text:
+    if mmap_hint:
+        return LOAD_POLICY_MAP_SELECTED_SEGMENTS
+    LOAD_POLICY_NORMAL
+
+# Compat mapping, new -> old: derived mmap_hint for legacy readers. auto keeps
+# the legacy default-on behavior for cacheable kinds resolved at plan time; at
+# the metadata level auto maps to hint=true (matches the pre-change defaults).
+pub fn load_policy_implies_mmap_hint(load_policy: text) -> bool:
+    load_policy == LOAD_POLICY_MAP_SELECTED_SEGMENTS or
+        load_policy == LOAD_POLICY_READ_AHEAD_SELECTED or
+        load_policy == LOAD_POLICY_AUTO
+
+pub struct LaunchMetadata:
+    entry_kind: text
+    target_os: text
+    target_arch: text
+    target_abi: text
+    uses_arg_parser: bool
+    # DERIVED/COMPAT (do not remove): legacy mechanism flag kept so existing
+    # artifacts and readers keep working; load_policy is the source of truth.
+    mmap_hint: bool
+    # Empty means "not declared": effective policy is then derived from the
+    # legacy mmap_hint (see launch_metadata_effective_load_policy). Default
+    # keeps pre-load_policy constructor call sites compiling unchanged.
+    load_policy: text = ""
+    required_native_dynlibs: [text]
+    required_smf_dynlibs: [text]
+
+pub struct StartupLaunchPlan:
+    entry_path: text
+    entry_kind: text
+    target_os: text
+    target_arch: text
+    target_abi: text
+    program_args: [text]
+    include_arg_parser: bool
+    include_mmap_cache: bool
+    include_dynlib_loader: bool
+    load_native_dynlibs: [text]
+    load_smf_dynlibs: [text]
+    executable_source: text
+    load_policy: text = ""
+    # DERIVED/COMPAT (do not remove): "mmap"/"normal_read"/... strategy names a
+    # mechanism; kept for existing consumers, computed from load_policy.
+    cache_strategy: text
+    supported: bool
+    error: text
+
+pub fn startup_detect_launch_kind(path: text) -> text:
+    val lower = path.lower()
+    if lower.ends_with(".smf"):
+        return "smf"
+    if lower.ends_with(".spl") or lower.ends_with(".simple") or lower.ends_with(".sscript") or lower.ends_with(".shs"):
+        return "script"
+    "native"
+
+pub fn startup_normalize_program_args(entry_path: text, args: [text]) -> [text]:
+    if args.len() > 0 and args[0] == entry_path:
+        return args
+    var normalized: [text] = [entry_path]
+    for arg in args:
+        normalized.push(arg)
+    normalized
+
+pub fn launch_metadata_default(entry_kind: text) -> LaunchMetadata:
+    val cacheable = entry_kind == "script" or entry_kind == "smf"
+    LaunchMetadata(
+        entry_kind: entry_kind,
+        target_os: "",
+        target_arch: "",
+        target_abi: "",
+        uses_arg_parser: cacheable,
+        mmap_hint: cacheable,
+        load_policy: load_policy_from_mmap_hint(cacheable),
+        required_native_dynlibs: [],
+        required_smf_dynlibs: []
+    )
+
+pub fn launch_metadata_for_path(path: text) -> LaunchMetadata:
+    launch_metadata_default(startup_detect_launch_kind(path))
+
+pub fn launch_metadata_for_native_build(target_os: text, target_arch: text, target_abi: text) -> LaunchMetadata:
+    LaunchMetadata(
+        entry_kind: "native",
+        target_os: target_os,
+        target_arch: target_arch,
+        target_abi: target_abi,
+        uses_arg_parser: false,
+        mmap_hint: false,
+        load_policy: LOAD_POLICY_NORMAL,
+        required_native_dynlibs: [],
+        required_smf_dynlibs: []
+    )
+
+pub fn launch_metadata_for_simpleos_path(path: text) -> LaunchMetadata:
+    val kind = startup_detect_launch_kind(path)
+    val uses_args = kind == "script" or kind == "smf"
+    LaunchMetadata(
+        entry_kind: kind,
+        target_os: "simpleos",
+        target_arch: "multiarch",
+        target_abi: "simpleos",
+        uses_arg_parser: uses_args,
+        mmap_hint: true,
+        load_policy: LOAD_POLICY_MAP_SELECTED_SEGMENTS,
+        required_native_dynlibs: [],
+        required_smf_dynlibs: []
+    )
+
+pub fn launch_metadata_for_simpleos_baremetal_path(path: text) -> LaunchMetadata:
+    val metadata = launch_metadata_for_simpleos_path(path)
+    LaunchMetadata(
+        entry_kind: metadata.entry_kind,
+        target_os: metadata.target_os,
+        target_arch: metadata.target_arch,
+        target_abi: "simpleos-baremetal",
+        uses_arg_parser: metadata.uses_arg_parser,
+        mmap_hint: metadata.mmap_hint,
+        load_policy: metadata.load_policy,
+        required_native_dynlibs: metadata.required_native_dynlibs,
+        required_smf_dynlibs: metadata.required_smf_dynlibs
+    )
+
+fn _has_dynlibs(metadata: LaunchMetadata) -> bool:
+    metadata.required_native_dynlibs.len() > 0 or metadata.required_smf_dynlibs.len() > 0
+
+fn _executable_source(metadata: LaunchMetadata) -> text:
+    if metadata.target_os == "simpleos" and metadata.target_abi == "simpleos-baremetal":
+        return "baremetal_got"
+    "filesystem"
+
+# DERIVED/COMPAT: legacy mechanism-named strategy computed from load_policy.
+fn _cache_strategy(metadata: LaunchMetadata, host_mmap_supported: bool, simpleos_cache_supported: bool) -> text:
+    val policy = launch_metadata_effective_load_policy(metadata)
+    if policy != LOAD_POLICY_MAP_SELECTED_SEGMENTS and policy != LOAD_POLICY_READ_AHEAD_SELECTED:
+        return "normal_read"
+    if host_mmap_supported:
+        return "mmap"
+    if simpleos_cache_supported:
+        return "simpleos_vfs_prewarm"
+    "normal_read"
+
+pub fn startup_plan_from_metadata(entry_path: text, args: [text], metadata: LaunchMetadata, host_mmap_supported: bool, simpleos_cache_supported: bool) -> StartupLaunchPlan:
+    val effective_policy = launch_metadata_effective_load_policy(metadata)
+    # Fail closed: an unknown declared policy never launches.
+    if not load_policy_is_valid(effective_policy):
+        return StartupLaunchPlan(
+            entry_path: entry_path,
+            entry_kind: metadata.entry_kind,
+            target_os: metadata.target_os,
+            target_arch: metadata.target_arch,
+            target_abi: metadata.target_abi,
+            program_args: startup_normalize_program_args(entry_path, args),
+            include_arg_parser: false,
+            include_mmap_cache: false,
+            include_dynlib_loader: false,
+            load_native_dynlibs: [],
+            load_smf_dynlibs: [],
+            executable_source: _executable_source(metadata),
+            load_policy: LOAD_POLICY_INVALID,
+            cache_strategy: "normal_read",
+            supported: false,
+            error: "unknown load_policy value"
+        )
+    val strategy = _cache_strategy(metadata, host_mmap_supported, simpleos_cache_supported)
+    val use_cache = strategy != "normal_read"
+    val dynlibs_needed = _has_dynlibs(metadata)
+    StartupLaunchPlan(
+        entry_path: entry_path,
+        entry_kind: metadata.entry_kind,
+        target_os: metadata.target_os,
+        target_arch: metadata.target_arch,
+        target_abi: metadata.target_abi,
+        program_args: startup_normalize_program_args(entry_path, args),
+        include_arg_parser: metadata.uses_arg_parser,
+        include_mmap_cache: use_cache,
+        include_dynlib_loader: dynlibs_needed,
+        load_native_dynlibs: metadata.required_native_dynlibs,
+        load_smf_dynlibs: metadata.required_smf_dynlibs,
+        executable_source: _executable_source(metadata),
+        load_policy: effective_policy,
+        cache_strategy: strategy,
+        supported: true,
+        error: ""
+    )
+
+pub fn startup_feature_summary(plan: StartupLaunchPlan) -> text:
+    "kind=" + plan.entry_kind +
+        "|os=" + plan.target_os +
+        "|arg_parser=" + plan.include_arg_parser.to_text() +
+        "|cache=" + plan.cache_strategy +
+        "|dynlib=" + plan.include_dynlib_loader.to_text()
+
+pub fn launch_metadata_sidecar_path(artifact_path: text) -> text:
+    artifact_path + ".simple_launch.sdn"
+
+fn _metadata_bool_text(value: bool) -> text:
+    if value:
+        return "true"
+    "false"
+
+# Restored 2026-08-28 alongside the load_policy block above (see that comment)
+# -- render_launch_metadata_sidecar below calls this.
+pub fn launch_metadata_effective_load_policy(metadata: LaunchMetadata) -> text:
+    if metadata.load_policy == "" or metadata.load_policy == LOAD_POLICY_AUTO:
+        return load_policy_from_mmap_hint(metadata.mmap_hint)
+    metadata.load_policy
+
+pub fn render_launch_metadata_sidecar(metadata: LaunchMetadata) -> text:
+    var out = "simple_launch_metadata:\n"
+    out = out + "  entry_kind: \"" + metadata.entry_kind + "\"\n"
+    out = out + "  target_os: \"" + metadata.target_os + "\"\n"
+    out = out + "  target_arch: \"" + metadata.target_arch + "\"\n"
+    out = out + "  target_abi: \"" + metadata.target_abi + "\"\n"
+    out = out + "  uses_arg_parser: " + _metadata_bool_text(metadata.uses_arg_parser) + "\n"
+    # mmap_hint is DERIVED/COMPAT emission for pre-load_policy readers.
+    out = out + "  mmap_hint: " + _metadata_bool_text(load_policy_implies_mmap_hint(launch_metadata_effective_load_policy(metadata))) + "\n"
+    out = out + "  load_policy: \"" + launch_metadata_effective_load_policy(metadata) + "\"\n"
+    for dep in metadata.required_native_dynlibs:
+        out = out + "  native_dynlib: \"" + dep + "\"\n"
+    for dep in metadata.required_smf_dynlibs:
+        out = out + "  smf_dynlib: \"" + dep + "\"\n"
+    out
+
+fn _strip_metadata_quotes(value: text) -> text:
+    val trimmed = value.trim()
+    if trimmed.len() >= 2 and trimmed.starts_with("\"") and trimmed.ends_with("\""):
+        return trimmed.slice(1, trimmed.len() - 1)
+    trimmed
+
+fn _metadata_value(line: text, key: text) -> text:
+    val trimmed = line.trim()
+    val prefix = key + ":"
+    if not trimmed.starts_with(prefix):
+        return ""
+    _strip_metadata_quotes(trimmed.slice(prefix.len(), trimmed.len()))
+
+pub fn parse_launch_metadata_sidecar(content: text, fallback_kind: text) -> LaunchMetadata:
+    var metadata = launch_metadata_default(fallback_kind)
+    var native_dynlibs: [text] = []
+    var smf_dynlibs: [text] = []
+    var declared_policy = ""
+    var saw_policy = false
+    for line in content.split("\n"):
+        val entry_kind = _metadata_value(line, "entry_kind")
+        if entry_kind != "":
+            metadata.entry_kind = entry_kind
+        val target_os = _metadata_value(line, "target_os")
+        if target_os != "":
+            metadata.target_os = target_os
+        val target_arch = _metadata_value(line, "target_arch")
+        if target_arch != "":
+            metadata.target_arch = target_arch
+        val target_abi = _metadata_value(line, "target_abi")
+        if target_abi != "":
+            metadata.target_abi = target_abi
+        val uses_arg_parser = _metadata_value(line, "uses_arg_parser")
+        if uses_arg_parser != "":
+            metadata.uses_arg_parser = uses_arg_parser == "true"
+        val mmap_hint = _metadata_value(line, "mmap_hint")
+        if mmap_hint != "":
+            metadata.mmap_hint = mmap_hint == "true"
+        val load_policy = _metadata_value(line, "load_policy")
+        if load_policy != "":
+            declared_policy = load_policy
+            saw_policy = true
+        val native_dynlib = _metadata_value(line, "native_dynlib")
+        if native_dynlib != "":
+            native_dynlibs.push(native_dynlib)
+        val smf_dynlib = _metadata_value(line, "smf_dynlib")
+        if smf_dynlib != "":
+            smf_dynlibs.push(smf_dynlib)
+    metadata.required_native_dynlibs = native_dynlibs
+    metadata.required_smf_dynlibs = smf_dynlibs
+    if saw_policy:
+        if load_policy_is_valid(declared_policy):
+            # New axis wins; mmap_hint becomes DERIVED for legacy consumers.
+            metadata.load_policy = declared_policy
+            metadata.mmap_hint = load_policy_implies_mmap_hint(declared_policy)
+        else:
+            # Fail closed: unknown declared policy poisons the metadata so any
+            # plan built from it is unsupported.
+            metadata.load_policy = LOAD_POLICY_INVALID
+    else:
+        # COMPAT: pre-load_policy sidecar — derive policy from legacy mmap_hint.
+        metadata.load_policy = load_policy_from_mmap_hint(metadata.mmap_hint)
+    metadata
+
+fn _launch_meta_le_u32(bytes: [u8], offset: i64) -> i64:
+    (bytes[offset] as i64) |
+    ((bytes[offset + 1] as i64) << 8) |
+    ((bytes[offset + 2] as i64) << 16) |
+    ((bytes[offset + 3] as i64) << 24)
+
+fn _launch_meta_le_u64(bytes: [u8], offset: i64) -> i64:
+    (bytes[offset] as i64) |
+    ((bytes[offset + 1] as i64) << 8) |
+    ((bytes[offset + 2] as i64) << 16) |
+    ((bytes[offset + 3] as i64) << 24) |
+    ((bytes[offset + 4] as i64) << 32) |
+    ((bytes[offset + 5] as i64) << 40) |
+    ((bytes[offset + 6] as i64) << 48) |
+    ((bytes[offset + 7] as i64) << 56)
+
+fn _launch_meta_char_from_byte(b: u8) -> text:
+    if b == 10u8:
+        return "\n"
+    if b == 13u8:
+        return "\r"
+    if b == 9u8:
+        return "\t"
+    val ascii_table = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
+    val idx = (b as i64) - 32
+    if idx >= 0 and idx < ascii_table.len():
+        return ascii_table.slice(idx, idx + 1)
+    "?"
+
+fn _launch_meta_bytes_to_text(bytes: [u8], offset: i64, size: i64) -> text:
+    var parts: [text] = []
+    var i: i64 = 0
+    while i < size:
+        parts.push(_launch_meta_char_from_byte(bytes[offset + i]))
+        i = i + 1
+    parts.join("")
+
+# The compatibility sidecar reader above intentionally remains permissive so
+# existing sidecars keep their historical behaviour.  Retained artifact bytes
+# cross a trust boundary, however, so they use this separate canonical parser:
+# do not silently turn a malformed present payload into default policy.
+struct StrictRetainedLaunchPayload:
+    ok: bool
+    metadata: LaunchMetadata
+    reason: text
+
+fn _strict_retained_metadata_text(value: text) -> [text]:
+    var invalid: [text] = []
+    if value.len() < 2 or not value.starts_with("\"") or not value.ends_with("\""):
+        return invalid
+    # The renderer emits scalar quoted strings, not a second escaping grammar.
+    # Refuse embedded quotes rather than accepting a different wire language.
+    val inner = value.slice(1, value.len() - 1)
+    if inner.contains("\""):
+        return invalid
+    [inner]
+
+fn _strict_retained_metadata_bool(value: text) -> [i64]:
+    if value == "true":
+        return [1]
+    if value == "false":
+        return [0]
+    []
+
+fn _strict_retained_payload(content: text, fallback_kind: text) -> StrictRetainedLaunchPayload:
+    val fallback = launch_metadata_default(fallback_kind)
+    val lines = content.split("\n")
+    if lines.len() == 0 or lines[0] != "simple_launch_metadata:":
+        return StrictRetainedLaunchPayload(ok: false, metadata: fallback,
+            reason: "launch_metadata_root_invalid")
+
+    var metadata = fallback
+    var native_dynlibs: [text] = []
+    var smf_dynlibs: [text] = []
+    var saw_entry_kind = false
+    var saw_target_os = false
+    var saw_target_arch = false
+    var saw_target_abi = false
+    var saw_uses_arg_parser = false
+    var saw_mmap_hint = false
+    var saw_policy = false
+    var declared_policy = ""
+    var declared_mmap_hint = false
+    var line_index: i64 = 1
+    while line_index < lines.len():
+        val line = lines[line_index]
+        # A final newline produces one empty split item. Empty interior lines,
+        # comments, tabs, and extra indentation are not canonical metadata.
+        if line == "" and line_index == lines.len() - 1:
+            line_index = line_index + 1
+            continue
+        if not line.starts_with("  ") or line.starts_with("   "):
+            return StrictRetainedLaunchPayload(ok: false, metadata: fallback,
+                reason: "launch_metadata_structure_invalid")
+        val body = line.slice(2, line.len())
+        val colon = body.index_of(":")
+        if colon <= 0 or colon + 2 > body.len() or body.slice(colon, colon + 2) != ": ":
+            return StrictRetainedLaunchPayload(ok: false, metadata: fallback,
+                reason: "launch_metadata_structure_invalid")
+        val key = body.slice(0, colon)
+        val value = body.slice(colon + 2, body.len())
+        if key == "entry_kind":
+            val parsed = _strict_retained_metadata_text(value)
+            if saw_entry_kind or parsed.len() != 1 or
+                    (parsed[0] != "native" and parsed[0] != "script" and parsed[0] != "smf"):
+                return StrictRetainedLaunchPayload(ok: false, metadata: fallback,
+                    reason: "launch_metadata_entry_kind_invalid")
+            metadata.entry_kind = parsed[0]
+            saw_entry_kind = true
+        else if key == "target_os":
+            val parsed = _strict_retained_metadata_text(value)
+            if saw_target_os or parsed.len() != 1:
+                return StrictRetainedLaunchPayload(ok: false, metadata: fallback,
+                    reason: "launch_metadata_target_os_invalid")
+            metadata.target_os = parsed[0]
+            saw_target_os = true
+        else if key == "target_arch":
+            val parsed = _strict_retained_metadata_text(value)
+            if saw_target_arch or parsed.len() != 1:
+                return StrictRetainedLaunchPayload(ok: false, metadata: fallback,
+                    reason: "launch_metadata_target_arch_invalid")
+            metadata.target_arch = parsed[0]
+            saw_target_arch = true
+        else if key == "target_abi":
+            val parsed = _strict_retained_metadata_text(value)
+            if saw_target_abi or parsed.len() != 1:
+                return StrictRetainedLaunchPayload(ok: false, metadata: fallback,
+                    reason: "launch_metadata_target_abi_invalid")
+            metadata.target_abi = parsed[0]
+            saw_target_abi = true
+        else if key == "uses_arg_parser":
+            val parsed = _strict_retained_metadata_bool(value)
+            if saw_uses_arg_parser or parsed.len() != 1:
+                return StrictRetainedLaunchPayload(ok: false, metadata: fallback,
+                    reason: "launch_metadata_uses_arg_parser_invalid")
+            metadata.uses_arg_parser = parsed[0] == 1
+            saw_uses_arg_parser = true
+        else if key == "mmap_hint":
+            val parsed = _strict_retained_metadata_bool(value)
+            if saw_mmap_hint or parsed.len() != 1:
+                return StrictRetainedLaunchPayload(ok: false, metadata: fallback,
+                    reason: "launch_metadata_mmap_hint_invalid")
+            declared_mmap_hint = parsed[0] == 1
+            metadata.mmap_hint = declared_mmap_hint
+            saw_mmap_hint = true
+        else if key == "load_policy":
+            val parsed = _strict_retained_metadata_text(value)
+            if saw_policy or parsed.len() != 1 or not load_policy_is_valid(parsed[0]):
+                return StrictRetainedLaunchPayload(ok: false, metadata: fallback,
+                    reason: "launch_metadata_policy_invalid")
+            declared_policy = parsed[0]
+            saw_policy = true
+        else if key == "native_dynlib":
+            val parsed = _strict_retained_metadata_text(value)
+            if parsed.len() != 1 or parsed[0] == "":
+                return StrictRetainedLaunchPayload(ok: false, metadata: fallback,
+                    reason: "launch_metadata_native_dynlib_invalid")
+            native_dynlibs.push(parsed[0])
+        else if key == "smf_dynlib":
+            val parsed = _strict_retained_metadata_text(value)
+            if parsed.len() != 1 or parsed[0] == "":
+                return StrictRetainedLaunchPayload(ok: false, metadata: fallback,
+                    reason: "launch_metadata_smf_dynlib_invalid")
+            smf_dynlibs.push(parsed[0])
+        else:
+            return StrictRetainedLaunchPayload(ok: false, metadata: fallback,
+                reason: "launch_metadata_key_unknown")
+        line_index = line_index + 1
+
+    if not saw_entry_kind or not saw_target_os or not saw_target_arch or
+            not saw_target_abi or not saw_uses_arg_parser or not saw_mmap_hint:
+        return StrictRetainedLaunchPayload(ok: false, metadata: fallback,
+            reason: "launch_metadata_required_field_missing")
+    if saw_policy:
+        # load_policy is authoritative and mmap_hint is its emitted legacy
+        # projection. Contradictory axes are not a valid retained artifact.
+        if load_policy_implies_mmap_hint(declared_policy) != declared_mmap_hint:
+            return StrictRetainedLaunchPayload(ok: false, metadata: fallback,
+                reason: "launch_metadata_policy_mmap_conflict")
+        metadata.load_policy = declared_policy
+    else:
+        # This is the one retained compatibility case: older canonical payloads
+        # lacked load_policy, so derive it exactly as the sidecar parser does.
+        metadata.load_policy = load_policy_from_mmap_hint(metadata.mmap_hint)
+    metadata.required_native_dynlibs = native_dynlibs
+    metadata.required_smf_dynlibs = smf_dynlibs
+    StrictRetainedLaunchPayload(ok: true, metadata: metadata,
+        reason: "launch_metadata_retained")
+
+# Strict retained-byte projection used by production startup. Unlike the
+# compatibility parser below, this record distinguishes an absent optional
+# section from a malformed present section so callers never invent policy.
+pub struct RetainedSmfLaunchMetadataV1:
+    present: bool
+    ok: bool
+    metadata: LaunchMetadata
+    reason: text
+
+pub fn retained_smf_launch_metadata_v1(bytes: [u8], fallback_kind: text) -> RetainedSmfLaunchMetadataV1:
+    val fallback = launch_metadata_default(fallback_kind)
+    if bytes.len() < 128:
+        return RetainedSmfLaunchMetadataV1(
+            present: false, ok: false, metadata: fallback,
+            reason: "smf_header_missing")
+
+    val header = bytes.len() - 128
+    if bytes[header] != 83 or bytes[header + 1] != 77 or bytes[header + 2] != 70 or bytes[header + 3] != 0:
+        return RetainedSmfLaunchMetadataV1(
+            present: false, ok: false, metadata: fallback,
+            reason: "smf_magic_invalid")
+    # A v1.1 trailer is canonical for retained startup metadata. If a leading
+    # magic is present too, two otherwise-valid readers could choose different
+    # headers, so fail closed instead of guessing which representation wins.
+    if header > 0 and bytes[0] == 83 and bytes[1] == 77 and bytes[2] == 70 and bytes[3] == 0:
+        return RetainedSmfLaunchMetadataV1(
+            present: true, ok: false, metadata: fallback,
+            reason: "smf_header_ambiguous")
+    if bytes[header + 4] != 1 or bytes[header + 5] != 1:
+        return RetainedSmfLaunchMetadataV1(
+            present: false, ok: false, metadata: fallback,
+            reason: "smf_version_unsupported")
+
+    # Raw table/section offsets are payload-relative in v1.1.  Keep the
+    # conversion explicit so a wrapper stub cannot shift one table while the
+    # section payload is checked against another coordinate system.
+    val stub_size = _launch_meta_le_u32(bytes, header + 52)
+    val data_offset = _launch_meta_le_u32(bytes, header + 56)
+    if stub_size < 0 or data_offset < 0 or stub_size != data_offset or data_offset > header:
+        return RetainedSmfLaunchMetadataV1(
+            present: false, ok: false, metadata: fallback,
+            reason: "smf_data_offset_invalid")
+    val section_count = _launch_meta_le_u32(bytes, header + 16)
+    val section_table_raw = _launch_meta_le_u64(bytes, header + 20)
+    val symbol_table_raw = _launch_meta_le_u64(bytes, header + 28)
+    val symbol_count = _launch_meta_le_u32(bytes, header + 36)
+    val section_entry_size = 64
+    if section_count <= 0:
+        return RetainedSmfLaunchMetadataV1(
+            present: false, ok: true, metadata: fallback,
+            reason: "launch_metadata_absent")
+
+    # Bound every table before scanning. This rejects integer-wrap encodings,
+    # keeps the table in the admitted payload (not the trailer), and verifies
+    # the canonical sections -> symbols order.
+    if section_table_raw < 0 or section_table_raw > header - data_offset:
+        return RetainedSmfLaunchMetadataV1(
+            present: false, ok: false, metadata: fallback,
+            reason: "launch_metadata_section_table_invalid")
+    val section_table = data_offset + section_table_raw
+    val available_entries = (header - section_table) / section_entry_size
+    if section_count > available_entries:
+        return RetainedSmfLaunchMetadataV1(
+            present: false, ok: false, metadata: fallback,
+            reason: "launch_metadata_section_count_invalid")
+    val section_table_end = section_table + section_count * section_entry_size
+    if symbol_table_raw < 0 or symbol_table_raw > header - data_offset:
+        return RetainedSmfLaunchMetadataV1(
+            present: false, ok: false, metadata: fallback,
+            reason: "launch_metadata_symbol_table_invalid")
+    val symbol_table = data_offset + symbol_table_raw
+    val symbol_entry_size = 56
+    if symbol_table < section_table_end or symbol_count > (header - symbol_table) / symbol_entry_size:
+        return RetainedSmfLaunchMetadataV1(
+            present: false, ok: false, metadata: fallback,
+            reason: "launch_metadata_symbol_table_overlap")
+
+    var found = false
+    var payload_offset = 0
+    var payload_size = 0
+    var section_starts: [i64] = []
+    var section_ends: [i64] = []
+    var i: i64 = 0
+    while i < section_count:
+        val entry = section_table + (i * section_entry_size)
+        val raw_offset = _launch_meta_le_u64(bytes, entry + 8)
+        val size = _launch_meta_le_u64(bytes, entry + 16)
+        # The writer's on-disk alignment field is u32 at byte 32. Validate
+        # its declared geometry; existing writer layouts intentionally retain
+        # compact, unpadded payloads, so do not invent a stronger offset-mod-A
+        # rule here until that producer changes in the same format revision.
+        val alignment = _launch_meta_le_u32(bytes, entry + 32)
+        if alignment <= 0 or (alignment & (alignment - 1)) != 0:
+            return RetainedSmfLaunchMetadataV1(
+                present: true, ok: false, metadata: fallback,
+                reason: "launch_metadata_section_alignment_invalid")
+        if raw_offset < 0 or size < 0 or raw_offset > header - data_offset:
+            return RetainedSmfLaunchMetadataV1(
+                present: true, ok: false, metadata: fallback,
+                reason: "launch_metadata_payload_invalid")
+        val absolute_offset = data_offset + raw_offset
+        if absolute_offset < data_offset or absolute_offset > section_table or
+                size > section_table - absolute_offset:
+            return RetainedSmfLaunchMetadataV1(
+                present: true, ok: false, metadata: fallback,
+                reason: "launch_metadata_payload_invalid")
+        if size > 0:
+            var previous: i64 = 0
+            while previous < section_starts.len():
+                if absolute_offset < section_ends[previous] and
+                        section_starts[previous] < absolute_offset + size:
+                    return RetainedSmfLaunchMetadataV1(
+                        present: true, ok: false, metadata: fallback,
+                        reason: "launch_metadata_section_overlap")
+                previous = previous + 1
+            section_starts.push(absolute_offset)
+            section_ends.push(absolute_offset + size)
+        if (bytes[entry] as i64) == 15:
+            if found:
+                return RetainedSmfLaunchMetadataV1(
+                    present: true, ok: false, metadata: fallback,
+                    reason: "launch_metadata_section_duplicate")
+            found = true
+            if size <= 0:
+                return RetainedSmfLaunchMetadataV1(
+                    present: true, ok: false, metadata: fallback,
+                    reason: "launch_metadata_payload_invalid")
+            payload_offset = absolute_offset
+            payload_size = size
+        i = i + 1
+    if not found:
+        return RetainedSmfLaunchMetadataV1(
+            present: false, ok: true, metadata: fallback,
+            reason: "launch_metadata_absent")
+    val strict_payload = _strict_retained_payload(
+        _launch_meta_bytes_to_text(bytes, payload_offset, payload_size), fallback_kind)
+    if not strict_payload.ok:
+        return RetainedSmfLaunchMetadataV1(
+            present: true, ok: false, metadata: fallback,
+            reason: strict_payload.reason)
+    RetainedSmfLaunchMetadataV1(
+        present: true, ok: true, metadata: strict_payload.metadata,
+        reason: "launch_metadata_retained")
+
+pub fn parse_launch_metadata_from_smf_bytes(bytes: [u8], fallback_kind: text) -> LaunchMetadata:
+    val retained = retained_smf_launch_metadata_v1(bytes, fallback_kind)
+    if retained.present and retained.ok:
+        return retained.metadata
+    launch_metadata_default(fallback_kind)
+
+pub fn native_launch_metadata_trailer_magic() -> [u8]:
+    # "SIMPLE_LAUNCH_V1" = 16 bytes.
+    [83, 73, 77, 80, 76, 69, 95, 76, 65, 85, 78, 67, 72, 95, 86, 49]
+
+fn _launch_meta_u64_byte(value: i64, shift: i64) -> u8:
+    val shifted: i64 = value >> shift
+    val masked: i64 = shifted & 0xFF
+    masked.to_u8()
+
+pub fn render_native_launch_metadata_trailer(metadata: LaunchMetadata) -> [u8]:
+    val payload: [u8] = render_launch_metadata_sidecar(metadata).bytes()
+    val payload_len: i64 = payload.len()
+    var out: [u8] = []
+    out = out.concat(payload)
+    out = out.concat([
+        _launch_meta_u64_byte(payload_len, 0),
+        _launch_meta_u64_byte(payload_len, 8),
+        _launch_meta_u64_byte(payload_len, 16),
+        _launch_meta_u64_byte(payload_len, 24),
+        _launch_meta_u64_byte(payload_len, 32),
+        _launch_meta_u64_byte(payload_len, 40),
+        _launch_meta_u64_byte(payload_len, 48),
+        _launch_meta_u64_byte(payload_len, 56)
+    ])
+    out = out.concat(native_launch_metadata_trailer_magic())
+    out
+
+pub fn has_native_launch_metadata_trailer(bytes: [u8]) -> bool:
+    val magic = native_launch_metadata_trailer_magic()
+    val trailer_size = magic.len() + 8
+    if bytes.len() < trailer_size:
+        return false
+    val magic_offset = bytes.len() - magic.len()
+    var i: i64 = 0
+    while i < magic.len():
+        if bytes[magic_offset + i] != magic[i]:
+            return false
+        i = i + 1
+    true
+
+pub fn parse_launch_metadata_from_native_bytes(bytes: [u8], fallback_kind: text) -> LaunchMetadata:
+    if not has_native_launch_metadata_trailer(bytes):
+        return launch_metadata_default(fallback_kind)
+    val magic = native_launch_metadata_trailer_magic()
+    val size_offset = bytes.len() - magic.len() - 8
+    val payload_size = _launch_meta_le_u64(bytes, size_offset)
+    if payload_size < 0 or payload_size > size_offset:
+        return launch_metadata_default(fallback_kind)
+    val payload_offset = size_offset - payload_size
+    val content = _launch_meta_bytes_to_text(bytes, payload_offset, payload_size)
+    parse_launch_metadata_sidecar(content, fallback_kind)

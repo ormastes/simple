@@ -1,0 +1,145 @@
+#!/bin/sh
+# Focused proof for Metal provider admission, raw dispatch, and core-owned
+# RuntimeValue conversion. Does not require macOS or a GPU.
+set -eu
+
+ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+TMP_BASE="${TMPDIR:-/tmp}"
+TMP="$(mktemp -d "$TMP_BASE/simple-metal-provider-registry.XXXXXX")"
+cleanup() {
+    case "$TMP" in
+        "$TMP_BASE"/simple-metal-provider-registry.*) rm -rf "$TMP" ;;
+        *) exit 2 ;;
+    esac
+}
+trap cleanup EXIT HUP INT TERM
+
+cat >"$TMP/provider.c" <<'EOF'
+#include <stdint.h>
+#include <string.h>
+#ifndef PROVIDER_ABI
+#define PROVIDER_ABI 1
+#endif
+int64_t rt_simple_gpu_provider_abi_version(void) { return PROVIDER_ABI; }
+int64_t rt_simple_gpu_provider_backend_bits(void) { return 4; }
+#define STUB(name) int64_t name(void) { return 1; }
+STUB(rt_metal_init) STUB(rt_metal_is_available) STUB(rt_metal_device_count)
+STUB(rt_metal_device_name) STUB(rt_metal_device_memory) STUB(rt_metal_create_device)
+STUB(rt_metal_destroy_device) STUB(rt_metal_alloc_buffer) STUB(rt_metal_free_buffer)
+STUB(rt_metal_destroy_shader) STUB(rt_metal_destroy_pipeline) STUB(rt_metal_dispatch_compute)
+STUB(rt_metal_create_compute_encoder) STUB(rt_metal_end_compute_encoder)
+STUB(rt_metal_destroy_compute_encoder) STUB(rt_metal_set_buffer) STUB(rt_metal_get_last_error)
+STUB(rt_metal_create_render_pipeline) STUB(rt_metal_destroy_render_pipeline)
+STUB(rt_metal_create_texture) STUB(rt_metal_free_texture) STUB(rt_metal_begin_render_pass)
+STUB(rt_metal_end_render_pass) STUB(rt_metal_draw_indexed) STUB(rt_metal_draw_primitives)
+STUB(rt_metal_create_command_queue) STUB(rt_metal_destroy_command_queue)
+STUB(rt_metal_create_command_buffer) STUB(rt_metal_commit_command_buffer)
+STUB(rt_metal_wait_completed) STUB(rt_metal_destroy_command_buffer)
+STUB(rt_metal_create_sampler) STUB(rt_metal_destroy_sampler) STUB(rt_metal_set_viewport)
+STUB(rt_metal_set_scissor) STUB(rt_metal_create_swapchain) STUB(rt_metal_destroy_swapchain)
+STUB(rt_metal_present) STUB(rt_metal_run_blit_frame) STUB(rt_metal_run_compute_frame)
+int64_t rt_metal_compile_shader_raw(int64_t device, int64_t ptr, int64_t len) {
+    const unsigned char expected[] = {'M', 0, 'L'};
+    return device == 7 && len == 3 && memcmp((void*)(intptr_t)ptr, expected, 3) == 0 ? 101 : 0;
+}
+int64_t rt_metal_create_compute_pipeline_raw(int64_t device, int64_t shader, int64_t ptr, int64_t len) {
+    return device == 7 && shader == 101 && len == 4 && memcmp((void*)(intptr_t)ptr, "main", 4) == 0 ? 202 : 0;
+}
+int64_t rt_metal_load_library_raw(int64_t device, int64_t ptr, int64_t len) {
+    const unsigned char expected[] = {9, 0, 255};
+    return device == 7 && len == 3 && memcmp((void*)(intptr_t)ptr, expected, 3) == 0 ? 303 : 0;
+}
+int64_t rt_metal_buffer_upload_raw(int64_t buffer, int64_t ptr, int64_t len) {
+    const unsigned char expected[] = {9, 0, 255};
+    return buffer == 8 && len == 3 && memcmp((void*)(intptr_t)ptr, expected, 3) == 0;
+}
+#ifndef OMIT_DOWNLOAD_RAW
+int64_t rt_metal_buffer_download_raw(int64_t ptr, int64_t buffer, int64_t len) {
+    unsigned char expected[] = {4, 5, 6};
+    if (buffer != 8 || len != 3) return 0;
+    memcpy((void*)(intptr_t)ptr, expected, 3);
+    return 1;
+}
+#endif
+int64_t rt_metal_set_bytes_raw(int64_t encoder, int64_t ptr, int64_t len, int64_t index) {
+    const unsigned char expected[] = {9, 0, 255};
+    return encoder == 11 && index == 2 && len == 3 && memcmp((void*)(intptr_t)ptr, expected, 3) == 0;
+}
+EOF
+
+cat >"$TMP/harness.c" <<'EOF'
+#include "runtime.h"
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+int64_t rt_gpu_provider_loaded(int64_t);
+int64_t rt_metal_compile_shader(int64_t,int64_t);
+int64_t rt_metal_create_compute_pipeline(int64_t,int64_t,int64_t);
+int64_t rt_metal_load_library_array(int64_t,int64_t);
+int64_t rt_metal_buffer_upload(int64_t,int64_t,int64_t);
+int64_t rt_metal_buffer_download(int64_t,int64_t,int64_t);
+int64_t rt_metal_set_bytes(int64_t,int64_t,int64_t,int64_t);
+static SplArray *bytes3(int64_t a, int64_t b, int64_t c) {
+    SplArray *out = rt_array_new(3);
+    rt_array_push(out, rt_value_int(a));
+    rt_array_push(out, rt_value_int(b));
+    rt_array_push(out, rt_value_int(c));
+    return out;
+}
+int main(int argc, char **argv) {
+    const uint8_t source_bytes[] = {'M', 0, 'L'};
+    const uint8_t entry_bytes[] = {'m','a','i','n'};
+    int64_t source, entry, shader, pipeline, library, upload, download, set;
+    SplArray *input, *output;
+    if (argc != 2 || setenv("SIMPLE_METAL_PROVIDER_PATH", argv[1], 1) != 0) return 2;
+    source = rt_string_new(source_bytes, 3);
+    entry = rt_string_new(entry_bytes, 4);
+    input = bytes3(9, 0, 255);
+    output = bytes3(0, 0, 0);
+    shader = rt_metal_compile_shader(7, source);
+    pipeline = rt_metal_create_compute_pipeline(7, shader, entry);
+    library = rt_metal_load_library_array(7, (int64_t)(intptr_t)input);
+    upload = rt_metal_buffer_upload(8, (int64_t)(intptr_t)input, 3);
+    download = rt_metal_buffer_download((int64_t)(intptr_t)output, 8, 3);
+    set = rt_metal_set_bytes(11, (int64_t)(intptr_t)input, 3, 2);
+    printf("loaded=%lld shader=%lld pipeline=%lld library=%lld upload=%lld download=%lld bytes=%lld,%lld,%lld set=%lld\n",
+        (long long)rt_gpu_provider_loaded(4), (long long)shader, (long long)pipeline,
+        (long long)library, (long long)upload, (long long)download,
+        (long long)rt_value_as_int(rt_array_get(output, 0)),
+        (long long)rt_value_as_int(rt_array_get(output, 1)),
+        (long long)rt_value_as_int(rt_array_get(output, 2)), (long long)set);
+    return 0;
+}
+EOF
+
+cc -shared -fPIC "$TMP/provider.c" -o "$TMP/provider.so"
+cc -shared -fPIC -DPROVIDER_ABI=99 "$TMP/provider.c" -o "$TMP/wrong.so"
+cc -shared -fPIC -DOMIT_DOWNLOAD_RAW "$TMP/provider.c" -o "$TMP/incomplete.so"
+cc -D_GNU_SOURCE -std=gnu11 -O0 -ffunction-sections -fdata-sections \
+    -DSIMPLE_RUNTIME_DYNLOAD_OWNER=1 \
+    -I"$ROOT/src/runtime" -I"$ROOT/src/runtime/platform" \
+    -c "$ROOT/src/runtime/runtime_native.c" -o "$TMP/runtime_native.o"
+cc -D_GNU_SOURCE -std=gnu11 -O0 -ffunction-sections -fdata-sections \
+    -I"$ROOT/src/runtime" -I"$ROOT/src/runtime/platform" \
+    -c "$ROOT/src/runtime/runtime_dynload.c" -o "$TMP/runtime_dynload.o"
+cc -Wl,--gc-sections -I"$ROOT/src/runtime" "$TMP/harness.c" \
+    "$TMP/runtime_native.o" "$TMP/runtime_dynload.o" -ldl -lm -o "$TMP/harness"
+
+good="$($TMP/harness "$TMP/provider.so")"
+bad="$($TMP/harness "$TMP/wrong.so")"
+incomplete="$($TMP/harness "$TMP/incomplete.so")"
+[ "$good" = "loaded=1 shader=101 pipeline=202 library=303 upload=1 download=1 bytes=4,5,6 set=1" ]
+[ "$bad" = "loaded=0 shader=0 pipeline=0 library=0 upload=0 download=0 bytes=0,0,0 set=0" ]
+[ "$incomplete" = "$bad" ]
+
+if command -v readelf >/dev/null 2>&1; then
+    ! readelf -d "$TMP/harness" | grep -Fq 'provider.so'
+fi
+printf '%s\n' \
+    'metal_provider_dynamic_load=true' \
+    'metal_provider_complete_surface_admitted=true' \
+    'metal_provider_incomplete_surface_rejected=true' \
+    'metal_provider_wrong_abi_rejected=true' \
+    'metal_provider_runtime_values_decoded_by_core=true' \
+    'metal_provider_raw_bytes_length_delimited=true' \
+    'metal_provider_static_dependency=false'

@@ -1,0 +1,498 @@
+//! Vulkan instance and physical device management
+
+use super::error::{VulkanError, VulkanResult};
+use ash::vk;
+use parking_lot::Mutex;
+use std::ffi::{c_char, CStr, CString};
+use std::sync::Arc;
+
+/// Global Vulkan instance (singleton)
+static VULKAN_INSTANCE: Mutex<Option<Arc<VulkanInstance>>> = Mutex::new(None);
+
+/// Candidate Vulkan loader names/paths beyond the platform-default soname.
+/// Mirrors the interpreter probe in `vulkan_graphics_runtime_core.rs`.
+#[cfg(target_os = "macos")]
+const VULKAN_LIB_CANDIDATES: &[&str] = &[
+    "libvulkan.1.dylib",
+    "libvulkan.dylib",
+    "/opt/homebrew/lib/libvulkan.1.dylib",
+    "/opt/homebrew/lib/libvulkan.dylib",
+    "/usr/local/lib/libvulkan.1.dylib",
+    "/usr/local/lib/libvulkan.dylib",
+];
+#[cfg(all(unix, not(target_os = "macos")))]
+const VULKAN_LIB_CANDIDATES: &[&str] = &["libvulkan.so.1", "libvulkan.so"];
+#[cfg(windows)]
+const VULKAN_LIB_CANDIDATES: &[&str] = &["vulkan-1.dll"];
+
+/// Vulkan instance wrapper with validation layers
+pub struct VulkanInstance {
+    entry: ash::Entry,
+    instance: ash::Instance,
+    #[cfg(feature = "vulkan")]
+    surface_loader: ash::khr::surface::Instance,
+    #[cfg(feature = "vulkan")]
+    headless_surface_enabled: bool,
+    debug_utils: Option<ash::ext::debug_utils::Instance>,
+    debug_messenger: Option<vk::DebugUtilsMessengerEXT>,
+}
+
+impl VulkanInstance {
+    /// Get or create the global Vulkan instance
+    pub fn get_or_init() -> VulkanResult<Arc<VulkanInstance>> {
+        let mut guard = VULKAN_INSTANCE.lock();
+        if let Some(instance) = guard.as_ref() {
+            return Ok(Arc::clone(instance));
+        }
+
+        let instance = Self::create()?;
+        let arc = Arc::new(instance);
+        *guard = Some(Arc::clone(&arc));
+        Ok(arc)
+    }
+
+    /// Check if Vulkan is available on this system
+    pub fn is_available() -> bool {
+        if unsafe { ash::Entry::load() }.is_ok() {
+            return true;
+        }
+        // ash only dlopens the platform-default soname; on macOS with MoltenVK
+        // the loader typically lives in /opt/homebrew/lib and is not on the
+        // default dyld search path. Mirror the interpreter probe candidates.
+        VULKAN_LIB_CANDIDATES
+            .iter()
+            .any(|name| unsafe { libloading::Library::new(name).is_ok() })
+    }
+
+    /// Load the Vulkan loader, falling back to well-known install paths when
+    /// the platform-default soname is not on the dyld search path (MoltenVK via
+    /// Homebrew installs to /opt/homebrew/lib, which `ash::Entry::load` misses).
+    fn load_entry() -> VulkanResult<ash::Entry> {
+        if let Ok(entry) = unsafe { ash::Entry::load() } {
+            return Ok(entry);
+        }
+        for name in VULKAN_LIB_CANDIDATES {
+            let lib = match unsafe { libloading::Library::new(name) } {
+                Ok(lib) => lib,
+                Err(_) => continue,
+            };
+            let get_proc_addr = unsafe {
+                lib.get::<vk::PFN_vkGetInstanceProcAddr>(b"vkGetInstanceProcAddr\0")
+            };
+            if let Ok(get_proc_addr) = get_proc_addr {
+                let entry = unsafe {
+                    ash::Entry::from_static_fn(ash::StaticFn {
+                        get_instance_proc_addr: *get_proc_addr,
+                    })
+                };
+                // The entry holds a raw fn pointer into the library; keep the
+                // library mapped for the process lifetime (the instance is a
+                // global singleton, so this leaks at most one handle).
+                std::mem::forget(lib);
+                return Ok(entry);
+            }
+        }
+        Err(VulkanError::InitializationFailed(
+            "Failed to load Vulkan library: tried platform default and candidate paths".to_owned(),
+        ))
+    }
+
+    fn create() -> VulkanResult<Self> {
+        // Load Vulkan library
+        let entry = Self::load_entry()?;
+
+        // Application info
+        let app_name = CString::new("Simple Language").unwrap();
+        let engine_name = CString::new("Simple Runtime").unwrap();
+        let app_info = vk::ApplicationInfo::default()
+            .application_name(&app_name)
+            .application_version(vk::make_api_version(0, 1, 0, 0))
+            .engine_name(&engine_name)
+            .engine_version(vk::make_api_version(0, 1, 0, 0))
+            .api_version(vk::API_VERSION_1_1); // Vulkan 1.1
+
+        // Enable validation layers in debug builds
+        let layer_names_raw: Vec<CString>;
+        let layer_names: Vec<*const c_char>;
+
+        #[cfg(debug_assertions)]
+        {
+            let validation_layer = CString::new("VK_LAYER_KHRONOS_validation").unwrap();
+            let validation_available = unsafe {
+                entry
+                    .enumerate_instance_layer_properties()
+                    .map(|layers| {
+                        layers
+                            .iter()
+                            .any(|layer| CStr::from_ptr(layer.layer_name.as_ptr()) == validation_layer.as_c_str())
+                    })
+                    .unwrap_or(false)
+            };
+            layer_names_raw = if validation_available {
+                vec![validation_layer]
+            } else {
+                vec![]
+            };
+            layer_names = layer_names_raw.iter().map(|name| name.as_ptr()).collect();
+        }
+
+        #[cfg(not(debug_assertions))]
+        {
+            layer_names_raw = vec![];
+            layer_names = vec![];
+        }
+
+        // Required extensions
+        let mut extension_names_raw = vec![];
+        let mut extension_names = vec![];
+
+        // Debug utils extension (debug builds only)
+        #[cfg(debug_assertions)]
+        {
+            extension_names_raw.push(ash::ext::debug_utils::NAME.to_owned());
+        }
+
+        // Surface extensions for windowing
+        #[cfg(feature = "vulkan")]
+        let mut headless_surface_enabled = false;
+        #[cfg(feature = "vulkan")]
+        {
+            extension_names_raw.push(ash::khr::surface::NAME.to_owned());
+            // Enumerate ONCE, then gate every optional surface extension on what
+            // the loader actually advertises. Requesting an unadvertised
+            // extension makes vkCreateInstance fail outright, which took down
+            // the whole Vulkan path -- including headless compute rendering that
+            // needs no surface at all -- on any host without the matching
+            // windowing system. Measured 2026-09-06 on a headless box:
+            // "loader_validate_instance_extensions: Extension VK_KHR_xlib_surface
+            // not found in list of known instance extensions", rt_vulkan_init -> 0,
+            // and every engine2d Vulkan gate died with no verdict line.
+            let available_exts: Vec<std::ffi::CString> = unsafe {
+                entry
+                    .enumerate_instance_extension_properties(None)
+                    .map(|extensions| {
+                        extensions
+                            .iter()
+                            .map(|e| CStr::from_ptr(e.extension_name.as_ptr()).to_owned())
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            };
+            let has_ext = |name: &CStr| available_exts.iter().any(|e| e.as_c_str() == name);
+            let headless_available = has_ext(ash::ext::headless_surface::NAME);
+            if headless_available {
+                extension_names_raw.push(ash::ext::headless_surface::NAME.to_owned());
+                headless_surface_enabled = true;
+            }
+
+            // Platform-specific surface extensions
+            #[cfg(target_os = "windows")]
+            extension_names_raw.push(ash::khr::win32_surface::NAME.to_owned());
+
+            #[cfg(target_os = "linux")]
+            {
+                // Prefer Wayland when the session advertises it, fall back to
+                // X11 -- but only ever request one the loader actually has. A
+                // headless host has neither, and that is not an error: the
+                // compute/offscreen paths do not need a window surface.
+                let want_wayland = std::env::var("WAYLAND_DISPLAY").is_ok();
+                if want_wayland && has_ext(ash::khr::wayland_surface::NAME) {
+                    extension_names_raw.push(ash::khr::wayland_surface::NAME.to_owned());
+                } else if has_ext(ash::khr::xlib_surface::NAME) {
+                    extension_names_raw.push(ash::khr::xlib_surface::NAME.to_owned());
+                } else if has_ext(ash::khr::wayland_surface::NAME) {
+                    extension_names_raw.push(ash::khr::wayland_surface::NAME.to_owned());
+                }
+            }
+
+            #[cfg(target_os = "macos")]
+            {
+                extension_names_raw.push(ash::ext::metal_surface::NAME.to_owned());
+                extension_names_raw.push(ash::khr::portability_enumeration::NAME.to_owned());
+            }
+        }
+
+        for ext in &extension_names_raw {
+            extension_names.push(ext.as_ptr());
+        }
+
+        let mut create_flags = vk::InstanceCreateFlags::empty();
+        #[cfg(target_os = "macos")]
+        {
+            create_flags |= vk::InstanceCreateFlags::ENUMERATE_PORTABILITY_KHR;
+        }
+
+        let create_info = vk::InstanceCreateInfo::default()
+            .application_info(&app_info)
+            .enabled_layer_names(&layer_names)
+            .enabled_extension_names(&extension_names)
+            .flags(create_flags);
+
+        let instance = unsafe {
+            entry
+                .create_instance(&create_info, None)
+                .map_err(|e| VulkanError::InitializationFailed(format!("{:?}", e)))?
+        };
+
+        // Setup debug messenger
+        #[cfg(debug_assertions)]
+        let (debug_utils, debug_messenger) = {
+            let debug_utils = ash::ext::debug_utils::Instance::new(&entry, &instance);
+            let messenger_info = vk::DebugUtilsMessengerCreateInfoEXT::default()
+                .message_severity(
+                    vk::DebugUtilsMessageSeverityFlagsEXT::WARNING | vk::DebugUtilsMessageSeverityFlagsEXT::ERROR,
+                )
+                .message_type(
+                    vk::DebugUtilsMessageTypeFlagsEXT::GENERAL
+                        | vk::DebugUtilsMessageTypeFlagsEXT::VALIDATION
+                        | vk::DebugUtilsMessageTypeFlagsEXT::PERFORMANCE,
+                )
+                .pfn_user_callback(Some(debug_callback));
+
+            let messenger = unsafe {
+                debug_utils
+                    .create_debug_utils_messenger(&messenger_info, None)
+                    .map_err(|e| VulkanError::InitializationFailed(format!("Debug messenger: {:?}", e)))?
+            };
+            (Some(debug_utils), Some(messenger))
+        };
+
+        #[cfg(not(debug_assertions))]
+        let (debug_utils, debug_messenger) = (None, None);
+
+        // Create surface loader for windowing support
+        #[cfg(feature = "vulkan")]
+        let surface_loader = ash::khr::surface::Instance::new(&entry, &instance);
+
+        tracing::info!("Vulkan instance created successfully");
+
+        Ok(Self {
+            entry,
+            instance,
+            #[cfg(feature = "vulkan")]
+            surface_loader,
+            #[cfg(feature = "vulkan")]
+            headless_surface_enabled,
+            debug_utils,
+            debug_messenger,
+        })
+    }
+
+    /// Enumerate physical devices
+    pub fn enumerate_devices(&self) -> VulkanResult<Vec<VulkanPhysicalDevice>> {
+        let devices = unsafe {
+            self.instance
+                .enumerate_physical_devices()
+                .map_err(|e| VulkanError::InitializationFailed(format!("Enumerate devices: {:?}", e)))?
+        };
+
+        devices
+            .into_iter()
+            .map(|device| VulkanPhysicalDevice::new(&self.instance, device))
+            .collect()
+    }
+
+    /// Get the Vulkan instance handle
+    pub fn instance(&self) -> &ash::Instance {
+        &self.instance
+    }
+
+    /// Get the Vulkan entry
+    pub fn entry(&self) -> &ash::Entry {
+        &self.entry
+    }
+
+    /// True only when this instance enabled VK_EXT_headless_surface.
+    /// Ash's generated loader aborts when asked to load an absent extension,
+    /// so callers must gate construction before creating that loader.
+    #[cfg(feature = "vulkan")]
+    pub fn has_headless_surface(&self) -> bool {
+        self.headless_surface_enabled
+    }
+
+    /// Get the surface loader
+    #[cfg(feature = "vulkan")]
+    pub fn surface_loader(&self) -> &ash::khr::surface::Instance {
+        &self.surface_loader
+    }
+}
+
+impl Drop for VulkanInstance {
+    fn drop(&mut self) {
+        unsafe {
+            #[cfg(debug_assertions)]
+            if let (Some(utils), Some(messenger)) = (&self.debug_utils, self.debug_messenger) {
+                utils.destroy_debug_utils_messenger(messenger, None);
+            }
+            self.instance.destroy_instance(None);
+        }
+        tracing::info!("Vulkan instance destroyed");
+    }
+}
+
+/// Debug callback for validation layers
+#[cfg(debug_assertions)]
+unsafe extern "system" fn debug_callback(
+    message_severity: vk::DebugUtilsMessageSeverityFlagsEXT,
+    _message_type: vk::DebugUtilsMessageTypeFlagsEXT,
+    p_callback_data: *const vk::DebugUtilsMessengerCallbackDataEXT<'_>,
+    _p_user_data: *mut std::ffi::c_void,
+) -> vk::Bool32 {
+    let message = CStr::from_ptr((*p_callback_data).p_message);
+    let message_str = message.to_string_lossy();
+
+    match message_severity {
+        vk::DebugUtilsMessageSeverityFlagsEXT::ERROR => {
+            tracing::error!("Vulkan validation: {}", message_str);
+        }
+        vk::DebugUtilsMessageSeverityFlagsEXT::WARNING => {
+            tracing::warn!("Vulkan validation: {}", message_str);
+        }
+        vk::DebugUtilsMessageSeverityFlagsEXT::INFO => {
+            tracing::info!("Vulkan validation: {}", message_str);
+        }
+        _ => {
+            tracing::debug!("Vulkan validation: {}", message_str);
+        }
+    }
+
+    vk::FALSE
+}
+
+/// Physical device wrapper with capability queries
+#[derive(Clone)]
+pub struct VulkanPhysicalDevice {
+    pub handle: vk::PhysicalDevice,
+    pub properties: vk::PhysicalDeviceProperties,
+    pub features: vk::PhysicalDeviceFeatures,
+    pub memory_properties: vk::PhysicalDeviceMemoryProperties,
+    pub queue_families: Vec<vk::QueueFamilyProperties>,
+}
+
+impl VulkanPhysicalDevice {
+    fn new(instance: &ash::Instance, device: vk::PhysicalDevice) -> VulkanResult<Self> {
+        unsafe {
+            let properties = instance.get_physical_device_properties(device);
+            let features = instance.get_physical_device_features(device);
+            let memory_properties = instance.get_physical_device_memory_properties(device);
+            let queue_families = instance.get_physical_device_queue_family_properties(device);
+
+            Ok(Self {
+                handle: device,
+                properties,
+                features,
+                memory_properties,
+                queue_families,
+            })
+        }
+    }
+
+    /// Get device name
+    pub fn name(&self) -> String {
+        let name_bytes = &self.properties.device_name;
+        let len = name_bytes.iter().position(|&c| c == 0).unwrap_or(name_bytes.len());
+        String::from_utf8_lossy(&name_bytes[..len].iter().map(|&c| c as u8).collect::<Vec<_>>()).to_string()
+    }
+
+    /// Score device for compute workloads (higher is better)
+    pub fn compute_score(&self) -> u32 {
+        let mut score = 0;
+
+        // Prefer discrete GPUs
+        if self.properties.device_type == vk::PhysicalDeviceType::DISCRETE_GPU {
+            score += 1000;
+        } else if self.properties.device_type == vk::PhysicalDeviceType::INTEGRATED_GPU {
+            score += 100;
+        }
+
+        // More memory is better
+        let total_memory: u64 = (0..self.memory_properties.memory_heap_count)
+            .filter_map(|i| {
+                let heap = self.memory_properties.memory_heaps[i as usize];
+                if heap.flags.contains(vk::MemoryHeapFlags::DEVICE_LOCAL) {
+                    Some(heap.size)
+                } else {
+                    None
+                }
+            })
+            .sum();
+        score += (total_memory / (1024 * 1024 * 1024)) as u32; // GB
+
+        score
+    }
+
+    /// Find compute queue family index
+    pub fn find_compute_queue_family(&self) -> Option<u32> {
+        self.queue_families
+            .iter()
+            .enumerate()
+            .find(|(_, props)| props.queue_flags.contains(vk::QueueFlags::COMPUTE))
+            .map(|(idx, _)| idx as u32)
+    }
+
+    /// Find transfer queue family index (prefer dedicated)
+    pub fn find_transfer_queue_family(&self) -> Option<u32> {
+        // Try to find dedicated transfer queue
+        let dedicated = self
+            .queue_families
+            .iter()
+            .enumerate()
+            .find(|(_, props)| {
+                props.queue_flags.contains(vk::QueueFlags::TRANSFER)
+                    && !props.queue_flags.contains(vk::QueueFlags::GRAPHICS)
+                    && !props.queue_flags.contains(vk::QueueFlags::COMPUTE)
+            })
+            .map(|(idx, _)| idx as u32);
+
+        if dedicated.is_some() {
+            return dedicated;
+        }
+
+        // Fall back to any transfer-capable queue
+        self.queue_families
+            .iter()
+            .enumerate()
+            .find(|(_, props)| props.queue_flags.contains(vk::QueueFlags::TRANSFER))
+            .map(|(idx, _)| idx as u32)
+    }
+
+    /// Find graphics queue family index
+    #[cfg(feature = "vulkan")]
+    pub fn find_graphics_queue_family(&self) -> Option<u32> {
+        self.queue_families
+            .iter()
+            .enumerate()
+            .find(|(_, props)| props.queue_flags.contains(vk::QueueFlags::GRAPHICS))
+            .map(|(idx, _)| idx as u32)
+    }
+
+    /// Find present queue family index (requires surface support check)
+    #[cfg(feature = "vulkan")]
+    pub fn find_present_queue_family(&self, instance: &VulkanInstance, surface: vk::SurfaceKHR) -> Option<u32> {
+        let surface_loader = instance.surface_loader();
+
+        self.queue_families
+            .iter()
+            .enumerate()
+            .find(|(idx, _)| unsafe {
+                surface_loader
+                    .get_physical_device_surface_support(self.handle, *idx as u32, surface)
+                    .unwrap_or(false)
+            })
+            .map(|(idx, _)| idx as u32)
+    }
+
+    /// Get total device memory in bytes
+    pub fn total_memory(&self) -> u64 {
+        (0..self.memory_properties.memory_heap_count)
+            .filter_map(|i| {
+                let heap = self.memory_properties.memory_heaps[i as usize];
+                if heap.flags.contains(vk::MemoryHeapFlags::DEVICE_LOCAL) {
+                    Some(heap.size)
+                } else {
+                    None
+                }
+            })
+            .sum()
+    }
+}

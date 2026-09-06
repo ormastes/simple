@@ -1,0 +1,184 @@
+#!/bin/sh
+# Broad Stage-2 qualification task used by bootstrap-strategy.sh.
+# It starts only after the immutable smoke-admission receipt exists. Its output
+# remains private to the scheduler; only the supervisor can publish a task
+# receipt after re-checking the generation lease.
+set -eu
+
+[ "$#" -eq 5 ] || {
+    echo "usage: $0 OUTPUT GENERATION_DIR LEASE LEASE_SHA ENGINE_DONE" >&2
+    exit 2
+}
+
+output=$1
+generation_dir=$2
+lease=$3
+lease_sha=$4
+engine_done=$5
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+contract="$root/scripts/bootstrap/bootstrap-scheduler-contract.shs"
+. "$contract"
+
+generation=$(bootstrap_scheduler_manifest_value generation "$lease") || {
+    echo 'qualification-error: generation lease is malformed' >&2
+    exit 75
+}
+bootstrap_scheduler_lease_current "$lease" "$generation" "$lease_sha" || {
+    echo 'qualification-error: generation lease is stale before admission' >&2
+    exit 75
+}
+
+wait_seconds=${SIMPLE_BOOTSTRAP_QUALIFY_WAIT_SECONDS:-14400}
+case "$wait_seconds" in ''|*[!0-9]*|0) exit 2 ;; esac
+waited=0
+admission=
+cleanup_marker="$generation_dir/stage2-cleanup.ready"
+while [ "$waited" -lt "$wait_seconds" ] && [ ! -f "$cleanup_marker" ]; do
+    if [ -f "$engine_done" ]; then
+        echo 'qualification-error: stage engine ended before Stage-2 cleanup readiness' >&2
+        exit 1
+    fi
+    sleep 1
+    waited=$((waited + 1))
+done
+[ -f "$cleanup_marker" ] || {
+    echo 'qualification-error: timed out waiting for Stage-2 cleanup readiness' >&2
+    exit 1
+}
+waited=0
+while [ "$waited" -lt "$wait_seconds" ]; do
+    set -- "$output"/stage3/*/stage2-admitted/admission.env
+    admission_count=0
+    for admission_candidate in "$@"; do
+        if [ -f "$admission_candidate" ] && [ ! -L "$admission_candidate" ]; then
+            admission=$admission_candidate
+            admission_count=$((admission_count + 1))
+        fi
+    done
+    if [ "$admission_count" -eq 1 ]; then
+        break
+    fi
+    if [ "$admission_count" -gt 1 ]; then
+        echo 'qualification-error: ambiguous Stage-2 admission generations' >&2
+        exit 2
+    fi
+    if [ -f "$engine_done" ]; then
+        echo 'qualification-error: stage engine ended before Stage-2 smoke admission' >&2
+        exit 1
+    fi
+    sleep 1
+    waited=$((waited + 1))
+done
+[ -n "$admission" ] || {
+    echo 'qualification-error: timed out waiting for Stage-2 smoke admission' >&2
+    exit 1
+}
+
+BOOTSTRAP_STAGE3_FACADE_PATH=\
+"$root/scripts/check/lib/bootstrap-stage3-provenance.shs"
+BOOTSTRAP_STAGE3_VERSION_ROOT=$root
+export BOOTSTRAP_STAGE3_FACADE_PATH BOOTSTRAP_STAGE3_VERSION_ROOT
+. "$BOOTSTRAP_STAGE3_FACADE_PATH"
+
+candidate=$(bootstrap_scheduler_manifest_value candidate_path "$admission") || exit 1
+source_snapshot=$(bootstrap_scheduler_manifest_value source_snapshot_path "$admission") || exit 1
+runtime_snapshot=$(bootstrap_scheduler_manifest_value runtime_snapshot_path "$admission") || exit 1
+tool_snapshot=$(bootstrap_scheduler_manifest_value tool_authority_path "$admission") || exit 1
+build_args=$(bootstrap_scheduler_manifest_value build_args_sha256 "$admission") || exit 1
+sanity=$(bootstrap_scheduler_manifest_value sanity_evidence_path "$admission") || exit 1
+receiver=$(bootstrap_scheduler_manifest_value receiver_evidence_path "$admission") || exit 1
+admission_root=$(dirname -- "$(dirname -- "$admission")")
+source_snapshot=$admission_root/source-inputs-before.txt
+runtime_snapshot=$admission_root/runtime-admitted.txt
+tool_snapshot=$admission_root/tool-authority-before.txt
+sanity=$admission_root/stage2-sanity.env
+receiver=$admission_root/stage2-receiver.env
+
+case "$candidate" in "$output"/*) ;; *)
+    echo 'qualification-error: admitted candidate escapes scheduler output' >&2
+    exit 1
+esac
+bootstrap_stage3_verify_stage2_admission_receipt \
+    "$admission" "$admission" "$candidate" "$candidate" \
+    "$source_snapshot" "$source_snapshot" "$runtime_snapshot" "$runtime_snapshot" \
+    "$admission_root/stage2-runtime-authority" "$admission_root/stage2-runtime-authority" \
+    "$tool_snapshot" "$tool_snapshot" "$build_args" "$sanity" "$sanity" \
+    "$(dirname -- "$sanity")" "$receiver" "$receiver" \
+    "$(dirname -- "$receiver")/stage2-receiver.log" "$(dirname -- "$receiver")/stage2-receiver.log" "$root" || {
+    echo 'qualification-error: Stage-2 smoke admission receipt did not re-verify' >&2
+    exit 1
+}
+bootstrap_scheduler_lease_current "$lease" "$generation" "$lease_sha" || {
+    echo 'qualification-error: generation lease became stale at admission' >&2
+    exit 75
+}
+
+started_tmp="$generation_dir/qualification.started.tmp.$$"
+{
+    echo schema=simple-bootstrap-task-start-v1
+    echo generation="$generation"
+    echo task=stage2-qualification
+    echo epoch_seconds="$(date +%s)"
+    echo admission_path="$admission"
+    echo admission_sha256="$(bootstrap_scheduler_hash_file "$admission")"
+} >"$started_tmp"
+bootstrap_scheduler_atomic_replace "$started_tmp" \
+    "$generation_dir/qualification.started"
+
+# The stage engine follows admission by starting Stage 3. Observe that concrete
+# child-build surface when possible; lack of an observation is recorded rather
+# than invented. The engine/qualification overlap is decided by the supervisor.
+platform_dir=$(dirname -- "$(dirname -- "$admission")")
+stage3_log="$output/logs/$(basename -- "$platform_dir")/stage3-native-build.log"
+child_observed=false
+child_wait=0
+while [ "$child_wait" -lt 30 ]; do
+    if [ -e "$stage3_log" ]; then
+        child_observed=true
+        break
+    fi
+    [ ! -f "$engine_done" ] || break
+    sleep 1
+    child_wait=$((child_wait + 1))
+done
+
+qualification_log="$generation_dir/stage2-qualification-gate.log"
+set +e
+HW_BACKEND=${SIMPLE_BOOTSTRAP_QUALIFICATION_BACKEND:-cranelift} \
+HW_THREADS=${SIMPLE_BOOTSTRAP_QUALIFICATION_CPU_SLOTS:-1} \
+    sh "$root/scripts/check/check-stage2-hello-world-native-build.shs" \
+        --candidate "$candidate" >"$qualification_log" 2>&1
+qualification_rc=$?
+set -e
+if [ "$qualification_rc" -ne 0 ]; then
+    tail -n 20 "$qualification_log" >&2
+    echo "qualification-error: broad Stage-2 gate failed rc=$qualification_rc" >&2
+    exit "$qualification_rc"
+fi
+tail -n 1 "$qualification_log" | grep -Eq '^PASS — [1-9][0-9]* case\(s\) checked' || {
+    echo 'qualification-error: broad gate emitted no non-vacuous PASS verdict' >&2
+    exit 1
+}
+bootstrap_scheduler_lease_current "$lease" "$generation" "$lease_sha" || {
+    echo 'qualification-error: generation lease became stale before result' >&2
+    exit 75
+}
+
+result_tmp="$generation_dir/qualification.result.env.tmp.$$"
+{
+    echo schema=simple-bootstrap-qualification-result-v1
+    echo generation="$generation"
+    echo status=passed
+    echo lease_sha256="$lease_sha"
+    echo admission_path="$admission"
+    echo admission_sha256="$(bootstrap_scheduler_hash_file "$admission")"
+    echo candidate_path="$candidate"
+    echo candidate_sha256="$(bootstrap_scheduler_hash_file "$candidate")"
+    echo child_build_observed="$child_observed"
+    echo gate=check-stage2-hello-world-native-build
+    echo gate_log_path="$qualification_log"
+    echo gate_log_sha256="$(bootstrap_scheduler_hash_file "$qualification_log")"
+    echo completed_epoch_seconds="$(date +%s)"
+} >"$result_tmp"
+bootstrap_scheduler_atomic_replace "$result_tmp" \
+    "$generation_dir/qualification.result.env"

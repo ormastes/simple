@@ -1,0 +1,285 @@
+#!/bin/sh
+# check-any-inventory-ratchet.shs — ratchet on the SOURCE-LEVEL `Any` population.
+#
+# Agent Y1, 2026-08-21. Plan:
+#   doc/01_research/compiler/hardening/simple_hardening_plan_2026-08-21.md
+#   §8.7 (compiler-internal Any migration), §15 Phase 0 census, §20.5 row Y1.
+#
+# WHAT IT MEASURES, AND WHY IT IS NOT check-any-escape-census.shs
+#   That gate (agent A5/Y2) decides findings on RESOLVED HIR TYPES. It is the
+#   stronger measurement where it applies, and it is the one that can see
+#   through aliasing. But it can only report on a file it manages to LOWER, and
+#   a file it cannot lower contributes zero to its totals while still being full
+#   of `Any` — measured 2026-08-21, its default scope was 8 analyzable modules
+#   and 12 unanalyzable, i.e. 60% of the scope silently absent from the number.
+#
+#   This gate is deliberately a DIFFERENT KIND of measurement: line-anchored
+#   source text, no parser, no HIR, no lowering. It therefore has a number for
+#   every file that exists. It undercounts aliases; the HIR census undercounts
+#   whatever fails to lower. Neither replaces the other, and the two disagreeing
+#   is itself the signal — see
+#   doc/08_tracking/bug/any_escape_census_undercounts_2026-08-21.md.
+#
+# WHY A RATCHET AND NOT A HARD ZERO
+#   §8.7 names this population a MIGRATION, not a defect to be deleted today.
+#   A hard zero would be red on day one and routed around, so the measured
+#   population is frozen in `scripts/check/any_inventory_baseline.txt` and any
+#   GROWTH fails — the same shape as check-no-direct-rt.shs and
+#   check-unbacked-extern-ratchet.shs. A baseline that no longer describes the
+#   tree (the count FELL) is also a FAIL, stale, for the reason the test-tree
+#   divergence guard gives: a drifted baseline is how a ratchet silently stops
+#   ratcheting.
+#
+# VERDICT (always the last line of stdout)
+#   PASS  — <n> file(s) scanned, <k> Any site(s) (baseline <b>)   exit 0
+#   FAIL  — ...                                                   exit 1
+#   ERROR — nothing was checked (<reason>)                        exit 2
+#
+#   A run that fed 0 files to the scanner is ERROR, never a pass: absence of a
+#   scan is absence of evidence. A missing `bin/simple` is ERROR too.
+#
+# USAGE
+#   sh scripts/check/check-any-inventory-ratchet.shs
+#   sh scripts/check/check-any-inventory-ratchet.shs --selftest
+#   sh scripts/check/check-any-inventory-ratchet.shs --generate-baseline
+#   sh scripts/check/check-any-inventory-ratchet.shs --report <out.md>
+#
+#   `--generate-baseline` is for DELIBERATE, REVIEWED updates only. Do not
+#   "fix" a FAIL with it without reading the diff: a FAIL naming growth is real
+#   new debt.
+
+set -u
+
+REPO_ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+cd "$REPO_ROOT" || { echo "ERROR — nothing was checked (cannot cd to repo root)"; exit 2; }
+
+# Overridable so a lane can pin the self-hosted release binary explicitly;
+# defaults to the deployed bin/simple symlink.
+SIMPLE_BIN="${SIMPLE_BIN:-bin/simple}"
+DRIVER="src/app/any_audit/main.spl"
+BASELINE="scripts/check/any_inventory_baseline.txt"
+# Chunked deliberately, for two reasons.
+#   1. A one-shot run over all ~12k files takes many minutes on the interpreter
+#      and gives no progress signal; a partially-written log is easy to mistake
+#      for a finished one (this cost real time during development, 2026-08-21).
+#   2. More importantly, every chunk is RECONCILED below: the driver's own
+#      `SUMMARY files=` count must equal the number of paths handed to it, and
+#      the SUMMARY line must be present at all. Without that, a run cut short
+#      for any reason would report a LOW site count, and a low count on a
+#      growth-only ratchet reads as a clean PASS. A short scan must be an
+#      ERROR, never a pass — that is the whole point of the reconciliation.
+CHUNK=1500
+
+MODE="scan"
+REPORT=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --selftest) MODE="selftest"; shift ;;
+        --generate-baseline) MODE="generate"; shift ;;
+        --report) REPORT="${2:-}"; shift 2 ;;
+        *) echo "ERROR — nothing was checked (unknown argument: $1)"; exit 2 ;;
+    esac
+done
+
+if [ ! -x "$SIMPLE_BIN" ]; then
+    echo "ERROR — nothing was checked (no executable $SIMPLE_BIN; absence of a scanner is absence of evidence)"
+    exit 2
+fi
+if [ ! -f "$DRIVER" ]; then
+    echo "ERROR — nothing was checked (missing driver $DRIVER)"
+    exit 2
+fi
+
+TMP=$(mktemp -d) || { echo "ERROR — nothing was checked (mktemp failed)"; exit 2; }
+trap 'rm -rf "$TMP"' EXIT
+
+# ---------------------------------------------------------------------------
+# run_scan <root-dir> <out-records>
+# Emits the driver's SITE/FILE records for every .spl under <root-dir>.
+# Prints the number of files fed to the scanner on stdout; returns non-zero on
+# any chunk failure so the caller can ERROR rather than report a short count.
+# ---------------------------------------------------------------------------
+run_scan() {
+    _root="$1"; _out="$2"
+    : > "$_out"
+    find "$_root" -name '*.spl' -not -path '*/vendor/*' 2>/dev/null | sort > "$TMP/list.txt"
+    _want=$(wc -l < "$TMP/list.txt" | tr -d ' ')
+    [ "$_want" -eq 0 ] && { echo 0; return 0; }
+    rm -f "$TMP"/part_*
+    split -l "$CHUNK" -d "$TMP/list.txt" "$TMP/part_"
+    _got=0
+    for _p in "$TMP"/part_*; do
+        # Exit status read DIRECTLY into a variable on the next line, never
+        # through a pipe: a pipeline's $? is the last stage's status and has
+        # produced false greens in this repo before.
+        "$SIMPLE_BIN" run "$DRIVER" --list "$_p" > "$TMP/chunk.out" 2>"$TMP/chunk.err"
+        _rc=$?
+        if [ "$_rc" -ne 0 ]; then
+            echo "$_got"
+            return 1
+        fi
+        _n=$(grep -c '^SUMMARY files=' "$TMP/chunk.out")
+        if [ "$_n" -ne 1 ]; then
+            # No SUMMARY line means the driver did not reach its end. The
+            # count it printed so far is not evidence of a small population,
+            # so this reconciliation is the only thing standing between a
+            # truncated run and a falsely-low PASS.
+            echo "$_got"
+            return 1
+        fi
+        _c=$(sed -n 's/^SUMMARY files=\([0-9]*\) .*/\1/p' "$TMP/chunk.out")
+        _want_c=$(wc -l < "$_p" | tr -d ' ')
+        if [ "$_c" -ne "$_want_c" ]; then
+            echo "$_got"
+            return 1
+        fi
+        _got=$((_got + _c))
+        grep -E '^(SITE|FILE) ' "$TMP/chunk.out" >> "$_out"
+    done
+    echo "$_got"
+    return 0
+}
+
+# `grep -c` prints 0 AND exits 1 on no match, so `grep -c ... || echo 0` emits
+# TWO lines and every downstream `[ "$x" -eq n ]` dies with "Illegal number".
+count_sites() {
+    _c=$(grep -c '^SITE ' "$1" 2>/dev/null)
+    [ -z "$_c" ] && _c=0
+    printf '%s\n' "$_c"
+}
+
+# ---------------------------------------------------------------------------
+# decide <sites> <baseline> <files>
+# The whole verdict, factored out so the selftest can exercise the comparison
+# ARITHMETIC without paying for a second full-tree scan. A ratchet whose compare
+# step is never tested is a ratchet that can silently stop ratcheting.
+# ---------------------------------------------------------------------------
+decide() {
+    _s="$1"; _b="$2"; _f="$3"
+    if [ "$_s" -gt "$_b" ]; then
+        echo "FAIL — $_f file(s) scanned, $_s Any site(s), $((_s - _b)) MORE than baseline $_b (new Any debt; see §8.7 migration targets)"
+        return 1
+    fi
+    if [ "$_s" -lt "$_b" ]; then
+        echo "FAIL — $_f file(s) scanned, $_s Any site(s), $((_b - _s)) FEWER than baseline $_b (stale baseline; regenerate deliberately with --generate-baseline)"
+        return 1
+    fi
+    echo "PASS — $_f file(s) scanned, $_s Any site(s) (baseline $_b)"
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# Selftest — fatal, runs before every scan.
+# ---------------------------------------------------------------------------
+selftest() {
+    _fx="$TMP/fx"
+    # 1. a file with a known population must be counted exactly
+    mkdir -p "$_fx/a"
+    cat > "$_fx/a/one.spl" <<'EOF'
+fn f(x: Any) -> Any:
+    val v: Any = nil
+    v
+EOF
+    _n=$(run_scan "$_fx/a" "$TMP/st1.out") || { echo "SELFTEST FAIL: scan of fixture a failed"; return 1; }
+    [ "$_n" -eq 1 ] || { echo "SELFTEST FAIL: expected 1 file scanned, got $_n"; return 1; }
+    _s=$(count_sites "$TMP/st1.out")
+    [ "$_s" -eq 3 ] || { echo "SELFTEST FAIL: expected 3 sites in fixture a, got $_s"; return 1; }
+
+    # 2. a file whose only `Any` is in a comment, a string, a docstring or an
+    #    enum variant must count ZERO — this is the vacuity guard on the
+    #    scanner itself.
+    mkdir -p "$_fx/b"
+    cat > "$_fx/b/two.spl" <<'EOF'
+# Any other value is fine.
+fn g() -> text:
+    """Any leftover state is discarded."""
+    val s: text = "kind: Any"
+    val k = Platform.Any
+    s
+EOF
+    _n=$(run_scan "$_fx/b" "$TMP/st2.out") || { echo "SELFTEST FAIL: scan of fixture b failed"; return 1; }
+    _s=$(count_sites "$TMP/st2.out")
+    [ "$_s" -eq 0 ] || { echo "SELFTEST FAIL: expected 0 sites in fixture b, got $_s"; return 1; }
+
+    # 3. growth must be detectable: adding a site raises the count
+    cp "$_fx/a/one.spl" "$_fx/b/three.spl"
+    _n=$(run_scan "$_fx/b" "$TMP/st3.out") || { echo "SELFTEST FAIL: scan of grown fixture failed"; return 1; }
+    _s=$(count_sites "$TMP/st3.out")
+    [ "$_s" -eq 3 ] || { echo "SELFTEST FAIL: expected 3 sites after growth, got $_s"; return 1; }
+
+    # 4. an empty tree must scan 0 files so the caller is FORCED to ERROR
+    mkdir -p "$_fx/empty"
+    _n=$(run_scan "$_fx/empty" "$TMP/st4.out") || { echo "SELFTEST FAIL: empty scan errored unexpectedly"; return 1; }
+    [ "$_n" -eq 0 ] || { echo "SELFTEST FAIL: expected 0 files in empty tree, got $_n"; return 1; }
+
+    # 5. the verdict arithmetic itself: equal PASSes, growth FAILs as growth,
+    #    shrink FAILs as STALE. Exercised directly so a full-tree scan is not
+    #    required to know the compare step still works.
+    _v=$(decide 627 627 12257); _r=$?
+    [ "$_r" -eq 0 ] || { echo "SELFTEST FAIL: equal counts should PASS, got rc=$_r"; return 1; }
+    case "$_v" in PASS*) ;; *) echo "SELFTEST FAIL: equal counts verdict not PASS: $_v"; return 1 ;; esac
+    _v=$(decide 628 627 12257); _r=$?
+    [ "$_r" -eq 1 ] || { echo "SELFTEST FAIL: growth should FAIL, got rc=$_r"; return 1; }
+    case "$_v" in *MORE*) ;; *) echo "SELFTEST FAIL: growth verdict does not name growth: $_v"; return 1 ;; esac
+    _v=$(decide 626 627 12257); _r=$?
+    [ "$_r" -eq 1 ] || { echo "SELFTEST FAIL: shrink should FAIL as stale, got rc=$_r"; return 1; }
+    case "$_v" in *stale*) ;; *) echo "SELFTEST FAIL: shrink verdict does not say stale: $_v"; return 1 ;; esac
+
+    echo "SELFTEST OK: 5 fixture(s)"
+    return 0
+}
+
+if ! selftest; then
+    echo "ERROR — nothing was checked (selftest failed)"
+    exit 2
+fi
+[ "$MODE" = "selftest" ] && { echo "PASS — selftest only, 5 fixture(s) checked"; exit 0; }
+
+# ---------------------------------------------------------------------------
+# Real scan
+# ---------------------------------------------------------------------------
+: > "$TMP/all.out"
+TOTAL_FILES=0
+SCAN_OK=1
+for ROOT in src/compiler src/app src/lib; do
+    [ -d "$ROOT" ] || continue
+    N=$(run_scan "$ROOT" "$TMP/part.out")
+    RC=$?
+    cat "$TMP/part.out" >> "$TMP/all.out" 2>/dev/null
+    TOTAL_FILES=$((TOTAL_FILES + N))
+    [ "$RC" -ne 0 ] && SCAN_OK=0
+done
+
+if [ "$SCAN_OK" -eq 0 ]; then
+    echo "ERROR — nothing was checked (a scan chunk terminated early; a truncated scan is not a low count)"
+    exit 2
+fi
+if [ "$TOTAL_FILES" -eq 0 ]; then
+    echo "ERROR — nothing was checked (0 files fed to the scanner)"
+    exit 2
+fi
+
+SITES=$(count_sites "$TMP/all.out")
+
+if [ -n "$REPORT" ]; then
+    cp "$TMP/all.out" "$REPORT"
+fi
+
+if [ "$MODE" = "generate" ]; then
+    printf '%s\n' "$SITES" > "$BASELINE"
+    echo "PASS — $TOTAL_FILES file(s) scanned, baseline regenerated at $SITES Any site(s)"
+    exit 0
+fi
+
+if [ ! -f "$BASELINE" ]; then
+    echo "ERROR — nothing was checked (missing baseline $BASELINE; run --generate-baseline deliberately)"
+    exit 2
+fi
+BASE=$(tr -dc '0-9' < "$BASELINE")
+if [ -z "$BASE" ]; then
+    echo "ERROR — nothing was checked (unreadable baseline $BASELINE)"
+    exit 2
+fi
+
+decide "$SITES" "$BASE" "$TOTAL_FILES"
+exit $?

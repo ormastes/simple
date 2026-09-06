@@ -1,0 +1,202 @@
+# Run-path (Cranelift JIT) probe for the SCALAR-SLOT ROUND-TRIP class.
+#
+# WHY THIS FILE EXISTS: `bin/simple test` executes specs on the tree-walk
+# INTERPRETER, so no spec in the suite can observe the JIT. Two HIGH bugs filed
+# 2026-08-17 were the same shape — a primitive value written into a slot whose
+# READ re-interprets it at a different type or width:
+#
+#   doc/08_tracking/bug/jit_optional_i64_payload_reinterpreted_2026-08-17.md
+#     `val x: i64? = 42` stored the RAW word 42. `42 & 7 == 2` is TAG_FLOAT, so
+#     rt_to_string re-read it as an inline f64 and printed ~2.08e-322.
+#   doc/08_tracking/bug/f32_struct_field_reads_as_zero_2026-08-17.md
+#     an f32 field written from an f64 literal stored 8 bytes and was read back
+#     as 4, and `2.5f64` is 0x4004000000000000 whose low 32 bits are zero.
+#
+# Both were found one type at a time. This probe generalises the class: EVERY
+# primitive type across BOTH boundaries (nullable `T?` slot, struct field), so
+# the next omission fails here instead of shipping.
+#
+# The oracle is absolute in every case — a literal the probe itself did not
+# compute — never "the two sides agree".
+#
+#   bin/simple run <this>                                   -> must ALL PASS
+#   SIMPLE_EXECUTION_MODE=interpreter bin/simple run <this>  -> control arm
+#
+# If the interpreter arm ever fails, the probe is broken, not the JIT.
+
+use std.io_runtime.{exit}
+
+struct Slots:
+    i_8: i8
+    i_16: i16
+    i_32: i32
+    i_64: i64
+    u_8: u8
+    u_16: u16
+    u_32: u32
+    u_64: u64
+    f_32: f32
+    f_64: f64
+    b: bool
+
+fn give_i64() -> i64?:
+    return 7
+
+fn give_i32() -> i32?:
+    return 11
+
+fn give_u64() -> u64?:
+    return 4294967297
+
+fn give_f64() -> f64?:
+    return 2.5
+
+fn give_f32() -> f32?:
+    return 1.5
+
+fn give_bool() -> bool?:
+    return true
+
+fn give_text() -> text?:
+    return "ok"
+
+fn check(name: text, actual: text, expected: text, fails: i64) -> i64:
+    if actual == expected:
+        print("PASS " + name + " = " + actual)
+        return fails
+    print("FAIL " + name + " expected=" + expected + " actual=" + actual)
+    return fails + 1
+
+fn main():
+    var fails = 0
+
+    # --- Boundary 1: a raw scalar bound into a nullable `T?` slot ------------
+    val oi8: i8? = 3
+    val oi16: i16? = 300
+    val oi32: i32? = 70000
+    val oi64: i64? = 42
+    val ou8: u8? = 200
+    val ou16: u16? = 60000
+    val ou32: u32? = 4000000000
+    val ou64: u64? = 4294967297
+    val of32: f32? = 1.5
+    val of64: f64? = 2.5
+    val ob: bool? = true
+    val ot: text? = "ok"
+
+    fails = check("opt_i8_local", oi8.to_string(), "3", fails)
+    fails = check("opt_i16_local", oi16.to_string(), "300", fails)
+    fails = check("opt_i32_local", oi32.to_string(), "70000", fails)
+    fails = check("opt_i64_local", oi64.to_string(), "42", fails)
+    fails = check("opt_u8_local", ou8.to_string(), "200", fails)
+    fails = check("opt_u16_local", ou16.to_string(), "60000", fails)
+    fails = check("opt_u32_local", ou32.to_string(), "4000000000", fails)
+    fails = check("opt_u64_local", ou64.to_string(), "4294967297", fails)
+    fails = check("opt_f32_local", of32.to_string(), "1.5", fails)
+    fails = check("opt_f64_local", of64.to_string(), "2.5", fails)
+    fails = check("opt_bool_local", ob.to_string(), "true", fails)
+    fails = check("opt_text_local", ot.to_string(), "ok", fails)
+
+    # `!` unwrap and `??` must agree with the rendering above. `??` is the one
+    # that matters most: it silently returned the CORRUPT payload rather than
+    # the default, so no caller-side branch could defend against the defect.
+    fails = check("opt_i64_bang", (oi64!).to_string(), "42", fails)
+    fails = check("opt_f64_bang", (of64!).to_string(), "2.5", fails)
+    fails = check("opt_bool_bang", (ob!).to_string(), "true", fails)
+    fails = check("opt_i64_coalesce", (oi64 ?? 99).to_string(), "42", fails)
+    fails = check("opt_f64_coalesce", (of64 ?? 9.5).to_string(), "2.5", fails)
+
+    # --- Boundary 1b: the same slot crossed by a function RETURN -------------
+    fails = check("opt_i64_return", give_i64().to_string(), "7", fails)
+    fails = check("opt_i32_return", give_i32().to_string(), "11", fails)
+    fails = check("opt_u64_return", give_u64().to_string(), "4294967297", fails)
+    fails = check("opt_f64_return", give_f64().to_string(), "2.5", fails)
+    fails = check("opt_f32_return", give_f32().to_string(), "1.5", fails)
+    fails = check("opt_bool_return", give_bool().to_string(), "true", fails)
+    fails = check("opt_text_return", give_text().to_string(), "ok", fails)
+    fails = check("opt_i64_return_bang", (give_i64()!).to_string(), "7", fails)
+
+    # --- Boundary 2: a raw scalar written into a STRUCT FIELD ----------------
+    # Construction (compile_struct_init) and assignment (compile_field_set) are
+    # SEPARATE lowering paths that must agree with compile_field_get's load
+    # width; the f32 bug was in the first and not the second. Both are covered.
+    var s = Slots(
+        i_8: 3, i_16: 300, i_32: 70000, i_64: 42,
+        u_8: 200, u_16: 60000, u_32: 4000000000, u_64: 4294967297,
+        f_32: 2.5, f_64: 3.5, b: true,
+    )
+    fails = check("field_i8_init", s.i_8.to_string(), "3", fails)
+    fails = check("field_i16_init", s.i_16.to_string(), "300", fails)
+    fails = check("field_i32_init", s.i_32.to_string(), "70000", fails)
+    fails = check("field_i64_init", s.i_64.to_string(), "42", fails)
+    fails = check("field_u8_init", s.u_8.to_string(), "200", fails)
+    fails = check("field_u16_init", s.u_16.to_string(), "60000", fails)
+    fails = check("field_u32_init", s.u_32.to_string(), "4000000000", fails)
+    fails = check("field_u64_init", s.u_64.to_string(), "4294967297", fails)
+    fails = check("field_f32_init", s.f_32.to_string(), "2.5", fails)
+    fails = check("field_f64_init", s.f_64.to_string(), "3.5", fails)
+    fails = check("field_bool_init", s.b.to_string(), "true", fails)
+
+    # A neighbouring-field check: an over-wide store into a narrow slot would
+    # clobber the field next to it, which a single-field read cannot see.
+    fails = check("field_i32_neighbour_intact", s.i_64.to_string(), "42", fails)
+
+    s.i_8 = 5
+    s.i_16 = 301
+    s.i_32 = 70001
+    s.i_64 = 43
+    s.u_8 = 201
+    s.u_16 = 60001
+    s.u_32 = 4000000001
+    s.u_64 = 4294967298
+    s.f_32 = 7.5
+    s.f_64 = 8.5
+    s.b = false
+    fails = check("field_i8_set", s.i_8.to_string(), "5", fails)
+    fails = check("field_i16_set", s.i_16.to_string(), "301", fails)
+    fails = check("field_i32_set", s.i_32.to_string(), "70001", fails)
+    fails = check("field_i64_set", s.i_64.to_string(), "43", fails)
+    fails = check("field_u8_set", s.u_8.to_string(), "201", fails)
+    fails = check("field_u16_set", s.u_16.to_string(), "60001", fails)
+    fails = check("field_u32_set", s.u_32.to_string(), "4000000001", fails)
+    fails = check("field_u64_set", s.u_64.to_string(), "4294967298", fails)
+    fails = check("field_f32_set", s.f_32.to_string(), "7.5", fails)
+    fails = check("field_f64_set", s.f_64.to_string(), "8.5", fails)
+    fails = check("field_bool_set", s.b.to_string(), "false", fails)
+
+    # The field must also be usable as a VALUE, not only renderable: a slot read
+    # at the wrong width can still print plausibly while arithmetic on it is
+    # wrong. 7.5 + 1.0 and 43 + 1 are absolute oracles.
+    fails = check("field_f32_arith", (s.f_32 + 1.0).to_string(), "8.5", fails)
+    fails = check("field_i64_arith", (s.i_64 + 1).to_string(), "44", fails)
+
+    # --- Boundary 3: a raw scalar written into an ARRAY ELEMENT --------------
+    # Array element slots are erased RuntimeValue slots too, so the same
+    # box-on-store / decode-on-load contract applies.
+    val ai: [i64] = [42, 43]
+    val af: [f64] = [2.5, 3.5]
+    val ab: [bool] = [true, false]
+    val at: [text] = ["ok", "no"]
+    fails = check("array_i64_elem", ai[0].to_string(), "42", fails)
+    fails = check("array_i64_elem_arith", (ai[1] + 1).to_string(), "44", fails)
+    fails = check("array_f64_elem", af[0].to_string(), "2.5", fails)
+    fails = check("array_f64_elem_arith", (af[1] + 1.0).to_string(), "4.5", fails)
+    fails = check("array_bool_elem", ab[0].to_string(), "true", fails)
+    fails = check("array_text_elem", at[0].to_string(), "ok", fails)
+
+    # A struct stored in an array, read back one level down.
+    val arr = [Slots(
+        i_8: 1, i_16: 2, i_32: 3, i_64: 4,
+        u_8: 5, u_16: 6, u_32: 7, u_64: 8,
+        f_32: 2.5, f_64: 3.5, b: true,
+    )]
+    fails = check("array_struct_f32_field", arr[0].f_32.to_string(), "2.5", fails)
+    fails = check("array_struct_i64_field", arr[0].i_64.to_string(), "4", fails)
+
+    if fails == 0:
+        print("SCALAR_SLOT_ROUNDTRIP PROBE: ALL PASS")
+        exit(0)
+    print("SCALAR_SLOT_ROUNDTRIP PROBE: " + fails.to_string() + " FAILED")
+    exit(1)
+
+main()

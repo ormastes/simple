@@ -1,0 +1,41 @@
+# AC-9: web-app login sample exposed as an SFM front-end layer.
+#
+# `web_login_attempt` authenticates a credential. The auth layer is a privileged
+# layer in a Trusted module, so access is mediated by the SFM authz gate
+# (resolve_layer -> authorize). A valid principal is granted trusted access and
+# its credential is checked; an invalid credential is denied.
+
+use std.sfm.manifest.{FeatureManifest, LayerDescriptor, LayerKind, SfmSecurityLevel}
+use std.sfm.di_bridge.{SfmContainer, new_sfm_container, register_layers, resolve_layer}
+use std.sfm.authz.{AuthzContext}
+
+# AC-9: feature manifest declaring the auth layer as a privileged front-end
+# layer under a Trusted module (so the authz gate is live).
+fn web_login_manifest() -> FeatureManifest:
+    val auth = LayerDescriptor(
+        role: "auth",
+        kind: LayerKind.FrontGui,
+        entry_symbol: "web_login_attempt",
+        privileged: true
+    )
+    return FeatureManifest(
+        name: "sfm-web-login",
+        version: "0.1.0",
+        security_level: SfmSecurityLevel.Trusted,
+        layers: [auth]
+    )
+
+# AC-9: attempt a login. Valid `admin/s3cret` -> "authenticated:admin"; any
+# other credential is denied through the manifest -> resolve_layer authz gate.
+fn web_login_attempt(user: text, password: text) -> Result<text, text>:
+    val valid: bool = user == "admin" and password == "s3cret"
+    val m: FeatureManifest = web_login_manifest()
+    val c: SfmContainer = new_sfm_container(m)
+    register_layers(c, m)
+    # A valid credential is granted trusted access to the privileged auth layer;
+    # an invalid one is not, so the authz gate denies resolution.
+    val ctx = AuthzContext(principal: user, granted_trusted: valid)
+    match resolve_layer(c, "auth", ctx):
+        Err(e): return Err("login denied: " + e)
+        Ok(_):
+            return Ok("authenticated:" + user)

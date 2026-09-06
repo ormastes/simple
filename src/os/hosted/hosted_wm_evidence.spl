@@ -1,0 +1,245 @@
+# Pure-Simple production evidence protocol for the hosted WM.
+
+use os.compositor.host_compositor_core.{HostCompositor, HostSurfaceState}
+use std.env.variables.{env_get}
+
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
+extern fn rt_file_write_text_at(path: text, offset: i64, data: text) -> i64
+
+val WM_EVIDENCE_SNAPSHOT_ENV: text = "SIMPLE_WM_EVIDENCE_SNAPSHOT_PATH"
+val WM_EVIDENCE_CAPTURE_ENV: text = "SIMPLE_WM_EVIDENCE_CAPTURE_PATH"
+val WM_EVIDENCE_INPUT_ENV: text = "SIMPLE_WM_EVIDENCE_INPUT_FIFO"
+
+struct HostWmEvidenceConfig:
+    enabled: bool
+    valid: bool
+    snapshot_path: text
+    capture_path: text
+    input_fifo: text
+    failure_reason: text
+
+struct HostWmEvidenceCommand:
+    valid: bool
+    nonce: i64
+    action: text
+    x: i32
+    y: i32
+    down: bool
+
+struct HostWmInputReceipt:
+    key_down_count: i64
+    key_up_count: i64
+    pointer_move_count: i64
+    pointer_button_down_count: i64
+    pointer_button_up_count: i64
+    text_commit_count: i64
+    last_text: text
+    last_event_kind: text
+    last_scancode: i64
+    last_keycode: i64
+    last_pointer_x: i32
+    last_pointer_y: i32
+    last_pointer_button: i64
+    event_id: i64
+    event_origin: text
+    wm_target_id: i64
+    semantic_target_id: text
+    callback_count: i64
+    mutation_revision: i64
+    semantic_reason: text
+    input_received_us: i64
+    present_completed_us: i64
+    input_to_present_us: i64
+    present_count: i64
+    skipped_frame_count: i64
+
+fn host_wm_input_receipt() -> HostWmInputReceipt:
+    HostWmInputReceipt(
+        key_down_count: 0,
+        key_up_count: 0,
+        pointer_move_count: 0,
+        pointer_button_down_count: 0,
+        pointer_button_up_count: 0,
+        text_commit_count: 0,
+        last_text: "",
+        last_event_kind: "none",
+        last_scancode: 0,
+        last_keycode: 0,
+        last_pointer_x: 0,
+        last_pointer_y: 0,
+        last_pointer_button: -1,
+        event_id: 0,
+        event_origin: "",
+        wm_target_id: 0,
+        semantic_target_id: "",
+        callback_count: 0,
+        mutation_revision: 0,
+        semantic_reason: "",
+        input_received_us: 0,
+        present_completed_us: 0,
+        input_to_present_us: 0,
+        present_count: 0,
+        skipped_frame_count: 0
+    )
+
+fn host_wm_input_record_key(receipt: HostWmInputReceipt, scancode: i64, keycode: i64, down: bool) -> HostWmInputReceipt:
+    var out = receipt
+    if down:
+        out.key_down_count = out.key_down_count + 1
+        out.last_event_kind = "key-down"
+    else:
+        out.key_up_count = out.key_up_count + 1
+        out.last_event_kind = "key-up"
+    out.last_scancode = scancode
+    out.last_keycode = keycode
+    out
+
+fn host_wm_input_record_text(receipt: HostWmInputReceipt, value: text) -> HostWmInputReceipt:
+    var out = receipt
+    out.text_commit_count = out.text_commit_count + 1
+    out.last_text = value
+    out.last_event_kind = "text-commit"
+    out
+
+fn host_wm_input_record_pointer_move(receipt: HostWmInputReceipt, x: i32, y: i32) -> HostWmInputReceipt:
+    var out = receipt
+    out.pointer_move_count = out.pointer_move_count + 1
+    out.last_event_kind = "pointer-move"
+    out.last_pointer_x = x
+    out.last_pointer_y = y
+    out
+
+fn host_wm_input_record_pointer_button(receipt: HostWmInputReceipt, button: i64, down: bool) -> HostWmInputReceipt:
+    var out = receipt
+    if down:
+        out.pointer_button_down_count = out.pointer_button_down_count + 1
+        out.last_event_kind = "pointer-button-down"
+    else:
+        out.pointer_button_up_count = out.pointer_button_up_count + 1
+        out.last_event_kind = "pointer-button-up"
+    out.last_pointer_button = button
+    out
+
+fn host_wm_input_record_semantic(receipt: HostWmInputReceipt, event_id: i64, wm_target_id: i64, semantic_target_id: text, callback_count: i64, mutation_revision: i64, reason: text, input_received_us: i64) -> HostWmInputReceipt:
+    if (event_id <= 0 or event_id <= receipt.event_id or
+        callback_count <= 0 or reason != "" or input_received_us <= 0):
+        return receipt
+    var out = receipt
+    out.event_id = event_id
+    out.event_origin = "screen"
+    out.wm_target_id = wm_target_id
+    out.semantic_target_id = semantic_target_id
+    out.callback_count = callback_count
+    out.mutation_revision = mutation_revision
+    out.semantic_reason = reason
+    out.input_received_us = input_received_us
+    if event_id > receipt.event_id:
+        out.present_completed_us = 0
+        out.input_to_present_us = 0
+        out.present_count = 0
+        out.skipped_frame_count = 0
+    out
+
+# Close the latest semantic receipt only after the host presenter has accepted
+# its next frame. This is host evidence, not browser protocol state.
+fn host_wm_input_record_presented(
+    receipt: HostWmInputReceipt,
+    present_completed_us: i64,
+    present_count: i64,
+    skipped_frame_count: i64
+) -> HostWmInputReceipt:
+    var out = receipt
+    if (out.event_id <= 0 or out.input_received_us <= 0 or
+        present_completed_us < out.input_received_us or present_count <= 0 or
+        skipped_frame_count < 0 or
+        present_completed_us < out.present_completed_us or
+        present_count < out.present_count or
+        skipped_frame_count < out.skipped_frame_count):
+        return out
+    out.present_completed_us = present_completed_us
+    out.input_to_present_us = present_completed_us - out.input_received_us
+    out.present_count = present_count
+    out.skipped_frame_count = skipped_frame_count
+    out
+
+fn host_wm_evidence_config(snapshot_path: text, capture_path: text, input_fifo: text) -> HostWmEvidenceConfig:
+    val count = (if snapshot_path != "": 1 else: 0) + (if capture_path != "": 1 else: 0) + (if input_fifo != "": 1 else: 0)
+    if count == 0:
+        return HostWmEvidenceConfig(enabled: false, valid: true, snapshot_path: "", capture_path: "", input_fifo: "", failure_reason: "")
+    if count != 3:
+        return HostWmEvidenceConfig(enabled: true, valid: false, snapshot_path: snapshot_path, capture_path: capture_path, input_fifo: input_fifo, failure_reason: "all three production evidence paths are required")
+    HostWmEvidenceConfig(enabled: true, valid: true, snapshot_path: snapshot_path, capture_path: capture_path, input_fifo: input_fifo, failure_reason: "")
+
+fn host_wm_evidence_config_from_env() -> HostWmEvidenceConfig:
+    host_wm_evidence_config(env_get(WM_EVIDENCE_SNAPSHOT_ENV), env_get(WM_EVIDENCE_CAPTURE_ENV), env_get(WM_EVIDENCE_INPUT_ENV))
+
+fn host_wm_evidence_parse_command(raw: text) -> HostWmEvidenceCommand:
+    val normalized = raw.trim()
+    val parts = normalized.split(" ")
+    if parts.len() < 2:
+        return HostWmEvidenceCommand(valid: false, nonce: 0, action: "", x: 0, y: 0, down: false)
+    val nonce = parts[0].to_i64()
+    val action = parts[1].trim().to_lower()
+    if nonce <= 0:
+        return HostWmEvidenceCommand(valid: false, nonce: nonce, action: action, x: 0, y: 0, down: false)
+    if action == "f11" or action == "tab" or action == "minimize" or action == "maximize" or action == "restore" or action == "close" or action == "snapshot":
+        return HostWmEvidenceCommand(valid: true, nonce: nonce, action: action, x: 0, y: 0, down: false)
+    if action == "pointer" and parts.len() == 4:
+        return HostWmEvidenceCommand(valid: true, nonce: nonce, action: action, x: parts[2].to_i32(), y: parts[3].to_i32(), down: false)
+    if action == "left" and parts.len() == 3 and (parts[2] == "down" or parts[2] == "up"):
+        return HostWmEvidenceCommand(valid: true, nonce: nonce, action: action, x: 0, y: 0, down: parts[2] == "down")
+    HostWmEvidenceCommand(valid: false, nonce: nonce, action: action, x: 0, y: 0, down: false)
+
+fn _json_text(value: text) -> text:
+    # The replace chain MUST be hoisted into a local: stage3 native builds
+    # emit a `{...}` interpolation containing escaped string literals as
+    # LITERAL SOURCE TEXT instead of evaluating it (live-proven: every text
+    # field of the first production snapshot contained this function's body).
+    val escaped_slashes = value.replace("\\", "\\\\")
+    val escaped_quotes = escaped_slashes.replace("\"", "\\\"")
+    val escaped_newlines = escaped_quotes.replace("\n", "\\n")
+    "\"{escaped_newlines}\""
+
+fn host_wm_input_receipt_json(receipt: HostWmInputReceipt) -> text:
+    "{\"key_down_count\":{receipt.key_down_count},\"key_up_count\":{receipt.key_up_count},\"pointer_move_count\":{receipt.pointer_move_count},\"pointer_button_down_count\":{receipt.pointer_button_down_count},\"pointer_button_up_count\":{receipt.pointer_button_up_count},\"text_commit_count\":{receipt.text_commit_count},\"last_text\":{_json_text(receipt.last_text)},\"last_event_kind\":{_json_text(receipt.last_event_kind)},\"last_scancode\":{receipt.last_scancode},\"last_keycode\":{receipt.last_keycode},\"last_pointer_x\":{receipt.last_pointer_x},\"last_pointer_y\":{receipt.last_pointer_y},\"last_pointer_button\":{receipt.last_pointer_button},\"event_id\":{receipt.event_id},\"event_origin\":{_json_text(receipt.event_origin)},\"wm_target_id\":{receipt.wm_target_id},\"semantic_target_id\":{_json_text(receipt.semantic_target_id)},\"callback_count\":{receipt.callback_count},\"mutation_revision\":{receipt.mutation_revision},\"semantic_reason\":{_json_text(receipt.semantic_reason)},\"input_received_us\":{receipt.input_received_us},\"present_completed_us\":{receipt.present_completed_us},\"input_to_present_us\":{receipt.input_to_present_us},\"present_count\":{receipt.present_count},\"skipped_frame_count\":{receipt.skipped_frame_count}}"
+
+# `compositor_json` is the receiver-built HostCompositor.evidence_compositor_json()
+# fragment. Passing the HostCompositor aggregate by value into this free
+# function corrupts its window elements under stage3 native codegen
+# (LLDB-proven nil receiver in the element loop), so only scalars and the
+# prebuilt text fragment cross this boundary.
+fn host_wm_evidence_snapshot(compositor_json: text, surface: HostSurfaceState, backend: text, fallback_used: bool, readback: text, engine2d_backend: text, readback_source: text, backend_handle: i64, checksum: i64, composition_id: text, scene_key: text, web_content_image_count: i32, readback_completed: bool, readback_width: i32, readback_height: i32, readback_stride: i32, readback_format: text, semantic_event_id: i64, mutation_revision: i64, command_nonce: i64, command_phase: text, input_receipt_json: text) -> text:
+    "{\"schema\":\"simple-wm-production-evidence-v1\",\"surface\":{\"mode\":{_json_text("{surface.mode}")},\"phase\":{_json_text("{surface.phase}")},\"requested_mode\":{_json_text("{surface.requested_mode}")},\"geometry\":{\"x\":{surface.geometry.x},\"y\":{surface.geometry.y},\"width\":{surface.geometry.width},\"height\":{surface.geometry.height},\"scale_milli\":{surface.geometry.scale_milli}},\"saved_windowed_geometry\":{\"x\":{surface.saved_windowed_geometry.x},\"y\":{surface.saved_windowed_geometry.y},\"width\":{surface.saved_windowed_geometry.width},\"height\":{surface.saved_windowed_geometry.height},\"scale_milli\":{surface.saved_windowed_geometry.scale_milli}},\"rollback_geometry\":{\"x\":{surface.rollback_geometry.x},\"y\":{surface.rollback_geometry.y},\"width\":{surface.rollback_geometry.width},\"height\":{surface.rollback_geometry.height},\"scale_milli\":{surface.rollback_geometry.scale_milli}},\"request_nonce\":{surface.request_nonce},\"transition_revision\":{surface.transition_revision},\"deadline_micros\":{surface.deadline_micros},\"resize_acknowledged\":{surface.resize_acknowledged},\"scale_acknowledged\":{surface.scale_acknowledged},\"failure_reason\":{_json_text(surface.failure_reason)}},\"compositor\":{compositor_json},\"render\":{\"backend\":{_json_text(backend)},\"fallback_used\":{fallback_used},\"readback\":{_json_text(readback)},\"engine2d_backend\":{_json_text(engine2d_backend)},\"readback_source\":{_json_text(readback_source)},\"backend_handle\":{backend_handle},\"checksum\":{checksum},\"composition_id\":{_json_text(composition_id)},\"scene_key\":{_json_text(scene_key)},\"web_content_image_count\":{web_content_image_count},\"readback_completed\":{readback_completed},\"readback_width\":{readback_width},\"readback_height\":{readback_height},\"readback_stride\":{readback_stride},\"readback_format\":{_json_text(readback_format)},\"semantic_event_id\":{semantic_event_id},\"mutation_revision\":{mutation_revision}},\"input\":{\"nonce\":{command_nonce},\"phase\":{_json_text(command_phase)},\"receipt\":{input_receipt_json}}}}\n"
+
+fn host_wm_evidence_write_snapshot(path: text, snapshot: text) -> bool:
+    if path == "":
+        return false
+    rt_file_delete(path)
+    rt_file_write_text_at(path, 0, snapshot) >= 0
+
+fn host_wm_evidence_ppm(width: i32, height: i32, pixels: [u32]) -> [u8]:
+    if width <= 0 or height <= 0 or pixels.len() != width * height:
+        return []
+    # Header bytes are pushed per-character: text_to_bytes returned an EMPTY
+    # array in the stage3 native build (live-proven: the first production
+    # capture was exactly width*height*3 raw bytes with no P6 header).
+    val header = "P6\n{width} {height}\n255\n"
+    var out: [u8] = []
+    var hi = 0
+    while hi < header.len():
+        out.push((header.char_code_at(hi) & 0xFF).to_u8())
+        hi = hi + 1
+    for pixel in pixels:
+        out.push(((pixel >> 16) & 0xFFu32).to_u8())
+        out.push(((pixel >> 8) & 0xFFu32).to_u8())
+        out.push((pixel & 0xFFu32).to_u8())
+    out
+
+fn host_wm_evidence_write_capture(path: text, width: i32, height: i32, pixels: [u32]) -> bool:
+    val ppm = host_wm_evidence_ppm(width, height, pixels)
+    path != "" and ppm.len() > 0 and rt_file_write_bytes(path, ppm)
+
+fn host_wm_evidence_read_command(path: text) -> HostWmEvidenceCommand:
+    host_wm_evidence_parse_command(rt_file_read_text(path) ?? "")

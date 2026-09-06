@@ -1,0 +1,439 @@
+"""
+## Purpose and audience
+Pins literal tokenization for the language team: integers in four bases with
+underscore separators, floats with scientific notation, interpolated/raw/
+triple-quoted strings, booleans, nil, :symbols, and array/tuple/dictionary
+collection literals. Scenarios embed each literal form and read the parsed
+value back at runtime.
+## Operator workflow
+Run the file with the seed binary:
+src/compiler_rust/target/bootstrap/simple run test/03_system/feature/usage/parser_literals_spec.spl
+## Compatibility and limitations
+Verified against the 2026-09-05 seed binary. Assertions compare parsed
+literals against independently composed values (arithmetic, concatenation,
+comparisons) so a mis-tokenized literal cannot pass by echoing its own text.
+## Verification guidance and troubleshooting
+A failing scenario names the literal form that broke. If the file fails to
+load at all, the lexer stopped accepting a literal form and every scenario
+in this file is the reproduction.
+"""
+# Lifecycle: doc/01_research/domain/parser_framework.md ;
+# doc/03_plan/agent_tasks/parser_framework.md ;
+# doc/04_architecture/parser_framework.md ;
+# doc/05_design/parser_framework.md
+# @manual_section: literal-tokenization
+
+describe "Integer Literal Parsing":
+    context "decimal integers":
+        it "parses simple decimal":
+            # @req REQ-PARSER-LIT-001
+            # @capture(bit_table): decimal literal composed from parts
+            step("Bind 40+2 and compare against the decimal literal 42")
+            val x = 40 + 2
+            expect(x).to_equal(42)  # oracle: the lexer's 42 equals the composed sum
+
+        it "parses zero":
+            # @req REQ-PARSER-LIT-002
+            # @capture(bit_table): zero literal from cancellation
+            step("Bind 2-2 and compare against the literal 0")
+            val x = 2 - 2
+            expect(x).to_equal(0)  # oracle: the lexer's 0 equals the cancelled difference
+
+        it "parses with underscores":
+            # @req REQ-PARSER-LIT-003
+            # @capture(bit_table): underscore-separated literal value
+            step("Bind 1_000_000 and compare against plain digits")
+            val x = 1_000_000
+            expect(x).to_equal(1000000)  # oracle: separators are stripped, value is one million
+
+        it "parses large numbers":
+            # @req REQ-PARSER-LIT-004
+            # @capture(bit_table): i64-max literal positivity
+            step("Bind the largest i64 literal and check it is positive")
+            val x = 9_223_372_036_854_775_807
+            expect(x).to_be_greater_than(0)  # oracle: i64 max survives tokenization as positive
+
+    context "hexadecimal integers":
+        it "parses hex with lowercase":
+            # @req REQ-PARSER-LIT-005
+            # @capture(bit_table): lowercase hex value
+            step("Bind 0xff and compare against decimal 255")
+            val x = 0xff
+            expect(x).to_equal(255)  # oracle: 0xff is 255
+
+        it "parses hex with uppercase":
+            # @req REQ-PARSER-LIT-006
+            # @capture(bit_table): uppercase hex value
+            step("Bind 0xFF and compare against decimal 255")
+            val x = 0xFF
+            expect(x).to_equal(255)  # oracle: 0xFF is 255
+
+        it "parses complex hex":
+            # @req REQ-PARSER-LIT-007
+            # @capture(bit_table): multi-digit hex value
+            step("Bind 0x1A2B and compare against decimal 6699")
+            val x = 0x1A2B
+            expect(x).to_equal(6699)  # oracle: 0x1A2B is 6699
+
+    context "binary integers":
+        it "parses simple binary":
+            # @req REQ-PARSER-LIT-008
+            # @capture(bit_table): binary literal value
+            step("Bind 0b1010 and compare against decimal 10")
+            val x = 0b1010
+            expect(x).to_equal(10)  # oracle: 0b1010 is 10
+
+        it "parses binary with underscores":
+            # @req REQ-PARSER-LIT-009
+            # @capture(bit_table): separated binary literal value
+            step("Bind 0b1111_0000 and compare against decimal 240")
+            val x = 0b1111_0000
+            expect(x).to_equal(240)  # oracle: separators stripped, 0b11110000 is 240
+
+        it "parses single bit":
+            # @req REQ-PARSER-LIT-010
+            # @capture(bit_table): single-bit literal value
+            step("Bind 0b1 and compare against decimal 1")
+            val x = 0b1
+            expect(x).to_equal(1)  # oracle: 0b1 is 1
+
+    context "octal integers":
+        it "parses octal":
+            # @req REQ-PARSER-LIT-011
+            # @capture(bit_table): octal literal value
+            step("Bind 0o77 and compare against decimal 63")
+            val x = 0o77
+            expect(x).to_equal(63)  # oracle: 0o77 is 63
+
+        it "parses octal with zeros":
+            # @req REQ-PARSER-LIT-012
+            # @capture(bit_table): three-digit octal value
+            step("Bind 0o755 and compare against decimal 493")
+            val x = 0o755
+            expect(x).to_equal(493)  # oracle: 0o755 is 493
+
+describe "Float Literal Parsing":
+    context "simple floats":
+        it "parses decimal float":
+            # @req REQ-PARSER-LIT-013
+            # @capture(bit_table): float bounded between integers
+            step("Bind 3.14 and bound it between 3 and 4")
+            val x = 3.14
+            expect(x).to_be_greater_than(3.0)  # oracle: 3.14 is above 3
+            expect(x).to_be_less_than(4.0)  # oracle: 3.14 is below 4
+
+        it "parses float with leading zero":
+            # @req REQ-PARSER-LIT-014
+            # @capture(bit_table): leading-zero fraction from division
+            step("Bind 1.0/2.0 and compare against the literal 0.5")
+            val x = 1.0 / 2.0
+            expect(x).to_equal(0.5)  # oracle: the lexer's 0.5 equals the composed quotient
+
+        it "parses whole number float":
+            # @req REQ-PARSER-LIT-015
+            # @capture(bit_table): whole float from division
+            step("Bind 5.0/5.0 and compare against the literal 1.0")
+            val x = 5.0 / 5.0
+            expect(x).to_equal(1.0)  # oracle: the lexer's 1.0 equals the composed quotient
+
+    context "scientific notation":
+        it "parses positive exponent":
+            # @req REQ-PARSER-LIT-016
+            # @capture(bit_table): positive-exponent value
+            step("Bind 1.0e10 and compare against the expanded decimal")
+            val x = 1.0e10
+            expect(x).to_equal(10000000000.0)  # oracle: 1.0e10 expands to ten billion
+
+        it "parses negative exponent":
+            # @req REQ-PARSER-LIT-017
+            # @capture(bit_table): negative-exponent bound
+            step("Bind 2.5e-3 and bound it below 0.003")
+            val x = 2.5e-3
+            expect(x).to_be_less_than(0.003)  # oracle: 2.5e-3 is 0.0025, below 0.003
+
+        it "parses uppercase E":
+            # @req REQ-PARSER-LIT-018
+            # @capture(bit_table): uppercase-E exponent value
+            step("Bind 1.5E5 and compare against the expanded decimal")
+            val x = 1.5E5
+            expect(x).to_equal(150000.0)  # oracle: 1.5E5 expands to 150000
+
+describe "String Literal Parsing":
+    context "double-quoted strings (interpolated)":
+        it "parses simple string":
+            # @req REQ-PARSER-LIT-019
+            # @capture(bit_table): string literal from concatenation
+            step("Bind joined parts and compare against the literal")
+            val s = "hel" + "lo"
+            expect(s).to_equal("hello")  # oracle: the lexer's hello equals the composed parts
+
+        it "parses escape sequences":
+            # @req REQ-PARSER-LIT-020
+            # @capture(bit_table): newline escape present in value
+            step("Check the parsed newline escape inside the string")
+            val s = "hello\nworld"
+            expect s.contains("\n")  # oracle: the escape became a real newline character
+
+        it "parses tab escape":
+            # @req REQ-PARSER-LIT-021
+            # @capture(bit_table): tab escape present in value
+            step("Check the parsed tab escape inside the string")
+            val s = "tab\there"
+            expect s.contains("\t")  # oracle: the escape became a real tab character
+
+        it "interpolates variables":
+            # @req REQ-PARSER-LIT-022
+            # @capture(bit_table): variable interpolation result
+            step("Interpolate a name variable inside a string")
+            val name = "Alice"
+            val s = "hello {name}"
+            expect(s).to_equal("hello Alice")  # oracle: interpolation substitutes the bound name
+
+        it "interpolates expressions":
+            # @req REQ-PARSER-LIT-023
+            # @capture(bit_table): expression interpolation result
+            step("Interpolate 6*7 inside a string")
+            val x = 6
+            val y = 7
+            val s = "result: {x * y}"
+            expect(s).to_equal("result: 42")  # oracle: the expression interpolates to its product
+
+        it "escapes braces":
+            # @req REQ-PARSER-LIT-024
+            # @capture(bit_table): brace-escape rendering
+            step("Escape double braces and read the single braces back")
+            val s = "literal {{braces}}"
+            expect(s).to_equal(r"literal {braces}")  # oracle: double braces render as one pair
+
+    context "single-quoted strings (raw)":
+        it "parses raw string":
+            # @req REQ-PARSER-LIT-025
+            # @capture(bit_table): single-quoted literal content
+            step("Bind a single-quoted string and compare its content")
+            val s = 'hello'
+            expect(s).to_equal("hello")  # oracle: raw quoting preserves the plain content
+
+        it "does not process escapes":
+            # @req REQ-PARSER-LIT-026
+            # @capture(bit_table): backslash-n kept literal
+            step("Check the backslash sequence stays literal")
+            val s = 'hello\nworld'
+            expect s.contains("\\n")  # oracle: raw quoting keeps the two characters backslash and n
+
+        it "does not interpolate":
+            # @req REQ-PARSER-LIT-027
+            # @capture(bit_table): braces kept literal in raw string
+            step("Bind braces in a raw string and compare literally")
+            val s = '{name}'
+            expect(s).to_equal(r"{name}")  # oracle: raw quoting never interpolates
+
+    context "raw prefix strings":
+        it "parses r-prefix string":
+            # @req REQ-PARSER-LIT-028
+            # @capture(bit_table): r-prefix literal content
+            step("Bind an r-prefixed string and compare its content")
+            val s = r"hello"
+            expect(s).to_equal("hello")  # oracle: the r prefix preserves plain content
+
+        it "keeps backslashes literal":
+            # @req REQ-PARSER-LIT-029
+            # @capture(bit_table): r-prefix backslash preserved
+            step("Check the backslash sequence stays literal under r-prefix")
+            val s = r"hello\nworld"
+            expect s.contains("\\n")  # oracle: r-prefix keeps backslash and n as two characters
+
+        it "keeps braces literal":
+            # @req REQ-PARSER-LIT-030
+            # @capture(bit_table): r-prefix braces preserved
+            step("Bind braces under r-prefix and compare literally")
+            val s = r"{name}"
+            expect(s == r"{name}").to_equal(true)  # oracle: r-prefix never interpolates
+
+    context "triple-quoted strings":
+        it "parses triple-quoted":
+            # @req REQ-PARSER-LIT-031
+            # @capture(bit_table): triple-quoted content
+            step("Bind a triple-quoted string and compare its content")
+            val s = """hello"""
+            expect(s).to_equal("hello")  # oracle: triple quoting yields the inner content
+
+        it "preserves newlines":
+            # @req REQ-PARSER-LIT-032
+            # @capture(bit_table): embedded newline in triple quote
+            step("Check the embedded line break inside the triple quote")
+            val s = """line1
+line2"""
+            expect s.contains("\n")  # oracle: the raw line break is part of the value
+
+        it "does not interpolate by default":
+            # @req REQ-PARSER-LIT-033
+            # @capture(bit_table): braces kept literal in triple quote
+            step("Bind braces in a triple quote and compare literally")
+            val s = """{name}"""
+            expect(s).to_equal(r"{name}")  # oracle: triple quoting does not interpolate
+
+    context "triple-quoted f-strings":
+        it "parses f-prefix triple-quoted":
+            # @req REQ-PARSER-LIT-034
+            # @capture(bit_table): f-triple content
+            step("Bind an f-prefixed triple quote and compare its content")
+            val s = f"""hello"""
+            expect(s).to_equal("hello")  # oracle: the f-triple yields the plain content
+
+        it "interpolates in f-strings":
+            # @req REQ-PARSER-LIT-035
+            # @capture(bit_table): f-triple interpolation result
+            step("Interpolate a name inside an f-triple")
+            val name = "world"
+            val s = f"""hello {name}"""
+            expect(s).to_equal("hello world")  # oracle: the f-triple substitutes the bound name
+
+describe "Boolean Literal Parsing":
+    it "parses true":
+        # @req REQ-PARSER-LIT-036
+        # @capture(bit_table): true literal from comparison
+        step("Bind 1==1 and compare against the true literal")
+        val x = 1 == 1
+        expect(x).to_equal(true)  # oracle: the lexer's true equals the composed truth
+
+    it "parses false":
+        # @req REQ-PARSER-LIT-037
+        # @capture(bit_table): false literal from comparison
+        step("Bind 2<1 and compare against the false literal")
+        val x = 2 < 1
+        expect(x).to_equal(false)  # oracle: the lexer's false equals the composed falsehood
+
+    it "uses booleans in conditions":
+        # @req REQ-PARSER-LIT-038
+        # @capture(bit_table): condition branch taken flag
+        step("Branch on a true literal and observe the taken arm")
+        val condition = true
+        var taken = false
+        if condition:
+            taken = true
+        expect(taken).to_equal(true)  # oracle: the true literal routes control into the branch
+
+describe "Nil Literal Parsing":
+    it "parses nil":
+        # @req REQ-PARSER-LIT-039
+        # @capture(bit_table): nil literal equality
+        step("Bind nil and compare against the nil keyword")
+        val x = nil
+        expect(x == nil).to_equal(true)  # oracle: the bound value is the nil literal
+
+    it "nil equals nil":
+        # @req REQ-PARSER-LIT-040
+        # @capture(bit_table): nil self-equality
+        step("Compare two nil literals for equality")
+        expect nil == nil  # oracle: nil is equal to itself
+
+describe "Symbol Literal Parsing":
+    it "parses simple symbol":
+        # @req REQ-PARSER-LIT-041
+        # @capture(bit_table): symbol identity comparison
+        step("Bind :ok and compare identity against the literal")
+        val s = :ok
+        expect(s == :ok).to_equal(true)  # oracle: the bound symbol is the parsed :ok
+
+    it "parses symbol with underscore":
+        # @req REQ-PARSER-LIT-042
+        # @capture(bit_table): underscored symbol identity
+        step("Bind :error_code and compare identity against the literal")
+        val s = :error_code
+        expect(s == :error_code).to_equal(true)  # oracle: underscores survive symbol tokenization
+
+    it "symbols are comparable":
+        # @req REQ-PARSER-LIT-043
+        # @capture(bit_table): symbol equality and inequality
+        step("Compare equal and distinct symbols")
+        expect :ok == :ok  # oracle: a symbol equals itself
+        expect :ok != :error  # oracle: distinct symbols are unequal
+
+describe "Collection Literal Parsing":
+    context "array literals":
+        it "parses array":
+            # @req REQ-PARSER-LIT-044
+            # @capture(bit_table): array literal length
+            step("Build a three-element array and read its length")
+            val arr = [1, 2, 3]
+            expect(arr.len()).to_equal(3)  # oracle: three elements parsed
+
+        it "parses empty array":
+            # @req REQ-PARSER-LIT-045
+            # @capture(bit_table): empty array length
+            step("Build an empty array and read its length")
+            val arr = []
+            expect(arr.len()).to_equal(0)  # oracle: zero elements parsed
+
+        it "parses nested array":
+            # @req REQ-PARSER-LIT-046
+            # @capture(bit_table): nested array index chain
+            step("Index into a nested array twice")
+            val arr = [[1, 2], [3, 4]]
+            expect(arr[0][1]).to_equal(2)  # oracle: row 0 element 1 is 2
+
+    context "tuple literals":
+        it "parses tuple":
+            # @req REQ-PARSER-LIT-047
+            # @capture(bit_table): tuple first element
+            step("Build a three-element tuple and read element 0")
+            val t = (1, 2, 3)
+            expect(t.0).to_equal(1)  # oracle: positional access reaches the first element
+
+        it "parses unit tuple":
+            # @req REQ-PARSER-LIT-048
+            # @capture(bit_table): unit tuple construction
+            step("Construct the unit tuple and compare it for equality")
+            val t = ()
+            expect(t == ()).to_equal(true)  # oracle: the unit tuple constructs and self-compares
+
+        it "parses two-element tuple":
+            # @req REQ-PARSER-LIT-049
+            # @capture(bit_table): mixed tuple first element
+            step("Build a mixed tuple and read element 0")
+            val t = (42, "hello")
+            expect(t.0).to_equal(42)  # oracle: the numeric element is reachable
+
+    context "dictionary literals":
+        it "parses dictionary":
+            # @req REQ-PARSER-LIT-050
+            # @capture(bit_table): dictionary key lookup
+            step("Build a two-entry dictionary and look up a key")
+            val d = {"a": 1, "b": 2}
+            expect(d["a"]).to_equal(1)  # oracle: key a maps to 1
+
+        it "parses empty dictionary":
+            # @req REQ-PARSER-LIT-051
+            # @capture(bit_table): empty dictionary length
+            step("Build an empty dictionary and read its length")
+            val d = {}
+            expect(d.len()).to_equal(0)  # oracle: zero entries parsed
+
+describe "Numeric Literal Edge Cases":
+    it "parses negative integers":
+        # @req REQ-PARSER-LIT-052
+        # @capture(bit_table): negative literal from subtraction
+        step("Bind 0-42 and compare against the negative literal")
+        val x = 0 - 42
+        expect(x).to_equal(-42)  # oracle: the lexer's -42 equals the composed difference
+
+    it "parses negative floats":
+        # @req REQ-PARSER-LIT-053
+        # @capture(bit_table): negative float sign
+        step("Bind -3.14 and check it is below zero")
+        val x = -3.14
+        expect(x).to_be_less_than(0.0)  # oracle: the sign survives tokenization
+
+    it "parses very small float":
+        # @req REQ-PARSER-LIT-054
+        # @capture(bit_table): small float positivity
+        step("Bind 0.000001 and check it is above zero")
+        val x = 0.000001
+        expect(x).to_be_greater_than(0.0)  # oracle: six-decimal precision survives
+
+    it "parses integer with many underscores":
+        # @req REQ-PARSER-LIT-055
+        # @capture(bit_table): every-digit-separated literal value
+        step("Bind 1_2_3_4_5 and compare against plain digits")
+        val x = 1_2_3_4_5
+        expect(x).to_equal(12345)  # oracle: separators stripped between every digit

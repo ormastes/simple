@@ -1,0 +1,39 @@
+use std.spec.*
+use compiler.mir.hwir.types.{CoreConfig}
+use compiler.mir.hwir.riscv_scalar_completion_skid.{strict_riscv_scalar_completion_skid}
+use compiler.backend.backend.hwir_to_vhdl.{render_strict_sequential_hwir}
+
+describe "typed scalar completion skid":
+    it "specializes the frozen full payload for RV32 and RV64":
+        for config in [CoreConfig.rv32(), CoreConfig.rv64()]:
+            val module = strict_riscv_scalar_completion_skid(
+                "scalar_completion_skid_rv" + config.xlen.to_text(), config).unwrap()
+            expect(module.diagnostic()).to_equal("")
+            expect(module.plan.named_width(module.ports, "completion_pc_after")).to_equal(config.xlen)
+            expect(module.plan.named_width(module.ports, "completion_redirect_target")).to_equal(config.xlen)
+            expect(module.plan.named_width(module.ports, "completion_execute_trap_cause")).to_equal(config.xlen)
+            expect(module.plan.named_width(module.ports, "completion_provider_event_id")).to_equal(64)
+            expect(module.plan.named_width(module.ports, "completion_decode_event_id")).to_equal(64)
+            expect(module.plan.named_width(module.ports, "completion_illegal_valid")).to_equal(1)
+            expect(module.plan.rules[0].name).to_equal("consume")
+            expect(module.plan.rules[1].name).to_equal("capture")
+            expect(module.plan.rules.len()).to_equal(2)
+
+    it "emits registered hold reset conservative ready and sticky fault logic":
+        val module = strict_riscv_scalar_completion_skid("scalar_completion_skid", CoreConfig.rv64()).unwrap()
+        val emitted = render_strict_sequential_hwir(module, "hwir-gen2-scalar-completion-skid-v1")
+        expect(emitted.is_success()).to_equal(true)
+        expect(emitted.vhdl).to_contain("upstream_ready <= '1' when")
+        expect(emitted.vhdl).to_contain("full_reg='0' and fault_reg='0' else '0';")
+        expect(emitted.vhdl).to_contain("completion_valid <= full_reg;")
+        expect(emitted.vhdl).to_contain("completion_redirect_target <= redirect_target_reg when full_reg='1' else (others=>'0');")
+        expect(emitted.vhdl).to_contain("completion_execute_trap_valid <= execute_trap_valid_reg when full_reg='1' else '0';")
+        expect(emitted.vhdl).to_contain("if rst='1' then")
+        expect(emitted.vhdl).to_contain("upstream_valid='1' and full_reg='1' then")
+        expect(emitted.vhdl).to_contain("fault_reg <= upstream_valid;")
+
+    it "rejects an empty module identity":
+        val rejected = strict_riscv_scalar_completion_skid("", CoreConfig.rv32())
+        expect(rejected.is_err()).to_equal(true)
+        expect(rejected.err().unwrap()).to_equal(
+            "HWIR-E-RISCV-COMPLETION-SKID-ID: completion skid requires a module name")

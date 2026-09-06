@@ -1,0 +1,295 @@
+#![allow(primitive_api)]
+# Counterpart -> ManualBlock projection for spipe_docgen (Lane F8).
+#
+# primitive_api is allowed here because the projected values are counts and
+# receipt flags that go straight into manual text lines.
+#
+# This module emits ManualBlock RECORDS ONLY. It contains no Markdown, by the
+# same rule the typed-evidence model states in its header: the capture runtime
+# and spipe_docgen are separate processes that share only files, so docgen must
+# stay the sole renderer. A renderer method here could never be reached by the
+# generator anyway.
+#
+# Sections emitted, matching the design's "generated QA manuals show" list:
+#   boundary + schema version; input fixture and digest; provider names,
+#   versions, build hashes; execution modes and environment; converter routes
+#   with declared loss; the comparison matrix; expected-vs-actual mismatch
+#   detail; the GPU execution receipt; ignored fields with reasons; artifact
+#   links.
+#
+# Large binaries never appear here. Only hashes and `artifact_link` blocks are
+# emitted; the bytes live in the content-addressed store
+# (src/lib/nogc_sync_mut/spec/evidence/counterpart/artifact_store.spl).
+
+use std.common.spec.evidence.model.{
+    ManualBlock, ManualBlockKind, EvidenceAudience, manual_block, manual_block_for
+}
+use std.common.spec.evidence.counterpart.model.{
+    CounterpartPlan, CounterpartRun, SourceResult, ComparisonCell,
+    ProviderManifest, ConversionReceipt, ExecutionReceipt, ProvenanceReceipt,
+    LogicalArtifact, BoundaryId, parse_boundary_id, provider_status_name,
+    relation_name, conversion_loss_name, execution_mode_name,
+    execution_mode_is_gpu, execution_receipt_gpu_gate_failures,
+    counterpart_run_vacuity_failures
+}
+
+# ---------------------------------------------------------------------------
+# Redaction
+# ---------------------------------------------------------------------------
+
+# A manual is published; a captured environment string is not guaranteed to be
+# publishable. Any value carrying a credential marker is replaced by a labelled
+# digest, never by the value. The label names the digest algorithm explicitly
+# (`fnv1a32`) so a reader cannot mistake a short redaction tag for the sha256
+# provenance hashes used everywhere else in this module.
+fn looks_secret(value: text) -> bool:
+    val lowered = value.to_lower()
+    (lowered.contains("password")
+        or lowered.contains("secret")
+        or lowered.contains("token")
+        or lowered.contains("api_key")
+        or lowered.contains("apikey")
+        or lowered.contains("private_key")
+        or lowered.contains("authorization"))
+
+# FNV-1a/32 kept inside 32 bits at every step: the accumulator never exceeds
+# 2^32 and the prime is under 2^25, so the product cannot overflow i64 and the
+# digest is identical on every engine.
+fn fnv1a32_hex(value: text) -> text:
+    var hash: i64 = 2166136261
+    var i = 0
+    while i < value.len():
+        hash = (hash ^ value.char_code_at(i)) & 4294967295
+        hash = (hash * 16777619) & 4294967295
+        i = i + 1
+    var digits: [text] = []
+    var shift = 28
+    while shift >= 0:
+        val nibble = (hash >> shift) & 15
+        digits.push("0123456789abcdef".slice(nibble, nibble + 1))
+        shift = shift - 4
+    digits.join("")
+
+pub fn redact(value: text) -> text:
+    if looks_secret(value):
+        return "<redacted:fnv1a32:" + fnv1a32_hex(value) + ">"
+    value
+
+# ---------------------------------------------------------------------------
+# Sections
+# ---------------------------------------------------------------------------
+
+fn bool_text(value: bool) -> text:
+    if value:
+        return "true"
+    "false"
+
+fn boundary_lines(run: CounterpartRun) -> [text]:
+    val id = parse_boundary_id(run.boundary_id)
+    [
+        "boundary_id | " + run.boundary_id,
+        "domain | " + id.domain,
+        "mdsoc_layer | " + id.layer,
+        "stage | " + id.stage,
+        "schema_version | " + "{id.schema_version}",
+        "plan_id | " + run.plan_id
+    ]
+
+pub fn boundary_block(run: CounterpartRun) -> ManualBlock:
+    manual_block(ManualBlockKind.table, "Component boundary and schema version", boundary_lines(run))
+
+# The input fixture is identified by ref AND digest. A fixture path alone does
+# not pin content, so a manual quoting only the path cannot tell a reader
+# whether the run they are reading about used today's fixture.
+pub fn input_block(plan: CounterpartPlan, input_digest: text) -> ManualBlock:
+    manual_block_for(
+        ManualBlockKind.table,
+        "Input fixture",
+        EvidenceAudience.user,
+        [
+            "input_ref | " + redact(plan.input_ref),
+            "input_sha256 | " + input_digest,
+            "environment_profile | " + redact(plan.environment_profile)
+        ]
+    )
+
+pub fn provider_block(run: CounterpartRun, manifests: [ProviderManifest]) -> ManualBlock:
+    var rows: [text] = ["source | provider | version | build hash | status | independence group"]
+    for source in run.sources:
+        var version = "<not recorded>"
+        var artifact_hash = "<not recorded>"
+        for manifest in manifests:
+            if manifest.provider_id == source.provider_id:
+                version = manifest.version
+                artifact_hash = manifest.artifact_hash
+        rows.push(
+            source.source_id + " | " + source.provider_id + " | " + version
+            + " | " + artifact_hash + " | " + provider_status_name(source.status)
+            + " | " + source.independence_group
+        )
+    manual_block(ManualBlockKind.table, "Providers", rows)
+
+pub fn execution_block(run: CounterpartRun) -> ManualBlock:
+    var rows: [text] = [
+        "provider | mode | device | submissions | fence | device-origin readback | fallback"
+    ]
+    for source in run.sources:
+        val receipt = source.execution
+        rows.push(
+            receipt.provider_id + " | " + execution_mode_name(receipt.execution_mode)
+            + " | " + redact(receipt.device_identity)
+            + " | " + "{receipt.submission_count}"
+            + " | " + bool_text(receipt.fence_completed)
+            + " | " + bool_text(receipt.device_origin_readback)
+            + " | " + bool_text(receipt.fallback_used)
+        )
+    rows.push("environment_profile | " + redact(run.environment_profile))
+    manual_block(ManualBlockKind.table, "Execution modes and environment", rows)
+
+pub fn converter_block(run: CounterpartRun) -> ManualBlock:
+    var rows: [text] = ["source | converter | version | declared loss | input hash | output hash | dropped dimensions"]
+    for source in run.sources:
+        for receipt in source.conversions:
+            var dropped = ""
+            for dimension in receipt.dropped_dimensions:
+                if dropped == "":
+                    dropped = dimension
+                else:
+                    dropped = dropped + ", " + dimension
+            if dropped == "":
+                dropped = "none"
+            rows.push(
+                source.source_id + " | " + receipt.converter_id + " | " + receipt.converter_version
+                + " | " + conversion_loss_name(receipt.loss)
+                + " | " + receipt.input_hash + " | " + receipt.output_hash
+                + " | " + dropped
+            )
+    manual_block(ManualBlockKind.table, "Converter routes and declared loss", rows)
+
+pub fn matrix_block(run: CounterpartRun) -> ManualBlock:
+    var rows: [text] = ["left | right | relation | matched | mismatches | route loss"]
+    for cell in run.matrix:
+        rows.push(
+            cell.left_source_id + " | " + cell.right_source_id + " | "
+            + relation_name(cell.relation) + " | " + bool_text(cell.matched)
+            + " | " + "{cell.mismatch_count}"
+            + " | " + conversion_loss_name(cell.route_loss)
+        )
+    manual_block(ManualBlockKind.table, "Comparison matrix", rows)
+
+# Only failing cells carry detail. A mismatch block that also lists the
+# agreements buries the one line a reader is looking for.
+pub fn mismatch_block(run: CounterpartRun) -> ManualBlock:
+    var rows: [text] = ["comparison | relation | expected (left) | actual (right) | detail"]
+    for cell in run.matrix:
+        if not cell.matched:
+            rows.push(
+                cell.left_source_id + " vs " + cell.right_source_id
+                + " | " + relation_name(cell.relation)
+                + " | " + cell.left_source_id + " output"
+                + " | " + cell.right_source_id + " output"
+                + " | " + redact(cell.detail)
+            )
+    if rows.len() == 1:
+        rows.push("(no mismatches) | - | - | - | every declared comparison matched")
+    manual_block(ManualBlockKind.expected_actual, "Expected vs actual mismatch detail", rows)
+
+# Emitted only for sources that CLAIM a GPU mode. A CPU source has no GPU
+# receipt to show, and printing an all-false row for it would read as a failed
+# GPU run rather than as a run that never claimed one.
+pub fn gpu_receipt_blocks(run: CounterpartRun) -> [ManualBlock]:
+    var blocks: [ManualBlock] = []
+    for source in run.sources:
+        val receipt = source.execution
+        if execution_mode_is_gpu(receipt.execution_mode):
+            var lines: [text] = [
+                "provider | " + receipt.provider_id,
+                "mode | " + execution_mode_name(receipt.execution_mode),
+                "device | " + redact(receipt.device_identity),
+                "queue | " + redact(receipt.queue_identity),
+                "submissions | " + "{receipt.submission_count}",
+                "fence_completed | " + bool_text(receipt.fence_completed),
+                "device_origin_readback | " + bool_text(receipt.device_origin_readback),
+                "fallback_used | " + bool_text(receipt.fallback_used),
+                "dropped_events | " + "{receipt.dropped_events}"
+            ]
+            val failures = execution_receipt_gpu_gate_failures(receipt)
+            for failure in failures:
+                lines.push("gate failure | " + failure)
+            val kind = if failures.len() > 0: ManualBlockKind.warning else: ManualBlockKind.table
+            blocks.push(manual_block(kind, "GPU execution receipt — " + receipt.provider_id, lines))
+    blocks
+
+# An ignored field without a stated reason is indistinguishable from a field
+# nobody looked at, so the reason is printed beside every entry.
+pub fn ignored_block(ignored_paths: [text], reasons: [text]) -> ManualBlock:
+    var rows: [text] = ["field | reason it is not checked"]
+    var i = 0
+    while i < ignored_paths.len():
+        val reason = if i < reasons.len(): reasons[i] else: "<MISSING REASON — unchecked field>"
+        rows.push(ignored_paths[i] + " | " + reason)
+        i = i + 1
+    if rows.len() == 1:
+        rows.push("(none) | every observed field is checked")
+    manual_block(ManualBlockKind.table, "Ignored fields", rows)
+
+# Artifact links only: hash plus store ref. The store holds the bytes; a manual
+# that embedded them would be unreadable and would defeat content addressing.
+pub fn artifact_link_blocks(run: CounterpartRun) -> [ManualBlock]:
+    var blocks: [ManualBlock] = []
+    for source in run.sources:
+        val artifact = source.artifact
+        blocks.push(manual_block(
+            ManualBlockKind.artifact_link,
+            "Artifact — " + source.source_id,
+            [
+                "schema | " + artifact.schema_id + "@" + "{artifact.schema_version}",
+                "items | " + "{artifact.item_count}",
+                "canonical_sha256 | " + artifact.canonical_hash,
+                "artifact_ref | " + artifact.artifact_ref,
+                "provenance.input_sha256 | " + source.provenance.input_hash,
+                "provenance.converter_route_sha256 | " + source.provenance.converter_route_hash,
+                "provenance.run_id | " + source.provenance.run_id
+            ]
+        ))
+    blocks
+
+# ---------------------------------------------------------------------------
+# Whole-run projection
+# ---------------------------------------------------------------------------
+
+# A vacuous run is projected as a single WARNING block listing every gate
+# failure, and nothing else. Emitting the ordinary sections for a run that
+# compared nothing would produce a manual that looks like a clean report.
+pub fn counterpart_run_to_manual_blocks(
+    plan: CounterpartPlan,
+    run: CounterpartRun,
+    manifests: [ProviderManifest],
+    input_digest: text,
+    ignored_paths: [text],
+    ignored_reasons: [text]
+) -> [ManualBlock]:
+    val vacuity = counterpart_run_vacuity_failures(run)
+    if vacuity.len() > 0 or run.rejections.len() > 0:
+        var lines: [text] = ["This run is NOT evidence of agreement. It did not compare what it claims to compare."]
+        for rejection in run.rejections:
+            lines.push("rejection: " + rejection)
+        for failure in vacuity:
+            lines.push("vacuity: " + failure)
+        return [manual_block(ManualBlockKind.warning, "Counterpart run rejected", lines)]
+
+    var blocks: [ManualBlock] = [
+        boundary_block(run),
+        input_block(plan, input_digest),
+        provider_block(run, manifests),
+        execution_block(run),
+        converter_block(run),
+        matrix_block(run),
+        mismatch_block(run)
+    ]
+    for block in gpu_receipt_blocks(run):
+        blocks.push(block)
+    blocks.push(ignored_block(ignored_paths, ignored_reasons))
+    for block in artifact_link_blocks(run):
+        blocks.push(block)
+    blocks

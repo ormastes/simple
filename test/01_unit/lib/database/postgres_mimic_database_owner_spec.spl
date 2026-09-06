@@ -1,0 +1,51 @@
+"""The pgwire database owner serializes complete session command flows."""
+
+use std.spec
+use std.database.postgres_mimic.{
+    PostgresMimicServer, PgResponseKind,
+    PgDispatchOperation, PgDispatchSubmitResult, PgDispatchTakeResult,
+    PgDatabaseOwner
+}
+
+describe "Postgres mimic single database owner":
+    it "executes startup query and terminate through one bounded owner":
+        val database = PostgresMimicServer.memory().unwrap()
+        var owner = PgDatabaseOwner.create(database, 4)
+        val startup = owner.dispatch.submit_startup(10, "simple", "simple",
+            "owner-spec", 0, 100)
+        val startup_id = match startup:
+            PgDispatchSubmitResult.Accepted(id): id
+            PgDispatchSubmitResult.Rejected: 0
+        expect(owner.process_one(1)).to_equal(true)
+        val startup_done = owner.dispatch.take(startup_id)
+        val session_id = match startup_done:
+            PgDispatchTakeResult.Ready(completion):
+                expect(completion.responses[0].kind).to_equal(PgResponseKind.AuthenticationOk)
+                completion.session_id
+            _:
+                0
+        expect(session_id).to_be_greater_than(0)
+
+        val query = owner.dispatch.submit(10, session_id,
+            PgDispatchOperation.Query, "VALUES (1)", 2, 100)
+        val query_id = match query:
+            PgDispatchSubmitResult.Accepted(id): id
+            PgDispatchSubmitResult.Rejected: 0
+        expect(owner.process_one(3)).to_equal(true)
+        val query_kind = match owner.dispatch.take(query_id):
+            PgDispatchTakeResult.Ready(completion): completion.responses[0].kind
+            _: PgResponseKind.ErrorResponse
+        expect(query_kind).to_equal(PgResponseKind.RowSet)
+
+        val terminate = owner.dispatch.submit(10, session_id,
+            PgDispatchOperation.Terminate, "", 4, 100)
+        val terminate_id = match terminate:
+            PgDispatchSubmitResult.Accepted(id): id
+            PgDispatchSubmitResult.Rejected: 0
+        expect(owner.process_one(5)).to_equal(true)
+        val close_connection = match owner.dispatch.take(terminate_id):
+            PgDispatchTakeResult.Ready(completion): completion.close_connection
+            _: false
+        expect(close_connection).to_equal(true)
+        expect(owner.commands_started).to_equal(3)
+        expect(owner.commands_completed).to_equal(3)

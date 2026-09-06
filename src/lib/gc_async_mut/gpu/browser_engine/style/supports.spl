@@ -1,0 +1,685 @@
+#![allow(REQC001)]
+#![allow(REQC004)]
+#![allow(unnamed_duplicate_typed_args)]
+
+pub fn known_properties() -> [text]:
+    val props: [text] = [
+        "display",
+        "color",
+        "background-color",
+        "background",
+        "background-attachment",
+        "opacity",
+        "position",
+        "top",
+        "left",
+        "right",
+        "bottom",
+        "width",
+        "height",
+        "min-width",
+        "min-height",
+        "max-width",
+        "max-height",
+        "margin",
+        "margin-top",
+        "margin-left",
+        "margin-right",
+        "margin-bottom",
+        "padding",
+        "padding-top",
+        "padding-left",
+        "padding-right",
+        "padding-bottom",
+        "border",
+        "border-width",
+        "border-color",
+        "border-style",
+        "border-radius",
+        "font-size",
+        "font-family",
+        "font-weight",
+        "font-style",
+        "line-height",
+        "text-align",
+        "text-decoration",
+        "overflow",
+        "overflow-x",
+        "overflow-y",
+        "transform",
+        "transition",
+        "animation",
+        "color-scheme",
+        "forced-color-adjust",
+        "print-color-adjust",
+        "color-adjust",
+        "speech-rate",
+        "pitch",
+        "pitch-range",
+        "volume",
+        "will-change",
+        "object-fit",
+        "object-position",
+        "visibility",
+        "z-index",
+        "cursor",
+        "pointer-events",
+        "box-sizing",
+        "flex",
+        "flex-direction",
+        "flex-wrap",
+        "flex-grow",
+        "flex-shrink",
+        "flex-basis",
+        "align-items",
+        "align-self",
+        "justify-content",
+        "gap",
+        "outline",
+        "box-shadow",
+        "text-shadow",
+        "white-space",
+        "word-break",
+        "overflow-wrap",
+        "vertical-align",
+        "float",
+        "clear",
+        "content",
+        "list-style",
+        "list-style-type",
+        "counter-reset",
+        "counter-increment"
+    ]
+    props
+
+pub fn eval_supports_query(query: text) -> bool:
+    if val supported = _eval_supports_query(query, 0):
+        return supported
+    false
+
+fn _eval_supports_query(
+    query: text, recursion_depth: i32
+) -> Option<bool>:
+    if recursion_depth > 32:
+        return nil
+    val trimmed = query.trim().lower()
+    if trimmed.len() == 0:
+        return nil
+    val recursion_tokens = (
+        (trimmed.len() - trimmed.replace("not ", "").len()) / 4 +
+        (trimmed.len() - trimmed.replace(" and ", "").len()) / 5 +
+        (trimmed.len() - trimmed.replace(" or ", "").len()) / 4
+    )
+    if recursion_tokens > 32:
+        return nil
+    var paren_depth = 0
+    var i = 0
+    while i < trimmed.len():
+        val ch = trimmed.slice(i, i + 1)
+        if ch == "(":
+            paren_depth = paren_depth + 1
+            if paren_depth > 32:
+                return nil
+        elif ch == ")":
+            paren_depth = paren_depth - 1
+            if paren_depth < 0:
+                return nil
+        i = i + 1
+    if paren_depth != 0:
+        return nil
+
+    if trimmed.starts_with("not "):
+        val rest = trimmed.slice(4, trimmed.len()).trim()
+        if val supported = _eval_supports_in_parens(
+            rest, recursion_depth
+        ):
+            return Some(not supported)
+        return nil
+
+    val and_pos = _find_combinator(trimmed, " and ")
+    val or_pos = _find_combinator(trimmed, " or ")
+    if and_pos >= 0 and or_pos >= 0:
+        return nil
+    if and_pos >= 0:
+        return _eval_supports_chain(
+            trimmed, " and ", recursion_depth
+        )
+
+    if or_pos >= 0:
+        return _eval_supports_chain(
+            trimmed, " or ", recursion_depth
+        )
+
+    _eval_supports_in_parens(trimmed, recursion_depth)
+
+fn _eval_supports_chain(
+    query: text, combinator: text, recursion_depth: i32
+) -> Option<bool>:
+    if recursion_depth > 32:
+        return nil
+    val operator_pos = _find_combinator(query, combinator)
+    if operator_pos < 0:
+        return _eval_supports_in_parens(query, recursion_depth)
+    val left_text = query.slice(0, operator_pos).trim()
+    val right_text = query.slice(
+        operator_pos + combinator.len(), query.len()
+    ).trim()
+    if left_text.len() == 0 or right_text.len() == 0:
+        return nil
+    val left_result = _eval_supports_in_parens(left_text, recursion_depth)
+    val right_result = _eval_supports_chain(
+        right_text, combinator, recursion_depth
+    )
+    if val left = left_result:
+        if val right = right_result:
+            if combinator == " and ":
+                return Some(left and right)
+            return Some(left or right)
+    nil
+
+fn _eval_supports_in_parens(
+    query: text, recursion_depth: i32
+) -> Option<bool>:
+    if recursion_depth > 32:
+        return nil
+    val trimmed = query.trim().lower()
+    if trimmed.starts_with("(") and trimmed.ends_with(")"):
+        var depth = 0
+        var i = 0
+        while i < trimmed.len():
+            val ch = trimmed.slice(i, i + 1)
+            if ch == "(":
+                depth = depth + 1
+            elif ch == ")":
+                depth = depth - 1
+                if depth == 0 and i != trimmed.len() - 1:
+                    return nil
+                if depth < 0:
+                    return nil
+            i = i + 1
+        if depth != 0:
+            return nil
+        val inner = trimmed.slice(1, trimmed.len() - 1).trim()
+        if inner.len() == 0:
+            return nil
+        if (
+            inner.starts_with("(") or inner.starts_with("not ") or
+            _find_combinator(inner, " and ") >= 0 or
+            _find_combinator(inner, " or ") >= 0
+        ):
+            return _eval_supports_query(inner, recursion_depth + 1)
+        if val declaration = _eval_single(inner):
+            return Some(declaration)
+        if (
+            not inner.contains(":") and
+            _supports_general_enclosed_in_parentheses(inner)
+        ):
+            return Some(false)
+        return nil
+
+    if trimmed.starts_with("selector(") and trimmed.ends_with(")"):
+        return _supports_selector(
+            trimmed.slice(9, trimmed.len() - 1).trim()
+        )
+    if _supports_general_enclosed(trimmed):
+        return Some(false)
+    nil
+
+fn _eval_single(condition: text) -> bool?:
+    val colon_pos = condition.index_of(":")
+    if colon_pos < 0:
+        return nil
+
+    val prop = condition.slice(0, colon_pos).trim().lower()
+    val value = condition.slice(
+        colon_pos + 1, condition.len()
+    ).trim().lower()
+    if prop.len() == 0 or value.len() == 0:
+        return nil
+    if not _supports_identifier(prop):
+        return nil
+    if prop.starts_with("--"):
+        return Some(prop.len() > 2)
+    if prop == "display":
+        return Some(
+            value == "none" or value == "block" or value == "inline" or
+            value == "inline-block" or value == "flex" or
+            value == "grid" or value == "contents"
+        )
+    if (
+        prop == "width" or prop == "height" or
+        prop == "min-width" or prop == "min-height" or
+        prop == "max-width" or prop == "max-height"
+    ):
+        return Some(_supports_dimension(value, true))
+    if (
+        prop == "top" or prop == "left" or prop == "right" or
+        prop == "bottom" or prop.starts_with("margin") or
+        prop.starts_with("padding") or prop == "gap" or
+        prop == "border-width" or prop == "border-radius" or
+        prop == "font-size"
+    ):
+        return Some(_supports_dimension(value, prop.starts_with("margin")))
+    if (
+        prop == "color" or prop == "background-color" or
+        prop == "border-color"
+    ):
+        return Some(_supports_color(value))
+    if prop == "text-overflow":
+        return Some(value == "clip" or value == "ellipsis")
+    if prop == "text-transform":
+        return Some(
+            value == "none" or value == "capitalize" or
+            value == "uppercase" or value == "lowercase"
+        )
+    if prop == "list-style-type":
+        return Some(
+            value == "none" or value == "disc" or value == "circle" or
+            value == "square" or value == "decimal"
+        )
+    if prop == "opacity":
+        if not _supports_number(value):
+            return Some(false)
+        val opacity = value.to_f64()
+        return Some(opacity >= 0.0 and opacity <= 1.0)
+    if prop == "position":
+        return Some(
+            value == "static" or value == "relative" or
+            value == "absolute" or value == "fixed" or value == "sticky"
+        )
+    if prop == "transform":
+        return Some(_supports_transform(value))
+    if prop == "visibility":
+        return Some(
+            value == "visible" or value == "hidden" or value == "collapse"
+        )
+    if prop == "overflow" or prop == "overflow-x" or prop == "overflow-y":
+        return Some(
+            value == "visible" or value == "hidden" or
+            value == "clip" or value == "scroll" or value == "auto"
+        )
+    if prop == "box-sizing":
+        return Some(value == "content-box" or value == "border-box")
+    if prop == "text-align":
+        return Some(
+            value == "start" or value == "end" or value == "left" or
+            value == "right" or value == "center" or value == "justify"
+        )
+    if prop == "flex-direction":
+        return Some(
+            value == "row" or value == "row-reverse" or
+            value == "column" or value == "column-reverse"
+        )
+    if prop == "flex-wrap":
+        return Some(
+            value == "nowrap" or value == "wrap" or
+            value == "wrap-reverse"
+        )
+    if (
+        prop == "align-items" or prop == "align-self" or
+        prop == "justify-content"
+    ):
+        return Some(
+            value == "normal" or value == "stretch" or
+            value == "start" or value == "end" or
+            value == "flex-start" or value == "flex-end" or
+            value == "center" or value == "space-between" or
+            value == "space-around" or value == "space-evenly"
+        )
+    Some(false)
+
+fn _supports_identifier(value: text) -> bool:
+    if value.len() == 0 or value == "-" or value == "--":
+        return false
+    val first = value.char_at(0)
+    if not (
+        (first >= "a" and first <= "z") or first == "_" or first == "-"
+    ):
+        return false
+    var i = 1
+    while i < value.len():
+        val ch = value.char_at(i)
+        if not (
+            (ch >= "a" and ch <= "z") or
+            (ch >= "0" and ch <= "9") or ch == "_" or ch == "-"
+        ):
+            return false
+        i = i + 1
+    true
+
+fn _supports_general_enclosed(value: text) -> bool:
+    val open = value.index_of("(")
+    if open <= 0 or not value.ends_with(")"):
+        return false
+    if not _supports_identifier(value.slice(0, open).trim()):
+        return false
+    var depth = 0
+    var i = open
+    while i < value.len():
+        val ch = value.slice(i, i + 1)
+        if ch == "(":
+            depth = depth + 1
+        elif ch == ")":
+            depth = depth - 1
+            if depth == 0 and i != value.len() - 1:
+                return false
+            if depth < 0:
+                return false
+        elif ch == "{" or ch == "}" or ch == ";":
+            return false
+        i = i + 1
+    depth == 0
+
+fn _supports_general_enclosed_in_parentheses(value: text) -> bool:
+    if _supports_general_enclosed(value):
+        return true
+    var name_end = 0
+    while name_end < value.len():
+        val ch = value.char_at(name_end)
+        if (
+            (ch >= "a" and ch <= "z") or
+            (ch >= "0" and ch <= "9") or ch == "_" or ch == "-"
+        ):
+            name_end = name_end + 1
+        else:
+            break
+    if name_end == 0 or not _supports_identifier(value.slice(0, name_end)):
+        return false
+    (
+        not value.contains("{") and not value.contains("}") and
+        not value.contains(";")
+    )
+
+fn _supports_number(value: text) -> bool:
+    if value.len() == 0:
+        return false
+    var i = 0
+    if value.char_at(0) == "+" or value.char_at(0) == "-":
+        i = 1
+    var digits = 0
+    var dots = 0
+    while i < value.len():
+        val ch = value.char_at(i)
+        if ch >= "0" and ch <= "9":
+            digits = digits + 1
+        elif ch == ".":
+            dots = dots + 1
+            if dots > 1:
+                return false
+        else:
+            return false
+        i = i + 1
+    digits > 0
+
+fn _supports_dimension(value: text, allow_auto: bool) -> bool:
+    if allow_auto and value == "auto":
+        return true
+    if value == "0":
+        return true
+    val suffixes: [text] = ["px", "%", "em", "rem", "vw", "vh"]
+    for suffix in suffixes:
+        if value.ends_with(suffix) and value.len() > suffix.len():
+            return _supports_number(
+                value.slice(0, value.len() - suffix.len())
+            )
+    false
+
+fn _supports_hex_color(value: text) -> bool:
+    if not value.starts_with("#"):
+        return false
+    val digits = value.len() - 1
+    if digits != 3 and digits != 4 and digits != 6 and digits != 8:
+        return false
+    var i = 1
+    while i < value.len():
+        val ch = value.char_at(i)
+        if not (
+            (ch >= "0" and ch <= "9") or
+            (ch >= "a" and ch <= "f")
+        ):
+            return false
+        i = i + 1
+    true
+
+fn _supports_color(value: text) -> bool:
+    if _supports_hex_color(value):
+        return true
+    if (
+        value == "transparent" or value == "currentcolor" or
+        value == "black" or value == "white" or value == "red" or
+        value == "green" or value == "blue" or
+        value == "rebeccapurple"
+    ):
+        return true
+    if not (
+        value.starts_with("rgb(") or value.starts_with("rgba(") or
+        value.starts_with("hsl(") or value.starts_with("hsla(")
+    ):
+        return false
+    if not value.ends_with(")") or value.len() <= 5:
+        return false
+    val inner = value.slice(value.index_of("(") + 1, value.len() - 1)
+    var numeric_tokens = 0
+    var in_number = false
+    var i = 0
+    while i < inner.len():
+        val ch = inner.char_at(i)
+        if ch >= "0" and ch <= "9":
+            if not in_number:
+                numeric_tokens = numeric_tokens + 1
+            in_number = true
+        elif (
+            ch != " " and ch != "\t" and ch != "," and ch != "." and
+            ch != "%" and ch != "/" and ch != "+" and ch != "-"
+        ):
+            return false
+        elif ch != "." and ch != "+" and ch != "-":
+            in_number = false
+        i = i + 1
+    numeric_tokens >= 3 and numeric_tokens <= 4
+
+fn _supports_transform(value: text) -> bool:
+    if value == "none":
+        return true
+    val open = value.index_of("(")
+    if open <= 0 or not value.ends_with(")"):
+        return false
+    val name = value.slice(0, open).trim()
+    val arg = value.slice(open + 1, value.len() - 1).trim()
+    if arg.len() == 0 or arg.contains("(") or arg.contains(")"):
+        return false
+    if name == "rotate":
+        val units: [text] = ["deg", "rad", "turn"]
+        for unit in units:
+            if arg.ends_with(unit) and arg.len() > unit.len():
+                return _supports_number(
+                    arg.slice(0, arg.len() - unit.len()).trim()
+                )
+        return false
+    if name == "translatex" or name == "translatey":
+        return _supports_dimension(arg, false)
+    if name == "translate":
+        val comma = arg.index_of(",")
+        if comma < 0:
+            return _supports_dimension(arg, false)
+        return (
+            _supports_dimension(arg.slice(0, comma).trim(), false) and
+            _supports_dimension(
+                arg.slice(comma + 1, arg.len()).trim(), false
+            )
+        )
+    if name == "scale":
+        val comma = arg.index_of(",")
+        if comma < 0:
+            return _supports_number(arg)
+        return (
+            _supports_number(arg.slice(0, comma).trim()) and
+            _supports_number(arg.slice(comma + 1, arg.len()).trim())
+        )
+    false
+
+fn _supports_selector(selector: text) -> Option<bool>:
+    val trimmed_selector = selector.trim()
+    if trimmed_selector.len() == 0:
+        return nil
+    var supported = true
+    if trimmed_selector.contains("::"):
+        supported = false
+    if (
+        trimmed_selector.starts_with(",") or
+        trimmed_selector.ends_with(",") or
+        trimmed_selector.ends_with(">") or
+        trimmed_selector.ends_with("+") or
+        trimmed_selector.ends_with("~")
+    ):
+        return nil
+    var depth = 0
+    var bracket_depth = 0
+    var open_positions: [i32] = [0; 33]
+    var option_commas: [i32] = [0; 33]
+    var option_starts: [i32] = [0; 33]
+    var bracket_starts: [i32] = [0; 2]
+    var top_level_commas = 0
+    var group_start = 0
+    var i = 0
+    while i < selector.len():
+        val ch = selector.slice(i, i + 1)
+        if ch == "(":
+            var function_start = i
+            while function_start > 0:
+                val function_ch = selector.char_at(function_start - 1)
+                if (
+                    (function_ch >= "a" and function_ch <= "z") or
+                    function_ch == "-"
+                ):
+                    function_start = function_start - 1
+                else:
+                    break
+            if (
+                function_start <= 0 or
+                selector.char_at(function_start - 1) != ":"
+            ):
+                return nil
+            val function_name = selector.slice(function_start, i)
+            if (
+                function_name != "has" and function_name != "is" and
+                function_name != "where" and function_name != "not" and
+                function_name != "nth-child"
+            ):
+                supported = false
+            depth = depth + 1
+            if depth > 32:
+                return nil
+            open_positions[depth] = i
+            option_commas[depth] = 0
+            option_starts[depth] = i + 1
+        elif ch == ")":
+            if depth <= 0:
+                return nil
+            val inner = selector.slice(option_starts[depth], i).trim()
+            if inner.len() == 0:
+                return nil
+            depth = depth - 1
+        elif ch == ",":
+            if depth == 0:
+                if selector.slice(group_start, i).trim().len() == 0:
+                    return nil
+                top_level_commas = top_level_commas + 1
+                if top_level_commas >= 16:
+                    return nil
+                group_start = i + 1
+            else:
+                if selector.slice(
+                    option_starts[depth], i
+                ).trim().len() == 0:
+                    return nil
+                option_commas[depth] = option_commas[depth] + 1
+                if option_commas[depth] >= 16:
+                    return nil
+                option_starts[depth] = i + 1
+        elif ch == "[":
+            bracket_depth = bracket_depth + 1
+            if bracket_depth > 1:
+                return nil
+            bracket_starts[bracket_depth] = i + 1
+        elif ch == "]":
+            if bracket_depth <= 0:
+                return nil
+            if selector.slice(
+                bracket_starts[bracket_depth], i
+            ).trim().len() == 0:
+                return nil
+            bracket_depth = bracket_depth - 1
+        elif ch == "{" or ch == "}" or ch == ";":
+            return nil
+        elif ch == "?":
+            return nil
+        elif ch == ":":
+            if i + 1 >= selector.len():
+                return nil
+            var name_end = i + 1
+            while name_end < selector.len():
+                val name_ch = selector.char_at(name_end)
+                if (
+                    (name_ch >= "a" and name_ch <= "z") or
+                    name_ch == "-"
+                ):
+                    name_end = name_end + 1
+                else:
+                    break
+            val name = selector.slice(i + 1, name_end)
+            val functional = (
+                name_end < selector.len() and
+                selector.char_at(name_end) == "("
+            )
+            val allowed_function = (
+                name == "has" or name == "is" or name == "where" or
+                name == "not" or name == "nth-child"
+            )
+            val allowed_ordinary = (
+                name == "empty" or name == "first-child" or
+                name == "last-child" or name == "only-child" or
+                name == "root" or name == "disabled" or
+                name == "hover" or name == "active" or name == "focus"
+            )
+            if (
+                (functional and not allowed_function) or
+                (not functional and not allowed_ordinary)
+            ):
+                supported = false
+        elif not (
+            (ch >= "a" and ch <= "z") or
+            (ch >= "0" and ch <= "9") or
+            ch == " " or ch == "\t" or ch == "\n" or ch == "\r" or
+            ch == "." or ch == "#" or ch == "_" or ch == "-" or
+            ch == "*" or ch == "=" or ch == "'" or ch == "\"" or
+            ch == ">" or ch == "+" or ch == "~" or ch == "|" or
+            ch == "^" or ch == "$" or ch == "%"
+        ):
+            return nil
+        i = i + 1
+    if (
+        depth != 0 or bracket_depth != 0 or
+        selector.slice(group_start, selector.len()).trim().len() == 0
+    ):
+        return nil
+    Some(supported)
+
+fn _find_combinator(s: text, combinator: text) -> i64:
+    var depth = 0
+    var i = 0
+    val slen = s.len()
+    val clen = combinator.len()
+    while i < slen:
+        val ch = s.slice(i, i + 1)
+        if ch == "(":
+            depth = depth + 1
+        else if ch == ")":
+            depth = depth - 1
+        else if depth == 0:
+            if i + clen <= slen:
+                val candidate = s.slice(i, i + clen)
+                if candidate == combinator:
+                    return i
+        i = i + 1
+    -1

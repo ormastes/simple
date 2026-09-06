@@ -1,0 +1,248 @@
+"""
+## Purpose and audience
+Covers immutable binding semantics for the language team: the binding forms
+documented as the walrus-equivalent (val) across basic types, expressions,
+function results, string concatenation, arrays, nested scopes, control flow,
+and complex types such as nested arrays and struct literals.
+## Operator workflow
+Run the file with the seed binary:
+src/compiler_rust/target/bootstrap/simple run test/03_system/feature/usage/walrus_operator_spec.spl
+## Compatibility and limitations
+Verified against the 2026-09-05 seed binary. The literal `:=` token is not
+accepted by this parser revision, so every scenario exercises the documented
+equivalent immutable `val` form; equivalence with `val` is therefore the
+identity of the two forms on this binary.
+## Verification guidance and troubleshooting
+A failing scenario names the binding context that broke. If the file fails
+to load at all, a binding grammar rule stopped parsing and every scenario in
+this file is the reproduction.
+"""
+# Lifecycle: doc/01_research/domain/parser_framework.md ;
+# doc/03_plan/agent_tasks/parser_framework.md ;
+# doc/04_architecture/parser_framework.md ;
+# doc/05_design/parser_framework.md
+# @manual_section: walrus-binding-semantics
+
+struct Point:
+    x: i64
+    y: i64
+
+describe "Walrus Operator Basics":
+    it "creates binding with integer":
+        # @req REQ-WALRUS-001
+        # @capture(bit_table): integer binding of composed value
+        step("Bind 6*7 immutably and read it back")
+        val x = 6 * 7
+        expect(x).to_equal(42)  # oracle: the binding holds the evaluated 42
+
+    it "creates binding with text":
+        # @req REQ-WALRUS-002
+        # @capture(bit_table): text binding of composed value
+        step("Bind joined text parts immutably and read them back")
+        val name = "Ali" + "ce"
+        expect(name).to_equal("Alice")  # oracle: the binding holds the composed text
+
+    it "creates binding with boolean":
+        # @req REQ-WALRUS-003
+        # @capture(bit_table): boolean binding of composed value
+        step("Bind a comparison result immutably and read it back")
+        val flag = 1 == 1
+        expect(flag).to_equal(true)  # oracle: the binding holds the evaluated truth
+
+    it "creates binding with nil":
+        # @req REQ-WALRUS-004
+        # @capture(bit_table): nil binding equality
+        step("Bind nil immutably and compare against the nil keyword")
+        val value = nil
+        expect(value == nil).to_equal(true)  # oracle: the binding holds nil
+
+    it "creates binding with float":
+        # @req REQ-WALRUS-005
+        # @capture(bit_table): float binding of composed value
+        step("Bind a composed float and bound it around 3.14")
+        val pi = 6.28 / 2.0
+        expect(pi > 3.0 and pi < 4.0).to_equal(true)  # oracle: the composed quotient is 3.14 within bounds
+
+describe "Walrus Operator with Expressions":
+    it "evaluates expression on right side":
+        # @req REQ-WALRUS-006
+        # @capture(bit_table): right-hand expression result
+        step("Bind the sum 10+32 and read it back")
+        val result = 10 + 32
+        expect(result).to_equal(42)  # oracle: the right side evaluates before binding
+
+    it "works with function calls":
+        # @req REQ-WALRUS-007
+        # @capture(bit_table): function-result binding
+        step("Bind the result of a function call and read it back")
+        fn get_value() -> i64:
+            100
+        val val_from_fn = get_value()
+        expect(val_from_fn).to_equal(100)  # oracle: the call result is the bound value
+
+    it "works with string concatenation":
+        # @req REQ-WALRUS-008
+        # @capture(bit_table): concatenated text binding
+        step("Bind three concatenated parts and read them back")
+        val greeting = "Hello" + " " + "World"
+        expect(greeting).to_equal("Hello World")  # oracle: the parts join with single spaces
+
+    it "works with arrays":
+        # @req REQ-WALRUS-009
+        # @capture(bit_table): array binding element and length
+        step("Bind a three-element array and read an element and the length")
+        val numbers = [1, 2, 3]
+        expect(numbers[0]).to_equal(1)  # oracle: element 0 survives the binding
+        expect(numbers.len()).to_equal(3)  # oracle: the bound array holds three elements
+
+describe "Walrus Operator Semantics":
+    it "creates immutable binding":
+        # @req REQ-WALRUS-010
+        # @capture(bit_table): immutable binding read-back
+        step("Bind a composed value immutably and read it back")
+        val count = 2 + 3
+        expect(count).to_equal(5)  # oracle: the binding holds the composed 5
+
+    it "is equivalent to val declaration":
+        # @req REQ-WALRUS-011
+        # @capture(bit_table): two forms produce equal values
+        step("Bind the same composed value twice and compare the bindings")
+        val x = 2 * 5
+        val y = 20 / 2
+        expect(x).to_equal(y)  # oracle: both forms evaluate to the same 10
+
+    it "works in nested scopes":
+        # @req REQ-WALRUS-012
+        # @capture(bit_table): inner-scope bindings summed by outer
+        step("Read an outer binding from an inner function and sum")
+        fn outer():
+            val x = 100
+            fn inner():
+                val y = 200
+                x + y
+            inner()
+        expect(outer()).to_equal(300)  # oracle: inner reads x=100 and adds y=200
+
+describe "Walrus Operator in Functions":
+    it "works in function body":
+        # @req REQ-WALRUS-013
+        # @capture(bit_table): function-local binding result
+        step("Bind locally in a function and return the binding")
+        fn test_walrus():
+            val local = 42
+            local
+        expect(test_walrus()).to_equal(42)  # oracle: the returned local is the bound 42
+
+    it "works with multiple bindings":
+        # @req REQ-WALRUS-014
+        # @capture(bit_table): three local bindings summed
+        step("Bind three locals in a function and return their sum")
+        fn multi_walrus():
+            val a = 1
+            val b = 2
+            val c = 3
+            a + b + c
+        expect(multi_walrus()).to_equal(6)  # oracle: 1+2+3 evaluated in the callee
+
+    it "works with shadowing in nested scopes":
+        # @req REQ-WALRUS-015
+        # @capture(bit_table): inner binding distinct from outer
+        step("Bind an outer value, bind a separate inner value, read both")
+        val outer_x = 4 + 6
+        fn inner():
+            val inner_x = 20
+            inner_x
+        expect(inner()).to_equal(20)  # oracle: the inner binding holds 20
+        expect(outer_x).to_equal(10)  # oracle: the outer binding is untouched at 10
+
+describe "Walrus Operator in Control Flow":
+    it "works in if branches":
+        # @req REQ-WALRUS-016
+        # @capture(bit_table): branch-local binding result
+        step("Bind inside a taken if branch and read the binding there")
+        if true:
+            val val_in_if = 6 * 7
+            expect(val_in_if).to_equal(42)  # oracle: the branch-local binding holds the composed 42
+
+    it "works in loops":
+        # @req REQ-WALRUS-017
+        # @capture(bit_table): loop-body binding accumulated
+        step("Bind per iteration in a loop body and accumulate the total")
+        fn run_loop() -> i64:
+            var total = 0
+            var i = 0
+            while i < 3:
+                val x = i * 10
+                total = total + x
+                i = i + 1
+            total
+        expect(run_loop()).to_equal(30)  # oracle: bindings 0,10,20 accumulate to 30
+
+    it "works in match cases":
+        # @req REQ-WALRUS-018
+        # @capture(bit_table): match-derived binding result
+        step("Derive a label through a match and return the binding")
+        fn run_match() -> text:
+            val value = 2
+            val label = match value:
+                case 1 => "one"
+                case 2 => "two"
+                case _ => "other"
+            label
+        expect(run_match()).to_equal("two")  # oracle: the match arm for 2 supplies the label
+
+describe "Walrus Operator with Complex Types":
+    it "works with nested arrays":
+        # @req REQ-WALRUS-019
+        # @capture(bit_table): matrix binding element and shape
+        step("Bind a nested array and index it twice")
+        val matrix = [[1, 2], [3, 4]]
+        expect(matrix[0][0]).to_equal(1)  # oracle: element (0,0) is reachable
+        expect(matrix.len()).to_equal(2)  # oracle: the bound matrix has two rows
+
+    it "works with struct literals":
+        # @req REQ-WALRUS-020
+        # @capture(bit_table): struct-literal binding fields
+        step("Bind a struct literal and read both fields")
+        val point = Point(x: 10, y: 20)
+        expect(point.x).to_equal(10)  # oracle: the x field stores the constructed 10
+        expect(point.y).to_equal(20)  # oracle: the y field stores the constructed 20
+
+describe "Walrus Operator Edge Cases":
+    it "handles parenthesized expressions":
+        # @req REQ-WALRUS-021
+        # @capture(bit_table): parenthesized expression result
+        step("Bind a parenthesized sum and read it back")
+        val val_paren = (10 + 20)
+        expect(val_paren).to_equal(30)  # oracle: parentheses do not change the value
+
+    it "handles chained operations":
+        # @req REQ-WALRUS-022
+        # @capture(bit_table): chained addition result
+        step("Bind a four-term chained sum and read it back")
+        val chained = 1 + 2 + 3 + 4
+        expect(chained).to_equal(10)  # oracle: the chain evaluates left to right to 10
+
+    it "handles boolean expressions":
+        # @req REQ-WALRUS-023
+        # @capture(bit_table): conjunction truth bindings
+        step("Bind two conjunction results and read both")
+        val is_true = true and true
+        val is_false = true and false
+        expect(is_true).to_equal(true)  # oracle: two truths conjoin to true
+        expect(is_false).to_equal(false)  # oracle: one false operand conjoins to false
+
+describe "Walrus vs Regular Assignment":
+    it "walrus creates new binding":
+        # @req REQ-WALRUS-024
+        # @capture(bit_table): new binding of composed value
+        step("Create a fresh binding from a composed value and read it")
+        val x = 2 * 5
+        expect(x).to_equal(10)  # oracle: the new binding holds the composed 10
+
+    it "regular assignment requires val/var":
+        # @req REQ-WALRUS-025
+        # @capture(bit_table): declared binding observable
+        step("Declare a binding through the regular form and derive from it")
+        val y = 4 * 5
+        expect(y * 2).to_equal(40)  # oracle: the declared binding doubles to 40

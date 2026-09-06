@@ -1,0 +1,91 @@
+# Centralized built-in backend loader.
+# Dynamic SFFI resolution is intentionally deferred; its versioned entry symbol
+# is reserved here so the later loader can share this admission path.
+
+use compiler.common.backend_plugin.model.{
+    BACKEND_PLUGIN_ABI_VERSION_V1, BACKEND_PLUGIN_DESCRIPTOR_MIN_SIZE_V1,
+    BackendPluginRequestV1, BackendPluginDescriptorV1,
+    backend_plugin_vtable_v1_all_operations
+}
+use compiler.common.backend_plugin.receipt.{
+    BackendPluginError, backend_plugin_receipt, validate_backend_plugin_request
+}
+use compiler.backend.backend_plugin.admission.{admit_backend_plugin}
+use compiler.backend.backend_plugin.registry.{
+    BUILTIN_SESSION_HANDLE, backend_request_with_default_name,
+    resolve_builtin_backend
+}
+use compiler.backend.backend_plugin.session.{BackendSession}
+use compiler.backend.backend_plugin.dynamic_loader.{
+    DynamicBackendPluginLoadError, load_dynamic_backend_plugin_lease
+}
+use compiler.backend.backend_plugin.dynamic_adapter.{DynamicBackendAdapter}
+use compiler.backend.backend_plugin.builtin_adapter.{
+    create_builtin_backend_compile_adapter
+}
+
+val BACKEND_PLUGIN_ENTRY_SYMBOL_V1 = "simple_backend_plugin_v1"
+
+fn dynamic_backend_plugin_error_v1(
+    error: DynamicBackendPluginLoadError
+) -> BackendPluginError:
+    match error:
+        case DynamicBackendPluginLoadError.LoadFailed(detail):
+            BackendPluginError.LoadFailed(detail)
+        case DynamicBackendPluginLoadError.MissingSymbol(detail):
+            BackendPluginError.MissingSymbol(detail)
+        case DynamicBackendPluginLoadError.Unsupported(detail):
+            BackendPluginError.ProviderRejected(detail)
+
+fn load_dynamic_backend_v1(
+    request: BackendPluginRequestV1
+) -> Result<BackendSession, BackendPluginError>:
+    val validated = validate_backend_plugin_request(request)
+    if validated.is_err():
+        return Err(validated.err().unwrap())
+    val loaded = unsafe(capabilities: [ffi, raw_ptr]):
+        load_dynamic_backend_plugin_lease(request.plugin_path)
+    val lease = match loaded:
+        case Ok(value): value
+        case Err(error): return Err(dynamic_backend_plugin_error_v1(error))
+    # The runtime bridge validates the actual foreign descriptor before any
+    # provider operation. This local projection binds session/cache provenance
+    # to the selected path until descriptor metadata is returned in v2.
+    val descriptor = BackendPluginDescriptorV1(
+        BACKEND_PLUGIN_ABI_VERSION_V1,
+        BACKEND_PLUGIN_DESCRIPTOR_MIN_SIZE_V1,
+        request.backend_name,
+        "dynamic-bridge-v1",
+        lease.build_id,
+        request.mir_abi_digest,
+        [request.role], [request.target], request.required_capabilities,
+        backend_plugin_vtable_v1_all_operations())
+    val receipt = backend_plugin_receipt(descriptor, request)
+    val adapter = DynamicBackendAdapter(
+        provider_path: lease.provider_path, request: request,
+        lease: lease, closed: false)
+    Ok(BackendSession.dynamic_admitted(
+        descriptor, request, receipt, adapter, 1))
+
+fn load_backend(
+    request: BackendPluginRequestV1
+) -> Result<BackendSession, BackendPluginError>:
+    val effective_request = backend_request_with_default_name(request)
+    if effective_request.has_plugin_path:
+        return load_dynamic_backend_v1(effective_request)
+    val descriptor = match resolve_builtin_backend(effective_request):
+        case Ok(value): value
+        case Err(error): return Err(error)
+    val receipt = match admit_backend_plugin(effective_request, descriptor):
+        case Ok(value): value
+        case Err(error): return Err(error)
+    val adapter = match create_builtin_backend_compile_adapter(effective_request):
+        case Ok(value): value
+        case Err(error): return Err(error)
+    Ok(BackendSession.admitted(
+        descriptor,
+        effective_request,
+        receipt,
+        adapter,
+        BUILTIN_SESSION_HANDLE
+    ))

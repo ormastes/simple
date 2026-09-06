@@ -1,0 +1,105 @@
+use std.spec.*
+use compiler.semantics.enum_contract.contract_model.{
+    EnumContractKind, EnumContract, EnumContractTable
+}
+use compiler.semantics.enum_contract.attribute_source.{enum_contract_table_from_source}
+use compiler.semantics.enum_contract.declaration_check.{
+    EnumVariantShape, check_enum_declaration, max_unsigned_for_bits
+}
+use compiler.semantics.enum_contract.match_check.{check_closed_match}
+use compiler.semantics.match_exhaustiveness.{build_match_coverage}
+use compiler.common.assurance.policy_schema.{AssuranceStrictness}
+
+fn closed(name: text) -> EnumContract:
+    EnumContract(enum_name: name, kind: EnumContractKind.Closed)
+
+fn unit_variant(name: text) -> EnumVariantShape:
+    EnumVariantShape(name: name, payload_names: [], payload_types: [],
+                     has_discriminant: false, discriminant: 0)
+
+fn disc_variant(name: text, value: i64) -> EnumVariantShape:
+    EnumVariantShape(name: name, payload_names: [], payload_types: [],
+                     has_discriminant: true, discriminant: value)
+
+describe "@closed enum contract (S2)":
+    describe "attribute recovery":
+        it "recognizes @closed on the enum it precedes":
+            val table = enum_contract_table_from_source("@closed\nenum Color:\n    Red\n    Green\n")
+            assert_true(table.has("Color"))
+
+        it "keeps a @closed decorator attached across an intervening doc comment":
+            val table = enum_contract_table_from_source("@closed\n# a note\nenum Color:\n    Red\n")
+            assert_true(table.has("Color"))
+
+        it "does not attach a decorator to an unrelated later enum":
+            val table = enum_contract_table_from_source("@closed\nfn f():\n    pass_do_nothing\nenum Color:\n    Red\n")
+            assert_false(table.has("Color"))
+
+        it "leaves an undecorated enum uncontracted":
+            val table = enum_contract_table_from_source("enum Color:\n    Red\n")
+            assert_false(table.has("Color"))
+
+    describe "E-CLOSED-001 wildcard over a closed enum":
+        it "reports the uncovered variants absorbed by a wildcard arm":
+            # REPRODUCE: match names Red only, `case _:` swallows Green and Blue.
+            val cov = build_match_coverage(1, 7, "Color", [0, 1, 2],
+                                           ["Red", "Green", "Blue"], [0], true)
+            val diags = check_closed_match(closed("Color"), cov, AssuranceStrictness.Moderate)
+            expect(diags.len()).to_equal(1)
+            expect(diags[0].code).to_equal("E-CLOSED-001")
+            expect(diags[0].enum_name).to_equal("Color")
+            expect(diags[0].detail).to_contain("Green")
+            expect(diags[0].detail).to_contain("Blue")
+
+        it "does not report a wildcard match that already names every variant":
+            # NEIGHBOUR: wildcard present but redundant -- nothing is absorbed.
+            val cov = build_match_coverage(1, 7, "Color", [0, 1, 2],
+                                           ["Red", "Green", "Blue"], [0, 1, 2], true)
+            val diags = check_closed_match(closed("Color"), cov, AssuranceStrictness.Moderate)
+            expect(diags.len()).to_equal(0)
+
+        it "does not report a wildcard-free exhaustive match":
+            val cov = build_match_coverage(1, 7, "Color", [0, 1, 2],
+                                           ["Red", "Green", "Blue"], [0, 1, 2], false)
+            val diags = check_closed_match(closed("Color"), cov, AssuranceStrictness.Moderate)
+            expect(diags.len()).to_equal(0)
+
+        it "leaves a wildcard-free incomplete match to the existing exhaustiveness error":
+            # NEIGHBOUR: genuinely non-exhaustive, but this rule is about the
+            # wildcard hole specifically -- it must not double-report.
+            val cov = build_match_coverage(1, 7, "Color", [0, 1, 2],
+                                           ["Red", "Green", "Blue"], [0], false)
+            val diags = check_closed_match(closed("Color"), cov, AssuranceStrictness.Moderate)
+            expect(diags.len()).to_equal(0)
+
+        it "fires at the critical profile too":
+            val cov = build_match_coverage(1, 7, "Color", [0, 1], ["Red", "Green"], [0], true)
+            val diags = check_closed_match(closed("Color"), cov, AssuranceStrictness.Critical)
+            expect(diags.len()).to_equal(1)
+            expect(diags[0].code).to_equal("E-CLOSED-001")
+
+    describe "E-CLOSED-002 duplicate discriminants":
+        it "reports two variants sharing one discriminant":
+            val diags = check_enum_declaration(closed("Code"),
+                [disc_variant("A", 1), disc_variant("B", 1)])
+            expect(diags.len()).to_equal(1)
+            expect(diags[0].code).to_equal("E-CLOSED-002")
+            expect(diags[0].detail).to_contain("A")
+            expect(diags[0].detail).to_contain("B")
+
+        it "accepts distinct discriminants":
+            val diags = check_enum_declaration(closed("Code"),
+                [disc_variant("A", 1), disc_variant("B", 2)])
+            expect(diags.len()).to_equal(0)
+
+        it "accepts an implicit-discriminant closed enum":
+            val diags = check_enum_declaration(closed("Color"),
+                [unit_variant("Red"), unit_variant("Green")])
+            expect(diags.len()).to_equal(0)
+
+    describe "max_unsigned_for_bits":
+        it "computes the u8 ceiling":
+            expect(max_unsigned_for_bits(8)).to_equal(255)
+
+        it "computes the u16 ceiling":
+            expect(max_unsigned_for_bits(16)).to_equal(65535)

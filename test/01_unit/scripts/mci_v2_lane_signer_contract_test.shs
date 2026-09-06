@@ -1,0 +1,119 @@
+#!/bin/sh
+set -eu
+root=$(CDPATH= cd -- "$(dirname "$0")/../../.." && pwd -P)
+signer=$root/scripts/check/sign-mci-v2-lane.shs
+work=$(mktemp -d "$root/build/mci-lane-signer-contract.XXXXXX")
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+chmod 700 "$work"
+# Contract-only key material: production keys are supplied externally.
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$work/key.pem" >/dev/null 2>&1
+openssl pkey -in "$work/key.pem" -pubout -out "$work/public.pem" >/dev/null 2>&1
+hash_file(){ if command -v sha256sum >/dev/null 2>&1;then sha256sum "$1"|awk '{print $1}';else shasum -a 256 "$1"|awk '{print $1}';fi; }
+hash=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+make_root(){ mkdir -p "$1/receipts" "$1/signatures"; chmod 700 "$1" "$1/receipts" "$1/signatures"; }
+common_tail(){
+    lane=$1 artifact_name=$2 artifact_hash=$3 artifact_schema=$4 scenarios=$5
+    echo run_id=contract-run; echo source_hash=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    echo configuration_hash=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+    echo captured_at_utc_ns=100; echo valid_until_utc_ns=200; echo result=pass; echo scenarios="$scenarios"
+    echo artifact_relpath="$artifact_name"; echo artifact_sha256="$artifact_hash"; echo artifact_schema="$artifact_schema"
+    echo artifact_mode=live; echo release_eligible=true
+}
+
+# Tooling normalization and detached-signature contract.
+mkdir -p "$work/tooling-generation/raw"
+tooling_ids='compiler-check lib-check mcp-check lsp-check bootstrap-essential bootstrap-portability bootstrap-parity lint duplicate whole-test direct-env-working direct-env-staged runtime-contract artifact-execution warm-cli warm-mcp warm-lsp'
+{
+ echo 'manifest_schema=mci-tooling-child-manifest-v2'; echo producer_class=tooling-admission; echo mode=live; echo release_eligible=true; echo required_child_ids="$tooling_ids"
+ echo capture_limit_bytes=16777216; echo timeout_seconds=1800; echo scan_count_limit=0; echo scan_count_policy=per-row-explicit
+ echo warm_cli_min_samples=30; echo warm_request_min_samples=1000; echo warm_cli_p95_max_ms=250; echo warm_cli_rss_max_kib=262144
+ echo warm_mcp_startup_max_ms=500; echo warm_mcp_request_p95_max_ms=100; echo warm_mcp_rss_max_kib=524288; echo warm_lsp_startup_max_ms=1500; echo warm_lsp_request_p95_max_ms=150; echo warm_lsp_rss_max_kib=786432
+ for id in $tooling_ids; do samples=20; case "$id" in warm-cli) samples=30;; warm-mcp|warm-lsp) samples=1000;; esac; echo "row=$id|pass|$hash|$hash|$hash|17|$hash|19|1|2|1|0|false|0|$samples|10|12|100|12|0"; echo "scan_policy=$id|not-applicable|command-contract-v1"; done
+ for id in warm-cli warm-mcp warm-lsp; do raw="$work/tooling-generation/raw/$id.samples"; if [ "$id" = warm-cli ]; then awk 'BEGIN{for(i=1;i<=30;i++)print "10|100"}' > "$raw"; else { echo 'startup|20'; awk 'BEGIN{for(i=1;i<=1000;i++)print "request|10|100"}'; } > "$raw"; fi; raw_hash=$(hash_file "$raw"); samples=30; [ "$id" = warm-cli ] || samples=1000; echo "metric=$id|startup_p95_ms|20|samples|$samples|p50_ms|10|p95_ms|12|p99_ms|12|max_rss_kib|100|raw_relpath|raw/$id.samples|raw_sha256|$raw_hash"; echo "baseline=$id|100|100"; done
+} > "$work/tooling-generation/manifest.env"
+tar -cf "$work/tooling-generation-v1.tar" -C "$work/tooling-generation" ./manifest.env ./raw
+tooling_hash=$(hash_file "$work/tooling-generation-v1.tar")
+tooling_scenarios=MCI-TOOL-001,MCI-TOOL-002,MCI-TOOL-003,MCI-NFR-001,MCI-NFR-002,MCI-NFR-005,MCI-NFR-006,MCI-NFR-013,MCI-NFR-014
+{
+ echo receipt_schema=mci-lane-receipt-v1; echo check_id=tooling; echo producer_class=tooling-admission
+ echo attestation=unsigned-template; echo trusted_key_id=signer-must-set; echo signature_relpath=tooling.sig
+ common_tail tooling tooling-generation-v1.tar "$tooling_hash" mci-tooling-child-manifest-v2 "$tooling_scenarios"
+ echo receipt_hash=signer-must-canonicalize-hash-and-sign
+} > "$work/tooling.template"
+make_root "$work/tooling-evidence"
+"$signer" --evidence "$work/tooling-evidence" --lane tooling --template "$work/tooling.template" --artifact "$work/tooling-generation-v1.tar" --private-key "$work/key.pem" --trusted-key-id contract-key >/dev/null
+tooling_generation=$(sed -n '1p' "$work/tooling-evidence/lane-generations/tooling.current")
+tooling_dir="$work/tooling-evidence/lane-generations/tooling/$tooling_generation"
+[ ! -e "$work/tooling-evidence/receipts/tooling.receipt" ] && [ ! -e "$work/tooling-evidence/signatures/tooling.sig" ]
+grep -Fxq attestation=signed-v1 "$tooling_dir/tooling.receipt"
+sed '/^receipt_hash=/d' "$tooling_dir/tooling.receipt" > "$work/tooling.canonical"
+field_hash=$(sed -n 's/^receipt_hash=//p' "$tooling_dir/tooling.receipt")
+[ "$field_hash" = "$(hash_file "$work/tooling.canonical")" ]
+openssl dgst -sha256 -verify "$work/public.pem" -signature "$tooling_dir/tooling.sig" "$work/tooling.canonical" >/dev/null 2>&1
+[ "$(hash_file "$tooling_dir/complete.env")" = "$tooling_generation" ]
+
+# Executable archive negatives: a valid receipt-shaped template cannot promote
+# an archive with missing raw members or a raw hash mismatch.
+tar -cf "$work/tooling-missing-raw.tar" -C "$work/tooling-generation" ./manifest.env
+missing_hash=$(hash_file "$work/tooling-missing-raw.tar")
+sed "s/$tooling_hash/$missing_hash/; s/tooling-generation-v1.tar/tooling-missing-raw.tar/" "$work/tooling.template" > "$work/missing-raw.template"
+make_root "$work/reject-missing-raw"
+if "$signer" --evidence "$work/reject-missing-raw" --lane tooling --template "$work/missing-raw.template" --artifact "$work/tooling-missing-raw.tar" --private-key "$work/key.pem" --trusted-key-id contract-key >/dev/null 2>&1; then exit 1; fi
+[ ! -e "$work/reject-missing-raw/lane-generations/tooling.current" ]
+mkdir "$work/tampered-generation"; cp "$work/tooling-generation/manifest.env" "$work/tampered-generation/manifest.env"; mkdir "$work/tampered-generation/raw"; cp "$work/tooling-generation/raw"/* "$work/tampered-generation/raw/"; printf 'tampered\n' >> "$work/tampered-generation/raw/warm-cli.samples"
+tar -cf "$work/tooling-tampered-raw.tar" -C "$work/tampered-generation" ./manifest.env ./raw
+tampered_hash=$(hash_file "$work/tooling-tampered-raw.tar")
+sed "s/$tooling_hash/$tampered_hash/; s/tooling-generation-v1.tar/tooling-tampered-raw.tar/" "$work/tooling.template" > "$work/tampered-raw.template"
+make_root "$work/reject-tampered-raw"
+if "$signer" --evidence "$work/reject-tampered-raw" --lane tooling --template "$work/tampered-raw.template" --artifact "$work/tooling-tampered-raw.tar" --private-key "$work/key.pem" --trusted-key-id contract-key >/dev/null 2>&1; then exit 1; fi
+[ ! -e "$work/reject-tampered-raw/lane-generations/tooling.current" ]
+
+# Duplicate options and an oversized tooling manifest fail before activation.
+make_root "$work/reject-duplicate"
+if "$signer" --evidence "$work/reject-duplicate" --evidence "$work/reject-duplicate" --lane tooling --template "$work/tooling.template" --artifact "$work/tooling-generation-v1.tar" --private-key "$work/key.pem" --trusted-key-id contract-key >/dev/null 2>&1; then exit 1; fi
+[ ! -e "$work/reject-duplicate/lane-generations/tooling.current" ]
+mkdir "$work/oversized-generation"; dd if=/dev/zero of="$work/oversized-generation/manifest.env" bs=1024 count=65 2>/dev/null
+tar -cf "$work/oversized.tar" -C "$work/oversized-generation" ./manifest.env
+oversized_hash=$(hash_file "$work/oversized.tar")
+sed "s/$tooling_hash/$oversized_hash/; s/tooling-generation-v1.tar/oversized.tar/" "$work/tooling.template" > "$work/oversized.template"
+make_root "$work/reject-oversized"
+if "$signer" --evidence "$work/reject-oversized" --lane tooling --template "$work/oversized.template" --artifact "$work/oversized.tar" --private-key "$work/key.pem" --trusted-key-id contract-key >/dev/null 2>&1; then exit 1; fi
+[ ! -e "$work/reject-oversized/lane-generations/tooling.current" ]
+
+# The compiler helper is always resolved from the repository, never evidence-adjacent source.
+mkdir -p "$work/scripts/check/lib"; printf '#error attacker-controlled helper compiled\n' > "$work/scripts/check/lib/mci-secure-publish.c"
+make_root "$work/helper-root"
+"$signer" --evidence "$work/helper-root" --lane tooling --template "$work/tooling.template" --artifact "$work/tooling-generation-v1.tar" --private-key "$work/key.pem" --trusted-key-id contract-key >/dev/null
+
+# SimpleOS's distinct unsigned schema is normalized to the same canonical receipt.
+printf 'artifact_schema=mci-simpleos-platform-evidence-v1\nartifact_mode=live\nrelease_eligible=true\n' > "$work/simpleos.evidence"
+simpleos_hash=$(hash_file "$work/simpleos.evidence")
+{
+ echo receipt_template_schema=mci-lane-unsigned-template-v1; echo check_id=simpleos; echo producer_class=simpleos-target
+ echo attestation=unsigned-v1; echo trusted_key_id=producer-key; echo signature_relpath=simpleos.sig
+ common_tail simpleos simpleos.evidence "$simpleos_hash" mci-simpleos-platform-evidence-v1 MCI-OS-001,MCI-OS-002,MCI-OS-003,MCI-OS-004,MCI-OS-005,MCI-OS-006
+} > "$work/simpleos.template"
+make_root "$work/simpleos-root"
+"$signer" --evidence "$work/simpleos-root" --lane simpleos --template "$work/simpleos.template" --artifact "$work/simpleos.evidence" --private-key "$work/key.pem" --trusted-key-id contract-key >/dev/null
+simpleos_generation=$(sed -n '1p' "$work/simpleos-root/lane-generations/simpleos.current")
+grep -Fxq receipt_schema=mci-lane-receipt-v1 "$work/simpleos-root/lane-generations/simpleos/$simpleos_generation/simpleos.receipt"
+
+# Fail closed before publication for malformed templates and fixture artifacts.
+sed 's/^artifact_mode=live$/artifact_mode=fixture/' "$work/simpleos.template" > "$work/malformed.template"
+make_root "$work/reject-malformed"
+if "$signer" --evidence "$work/reject-malformed" --lane simpleos --template "$work/malformed.template" --artifact "$work/simpleos.evidence" --private-key "$work/key.pem" --trusted-key-id contract-key >/dev/null 2>&1; then exit 1; fi
+[ ! -e "$work/reject-malformed/receipts/simpleos.receipt" ] && [ ! -e "$work/reject-malformed/signatures/simpleos.sig" ]
+mkdir "$work/fixture-input"; printf 'artifact_schema=mci-simpleos-platform-evidence-v1\nartifact_mode=fixture\nrelease_eligible=false\n' > "$work/fixture-input/simpleos.evidence"
+fixture_hash=$(hash_file "$work/fixture-input/simpleos.evidence"); sed "s/$simpleos_hash/$fixture_hash/" "$work/simpleos.template" > "$work/fixture.template"
+make_root "$work/reject-fixture"
+if "$signer" --evidence "$work/reject-fixture" --lane simpleos --template "$work/fixture.template" --artifact "$work/fixture-input/simpleos.evidence" --private-key "$work/key.pem" --trusted-key-id contract-key >/dev/null 2>&1; then exit 1; fi
+[ ! -e "$work/reject-fixture/receipts/simpleos.receipt" ] && [ ! -e "$work/reject-fixture/signatures/simpleos.sig" ]
+
+# Stress expiry is signer-owned and must be supplied as a bounded decimal.
+printf 'artifact_schema=mci-stress-evidence-v1\nartifact_mode=live\nrelease_eligible=true\n' > "$work/stress.evidence"; stress_hash=$(hash_file "$work/stress.evidence")
+{ echo receipt_schema=mci-lane-receipt-v1; echo check_id=stress; echo producer_class=stress-target; echo attestation=EXTERNAL_SIGNER_SETS_signed-v1; echo trusted_key_id=EXTERNAL_SIGNER_SETS_key_id; echo signature_relpath=stress.sig; common_tail stress stress.evidence "$stress_hash" mci-stress-evidence-v1 MCI-NFR-015,MCI-NFR-016; echo receipt_hash=placeholder; } > "$work/stress.template"
+sed 's/^valid_until_utc_ns=200$/valid_until_utc_ns=EXTERNAL_SIGNER_SETS_valid_until_utc_ns/' "$work/stress.template" > "$work/stress.placeholder"; mv "$work/stress.placeholder" "$work/stress.template"
+make_root "$work/stress-root"; "$signer" --evidence "$work/stress-root" --lane stress --template "$work/stress.template" --artifact "$work/stress.evidence" --private-key "$work/key.pem" --trusted-key-id contract-key --valid-until-utc-ns 200 >/dev/null
+stress_generation=$(sed -n '1p' "$work/stress-root/lane-generations/stress.current")
+grep -Fxq valid_until_utc_ns=200 "$work/stress-root/lane-generations/stress/$stress_generation/stress.receipt"
+echo 'mci_v2_lane_signer_contract_test: PASS'

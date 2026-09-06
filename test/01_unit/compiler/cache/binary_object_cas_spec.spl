@@ -1,0 +1,66 @@
+# Shadow binary-object CAS contract. No action-key lookup is exercised here.
+
+use std.spec.*
+use compiler.driver.cache.binary_object_cas.{binary_object_magic_kind,
+    binary_object_cas_blob_path, binary_object_cas_read,
+    binary_object_cas_verify, binary_object_cas_put}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.nogc_sync_mut.io.file_ops.{file_write_bytes}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all}
+use std.io_runtime.{getpid, time_now_unix_micros}
+
+fn object_cas_root(name: text) -> text:
+    val root = "build/tmp/binary_object_cas_spec/{name}-{getpid()}-{time_now_unix_micros()}"
+    dir_create_all(root)
+    root
+
+fn elf_fixture(tail: i64) -> [u8]:
+    [0x7F_u8, 0x45_u8, 0x4C_u8, 0x46_u8, 0x02_u8, 0x01_u8,
+        0x01_u8, tail.to_u8()]
+
+fn bytes_or_empty(value: [u8]?) -> [u8]:
+    value ?? []
+
+describe "shadow binary object CAS":
+    it "recognizes supported object container magic and rejects text":
+        expect(binary_object_magic_kind(elf_fixture(7))).to_equal("elf")
+        expect(binary_object_magic_kind([0xCF_u8, 0xFA_u8, 0xED_u8, 0xFE_u8]))
+            .to_equal("macho")
+        expect(binary_object_magic_kind([0x64_u8, 0x86_u8, 0_u8, 0_u8]))
+            .to_equal("coff")
+        expect(binary_object_magic_kind("not an object".bytes())).to_equal("")
+
+    it "publishes by verified SHA-256 and deduplicates identical bytes":
+        val root = object_cas_root("roundtrip")
+        val object = elf_fixture(11)
+        val expected = sha256_u8_hex(object)
+        expect(binary_object_cas_put(root, object)).to_equal(expected)
+        expect(binary_object_cas_put(root, object)).to_equal(expected)
+        expect(bytes_or_empty(binary_object_cas_read(root, expected, 64)))
+            .to_equal(object)
+        expect(binary_object_cas_verify(root, expected)).to_equal(true)
+
+    it "rejects malformed digest paths and non-object payloads":
+        val root = object_cas_root("invalid")
+        expect(binary_object_cas_blob_path(root, "../escape")).to_equal("")
+        expect(binary_object_cas_put(root, "ordinary text".bytes())).to_equal("")
+        val absent = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+        expect(binary_object_cas_read(root, absent, 3)).to_be_nil()
+
+    it "never serves digest-mismatched bytes from an authoritative path":
+        val root = object_cas_root("poison")
+        val expected_object = elf_fixture(21)
+        val expected_digest = sha256_u8_hex(expected_object)
+        val path = binary_object_cas_blob_path(root, expected_digest)
+        val slash = path.last_index_of("/")
+        dir_create_all(path.substring(0, slash))
+        expect(file_write_bytes(path, elf_fixture(22))).to_equal(true)
+        expect(binary_object_cas_read(root, expected_digest, 64)).to_be_nil()
+        expect(binary_object_cas_verify(root, expected_digest)).to_equal(false)
+
+    it "fails closed when the caller read bound is smaller than the object":
+        val root = object_cas_root("bounded")
+        val object = elf_fixture(31)
+        val digest = binary_object_cas_put(root, object)
+        expect(digest == "").to_equal(false)
+        expect(binary_object_cas_read(root, digest, 4)).to_be_nil()

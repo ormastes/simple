@@ -1,0 +1,29 @@
+#!/bin/sh
+# Static cross-lane clock guard for certificate and OIDC validation.
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+tls="$root/src/lib/nogc_sync_mut/tls/certificate.spl"
+oidc="$root/src/lib/nogc_sync_mut/oidc/id_token.spl"
+runtime="$root/src/runtime/runtime_time.c"
+interpreter="$root/src/compiler_rust/compiler/src/interpreter_extern/time.rs"
+
+for source in "$tls" "$oidc"; do
+    grep -Fq 'extern fn rt_time_now_unix_micros() -> i64' "$source"
+    ! grep -Fq 'rt_time_now_seconds' "$source"
+    raw_calls=$(awk '
+        /unsafe\(capabilities: \[ffi\]\):/ { pending=1; next }
+        pending && /^[[:space:]]+rt_time_now_unix_micros/ { count++; pending=0; next }
+        pending { pending=0 }
+        END { print count + 0 }
+    ' "$source")
+    test "$raw_calls" -eq 1
+done
+
+grep -Fq 'if micros < 0:' "$tls"
+grep -Fq 'return false' "$tls"
+grep -Fq 'return Err("OIDC clock unavailable")' "$oidc"
+grep -Fq 'int64_t rt_time_now_unix_micros(void)' "$runtime"
+grep -Fq 'pub fn rt_time_now_unix_micros' "$interpreter"
+
+echo 'TLS/OIDC clock SFFI authority: PASS integer_cross_lane_abi=shared lexical_raw_calls=2 failure=tls_false_oidc_err no_extra_clock_read=1'

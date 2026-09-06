@@ -1,0 +1,54 @@
+# Reproducing spec for:
+#   doc/08_tracking/bug/private_helper_name_collision_across_modules_has_2026-08-17.md
+#
+# A module-private (`_`-prefixed, non-`pub`) top-level function is NOT private:
+# the interpreter resolves free functions by NAME across every co-compiled
+# module. `app.build.targets.change_classifier` defines
+#   fn _has(values: [text], value: text) -> bool   # EQUALITY semantics
+# so a spec-local `_has` with SUBSTRING semantics is silently replaced by the
+# equality one once that module joins the import closure. Exit 0, wrong answer.
+#
+# The import list below is deliberately the full set from
+# build_targets_spec.spl -- the bug doc records that the collision only appears
+# once the transitive module closure grows to include change_classifier.
+
+use app.build.targets.build_targets.{parse_targets_text, validate_targets}
+use app.build.targets.target_resolve.{resolve_target}
+use app.build.targets.targets_cli.{target_arg}
+use app.build.targets.target_executor.{target_action, target_name_valid}
+use app.build.targets.change_classifier.{classify_change}
+
+# Spec-local private helper with SUBSTRING semantics. Same name and same
+# signature as change_classifier's private `_has`, which uses EQUALITY.
+fn _has(values: [text], value: text) -> bool:
+    var i = 0
+    while i < values.len():
+        if values[i].contains(value):
+            return true
+        i = i + 1
+    false
+
+describe "private module helper name collision across modules":
+
+    it "resolves a spec-local private `_has` to the spec's own substring body":
+        val values = ["target-error: duplicate-name: a"]
+        # Direct, inline: proves the data and `.contains` are both fine.
+        expect(values[0].contains("duplicate-name: a")).to_equal(true)
+        # Through the local helper: RED when `_has` resolves to
+        # change_classifier's equality version.
+        expect(_has(values, "duplicate-name: a")).to_equal(true)
+
+    it "does not degrade the local substring helper into equality":
+        val values = ["alpha-beta-gamma"]
+        # Equality semantics would answer false here; substring answers true.
+        expect(_has(values, "beta")).to_equal(true)
+        # And an exact match must still answer true under either semantics,
+        # so this assertion passing while the one above fails pinpoints the
+        # substituted body rather than a broken call.
+        expect(_has(values, "alpha-beta-gamma")).to_equal(true)
+
+    it "still routes real validate_targets errors through the local helper":
+        val parsed = parse_targets_text("target a:\n    kind: library\n    entry: src/a.spl\n\ntarget a:\n    kind: library\n    entry: src/b.spl\n")
+        val errs = validate_targets(parsed, "/nonexistent-root-for-collision-spec")
+        expect(errs.len() > 0).to_equal(true)
+        expect(_has(errs, "duplicate-name")).to_equal(true)

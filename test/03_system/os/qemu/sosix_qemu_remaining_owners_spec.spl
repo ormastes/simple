@@ -1,0 +1,156 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-SYSTEM
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+"""
+# SOSIX QEMU remaining-owner handoff
+
+This executable manual verifies the shared fail-closed owner gate and the
+typed handoff oracle for every one of the 24 host/guest rows. A BLOCKED or
+POSTPONED oracle is success for this handoff spec only: it proves that the row
+was retained and cannot be promoted. It is never live QEMU PASS evidence.
+
+**Plan:** `doc/03_plan/agent_tasks/sosix_parallel_qemu_refactor.md`
+**Tracking:** `doc/08_tracking/bug/sosix_qemu_matrix_remaining_owners_2026-08-14.md`
+"""
+
+# @tag: system, simpleos, qemu, sosix, provenance
+# @evidence-display: links
+
+use std.spec.step
+
+use app.io.mod.{file_read_text}
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
+use std.spec.*
+
+val MAX_EVIDENCE_STREAM_BYTES: i64 = 4194304
+
+class CommandEvidence:
+    stdout: text
+    stderr: text
+    exit_code: i64
+
+class RowOracle:
+    acceptance_id: text
+    expected_state: text
+
+fn run_check(command: text, timeout_ms: i64) -> CommandEvidence:
+    val (stdout, stderr, exit_code) = process_run_bounded(
+        "/bin/sh", ["-c", command], timeout_ms, MAX_EVIDENCE_STREAM_BYTES)
+    CommandEvidence(stdout: stdout, stderr: stderr, exit_code: exit_code)
+
+fn run_check_with_limit(command: text, timeout_ms: i64, max_output_bytes: i64) -> CommandEvidence:
+    val (stdout, stderr, exit_code) = process_run_bounded(
+        "/bin/sh", ["-c", command], timeout_ms, max_output_bytes)
+    CommandEvidence(stdout: stdout, stderr: stderr, exit_code: exit_code)
+
+fn retained_rows() -> [RowOracle]:
+    [
+        RowOracle(acceptance_id: "SOSIX-LINUX-X86_64", expected_state: "PASS"),
+        RowOracle(acceptance_id: "SOSIX-LINUX-ARM64", expected_state: "PASS"),
+        RowOracle(acceptance_id: "SOSIX-LINUX-RISCV32", expected_state: "PASS"),
+        RowOracle(acceptance_id: "SOSIX-LINUX-RISCV64", expected_state: "BLOCKED"),
+        RowOracle(acceptance_id: "SOSIX-LINUX-X86_32", expected_state: "BLOCKED"),
+        RowOracle(acceptance_id: "SOSIX-LINUX-ARM32", expected_state: "BLOCKED"),
+        RowOracle(acceptance_id: "SOSIX-WINDOWS-X86_64", expected_state: "BLOCKED"),
+        RowOracle(acceptance_id: "SOSIX-WINDOWS-ARM64", expected_state: "BLOCKED"),
+        RowOracle(acceptance_id: "SOSIX-WINDOWS-RISCV32", expected_state: "BLOCKED"),
+        RowOracle(acceptance_id: "SOSIX-WINDOWS-RISCV64", expected_state: "BLOCKED"),
+        RowOracle(acceptance_id: "SOSIX-WINDOWS-X86_32", expected_state: "BLOCKED"),
+        RowOracle(acceptance_id: "SOSIX-WINDOWS-ARM32", expected_state: "BLOCKED"),
+        RowOracle(acceptance_id: "SOSIX-FREEBSD-X86_64", expected_state: "BLOCKED"),
+        RowOracle(acceptance_id: "SOSIX-FREEBSD-ARM64", expected_state: "BLOCKED"),
+        RowOracle(acceptance_id: "SOSIX-FREEBSD-RISCV32", expected_state: "BLOCKED"),
+        RowOracle(acceptance_id: "SOSIX-FREEBSD-RISCV64", expected_state: "BLOCKED"),
+        RowOracle(acceptance_id: "SOSIX-FREEBSD-X86_32", expected_state: "BLOCKED"),
+        RowOracle(acceptance_id: "SOSIX-FREEBSD-ARM32", expected_state: "BLOCKED"),
+        RowOracle(acceptance_id: "SOSIX-MACOS-X86_64", expected_state: "POSTPONED"),
+        RowOracle(acceptance_id: "SOSIX-MACOS-ARM64", expected_state: "POSTPONED"),
+        RowOracle(acceptance_id: "SOSIX-MACOS-RISCV32", expected_state: "POSTPONED"),
+        RowOracle(acceptance_id: "SOSIX-MACOS-RISCV64", expected_state: "POSTPONED"),
+        RowOracle(acceptance_id: "SOSIX-MACOS-X86_32", expected_state: "POSTPONED"),
+        RowOracle(acceptance_id: "SOSIX-MACOS-ARM32", expected_state: "POSTPONED"),
+    ]
+
+describe "SOSIX QEMU remaining-owner handoff":
+    # @manual scenario evidence
+
+        # @req: REQ-SSPEC-SYSTEM
+        # @req: REQ-SSPEC-SYSTEM
+        # @req: REQ-SSPEC-SYSTEM
+    it "should enforce the shared matrix ownership boundaries behaviorally":
+        # @req REQ-SSPEC-SYSTEM
+        step("should enforce the shared matrix ownership boundaries behaviorally")
+        step("Validate matrix promotion")
+        val evidence = run_check("sh scripts/check/check-sosix-qemu-shared-owners.shs --self-test", 30000)
+        expect(evidence.exit_code).to_equal(0)
+        expect(evidence.stderr).to_equal("")
+        expect(evidence.stdout).to_contain("sosix_qemu_shared_owner_collector_status=pass")
+        expect(evidence.stdout).to_contain("sosix_qemu_shared_owner_behavioral_fixture_status=pass")
+        step("Reject mutable source aliasing")
+        expect(evidence.stdout).to_contain("sosix_qemu_shared_owner_media_alias_status=pass")
+        expect(evidence.stdout).to_contain("sosix_qemu_shared_owner_media_copy_status=pass")
+        expect(evidence.stdout).to_contain("sosix_qemu_shared_owner_media_corruption_status=pass")
+        step("Bind the admitted runtime")
+        expect(evidence.stdout).to_contain("sosix_qemu_shared_owner_admitted_runtime_status=pass")
+        val truncated = run_check_with_limit(
+            "awk 'BEGIN { for (i = 0; i < 4096; i++) printf \"x\" }'", 5000, 1024)
+        expect(truncated.exit_code).to_equal(0)
+        expect(truncated.stdout).to_contain("[output truncated:")
+        expect(truncated.stdout).to_contain("bytes omitted]")
+
+        # @req: REQ-SSPEC-SYSTEM
+    it "should retain linked-artifact admission for incomplete Linux lifecycle rows":
+        # @req REQ-SSPEC-SYSTEM
+        step("should retain linked-artifact admission for incomplete Linux lifecycle rows")
+        step("Admit the Linux guest lifecycle")
+        val rv64 = run_check("sh scripts/check/check-rv64-inline-asm-operand-transport.shs", 30000)
+        expect(rv64.exit_code).to_equal(0)
+        val x86_source = run_check("sh scripts/check/check-x86-32-cpl3-lifecycle-contract.shs --self-test", 30000)
+        expect(x86_source.exit_code).to_equal(0)
+        expect(x86_source.stdout).to_contain("non-ELF and missing-strong-symbol gates fail closed")
+        val x86_link = run_check("sh scripts/check/check-x86-32-cpl3-lifecycle-contract.shs --admit build/os/__missing_sosix_x86_32_lifecycle.elf", 30000)
+        expect(x86_link.exit_code).to_be_greater_than(0)
+        expect(x86_link.stdout + x86_link.stderr).to_contain("linked kernel missing")
+        val arm_source = run_check("sh scripts/check/check-arm32-user-lifecycle-contract.shs --self-test", 30000)
+        expect(arm_source.exit_code).to_equal(0)
+        expect(arm_source.stdout).to_contain("non-ELF and missing-strong-symbol gates fail closed")
+        val arm_link = run_check("sh scripts/check/check-arm32-user-lifecycle-contract.shs --admit build/os/__missing_sosix_arm32_lifecycle.elf", 30000)
+        expect(arm_link.exit_code).to_be_greater_than(0)
+        expect(arm_link.stdout + arm_link.stderr).to_contain("linked kernel missing")
+        val tracking = file_read_text("doc/08_tracking/bug/sosix_qemu_matrix_remaining_owners_2026-08-14.md")
+        expect(tracking).to_contain("RV64 compiler owner")
+
+        # @req: REQ-SSPEC-SYSTEM
+    it "should retain a typed fail-closed oracle for all 24 acceptance rows":
+        # @req REQ-SSPEC-SYSTEM
+        step("should retain a typed fail-closed oracle for all 24 acceptance rows")
+        step("Record unavailable native hosts")
+        val plan = file_read_text("doc/03_plan/agent_tasks/sosix_parallel_qemu_refactor.md")
+        val rows = retained_rows()
+        expect(rows.len()).to_equal(24)
+        var pass_count = 0
+        var blocked_count = 0
+        var postponed_count = 0
+        for row in rows:
+            expect(plan).to_contain("| `" + row.acceptance_id + "` | " + row.expected_state + " |")
+            if row.expected_state == "PASS": pass_count = pass_count + 1
+            if row.expected_state == "BLOCKED": blocked_count = blocked_count + 1
+            if row.expected_state == "POSTPONED": postponed_count = postponed_count + 1
+        expect(pass_count).to_equal(3)
+        expect(blocked_count).to_equal(15)
+        expect(postponed_count).to_equal(6)
+
+        # @req: REQ-SSPEC-SYSTEM
+    it "should retain exact owners and unblock conditions for incomplete work":
+        # @req REQ-SSPEC-SYSTEM
+        step("should retain exact owners and unblock conditions for incomplete work")
+        step("Retain the implementation handoff")
+        val tracking = file_read_text("doc/08_tracking/bug/sosix_qemu_matrix_remaining_owners_2026-08-14.md")
+        expect(tracking).to_contain("RV64 compiler owner")
+        expect(tracking).to_contain("x86_32 kernel owner")
+        expect(tracking).to_contain("ARM32 kernel owner")
+        expect(tracking).to_contain("Windows operator")
+        expect(tracking).to_contain("FreeBSD operator")
+        expect(tracking).to_contain("macOS operator")
+        expect(tracking).to_contain("System-test/docgen owner")

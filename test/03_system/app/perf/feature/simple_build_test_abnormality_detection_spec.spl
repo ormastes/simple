@@ -1,0 +1,141 @@
+"""
+# Simple Build/Test Abnormality Detection
+
+This scenario is the operator-facing contract for separating machine
+protection, declared budgets, and historical regression decisions. Platform
+providers may offer different evidence quality, but they may never fabricate a
+stronger cause or silently move an approved baseline.
+"""
+
+use std.common.perf.execution_metrics.{ResourceEvidenceQuality, TerminationCause, BaselineState, DecisionStatus, TerminationEvidence, ResourceBudget, AnomalyPolicy, ApprovedBaseline, classify_termination, compare_approved_baseline, required_spans_present, suspicious_apparent_speedup, complexity_regression, tail_evidence, incremental_invalidation_evidence_valid}
+use std.nogc_sync_mut.io.resource_scope.{ExecutionResourceClass, execution_resource_scope, execution_resource_scope_with_budget, run_in_execution_resource_scope, run_in_systemd_resource_scope, parse_cgroup_v2_events, cgroup_memory_max_event}
+use std.spec.{step, expect_not}
+
+@manual_section("Trustworthy resource evidence")
+describe "resource evidence and abnormality decisions":
+    # @req: REQ-001, REQ-002, REQ-013
+    # @capture(exec)
+    it "measures a real owned child tree through the production facade":
+        step("Create a bounded execution resource scope")
+        val scope = execution_resource_scope(ExecutionResourceClass.Tiny, 2_000, 4_096)
+        step("Run a child tree and collect resource evidence")
+        val fixture = "import subprocess, sys\nchild = subprocess.Popen([sys.executable, '-c', 'import time; x = bytearray(33554432); time.sleep(0.5)'])\nchild.wait()"
+        val result = run_in_execution_resource_scope(scope, "/usr/bin/python3", ["-c", fixture])
+        expect(result.process.runtime_error).to_equal(0)
+        expect(result.process.usage.exit_code).to_equal(0)
+        expect_not(result.process.usage.evidence_quality == ResourceEvidenceQuality.Unavailable)
+        expect(result.process.usage.peak_direct_child_rss_bytes).to_be_greater_than(0)
+        expect(result.process.usage.peak_tree_charge_bytes).to_be_greater_than(0)
+        expect(result.process.usage.peak_tree_charge_bytes).to_be_greater_than(result.process.usage.peak_direct_child_rss_bytes)
+        expect(result.process.usage.pids_peak).to_be_greater_than(1)
+        step("Explain the budget and anomaly decisions")
+        expect(result.budget_decision.status).to_equal(DecisionStatus.Pass)
+
+    # @req: REQ-003, REQ-004
+    # @capture(exec)
+    it "proves a wall watchdog with a real child":
+        step("Create a bounded execution resource scope")
+        val scope = execution_resource_scope(ExecutionResourceClass.Tiny, 50, 4_096)
+        step("Run a child tree and collect resource evidence")
+        val result = run_in_execution_resource_scope(scope, "/bin/sh", ["-c", "sleep 1"])
+        step("Classify termination from affirmative evidence")
+        expect(result.process.usage.termination).to_equal(TerminationCause.WallTimeout)
+
+    # @req: REQ-003, REQ-004
+    # @capture(exec)
+    it "records a real segmentation signal without calling it memory exhaustion":
+        step("Create a bounded execution resource scope")
+        val scope = execution_resource_scope(ExecutionResourceClass.Tiny, 2_000, 4_096)
+        step("Run a child tree and collect resource evidence")
+        val result = run_in_execution_resource_scope(scope, "/bin/sh", ["-c", "kill -SEGV $$"])
+        step("Classify termination from affirmative evidence")
+        expect(result.process.usage.signal).to_equal(11)
+        expect(result.process.usage.termination).to_equal(TerminationCause.Signal)
+
+    # @req: REQ-002, REQ-003, REQ-004
+    it "classifies only affirmative termination evidence":
+        step("Create a bounded execution resource scope")
+        step("Run a child tree and collect resource evidence")
+        step("Classify termination from affirmative evidence")
+        val evidence = TerminationEvidence(infrastructure_failed: false, wall_watchdog_fired: false, no_progress_watchdog_fired: false, cpu_limit_event: false, memory_high_event: false, memory_max_event: false, process_limit_event: false, output_limit_event: false, externally_terminated: false, signal: 11, exit_code: 139)
+        expect(classify_termination(evidence)).to_equal(TerminationCause.Signal)
+
+    # @req: REQ-003, REQ-004
+    it "proves a memory budget event from scope counters":
+        step("Create a bounded execution resource scope")
+        val before = parse_cgroup_v2_events("high 0\nmax 0\noom 0\noom_kill 0", "max 0")
+        val after = parse_cgroup_v2_events("high 1\nmax 1\noom 1\noom_kill 1", "max 0")
+        step("Run a child tree and collect resource evidence")
+        expect(cgroup_memory_max_event(before, after)).to_be(true)
+        step("Classify termination from affirmative evidence")
+        val evidence = TerminationEvidence(infrastructure_failed: false, wall_watchdog_fired: false, no_progress_watchdog_fired: false, cpu_limit_event: false, memory_high_event: true, memory_max_event: true, process_limit_event: false, output_limit_event: false, externally_terminated: false, signal: 9, exit_code: 137)
+        expect(classify_termination(evidence)).to_equal(TerminationCause.MemoryMax)
+
+    # @req: REQ-003, REQ-004, REQ-010
+    # @capture(exec)
+    it "proves a live Linux memory kill from the delegated service provider":
+        step("Create a bounded execution resource scope")
+        val budget = ResourceBudget(max_wall_ms: 5_000, max_cpu_ms: 0, max_tree_charge_bytes: 33_554_432, max_direct_child_rss_bytes: 33_554_432, max_io_read_bytes: 0, max_io_write_bytes: 0, max_pids: 64, max_fds: 64)
+        val scope = execution_resource_scope_with_budget(ExecutionResourceClass.System, budget, 4_096)
+        step("Run a child tree and collect resource evidence")
+        val result = run_in_systemd_resource_scope(scope, "/usr/bin/python3", ["-c", "x = bytearray(134217728)"])
+        step("Classify termination from affirmative evidence")
+        expect(result.process.usage.termination).to_equal(TerminationCause.MemoryMax)
+        expect(result.process.usage.signal).to_equal(9)
+        expect_not(result.process.usage.evidence_quality == ResourceEvidenceQuality.Unavailable)
+
+    # @req: REQ-003, REQ-004, REQ-010
+    # @capture(exec)
+    it "proves a live Linux PID limit from the delegated cgroup counter":
+        step("Create a bounded execution resource scope")
+        val budget = ResourceBudget(max_wall_ms: 5_000, max_cpu_ms: 0, max_tree_charge_bytes: 268_435_456, max_direct_child_rss_bytes: 268_435_456, max_io_read_bytes: 0, max_io_write_bytes: 0, max_pids: 4, max_fds: 64)
+        val scope = execution_resource_scope_with_budget(ExecutionResourceClass.System, budget, 4_096)
+        step("Run a child tree and collect resource evidence")
+        val fixture = "import os, time\nchildren = []\nfor _ in range(32):\n    try:\n        pid = os.fork()\n    except OSError:\n        break\n    if pid == 0:\n        time.sleep(1)\n        os._exit(0)\n    children.append(pid)\nfor pid in children:\n    os.waitpid(pid, 0)"
+        val result = run_in_systemd_resource_scope(scope, "/usr/bin/python3", ["-c", fixture])
+        step("Classify termination from affirmative evidence")
+        expect(result.process.usage.termination).to_equal(TerminationCause.ProcessLimit)
+        expect_not(result.process.usage.evidence_quality == ResourceEvidenceQuality.Unavailable)
+
+    # @req: REQ-003, REQ-004, REQ-010
+    # @capture(exec)
+    it "records a supervisor-requested external termination":
+        step("Create a bounded execution resource scope")
+        val scope = execution_resource_scope(ExecutionResourceClass.System, 5_000, 4_096)
+        step("Run a child tree and collect resource evidence")
+        val result = run_in_systemd_resource_scope(scope, "/bin/sleep", ["10"], cancel_after_ms: 100)
+        step("Classify termination from affirmative evidence")
+        expect(result.process.usage.termination).to_equal(TerminationCause.ExternalTermination)
+        expect(result.process.usage.signal).to_equal(15)
+
+    # @req: REQ-008, REQ-009
+    # @capture(statistics)
+    it "detects a confirmed regression while preserving its approved baseline":
+        step("Record spans and work counters")
+        expect(required_spans_present(["Parse", "HirLower", "TypeCheck"], ["Parse", "HirLower", "TypeCheck"])).to_be(true)
+        step("Compare against an approved cohort baseline")
+        val policy = AnomalyPolicy(warning_relative_percent: 10, warning_mad_multiplier: 3.0, failure_relative_percent: 15, failure_mad_multiplier: 4.0, absolute_floor: 5.0)
+        val baseline = ApprovedBaseline(cohort_id: "native-opt-cold", state: BaselineState.Approved, samples: [98.0, 100.0, 102.0], generation: 4)
+        val decision = compare_approved_baseline(baseline, [124.0, 125.0, 126.0], "native-opt-cold", true, policy)
+        step("Explain the budget and anomaly decisions")
+        expect(decision.status).to_equal(DecisionStatus.Failure)
+        expect(baseline.generation).to_equal(4)
+
+    # @req: REQ-010, REQ-012
+    it "detects missing phases and quadratic work before timeout":
+        step("Record spans and work counters")
+        expect(required_spans_present(["Parse", "HirLower"], ["Parse", "HirLower", "TypeCheck"])).to_be(false)
+        expect(suspicious_apparent_speedup(1_000.0, 500.0, 10_000, 1_000, 90)).to_be(true)
+        expect(complexity_regression([10.0, 40.0, 160.0, 640.0], 1.4)).to_be(true)
+        step("Explain the budget and anomaly decisions")
+
+    # @req: REQ-009, REQ-010
+    # @capture(statistics)
+    it "retains a rare spike and explains incremental invalidation":
+        step("Record spans and work counters")
+        val tail = tail_evidence([100.0, 101.0, 99.0, 100.0, 500.0], 4.0, 5.0)
+        expect(tail.sample_count).to_equal(5)
+        expect(tail.maximum).to_equal(500.0)
+        expect(tail.outlier_count).to_equal(1)
+        expect(incremental_invalidation_evidence_valid(9, 1, "source-content-digest-changed")).to_be(true)
+        step("Explain the budget and anomaly decisions")

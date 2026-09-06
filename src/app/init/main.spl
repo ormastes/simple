@@ -1,0 +1,156 @@
+# Simple CLI - init command
+# Initialize a new Simple project
+
+use std.cli.cli_util (get_cli_args)
+use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
+use std.path as path
+
+use app.io.mod (file_exists, file_write, dir_create, cwd)
+use std.db_atomic.{atomic_write, DbConfig}
+use std.log.{error}
+
+fn print_help():
+    print "Usage: simple init [name] [options]"
+    print ""
+    print "Initialize a new Simple project in the current directory."
+    print ""
+    print "Arguments:"
+    print "  [name]         Project name (default: directory name)"
+    print ""
+    print "Options:"
+    print "  --json         Output as JSON"
+    print "  --lib          Create a library project (no main.spl)"
+    print "  --minimal      Minimal project (manifest only)"
+    for line in log_options_help():
+        print "  {line}"
+    print "  -h, --help     Show this help"
+
+fn _is_log_option(arg: text) -> bool:
+    arg == "--human" or arg == "--llm" or arg == "--json" or
+        arg == "--tui" or arg == "--stdout" or arg == "--quiet" or
+        arg == "--verbose" or arg == "--dots" or arg == "--count" or
+        arg == "--no-progress" or arg == "--log-mode" or arg == "--surface" or
+        arg == "--progress" or arg.starts_with("--log-mode=") or
+        arg.starts_with("--surface=") or arg.starts_with("--progress=")
+
+fn main() -> i64:
+    val args = get_cli_args()
+    val cwd = cwd()
+
+    var name = ""
+    var is_lib = false
+    var minimal = false
+    var as_json = false
+    val log_opts = parse_log_options(args)
+    if not log_opts.valid:
+        error("init", log_opts.error)
+        return 1
+
+    var ai = 0
+    while ai < args.len():
+        val arg = args[ai]
+        if arg == "-h" or arg == "--help":
+            print_help()
+            return 0
+        elif arg == "--json" or arg == "--log-mode=json":
+            as_json = true
+        elif arg == "--lib":
+            is_lib = true
+        elif arg == "--minimal":
+            minimal = true
+        elif arg == "--log-mode" or arg == "--surface" or arg == "--progress":
+            ai = ai + 1
+        elif _is_log_option(arg):
+            pass
+        elif not arg.starts_with("-"):
+            name = arg
+        ai = ai + 1
+
+    if log_opts.log_mode == "json":
+        as_json = true
+
+    # Check if already initialized
+    if file_exists("{cwd}/simple.sdn"):
+        error("init", "project already initialized (simple.sdn exists)")
+        return 1
+    if file_exists("{cwd}/simple.toml"):
+        error("init", "project already initialized (simple.toml exists)")
+        return 1
+
+    # Determine project name
+    if name == "":
+        name = path.basename(cwd)
+    if name == "":
+        name = "my-project"
+
+    # Write simple.sdn manifest atomically
+    val main_entry = if is_lib: "src/lib.spl" else: "src/main.spl"
+    val manifest = "# Simple Package Manifest\n# SDN (Simple Data Notation) format\n\npackage:\n  name: {name}\n  version: 0.1.0\n  license: MIT\n  main: {main_entry}\n"
+    val write_result = atomic_write("{cwd}/simple.sdn", manifest, DbConfig.defaults())
+    match write_result:
+        Ok(_): ()
+        Err(message):
+            error("init", "failed to write simple.sdn: {message}")
+            return 1
+
+    if minimal:
+        if as_json:
+            print "{\"command\":\"init\",\"status\":\"ok\",\"name\":\"{name}\",\"minimal\":true,\"lib\":{is_lib}}"
+            return 0
+        if log_opts.progress != "summary":
+            val progress_line = render_progress(log_opts.progress, 1, 1, "init")
+            if progress_line != "":
+                print progress_line
+        print "Initialized Simple project '{name}' (minimal)"
+        return 0
+
+    # Create directories
+    if not dir_create("{cwd}/src", true):
+        error("init", "failed to create src/")
+        return 1
+
+    if not dir_create("{cwd}/test", true):
+        error("init", "failed to create test/")
+        return 1
+
+    # Write main source file
+    if is_lib:
+        val lib_path = "{cwd}/src/lib.spl"
+        if not file_exists(lib_path):
+            val lib_content = "# {name} - Simple Library\n\nfn hello() -> text:\n    \"Hello from {name}!\"\n\nexport hello\n"
+            file_write(lib_path, lib_content)
+    else:
+        val main_path = "{cwd}/src/main.spl"
+        if not file_exists(main_path):
+            val main_content = "# {name} - Simple Project\n# Run with: simple run\n\nfn main() -> i32:\n    print \"Hello, Simple!\"\n    0\n"
+            file_write(main_path, main_content)
+
+    # Write test file
+    val test_path = "{cwd}/test/{name}_spec.spl"
+    if not file_exists(test_path):
+        val test_content = "# {name} tests\n\ndescribe \"{name}\":\n    it \"should work\":\n        assert true\n"
+        file_write(test_path, test_content)
+
+    if as_json:
+        print "{\"command\":\"init\",\"status\":\"ok\",\"name\":\"{name}\",\"minimal\":false,\"lib\":{is_lib}}"
+        return 0
+    if log_opts.progress != "summary":
+        val progress_line = render_progress(log_opts.progress, 1, 1, "init")
+        if progress_line != "":
+            print progress_line
+
+    print "Initialized Simple project '{name}'"
+    print ""
+    print "  simple.sdn       - package manifest"
+    if is_lib:
+        print "  src/lib.spl      - source code"
+    else:
+        print "  src/main.spl     - source code"
+    print "  test/             - tests"
+    print ""
+    print "Get started:"
+    if is_lib:
+        print "  simple test"
+    else:
+        print "  simple run"
+    0

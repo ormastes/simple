@@ -1,0 +1,348 @@
+# USB HID Bridge — HID report descriptor parsing and hotplug detection
+# MDSOC: feature dimension, drivers layer
+#
+# Provides HidReportField, HidReportDescriptor, HidDevice, HidHotplugBridge,
+# and InputLaneStatus for bridging USB HID devices to the input event layer.
+
+# ============================================================================
+# HidReportField — parsed HID report descriptor field
+# ============================================================================
+
+class HidReportField:
+    """A single field extracted from a HID report descriptor."""
+    usage_page: i64
+    usage: i64
+    bit_offset: i64
+    bit_size: i64
+    is_variable: bool
+    is_relative: bool
+    is_signed: bool
+
+impl HidReportField:
+    static fn create(page: i64, usage: i64, offset: i64, size: i64) -> HidReportField:
+        """Create a HID report field with default flags."""
+        HidReportField(
+            usage_page: page,
+            usage: usage,
+            bit_offset: offset,
+            bit_size: size,
+            is_variable: false,
+            is_relative: false,
+            is_signed: false
+        )
+
+    me summary() -> text:
+        "field page=" + self.usage_page.to_text() +
+            " usage=" + self.usage.to_text() +
+            " offset=" + self.bit_offset.to_text() +
+            " size=" + self.bit_size.to_text() +
+            " var=" + self.is_variable.to_text() +
+            " rel=" + self.is_relative.to_text() +
+            " signed=" + self.is_signed.to_text()
+
+# ============================================================================
+# HidReportDescriptor — parsed descriptor, max 8 fields (flat)
+# ============================================================================
+
+class HidReportDescriptor:
+    """Parsed HID report descriptor with up to 8 flat fields."""
+    device_type: text
+    field_count: i64
+    f0: HidReportField
+    f1: HidReportField
+    f2: HidReportField
+    f3: HidReportField
+    f4: HidReportField
+    f5: HidReportField
+    f6: HidReportField
+    f7: HidReportField
+
+impl HidReportDescriptor:
+    static fn keyboard() -> HidReportDescriptor:
+        """Create a standard keyboard HID descriptor."""
+        val empty = HidReportField.create(0, 0, 0, 0)
+        val modifier = HidReportField(
+            usage_page: 7, usage: 0xE0, bit_offset: 0, bit_size: 8,
+            is_variable: true, is_relative: false, is_signed: false
+        )
+        val keycode = HidReportField(
+            usage_page: 7, usage: 0x00, bit_offset: 16, bit_size: 48,
+            is_variable: false, is_relative: false, is_signed: false
+        )
+        HidReportDescriptor(
+            device_type: "keyboard",
+            field_count: 2,
+            f0: modifier,
+            f1: keycode,
+            f2: empty,
+            f3: empty,
+            f4: empty,
+            f5: empty,
+            f6: empty,
+            f7: empty
+        )
+
+    static fn mouse() -> HidReportDescriptor:
+        """Create a standard mouse HID descriptor."""
+        val empty = HidReportField.create(0, 0, 0, 0)
+        val buttons = HidReportField(
+            usage_page: 9, usage: 1, bit_offset: 0, bit_size: 3,
+            is_variable: true, is_relative: false, is_signed: false
+        )
+        val x_axis = HidReportField(
+            usage_page: 1, usage: 0x30, bit_offset: 8, bit_size: 8,
+            is_variable: true, is_relative: true, is_signed: true
+        )
+        val y_axis = HidReportField(
+            usage_page: 1, usage: 0x31, bit_offset: 16, bit_size: 8,
+            is_variable: true, is_relative: true, is_signed: true
+        )
+        HidReportDescriptor(
+            device_type: "mouse",
+            field_count: 3,
+            f0: buttons,
+            f1: x_axis,
+            f2: y_axis,
+            f3: empty,
+            f4: empty,
+            f5: empty,
+            f6: empty,
+            f7: empty
+        )
+
+    me add_field(f: HidReportField) -> text:
+        """Add a field; returns empty string on success or 'full' if at capacity."""
+        if self.field_count >= 8:
+            return "full"
+        if self.field_count == 0:
+            self.f0 = f
+        if self.field_count == 1:
+            self.f1 = f
+        if self.field_count == 2:
+            self.f2 = f
+        if self.field_count == 3:
+            self.f3 = f
+        if self.field_count == 4:
+            self.f4 = f
+        if self.field_count == 5:
+            self.f5 = f
+        if self.field_count == 6:
+            self.f6 = f
+        if self.field_count == 7:
+            self.f7 = f
+        self.field_count = self.field_count + 1
+        ""
+
+    me summary() -> text:
+        "hid descriptor type=" + self.device_type +
+            " fields=" + self.field_count.to_text()
+
+# ============================================================================
+# HidDevice — a connected HID device
+# ============================================================================
+
+class HidDevice:
+    """A connected USB HID device with descriptor and connection state."""
+    usb_address: i64
+    interface_num: i64
+    descriptor: HidReportDescriptor
+    vendor_id: i64
+    product_id: i64
+    device_name: text
+    connected: bool
+    last_report_us: i64
+
+impl HidDevice:
+    static fn create(addr: i64, iface: i64, vid: i64, pid: i64, name: text) -> HidDevice:
+        """Create a new HID device with default mouse descriptor."""
+        HidDevice(
+            usb_address: addr,
+            interface_num: iface,
+            descriptor: HidReportDescriptor.mouse(),
+            vendor_id: vid,
+            product_id: pid,
+            device_name: name,
+            connected: true,
+            last_report_us: 0
+        )
+
+    me disconnect() -> text:
+        self.connected = false
+        "disconnected addr=" + self.usb_address.to_text()
+
+    me receive_report(timestamp_us: i64) -> text:
+        self.last_report_us = timestamp_us
+        "report addr=" + self.usb_address.to_text() +
+            " ts=" + timestamp_us.to_text()
+
+    me summary() -> text:
+        val state = if self.connected: "connected" else: "disconnected"
+        "hid addr=" + self.usb_address.to_text() +
+            " vid=" + self.vendor_id.to_text() +
+            " pid=" + self.product_id.to_text() +
+            " name=" + self.device_name +
+            " iface=" + self.interface_num.to_text() +
+            " " + state
+
+# ============================================================================
+# HidHotplugBridge — hotplug detection, max 4 device slots (flat)
+# ============================================================================
+
+class HidHotplugBridge:
+    """Tracks up to 4 USB HID devices for hotplug attach/detach."""
+    device_count: i64
+    d0_usb_addr: i64
+    d0_vid: i64
+    d0_pid: i64
+    d0_name: text
+    d0_connected: bool
+    d1_usb_addr: i64
+    d1_vid: i64
+    d1_pid: i64
+    d1_name: text
+    d1_connected: bool
+    d2_usb_addr: i64
+    d2_vid: i64
+    d2_pid: i64
+    d2_name: text
+    d2_connected: bool
+    d3_usb_addr: i64
+    d3_vid: i64
+    d3_pid: i64
+    d3_name: text
+    d3_connected: bool
+
+impl HidHotplugBridge:
+    static fn create() -> HidHotplugBridge:
+        """Create an empty hotplug bridge."""
+        HidHotplugBridge(
+            device_count: 0,
+            d0_usb_addr: 0, d0_vid: 0, d0_pid: 0, d0_name: "", d0_connected: false,
+            d1_usb_addr: 0, d1_vid: 0, d1_pid: 0, d1_name: "", d1_connected: false,
+            d2_usb_addr: 0, d2_vid: 0, d2_pid: 0, d2_name: "", d2_connected: false,
+            d3_usb_addr: 0, d3_vid: 0, d3_pid: 0, d3_name: "", d3_connected: false
+        )
+
+    me on_attach(addr: i64, vid: i64, pid: i64, name: text) -> text:
+        """Record a device attach; returns slot label or 'full'."""
+        if self.device_count == 0:
+            self.d0_usb_addr = addr
+            self.d0_vid = vid
+            self.d0_pid = pid
+            self.d0_name = name
+            self.d0_connected = true
+            self.device_count = self.device_count + 1
+            return "slot0"
+        if self.device_count == 1:
+            self.d1_usb_addr = addr
+            self.d1_vid = vid
+            self.d1_pid = pid
+            self.d1_name = name
+            self.d1_connected = true
+            self.device_count = self.device_count + 1
+            return "slot1"
+        if self.device_count == 2:
+            self.d2_usb_addr = addr
+            self.d2_vid = vid
+            self.d2_pid = pid
+            self.d2_name = name
+            self.d2_connected = true
+            self.device_count = self.device_count + 1
+            return "slot2"
+        if self.device_count == 3:
+            self.d3_usb_addr = addr
+            self.d3_vid = vid
+            self.d3_pid = pid
+            self.d3_name = name
+            self.d3_connected = true
+            self.device_count = self.device_count + 1
+            return "slot3"
+        "full"
+
+    me on_detach(addr: i64) -> text:
+        """Mark a device disconnected by USB address."""
+        if self.d0_usb_addr == addr:
+            self.d0_connected = false
+            return "detached slot0"
+        if self.d1_usb_addr == addr:
+            self.d1_connected = false
+            return "detached slot1"
+        if self.d2_usb_addr == addr:
+            self.d2_connected = false
+            return "detached slot2"
+        if self.d3_usb_addr == addr:
+            self.d3_connected = false
+            return "detached slot3"
+        "not found"
+
+    me connected_count() -> i64:
+        var n: i64 = 0
+        if self.d0_connected:
+            n = n + 1
+        if self.d1_connected:
+            n = n + 1
+        if self.d2_connected:
+            n = n + 1
+        if self.d3_connected:
+            n = n + 1
+        n
+
+    me stats() -> text:
+        "hid hotplug: total=" + self.device_count.to_text() +
+            " connected=" + self.connected_count().to_text()
+
+# ============================================================================
+# InputLaneStatus — lane readiness evidence
+# ============================================================================
+
+class InputLaneStatus:
+    """Readiness evidence for the input driver lane."""
+    owner: text
+    has_contract: bool
+    has_tests: bool
+    has_docs: bool
+    has_reviewer: bool
+    ps2_ready: bool
+    usb_hid_ready: bool
+    touch_ready: bool
+    gamepad_ready: bool
+
+impl InputLaneStatus:
+    static fn create() -> InputLaneStatus:
+        """Create a default (all false) lane status."""
+        InputLaneStatus(
+            owner: "",
+            has_contract: false,
+            has_tests: false,
+            has_docs: false,
+            has_reviewer: false,
+            ps2_ready: false,
+            usb_hid_ready: false,
+            touch_ready: false,
+            gamepad_ready: false
+        )
+
+    me is_ready() -> bool:
+        if self.has_contract == false:
+            return false
+        if self.has_tests == false:
+            return false
+        if self.has_docs == false:
+            return false
+        if self.ps2_ready == false:
+            return false
+        if self.usb_hid_ready == false:
+            return false
+        true
+
+    me report() -> text:
+        val ready = if self.is_ready(): "READY" else: "NOT_READY"
+        "input lane owner=" + self.owner +
+            " status=" + ready +
+            " contract=" + self.has_contract.to_text() +
+            " tests=" + self.has_tests.to_text() +
+            " docs=" + self.has_docs.to_text() +
+            " ps2=" + self.ps2_ready.to_text() +
+            " usb_hid=" + self.usb_hid_ready.to_text() +
+            " touch=" + self.touch_ready.to_text() +
+            " gamepad=" + self.gamepad_ready.to_text()

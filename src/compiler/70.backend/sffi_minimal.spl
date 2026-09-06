@@ -1,0 +1,239 @@
+# Minimal SFFI Declarations for Simple Runtime
+# # This module declares the essential SFFI functions from build/rust/sffi_gen
+# These functions are implemented in Rust and linked via C ABI.
+# # NOTE: This module provides low-level SFFI bindings. For normal Simple code,
+# use the standard library types (Int, String, List, etc.) which will
+# eventually use these SFFI functions under the hood.
+
+# ==============================================================================
+# Value Type
+# ==============================================================================
+
+# Value type tags
+enum ValueType:
+    Nil
+    Bool
+    Int
+    Float
+    String
+    Array
+    Dict
+    Object
+    Function
+
+# ==============================================================================
+# RuntimeValue - Opaque pointer type
+# ==============================================================================
+
+# Opaque pointer to RuntimeValue (managed by Rust SFFI)
+# In Simple, we represent C pointers as i64 for now
+type RuntimeValuePtr = i64
+
+# ==============================================================================
+# Constructors
+# ==============================================================================
+
+@unsafe(reason: "raw owned runtime-value allocation ABI; zero means failure", capabilities: [ffi])
+extern fn rt_value_nil() -> RuntimeValuePtr
+@unsafe(reason: "raw owned runtime-value allocation ABI; zero means failure", capabilities: [ffi])
+extern fn rt_value_bool(value: bool) -> RuntimeValuePtr
+@unsafe(reason: "raw owned runtime-value allocation ABI; zero means failure", capabilities: [ffi])
+extern fn rt_value_int(value: i64) -> RuntimeValuePtr
+@unsafe(reason: "raw owned runtime-value allocation ABI; zero means failure", capabilities: [ffi])
+extern fn rt_value_float(value: f64) -> RuntimeValuePtr
+
+# ==============================================================================
+# Type Checking
+# ==============================================================================
+
+@unsafe(reason: "raw runtime-value pointer type-query ABI", capabilities: [ffi])
+extern fn rt_value_is_nil(value: RuntimeValuePtr) -> bool
+@unsafe(reason: "raw runtime-value pointer type-query ABI", capabilities: [ffi])
+extern fn rt_value_is_bool(value: RuntimeValuePtr) -> bool
+@unsafe(reason: "raw runtime-value pointer type-query ABI", capabilities: [ffi])
+extern fn rt_value_is_int(value: RuntimeValuePtr) -> bool
+@unsafe(reason: "raw runtime-value pointer type-query ABI", capabilities: [ffi])
+extern fn rt_value_is_float(value: RuntimeValuePtr) -> bool
+
+# ==============================================================================
+# Conversions
+# ==============================================================================
+
+@unsafe(reason: "raw runtime-value pointer boolean projection ABI", capabilities: [ffi])
+extern fn rt_value_as_bool(value: RuntimeValuePtr) -> bool
+@unsafe(reason: "raw runtime-value pointer integer projection ABI", capabilities: [ffi])
+extern fn rt_value_as_int(value: RuntimeValuePtr) -> i64
+@unsafe(reason: "raw runtime-value pointer float projection ABI", capabilities: [ffi])
+extern fn rt_value_as_float(value: RuntimeValuePtr) -> f64
+
+# ==============================================================================
+# Arithmetic Operations
+# ==============================================================================
+
+
+# ==============================================================================
+# Memory Management
+# ==============================================================================
+
+
+# ==============================================================================
+# File I/O
+# ==============================================================================
+
+@unsafe(reason: "raw borrowed filesystem path pointer/length query ABI", capabilities: [ffi])
+extern fn rt_file_exists(path_ptr: i64, path_len: i64) -> bool
+@unsafe(reason: "raw borrowed filesystem path pointer/length no-follow query ABI", capabilities: [ffi])
+extern fn rt_file_is_regular_no_follow(path_ptr: i64, path_len: i64) -> bool
+@unsafe(reason: "raw borrowed filesystem path and owned tagged-string result ABI", capabilities: [ffi])
+extern fn rt_file_read_text(path_ptr: i64, path_len: i64) -> i64
+@unsafe(reason: "raw borrowed filesystem path and bounded owned tagged-string result ABI", capabilities: [ffi])
+extern fn rt_file_read_regular_no_follow_bounded(path_ptr: i64, path_len: i64, max_bytes: i64) -> i64
+@unsafe(reason: "raw borrowed filesystem path/content pointer-length write ABI", capabilities: [ffi])
+extern fn rt_file_write_text(path_ptr: i64, path_len: i64, content_ptr: i64, content_len: i64) -> bool
+# Returns 1 if reclaimed, 0 if refused. The return type matters: the backends
+# register this symbol as (i64)->i64 keyed by NAME, so declaring it void here
+# would feed a conflicting signature into the shared type table.
+#
+# NOTE: this file's file-IO group works in raw char* pointers, but the runtime
+# rt_string_free takes a TAGGED string value. A raw pointer fails the tag and
+# registry checks and is refused (returns 0) -- safe, but it will not free
+# anything. Use it only on tagged values.
+@unsafe(reason: "raw tagged-string ownership release ABI; zero means refused", capabilities: [ffi])
+extern fn rt_string_free(ptr: i64) -> i64
+# Deep (recursive) array free. Takes a TAGGED array value, returns 1 only if the
+# ENTIRE reachable structure was reclaimed and 0 if the call was refused having
+# freed NOTHING (all-or-nothing; see the contract comment above
+# rt_array_free_deep in src/runtime/runtime_native.c and its Rust twin in
+# src/compiler_rust/runtime/src/value/collections.rs). Refuses any element that
+# is not an immediate, a non-shared registered string, or a registered array --
+# and refuses on any alias or cycle INTERNAL to the structure. It cannot detect
+# an alias from OUTSIDE, so the caller must own the whole subtree, not just the
+# root.
+@unsafe(reason: "raw exclusively owned tagged-array deep-release ABI; nil means foreign or freed pointer", capabilities: [ffi])
+extern fn rt_array_free_deep(value: i64) -> i64?  # nil on a freed/foreign pointer
+
+# ==============================================================================
+# Environment Variables
+# ==============================================================================
+
+@unsafe(reason: "raw borrowed environment-name pointer/length and tagged-string result ABI", capabilities: [ffi])
+extern fn rt_env_get(name_ptr: i64, name_len: i64) -> i64?
+@unsafe(reason: "raw borrowed environment name/value pointer-length mutation ABI", capabilities: [ffi])
+extern fn rt_env_set(name_ptr: i64, name_len: i64, value_ptr: i64, value_len: i64) -> bool
+
+# ==============================================================================
+# Wrapper Functions (Two-Tier Pattern)
+# ==============================================================================
+
+# Constructor wrappers
+@unsafe(reason: "unverified raw SFFI wrapper; caller must uphold the declared runtime ABI", capabilities: [ffi])
+fn value_nil() -> RuntimeValuePtr:
+    rt_value_nil()
+
+@unsafe(reason: "unverified raw SFFI wrapper; caller must uphold the declared runtime ABI", capabilities: [ffi])
+fn value_bool(value: bool) -> RuntimeValuePtr:
+    rt_value_bool(value)
+
+@unsafe(reason: "unverified raw SFFI wrapper; caller must uphold the declared runtime ABI", capabilities: [ffi])
+fn value_int(value: i64) -> RuntimeValuePtr:
+    rt_value_int(value)
+
+@unsafe(reason: "unverified raw SFFI wrapper; caller must uphold the declared runtime ABI", capabilities: [ffi])
+fn value_float(value: f64) -> RuntimeValuePtr:
+    rt_value_float(value)
+
+# Type checking wrappers
+@unsafe(reason: "unverified raw SFFI wrapper; caller must uphold the declared runtime ABI", capabilities: [ffi])
+fn value_is_nil(value: RuntimeValuePtr) -> bool:
+    rt_value_is_nil(value)
+
+@unsafe(reason: "unverified raw SFFI wrapper; caller must uphold the declared runtime ABI", capabilities: [ffi])
+fn value_is_bool(value: RuntimeValuePtr) -> bool:
+    rt_value_is_bool(value)
+
+@unsafe(reason: "unverified raw SFFI wrapper; caller must uphold the declared runtime ABI", capabilities: [ffi])
+fn value_is_int(value: RuntimeValuePtr) -> bool:
+    rt_value_is_int(value)
+
+@unsafe(reason: "unverified raw SFFI wrapper; caller must uphold the declared runtime ABI", capabilities: [ffi])
+fn value_is_float(value: RuntimeValuePtr) -> bool:
+    rt_value_is_float(value)
+
+# Conversion wrappers
+@unsafe(reason: "unverified raw SFFI wrapper; caller must uphold the declared runtime ABI", capabilities: [ffi])
+fn value_as_bool(value: RuntimeValuePtr) -> bool:
+    rt_value_as_bool(value)
+
+@unsafe(reason: "unverified raw SFFI wrapper; caller must uphold the declared runtime ABI", capabilities: [ffi])
+fn value_as_int(value: RuntimeValuePtr) -> i64:
+    rt_value_as_int(value)
+
+@unsafe(reason: "unverified raw SFFI wrapper; caller must uphold the declared runtime ABI", capabilities: [ffi])
+fn value_as_float(value: RuntimeValuePtr) -> f64:
+    rt_value_as_float(value)
+
+# File I/O wrappers
+@unsafe(reason: "unverified raw SFFI wrapper; caller must uphold the declared runtime ABI", capabilities: [ffi])
+fn file_exists_ptr(path_ptr: i64, path_len: i64) -> bool:
+    rt_file_exists(path_ptr, path_len)
+
+@unsafe(reason: "unverified raw SFFI wrapper; caller must uphold the declared runtime ABI", capabilities: [ffi])
+fn file_is_regular_no_follow_ptr(path_ptr: i64, path_len: i64) -> bool:
+    rt_file_is_regular_no_follow(path_ptr, path_len)
+
+@unsafe(reason: "unverified raw SFFI wrapper; caller must uphold the declared runtime ABI", capabilities: [ffi])
+fn file_read_text_ptr(path_ptr: i64, path_len: i64) -> i64:
+    rt_file_read_text(path_ptr, path_len)
+
+@unsafe(reason: "unverified raw SFFI wrapper; caller must uphold the declared runtime ABI", capabilities: [ffi])
+fn file_read_regular_no_follow_bounded_ptr(path_ptr: i64, path_len: i64, max_bytes: i64) -> i64:
+    rt_file_read_regular_no_follow_bounded(path_ptr, path_len, max_bytes)
+
+@unsafe(reason: "unverified raw SFFI wrapper; caller must uphold the declared runtime ABI", capabilities: [ffi])
+fn file_write_text_ptr(path_ptr: i64, path_len: i64, content_ptr: i64, content_len: i64) -> bool:
+    rt_file_write_text(path_ptr, path_len, content_ptr, content_len)
+
+@unsafe(reason: "unverified raw SFFI wrapper; caller must uphold the declared runtime ABI", capabilities: [ffi])
+fn string_free(ptr: i64) -> i64:
+    rt_string_free(ptr)
+
+@unsafe(reason: "unverified raw SFFI wrapper; caller must uphold the declared runtime ABI", capabilities: [ffi])
+fn array_free_deep(value: i64) -> i64?:
+    rt_array_free_deep(value)
+
+# Environment wrappers
+# Pointer-ABI env lookup preserves absence as `nil`; it must not collapse an
+# absent variable or bridge failure into an integer that could be consumed as
+# a valid runtime handle.
+@unsafe(reason: "unverified raw SFFI wrapper; caller must uphold the declared runtime ABI", capabilities: [ffi])
+fn env_get_ptr(name_ptr: i64, name_len: i64) -> i64?:
+    rt_env_get(name_ptr, name_len)
+
+@unsafe(reason: "unverified raw SFFI wrapper; caller must uphold the declared runtime ABI", capabilities: [ffi])
+fn env_set_ptr(name_ptr: i64, name_len: i64, value_ptr: i64, value_len: i64) -> bool:
+    rt_env_set(name_ptr, name_len, value_ptr, value_len)
+
+# ==============================================================================
+# Exports
+# ==============================================================================
+
+
+# GC exports
+
+# Constructor exports
+
+# Type checking exports
+
+# Conversion exports
+
+# Arithmetic exports
+
+# Comparison exports
+
+# Printing exports
+
+# Memory management exports
+
+# File I/O exports
+
+# Environment exports

@@ -1,0 +1,57 @@
+# Chained method call must NOT write its result back into the receiver variable.
+#
+# Bug: doc/08_tracking/bug/chained_method_call_writes_result_back_into_receiver_variable_2026-08-31.md
+# On the interpreter lane, `val t = ...; t.head(2).head(1)` overwrote the
+# immutable `t` binding with the FINAL chain result (any class/struct, not just
+# Table), while the split form and the JIT lane kept `t` intact. The
+# `unjittable` method below reproduces the shape that forces the whole module
+# onto the interpreter fallback (a lambda-taking method with an Any boundary,
+# same as Table.filter_by), so this spec exercises the buggy lane even when the
+# default engine is JIT-with-fallback.
+
+use std.spec
+
+struct ChainBox:
+    n: i64
+
+impl ChainBox:
+    fn head(k: i64) -> ChainBox:
+        ChainBox(n: self.n - k)
+    fn unjittable(f: fn(Any) -> bool) -> bool:
+        f(self.n)
+
+class ChainBuilder:
+    xs: [i64]
+    me fn add(v: i64) -> ChainBuilder:
+        self.xs.push(v)
+        self
+
+describe "chained method calls on the interpreter lane":
+    it "does not write the chain result back into a val receiver":
+        val b = ChainBox(n: 10)
+        val c = b.head(1).head(2)
+        expect(c.n).to_equal(7)
+        expect(b.n).to_equal(10)
+
+    it "does not corrupt the receiver in a bare-statement chain":
+        val b = ChainBox(n: 10)
+        b.head(1).head(2)
+        expect(b.n).to_equal(10)
+
+    it "keeps a three-link chain from touching the receiver":
+        val s = ChainBox(n: 20)
+        val r = s.head(1).head(2).head(3)
+        expect(r.n).to_equal(14)
+        expect(s.n).to_equal(20)
+
+    it "matches the split form exactly":
+        val u = ChainBox(n: 10)
+        val u1 = u.head(1)
+        val u2 = u1.head(2)
+        expect(u.n).to_equal(10)
+        expect(u2.n).to_equal(7)
+
+    it "still writes back a genuine me-method builder chain":
+        var bld = ChainBuilder(xs: [])
+        bld.add(1).add(2).add(3)
+        expect(bld.xs.len()).to_equal(3)

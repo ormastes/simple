@@ -1,0 +1,68 @@
+# Authenticated-catalog utilities for filesystem-launched Simplebox.
+#
+# `which` deliberately does not inspect an ambient PATH or probe arbitrary
+# filesystem entries.  The boot-authenticated Simplebox alias inventory is its
+# only lookup authority, so every successful answer names an admitted alias of
+# the artifact that is already being executed.
+
+use os.tools.simplebox.simplebox_inventory_v1.{
+    simplebox_inventory_contains_applet_v1
+}
+use os.tools.simplebox.simplebox_artifact_contract.{
+    SIMPLEBOX_CANONICAL_PATH_V1
+}
+
+extern fn stdout_write(data: text)
+
+val SIMPLEBOX_WHICH_MAX_OPERANDS: u64 = 64u64
+val SIMPLEBOX_WHICH_MAX_NAME_BYTES: i64 = 255
+val SIMPLEBOX_WHICH_MAX_OUTPUT_BYTES: i64 = 65536
+
+pub fn simplebox_which_catalog_path_v1(command: text) -> text:
+    """Resolve a command name or exact path only from authenticated aliases."""
+    if command == "" or command.len() > SIMPLEBOX_WHICH_MAX_NAME_BYTES:
+        return ""
+    if command.contains("/"):
+        # The compiled artifact is a valid executable identity in addition to
+        # its busybox compatibility name and applet aliases.  Do not make
+        # discovery claim that only aliases are filesystem-launchable.
+        if command == SIMPLEBOX_CANONICAL_PATH_V1 or command == "/bin/busybox":
+            return command
+        if not command.starts_with("/bin/") or command.len() <= 5:
+            return ""
+        val requested = command.slice(5, command.len())
+        if simplebox_inventory_contains_applet_v1(requested):
+            return command
+        return ""
+    if command == "simplebox":
+        return SIMPLEBOX_CANONICAL_PATH_V1
+    if command == "busybox" or simplebox_inventory_contains_applet_v1(command):
+        return "/bin/" + command
+    ""
+
+pub fn simplebox_which(args: [text]) -> i32:
+    """Print bounded authenticated alias paths for the requested commands."""
+    if args.len() == 0u64:
+        stdout_write("which: missing command operand\n")
+        return 1
+    if args.len() > SIMPLEBOX_WHICH_MAX_OPERANDS:
+        stdout_write("which: too many operands\n")
+        return 1
+
+    var paths: [text] = []
+    var output_bytes: i64 = 0
+    var all_found = true
+    for command in args:
+        val path = simplebox_which_catalog_path_v1(command)
+        if path == "":
+            all_found = false
+        else:
+            val line_bytes = path.len().to_i64() + 1
+            if line_bytes > SIMPLEBOX_WHICH_MAX_OUTPUT_BYTES - output_bytes:
+                stdout_write("which: output exceeds 65536-byte limit\n")
+                return 1
+            output_bytes = output_bytes + line_bytes
+            paths.push(path)
+    for path in paths:
+        stdout_write(path + "\n")
+    if all_found: 0 else: 1

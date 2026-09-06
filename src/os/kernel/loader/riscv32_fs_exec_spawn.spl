@@ -1,0 +1,193 @@
+# RISC-V 32 authenticated filesystem-exec scheduler bridge.
+
+use os.kernel.arch.arch_context.{Architecture}
+use os.kernel.arch_adapt.user_entry.{dispatch_fs_exec_user_handoff}
+use os.kernel.loader.fs_exec_spawn.{FsExecAuthenticatedRunResultV1}
+use std.fs_driver.mount_table.{MountTable}
+use os.kernel.loader.executable_authority_registry.{
+    ExecutableAuthorityRegistryV1, ExecutableAuthorityTokenV1,
+    executable_authority_snapshot_armed_preparation_v1,
+    executable_authority_begin_riscv32_mapping_transaction_v1
+}
+use os.kernel.loader.executable_load_plan_v1.{ExecutableLoadConsumerV1}
+use os.kernel.loader.executable_image_prepare.{
+    executable_prepare_read_exact_v1
+}
+use os.kernel.scheduler.scheduler_types.{Scheduler}
+use os.kernel.scheduler.scheduler_riscv32_executable_adoption_v1.{
+    SchedulerRiscv32AdoptionResultV1
+}
+use os.kernel.loader.riscv32_sv32_mapping_owner_v1.{
+    Riscv32Sv32MappingStateV1, Riscv32Sv32MappingErrorV1,
+    riscv32_sv32_mapping_prepare_v1
+}
+use os.kernel.loader.process_image.{build_user_process_image}
+use os.kernel.types.task_types.{
+    TaskId, TaskPriority, UserProcessImage,
+    user_process_image_entry,
+    user_process_image_stack_top, user_process_image_stack_size,
+    user_process_image_initial_sp, user_process_image_initial_stack_bytes
+}
+use os.kernel.loader.executable_launch_arguments_v1.{
+    executable_launch_arguments_v1_validate
+}
+use os.kernel.loader.cap_exec_gate.{exec_cap_check_caps}
+use os.kernel.loader.spawn_authority.{
+    spawn_authority_check_spawn, spawn_authority_spawn_caps
+}
+use os.kernel.loader.spawn_recipes.{
+    spawn_recipe_is_migrated, spawn_recipe_seed_parent_caps,
+    spawn_recipe_launch_contract_valid
+}
+use os.kernel.types.capability_types.{CapabilitySet}
+use os.kernel.loader.executable_admission_pipeline.{executable_loader_revoke}
+use os.kernel.scheduler.scheduler.{
+    wait_collect_result_error, wait_collect_result_pid,
+    wait_collect_result_status
+}
+use os.kernel.scheduler.process_execution_observation.{
+    SchedulerExecutionDeliveryStatusV2,
+    scheduler_execution_compare_and_deliver_reaped_v2,
+    scheduler_execution_discard_terminal_v2
+}
+
+fn _rv32_parent_caps_v1(caller: i64, recipe: i64) -> CapabilitySet:
+    if not spawn_recipe_is_migrated(recipe): return CapabilitySet.empty()
+    val owner = if caller < 0: 0u64 else: caller.to_u64()
+    spawn_recipe_seed_parent_caps(recipe, owner)
+
+fn _rv32_prepare_authenticated_task_v1(
+    scheduler: Scheduler,
+    mut table: MountTable,
+    authorities: ExecutableAuthorityRegistryV1,
+    token: ExecutableAuthorityTokenV1,
+    consumer: ExecutableLoadConsumerV1,
+    entry_point: u64,
+    caller: i64,
+    caller_caps: CapabilitySet,
+    path: text,
+    argv: [text],
+    envp: [text],
+    recipe: i64
+) -> (Scheduler, i64):
+    val checked = executable_launch_arguments_v1_validate(path, argv, envp)
+    if checked.is_err(): return (scheduler, -22)
+    val launch = checked.unwrap()
+    if not spawn_recipe_launch_contract_valid(
+        recipe, launch.path, launch.argv, launch.envp):
+        return (scheduler, -13)
+    val gate = exec_cap_check_caps(caller_caps, launch.path)
+    if gate != 0: return (scheduler, gate.to_i64())
+    val allowed = spawn_authority_check_spawn(caller, recipe)
+    if allowed != 0: return (scheduler, allowed.to_i64())
+    val source_snapshot = executable_authority_snapshot_armed_preparation_v1(
+        authorities, token)
+    if source_snapshot.is_err(): return (scheduler, -13)
+    val preparation = source_snapshot.unwrap()
+    if (preparation.identity.canonical_source_path != launch.path or
+        not preparation.identity.has_entry_identity or
+        preparation.identity.entry_point != entry_point or
+        preparation.identity.target.os != "simpleos" or
+        preparation.identity.target.arch != "riscv32" or
+        preparation.identity.target.abi != "simpleos"):
+        return (scheduler, -13)
+    val handle = preparation.image_handle
+    val source = executable_prepare_read_exact_v1(table, handle)
+    if not source.?: return (scheduler, -5)
+    val source_bytes = source.unwrap()
+    val built = build_user_process_image(
+        launch.path, source_bytes, Architecture.Riscv32,
+        launch.argv, launch.envp)
+    if built.is_err(): return (scheduler, -8)
+    val image: UserProcessImage = built.unwrap()
+    # The authenticated identity authorizes one exact ELF entry.  Recheck the
+    # entry parsed from the authenticated bytes before reserving any mapping
+    # authority; a caller-supplied in-range substitute must fail closed.
+    if user_process_image_entry(image) != entry_point:
+        return (scheduler, -8)
+    val stack_top = user_process_image_stack_top(image)
+    val stack_size = user_process_image_stack_size(image)
+    val initial_sp = user_process_image_initial_sp(image)
+    val initial_stack = user_process_image_initial_stack_bytes(image)
+    val transaction = executable_authority_begin_riscv32_mapping_transaction_v1(
+        authorities, token, consumer, entry_point, initial_sp, 0u32,
+        launch.path)
+    if transaction.is_err(): return (scheduler, -13)
+    val mapped = riscv32_sv32_mapping_prepare_v1(
+        authorities, transaction.unwrap(), handle, source_bytes, entry_point,
+        stack_top, stack_size, initial_sp, initial_stack)
+    if (mapped.state != Riscv32Sv32MappingStateV1.MappedBlocked or
+        mapped.error != Riscv32Sv32MappingErrorV1.None):
+        return (scheduler, -12)
+    val caps = spawn_authority_spawn_caps(caller, recipe, caller_caps)
+    var owner = scheduler
+    val adopted = owner.adopt_authenticated_riscv32_mapping_v1(
+        authorities, token, mapped, handle, launch, entry_point, initial_sp,
+        stack_top, TaskPriority.Normal, caps)
+    if adopted.pid == 0u64: return (owner, -13)
+    (owner, adopted.pid.to_i64())
+
+pub fn riscv32_fs_exec_spawn_authenticated_with_launch_v1(
+    scheduler: Scheduler,
+    mut table: MountTable,
+    authorities: ExecutableAuthorityRegistryV1,
+    token: ExecutableAuthorityTokenV1,
+    consumer: ExecutableLoadConsumerV1,
+    entry_point: u64,
+    caller: i64,
+    caller_caps: CapabilitySet,
+    path: text,
+    argv: [text],
+    envp: [text],
+    recipe: i64
+) -> FsExecAuthenticatedRunResultV1:
+    """Consume authority, execute RV32 U-mode, and deliver reap evidence once."""
+    val prepared = _rv32_prepare_authenticated_task_v1(
+        scheduler, table, authorities, token, consumer, entry_point,
+        caller, caller_caps, path, argv, envp, recipe)
+    if prepared.1 <= 0:
+        return FsExecAuthenticatedRunResultV1(
+            exit_code: prepared.1, evidence: nil, scheduler: prepared.0)
+
+    val child = TaskId(id: prepared.1.to_u64())
+    val exit_code = dispatch_fs_exec_user_handoff(
+        Architecture.Riscv32, child.id, prepared.0)
+    var owner = prepared.0
+    owner.exit_task_by_id(child, exit_code.to_i32())
+    val collected = owner.wait_for_collect(TaskId(id: 0u64), child, false)
+    if (wait_collect_result_error(collected) != 0 or
+        wait_collect_result_pid(collected) != child.id or
+        wait_collect_result_status(collected) != exit_code.to_i32()):
+        _ = scheduler_execution_discard_terminal_v2(child.id)
+        return FsExecAuthenticatedRunResultV1(exit_code: -10, evidence: nil, scheduler: owner)
+    if executable_loader_revoke(table, authorities, token).is_err():
+        _ = scheduler_execution_discard_terminal_v2(child.id)
+        return FsExecAuthenticatedRunResultV1(exit_code: -10, evidence: nil, scheduler: owner)
+
+    val delivered = scheduler_execution_compare_and_deliver_reaped_v2(
+        child.id, path, argv)
+    if delivered.status != SchedulerExecutionDeliveryStatusV2.Delivered:
+        _ = scheduler_execution_discard_terminal_v2(child.id)
+        return FsExecAuthenticatedRunResultV1(exit_code: -10, evidence: nil, scheduler: owner)
+    FsExecAuthenticatedRunResultV1(
+        exit_code: exit_code, evidence: delivered.token, scheduler: owner)
+
+pub fn riscv32_fs_exec_spawn_authenticated_v1(
+    scheduler: Scheduler,
+    table: MountTable,
+    authorities: ExecutableAuthorityRegistryV1,
+    token: ExecutableAuthorityTokenV1,
+    consumer: ExecutableLoadConsumerV1,
+    entry_point: u64,
+    caller: i64,
+    path: text,
+    recipe: i64
+) -> i64:
+    """Compatibility launch with path as argv[0] and no environment."""
+    riscv32_fs_exec_spawn_authenticated_with_launch_v1(
+        scheduler, table, authorities, token, consumer, entry_point,
+        caller, _rv32_parent_caps_v1(caller, recipe),
+        path, [path], [], recipe).exit_code
+
+export riscv32_fs_exec_spawn_authenticated_v1
+export riscv32_fs_exec_spawn_authenticated_with_launch_v1

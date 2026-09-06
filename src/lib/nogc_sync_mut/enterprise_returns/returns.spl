@@ -1,0 +1,318 @@
+"""
+# Returns / RMA Vertical — customer returns and refund authorization
+
+Lane W21-C of the Simple Enterprise Suite over the durable enterprise store:
+
+    request -> approve|reject -> receive -> refund (Money)
+
+Every write runs the FROZEN guarded sequence (foundation.spl):
+
+    session -> rbac -> domain validation -> idempotency -> effects in one UoW
+
+Effects committed together in one unit of work: the insert-only RMA-state row,
+the refund ledger row (on refund), the outbox event, the sha256-chained audit
+record, and the idempotency key — so a replayed command produces exactly one
+effect and a rollback carries none (atomicity on ACID backends).
+
+## Storage model — insert-only + derive (immutable-ledger rule)
+
+An RMA is a state machine expressed as an insert-only event log; the CURRENT
+state is a pure fold over `ret_rma_events`, never an UPDATE:
+
+    "" (unknown) -> requested -> approved -> received -> refunded
+                              \-> rejected
+
+Illegal moves are denied with the closed-set reason `invalid-transition`
+(foundation.reason_set) and NO effect:
+- deciding an RMA that is not `requested` (cannot decide twice);
+- receiving an RMA that is not `approved` (cannot receive before approved);
+- refunding an RMA that is not `received` (cannot refund before received).
+
+An unknown RMA is denied `not-found`; a malformed request is `invalid-record`.
+No reason outside the closed 16-member set is ever returned.
+
+## Money — integer minor units
+
+`rma_request` captures the returned line's per-unit price as a `Money` (integer
+minor units + currency; never floats). `rma_refund` records the refund
+`qty * unit_price` into the insert-only `ret_refunds` ledger; `rma_status`
+folds that ledger to the refunded amount (0 until refunded).
+
+## RBAC — reused frozen roles, local gate (no frozen-table edit)
+
+`foundation.role_allows` is FROZEN. Returns intake/receipt/refund map naturally
+to the existing `sales` role; the approval decision is an admin-tier action.
+Rather than mutate the frozen table or `enterprise_sale.rbac_registry`, this
+module REUSES those roles through a local `returns_role_allows` gate (admin
+passes everything via the blanket rule). The frozen SEQUENCE is preserved
+exactly; only the role->action policy for `returns.*` lives here.
+
+## Cross-OS rule
+
+sha256 audit is taken only via the enterprise_store facade
+(`records.audit_append` -> `audit_hash.audit_sha256_hex`); this module never
+imports `std.common.crypto.sha256` directly (one codebase, host + SimpleOS).
+
+Tenant isolation: the SESSION tenant is authority; every reader filters by
+tenant in pure Simple and a payload tenant is never trusted.
+"""
+
+use std.nogc_sync_mut.enterprise_store.store.{
+    EnterpriseStore, store_migrate, store_rows, store_insert_row,
+    uow_begin, uow_commit
+}
+use std.nogc_sync_mut.enterprise_store.records.{
+    idempotency_seen, idempotency_result, idempotency_record,
+    outbox_append, audit_append
+}
+use std.nogc_sync_mut.io.sqlite_sffi.{sqlite_row_get}
+use std.nogc_sync_mut.enterprise_sale.foundation.{
+    TenantContext, ActorContext, SessionContext, Money,
+    CommandEnvelope, CommandResult,
+    accepted, denied, session_valid
+}
+
+# =============================================================================
+# Schema
+# =============================================================================
+
+fn returns_setup(store: EnterpriseStore) -> bool:
+    var ok = store_migrate(store, "ret_001_rmas",
+        "CREATE TABLE IF NOT EXISTS ret_rmas (id INTEGER PRIMARY KEY, tenant_id TEXT, rma_id TEXT, order_id TEXT, sku TEXT, qty TEXT, unit_cents TEXT, currency TEXT, reason TEXT)")
+    ok = ok and store_migrate(store, "ret_002_rma_events",
+        "CREATE TABLE IF NOT EXISTS ret_rma_events (id INTEGER PRIMARY KEY, tenant_id TEXT, rma_id TEXT, state TEXT, detail TEXT)")
+    ok = ok and store_migrate(store, "ret_003_refunds",
+        "CREATE TABLE IF NOT EXISTS ret_refunds (id INTEGER PRIMARY KEY, tenant_id TEXT, rma_id TEXT, amount_cents TEXT, currency TEXT)")
+    ok
+
+# =============================================================================
+# RBAC — reused 'sales' + 'admin' roles via a local gate (see module docstring)
+# =============================================================================
+
+fn returns_role_allows(role: text, action: text) -> bool:
+    if role == "admin":
+        return true
+    if role == "sales":
+        # Intake, receipt and refund are the sales-desk actions; the approval
+        # DECISION (returns.rma.decide) is admin-tier and is NOT granted here.
+        return action == "returns.rma.request" or action == "returns.rma.receive" or action == "returns.rma.refund"
+    false
+
+# =============================================================================
+# Validated allowed-transition sets
+# =============================================================================
+
+# A 'requested' RMA may be approved or rejected; nothing else.
+fn rma_decide_allowed(cur: text) -> bool:
+    cur == "requested"
+
+# Only an 'approved' RMA may be received.
+fn rma_receive_allowed(cur: text) -> bool:
+    cur == "approved"
+
+# Only a 'received' RMA may be refunded.
+fn rma_refund_allowed(cur: text) -> bool:
+    cur == "received"
+
+# =============================================================================
+# Derived reads — current state is a pure fold over insert-only history
+# =============================================================================
+
+# ret_rma_state folds the RMA's event stream to its current state
+# ("" when the RMA does not exist for this tenant).
+fn ret_rma_state(store: EnterpriseStore, tenant_id: text, rma_id: text) -> text:
+    var state = ""
+    val rows = store_rows(store, "ret_rma_events", "id, tenant_id, rma_id, state, detail")
+    for row in rows:
+        if sqlite_row_get(row, "tenant_id") == tenant_id and sqlite_row_get(row, "rma_id") == rma_id:
+            state = sqlite_row_get(row, "state")
+    state
+
+# ret_rma_qty reads the returned quantity (-1 when unknown for this tenant).
+fn ret_rma_qty(store: EnterpriseStore, tenant_id: text, rma_id: text) -> i64:
+    val rows = store_rows(store, "ret_rmas", "id, tenant_id, rma_id, order_id, sku, qty, unit_cents, currency, reason")
+    for row in rows:
+        if sqlite_row_get(row, "tenant_id") == tenant_id and sqlite_row_get(row, "rma_id") == rma_id:
+            return int(sqlite_row_get(row, "qty"))
+    -1
+
+# ret_rma_unit_cents reads the captured per-unit price in minor units
+# (-1 when the RMA does not exist for this tenant).
+fn ret_rma_unit_cents(store: EnterpriseStore, tenant_id: text, rma_id: text) -> i64:
+    val rows = store_rows(store, "ret_rmas", "id, tenant_id, rma_id, order_id, sku, qty, unit_cents, currency, reason")
+    for row in rows:
+        if sqlite_row_get(row, "tenant_id") == tenant_id and sqlite_row_get(row, "rma_id") == rma_id:
+            return int(sqlite_row_get(row, "unit_cents"))
+    -1
+
+# ret_rma_currency reads the RMA's currency code ("" when unknown).
+fn ret_rma_currency(store: EnterpriseStore, tenant_id: text, rma_id: text) -> text:
+    val rows = store_rows(store, "ret_rmas", "id, tenant_id, rma_id, order_id, sku, qty, unit_cents, currency, reason")
+    for row in rows:
+        if sqlite_row_get(row, "tenant_id") == tenant_id and sqlite_row_get(row, "rma_id") == rma_id:
+            return sqlite_row_get(row, "currency")
+    ""
+
+# ret_rma_refund_cents folds the refund ledger to the recorded refund amount
+# (0 until the RMA is refunded).
+fn ret_rma_refund_cents(store: EnterpriseStore, tenant_id: text, rma_id: text) -> i64:
+    var total: i64 = 0
+    val rows = store_rows(store, "ret_refunds", "id, tenant_id, rma_id, amount_cents, currency")
+    for row in rows:
+        if sqlite_row_get(row, "tenant_id") == tenant_id and sqlite_row_get(row, "rma_id") == rma_id:
+            total = total + int(sqlite_row_get(row, "amount_cents"))
+    total
+
+# =============================================================================
+# Pure status read — a fold over the RMA's ledgers
+# =============================================================================
+
+struct RmaStatus:
+    rma_id: text
+    state: text
+    refund_cents: i64
+    currency: text
+
+# rma_status folds an RMA's event and refund ledgers into its current state and
+# refunded Money. Pure read: no writes, tenant-scoped. An unknown RMA folds to
+# state "" and refund_cents 0.
+fn rma_status(store: EnterpriseStore, tenant_id: text, rma_id: text) -> RmaStatus:
+    RmaStatus(
+        rma_id: rma_id,
+        state: ret_rma_state(store, tenant_id, rma_id),
+        refund_cents: ret_rma_refund_cents(store, tenant_id, rma_id),
+        currency: ret_rma_currency(store, tenant_id, rma_id))
+
+# =============================================================================
+# Guarded commands — frozen sequence over the durable store
+# =============================================================================
+
+# rma_request opens a customer return at state "requested", capturing the
+# returned line and its per-unit price (Money, minor units). Replaying the same
+# idempotency key returns the recorded result WITHOUT a second effect.
+fn rma_request(store: EnterpriseStore, session: SessionContext, tenant: TenantContext, who: ActorContext, envelope: CommandEnvelope, rma_id: text, order_id: text, sku: text, qty: i64, unit_price: Money) -> CommandResult:
+    # 1. session
+    if not session_valid(session, tenant, who):
+        return denied("invalid-session", rma_id)
+    # 2. rbac
+    if not returns_role_allows(who.role, "returns.rma.request"):
+        return denied("forbidden", rma_id)
+    # 3. domain validation (state-independent identity/shape checks)
+    if rma_id == "" or order_id == "" or sku == "" or qty <= 0 or unit_price.amount_cents <= 0 or unit_price.currency == "":
+        return denied("invalid-record", rma_id)
+    # 4. idempotency — a replay returns the recorded outcome, no new effect.
+    val replayed = idempotency_seen(store, tenant.tenant_id, envelope.idempotency_key)
+    if not replayed and ret_rma_state(store, tenant.tenant_id, rma_id) != "":
+        return denied("invalid-record", rma_id)
+    if replayed:
+        return CommandResult(ok: true, reason: "duplicate-key", detail: idempotency_result(store, tenant.tenant_id, envelope.idempotency_key))
+    # 5. effects — one unit of work
+    uow_begin(store)
+    store_insert_row(store,
+        "INSERT INTO ret_rmas (tenant_id, rma_id, order_id, sku, qty, unit_cents, currency, reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        [tenant.tenant_id, rma_id, order_id, sku, "{qty}", "{unit_price.amount_cents}", unit_price.currency, envelope.payload])
+    store_insert_row(store,
+        "INSERT INTO ret_rma_events (tenant_id, rma_id, state, detail) VALUES (?, ?, ?, ?)",
+        [tenant.tenant_id, rma_id, "requested", order_id])
+    outbox_append(store, tenant.tenant_id, "returns.rma.requested", rma_id)
+    audit_append(store, tenant.tenant_id, who.actor_id, "rma.request", rma_id + ":" + order_id)
+    idempotency_record(store, tenant.tenant_id, envelope.idempotency_key, rma_id)
+    uow_commit(store)
+    accepted(rma_id)
+
+# rma_decide approves or rejects a "requested" RMA (admin-tier). Deciding an
+# RMA that is not requested — including a second decision — is denied
+# invalid-transition. An unknown RMA is denied not-found.
+fn rma_decide(store: EnterpriseStore, session: SessionContext, tenant: TenantContext, who: ActorContext, envelope: CommandEnvelope, rma_id: text, approve: bool) -> CommandResult:
+    if not session_valid(session, tenant, who):
+        return denied("invalid-session", rma_id)
+    if not returns_role_allows(who.role, "returns.rma.decide"):
+        return denied("forbidden", rma_id)
+    val cur = ret_rma_state(store, tenant.tenant_id, rma_id)
+    # Unknown RMA is state-independent (this command never creates one).
+    if cur == "":
+        return denied("not-found", rma_id)
+    # The transition is state-DEPENDENT on this command's own effect, so it is
+    # asked only of a command not already recorded (else a replay of a valid
+    # decision would be denied invalid-transition instead of duplicate-key).
+    val replayed = idempotency_seen(store, tenant.tenant_id, envelope.idempotency_key)
+    if not replayed and not rma_decide_allowed(cur):
+        return denied("invalid-transition", rma_id)
+    if replayed:
+        return CommandResult(ok: true, reason: "duplicate-key", detail: idempotency_result(store, tenant.tenant_id, envelope.idempotency_key))
+    var target = "rejected"
+    if approve:
+        target = "approved"
+    uow_begin(store)
+    store_insert_row(store,
+        "INSERT INTO ret_rma_events (tenant_id, rma_id, state, detail) VALUES (?, ?, ?, ?)",
+        [tenant.tenant_id, rma_id, target, ""])
+    outbox_append(store, tenant.tenant_id, "returns.rma." + target, rma_id)
+    audit_append(store, tenant.tenant_id, who.actor_id, "rma.decide", rma_id + ":" + target)
+    idempotency_record(store, tenant.tenant_id, envelope.idempotency_key, rma_id)
+    uow_commit(store)
+    accepted(rma_id)
+
+# rma_receive marks an "approved" RMA as physically "received". Receiving
+# before approval (any non-approved state) is denied invalid-transition; an
+# unknown RMA is denied not-found.
+fn rma_receive(store: EnterpriseStore, session: SessionContext, tenant: TenantContext, who: ActorContext, envelope: CommandEnvelope, rma_id: text) -> CommandResult:
+    if not session_valid(session, tenant, who):
+        return denied("invalid-session", rma_id)
+    if not returns_role_allows(who.role, "returns.rma.receive"):
+        return denied("forbidden", rma_id)
+    val cur = ret_rma_state(store, tenant.tenant_id, rma_id)
+    if cur == "":
+        return denied("not-found", rma_id)
+    val replayed = idempotency_seen(store, tenant.tenant_id, envelope.idempotency_key)
+    if not replayed and not rma_receive_allowed(cur):
+        return denied("invalid-transition", rma_id)
+    if replayed:
+        return CommandResult(ok: true, reason: "duplicate-key", detail: idempotency_result(store, tenant.tenant_id, envelope.idempotency_key))
+    uow_begin(store)
+    store_insert_row(store,
+        "INSERT INTO ret_rma_events (tenant_id, rma_id, state, detail) VALUES (?, ?, ?, ?)",
+        [tenant.tenant_id, rma_id, "received", ""])
+    outbox_append(store, tenant.tenant_id, "returns.rma.received", rma_id)
+    audit_append(store, tenant.tenant_id, who.actor_id, "rma.receive", rma_id)
+    idempotency_record(store, tenant.tenant_id, envelope.idempotency_key, rma_id)
+    uow_commit(store)
+    accepted(rma_id)
+
+# rma_refund records the refund Money (qty * captured unit price, minor units)
+# for a "received" RMA into the insert-only refund ledger and advances state to
+# "refunded". Refunding before receipt is denied invalid-transition; an unknown
+# RMA is denied not-found.
+fn rma_refund(store: EnterpriseStore, session: SessionContext, tenant: TenantContext, who: ActorContext, envelope: CommandEnvelope, rma_id: text) -> CommandResult:
+    if not session_valid(session, tenant, who):
+        return denied("invalid-session", rma_id)
+    if not returns_role_allows(who.role, "returns.rma.refund"):
+        return denied("forbidden", rma_id)
+    val cur = ret_rma_state(store, tenant.tenant_id, rma_id)
+    if cur == "":
+        return denied("not-found", rma_id)
+    val replayed = idempotency_seen(store, tenant.tenant_id, envelope.idempotency_key)
+    if not replayed and not rma_refund_allowed(cur):
+        return denied("invalid-transition", rma_id)
+    if replayed:
+        return CommandResult(ok: true, reason: "duplicate-key", detail: idempotency_result(store, tenant.tenant_id, envelope.idempotency_key))
+    val amount = ret_rma_qty(store, tenant.tenant_id, rma_id) * ret_rma_unit_cents(store, tenant.tenant_id, rma_id)
+    val currency = ret_rma_currency(store, tenant.tenant_id, rma_id)
+    uow_begin(store)
+    store_insert_row(store,
+        "INSERT INTO ret_refunds (tenant_id, rma_id, amount_cents, currency) VALUES (?, ?, ?, ?)",
+        [tenant.tenant_id, rma_id, "{amount}", currency])
+    store_insert_row(store,
+        "INSERT INTO ret_rma_events (tenant_id, rma_id, state, detail) VALUES (?, ?, ?, ?)",
+        [tenant.tenant_id, rma_id, "refunded", "{amount}"])
+    outbox_append(store, tenant.tenant_id, "returns.rma.refunded", rma_id)
+    audit_append(store, tenant.tenant_id, who.actor_id, "rma.refund", rma_id + ":{amount}")
+    idempotency_record(store, tenant.tenant_id, envelope.idempotency_key, rma_id)
+    uow_commit(store)
+    accepted(rma_id)
+
+export returns_setup, returns_role_allows
+export rma_decide_allowed, rma_receive_allowed, rma_refund_allowed
+export ret_rma_state, ret_rma_qty, ret_rma_unit_cents, ret_rma_currency, ret_rma_refund_cents
+export RmaStatus, rma_status
+export rma_request, rma_decide, rma_receive, rma_refund

@@ -1,0 +1,40 @@
+# Minimal repro for the native `Option<bool>`-vs-raw-literal equality defect:
+# doc/08_tracking/bug/native_option_bool_eq_against_raw_literal_2026-08-08.md
+#
+# `make(flag)` returns `bool?` via implicit true/false coercion. Comparing
+# the result against a raw `true`/`false`/`nil` literal exercises
+# expr_dispatch.spl's `bin_is_enum_eq` gate, which requires BOTH operands to
+# resolve to the same enum id -- a raw bool literal never does, so the
+# comparison falls through to a representation-blind raw compare between the
+# boxed Option and the raw scalar.
+#
+# hit1/hit2/hit3 are rows whose correct answer is "match" (boxed Some(true)
+# == true, boxed Some(false) == false, boxed nil == nil). miss1..miss4 are
+# the rows that already agree across all three engines (interp/jit/native)
+# and are hard-asserted as a regression fence.
+fn make(flag: bool) -> bool?:
+    if flag:
+        return true
+    return false
+
+fn make_nil() -> bool?:
+    return nil
+
+fn main():
+    val t = make(true)
+    val f = make(false)
+    val n = make_nil()
+
+    # Correct answer is "match" (boxed Some(true) == true,
+    # boxed Some(false) == false, boxed nil == nil).
+    val hit1 = if t == true: "match" else: "no-match"
+    val hit2 = if f == false: "match" else: "no-match"
+    val hit3 = if n == nil: "match" else: "no-match"
+
+    # Already correct on all three engines -- hard-asserted regression fence.
+    val miss1 = if n == true: "match" else: "no-match"
+    val miss2 = if n == false: "match" else: "no-match"
+    val miss3 = if t == false: "match" else: "no-match"
+    val miss4 = if f == true: "match" else: "no-match"
+
+    print("hit1={hit1} hit2={hit2} hit3={hit3} miss1={miss1} miss2={miss2} miss3={miss3} miss4={miss4}")

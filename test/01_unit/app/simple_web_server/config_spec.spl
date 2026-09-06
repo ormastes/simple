@@ -1,0 +1,80 @@
+"""Hosted web server configuration and SSR registry specification."""
+
+use std.spec
+use std.io.file_read_text
+use app.simple_web_server.config.{
+    HOSTED_SSR_HANDLER, default_hosted_web_cli, parse_hosted_web_cli,
+    hosted_web_server_config, hosted_web_registry
+}
+
+describe "hosted Simple web server configuration":
+    it "builds one exact asynchronous SSR route with bounded defaults":
+        val cli = default_hosted_web_cli()
+        val server = hosted_web_server_config(cli)
+        expect(server.locations.len()).to_equal(1)
+        expect(server.locations[0].pattern).to_equal("/render")
+        expect(server.locations[0].match_type).to_equal("exact")
+        expect(server.locations[0].handler_type).to_equal(HOSTED_SSR_HANDLER)
+        expect(server.max_connections).to_equal(10000)
+        expect(server.client_max_body_size).to_equal(1048576)
+        expect(server.read_timeout_ms).to_equal(15000)
+        expect(server.drain_timeout_ms).to_equal(10000)
+
+    it "registers the canonical asynchronous SSR submitter before startup":
+        val cli = default_hosted_web_cli()
+        val result = hosted_web_registry(cli)
+        expect(result.is_ok()).to_equal(true)
+        match result:
+            Ok(registry): expect(registry.has_async(HOSTED_SSR_HANDLER)).to_equal(true)
+            Err(message): fail(message)
+
+    it "parses explicit production bounds and TLS 1.3 configuration":
+        val parsed = parse_hosted_web_cli([
+            "--listen", "127.0.0.1:8443", "--workers", "4",
+            "--max-connections", "2048", "--max-body-bytes", "262144",
+            "--ssr-path", "/v1/render", "--width", "640", "--height", "480",
+            "--backend", "cpu", "--tls-cert", "cert.pem", "--tls-key", "key.pem",
+            "--launch-id", "boot-a1-launch-b2"
+        ])
+        expect(parsed.valid()).to_equal(true)
+        val server = hosted_web_server_config(parsed.config)
+        expect(server.listen_addr).to_equal("127.0.0.1:8443")
+        expect(server.worker_count).to_equal(4)
+        expect(server.locations[0].pattern).to_equal("/v1/render")
+        expect(server.tls_enabled).to_equal(true)
+        expect(server.tls_min_version).to_equal("1.3")
+        expect(parsed.config.launch_id).to_equal("boot-a1-launch-b2")
+
+    it "rejects unbounded and incomplete security configuration":
+        expect(parse_hosted_web_cli(["--max-connections", "0"]).valid()).to_equal(false)
+        expect(parse_hosted_web_cli(["--max-body-bytes", "999999999"]).valid()).to_equal(false)
+        expect(parse_hosted_web_cli(["--read-timeout-ms", "0"]).valid()).to_equal(false)
+        expect(parse_hosted_web_cli(["--ssr-path", "render"]).valid()).to_equal(false)
+        expect(parse_hosted_web_cli(["--tls-cert", "cert.pem"]).valid()).to_equal(false)
+        expect(parse_hosted_web_cli(["--unknown", "x"]).valid()).to_equal(false)
+
+    it "normalizes a filesystem-launched SimpleOS server to supported capabilities":
+        val parsed = parse_hosted_web_cli([
+            "--simpleos", "--launch-id", "boot-7-launch-2", "--workers", "32"
+        ])
+        expect(parsed.valid()).to_equal(true)
+        expect(parsed.config.listen_addr).to_equal("0.0.0.0:8080")
+        expect(parsed.config.worker_count).to_equal(1)
+        expect(parsed.config.ssr_backend).to_equal("cpu")
+        expect(hosted_web_server_config(parsed.config).tls_enabled).to_equal(false)
+
+    it "requires an attributable launch and rejects unsupported SimpleOS TLS":
+        expect(parse_hosted_web_cli(["--simpleos"]).error).to_contain("requires a non-whitespace --launch-id")
+        expect(parse_hosted_web_cli([
+            "--simpleos", "--launch-id", "forged\nmarker"
+        ]).valid()).to_equal(false)
+        val tls = parse_hosted_web_cli([
+            "--simpleos", "--launch-id", "boot-1", "--tls-cert", "cert.pem",
+            "--tls-key", "key.pem"
+        ])
+        expect(tls.error).to_contain("TLS is unavailable")
+
+    it "emits the filesystem launch marker only for the SimpleOS profile":
+        val entry = file_read_text("src/app/simple_web_server/main.spl")
+        expect(entry).to_contain("if parsed.config.simpleos:")
+        expect(entry).to_contain("SIMPLEOS_SERVER_LAUNCH artifact=simple_web_server")

@@ -1,0 +1,64 @@
+use std.spec.*
+use compiler.mir.hwir.types.{CoreConfig}
+use compiler.mir.hwir.host_evaluator.{HwHostInput, evaluate_strict_comb_hwir}
+use compiler.mir.hwir.riscv_scalar_runtime_illegal_provider.{
+    strict_riscv_scalar_runtime_illegal_provider}
+
+fn illegal_inputs(uop: i64, legal: i64, illegal: i64, lineage: i64,
+    instruction: i64) -> [HwHostInput]:
+    [HwHostInput.bits("uop_valid", uop), HwHostInput.bits("decode_legal", legal),
+        HwHostInput.bits("illegal_valid", illegal), HwHostInput.bits("lineage_valid", lineage),
+        HwHostInput.bits("privilege", 3), HwHostInput.bits("original_instruction", instruction),
+        HwHostInput.bits("canonical_instruction", instruction),
+        HwHostInput.bits("instruction_length_bytes", 4),
+        HwHostInput.bits("pc_before", 0x100), HwHostInput.bits("fallthrough_pc", 0x104),
+        HwHostInput.bits("provider_event_id", 7), HwHostInput.bits("decode_event_id", 7)]
+
+describe "runtime architectural illegal-instruction provider":
+    it "normalizes a registered illegal uop without architectural side effects":
+        for config in [CoreConfig.rv32(), CoreConfig.rv64()]:
+            val module = strict_riscv_scalar_runtime_illegal_provider(
+                "runtime_illegal_" + config.xlen.to_text(), config).unwrap()
+            val result = evaluate_strict_comb_hwir(module,
+                illegal_inputs(1, 0, 1, 1, 0xFFFFFFFF)).unwrap()
+            expect(result.value_of("completion_valid").unwrap()).to_equal(1)
+            expect(result.value_of("protocol_fault").unwrap()).to_equal(0)
+            expect(result.value_of("completion_execute_trap_valid").unwrap()).to_equal(1)
+            expect(result.value_of("completion_execute_trap_cause").unwrap()).to_equal(2)
+            expect(result.value_of("completion_execute_trap_tval").unwrap()).to_equal(0xFFFFFFFF)
+            expect(result.value_of("completion_privilege").unwrap()).to_equal(3)
+            expect(result.value_of("completion_original_instruction").unwrap()).to_equal(0xFFFFFFFF)
+            expect(result.value_of("completion_pc_before").unwrap()).to_equal(0x100)
+            expect(result.value_of("completion_pc_after").unwrap()).to_equal(0x104)
+            expect(result.value_of("completion_provider_event_id").unwrap()).to_equal(7)
+            expect(result.value_of("completion_decode_event_id").unwrap()).to_equal(7)
+            expect(result.value_of("completion_illegal_valid").unwrap()).to_equal(1)
+            for zero in ["completion_rd", "completion_rd_write", "completion_rd_value",
+                    "completion_memory_address", "completion_memory_read_mask",
+                    "completion_memory_write_mask", "completion_memory_read_data",
+                    "completion_memory_write_data", "completion_memory_trap_valid",
+                    "completion_memory_trap_cause", "completion_memory_trap_tval",
+                    "completion_redirect_valid", "completion_redirect_target"]:
+                expect(result.value_of(zero).unwrap()).to_equal(0)
+
+    it "faults malformed illegal envelopes and stays idle without illegal validity":
+        val module = strict_riscv_scalar_runtime_illegal_provider(
+            "runtime_illegal_malformed", CoreConfig.rv32()).unwrap()
+        for malformed in [illegal_inputs(1, 1, 1, 1, 0xFFFFFFFF),
+                illegal_inputs(1, 0, 1, 0, 0xFFFFFFFF),
+                illegal_inputs(0, 0, 1, 1, 0xFFFFFFFF)]:
+            val result = evaluate_strict_comb_hwir(module, malformed).unwrap()
+            expect(result.value_of("completion_valid").unwrap()).to_equal(0)
+            expect(result.value_of("protocol_fault").unwrap()).to_equal(1)
+        val idle = evaluate_strict_comb_hwir(module,
+            illegal_inputs(1, 1, 0, 1, 0x002081B3)).unwrap()
+        expect(idle.value_of("completion_valid").unwrap()).to_equal(0)
+        expect(idle.value_of("protocol_fault").unwrap()).to_equal(0)
+
+    it "builds only from a valid concrete config and stable module identity":
+        val first = strict_riscv_scalar_runtime_illegal_provider(
+            "runtime_illegal_hash", CoreConfig.rv32()).unwrap()
+        val second = strict_riscv_scalar_runtime_illegal_provider(
+            "runtime_illegal_hash", CoreConfig.rv32()).unwrap()
+        expect(first.structural_sha256()).to_equal(second.structural_sha256())
+        expect(strict_riscv_scalar_runtime_illegal_provider("", CoreConfig.rv32()).is_err()).to_be(true)

@@ -1,0 +1,175 @@
+# Build/test abnormality evidence CLI.
+
+use std.cli.cli_util.{get_cli_args}
+use std.test_runner.test_db_compat.{RunnerTestDb, load_test_db_compat}
+use std.common.perf.execution_metrics.{
+    ApprovedBaseline, AnomalyPolicy, BaselineState, DecisionStatus,
+    compare_approved_baseline, decision_status_name
+}
+
+fn _usage() -> i64:
+    print "Usage: simple perf <record|compare|explain|baseline promote> ..."
+    print "  record <test-path> <cohort-id> <duration-ms>"
+    print "  compare <test-path> <cohort-id> <candidate-ms> [--confirmed]"
+    print "  explain <test-path>"
+    print "  baseline promote <test-path> <cohort-id>"
+    2
+
+fn _load_db() -> RunnerTestDb?:
+    match load_test_db_compat():
+        case Ok(db): Some(db)
+        case Err(reason):
+            print "perf-error: {reason}"
+            nil
+
+fn _samples(encoded: text) -> [f64]?:
+    var values: [f64] = []
+    val body = encoded.trim().replace("[", "").replace("]", "")
+    if body == "":
+        return Some(values)
+    for item in body.split(","):
+        if item.trim() != "":
+            match item.trim().parse_float():
+                case Some(value): values.push(value)
+                case nil: return nil
+    Some(values)
+
+fn _positive_ms(raw: text) -> f64?:
+    match raw.trim().parse_float():
+        case Some(value):
+            if value > 0.0: Some(value)
+            else: nil
+        case nil: nil
+
+fn _default_policy() -> AnomalyPolicy:
+    AnomalyPolicy(
+        warning_relative_percent: 10, warning_mad_multiplier: 3.0,
+        failure_relative_percent: 15, failure_mad_multiplier: 4.0,
+        absolute_floor: 5.0)
+
+fn _baseline_state(value: text) -> BaselineState:
+    if value == "approved": return BaselineState.Approved
+    if value == "suspect": return BaselineState.Suspect
+    if value == "superseded": return BaselineState.Superseded
+    BaselineState.Provisional
+
+fn _record(args: [text]) -> i64:
+    if args.len() != 3:
+        return _usage()
+    val duration_ms = match _positive_ms(args[2]):
+        case Some(value): value
+        case nil:
+            print "perf-error: subject, cohort, and positive duration are required"
+            return 2
+    if args[0].trim() == "" or args[1].trim() == "":
+        print "perf-error: subject, cohort, and positive duration are required"
+        return 2
+    var db = match _load_db():
+        case Some(value): value
+        case nil: return 2
+    if not db.record_timing_observation(args[0], args[1], duration_ms):
+        print "perf-error: stable test subject not found: {args[0]}"
+        return 2
+    match db.save():
+        case Ok(_):
+            print "perf-recorded: subject={args[0]} cohort={args[1]} duration_ms={args[2]}"
+            0
+        case Err(reason):
+            print "perf-error: {reason}"
+            2
+
+fn _explain(args: [text]) -> i64:
+    if args.len() != 1:
+        return _usage()
+    val db = match _load_db():
+        case Some(value): value
+        case nil: return 2
+    match db.timing_summary_for_test(args[0]):
+        case Some(summary):
+            print "subject={args[0]}"
+            print "baseline_state={summary.baseline_state}"
+            print "baseline_generation={summary.baseline_generation}"
+            print "baseline_cohort_id={summary.baseline_cohort_id}"
+            print "baseline_samples={summary.baseline_samples}"
+            print "provisional_p50={summary.provisional_p50}"
+            0
+        case nil:
+            print "perf-error: timing subject not found: {args[0]}"
+            2
+
+fn _compare(args: [text]) -> i64:
+    if args.len() < 3:
+        return _usage()
+    val candidate_ms = match _positive_ms(args[2]):
+        case Some(value): value
+        case nil:
+            print "perf-error: subject, cohort, and positive candidate duration are required"
+            return 2
+    if args[0].trim() == "" or args[1].trim() == "":
+        print "perf-error: subject, cohort, and positive candidate duration are required"
+        return 2
+    val db = match _load_db():
+        case Some(value): value
+        case nil: return 2
+    val summary = match db.timing_summary_for_test(args[0]):
+        case Some(value): value
+        case nil:
+            print "perf-incomplete: timing subject not found"
+            return 2
+    val baseline_samples = match _samples(summary.baseline_samples):
+        case Some(values): values
+        case nil:
+            print "perf-error: malformed baseline samples for {args[0]}"
+            return 2
+    val baseline = ApprovedBaseline(
+        cohort_id: summary.baseline_cohort_id,
+        state: _baseline_state(summary.baseline_state),
+        samples: baseline_samples,
+        generation: summary.baseline_generation)
+    val decision = compare_approved_baseline(
+        baseline, [candidate_ms], args[1], args.contains("--confirmed"), _default_policy())
+    print "status={decision_status_name(decision.status)}"
+    print "reason={decision.reason}"
+    print "baseline_median={decision.baseline_median}"
+    print "candidate_median={decision.candidate_median}"
+    print "delta={decision.delta}"
+    print "relative_percent={decision.relative_percent}"
+    if decision.status == DecisionStatus.Failure: 1 elif decision.status == DecisionStatus.Incomplete: 2 else: 0
+
+fn _promote(args: [text]) -> i64:
+    if args.len() != 2:
+        return _usage()
+    if args[0].trim() == "" or args[1].trim() == "":
+        print "perf-error: subject and cohort are required"
+        return 2
+    var db = match _load_db():
+        case Some(value): value
+        case nil: return 2
+    if not db.promote_timing_baseline(args[0], args[1]):
+        print "perf-error: no provisional timing samples for {args[0]}"
+        return 2
+    match db.save():
+        case Ok(_):
+            print "baseline-promoted: subject={args[0]} cohort={args[1]}"
+            0
+        case Err(reason):
+            print "perf-error: {reason}"
+            2
+
+fn run_perf_cli(args: [text]) -> i64:
+    if args.len() == 0:
+        return _usage()
+    if args[0] == "record":
+        return _record(args[1:])
+    if args[0] == "compare":
+        return _compare(args[1:])
+    if args[0] == "explain":
+        return _explain(args[1:])
+    if args[0] == "baseline" and args.len() > 1 and args[1] == "promote":
+        return _promote(args[2:])
+    _usage()
+
+fn main() -> i64:
+    run_perf_cli(get_cli_args())
+
+export run_perf_cli

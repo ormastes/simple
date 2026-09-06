@@ -1,0 +1,432 @@
+# Exact-source HAL branch denominator and instrumentation manifest.
+#
+# This module never accepts a caller-supplied host/board label.  Evidence scope
+# follows from the parser that produced the evidence: Simple decision SDN and
+# LLVM LCOV are host-executable instrumentation; a board contract is separate,
+# has no branch counts, and can never improve the host branch percentage.
+
+use app.io.mod.{dir_walk, file_hash_sha256}
+use std.common.coverage_sdn.{parse_coverage_sdn}
+
+val HAL_BRANCH_MANIFEST_SCHEMA = "simple.hal-branch-source-manifest.v1"
+val HAL_HISTORICAL_AUDIT_SIMPLE_FILES: i64 = 195
+val HAL_HISTORICAL_AUDIT_C_FILES: i64 = 20
+val HAL_BRANCH_SOURCE_MANIFEST_PATH = "doc/10_metrics/test/hal_branch_source_manifest.sdn"
+
+enum HalSourceLanguage:
+    Simple
+    C
+
+enum HalEvidenceScope:
+    HostExecutable
+    PhysicalBoard
+
+enum HalInstrumentation:
+    SimpleDecisionSdn
+    LlvmCovLcov
+    PhysicalBoardContract
+
+struct HalSourceIdentity:
+    path: text
+    sha256: text
+    language: HalSourceLanguage
+
+struct HalBranchEvidence:
+    source_path: text
+    source_sha256: text
+    scope: HalEvidenceScope
+    instrumentation: HalInstrumentation
+    covered_branch_outcomes: i64
+    branch_outcomes: i64
+    receipt_sha256: text
+    rejection: text
+
+struct HalBoardExclusion:
+    source_path: text
+    source_sha256: text
+    reason: text
+
+struct HalBranchSummary:
+    source_files: i64
+    simple_files: i64
+    c_files: i64
+    host_source_files: i64
+    board_source_files: i64
+    covered_branch_outcomes: i64
+    branch_outcomes: i64
+    coverage_basis_points: i64
+    full_coverage_proven: bool
+    rejections: [text]
+
+fn _hal_sha256_valid(value: text) -> bool:
+    if value.len() != 64:
+        return false
+    for ch in value:
+        val digit = ch.to_text()
+        if not ((digit >= "0" and digit <= "9") or
+                (digit >= "a" and digit <= "f")):
+            return false
+    true
+
+fn _hal_source_root(path: text) -> bool:
+    (path.starts_with("src/os/kernel/arch/") or
+        path.starts_with("src/os/kernel/arch_adapt/") or
+        path.starts_with("src/lib/nogc_sync_mut/hal/") or
+        path.starts_with("src/compiler_rust/lib/std/src/bare/hal/"))
+
+fn _hal_source_language(path: text) -> Result<HalSourceLanguage, text>:
+    if path.ends_with(".spl"):
+        return Ok(HalSourceLanguage.Simple)
+    if path.ends_with(".c"):
+        return Ok(HalSourceLanguage.C)
+    Err("unsupported-source-language:" + path)
+
+fn hal_source_identity(path: text, sha256: text) -> Result<HalSourceIdentity, text>:
+    if not _hal_source_root(path):
+        return Err("source-outside-audited-roots:" + path)
+    if path.contains("/vendor/"):
+        return Err("vendor-source-forbidden:" + path)
+    if not _hal_sha256_valid(sha256):
+        return Err("invalid-source-sha256:" + path)
+    val language = _hal_source_language(path)?
+    Ok(HalSourceIdentity(path: path, sha256: sha256, language: language))
+
+fn _hal_source_less(left: HalSourceIdentity, right: HalSourceIdentity) -> bool:
+    left.path < right.path
+
+fn _hal_sorted_sources(rows: [HalSourceIdentity]) -> [HalSourceIdentity]:
+    var out: [HalSourceIdentity] = []
+    for row in rows:
+        var inserted = false
+        var next: [HalSourceIdentity] = []
+        for present in out:
+            if not inserted and _hal_source_less(row, present):
+                next.push(row)
+                inserted = true
+            next.push(present)
+        if not inserted:
+            next.push(row)
+        out = next
+    out
+
+fn hal_discover_source_inventory() -> Result<[HalSourceIdentity], text>:
+    val roots = [
+        "src/os/kernel/arch",
+        "src/os/kernel/arch_adapt",
+        "src/lib/nogc_sync_mut/hal",
+        "src/compiler_rust/lib/std/src/bare/hal"
+    ]
+    var rows: [HalSourceIdentity] = []
+    for root in roots:
+        for path in dir_walk(root):
+            if (path.ends_with(".spl") or path.ends_with(".c")) and
+                    not path.contains("/vendor/"):
+                rows.push(hal_source_identity(path, file_hash_sha256(path))?)
+    if rows.len() == 0:
+        return Err("zero-source-denominator")
+    Ok(_hal_sorted_sources(rows))
+
+fn _hal_language_text(language: HalSourceLanguage) -> text:
+    match language:
+        case HalSourceLanguage.Simple: "simple"
+        case HalSourceLanguage.C: "c"
+
+fn hal_render_source_manifest(rows: [HalSourceIdentity]) -> Result<text, text>:
+    if rows.len() == 0:
+        return Err("zero-source-denominator")
+    val sorted = _hal_sorted_sources(rows)
+    var simple_count: i64 = 0
+    var c_count: i64 = 0
+    var previous = ""
+    for row in sorted:
+        if not _hal_source_root(row.path) or row.path.contains("/vendor/"):
+            return Err("invalid-source-path:" + row.path)
+        if not _hal_sha256_valid(row.sha256):
+            return Err("invalid-source-sha256:" + row.path)
+        if row.path == previous:
+            return Err("duplicate-source:" + row.path)
+        previous = row.path
+        match row.language:
+            case HalSourceLanguage.Simple: simple_count = simple_count + 1
+            case HalSourceLanguage.C: c_count = c_count + 1
+
+    var out = "schema: " + HAL_BRANCH_MANIFEST_SCHEMA + "\n" +
+        "historical_audit_simple_files: " + HAL_HISTORICAL_AUDIT_SIMPLE_FILES.to_text() + "\n" +
+        "historical_audit_c_files: " + HAL_HISTORICAL_AUDIT_C_FILES.to_text() + "\n" +
+        "current_simple_files: " + simple_count.to_text() + "\n" +
+        "current_c_files: " + c_count.to_text() + "\n" +
+        "source_files: " + sorted.len().to_text() + "\n"
+    for row in sorted:
+        out = out + "source:\n" +
+            "  path: " + row.path + "\n" +
+            "  language: " + _hal_language_text(row.language) + "\n" +
+            "  sha256: " + row.sha256 + "\n"
+    Ok(out)
+
+fn _hal_find_source(rows: [HalSourceIdentity], path: text) -> i64:
+    var index: i64 = 0
+    while index < rows.len():
+        if rows[index].path == path:
+            return index
+        index = index + 1
+    -1
+
+fn hal_exact_source_rejections(
+    expected: [HalSourceIdentity],
+    actual: [HalSourceIdentity]
+) -> [text]:
+    var out: [text] = []
+    if expected.len() == 0 or actual.len() == 0:
+        out.push("zero-source-denominator")
+    for wanted in expected:
+        val index = _hal_find_source(actual, wanted.path)
+        if index < 0:
+            out.push("missing-source:" + wanted.path)
+        elif actual[index].sha256 != wanted.sha256:
+            out.push("stale-source:" + wanted.path)
+    for present in actual:
+        if _hal_find_source(expected, present.path) < 0:
+            out.push("unexpected-source:" + present.path)
+    out
+
+fn _hal_rejected_evidence(
+    path: text,
+    sha256: text,
+    scope: HalEvidenceScope,
+    instrumentation: HalInstrumentation,
+    rejection: text
+) -> HalBranchEvidence:
+    HalBranchEvidence(
+        source_path: path,
+        source_sha256: sha256,
+        scope: scope,
+        instrumentation: instrumentation,
+        covered_branch_outcomes: 0,
+        branch_outcomes: 0,
+        receipt_sha256: "",
+        rejection: rejection
+    )
+
+fn hal_simple_decision_evidence(
+    source_path: text,
+    source_sha256: text,
+    coverage_sdn: text,
+    receipt_sha256: text
+) -> HalBranchEvidence:
+    if not source_path.ends_with(".spl"):
+        return _hal_rejected_evidence(source_path, source_sha256,
+            HalEvidenceScope.HostExecutable, HalInstrumentation.SimpleDecisionSdn,
+            "simple-instrumentation-language-mismatch")
+    val parsed = parse_coverage_sdn(coverage_sdn)
+    var covered: i64 = 0
+    var total: i64 = 0
+    for decision in parsed.decisions:
+        if decision.file == source_path:
+            total = total + 2
+            if decision.true_count > 0:
+                covered = covered + 1
+            if decision.false_count > 0:
+                covered = covered + 1
+    HalBranchEvidence(
+        source_path: source_path,
+        source_sha256: source_sha256,
+        scope: HalEvidenceScope.HostExecutable,
+        instrumentation: HalInstrumentation.SimpleDecisionSdn,
+        covered_branch_outcomes: covered,
+        branch_outcomes: total,
+        receipt_sha256: receipt_sha256,
+        rejection: if total == 0: "zero-branch-denominator" else: ""
+    )
+
+fn _hal_lcov_count(value: text) -> i64:
+    val trimmed = value.trim()
+    if trimmed == "-":
+        return 0
+    match trimmed.to_i64():
+        case Some(count): count
+        case None: -1
+
+fn hal_c_lcov_evidence(
+    source_path: text,
+    source_sha256: text,
+    lcov: text,
+    receipt_sha256: text
+) -> HalBranchEvidence:
+    if not source_path.ends_with(".c"):
+        return _hal_rejected_evidence(source_path, source_sha256,
+            HalEvidenceScope.HostExecutable, HalInstrumentation.LlvmCovLcov,
+            "lcov-language-mismatch")
+    var active_source = ""
+    var records: i64 = 0
+    var covered: i64 = 0
+    var total: i64 = 0
+    var malformed = false
+    for raw in lcov.split("\n"):
+        val line = raw.trim()
+        if line.starts_with("SF:"):
+            active_source = line[3:]
+            if active_source == source_path or active_source.ends_with("/" + source_path):
+                records = records + 1
+        elif line.starts_with("BRDA:") and
+                (active_source == source_path or active_source.ends_with("/" + source_path)):
+            val parts = line[5:].split(",")
+            if parts.len() != 4:
+                malformed = true
+            else:
+                val count = _hal_lcov_count(parts[3])
+                if count < 0:
+                    malformed = true
+                else:
+                    total = total + 1
+                    if count > 0:
+                        covered = covered + 1
+        elif line == "end_of_record":
+            active_source = ""
+    var rejection = ""
+    if malformed:
+        rejection = "malformed-lcov"
+    elif records == 0:
+        rejection = "coverage-source-missing"
+    elif records > 1:
+        rejection = "coverage-source-duplicate"
+    elif total == 0:
+        rejection = "zero-branch-denominator"
+    HalBranchEvidence(
+        source_path: source_path,
+        source_sha256: source_sha256,
+        scope: HalEvidenceScope.HostExecutable,
+        instrumentation: HalInstrumentation.LlvmCovLcov,
+        covered_branch_outcomes: covered,
+        branch_outcomes: total,
+        receipt_sha256: receipt_sha256,
+        rejection: rejection
+    )
+
+fn hal_physical_board_contract(
+    source_path: text,
+    source_sha256: text,
+    receipt_sha256: text
+) -> HalBranchEvidence:
+    var rejection = ""
+    if not _hal_sha256_valid(receipt_sha256):
+        rejection = "board-receipt-sha256-invalid"
+    HalBranchEvidence(
+        source_path: source_path,
+        source_sha256: source_sha256,
+        scope: HalEvidenceScope.PhysicalBoard,
+        instrumentation: HalInstrumentation.PhysicalBoardContract,
+        covered_branch_outcomes: 0,
+        branch_outcomes: 0,
+        receipt_sha256: receipt_sha256,
+        rejection: rejection
+    )
+
+fn hal_board_exclusion(
+    source_path: text,
+    source_sha256: text,
+    reason: text
+) -> HalBoardExclusion:
+    HalBoardExclusion(source_path: source_path, source_sha256: source_sha256, reason: reason)
+
+fn _hal_find_evidence(rows: [HalBranchEvidence], path: text) -> i64:
+    var index: i64 = 0
+    while index < rows.len():
+        if rows[index].source_path == path:
+            return index
+        index = index + 1
+    -1
+
+fn _hal_find_exclusion(rows: [HalBoardExclusion], path: text) -> i64:
+    var index: i64 = 0
+    while index < rows.len():
+        if rows[index].source_path == path:
+            return index
+        index = index + 1
+    -1
+
+fn hal_validate_branch_manifest(
+    sources: [HalSourceIdentity],
+    evidence: [HalBranchEvidence],
+    board_exclusions: [HalBoardExclusion]
+) -> HalBranchSummary:
+    var rejections: [text] = []
+    var simple_files: i64 = 0
+    var c_files: i64 = 0
+    var host_files: i64 = 0
+    var board_files: i64 = 0
+    var covered: i64 = 0
+    var total: i64 = 0
+    if sources.len() == 0:
+        rejections.push("zero-source-denominator")
+
+    for source in sources:
+        match source.language:
+            case HalSourceLanguage.Simple: simple_files = simple_files + 1
+            case HalSourceLanguage.C: c_files = c_files + 1
+        val evidence_index = _hal_find_evidence(evidence, source.path)
+        if evidence_index < 0:
+            rejections.push("missing-instrumentation:" + source.path)
+            continue
+        val measured = evidence[evidence_index]
+        if measured.source_sha256 != source.sha256:
+            rejections.push("stale-instrumentation:" + source.path)
+        if measured.rejection != "":
+            rejections.push(measured.rejection + ":" + source.path)
+        if not _hal_sha256_valid(measured.receipt_sha256):
+            rejections.push("instrumentation-receipt-sha256-invalid:" + source.path)
+        match measured.scope:
+            case HalEvidenceScope.HostExecutable:
+                host_files = host_files + 1
+                if _hal_find_exclusion(board_exclusions, source.path) >= 0:
+                    rejections.push("host-source-excluded:" + source.path)
+                if measured.branch_outcomes <= 0:
+                    rejections.push("zero-branch-denominator:" + source.path)
+                elif (measured.covered_branch_outcomes < 0 or
+                        measured.covered_branch_outcomes > measured.branch_outcomes):
+                    rejections.push("invalid-branch-counts:" + source.path)
+                else:
+                    covered = covered + measured.covered_branch_outcomes
+                    total = total + measured.branch_outcomes
+            case HalEvidenceScope.PhysicalBoard:
+                board_files = board_files + 1
+                val exclusion_index = _hal_find_exclusion(board_exclusions, source.path)
+                if exclusion_index < 0:
+                    rejections.push("board-exclusion-missing:" + source.path)
+                elif (board_exclusions[exclusion_index].source_sha256 != source.sha256 or
+                        board_exclusions[exclusion_index].reason.trim() == ""):
+                    rejections.push("board-exclusion-drift:" + source.path)
+
+    for measured in evidence:
+        if _hal_find_source(sources, measured.source_path) < 0:
+            rejections.push("instrumentation-source-outside-manifest:" + measured.source_path)
+    for exclusion in board_exclusions:
+        val source_index = _hal_find_source(sources, exclusion.source_path)
+        val evidence_index = _hal_find_evidence(evidence, exclusion.source_path)
+        if source_index < 0 or evidence_index < 0:
+            rejections.push("board-exclusion-drift:" + exclusion.source_path)
+        elif evidence[evidence_index].scope != HalEvidenceScope.PhysicalBoard:
+            rejections.push("board-exclusion-drift:" + exclusion.source_path)
+
+    if total == 0:
+        rejections.push("zero-branch-denominator")
+    val basis_points: i64 = if total > 0: (covered * 10000) / total else: 0
+    HalBranchSummary(
+        source_files: sources.len(),
+        simple_files: simple_files,
+        c_files: c_files,
+        host_source_files: host_files,
+        board_source_files: board_files,
+        covered_branch_outcomes: covered,
+        branch_outcomes: total,
+        coverage_basis_points: basis_points,
+        full_coverage_proven: (rejections.len() == 0 and total > 0 and covered == total),
+        rejections: rejections
+    )
+
+export HAL_BRANCH_MANIFEST_SCHEMA, HAL_HISTORICAL_AUDIT_SIMPLE_FILES
+export HAL_HISTORICAL_AUDIT_C_FILES, HAL_BRANCH_SOURCE_MANIFEST_PATH
+export HalSourceLanguage, HalEvidenceScope, HalInstrumentation
+export HalSourceIdentity, HalBranchEvidence, HalBoardExclusion, HalBranchSummary
+export hal_source_identity, hal_discover_source_inventory, hal_render_source_manifest
+export hal_exact_source_rejections, hal_simple_decision_evidence, hal_c_lcov_evidence
+export hal_physical_board_contract, hal_board_exclusion, hal_validate_branch_manifest

@@ -1,0 +1,84 @@
+"""
+## Purpose
+Prove UNREACH001 uses executable lexical successors and original token spans.
+"""
+
+use app.cli.query_lint.{_collect_lint_diagnostics_json}
+use app.cli.query_lint_checks.{_query_indent_successor_index}
+use std.io_runtime.file_read
+use std.spec.step
+
+fn unreachable_diagnostics(source: text) -> [text]:
+    val all = _collect_lint_diagnostics_json("sample.spl", source).1
+    var result: [text] = []
+    for diagnostic in all:
+        if diagnostic.contains("\"code\":\"UNREACH001\""):
+            result.push(diagnostic)
+    result
+
+describe "query unreachable lexical successors":
+    it "skips comments blanks and docstring payload":
+        step("Do not treat non-code lines as a successor or return origin")
+        val comment_only = "fn f():\n    return 1\n    # explanation\n\nval outside = 1\n"
+        expect(unreachable_diagnostics(comment_only).len()).to_equal(0)
+
+        val docstring = ("fn f():\n" +
+            "    val docs = \"\"\"\n" +
+            "    return pretend\n" +
+            "    fake_call()\n" +
+            "    \"\"\"\n" +
+            "    done()\n")
+        expect(unreachable_diagnostics(docstring).len()).to_equal(0)
+
+    it "points to the first real same-indent successor token":
+        step("Skip intervening comments and preserve original columns")
+        val source = ("fn f():\n" +
+            "    return 1\n" +
+            "    # explanation\n" +
+            "    work()\n")
+        val diagnostics = unreachable_diagnostics(source)
+        expect(diagnostics.len()).to_equal(1)
+        expect(diagnostics[0]).to_equal(
+            "{\"severity\":2,\"code\":\"UNREACH001\",\"message\":\"unreachable code after return\",\"line\":4,\"col\":5,\"end_line\":4,\"end_col\":9,\"tags\":[1],\"source\":\"simple-lint\"}")
+
+    it "keeps standalone string expressions executable but masks payload":
+        step("Report the opening quote after return and retain RET001 ordering")
+        val ordinary = "fn f():\n    return 1\n    \"dead\"\n"
+        val ordinary_diagnostics = unreachable_diagnostics(ordinary)
+        expect(ordinary_diagnostics.len()).to_equal(1)
+        expect(ordinary_diagnostics[0]).to_contain(
+            "\"line\":3,\"col\":5,\"end_line\":3,\"end_col\":6")
+
+        val triple = ("fn f():\n    return 1\n    \"\"\"dead\n" +
+            "    return pretend\n    \"\"\"\n")
+        val triple_diagnostics = unreachable_diagnostics(triple)
+        expect(triple_diagnostics.len()).to_equal(1)
+        expect(triple_diagnostics[0]).to_contain(
+            "\"line\":3,\"col\":5,\"end_line\":3,\"end_col\":6")
+
+        val ret_all = _collect_lint_diagnostics_json(
+            "sample.spl", "fn f():\n    compute()\n    \"result\"\n").1.join("\n")
+        expect(ret_all).to_contain("\"code\":\"RET001\"")
+        expect(ret_all).to_contain("return value of 'compute()' is discarded")
+
+    it "keeps executable successor and return facts aligned":
+        step("Inspect one stateful lexical projection through the shared index")
+        val lines = [
+            "    return 1", "    # comment", "    \"\"\"", "    pretend()",
+            "    \"\"\"", "    next_step()"]
+        val facts = _query_indent_successor_index(lines)
+        expect(facts.is_return_statement).to_equal(
+            [true, false, false, false, false, false])
+        expect(facts.first_executable_column).to_equal([5, 0, 5, 0, 0, 5])
+        expect(facts.next_same_or_shallower[0]).to_equal(2)
+        expect(facts.first_token_end_column[5]).to_equal(14)
+
+    it "routes live and collected diagnostics through shared facts":
+        step("Prevent raw return and hardcoded point-span regressions")
+        val live = file_read("src/app/cli/query_lint.spl")
+        val collected = file_read("src/app/cli/query_check.spl")
+        for source in [live, collected]:
+            expect(source).to_contain("indent_successors.is_return_statement[")
+            expect(source).to_contain("indent_successors.first_executable_column[successor]")
+            expect(source).to_contain("indent_successors.first_token_end_column[successor]")
+            expect(source).not.to_contain("if _is_return_statement(trimmed):")

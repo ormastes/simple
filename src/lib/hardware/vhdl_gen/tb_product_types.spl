@@ -1,0 +1,375 @@
+# Structured VHDL generation primitives for the *product-core* GHDL
+# testbenches under test/01_unit/lib/hardware/fpga_linux/:
+#
+#   tb_rv32_product_sv32_pmp.vhd   Sv32 walk + PMP deny on rv32imac_core_product_wb
+#   tb_rv64_product_sv39_pmp.vhd   Sv39 walk + PMP deny on rv64imac_core_product_wb
+#   tb_rv64_product_wb_axi.vhd     WB->AXI-HP bridge conformance around the rv64 core
+#
+# Same construction-API style as gen_types.spl / tb_single_lane_types.spl:
+# typed descriptor arrays elaborated at generator time into VHDL text. No Dict
+# anywhere (determinism: seed Dict order is random per process); arrays only.
+#
+# These goldens are written in a DENSER house style than the single-lane
+# testbenches, which is what this module adds on top of tb_single_lane_types:
+#   - a 3-line `library ieee` header (no textio, no std.env) or a longer one
+#   - `entity X is end entity;` / `end architecture;` with the name OMITTED
+#   - several declarations packed onto one line (vgtb_decl_rows)
+#   - `formal=>actual` association spelling, and `port map (` riding the
+#     instantiation line (vgtb_map_block_at)
+#   - `assert <cond> report "<msg>" severity <sev>;` as a first-class emitter,
+#     inline or wrapped onto a continuation line
+#   - an address->value memory/PTE table shared by the Sv32/Sv39 pair, rendered
+#     either as an `if/elsif` chain (rv32) or as `if ... return ...; end if;`
+#     lines (rv64)
+#
+# Named `vgtbp_*` / `VgTbp*`: the interpreter keeps a FLAT function/struct
+# registry, so a duplicate name in a sibling module silently hijacks the import.
+
+use std.hardware.vhdl_gen.gen_types.*
+use std.hardware.vhdl_gen.tb_single_lane_types.*
+
+# ---------------------------------------------------------------------------
+# Descriptors
+# ---------------------------------------------------------------------------
+
+# One component instantiation, with the layout knobs the three goldens differ
+# on. `colon` is " : " or ": "; `head_map` puts `port map (` on the entity
+# line; `sep` is the association arrow spelling.
+struct VgTbpInst:
+    label: text
+    colon: text
+    entity_name: text
+    head_map: bool
+    generics: [VgTbAssoc]
+    generic_rows: [i64]
+    generic_sep: text
+    ports: [VgTbAssoc]
+    port_rows: [i64]
+    sep: text
+    open_ind: i64
+    row_ind: i64
+    inline_first: bool
+
+# One row of an address->value memory / page-table decode table. Shared by the
+# Sv32 and Sv39 testbenches; only the RENDERING differs (see the two emitters
+# below), because rv32 decodes a `natural` word address into a variable and
+# rv64 compares a 64-bit vector and returns.
+struct VgTbpEntry:
+    pre_comments: [text]
+    key: text              # right-hand side of the address comparison
+    value: text            # the data the entry yields
+    comment: text          # trailing `-- ...` comment (may be "")
+
+# `if <cond> then <flag> <= true; end if;` — a walker-PTE observation latch.
+struct VgTbpWatch:
+    cond: text
+    flag: text
+
+fn vgtbp_entry(key: text, value: text, comment: text) -> VgTbpEntry:
+    VgTbpEntry(pre_comments: no_lines(), key: key, value: value, comment: comment)
+
+fn vgtbp_entry_c(pre: [text], key: text, value: text, comment: text) -> VgTbpEntry:
+    VgTbpEntry(pre_comments: pre, key: key, value: value, comment: comment)
+
+fn vgtbp_watch(cond: text, flag: text) -> VgTbpWatch:
+    VgTbpWatch(cond: cond, flag: flag)
+
+# Product-testbench declarations are never column-aligned: every one of them
+# puts exactly one space before the colon, so the width is derived rather than
+# carried per item (unlike the single-lane goldens' group-local alignment).
+fn vgtbp_sig(name: text, ty: text, init: text) -> VgTbDecl:
+    vgtb_decl(name, name.len() + 1, ty, init)
+
+fn vgtbp_append_assocs(dst: [VgTbAssoc], src: [VgTbAssoc]) -> [VgTbAssoc]:
+    vgtb_append_assocs(dst, src)
+
+# ---------------------------------------------------------------------------
+# Structural emitters — file shell
+# ---------------------------------------------------------------------------
+
+# `library ieee;` plus the caller's `use` lines, in the caller's order (these
+# goldens do not agree on textio-vs-env ordering, so it is data, not policy).
+fn vgtbp_library_header(uses: [text]) -> [text]:
+    var l: [text] = []
+    l = l.push("library ieee;")
+    l = vg_append(l, uses)
+    l
+
+fn vgtbp_use_std_logic() -> [text]:
+    var u: [text] = []
+    u = u.push("use ieee.std_logic_1164.all;")
+    u = u.push("use ieee.numeric_std.all;")
+    u
+
+# Testbench entity with the trailing name omitted. With no generics the whole
+# declaration collapses onto one line, which is what two of the three goldens
+# do; a single generic rides its own `generic (...)` line.
+fn vgtbp_entity(name: text, gens: [VgGenericSpec]) -> [text]:
+    var l: [text] = []
+    if gens.len() == 0:
+        l = l.push("entity " + name + " is end entity;")
+        return l
+    l = l.push("entity " + name + " is")
+    var i = 0
+    while i < gens.len():
+        val g = gens[i]
+        l = vg_append(l, g.pre_comments)
+        l = l.push("  generic (" + g.name + " : " + g.ty + " := " + g.default_val + ");")
+        i = i + 1
+    l = l.push("end entity;")
+    l
+
+fn vgtbp_arch_head(arch: text, entity_name: text) -> text:
+    vgtb_arch_head(arch, entity_name)
+
+# `end architecture;` — unnamed, unlike vgtb_arch_foot.
+fn vgtbp_arch_foot() -> text:
+    "end architecture;"
+
+# ---------------------------------------------------------------------------
+# Structural emitters — Wishbone boundary
+# ---------------------------------------------------------------------------
+
+# The clk/rst/adr/dat/sel/control signal group every product testbench drives
+# into the DUT's Wishbone port. `split_adr` gives `adr` its own uninitialised
+# declaration instead of grouping it with dat_o/dat_i (the Sv32 golden's form).
+fn vgtbp_wb_signals(split_adr: bool) -> [VgTbDecl]:
+    var d: [VgTbDecl] = []
+    d = d.push(vgtbp_sig("clk", "std_logic", "'0'"))
+    d = d.push(vgtbp_sig("rst", "std_logic", "'1'"))
+    if split_adr:
+        d = d.push(vgtbp_sig("adr", "std_logic_vector(63 downto 0)", ""))
+        d = d.push(vgtbp_sig("dat_o, dat_i", "std_logic_vector(63 downto 0)", "(others => '0')"))
+    else:
+        d = d.push(vgtbp_sig("adr, dat_o, dat_i", "std_logic_vector(63 downto 0)", "(others => '0')"))
+    d = d.push(vgtbp_sig("sel", "std_logic_vector(7 downto 0)", ""))
+    d = d.push(vgtbp_sig("we, stb, cyc, lock, ack, err", "std_logic", "'0'"))
+    d
+
+# The DUT's Wishbone port association list — identical formals and actuals in
+# all three goldens; only the arrow spelling differs, so `others_expr` carries
+# the matching `(others=>'0')` / `(others => '0')` spelling for time_value_i.
+fn vgtbp_core_wb_ports(others_expr: text) -> [VgTbAssoc]:
+    var a: [VgTbAssoc] = []
+    a = a.push(vgtb_wire("clk"))
+    a = a.push(vgtb_wire("rst"))
+    a = a.push(vgtb_assoc("msip_i", "'0'"))
+    a = a.push(vgtb_assoc("mtip_i", "'0'"))
+    a = a.push(vgtb_assoc("meip_i", "'0'"))
+    a = a.push(vgtb_assoc("stip_i", "'0'"))
+    a = a.push(vgtb_assoc("seip_i", "'0'"))
+    a = a.push(vgtb_assoc("time_value_i", others_expr))
+    a = a.push(vgtb_assoc("wb_adr_o", "adr"))
+    a = a.push(vgtb_assoc("wb_dat_o", "dat_o"))
+    a = a.push(vgtb_assoc("wb_dat_i", "dat_i"))
+    a = a.push(vgtb_assoc("wb_we_o", "we"))
+    a = a.push(vgtb_assoc("wb_sel_o", "sel"))
+    a = a.push(vgtb_assoc("wb_stb_o", "stb"))
+    a = a.push(vgtb_assoc("wb_cyc_o", "cyc"))
+    a = a.push(vgtb_assoc("wb_lock_o", "lock"))
+    a = a.push(vgtb_assoc("wb_ack_i", "ack"))
+    a = a.push(vgtb_assoc("wb_err_i", "err"))
+    a
+
+# `<prefix><name> => <name>` for each bare name — the AXI-HP bridge's master
+# port group, where every formal is its testbench signal under a fixed prefix.
+fn vgtbp_prefixed_assocs(prefix: text, names: [text]) -> [VgTbAssoc]:
+    var a: [VgTbAssoc] = []
+    var i = 0
+    while i < names.len():
+        a = a.push(vgtb_assoc(prefix + names[i], names[i]))
+        i = i + 1
+    a
+
+fn vgtbp_inst(x: VgTbpInst) -> [text]:
+    var l: [text] = []
+    val head = "  " + x.label + x.colon + "entity work." + x.entity_name
+    if x.head_map:
+        val ri = vg_spaces(x.row_ind)
+        l = l.push(head + " port map (")
+        var idx = 0
+        var r = 0
+        while r < x.port_rows.len():
+            val row = vgtb_assoc_row_sep(x.ports, idx, x.port_rows[r], x.sep)
+            idx = idx + x.port_rows[r]
+            if r == x.port_rows.len() - 1:
+                l = l.push(ri + row + ");")
+            else:
+                l = l.push(ri + row + ",")
+            r = r + 1
+        return l
+    l = l.push(head)
+    l = vg_append(l, vgtb_map_block_at("generic", x.generics, x.generic_rows, ")",
+        x.generic_sep, x.open_ind, x.row_ind, false))
+    l = vg_append(l, vgtb_map_block_at("port", x.ports, x.port_rows, ");",
+        x.sep, x.open_ind, x.row_ind, x.inline_first))
+    l
+
+# ---------------------------------------------------------------------------
+# Structural emitters — statements
+# ---------------------------------------------------------------------------
+
+# `assert <cond> report "<msg>" severity <sev>;`, either on one line or with
+# the report clause wrapped two columns deeper (both forms appear in the
+# goldens, chosen per-site by line length).
+fn vgtbp_assert(indent: i64, cond: text, msg: text, severity: text, wrapped: bool) -> [text]:
+    val ind = vg_spaces(indent)
+    var l: [text] = []
+    val tail = "report \"" + msg + "\" severity " + severity + ";"
+    if wrapped:
+        l = l.push(ind + "assert " + cond)
+        l = l.push(vg_spaces(indent + 2) + tail)
+    else:
+        l = l.push(ind + "assert " + cond + " " + tail)
+    l
+
+# `if <cond> then <flag> <= true; end if;` observation latches.
+fn vgtbp_watch_lines(indent: i64, watches: [VgTbpWatch]) -> [text]:
+    val ind = vg_spaces(indent)
+    var l: [text] = []
+    var i = 0
+    while i < watches.len():
+        l = l.push(ind + "if " + watches[i].cond + " then " + watches[i].flag + " <= true; end if;")
+        i = i + 1
+    l
+
+# rv32 rendering of the shared memory table: one `if`/`elsif` chain assigning
+# into a variable, closed by `end if;`.
+fn vgtbp_elsif_table(indent: i64, subject: text, target: text, head: VgTbpEntry,
+                     entries: [VgTbpEntry]) -> [text]:
+    val ind = vg_spaces(indent)
+    var l: [text] = []
+    l = vg_append(l, head.pre_comments)
+    l = l.push(ind + "if " + subject + " " + head.key + " then " + target + " := " + head.value + ";" + head.comment)
+    var i = 0
+    while i < entries.len():
+        val e = entries[i]
+        l = vg_append(l, e.pre_comments)
+        l = l.push(ind + "elsif " + subject + " = " + e.key + " then " + target + " := " + e.value + ";" + e.comment)
+        i = i + 1
+    l = l.push(ind + "end if;")
+    l
+
+# rv64 rendering of the same table: independent `if <subj> = <key> then
+# return <value>; end if;` guards inside an impure function.
+fn vgtbp_if_return_table(indent: i64, subject: text, entries: [VgTbpEntry]) -> [text]:
+    val ind = vg_spaces(indent)
+    var l: [text] = []
+    var i = 0
+    while i < entries.len():
+        val e = entries[i]
+        l = vg_append(l, e.pre_comments)
+        l = l.push(ind + "if " + subject + " = " + e.key + " then return " + e.value + "; end if;" + e.comment)
+        i = i + 1
+    l
+
+# ---------------------------------------------------------------------------
+# Structural emitters — processes
+# ---------------------------------------------------------------------------
+
+# A `process` with no sensitivity list, used by all three goldens for the
+# reset release plus watchdog. Fully data-driven layout: `rows[r]` statements
+# share emitted line r; `inline_begin` puts `begin` on the `process` line;
+# `one_line` collapses the whole process (header, body, footer) onto one line.
+fn vgtbp_stmt_process(inline_begin: bool, one_line: bool, indent: i64,
+                      stmts: [text], rows: [i64]) -> [text]:
+    var body: [text] = []
+    var idx = 0
+    var r = 0
+    while r < rows.len():
+        val count = rows[r]
+        var cells: [text] = []
+        var k = 0
+        while k < count:
+            cells = cells.push(stmts[idx + k])
+            k = k + 1
+        idx = idx + count
+        body = body.push(cells.join(" "))
+        r = r + 1
+    var l: [text] = []
+    if one_line:
+        l = l.push("  process begin " + body.join(" ") + " end process;")
+        return l
+    if inline_begin:
+        l = l.push("  process begin")
+    else:
+        l = l.push("  process")
+        l = l.push("  begin")
+    val ind = vg_spaces(indent)
+    var i = 0
+    while i < body.len():
+        l = l.push(ind + body[i])
+        i = i + 1
+    l = l.push("  end process;")
+    l
+
+# `process(<sens>)` + optional variable declarations + optional guarding `if`.
+# `cond` == "" emits the body straight after `begin` (the combinational
+# `process(all)` memory model); otherwise the body sits inside
+# `if <cond> then ... end if;`.
+fn vgtbp_clocked_process(sens: text, decls: [text], cond: text, body: [text]) -> [text]:
+    var l: [text] = []
+    l = l.push("  process(" + sens + ")")
+    l = vg_append(l, decls)
+    l = l.push("  begin")
+    if cond != "":
+        l = l.push("    if " + cond + " then")
+        l = vg_append(l, body)
+        l = l.push("    end if;")
+    else:
+        l = vg_append(l, body)
+    l = l.push("  end process;")
+    l
+
+# `impure function <name>(<args>) return <ret> is` / declarations / `begin` /
+# body / `end function;`. The shell is structural; the loop bodies these three
+# goldens use are one-off paragraphs supplied by tb_product_sections.
+fn vgtbp_impure_function(name: text, args: text, ret_ty: text,
+                         decls: [text], body: [text]) -> [text]:
+    var l: [text] = []
+    l = l.push("  impure function " + name + args + " return " + ret_ty + " is")
+    l = vg_append(l, decls)
+    l = l.push("  begin")
+    l = vg_append(l, body)
+    l = l.push("  end function;")
+    l
+
+# `file <name> : text open read_mode is <src>;` — the textio file declaration
+# that opens a .mem / .hex image for the memory model.
+fn vgtbp_file_decl(indent: i64, name: text, src: text) -> text:
+    vg_spaces(indent) + "file " + name + " : text open read_mode is " + src + ";"
+
+# `case <subject> is` + when-arms + `end case;`, reusing gen_types' VgArm
+# descriptor. Unlike emit_decode_case the arm code is emitted verbatim (these
+# are integer/enum selectors, not quoted 7-bit opcodes).
+fn vgtbp_case(indent: i64, subject: text, arms: [VgArm]) -> [text]:
+    val ci = vg_spaces(indent)
+    val ai = vg_spaces(indent + 2)
+    var l: [text] = []
+    l = l.push(ci + "case " + subject + " is")
+    var i = 0
+    while i < arms.len():
+        val a = arms[i]
+        l = vg_append(l, a.pre_lines)
+        if a.inline != "":
+            l = l.push(ai + "when " + a.code + " => " + a.inline)
+        else:
+            l = l.push(ai + "when " + a.code + " =>")
+            l = vg_append(l, a.body)
+        i = i + 1
+    l = l.push(ci + "end case;")
+    l
+
+fn vgtbp_arm(code: text, inline: text) -> VgArm:
+    VgArm(pre_lines: no_lines(), code: code, inline: inline, body: no_lines())
+
+fn vgtbp_arm_body(code: text, body: [text]) -> VgArm:
+    VgArm(pre_lines: no_lines(), code: code, inline: "", body: body)
+
+# `report "<TAG>" severity note;` + the simulation-stop call. `finish_call` is
+# `finish;` when the golden pulled `std.env` into scope with a use clause, or
+# `std.env.finish;` when it did not.
+fn vgtbp_pass_report(indent: i64, tag: text, finish_call: text) -> [text]:
+    var l = vgtb_report(indent, "\"" + tag + "\"", no_lines(), "note")
+    l = l.push(vg_spaces(indent) + finish_call)
+    l

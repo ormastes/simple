@@ -1,0 +1,103 @@
+# Checked full-block schedule for an admitted fixed-width AoSoA layout.
+# Partial blocks always remain scalar until every native backend has a proven
+# masked-load/store contract. Padding bytes never become logical lanes.
+
+use compiler.mir_opt.mir_opt.storage_simd_admission.{
+    StorageSimdAdmissionKind,
+    StorageSimdAdmissionV1
+}
+
+val STORAGE_SIMD_SCHEDULE_I64_MAX: i64 = 9223372036854775807
+
+enum StorageSimdTailMode:
+    Empty
+    FullBlocksOnly
+    ScalarTail
+    Rejected
+
+struct StorageSimdScheduleV1:
+    valid: bool
+    lane_count: i64
+    element_count: i64
+    full_block_count: i64
+    physical_block_count: i64
+    tail_count: i64
+    tail_start: i64
+    required_bytes: i64
+    tail_mode: StorageSimdTailMode
+    reason: text
+
+fn storage_simd_schedule_result(
+    valid: bool,
+    lane_count: i64,
+    element_count: i64,
+    full_block_count: i64,
+    physical_block_count: i64,
+    tail_count: i64,
+    tail_start: i64,
+    required_bytes: i64,
+    tail_mode: StorageSimdTailMode,
+    reason: text
+) -> StorageSimdScheduleV1:
+    StorageSimdScheduleV1(
+        valid: valid, lane_count: lane_count, element_count: element_count,
+        full_block_count: full_block_count,
+        physical_block_count: physical_block_count, tail_count: tail_count,
+        tail_start: tail_start, required_bytes: required_bytes,
+        tail_mode: tail_mode, reason: reason)
+
+fn storage_simd_schedule_failure(reason: text) -> StorageSimdScheduleV1:
+    storage_simd_schedule_result(
+        false, 0, 0, 0, 0, 0, 0, 0,
+        StorageSimdTailMode.Rejected, reason)
+
+fn storage_simd_schedule(
+    admission: StorageSimdAdmissionV1,
+    element_count: i64,
+    block_stride: i64,
+    physical_capacity_bytes: i64,
+    maximum_blocks: i64
+) -> StorageSimdScheduleV1:
+    if admission.kind != StorageSimdAdmissionKind.AdmittedFixed:
+        if admission.kind == StorageSimdAdmissionKind.ScalarFallback:
+            return storage_simd_schedule_failure("scalar-fallback-has-no-simd-schedule")
+        if admission.kind == StorageSimdAdmissionKind.DeferredScalable:
+            return storage_simd_schedule_failure("scalable-schedule-deferred")
+        return storage_simd_schedule_failure("simd-admission-rejected")
+    if admission.lane_count <= 0 or admission.vector_bits <= 0
+        or admission.vector_bits % admission.lane_count != 0:
+        return storage_simd_schedule_failure("invalid-admission-shape")
+    if element_count < 0
+        or block_stride <= 0 or physical_capacity_bytes < 0
+        or maximum_blocks < 0:
+        return storage_simd_schedule_failure("invalid-schedule-input")
+    if element_count == 0:
+        return storage_simd_schedule_result(
+            true, admission.lane_count, 0, 0, 0, 0, 0, 0,
+            StorageSimdTailMode.Empty, "empty")
+
+    val full_blocks = element_count / admission.lane_count
+    val tail_count = element_count % admission.lane_count
+    var physical_blocks = full_blocks
+    if tail_count > 0:
+        if physical_blocks == STORAGE_SIMD_SCHEDULE_I64_MAX:
+            return storage_simd_schedule_failure("block-count-overflow")
+        physical_blocks = physical_blocks + 1
+    if physical_blocks > maximum_blocks:
+        return storage_simd_schedule_failure("block-budget-exceeded")
+    if physical_blocks > STORAGE_SIMD_SCHEDULE_I64_MAX / block_stride:
+        return storage_simd_schedule_failure("required-bytes-overflow")
+    val required_bytes = physical_blocks * block_stride
+    if required_bytes > physical_capacity_bytes:
+        return storage_simd_schedule_failure("physical-capacity-too-small")
+
+    val tail_start = full_blocks * admission.lane_count
+    if tail_count == 0:
+        return storage_simd_schedule_result(
+            true, admission.lane_count, element_count,
+            full_blocks, physical_blocks, 0, element_count, required_bytes,
+            StorageSimdTailMode.FullBlocksOnly, "full-blocks-only")
+    storage_simd_schedule_result(
+        true, admission.lane_count, element_count,
+        full_blocks, physical_blocks, tail_count, tail_start, required_bytes,
+        StorageSimdTailMode.ScalarTail, "scalar-tail-required")

@@ -1,0 +1,158 @@
+# ============================================================================
+# test/fixtures/structural/hash256_golden_v1.spl
+#
+# GOLDEN VECTORS for the frozen Hash256 wire contract v1.
+#
+# Every hex string below was derived BY HAND from the frozen layout in
+# doc/05_design/platform/structural_compute/hash256_contract_v1.md, not
+# captured from encoder output. That is what makes them an oracle: the gate
+# asserts encoder output EQUALS these bytes, so a codec regression cannot
+# silently redefine the contract. A round-trip test would pass a SYMMETRIC
+# encode/decode defect straight through; these vectors will not. Seven waves of
+# this freeze confirmed that is not a theoretical distinction.
+#
+# Follows the golden-vector convention of the ID-TAG, MAP, QUERY, RECEIPT and
+# PLACE lanes: pure data, no file I/O, lowercase unseparated hex, zero and
+# maximum edge cases, mirrored byte for byte in the sibling .sdn, never edited
+# in place.
+#
+# LAYOUT UNDER TEST — 32 bytes, no envelope:
+#
+#   byte i  =  characters 2i and 2i+1 of the 64-character lowercase hex host
+#              spelling, HIGH NIBBLE FIRST.
+#
+# So the wire bytes and the host spelling are the SAME sequence. The ascending
+# and descending ladders below are the vectors that pin this. If `Hash256` were
+# instead written as four little-endian u64 halves — the shape `Hash128` uses —
+# GOLDEN_HASH256_LADDER_ASC would encode as
+#   0706050403020100 0f0e0d0c0b0a0908 1716151413121110 1f1e1d1c1b1a1918
+# which differs from the vector in 48 of its 64 characters. A round trip would
+# be perfectly happy with either.
+# ============================================================================
+
+# ----------------------------------------------------------------------------
+# Digests — the host-side 64-character lowercase hex spellings
+# ----------------------------------------------------------------------------
+
+# The all-zero digest. NOT an absence sentinel (see HASH256_ZERO's note in
+# common/structural/digest/hash256.spl); it is here as the low edge case.
+val GOLDEN_HASH256_ZERO_HEX: text =
+    "0000000000000000000000000000000000000000000000000000000000000000"
+
+# The all-ones digest — the high edge case. Also the vector that catches a
+# writer that masks a nibble to 4 bits but forgets to mask the byte to 8.
+val GOLDEN_HASH256_ONES_HEX: text =
+    "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+
+# Bytes 0x00..0x1f in ascending order. Every byte is distinct, so ANY
+# permutation of the 32 positions — an endianness flip, a per-word reversal, a
+# half swap, an off-by-one offset — produces a different string.
+val GOLDEN_HASH256_LADDER_ASC_HEX: text =
+    "000102030405060708090a0b0c0d0e0f"
+        + "101112131415161718191a1b1c1d1e1f"
+
+# Bytes 0xff..0xe0 in descending order. The mirror of the ladder above: it
+# distinguishes a reversal of the whole 32-byte run, which the ascending ladder
+# alone would not, because a reversed ascending ladder is a descending one.
+val GOLDEN_HASH256_LADDER_DESC_HEX: text =
+    "fffefdfcfbfaf9f8f7f6f5f4f3f2f1f0"
+        + "efeeedecebeae9e8e7e6e5e4e3e2e1e0"
+
+# Top bit of byte 0 set, low bit of byte 31 set, everything between zero.
+# `Hash128`'s own docstring warns that "a hash with the top bit set appears
+# negative" when halves are carried in i64; this vector proves no sign
+# extension reaches the wire and that the two ends of the digest are not
+# swapped.
+val GOLDEN_HASH256_HIGH_BIT_HEX: text =
+    "80"
+        + "000000000000000000000000000000"
+        + "000000000000000000000000000000"
+        + "01"
+
+# ----------------------------------------------------------------------------
+# Encodings — lowercase unseparated hex of the COMPLETE 32-byte field
+#
+# For this contract the encoding of a digest is its own spelling. That identity
+# IS the contract, and stating both sides separately is what lets the gate
+# assert it rather than assume it.
+# ----------------------------------------------------------------------------
+
+val GOLDEN_HASH256_ZERO_BYTES: text =
+    "0000000000000000000000000000000000000000000000000000000000000000"
+
+val GOLDEN_HASH256_ONES_BYTES: text =
+    "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+
+val GOLDEN_HASH256_LADDER_ASC_BYTES: text =
+    "000102030405060708090a0b0c0d0e0f"
+        + "101112131415161718191a1b1c1d1e1f"
+
+val GOLDEN_HASH256_LADDER_DESC_BYTES: text =
+    "fffefdfcfbfaf9f8f7f6f5f4f3f2f1f0"
+        + "efeeedecebeae9e8e7e6e5e4e3e2e1e0"
+
+val GOLDEN_HASH256_HIGH_BIT_BYTES: text =
+    "80"
+        + "000000000000000000000000000000"
+        + "000000000000000000000000000000"
+        + "01"
+
+# ----------------------------------------------------------------------------
+# Embedded field vector
+#
+# `Hash256` is a field type, so the case that matters most to an embedder is
+# what it looks like AFTER another field. A u32 `1` little-endian is 01000000;
+# the digest follows immediately with no length prefix, no envelope and no
+# alignment padding. A codec that framed the digest, or aligned it to 8, would
+# produce a longer buffer and fail this exactly.
+# ----------------------------------------------------------------------------
+
+val GOLDEN_HASH256_EMBEDDED_PREFIX_U32: i64 = 1
+
+val GOLDEN_HASH256_EMBEDDED_BYTES: text =
+    "01000000"
+        + "000102030405060708090a0b0c0d0e0f"
+        + "101112131415161718191a1b1c1d1e1f"
+
+# ----------------------------------------------------------------------------
+# Rejected spellings — pinned so a later "tolerant" reader is a test failure
+#
+# These are NOT encodings. Each is a host-side spelling the contract refuses,
+# with the reason it is refused.
+# ----------------------------------------------------------------------------
+
+# Uppercase. Rejected, not folded: two spellings of one hash would give one
+# record two encodings, and a receipt hashing that record would not be stable.
+val GOLDEN_HASH256_REJECT_UPPERCASE: text =
+    "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF"
+
+# Mixed case — same rule, and the case a naive `to_lower` fold would let past.
+val GOLDEN_HASH256_REJECT_MIXED_CASE: text =
+    "000102030405060708090A0B0C0D0E0F"
+        + "101112131415161718191a1b1c1d1e1f"
+
+# 63 characters: one nibble short. Truncation must not encode as a short field.
+val GOLDEN_HASH256_REJECT_SHORT: text =
+    "000102030405060708090a0b0c0d0e0f"
+        + "101112131415161718191a1b1c1d1e1"
+
+# 66 characters: one byte long.
+val GOLDEN_HASH256_REJECT_LONG: text =
+    "000102030405060708090a0b0c0d0e0f"
+        + "101112131415161718191a1b1c1d1e1f"
+        + "20"
+
+# Non-hex character in the alphabet's immediate neighbourhood (`g` is 0x67,
+# one past `f`), which is exactly what an off-by-one range check would admit.
+val GOLDEN_HASH256_REJECT_NON_HEX: text =
+    "g00102030405060708090a0b0c0d0e0f"
+        + "101112131415161718191a1b1c1d1e1f"
+
+# The empty text. In tree TODAY, `receipt_types.spl` initialises
+# `input_hash: ""` and `staged_backend.spl` writes
+# `Hash256(value: "staged_empty")`. Both are refused by this contract; that is
+# a real, currently-unmet migration, recorded in the contract document, not a
+# theoretical one.
+val GOLDEN_HASH256_REJECT_EMPTY: text = ""
+
+val GOLDEN_HASH256_REJECT_FREEFORM: text = "staged_empty"

@@ -1,0 +1,95 @@
+use std.spec
+use std.http_server.{HttpServer, default_server_config}
+use std.common.contracts.execution.simpleos_server_v1.{
+    ServerLifecycleState
+}
+use os.services.web.web_service.{
+    web_service_new, web_service_receipt, web_service_start,
+    web_service_cancel
+}
+
+describe "SimpleOS web service lifecycle integration":
+    it "constructs an explicitly bounded one-worker service":
+        val service = web_service_new(18080)
+        expect(service.config.worker_count).to_equal(1)
+        expect(service.lifecycle.state).to_equal(ServerLifecycleState.Created)
+        val receipt = web_service_receipt(service)
+        expect(receipt.worker_count).to_equal(0)
+        expect(receipt.total_worker_admissions).to_equal(0)
+
+    it "fails closed before binding when an unsafe worker count is supplied":
+        var service = web_service_new(18081)
+        service.config.worker_count = 0
+        val result = web_service_start(service)
+        expect(result.is_err()).to_be(true)
+        expect(service.lifecycle.state).to_equal(ServerLifecycleState.Created)
+
+    it "rejects dynamic worker count in the underlying server owner":
+        var config = default_server_config()
+        val server = HttpServer.new(config)
+        val result = server.start()
+        expect(result.is_err()).to_be(true)
+        expect(server.is_running()).to_be(false)
+
+    it "retains a failed server owner for close or restart retry":
+        var service = web_service_new(18084)
+        service.config.worker_count = 257
+        val result = web_service_start(service)
+        expect(result.is_err()).to_be(true)
+        expect(service.server.?).to_be(true)
+        expect(service.lifecycle.state).to_equal(ServerLifecycleState.Failed)
+
+    it "rejects generation overflow before binding":
+        var config = default_server_config()
+        config.worker_count = 1
+        val server = HttpServer.new(config)
+        server.generation = 9223372036854775807
+        val result = server.start()
+        expect(result.is_err()).to_be(true)
+        expect(server.is_bound()).to_be(false)
+
+    it "cancels a not-yet-started service through the common lifecycle":
+        var service = web_service_new(18082)
+        val result = web_service_cancel(service)
+        expect(result.is_ok()).to_be(true)
+        expect(service.lifecycle.state).to_equal(ServerLifecycleState.Cancelled)
+
+    it "bounds queue and result reservations":
+        var config = default_server_config()
+        config.worker_count = 1
+        val server = HttpServer.new(config)
+        expect(server.is_bound()).to_be(false)
+        expect(server.is_ready()).to_be(false)
+        expect(server.queue_bytes_reserved()).to_equal(0)
+        expect(server.reserve_queue_bytes(-1)).to_be(false)
+        expect(server.reserve_queue_bytes(268435457)).to_be(false)
+        expect(server.release_queue_bytes(1)).to_be(false)
+        expect(server.reserve_result()).to_be(false)
+        expect(server.release_result()).to_be(false)
+        expect(server.result_reservations()).to_equal(0)
+
+    it "reclaims only active worker ids when retrying partial cancellation":
+        var service = web_service_new(18083)
+        service.lifecycle.quota.max_workers = 2
+        val validated = service.lifecycle.validate(service.lifecycle.generation)
+        expect(validated.is_ok()).to_be(true)
+        val bound = service.lifecycle.bind("127.0.0.1:18083", service.lifecycle.generation)
+        expect(bound.is_ok()).to_be(true)
+        val ready = service.lifecycle.mark_ready(
+            "loopback:18083", "test-owner:18083", service.lifecycle.generation
+        )
+        expect(ready.is_ok()).to_be(true)
+        val worker_zero = service.lifecycle.admit_worker(service.lifecycle.generation)
+        expect(worker_zero.is_ok()).to_be(true)
+        val worker_one = service.lifecycle.admit_worker(service.lifecycle.generation)
+        expect(worker_one.is_ok()).to_be(true)
+        val first_completed = service.lifecycle.complete_worker(0, service.lifecycle.generation)
+        expect(first_completed.is_ok()).to_be(true)
+
+        var config = default_server_config()
+        config.worker_count = 2
+        service.server = Some(HttpServer.new(config))
+        val cancelled = web_service_cancel(service)
+        expect(cancelled.is_ok()).to_be(true)
+        expect(service.lifecycle.worker_count).to_equal(0)
+        expect(service.lifecycle.state).to_equal(ServerLifecycleState.Cancelled)

@@ -1,0 +1,351 @@
+# codex-impl
+# Source contract cases for the bounded exact RT/HAL byte-codec owner.
+# Operational branches become active only when the independent scalar identity
+# owner publishes the matching generation/capability. Until then admission is
+# deliberately fail-closed.
+
+use std.nogc_sync_mut.rt_hal.exact_byte_codec_owner.{
+    RT_HAL_CODEC_MAX_ELEMENTS, RT_HAL_CODEC_MAX_SLOTS,
+    RT_HAL_CODEC_ARENA_PAYLOAD_BYTES, RT_HAL_CODEC_SCALAR_METADATA_BUDGET,
+    RT_HAL_CODEC_ATOMIC_HEADER_BUDGET, RT_HAL_CODEC_RETAINED_BYTES,
+    RT_HAL_CODEC_DORMANT_RETAINED_BYTES,
+    RtHalCodecError, RtHalCodecRootDomain,
+    rt_hal_codec_error, rt_hal_codec_complete,
+    rt_hal_codec_rewind, rt_hal_codec_decode_next_event_tag,
+    rt_hal_codec_decode_take_event_arg,
+    rt_hal_codec_decode_next_byte, rt_hal_codec_finish_decode,
+    rt_hal_codec_snapshot_finalize, rt_hal_codec_snapshot_span,
+    rt_hal_codec_snapshot_event_tag_at, rt_hal_codec_snapshot_event_arg_at,
+    rt_hal_codec_snapshot_byte_at, rt_hal_codec_snapshot_error,
+    rt_hal_codec_snapshot_release, rt_hal_codec_parent_snapshot_compare,
+    rt_hal_codec_parent_snapshot_commit
+}
+use std.common.rt_hal.exact_type_id.{RtHalExactTypeDescriptor,rt_hal_exact_type_descriptor_i64,
+    rt_hal_exact_type_descriptor_u8,rt_hal_exact_type_descriptor_bool,
+    rt_hal_exact_type_descriptor_u16,rt_hal_exact_type_descriptor_bytes,
+    rt_hal_exact_type_descriptor_text,rt_hal_exact_type_descriptor_fixed_array,
+    rt_hal_exact_type_descriptor_tuple,rt_hal_exact_type_descriptor_result,
+    rt_hal_exact_type_descriptor_unit,rt_hal_exact_type_descriptor_f64,
+    rt_hal_exact_type_foreign_candidate}
+use std.nogc_sync_mut.rt_hal.exact_type_identity_owner.{
+    RtHalExactTypeRegistryOwner, RtHalExactTypeRegistrySeal, RtHalExactTypeCodecOwner,
+    rt_hal_exact_type_registry_create, rt_hal_exact_type_registry_admit,
+    rt_hal_exact_type_registry_readmit_five,
+    rt_hal_exact_type_registry_freeze, rt_hal_exact_type_registry_bind_codec,
+    rt_hal_exact_type_codec_generation, rt_hal_exact_type_codec_root_id,
+    rt_hal_exact_type_codec_admit_five,
+    rt_hal_exact_type_registry_unbind_codec, rt_hal_exact_type_registry_release
+}
+use std.nogc_sync_mut.rt_hal.exact_io_schema.{
+    RtHalExactIoParentBatch, rt_hal_exact_io_finalize_snapshot
+}
+use std.nogc_sync_mut.rt_hal.exact_shape_program_owner.{
+    rt_hal_shape_begin,rt_hal_shape_finish,rt_hal_shape_abort,
+    rt_hal_shape_begin_tuple,rt_hal_shape_end_tuple,
+    rt_hal_shape_begin_array,rt_hal_shape_begin_result,rt_hal_shape_end_result,
+    rt_hal_shape_begin_bytes,rt_hal_shape_write_byte,rt_hal_shape_end_bytes,
+    rt_hal_shape_begin_utf8,rt_hal_shape_write_utf8_byte,rt_hal_shape_end_utf8,
+    rt_hal_shape_write_i64,rt_hal_shape_write_u8,rt_hal_shape_write_u16
+}
+
+var fixture_owner = RtHalExactTypeRegistryOwner.invalid_probe()
+var fixture_seal = RtHalExactTypeRegistrySeal.invalid_probe()
+var fixture_codec = RtHalExactTypeCodecOwner.invalid_probe()
+var fixture_operation_root_id = 0
+var fixture_input_root_id = 0
+var fixture_output_root_id = 0
+var fixture_error_root_id = 0
+var fixture_effect_root_id = 0
+var fixture_arbitrary_root_id = 0
+
+fn codec_candidate_with_output(output:RtHalExactTypeDescriptor) -> i64:
+    val operation = rt_hal_exact_type_descriptor_i64()
+    val error = rt_hal_exact_type_descriptor_bool()
+    val effect = rt_hal_exact_type_descriptor_unit()
+    val operation_candidate = rt_hal_exact_type_foreign_candidate(operation.identity)
+    val output_candidate = rt_hal_exact_type_foreign_candidate(output.identity)
+    val error_candidate = rt_hal_exact_type_foreign_candidate(error.identity)
+    val effect_candidate = rt_hal_exact_type_foreign_candidate(effect.identity)
+    fixture_owner = rt_hal_exact_type_registry_create(8, 4096)
+    val batch = rt_hal_exact_type_registry_readmit_five(fixture_owner,
+        operation_candidate, operation.canonical, operation_candidate, operation.canonical,
+        output_candidate, output.canonical, error_candidate, error.canonical,
+        effect_candidate, effect.canonical)
+    if not batch.valid: return 0
+    val arbitrary_descriptor=rt_hal_exact_type_descriptor_f64()
+    val arbitrary=rt_hal_exact_type_registry_admit(fixture_owner,arbitrary_descriptor.canonical)
+    fixture_seal = rt_hal_exact_type_registry_freeze(fixture_owner)
+    fixture_codec = rt_hal_exact_type_registry_bind_codec(fixture_owner, fixture_seal)
+    val generation = rt_hal_exact_type_codec_generation(fixture_codec)
+    fixture_operation_root_id = rt_hal_exact_type_codec_root_id(fixture_codec, fixture_seal, batch.operation)
+    fixture_input_root_id = rt_hal_exact_type_codec_root_id(fixture_codec, fixture_seal, batch.input)
+    fixture_output_root_id = rt_hal_exact_type_codec_root_id(fixture_codec, fixture_seal, batch.output)
+    fixture_error_root_id = rt_hal_exact_type_codec_root_id(fixture_codec, fixture_seal, batch.error)
+    fixture_effect_root_id = rt_hal_exact_type_codec_root_id(fixture_codec, fixture_seal, batch.effect)
+    fixture_arbitrary_root_id=rt_hal_exact_type_codec_root_id(fixture_codec,fixture_seal,arbitrary)
+    if (fixture_operation_root_id <= 0 or fixture_input_root_id <= 0 or
+        fixture_output_root_id <= 0 or fixture_error_root_id <= 0 or
+        fixture_effect_root_id <= 0):
+        return 0
+    if not rt_hal_exact_type_codec_admit_five(fixture_codec, fixture_seal, batch): return 0
+    generation
+
+fn codec_candidate() -> i64:
+    codec_candidate_with_output(rt_hal_exact_type_descriptor_u8())
+
+fn codec_release(generation: i64) -> bool:
+    if generation <= 0: return false
+    if not rt_hal_exact_type_registry_unbind_codec(fixture_owner, fixture_seal, fixture_codec): return false
+    rt_hal_exact_type_registry_release(fixture_owner, fixture_seal)
+
+describe "RT/HAL exact byte codec owner":
+    it "declares one fixed bounded 64-slot arena budget":
+        expect(RT_HAL_CODEC_MAX_SLOTS).to_equal(64)
+        expect(RT_HAL_CODEC_ARENA_PAYLOAD_BYTES).to_equal(12713984)
+        expect(RT_HAL_CODEC_RETAINED_BYTES).to_equal(
+            RT_HAL_CODEC_ARENA_PAYLOAD_BYTES +
+            RT_HAL_CODEC_SCALAR_METADATA_BUDGET +
+            RT_HAL_CODEC_ATOMIC_HEADER_BUDGET)
+        expect(RT_HAL_CODEC_RETAINED_BYTES).to_equal(12898496)
+        expect(RT_HAL_CODEC_DORMANT_RETAINED_BYTES).to_equal(1728)
+
+    it "admits only through the opaque identity owner bridge":
+        val generation = codec_candidate()
+        expect(generation).to_be_greater_than(0)
+        expect(fixture_operation_root_id).to_be_greater_than(0)
+        expect(fixture_input_root_id).to_be_greater_than(0)
+        expect(fixture_output_root_id).to_be_greater_than(0)
+        expect(fixture_error_root_id).to_be_greater_than(0)
+        expect(fixture_effect_root_id).to_be_greater_than(0)
+        expect(codec_release(generation)).to_be(true)
+
+    it "binds independent codec worker slots under one frozen registry":
+        val first_generation=codec_candidate()
+        if first_generation>0:
+            val second=rt_hal_exact_type_registry_bind_codec(fixture_owner,fixture_seal)
+            val second_generation=rt_hal_exact_type_codec_generation(second)
+            expect(second_generation).to_be_greater_than(0)
+            expect(second_generation!=first_generation).to_be(true)
+            expect(rt_hal_exact_type_registry_unbind_codec(fixture_owner,fixture_seal,second)).to_be(true)
+            expect(rt_hal_exact_type_codec_generation(fixture_codec)).to_equal(first_generation)
+            expect(codec_release(first_generation)).to_be(true)
+
+    it "rebinds after last unbind without resurrecting the retired handle":
+        val retired = codec_candidate()
+        expect(retired).to_be_greater_than(0)
+        if retired > 0:
+            expect(codec_release(retired)).to_be(true)
+            val replacement = codec_candidate()
+            expect(replacement).to_be_greater_than(0)
+            expect(replacement != retired).to_be(true)
+            val stale = rt_hal_shape_begin(retired, RtHalCodecRootDomain.Output,
+                fixture_output_root_id)
+            expect(rt_hal_shape_write_u8(stale, 1)).to_be(false)
+            expect(codec_release(replacement)).to_be(true)
+        val retired_generation=codec_candidate()
+        if retired_generation>0:
+            expect(rt_hal_exact_type_registry_unbind_codec(fixture_owner,fixture_seal,
+                fixture_codec)).to_be(true)
+            val replacement=rt_hal_exact_type_registry_bind_codec(fixture_owner,fixture_seal)
+            val replacement_generation=rt_hal_exact_type_codec_generation(replacement)
+            expect(replacement_generation).to_be_greater_than(0)
+            expect(replacement_generation!=retired_generation).to_be(true)
+            expect(rt_hal_codec_begin_root(retired_generation,RtHalCodecRootDomain.Output,
+                fixture_output_root_id)).to_be(false)
+            expect(rt_hal_exact_type_registry_unbind_codec(fixture_owner,fixture_seal,
+                replacement)).to_be(true)
+            expect(rt_hal_exact_type_registry_release(fixture_owner,fixture_seal)).to_be(true)
+
+    it "rejects a separately admitted but role-unbound root id":
+        val generation=codec_candidate()
+        expect(generation).to_be_greater_than(0)
+        if generation>0:
+            expect(fixture_arbitrary_root_id).to_be_greater_than(0)
+            val cursor=rt_hal_shape_begin(generation,RtHalCodecRootDomain.Output,
+                fixture_arbitrary_root_id)
+            expect(rt_hal_shape_write_u8(cursor,1)).to_be(false)
+            expect(codec_release(generation)).to_be(true)
+
+    it "rejects a valid root id when used in the wrong domain":
+        val generation=codec_candidate()
+        expect(generation).to_be_greater_than(0)
+        if generation>0:
+            val cursor=rt_hal_shape_begin(generation,RtHalCodecRootDomain.Input,
+                fixture_output_root_id)
+            expect(rt_hal_shape_write_i64(cursor,1)).to_be(false)
+            expect(codec_release(generation)).to_be(true)
+
+    it "allows one admitted type to intentionally occupy two roles":
+        val generation=codec_candidate()
+        expect(generation).to_be_greater_than(0)
+        if generation>0:
+            expect(fixture_operation_root_id).to_equal(fixture_input_root_id)
+            val cursor=rt_hal_shape_begin(generation,RtHalCodecRootDomain.Input,
+                fixture_input_root_id)
+            expect(rt_hal_shape_write_i64(cursor,1)).to_be(true)
+            expect(rt_hal_shape_finish(cursor)).to_be(true)
+            expect(codec_release(generation)).to_be(true)
+
+    it "rejects an admitted role root after codec unbind":
+        val generation=codec_candidate()
+        expect(generation).to_be_greater_than(0)
+        if generation>0:
+            val stale=fixture_output_root_id
+            expect(codec_release(generation)).to_be(true)
+            val cursor=rt_hal_shape_begin(generation,RtHalCodecRootDomain.Output,stale)
+            expect(rt_hal_shape_write_u8(cursor,1)).to_be(false)
+
+    it "records u16 as one width-tagged scalar rather than two u8 values":
+        val generation = codec_candidate_with_output(rt_hal_exact_type_descriptor_u16())
+        expect(generation).to_be_greater_than(0)
+        if generation > 0:
+            val cursor=rt_hal_shape_begin(generation,RtHalCodecRootDomain.Output,fixture_output_root_id)
+            expect(rt_hal_shape_write_u16(cursor,0x0201)).to_be(true)
+            expect(rt_hal_shape_finish(cursor)).to_be(true)
+            expect(rt_hal_codec_rewind(generation)).to_be(true)
+            val root_tag = rt_hal_codec_decode_next_event_tag(generation)
+            val root_argument = rt_hal_codec_decode_take_event_arg(generation)
+            expect(root_argument & 0xffffffff).to_equal(fixture_output_root_id)
+            expect(root_argument >> 32).to_equal(3)
+            val scalar_tag = rt_hal_codec_decode_next_event_tag(generation)
+            expect(rt_hal_codec_decode_take_event_arg(generation)).to_equal(2)
+            val ending_tag = rt_hal_codec_decode_next_event_tag(generation)
+            expect(rt_hal_codec_decode_take_event_arg(generation)).to_equal(0)
+            expect(root_tag != scalar_tag).to_be(true)
+            expect(ending_tag != scalar_tag).to_be(true)
+            expect(rt_hal_codec_decode_next_byte(generation)).to_equal(1)
+            expect(rt_hal_codec_decode_next_byte(generation)).to_equal(2)
+            expect(rt_hal_codec_finish_decode(generation)).to_be(true)
+            val snapshot = rt_hal_exact_io_finalize_snapshot(generation, 4096)
+            var parent_batch = RtHalExactIoParentBatch.begin(1, 4096)
+            expect(parent_batch.add(snapshot, 0)).to_be(true)
+            expect(parent_batch.commit()).to_be(true)
+            expect(codec_release(generation)).to_be(true)
+
+    it "enforces element bounds with a sticky typed failure":
+        val output=rt_hal_exact_type_descriptor_fixed_array(rt_hal_exact_type_descriptor_u8(),
+            RT_HAL_CODEC_MAX_ELEMENTS+1)
+        val generation = codec_candidate_with_output(output)
+        expect(generation).to_be_greater_than(0)
+        if generation > 0:
+            val cursor=rt_hal_shape_begin(generation,RtHalCodecRootDomain.Output,fixture_output_root_id)
+            expect(rt_hal_shape_begin_array(cursor,RT_HAL_CODEC_MAX_ELEMENTS+1)).to_be(false)
+            expect(rt_hal_codec_error(generation)).to_equal(RtHalCodecError.ElementBound)
+            expect(rt_hal_shape_write_u8(cursor,1)).to_be(false)
+            expect(rt_hal_codec_error(generation)).to_equal(RtHalCodecError.ElementBound)
+            expect(rt_hal_shape_abort(cursor)).to_be(true)
+            # Abort frees only the shape cursor. The partial codec generation
+            # is terminal poison: it cannot complete, snapshot, or begin again.
+            expect(rt_hal_codec_complete(generation)).to_be(false)
+            val retry=rt_hal_shape_begin(generation,RtHalCodecRootDomain.Output,
+                fixture_output_root_id)
+            expect(rt_hal_shape_write_u8(retry,1)).to_be(false)
+            expect(codec_release(generation)).to_be(true)
+
+    it "validates nesting result shape and declared byte length":
+        val branch=rt_hal_exact_type_descriptor_result(rt_hal_exact_type_descriptor_u8(),
+            rt_hal_exact_type_descriptor_u8())
+        val output=rt_hal_exact_type_descriptor_tuple([branch,rt_hal_exact_type_descriptor_bytes()])
+        val generation = codec_candidate_with_output(output)
+        expect(generation).to_be_greater_than(0)
+        if generation > 0:
+            val cursor=rt_hal_shape_begin(generation,RtHalCodecRootDomain.Output,fixture_output_root_id)
+            expect(rt_hal_shape_begin_tuple(cursor,2)).to_be(true)
+            expect(rt_hal_shape_begin_result(cursor,true)).to_be(true)
+            expect(rt_hal_shape_write_u8(cursor,7)).to_be(true)
+            expect(rt_hal_shape_end_result(cursor,true)).to_be(true)
+            expect(rt_hal_shape_begin_bytes(cursor,2)).to_be(true)
+            expect(rt_hal_shape_write_byte(cursor,8)).to_be(true)
+            expect(rt_hal_shape_end_bytes(cursor)).to_be(false)
+            expect(rt_hal_codec_error(generation)).to_equal(RtHalCodecError.Incomplete)
+            expect(rt_hal_shape_end_tuple(cursor)).to_be(false)
+            expect(rt_hal_shape_abort(cursor)).to_be(true)
+            expect(codec_release(generation)).to_be(true)
+
+    it "rejects malformed streaming UTF8 and preserves the first error":
+        val generation = codec_candidate_with_output(rt_hal_exact_type_descriptor_text())
+        expect(generation).to_be_greater_than(0)
+        if generation > 0:
+            val cursor=rt_hal_shape_begin(generation,RtHalCodecRootDomain.Output,fixture_output_root_id)
+            expect(rt_hal_shape_begin_utf8(cursor,2)).to_be(true)
+            expect(rt_hal_shape_write_utf8_byte(cursor,0xc2)).to_be(true)
+            expect(rt_hal_shape_write_utf8_byte(cursor,0x20)).to_be(false)
+            expect(rt_hal_codec_error(generation)).to_equal(RtHalCodecError.InvalidUtf8)
+            expect(rt_hal_shape_end_utf8(cursor)).to_be(false)
+            expect(rt_hal_codec_error(generation)).to_equal(RtHalCodecError.InvalidUtf8)
+            expect(rt_hal_shape_abort(cursor)).to_be(true)
+            expect(codec_release(generation)).to_be(true)
+
+    it "requires exact one-pass decode consumption":
+        val generation = codec_candidate()
+        expect(generation).to_be_greater_than(0)
+        if generation > 0:
+            val cursor=rt_hal_shape_begin(generation,RtHalCodecRootDomain.Output,fixture_output_root_id)
+            expect(rt_hal_shape_write_u8(cursor,9)).to_be(true)
+            expect(rt_hal_shape_finish(cursor)).to_be(true)
+            expect(rt_hal_codec_complete(generation)).to_be(true)
+            expect(rt_hal_codec_rewind(generation)).to_be(true)
+            expect(rt_hal_codec_decode_next_event_tag(generation) > 0).to_be(true)
+            expect(rt_hal_codec_decode_take_event_arg(generation)).to_equal(fixture_output_root_id)
+            expect(rt_hal_codec_finish_decode(generation)).to_be(false)
+            expect(rt_hal_codec_error(generation)).to_equal(RtHalCodecError.Incomplete)
+            expect(rt_hal_codec_rewind(generation)).to_be(false)
+            expect(codec_release(generation)).to_be(true)
+
+    it "rejects second roots and stale handles after release":
+        val generation = codec_candidate()
+        expect(generation).to_be_greater_than(0)
+        if generation > 0:
+            val cursor=rt_hal_shape_begin(generation,RtHalCodecRootDomain.Output,fixture_output_root_id)
+            expect(rt_hal_shape_write_u8(cursor,1)).to_be(true)
+            expect(rt_hal_shape_finish(cursor)).to_be(true)
+            val second=rt_hal_shape_begin(generation,RtHalCodecRootDomain.Output,fixture_output_root_id)
+            expect(rt_hal_shape_write_u8(second,2)).to_be(false)
+            expect(codec_release(generation)).to_be(true)
+            val stale=rt_hal_shape_begin(generation,RtHalCodecRootDomain.Output,fixture_output_root_id)
+            expect(rt_hal_shape_write_u8(stale,2)).to_be(false)
+
+    it "publishes one bounded scalar snapshot lease and invalidates it on drain":
+        val generation = codec_candidate_with_output(rt_hal_exact_type_descriptor_u16())
+        expect(generation).to_be_greater_than(0)
+        if generation > 0:
+            val cursor=rt_hal_shape_begin(generation,RtHalCodecRootDomain.Output,fixture_output_root_id)
+            expect(rt_hal_shape_write_u16(cursor,0x0201)).to_be(true)
+            expect(rt_hal_shape_finish(cursor)).to_be(true)
+            val snapshot = rt_hal_codec_snapshot_finalize(generation)
+            val span = rt_hal_codec_snapshot_span(snapshot)
+            expect(span.event_offset).to_equal(0)
+            expect(span.event_count).to_equal(3)
+            expect(span.byte_offset).to_equal(0)
+            expect(span.byte_length).to_equal(2)
+            expect(rt_hal_codec_snapshot_event_tag_at(snapshot, 0) > 0).to_be(true)
+            val root_argument = rt_hal_codec_snapshot_event_arg_at(snapshot, 0)
+            expect(root_argument & 0xffffffff).to_equal(fixture_output_root_id)
+            expect(root_argument >> 32).to_equal(3)
+            expect(rt_hal_codec_snapshot_byte_at(snapshot, 0)).to_equal(1)
+            expect(rt_hal_codec_snapshot_byte_at(snapshot, 1)).to_equal(2)
+            expect(rt_hal_codec_snapshot_byte_at(snapshot, 2)).to_equal(-1)
+            expect(rt_hal_codec_snapshot_error(snapshot)).to_equal(RtHalCodecError.None)
+            val duplicate = rt_hal_codec_snapshot_finalize(generation)
+            expect(rt_hal_codec_snapshot_span(duplicate).event_count).to_equal(-1)
+            expect(rt_hal_codec_rewind(generation)).to_be(false)
+            expect(rt_hal_codec_snapshot_release(snapshot)).to_be(true)
+            expect(rt_hal_codec_snapshot_event_tag_at(snapshot, 0)).to_equal(-1)
+            expect(rt_hal_codec_snapshot_error(snapshot)).to_equal(RtHalCodecError.StaleHandle)
+            expect(rt_hal_codec_snapshot_release(snapshot)).to_be(false)
+            expect(codec_release(generation)).to_be(true)
+
+    it "lets the parent compare and deterministically consume a frozen child result":
+        val generation = codec_candidate()
+        expect(generation).to_be_greater_than(0)
+        if generation > 0:
+            val cursor=rt_hal_shape_begin(generation,RtHalCodecRootDomain.Output,
+                fixture_output_root_id)
+            expect(rt_hal_shape_write_u8(cursor,42)).to_be(true)
+            expect(rt_hal_shape_finish(cursor)).to_be(true)
+            val snapshot = rt_hal_codec_snapshot_finalize(generation)
+            expect(rt_hal_codec_parent_snapshot_compare(snapshot, snapshot)).to_equal(0)
+            expect(rt_hal_codec_parent_snapshot_commit(snapshot, 7)).to_be(true)
+            expect(rt_hal_codec_parent_snapshot_commit(snapshot, 7)).to_be(false)
+            expect(rt_hal_codec_snapshot_byte_at(snapshot, 0)).to_equal(-1)
+            expect(codec_release(generation)).to_be(true)

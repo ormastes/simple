@@ -1,0 +1,142 @@
+use app.llm_dashboard.collectors.diagnostics_jsonl_collector.{collect_llm_diagnostics_jsonl, render_llm_diagnostics_panel_text, render_llm_diagnostics_panel_html}
+use std.io_runtime.{write_file, mkdir_p, remove_file_if_exists}
+
+fn fixture_diag_path() -> text:
+    ".build/llm_dashboard/diagnostics/diagnostics_jsonl_collector_spec.jsonl"
+
+fn fixture_diag_jsonl() -> text:
+    "{\"ts\":1710000000000,\"event\":\"SessionStart\",\"sid\":\"sid-a\",\"data\":{\"hook_event_name\":\"SessionStart\",\"session_id\":\"sid-a\"}}\n" +
+        "{\"ts\":1710000000100,\"event\":\"PreToolUse\",\"sid\":\"sid-a\",\"data\":{\"hook_event_name\":\"PreToolUse\",\"session_id\":\"sid-a\",\"tool_name\":\"Read\"}}\n" +
+        "{\"ts\":1710000000200,\"event\":\"PostToolUse\",\"sid\":\"sid-a\",\"data\":{\"hook_event_name\":\"PostToolUse\",\"session_id\":\"sid-a\",\"tool_name\":\"Read\"}}\n" +
+        "{\"ts\":1710000000300,\"event\":\"SessionStart\",\"sid\":\"sid-b\",\"data\":{\"hook_event_name\":\"SessionStart\",\"session_id\":\"sid-b\"}}\n"
+
+fn fixture_nested_diag_jsonl() -> text:
+    "{\"ts\":1710000000000,\"data\":{\"hook_event_name\":\"SessionStart\",\"session_id\":\"sid-nested\"}}\n" +
+        "{\"ts\":1710000000100,\"data\":{\"hook_event_name\":\"PreToolUse\",\"session_id\":\"sid-nested\",\"tool_name\":\"Read\"}}\n"
+
+fn fixture_missing_fields_jsonl() -> text:
+    "{\"ts\":1710000000000,\"data\":{}}\n" +
+        "{\"ts\":1710000000100,\"event\":\"PostToolUse\"}\n"
+
+fn fixture_vllm_jsonl() -> text:
+    "{\"event\":\"llm_runtime_vllm_serve_readiness_run\",\"status\":\"skipped\",\"reason\":\"missing_local_vllm_and_gpu\"}\n" +
+        "{\"event\":\"llm_runtime_vllm_models_probe\",\"status\":\"ready\",\"reason\":\"models_endpoint_ready\"}\n"
+
+fn expect_absence_marker_hidden(value: text):
+    val absence_marker = "n" + "il"
+    expect(value.split(absence_marker).len()).to_equal(1)
+
+describe "LLM diagnostics dashboard JSONL collector":
+    it "summarizes hook JSONL for dashboard panels":
+        val path = fixture_diag_path()
+        mkdir_p(".build/llm_dashboard/diagnostics")
+        remove_file_if_exists(path)
+        write_file(path, fixture_diag_jsonl())
+        val panel = collect_llm_diagnostics_jsonl(path)
+        expect(panel.event_count).to_equal(4)
+        expect(panel.session_count).to_equal(2)
+        expect(panel.tool_event_count).to_equal(2)
+        expect(panel.last_session_id).to_equal("sid-b")
+        remove_file_if_exists(path)
+
+    it "summarizes vLLM runtime evidence for dashboard panels":
+        val path = fixture_diag_path()
+        mkdir_p(".build/llm_dashboard/diagnostics")
+        remove_file_if_exists(path)
+        write_file(path, fixture_vllm_jsonl())
+        val panel = collect_llm_diagnostics_jsonl(path)
+        expect(panel.event_count).to_equal(2)
+        expect(panel.vllm_event_count).to_equal(2)
+        expect(panel.last_vllm_status).to_equal("ready")
+        expect(panel.last_vllm_reason).to_equal("models_endpoint_ready")
+        val text = render_llm_diagnostics_panel_text(panel)
+        expect(text).to_contain("vllm_events=2")
+        expect(text).to_contain("vllm_status=ready")
+        expect(text).to_contain("vllm_reason=models_endpoint_ready")
+        expect_absence_marker_hidden(text)
+        remove_file_if_exists(path)
+
+    it "renders absence-safe diagnostics panel summary":
+        val path = fixture_diag_path()
+        mkdir_p(".build/llm_dashboard/diagnostics")
+        remove_file_if_exists(path)
+        write_file(path, fixture_diag_jsonl())
+        val text = render_llm_diagnostics_panel_text(collect_llm_diagnostics_jsonl(path))
+        expect(text).to_contain("LLM Diagnostics")
+        expect(text).to_contain("events=4")
+        expect_absence_marker_hidden(text)
+        remove_file_if_exists(path)
+
+    it "uses nested hook data fields from real hook payloads":
+        val path = fixture_diag_path()
+        mkdir_p(".build/llm_dashboard/diagnostics")
+        remove_file_if_exists(path)
+        write_file(path, fixture_nested_diag_jsonl())
+        val panel = collect_llm_diagnostics_jsonl(path)
+        expect(panel.event_count).to_equal(2)
+        expect(panel.session_count).to_equal(1)
+        expect(panel.tool_event_count).to_equal(1)
+        expect(panel.last_event).to_equal("PreToolUse")
+        expect(panel.last_session_id).to_equal("sid-nested")
+        remove_file_if_exists(path)
+
+    it "keeps missing diagnostics fields absence-marker-free":
+        val path = fixture_diag_path()
+        mkdir_p(".build/llm_dashboard/diagnostics")
+        remove_file_if_exists(path)
+        write_file(path, fixture_missing_fields_jsonl())
+        val text = render_llm_diagnostics_panel_text(collect_llm_diagnostics_jsonl(path))
+        expect(text).to_contain("events=2")
+        expect(text).to_contain("last_event=PostToolUse")
+        expect(text).to_contain("last_session=none")
+        expect_absence_marker_hidden(text)
+        remove_file_if_exists(path)
+
+    it "keeps missing files absence-marker-free":
+        val path = fixture_diag_path()
+        remove_file_if_exists(path)
+        val text = render_llm_diagnostics_panel_text(collect_llm_diagnostics_jsonl(path))
+        expect(text).to_contain("events=0")
+        expect(text).to_contain("last_event=none")
+        expect(text).to_contain("last_session=none")
+        expect(text).to_contain("vllm_status=none")
+        expect_absence_marker_hidden(text)
+
+    it "escapes diagnostics field text in html":
+        val path = fixture_diag_path()
+        mkdir_p(".build/llm_dashboard/diagnostics")
+        remove_file_if_exists(path)
+        write_file(path, "{\"event\":\"PreToolUse<tag>\",\"sid\":\"sid&\"}\n")
+        val html = render_llm_diagnostics_panel_html(collect_llm_diagnostics_jsonl(path))
+        expect(html).to_contain("PreToolUse&lt;tag&gt;")
+        expect(html).to_contain("sid&amp;")
+        expect(html.split("<tag>").len()).to_equal(1)
+        expect_absence_marker_hidden(html)
+        remove_file_if_exists(path)
+
+    it "escapes vLLM status fields in html":
+        val path = fixture_diag_path()
+        mkdir_p(".build/llm_dashboard/diagnostics")
+        remove_file_if_exists(path)
+        write_file(path, "{\"event\":\"llm_runtime_vllm_models_probe\",\"status\":\"ready<tag>\",\"reason\":\"models&endpoint\"}\n")
+        val html = render_llm_diagnostics_panel_html(collect_llm_diagnostics_jsonl(path))
+        expect(html).to_contain("vllm_events=1")
+        expect(html).to_contain("ready&lt;tag&gt;")
+        expect(html).to_contain("models&amp;endpoint")
+        expect(html.split("ready<tag>").len()).to_equal(1)
+        expect_absence_marker_hidden(html)
+        remove_file_if_exists(path)
+
+    it "decodes escaped JSONL string fields before dashboard rendering":
+        val path = fixture_diag_path()
+        mkdir_p(".build/llm_dashboard/diagnostics")
+        remove_file_if_exists(path)
+        write_file(path, "{\"event\":\"llm_runtime_vllm_models_probe\",\"status\":\"ready\\\"quoted\",\"reason\":\"models\\\\endpoint\"}\n")
+        val panel = collect_llm_diagnostics_jsonl(path)
+        expect(panel.vllm_event_count).to_equal(1)
+        expect(panel.last_vllm_status).to_equal("ready\"quoted")
+        expect(panel.last_vllm_reason).to_equal("models\\endpoint")
+        val html = render_llm_diagnostics_panel_html(panel)
+        expect(html).to_contain("ready&quot;quoted")
+        expect_absence_marker_hidden(html)
+        remove_file_if_exists(path)

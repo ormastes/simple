@@ -1,0 +1,50 @@
+use std.common.contracts.execution.simpleos_executable_v1.{ManifestTarget, ManifestResourceLimits, SimpleArtifactManifest}
+use std.common.contracts.execution.simpleos_executable_admission_v1.{ExecutableAdmissionDecisionV1, ExecutableAdmissionV1}
+use os.kernel.loader.executable_signing_body.{executable_manifest_signing_body_v1}
+use app.io.args_ops.{get_args}
+use app.io.binary_file_ops.{binary_file_write}
+
+fn _positive(value: text) -> u64:
+    if value == "":
+        panic("x86-64-auth-contract: invalid positive coordinate")
+    var parsed: u64 = 0 as u64
+    var i = 0
+    while i < value.len():
+        val byte = value.bytes()[i]
+        if byte < 48u8 or byte > 57u8:
+            panic("x86-64-auth-contract: invalid positive coordinate")
+        val digit = (byte - 48u8) as u64
+        # ExecuteOpenBinding coordinates currently originate in the signed-i64
+        # filesystem identity domain.  Keeping the parser in that proven range
+        # also avoids accepting values no filesystem owner can issue.
+        if parsed > (9223372036854775807u64 - digit) / 10u64:
+            panic("x86-64-auth-contract: coordinate overflow")
+        parsed = parsed * 10u64 + digit
+        i = i + 1
+    if parsed == 0u64:
+        panic("x86-64-auth-contract: invalid positive coordinate")
+    parsed
+
+fn main():
+    val args = get_args()
+    if args.len() != 9:
+        panic("x86-64-auth-contract: expected OUTPUT IMAGE_HASH KERNEL_HASH TRUST_HASH MOUNT_ID MOUNT_GEN FILE_ID FILE_GEN")
+    val target = ManifestTarget(os: "simpleos", arch: "x86_64", abi: "simpleos")
+    val manifest = SimpleArtifactManifest(
+        format_version: 1, artifact_kind: "elf", target: target, entrypoint: "main",
+        required_abi_features: ["elf64", "w_xor_x"], required_services: [], required_capabilities: 69u32,
+        resource_limits: ManifestResourceLimits(max_memory_bytes: 0, max_open_handles: 0, max_threads: 0, cpu_budget_us: 0),
+        namespace_template: "app_default", native_libraries: [], smf_libraries: [], interpreter: "",
+        argument_schema: [], startup_preloads: [], content_hashes: [args[2]],
+        signature: "ed25519:x86-64-qemu-acceptance-v1", debug_identity: "")
+    val admission = ExecutableAdmissionV1(
+        schema_version: 1, admission_id: "x86-64-qemu-fs-exec-v1",
+        decision: ExecutableAdmissionDecisionV1.Admitted, rejection_reason: "",
+        image_hash: args[2], manifest_hash: args[2], kernel_hash: args[3], trust_root_hash: args[4],
+        trust_epoch: 1u64, target: target, firmware_profile: "ovmf-q35",
+        compiler_identity: "admitted-stage2", source_identity: "retained-source-tree",
+        config_identity: "x86-64-authenticated-fs-exec-v1",
+        mount_id: _positive(args[5]), mount_generation: _positive(args[6]),
+        file_id: _positive(args[7]), file_generation: _positive(args[8]), effective_capabilities: 69u32)
+    if not binary_file_write(args[1], executable_manifest_signing_body_v1(manifest, admission, args[2])):
+        panic("x86-64-auth-contract: cannot write canonical body")

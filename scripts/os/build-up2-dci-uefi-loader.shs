@@ -1,0 +1,45 @@
+#!/usr/bin/env sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+SOURCE="$ROOT_DIR/examples/09_embedded/simple_os/arch/x86_64/boot/up2_dci_uefi_loader.c"
+TRANSITION_SOURCE="$ROOT_DIR/examples/09_embedded/simple_os/arch/x86_64/boot/up2_dci_uefi_transition.S"
+SHIM_ELF="${UP2_DCI_SHIM_ELF:-$ROOT_DIR/build/os/up-squared-apollo-lake/usb/multiboot2-elf64-loader.elf}"
+OUTPUT="${UP2_DCI_UEFI_OUTPUT:-$ROOT_DIR/build/os/up-squared-apollo-lake/usb/esp-stage/EFI/BOOT/BOOTX64.EFI}"
+OBJ_DIR="${UP2_DCI_UEFI_OBJ_DIR:-$ROOT_DIR/build/os/up-squared-apollo-lake/usb/dci-uefi-loader-objects}"
+
+for tool in gcc ld objcopy llvm-readobj; do
+    command -v "$tool" >/dev/null 2>&1 || { echo "error: missing $tool" >&2; exit 2; }
+done
+test -s /usr/include/efi/efi.h || { echo "error: gnu-efi headers missing" >&2; exit 2; }
+test -s "$TRANSITION_SOURCE" || { echo "error: UEFI transition source missing" >&2; exit 2; }
+test -s "$SHIM_ELF" || { echo "error: Multiboot2 shim missing: $SHIM_ELF" >&2; exit 2; }
+test -s /usr/lib/crt0-efi-x86_64.o -a -s /usr/lib/elf_x86_64_efi.lds || {
+    echo "error: gnu-efi x86_64 runtime missing" >&2; exit 2;
+}
+
+mkdir -p "$OBJ_DIR" "$(dirname -- "$OUTPUT")"
+gcc -I/usr/include/efi -I/usr/include/efi/x86_64 -I/usr/include/efi/protocol \
+    -DEFI_FUNCTION_WRAPPER -fpic -fshort-wchar -mno-red-zone \
+    -fno-stack-protector -fno-builtin -Wall -Wextra -Werror -Os \
+    -c "$SOURCE" -o "$OBJ_DIR/loader.o"
+gcc -fpic -mno-red-zone -c "$TRANSITION_SOURCE" -o "$OBJ_DIR/transition.o"
+cp "$SHIM_ELF" "$OBJ_DIR/shim.elf"
+(cd "$OBJ_DIR" && objcopy -I binary -O elf64-x86-64 -B i386:x86-64 \
+    shim.elf shim_blob.o)
+ld -nostdlib -znocombreloc -z noexecstack \
+    -T /usr/lib/elf_x86_64_efi.lds -shared -Bsymbolic \
+    /usr/lib/crt0-efi-x86_64.o "$OBJ_DIR/loader.o" "$OBJ_DIR/transition.o" \
+    "$OBJ_DIR/shim_blob.o" \
+    -L/usr/lib -lefi -lgnuefi -o "$OBJ_DIR/loader.so"
+objcopy -j .text -j .sdata -j .data -j .dynamic -j .dynsym \
+    -j .rel -j .rela -j .reloc --target=efi-app-x86_64 \
+    "$OBJ_DIR/loader.so" "$OUTPUT"
+
+llvm-readobj --file-headers "$OUTPUT" > "$OBJ_DIR/loader.headers"
+grep -q 'Format: COFF-x86-64' "$OBJ_DIR/loader.headers"
+grep -q 'Magic: 0x20B' "$OBJ_DIR/loader.headers"
+grep -q 'Subsystem: IMAGE_SUBSYSTEM_EFI_APPLICATION' "$OBJ_DIR/loader.headers"
+echo up2_dci_uefi_loader_status=pass
+echo output="$OUTPUT"
+echo output_sha256="$(sha256sum "$OUTPUT" | awk '{print $1}')"

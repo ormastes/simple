@@ -1,0 +1,44 @@
+# ARM32 scheduler-to-user entry prerequisite.
+use os.kernel.arch.arm32.cpu.{mrc_ttbr0, mcr_ttbr0, tlbiall, dsb, isb}
+
+pub struct Arm32UserEntryStateV1:
+    root_phys: u32
+    entry: u32
+    user_sp: u32
+    task_id: u64
+    lifecycle_generation: u64
+    exec_token: u32
+    exec_generation: u32
+
+pub fn arm32_user_entry_state_v1(
+    root_phys: u64, entry: u64, user_sp: u64, task_id: u64,
+    lifecycle_generation: u64, exec_token: u64, exec_generation: u64
+) -> Arm32UserEntryStateV1?:
+    """Validate exact 32-bit entry material without touching CPU state."""
+    if (root_phys == 0u64 or root_phys > 0xFFFFFFFFu64 or
+        root_phys % 16384u64 != 0u64 or entry == 0u64 or
+        entry > 0xFFFFFFFFu64 or entry % 4u64 != 0u64 or
+        user_sp == 0u64 or user_sp > 0xFFFFFFFFu64 or
+        user_sp % 8u64 != 0u64 or task_id == 0u64 or
+        lifecycle_generation == 0u64 or exec_token == 0u64 or
+        exec_token > 0xFFFFFFFFu64 or exec_generation == 0u64 or
+        exec_generation > 0xFFFFFFFFu64):
+        return nil
+    Some(Arm32UserEntryStateV1(
+        root_phys: root_phys as u32, entry: entry as u32,
+        user_sp: user_sp as u32, task_id: task_id,
+        lifecycle_generation: lifecycle_generation,
+        exec_token: exec_token as u32,
+        exec_generation: exec_generation as u32))
+
+pub(package) fn arm32_user_ttbr0_install_v1(state: Arm32UserEntryStateV1) -> bool:
+    """Install the owned root with the ARM-required barrier/TLB sequence."""
+    dsb()
+    mcr_ttbr0(state.root_phys)
+    tlbiall()
+    dsb()
+    isb()
+    (mrc_ttbr0() & 0xFFFFC000) == state.root_phys
+
+export Arm32UserEntryStateV1
+export arm32_user_entry_state_v1

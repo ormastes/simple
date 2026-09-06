@@ -1,0 +1,27 @@
+use compiler.mir.hwir.types.{CoreConfig}
+use compiler.mir.hwir.riscv_scalar_csr_projection.{strict_riscv_scalar_csr_projection_hwir}
+use compiler.mir.hwir.riscv_scalar_csr_owner.{strict_riscv_scalar_csr_owner}
+use compiler.backend.backend.hwir_to_vhdl.{HwirStrictVhdlResult,
+    render_strict_hwir_vhdl, render_strict_sequential_hwir}
+
+pub fn compile_strict_riscv_scalar_csr_owner(name: text, config: CoreConfig,
+    instruction: u32) -> HwirStrictVhdlResult:
+    val child = strict_riscv_scalar_csr_projection_hwir(
+        name + "_access_projection", config, instruction)
+    if child.is_err(): return HwirStrictVhdlResult.rejected(child.err().unwrap())
+    val child_module = child.ok().unwrap()
+    val child_vhdl = render_strict_hwir_vhdl(child_module)
+    if not child_vhdl.is_success(): return child_vhdl
+    val owner = strict_riscv_scalar_csr_owner(name, config, instruction)
+    if owner.is_err(): return HwirStrictVhdlResult.rejected(owner.err().unwrap())
+    val owner_module = owner.ok().unwrap()
+    if owner_module.child_graph_sha256 != child_module.structural_sha256():
+        return HwirStrictVhdlResult.rejected(
+            "HWIR-E-RISCV-CSR-OWNER-CHILD: CSR owner child graph receipt drift")
+    val wrapper = render_strict_sequential_hwir(owner_module,
+        "hwir-gen2-scalar-csr-owner-v1")
+    if not wrapper.is_success(): return wrapper
+    HwirStrictVhdlResult(success: true, vhdl: child_vhdl.vhdl + "\n" + wrapper.vhdl,
+        diagnostic: "", route: wrapper.route, module_node_id: wrapper.module_node_id,
+        config_xlen: wrapper.config_xlen, config_profile: wrapper.config_profile,
+        hwir_graph_sha256: wrapper.hwir_graph_sha256)

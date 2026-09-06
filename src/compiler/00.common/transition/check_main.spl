@@ -1,0 +1,95 @@
+"""
+Entry point for `scripts/check/check-compiler-transition-coverage.shs`.
+
+Usage: simple run <this file> <transitions-dir>
+
+Loads every `*.sdn` under the given directory, runs the negative-space
+validator over each, and prints the verdict as the LAST line of stdout:
+
+    PASS — <n> transition(s) checked across <k> table(s), 0 missing
+    FAIL — <n> transition(s) checked across <k> table(s), <m> missing: <names>
+    ERROR — nothing was checked (<reason>)
+
+Exit codes 0 / 1 / 2. A run that checked zero transitions is ERROR, never a
+pass: a validator that silently examined nothing is the failure mode the whole
+negative-space proof exists to prevent.
+"""
+
+use std.io_runtime.{file_read, file_exists, dir_list, get_args, exit}
+use compiler.common.transition.transition_table.{parse_transition_table}
+use compiler.common.transition.validator.{validate_transition_table}
+
+fn join_names(names: [text]) -> text:
+    var out = ""
+    for n in names:
+        if out == "":
+            out = n
+        else:
+            out = "{out}, {n}"
+    return out
+
+fn main():
+    val args = get_args()
+    var dir = ""
+    for a in args:
+        if a.ends_with(".spl"):
+            continue
+        if a == "run" or a == "simple":
+            continue
+        dir = a
+    if dir == "":
+        print("ERROR — nothing was checked (no transitions directory argument)")
+        exit(2)
+        return
+    if not file_exists(dir):
+        print("ERROR — nothing was checked (no such directory: {dir})")
+        exit(2)
+        return
+
+    var tables = 0
+    var checked = 0
+    var missing_all: [text] = []
+    var problems: [text] = []
+
+    for entry in dir_list(dir):
+        if not entry.ends_with(".sdn"):
+            continue
+        val path = if entry.starts_with(dir): entry else: "{dir}/{entry}"
+        val table = parse_transition_table(file_read(path))
+        val report = validate_transition_table(table)
+        tables = tables + 1
+        checked = checked + report.declared
+
+        val label = if report.table_name != "": report.table_name else: entry
+        for m in report.missing:
+            missing_all.push("{label}.{m}")
+        for u in report.unknown:
+            problems.push("{label}: '{u}' declared but absent from the producer universe")
+        for d in report.duplicated:
+            problems.push("{label}: '{d}' declared more than once")
+        for e in report.errors:
+            problems.push("{label}: {e}")
+        print("  {label}: {report.declared} declared / {report.universe_size} in universe, {report.missing.len()} missing")
+
+    if tables == 0:
+        print("ERROR — nothing was checked (no *.sdn transition tables under {dir})")
+        exit(2)
+        return
+    if checked == 0:
+        print("ERROR — nothing was checked (0 transitions across {tables} table(s))")
+        exit(2)
+        return
+
+    for p in problems:
+        print("  problem: {p}")
+
+    if missing_all.len() > 0 or problems.len() > 0:
+        var names = join_names(missing_all)
+        if names == "":
+            names = join_names(problems)
+        print("FAIL — {checked} transition(s) checked across {tables} table(s), {missing_all.len()} missing: {names}")
+        exit(1)
+        return
+
+    print("PASS — {checked} transition(s) checked across {tables} table(s), 0 missing")
+    exit(0)

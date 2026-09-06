@@ -1,0 +1,102 @@
+# Focused REQ-003/REQ-004/REQ-005/REQ-006/REQ-007/NFR-006 evidence for
+# built-in backend loading and session ownership.
+
+use std.spec
+use std.spec.step
+use std.io_runtime.{file_read}
+use compiler.common.backend_plugin.model.{BackendRole, BackendCapability,
+    BackendPluginRequestV1}
+use compiler.common.backend_plugin.receipt.{BackendPluginError}
+use compiler.backend_plugin.registry.{BUILTIN_MIR_ABI_DIGEST_V1}
+use compiler.backend_plugin.session.{BackendSession}
+use compiler.backend_plugin.loader.{load_backend}
+
+fn loader_test_request(
+    role: BackendRole,
+    backend_name: text = "",
+    mir_abi_digest: text = BUILTIN_MIR_ABI_DIGEST_V1,
+    required_capabilities: [BackendCapability] = []
+) -> BackendPluginRequestV1:
+    BackendPluginRequestV1(
+        role, backend_name, "host", "generic", [], "debug",
+        mir_abi_digest, required_capabilities, "", false)
+
+fn loader_error_code(result: Result<BackendSession, BackendPluginError>) -> text:
+    match result:
+        case Err(backend_error): backend_error.code()
+        case Ok(_): "ok"
+
+describe "built-in versioned backend loader":
+    it "REQ-003 selects Cranelift for an interpreter JIT request":
+        step("load the deterministic interpreter default")
+        val request = loader_test_request(
+            BackendRole.InterpreterJit,
+            required_capabilities: [BackendCapability.JitExecute]
+        )
+        val session = load_backend(request).ok().unwrap()
+        expect(session.provider_name()).to_equal("cranelift")
+        expect(session.receipt.provider_identity).to_equal("cranelift")
+        expect(session.is_open()).to_equal(true)
+
+    it "REQ-004 selects LLVM for a compiler AOT request":
+        step("load the deterministic compiler default")
+        val request = loader_test_request(
+            BackendRole.CompilerAot,
+            required_capabilities: [BackendCapability.ObjectEmit]
+        )
+        val session = load_backend(request).ok().unwrap()
+        expect(session.provider_name()).to_equal("llvm")
+        expect(session.receipt.provider_identity).to_equal("llvm")
+
+    it "REQ-007 rejects an unavailable explicit provider without substitution":
+        step("retain the explicit provider failure")
+        val request = loader_test_request(BackendRole.CompilerAot, "missing")
+        expect(loader_error_code(load_backend(request))).to_equal(
+            "BACKEND_PLUGIN_NOT_FOUND"
+        )
+
+    it "REQ-006 rejects incompatible digest and capability metadata":
+        step("run built-in descriptors through the common admission gate")
+        val bad_digest = loader_test_request(
+            BackendRole.CompilerAot,
+            "llvm",
+            "incompatible-mir"
+        )
+        expect(loader_error_code(load_backend(bad_digest))).to_equal(
+            "BACKEND_PLUGIN_MIR_DIGEST"
+        )
+        val incremental = loader_test_request(
+            BackendRole.CompilerAot,
+            "llvm",
+            required_capabilities: [BackendCapability.IncrementalCompilation]
+        )
+        expect(loader_error_code(load_backend(incremental))).to_equal(
+            "BACKEND_PLUGIN_CAPABILITY"
+        )
+
+    it "NFR-006 closes an admitted session exactly once":
+        step("close twice without repeating provider teardown")
+        var session = load_backend(loader_test_request(
+            BackendRole.CompilerAot,
+            required_capabilities: [BackendCapability.ObjectEmit]
+        )).ok().unwrap()
+        val first = session.close()
+        val second = session.close()
+        expect(first).to_equal(true)
+        expect(second).to_equal(true)
+        expect(session.closed).to_equal(true)
+        expect(session.handle).to_equal(0)
+        expect(session.close_count).to_equal(1)
+
+    it "accepts explicit plugin paths through the checked dynamic session lane":
+        val loader_source = file_read(
+            "src/compiler/70.backend/backend_plugin/loader.spl")
+        val session_source = file_read(
+            "src/compiler/70.backend/backend_plugin/session.spl")
+        expect(loader_source).to_contain(
+            "return load_dynamic_backend_v1(effective_request)")
+        expect(loader_source).to_contain("load_dynamic_backend_plugin_lease")
+        expect(loader_source.contains(
+            "is not available in the built-in loader")).to_equal(false)
+        expect(session_source).to_contain("dynamic_adapter: DynamicBackendAdapter?")
+        expect(session_source).to_contain("retained_dynamic.close()")

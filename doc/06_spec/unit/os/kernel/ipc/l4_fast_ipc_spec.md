@@ -1,0 +1,193 @@
+# L4 Fast Ipc Specification
+
+> Tests covering L4 fast IPC pure Simple primitives.
+
+| Tests | Active | Skipped | Pending |
+|-------|--------|---------|--------:|
+| 3 | 3 | 0 | 0 |
+
+<details>
+<summary>Full Scenario Manual</summary>
+
+# L4 Fast Ipc Specification
+
+## Scenarios
+
+### L4 fast IPC pure Simple primitives
+
+#### builds deterministic 32-bit register messages
+
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- builds deterministic 32-bit register messages
+   - Expected: msg.method_id equals `5`
+   - Expected: msg.payload_len equals `32`
+   - Expected: msg.r0 equals `5`
+   - Expected: msg.r7 equals `12`
+   - Expected: l4_inline_checksum32(msg) equals `54`
+   - Expected: l4_inline_round_trip_32bit(5) equals `54`
+   - Expected: l4_inline_round_trip_32bit_index(5) equals `54`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("builds deterministic 32-bit register messages")
+val msg = l4_inline_message32_from_counter(5)
+expect(msg.method_id).to_equal(5)
+expect(msg.payload_len).to_equal(32)
+expect(msg.r0).to_equal(5)
+expect(msg.r7).to_equal(12)
+expect(l4_inline_checksum32(msg)).to_equal(54)
+expect(l4_inline_round_trip_32bit(5)).to_equal(54)
+expect(l4_inline_round_trip_32bit_index(5)).to_equal(54)
+```
+
+</details>
+
+#### builds deterministic 64-bit register messages
+
+- builds deterministic 64-bit register messages
+   - Expected: msg.method_id equals `5`
+   - Expected: msg.payload_len equals `32`
+   - Expected: msg.r0 equals `5`
+   - Expected: msg.r7 equals `12`
+   - Expected: l4_inline_checksum64(msg) equals `86`
+   - Expected: l4_inline_round_trip_64bit(5) equals `86`
+   - Expected: l4_inline_round_trip_64bit_index(5) equals `86`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("builds deterministic 64-bit register messages")
+val msg = l4_inline_message64_from_counter(5)
+expect(msg.method_id).to_equal(5)
+expect(msg.payload_len).to_equal(32)
+expect(msg.r0).to_equal(5)
+expect(msg.r7).to_equal(12)
+expect(l4_inline_checksum64(msg)).to_equal(86)
+expect(l4_inline_round_trip_64bit(5)).to_equal(86)
+expect(l4_inline_round_trip_64bit_index(5)).to_equal(86)
+```
+
+</details>
+
+#### transfers a 4096-byte buffer slot and clears ownership
+
+- transfers a 4096-byte buffer slot and clears ownership
+   - Expected: checksum equals `4111`
+   - Expected: pool.states[2] equals `0`
+   - Expected: pool.owners[2] equals `0`
+   - Expected: pool.msg_lens[2] equals `0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("transfers a 4096-byte buffer slot and clears ownership")
+var pool = L4BufferPool.new(4)
+val checksum = pool.transfer_4096(6, 11, 12)
+expect(checksum).to_equal(4111)
+expect(pool.states[2]).to_equal(0)
+expect(pool.owners[2]).to_equal(0)
+expect(pool.msg_lens[2]).to_equal(0)
+```
+
+</details>
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Hardware & OS |
+| Status | Active |
+| Source | `test/unit/os/kernel/ipc/l4_fast_ipc_spec.spl` |
+| Updated | 2026-08-26 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+Tests covering L4 fast IPC pure Simple primitives.
+- L4 fast IPC pure Simple primitives
+
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 3 |
+| Active scenarios | 3 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
+
+
+</details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `f1a2571bff181651d32a11181b68932ee8b15eb5f8d57b135f5eef3ca8471c8a`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `f1a2571bff181651d32a11181b68932ee8b15eb5f8d57b135f5eef3ca8471c8a`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `f1a2571bff181651d32a11181b68932ee8b15eb5f8d57b135f5eef3ca8471c8a`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
+
+SSpec documentization score: 86/100
+source: test/unit/os/kernel/ipc/l4_fast_ipc_spec.spl
+mirror: doc/06_spec/unit/os/kernel/ipc/l4_fast_ipc_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/unit/os/kernel/ipc/l4_fast_ipc_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/unit/os/kernel/ipc/l4_fast_ipc_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/unit/os/kernel/ipc/l4_fast_ipc_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 18 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/unit/os/kernel/ipc/l4_fast_ipc_spec.spl:22:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'builds deterministic 32-bit register messages' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/unit/os/kernel/ipc/l4_fast_ipc_spec.spl:34:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'builds deterministic 64-bit register messages' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/unit/os/kernel/ipc/l4_fast_ipc_spec.spl:46:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'transfers a 4096-byte buffer slot and clears ownership' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

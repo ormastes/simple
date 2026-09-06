@@ -1,0 +1,353 @@
+# Concrete browser consumer contracts for structural layout.
+
+use std.common.structural.layout.{
+    LayoutBox,
+    LayoutDependency,
+    LayoutExecutionProfile,
+    LayoutFragment,
+    LayoutLineBox,
+    LayoutMapping,
+    LayoutNodeSemantics,
+    LayoutOverflow,
+    LayoutSnapshot,
+    LayoutTextMeasureRequest,
+    LayoutTextMeasureResult,
+    layout_text_measure_request
+}
+
+val WEB_LAYOUT_CONTRACT_VERSION: i64 = 1
+
+enum StyleDifference:
+    NoChange
+    InheritedOnly
+    PaintOnly
+    CompositeOnly
+    IntrinsicMeasure
+    LayoutSelf
+    LayoutSubtree
+    RebuildFormattingContext
+
+struct WebLayoutStyleFingerprint:
+    inherited_hash: text
+    paint_hash: text
+    composite_hash: text
+    intrinsic_hash: text
+    layout_self_hash: text
+    layout_subtree_hash: text
+    formatting_context_hash: text
+    geometry_hash: text
+
+struct WebLayoutResolvedTextMetrics:
+    available: bool
+    font_identity: text
+    advances: [i64]
+    width: i64
+    line_height: i64
+
+struct WebLayoutProfileAdmission:
+    supported: bool
+    profile_id: text
+    reason: text
+
+struct WebLayoutNodeSnapshot:
+    id: i64
+    arena_index: i64
+    dom_route_id: i64
+    parent_id: i64
+    tag: text
+    profile_id: text
+    formatting_boundary: bool
+    layout_contained: bool
+    style: WebLayoutStyleFingerprint
+    text_content: text
+    font_family: text
+    font_size: i64
+    language: text
+    text_metrics: WebLayoutResolvedTextMetrics
+    semantics: LayoutNodeSemantics
+    estimated_work: i64
+    text_measure_required: bool
+
+struct WebLayoutSnapshot:
+    contract_version: i64
+    generation: i64
+    viewport_fingerprint: text
+    nodes: [WebLayoutNodeSnapshot]
+    text_requests: [LayoutTextMeasureRequest]
+    text_results: [LayoutTextMeasureResult]
+    viewport_width: i64
+    viewport_height: i64
+    grid_tracks: [i64]
+    retained_boxes: [LayoutBox]
+    retained_fragments: [LayoutFragment]
+    retained_line_boxes: [LayoutLineBox]
+    retained_overflows: [LayoutOverflow]
+    oracle_boxes: [LayoutBox]
+    oracle_fragments: [LayoutFragment]
+    oracle_line_boxes: [LayoutLineBox]
+    oracle_overflows: [LayoutOverflow]
+    dependencies: [LayoutDependency]
+    execution: LayoutExecutionProfile
+    fixed_point_cap: i64
+
+enum WebLayoutMutationKind:
+    StyleMutation
+    Insert
+    FontResource
+    Viewport
+
+struct WebLayoutChange:
+    kind: WebLayoutMutationKind
+    difference: StyleDifference
+    node_id: i64
+    containing_context_id: i64
+    downstream_sibling_ids: [i64]
+    subtree_ids: [i64]
+    line_box_ids: [i64]
+    intrinsic_ancestor_ids: [i64]
+    inserted_ids: [i64]
+    font_metric_ids: [i64]
+    viewport_geometry_ids: [i64]
+
+struct WebLayoutDirtyNode:
+    id: i64
+    dirty_bits: i64
+
+struct WebLayoutFrontier:
+    dirty_nodes: [WebLayoutDirtyNode]
+    invalidated_ids: [i64]
+    fault: text
+
+struct WebLayoutHitRegion:
+    generation: i64
+    epoch: i64
+    structural_id: i64
+    dom_route_id: i64
+    box: LayoutBox
+
+struct WebGpuLineBreakRange:
+    node_id: i64
+    line_index: i64
+    text_start: i64
+    text_end: i64
+
+struct WebGpuLineBreakProof:
+    attempted: bool
+    admitted: bool
+    submitted: bool
+    synchronized: bool
+    device_readback: bool
+    oracle_verified: bool
+    ranges: [WebGpuLineBreakRange]
+    reason: text
+
+struct WebLayoutRunResult:
+    generation: i64
+    epoch: i64
+    layout: LayoutSnapshot
+    hit_regions: [WebLayoutHitRegion]
+    hit_mappings: [LayoutMapping]
+    gpu_line_break: WebGpuLineBreakProof
+    stale: bool
+    fault: text
+
+class WebLayoutSnapshotAdapter:
+    generation: i64
+
+class WebLayoutManager:
+    generation: i64
+    epoch: i64
+
+fn web_layout_style_fingerprint(
+    inherited_hash: text,
+    paint_hash: text,
+    composite_hash: text,
+    intrinsic_hash: text,
+    layout_self_hash: text,
+    layout_subtree_hash: text,
+    formatting_context_hash: text,
+    geometry_hash: text
+) -> WebLayoutStyleFingerprint:
+    WebLayoutStyleFingerprint(
+        inherited_hash: inherited_hash,
+        paint_hash: paint_hash,
+        composite_hash: composite_hash,
+        intrinsic_hash: intrinsic_hash,
+        layout_self_hash: layout_self_hash,
+        layout_subtree_hash: layout_subtree_hash,
+        formatting_context_hash: formatting_context_hash,
+        geometry_hash: geometry_hash
+    )
+
+fn web_layout_classify_style(old: WebLayoutStyleFingerprint, new: WebLayoutStyleFingerprint) -> StyleDifference:
+    if old.formatting_context_hash != new.formatting_context_hash:
+        return StyleDifference.RebuildFormattingContext
+    if old.layout_subtree_hash != new.layout_subtree_hash:
+        return StyleDifference.LayoutSubtree
+    if old.layout_self_hash != new.layout_self_hash:
+        return StyleDifference.LayoutSelf
+    if old.intrinsic_hash != new.intrinsic_hash:
+        return StyleDifference.IntrinsicMeasure
+    if old.composite_hash != new.composite_hash:
+        return StyleDifference.CompositeOnly
+    if old.paint_hash != new.paint_hash:
+        return StyleDifference.PaintOnly
+    if old.inherited_hash != new.inherited_hash:
+        return StyleDifference.InheritedOnly
+    StyleDifference.NoChange
+
+fn _web_layout_replaced_tag(tag: text) -> bool:
+    (tag == "img" or tag == "video" or tag == "canvas" or tag == "svg" or
+        tag == "input" or tag == "textarea" or tag == "select" or tag == "button")
+
+fn web_layout_admit_profile(
+    tag: text,
+    display: text,
+    position_absolute: bool,
+    position_sticky: bool,
+    overflow_auto_y: bool,
+    overflow_scroll_y: bool
+) -> WebLayoutProfileAdmission:
+    val replaced = _web_layout_replaced_tag(tag)
+    if tag == "#text":
+        return WebLayoutProfileAdmission(supported: true, profile_id: "inline", reason: "")
+    if replaced and (position_absolute or position_sticky):
+        return WebLayoutProfileAdmission(supported: false, profile_id: "", reason: "unsupported-compound-replaced-positioned")
+    if position_absolute or position_sticky:
+        return WebLayoutProfileAdmission(supported: true, profile_id: "absolute-sticky", reason: "")
+    if overflow_auto_y or overflow_scroll_y:
+        return WebLayoutProfileAdmission(supported: true, profile_id: "scroll", reason: "")
+    if replaced:
+        return WebLayoutProfileAdmission(supported: true, profile_id: "replaced", reason: "")
+    if (display == "table" or display == "inline-table" or display == "table-row-group" or
+        display == "table-header-group" or display == "table-footer-group" or display == "table-row" or
+        display == "table-cell" or display == "table-column-group" or display == "table-column" or
+        display == "table-caption"):
+        return WebLayoutProfileAdmission(supported: true, profile_id: "table", reason: "")
+    if display == "grid" or display == "inline-grid":
+        return WebLayoutProfileAdmission(supported: true, profile_id: "grid", reason: "")
+    if display == "flex" or display == "inline-flex":
+        return WebLayoutProfileAdmission(supported: true, profile_id: "flex", reason: "")
+    if display == "inline" or display == "inline-block":
+        return WebLayoutProfileAdmission(supported: true, profile_id: "inline", reason: "")
+    if display == "block" or display == "list-item" or display == "none" or display == "contents" or tag == "#root":
+        return WebLayoutProfileAdmission(supported: true, profile_id: "block", reason: "")
+    WebLayoutProfileAdmission(supported: false, profile_id: "", reason: "unsupported-display:" + display)
+
+fn web_layout_change(
+    kind: WebLayoutMutationKind,
+    difference: StyleDifference,
+    node_id: i64,
+    containing_context_id: i64,
+    downstream_sibling_ids: [i64],
+    subtree_ids: [i64],
+    line_box_ids: [i64],
+    intrinsic_ancestor_ids: [i64],
+    inserted_ids: [i64],
+    font_metric_ids: [i64],
+    viewport_geometry_ids: [i64]
+) -> WebLayoutChange:
+    WebLayoutChange(
+        kind: kind,
+        difference: difference,
+        node_id: node_id,
+        containing_context_id: containing_context_id,
+        downstream_sibling_ids: downstream_sibling_ids,
+        subtree_ids: subtree_ids,
+        line_box_ids: line_box_ids,
+        intrinsic_ancestor_ids: intrinsic_ancestor_ids,
+        inserted_ids: inserted_ids,
+        font_metric_ids: font_metric_ids,
+        viewport_geometry_ids: viewport_geometry_ids
+    )
+
+fn web_layout_snapshot(
+    generation: i64,
+    viewport_fingerprint: text,
+    nodes: [WebLayoutNodeSnapshot],
+    dependencies: [LayoutDependency],
+    execution: LayoutExecutionProfile,
+    fixed_point_cap: i64,
+    viewport_width: i64 = 0,
+    viewport_height: i64 = 0,
+    grid_tracks: [i64] = [],
+    oracle_boxes: [LayoutBox] = [],
+    oracle_fragments: [LayoutFragment] = [],
+    oracle_line_boxes: [LayoutLineBox] = [],
+    oracle_overflows: [LayoutOverflow] = [],
+    retained_boxes: [LayoutBox] = [],
+    retained_fragments: [LayoutFragment] = [],
+    retained_line_boxes: [LayoutLineBox] = [],
+    retained_overflows: [LayoutOverflow] = []
+) -> WebLayoutSnapshot:
+    var text_requests: [LayoutTextMeasureRequest] = []
+    var text_results: [LayoutTextMeasureResult] = []
+    for node in nodes:
+        if node.text_measure_required:
+            text_requests.push(layout_text_measure_request(
+                node.id,
+                node.text_content,
+                node.font_family,
+                node.font_size,
+                node.language
+            ))
+            text_results.push(LayoutTextMeasureResult(
+                node_id: node.id,
+                available: node.text_metrics.available,
+                font_identity: node.text_metrics.font_identity,
+                width: node.text_metrics.width,
+                line_height: node.text_metrics.line_height,
+                advances: node.text_metrics.advances,
+                reason: ""
+            ))
+    WebLayoutSnapshot(
+        contract_version: WEB_LAYOUT_CONTRACT_VERSION,
+        generation: generation,
+        viewport_fingerprint: viewport_fingerprint,
+        nodes: nodes,
+        text_requests: text_requests,
+        text_results: text_results,
+        viewport_width: viewport_width,
+        viewport_height: viewport_height,
+        grid_tracks: grid_tracks,
+        retained_boxes: retained_boxes,
+        retained_fragments: retained_fragments,
+        retained_line_boxes: retained_line_boxes,
+        retained_overflows: retained_overflows,
+        oracle_boxes: oracle_boxes,
+        oracle_fragments: oracle_fragments,
+        oracle_line_boxes: oracle_line_boxes,
+        oracle_overflows: oracle_overflows,
+        dependencies: dependencies,
+        execution: execution,
+        fixed_point_cap: fixed_point_cap
+    )
+
+fn web_layout_snapshot_adapter(generation: i64) -> WebLayoutSnapshotAdapter:
+    WebLayoutSnapshotAdapter(generation: generation)
+
+fn web_layout_manager(generation: i64) -> WebLayoutManager:
+    WebLayoutManager(generation: generation, epoch: 0)
+
+fn web_gpu_line_break_proof_unavailable(reason: text) -> WebGpuLineBreakProof:
+    WebGpuLineBreakProof(
+        attempted: false,
+        admitted: false,
+        submitted: false,
+        synchronized: false,
+        device_readback: false,
+        oracle_verified: false,
+        ranges: [],
+        reason: reason
+    )
+
+export WEB_LAYOUT_CONTRACT_VERSION, StyleDifference
+export WebLayoutStyleFingerprint, WebLayoutResolvedTextMetrics, WebLayoutProfileAdmission
+export WebLayoutNodeSnapshot, WebLayoutSnapshot
+export WebLayoutMutationKind, WebLayoutChange, WebLayoutDirtyNode, WebLayoutFrontier
+export WebLayoutHitRegion, WebGpuLineBreakRange, WebGpuLineBreakProof
+export WebLayoutRunResult, WebLayoutSnapshotAdapter, WebLayoutManager
+export web_layout_style_fingerprint, web_layout_change, web_layout_snapshot
+export web_layout_classify_style, web_layout_admit_profile
+export web_layout_snapshot_adapter, web_layout_manager
+export web_gpu_line_break_proof_unavailable

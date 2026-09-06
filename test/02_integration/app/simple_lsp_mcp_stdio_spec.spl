@@ -1,0 +1,116 @@
+# Simple LSP MCP stdio protocol checks.
+
+use std.spec
+use app.io.mod.{shell}
+
+extern fn rt_file_write_text(path: text, content: text) -> bool
+
+fn write_framed_request(body: text) -> text:
+    "Content-Type: application/vscode-jsonrpc; charset=utf-8\r\nContent-Length: " + body.len().to_string() + "\r\n\r\n" + body
+
+fn lsp_mcp_jsonl(body: text) -> text:
+    body + "\n"
+
+fn lsp_init_body(id: text) -> text:
+    "{\"jsonrpc\":\"2.0\",\"id\":\"" + id + "\",\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"spec\",\"version\":\"1.0\"}}}"
+
+fn lsp_tools_body(id: text) -> text:
+    "{\"jsonrpc\":\"2.0\",\"id\":\"" + id + "\",\"method\":\"tools/list\",\"params\":{}}"
+
+fn lsp_initialized_notification_body() -> text:
+    "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\",\"params\":{}}"
+
+fn parse_nonnegative_i64(value: text) -> i64:
+    var n: i64 = 0
+    var i: i64 = 0
+    if value.len() == 0:
+        return -1
+    while i < value.len():
+        val ch = value.char_at(i)
+        var digit: i64 = -1
+        if ch == "0": digit = 0
+        elif ch == "1": digit = 1
+        elif ch == "2": digit = 2
+        elif ch == "3": digit = 3
+        elif ch == "4": digit = 4
+        elif ch == "5": digit = 5
+        elif ch == "6": digit = 6
+        elif ch == "7": digit = 7
+        elif ch == "8": digit = 8
+        elif ch == "9": digit = 9
+        if digit < 0:
+            return -1
+        n = n * 10 + digit
+        i = i + 1
+    n
+
+fn assert_all_content_length_frames(output: text, expected_count: i64):
+    var remaining = output
+    var frame_count: i64 = 0
+    while remaining != "":
+        expect(remaining.starts_with("Content-Length: ")).to_equal(true)
+        val header_end = remaining.index_of("\r\n\r\n")
+        expect(header_end >= 0).to_equal(true)
+        if header_end < 0:
+            return
+        val header = remaining.slice(0, header_end)
+        val length_text = header.replace("Content-Length:", "").trim()
+        val body_length = parse_nonnegative_i64(length_text)
+        expect(body_length >= 0).to_equal(true)
+        if body_length < 0:
+            return
+        val body_start = header_end + 4
+        val body_end = body_start + body_length
+        expect(body_end <= remaining.len()).to_equal(true)
+        if body_end > remaining.len():
+            return
+        val body = remaining.slice(body_start, body_end)
+        expect(body.starts_with("{")).to_equal(true)
+        remaining = remaining.slice(body_end, remaining.len())
+        frame_count = frame_count + 1
+    expect(frame_count).to_equal(expected_count)
+
+fn assert_response_id_preserved(output: text, id_raw: text):
+    expect(output.contains("\"id\":" + id_raw)).to_equal(true)
+    expect(output.contains("\"id\":null")).to_equal(false)
+
+fn send_lsp_mcp(messages: text) -> text:
+    val tmp = "/tmp/simple_lsp_mcp_stdio_input.txt"
+    rt_file_write_text(tmp, messages)
+    val result = shell("cat " + tmp + " | node bin/mcp_stdio_bridge.js -- bin/release/linux-x86_64/simple_lsp_mcp_server 2>/dev/null")
+    result.stdout ?? ""
+
+describe "Simple LSP MCP stdio":
+    it "mirrors Claude-style JSONL requests with JSONL responses":
+        val input = lsp_mcp_jsonl(lsp_init_body("1")) + lsp_mcp_jsonl(lsp_tools_body("2"))
+        val output = send_lsp_mcp(input)
+        expect(output.starts_with("{\"jsonrpc\":\"2.0\"")).to_equal(true)
+        expect(output.contains("Content-Length:")).to_equal(false)
+        expect(output.contains("\"serverInfo\":{\"name\":\"simple-lsp-mcp\"")).to_equal(true)
+        expect(output.contains("\"id\":\"2\",\"result\":{\"tools\"")).to_equal(true)
+        expect(output.contains("\"name\":\"lsp_definition\"")).to_equal(true)
+        expect(output.contains("\"error\":")).to_equal(false)
+
+    it "keeps Content-Length framing for framed MCP clients":
+        val input = write_framed_request(lsp_init_body("1")) + write_framed_request(lsp_tools_body("2"))
+        val output = send_lsp_mcp(input)
+        assert_all_content_length_frames(output, 2)
+        expect(output.contains("\"serverInfo\":{\"name\":\"simple-lsp-mcp\"")).to_equal(true)
+        expect(output.contains("\"id\":\"2\",\"result\":{\"tools\"")).to_equal(true)
+        expect(output.contains("\"name\":\"lsp_definition\"")).to_equal(true)
+        expect(output.contains("\"error\":")).to_equal(false)
+
+    it "preserves numeric and string ids across consecutive framed responses":
+        val numeric_init = "{\"jsonrpc\":\"2.0\",\"id\":17,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"spec\",\"version\":\"1.0\"}}}"
+        val string_tools = lsp_tools_body("request-alpha")
+        val output = send_lsp_mcp(write_framed_request(numeric_init) + write_framed_request(string_tools))
+        assert_all_content_length_frames(output, 2)
+        assert_response_id_preserved(output, "17")
+        assert_response_id_preserved(output, "\"request-alpha\"")
+
+    it "swallows Claude and Gemini initialized notification before tools/list":
+        val input = lsp_mcp_jsonl(lsp_init_body("1")) + lsp_mcp_jsonl(lsp_initialized_notification_body()) + lsp_mcp_jsonl(lsp_tools_body("2"))
+        val output = send_lsp_mcp(input)
+        expect(output.contains("\"serverInfo\":{\"name\":\"simple-lsp-mcp\"")).to_equal(true)
+        expect(output.contains("\"name\":\"lsp_definition\"")).to_equal(true)
+        expect(output.contains("\"error\":")).to_equal(false)

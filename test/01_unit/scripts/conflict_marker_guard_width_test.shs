@@ -1,0 +1,115 @@
+#!/bin/sh
+# Regression: check-no-conflict-markers-push.shs must catch jj markers of ANY
+# width, not just 7. jj sizes markers per file so they cannot collide with the
+# wrapped content; a materialized conflict is routinely 10 chars. The guard's
+# original `^<<<<<<< ` pattern required a space at column 8 and therefore missed
+# every longer marker -- .spipe/scv-remaining/impl_ws_a.md reached origin that
+# way (found 2026-08-02).
+#
+# Builds a throwaway git repo and runs the REAL guard against it, so the test
+# cannot pass by agreeing with a stale copy of the regex.
+set -e
+
+GUARD=$(cd "$(dirname "$0")/../../.." && pwd)/scripts/check/check-no-conflict-markers-push.shs
+[ -x "$GUARD" ] || { echo "FAIL: guard not found at $GUARD"; exit 1; }
+
+TMPD=$(mktemp -d)
+trap 'rm -rf "$TMPD"' EXIT
+
+# Isolate from any inherited GIT_DIR (see reference: `git -C` does NOT override it).
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
+
+repo="$TMPD/r"
+mkdir -p "$repo"
+env -u GIT_DIR git -C "$repo" init -q
+env -u GIT_DIR git -C "$repo" config user.email t@t
+env -u GIT_DIR git -C "$repo" config user.name t
+# The guard is fail-closed on "script lives in repo X but cwd is repo Y" (that
+# is the 2026-08-01 cwd fail-open fix). So run a byte copy of it from inside the
+# fixture repo -- same logic, satisfies its own containment check.
+mkdir -p "$repo/scripts/check"
+cp "$GUARD" "$repo/scripts/check/g.shs"
+chmod +x "$repo/scripts/check/g.shs"
+GUARD="$repo/scripts/check/g.shs"
+echo base > "$repo/f.txt"
+env -u GIT_DIR git -C "$repo" add -A
+env -u GIT_DIR git -C "$repo" commit -qm base
+BASE=$(env -u GIT_DIR git -C "$repo" rev-parse HEAD)
+
+# marker_case <open> <close> -> echoes the guard's exit code
+marker_case() {
+    printf '%s Conflict 1 of 1\nours\n%%%%%%%%%%%% base to side 1\ntheirs\n%s Conflict 1 of 1 ends\n' \
+        "$1" "$2" > "$repo/f.txt"
+    env -u GIT_DIR git -C "$repo" add -A
+    env -u GIT_DIR git -C "$repo" commit -qm "case"
+    tip=$(env -u GIT_DIR git -C "$repo" rev-parse HEAD)
+    # `|| rc=$?` is load-bearing: under `set -e` a bare non-zero exit would kill
+    # this subshell before it could report the code we are actually testing for.
+    rc=0
+    ( cd "$repo" && "$GUARD" "$BASE..$tip" ) >/dev/null 2>&1 || rc=$?
+    echo "$rc"
+}
+
+fails=0
+check() { # <label> <actual> <expected>
+    if [ "$2" = "$3" ]; then
+        echo "ok   $1 (exit $2)"
+    else
+        echo "FAIL $1: expected exit $3, got $2"
+        fails=$((fails + 1))
+    fi
+}
+
+check "7-char markers rejected"  "$(marker_case '<<<<<<<' '>>>>>>>')"       1
+check "10-char markers rejected" "$(marker_case '<<<<<<<<<<' '>>>>>>>>>>')" 1
+
+# The LABEL is optional as well. `git merge-file -L '' -L '' -L ''` emits
+# "<<<<<<< " / ">>>>>>> " -- marker, space, empty label -- and any
+# trailing-whitespace strip (formatters, this repo's own fmt/lint, editors on
+# save) reduces those to a bare "<<<<<<<" / ">>>>>>>". Requiring a space at the
+# END of the marker run was the same fixed-shape mistake as requiring one at
+# column 8: a real conflict block that survived a formatter went unseen.
+# Built here from the REAL `git merge-file` output, then stripped, so the case
+# is the actual artefact and not a hand-typed approximation.
+bare_case() { # <extra-open-chars> <extra-close-chars> -> guard exit code
+    env -u GIT_DIR git -C "$repo" reset -q --hard "$BASE"
+    printf 'a\nX\nc\n' > "$TMPD/m1"
+    printf 'a\nb\nc\n' > "$TMPD/m2"
+    printf 'a\nY\nc\n' > "$TMPD/m3"
+    env -u GIT_DIR git merge-file -p -L '' -L '' -L '' \
+        "$TMPD/m1" "$TMPD/m2" "$TMPD/m3" > "$TMPD/raw" 2>/dev/null || true
+    # widen the marker runs, then strip trailing whitespace exactly as a
+    # formatter would
+    sed -e "s/^<<<<<<</<<<<<<<$1/" -e "s/^>>>>>>>/>>>>>>>$2/" -e 's/[ 	]*$//' \
+        "$TMPD/raw" > "$repo/f.txt"
+    env -u GIT_DIR git -C "$repo" add -A
+    env -u GIT_DIR git -C "$repo" commit -qm bare
+    tip=$(env -u GIT_DIR git -C "$repo" rev-parse HEAD)
+    rc=0
+    ( cd "$repo" && "$GUARD" "$BASE..$tip" ) >/dev/null 2>&1 || rc=$?
+    echo "$rc"
+}
+
+check "bare 7-char markers (empty label, whitespace-stripped) rejected" \
+      "$(bare_case '' '')"        1
+check "bare 10-char markers (empty label, whitespace-stripped) rejected" \
+      "$(bare_case '<<<' '>>>')"  1
+
+# Negative controls for the relaxed pattern: a run of 6 is not a marker, and a
+# run of 7 glued to other text is not a marker line. Neither may be flagged.
+check "6-char run not flagged"     "$(marker_case '<<<<<<' '>>>>>>')"   0
+check "marker glued to text not flagged" \
+      "$(marker_case '<<<<<<<x' '>>>>>>>x')" 0
+
+# Prose that merely MENTIONS marker syntax (no matching pair) must still pass --
+# this file and the guard's own header do exactly that.
+env -u GIT_DIR git -C "$repo" reset -q --hard "$BASE"
+printf 'A conflict opens with <<<<<<< at line start. No close marker here.\n' > "$repo/f.txt"
+env -u GIT_DIR git -C "$repo" add -A
+env -u GIT_DIR git -C "$repo" commit -qm prose
+ptip=$(env -u GIT_DIR git -C "$repo" rev-parse HEAD)
+prose=$( cd "$repo" && "$GUARD" "$BASE..$ptip" >/dev/null 2>&1; echo $? )
+check "prose-only mention passes" "$prose" 0
+
+[ "$fails" -eq 0 ] || exit 1
+echo "PASS - 7/7"

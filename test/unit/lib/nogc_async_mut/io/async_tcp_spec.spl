@@ -1,0 +1,52 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-LIB
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+# Async TCP mirror: connect_timeout, peer_addr, and a text-mode echo
+# over the accepted server side, driven by poll() on eager futures.
+
+use std.spec.step
+use std.nogc_async_mut.io.tcp.{AsyncTcpListener, AsyncTcpStream}
+use std.async.poll.{Poll}
+
+describe "AsyncTcpStream connected session":
+    # @manual scenario evidence
+    it "connect_timeout resolves eagerly and exposes both addresses":
+        # @req REQ-SSPEC-LIB
+        step("connect with a timeout and inspect addresses")
+        val listener = match AsyncTcpListener.bind("127.0.0.1:0").poll():
+            case Poll.Ready(Ok(l)): l
+            case _: panic("bind failed")
+        val addr = listener.local_addr().unwrap()
+        var client = match AsyncTcpStream.connect_timeout(addr, 5000).poll():
+            case Poll.Ready(Ok(s)): s
+            case _: panic("connect failed")
+        expect(client.is_open()).to_equal(true)
+        expect(client.local_addr().unwrap().contains("127.0.0.1")).to_equal(true)
+        client.close()
+        listener.close()
+
+    it "round-trips text through an accepted connection":
+        # @req REQ-SSPEC-LIB
+        step("write_text then read_exact the same bytes")
+        val listener = match AsyncTcpListener.bind("127.0.0.1:0").poll():
+            case Poll.Ready(Ok(l)): l
+            case _: panic("bind failed")
+        val addr = listener.local_addr().unwrap()
+        var client = match AsyncTcpStream.connect(addr).poll():
+            case Poll.Ready(Ok(s)): s
+            case _: panic("connect failed")
+        var server = match listener.accept().poll():
+            case Poll.Ready(Ok(s)): s
+            case _: panic("accept failed")
+        match client.write_text("echo").poll():
+            case Poll.Ready(Ok(())): expect(true).to_equal(true)
+            case _: expect(false).to_equal(true)
+        var got = match server.read_exact(4).poll():
+            case Poll.Ready(Ok(data)): data
+            case _: panic("read failed")
+        expect(got.len()).to_equal(4)
+        expect(got[0]).to_equal(101)
+        client.close()
+        server.close()
+        listener.close()

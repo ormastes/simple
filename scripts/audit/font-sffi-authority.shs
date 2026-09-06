@@ -1,0 +1,50 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+module="$root/src/lib/nogc_sync_mut/sffi/spl_fonts.spl"
+registry="$root/src/compiler_rust/compiler/src/codegen/runtime_sffi.rs"
+interpreter="$root/src/compiler_rust/compiler/src/interpreter_extern/mod.rs"
+
+# Every raw declaration states FFI/pointer authority. Only methods that retain
+# or invoke foreign handles carry that authority; pure selected-font paths stay
+# safe and no mandatory-inline annotation is added to large raster/layout loops.
+[ "$(grep -c '^@unsafe(reason:' "$module")" -eq 8 ]
+[ "$(grep -c '^    @unsafe(reason:' "$module")" -eq 17 ]
+[ "$(grep -c '^@always_inline$' "$module")" -eq 0 ]
+
+symbols='spl_dlopen_checked spl_dlsym_checked spl_dlclose spl_wffi_call_i64 rt_bytes_from_raw spl_fonts_call_init_blob spl_fonts_call_init_path spl_fonts_call_layout_text'
+both=0
+one=0
+none=0
+for symbol in $symbols; do
+    providers=0
+    grep -q "RuntimeFuncSpec::new(\"$symbol\"" "$registry" && providers=$((providers + 1))
+    grep -q "insert_simple!(\"$symbol\"" "$interpreter" && providers=$((providers + 1))
+    case "$providers" in
+        2) both=$((both + 1)) ;;
+        1) one=$((one + 1)) ;;
+        0) none=$((none + 1)) ;;
+    esac
+done
+[ "$both" -eq 7 ]
+[ "$one" -eq 1 ]
+[ "$none" -eq 0 ]
+
+grep -q '^    fn has_glyph(codepoint: i64) -> bool:' "$module"
+grep -q 'val present = spl_wffi_call_i64(self.has_glyph_fp, args, 1) == 1' "$module"
+
+# Legacy stb_truetype boundary: keep all raw calls confined to the canonical
+# no-GC wrapper without adding work to glyph creation or per-pixel reads.
+legacy="$root/src/lib/nogc_sync_mut/io/font_sffi.spl"
+legacy_symbols='rt_font_load_array rt_font_load rt_font_free rt_font_glyph_bitmap rt_font_glyph_index rt_font_bitmap_width rt_font_bitmap_height rt_font_bitmap_get_pixel rt_font_bitmap_free rt_font_glyph_advance rt_font_line_height rt_font_ascent'
+[ "$(grep -c '^@unsafe(reason: .*capabilities: \[ffi\])$' "$legacy")" -eq 12 ]
+[ "$(grep -c '^    unsafe(capabilities: \[ffi\]):$' "$legacy")" -eq 9 ]
+for symbol in $legacy_symbols; do
+    [ "$(grep -c "${symbol}(" "$legacy")" -eq 2 ]
+done
+[ "$(grep -c 'rt_font_bitmap_get_pixel(self.bitmap_handle, x, y)' "$legacy")" -eq 1 ]
+[ "$(grep -c 'rt_font_glyph_bitmap(font.handle, codepoint, size_px)' "$legacy")" -eq 1 ]
+! grep -q 'export rt_font_' "$legacy"
+
+echo "Font SFFI authority audit: PASS (spl_fonts: 26 calls/8 symbols, 7 both/1 one/0 no-provider; legacy: 12 annotated declarations/9 confined regions; semantic bool preserved; no forced inlining)"

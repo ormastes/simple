@@ -1,0 +1,62 @@
+# Architecture-selected kernel/user copy facade.
+# ARM64 EL0 address spaces are owned by the recorded TTBR0 walker in the
+# bare-metal runtime; other current kernels retain the generic VMM walker.
+
+use os.kernel.memory.vmm.{
+    VmmCopyBytesResult, VmmUserCopyStatus,
+    vmm_copyin_bytes, vmm_copyout_bytes
+}
+
+@cfg(arm64)
+extern fn rt_arm64_user_copyin(dst: u64, user: u64, len: u64) -> i64
+@cfg(arm64)
+extern fn rt_arm64_user_copyout(user: u64, src: u64, len: u64) -> i64
+
+@cfg(arm64)
+fn user_copyin_bytes(ptr: u64, len: u64) -> VmmCopyBytesResult:
+    if len == 0:
+        return VmmCopyBytesResult(
+            status: VmmUserCopyStatus(ok: true, errno: 0, bytes_read: 0),
+            bytes: []
+        )
+    var bytes = [0u8; len]
+    val copied = rt_arm64_user_copyin(bytes.data_ptr().to_u64(), ptr, len)
+    if copied < 0:
+        return VmmCopyBytesResult(
+            status: VmmUserCopyStatus(ok: false, errno: copied as i32, bytes_read: 0),
+            bytes: []
+        )
+    VmmCopyBytesResult(
+        status: VmmUserCopyStatus(ok: true, errno: 0, bytes_read: copied as u64),
+        bytes: bytes
+    )
+
+@cfg(arm64)
+fn user_copyout_bytes(ptr: u64, bytes: [u8]) -> i64:
+    if bytes.len() == 0:
+        return 0
+    rt_arm64_user_copyout(ptr, bytes.data_ptr().to_u64(), bytes.len())
+
+@cfg(x86_64)
+fn user_copyin_bytes(ptr: u64, len: u64) -> VmmCopyBytesResult:
+    vmm_copyin_bytes(ptr, len)
+
+@cfg(x86_64)
+fn user_copyout_bytes(ptr: u64, bytes: [u8]) -> i64:
+    vmm_copyout_bytes(ptr, bytes) as i64
+
+@cfg(riscv64)
+fn user_copyin_bytes(ptr: u64, len: u64) -> VmmCopyBytesResult:
+    vmm_copyin_bytes(ptr, len)
+
+@cfg(riscv64)
+fn user_copyout_bytes(ptr: u64, bytes: [u8]) -> i64:
+    vmm_copyout_bytes(ptr, bytes) as i64
+
+@cfg(riscv32)
+fn user_copyin_bytes(ptr: u64, len: u64) -> VmmCopyBytesResult:
+    vmm_copyin_bytes(ptr, len)
+
+@cfg(riscv32)
+fn user_copyout_bytes(ptr: u64, bytes: [u8]) -> i64:
+    vmm_copyout_bytes(ptr, bytes) as i64

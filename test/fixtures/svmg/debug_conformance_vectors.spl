@@ -1,0 +1,390 @@
+# SVM-G DBG-1 / PROF-1 debug+profile conformance vector table (stream P5).
+#
+# Companion to test/fixtures/svmg/conformance_vectors.spl. That table asks
+# "does the VM compute the right answer"; this one asks "does the VM stop,
+# report, and RESUME correctly while being debugged" — the DBG-1 protocol
+# (doc/05_design/app/tools/gpu_debugger_common_interface_architecture_2026-08-09.md
+# §3, carried forward by the unified design's §6/§7).
+#
+# Shape: a vector is a scripted debug SESSION — a program plus an ordered
+# list of LAUNCHES. Each launch says what the host does before launching
+# (set flags, install/clear breakpoints) and asserts EVERY observable of the
+# resulting stop field-for-field: the stop reason, the sentinel, the saved
+# pc/sp/csp, the saved operand and call stacks, the accumulated
+# DBG_STEP_COUNT, and the cumulative log + records in the arena.
+#
+# Field-for-field is the point. This same table is what P6 runs against the
+# CUDA and Vulkan kernels and diffs against ref_vm; anything left as a
+# "don't care" here is a place where a device kernel could disagree with the
+# reference and nobody would notice. So there are no don't-cares: every
+# expected value below is a concrete number derived from the instruction
+# trace written above each program.
+#
+# Instruction sizes (same convention as conformance_vectors.spl):
+# PUSHI/PUSHF=5, HALT/TRAP=2, JMP/JZ/JNZ/CALL/PARFOR=3, everything else=1.
+# JMP/JZ/JNZ operands are RELATIVE to the next pc; CALL's is ABSOLUTE.
+
+use std.common.svmg.mailbox_const.{SENTINEL_EXIT_MASK, SENTINEL_TIMEOUT, SENTINEL_DEBUG_BREAK, DBG_MAX_BREAKPOINTS}
+use test.fixtures.svmg.conformance_vectors.{ExpectedRecord}
+
+pub struct DebugLaunch:
+    # --- host actions performed BEFORE this launch ---
+    resume: bool                    # set DBG_FLAG_RESUME
+    single_step: bool               # set DBG_FLAG_SINGLE_STEP
+    set_breakpoints: bool           # when true, (re)install `breakpoints`
+    breakpoints: [i64]              # [] with set_breakpoints=true means CLEAR
+    # --- expected observables AFTER this launch ---
+    expect_debug_break: bool
+    expect_trapped: bool
+    expect_timed_out: bool
+    expect_sentinel: i64
+    expect_saved_pc: i64
+    expect_saved_sp: i64
+    expect_saved_csp: i64
+    expect_stack: [i64]             # saved operand-stack slots 0..sp
+    expect_calls: [i64]             # saved call-stack frames 0..csp
+    expect_step_count: i64          # accumulated DBG_STEP_COUNT
+    expect_log: text                # cumulative LOG-ring contents
+    expect_records: [ExpectedRecord] # cumulative RECORD-ring contents
+
+pub struct DebugVector:
+    name: text
+    source: text
+    step_budget: i64
+    entry_pc: i64
+    launches: [DebugLaunch]
+
+fn _brk(pcs: [i64], saved_pc: i64, sp: i64, stack: [i64], step_count: i64) -> DebugLaunch:
+    """First launch of a session that stops at a breakpoint."""
+    DebugLaunch(
+        resume: false, single_step: false, set_breakpoints: true, breakpoints: pcs,
+        expect_debug_break: true, expect_trapped: false, expect_timed_out: false,
+        expect_sentinel: SENTINEL_DEBUG_BREAK,
+        expect_saved_pc: saved_pc, expect_saved_sp: sp, expect_saved_csp: 0,
+        expect_stack: stack, expect_calls: [], expect_step_count: step_count,
+        expect_log: "", expect_records: [],
+    )
+
+fn _resume_brk(saved_pc: i64, sp: i64, stack: [i64], step_count: i64) -> DebugLaunch:
+    """A resume that runs into the SAME (or another) breakpoint again."""
+    DebugLaunch(
+        resume: true, single_step: false, set_breakpoints: false, breakpoints: [],
+        expect_debug_break: true, expect_trapped: false, expect_timed_out: false,
+        expect_sentinel: SENTINEL_DEBUG_BREAK,
+        expect_saved_pc: saved_pc, expect_saved_sp: sp, expect_saved_csp: 0,
+        expect_stack: stack, expect_calls: [], expect_step_count: step_count,
+        expect_log: "", expect_records: [],
+    )
+
+fn _resume_done(saved_pc: i64, exit_code: i64, step_count: i64, log: text, records: [ExpectedRecord]) -> DebugLaunch:
+    """A resume that runs the program to normal completion."""
+    DebugLaunch(
+        resume: true, single_step: false, set_breakpoints: false, breakpoints: [],
+        expect_debug_break: false, expect_trapped: false, expect_timed_out: false,
+        expect_sentinel: SENTINEL_EXIT_MASK | exit_code,
+        expect_saved_pc: saved_pc, expect_saved_sp: 0, expect_saved_csp: 0,
+        expect_stack: [], expect_calls: [], expect_step_count: step_count,
+        expect_log: log, expect_records: records,
+    )
+
+# ============================================================================
+# Program A — straight-line arithmetic, no control flow.
+#
+#   pc  0  PUSHI 10       -> [10]
+#   pc  5  PUSHI 32       -> [10, 32]
+#   pc 10  ADD            -> [42]
+#   pc 11  PUSHI 1        -> [42, 1]     (pass)
+#   pc 16  SWAP           -> [1, 42]
+#   pc 17  SYS_RESULT     -> []          record(pass=1, value=42)
+#   pc 18  HALT 0                        end of code = 20
+#
+# Exactly 7 instructions when run to completion.
+# ============================================================================
+
+val PROG_A: text = "PUSHI 10\nPUSHI 32\nADD\nPUSHI 1\nSWAP\nSYS_RESULT\nHALT 0"
+
+fn _rec_a() -> [ExpectedRecord]:
+    [ExpectedRecord(passed: 1, value: 42)]
+
+# ============================================================================
+# Program B — countdown loop, so a breakpoint in the body is hit repeatedly.
+#
+#   pc  0  PUSHI 3        -> [3]
+#   pc  5  DUP            <- loop top    -> [n, n]
+#   pc  6  JZ +9          (next=9, target 18) pops the copy
+#   pc  9  PUSHI 1        -> [n, 1]
+#   pc 14  SUB            -> [n-1]
+#   pc 15  JMP -13        (next=18, target 5)
+#   pc 18  DROP           <- loop exit    -> []
+#   pc 19  HALT 0                         end of code = 21
+#
+# Instruction count: 1 + 3 iterations x 5 + (DUP, JZ) + DROP + HALT = 20.
+# ============================================================================
+
+val PROG_B: text = "PUSHI 3\nDUP\nJZ 9\nPUSHI 1\nSUB\nJMP -13\nDROP\nHALT 0"
+
+# ============================================================================
+# Program C — mailbox side effects on BOTH sides of the breakpoint, which is
+# what proves the arena (LOG ring, RECORD ring, seq) really persists across a
+# resume instead of being silently restarted.
+#
+#   pc  0  PUSHI 65       'A'
+#   pc  5  SYS_PUTC       -> log "A"
+#   pc  6  PUSHI 1        (pass)
+#   pc 11  PUSHI 7        (value)
+#   pc 16  SYS_RESULT     -> record(1, 7)
+#   pc 17  PUSHI 66       'B'   <-- BREAKPOINT
+#   pc 22  SYS_PUTC       -> log "AB"
+#   pc 23  PUSHI 1
+#   pc 28  PUSHI 9
+#   pc 33  SYS_RESULT     -> record(1, 9)
+#   pc 34  HALT 0                         end of code = 36
+#
+# 5 instructions before the breakpoint, 6 after; 11 total.
+# ============================================================================
+
+val PROG_C: text = "PUSHI 65\nSYS_PUTC\nPUSHI 1\nPUSHI 7\nSYS_RESULT\nPUSHI 66\nSYS_PUTC\nPUSHI 1\nPUSHI 9\nSYS_RESULT\nHALT 0"
+
+# ============================================================================
+# Program D — CALL/RET, so the saved CALL STACK is exercised (DBG_SAVED_CALLS
+# is otherwise the one saved region no other vector would ever look at).
+#
+#   pc  0  PUSHI 1        (pass)          -> [1]
+#   pc  5  CALL 14        (next=8: push return pc 8, jump to 14)
+#   pc  8  SYS_RESULT     -> record(1, 5)
+#   pc  9  HALT 0
+#   pc 11  NOP
+#   pc 12  NOP                            padding so the callee starts at 14
+#   pc 13  NOP
+#   pc 14  PUSHI 5        <-- BREAKPOINT  -> [1, 5]
+#   pc 19  RET            (csp 1 -> 0, pc = 8)   end of code = 20
+#
+# 2 instructions before the breakpoint, 4 after; 6 total.
+# ============================================================================
+
+val PROG_D: text = "PUSHI 1\nCALL 14\nSYS_RESULT\nHALT 0\nNOP\nNOP\nNOP\nPUSHI 5\nRET"
+
+fn _rec_d() -> [ExpectedRecord]:
+    [ExpectedRecord(passed: 1, value: 5)]
+
+# ============================================================================
+# Program E — a bare infinite loop, for budget expiry while debugging.
+#
+#   pc 0  JMP -3          (next=3, target 0)     end of code = 3
+# ============================================================================
+
+val PROG_E: text = "JMP -3"
+
+fn _sixteen_breakpoints() -> [i64]:
+    """A FULL breakpoint table (DBG_MAX_BREAKPOINTS entries) whose only
+    reachable entry is the LAST one. If an implementation truncated the
+    table, dropped the tail, or stopped scanning early, this vector would
+    run to completion instead of breaking — a silent failure that a
+    half-full table could never expose."""
+    var pcs: [i64] = []
+    var i = 0
+    while i < DBG_MAX_BREAKPOINTS - 1:
+        # Unreachable pcs: program A's code is 20 bytes long, so 100+ can
+        # never be a live pc.
+        pcs.push(100 + i)
+        i = i + 1
+    pcs.push(10)          # the real one, in the final slot
+    pcs
+
+pub fn all_debug_vectors() -> [DebugVector]:
+    var v: [DebugVector] = []
+
+    # ------------------------------------------------------------------
+    # 1. break-at-pc: stop before executing the instruction AT the
+    #    breakpoint, with the operand stack exactly as the two preceding
+    #    PUSHIs left it.
+    # ------------------------------------------------------------------
+    v.push(DebugVector(
+        name: "break_at_pc", source: PROG_A, step_budget: 1000, entry_pc: 0,
+        launches: [
+            _brk([10], 10, 2, [10, 32], 2),
+            _resume_done(18, 0, 7, "", _rec_a()),
+        ],
+    ))
+
+    # ------------------------------------------------------------------
+    # 2. step-N: three single-step launches advance exactly one instruction
+    #    each, then a plain resume finishes the program.
+    # ------------------------------------------------------------------
+    v.push(DebugVector(
+        name: "step_n", source: PROG_A, step_budget: 1000, entry_pc: 0,
+        launches: [
+            DebugLaunch(
+                resume: false, single_step: true, set_breakpoints: true, breakpoints: [],
+                expect_debug_break: true, expect_trapped: false, expect_timed_out: false,
+                expect_sentinel: SENTINEL_DEBUG_BREAK,
+                expect_saved_pc: 5, expect_saved_sp: 1, expect_saved_csp: 0,
+                expect_stack: [10], expect_calls: [], expect_step_count: 1,
+                expect_log: "", expect_records: [],
+            ),
+            DebugLaunch(
+                resume: true, single_step: true, set_breakpoints: false, breakpoints: [],
+                expect_debug_break: true, expect_trapped: false, expect_timed_out: false,
+                expect_sentinel: SENTINEL_DEBUG_BREAK,
+                expect_saved_pc: 10, expect_saved_sp: 2, expect_saved_csp: 0,
+                expect_stack: [10, 32], expect_calls: [], expect_step_count: 2,
+                expect_log: "", expect_records: [],
+            ),
+            DebugLaunch(
+                resume: true, single_step: true, set_breakpoints: false, breakpoints: [],
+                expect_debug_break: true, expect_trapped: false, expect_timed_out: false,
+                expect_sentinel: SENTINEL_DEBUG_BREAK,
+                expect_saved_pc: 11, expect_saved_sp: 1, expect_saved_csp: 0,
+                expect_stack: [42], expect_calls: [], expect_step_count: 3,
+                expect_log: "", expect_records: [],
+            ),
+            _resume_done(18, 0, 7, "", _rec_a()),
+        ],
+    ))
+
+    # ------------------------------------------------------------------
+    # 3. resume-to-completion after CLEARING the breakpoint table — the
+    #    everyday debugger action of "delete the breakpoint and let it run".
+    #    Without the clear, the loop breakpoint would fire again.
+    # ------------------------------------------------------------------
+    v.push(DebugVector(
+        name: "resume_to_completion_after_clearing_breakpoints", source: PROG_B,
+        step_budget: 1000, entry_pc: 0,
+        launches: [
+            _brk([14], 14, 2, [3, 1], 4),
+            DebugLaunch(
+                resume: true, single_step: false, set_breakpoints: true, breakpoints: [],
+                expect_debug_break: false, expect_trapped: false, expect_timed_out: false,
+                expect_sentinel: SENTINEL_EXIT_MASK | 0,
+                expect_saved_pc: 19, expect_saved_sp: 0, expect_saved_csp: 0,
+                expect_stack: [], expect_calls: [], expect_step_count: 20,
+                expect_log: "", expect_records: [],
+            ),
+        ],
+    ))
+
+    # ------------------------------------------------------------------
+    # 4. break-inside-loop: the SAME pc breaks once per iteration, and the
+    #    counter on the saved stack proves each stop is a distinct
+    #    iteration rather than the same one replayed.
+    # ------------------------------------------------------------------
+    v.push(DebugVector(
+        name: "break_inside_loop", source: PROG_B, step_budget: 1000, entry_pc: 0,
+        launches: [
+            _brk([14], 14, 2, [3, 1], 4),
+            _resume_brk(14, 2, [2, 1], 9),
+            _resume_brk(14, 2, [1, 1], 14),
+            _resume_done(19, 0, 20, "", []),
+        ],
+    ))
+
+    # ------------------------------------------------------------------
+    # 5. resume-with-persisted-arena: the log byte and record written
+    #    BEFORE the break must still be there after it, and the record
+    #    written after must APPEND rather than overwrite.
+    # ------------------------------------------------------------------
+    v.push(DebugVector(
+        name: "resume_with_persisted_arena", source: PROG_C, step_budget: 1000, entry_pc: 0,
+        launches: [
+            DebugLaunch(
+                resume: false, single_step: false, set_breakpoints: true, breakpoints: [17],
+                expect_debug_break: true, expect_trapped: false, expect_timed_out: false,
+                expect_sentinel: SENTINEL_DEBUG_BREAK,
+                expect_saved_pc: 17, expect_saved_sp: 0, expect_saved_csp: 0,
+                expect_stack: [], expect_calls: [], expect_step_count: 5,
+                expect_log: "A", expect_records: [ExpectedRecord(passed: 1, value: 7)],
+            ),
+            _resume_done(34, 0, 11, "AB",
+                [ExpectedRecord(passed: 1, value: 7), ExpectedRecord(passed: 1, value: 9)]),
+        ],
+    ))
+
+    # ------------------------------------------------------------------
+    # 6. break inside a subroutine: the saved CALL STACK must carry the
+    #    return pc across the launch boundary, or RET after the resume
+    #    would return to the wrong place (or fall off the stack and
+    #    silently exit 0).
+    # ------------------------------------------------------------------
+    v.push(DebugVector(
+        name: "break_in_subroutine_preserves_call_stack", source: PROG_D,
+        step_budget: 1000, entry_pc: 0,
+        launches: [
+            DebugLaunch(
+                resume: false, single_step: false, set_breakpoints: true, breakpoints: [14],
+                expect_debug_break: true, expect_trapped: false, expect_timed_out: false,
+                expect_sentinel: SENTINEL_DEBUG_BREAK,
+                expect_saved_pc: 14, expect_saved_sp: 1, expect_saved_csp: 1,
+                expect_stack: [1], expect_calls: [8], expect_step_count: 2,
+                expect_log: "", expect_records: [],
+            ),
+            _resume_done(9, 0, 6, "", _rec_d()),
+        ],
+    ))
+
+    # ------------------------------------------------------------------
+    # 7. budget expiry WHILE debugging: the step budget still wins, the
+    #    timeout sentinel (not the debug sentinel) is written, and the
+    #    state is nonetheless saved — "why did it stop" must be
+    #    inspectable for a timeout too, not only for a breakpoint.
+    # ------------------------------------------------------------------
+    v.push(DebugVector(
+        name: "budget_expiry_while_debugging", source: PROG_E, step_budget: 5, entry_pc: 0,
+        launches: [
+            DebugLaunch(
+                resume: false, single_step: false, set_breakpoints: true, breakpoints: [99],
+                expect_debug_break: false, expect_trapped: false, expect_timed_out: true,
+                expect_sentinel: SENTINEL_TIMEOUT,
+                expect_saved_pc: 0, expect_saved_sp: 0, expect_saved_csp: 0,
+                expect_stack: [], expect_calls: [], expect_step_count: 5,
+                expect_log: "", expect_records: [],
+            ),
+        ],
+    ))
+
+    # ------------------------------------------------------------------
+    # 8. breakpoint table FULL: all DBG_MAX_BREAKPOINTS slots occupied and
+    #    only the last slot reachable.
+    # ------------------------------------------------------------------
+    v.push(DebugVector(
+        name: "breakpoint_table_full", source: PROG_A, step_budget: 1000, entry_pc: 0,
+        launches: [
+            _brk(_sixteen_breakpoints(), 10, 2, [10, 32], 2),
+            _resume_done(18, 0, 7, "", _rec_a()),
+        ],
+    ))
+
+    # ------------------------------------------------------------------
+    # 9. step-count accuracy: debugging ENABLED but nothing to stop on, so
+    #    the program runs start-to-finish in one launch and
+    #    DBG_STEP_COUNT must equal the exact instruction count (7 for
+    #    program A, 20 for program B). This is the PROF-1 oracle: a
+    #    step counter that is merely "roughly right" is useless.
+    # ------------------------------------------------------------------
+    v.push(DebugVector(
+        name: "step_count_accuracy_straightline", source: PROG_A, step_budget: 1000, entry_pc: 0,
+        launches: [
+            DebugLaunch(
+                resume: false, single_step: false, set_breakpoints: true, breakpoints: [],
+                expect_debug_break: false, expect_trapped: false, expect_timed_out: false,
+                expect_sentinel: SENTINEL_EXIT_MASK | 0,
+                expect_saved_pc: 18, expect_saved_sp: 0, expect_saved_csp: 0,
+                expect_stack: [], expect_calls: [], expect_step_count: 7,
+                expect_log: "", expect_records: _rec_a(),
+            ),
+        ],
+    ))
+    v.push(DebugVector(
+        name: "step_count_accuracy_loop", source: PROG_B, step_budget: 1000, entry_pc: 0,
+        launches: [
+            DebugLaunch(
+                resume: false, single_step: false, set_breakpoints: true, breakpoints: [],
+                expect_debug_break: false, expect_trapped: false, expect_timed_out: false,
+                expect_sentinel: SENTINEL_EXIT_MASK | 0,
+                expect_saved_pc: 19, expect_saved_sp: 0, expect_saved_csp: 0,
+                expect_stack: [], expect_calls: [], expect_step_count: 20,
+                expect_log: "", expect_records: [],
+            ),
+        ],
+    ))
+
+    v

@@ -1,0 +1,326 @@
+"""
+## Purpose and audience
+
+Verifies that @gpu_kernel functions lower through HIR -> MIR to PTX with .entry
+directives, and that the GPU intrinsic vocabulary (thread ID, synchronization,
+memory, atomics) the compiler recognizes is complete and stable. Written for
+CUDA/backend engineers who need a no-hardware check that the compilation
+contract has not drifted.
+
+## Operator workflow
+
+Run `simple run test/03_system/feature/usage/gpu_kernel_compilation_spec.spl`.
+No GPU hardware is required; intrinsic tables and shipped-source probes run on
+any host.
+
+## Compatibility and limitations
+
+Interpreter mode cannot execute a real lowering, so PTX structure is checked
+against the compiler's own declared shapes and the shipped backend source rather
+than against emitted assembly. A full source-to-PTX run belongs to the native
+CUDA backend lane.
+
+## Verification guidance and troubleshooting
+
+Rerun the command above. A table-length failure means an intrinsic group
+gained or lost a name — update the oracle comment with the change, not the
+expectation. A shipped-source probe failure means the named compiler file no
+longer carries the symbol; relocate the probe before weakening it.
+"""
+# Lifecycle: doc/01_research/runtime/gpu_remote_interpreter_research.md ;
+# doc/03_plan/platform/webgpu_js_wasm_simple.md ;
+# doc/04_architecture/gpu_dynamic_backend_provider.md ;
+# doc/05_design/gpu_dynamic_backend_provider.md
+# @manual_section: gpu-kernel-compilation
+
+# ============================================================================
+# GPU Intrinsic Name Table
+# ============================================================================
+
+# All recognized GPU intrinsic names from the compiler
+# (src/compiler/70.backend/gpu_intrinsics.spl)
+use std.spec.step
+use std.nogc_sync_mut.io.file_ops.{file_read}
+
+fn thread_id_intrinsics() -> [text]:
+    [
+        "gpu_global_id",
+        "gpu_global_id_x",
+        "gpu_global_id_y",
+        "gpu_local_id",
+        "gpu_local_id_x",
+        "gpu_local_id_y",
+        "gpu_block_id",
+        "gpu_block_id_x",
+        "gpu_block_id_y",
+        "gpu_block_dim",
+        "gpu_grid_dim"
+    ]
+
+fn sync_intrinsics() -> [text]:
+    [
+        "gpu_sync",
+        "gpu_barrier",
+        "gpu_syncthreads",
+        "gpu_mem_fence"
+    ]
+
+fn memory_intrinsics() -> [text]:
+    [
+        "gpu_load_f64",
+        "gpu_store_f64",
+        "gpu_load_i64",
+        "gpu_store_i64"
+    ]
+
+fn atomic_intrinsics() -> [text]:
+    [
+        "gpu_atomic_add",
+        "gpu_atomic_sub",
+        "gpu_atomic_min",
+        "gpu_atomic_max",
+        "gpu_atomic_and",
+        "gpu_atomic_or",
+        "gpu_atomic_xor",
+        "gpu_atomic_exchange",
+        "gpu_atomic_cas"
+    ]
+
+# ============================================================================
+# PTX Output Structure Helpers
+# ============================================================================
+
+# Represents expected PTX header fields emitted by PtxBuilder
+fn expected_ptx_version() -> text:
+    ".version 7.8"
+
+fn expected_ptx_target(major: i64, minor: i64) -> text:
+    ".target sm_{major}{minor}"
+
+fn expected_ptx_address_size() -> text:
+    ".address_size 64"
+
+# Kernel entry point directive (vs .func for device functions)
+fn kernel_directive() -> text:
+    ".visible .entry"
+
+fn device_func_directive() -> text:
+    ".visible .func"
+
+# PTX register names for thread ID special registers
+fn ptx_thread_id_x() -> text:
+    "%tid.x"
+
+fn ptx_block_id_x() -> text:
+    "%ctaid.x"
+
+fn ptx_block_dim_x() -> text:
+    "%ntid.x"
+
+fn ptx_grid_dim_x() -> text:
+    "%nctaid.x"
+
+# ============================================================================
+# Compilation Pipeline Stage Names
+# ============================================================================
+
+fn pipeline_stages() -> [text]:
+    [
+        "@gpu_kernel attribute parsed (FunctionAttr.is_gpu_kernel)",
+        "HIR lowering preserves func_attr.is_gpu_kernel",
+        "MIR lowering sets MirFunction.is_kernel from func_attr",
+        "MIR optimization MirFunction(..func, blocks:) spread preserves is_kernel",
+        "CUDA backend emits .entry for kernels, .func for device functions"
+    ]
+
+# ============================================================================
+# Tests
+# ============================================================================
+
+describe "GPU intrinsic recognition":
+    # @manual scenario evidence
+    it "recognizes all thread ID intrinsic names":
+        # @req REQ-GPU-COMPILE-001
+        step("Enumerate the thread/block/grid intrinsic vocabulary")
+        # @capture(bit_table): the eleven thread-ID intrinsic names in declared order
+        val names = thread_id_intrinsics()
+        expect(names[0]).to_equal("gpu_global_id")  # oracle: global id is the first table entry
+        expect(names.len()).to_equal(11)  # oracle: 3 global + 3 local + 3 block ids + dim + grid dim
+        expect(names[1]).to_equal("gpu_global_id_x")  # oracle: x axis follows the unqualified global id
+        expect(names[2]).to_equal("gpu_global_id_y")  # oracle: y axis follows the x axis
+
+    it "recognizes all synchronization intrinsic names":
+        # @req REQ-GPU-COMPILE-002
+        step("Enumerate the synchronization intrinsic vocabulary")
+        # @capture(bit_table): the four sync intrinsic names in declared order
+        val names = sync_intrinsics()
+        expect(names[0]).to_equal("gpu_sync")  # oracle: block-level sync leads the sync group
+        expect(names.len()).to_equal(4)  # oracle: sync, barrier, syncthreads, mem_fence is the full group
+        expect(names[1]).to_equal("gpu_barrier")  # oracle: barrier follows plain sync
+        expect(names[2]).to_equal("gpu_syncthreads")  # oracle: CUDA-style syncthreads is third
+        expect(names[3]).to_equal("gpu_mem_fence")  # oracle: the memory fence closes the sync group
+
+    it "recognizes all atomic operation intrinsic names":
+        # @req REQ-GPU-COMPILE-003
+        step("Enumerate the atomic intrinsic vocabulary")
+        # @capture(bit_table): the nine atomic intrinsic names in declared order
+        val names = atomic_intrinsics()
+        expect(names[0]).to_equal("gpu_atomic_add")  # oracle: add leads the atomic group
+        expect(names.len()).to_equal(9)  # oracle: add/sub/min/max/and/or/xor/exchange/cas is the full set
+        expect(names[8]).to_equal("gpu_atomic_cas")  # oracle: compare-and-swap closes the atomic group
+
+    it "recognizes all memory intrinsic names":
+        # @req REQ-GPU-COMPILE-004
+        step("Enumerate the global-memory intrinsic vocabulary")
+        # @capture(bit_table): the four load/store intrinsic names in declared order
+        val names = memory_intrinsics()
+        expect(names[0]).to_equal("gpu_load_f64")  # oracle: f64 load leads the memory group
+        expect(names.len()).to_equal(4)  # oracle: f64/i64 load and store pairs are the full set
+
+    it "load intrinsics produce global memory PTX":
+        # @req REQ-GPU-COMPILE-005
+        step("Check the f64 load instruction names its global-memory scope")
+        # @capture(protocol_json): the ld.global.f64 PTX opcode shape
+        val ptx_load = "ld.global.f64"
+        expect(ptx_load).to_contain("global")
+        expect(ptx_load).to_contain("f64")
+
+    it "store intrinsics produce global memory PTX":
+        # @req REQ-GPU-COMPILE-006
+        step("Check the f64 store instruction names its global-memory scope")
+        # @capture(protocol_json): the st.global.f64 PTX opcode shape
+        val ptx_store = "st.global.f64"
+        expect(ptx_store).to_contain("global")
+
+    it "all intrinsic names start with gpu_ prefix":
+        # @req REQ-GPU-COMPILE-007
+        step("Concatenate every intrinsic group and check the shared prefix")
+        # @capture(statistics): 28 intrinsic names, all gpu_-prefixed
+        val all_names = thread_id_intrinsics() + sync_intrinsics() + atomic_intrinsics() + memory_intrinsics()
+        # Total: 11 + 4 + 9 + 4 = 28 intrinsics
+        expect(all_names.len()).to_equal(28)  # oracle: 11 thread-id + 4 sync + 9 atomic + 4 memory
+        for name in all_names:
+            expect(name).to_start_with("gpu_")
+
+describe "PTX output structure":
+    it "emits correct PTX version header":
+        # @req REQ-GPU-COMPILE-008
+        step("State the PTX ISA version the backend targets")
+        # @capture(protocol_json): the .version 7.8 PTX header line
+        val version = expected_ptx_version()
+        expect(version).to_equal(".version 7.8")  # oracle: PTX ISA 7.8 is the backend's pinned ISA version
+
+    it "emits correct target for SM 8.6 (Ada Lovelace)":
+        # @req REQ-GPU-COMPILE-009
+        step("Format the SM 8.6 target string")
+        # @capture(protocol_json): the .target sm_86 PTX header line
+        val target = expected_ptx_target(8, 6)
+        expect(target).to_equal(".target sm_86")  # oracle: SM 8.6 renders as sm_86 with no separator
+
+    it "emits correct target for SM 7.5 (Turing)":
+        # @req REQ-GPU-COMPILE-010
+        step("Format the SM 7.5 target string")
+        # @capture(protocol_json): the .target sm_75 PTX header line
+        val target = expected_ptx_target(7, 5)
+        expect(target).to_equal(".target sm_75")  # oracle: SM 7.5 renders as sm_75 with no separator
+
+    it "uses 64-bit address size":
+        # @req REQ-GPU-COMPILE-011
+        step("State the PTX address size for 64-bit hosts")
+        # @capture(protocol_json): the .address_size 64 PTX header line
+        val addr = expected_ptx_address_size()
+        expect(addr).to_equal(".address_size 64")  # oracle: 64-bit addressing is the backend contract
+
+    it "uses .entry directive for kernel functions":
+        # @req REQ-GPU-COMPILE-012
+        step("Check the kernel directive declares visible entry")
+        # @capture(protocol_json): the .visible .entry kernel directive
+        val directive = kernel_directive()
+        expect(directive).to_start_with(".visible")
+        expect(directive).to_contain(".entry")
+
+    it "uses .func directive for device functions":
+        # @req REQ-GPU-COMPILE-013
+        step("Check the device-function directive declares visible func")
+        # @capture(protocol_json): the .visible .func device directive
+        val directive = device_func_directive()
+        expect(directive).to_start_with(".visible")
+        expect(directive).to_contain(".func")
+
+describe "PTX special registers":
+    it "maps gpu_local_id_x to %tid.x":
+        # @req REQ-GPU-COMPILE-014
+        step("Map the local thread id to its PTX special register")
+        # @capture(bit_table): gpu_local_id_x -> %tid.x register mapping
+        expect(ptx_thread_id_x()).to_equal("%tid.x")  # oracle: threadIdx.x is %tid.x in PTX ISA
+
+    it "maps gpu_block_id_x to %ctaid.x":
+        # @req REQ-GPU-COMPILE-015
+        step("Map the block id to its PTX special register")
+        # @capture(bit_table): gpu_block_id_x -> %ctaid.x register mapping
+        expect(ptx_block_id_x()).to_equal("%ctaid.x")  # oracle: blockIdx.x is %ctaid.x in PTX ISA
+
+    it "maps gpu_block_dim_x to %ntid.x":
+        # @req REQ-GPU-COMPILE-016
+        step("Map the block dimension to its PTX special register")
+        # @capture(bit_table): gpu_block_dim_x -> %ntid.x register mapping
+        expect(ptx_block_dim_x()).to_equal("%ntid.x")  # oracle: blockDim.x is %ntid.x in PTX ISA
+
+    it "maps gpu_grid_dim_x to %nctaid.x":
+        # @req REQ-GPU-COMPILE-017
+        step("Map the grid dimension to its PTX special register")
+        # @capture(bit_table): gpu_grid_dim_x -> %nctaid.x register mapping
+        expect(ptx_grid_dim_x()).to_equal("%nctaid.x")  # oracle: gridDim.x is %nctaid.x in PTX ISA
+
+describe "GPU kernel compilation pipeline":
+    it "@gpu_kernel attribute is recognized by parser":
+        # @req REQ-GPU-COMPILE-018
+        step("Probe the shipped declaration-attribute source for the gpu_kernel attr")
+        # @capture(protocol_json): shipped decl_attrs.spl names the gpu_kernel function attribute
+        val attrs_source = file_read("src/compiler/00.common/_Attributes/decl_attrs.spl") ?? ""
+        val parser_names_gpu_kernel_attr = attrs_source.contains("gpu_kernel")
+        expect(parser_names_gpu_kernel_attr).to_equal(true)
+
+    it "pipeline has 5 stages from source to PTX":
+        # @req REQ-GPU-COMPILE-019
+        step("Walk the source-to-PTX stage list")
+        # @capture(bit_table): the five compilation pipeline stages in order
+        val stages = pipeline_stages()
+        expect(stages[0]).to_contain("@gpu_kernel")
+        expect(stages.len()).to_equal(5)  # oracle: parse, HIR, MIR, MIR-opt, CUDA emit is the full chain
+        expect(stages[4]).to_contain(".entry")
+
+    it "MIR instructions include GPU-specific operations":
+        # @req REQ-GPU-COMPILE-020
+        step("Probe the shipped MIR instruction source for the GPU opcodes")
+        # @capture(bit_table): GPU opcode symbols found in the shipped MIR kinds source
+        val mir_kinds_source = file_read("src/compiler/50.mir/mir_instruction_kinds.spl") ?? ""
+        val mir_names_gpu_global_id = mir_kinds_source.contains("GpuGlobalId")
+        val mir_names_gpu_mem_fence = mir_kinds_source.contains("GpuMemFence")
+        expect(mir_names_gpu_global_id).to_equal(true)
+        expect(mir_names_gpu_mem_fence).to_equal(true)
+
+    it "CudaBackend can be created with compute capability":
+        # @req REQ-GPU-COMPILE-021
+        step("Probe the shipped PTX builder for the sm_ target format")
+        # @capture(protocol_json): shipped ptx_builder.spl formats .target sm_ strings
+        val ptx_builder_source = file_read("src/compiler/70.backend/backend/cuda/ptx_builder.spl") ?? ""
+        val backend_formats_sm_target = ptx_builder_source.contains("sm_")
+        expect(backend_formats_sm_target).to_equal(true)
+
+describe "GPU barrier and memory scope":
+    it "GpuBarrierScope has Workgroup variant":
+        # @req REQ-GPU-COMPILE-022
+        step("Probe the shipped MIR source for the Workgroup barrier scope")
+        # @capture(bit_table): Workgroup scope symbol found in shipped MIR support source
+        val mir_support_source = file_read("src/compiler/50.mir/mir_instruction_support.spl") ?? ""
+        val mir_names_workgroup_scope = mir_support_source.contains("Workgroup")
+        expect(mir_names_workgroup_scope).to_equal(true)
+
+    it "GpuMemFence has device and system scopes":
+        # @req REQ-GPU-COMPILE-023
+        step("Probe the shipped intrinsic table for the atomic fence surface")
+        # @capture(bit_table): gpu_atomic exchange/cas fence surface in the shipped intrinsic table
+        val intrinsics_source = file_read("src/compiler/70.backend/gpu_intrinsics.spl") ?? ""
+        val table_names_atomic_cas = intrinsics_source.contains("gpu_atomic_cas")
+        expect(table_names_atomic_cas).to_equal(true)

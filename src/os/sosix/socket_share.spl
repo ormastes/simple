@@ -1,0 +1,160 @@
+# SOSIX socket sharing — IPC socket FD pass table (SCM_RIGHTS semantics).
+#
+# Tracks pending cross-process FD transfers attached to unix-domain socket
+# channels. This is a handle table only; the actual socket implementation
+# lives in the netstack.
+
+use os.kernel.errno.{EBADF, EINVAL, ENOMEM}
+
+val SOSIX_MAX_SOCK_TRANSFERS: u64 = 32
+val SOSIX_SOCK_HANDLE_SLOT_BITS: u64 = 16
+val SOSIX_SOCK_HANDLE_SLOT_MASK: u64 = 0xFFFF
+val SOSIX_SOCK_NO_HANDLE: u64 = 0xFFFFFFFFFFFFFFFF
+
+val SOSIX_SOCK_XFER_FREE: u8 = 0
+val SOSIX_SOCK_XFER_PENDING: u8 = 1
+val SOSIX_SOCK_XFER_CONSUMED: u8 = 2
+
+val SOSIX_SOCK_MAX_FDS: u64 = 8
+
+var sosix_sock_xfer_active: [bool; 32]
+var sosix_sock_xfer_state: [u8; 32]
+var sosix_sock_xfer_sender: [u64; 32]
+var sosix_sock_xfer_receiver: [u64; 32]
+var sosix_sock_xfer_fd_count: [u64; 32]
+var sosix_sock_xfer_generations: [u64; 32]
+# Packed FD slots: [slot_index * SOSIX_SOCK_MAX_FDS + fd_index]
+var sosix_sock_xfer_fds: [i32; 256]
+
+fn sosix_socket_share_init():
+    """Initialize the SOSIX socket FD-transfer table."""
+    var i: u64 = 0
+    while i < SOSIX_MAX_SOCK_TRANSFERS:
+        sosix_sock_xfer_active[i] = false
+        sosix_sock_xfer_state[i] = SOSIX_SOCK_XFER_FREE
+        sosix_sock_xfer_sender[i] = 0
+        sosix_sock_xfer_receiver[i] = 0
+        sosix_sock_xfer_fd_count[i] = 0
+        sosix_sock_xfer_generations[i] = 0
+        i = i + 1
+    i = 0
+    while i < SOSIX_MAX_SOCK_TRANSFERS * SOSIX_SOCK_MAX_FDS:
+        sosix_sock_xfer_fds[i] = -1
+        i = i + 1
+
+fn _sosix_sock_handle_slot(handle: u64) -> u64:
+    handle & SOSIX_SOCK_HANDLE_SLOT_MASK
+
+fn _sosix_sock_handle_generation(handle: u64) -> u64:
+    handle >> SOSIX_SOCK_HANDLE_SLOT_BITS
+
+fn _sosix_sock_make_handle(slot: u64) -> u64:
+    (sosix_sock_xfer_generations[slot] << SOSIX_SOCK_HANDLE_SLOT_BITS) | slot
+
+fn _sosix_sock_xfer_valid(handle: u64) -> bool:
+    if handle == SOSIX_SOCK_NO_HANDLE:
+        return false
+    val slot = _sosix_sock_handle_slot(handle)
+    if slot >= SOSIX_MAX_SOCK_TRANSFERS:
+        return false
+    if not sosix_sock_xfer_active[slot]:
+        return false
+    sosix_sock_xfer_generations[slot] == _sosix_sock_handle_generation(handle)
+
+fn sosix_socket_transfer_create(sender_pid: u64, receiver_pid: u64) -> i64:
+    """Create a pending socket FD-transfer record from sender to receiver.
+
+    Returns a handle (>=0) on success, or a negated errno on failure.
+    """
+    if sender_pid == 0:
+        return 0 - EINVAL as i64
+    var i: u64 = 0
+    while i < SOSIX_MAX_SOCK_TRANSFERS:
+        if not sosix_sock_xfer_active[i]:
+            sosix_sock_xfer_active[i] = true
+            sosix_sock_xfer_state[i] = SOSIX_SOCK_XFER_PENDING
+            sosix_sock_xfer_sender[i] = sender_pid
+            sosix_sock_xfer_receiver[i] = receiver_pid
+            sosix_sock_xfer_fd_count[i] = 0
+            var fi: u64 = 0
+            while fi < SOSIX_SOCK_MAX_FDS:
+                sosix_sock_xfer_fds[i * SOSIX_SOCK_MAX_FDS + fi] = -1
+                fi = fi + 1
+            return _sosix_sock_make_handle(i) as i64
+        i = i + 1
+    0 - ENOMEM as i64
+
+fn sosix_socket_transfer_add_fd(handle: u64, fd: i32) -> i64:
+    """Attach an FD to a pending socket transfer.
+
+    Returns 0 on success, negated errno on failure.
+    """
+    if not _sosix_sock_xfer_valid(handle):
+        return 0 - EBADF as i64
+    val slot = _sosix_sock_handle_slot(handle)
+    if sosix_sock_xfer_state[slot] != SOSIX_SOCK_XFER_PENDING:
+        return 0 - EINVAL as i64
+    val count = sosix_sock_xfer_fd_count[slot]
+    if count >= SOSIX_SOCK_MAX_FDS:
+        return 0 - EINVAL as i64
+    sosix_sock_xfer_fds[slot * SOSIX_SOCK_MAX_FDS + count] = fd
+    sosix_sock_xfer_fd_count[slot] = count + 1
+    0
+
+fn sosix_socket_transfer_fd_count(handle: u64) -> i64:
+    """Return the number of FDs in the transfer, or negated errno."""
+    if not _sosix_sock_xfer_valid(handle):
+        return 0 - EBADF as i64
+    sosix_sock_xfer_fd_count[_sosix_sock_handle_slot(handle)] as i64
+
+fn sosix_socket_transfer_get_fd(handle: u64, index: u64) -> i32:
+    """Return the FD at index within the transfer, or -1 on bad handle/index."""
+    if not _sosix_sock_xfer_valid(handle):
+        return -1
+    val slot = _sosix_sock_handle_slot(handle)
+    if index >= sosix_sock_xfer_fd_count[slot]:
+        return -1
+    sosix_sock_xfer_fds[slot * SOSIX_SOCK_MAX_FDS + index]
+
+fn sosix_socket_transfer_consume(handle: u64) -> i64:
+    """Mark a transfer as consumed by the receiver.
+
+    Returns 0 on success, negated errno on failure.
+    """
+    if not _sosix_sock_xfer_valid(handle):
+        return 0 - EBADF as i64
+    val slot = _sosix_sock_handle_slot(handle)
+    if sosix_sock_xfer_state[slot] != SOSIX_SOCK_XFER_PENDING:
+        return 0 - EINVAL as i64
+    sosix_sock_xfer_state[slot] = SOSIX_SOCK_XFER_CONSUMED
+    0
+
+fn sosix_socket_transfer_close(handle: u64) -> i64:
+    """Release a socket FD-transfer slot.
+
+    Returns 0 on success, negated errno on failure.
+    """
+    if not _sosix_sock_xfer_valid(handle):
+        return 0 - EBADF as i64
+    val slot = _sosix_sock_handle_slot(handle)
+    sosix_sock_xfer_active[slot] = false
+    sosix_sock_xfer_state[slot] = SOSIX_SOCK_XFER_FREE
+    sosix_sock_xfer_sender[slot] = 0
+    sosix_sock_xfer_receiver[slot] = 0
+    sosix_sock_xfer_fd_count[slot] = 0
+    sosix_sock_xfer_generations[slot] = sosix_sock_xfer_generations[slot] + 1
+    var fi: u64 = 0
+    while fi < SOSIX_SOCK_MAX_FDS:
+        sosix_sock_xfer_fds[slot * SOSIX_SOCK_MAX_FDS + fi] = -1
+        fi = fi + 1
+    0
+
+fn sosix_socket_transfer_handle_slot(handle: u64) -> i64:
+    if not _sosix_sock_xfer_valid(handle):
+        return 0 - EBADF as i64
+    _sosix_sock_handle_slot(handle) as i64
+
+fn sosix_socket_transfer_handle_generation(handle: u64) -> i64:
+    if not _sosix_sock_xfer_valid(handle):
+        return 0 - EBADF as i64
+    _sosix_sock_handle_generation(handle) as i64

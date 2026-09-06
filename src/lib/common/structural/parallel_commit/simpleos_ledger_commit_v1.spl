@@ -1,0 +1,214 @@
+# SimpleOS capability-ledger commit contract.
+#
+# This is the shared, immutable value vocabulary.  The evidence service is the
+# only mutable owner; runners may construct candidates but cannot publish rows.
+
+use std.common.structural.receipt.simpleos_evidence_receipt_v1.{
+    SimpleOsEvidenceEnvironment,
+    SimpleOsEvidenceReceiptV1,
+    simpleos_evidence_environment_to_text
+}
+
+val SIMPLEOS_LEDGER_SCHEMA_VERSION: i64 = 1
+val SIMPLEOS_LEDGER_MAX_ROWS: i64 = 4096
+val SIMPLEOS_LEDGER_MAX_BATCH_ROWS: i64 = 256
+val SIMPLEOS_LEDGER_MAX_KEY_BYTES: i64 = 256
+val SIMPLEOS_LEDGER_MAX_REASON_BYTES: i64 = 512
+val SIMPLEOS_LEDGER_MAX_TODO_BYTES: i64 = 512
+val SIMPLEOS_LEDGER_MAX_PREREQUISITE_BYTES: i64 = 512
+val SIMPLEOS_LEDGER_MAX_RESUME_COMMAND_BYTES: i64 = 1024
+val SIMPLEOS_LEDGER_MAX_OWNER_BYTES: i64 = 256
+val SIMPLEOS_LEDGER_MAX_REVIEWER_BYTES: i64 = 256
+val SIMPLEOS_LEDGER_MAX_ARTIFACTS: i64 = 64
+val SIMPLEOS_LEDGER_MAX_ARTIFACT_PATH_BYTES: i64 = 1024
+val SIMPLEOS_LEDGER_MAX_CONSUMED_NONCES: i64 = 8192
+
+enum SimpleOsCapabilityStatus:
+    Pass
+    Blocked
+
+enum SimpleOsCapabilityLedgerFailure:
+    None
+    InvalidLedger
+    InvalidCandidate
+    BatchBound
+    DuplicateKey
+    RowBound
+    NonceBound
+    AdmissionRequired
+    RevisionExhausted
+
+struct SimpleOsCapabilityRowV1:
+    requirement_id: text
+    capability: text
+    target: text
+    environment: SimpleOsEvidenceEnvironment
+    filesystem: text
+    protocol_profile: text
+    status: SimpleOsCapabilityStatus
+    receipt_id: text
+    receipt_nonce: text
+    source_hash: text
+    image_hash: text
+    binary_hash: text
+    config_hash: text
+    artifacts: [text]
+    artifact_paths: [text]
+    blocker_reason: text
+    todo: text
+    prerequisite: text
+    resume_command: text
+    owner: text
+    reviewer: text
+
+struct SimpleOsCapabilityLedgerV1:
+    schema_version: i64
+    revision: i64
+    rows: [SimpleOsCapabilityRowV1]
+    consumed_nonces: [text]
+
+struct SimpleOsCapabilityLedgerCandidateV1:
+    row: SimpleOsCapabilityRowV1
+    receipt_present: bool
+    receipt: SimpleOsEvidenceReceiptV1
+
+struct SimpleOsCapabilityAdmissionContextV1:
+    admission_owner: text
+    issued_nonce: text
+    current_source_hash: text
+    current_image_hash: text
+    current_binary_hash: text
+    current_config_hash: text
+    current_artifact_hashes: [text]
+    freshness_lower_bound_unix_us: i64
+    now_unix_us: i64
+    trusted_signer_key_id: text
+    signature_verified: bool
+    source_hash_verified: bool
+    image_hash_verified: bool
+    binary_hash_verified: bool
+    config_hash_verified: bool
+    artifacts_verified: bool
+    # Performance admission is derived by the service from the receipt and
+    # the canonical performance contract.  These values are service-owned
+    # campaign inputs, never runner assertions.
+    performance_configured_max_rss_bytes: u64
+    performance_baseline_value: u64
+    performance_baseline_rss_bytes: u64
+    performance_fixture_hash: text
+    performance_baseline_identity_hash: text
+    performance_external_comparability_verified: bool
+
+struct SimpleOsCapabilityLedgerCheckV1:
+    ok: bool
+    reason: text
+
+struct SimpleOsCapabilityLedgerCommitResultV1:
+    ok: bool
+    ledger: SimpleOsCapabilityLedgerV1
+    ordered_keys: [text]
+    failure: SimpleOsCapabilityLedgerFailure
+    reason: text
+
+fn simpleos_capability_status_to_text(status: SimpleOsCapabilityStatus) -> text:
+    match status:
+        case SimpleOsCapabilityStatus.Pass: "Pass"
+        case SimpleOsCapabilityStatus.Blocked: "Blocked"
+
+fn simpleos_capability_status_valid(status: SimpleOsCapabilityStatus) -> bool:
+    match status:
+        case SimpleOsCapabilityStatus.Pass: true
+        case SimpleOsCapabilityStatus.Blocked: true
+
+fn simpleos_capability_ledger_v1() -> SimpleOsCapabilityLedgerV1:
+    SimpleOsCapabilityLedgerV1(
+        schema_version: SIMPLEOS_LEDGER_SCHEMA_VERSION,
+        revision: 0,
+        rows: [],
+        consumed_nonces: [])
+
+fn simpleos_capability_row_key(row: SimpleOsCapabilityRowV1) -> text:
+    row.requirement_id + "|" + row.capability + "|" + row.target + "|" +
+        simpleos_evidence_environment_to_text(row.environment) + "|" +
+        row.filesystem + "|" + row.protocol_profile
+
+fn simpleos_capability_rows_same_key(a: SimpleOsCapabilityRowV1,
+                                     b: SimpleOsCapabilityRowV1) -> bool:
+    simpleos_capability_row_key(a) == simpleos_capability_row_key(b)
+
+fn simpleos_capability_ledger_candidate_before(
+    a: SimpleOsCapabilityLedgerCandidateV1,
+    b: SimpleOsCapabilityLedgerCandidateV1) -> bool:
+    simpleos_capability_row_key(a.row) < simpleos_capability_row_key(b.row)
+
+fn simpleos_capability_ledger_order_candidates(
+    candidates: [SimpleOsCapabilityLedgerCandidateV1])
+        -> [SimpleOsCapabilityLedgerCandidateV1]:
+    # Stable insertion order is deterministic and bounded by the batch cap.
+    var ordered: [SimpleOsCapabilityLedgerCandidateV1] = []
+    for candidate in candidates:
+        var position: i64 = ordered.len()
+        while position > 0:
+            val previous = ordered[position - 1]
+            if not simpleos_capability_ledger_candidate_before(candidate, previous):
+                break
+            position = position - 1
+        ordered = ordered.push(candidate)
+        var i: i64 = ordered.len() - 1
+        while i > position:
+            ordered[i] = ordered[i - 1]
+            i = i - 1
+        ordered[position] = candidate
+    ordered
+
+fn simpleos_capability_row_key_bounded(row: SimpleOsCapabilityRowV1) -> bool:
+    val key = simpleos_capability_row_key(row)
+    key.len() > 0 and key.len() <= SIMPLEOS_LEDGER_MAX_KEY_BYTES
+
+fn simpleos_capability_ledger_check_v1(
+    ledger: SimpleOsCapabilityLedgerV1) -> SimpleOsCapabilityLedgerCheckV1:
+    if ledger.schema_version != SIMPLEOS_LEDGER_SCHEMA_VERSION:
+        return SimpleOsCapabilityLedgerCheckV1(ok: false, reason: "schema-version")
+    if ledger.revision < 0:
+        return SimpleOsCapabilityLedgerCheckV1(ok: false, reason: "revision")
+    if ledger.rows.len() > SIMPLEOS_LEDGER_MAX_ROWS:
+        return SimpleOsCapabilityLedgerCheckV1(ok: false, reason: "row-bound")
+    if ledger.consumed_nonces.len() > SIMPLEOS_LEDGER_MAX_CONSUMED_NONCES:
+        return SimpleOsCapabilityLedgerCheckV1(ok: false, reason: "nonce-bound")
+    var nonce_index: i64 = 0
+    while nonce_index < ledger.consumed_nonces.len():
+        val nonce = ledger.consumed_nonces[nonce_index]
+        if nonce.len() == 0 or nonce.len() > SIMPLEOS_LEDGER_MAX_KEY_BYTES:
+            return SimpleOsCapabilityLedgerCheckV1(ok: false, reason: "nonce-invalid")
+        if nonce_index > 0 and ledger.consumed_nonces[nonce_index - 1] >= nonce:
+            return SimpleOsCapabilityLedgerCheckV1(ok: false, reason: "nonce-order")
+        nonce_index = nonce_index + 1
+    var i: i64 = 0
+    while i < ledger.rows.len():
+        val row = ledger.rows[i]
+        if not simpleos_capability_row_key_bounded(row):
+            return SimpleOsCapabilityLedgerCheckV1(ok: false, reason: "key-bound")
+        if i > 0 and simpleos_capability_row_key(ledger.rows[i - 1]) >=
+            simpleos_capability_row_key(row):
+            return SimpleOsCapabilityLedgerCheckV1(ok: false, reason: "row-order")
+        i = i + 1
+    SimpleOsCapabilityLedgerCheckV1(ok: true, reason: "")
+
+export SIMPLEOS_LEDGER_SCHEMA_VERSION, SIMPLEOS_LEDGER_MAX_ROWS
+export SIMPLEOS_LEDGER_MAX_BATCH_ROWS, SIMPLEOS_LEDGER_MAX_KEY_BYTES
+export SIMPLEOS_LEDGER_MAX_REASON_BYTES, SIMPLEOS_LEDGER_MAX_TODO_BYTES
+export SIMPLEOS_LEDGER_MAX_PREREQUISITE_BYTES
+export SIMPLEOS_LEDGER_MAX_RESUME_COMMAND_BYTES, SIMPLEOS_LEDGER_MAX_OWNER_BYTES
+export SIMPLEOS_LEDGER_MAX_REVIEWER_BYTES, SIMPLEOS_LEDGER_MAX_ARTIFACTS
+export SIMPLEOS_LEDGER_MAX_ARTIFACT_PATH_BYTES, SIMPLEOS_LEDGER_MAX_CONSUMED_NONCES
+export SimpleOsCapabilityStatus, SimpleOsCapabilityRowV1
+export SimpleOsCapabilityLedgerFailure
+export SimpleOsCapabilityLedgerV1, SimpleOsCapabilityLedgerCandidateV1
+export SimpleOsCapabilityAdmissionContextV1
+export SimpleOsCapabilityLedgerCheckV1, SimpleOsCapabilityLedgerCommitResultV1
+export simpleos_capability_status_to_text, simpleos_capability_status_valid
+export simpleos_capability_ledger_v1
+export simpleos_capability_row_key, simpleos_capability_rows_same_key
+export simpleos_capability_ledger_candidate_before
+export simpleos_capability_ledger_order_candidates
+export simpleos_capability_row_key_bounded, simpleos_capability_ledger_check_v1

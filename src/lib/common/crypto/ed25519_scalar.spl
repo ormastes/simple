@@ -1,0 +1,157 @@
+# Ed25519 scalar arithmetic modulo the prime group order L.
+# Canonical common-layer scalar owner used by signing and verification.
+
+# ============================================================================
+# Scalar Arithmetic mod L
+# ============================================================================
+
+fn _sc_L() -> [u32]:
+    """Group order L as 8 u32 limbs (little-endian)."""
+    var l: [u32] = []
+    l.push(0x5cf5d3ed)
+    l.push(0x5812631a)
+    l.push(0xa2f79cd6)
+    l.push(0x14def9de)
+    l.push(0x00000000)
+    l.push(0x00000000)
+    l.push(0x00000000)
+    l.push(0x10000000)
+    l
+
+fn _bytes_to_limbs32(b: [u8], count: u64) -> [u32]:
+    var limbs: [u32] = []
+    var i: u64 = 0
+    while i < count:
+        val idx = i * 4
+        var val_u32 = b[idx].to_u32()
+        val_u32 = val_u32 | (b[idx + 1].to_u32() << 8)
+        val_u32 = val_u32 | (b[idx + 2].to_u32() << 16)
+        val_u32 = val_u32 | (b[idx + 3].to_u32() << 24)
+        limbs.push(val_u32)
+        i = i + 1
+    limbs
+
+fn _limbs32_to_bytes(limbs: [u32], byte_count: u64) -> [u8]:
+    var result: [u8] = []
+    var i: u64 = 0
+    while i < byte_count:
+        val limb_idx = i / 4
+        val byte_idx = i % 4
+        val byte_val = ((limbs[limb_idx].to_u64() >> (byte_idx * 8)) & 0xFF).to_u8()
+        result.push(byte_val)
+        i = i + 1
+    result
+
+fn _sc_sub_L(a: [u32]) -> [u32]:
+    """Constant-work subtraction of L; limb[8] is the final borrow bit."""
+    val l = _sc_L()
+    var result: [u32] = []
+    var borrow: u64 = 0
+    var i: u64 = 0
+    while i < 8:
+        val ai: u64 = a[i].to_u64()
+        val li: u64 = l[i].to_u64()
+        # Adding 2^32 prevents unsigned underflow.  Bit 32 is one exactly
+        # when this limb did not borrow, so the next borrow is its inverse.
+        val wide = ai + 0x100000000u64 - li - borrow
+        result.push((wide & 0xFFFFFFFFu64).to_u32())
+        borrow = 1u64 - ((wide >> 32) & 1u64)
+        i = i + 1
+    result.push(borrow.to_u32())
+    result
+
+fn _sc_get_bit_bytes(s: [u8], bit_idx: u64) -> u64:
+    val byte_idx = bit_idx / 8
+    val bit_in_byte = bit_idx - byte_idx * 8
+    (s[byte_idx].to_u64() >> bit_in_byte) & 1
+
+fn _sc_shift_left1_add_bit(a: [u32], bit: u64) -> [u32]:
+    var result: [u32] = []
+    var carry = bit
+    var i: u64 = 0
+    while i < 8:
+        val v = a[i].to_u64() * 2 + carry
+        result.push((v & 0xFFFFFFFF).to_u32())
+        carry = v >> 32
+        i = i + 1
+    result
+
+fn _sc_low8(a: [u32]) -> [u32]:
+    var low: [u32] = []
+    var i: u64 = 0
+    while i < 8:
+        low.push(a[i])
+        i = i + 1
+    low
+
+fn _sc_select8(a: [u32], b: [u32], choose_b: u64) -> [u32]:
+    """Select b when choose_b is one, otherwise a, without a branch."""
+    val mask = 0u64 - choose_b
+    var selected: [u32] = []
+    var i: u64 = 0
+    while i < 8:
+        val ai = a[i].to_u64()
+        val bi = b[i].to_u64()
+        selected.push((ai ^ (mask & (ai ^ bi))).to_u32())
+        i = i + 1
+    selected
+
+fn _sc_reduce_bits(s: [u8], max_bit_idx: i64) -> [u32]:
+    var rem: [u32] = [0,0,0,0,0,0,0,0]
+    var bit_idx = max_bit_idx
+    while bit_idx >= 0:
+        rem = _sc_shift_left1_add_bit(rem, _sc_get_bit_bytes(s, bit_idx as u64))
+        val sub = _sc_sub_L(rem)
+        val reduced = _sc_low8(sub)
+        val choose_reduced = 1u64 - sub[8].to_u64()
+        rem = _sc_select8(rem, reduced, choose_reduced)
+        bit_idx = bit_idx - 1
+    rem
+
+fn _sc_add_mod(a: [u32], b: [u32]) -> [u32]:
+    var result: [u32] = []
+    var carry: u64 = 0
+    var i: u64 = 0
+    while i < 8:
+        val sum = a[i].to_u64() + b[i].to_u64() + carry
+        result.push((sum & 0xFFFFFFFF).to_u32())
+        carry = sum >> 32
+        i = i + 1
+    # Inputs are reduced, so their sum is below 2L and one conditional
+    # subtraction is sufficient.  The final 256-bit carry is therefore zero;
+    # keep the fixed limb loop above so work is independent of operand bits.
+    val sub = _sc_sub_L(result)
+    val reduced = _sc_low8(sub)
+    val choose_reduced = 1u64 - sub[8].to_u64()
+    _sc_select8(result, reduced, choose_reduced)
+
+fn _sc_mul_mod(a: [u32], b: [u32]) -> [u32]:
+    var acc: [u32] = [0,0,0,0,0,0,0,0]
+    var addend = a
+    var bit_idx: u64 = 0
+    while bit_idx < 256:
+        val limb_idx = bit_idx / 32
+        val bit_in_limb = bit_idx - limb_idx * 32
+        val bit = (b[limb_idx].to_u64() >> bit_in_limb) & 1
+        val added = _sc_add_mod(acc, addend)
+        acc = _sc_select8(acc, added, bit)
+        addend = _sc_add_mod(addend, addend)
+        bit_idx = bit_idx + 1
+    acc
+
+fn sc_reduce(s: [u8]) -> [u8]:
+    """Reduce a 64-byte scalar modulo L to 32 bytes."""
+    val rem = _sc_reduce_bits(s, 511)
+    _limbs32_to_bytes(rem, 32)
+
+fn sc_muladd(a_bytes: [u8], b_bytes: [u8], c_bytes: [u8]) -> [u8]:
+    """Compute (a * b + c) mod L, where a, b, c are 32-byte scalars."""
+    val a = _sc_reduce_bits(a_bytes, 255)
+    val b = _sc_reduce_bits(b_bytes, 255)
+    val c = _sc_reduce_bits(c_bytes, 255)
+    val product = _sc_mul_mod(a, b)
+    _limbs32_to_bytes(_sc_add_mod(product, c), 32)
+
+# Minimal cross-file surface consumed by the public Ed25519 facade.
+export _sc_L, _bytes_to_limbs32, _limbs32_to_bytes, _sc_sub_L
+export sc_reduce, sc_muladd

@@ -1,0 +1,186 @@
+# LLM Caret - OpenCode CLI Wrapper
+
+use app.io.mod.{process_run, process_spawn_async, process_is_running, process_kill}
+use std.common.json.parser.{json_parse}
+use std.common.json.object_ops.{json_object_get, json_object_has}
+use std.common.json.types.{json_get_type, json_to_string}
+
+struct OpencodeCliResponse:
+    content: text
+    model: text
+    session_id: text
+    stop_reason: text
+    input_tokens: i64
+    output_tokens: i64
+    error: text
+    is_error: bool
+    raw: text
+
+struct OpencodeProcessResult:
+    status: text
+    reason: text
+    pid: i64
+
+struct OpencodeInvocation:
+    path: text
+    args: [text]
+
+fn _json_text(object: any, key: text) -> text:
+    val value = json_to_string(json_object_get(object, key))
+    if value == nil: "" else: value
+
+fn _json_string_field_valid(object: any, key: text) -> bool:
+    not json_object_has(object, key) or
+        json_get_type(json_object_get(object, key)) == "string"
+
+fn _error_response(error: text, model: text, session_id: text, raw: text) -> OpencodeCliResponse:
+    OpencodeCliResponse(
+        content: "",
+        model: model,
+        session_id: session_id,
+        stop_reason: "error",
+        input_tokens: 0,
+        output_tokens: 0,
+        error: error,
+        is_error: true,
+        raw: raw
+    )
+
+pub fn build_opencode_args(prompt: text, model: text, session_id: text, output_format: text, attach_url: text, auto_approve: bool, extra_args: [text]) -> [text]:
+    var args = ["run"]
+    if output_format != "":
+        args = args + ["--format", output_format]
+    else:
+        args = args + ["--format", "json"]
+    if model != "":
+        args = args + ["--model", model]
+    if session_id != "":
+        args = args + ["--session", session_id]
+    if attach_url != "":
+        args = args + ["--attach", attach_url]
+    if auto_approve:
+        args = args + ["--auto"]
+    for arg in extra_args:
+        if arg != "":
+            args = args + [arg]
+    args + [prompt]
+
+pub fn build_opencode_invocation(cli_path: text, prompt: text, model: text, session_id: text, attach_url: text, extra_args: [text]) -> OpencodeInvocation:
+    var path = cli_path
+    if path == "":
+        path = "opencode"
+    OpencodeInvocation(
+        path: path,
+        args: build_opencode_args(
+            prompt, model, session_id, "json", attach_url, false, extra_args
+        )
+    )
+
+pub fn parse_opencode_response(raw: text, model: text) -> OpencodeCliResponse:
+    val trimmed = raw.trim()
+    if trimmed == "":
+        return _error_response("empty response", model, "", raw)
+    val parsed = json_parse(trimmed)
+    if parsed == nil:
+        if trimmed.starts_with("{") or trimmed.starts_with("[") or
+           trimmed.ends_with("}") or trimmed.ends_with("]"):
+            return _error_response("malformed response", model, "", raw)
+        return OpencodeCliResponse(
+            content: trimmed,
+            model: model,
+            session_id: "",
+            stop_reason: "stop",
+            input_tokens: 0,
+            output_tokens: 0,
+            error: "",
+            is_error: false,
+            raw: raw
+        )
+    if json_get_type(parsed) != "object":
+        return _error_response("malformed response", model, "", raw)
+    for field in ["content", "message", "text", "error", "sessionID"]:
+        if not _json_string_field_valid(parsed, field):
+            return _error_response("malformed response", model, "", raw)
+    val provider_error = _json_text(parsed, "error")
+    if provider_error != "":
+        return _error_response(
+            provider_error, model, _json_text(parsed, "sessionID"), raw
+        )
+    val has_content = (
+        json_object_has(parsed, "content") or
+        json_object_has(parsed, "message") or
+        json_object_has(parsed, "text")
+    )
+    if not has_content:
+        return _error_response("malformed response", model, "", raw)
+    val content = _first_non_empty([
+        _json_text(parsed, "content"),
+        _json_text(parsed, "message"),
+        _json_text(parsed, "text")
+    ])
+    val session = _json_text(parsed, "sessionID")
+    OpencodeCliResponse(content: content, model: model, session_id: session, stop_reason: "stop", input_tokens: 0, output_tokens: 0, error: "", is_error: false, raw: raw)
+
+fn _first_non_empty(values: [text]) -> text:
+    for value in values:
+        if value != "":
+            return value
+    ""
+
+pub fn complete_opencode_process(model: text, session_id: text, stdout: text, stderr: text, exit_code: i64) -> OpencodeCliResponse:
+    if exit_code != 0:
+        var err = "opencode CLI exited with code " + exit_code.to_text()
+        if stderr.trim() != "":
+            err = err + ": " + stderr.trim()
+        return _error_response(err, model, session_id, stdout)
+    val parsed = parse_opencode_response(stdout, model)
+    if parsed.is_error or parsed.session_id != "" or session_id == "":
+        return parsed
+    OpencodeCliResponse(
+        content: parsed.content,
+        model: parsed.model,
+        session_id: session_id,
+        stop_reason: parsed.stop_reason,
+        input_tokens: parsed.input_tokens,
+        output_tokens: parsed.output_tokens,
+        error: parsed.error,
+        is_error: parsed.is_error,
+        raw: parsed.raw
+    )
+
+pub fn opencode_cli_send(cli_path: text, prompt: text, model: text, session_id: text, attach_url: text, extra_args: [text]) -> OpencodeCliResponse:
+    val invocation = build_opencode_invocation(
+        cli_path, prompt, model, session_id, attach_url, extra_args
+    )
+    val result = process_run(invocation.path, invocation.args)
+    val stdout = result.0 ?? ""
+    val stderr = result.1 ?? ""
+    val exit_code = result.2
+    complete_opencode_process(model, session_id, stdout, stderr, exit_code)
+
+pub fn opencode_cli_spawn(cli_path: text, prompt: text, model: text, session_id: text, attach_url: text, extra_args: [text]) -> OpencodeProcessResult:
+    val invocation = build_opencode_invocation(
+        cli_path, prompt, model, session_id, attach_url, extra_args
+    )
+    val pid = process_spawn_async(invocation.path, invocation.args)
+    if pid <= 0:
+        return OpencodeProcessResult(status: "error", reason: "spawn_failed", pid: pid)
+    OpencodeProcessResult(status: "started", reason: "process_spawned", pid: pid)
+
+pub fn opencode_cli_running_status(pid: i64) -> text:
+    if pid <= 0:
+        return "not_running"
+    if process_is_running(pid):
+        return "running"
+    "not_running"
+
+pub fn opencode_cli_kill(pid: i64) -> OpencodeProcessResult:
+    if pid <= 0:
+        return OpencodeProcessResult(status: "not_stopped", reason: "invalid_pid", pid: pid)
+    if process_kill(pid):
+        return OpencodeProcessResult(status: "stopped", reason: "process_killed", pid: pid)
+    OpencodeProcessResult(status: "error", reason: "process_kill_failed", pid: pid)
+
+export OpencodeCliResponse, OpencodeProcessResult, OpencodeInvocation
+export build_opencode_args, build_opencode_invocation, parse_opencode_response, complete_opencode_process
+export opencode_cli_send, opencode_cli_spawn, opencode_cli_running_status, opencode_cli_kill

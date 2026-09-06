@@ -1,0 +1,53 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+CHECKER="$ROOT_DIR/scripts/check/check-simpleos-compiler-filesystem-qemu.shs"
+RUNNER="$ROOT_DIR/scripts/check/fixtures/simpleos-compiler-filesystem-fake-qemu.shs"
+TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/simpleos-cfs-qemu-contract.XXXXXX")
+trap 'rm -rf "$TMP_DIR"' EXIT HUP INT TERM
+
+IMAGE="$TMP_DIR/disk.img"
+printf 'contract fixture, never live evidence\n' >"$IMAGE"
+
+for arch in x86_64 aarch64 riscv32 riscv64; do
+    output="$TMP_DIR/$arch"
+    result=$(SIMPLEOS_COMPILER_FS_QEMU_TEST_MODE=1 \
+        SIMPLEOS_COMPILER_FS_QEMU_RUNNER="$RUNNER" \
+        sh "$CHECKER" --arch="$arch" --image="$IMAGE" --output-dir="$output")
+    printf '%s\n' "$result" | grep -Fx "simpleos_compiler_filesystem_qemu_status=contract-pass" >/dev/null
+    grep -Fx "status=contract-pass" "$output/$arch.manifest" >/dev/null
+    grep -Fx "evidence_class=hermetic-fake-qemu-contract" "$output/$arch.manifest" >/dev/null
+    grep -Fx "arch=$arch" "$output/$arch.manifest" >/dev/null
+done
+
+if SIMPLEOS_COMPILER_FS_QEMU_RUNNER="$RUNNER" \
+    sh "$CHECKER" --arch=aarch64 --image="$IMAGE" --output-dir="$TMP_DIR/no-test-mode" \
+    >"$TMP_DIR/no-test-mode.log" 2>&1; then
+    echo "FAIL: runner override passed without explicit test mode" >&2
+    exit 1
+fi
+grep -F "runner-override-requires-test-mode" "$TMP_DIR/no-test-mode.log" >/dev/null
+
+set +e
+sh "$CHECKER" --arch=aarch64 --image="$IMAGE" --output-dir="$TMP_DIR/live" \
+    >"$TMP_DIR/live.log" 2>&1
+live_status=$?
+set -e
+[ "$live_status" -eq 3 ]
+grep -F "aarch64-live-compiler-filesystem-route-absent" "$TMP_DIR/live.log" >/dev/null
+[ ! -e "$TMP_DIR/live/aarch64.receipt" ]
+
+for arch in riscv32 riscv64; do
+    set +e
+    sh "$CHECKER" --arch="$arch" --image="$IMAGE" --output-dir="$TMP_DIR/live-$arch" \
+        >"$TMP_DIR/live-$arch.log" 2>&1
+    live_status=$?
+    set -e
+    [ "$live_status" -eq 3 ]
+    grep -F "$arch-live-compiler-filesystem-route-absent" "$TMP_DIR/live-$arch.log" >/dev/null
+    grep -F "implement-target-native-payload-and-in-guest-exec-for-$arch-virtio-fat32-smf" "$TMP_DIR/live-$arch.log" >/dev/null
+    [ ! -e "$TMP_DIR/live-$arch/$arch.receipt" ]
+done
+
+echo "simpleos compiler filesystem QEMU contract tests passed"

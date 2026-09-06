@@ -1,0 +1,126 @@
+"""
+# `spawn` and `join` use the same store under the `native` concurrent backend
+
+**Category:** Interpreter concurrency bridge (reproducing spec)
+**Bug:** doc/08_tracking/bug/native_concurrent_backend_spawn_not_backend_aware_join_is_2026-08-04.md
+
+## Overview
+
+With the concurrent backend set to `"native"`, every spawned thread joined to
+`nil`. Silently — no error, no warning.
+
+`rt_thread_join` (`interpreter_extern/concurrency.rs`) opened with
+`get_concurrent_registry()` and dispatched to `registry.thread.thread_join`
+whenever the backend was not `PureStd`. The two spawn functions,
+`rt_thread_spawn_isolated_with_context` and
+`rt_thread_spawn_isolated_with_args_context`, had **no**
+`get_concurrent_registry()` call at all: they unconditionally allocated a
+handle from `NEXT_HANDLE_ID` and stored the result in the process-global
+`THREAD_RESULTS` map. So spawn wrote one store and join read another, and the
+native provider had never heard of the handle it was asked about.
+
+The discriminator in the original report was clean: the `pure_std` spawns in
+the very same examples joined correctly; only the spawns issued while `native`
+was active returned `nil`.
+
+## Why a subprocess
+
+`rt_set_concurrent_backend` mutates a **process-global** registry. Setting it
+from inside the shared spec-runner process changes Map/Channel/Thread behaviour
+for every other spec in the same run. The fixture is therefore driven in a child
+process, through the tree-walk interpreter
+(`SIMPLE_EXECUTION_MODE=interpreter`) — `run` alone is the Cranelift JIT and
+never reaches `interpreter_extern/concurrency.rs`, which would make this spec
+vacuous.
+
+## Oracle
+
+Expected values are literals, none of them `nil` and none of them `0` — the
+defect returned `nil` in the native direction, and the pure_std join miss
+defaulted to `Value::Int(0)`, so a `0` would hide the mirror-image fault.
+The backend is asserted to have actually changed, so a no-op
+`rt_set_concurrent_backend` cannot let the working pure_std path satisfy the
+native assertions.
+"""
+
+use std.spec.*
+use std.io_runtime.{file_write, process_run, env_get}
+
+# NOTE: no `{...}` interpolation in the embedded source — a `{name}` inside this
+# spec's own string literal is resolved by the SPEC's lexer and kills the file
+# with `zero-examples` before any example runs.
+val FIXTURE_SOURCE: text = ("extern fn rt_thread_spawn_isolated(closure: Any) -> i64\n" +
+    "extern fn rt_thread_spawn_isolated_with_args(closure: Any, d1: Any, d2: Any) -> i64\n" +
+    "extern fn rt_thread_join(handle: i64) -> Any\n" +
+    "extern fn rt_set_concurrent_backend(name: text)\n" +
+    "extern fn rt_get_concurrent_backend() -> text\n" +
+    "\n" +
+    "fn main():\n" +
+    "    rt_set_concurrent_backend(\"native\")\n" +
+    "    print(\"NATIVE-BACKEND\")\n" +
+    "    print(rt_get_concurrent_backend())\n" +
+    "    print(\"NATIVE-SPAWN\")\n" +
+    "    print(rt_thread_join(rt_thread_spawn_isolated(\\: 42)))\n" +
+    "    print(\"NATIVE-SPAWN-ARGS\")\n" +
+    "    print(rt_thread_join(rt_thread_spawn_isolated_with_args(\\a, b: a + b, 2, 3)))\n" +
+    "\n" +
+    "    rt_set_concurrent_backend(\"pure_std\")\n" +
+    "    print(\"PURESTD-SPAWN\")\n" +
+    "    print(rt_thread_join(rt_thread_spawn_isolated(\\: 42)))\n" +
+    "\n" +
+    "    print(\"ALTERNATE\")\n" +
+    "    rt_set_concurrent_backend(\"native\")\n" +
+    "    val h1 = rt_thread_spawn_isolated(\\: 7)\n" +
+    "    rt_set_concurrent_backend(\"pure_std\")\n" +
+    "    val h2 = rt_thread_spawn_isolated(\\: 9)\n" +
+    "    print(rt_thread_join(h1))\n" +
+    "    print(rt_thread_join(h2))\n" +
+    "    print(\"END\")\n")
+
+fn run_spawn_fixture() -> text:
+    val dir = "build/test-artifacts/spawn_join_backend_store"
+    val src = dir + "/spawn_fixture.spl"
+    var bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    process_run("sh", ["-c", "mkdir -p " + dir])
+    file_write(src, FIXTURE_SOURCE)
+    val cmd = ("SIMPLE_BOOTSTRAP=1 SIMPLE_TIMEOUT_SECONDS=0 " +
+        "SIMPLE_EXECUTION_MODE=interpreter nice -n 19 " + bin +
+        " run " + src + " 2>/dev/null || echo FIXTURE-FAILED")
+    val out = process_run("sh", ["-c", cmd])
+    out.0
+
+describe "a thread joins to its own result under either concurrent backend":
+
+    it "returns the spawned value under native, pure_std, and across a switch":
+        # ONE example on purpose: the fixture costs a full compiler start-up and
+        # spec module globals do not persist between examples.
+        step("Run the spawn/join fixture in a child process, interpreted")
+        val out = run_spawn_fixture()
+
+        step("Refuse to pass on a run that produced nothing")
+        # Without this a FIXTURE-FAILED string satisfies every `not contains`
+        # assertion below and the spec is vacuously green.
+        expect(out.contains("FIXTURE-FAILED")).to_equal(false)
+        expect(out).to_contain("END")
+
+        step("The backend really changed — otherwise pure_std satisfies everything")
+        expect(out).to_contain("NATIVE-BACKEND\nnative")
+
+        step("A native-backend spawn joins to its own value (the reported defect)")
+        expect(out).to_contain("NATIVE-SPAWN\n42")
+        expect(out.contains("NATIVE-SPAWN\nnil")).to_equal(false)
+        expect(out.contains("NATIVE-SPAWN\n0")).to_equal(false)
+
+        step("The _with_args spawn variant has the same contract")
+        expect(out).to_contain("NATIVE-SPAWN-ARGS\n5")
+        expect(out.contains("NATIVE-SPAWN-ARGS\nnil")).to_equal(false)
+
+        step("pure_std still works — the control that always passed")
+        expect(out).to_contain("PURESTD-SPAWN\n42")
+
+        step("A handle survives a backend switch between spawn and join")
+        # h1 is spawned under native and joined under pure_std; h2 the reverse
+        # direction of the same hazard. Neither may resolve to a silent nil.
+        expect(out).to_contain("ALTERNATE\n7\n9")

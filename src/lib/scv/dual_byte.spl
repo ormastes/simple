@@ -1,0 +1,46 @@
+# SCV-IMPL-B-03 — the dual-byte content model.
+#
+# A worktree file has TWO byte identities: WorktreeContentId (the bytes as
+# they sit on disk) and RepositoryContentId (the bytes after the repository
+# transform), tied together by a TransformId naming the EOL/filter/attribute
+# policy that maps one onto the other. The native default is the identity
+# transform — worktree bytes ARE repository bytes — and an unknown
+# TransformId is an honest ERROR, never a silent identity.
+
+use std.scv.store.{scv_hash_text}
+
+fn scv_transform_default() -> text:
+    "identity"
+
+fn scv_transform_valid(transform: text) -> bool:
+    transform == "identity" or transform == "eol-lf" or transform == "eol-crlf"
+
+fn scv_apply_transform(transform: text, content: text) -> text:
+    if transform == "identity":
+        return content
+    if transform == "eol-lf":
+        return content.replace("\r\n", "\n")
+    if transform == "eol-crlf":
+        return content.replace("\r\n", "\n").replace("\n", "\r\n")
+    "ERROR dual-byte: unknown transform: {transform}\n"
+
+# Identity of the bytes as they sit in the worktree (pre-transform).
+fn scv_worktree_content_id(content: text) -> text:
+    scv_hash_text("wct", content)
+
+# Identity of the bytes as the repository stores them (post-transform).
+fn scv_repository_content_id(transform: text, content: text) -> text:
+    if not scv_transform_valid(transform):
+        return "ERROR dual-byte: unknown transform: {transform}\n"
+    scv_hash_text("rep", scv_apply_transform(transform, content))
+
+# The full recorded triple: transform + both ids.
+fn scv_dual_byte_record(transform: text, content: text) -> text:
+    if not scv_transform_valid(transform):
+        return "ERROR dual-byte: unknown transform: {transform}\n"
+    val wt = scv_worktree_content_id(content)
+    val repo = scv_repository_content_id(transform, content)
+    "transform: {transform}\nworktree: {wt}\nrepository: {repo}\n"
+
+export scv_transform_default, scv_transform_valid, scv_apply_transform
+export scv_worktree_content_id, scv_repository_content_id, scv_dual_byte_record

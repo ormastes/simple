@@ -1,0 +1,284 @@
+"""
+# Prometheus Metrics Endpoint
+
+Prometheus text exposition format metrics: counters, gauges, and histograms.
+Exposes a `/metrics` handler that returns metrics in the standard
+`text/plain; version=0.0.4` format.
+
+## Usage
+
+```simple
+var registry = MetricsRegistry.new()
+var counter = registry.register_counter("http_requests_total", "Total HTTP requests")
+counter.inc()
+
+var gauge = registry.register_gauge("http_active_connections", "Active connections")
+gauge.set(42)
+
+var hist = registry.register_histogram(
+    "http_request_duration_ms", "Request duration",
+    [5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000]
+)
+hist.observe(37)
+
+val response = metrics_handler(registry, request)
+```
+"""
+
+use std.http_server.types.{HttpRequestData, HttpResponseData}
+
+# ============================================================================
+# Counter — monotonically increasing value
+# ============================================================================
+
+class Counter:
+    """A monotonically increasing counter metric."""
+    name: text
+    help: text
+    labels: [(text, text)]
+    value: i64
+
+    me inc():
+        """Increment by 1."""
+        self.value = self.value + 1
+
+    me inc_by(n: i64):
+        """Increment by n."""
+        self.value = self.value + n
+
+    fn get() -> i64:
+        self.value
+
+# ============================================================================
+# Gauge — value that can go up or down
+# ============================================================================
+
+class Gauge:
+    """A gauge metric that can increase or decrease."""
+    name: text
+    help: text
+    labels: [(text, text)]
+    value: i64
+
+    me set(v: i64):
+        """Set to an absolute value."""
+        self.value = v
+
+    me inc():
+        """Increment by 1."""
+        self.value = self.value + 1
+
+    me dec():
+        """Decrement by 1."""
+        self.value = self.value - 1
+
+    fn get() -> i64:
+        self.value
+
+# ============================================================================
+# Histogram — distribution of observed values
+# ============================================================================
+
+class Histogram:
+    """A histogram metric with configurable bucket boundaries.
+
+    Buckets are cumulative: each bucket counts all observations <= its boundary.
+    """
+    name: text
+    help: text
+    buckets: [i64]
+    counts: [i64]
+    sum_value: i64
+    count_value: i64
+
+    me observe(value: i64):
+        """Record an observed value into the appropriate buckets."""
+        var new_counts: [i64] = []
+        var i = 0
+        while i < self.buckets.len():
+            val current = self.counts[i]
+            if value <= self.buckets[i]:
+                new_counts.push(current + 1)
+            else:
+                new_counts.push(current)
+            i = i + 1
+        self.counts = new_counts
+        self.sum_value = self.sum_value + value
+        self.count_value = self.count_value + 1
+
+    fn get_count() -> i64:
+        self.count_value
+
+    fn get_sum() -> i64:
+        self.sum_value
+
+# ============================================================================
+# MetricsRegistry — central registry for all metric types
+# ============================================================================
+
+class MetricsRegistry:
+    """Central registry that holds all metrics and exposes them."""
+    counters: [Counter]
+    gauges: [Gauge]
+    histograms: [Histogram]
+
+    static fn new() -> MetricsRegistry:
+        MetricsRegistry(counters: [], gauges: [], histograms: [])
+
+    me register_counter(name: text, help: text) -> Counter:
+        """Create and register a new counter."""
+        val counter = Counter(name: name, help: help, labels: [], value: 0)
+        self.counters.push(counter)
+        counter
+
+    me register_gauge(name: text, help: text) -> Gauge:
+        """Create and register a new gauge."""
+        val gauge = Gauge(name: name, help: help, labels: [], value: 0)
+        self.gauges.push(gauge)
+        gauge
+
+    me register_histogram(name: text, help: text, bucket_boundaries: [i64]) -> Histogram:
+        """Create and register a new histogram with the given bucket boundaries."""
+        var zero_counts: [i64] = []
+        var i = 0
+        while i < bucket_boundaries.len():
+            zero_counts.push(0)
+            i = i + 1
+        val hist = Histogram(
+            name: name,
+            help: help,
+            buckets: bucket_boundaries,
+            counts: zero_counts,
+            sum_value: 0,
+            count_value: 0
+        )
+        self.histograms.push(hist)
+        hist
+
+    fn expose() -> text:
+        """Render all metrics in Prometheus text exposition format."""
+        var lines: [text] = []
+
+        for counter in self.counters:
+            lines.push("# HELP {counter.name} {counter.help}")
+            lines.push("# TYPE {counter.name} counter")
+            val label_str = format_labels(counter.labels)
+            lines.push("{counter.name}{label_str} {counter.value}")
+            lines.push("")
+
+        for gauge in self.gauges:
+            lines.push("# HELP {gauge.name} {gauge.help}")
+            lines.push("# TYPE {gauge.name} gauge")
+            val label_str = format_labels(gauge.labels)
+            lines.push("{gauge.name}{label_str} {gauge.value}")
+            lines.push("")
+
+        for hist in self.histograms:
+            lines.push("# HELP {hist.name} {hist.help}")
+            lines.push("# TYPE {hist.name} histogram")
+            var i = 0
+            while i < hist.buckets.len():
+                val bucket_count = hist.counts[i]
+                val boundary = hist.buckets[i]
+                val bucket_line = hist.name + "_bucket" + "{" + "le=\"" + "{boundary}" + "\"" + "}" + " " + "{bucket_count}"
+                lines.push(bucket_line)
+                i = i + 1
+            val inf_line = hist.name + "_bucket" + "{" + "le=\"+Inf\"" + "}" + " " + "{hist.count_value}"
+            lines.push(inf_line)
+            lines.push("{hist.name}_sum {hist.sum_value}")
+            lines.push("{hist.name}_count {hist.count_value}")
+            lines.push("")
+
+        join_lines(lines)
+
+# ============================================================================
+# Metrics Endpoint Handler
+# ============================================================================
+
+fn metrics_handler(registry: MetricsRegistry, request: HttpRequestData) -> HttpResponseData:
+    """/metrics endpoint returning Prometheus text format.
+
+    Args:
+        registry: The metrics registry to expose
+        request: Incoming HTTP request
+
+    Returns:
+        HTTP response with Content-Type text/plain; version=0.0.4
+    """
+    val body = registry.expose()
+    HttpResponseData(
+        status: 200,
+        reason: "OK",
+        headers: [
+            ("Content-Type", "text/plain; version=0.0.4; charset=utf-8"),
+            ("Server", "SimpleServer")
+        ],
+        body: body,
+        body_bytes: [],
+        body_file: "",
+        body_offset: 0,
+        body_length: 0,
+        chunked: false
+    )
+
+# ============================================================================
+# Built-in HTTP Metrics Factories
+# ============================================================================
+
+fn create_http_metrics(registry: MetricsRegistry) -> (Counter, Histogram, Gauge):
+    """Create standard HTTP server metrics.
+
+    Returns:
+        Tuple of (http_requests_total, http_request_duration_ms, http_active_connections)
+    """
+    val requests_total = registry.register_counter(
+        "http_requests_total",
+        "Total number of HTTP requests"
+    )
+    val duration = registry.register_histogram(
+        "http_request_duration_ms",
+        "HTTP request duration in milliseconds",
+        [5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000]
+    )
+    val active = registry.register_gauge(
+        "http_active_connections",
+        "Number of active HTTP connections"
+    )
+    (requests_total, duration, active)
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn format_labels(labels: [(text, text)]) -> text:
+    """Format label pairs as Prometheus label string `{k="v",...}` or empty."""
+    if labels.len() == 0:
+        return ""
+    var parts: [text] = []
+    for label in labels:
+        val k = label.0
+        val v = label.1
+        parts.push("{k}=\"{v}\"")
+    "{" + join_label_parts(parts, ",") + "}"
+
+fn join_label_parts(parts: [text], sep: text) -> text:
+    """Join text parts with a separator."""
+    var result = ""
+    var i = 0
+    for part in parts:
+        if i > 0:
+            result = result + sep
+        result = result + part
+        i = i + 1
+    result
+
+fn join_lines(lines: [text]) -> text:
+    """Join lines with newline separator."""
+    var result = ""
+    var i = 0
+    for line in lines:
+        if i > 0:
+            result = result + "\n"
+        result = result + line
+        i = i + 1
+    result

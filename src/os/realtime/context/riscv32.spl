@@ -1,0 +1,70 @@
+# @platform: baremetal
+# @cfg: riscv32
+#
+# RISC-V RV32 context switch via machine-mode trap.
+# Saves x1-x31 to TCB stack frame (31 words = 124 bytes).
+# Uses mscratch for kernel SP swap.
+
+# Stack frame layout (32 register slots, x0 is always zero):
+#   [SP+0]   x1 (ra)
+#   [SP+4]   x2 (sp) — saved for reference
+#   [SP+8]   x3 (gp)
+#   [SP+12]  x4 (tp)
+#   [SP+16]  x5 (t0)
+#   ...
+#   [SP+120] x31 (t6)
+#   [SP+124] mepc
+val CONTEXT_FRAME_WORDS: i32 = 32
+val CONTEXT_FRAME_SIZE: u32 = 128
+
+# extern for actual asm context save/restore
+extern fn rt_riscv_context_save(stack_ptr: u64) -> u64
+extern fn rt_riscv_context_restore(stack_ptr: u64)
+extern fn rt_riscv_read_csr_mepc() -> u64
+extern fn rt_riscv_write_csr_mepc(val: u64)
+extern fn rt_riscv_read_csr_mscratch() -> u64
+extern fn rt_riscv_write_csr_mscratch(val: u64)
+
+use std.baremetal.interrupt (mem_read_u32, mem_write_u32)
+
+fn riscv_context_switch():
+    """Called from trap handler. Saves current context, picks next, restores."""
+    val curr_id = sched_get_current()
+
+    if curr_id >= 0:
+        val saved_sp = rt_riscv_read_csr_mscratch()
+        val new_sp = rt_riscv_context_save(saved_sp)
+        task_set_stack_ptr(curr_id, new_sp)
+
+    sched_switch()
+
+    val next_id = sched_get_current()
+    if next_id >= 0:
+        val next_task = task_get(next_id)
+        rt_riscv_context_restore(next_task.stack_ptr)
+        rt_riscv_write_csr_mscratch(next_task.stack_ptr + CONTEXT_FRAME_SIZE.to_u64())
+
+fn riscv_init_task_stack(stack_top: u64, entry: u64) -> u64:
+    """Initialize a task stack frame for first context restore.
+    Returns adjusted SP pointing to the saved register frame."""
+    var sp = stack_top - CONTEXT_FRAME_SIZE.to_u64()
+
+    # Zero all register slots
+    var i = 0
+    while i < CONTEXT_FRAME_WORDS:
+        mem_write_u32((sp + (i * 4).to_u64()).to_u32(), 0u32)
+        i = i + 1
+
+    # x1 (ra) = entry function address
+    mem_write_u32(sp.to_u32(), entry.to_u32())
+    # mepc slot = entry
+    mem_write_u32((sp + 124u64).to_u32(), entry.to_u32())
+
+    sp
+
+fn riscv_trap_handler():
+    """Machine-mode trap handler entry. Routes timer to scheduler."""
+    timer_isr()
+
+    if sched_needs_switch():
+        riscv_context_switch()

@@ -1,0 +1,121 @@
+# codex-impl
+"""
+## Purpose and proof boundary
+
+Exhaustively enumerate every length-six trace over the V1 single-slot abstract
+transition alphabet.  This is a finite model check (7^6 = 117,649 traces), not
+a universal proof of the hosted implementation, arbitrary capacity, threads,
+integer overflow, or native providers.
+"""
+
+use std.spec.{describe, it, expect}
+
+enum ModelPhase:
+    Empty
+    Reserved
+    Committed
+    InFlight
+    CancelRequested
+    Terminal
+
+struct ModelState:
+    phase: ModelPhase
+    generation: u64
+    admitted: u64
+    terminals: u64
+    consumed: u64
+    stale_rejects: u64
+    duplicate_rejects: u64
+
+fn initial_state() -> ModelState:
+    ModelState(phase: ModelPhase.Empty, generation: 1u64, admitted: 0u64,
+        terminals: 0u64, consumed: 0u64, stale_rejects: 0u64,
+        duplicate_rejects: 0u64)
+
+fn model_step(state: ModelState, action: i64) -> ModelState:
+    var next = state
+    match action:
+        case 0:  # reserve: Full unless the sole slot is empty
+            if state.phase == ModelPhase.Empty:
+                next.phase = ModelPhase.Reserved
+                next.admitted = next.admitted + 1u64
+        case 1:  # commit linearizes provider visibility
+            if state.phase == ModelPhase.Reserved:
+                next.phase = ModelPhase.Committed
+        case 2:  # provider take is the only Committed -> InFlight edge
+            if state.phase == ModelPhase.Committed:
+                next.phase = ModelPhase.InFlight
+        case 3:  # cancellation linearizes by current lifecycle state
+            match state.phase:
+                case ModelPhase.Reserved:
+                    next.phase = ModelPhase.Empty
+                    next.generation = next.generation + 1u64
+                case ModelPhase.Committed: next.phase = ModelPhase.CancelRequested
+                case ModelPhase.InFlight: next.phase = ModelPhase.CancelRequested
+                case _: ()
+        case 4:  # ordinary provider terminal
+            match state.phase:
+                case ModelPhase.InFlight:
+                    next.phase = ModelPhase.Terminal
+                    next.terminals = next.terminals + 1u64
+                case ModelPhase.Terminal:
+                    next.duplicate_rejects = next.duplicate_rejects + 1u64
+                case _: ()
+        case 5:  # cancelled provider terminal
+            match state.phase:
+                case ModelPhase.InFlight:
+                    next.phase = ModelPhase.Terminal
+                    next.terminals = next.terminals + 1u64
+                case ModelPhase.CancelRequested:
+                    next.phase = ModelPhase.Terminal
+                    next.terminals = next.terminals + 1u64
+                case ModelPhase.Terminal:
+                    next.duplicate_rejects = next.duplicate_rejects + 1u64
+                case _: ()
+        case 6:  # owner consumes terminal and releases the slot
+            if state.phase == ModelPhase.Terminal:
+                next.phase = ModelPhase.Empty
+                next.generation = next.generation + 1u64
+                next.consumed = next.consumed + 1u64
+        case _: ()
+    next
+
+fn assert_invariants(state: ModelState):
+    # Capacity one: at most one lifecycle occupies the slot.
+    val occupied = if state.phase == ModelPhase.Empty: 0 else: 1
+    expect(occupied).to_be_less_than(2)
+    # Exactly-once safety: consumption cannot exceed publication; publication
+    # cannot exceed admission.  A terminal remains owned until consumption.
+    expect(state.consumed).to_be_less_than(state.terminals + 1u64)
+    expect(state.terminals).to_be_less_than(state.admitted + 1u64)
+    val outstanding_terminal = state.terminals - state.consumed
+    if state.phase == ModelPhase.Terminal:
+        expect(outstanding_terminal).to_equal(1u64)
+    else:
+        expect(outstanding_terminal).to_equal(0u64)
+    # Every slot release advances the generation exactly once.
+    val precommit_cancels = state.admitted - state.terminals -
+        (if state.phase == ModelPhase.Reserved or
+            state.phase == ModelPhase.Committed or
+            state.phase == ModelPhase.InFlight or
+            state.phase == ModelPhase.CancelRequested: 1u64 else: 0u64)
+    expect(state.generation).to_equal(1u64 + state.consumed + precommit_cancels)
+
+describe "SimpleRing V1 bounded abstract linearization model":
+    it "preserves capacity, terminal, and generation invariants for all traces through depth six":
+        val alphabet = 7
+        val trace_count = 117649  # 7^6
+        var encoded = 0
+        while encoded < trace_count:
+            var state = initial_state()
+            var digits = encoded
+            var depth = 0
+            while depth < 6:
+                val action = digits % alphabet
+                digits = digits / alphabet
+                state = model_step(state, action)
+                assert_invariants(state)
+                depth = depth + 1
+            encoded = encoded + 1
+        expect(encoded).to_equal(trace_count)
+

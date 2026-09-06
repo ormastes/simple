@@ -1,0 +1,124 @@
+"""
+# Interface Digest Differential Specification
+
+**Category:** Infrastructure
+**Covers:** compiler.driver.cache.action_key.{source_interface_parts,
+interface_digest_of_source}
+
+## Why this exists
+
+`hir_cache_closure_digest` (80.driver/driver_hir_cache.spl) folds every
+surface's raw file `content_hash`, so ANY edit in the closure — a comment, a
+function body — invalidates all HIR cache entries. The incremental hit rate is
+0% by construction. The proposed fix is to key the closure digest on
+`interface_digest_of_source` instead, so only INTERFACE changes invalidate
+dependents.
+
+That re-key is only safe if the textual v1 extractor is COMPLETE with respect
+to downstream-visible surface. A construct the extractor misses becomes a
+stale cache HIT — a silently wrong binary. This spec is the differential
+proof, per construct: an interface-only edit MUST change the digest, and a
+paired body/comment-only edit MUST NOT.
+
+Constructs asserted here: extend decls, re-export aliases, impls, trait
+default methods, and struct/class fields.
+"""
+
+use std.spec.*
+use compiler.driver.cache.action_key.{interface_digest_of_source, source_interface_parts}
+
+fn digest(src: text) -> text:
+    interface_digest_of_source(src)
+
+fn differs(a: text, b: text) -> bool:
+    digest(a) != digest(b)
+
+# ---------------------------------------------------------------- extend ----
+val EXTEND_BASE: text = "extend Foo:\n    fn bar(self) -> i64:\n        1\n"
+# INTERFACE edit: the extended TYPE changes; every method line is identical.
+val EXTEND_TARGET_EDIT: text = "extend Baz:\n    fn bar(self) -> i64:\n        1\n"
+# BODY-only edit: same extend target, same signature.
+val EXTEND_BODY_EDIT: text = "extend Foo:\n    fn bar(self) -> i64:\n        2\n"
+
+# ------------------------------------------------------- re-export alias ----
+val ALIAS_BASE: text = "use m.core.\{alpha as shared}\nexport shared\n"
+# INTERFACE edit: `shared` now re-exports a DIFFERENT symbol.
+val ALIAS_TARGET_EDIT: text = "use m.core.\{beta as shared}\nexport shared\n"
+# COMMENT-only edit.
+val ALIAS_COMMENT_EDIT: text = "# note\nuse m.core.\{alpha as shared}\nexport shared\n"
+
+# ------------------------------------------------------------------ impl ----
+val IMPL_BASE: text = "impl Greet for Foo:\n    fn hi(self) -> text:\n        \"a\"\n"
+val IMPL_TYPE_EDIT: text = "impl Greet for Bar:\n    fn hi(self) -> text:\n        \"a\"\n"
+val IMPL_BODY_EDIT: text = "impl Greet for Foo:\n    fn hi(self) -> text:\n        \"b\"\n"
+
+# ---------------------------------------------- trait default methods -------
+val TRAIT_BASE: text = "trait Greet:\n    fn hi(self) -> text:\n        \"a\"\n"
+val TRAIT_SIG_EDIT: text = "trait Greet:\n    fn hi(self) -> i64:\n        \"a\"\n"
+val TRAIT_BODY_EDIT: text = "trait Greet:\n    fn hi(self) -> text:\n        \"b\"\n"
+
+# ----------------------------------------------------- struct fields --------
+val STRUCT_BASE: text = "struct Point:\n    x: i64\n    y: i64\n"
+# INTERFACE edit: field TYPE changes — layout is downstream-visible.
+val STRUCT_FIELD_TYPE_EDIT: text = "struct Point:\n    x: f64\n    y: i64\n"
+# INTERFACE edit: a field is ADDED — layout and size change.
+val STRUCT_FIELD_ADD_EDIT: text = "struct Point:\n    x: i64\n    y: i64\n    z: i64\n"
+
+describe "extend declarations are part of the interface":
+    it "changes the digest when the extended type changes":
+        expect(differs(EXTEND_BASE, EXTEND_TARGET_EDIT)).to_equal(true)
+
+    it "leaves the digest unchanged for a body-only edit":
+        expect(digest(EXTEND_BASE)).to_equal(digest(EXTEND_BODY_EDIT))
+
+describe "re-export aliases are part of the interface":
+    it "changes the digest when the alias targets a different symbol":
+        expect(differs(ALIAS_BASE, ALIAS_TARGET_EDIT)).to_equal(true)
+
+    it "leaves the digest unchanged for a comment-only edit":
+        expect(digest(ALIAS_BASE)).to_equal(digest(ALIAS_COMMENT_EDIT))
+
+describe "impl blocks are part of the interface":
+    it "changes the digest when the implementing type changes":
+        expect(differs(IMPL_BASE, IMPL_TYPE_EDIT)).to_equal(true)
+
+    it "leaves the digest unchanged for a body-only edit":
+        expect(digest(IMPL_BASE)).to_equal(digest(IMPL_BODY_EDIT))
+
+describe "trait default methods are part of the interface":
+    it "changes the digest when a default method signature changes":
+        expect(differs(TRAIT_BASE, TRAIT_SIG_EDIT)).to_equal(true)
+
+    it "leaves the digest unchanged for a default-body-only edit":
+        expect(digest(TRAIT_BASE)).to_equal(digest(TRAIT_BODY_EDIT))
+
+# BLOCKING GAP — asserted as it IS, not as it should be.
+# Field layout is downstream-visible (offsets, size), but the textual v1
+# extractor captures only declaration HEADER lines, so a field retype or a
+# field addition leaves the digest unchanged. That is an UNDER-capture: the
+# one direction that yields a stale cache HIT. These two assertions pin the
+# defect so it cannot be silently "fixed" by a re-key; flip them to
+# `true` only together with an extractor that really covers fields.
+# See doc/08_tracking/bug/
+# hir_closure_digest_rekey_blocked_by_incomplete_interface_digest_2026-08-23.md
+describe "struct fields are NOT yet part of the interface (blocking gap)":
+    it "does not change the digest when a field type changes":
+        expect(differs(STRUCT_BASE, STRUCT_FIELD_TYPE_EDIT)).to_equal(false)
+
+    it "does not change the digest when a field is added":
+        expect(differs(STRUCT_BASE, STRUCT_FIELD_ADD_EDIT)).to_equal(false)
+
+describe "extractor part sets (diagnostic evidence)":
+    it "captures the extend header line":
+        var found = false
+        for p in source_interface_parts(EXTEND_BASE):
+            if p.starts_with("extend "):
+                found = true
+        expect(found).to_equal(true)
+
+    it "does not capture struct field lines (blocking gap)":
+        var fields = 0
+        for p in source_interface_parts(STRUCT_BASE):
+            if p == "x: i64" or p == "y: i64":
+                fields = fields + 1
+        expect(fields).to_equal(0)

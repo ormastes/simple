@@ -1,0 +1,30 @@
+# @expect: clean
+# The REAL mono pass (`run_monomorphization`) over `box_it<T>` + `main`,
+# verified through the same entry point the driver would use. Since plan
+# section 9.3 step 12 landed, the pass removes the `box_it<T>` template from
+# `module.functions` once its `box_it$i64` specialization exists, so the module
+# is fully monomorphic and every section 9.5 counter is zero.
+use compiler.hir.hir.*
+use compiler.mono.monomorphize_integration.{run_monomorphization}
+use compiler.verify.post_mono_verify.*
+use post_mono_fixture_support.*
+
+fn main():
+    val arr = fx_typed_expr(
+        HirExprKind.ArrayLit([fx_typed_expr(HirExprKind.Var(SymbolId(id: 81)), fx_tparam_type())], fx_tparam_type()),
+        fx_type(HirTypeKind.Array(fx_tparam_type(), nil))
+    )
+    val box_it = fx_fn(80, "box_it", [fx_tparam()], [fx_param(81, "v", fx_tparam_type())],
+                       fx_type(HirTypeKind.Array(fx_tparam_type(), nil)), fx_block([], arr))
+    val call = fx_expr(HirExprKind.Call(
+        fx_expr(HirExprKind.Var(SymbolId(id: 80))),
+        [HirCallArg(has_name: false, name: "", value: fx_expr(HirExprKind.IntLit(7, nil)), span: fx_span())],
+        [fx_i64()]
+    ))
+    val main_fn = fx_fn(82, "main", [], [], fx_type(HirTypeKind.Unit),
+                        fx_block([HirStmt(kind: HirStmtKind.Expr(call), span: fx_span())],
+                                 fx_expr(HirExprKind.NilLit)))
+    var modules: Dict<text, HirModule> = {}
+    modules["real_mono"] = fx_module("real_mono", [box_it, main_fn])
+    val (result, _) = run_monomorphization(modules)
+    fx_emit(post_mono_verify_modules(result))

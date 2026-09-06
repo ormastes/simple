@@ -1,0 +1,50 @@
+use std.spec
+use std.common.crypto.sha256.{sha256_text}
+use std.common.debug.capability.{CapLevel}
+use std.common.debug.contracts_v1.{DebugVerificationV1, debug_policy_observe_only_v1}
+use std.common.debug.service_v1.{central_debug_service_v1_graph, central_debug_service_v1_receipts}
+use std.nogc_sync_mut.io_runtime.{dir_create_all, file_exists, file_read, file_write}
+use os.realtime.jtag.embedded_dump_service_v1.{
+    EmbeddedDumpMechanismV1, retain_embedded_dump_v1, close_embedded_dump_v1,
+}
+
+val EMBEDDED_BUILD = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+describe "embedded dump-first DebugServiceV1 slice":
+    it "retains and indexes an existing native dump before any active debugging":
+        val fixture_dir = "build/test-embedded-dump-service"
+        val source = fixture_dir + "/input.t32"
+        val bundle = fixture_dir + "/bundle"
+        expect(dir_create_all(fixture_dir)).to_equal(true)
+        expect(file_write(source, "TRACE32-native-dump-fixture-v1")).to_equal(true)
+        val result = retain_embedded_dump_v1(EmbeddedDumpMechanismV1.Trace32Dump,
+            source, bundle, "target.t32", sha256_text("TRACE32-native-dump-fixture-v1"),
+            "redacted", "embedded://board/fixture", EMBEDDED_BUILD, 814,
+            debug_policy_observe_only_v1()).unwrap()
+        expect(file_exists(bundle + "/raw/target.t32")).to_equal(true)
+        expect(file_read(bundle + "/raw/target.t32")).to_equal("TRACE32-native-dump-fixture-v1")
+        expect(result.evidence.build_id).to_equal(EMBEDDED_BUILD)
+        expect(result.evidence.artifacts.len()).to_equal(1)
+        expect(result.bundle.raw_artifact_count).to_equal(1)
+        val graph = central_debug_service_v1_graph(result.session_id).unwrap()
+        expect(graph.capabilities[0].support).to_equal(CapLevel.Native)
+        expect(graph.capabilities[0].verification).to_equal(DebugVerificationV1.FixtureVerified)
+        expect(graph.capabilities[1:].all(\cap: cap.support == CapLevel.Unavailable and cap.verification == DebugVerificationV1.Blocked)).to_equal(true)
+        val receipts = central_debug_service_v1_receipts(result.session_id)
+        expect(receipts.any(\receipt: receipt.action == "evidence.export" and receipt.allowed)).to_equal(true)
+        expect(receipts.last().execution_changed).to_equal(false)
+        close_embedded_dump_v1(result.session_id).unwrap()
+
+    it "denies evidence before creating a retained bundle":
+        val fixture_dir = "build/test-embedded-dump-service-denied"
+        val source = fixture_dir + "/input.bin"
+        val bundle = fixture_dir + "/bundle"
+        expect(dir_create_all(fixture_dir)).to_equal(true)
+        expect(file_write(source, "custom-product-dump")).to_equal(true)
+        var policy = debug_policy_observe_only_v1()
+        policy.allow_evidence = false
+        val result = retain_embedded_dump_v1(EmbeddedDumpMechanismV1.CustomProductDump,
+            source, bundle, "product.dump", sha256_text("custom-product-dump"),
+            "redacted", "embedded://product/fixture", EMBEDDED_BUILD, 815, policy)
+        expect(result.is_err()).to_equal(true)
+        expect(file_exists(bundle + "/manifest.sdn")).to_equal(false)

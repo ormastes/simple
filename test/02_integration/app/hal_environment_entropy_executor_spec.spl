@@ -1,0 +1,111 @@
+# @feature mcdc_hal_runtime_hardening
+# @req REQ-011 REQ-015 REQ-016 REQ-017
+
+use std.spec.*
+use app.test.hal_environment_entropy_executor.*
+use std.common.structural.environment_instruction.*
+
+fn entropy_put_i64_le(out: [u8], offset: i64, value: i64):
+    var i = 0
+    while i < 8:
+        out[offset + i] = ((value >> (i * 8)) & 255) as u8
+        i = i + 1
+
+fn entropy_authority() -> HostedSecureEntropyAuthorityV1:
+    HostedSecureEntropyAuthorityV1(
+        invocation_id: 771, capability_id: 14,
+        authorization_hi: 0x10203040, authorization_lo: 0x50607080,
+        max_bytes: 32, sealed: true)
+
+fn entropy_policy() -> EnvExecutorPolicyV1:
+    val opcode = env_opcode_mask_v1(EnvOpcodeV1.RandomFill)
+    env_executor_policy_v1(opcode, 1 << 14, 0, opcode,
+        false, true, true)
+
+fn entropy_instruction(result_bytes: i64) -> EnvInstructionV1:
+    env_instruction_v1(771, 0, EnvOpcodeV1.RandomFill, 14, 0,
+        0, HOSTED_SECURE_ENTROPY_ARGUMENT_BYTES_V1,
+        HOSTED_SECURE_ENTROPY_ARGUMENT_BYTES_V1,
+        0, result_bytes, result_bytes)
+
+fn entropy_arguments(requested: i64) -> [u8]:
+    var arguments: [u8] = [0u8; HOSTED_SECURE_ENTROPY_ARGUMENT_BYTES_V1]
+    entropy_put_i64_le(arguments, 0, requested)
+    entropy_put_i64_le(arguments, 8, 0x10203040)
+    entropy_put_i64_le(arguments, 16, 0x50607080)
+    arguments
+
+describe "hosted secure entropy environment executor":
+    it "fills caller-owned storage once and replays without another effect":
+        val authority = entropy_authority()
+        val cursor = hosted_secure_entropy_cursor_v1(authority)
+        val instruction = entropy_instruction(32)
+        val arguments = entropy_arguments(32)
+        var captured: [u8] = [0u8; 32]
+        var replayed: [u8] = [0u8; 32]
+
+        val step = hosted_secure_entropy_execute_v1(
+            authority, cursor, entropy_policy(), instruction,
+            arguments, captured)
+        val replay = env_replay_exact_v1(
+            instruction, instruction, step.receipt.observation,
+            arguments, captured, replayed)
+
+        expect(step.receipt.applied).to_be(true)
+        expect(step.receipt.physical_effect).to_be(true)
+        expect(step.receipt.allocation_count_after_seal).to_equal(0)
+        expect(hosted_secure_entropy_complete_v1(step.cursor)).to_be(true)
+        expect(replay.applied).to_be(true)
+        expect(replay.physical_effect).to_be(false)
+        expect(replay.allocation_count_after_seal).to_equal(0)
+        expect(replayed).to_equal(captured)
+
+    it "rejects cursor reuse before reading entropy or changing storage":
+        val authority = entropy_authority()
+        val consumed = HostedSecureEntropyCursorV1(
+            invocation_id: 771, next_sequence: 1,
+            consumed_count: 1, sealed: true)
+        val instruction = entropy_instruction(16)
+        var result: [u8] = [73u8; 16]
+
+        val step = hosted_secure_entropy_execute_v1(
+            authority, consumed, entropy_policy(), instruction,
+            entropy_arguments(16), result)
+
+        expect(step.receipt.applied).to_be(false)
+        expect(env_instruction_status_to_i64(
+            step.receipt.observation.status)).to_equal(
+                env_instruction_status_to_i64(EnvInstructionStatusV1.Diverged))
+        expect(result[0]).to_equal(73u8)
+
+    it "rejects wrong authorization without reading entropy":
+        val authority = entropy_authority()
+        val cursor = hosted_secure_entropy_cursor_v1(authority)
+        val instruction = entropy_instruction(16)
+        var arguments = entropy_arguments(16)
+        arguments[8] = 0u8
+        var result: [u8] = [91u8; 16]
+
+        val step = hosted_secure_entropy_execute_v1(
+            authority, cursor, entropy_policy(), instruction,
+            arguments, result)
+
+        expect(step.receipt.applied).to_be(false)
+        expect(env_instruction_status_to_i64(
+            step.receipt.observation.status)).to_equal(
+                env_instruction_status_to_i64(EnvInstructionStatusV1.Diverged))
+        expect(result[0]).to_equal(91u8)
+
+    it "rejects oversized requests without allocation":
+        val authority = entropy_authority()
+        val cursor = hosted_secure_entropy_cursor_v1(authority)
+        val instruction = entropy_instruction(33)
+        var result: [u8] = [91u8; 33]
+
+        val step = hosted_secure_entropy_execute_v1(
+            authority, cursor, entropy_policy(), instruction,
+            entropy_arguments(33), result)
+
+        expect(step.receipt.applied).to_be(false)
+        expect(step.receipt.allocation_count_after_seal).to_equal(0)
+        expect(result[0]).to_equal(91u8)

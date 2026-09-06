@@ -1,0 +1,259 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-SYSTEM
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+# @tag: system, acceptance, llm_caret, tmux, worktree, infra, mcp
+"""Operator signs off the LLM Caret agent infrastructure end to end.
+
+An operator is about to hand the caret agent infrastructure to a team. Before
+signing off they walk the whole journey once, in order, the way they would on a
+real machine: they start a private agent workspace and put two agents in it —
+each one in its own detached git worktree and its own tmux window; they send a
+single broadcast and check that every agent's pane executed it independently;
+they drive the caret TOOL layer the way a dev tool or the MCP server would, and
+watch a mutating wiki write get REFUSED under the default policy before it is
+granted, then read the page back byte for byte; they run the caret suite in a
+tmux window and read the authoritative `Results:` verdict off the pane without
+leaving tmux; and finally they tear the whole thing down and confirm the machine
+is clean — no tmux server answering on the private socket, no worktree still
+registered with git, no directory left behind.
+
+This is the acceptance layer, not more unit coverage. Every fact below is read
+back out of the real system — files written by real shells in real tmux panes,
+`git worktree list --porcelain`, the tmux server's own exit status, and bytes
+re-read from disk — never from a tool's own success string. Rows that need a
+live server the host may not run report `pending("BLOCKED: ...")` and are never
+faked green.
+"""
+# @req: REQ-SSPEC-SYSTEM — the operator journey holds end to end.
+
+use std.spec.step
+
+use std.spec.{describe, it, expect, step, pending}
+use app.io.mod.{process_run, dir_create_all, dir_remove_all, dir_exists,
+    file_write, file_read, file_exists, cwd, sleep_ms, current_time_ms, env_get}
+use app.llm_caret.agent_workspace.{agent_workspace, tmux_available,
+    session_alive, session_kill, list_panes, send_to_each_pane,
+    wait_for_pane_text, capture_pane, worktree_path, worktree_list,
+    agent_attach, agent_detach, launch_caret_suite}
+use app.llm_caret.tools.{run_tool, default_policy, policy_with_allow, new_tool_call}
+use app.llm_caret.infra_wiki.{wiki_read}
+use app.llm_caret.config.{parse_config_text, reset_config}
+
+val AGENTS = ["reviewer", "builder"]
+
+# The suite the operator runs inside the tmux window. Deliberately a small,
+# fast caret unit spec: the point is that the verdict is READ OFF THE PANE,
+# not that this particular suite is large.
+val SUITE = "test/01_unit/app/llm_caret/agent_vcs_spec.spl"
+
+fn _scratch(name: text) -> text:
+    cwd() + "/build/test-artifacts/llm_caret/acceptance_" + name
+
+fn _live(flag: text) -> bool:
+    (env_get(flag) ?? "") == "1"
+
+fn _json(pairs: [text]) -> text:
+    "{" + pairs.join(", ") + "}"
+
+fn _kv(k: text, v: text) -> text:
+    "\"" + k + "\": \"" + v + "\""
+
+fn _contains(items: [text], needle: text) -> bool:
+    for item in items:
+        if item == needle:
+            return true
+    false
+
+# A real git repo for the agents' detached worktrees to branch off.
+fn _fixture_repo(root: text) -> text:
+    val repo = root + "/repo"
+    dir_create_all(repo)
+    process_run("git", ["-C", repo, "init", "-q"])
+    process_run("git", ["-C", repo, "config", "user.email", "caret@test"])
+    process_run("git", ["-C", repo, "config", "user.name", "caret"])
+    file_write(repo + "/README.md", "acceptance fixture\n")
+    process_run("git", ["-C", repo, "add", "README.md"])
+    process_run("git", ["-C", repo, "commit", "-q", "-m", "init"])
+    repo
+
+
+# @manual_section: The operator's tmux journey — attach, broadcast, run the suite, tear down
+
+describe "LLM Caret agent infrastructure: operator acceptance journey":
+    it "attaches two isolated agents, broadcasts to every pane, reads the suite verdict off a pane, and leaves nothing behind":
+        # @req REQ-SSPEC-SYSTEM
+        step("attaches two isolated agents, broadcasts to every pane, reads the suite verdict off a pane, and leaves nothing behind")
+        if not tmux_available():
+            pending("BLOCKED: tmux not installed on this host")
+            return
+        val run_id = current_time_ms().to_text()
+        val root = _scratch("journey_" + run_id)
+        dir_remove_all(root)
+        val repo = _fixture_repo(root)
+        val id = "acc-journey-" + run_id
+        val ws = agent_workspace(id, repo, root + "/trees")
+        # Kill first: a leftover server from an aborted run must never be
+        # mistaken for the one this example started.
+        session_kill(ws)
+
+        step("Start the workspace and attach two agents, each in its own detached worktree and tmux window")
+        for agent in AGENTS:
+            val attached = agent_attach(ws, agent, "")
+            expect(attached.status).to_equal("ok")
+            # The worktree is real: the repo's committed file is present in it.
+            expect(file_exists(worktree_path(ws, agent) + "/README.md")).to_be(true)
+        expect(session_alive(ws)).to_be(true)
+        # two agent windows plus the session's bootstrap window 0
+        expect(list_panes(ws).len()).to_equal(3)
+
+        step("git itself registers both agent worktrees alongside the repo")
+        val trees_live = worktree_list(ws)
+        expect(trees_live.len()).to_equal(3)
+        for agent in AGENTS:
+            expect(_contains(trees_live, worktree_path(ws, agent))).to_be(true)
+
+        step("Each agent's worktree is its own: a file one agent writes never appears in the other's tree or in the repo")
+        for agent in AGENTS:
+            file_write(worktree_path(ws, agent) + "/owned_by_" + agent + ".txt", agent + "\n")
+        for writer in AGENTS:
+            for tree_owner in AGENTS:
+                val present = file_exists(worktree_path(ws, tree_owner) + "/owned_by_" + writer + ".txt")
+                expect(present).to_be(writer == tree_owner)
+            expect(file_exists(repo + "/owned_by_" + writer + ".txt")).to_be(false)
+
+        step("One broadcast reaches every pane and each pane EXECUTES it independently")
+        # Lowercase in, uppercase out: the marker can only appear on a pane that
+        # actually ran the command, not one that merely received the keystrokes.
+        val marker_in = "acc_bcast_" + run_id
+        val marker_out = "ACC_BCAST_" + run_id
+        val reached = send_to_each_pane(ws, "echo " + marker_in + " | tr a-z A-Z")
+        expect(reached.len()).to_equal(3)
+        for agent in AGENTS:
+            expect(_contains(reached, id + ":" + agent + ".0")).to_be(true)
+            expect(wait_for_pane_text(ws, id + ":" + agent, marker_out, 20000)).to_be(true)
+
+        step("Launch the caret suite in its own tmux window of the same session")
+        val launched = launch_caret_suite(ws, cwd(), SUITE)
+        expect(launched.status).to_equal("ok")
+        val suite_target = launched.output
+        expect(suite_target).to_equal(id + ":caret_suite")
+        expect(_contains(list_panes(ws), id + ":caret_suite.0")).to_be(true)
+
+        step("Read the runner's authoritative verdict straight off the suite pane")
+        expect(wait_for_pane_text(ws, suite_target, "Results:", 600000)).to_be(true)
+        val screen = capture_pane(ws, suite_target)
+        # The per-file verdict line, not just "it finished".
+        expect(screen).to_contain("SPEC FILE VERDICT: " + SUITE)
+        expect(screen).to_contain("0 failed")
+        expect(screen).to_contain("PASS " + SUITE)
+
+        step("Tear down: detach both agents, then kill the private tmux server")
+        for agent in AGENTS:
+            expect(agent_detach(ws, agent).status).to_equal("ok")
+            expect(dir_exists(worktree_path(ws, agent))).to_be(false)
+        expect(session_kill(ws).status).to_equal("ok")
+
+        step("Nothing leaks: no session, no server on the private socket, git registers only the repo")
+        expect(session_alive(ws)).to_be(false)
+        val (_ls_out, _ls_err, ls_code) = process_run("tmux", ["-L", ws.socket, "list-sessions"])
+        expect(ls_code).to_be_greater_than(0)
+        val trees_after = worktree_list(ws)
+        expect(trees_after.len()).to_equal(1)
+        # git reports the resolved path; the fixture may sit behind a symlinked cwd.
+        val (real_repo, _re, _rc) = process_run("realpath", ["-m", repo])
+        expect(trees_after[0]).to_equal(real_repo.trim())
+        dir_remove_all(root)
+
+
+# @manual_section: The caret tool layer — a mutating write is refused before it is granted
+
+describe "LLM Caret tool layer: the operator drives wiki access the way a dev tool does":
+    it "refuses a wiki write without permission, then writes and reads the page back byte-identical once granted":
+        # @req REQ-SSPEC-SYSTEM
+        step("refuses a wiki write without permission, then writes and reads the page back byte-identical once granted")
+        val run_id = current_time_ms().to_text()
+        val ws_root = _scratch("wiki_" + run_id)
+        dir_remove_all(ws_root)
+        dir_create_all(ws_root)
+        # Module-level config does not persist across examples: configure here.
+        reset_config()
+        parse_config_text("wiki:\n    backend: local\n    root: wiki\n")
+
+        # A page id carries its `.md` extension: that is the id `wiki_search`
+        # reports and the id `wiki_read` resolves.
+        val page = "acceptance/report-" + run_id + ".md"
+        # A nonce'd body is the absolute oracle: it cannot pre-exist on disk.
+        val body = "acceptance body " + run_id + "\nsecond line\n"
+        val call = new_tool_call("w1", "wiki_write",
+            _json([_kv("page_id", page), _kv("body", body)]))
+
+        step("Under the default policy the mutating write is REFUSED and nothing lands on disk")
+        val denied = run_tool(default_policy(ws_root), call)
+        expect(denied.is_error).to_be(true)
+        expect(denied.content).to_contain("permission denied")
+        # The refusal is real, not cosmetic: the file was never created.
+        expect(file_exists(ws_root + "/wiki/" + page)).to_be(false)
+
+        step("With an explicit grant for wiki_write the page is created")
+        val granted = run_tool(policy_with_allow(ws_root, ["wiki_write"]), call)
+        expect(granted.is_error).to_be(false)
+        expect(file_exists(ws_root + "/wiki/" + page)).to_be(true)
+
+        step("The page reads back byte-identical — checked on disk AND through the read tool")
+        val on_disk = file_read(ws_root + "/wiki/" + page)
+        expect(on_disk).to_contain(body)
+        val (ok, content) = wiki_read(ws_root, page)
+        expect(ok).to_be(true)
+        expect(content).to_contain(body)
+
+        step("The read side needed no grant: reads are not gated, only mutations are")
+        val read_ungated = run_tool(default_policy(ws_root), new_tool_call("r1", "wiki_read",
+            _json([_kv("page_id", page)])))
+        expect(read_ungated.is_error).to_be(false)
+        expect(read_ungated.content).to_contain(body)
+
+        reset_config()
+        dir_remove_all(ws_root)
+
+
+# @manual_section: Live object storage — signed off only against a real server, never faked
+
+describe "LLM Caret tool layer: object storage round trip against a live server":
+    it "puts an object and gets the same bytes back through the storage tools":
+        # @req REQ-SSPEC-SYSTEM
+        step("puts an object and gets the same bytes back through the storage tools")
+        # No live MinIO on this host means NO EVIDENCE, which is not a pass.
+        if not _live("LLM_CARET_STORAGE_LIVE"):
+            pending("BLOCKED: no local S3-compatible (minio) server on this host — set LLM_CARET_STORAGE_LIVE=1 with credentials (LLM_CARET_CONFIG + access_key_env/secret_key_env) to run")
+            return
+        val run_id = current_time_ms().to_text()
+        val ws_root = _scratch("storage_" + run_id)
+        dir_create_all(ws_root)
+        reset_config()
+        val cfg = env_get("LLM_CARET_CONFIG") ?? ""
+        expect(cfg).to_not_equal("")
+
+        val bucket = env_get("LLM_CARET_STORAGE_BUCKET") ?? "caret-acceptance"
+        val key = "acceptance/obj-" + run_id + ".txt"
+        val payload = "acceptance payload " + run_id
+
+        step("Under the default policy storage_put is REFUSED: it is a mutating tool")
+        val put_call = new_tool_call("p1", "storage_put",
+            _json([_kv("bucket", bucket), _kv("key", key), _kv("content", payload)]))
+        val denied = run_tool(default_policy(ws_root), put_call)
+        expect(denied.is_error).to_be(true)
+        expect(denied.content).to_contain("permission denied")
+
+        step("With a grant the object is stored on the real server")
+        val put = run_tool(policy_with_allow(ws_root, ["storage_put"]), put_call)
+        expect(put.is_error).to_be(false)
+
+        step("The object reads back with exactly the bytes that were written")
+        val got = run_tool(default_policy(ws_root), new_tool_call("g1", "storage_get",
+            _json([_kv("bucket", bucket), _kv("key", key)])))
+        expect(got.is_error).to_be(false)
+        expect(got.content).to_contain(payload)
+
+        reset_config()
+        dir_remove_all(ws_root)

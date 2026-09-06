@@ -1,0 +1,133 @@
+# Explicit-root x86_32 address-space owner using the one-page kmap lease.
+
+use os.kernel.types.memory_types.{VirtAddr, PhysAddr, PageFrame, VmFlags}
+use os.kernel.memory.pmm.{pmm_alloc_page, pmm_free_page}
+use os.kernel.arch.x86_32.kmap_owner.{
+    x86_32_kmap_acquire, x86_32_kmap_zero, x86_32_kmap_read32,
+    x86_32_kmap_write32, x86_32_kmap_revoke
+}
+use os.kernel.arch.x86_32.paging.{X86_32_RECURSIVE_PD_VA}
+use os.kernel.boot.mmio.{mmio_read32}
+
+val PAGE_SIZE_32: u32 = 4096
+val PTE_PRESENT_32: u32 = 1
+val PTE_WRITABLE_32: u32 = 2
+val PTE_USER_32: u32 = 4
+val PTE_ADDR_MASK_32: u32 = 0xFFFFF000
+val PDE_KMAP_32: u32 = 1022
+val PDE_RECURSIVE_32: u32 = 1023
+
+fn _x86_32_alloc_zero_frame() -> u32:
+    val frame = pmm_alloc_page()
+    if frame == nil: return 0
+    val phys = (frame.unwrap().pfn as u32) * PAGE_SIZE_32
+    val lease = x86_32_kmap_acquire(phys)
+    if lease == nil:
+        pmm_free_page(frame.unwrap())
+        return 0
+    val held = lease.unwrap()
+    val ok = x86_32_kmap_zero(held)
+    val revoked = x86_32_kmap_revoke(held)
+    if not ok or not revoked:
+        pmm_free_page(frame.unwrap())
+        return 0
+    phys
+
+fn x86_32_create_address_space_owned() -> u32:
+    val root = _x86_32_alloc_zero_frame()
+    if root == 0: return 0
+    val lease = x86_32_kmap_acquire(root)
+    if lease == nil:
+        pmm_free_page(PageFrame(pfn: (root / PAGE_SIZE_32) as u64))
+        return 0
+    val held = lease.unwrap()
+    var i: u32 = 768
+    var ok = true
+    while i < PDE_RECURSIVE_32 and ok:
+        val entry = mmio_read32((X86_32_RECURSIVE_PD_VA + i * 4) as u64)
+        ok = x86_32_kmap_write32(held, i * 4, entry)
+        i = i + 1
+    if ok:
+        ok = x86_32_kmap_write32(held, PDE_RECURSIVE_32 * 4, root | PTE_PRESENT_32 | PTE_WRITABLE_32)
+    val revoked = x86_32_kmap_revoke(held)
+    if not ok or not revoked:
+        pmm_free_page(PageFrame(pfn: (root / PAGE_SIZE_32) as u64))
+        return 0
+    root
+
+fn _x86_32_flags(flags: VmFlags) -> u32:
+    var bits: u32 = PTE_PRESENT_32
+    if flags.writable(): bits = bits | PTE_WRITABLE_32
+    if flags.user(): bits = bits | PTE_USER_32
+    bits
+
+fn x86_32_map_page_owned(root: u32, virt: VirtAddr, phys: PhysAddr, flags: VmFlags) -> bool:
+    val va = virt.addr as u32
+    val pa = phys.addr as u32
+    if root == 0 or (root & 0xFFF) != 0 or (va & 0xFFF) != 0 or (pa & 0xFFF) != 0:
+        return false
+    val pdi = (va >> 22) & 0x3FF
+    if pdi >= 768: return false
+    var lease = x86_32_kmap_acquire(root)
+    if lease == nil: return false
+    var held = lease.unwrap()
+    val found = x86_32_kmap_read32(held, pdi * 4)
+    if found == nil or not x86_32_kmap_revoke(held): return false
+    var pt = if (found.unwrap() & PTE_PRESENT_32) != 0: found.unwrap() & PTE_ADDR_MASK_32 else: 0
+    if pt == 0:
+        pt = _x86_32_alloc_zero_frame()
+        if pt == 0: return false
+        lease = x86_32_kmap_acquire(root)
+        if lease == nil: return false
+        held = lease.unwrap()
+        val wrote = x86_32_kmap_write32(held, pdi * 4, pt | PTE_PRESENT_32 | PTE_WRITABLE_32 | PTE_USER_32)
+        if not x86_32_kmap_revoke(held) or not wrote: return false
+    lease = x86_32_kmap_acquire(pt)
+    if lease == nil: return false
+    held = lease.unwrap()
+    val pti = (va >> 12) & 0x3FF
+    val wrote = x86_32_kmap_write32(held, pti * 4, (pa & PTE_ADDR_MASK_32) | _x86_32_flags(flags))
+    x86_32_kmap_revoke(held) and wrote
+
+fn x86_32_user_page_readonly_owned(root: u32, va: u32, expected_phys: u32) -> bool:
+    val pdi = (va >> 22) & 0x3FF
+    val pti = (va >> 12) & 0x3FF
+    val root_lease = x86_32_kmap_acquire(root)
+    if root_lease == nil: return false
+    val root_held = root_lease.unwrap()
+    val pde = x86_32_kmap_read32(root_held, pdi * 4)
+    if not x86_32_kmap_revoke(root_held) or pde == nil: return false
+    if (pde.unwrap() & (PTE_PRESENT_32 | PTE_USER_32)) != (PTE_PRESENT_32 | PTE_USER_32): return false
+    val pt_lease = x86_32_kmap_acquire(pde.unwrap() & PTE_ADDR_MASK_32)
+    if pt_lease == nil: return false
+    val pt_held = pt_lease.unwrap()
+    val pte = x86_32_kmap_read32(pt_held, pti * 4)
+    if not x86_32_kmap_revoke(pt_held) or pte == nil: return false
+    val entry = pte.unwrap()
+    (entry & (PTE_PRESENT_32 | PTE_USER_32)) == (PTE_PRESENT_32 | PTE_USER_32) and
+        (entry & PTE_WRITABLE_32) == 0 and (entry & PTE_ADDR_MASK_32) == expected_phys
+
+fn x86_32_destroy_address_space_owned(root: u32):
+    if root == 0 or (root & 0xFFF) != 0: return
+    var pdi: u32 = 0
+    while pdi < 768:
+        val root_lease = x86_32_kmap_acquire(root)
+        if root_lease == nil: return
+        val root_held = root_lease.unwrap()
+        val pde = x86_32_kmap_read32(root_held, pdi * 4)
+        if not x86_32_kmap_revoke(root_held): return
+        if pde != nil and (pde.unwrap() & PTE_PRESENT_32) != 0:
+            val pt = pde.unwrap() & PTE_ADDR_MASK_32
+            var pti: u32 = 0
+            while pti < 1024:
+                val pt_lease = x86_32_kmap_acquire(pt)
+                if pt_lease == nil: return
+                val pt_held = pt_lease.unwrap()
+                val pte = x86_32_kmap_read32(pt_held, pti * 4)
+                if not x86_32_kmap_revoke(pt_held): return
+                if pte != nil and (pte.unwrap() & PTE_PRESENT_32) != 0:
+                    pmm_free_page(PageFrame(pfn: ((pte.unwrap() & PTE_ADDR_MASK_32) / PAGE_SIZE_32) as u64))
+                pti = pti + 1
+            pmm_free_page(PageFrame(pfn: (pt / PAGE_SIZE_32) as u64))
+        pdi = pdi + 1
+    pmm_free_page(PageFrame(pfn: (root / PAGE_SIZE_32) as u64))

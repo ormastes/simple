@@ -1,0 +1,78 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-FEATURE
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+"""
+## Purpose and audience
+
+Exercises the module-CLI contract that a `cli` block in a module's mod.spl
+relies on: a named entry surface, declared arguments surfaced through typed
+accessors, callable validation alongside parsing, and nothing outside the
+declared surface leaking to importers. Scenarios drive the real parser
+(std.cli.cli_parser) that module entry points are specified against.
+
+## Operator workflow
+
+Run `bin/simple test --no-session-daemon test/feature/usage/cli_args_modspl_spec.spl` and
+confirm the Results line reports 0 failed. Each scenario names the requirement
+it traces to, starts with a Verify step, and asserts on real parser output.
+
+## Compatibility and limitations
+
+Covers only the behavior explicitly asserted below on the current toolchain:
+the parser-side contract of a module CLI, not the mod.spl loader itself. No
+external standard or cross-version contract is claimed.
+
+## Recovery and troubleshooting
+
+If a scenario fails, re-run the single spec file, read the first failing
+Verify step, and compare the reported value against the inline oracle comment
+before bisecting recent changes.
+"""
+
+# @manual_section: cli args mod spl embedding
+
+use std.spec.step
+
+use std.spec.{describe, it, expect}
+use std.cli.cli_parser.{cli_spec, cli_spec_program, cli_spec_flag, cli_spec_option, parse_cli_args, validate_args, parsed_flag, parsed_option}
+
+describe "CLI Args mod.spl Embedding":
+    # @manual scenario evidence
+
+    context "module entry point":
+        it "defines cli in mod.spl":
+            # @req REQ-SSPEC-FEATURE
+            # @capture(protocol_json): generated usage text naming the module program
+            step("declare a named module CLI surface and generate its help")
+            val spec = cli_spec_program(cli_spec_flag(cli_spec(), "verbose", "v", "Show detailed output"), "my_tool", "Self-contained CLI tool as a module")
+            val help = generate_help(spec)
+            expect(help.contains("my_tool")).to_equal(true)  # oracle: generate_help prefixes usage with the declared program name
+            expect(help.contains("Usage:")).to_equal(true)  # oracle: a declared module surface always renders a usage block
+
+        it "generates CliArgs struct in module scope":
+            # @req REQ-SSPEC-FEATURE
+            # @capture(statistics): accessor values for the module-declared surface
+            step("parse an empty argv against the module-declared surface and read the accessors")
+            val spec = cli_spec_option(cli_spec_flag(cli_spec(), "verbose", "v", "Verbose mode"), "output", "o", "Output file", "result.txt", [])
+            val parsed = parse_cli_args(spec, [])
+            expect(parsed_flag(parsed, "verbose")).to_equal(false)  # oracle: the generated argument surface seeds declared flags to false
+            expect(parsed_option(parsed, "output")).to_equal("result.txt")  # oracle: the generated argument surface seeds declared options with their defaults
+
+    context "module interaction":
+        it "allows importing module functions alongside cli":
+            # @req REQ-SSPEC-FEATURE
+            # @capture(statistics): validation verdict for a satisfied module surface
+            step("parse a satisfied argv and run validation alongside the parser")
+            val spec = cli_spec_flag(cli_spec(), "verbose", "v", "Verbose mode")
+            val parsed = parse_cli_args(spec, ["--verbose"])
+            val (ok, error) = validate_args(spec, parsed)
+            expect(ok).to_equal(true)  # oracle: validate_args accepts a parse with no unmet declared requirement
+            expect(error).to_equal("")  # oracle: validate_args returns an empty message on the passing path
+
+        it "does not export CliArgs struct by default":
+            # @req REQ-SSPEC-FEATURE
+            # @capture(statistics): accessor verdict for a name outside the declared surface
+            step("query an accessor for a name the module never declared")
+            val spec = cli_spec_flag(cli_spec(), "verbose", "v", "Verbose mode")
+            val parsed = parse_cli_args(spec, ["--verbose"])
+            expect(parsed_option(parsed, "internal_state")).to_equal("")  # oracle: accessors return empty for undeclared names, so nothing outside the declared surface leaks

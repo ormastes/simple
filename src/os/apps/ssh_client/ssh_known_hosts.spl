@@ -1,0 +1,200 @@
+#![allow(unnamed_duplicate_typed_args)]
+# SSH client known-hosts store and server host-key verification.
+#
+# This module has NO server-side counterpart: sshd never verifies a host key,
+# so nothing here duplicates os.apps.sshd. It is the security core of the
+# client — an SSH client that does not pin the server host key gives a MITM
+# the entire session, so every path here fails CLOSED:
+#
+#   * The only success value is Ok(true), reachable only when the host, the
+#     key algorithm, AND the full key blob all match a stored entry byte for
+#     byte. There is no Ok(false) a caller can misread as "not fatal".
+#   * An unknown host is a refusal, not a prompt-and-continue.
+#   * A host present with a DIFFERENT key for the same algorithm is reported
+#     as a distinct MISMATCH refusal (possible man-in-the-middle).
+#   * A malformed known_hosts line is a hard parse error: a store that cannot
+#     be read is never treated as an empty store.
+
+extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
+
+val _SSH_B64_ALPHABET: text = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+
+# Verdict codes.
+val SSH_HOSTKEY_OK: text = "ok"
+val SSH_HOSTKEY_UNKNOWN: text = "unknown"
+val SSH_HOSTKEY_MISMATCH: text = "mismatch"
+
+struct SshKnownHostEntry:
+    """One pinned (host, algorithm, key) triple."""
+    host: text
+    algorithm: text
+    key_blob: [u8]
+
+struct SshKnownHostsDb:
+    """A parsed known_hosts store."""
+    entries: [SshKnownHostEntry]
+
+fn _sshcli_u8_at(data: [u8], idx: u64) -> u8:
+    rt_bytes_u8_at(data, idx.to_i64()).to_u8()
+
+fn _b64_char_value(ch: text) -> i64:
+    var i: i64 = 0
+    while i < _SSH_B64_ALPHABET.len():
+        if _SSH_B64_ALPHABET[i:i + 1] == ch:
+            return i
+        i = i + 1
+    -1
+
+fn ssh_base64_decode_bytes(encoded: text) -> Result<[u8], text>:
+    """Strict base64 -> bytes. Any character outside the alphabet (other than
+    '=' padding) is an error; a silent skip would let a corrupted known_hosts
+    line decode to a *different* key."""
+    var out: [u8] = []
+    var acc: i64 = 0
+    var bits: i64 = 0
+    var saw_pad: bool = false
+    for ch in encoded:
+        if ch == "=":
+            saw_pad = true
+        else:
+            if saw_pad:
+                return Err("base64: data after padding")
+            val v: i64 = _b64_char_value(ch)
+            if v < 0:
+                return Err("base64: invalid character")
+            acc = (acc << 6) | v
+            bits = bits + 6
+            if bits >= 8:
+                bits = bits - 8
+                val byte_val: i64 = (acc >> bits) & 0xFF
+                out.push(byte_val.to_u8())
+    Ok(out)
+
+fn _sshcli_b64_char(value: i64) -> text:
+    """Alphabet lookup for a 6-bit group."""
+    _SSH_B64_ALPHABET[value:value + 1]
+
+fn ssh_base64_encode_bytes(data: [u8]) -> text:
+    """Bytes -> standard base64 with '=' padding."""
+    # Accumulate into a parts array and join once — repeated `text = text + x`
+    # inside the loop would be O(n^2) (lint COLL006).
+    var parts: [text] = []
+    var i: u64 = 0
+    while i + 2 < data.len():
+        val b0: i64 = _sshcli_u8_at(data, i).to_i64()
+        val b1: i64 = _sshcli_u8_at(data, i + 1).to_i64()
+        val b2: i64 = _sshcli_u8_at(data, i + 2).to_i64()
+        val n: i64 = (b0 << 16) | (b1 << 8) | b2
+        parts.push(_sshcli_b64_char((n >> 18) & 0x3F))
+        parts.push(_sshcli_b64_char((n >> 12) & 0x3F))
+        parts.push(_sshcli_b64_char((n >> 6) & 0x3F))
+        parts.push(_sshcli_b64_char(n & 0x3F))
+        i = i + 3
+    val rem: u64 = data.len() - i
+    if rem == 1:
+        val b0: i64 = _sshcli_u8_at(data, i).to_i64()
+        val n: i64 = b0 << 16
+        parts.push(_sshcli_b64_char((n >> 18) & 0x3F))
+        parts.push(_sshcli_b64_char((n >> 12) & 0x3F))
+        parts.push("==")
+    elif rem == 2:
+        val b0: i64 = _sshcli_u8_at(data, i).to_i64()
+        val b1: i64 = _sshcli_u8_at(data, i + 1).to_i64()
+        val n: i64 = (b0 << 16) | (b1 << 8)
+        parts.push(_sshcli_b64_char((n >> 18) & 0x3F))
+        parts.push(_sshcli_b64_char((n >> 12) & 0x3F))
+        parts.push(_sshcli_b64_char((n >> 6) & 0x3F))
+        parts.push("=")
+    parts.join("")
+
+fn _sshcli_split_fields(line: text) -> [text]:
+    var out: [text] = []
+    for raw in line.split(" "):
+        val part = raw.trim()
+        if part != "":
+            out.push(part)
+    out
+
+fn ssh_known_hosts_parse(content: text) -> Result<SshKnownHostsDb, text>:
+    """Parse an OpenSSH-style known_hosts file body.
+
+    Accepted line shape:  <host>[,<host>...] <algorithm> <base64-blob> [comment]
+    Blank lines and lines beginning with '#' are ignored. Anything else is a
+    hard error — a store we cannot fully read must not silently become empty.
+    """
+    var entries: [SshKnownHostEntry] = []
+    var lineno: u64 = 0
+    for raw_line in content.split("\n"):
+        lineno = lineno + 1
+        val line = raw_line.trim()
+        if line == "":
+            pass_dn
+        elif line[0:1] == "#":
+            pass_dn
+        else:
+            val fields = _sshcli_split_fields(line)
+            if fields.len() < 3:
+                return Err("known_hosts: malformed line " + lineno.to_text())
+            val algorithm = fields[1]
+            if algorithm == "":
+                return Err("known_hosts: empty algorithm on line " + lineno.to_text())
+            val blob = ssh_base64_decode_bytes(fields[2])?
+            if blob.len() == 0:
+                return Err("known_hosts: empty key blob on line " + lineno.to_text())
+            for host_raw in fields[0].split(","):
+                val host = host_raw.trim()
+                if host == "":
+                    return Err("known_hosts: empty host on line " + lineno.to_text())
+                entries.push(SshKnownHostEntry(host: host, algorithm: algorithm, key_blob: blob))
+    Ok(SshKnownHostsDb(entries: entries))
+
+fn ssh_known_hosts_line(host: text, algorithm: text, key_blob: [u8]) -> text:
+    """Render a store line for a newly accepted key (explicit user action)."""
+    host + " " + algorithm + " " + ssh_base64_encode_bytes(key_blob)
+
+fn _sshcli_blobs_equal(a: [u8], b: [u8]) -> bool:
+    if a.len() != b.len():
+        return false
+    var i: u64 = 0
+    while i < a.len():
+        if _sshcli_u8_at(a, i) != _sshcli_u8_at(b, i):
+            return false
+        i = i + 1
+    true
+
+fn ssh_known_hosts_status(db: SshKnownHostsDb, host: text, algorithm: text, key_blob: [u8]) -> text:
+    """Classify a presented host key: ok / mismatch / unknown.
+
+    Precedence is deliberate: an exact match anywhere wins, otherwise a stored
+    key for the same (host, algorithm) makes this a MISMATCH rather than an
+    unknown host.
+    """
+    var saw_host_algorithm: bool = false
+    var i: u64 = 0
+    while i < db.entries.len():
+        val e = db.entries[i]
+        if e.host == host and e.algorithm == algorithm:
+            saw_host_algorithm = true
+            if _sshcli_blobs_equal(e.key_blob, key_blob):
+                return SSH_HOSTKEY_OK
+        i = i + 1
+    if saw_host_algorithm:
+        return SSH_HOSTKEY_MISMATCH
+    SSH_HOSTKEY_UNKNOWN
+
+fn ssh_known_hosts_verify(db: SshKnownHostsDb, host: text, algorithm: text, key_blob: [u8]) -> Result<bool, text>:
+    """Fail-closed host-key check. Ok(true) is the ONLY non-error outcome."""
+    if key_blob.len() == 0:
+        return Err("host key rejected: empty key blob for " + host)
+    val status = ssh_known_hosts_status(db, host, algorithm, key_blob)
+    if status == SSH_HOSTKEY_OK:
+        return Ok(true)
+    if status == SSH_HOSTKEY_MISMATCH:
+        return Err("HOST KEY MISMATCH for " + host + " (" + algorithm + "): stored key differs — possible man-in-the-middle, refusing to connect")
+    Err("unknown host key for " + host + " (" + algorithm + "): not in known_hosts, refusing to connect")
+
+export SshKnownHostEntry, SshKnownHostsDb
+export SSH_HOSTKEY_OK, SSH_HOSTKEY_UNKNOWN, SSH_HOSTKEY_MISMATCH
+export ssh_base64_decode_bytes, ssh_base64_encode_bytes
+export ssh_known_hosts_parse, ssh_known_hosts_line
+export ssh_known_hosts_status, ssh_known_hosts_verify

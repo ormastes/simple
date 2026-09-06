@@ -1,0 +1,63 @@
+# Run-path probe: the named-argument class literal must build FIELDS, never
+# dispatch to `static fn new`.
+#
+# Oracle for test/01_unit/compiler/interpreter/named_ctor_static_new_hijack_spec.spl
+# (doc/08_tracking/bug/interp_static_fn_new_hijacks_named_ctor_2026-07-02.md).
+#
+# KNOWN RED as of 2026-08-17 on the `param_names_do_not_hijack` check. Root
+# cause: src/compiler_rust/compiler/src/interpreter_call/core/class_instantiation.rs
+# lines 148-155. `all_named_struct_literal` suppresses the auto-call to `new`
+# only when EVERY named argument is a class field; when a name is instead a
+# parameter of `static fn new`, `named_args_fit_new` wins and the literal is
+# routed into `new`'s body with no diagnostic.
+#
+# The sentinel 77 exists nowhere except inside `new`'s body, so observing it is
+# proof the static was reached — not merely that some field ended up wrong.
+
+class Font:
+    id: i64
+    size: i64
+    static fn new(path: text, size: i64) -> Font:
+        return Font(id: 77, size: size)
+
+class Widget:
+    id: i64
+    size: i64
+    static fn new(path: text, size: i64) -> Widget:
+        return Widget(id: 77, size: size)
+
+var failures: i64 = 0
+
+fn check(name: text, got: i64, want: i64):
+    if got == want:
+        print("PASS " + name)
+    else:
+        print("FAIL " + name + " got=" + got.to_text() + " want=" + want.to_text())
+        failures = failures + 1
+
+fn main():
+    # Control 1: all names are FIELDS -> must build the struct directly.
+    val a = Font(id: 1, size: 8)
+    check("field_names_build_struct_id", a.id, 1)
+    check("field_names_build_struct_size", a.size, 8)
+
+    # Control 2: reversed order -> names must be honoured, not positions.
+    val b = Widget(size: 4, id: 3)
+    check("reversed_order_id", b.id, 3)
+    check("reversed_order_size", b.size, 4)
+
+    # Control 3: the explicit associated-constructor call must still reach
+    # `new`. If this ever fails the probe is testing the wrong thing.
+    val c = Widget.new("x", 9)
+    check("explicit_new_still_reaches_static", c.id, 77)
+
+    # THE DEFECT: `path` is a parameter of `static fn new` and is NOT a field
+    # of the class. The named-literal form must not silently dispatch to `new`.
+    # id == 77 means it did.
+    val d = Font(path: "x", size: 8)
+    check("param_names_do_not_hijack", d.id, 0)
+
+    if failures == 0:
+        print("NAMED_CTOR_HIJACK PROBE: ALL PASS")
+    else:
+        print("NAMED_CTOR_HIJACK PROBE: FAILURES=" + failures.to_text())

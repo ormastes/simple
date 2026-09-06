@@ -1,0 +1,48 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+module="$root/src/lib/nogc_sync_mut/engine/audio/audio_manager.spl"
+registry="$root/src/compiler_rust/compiler/src/codegen/runtime_sffi.rs"
+interpreter="$root/src/compiler_rust/compiler/src/interpreter_extern/mod.rs"
+
+[ "$(grep -c '^    @unsafe(reason:' "$module")" -eq 24 ]
+[ "$(grep -c '^@always_inline$' "$module" || true)" -eq 0 ]
+
+call_count=$(perl -0ne '
+    s/""".*?"""//sg;
+    s/#.*//mg;
+    while (/\brt_audio_[a-z0-9_]+\s*\(/g) { $count++ }
+    END { print $count + 0 }
+' "$module")
+[ "$call_count" -eq 34 ]
+
+symbols=$(perl -0ne '
+    s/""".*?"""//sg;
+    s/#.*//mg;
+    while (/\b(rt_audio_[a-z0-9_]+)\s*\(/g) { $seen{$1}=1 }
+    END { print "$_\n" for sort keys %seen }
+' "$module")
+both=0
+one=0
+none=0
+for symbol in $symbols; do
+    providers=0
+    grep -q "RuntimeFuncSpec::new(\"$symbol\"" "$registry" && providers=$((providers + 1))
+    grep -q "insert_simple!(\"$symbol\"" "$interpreter" && providers=$((providers + 1))
+    case "$providers" in
+        2) both=$((both + 1)) ;;
+        1) one=$((one + 1)) ;;
+        0) none=$((none + 1)) ;;
+    esac
+done
+[ "$both" -eq 0 ]
+[ "$one" -eq 0 ]
+[ "$none" -eq 18 ]
+
+grep -q '^    me stop_sound(handle: SoundHandle) -> bool:' "$module"
+grep -q '^    me pause_sound(handle: SoundHandle) -> bool:' "$module"
+grep -q '^    me resume_sound(handle: SoundHandle) -> bool:' "$module"
+grep -q 'rt_audio_set_spatialization_enabled(playback_handle, 1)' "$module"
+
+echo "AudioManager SFFI authority audit: PASS (34 calls/18 symbols; 24 narrow direct/transitive unsafe resource owners; 0 both/0 one/18 no-provider; semantic public bool preserved; raw numeric spatial ABI remains explicit; no forced inlining)"

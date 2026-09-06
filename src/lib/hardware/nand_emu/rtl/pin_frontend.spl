@@ -1,0 +1,92 @@
+# ============================================================================
+# nand_emu RTL — Pin frontend (VHDL-2008 subset feasibility spike)
+# ============================================================================
+#
+# Written in the hardware-oriented Simple subset (see
+# doc/04_architecture/hardware/vhdl/vhdl_support_matrix.md) — pure functions,
+# fixed-width ints, simple structs, no dynamic allocation, no unbounded loops,
+# no heap/text. Mirrors the style of src/lib/hardware/rv32i_rtl/alu.spl.
+#
+# This is a P1 feasibility spike (doc §5.1): latch classification (combinational)
+# and the serial-access column counter (clocked). Backend subset gaps found here
+# are valid findings, recorded honestly — not failures to hide.
+#
+# Source: doc/01_research/hardware/nand_emu/nand_emu_fpga_riscv_emulator.md §5.1
+# ============================================================================
+
+use hardware.nand_emu.nand_types.NeLatchKind
+
+# ----------------------------------------------------------------------------
+# Pin bundle (doc §5.1) — synchronizable NAND pad signals.
+# ----------------------------------------------------------------------------
+
+struct NePins:
+    """NAND pad signals (doc §5.1). io_i from pads, io_o to pads."""
+    io_i: u8       # from pads
+    io_o: u8       # to pads
+    io_oe: bool    # tri-state enable
+    cle: bool
+    ale: bool
+    ce_n: bool
+    re_n: bool
+    we_n: bool
+    wp_n: bool
+    rb_n: bool     # open-drain: drive 0 or Hi-Z
+
+# ----------------------------------------------------------------------------
+# Latch classification (doc §5.1) — IMPLEMENTED (combinational, 4 arms).
+# ----------------------------------------------------------------------------
+
+fn ne_latch_classify(cle: bool, ale: bool) -> NeLatchKind:
+    """Classify the current latch cycle from the CLE/ALE strobes (doc §5.1).
+    Pure combinational logic — CLE selects Command, ALE selects Address,
+    neither selects DataIn, both asserted is Illegal."""
+    if cle and (not ale):
+        NeLatchKind.Command
+    else if (not cle) and ale:
+        NeLatchKind.Address
+    else if (not cle) and (not ale):
+        NeLatchKind.DataIn
+    else:
+        NeLatchKind.Illegal
+
+# ----------------------------------------------------------------------------
+# Serial-access column counter (doc §5.1 req. 3 + 6) — IMPLEMENTED (clocked).
+# ----------------------------------------------------------------------------
+
+struct NeColCounter:
+    """Clocked serial-access column counter state (doc §5.1)."""
+    col: u32       # current column index into the page buffer
+    valid: bool    # a page is loaded and the counter is armed
+
+fn ne_col_counter_step(state: NeColCounter, re_rising: bool, addr_latch: bool, page_bytes: u32) -> NeColCounter:
+    """Clocked register update for the serial-access column counter (doc §5.1
+    req. 3 + 6).
+
+    - `addr_latch` (a WE-rising-edge cycle classified Address, doc §5.1 req. 2)
+      arms the counter at column 0 — a freshly latched address restarts serial
+      access from the first byte.
+    - `re_rising` (an RE rising edge, doc §5.1 req. 3) pre-fetches the next
+      byte: the column counter increments and wraps at `page_bytes`. Only
+      armed (`valid`) counters advance.
+    - CE don't-care (doc §5.1 req. 6): this register has no `ce_n` input at
+      all, by construction — it is driven only by `addr_latch` / `re_rising`,
+      so CE going inactive mid serial-access cannot perturb `col` or `valid`;
+      the state simply holds on any clock edge where neither strobe fires.
+    - `page_bytes == 0` is a degenerate geometry; the counter holds at 0
+      instead of wrapping (explicit safe result, never a panic — this is a
+      clocked register, not a place to raise runtime errors)."""
+    var next_col: u32 = state.col
+    var next_valid: bool = state.valid
+
+    if addr_latch:
+        next_col = 0
+        next_valid = true
+    else if re_rising and state.valid and page_bytes != 0:
+        val bumped = state.col + 1
+        if bumped >= page_bytes:
+            next_col = 0
+        else:
+            next_col = bumped
+
+    NeColCounter(col: next_col, valid: next_valid)

@@ -1,0 +1,191 @@
+# UP Squared Apollo Lake Intel DCI programming and debug guide
+
+## Supported meaning
+
+Intel documents Apollo Lake processors in its USB 3.x DCI Debug Class matrix.
+Whether a particular original UP Squared exposes that JTAG-like run-control and
+accessible-memory lane depends on its exact FAB, BIOS routing/consent, enabled
+debug interface, Intel-qualified DCI DbC cable/probe, and the CNDA-controlled
+Intel System Debugger/System Bring-Up Toolkit. Smart KM
+Link, ordinary A-to-A USB, Tigard, CN22, GDB, and OpenOCD are not substitutes.
+
+Start with the read-only inventory:
+
+```sh
+scripts/check/check-up-squared-apl-dci.shs --inventory
+```
+
+`blocked` is expected until a retained Intel-tool connection receipt exists.
+Never infer readiness from a connector or unknown USB VID/PID.
+
+## Current host checkpoint (2026-08-22)
+
+The host is Ubuntu 24.04.4. No Intel System Debugger/System Bring-Up Toolkit
+installer, installation directory, or `/etc/udev/rules.d/99-dci.rules` is
+present. Intel does not publish this toolkit through Ubuntu APT: installation
+starts only after the operator completes Intel's corporate-NDA request and
+downloads the authenticated Registration Center package. Do not use a mirror,
+guess a package name, or install a similarly named debugger.
+
+The observed Smart KM Link `0ea0:2211` is a USB 2.0 mass-storage/HID composite
+at 480 Mbit/s, not a DCI target endpoint. A passive cable may not enumerate by
+itself, so the decisive test remains Target Connection Agent discovering the
+Apollo Lake target and CPU threads. The Intel request page and the UP community
+DCI discussion were opened for the operator; BIOS enablement is still
+unproven until the exact board menu or a successful target receipt confirms it.
+
+## Safe enablement sequence
+
+1. Record exact `UPS-APL` model, board FAB, BIOS version, RAM, and storage.
+2. Back up firmware with a verified external recovery path before considering
+   any firmware change. Do not use the old FAB-A debug image by default.
+3. Install the CNDA-controlled Intel toolkit on a supported host and its DCI
+   udev rules. Use a genuine Intel SVT DCI DbC2/3 cable/probe or another cable
+   explicitly qualified by Intel's target-connection documentation.
+4. In the board's existing BIOS, inspect only the board-specific DCI/debug
+   consent settings. Menu names vary. Do not patch `IA32_DEBUG_INTERFACE` or
+   flash firmware as part of this guide.
+5. Connect through Target Connection Agent and retain a receipt identifying
+   target, connection type, tool version, cable, firmware, and timestamp.
+6. Prove halt/resume on a disposable, secret-free target, then read a known
+   non-sensitive physical-memory location. Never unplug DCI while halted.
+
+Do **not** use OpenRC warm reset on Apollo Lake. Intel documents that it can
+leave cores unreleasable in an undefined state and gives manual reset as the
+recovery. Treat physical reset as the baseline. A toolkit Power-Good reset is a
+separate experiment and is accepted only after exact-board evidence.
+
+## Boot SimpleOS
+
+The selected scope is A+B+D: DCI-assisted UEFI first boot, a UEFI-resident RAM
+mailbox loader for repeated boots, and a target-side storage provisioner. Raw
+debugger-authored CPU-state boot and open xHCI DbC are excluded from this work.
+
+The recommended lane is DCI-assisted UEFI boot. Keep the existing removable
+GPT/FAT32 image and let UEFI/GRUB establish the boot contract. Use DCI only for
+the halt, breakpoint, accessible-memory, and reset capabilities separately
+proven on the exact target. OpenRC is never admitted; Power-Good is not admitted
+until exact-board proof. Accept boot only when CN16 UART
+shows the current loader/shim/entry/console/VFS/shell markers and a freshly
+injected `ls /` returns `/bin`, `/etc`, and `/README.txt`.
+
+Do not copy `simpleos.elf` to `0x08000000` and set RIP. Its three current
+`PT_LOAD` segments use different file offsets/physical addresses, and the
+writable segment expands from 250 file bytes to `0x02fd7000` memory bytes,
+ending at `0x0b000000`. The current entry is a 32-bit bootstrap contract;
+arbitrary debugger/UEFI state is
+incompatible.
+
+The preferred direct-memory design is a resident UEFI loader: it allocates and
+publishes a staging mailbox, DCI writes the hash-bound image, and target code
+parses ELF, zeros BSS, exits firmware, parks cores, and constructs exact
+Multiboot state. Raw debugger-controlled register/CR/GDT/page-table setup is a
+last-resort design, not an operational command in this guide.
+That resident adapter is not implemented. The landed `dci_mailbox.spl` is an
+admission-policy capsule, while the RSP range is a post-boot data staging area.
+Neither can presently boot a DCI-uploaded ELF. UEFI's standardized Debug Support
+Table can aid loaded-image discovery but does not create this missing handoff.
+
+## Read and write storage
+
+DCI may stage an image in RAM but does not write blocks. Use one of:
+
+- the existing identity-gated removable-media writer on the writer host; or
+- a trusted RAM/PXE Linux/provisioner on UP2 with a real device driver; or
+- the landed SimpleOS NVMe path: `nvme identify`, exact printed
+  `nvme format FORMAT:...`, then `ls /nvme` and verify `/nvme/proof.txt`.
+
+Before any write, bind model, serial, transport, capacity, partition layout,
+mount/holder state, and root/swap exclusion. Write only explicit bounds, flush,
+then hash the exact-length readback. Never program eMMC/SATA/USB controller MMIO
+through debugger memory writes. Never treat the M.2 E-key as generic NVMe.
+The original manual documents E-key, Mini Card, and SATA but no M-key socket;
+an attached adapter must first enumerate as PCI storage class `01:08` and pass
+NVMe Identify. The QEMU scratch proof is complete; physical UP2 is not.
+
+## Open alternative
+
+SimpleOS may later implement xHCI DbC as a high-speed post-entry byte transport
+for a console or resident GDB endpoint. The GNU-remote USB interface descriptor
+does not supply CPU debugging by itself. This lane is not Intel DCI and cannot
+provide pre-boot reset/halt/memory load before target software initializes xHCI.
+
+## Free first-light and software-debug path
+
+The free path does not emulate Intel DCI. It boots the existing removable UEFI
+image, observes CN16, and exposes a bounded target-resident GDB RSP memory
+monitor after SimpleOS starts. Use this exact CN16 UART wiring:
+
+| CN16 pin | UP2 signal | Connect to Tigard Port A |
+|---:|---|---|
+| 8 | GND | GND |
+| 9 | UART RX, 3.3-V TTL | TX (only when input is needed) |
+| 10 | UART TX, 3.3-V TTL | RX |
+
+Never connect adapter VCC or CN16 pins 1 or 5 (5 V). Configure 115200 8N1, no
+flow control. CN22 pin 4 is 1.8 V and the documented JTAG path services the
+FPGA; the manual does not qualify its signal thresholds for a generic probe.
+Tigard interface 00 is Port A/Serial; interface 01 is Port B/JTAG. Do not send
+UART data through the JTAG interface, and do not connect Tigard JTAG to CN22:
+pin 4 alone establishes the 1.8-V service rail, not compatible thresholds for
+every signal.
+
+SimpleOS initializes COM1 before its first `UP2 entry` marker. Its loopback
+self-test must consume the injected `0xAE` byte before the shell starts; a raw
+transcript containing `ae 6c 73 20 2f` identifies a stale probe byte. The
+admitted OVMF check covers this invariant.
+
+On the host:
+
+```sh
+picocom --baud 115200 --flow none --databits 8 --parity n --stopbits 1 \
+  /dev/serial/by-id/usb-Tigard_port_A:Serial_port_B:JTAG_*-if00-port0
+```
+
+Insert the admitted UEFI USB image and record Secure Boot state. Use F7 for the
+one-time UEFI boot entry; use DEL or ESC when the firmware prompt requires setup.
+If the removable entry is absent, the EFI shell may launch the exact fallback
+path from its mapped FAT filesystem, but record that as a distinct manual-shell
+route. Capture from power-on/reset through the fresh `ls /` response. A quiet UART is
+not PASS: verify power, pin 10-to-RX and pin 8-to-GND first, then capture factory
+firmware output to separate wiring from a SimpleOS UART-routing problem.
+
+### Load and verify staging RAM with GDB
+
+At the SimpleOS prompt, type `gdb`. The monitor then owns the serial port until
+detach. Exit picocom without resetting the board, and attach host GDB to the
+same stable serial path:
+
+```gdb
+set serial baud 115200
+set remotetimeout 5
+target remote /dev/serial/by-id/usb-Tigard_port_A:Serial_port_B:JTAG_*-if00-port0
+maintenance packet M0a000000,4:53494d50
+maintenance packet m0a000000,4
+detach
+```
+
+The read response must be `53494d50`. Valid addresses are exactly
+`0x0a000000..0x0b000000`, with at most 1024 bytes per packet. The writable ELF
+`PT_LOAD` reserves this 16 MiB staging range, and every `M` packet is read back
+before `OK`. Use `maintenance packet` for this current memory-only monitor;
+ordinary register display, breakpoints, `continue`, `step`, reset, and binary
+`X` packets are not implemented and return unsupported. This is post-boot RAM
+access, not preboot DCI/JTAG or a direct CPU-state boot method.
+
+The canonical OVMF checker proves the sequence `qSupported` → write `SIMP` →
+read `53494d50` → detach while retaining the earlier boot/VFS/`ls /` evidence.
+Physical CN16 PASS still requires the exact board transcript.
+
+The 2026-08-22 current-image receipt binds kernel SHA-256 `31ce1fb4…e1fbdf`
+and USB-image SHA-256 `983b74b9…b9ae8`. Its separate scratch-NVMe receipt also
+passes Identify, GPT/FAT32, flush, fresh-adapter readback, and proof-file access.
+These are emulator receipts, not physical-board or physical-drive receipts.
+
+Do not install CHIPSEC on the host expecting remote access. CHIPSEC must execute
+on UP2 under a trusted Linux/Windows driver or UEFI agent. Linux xHCI DbC and the
+SimpleOS GDB monitor are post-initialization software tools; neither can
+halt or reset an otherwise dead target.
+
+Research and source links are in
+`doc/01_research/domain/up_squared_apl_intel_dci_debug.md`.

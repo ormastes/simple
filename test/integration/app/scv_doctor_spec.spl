@@ -1,0 +1,114 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-INTEGRATION
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+"""
+## Purpose and audience
+Purpose: This spec proves `scv doctor` prints one `<component>  OK|STALE|FAIL`
+row per health check and a final verdict line with fail-closed exit codes
+(stabilization report §3).
+Audience: Maintainers of the SCV stabilization tooling.
+"""
+# @req: REQ-SSPEC-INTEGRATION
+use std.spec.step
+
+use std.spec.{describe, it, expect, step}
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+fn _prelude(tag: text) -> [text]:
+    [
+        "set -eu",
+        "REPO=$(pwd)",
+        "TMP=$(mktemp -d /tmp/scv-doctor-{tag}.XXXXXX)",
+        "scv() { SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" \"$@\"; }",
+        "cd \"$TMP\"",
+        "printf 'hello\\n' > a.txt",
+        "scv init >/dev/null",
+        "scv snapshot >/dev/null"
+    ]
+
+fn _run(lines: [text]) -> text:
+    val (out, err, code) = rt_process_run("/bin/sh", ["-c", lines.join("\n") + "\n"])
+    val combined = "{out}{err}\nexit={code}\n"
+    expect(out == "" and err == "").to_equal(false)
+    combined
+
+describe "scv doctor":
+    # @manual scenario evidence
+    it "reports every component OK on a healthy repository":
+        # @req REQ-SSPEC-INTEGRATION
+        step("reports every component OK on a healthy repository")
+        step("Run doctor on a healthy repository")
+        var lines = _prelude("healthy")
+        lines.push("scv doctor")
+        lines.push("printf 'doctor_code=%s\\n' \"$?\"")
+        val out = _run(lines)
+        step("Verify one row per component and a PASS verdict")
+        expect(out).to_contain("objects  OK")
+        expect(out).to_contain("refs  OK")
+        expect(out).to_contain("operation heads  OK")
+        expect(out).to_contain("view  OK")
+        expect(out).to_contain("checkpoints  OK")
+        expect(out).to_contain("parser index  OK")
+        expect(out).to_contain("PASS — 8 check(s), 0 failed")
+        expect(out).to_contain("doctor_code=0")
+        expect(out).to_contain("exit=0")
+
+    it "fails with exit 1 when an object is corrupted":
+        # @req REQ-SSPEC-INTEGRATION
+        step("fails with exit 1 when an object is corrupted")
+        step("Corrupt a commit object and run doctor")
+        var lines = _prelude("corrupt")
+        lines.push("C=$(sed -n 's/default: //p' .scv/meta/workspaces.sdn)")
+        lines.push("printf 'garbage\\n' >> \".scv/objects/commits/$C.sdn\"")
+        lines.push("set +e")
+        lines.push("scv doctor")
+        lines.push("printf 'doctor_code=%s\\n' \"$?\"")
+        lines.push("set -e")
+        val out = _run(lines)
+        step("Verify the objects row FAILs and the verdict is FAIL exit 1")
+        expect(out).to_contain("objects  FAIL")
+        expect(out).to_contain("FAIL — 8 check(s), 1 failed")
+        expect(out).to_contain("doctor_code=1")
+        expect(out).to_contain("exit=0")
+
+    it "errors with exit 2 outside a repository":
+        # @req REQ-SSPEC-INTEGRATION
+        step("errors with exit 2 outside a repository")
+        step("Run doctor in a directory with no repository")
+        val lines = [
+            "set -eu",
+            "REPO=$(pwd)",
+            "TMP=$(mktemp -d /tmp/scv-doctor-norepo.XXXXXX)",
+            "cd \"$TMP\"",
+            "set +e",
+            "SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" doctor",
+            "printf 'doctor_code=%s\\n' \"$?\"",
+            "set -e"
+        ]
+        val out = _run(lines)
+        step("Verify the nothing-was-checked verdict and exit 2")
+        expect(out).to_contain("ERROR — nothing was checked")
+        expect(out).to_contain("doctor_code=2")
+        expect(out).to_contain("exit=0")
+
+    it "reports a stale journal row and reconciles it from the published head":
+        # @req REQ-SSPEC-INTEGRATION
+        step("reports a stale journal row and reconciles it from the published head")
+        step("Desynchronize the workspace pointer from the head view")
+        var lines = _prelude("staleview")
+        lines.push("cp .scv/meta/workspaces.sdn ws.before")
+        lines.push("printf 'x2\\n' > b.txt")
+        lines.push("SCV_FAULT_AFTER=head scv snapshot >/dev/null 2>&1 || true")
+        lines.push("scv doctor")
+        lines.push("printf 'doctor_code=%s\\n' \"$?\"")
+        lines.push("scv doctor")
+        val out = _run(lines)
+        step("Verify the first run reports the stale journal, reconciles, and the second is OK")
+        expect(out).to_contain("journal  STALE")
+        expect(out).to_contain("journal  OK")
+        expect(out).to_not_contain("view  STALE")
+        expect(out).to_contain("view  OK")
+        expect(out).to_contain("doctor_code=0")
+        expect(out).to_contain("exit=0")

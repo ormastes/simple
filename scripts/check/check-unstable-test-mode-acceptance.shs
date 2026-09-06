@@ -1,0 +1,130 @@
+#!/bin/sh
+# Acceptance gate for doc/02_requirements/infra/supervised_test_runner.md.
+#
+# ONE sequential run over the five fixtures in test/fixtures/unstable_mode/
+# (one crashes, one infinite-loops into the timeout, one fails an assertion,
+# two pass) must:
+#   * reach the END of the list (all five attributed),
+#   * report the crash as CRASHED, never as a pass and never as absent,
+#   * report the timeout as UNVERIFIED, never as a failure,
+#   * exit NON-ZERO,
+#   * never claim five passed.
+#
+# R4: the runner's exit status is read on the line AFTER the invocation, never
+# through a pipe -- a pipe yields the LAST command's status and has produced
+# false greens in this repo.
+# R5: sequential by construction. This script never runs two `simple test`
+# invocations at once; parallel directory runs corrupt the shared test DB.
+#
+# Verdict is the LAST line of stdout:
+#   PASS  — <n> check(s) verified ...        exit 0
+#   FAIL  — ...                              exit 1
+#   ERROR — nothing was checked              exit 2   (vacuous run: never a pass)
+#
+# Negative control (`--control`): re-runs the same fixtures with the outcome
+# classification disabled (SIMPLE_TEST_UNSTABLE_CONTROL=1 is NOT read by the
+# runner -- the control is performed by asserting that the pre-change shape,
+# "five specs, no CRASHED/unverified vocabulary in the summary", is NOT what we
+# observe). A control that cannot fail proves nothing, so the control asserts a
+# concrete, checkable difference and FAILs if the two arms agree.
+
+set -u
+
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+FIXDIR="$ROOT/test/fixtures/unstable_mode"
+BIN="$ROOT/bin/simple"
+TIMEOUT_SECS="${UNSTABLE_FIXTURE_TIMEOUT:-20}"
+LOG="${UNSTABLE_ACCEPTANCE_LOG:-$ROOT/build/unstable_acceptance.log}"
+CHECKED=0
+FAILURES=""
+
+mkdir -p "$(dirname "$LOG")" 2>/dev/null
+
+fail() { FAILURES="$FAILURES
+  - $1"; }
+check() { CHECKED=$((CHECKED + 1)); }
+
+if [ ! -x "$BIN" ] && [ ! -L "$BIN" ]; then
+  echo "ERROR — nothing was checked (no $BIN)"
+  exit 2
+fi
+if [ ! -d "$FIXDIR" ]; then
+  echo "ERROR — nothing was checked (fixture dir missing: $FIXDIR)"
+  exit 2
+fi
+
+# Non-vacuity: the fixture set itself must be complete before anything is run.
+for f in crash_spec.spl timeout_spec.spl fail_spec.spl pass_a_spec.spl pass_b_spec.spl; do
+  check
+  [ -f "$FIXDIR/$f" ] || fail "missing fixture $f"
+done
+
+# Stale sentinel from an earlier run would mislabel this one.
+rm -f "$FIXDIR"/*.crashed
+
+cd "$ROOT" || { echo "ERROR — nothing was checked (cannot cd $ROOT)"; exit 2; }
+
+"$BIN" test test/fixtures/unstable_mode --unstable --only-skipped --timeout "$TIMEOUT_SECS" > "$LOG" 2>&1
+RC=$?
+
+SUMMARY=$(grep -c '^Results:' "$LOG")
+
+check
+if [ "$SUMMARY" -eq 0 ]; then
+  fail "no 'Results:' summary line — silent green shape (rc=$RC); see $LOG"
+fi
+
+check
+if [ "$RC" -eq 0 ]; then
+  fail "runner exited 0 with a crashing and a failing fixture in the run"
+fi
+
+check
+if ! grep -q 'crashed' "$LOG"; then
+  fail "summary never names a CRASHED unit"
+fi
+
+check
+if ! grep -qi 'unverified' "$LOG"; then
+  fail "summary never names the timed-out unit as unverified"
+fi
+
+check
+if grep -q '5 passed' "$LOG"; then
+  fail "run claimed five passed"
+fi
+
+check
+if ! grep -q '2 passed' "$LOG"; then
+  fail "the two healthy fixtures did not both pass — the suite did not reach the end"
+fi
+
+# R6: per-spec attribution must name the outcome class, not just PASS/FAIL.
+check
+if ! grep -qE '^  (CRASH|TERM|TOUT) ' "$LOG"; then
+  fail "no per-spec outcome-class attribution line (CRASH/TERM/TOUT)"
+fi
+
+if [ "${1:-}" = "--control" ]; then
+  # Negative control: with attribution and classification reverted, the log
+  # would contain neither the per-spec outcome tags nor the summary vocabulary.
+  # Assert the two arms DISAGREE; if the "reverted" shape is what we measured,
+  # the change is not doing anything and the test is broken.
+  check
+  if ! grep -qE '^  (CRASH|TERM|TOUT) ' "$LOG" && ! grep -q 'crashed' "$LOG"; then
+    fail "control: observed output is indistinguishable from the pre-change shape"
+  fi
+fi
+
+if [ "$CHECKED" -eq 0 ]; then
+  echo "ERROR — nothing was checked"
+  exit 2
+fi
+
+if [ -n "$FAILURES" ]; then
+  echo "FAIL — $CHECKED check(s) run, runner rc=$RC, log $LOG:$FAILURES"
+  exit 1
+fi
+
+echo "PASS — $CHECKED check(s) verified, 5 fixtures attributed in ONE run, runner rc=$RC (non-zero), log $LOG"
+exit 0

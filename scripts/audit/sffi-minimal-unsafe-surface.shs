@@ -1,0 +1,44 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+module="$root/src/compiler/70.backend/sffi_minimal.spl"
+registry="$root/src/compiler_rust/compiler/src/codegen/runtime_sffi.rs"
+interpreter="$root/src/compiler_rust/compiler/src/interpreter_extern/mod.rs"
+
+[ "$(grep -c '^extern fn ' "$module")" -eq 20 ]
+[ "$(grep -c '^fn ' "$module")" -eq 20 ]
+[ "$(grep -c '^@unsafe(' "$module")" -eq 40 ]
+
+for raw in $(sed -n 's/^extern fn \([A-Za-z0-9_]*\).*/\1/p' "$module"); do
+    # Every declaration is exercised by exactly one smallest-scope wrapper;
+    # there is no extra owner call or generic dispatch layer.
+    [ "$(grep -Ec "^[[:space:]]+${raw}\\(" "$module")" -eq 1 ]
+done
+
+grep -q '^extern fn rt_env_get(name_ptr: i64, name_len: i64) -> i64?$' "$module"
+grep -q '^fn env_get_ptr(name_ptr: i64, name_len: i64) -> i64?:$' "$module"
+grep -q '^fn array_free_deep(value: i64) -> i64?:$' "$module"
+! sed -n '/^fn env_get_ptr/,/^fn env_set_ptr/p' "$module" | grep -q '?? 0'
+! sed -n '/^fn array_free_deep/,/^# Environment wrappers/p' "$module" | grep -q '?? 0'
+both=0
+native_only=0
+interpreter_only=0
+neither=0
+for raw in $(sed -n 's/^extern fn \([A-Za-z0-9_]*\).*/\1/p' "$module"); do
+    state=0
+    grep -q "RuntimeFuncSpec::new(\"$raw\"" "$registry" && state=$((state + 1))
+    grep -q "insert_simple!(\"$raw\"" "$interpreter" && state=$((state + 2))
+    case "$state" in
+        0) neither=$((neither + 1)) ;;
+        1) native_only=$((native_only + 1)) ;;
+        2) interpreter_only=$((interpreter_only + 1)) ;;
+        3) both=$((both + 1)) ;;
+    esac
+done
+[ "$both" -eq 20 ]
+[ "$native_only" -eq 0 ]
+[ "$interpreter_only" -eq 0 ]
+[ "$neither" -eq 0 ]
+
+echo "minimal SFFI unsafe-surface audit: PASS (20/20 wrappers explicitly unsafe; nullable outcomes preserved; provider coverage both=20 native-only=0 interpreter-only=0 neither=0)"

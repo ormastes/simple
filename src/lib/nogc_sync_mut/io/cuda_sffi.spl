@@ -1,0 +1,311 @@
+# CUDA Runtime SFFI Bindings
+#
+# Legacy CUDA runtime ABI owner for Simple-friendly I/O wrappers.
+# The GC async compatibility family imports this module instead of
+# declaring these runtime hooks locally.
+#
+# Every extern below is checked against the runtime owner
+# (src/compiler_rust/runtime/src/cuda_runtime.rs) and the interpreter
+# extern table (compiler/src/interpreter_extern/gpu.rs). Until 2026-08-25
+# this file declared 17 externs that existed nowhere (rt_cuda_stream_*,
+# rt_cuda_compile_ptx, rt_cuda_get_function, rt_cuda_synchronize, ...)
+# and a `rt_cuda_launch_kernel` with the wrong arity, so every call
+# through CudaFunc/CudaStream silently returned nil.
+
+# ============================================================================
+# Tier 1: Extern Declarations (Raw SFFI)
+# ============================================================================
+
+@unsafe(reason: "raw CUDA availability ABI; contract: zero means unavailable", capabilities: [ffi])
+extern fn rt_cuda_available() -> i64
+@unsafe(reason: "raw CUDA initialization status ABI; contract: zero means success", capabilities: [ffi])
+extern fn rt_cuda_init() -> i64
+@unsafe(reason: "raw CUDA device-count ABI; contract: zero means no devices or provider failure", capabilities: [ffi])
+extern fn rt_cuda_device_count() -> i64
+@unsafe(reason: "raw CUDA device handle ABI; contract: negative means failure", capabilities: [ffi])
+extern fn rt_cuda_device_get(device_id: i64) -> i64
+@unsafe(reason: "raw CUDA device-name ABI; contract: borrowed nonnull process-lifetime text", capabilities: [ffi])
+extern fn rt_cuda_device_name(device: i64) -> text
+@unsafe(reason: "raw CUDA capability ABI; contract: non-positive means invalid device", capabilities: [ffi])
+extern fn rt_cuda_device_compute_capability(device: i64) -> i64
+@unsafe(reason: "raw CUDA context handle ABI; contract: non-positive means failure", capabilities: [ffi])
+extern fn rt_cuda_ctx_create(device: i64) -> i64
+@unsafe(reason: "raw CUDA current-context status ABI; contract: zero means success", capabilities: [ffi])
+extern fn rt_cuda_ctx_set_current(ctx: i64) -> i64
+@unsafe(reason: "raw CUDA device allocation ABI; contract: non-positive means failure", capabilities: [ffi, raw_ptr])
+extern fn rt_cuda_mem_alloc(size: i64) -> i64
+@unsafe(reason: "raw CUDA device release status ABI; contract: zero means success", capabilities: [ffi, raw_ptr])
+extern fn rt_cuda_mem_free(ptr: i64) -> i64
+@unsafe(reason: "raw CUDA host-to-device extent copy status ABI; contract: zero means success", capabilities: [ffi, raw_ptr])
+extern fn rt_cuda_memcpy_htod_array(dst_device: i64, data: [u8], byte_count: i64) -> i64
+@unsafe(reason: "raw CUDA device-to-host pointer extent copy status ABI; contract: zero means success", capabilities: [ffi, raw_ptr])
+extern fn rt_cuda_memcpy_dtoh(dst_host: i64, src_device: i64, size: i64) -> i64
+@unsafe(reason: "raw CUDA device pointer extent copy status ABI; contract: zero means success", capabilities: [ffi, raw_ptr])
+extern fn rt_cuda_memcpy_dtod(dst: i64, src: i64, size: i64) -> i64
+@unsafe(reason: "raw CUDA device pointer extent fill status ABI; contract: zero means success", capabilities: [ffi, raw_ptr])
+extern fn rt_cuda_memset(ptr: i64, value: i64, size: i64) -> i64
+@unsafe(reason: "raw CUDA PTX pointer extent ABI; contract: non-positive handle means failure", capabilities: [ffi, raw_ptr])
+extern fn rt_cuda_module_load_data_bytes(ptx_ptr: i64, ptx_len: i64) -> i64
+@unsafe(reason: "raw CUDA module release status ABI; contract: zero means success", capabilities: [ffi])
+extern fn rt_cuda_module_unload(module: i64) -> i64
+@unsafe(reason: "raw CUDA launch pointer/status ABI; contract: zero means success", capabilities: [ffi, raw_ptr])
+extern fn rt_cuda_launch_kernel(module: i64, func_name: text, grid_x: i64, grid_y: i64, grid_z: i64, block_x: i64, block_y: i64, block_z: i64, args_ptr: i64) -> i64
+@unsafe(reason: "raw CUDA synchronization status ABI; contract: zero means success", capabilities: [ffi])
+extern fn rt_cuda_sync() -> i64
+# Plan E2: launch with dynamic shared memory + stream slot (stream 0 = default).
+@unsafe(reason: "raw CUDA extended launch pointer/status ABI; contract: zero means success", capabilities: [ffi, raw_ptr])
+extern fn rt_cuda_launch_kernel_ex(module: i64, func_name: text, grid_x: i64, grid_y: i64, grid_z: i64, block_x: i64, block_y: i64, block_z: i64, shared_bytes: i64, stream: i64, args_ptr: i64) -> i64
+@unsafe(reason: "raw CUDA error text ABI; contract: provider returns borrowed nonnull static text", capabilities: [ffi])
+extern fn rt_cuda_get_error_string(error_code: i64) -> text
+
+# Host staging for kernel parameter blocks and device->host reads.
+@unsafe(reason: "raw host staging allocation ABI; contract: zero means failure", capabilities: [ffi, raw_ptr])
+extern fn rt_alloc(size: i64) -> i64
+@unsafe(reason: "raw host staging release ABI; contract: ownership is caller-established", capabilities: [ffi, raw_ptr])
+extern fn rt_free(ptr: i64)
+@unsafe(reason: "raw pointer offset i64 write ABI; contract: caller establishes allocation bounds", capabilities: [ffi, raw_ptr])
+extern fn rt_ptr_write_i64(ptr: i64, offset: i64, value: i64)
+@unsafe(reason: "raw pointer offset byte read ABI; contract: caller establishes allocation bounds", capabilities: [ffi, raw_ptr])
+extern fn rt_ptr_read_u8(ptr: i64, offset: i64) -> i64
+@unsafe(reason: "raw pointer offset byte write ABI; contract: caller establishes allocation bounds", capabilities: [ffi, raw_ptr])
+extern fn rt_ptr_write_u8(ptr: i64, offset: i64, value: i64)
+
+# ============================================================================
+# Tier 2: Simple-Friendly Wrapper Functions
+# ============================================================================
+
+fn cuda_available() -> bool:
+    rt_cuda_available() != 0
+
+fn cuda_device_count() -> i64:
+    rt_cuda_device_count()
+
+# Driver-level init (cuInit). Idempotent; every handle-producing wrapper
+# calls it so a caller never has to remember the ordering. Returns false
+# when the driver is absent or refuses to initialise.
+fn cuda_driver_init() -> bool:
+    rt_cuda_init() == 0
+
+# Make device `id` current by creating a context on it. Returns false when
+# the device does not exist or the driver refuses the context.
+fn cuda_set_device(id: i64) -> bool:
+    if not cuda_driver_init():
+        return false
+    val device = rt_cuda_device_get(id)
+    if device < 0:
+        return false
+    val ctx = rt_cuda_ctx_create(device)
+    if ctx <= 0:
+        return false
+    rt_cuda_ctx_set_current(ctx) == 0
+
+struct CudaDeviceInfo:
+    id: i64
+    name: text
+    compute_capability: (i64, i64)
+
+fn cuda_device_info(id: i64) -> CudaDeviceInfo:
+    cuda_driver_init()
+    val device = rt_cuda_device_get(id)
+    val cap = rt_cuda_device_compute_capability(device)
+    CudaDeviceInfo(id: id, name: rt_cuda_device_name(device), compute_capability: (cap / 10, cap % 10))
+
+struct CudaPtr:
+    ptr: i64
+    size: i64
+    is_valid: bool
+
+fn cuda_alloc(size: i64) -> CudaPtr:
+    cuda_driver_init()
+    val ptr = rt_cuda_mem_alloc(size)
+    CudaPtr(ptr: ptr, size: size, is_valid: ptr > 0)
+
+fn cuda_free(mem: CudaPtr) -> bool:
+    if mem.is_valid:
+        rt_cuda_mem_free(mem.ptr) == 0
+    else:
+        true
+
+fn cuda_copy_to_device(dst: CudaPtr, src: [u8]) -> bool:
+    if not dst.is_valid:
+        false
+    else:
+        rt_cuda_memcpy_htod_array(dst.ptr, src, src.len()) == 0
+
+# Device -> host. Returns the bytes read (empty on failure): the runtime
+# copies into a raw host buffer, so the result is staged rather than
+# written through a Simple array alias.
+fn cuda_copy_from_device(src: CudaPtr, size: i64) -> [u8]:
+    if not src.is_valid or size <= 0:
+        return []
+    val staging = rt_alloc(size)
+    val rc = rt_cuda_memcpy_dtoh(staging, src.ptr, size)
+    var out: [u8] = []
+    if rc == 0:
+        for i in 0..size:
+            out.push(rt_ptr_read_u8(staging, i) as u8)
+    rt_free(staging)
+    out
+
+# reason: positional io cuda_sffi API
+# TODO: (gpu) expose cudaMemcpyPeer / cuMemcpyPeer so multi-GPU transfers do not have
+# to stage through host memory (examples/08_gpu/simple_cuda_example/20.cuda_intermediate/
+# 27.Multi_GPU currently stages via the host and says so).
+fn cuda_copy_device_to_device(dst: CudaPtr, src: CudaPtr, size: i64) -> bool:
+    if not dst.is_valid or not src.is_valid:
+        false
+    else:
+        rt_cuda_memcpy_dtod(dst.ptr, src.ptr, size) == 0
+
+fn cuda_memset(mem: CudaPtr, value: i64) -> bool:
+    if not mem.is_valid:
+        false
+    else:
+        rt_cuda_memset(mem.ptr, value, mem.size) == 0
+
+struct CudaModule:
+    handle: i64
+    is_valid: bool
+
+# The PTX is staged into a raw host buffer and loaded through the
+# length-tracked entry, which appends the NUL terminator the PTX parser
+# requires (do not append one here: the interpreter lane rejects embedded
+# NUL), so the load does not depend on how the `text` argument was marshalled (the text-typed entry intermittently returned
+# CUDA_ERROR_INVALID_PTX (-218) for the same source on the seed).
+fn cuda_compile(ptx_source: text) -> CudaModule:
+    cuda_driver_init()
+    val bytes = ptx_source.bytes()
+    val n = bytes.len()
+    if n == 0:
+        return CudaModule(handle: -1, is_valid: false)
+    val staging = rt_alloc(n)
+    for i in 0..n:
+        rt_ptr_write_u8(staging, i, bytes[i] as i64)
+    val handle = rt_cuda_module_load_data_bytes(staging, n)
+    rt_free(staging)
+    CudaModule(handle: handle, is_valid: handle > 0)
+
+fn cuda_unload(module: CudaModule) -> bool:
+    if module.is_valid:
+        rt_cuda_module_unload(module.handle) == 0
+    else:
+        true
+
+# A kernel is addressed by (module, entry name): the runtime launch entry
+# resolves the CUfunction itself from the name on every launch, so no
+# function handle is held here. A name that is not an entry of the module
+# surfaces as a failed launch (cuda_launch returns false).
+struct CudaFunc:
+    module: CudaModule
+    name: text
+    is_valid: bool
+
+fn cuda_get_kernel(module: CudaModule, name: text) -> CudaFunc:
+    CudaFunc(module: module, name: name, is_valid: module.is_valid and name != "")
+
+# The runtime launch entry has no dynamic-shared-memory slot; kernels that
+# need shared memory declare it statically in PTX.
+struct CudaLaunchConfig:
+    gx: i64
+    gy: i64
+    gz: i64
+    blk_x: i64
+    blk_y: i64
+    blk_z: i64
+
+# reason: positional io cuda_sffi API
+fn cuda_launch_config_3d(gx: i64, gy: i64, gz: i64, blk_x: i64, blk_y: i64, blk_z: i64) -> CudaLaunchConfig:
+    CudaLaunchConfig(gx: gx, gy: gy, gz: gz, blk_x: blk_x, blk_y: blk_y, blk_z: blk_z)
+
+# reason: positional io cuda_sffi API
+fn cuda_launch_config_1d(grid_size: i64, block_size: i64) -> CudaLaunchConfig:
+    CudaLaunchConfig(gx: grid_size, gy: 1, gz: 1, blk_x: block_size, blk_y: 1, blk_z: 1)
+
+# Launch `kfn` with `args` as 64-bit kernel parameters (device pointers or
+# integers). cuLaunchKernel takes an array of POINTERS to parameter values,
+# so the values are staged in one host block and a second block holds their
+# addresses. Parameters are copied by the driver at launch, so both blocks
+# are released immediately after the call.
+fn cuda_launch(kfn: CudaFunc, config: CudaLaunchConfig, args: [i64]) -> bool:
+    if not kfn.is_valid:
+        return false
+    val n = args.len()
+    var args_ptr = 0
+    var values = 0
+    var pointers = 0
+    if n > 0:
+        values = rt_alloc(n * 8)
+        pointers = rt_alloc(n * 8)
+        for i in 0..n:
+            rt_ptr_write_i64(values, i * 8, args[i])
+            rt_ptr_write_i64(pointers, i * 8, values + i * 8)
+        args_ptr = pointers
+    val rc = rt_cuda_launch_kernel(kfn.module.handle, kfn.name, config.gx, config.gy, config.gz, config.blk_x, config.blk_y, config.blk_z, args_ptr)
+    if n > 0:
+        rt_free(pointers)
+        rt_free(values)
+    rc == 0
+
+# Plan E2: launch on an explicit stream (raw CUstream handle from
+# std.cuda cuda_stream_create(); 0 = default stream) with `shared_bytes` of
+# dynamic shared memory. Same parameter-block staging as cuda_launch; the
+# driver copies the block at launch so it is freed immediately even though
+# the kernel may still be queued on `stream`.
+fn cuda_launch_on(kfn: CudaFunc, config: CudaLaunchConfig, stream: i64, shared_bytes: i64, args: [i64]) -> bool:
+    if not kfn.is_valid or stream < 0 or shared_bytes < 0:
+        return false
+    val n = args.len()
+    var args_ptr = 0
+    var values = 0
+    var pointers = 0
+    if n > 0:
+        values = rt_alloc(n * 8)
+        pointers = rt_alloc(n * 8)
+        for i in 0..n:
+            rt_ptr_write_i64(values, i * 8, args[i])
+            rt_ptr_write_i64(pointers, i * 8, values + i * 8)
+        args_ptr = pointers
+    val rc = rt_cuda_launch_kernel_ex(kfn.module.handle, kfn.name, config.gx, config.gy, config.gz, config.blk_x, config.blk_y, config.blk_z, shared_bytes, stream, args_ptr)
+    if n > 0:
+        rt_free(pointers)
+        rt_free(values)
+    rc == 0
+
+fn cuda_sync() -> bool:
+    rt_cuda_sync() == 0
+
+# The runtime exposes only the default (null) stream: every launch and copy
+# is issued on it and there is no stream parameter on the launch ABI. A
+# CudaStream is therefore always handle 0 — the same stream the gpu_lane
+# profiler names CUDA_NATIVE_DEFAULT_STREAM — and synchronizing it is a
+# device-wide sync.
+struct CudaStream:
+    handle: i64
+    is_valid: bool
+
+fn cuda_stream_create() -> CudaStream:
+    CudaStream(handle: 0, is_valid: cuda_available())
+
+fn cuda_stream_destroy(stream: CudaStream) -> bool:
+    true
+
+fn cuda_stream_sync(stream: CudaStream) -> bool:
+    if stream.is_valid:
+        rt_cuda_sync() == 0
+    else:
+        true
+
+fn cuda_error_string(error_code: i64) -> text:
+    rt_cuda_get_error_string(error_code)
+
+# reason: positional io cuda_sffi API
+fn cuda_run_1d(kfn: CudaFunc, total_elements: i64, block_size: i64, args: [i64]) -> bool:
+    val grid_size = (total_elements + block_size - 1) / block_size
+    val config = cuda_launch_config_1d(grid_size, block_size)
+    cuda_launch(kfn, config, args) and cuda_sync()
+
+fn cuda_alloc_from_host(data: [u8]) -> CudaPtr:
+    val mem = cuda_alloc(data.len())
+    if mem.is_valid:
+        cuda_copy_to_device(mem, data)
+    mem

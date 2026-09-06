@@ -1,0 +1,48 @@
+#!/bin/sh
+# SCV-IMPL-E-09 — editor IPC (buffer_open/edit/save_begin/save_end/
+# path_rename/refactor_begin-entity-end/flush; open-buffer bytes skip the
+# disk read). Transport honesty: the spec exercises the filesystem-pipe
+# spool transport — the UDS externs core-dump under the seed (extern text
+# shape vs Rust ptr/len ABI); the UDS swap is an explicit TODO in the
+# module. Mechanical: verifies module + spec + twin exist, the IPC surface
+# is present and exported, and runs the acceptance spec. Verdict is ALWAYS
+# the last stdout line: PASS exit 0 / FAIL exit 1 / ERROR exit 2. Committed
+# UNSIGNED: sign with
+#   sh scripts/trust/sign-script.shs --name scv-migration-root scripts/scv-migration/steps/SCV-IMPL-E-09.shs
+set -u
+MOD="src/lib/scv/editor_ipc.spl"
+SPEC="test/integration/app/scv_editor_ipc_spec.spl"
+TWIN="test/02_integration/app/scv_editor_ipc_spec.spl"
+[ -x bin/simple ] || { echo "ERROR — nothing was checked (missing bin/simple)"; exit 2; }
+checked=0
+missing=""
+for f in "$MOD" "$SPEC" "$TWIN"; do
+  checked=$((checked + 1))
+  [ -f "$f" ] || missing="$missing missing($f)"
+done
+if [ -f "$SPEC" ] && [ -f "$TWIN" ]; then
+  checked=$((checked + 1))
+  cmp -s "$SPEC" "$TWIN" || missing="$missing twin-diverged($TWIN)"
+fi
+for sym in scv_editor_ipc_open scv_editor_ipc_send scv_editor_ipc_poll scv_editor_read scv_editor_ipc_flush; do
+  checked=$((checked + 1))
+  grep -q "fn $sym" "$MOD" 2>/dev/null || missing="$missing no-fn($sym)"
+done
+checked=$((checked + 1))
+grep -q "^export editor_ipc\.\*" src/lib/scv/__init__.spl || missing="$missing not-exported(editor_ipc)"
+if [ -n "$missing" ]; then
+  echo "FAIL — $checked check(s), unmet:$missing"
+  exit 1
+fi
+OUT="${TMPDIR:-/tmp}/SCV-IMPL-E-09.$$.out"
+SIMPLE_TIMEOUT_SECONDS=900 bin/simple test "$SPEC" > "$OUT" 2>&1
+rc=$?
+RES=$(grep -E '^Results: ' "$OUT" | tail -1)
+rm -f "$OUT"
+checked=$((checked + 1))
+[ "$checked" -gt 0 ] || { echo "ERROR — nothing was checked"; exit 2; }
+case "$RES" in
+  "") echo "ERROR — nothing was checked (spec printed no Results line, rc=$rc)"; exit 2 ;;
+  *" 0 failed"*) echo "PASS — $checked check(s): module+spec+twin present, surface exported, $RES"; exit 0 ;;
+  *) echo "FAIL — $checked check(s), spec not green: $RES"; exit 1 ;;
+esac

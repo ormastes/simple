@@ -1,0 +1,46 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-FEATURE
+"""
+# MCP server answers a well-formed initialize response over stdio
+
+End-to-end protocol probe for `src/app/mcp/main.spl`, added with the
+2026-09-01 Windows deployment fix (a stale deployed runtime rejected
+`@always_inline` and the server emitted zero bytes with rc=0 — a silent
+green). A server that starts but answers nothing must FAIL here: the
+assertions require the actual JSON-RPC initialize result fields, not mere
+process liveness. `shell()` is cmd.exe on Windows and /bin/sh elsewhere, so
+the launch line is branched per platform; both exercise the same entry.
+"""
+
+use std.spec.step
+use app.io.mod (file_write, shell, is_windows_platform)
+
+describe "simple-mcp stdio protocol":
+    it "answers initialize with a well-formed JSON-RPC result":
+        # @req REQ-SSPEC-FEATURE
+        step("feed one newline-delimited initialize request on stdin")
+        val req = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"spec\",\"version\":\"0\"}}}\n"
+        file_write("mcp_init_spec_req_tmp.txt", req)
+        val launch = if is_windows_platform():
+            "bin\\simple.cmd run src\\app\\mcp\\main.spl < mcp_init_spec_req_tmp.txt 2>nul"
+        else:
+            "bin/simple run src/app/mcp/main.spl < mcp_init_spec_req_tmp.txt 2>/dev/null"
+        val result = shell(launch)
+        val output = result.stdout ?? ""
+        val exit_code = result.exit_code ?? 1
+        shell(if is_windows_platform(): "del mcp_init_spec_req_tmp.txt" else: "rm -f mcp_init_spec_req_tmp.txt")
+
+        step("process exits cleanly and produced bytes (no silent green)")
+        expect(exit_code).to_equal(0)
+        assert_true(output.len() > 0)
+
+        step("response is a JSON-RPC result for id 1 with the required fields")
+        expect(output).to_contain("\"jsonrpc\":\"2.0\"")
+        expect(output).to_contain("\"id\":1")
+        expect(output).to_contain("\"result\"")
+        expect(output).to_contain("\"protocolVersion\"")
+        expect(output).to_contain("\"capabilities\"")
+        expect(output).to_contain("\"serverInfo\"")
+        expect(output).to_contain("simple-mcp")
+        step("and is not an error response")
+        assert_false(output.contains("\"error\""))

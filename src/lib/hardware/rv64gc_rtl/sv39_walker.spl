@@ -1,0 +1,227 @@
+# RV64 Sv39 request/response page-table walker.
+#
+# One PTE read may be outstanding. Every bus request is an aligned 8-byte read.
+# A/D bits use the Svade policy: a clear A, or clear D on store, raises the
+# originating page fault instead of writing PTEs. DONE/FAULT remain valid until
+# the caller replaces the state with a new sv39_walker64_start() result.
+
+use std.hardware.rv64gc_rtl.sv39_address.{sv39_full_vpn, sv39_is_canonical}
+use std.hardware.rv64gc_rtl.mmu_sv39.{MmuState64, mmu64_tlb_lookup, mmu64_tlb_paddr}
+use std.hardware.rv64gc_rtl.mmu_sv39.{mmu64_tlb_insert_level, pte64_check_perms_ext}
+use std.hardware.rv64gc_rtl.mmu_sv39.{sv39_vpn2, sv39_vpn1, sv39_vpn0}
+use std.hardware.rv64gc_rtl.mmu_sv39.{pte64_ppn2, pte64_ppn1, pte64_ppn0, pte64_ppn_full}
+use std.hardware.rv64gc_rtl.mmu_sv39.{pte64_flags_extract, fault64_cause_for}
+use std.hardware.rv64gc_rtl.mmu_sv39.{SATP_MODE_BARE, SATP_MODE_SV39}
+use std.hardware.rv64gc_rtl.mmu_sv39.{ACCESS_FETCH_64, ACCESS_LOAD_64, ACCESS_STORE_64}
+use std.hardware.rv64gc_rtl.mmu_sv39.{PRIV_U_64, PRIV_S_64, PRIV_M_64}
+use std.hardware.rv64gc_rtl.mmu_sv39.{PTE64_V_MASK, PTE64_R_MASK, PTE64_W_MASK, PTE64_X_MASK}
+use std.hardware.rv64gc_rtl.mmu_sv39.{PTE64_U_MASK, PTE64_G_MASK, PTE64_A_MASK, PTE64_D_MASK}
+use std.hardware.rv64gc_rtl.pmp.{PmpEntries64, pmp64_gate_access}
+use std.hardware.rv64gc_rtl.pmp.{PMP64_ACCESS_READ, PMP64_PRIV_S, PMP64_NO_MATCH}
+use std.hardware.rv64gc_rtl.pmp.{PMP64_CAUSE_INSN_ACCESS_FAULT, PMP64_CAUSE_LOAD_ACCESS_FAULT, PMP64_CAUSE_STORE_ACCESS_FAULT}
+
+val SV39_WALK_IDLE: u32 = 0
+val SV39_WALK_REQUEST: u32 = 1
+val SV39_WALK_WAIT: u32 = 2
+val SV39_WALK_DONE: u32 = 3
+val SV39_WALK_FAULT: u32 = 4
+
+struct Sv39Walker64:
+    phase: u32
+    level: u32
+    vaddr: i64
+    access_type: u32
+    privilege: u32
+    sum: bool
+    mxr: bool
+    table_ppn: i64
+    global_seen: bool
+    paddr: i64
+    fault_cause: i64
+    pmp_index: u32
+    tlb_hit: bool
+
+struct Sv39PteConsume64:
+    walker: Sv39Walker64
+    mmu: MmuState64
+
+struct Sv39WalkCycle64:
+    walker: Sv39Walker64
+    mmu: MmuState64
+    bus_valid: bool
+    bus_addr: i64
+    bus_size: u32
+    bus_write: bool
+    done: bool
+    fault: bool
+    paddr: i64
+    fault_cause: i64
+    fault_tval: i64
+    pmp_index: u32
+    tlb_hit: bool
+
+@hardware
+fn sv39_walker64_reset() -> Sv39Walker64:
+    Sv39Walker64(phase: SV39_WALK_IDLE, level: 2, vaddr: 0,
+        access_type: ACCESS_LOAD_64, privilege: PRIV_S_64, sum: false, mxr: false,
+        table_ppn: 0, global_seen: false, paddr: 0, fault_cause: 0,
+        pmp_index: PMP64_NO_MATCH, tlb_hit: false)
+
+@hardware
+fn sv39_walker64_page_fault(state: Sv39Walker64) -> Sv39Walker64:
+    var out = state
+    out.phase = SV39_WALK_FAULT
+    out.paddr = 0
+    out.fault_cause = fault64_cause_for(state.access_type)
+    out
+
+@hardware
+fn sv39_walker64_access_fault_cause(access_type: u32) -> i64:
+    if access_type == ACCESS_FETCH_64:
+        return PMP64_CAUSE_INSN_ACCESS_FAULT
+    if access_type == ACCESS_STORE_64:
+        return PMP64_CAUSE_STORE_ACCESS_FAULT
+    PMP64_CAUSE_LOAD_ACCESS_FAULT
+
+@hardware
+fn sv39_walker64_access_fault(state: Sv39Walker64, pmp_index: u32) -> Sv39Walker64:
+    var out = state
+    out.phase = SV39_WALK_FAULT
+    out.paddr = 0
+    out.fault_cause = sv39_walker64_access_fault_cause(state.access_type)
+    out.pmp_index = pmp_index
+    out
+
+@hardware
+fn sv39_walker64_start(mmu: MmuState64, vaddr: i64, access_type: u32, privilege: u32, sum: bool, mxr: bool) -> Sv39Walker64:
+    var out = sv39_walker64_reset()
+    out.vaddr = vaddr
+    out.access_type = access_type
+    out.privilege = privilege
+    out.sum = sum
+    out.mxr = mxr
+
+    if access_type > ACCESS_STORE_64:
+        return sv39_walker64_page_fault(out)
+    if privilege != PRIV_U_64 and privilege != PRIV_S_64 and privilege != PRIV_M_64:
+        return sv39_walker64_page_fault(out)
+    if privilege == PRIV_M_64 or mmu.satp_mode == SATP_MODE_BARE:
+        out.phase = SV39_WALK_DONE
+        out.paddr = vaddr
+        return out
+    if mmu.satp_mode != SATP_MODE_SV39 or not sv39_is_canonical(vaddr):
+        return sv39_walker64_page_fault(out)
+
+    val hit = mmu64_tlb_lookup(mmu, sv39_full_vpn(vaddr))
+    if hit.hit:
+        if not pte64_check_perms_ext(hit.flags, access_type, privilege, sum, mxr):
+            return sv39_walker64_page_fault(out)
+        out.phase = SV39_WALK_DONE
+        out.paddr = mmu64_tlb_paddr(vaddr, hit.ppn, hit.level)
+        out.tlb_hit = true
+        return out
+
+    out.phase = SV39_WALK_REQUEST
+    out.level = 2
+    out.table_ppn = mmu.satp_ppn
+    out
+
+@hardware
+fn sv39_walker64_pte_addr(state: Sv39Walker64) -> i64:
+    var vpn_index = sv39_vpn0(state.vaddr)
+    if state.level == 2:
+        vpn_index = sv39_vpn2(state.vaddr)
+    else if state.level == 1:
+        vpn_index = sv39_vpn1(state.vaddr)
+    (state.table_ppn << 12) + (vpn_index << 3)
+
+@hardware
+fn sv39_walker64_leaf_paddr(state: Sv39Walker64, pte: i64) -> i64:
+    val ppn = pte64_ppn_full(pte)
+    mmu64_tlb_paddr(state.vaddr, ppn, state.level)
+
+@hardware
+fn sv39_walker64_consume_pte(state: Sv39Walker64, mmu: MmuState64, pte: i64) -> Sv39PteConsume64:
+    val flags = pte64_flags_extract(pte)
+    val valid = (flags & PTE64_V_MASK) != 0
+    val readable = (flags & PTE64_R_MASK) != 0
+    val writable = (flags & PTE64_W_MASK) != 0
+    val executable = (flags & PTE64_X_MASK) != 0
+    val reserved_high = (pte >> 54) != 0
+
+    if reserved_high or not valid or (writable and not readable):
+        return Sv39PteConsume64(walker: sv39_walker64_page_fault(state), mmu: mmu)
+
+    val leaf = readable or executable
+    if not leaf:
+        val reserved_nonleaf = (flags & (PTE64_U_MASK | PTE64_A_MASK | PTE64_D_MASK)) != 0
+        if state.level == 0 or reserved_nonleaf:
+            return Sv39PteConsume64(walker: sv39_walker64_page_fault(state), mmu: mmu)
+        var next = state
+        next.phase = SV39_WALK_REQUEST
+        next.level = state.level - 1
+        next.table_ppn = pte64_ppn_full(pte)
+        next.global_seen = state.global_seen or (flags & PTE64_G_MASK) != 0
+        return Sv39PteConsume64(walker: next, mmu: mmu)
+
+    if state.level == 2 and (pte64_ppn1(pte) != 0 or pte64_ppn0(pte) != 0):
+        return Sv39PteConsume64(walker: sv39_walker64_page_fault(state), mmu: mmu)
+    if state.level == 1 and pte64_ppn0(pte) != 0:
+        return Sv39PteConsume64(walker: sv39_walker64_page_fault(state), mmu: mmu)
+    if not pte64_check_perms_ext(flags, state.access_type, state.privilege, state.sum, state.mxr):
+        return Sv39PteConsume64(walker: sv39_walker64_page_fault(state), mmu: mmu)
+
+    val paddr = sv39_walker64_leaf_paddr(state, pte)
+    val cached_flags = if state.global_seen: flags | PTE64_G_MASK else: flags
+    val next_mmu = mmu64_tlb_insert_level(mmu, sv39_full_vpn(state.vaddr), pte64_ppn_full(pte), cached_flags, state.level)
+    var done = state
+    done.phase = SV39_WALK_DONE
+    done.paddr = paddr
+    done.fault_cause = 0
+    Sv39PteConsume64(walker: done, mmu: next_mmu)
+
+@hardware
+fn sv39_walker64_cycle(state: Sv39Walker64, mmu: MmuState64, pmp: PmpEntries64, request_ready: bool, response_valid: bool, response_error: bool, response_data: i64) -> Sv39WalkCycle64:
+    var next = state
+    var next_mmu = mmu
+    var bus_valid = false
+    var bus_addr: i64 = 0
+
+    if state.phase == SV39_WALK_REQUEST:
+        bus_addr = sv39_walker64_pte_addr(state)
+        val gate = pmp64_gate_access(pmp, bus_addr, 8, PMP64_ACCESS_READ,
+            PMP64_PRIV_S, false, 0)
+        if not gate.bus_valid:
+            next = sv39_walker64_access_fault(state, gate.matched_index)
+        else:
+            bus_valid = true
+            if request_ready:
+                next.pmp_index = gate.matched_index
+                if response_valid:
+                    if response_error:
+                        next = sv39_walker64_access_fault(state, gate.matched_index)
+                    else:
+                        val consumed = sv39_walker64_consume_pte(state, mmu, response_data)
+                        next = consumed.walker
+                        next_mmu = consumed.mmu
+                else:
+                    next.phase = SV39_WALK_WAIT
+
+    else if state.phase == SV39_WALK_WAIT and response_valid:
+        if response_error:
+            next = sv39_walker64_access_fault(state, state.pmp_index)
+        else:
+            val consumed = sv39_walker64_consume_pte(state, mmu, response_data)
+            next = consumed.walker
+            next_mmu = consumed.mmu
+
+    val done = next.phase == SV39_WALK_DONE or next.phase == SV39_WALK_FAULT
+    Sv39WalkCycle64(walker: next, mmu: next_mmu, bus_valid: bus_valid,
+        bus_addr: bus_addr, bus_size: 8, bus_write: false,
+        done: done, fault: next.phase == SV39_WALK_FAULT,
+        paddr: next.paddr, fault_cause: next.fault_cause, fault_tval: next.vaddr,
+        pmp_index: next.pmp_index, tlb_hit: next.tlb_hit)
+
+export Sv39Walker64, Sv39WalkCycle64
+export sv39_walker64_reset, sv39_walker64_start, sv39_walker64_cycle
+export SV39_WALK_IDLE, SV39_WALK_REQUEST, SV39_WALK_WAIT, SV39_WALK_DONE, SV39_WALK_FAULT

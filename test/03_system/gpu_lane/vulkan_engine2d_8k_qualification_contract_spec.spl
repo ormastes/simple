@@ -1,0 +1,87 @@
+"""
+# Vulkan Engine2D 8K Qualification Contract
+
+Protects the physical-adapter, exact-readback, retained-batch, and 80-fps
+qualification gates used by the clear, font, and mixed Vulkan profiles.
+
+**Requirements:** REQ-GPU-DYN-007, REQ-GPU-DYN-008, REQ-GPU-DYN-012,
+NFR-GPU-DYN-001, NFR-GPU-DYN-010
+"""
+
+# @tag: system, gpu, vulkan, engine2d, profile
+
+use std.spec.*
+use std.io_runtime.file_read
+
+describe "Vulkan Engine2D 8K qualification contract":
+
+    it "uses packed font dispatch by default":
+        step("Read the font qualification gate")
+        val source = file_read("scripts/check/check-engine2d-vulkan-font-8k.shs")
+
+        step("Require one packed parameter upload and dispatch lane")
+        # @req: REQ-GPU-DYN-008
+        expect(source).to_contain("ENGINE2D_VULKAN_FONT_MODE:-packed")
+        expect(source).to_contain("engine2d_vulkan_font_mismatch_count=0")
+
+    it "can require physical hardware and the selected latency budget":
+        step("Inspect every Vulkan Engine2D profile gate")
+        val clear = file_read("scripts/check/check-engine2d-vulkan-clear-8k.shs")
+        val font = file_read("scripts/check/check-engine2d-vulkan-font-8k.shs")
+        val mixed = file_read("scripts/check/check-engine2d-vulkan-mixed-8k.shs")
+
+        step("Require explicit physical-adapter qualification")
+        # @req: REQ-GPU-DYN-007
+        expect(clear).to_contain("ENGINE2D_VULKAN_REQUIRE_PHYSICAL")
+        expect(font).to_contain("ENGINE2D_VULKAN_REQUIRE_PHYSICAL")
+        expect(mixed).to_contain("ENGINE2D_VULKAN_REQUIRE_PHYSICAL")
+        expect(clear).to_contain("(discrete|integrated)")
+        expect(font).to_contain("(discrete|integrated)")
+        expect(mixed).to_contain("(discrete|integrated)")
+
+        step("Require an enforceable 80-fps p95 gate")
+        # @req: REQ-GPU-DYN-012
+        expect(clear).to_contain("ENGINE2D_VULKAN_REQUIRE_80FPS")
+        expect(font).to_contain("ENGINE2D_VULKAN_REQUIRE_80FPS")
+        expect(mixed).to_contain("ENGINE2D_VULKAN_REQUIRE_80FPS")
+        expect(clear).to_contain("engine2d_vulkan_within_80fps_budget=true")
+        expect(font).to_contain("engine2d_vulkan_font_within_80fps_budget=true")
+        expect(mixed).to_contain("engine2d_vulkan_mixed_within_80fps_budget=true")
+
+    it "publishes font adapter provenance with exact evidence":
+        step("Read the native font benchmark")
+        val source = file_read("test/09_baselines/engine2d_vulkan/engine2d_vulkan_font_8k_bench.c")
+
+        step("Require device identity and zero-tolerance comparison fields")
+        # @req: NFR-GPU-DYN-001
+        expect(source).to_contain("engine2d_vulkan_font_adapter_name=")
+        expect(source).to_contain("engine2d_vulkan_font_adapter_type=")
+        expect(source).to_contain("engine2d_vulkan_font_adapter_driver_identity=")
+        expect(source).to_contain("engine2d_vulkan_font_mismatch_count=")
+        expect(source).to_contain("engine2d_vulkan_font_checksum=")
+        expect(source).to_contain("engine2d_vulkan_font_timed_readback_bytes=0")
+
+    it "normalizes C primitive evidence for feature parity":
+        step("Read the native primitive qualification gate")
+        val source = file_read("scripts/check/check-engine2d-vulkan-clear-8k.shs")
+
+        step("Require exact workload and output fields")
+        expect(source).to_contain("schema=engine2d-vulkan-feature-perf-v1")
+        expect(source).to_contain("implementation=c")
+        expect(source).to_contain("feature=$feature")
+        expect(source).to_contain("active-bp=$ACTIVE;count=$RECT_COUNT")
+        expect(source).to_contain("timing_scope=descriptor-command-record-submit-and-fence")
+        expect(source).to_contain("mismatch_count=$(field engine2d_vulkan_mismatch_count)")
+        expect(source).to_contain("checksum=$(field engine2d_vulkan_checksum)")
+
+    it "publishes a C packed-font receipt for the two-times parity gate":
+        step("Read the native font qualification gate")
+        val source = file_read("scripts/check/check-engine2d-vulkan-font-8k.shs")
+
+        step("Require workload, device, timing, and exact-output correlation")
+        expect(source).to_contain("schema=engine2d-vulkan-feature-perf-v1")
+        expect(source).to_contain("implementation=c")
+        expect(source).to_contain("feature=font-atlas-packed")
+        expect(source).to_contain("timing_scope=params-upload-and-vulkan-submit-and-fence")
+        expect(source).to_contain("mismatch_count=$(field engine2d_vulkan_font_mismatch_count)")
+        expect(source).to_contain("checksum=$(field engine2d_vulkan_font_checksum)")

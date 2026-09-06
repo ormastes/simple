@@ -1,0 +1,201 @@
+# Versioned resolved-direct-call identity adapter for Verification 2.0.
+#
+# MIR v1 represents a direct callee as a string operand.  Changing that field
+# would migrate every backend and hand-built MIR fixture.  This adapter keeps
+# that representation intact while requiring the pre-MIR resolver to provide a
+# separately hashed, snapshot-bound binding manifest.  It is deliberately not
+# a name-to-symbol lookup: each binding names one canonical instruction site,
+# the exact callee SymbolId, signature, and body in the exact module snapshot.
+
+use std.common.crypto.sha256.{sha256_text}
+use std.common.encoding.sha256_contract.{sha256_lower_hex_valid}
+use compiler.mir.mir_instruction_graph.{MirFunction, MirModule}
+use compiler.mir.mir_instructions.{MirInstKind, MirOperandKind}
+use compiler.mir.mir_types.{MirConstValue, MirTypeKind}
+use compiler.mir.mir_json.{serialize_mir_function, serialize_mir_signature,
+    serialize_mir_inst_kind}
+
+pub struct ResolvedDirectCallBindingV1:
+    owner_symbol_id: text
+    call_site_hash: text
+    callee_symbol_id: text
+    callee_signature_hash: text
+    callee_body_hash: text
+
+    fn canonical_text() -> text:
+        "ResolvedDirectCallBinding-v1|owner=" + self.owner_symbol_id +
+            "|site=" + self.call_site_hash + "|callee=" +
+            self.callee_symbol_id + "|signature=" +
+            self.callee_signature_hash + "|body=" + self.callee_body_hash
+
+pub struct ResolvedDirectCallManifestV1:
+    module_hash: text
+    resolver_receipt_hash: text
+    bindings: [ResolvedDirectCallBindingV1]
+
+    fn hash() -> text:
+        var rows: [text] = []
+        for binding in self.bindings: rows.push(binding.canonical_text())
+        rows.sort()
+        sha256_text("ResolvedDirectCallManifest-v1|module=" +
+            self.module_hash + "|resolver=" + self.resolver_receipt_hash +
+            "|bindings=" + rows.join(";"))
+
+pub struct ResolvedDirectCallClosureV1:
+    manifest_hash: text
+    call_site_hashes: [text]
+    diagnostic: text
+
+    fn closed() -> bool:
+        self.manifest_hash != "" and self.diagnostic == ""
+
+pub fn resolved_direct_call_module_hash_v1(module: MirModule) -> text:
+    var rows: [text] = []
+    for symbol in module.functions.keys():
+        val function = module.functions[symbol]
+        rows.push(function.symbol.id.to_string() + ":" +
+            sha256_text(serialize_mir_function(function)))
+    rows.sort()
+    sha256_text("fv2-resolved-direct-call-module-v1|name=" + module.name +
+        "|functions=" + rows.join(","))
+
+pub fn resolved_direct_call_site_hash_v1(owner: MirFunction,
+    block_index: i64, instruction_index: i64
+) -> text:
+    if block_index < 0 or block_index >= owner.blocks.len(): return ""
+    val block = owner.blocks[block_index]
+    if instruction_index < 0 or instruction_index >= block.instructions.len():
+        return ""
+    sha256_text("fv2-resolved-direct-call-site-v1|owner=" +
+        owner.symbol.id.to_string() + "|owner-mir=" +
+        sha256_text(serialize_mir_function(owner)) + "|block=" +
+        block.id.id.to_string() + "|instruction=" + instruction_index.to_string() +
+        "|kind=" + serialize_mir_inst_kind(block.instructions[instruction_index].kind))
+
+fn resolved_direct_call_name_v1(instruction: MirInstKind) -> text:
+    match instruction:
+        case MirInstKind.Call(_, callee, _):
+            match callee.kind:
+                case MirOperandKind.Const(MirConstValue.Str(name), _): name
+                case _: ""
+        case _: ""
+
+fn resolved_direct_call_signature_hash_v1(instruction: MirInstKind) -> text:
+    match instruction:
+        case MirInstKind.Call(_, callee, _):
+            match callee.kind:
+                case MirOperandKind.Const(MirConstValue.Str(_), type_):
+                    match type_.kind:
+                        case MirTypeKind.FuncPtr(signature):
+                            sha256_text(serialize_mir_signature(signature))
+                        case _: ""
+                case _: ""
+        case _: ""
+
+fn resolved_direct_call_function_v1(module: MirModule,
+    symbol_id: text) -> MirFunction?:
+    var found: MirFunction? = nil
+    for symbol in module.functions.keys():
+        val candidate = module.functions[symbol]
+        if candidate.symbol.id.to_string() == symbol_id:
+            if found != nil: return nil
+            found = Some(candidate)
+    found
+
+fn resolved_direct_call_binding_for_site_v1(
+    bindings: [ResolvedDirectCallBindingV1], owner_symbol_id: text,
+    call_site_hash: text
+) -> ResolvedDirectCallBindingV1?:
+    var found: ResolvedDirectCallBindingV1? = nil
+    for binding in bindings:
+        if binding.owner_symbol_id == owner_symbol_id and
+                binding.call_site_hash == call_site_hash:
+            if found != nil: return nil
+            found = Some(binding)
+    found
+
+pub fn validate_resolved_direct_call_manifest_v1(module: MirModule,
+    manifest: ResolvedDirectCallManifestV1
+) -> ResolvedDirectCallClosureV1:
+    if manifest.module_hash != resolved_direct_call_module_hash_v1(module):
+        return ResolvedDirectCallClosureV1("", [],
+            "FV2-E-CALL-IDENTITY-MODULE: resolver manifest does not bind this exact MIR module")
+    if not sha256_lower_hex_valid(manifest.resolver_receipt_hash):
+        return ResolvedDirectCallClosureV1("", [],
+            "FV2-E-CALL-IDENTITY-RECEIPT: resolver receipt must be lowercase SHA-256")
+    var sites: [text] = []
+    var call_site_hashes: [text] = []
+    for symbol in module.functions.keys():
+        val owner = module.functions[symbol]
+        for block_index in 0..owner.blocks.len():
+            val block = owner.blocks[block_index]
+            for instruction_index in 0..block.instructions.len():
+                val instruction = block.instructions[instruction_index]
+                match instruction.kind:
+                    case MirInstKind.Call(_, _, _):
+                        val name = resolved_direct_call_name_v1(instruction.kind)
+                        if name == "": return ResolvedDirectCallClosureV1("", [],
+                            "FV2-E-CALL-IDENTITY-CALLEE: direct call lacks a textual target for resolver cross-check")
+                        val operand_signature_hash =
+                            resolved_direct_call_signature_hash_v1(instruction.kind)
+                        if operand_signature_hash == "":
+                            return ResolvedDirectCallClosureV1("", [],
+                                "FV2-E-CALL-IDENTITY-SIGNATURE: direct call lacks an exact function signature")
+                        val site = resolved_direct_call_site_hash_v1(owner,
+                            block_index, instruction_index)
+                        val binding = match resolved_direct_call_binding_for_site_v1(
+                                manifest.bindings, owner.symbol.id.to_string(), site):
+                            case Some(value): value
+                            case _: return ResolvedDirectCallClosureV1("", [],
+                                "FV2-E-CALL-IDENTITY-MISSING: every direct call requires one resolved binding")
+                        if not sha256_lower_hex_valid(binding.callee_signature_hash) or
+                                not sha256_lower_hex_valid(binding.callee_body_hash):
+                            return ResolvedDirectCallClosureV1("", [],
+                                "FV2-E-CALL-IDENTITY-HASH: callee signature and body identities must be lowercase SHA-256")
+                        val callee = match resolved_direct_call_function_v1(module,
+                                binding.callee_symbol_id):
+                            case Some(value): value
+                            case _: return ResolvedDirectCallClosureV1("", [],
+                                "FV2-E-CALL-IDENTITY-CALLEE: bound SymbolId does not resolve uniquely in module")
+                        if callee.name != name:
+                            return ResolvedDirectCallClosureV1("", [],
+                                "FV2-E-CALL-IDENTITY-NAME: resolver binding disagrees with direct-call operand")
+                        if binding.callee_signature_hash != operand_signature_hash:
+                            return ResolvedDirectCallClosureV1("", [],
+                                "FV2-E-CALL-IDENTITY-SIGNATURE: resolver binding disagrees with direct-call signature")
+                        if binding.callee_signature_hash != sha256_text(
+                                serialize_mir_signature(callee.signature)) or
+                                binding.callee_body_hash != sha256_text(
+                                serialize_mir_function(callee)):
+                            return ResolvedDirectCallClosureV1("", [],
+                                "FV2-E-CALL-IDENTITY-STALE: callee signature or body changed after resolution")
+                        sites.push(owner.symbol.id.to_string() + "|" + site)
+                        call_site_hashes.push(site)
+                    case _: continue
+    for binding in manifest.bindings:
+        if binding.owner_symbol_id == "" or binding.call_site_hash == "" or
+                binding.callee_symbol_id == "":
+            return ResolvedDirectCallClosureV1("", [],
+                "FV2-E-CALL-IDENTITY-FIELD: binding identities must be nonempty")
+        if not sites.contains(binding.owner_symbol_id + "|" +
+                binding.call_site_hash):
+            return ResolvedDirectCallClosureV1("", [],
+                "FV2-E-CALL-IDENTITY-EXTRA: resolver manifest contains a stale or forged call site")
+    sites.sort()
+    ResolvedDirectCallClosureV1(manifest.hash(), call_site_hashes, "")
+
+# The only public lookup path validates the complete snapshot first.  Consumers
+# must not use a manifest as an unaudited name-to-SymbolId table.
+pub fn resolved_direct_call_callee_symbol_v1(module: MirModule,
+    manifest: ResolvedDirectCallManifestV1, owner: MirFunction,
+    block_index: i64, instruction_index: i64
+) -> Result<text, text>:
+    val closure = validate_resolved_direct_call_manifest_v1(module, manifest)
+    if not closure.closed(): return Err(closure.diagnostic)
+    val site = resolved_direct_call_site_hash_v1(owner, block_index,
+        instruction_index)
+    if site == "": return Err("FV2-E-CALL-IDENTITY-SITE: call site is outside owner MIR")
+    match resolved_direct_call_binding_for_site_v1(manifest.bindings,
+            owner.symbol.id.to_string(), site):
+        case Some(binding): Ok(binding.callee_symbol_id)
+        case _: Err("FV2-E-CALL-IDENTITY-MISSING: direct call binding is absent")

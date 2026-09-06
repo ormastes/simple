@@ -1,0 +1,155 @@
+# src/compiler/70.backend/backend/native/encode_rvv_float.spl
+#
+# RVV v1.0 Vector Floating-Point Arithmetic Byte-Emit Encoder — Pure Simple
+#
+# Produces exact 4-byte little-endian instruction words for RISC-V Vector
+# floating-point arithmetic instructions per RVV v1.0 §13.2-13.6.
+#
+# Reference: RISC-V Vector Extension v1.0
+#   §13.2  Vector Single-Width Floating-Point Add/Subtract Instructions
+#   §13.3  Vector Floating-Point Min/Max Instructions
+#   §13.4  Vector Floating-Point Multiply Instructions
+#   §13.5  Vector Floating-Point Divide Instructions
+#   §13.6  Vector Floating-Point Fused Multiply-Add Instructions
+#
+# Instruction format (all 32-bit, OP-V major opcode 0x57):
+#   bits[31:26] = funct6
+#   bit[25]     = vm   (1=unmasked)
+#   bits[24:20] = vs2
+#   bits[19:15] = vs1
+#   bits[14:12] = funct3 (OPFVV=001=1 for vector-vector FP)
+#   bits[11:7]  = vd
+#   bits[6:0]   = opcode 0x57
+#
+# funct6/funct3 values (RVV v1.0):
+#   vfadd.vv   0x00 (000000)  OPFVV funct3=1  FP add vectors
+#   vfsub.vv   0x02 (000010)  OPFVV funct3=1  FP subtract vectors
+#   vfmul.vv   0x24 (100100)  OPFVV funct3=1  FP multiply vectors
+#   vfdiv.vv   0x20 (100000)  OPFVV funct3=1  FP divide vectors
+#   vfmadd.vv  0x28 (101000)  OPFVV funct3=1  FP fused multiply-add (vd = vs1*vd + vs2)
+#   vfmsub.vv  0x2A (101010)  OPFVV funct3=1  FP fused multiply-sub (vd = vs1*vd - vs2)
+#   vfmin.vv   0x04 (000100)  OPFVV funct3=1  FP minimum
+#   vfmax.vv   0x06 (000110)  OPFVV funct3=1  FP maximum
+#
+# Encoding convention: multiplication/division only (avoids negative-bit-op
+# hazards in interpreter mode). Consistent with encode_rvv_widen.spl and
+# encode_rvv_misc.spl.
+#
+# Return type: [i64] (4 bytes, little-endian).
+#
+# ALL byte goldens derived from RVV v1.0 spec table + manual derivation formula
+# (llvm-mc unavailable on build host).
+# ============================================================================
+# Internal helpers (independent copy; encode_rvv_widen.spl is a separate module)
+# ============================================================================
+
+fn _rvv_float_word_to_le4(word: i64) -> [i64]:
+    """
+    Convert a 32-bit floating-point instruction word to 4 little-endian bytes.
+    Uses division/modulo to avoid negative bit-op hazards in interpreter.
+    """
+    var w = word
+    if w < 0:
+        w = w + 4294967296
+    val b0 = w % 256
+    val b1 = (w / 256) % 256
+    val b2 = (w / 65536) % 256
+    val b3 = (w / 16777216) % 256
+    [b0, b1, b2, b3]
+
+fn _encode_rvv_float(funct6: i64, vm: i64, vs2: i64, vs1: i64, funct3: i64, vd: i64) -> [i64]:
+    """
+    Encode an OP-V floating-point instruction (opcode=0x57=87).
+
+    funct6: 6-bit function code (bits[31:26])
+    vm:     1=unmasked (bit[25])
+    vs2:    source register 2 (bits[24:20])
+    vs1:    source register 1 (bits[19:15])
+    funct3: OPFVV=1 for vector-vector FP (bits[14:12])
+    vd:     destination register (bits[11:7])
+    """
+    val word = (funct6 * 67108864) + (vm * 33554432) + (vs2 * 1048576) + (vs1 * 32768) + (funct3 * 4096) + (vd * 128) + 87
+    _rvv_float_word_to_le4(word)
+
+# ============================================================================
+# Vector FP Add/Subtract (RVV v1.0 §13.2)
+# ============================================================================
+
+# RVV v1.0 §13.2 vfadd.vv; funct6=0x00 (000000); OPFVV funct3=1; vm=1
+# Canonical (vd=1, vs2=2, vs1=3): word=0x022190D7 LE [0xD7,0x90,0x21,0x02]
+fn emit_vfadd_vv(vd: i64, vs2: i64, vs1: i64) -> [i64]:
+    """FP add vectors: vd = vs2 + vs1."""
+    _encode_rvv_float(0x00, 1, vs2, vs1, 1, vd)
+
+# RVV v1.0 §13.2 vfsub.vv; funct6=0x02 (000010); OPFVV funct3=1; vm=1
+# Canonical (vd=1, vs2=2, vs1=3): word=0x0A2190D7 LE [0xD7,0x90,0x21,0x0A]
+fn emit_vfsub_vv(vd: i64, vs2: i64, vs1: i64) -> [i64]:
+    """FP subtract vectors: vd = vs2 - vs1."""
+    _encode_rvv_float(0x02, 1, vs2, vs1, 1, vd)
+
+# ============================================================================
+# Vector FP Min/Max (RVV v1.0 §13.3)
+# ============================================================================
+
+# RVV v1.0 §13.3 vfmin.vv; funct6=0x04 (000100); OPFVV funct3=1; vm=1
+# Canonical (vd=1, vs2=2, vs1=3): word=0x122190D7 LE [0xD7,0x90,0x21,0x12]
+fn emit_vfmin_vv(vd: i64, vs2: i64, vs1: i64) -> [i64]:
+    """FP minimum: vd = min(vs2, vs1)."""
+    _encode_rvv_float(0x04, 1, vs2, vs1, 1, vd)
+
+# RVV v1.0 §13.3 vfmax.vv; funct6=0x06 (000110); OPFVV funct3=1; vm=1
+# Canonical (vd=1, vs2=2, vs1=3): word=0x1A2190D7 LE [0xD7,0x90,0x21,0x1A]
+fn emit_vfmax_vv(vd: i64, vs2: i64, vs1: i64) -> [i64]:
+    """FP maximum: vd = max(vs2, vs1)."""
+    _encode_rvv_float(0x06, 1, vs2, vs1, 1, vd)
+
+# ============================================================================
+# Vector FP Multiply (RVV v1.0 §13.4)
+# ============================================================================
+
+# RVV v1.0 §13.4 vfmul.vv; funct6=0x24 (100100); OPFVV funct3=1; vm=1
+# Canonical (vd=1, vs2=2, vs1=3): word=0x922190D7 LE [0xD7,0x90,0x21,0x92]
+fn emit_vfmul_vv(vd: i64, vs2: i64, vs1: i64) -> [i64]:
+    """FP multiply vectors: vd = vs2 * vs1."""
+    _encode_rvv_float(0x24, 1, vs2, vs1, 1, vd)
+
+# ============================================================================
+# Vector FP Divide (RVV v1.0 §13.5)
+# ============================================================================
+
+# RVV v1.0 §13.5 vfdiv.vv; funct6=0x20 (100000); OPFVV funct3=1; vm=1
+# Canonical (vd=1, vs2=2, vs1=3): word=0x822190D7 LE [0xD7,0x90,0x21,0x82]
+fn emit_vfdiv_vv(vd: i64, vs2: i64, vs1: i64) -> [i64]:
+    """FP divide vectors: vd = vs2 / vs1."""
+    _encode_rvv_float(0x20, 1, vs2, vs1, 1, vd)
+
+# ============================================================================
+# Vector FP Fused Multiply-Add/Sub (RVV v1.0 §13.6)
+# ============================================================================
+
+# RVV v1.0 §13.6 vfmadd.vv; funct6=0x28 (101000); OPFVV funct3=1; vm=1
+# Operation: vd = vs1*vd + vs2 (vs1 and vs2 in API; vs2 encodes into vs2 field)
+# Canonical (vd=1, vs1=2, vs2=3): word=0xA23110D7 LE [0xD7,0x10,0x31,0xA2]
+fn emit_vfmadd_vv(vd: i64, vs1: i64, vs2: i64) -> [i64]:
+    """FP fused multiply-add: vd = vs1*vd + vs2."""
+    _encode_rvv_float(0x28, 1, vs2, vs1, 1, vd)
+
+# RVV v1.0 §13.6 vfmsub.vv; funct6=0x2A (101010); OPFVV funct3=1; vm=1
+# Operation: vd = vs1*vd - vs2 (vs1 and vs2 in API; vs2 encodes into vs2 field)
+# Canonical (vd=1, vs1=2, vs2=3): word=0xAA3110D7 LE [0xD7,0x10,0x31,0xAA]
+fn emit_vfmsub_vv(vd: i64, vs1: i64, vs2: i64) -> [i64]:
+    """FP fused multiply-sub: vd = vs1*vd - vs2."""
+    _encode_rvv_float(0x2A, 1, vs2, vs1, 1, vd)
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export emit_vfadd_vv
+export emit_vfsub_vv
+export emit_vfmul_vv
+export emit_vfdiv_vv
+export emit_vfmadd_vv
+export emit_vfmsub_vv
+export emit_vfmin_vv
+export emit_vfmax_vv

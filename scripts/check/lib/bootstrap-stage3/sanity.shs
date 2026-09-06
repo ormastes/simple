@@ -1,0 +1,979 @@
+bootstrap_stage3_sanity_fail() {
+    printf 'stage2-sanity-error: %s\n' "$1" >&2
+    return 1
+}
+
+bootstrap_stage3_sanity_regular_authority() {
+    [ -f "$1" ] || return 1
+    if [ "${BOOTSTRAP_STAGE3_DESCRIPTOR_CAPSULE:-0}" = 1 ]; then
+        expr "$1" : '/proc/[1-9][0-9]*/fd/[1-9][0-9]*$' >/dev/null ||
+            expr "$1" : \
+                '/proc/[1-9][0-9]*/fd/[1-9][0-9]*/[A-Za-z0-9_.-][A-Za-z0-9_.-]*$' \
+                >/dev/null
+    else
+        [ ! -L "$1" ]
+    fi
+}
+
+bootstrap_stage3_sanity_safe_regular() (
+    [ "$#" = 1 ] || return 1
+    bootstrap_stage3_safe_path=$1
+    case "$bootstrap_stage3_safe_path" in
+      *//*|*/./*|*/../*|*/.|*/..|*%*|*\\*|*'
+'*) return 1 ;;
+    esac
+    case "$bootstrap_stage3_safe_path" in
+      /proc/*)
+        expr "$bootstrap_stage3_safe_path" : \
+            '/proc/[1-9][0-9]*/fd/[1-9][0-9]*/[A-Za-z0-9_.-][A-Za-z0-9_./-]*$' \
+            >/dev/null || return 1
+        bootstrap_stage3_safe_anchor=$(expr "$bootstrap_stage3_safe_path" : \
+            '\(/proc/[1-9][0-9]*/fd/[1-9][0-9]*\)/') || return 1
+        bootstrap_stage3_safe_rest=${bootstrap_stage3_safe_path#"$bootstrap_stage3_safe_anchor"/}
+        bootstrap_stage3_safe_current=$bootstrap_stage3_safe_anchor ;;
+      /*)
+        bootstrap_stage3_safe_rest=${bootstrap_stage3_safe_path#/}
+        bootstrap_stage3_safe_current= ;;
+      *) return 1 ;;
+    esac
+    set -f
+    bootstrap_stage3_safe_old_ifs=$IFS
+    IFS=/; set -- $bootstrap_stage3_safe_rest; IFS=$bootstrap_stage3_safe_old_ifs
+    [ "$#" -gt 0 ] || return 1
+    while [ "$#" -gt 1 ]; do
+        bootstrap_stage3_safe_component=$1; shift
+        case "$bootstrap_stage3_safe_component" in ''|.|..|*[!A-Za-z0-9_.-]*) return 1 ;; esac
+        bootstrap_stage3_safe_current=$bootstrap_stage3_safe_current/$bootstrap_stage3_safe_component
+        [ -d "$bootstrap_stage3_safe_current" ] && [ ! -L "$bootstrap_stage3_safe_current" ] || return 1
+    done
+    case "$1" in ''|.|..|*[!A-Za-z0-9_.-]*) return 1 ;; esac
+    bootstrap_stage3_safe_current=$bootstrap_stage3_safe_current/$1
+    [ -f "$bootstrap_stage3_safe_current" ] && [ ! -L "$bootstrap_stage3_safe_current" ]
+)
+
+# Print the one bootstrap product version admitted by the repository.  The SDN
+# authority owns the value; VERSION and the compiled bootstrap identity are
+# checked projections.  Keeping this parser here makes Stage 2 production,
+# resume, receipt verification, and manifest verification use one rule.
+bootstrap_stage3_canonical_version() (
+    bootstrap_stage3_version_root=$1
+    bootstrap_stage3_version_authority="$bootstrap_stage3_version_root/release/version.sdn"
+    bootstrap_stage3_version_projection="$bootstrap_stage3_version_root/VERSION"
+    bootstrap_stage3_version_identity="$bootstrap_stage3_version_root/src/app/cli/bootstrap_identity.spl"
+    for bootstrap_stage3_version_file in \
+        "$bootstrap_stage3_version_authority" \
+        "$bootstrap_stage3_version_projection" \
+        "$bootstrap_stage3_version_identity"; do
+        [ -f "$bootstrap_stage3_version_file" ] &&
+            [ ! -L "$bootstrap_stage3_version_file" ] || return 1
+    done
+    [ "$(grep -Ec '^[[:space:]]*schema:' \
+        "$bootstrap_stage3_version_authority")" = 1 ] || return 1
+    [ "$(grep -Ec '^[[:space:]]*schema:[[:space:]]*simple-release-version/1[[:space:]]*$' \
+        "$bootstrap_stage3_version_authority")" = 1 ] || return 1
+    bootstrap_stage3_version_semver=$(sed -n \
+        's/^[[:space:]]*semver:[[:space:]]*\([^[:space:]#][^[:space:]#]*\)[[:space:]]*$/\1/p' \
+        "$bootstrap_stage3_version_authority") || return 1
+    [ -n "$bootstrap_stage3_version_semver" ] || return 1
+    [ "$(grep -Ec \
+        '^[[:space:]]*semver:[[:space:]]*[^[:space:]#][^[:space:]#]*[[:space:]]*$' \
+        "$bootstrap_stage3_version_authority")" = 1 ] ||
+        return 1
+    printf '%s\n' "$bootstrap_stage3_version_semver" |
+        grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z]+(\.[0-9A-Za-z]+)*)?$' ||
+        return 1
+    [ "$(awk 'END { print NR }' "$bootstrap_stage3_version_projection")" = 1 ] ||
+        return 1
+    bootstrap_stage3_version_projected=$(sed -n '1p' \
+        "$bootstrap_stage3_version_projection") || return 1
+    [ "$bootstrap_stage3_version_projected" = "$bootstrap_stage3_version_semver" ] ||
+        return 1
+    [ "$(grep -Ec '^[[:space:]]*pub fn bootstrap_version[(][)] -> text:[[:space:]]*$' \
+        "$bootstrap_stage3_version_identity")" = 1 ] || return 1
+    bootstrap_stage3_version_compiled=$(awk '
+        /^[[:space:]]*pub fn bootstrap_version[(][)] -> text:[[:space:]]*$/ {
+            if (seen++) exit 2
+            if ((getline next_line) <= 0) exit 3
+            if (next_line !~ /^[[:space:]]*"[^"]*"[[:space:]]*$/) exit 4
+            sub(/^[[:space:]]*"/, "", next_line)
+            sub(/"[[:space:]]*$/, "", next_line)
+            print next_line
+            body_seen=1
+            next
+        }
+        body_seen && $0 !~ /^[[:space:]]*$/ { exit 5 }
+        END { if (!body_seen) exit 6 }
+    ' "$bootstrap_stage3_version_identity") || return 1
+    [ -n "$bootstrap_stage3_version_compiled" ] ||
+        return 1
+    [ "$bootstrap_stage3_version_compiled" = "$bootstrap_stage3_version_semver" ] ||
+        return 1
+    printf '%s\n' "$bootstrap_stage3_version_semver"
+)
+
+bootstrap_stage3_sanity_expect() {
+    bootstrap_stage3_sanity_expect_key=$1
+    bootstrap_stage3_sanity_expect_file=$2
+    bootstrap_stage3_sanity_expect_value=$3
+    bootstrap_stage3_sanity_expect_actual=$(
+        bootstrap_stage3_manifest_value \
+            "$bootstrap_stage3_sanity_expect_key" \
+            "$bootstrap_stage3_sanity_expect_file"
+    ) || bootstrap_stage3_sanity_fail \
+"field '$bootstrap_stage3_sanity_expect_key' unreadable in $bootstrap_stage3_sanity_expect_file" ||
+        return 1
+    [ "$bootstrap_stage3_sanity_expect_actual" = \
+        "$bootstrap_stage3_sanity_expect_value" ] ||
+        bootstrap_stage3_sanity_fail \
+"field '$bootstrap_stage3_sanity_expect_key' was '$bootstrap_stage3_sanity_expect_actual', expected '$bootstrap_stage3_sanity_expect_value'" ||
+        return 1
+}
+
+bootstrap_stage3_verify_frontend_status_receipt() {
+    [ "$#" = 7 ] || return 1
+    bootstrap_stage3_frontend_status_file=$1
+    bootstrap_stage3_frontend_status_display=$2
+    bootstrap_stage3_frontend_log=$3
+    bootstrap_stage3_frontend_log_display=$4
+    bootstrap_stage3_frontend_mode=$5
+    bootstrap_stage3_frontend_backend=$6
+    bootstrap_stage3_frontend_expected_sha=$7
+    bootstrap_stage3_frontend_reject() {
+        printf 'stage2-sanity-error: frontend-status role=%s failure=%s\n' \
+            "$1" "$2" >&2
+        return 1
+    }
+    [ -f "$bootstrap_stage3_frontend_status_file" ] &&
+        [ ! -L "$bootstrap_stage3_frontend_status_file" ] ||
+        bootstrap_stage3_frontend_reject outer status-authority || return 1
+    [ -f "$bootstrap_stage3_frontend_log" ] &&
+        [ ! -L "$bootstrap_stage3_frontend_log" ] ||
+        bootstrap_stage3_frontend_reject outer log-authority || return 1
+    [ "$(bootstrap_stage3_hash_file "$bootstrap_stage3_frontend_status_file")" = \
+        "$bootstrap_stage3_frontend_expected_sha" ] ||
+        bootstrap_stage3_frontend_reject outer status-sha-mismatch || return 1
+    for bootstrap_stage3_frontend_key in schema result probe raw_status \
+        bootstrap_mode backend log_path; do
+        bootstrap_stage3_manifest_value "$bootstrap_stage3_frontend_key" \
+            "$bootstrap_stage3_frontend_status_file" >/dev/null ||
+            bootstrap_stage3_frontend_reject outer "missing-$bootstrap_stage3_frontend_key" || return 1
+    done
+    [ "$(bootstrap_stage3_manifest_value schema \
+        "$bootstrap_stage3_frontend_status_file")" = \
+        simple-candidate-frontend-status-v2 ] || bootstrap_stage3_frontend_reject outer schema || return 1
+    [ "$(bootstrap_stage3_manifest_value result \
+        "$bootstrap_stage3_frontend_status_file")" = pass ] || bootstrap_stage3_frontend_reject outer result || return 1
+    [ "$(bootstrap_stage3_manifest_value probe \
+        "$bootstrap_stage3_frontend_status_file")" = complete ] || bootstrap_stage3_frontend_reject outer probe || return 1
+    [ "$(bootstrap_stage3_manifest_value raw_status \
+        "$bootstrap_stage3_frontend_status_file")" = 0 ] || bootstrap_stage3_frontend_reject outer raw-status || return 1
+    [ "$(bootstrap_stage3_manifest_value bootstrap_mode \
+        "$bootstrap_stage3_frontend_status_file")" = \
+        "$bootstrap_stage3_frontend_mode" ] || bootstrap_stage3_frontend_reject outer mode || return 1
+    [ "$(bootstrap_stage3_manifest_value backend \
+        "$bootstrap_stage3_frontend_status_file")" = \
+        "$bootstrap_stage3_frontend_backend" ] || bootstrap_stage3_frontend_reject outer backend || return 1
+    [ "$(bootstrap_stage3_manifest_value log_path \
+        "$bootstrap_stage3_frontend_status_file")" = \
+        "$bootstrap_stage3_frontend_log_display" ] || bootstrap_stage3_frontend_reject outer legacy-log || return 1
+    bootstrap_stage3_sanity_frontend_seen=${bootstrap_stage3_sanity_frontend_seen:-' '}
+    for bootstrap_stage3_frontend_probe in p2_add stage2_mir_retention \
+        stage2_module_path_naming hello_world_positional; do
+        bootstrap_stage3_probe_log=$(bootstrap_stage3_manifest_value \
+            "${bootstrap_stage3_frontend_probe}_log_path" \
+            "$bootstrap_stage3_frontend_status_file") || return 1
+        bootstrap_stage3_probe_log_sha=$(bootstrap_stage3_manifest_value \
+            "${bootstrap_stage3_frontend_probe}_log_sha256" \
+            "$bootstrap_stage3_frontend_status_file") || return 1
+        bootstrap_stage3_probe_receipt=$(bootstrap_stage3_manifest_value \
+            "${bootstrap_stage3_frontend_probe}_collector_receipt_path" \
+            "$bootstrap_stage3_frontend_status_file") || return 1
+        bootstrap_stage3_probe_receipt_sha=$(bootstrap_stage3_manifest_value \
+            "${bootstrap_stage3_frontend_probe}_collector_receipt_sha256" \
+            "$bootstrap_stage3_frontend_status_file") || return 1
+        bootstrap_stage3_probe_raw=$(bootstrap_stage3_manifest_value \
+            "${bootstrap_stage3_frontend_probe}_raw_status" \
+            "$bootstrap_stage3_frontend_status_file") || return 1
+        [ "$bootstrap_stage3_probe_raw" = 0 ] || bootstrap_stage3_frontend_reject "$bootstrap_stage3_frontend_probe" raw-status || return 1
+        case "$bootstrap_stage3_frontend_probe" in
+          p2_add)
+            bootstrap_stage3_expected_probe_log=$bootstrap_stage3_frontend_log_display
+            bootstrap_stage3_probe_log_authority=$bootstrap_stage3_frontend_log ;;
+          stage2_mir_retention)
+            bootstrap_stage3_expected_probe_log=$bootstrap_stage3_frontend_log_display.stage2-mir-retention
+            bootstrap_stage3_probe_log_authority=$bootstrap_stage3_frontend_log.stage2-mir-retention ;;
+          stage2_module_path_naming)
+            bootstrap_stage3_expected_probe_log=$bootstrap_stage3_frontend_log_display.stage2-module-path-naming
+            bootstrap_stage3_probe_log_authority=$bootstrap_stage3_frontend_log.stage2-module-path-naming ;;
+          hello_world_positional)
+            bootstrap_stage3_expected_probe_log=$bootstrap_stage3_frontend_log_display.hello-world-positional
+            bootstrap_stage3_probe_log_authority=$bootstrap_stage3_frontend_log.hello-world-positional ;;
+        esac
+        bootstrap_stage3_expected_probe_receipt=$bootstrap_stage3_expected_probe_log.bounded.env
+        bootstrap_stage3_probe_receipt_authority=$bootstrap_stage3_probe_log_authority.bounded.env
+        [ "$bootstrap_stage3_probe_log" = "$bootstrap_stage3_expected_probe_log" ] || bootstrap_stage3_frontend_reject "$bootstrap_stage3_frontend_probe" canonical-log || return 1
+        [ "$bootstrap_stage3_probe_receipt" = \
+            "$bootstrap_stage3_expected_probe_receipt" ] || bootstrap_stage3_frontend_reject "$bootstrap_stage3_frontend_probe" canonical-receipt || return 1
+        for bootstrap_stage3_frontend_artifact in \
+            "$bootstrap_stage3_probe_log" "$bootstrap_stage3_probe_receipt"; do
+            if [ "$bootstrap_stage3_frontend_artifact" = \
+                "$bootstrap_stage3_probe_log" ]; then
+                bootstrap_stage3_frontend_artifact_role=log
+            else
+                bootstrap_stage3_frontend_artifact_role=receipt
+            fi
+            case "$bootstrap_stage3_sanity_frontend_seen" in
+              *" $bootstrap_stage3_frontend_artifact "*) bootstrap_stage3_frontend_reject "$bootstrap_stage3_frontend_probe" "uniqueness-$bootstrap_stage3_frontend_artifact_role"; return 1 ;;
+            esac
+            bootstrap_stage3_sanity_frontend_seen=\
+"$bootstrap_stage3_sanity_frontend_seen$bootstrap_stage3_frontend_artifact "
+        done
+        bootstrap_stage3_sanity_safe_regular "$bootstrap_stage3_probe_log_authority" ||
+            bootstrap_stage3_frontend_reject "$bootstrap_stage3_frontend_probe" safe-regular-log || return 1
+        bootstrap_stage3_sanity_safe_regular "$bootstrap_stage3_probe_receipt_authority" ||
+            bootstrap_stage3_frontend_reject "$bootstrap_stage3_frontend_probe" safe-regular-receipt || return 1
+        for bootstrap_stage3_frontend_sha in \
+            "$bootstrap_stage3_probe_log_sha" \
+            "$bootstrap_stage3_probe_receipt_sha"; do
+            printf '%s\n' "$bootstrap_stage3_frontend_sha" |
+                grep -Eq '^[0-9a-f]{64}$' || bootstrap_stage3_frontend_reject "$bootstrap_stage3_frontend_probe" sha-syntax || return 1
+        done
+        [ "$(bootstrap_stage3_hash_file "$bootstrap_stage3_probe_log_authority")" = "$bootstrap_stage3_probe_log_sha" ] || bootstrap_stage3_frontend_reject "$bootstrap_stage3_frontend_probe" log-sha-mismatch || return 1
+        [ "$(bootstrap_stage3_hash_file "$bootstrap_stage3_probe_receipt_authority")" = "$bootstrap_stage3_probe_receipt_sha" ] || bootstrap_stage3_frontend_reject "$bootstrap_stage3_frontend_probe" receipt-sha-mismatch || return 1
+        for bootstrap_stage3_collector_key in schema status reason raw_status \
+            max_bytes bytes_captured timeout_seconds term_grace_seconds \
+            combined_stream process_group artifact_limit log_leaf log_sha256; do
+            bootstrap_stage3_manifest_value "$bootstrap_stage3_collector_key" \
+                "$bootstrap_stage3_probe_receipt_authority" >/dev/null || bootstrap_stage3_frontend_reject "$bootstrap_stage3_frontend_probe" "bounded-missing-$bootstrap_stage3_collector_key" || return 1
+        done
+        [ "$(bootstrap_stage3_manifest_value schema "$bootstrap_stage3_probe_receipt_authority")" = simple-bounded-process-log-v1 ] || bootstrap_stage3_frontend_reject "$bootstrap_stage3_frontend_probe" bounded-schema || return 1
+        [ "$(bootstrap_stage3_manifest_value status "$bootstrap_stage3_probe_receipt_authority")" = complete ] || bootstrap_stage3_frontend_reject "$bootstrap_stage3_frontend_probe" bounded-status || return 1
+        [ "$(bootstrap_stage3_manifest_value reason "$bootstrap_stage3_probe_receipt_authority")" = child-exit ] || bootstrap_stage3_frontend_reject "$bootstrap_stage3_frontend_probe" bounded-reason || return 1
+        [ "$(bootstrap_stage3_manifest_value raw_status "$bootstrap_stage3_probe_receipt_authority")" = "$bootstrap_stage3_probe_raw" ] || bootstrap_stage3_frontend_reject "$bootstrap_stage3_frontend_probe" bounded-raw || return 1
+        [ "$(bootstrap_stage3_manifest_value log_sha256 "$bootstrap_stage3_probe_receipt_authority")" = "$bootstrap_stage3_probe_log_sha" ] || bootstrap_stage3_frontend_reject "$bootstrap_stage3_frontend_probe" bounded-log-sha || return 1
+        [ "$(bootstrap_stage3_manifest_value log_leaf "$bootstrap_stage3_probe_receipt_authority")" = \
+            "${bootstrap_stage3_probe_log##*/}" ] || bootstrap_stage3_frontend_reject "$bootstrap_stage3_frontend_probe" bounded-leaf || return 1
+        [ "$(bootstrap_stage3_manifest_value combined_stream "$bootstrap_stage3_probe_receipt_authority")" = stdout-stderr ] || bootstrap_stage3_frontend_reject "$bootstrap_stage3_frontend_probe" bounded-stream || return 1
+        [ "$(bootstrap_stage3_manifest_value process_group "$bootstrap_stage3_probe_receipt_authority")" = setsid ] || bootstrap_stage3_frontend_reject "$bootstrap_stage3_frontend_probe" bounded-group || return 1
+        [ "$(bootstrap_stage3_manifest_value artifact_limit "$bootstrap_stage3_probe_receipt_authority")" = none ] || bootstrap_stage3_frontend_reject "$bootstrap_stage3_frontend_probe" bounded-artifact-limit || return 1
+        bootstrap_stage3_collector_max=$(bootstrap_stage3_manifest_value \
+            max_bytes "$bootstrap_stage3_probe_receipt_authority") || return 1
+        bootstrap_stage3_collector_bytes=$(bootstrap_stage3_manifest_value \
+            bytes_captured "$bootstrap_stage3_probe_receipt_authority") || return 1
+        bootstrap_stage3_collector_timeout=$(bootstrap_stage3_manifest_value \
+            timeout_seconds "$bootstrap_stage3_probe_receipt_authority") || return 1
+        bootstrap_stage3_collector_grace=$(bootstrap_stage3_manifest_value \
+            term_grace_seconds "$bootstrap_stage3_probe_receipt_authority") || return 1
+        for bootstrap_stage3_positive in "$bootstrap_stage3_collector_max" \
+            "$bootstrap_stage3_collector_timeout"; do
+            printf '%s\n' "$bootstrap_stage3_positive" |
+                grep -Eq '^[1-9][0-9]*$' || bootstrap_stage3_frontend_reject "$bootstrap_stage3_frontend_probe" bounded-positive-syntax || return 1
+        done
+        for bootstrap_stage3_nonnegative in \
+            "$bootstrap_stage3_collector_bytes" \
+            "$bootstrap_stage3_collector_grace"; do
+            printf '%s\n' "$bootstrap_stage3_nonnegative" |
+                grep -Eq '^[0-9]+$' || bootstrap_stage3_frontend_reject "$bootstrap_stage3_frontend_probe" bounded-nonnegative-syntax || return 1
+        done
+        [ "$bootstrap_stage3_collector_max" = \
+            "${CANDIDATE_FRONTEND_MAX_LOG_BYTES:-4194304}" ] || bootstrap_stage3_frontend_reject "$bootstrap_stage3_frontend_probe" bounded-max-config || return 1
+        [ "$bootstrap_stage3_collector_timeout" = \
+            "${COMPILER_BUILD_TIMEOUT_SECONDS:-180}" ] || bootstrap_stage3_frontend_reject "$bootstrap_stage3_frontend_probe" bounded-timeout-config || return 1
+        [ "$bootstrap_stage3_collector_grace" = \
+            "${COMPILER_CHECK_KILL_GRACE_SECONDS:-1}" ] || bootstrap_stage3_frontend_reject "$bootstrap_stage3_frontend_probe" bounded-grace-config || return 1
+        [ "$bootstrap_stage3_collector_bytes" -le \
+            "$bootstrap_stage3_collector_max" ] || bootstrap_stage3_frontend_reject "$bootstrap_stage3_frontend_probe" bounded-over-cap || return 1
+        [ "$bootstrap_stage3_collector_bytes" = \
+            "$(wc -c <"$bootstrap_stage3_probe_log_authority")" ] || bootstrap_stage3_frontend_reject "$bootstrap_stage3_frontend_probe" bounded-bytes || return 1
+    done
+    [ "$(bootstrap_stage3_manifest_value p2_add_log_path "$bootstrap_stage3_frontend_status_file")" = "$bootstrap_stage3_frontend_log_display" ] || return 1
+}
+
+bootstrap_stage3_verify_sanity_evidence_receipt() (
+    [ "$#" = 5 ] || return 1
+    bootstrap_stage3_sanity_file=$1
+    bootstrap_stage3_sanity_display=$2
+    bootstrap_stage3_sanity_companion_parent=$3
+    bootstrap_stage3_sanity_candidate=$4
+    bootstrap_stage3_sanity_root=$5
+    [ -n "$bootstrap_stage3_sanity_display" ] &&
+        [ "${bootstrap_stage3_sanity_display#/}" != \
+            "$bootstrap_stage3_sanity_display" ] || return 1
+    bootstrap_stage3_sanity_companion_base=\
+"$bootstrap_stage3_sanity_companion_parent/${bootstrap_stage3_sanity_display##*/}"
+    bootstrap_stage3_sanity_display_base=$bootstrap_stage3_sanity_display
+    bootstrap_stage3_sanity_outer_reject() {
+        printf 'stage2-sanity-error: sanity-receipt role=%s failure=%s\n' \
+            "$1" "$2" >&2
+        return 1
+    }
+    bootstrap_stage3_sanity_regular_authority \
+        "$bootstrap_stage3_sanity_file" ||
+        bootstrap_stage3_sanity_fail \
+"sanity evidence '$bootstrap_stage3_sanity_file' is missing or is a symlink" ||
+        bootstrap_stage3_sanity_outer_reject outer authority || return 1
+    for bootstrap_stage3_sanity_key in schema status candidate_sha256_before \
+        version_status version_output unsupported_status \
+        unsupported_output_sha256 frontend_smoke_status \
+        frontend_smoke_bootstrap_mode_status \
+        frontend_smoke_backend frontend_smoke_bootstrap0_raw_status \
+        frontend_smoke_bootstrap0_log_path \
+        frontend_smoke_bootstrap0_log_sha256 \
+        frontend_smoke_bootstrap0_status_path \
+        frontend_smoke_bootstrap0_status_sha256 \
+        frontend_smoke_bootstrap1_ran \
+        frontend_smoke_bootstrap1_raw_status \
+        frontend_smoke_bootstrap1_log_path \
+        frontend_smoke_bootstrap1_log_sha256 \
+        frontend_smoke_bootstrap1_status_path \
+        frontend_smoke_bootstrap1_status_sha256 \
+        frontend_smoke_output_sha256 frontend_smoke_driver_log_path \
+        frontend_smoke_driver_log_sha256 \
+        candidate_sha256_after; do
+        bootstrap_stage3_manifest_value "$bootstrap_stage3_sanity_key" \
+            "$bootstrap_stage3_sanity_file" >/dev/null ||
+            bootstrap_stage3_sanity_fail \
+"required field '$bootstrap_stage3_sanity_key' absent from $bootstrap_stage3_sanity_file" ||
+            return 1
+    done
+    bootstrap_stage3_sanity_expect schema "$bootstrap_stage3_sanity_file" \
+        simple-bootstrap-sanity-evidence-v1 || bootstrap_stage3_sanity_outer_reject outer schema || return 1
+    bootstrap_stage3_sanity_expect status "$bootstrap_stage3_sanity_file" \
+        pass || bootstrap_stage3_sanity_outer_reject outer status || return 1
+    bootstrap_stage3_sanity_expect version_status \
+        "$bootstrap_stage3_sanity_file" 0 || bootstrap_stage3_sanity_outer_reject version status || return 1
+    bootstrap_stage3_sanity_canonical=$(bootstrap_stage3_canonical_version \
+        "$bootstrap_stage3_sanity_root") || bootstrap_stage3_sanity_fail \
+"canonical release version authority is invalid under '$bootstrap_stage3_sanity_root'" ||
+        return 1
+    bootstrap_stage3_sanity_expected=$(bootstrap_stage3_manifest_value \
+        version_expected "$bootstrap_stage3_sanity_file" 2>/dev/null || true)
+    if [ -n "$bootstrap_stage3_sanity_expected" ]; then
+        bootstrap_stage3_sanity_expect version_expect_status \
+            "$bootstrap_stage3_sanity_file" 0 || bootstrap_stage3_sanity_outer_reject version expected-status || return 1
+        bootstrap_stage3_sanity_expect version_match_status \
+            "$bootstrap_stage3_sanity_file" 0 || bootstrap_stage3_sanity_outer_reject version match-status || return 1
+        [ "$bootstrap_stage3_sanity_expected" = \
+            "$bootstrap_stage3_sanity_canonical" ] || bootstrap_stage3_sanity_fail \
+"field 'version_expected' was '$bootstrap_stage3_sanity_expected', canonical release version is '$bootstrap_stage3_sanity_canonical'" ||
+            return 1
+    else
+        bootstrap_stage3_sanity_expected=$bootstrap_stage3_sanity_canonical
+    fi
+    bootstrap_stage3_sanity_expect version_output \
+        "$bootstrap_stage3_sanity_file" \
+        "simple-bootstrap $bootstrap_stage3_sanity_expected" || bootstrap_stage3_sanity_outer_reject version output || return 1
+    bootstrap_stage3_sanity_expect unsupported_status \
+        "$bootstrap_stage3_sanity_file" 1 || return 1
+    bootstrap_stage3_sanity_expect frontend_smoke_status \
+        "$bootstrap_stage3_sanity_file" 0 || bootstrap_stage3_sanity_outer_reject frontend raw || return 1
+    bootstrap_stage3_sanity_expect frontend_smoke_bootstrap_mode_status \
+        "$bootstrap_stage3_sanity_file" 0 || bootstrap_stage3_sanity_outer_reject frontend mode-raw || return 1
+    bootstrap_stage3_sanity_expect frontend_smoke_bootstrap0_raw_status \
+        "$bootstrap_stage3_sanity_file" 0 || bootstrap_stage3_sanity_outer_reject bootstrap0 raw || return 1
+    bootstrap_stage3_sanity_expect frontend_smoke_bootstrap1_ran \
+        "$bootstrap_stage3_sanity_file" true || bootstrap_stage3_sanity_outer_reject bootstrap1 ran || return 1
+    bootstrap_stage3_sanity_expect frontend_smoke_bootstrap1_raw_status \
+        "$bootstrap_stage3_sanity_file" 0 || bootstrap_stage3_sanity_outer_reject bootstrap1 raw || return 1
+    bootstrap_stage3_sanity_candidate_sha=$(
+        bootstrap_stage3_hash_file "$bootstrap_stage3_sanity_candidate"
+    ) || bootstrap_stage3_sanity_fail \
+"candidate '$bootstrap_stage3_sanity_candidate' could not be hashed" ||
+        return 1
+    bootstrap_stage3_sanity_expect candidate_sha256_before \
+        "$bootstrap_stage3_sanity_file" \
+        "$bootstrap_stage3_sanity_candidate_sha" || bootstrap_stage3_sanity_outer_reject candidate before-hash || return 1
+    bootstrap_stage3_sanity_expect candidate_sha256_after \
+        "$bootstrap_stage3_sanity_file" \
+        "$bootstrap_stage3_sanity_candidate_sha" || bootstrap_stage3_sanity_outer_reject candidate after-hash || return 1
+    bootstrap_stage3_sanity_unsupported_sha=$(
+        bootstrap_stage3_manifest_value unsupported_output_sha256 \
+            "$bootstrap_stage3_sanity_file"
+    ) || bootstrap_stage3_sanity_fail \
+"field 'unsupported_output_sha256' unreadable in $bootstrap_stage3_sanity_file" ||
+        return 1
+    printf '%s\n' "$bootstrap_stage3_sanity_unsupported_sha" |
+        grep -Eq '^[0-9a-f]{64}$' ||
+        bootstrap_stage3_sanity_fail \
+"field 'unsupported_output_sha256' is not a sha256: '$bootstrap_stage3_sanity_unsupported_sha'" ||
+        return 1
+    bootstrap_stage3_sanity_frontend_sha=$(
+        bootstrap_stage3_manifest_value frontend_smoke_output_sha256 \
+            "$bootstrap_stage3_sanity_file"
+    ) || bootstrap_stage3_sanity_fail \
+"field 'frontend_smoke_output_sha256' unreadable in $bootstrap_stage3_sanity_file" ||
+        return 1
+    printf '%s\n' "$bootstrap_stage3_sanity_frontend_sha" |
+        grep -Eq '^[0-9a-f]{64}$' ||
+        bootstrap_stage3_sanity_fail \
+"field 'frontend_smoke_output_sha256' is not a sha256: '$bootstrap_stage3_sanity_frontend_sha'" ||
+        return 1
+    bootstrap_stage3_sanity_backend=$(bootstrap_stage3_manifest_value \
+        frontend_smoke_backend "$bootstrap_stage3_sanity_file") || return 1
+    case "$bootstrap_stage3_sanity_backend" in
+        llvm|cranelift) ;; *) bootstrap_stage3_sanity_outer_reject outer backend; return 1 ;;
+    esac
+    bootstrap_stage3_sanity_bootstrap0_log_display=$(bootstrap_stage3_manifest_value \
+        frontend_smoke_bootstrap0_log_path \
+        "$bootstrap_stage3_sanity_file") || return 1
+    [ "$bootstrap_stage3_sanity_bootstrap0_log_display" = \
+        "$bootstrap_stage3_sanity_display_base.frontend-bootstrap-0.log" ] ||
+        bootstrap_stage3_sanity_outer_reject bootstrap0 canonical-log || return 1
+    bootstrap_stage3_sanity_driver_log=$(bootstrap_stage3_manifest_value \
+        frontend_smoke_driver_log_path "$bootstrap_stage3_sanity_file") || return 1
+    [ "$bootstrap_stage3_sanity_driver_log" = \
+        "$bootstrap_stage3_sanity_display_base.frontend-driver.log" ] || bootstrap_stage3_sanity_outer_reject driver canonical-path || return 1
+    bootstrap_stage3_sanity_driver_authority=\
+"$bootstrap_stage3_sanity_companion_base.frontend-driver.log"
+    bootstrap_stage3_sanity_safe_regular "$bootstrap_stage3_sanity_driver_authority" || bootstrap_stage3_sanity_outer_reject driver authority || return 1
+    bootstrap_stage3_sanity_driver_sha=$(bootstrap_stage3_manifest_value \
+        frontend_smoke_driver_log_sha256 "$bootstrap_stage3_sanity_file") || return 1
+    [ "$bootstrap_stage3_sanity_driver_sha" = \
+        "$bootstrap_stage3_sanity_frontend_sha" ] || bootstrap_stage3_sanity_outer_reject driver outer-hash || return 1
+    [ "$bootstrap_stage3_sanity_driver_sha" = \
+        "$(bootstrap_stage3_hash_file "$bootstrap_stage3_sanity_driver_authority")" ] || bootstrap_stage3_sanity_outer_reject driver content-hash || return 1
+    bootstrap_stage3_sanity_frontend_seen=' '
+    for bootstrap_stage3_sanity_mode in 0 1; do
+        bootstrap_stage3_sanity_log=$(bootstrap_stage3_manifest_value \
+            "frontend_smoke_bootstrap${bootstrap_stage3_sanity_mode}_log_path" \
+            "$bootstrap_stage3_sanity_file") || return 1
+        bootstrap_stage3_sanity_status=$(bootstrap_stage3_manifest_value \
+            "frontend_smoke_bootstrap${bootstrap_stage3_sanity_mode}_status_path" \
+            "$bootstrap_stage3_sanity_file") || return 1
+        [ "$bootstrap_stage3_sanity_log" = \
+            "$bootstrap_stage3_sanity_display_base.frontend-bootstrap-$bootstrap_stage3_sanity_mode.log" ] || bootstrap_stage3_sanity_outer_reject "bootstrap$bootstrap_stage3_sanity_mode" canonical-log || return 1
+        [ "$bootstrap_stage3_sanity_status" = \
+            "$bootstrap_stage3_sanity_display_base.frontend-bootstrap-$bootstrap_stage3_sanity_mode.status.env" ] || bootstrap_stage3_sanity_outer_reject "bootstrap$bootstrap_stage3_sanity_mode" canonical-status || return 1
+        bootstrap_stage3_sanity_log_authority=\
+"$bootstrap_stage3_sanity_companion_base.frontend-bootstrap-$bootstrap_stage3_sanity_mode.log"
+        bootstrap_stage3_sanity_status_authority=\
+"$bootstrap_stage3_sanity_companion_base.frontend-bootstrap-$bootstrap_stage3_sanity_mode.status.env"
+        bootstrap_stage3_sanity_log_sha=$(bootstrap_stage3_manifest_value \
+            "frontend_smoke_bootstrap${bootstrap_stage3_sanity_mode}_log_sha256" \
+            "$bootstrap_stage3_sanity_file") || return 1
+        bootstrap_stage3_sanity_safe_regular "$bootstrap_stage3_sanity_log_authority" || bootstrap_stage3_sanity_outer_reject "bootstrap$bootstrap_stage3_sanity_mode" log-authority || return 1
+        [ "$bootstrap_stage3_sanity_log_sha" = \
+            "$(bootstrap_stage3_hash_file "$bootstrap_stage3_sanity_log_authority")" ] || bootstrap_stage3_sanity_outer_reject "bootstrap$bootstrap_stage3_sanity_mode" log-hash || return 1
+        bootstrap_stage3_sanity_status_sha=$(bootstrap_stage3_manifest_value \
+            "frontend_smoke_bootstrap${bootstrap_stage3_sanity_mode}_status_sha256" \
+            "$bootstrap_stage3_sanity_file") || return 1
+        bootstrap_stage3_verify_frontend_status_receipt \
+            "$bootstrap_stage3_sanity_status_authority" \
+            "$bootstrap_stage3_sanity_status" \
+            "$bootstrap_stage3_sanity_log_authority" \
+            "$bootstrap_stage3_sanity_log" \
+            "$bootstrap_stage3_sanity_mode" \
+            "$bootstrap_stage3_sanity_backend" \
+            "$bootstrap_stage3_sanity_status_sha" || bootstrap_stage3_sanity_outer_reject "bootstrap$bootstrap_stage3_sanity_mode" status-verification || return 1
+    done
+)
+
+bootstrap_stage3_verify_receiver_evidence_receipt() (
+    [ "$#" = 8 ] || return 1
+    bootstrap_stage3_receiver_file=$1
+    bootstrap_stage3_receiver_display=$2
+    bootstrap_stage3_receiver_candidate=$3
+    bootstrap_stage3_receiver_candidate_display=$4
+    bootstrap_stage3_receiver_runtime_snapshot=$5
+    bootstrap_stage3_receiver_runtime_display=$6
+    bootstrap_stage3_receiver_log_authority=$7
+    bootstrap_stage3_receiver_log_display=$8
+    for bootstrap_stage3_receiver_audit_path in "$bootstrap_stage3_receiver_display" \
+        "$bootstrap_stage3_receiver_candidate_display" "$bootstrap_stage3_receiver_runtime_display" \
+        "$bootstrap_stage3_receiver_log_display"; do
+        bootstrap_stage3_normalized_absolute "$bootstrap_stage3_receiver_audit_path" || return 1
+    done
+    bootstrap_stage3_sanity_regular_authority \
+        "$bootstrap_stage3_receiver_file" || return 1
+    bootstrap_stage3_sanity_regular_authority \
+        "$bootstrap_stage3_receiver_candidate" || return 1
+    bootstrap_stage3_sanity_regular_authority \
+        "$bootstrap_stage3_receiver_runtime_snapshot" || return 1
+    for bootstrap_stage3_receiver_key in schema status probe_exit \
+        candidate_sha256_before candidate_sha256_after \
+        runtime_snapshot_sha256 probe_log probe_log_sha256; do
+        bootstrap_stage3_manifest_value "$bootstrap_stage3_receiver_key" \
+            "$bootstrap_stage3_receiver_file" >/dev/null || return 1
+    done
+    [ "$(bootstrap_stage3_manifest_value schema \
+        "$bootstrap_stage3_receiver_file")" = \
+        simple-bootstrap-stage2-receiver-evidence-v1 ] || return 1
+    [ "$(bootstrap_stage3_manifest_value status \
+        "$bootstrap_stage3_receiver_file")" = pass ] || return 1
+    [ "$(bootstrap_stage3_manifest_value probe_exit \
+        "$bootstrap_stage3_receiver_file")" = 0 ] || return 1
+    bootstrap_stage3_receiver_candidate_sha=$(bootstrap_stage3_hash_file \
+        "$bootstrap_stage3_receiver_candidate") || return 1
+    [ "$(bootstrap_stage3_manifest_value candidate_sha256_before \
+        "$bootstrap_stage3_receiver_file")" = \
+        "$bootstrap_stage3_receiver_candidate_sha" ] || return 1
+    [ "$(bootstrap_stage3_manifest_value candidate_sha256_after \
+        "$bootstrap_stage3_receiver_file")" = \
+        "$bootstrap_stage3_receiver_candidate_sha" ] || return 1
+    [ "$(bootstrap_stage3_manifest_value runtime_snapshot_sha256 \
+        "$bootstrap_stage3_receiver_file")" = \
+        "$(bootstrap_stage3_hash_file \
+            "$bootstrap_stage3_receiver_runtime_snapshot")" ] || return 1
+    bootstrap_stage3_receiver_log=$(bootstrap_stage3_manifest_value probe_log \
+        "$bootstrap_stage3_receiver_file") || return 1
+    [ "$bootstrap_stage3_receiver_log" = \
+        "$bootstrap_stage3_receiver_log_display" ] || return 1
+    bootstrap_stage3_sanity_regular_authority "$bootstrap_stage3_receiver_log_authority" || return 1
+    [ "$(bootstrap_stage3_manifest_value probe_log_sha256 \
+        "$bootstrap_stage3_receiver_file")" = \
+        "$(bootstrap_stage3_hash_file "$bootstrap_stage3_receiver_log_authority")" ] ||
+        return 1
+)
+
+bootstrap_stage3_stage2_admission_identity() {
+    [ "$#" = 9 ] || return 1
+    for bootstrap_stage3_identity_sha in "$1" "$2" "$3" "$4" "$5" \
+        "$6" "$7" "$9"; do
+        printf '%s\n' "$bootstrap_stage3_identity_sha" |
+            grep -Eq '^[0-9a-f]{64}$' || return 1
+    done
+    case "$8" in deps/libspl_hosted_runtime-*.rlib) ;; *) return 1 ;; esac
+    {
+        echo 'schema=simple-bootstrap-stage2-admission-identity-v1'
+        echo "artifact_sha256=$1"
+        echo "source_snapshot_sha256=$2"
+        echo "runtime_snapshot_sha256=$3"
+        echo "tool_authority_sha256=$4"
+        echo "build_args_sha256=$5"
+        echo "sanity_evidence_sha256=$6"
+        echo "receiver_evidence_sha256=$7"
+        echo "hosted_runtime_relative_path=$8"
+        echo "hosted_runtime_sha256=$9"
+    } | bootstrap_stage3_hash_stream
+}
+
+bootstrap_stage3_write_stage2_admission_receipt() (
+    [ "$#" = 21 ] || return 1
+    bootstrap_stage3_admission_receipt=$1
+    bootstrap_stage3_admission_receipt_display=$2
+    bootstrap_stage3_admission_candidate=$3 bootstrap_stage3_admission_candidate_display=$4
+    bootstrap_stage3_admission_source=$5 bootstrap_stage3_admission_source_display=$6
+    bootstrap_stage3_admission_runtime=$7 bootstrap_stage3_admission_runtime_display=$8
+    bootstrap_stage3_admission_runtime_authority=$9 bootstrap_stage3_admission_runtime_authority_display=${10}
+    bootstrap_stage3_admission_tool=${11} bootstrap_stage3_admission_tool_display=${12}
+    bootstrap_stage3_admission_args_sha=${13}
+    bootstrap_stage3_admission_sanity=${14} bootstrap_stage3_admission_sanity_display=${15}
+    bootstrap_stage3_admission_sanity_companion_parent=${16}
+    bootstrap_stage3_admission_receiver=${17} bootstrap_stage3_admission_receiver_display=${18}
+    bootstrap_stage3_admission_receiver_log=${19} bootstrap_stage3_admission_receiver_log_display=${20}
+    bootstrap_stage3_admission_root=${21}
+    for bootstrap_stage3_admission_display in "$bootstrap_stage3_admission_receipt_display" \
+        "$bootstrap_stage3_admission_candidate_display" "$bootstrap_stage3_admission_source_display" \
+        "$bootstrap_stage3_admission_runtime_display" "$bootstrap_stage3_admission_tool_display" \
+        "$bootstrap_stage3_admission_runtime_authority_display" \
+        "$bootstrap_stage3_admission_sanity_display" "$bootstrap_stage3_admission_receiver_display" \
+        "$bootstrap_stage3_admission_receiver_log_display"; do
+        bootstrap_stage3_normalized_absolute "$bootstrap_stage3_admission_display" || return 1
+    done
+    [ ! -e "$bootstrap_stage3_admission_receipt" ] || return 1
+    for bootstrap_stage3_admission_file in \
+        "$bootstrap_stage3_admission_candidate" \
+        "$bootstrap_stage3_admission_source" \
+        "$bootstrap_stage3_admission_runtime" \
+        "$bootstrap_stage3_admission_tool" \
+        "$bootstrap_stage3_admission_sanity" \
+        "$bootstrap_stage3_admission_receiver"; do
+        [ -f "$bootstrap_stage3_admission_file" ] &&
+            [ ! -L "$bootstrap_stage3_admission_file" ] || return 1
+    done
+    printf '%s\n' "$bootstrap_stage3_admission_args_sha" |
+        grep -Eq '^[0-9a-f]{64}$' || return 1
+    bootstrap_stage3_verify_sanity_evidence_receipt \
+        "$bootstrap_stage3_admission_sanity" \
+        "$bootstrap_stage3_admission_sanity_display" \
+        "$bootstrap_stage3_admission_sanity_companion_parent" \
+        "$bootstrap_stage3_admission_candidate" \
+        "$bootstrap_stage3_admission_root" || return 1
+    bootstrap_stage3_verify_receiver_evidence_receipt \
+        "$bootstrap_stage3_admission_receiver" "$bootstrap_stage3_admission_receiver_display" \
+        "$bootstrap_stage3_admission_candidate" "$bootstrap_stage3_admission_candidate_display" \
+        "$bootstrap_stage3_admission_runtime" "$bootstrap_stage3_admission_runtime_display" \
+        "$bootstrap_stage3_admission_receiver_log" "$bootstrap_stage3_admission_receiver_log_display" ||
+        return 1
+    bootstrap_stage3_admission_candidate_sha=$(bootstrap_stage3_hash_file \
+        "$bootstrap_stage3_admission_candidate") || return 1
+    bootstrap_stage3_admission_source_sha=$(bootstrap_stage3_hash_file \
+        "$bootstrap_stage3_admission_source") || return 1
+    bootstrap_stage3_admission_runtime_sha=$(bootstrap_stage3_hash_file \
+        "$bootstrap_stage3_admission_runtime") || return 1
+    bootstrap_stage3_admission_tool_sha=$(bootstrap_stage3_hash_file \
+        "$bootstrap_stage3_admission_tool") || return 1
+    bootstrap_stage3_admission_sanity_sha=$(bootstrap_stage3_hash_file \
+        "$bootstrap_stage3_admission_sanity") || return 1
+    bootstrap_stage3_admission_receiver_sha=$(bootstrap_stage3_hash_file \
+        "$bootstrap_stage3_admission_receiver") || return 1
+    bootstrap_stage3_admission_receiver_log_sha=$(bootstrap_stage3_hash_file \
+        "$bootstrap_stage3_admission_receiver_log") || return 1
+    bootstrap_stage3_verify_hosted_runtime_authority \
+        "$bootstrap_stage3_admission_runtime_authority" || return 1
+    bootstrap_stage3_admission_hosted_relative=\
+$BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH
+    bootstrap_stage3_admission_hosted_sha=\
+$BOOTSTRAP_STAGE3_HOSTED_RUNTIME_SHA256
+    bootstrap_stage3_admission_identity=$(
+        bootstrap_stage3_stage2_admission_identity \
+            "$bootstrap_stage3_admission_candidate_sha" \
+            "$bootstrap_stage3_admission_source_sha" \
+            "$bootstrap_stage3_admission_runtime_sha" \
+            "$bootstrap_stage3_admission_tool_sha" \
+            "$bootstrap_stage3_admission_args_sha" \
+            "$bootstrap_stage3_admission_sanity_sha" \
+            "$bootstrap_stage3_admission_receiver_sha" \
+            "$bootstrap_stage3_admission_hosted_relative" \
+            "$bootstrap_stage3_admission_hosted_sha"
+    ) || return 1
+    bootstrap_stage3_admission_tmp="${bootstrap_stage3_admission_receipt}.tmp.$$"
+    trap 'rm -f "$bootstrap_stage3_admission_tmp"' EXIT INT TERM HUP
+    umask 077
+    {
+        echo 'schema=simple-bootstrap-stage2-admission-v2'
+        echo 'status=admitted'
+        echo "admission_receipt_path=$bootstrap_stage3_admission_receipt_display"
+        echo "candidate_path=$bootstrap_stage3_admission_candidate_display"
+        echo "candidate_sha256=$bootstrap_stage3_admission_candidate_sha"
+        echo "source_snapshot_path=$bootstrap_stage3_admission_source_display"
+        echo "source_snapshot_sha256=$bootstrap_stage3_admission_source_sha"
+        echo "runtime_snapshot_path=$bootstrap_stage3_admission_runtime_display"
+        echo "runtime_snapshot_sha256=$bootstrap_stage3_admission_runtime_sha"
+        echo "runtime_authority_path=$bootstrap_stage3_admission_runtime_authority_display"
+        echo "hosted_runtime_relative_path=$bootstrap_stage3_admission_hosted_relative"
+        echo "hosted_runtime_sha256=$bootstrap_stage3_admission_hosted_sha"
+        echo "tool_authority_path=$bootstrap_stage3_admission_tool_display"
+        echo "tool_authority_sha256=$bootstrap_stage3_admission_tool_sha"
+        echo "build_args_sha256=$bootstrap_stage3_admission_args_sha"
+        echo "sanity_evidence_path=$bootstrap_stage3_admission_sanity_display"
+        echo "sanity_evidence_sha256=$bootstrap_stage3_admission_sanity_sha"
+        echo "receiver_evidence_path=$bootstrap_stage3_admission_receiver_display"
+        echo "receiver_evidence_sha256=$bootstrap_stage3_admission_receiver_sha"
+        echo "receiver_log_path=$bootstrap_stage3_admission_receiver_log_display"
+        echo "receiver_log_sha256=$bootstrap_stage3_admission_receiver_log_sha"
+        echo "admission_identity=$bootstrap_stage3_admission_identity"
+        echo 'checks_executed_at_admission=1'
+        echo 'checks_replayed_during_stage3=0'
+    } >"$bootstrap_stage3_admission_tmp" || return 1
+    chmod 400 "$bootstrap_stage3_admission_tmp" || return 1
+    mv "$bootstrap_stage3_admission_tmp" \
+        "$bootstrap_stage3_admission_receipt" || return 1
+    trap - EXIT INT TERM HUP
+)
+
+bootstrap_stage3_verify_stage2_admission_receipt() (
+    [ "$#" = 21 ] || return 1
+    bootstrap_stage3_admission_receipt=$1
+    bootstrap_stage3_admission_receipt_display=$2
+    bootstrap_stage3_admission_candidate=$3 bootstrap_stage3_admission_candidate_display=$4
+    bootstrap_stage3_admission_source=$5 bootstrap_stage3_admission_source_display=$6
+    bootstrap_stage3_admission_runtime=$7 bootstrap_stage3_admission_runtime_display=$8
+    bootstrap_stage3_admission_runtime_authority=$9 bootstrap_stage3_admission_runtime_authority_display=${10}
+    bootstrap_stage3_admission_tool=${11} bootstrap_stage3_admission_tool_display=${12}
+    bootstrap_stage3_admission_args_sha=${13}
+    bootstrap_stage3_admission_sanity=${14} bootstrap_stage3_admission_sanity_display=${15}
+    bootstrap_stage3_admission_sanity_companion_parent=${16}
+    bootstrap_stage3_admission_receiver=${17} bootstrap_stage3_admission_receiver_display=${18}
+    bootstrap_stage3_admission_receiver_log=${19} bootstrap_stage3_admission_receiver_log_display=${20}
+    bootstrap_stage3_admission_root=${21}
+    for bootstrap_stage3_admission_display in "$bootstrap_stage3_admission_receipt_display" \
+        "$bootstrap_stage3_admission_candidate_display" "$bootstrap_stage3_admission_source_display" \
+        "$bootstrap_stage3_admission_runtime_display" "$bootstrap_stage3_admission_tool_display" \
+        "$bootstrap_stage3_admission_runtime_authority_display" \
+        "$bootstrap_stage3_admission_sanity_display" "$bootstrap_stage3_admission_receiver_display" \
+        "$bootstrap_stage3_admission_receiver_log_display"; do
+        bootstrap_stage3_normalized_absolute "$bootstrap_stage3_admission_display" || return 1
+    done
+    bootstrap_stage3_verify_sanity_evidence_receipt \
+        "$bootstrap_stage3_admission_sanity" \
+        "$bootstrap_stage3_admission_sanity_display" \
+        "$bootstrap_stage3_admission_sanity_companion_parent" \
+        "$bootstrap_stage3_admission_candidate" \
+        "$bootstrap_stage3_admission_root" || return 1
+    bootstrap_stage3_verify_receiver_evidence_receipt \
+        "$bootstrap_stage3_admission_receiver" "$bootstrap_stage3_admission_receiver_display" \
+        "$bootstrap_stage3_admission_candidate" "$bootstrap_stage3_admission_candidate_display" \
+        "$bootstrap_stage3_admission_runtime" "$bootstrap_stage3_admission_runtime_display" \
+        "$bootstrap_stage3_admission_receiver_log" "$bootstrap_stage3_admission_receiver_log_display" || return 1
+    bootstrap_stage3_sanity_regular_authority \
+        "$bootstrap_stage3_admission_receipt" || return 1
+    [ "$(wc -l <"$bootstrap_stage3_admission_receipt" | tr -d ' ')" = 24 ] || return 1
+    bootstrap_stage3_admission_keys=$(sed 's/=.*//' "$bootstrap_stage3_admission_receipt" | tr '\n' ' ')
+    [ "$bootstrap_stage3_admission_keys" = \
+"schema status admission_receipt_path candidate_path candidate_sha256 source_snapshot_path source_snapshot_sha256 runtime_snapshot_path runtime_snapshot_sha256 runtime_authority_path hosted_runtime_relative_path hosted_runtime_sha256 tool_authority_path tool_authority_sha256 build_args_sha256 sanity_evidence_path sanity_evidence_sha256 receiver_evidence_path receiver_evidence_sha256 receiver_log_path receiver_log_sha256 admission_identity checks_executed_at_admission checks_replayed_during_stage3 " ] || return 1
+    for bootstrap_stage3_admission_key in schema status admission_receipt_path candidate_path \
+        candidate_sha256 source_snapshot_path source_snapshot_sha256 \
+        runtime_snapshot_path runtime_snapshot_sha256 tool_authority_path \
+        runtime_authority_path hosted_runtime_relative_path \
+        hosted_runtime_sha256 \
+        tool_authority_sha256 build_args_sha256 sanity_evidence_path \
+        sanity_evidence_sha256 receiver_evidence_path receiver_log_path receiver_log_sha256 \
+        receiver_evidence_sha256 admission_identity \
+        checks_executed_at_admission checks_replayed_during_stage3; do
+        bootstrap_stage3_manifest_value "$bootstrap_stage3_admission_key" \
+            "$bootstrap_stage3_admission_receipt" >/dev/null || return 1
+    done
+    [ "$(bootstrap_stage3_manifest_value schema \
+        "$bootstrap_stage3_admission_receipt")" = \
+        simple-bootstrap-stage2-admission-v2 ] || return 1
+    [ "$(bootstrap_stage3_manifest_value status \
+        "$bootstrap_stage3_admission_receipt")" = admitted ] || return 1
+    [ "$(bootstrap_stage3_manifest_value checks_executed_at_admission \
+        "$bootstrap_stage3_admission_receipt")" = 1 ] || return 1
+    [ "$(bootstrap_stage3_manifest_value checks_replayed_during_stage3 \
+        "$bootstrap_stage3_admission_receipt")" = 0 ] || return 1
+    for bootstrap_stage3_admission_binding in \
+        "candidate_path:$bootstrap_stage3_admission_candidate_display" \
+        "admission_receipt_path:$bootstrap_stage3_admission_receipt_display" \
+        "source_snapshot_path:$bootstrap_stage3_admission_source_display" \
+        "runtime_snapshot_path:$bootstrap_stage3_admission_runtime_display" \
+        "tool_authority_path:$bootstrap_stage3_admission_tool_display" \
+        "sanity_evidence_path:$bootstrap_stage3_admission_sanity_display" \
+        "receiver_evidence_path:$bootstrap_stage3_admission_receiver_display" \
+        "receiver_log_path:$bootstrap_stage3_admission_receiver_log_display"; do
+        bootstrap_stage3_admission_key=${bootstrap_stage3_admission_binding%%:*}
+        bootstrap_stage3_admission_expected=${bootstrap_stage3_admission_binding#*:}
+        [ "$(bootstrap_stage3_manifest_value \
+            "$bootstrap_stage3_admission_key" \
+            "$bootstrap_stage3_admission_receipt")" = \
+            "$bootstrap_stage3_admission_expected" ] || return 1
+    done
+    [ "$(bootstrap_stage3_manifest_value runtime_authority_path \
+        "$bootstrap_stage3_admission_receipt")" = \
+        "$bootstrap_stage3_admission_runtime_authority_display" ] || return 1
+    bootstrap_stage3_verify_hosted_runtime_authority \
+        "$bootstrap_stage3_admission_runtime_authority" || return 1
+    bootstrap_stage3_admission_hosted_relative=\
+$BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH
+    bootstrap_stage3_admission_hosted_sha=\
+$BOOTSTRAP_STAGE3_HOSTED_RUNTIME_SHA256
+    [ "$(bootstrap_stage3_manifest_value hosted_runtime_relative_path \
+        "$bootstrap_stage3_admission_receipt")" = \
+        "$bootstrap_stage3_admission_hosted_relative" ] || return 1
+    [ "$(bootstrap_stage3_manifest_value hosted_runtime_sha256 \
+        "$bootstrap_stage3_admission_receipt")" = \
+        "$bootstrap_stage3_admission_hosted_sha" ] || return 1
+    bootstrap_stage3_admission_candidate_sha=$(bootstrap_stage3_hash_file \
+        "$bootstrap_stage3_admission_candidate") || return 1
+    bootstrap_stage3_admission_source_sha=$(bootstrap_stage3_hash_file \
+        "$bootstrap_stage3_admission_source") || return 1
+    bootstrap_stage3_admission_runtime_sha=$(bootstrap_stage3_hash_file \
+        "$bootstrap_stage3_admission_runtime") || return 1
+    bootstrap_stage3_admission_tool_sha=$(bootstrap_stage3_hash_file \
+        "$bootstrap_stage3_admission_tool") || return 1
+    bootstrap_stage3_admission_sanity_sha=$(bootstrap_stage3_hash_file \
+        "$bootstrap_stage3_admission_sanity") || return 1
+    bootstrap_stage3_admission_receiver_sha=$(bootstrap_stage3_hash_file \
+        "$bootstrap_stage3_admission_receiver") || return 1
+    bootstrap_stage3_admission_receiver_log_sha=$(bootstrap_stage3_hash_file \
+        "$bootstrap_stage3_admission_receiver_log") || return 1
+    for bootstrap_stage3_admission_binding in \
+        "candidate_sha256:$bootstrap_stage3_admission_candidate_sha" \
+        "source_snapshot_sha256:$bootstrap_stage3_admission_source_sha" \
+        "runtime_snapshot_sha256:$bootstrap_stage3_admission_runtime_sha" \
+        "tool_authority_sha256:$bootstrap_stage3_admission_tool_sha" \
+        "build_args_sha256:$bootstrap_stage3_admission_args_sha" \
+        "sanity_evidence_sha256:$bootstrap_stage3_admission_sanity_sha" \
+        "receiver_evidence_sha256:$bootstrap_stage3_admission_receiver_sha"; do
+        bootstrap_stage3_admission_key=${bootstrap_stage3_admission_binding%%:*}
+        bootstrap_stage3_admission_expected=${bootstrap_stage3_admission_binding#*:}
+        bootstrap_stage3_admission_actual=$(bootstrap_stage3_manifest_value \
+            "$bootstrap_stage3_admission_key" \
+            "$bootstrap_stage3_admission_receipt")
+        if [ "$bootstrap_stage3_admission_actual" != \
+            "$bootstrap_stage3_admission_expected" ]; then
+            # Say WHICH binding disagreed. A bare `return 1` here surfaces to
+            # the operator only as a resume that stops with no output at all,
+            # which is the same fail-mute this tree has already had to fix in
+            # the seed-input fingerprint. The recorded value belongs to the
+            # admitted Stage 2; the expected value is recomputed now, so a
+            # mismatch means the admitted state no longer describes this tree.
+            echo "bootstrap-stage3-admission-mismatch: ${bootstrap_stage3_admission_key} recorded=${bootstrap_stage3_admission_actual} expected=${bootstrap_stage3_admission_expected} receipt=${bootstrap_stage3_admission_receipt}" >&2
+            return 1
+        fi
+    done
+    [ "$(bootstrap_stage3_manifest_value receiver_log_sha256 "$bootstrap_stage3_admission_receipt")" = \
+        "$bootstrap_stage3_admission_receiver_log_sha" ] || return 1
+    bootstrap_stage3_admission_identity=$(
+        bootstrap_stage3_stage2_admission_identity \
+            "$bootstrap_stage3_admission_candidate_sha" \
+            "$bootstrap_stage3_admission_source_sha" \
+            "$bootstrap_stage3_admission_runtime_sha" \
+            "$bootstrap_stage3_admission_tool_sha" \
+            "$bootstrap_stage3_admission_args_sha" \
+            "$bootstrap_stage3_admission_sanity_sha" \
+            "$bootstrap_stage3_admission_receiver_sha" \
+            "$bootstrap_stage3_admission_hosted_relative" \
+            "$bootstrap_stage3_admission_hosted_sha"
+    ) || return 1
+    [ "$(bootstrap_stage3_manifest_value admission_identity \
+        "$bootstrap_stage3_admission_receipt")" = \
+        "$bootstrap_stage3_admission_identity" ] || return 1
+)
+
+bootstrap_stage3_verify_sanity_evidence() (
+    [ "$#" -eq 9 ] || return 1
+    bootstrap_stage3_sanity_file=$1
+    bootstrap_stage3_sanity_display=$2
+    bootstrap_stage3_sanity_companion_parent=$3
+    bootstrap_stage3_sanity_candidate=$4
+    bootstrap_stage3_sanity_root=$5
+    bootstrap_stage3_sanity_backend=$6
+    bootstrap_stage3_sanity_home=$7
+    bootstrap_stage3_sanity_tmpdir=$8
+    bootstrap_stage3_sanity_path=$9
+    bootstrap_stage3_verify_sanity_evidence_receipt \
+        "$bootstrap_stage3_sanity_file" \
+        "$bootstrap_stage3_sanity_display" \
+        "$bootstrap_stage3_sanity_companion_parent" \
+        "$bootstrap_stage3_sanity_candidate" \
+        "$bootstrap_stage3_sanity_root" || return 1
+    bootstrap_stage3_sanity_perl_descriptor=${BOOTSTRAP_STAGE3_PERL_DESCRIPTOR:-}
+    bootstrap_stage3_sanity_bounded_descriptor=${BOOTSTRAP_STAGE3_BOUNDED_LOG_DESCRIPTOR:-}
+    for bootstrap_stage3_sanity_env_name in $(env | sed 's/=.*//'); do
+        unset "$bootstrap_stage3_sanity_env_name"
+    done
+    HOME=$bootstrap_stage3_sanity_home
+    TMPDIR=$bootstrap_stage3_sanity_tmpdir
+    PATH=$bootstrap_stage3_sanity_path
+    LC_ALL=C
+    LANG=C
+    BOOTSTRAP_STAGE3_PERL_DESCRIPTOR=$bootstrap_stage3_sanity_perl_descriptor
+    BOOTSTRAP_STAGE3_BOUNDED_LOG_DESCRIPTOR=$bootstrap_stage3_sanity_bounded_descriptor
+    export HOME TMPDIR PATH LC_ALL LANG
+    export BOOTSTRAP_STAGE3_PERL_DESCRIPTOR BOOTSTRAP_STAGE3_BOUNDED_LOG_DESCRIPTOR
+    bootstrap_stage3_sanity_unsupported_sha=$(
+        bootstrap_stage3_manifest_value unsupported_output_sha256 \
+            "$bootstrap_stage3_sanity_file"
+    ) || return 1
+    bootstrap_stage3_sanity_frontend_sha=$(
+        bootstrap_stage3_manifest_value frontend_smoke_output_sha256 \
+            "$bootstrap_stage3_sanity_file"
+    ) || return 1
+    if ! command -v candidate_frontend_smoke >/dev/null 2>&1; then
+        [ -f "$bootstrap_stage3_sanity_root/scripts/check/cert/redeploy_gate/candidate_frontend_admission.shs" ] ||
+            bootstrap_stage3_sanity_fail \
+"frontend admission helper missing under root '$bootstrap_stage3_sanity_root'" ||
+            return 1
+        . "$bootstrap_stage3_sanity_root/scripts/check/cert/redeploy_gate/candidate_frontend_admission.shs"
+    fi
+    bootstrap_stage3_sanity_frontend_leaf=stage3-sanity.frontend-replay.$$.log
+    bootstrap_stage3_sanity_frontend_probe_log=\
+"$bootstrap_stage3_sanity_companion_parent/$bootstrap_stage3_sanity_frontend_leaf"
+    bootstrap_stage3_sanity_frontend_display_parent=${bootstrap_stage3_sanity_display%/*}
+    bootstrap_stage3_sanity_frontend_probe_display=\
+"$bootstrap_stage3_sanity_frontend_display_parent/$bootstrap_stage3_sanity_frontend_leaf"
+    bootstrap_stage3_sanity_frontend_log=\
+"$bootstrap_stage3_sanity_companion_parent/$bootstrap_stage3_sanity_frontend_leaf.driver"
+    bootstrap_stage3_sanity_frontend_status=0
+    CANDIDATE_FRONTEND_ROOT="$bootstrap_stage3_sanity_root" \
+    CANDIDATE_FRONTEND_BACKEND="$bootstrap_stage3_sanity_backend" \
+    COMPILER_PROBE_TIMEOUT_SECONDS=5 \
+    COMPILER_BUILD_TIMEOUT_SECONDS=${COMPILER_BUILD_TIMEOUT_SECONDS:-180} \
+    COMPILER_EXEC_TIMEOUT_SECONDS=5 \
+    COMPILER_CHECK_KILL_GRACE_SECONDS=1 \
+    CANDIDATE_FRONTEND_LOG_PATH="$bootstrap_stage3_sanity_frontend_probe_log" \
+    CANDIDATE_FRONTEND_LOG_DISPLAY_PATH="$bootstrap_stage3_sanity_frontend_probe_display" \
+        candidate_frontend_smoke "$bootstrap_stage3_sanity_candidate" \
+        >"$bootstrap_stage3_sanity_frontend_log" 2>&1 ||
+        bootstrap_stage3_sanity_frontend_status=$?
+    for bootstrap_stage3_sanity_replay_suffix in '' .bounded.env \
+        .stage2-mir-retention .stage2-mir-retention.bounded.env \
+        .stage2-module-path-naming .stage2-module-path-naming.bounded.env \
+        .hello-world-positional .hello-world-positional.bounded.env; do
+        rm -f -- \
+            "$bootstrap_stage3_sanity_frontend_probe_log$bootstrap_stage3_sanity_replay_suffix"
+    done
+    bootstrap_stage3_sanity_frontend_replay_sha=$(
+        bootstrap_stage3_hash_file \
+            "$bootstrap_stage3_sanity_frontend_log"
+    ) || {
+        rm -f "$bootstrap_stage3_sanity_frontend_log"
+        bootstrap_stage3_sanity_fail \
+"frontend smoke replay log could not be hashed"
+        return 1
+    }
+    rm -f "$bootstrap_stage3_sanity_frontend_log"
+    bootstrap_stage3_sanity_recorded_frontend_status=$(
+        bootstrap_stage3_manifest_value frontend_smoke_status \
+            "$bootstrap_stage3_sanity_file"
+    )
+    [ "$bootstrap_stage3_sanity_frontend_status" = \
+        "$bootstrap_stage3_sanity_recorded_frontend_status" ] ||
+        bootstrap_stage3_sanity_fail \
+"frontend smoke replay exit status $bootstrap_stage3_sanity_frontend_status does not match recorded frontend_smoke_status=$bootstrap_stage3_sanity_recorded_frontend_status" ||
+        return 1
+    [ "$bootstrap_stage3_sanity_frontend_status" = 0 ] ||
+        bootstrap_stage3_sanity_fail \
+"frontend smoke replay failed with exit status $bootstrap_stage3_sanity_frontend_status" ||
+        return 1
+    [ "$bootstrap_stage3_sanity_frontend_replay_sha" = \
+        "$bootstrap_stage3_sanity_frontend_sha" ] ||
+        bootstrap_stage3_sanity_fail \
+"frontend smoke replay output sha256 $bootstrap_stage3_sanity_frontend_replay_sha does not match recorded $bootstrap_stage3_sanity_frontend_sha" ||
+        return 1
+    bootstrap_stage3_sanity_version_status=0
+    bootstrap_stage3_sanity_version=$(
+        "$bootstrap_stage3_sanity_candidate" --version 2>&1
+    ) || bootstrap_stage3_sanity_version_status=$?
+    [ "$bootstrap_stage3_sanity_version_status" = 0 ] ||
+        bootstrap_stage3_sanity_fail \
+"candidate '--version' exited $bootstrap_stage3_sanity_version_status: $bootstrap_stage3_sanity_version" ||
+        return 1
+    bootstrap_stage3_sanity_expected=$(bootstrap_stage3_canonical_version \
+        "$bootstrap_stage3_sanity_root") || bootstrap_stage3_sanity_fail \
+"canonical release version authority is invalid under '$bootstrap_stage3_sanity_root'" ||
+        return 1
+    [ "$bootstrap_stage3_sanity_version" = \
+        "simple-bootstrap $bootstrap_stage3_sanity_expected" ] ||
+        bootstrap_stage3_sanity_fail \
+"candidate '--version' printed '$bootstrap_stage3_sanity_version', expected 'simple-bootstrap $bootstrap_stage3_sanity_expected'" ||
+        return 1
+    bootstrap_stage3_sanity_unsupported_status=0
+    bootstrap_stage3_sanity_unsupported=$(
+        "$bootstrap_stage3_sanity_candidate" run \
+            scripts/check/cert/redeploy_gate/fixtures/p2_add.spl 2>&1
+    ) || bootstrap_stage3_sanity_unsupported_status=$?
+    [ "$bootstrap_stage3_sanity_unsupported_status" = 1 ] ||
+        bootstrap_stage3_sanity_fail \
+"candidate 'run' exited $bootstrap_stage3_sanity_unsupported_status, expected 1 (unsupported command): $bootstrap_stage3_sanity_unsupported" ||
+        return 1
+    case "$bootstrap_stage3_sanity_unsupported" in
+        *"unknown command 'run'"*) ;;
+        *)
+            bootstrap_stage3_sanity_fail \
+"candidate 'run' output did not contain \"unknown command 'run'\": $bootstrap_stage3_sanity_unsupported"
+            return 1
+            ;;
+    esac
+    bootstrap_stage3_sanity_unsupported_replay_sha=$(
+        printf '%s' "$bootstrap_stage3_sanity_unsupported" |
+            bootstrap_stage3_hash_stream
+    )
+    [ "$bootstrap_stage3_sanity_unsupported_replay_sha" = \
+        "$bootstrap_stage3_sanity_unsupported_sha" ] ||
+        bootstrap_stage3_sanity_fail \
+"candidate 'run' output sha256 $bootstrap_stage3_sanity_unsupported_replay_sha does not match recorded $bootstrap_stage3_sanity_unsupported_sha" ||
+        return 1
+    return 0
+)
+# Required environment:
+#   BSTAGE3_ROOT BSTAGE3_MANIFEST BSTAGE3_PLATFORM BSTAGE3_BACKEND
+#   BSTAGE3_MODE BSTAGE3_SEED BSTAGE3_NATIVE_ALL BSTAGE3_BACKFILL
+#   BSTAGE3_SEED_STAMP BSTAGE3_HELPER BSTAGE3_HELPER_SHA256_BEFORE
+#   BSTAGE3_STAGE2 BSTAGE3_STAGE2_ADMITTED BSTAGE3_STAGE2_ADMISSION
+#   BSTAGE3_STAGE3
+#   BSTAGE3_SOURCE_BEFORE BSTAGE3_SOURCE_AFTER
+#   BSTAGE3_STAGE2_LOG BSTAGE3_STAGE3_LOG BSTAGE3_STAGE2_ARGS_SHA256
+#   BSTAGE3_STAGE3_ARGS_SHA256 BSTAGE3_BOOTSTRAP_SCRIPT
+#   BSTAGE3_STAGE2_THREADS BSTAGE3_STAGE3_THREADS
+#   BSTAGE3_STAGE2_CACHE_DIR BSTAGE3_STAGE3_CACHE_DIR
+#   BSTAGE3_RUNTIME_PATH BSTAGE3_STAGE2_COMMAND_OUTPUT
+#   BSTAGE3_STAGE3_COMMAND_OUTPUT
+#   BSTAGE3_BOOTSTRAP_SCRIPT_SHA256_BEFORE BSTAGE3_SEED_INPUTS_FINGERPRINT
+#   BSTAGE3_SEED_FEATURES BSTAGE3_GIT_BEFORE BSTAGE3_GIT_AFTER
+#   BSTAGE3_STAGE2_TRANSCRIPT BSTAGE3_STAGE3_TRANSCRIPT
+#   BSTAGE3_STAGE2_SANITY BSTAGE3_STAGE2_RECEIVER BSTAGE3_STAGE3_SANITY
+#   BSTAGE3_TOOL_AUTHORITY BSTAGE3_TOOL_AUTHORITY_BEFORE
+#   BSTAGE3_LOCK

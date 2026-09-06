@@ -1,0 +1,51 @@
+"""
+## Purpose and audience
+Purpose: Prove lint can consume an existing parsed revision without reparsing.
+Audience: compiler driver, LSP, and lint maintainers.
+"""
+# @req: REQ-005, REQ-006, REQ-017
+
+use std.spec.*
+use compiler.tools.lint.main.{
+    Linter, LintParsedRevision, lint_parsed_revision,
+    lint_cli_source_with_parsed_revision
+}
+use compiler.core.parser.{parser_has_errors, parser_set_had_error}
+use std.nogc_sync_mut.io.file_ops.{file_read}
+
+describe "lint parsed revision entrypoint":
+    it "preserves parser state while consuming matching declarations":
+        step("Reuse a parsed compiler revision")
+        val path = "/tmp/already_parsed.spl"
+        val source = "fn clean():\n    1\n"
+        val revision = lint_parsed_revision(path, source, [])
+        parser_set_had_error(true)
+        val results = lint_cli_source_with_parsed_revision(
+            Linter.new(), path, source, revision)
+        expect(parser_has_errors()).to_equal(true)
+        var revision_errors = 0
+        for result in results:
+            if result.lint.code == "LINTREV001": revision_errors = revision_errors + 1
+        expect(revision_errors).to_equal(0)
+        parser_set_had_error(false)
+
+    it "fails closed when path or source digest is stale":
+        step("Reject a stale parsed lint revision")
+        val stale = LintParsedRevision("/tmp/old.spl", "not-a-digest", -1, [])
+        val results = lint_cli_source_with_parsed_revision(
+            Linter.new(), "/tmp/new.spl", "fn changed():\n    1\n", stale)
+        var revision_errors = 0
+        for result in results:
+            if result.lint.code == "LINTREV001": revision_errors = revision_errors + 1
+        expect(revision_errors).to_equal(1)
+
+    it "keeps parser calls outside the parsed-revision function body":
+        step("Reject parser ownership in the parsed lint bridge")
+        val source = file_read(
+            "src/compiler/90.tools/lint/_LintMain/entry_and_fixes.spl")
+        val start = source.find("fn lint_cli_source_with_parsed_revision")
+        expect(start).to_be_greater_than(-1)
+        val tail = source[start:]
+        val end = tail.find("fn lint_cli_append_parsed_results")
+        expect(end).to_be_greater_than(0)
+        expect(tail[0:end].contains("parse_module_silent")).to_equal(false)

@@ -1,0 +1,126 @@
+# Pure-Simple first-class closure ABI.
+
+@unsafe(reason: "raw libc zeroed heap allocation ABI; zero means failure", capabilities: [ffi, raw_ptr])
+extern fn calloc(count: i64, size: i64) -> i64
+@unsafe(reason: "raw libc heap free ABI", capabilities: [ffi, raw_ptr])
+extern fn free(ptr: i64)
+@unsafe(reason: "raw pointer/offset i64 load ABI", capabilities: [ffi, raw_ptr])
+extern fn spl_load_i64(ptr: i64, offset: i64) -> i64
+@unsafe(reason: "raw pointer/offset i64 store ABI", capabilities: [ffi, raw_ptr])
+extern fn spl_store_i64(ptr: i64, offset: i64, value: i64)
+@unsafe(reason: "raw pointer/offset byte store ABI", capabilities: [ffi, raw_ptr])
+extern fn spl_store_u8(ptr: i64, offset: i64, value: i64)
+@unsafe(reason: "raw transient-tracking runtime note ABI", capabilities: [ffi, raw_ptr])
+extern fn rt_simple_core_transient_note(ptr: i64, kind: i64) -> i64
+@unsafe(reason: "raw fail-closed process termination ABI", capabilities: [ffi])
+extern fn abort()
+
+@always_inline
+fn _sffi_core_closure_calloc(count: i64, size: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        calloc(count, size)
+
+@always_inline
+fn _sffi_core_closure_load_i64(ptr: i64, offset: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        spl_load_i64(ptr, offset)
+
+@always_inline
+fn _sffi_core_closure_store_i64(ptr: i64, offset: i64, value: i64):
+    unsafe(capabilities: [ffi, raw_ptr]):
+        spl_store_i64(ptr, offset, value)
+
+@always_inline
+fn _sffi_core_closure_store_u8(ptr: i64, offset: i64, value: i64):
+    unsafe(capabilities: [ffi, raw_ptr]):
+        spl_store_u8(ptr, offset, value)
+
+@always_inline
+fn _sffi_core_closure_abort():
+    unsafe(capabilities: [ffi]):
+        abort()
+
+@always_inline
+fn _sffi_core_closure_free(ptr: i64):
+    unsafe(capabilities: [ffi, raw_ptr]):
+        free(ptr)
+
+@always_inline
+fn _sffi_core_closure_transient_note(ptr: i64, kind: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        rt_simple_core_transient_note(ptr, kind)
+
+var closure_registry_head: i64 = 0
+
+fn closure_ptr(value: i64) -> i64:
+    if value < 4096 or (value & 7) != 1:
+        return 0
+    val candidate = value & -8
+    # Compare membership before dereferencing candidate: a raw function
+    # pointer or integer may share the heap tag bits.
+    var current = closure_registry_head
+    while current != 0:
+        if current == candidate:
+            return current
+        current = _sffi_core_closure_load_i64(current, 24)
+    0
+
+pub fn rt_closure_new(func_ptr: i64, capture_count: i64) -> i64:
+    if func_ptr == 0 or capture_count < 0 or capture_count > 1152921504606846971:
+        return 3
+    val closure = _sffi_core_closure_calloc(1, 32 + capture_count * 8)
+    if closure == 0:
+        _sffi_core_closure_abort()
+        return 3
+    _sffi_core_closure_store_u8(closure, 0, 3)
+    _sffi_core_closure_store_i64(closure, 8, func_ptr)
+    _sffi_core_closure_store_i64(closure, 16, capture_count)
+    _sffi_core_closure_store_i64(closure, 24, closure_registry_head)
+    closure_registry_head = closure
+    if _sffi_core_closure_transient_note(closure, 6) < 0:
+        closure_registry_head = _sffi_core_closure_load_i64(closure, 24)
+        _sffi_core_closure_free(closure)
+        return 3
+    closure | 1
+
+# Membership test for the transient machinery (core_memory.spl).
+pub fn closure_is_valid(value: i64) -> i64:
+    return if closure_ptr(value) > 0: 1 else: 0
+
+fn closure_unregister(ptr: i64):
+    var previous: i64 = 0
+    var current = closure_registry_head
+    while current > 0:
+        val next = _sffi_core_closure_load_i64(current, 24)
+        if current == ptr:
+            if previous < 1:
+                closure_registry_head = next
+            else:
+                _sffi_core_closure_store_i64(previous, 24, next)
+            return
+        previous = current
+        current = next
+
+# Scope-end reclamation of an unpromoted transient closure (raw header ptr).
+pub fn closure_reclaim_transient(ptr: i64):
+    closure_unregister(ptr)
+    _sffi_core_closure_free(ptr)
+
+pub fn rt_closure_set_capture(closure: i64, index: i64, value: i64) -> i64:
+    val ptr = closure_ptr(closure)
+    if ptr == 0 or index < 0 or index >= _sffi_core_closure_load_i64(ptr, 16):
+        return 0
+    _sffi_core_closure_store_i64(ptr, 32 + index * 8, value)
+    1
+
+pub fn rt_closure_get_capture(closure: i64, index: i64) -> i64:
+    val ptr = closure_ptr(closure)
+    if ptr == 0 or index < 0 or index >= _sffi_core_closure_load_i64(ptr, 16):
+        return 3
+    _sffi_core_closure_load_i64(ptr, 32 + index * 8)
+
+pub fn rt_closure_func_ptr(closure: i64) -> i64:
+    val ptr = closure_ptr(closure)
+    if ptr == 0:
+        return 0
+    _sffi_core_closure_load_i64(ptr, 8)

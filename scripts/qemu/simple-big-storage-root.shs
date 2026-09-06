@@ -1,0 +1,61 @@
+#!/bin/sh
+# Resolve the shared large-artifact root without baking host paths into lanes.
+set -eu
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+local_config=${SIMPLE_BIG_STORAGE_CONFIG:-${repo_root}/.simple-big-storage-root}
+
+if [ -n "${SIMPLE_BIG_STORAGE_ROOT:-}" ]; then
+    storage_root=${SIMPLE_BIG_STORAGE_ROOT}
+    storage_source=environment
+elif [ -f "${local_config}" ]; then
+    IFS= read -r storage_root < "${local_config}"
+    storage_source=workspace-local
+else
+    storage_root=${HOME}/.simple
+    storage_source=home-default
+fi
+
+case "${storage_root}" in
+    /*) ;;
+    *) printf '%s\n' "simple-big-storage: root must be absolute: ${storage_root}" >&2; exit 2 ;;
+esac
+
+print_settings() {
+    printf '%s\n' "simple_big_storage_root=${storage_root}"
+    printf '%s\n' "simple_big_storage_source=${storage_source}"
+    printf '%s\n' "simple_big_storage_config=${local_config}"
+    printf '%s\n' "simple_bootstrap_root=${storage_root}/bootstrap"
+    printf '%s\n' "simple_qemu_storage_root=${storage_root}/qemu"
+    printf '%s\n' "simple_qemu_image_root=${storage_root}/qemu/images"
+    printf '%s\n' "simple_qemu_overlay_root=${storage_root}/qemu/overlays"
+    printf '%s\n' "simple_qemu_artifact_root=${storage_root}/qemu/artifacts"
+    printf '%s\n' "simple_qemu_cache_root=${storage_root}/qemu/cache"
+}
+
+case "${1:---print}" in
+    --print)
+        print_settings
+        ;;
+    --check)
+        parent=${storage_root}
+        while [ ! -e "${parent}" ]; do parent=$(dirname -- "${parent}"); done
+        [ -d "${parent}" ] || { printf '%s\n' "simple-big-storage: parent is not a directory: ${parent}" >&2; exit 3; }
+        [ -w "${parent}" ] || { printf '%s\n' "simple-big-storage: parent is not writable: ${parent}" >&2; exit 4; }
+        print_settings
+        printf '%s\n' 'simple_big_storage_status=pass'
+        ;;
+    --prepare)
+        mkdir -p "${storage_root}/bootstrap" \
+            "${storage_root}/qemu/images" \
+            "${storage_root}/qemu/overlays" \
+            "${storage_root}/qemu/artifacts" \
+            "${storage_root}/qemu/cache"
+        print_settings
+        printf '%s\n' 'simple_big_storage_prepare_status=pass'
+        ;;
+    *)
+        printf '%s\n' 'usage: simple-big-storage-root.shs [--print|--check|--prepare]' >&2
+        exit 64
+        ;;
+esac

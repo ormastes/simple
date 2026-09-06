@@ -1,0 +1,28 @@
+#!/bin/sh
+# Canonical parser for target-emitted SimpleOS server credential zeroization.
+# Callers hash the returned canonical line; raw serial placement is not authority.
+
+simpleos_server_zeroization_canonical() {
+    awk '
+        { sub(/\r$/, "") }
+        $1 == "[simpleos-servers-user]" && $2 == "credential-zeroization" {
+            if (NF != 9) exit 1
+            split($3, phase, "="); split($4, method, "=")
+            split($5, bytes, "="); split($6, overwritten, "=")
+            split($7, residual, "="); split($8, workspace, "="); split($9, status, "=")
+            if (phase[1] != "phase" || phase[2] != "loaded" ||
+                method[1] != "method" || method[2] != "volatile-u8-exact-byte-readback-v1" ||
+                bytes[1] != "bytes" || bytes[2] !~ /^[1-9][0-9]*$/ || bytes[2] > 128 ||
+                overwritten[1] != "overwritten" || overwritten[2] != bytes[2] ||
+                residual[1] != "residual_nonzero" || residual[2] != "0" ||
+                workspace[1] != "hash_workspace" || workspace[2] != "verified" ||
+                status[1] != "status" || status[2] != "verified" ||
+                seen[phase[2]]++) exit 1
+            line[phase[2]] = $0
+        }
+        END {
+            if (seen["loaded"] != 1) exit 1
+            print line["loaded"]
+        }
+    ' "$1"
+}

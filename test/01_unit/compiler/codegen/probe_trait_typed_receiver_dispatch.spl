@@ -1,0 +1,85 @@
+# Run-path probe: trait-typed receiver resolution across every receiver SHAPE.
+#
+# Companion to trait_typed_receiver_dispatch_class_spec.spl. Executed as a
+# SUBPROCESS under both SIMPLE_EXECUTION_MODE=interpreter and =jit, because a
+# spec body only ever runs on the tree-walk interpreter and therefore cannot go
+# red on a codegen defect.
+#
+# Every oracle below is an ABSOLUTE literal ("optfield D"), never "the two
+# engines agree" — agreement passes happily when both engines are wrong the
+# same way, which is exactly how Shape D shipped.
+#
+# Origin: test/fixtures/native_trait_receiver_resolution/main.spl was filed
+# 2026-08-09 as the repro for
+# doc/08_tracking/bug/native_trait_typed_return_receiver_unresolved_2026-08-09.md
+# but had ZERO consumers anywhere in test/ or scripts/, and its hard-failing
+# case (Shape C) was commented out. It could never fail. This probe restores
+# both shapes as live, asserted checks.
+
+trait Greeter:
+    me greet(name: text) -> text
+
+class FriendlyGreeter:
+    prefix: text
+
+impl Greeter for FriendlyGreeter:
+    me greet(name: text) -> text:
+        self.prefix + " " + name
+
+class Host:
+    g: Greeter
+
+class OptHost:
+    g: Greeter?
+
+fn make_greeter() -> Greeter:
+    FriendlyGreeter(prefix: "ret")
+
+var failures: i64 = 0
+
+fn check(label: text, got: text, want: text):
+    if got == want:
+        print("PASS " + label + "\n")
+    else:
+        failures = failures + 1
+        print("FAIL " + label + " got=[" + got + "] want=[" + want + "]\n")
+
+fn main() -> i64:
+    # Shape A — trait-typed LOCAL variable receiver.
+    var a: Greeter = FriendlyGreeter(prefix: "local")
+    check("shape_a_local_var", a.greet("A"), "local A")
+
+    # Shape B — trait-typed struct FIELD receiver.
+    var h = Host(g: FriendlyGreeter(prefix: "field"))
+    check("shape_b_struct_field", h.g.greet("B"), "field B")
+
+    # Shape C — trait-typed function RETURN value used directly as a receiver.
+    # This is the shape the 2026-08-09 bug reports as a hard MIR-lowering
+    # failure under native-build. It is asserted here, not commented out.
+    check("shape_c_return_value", make_greeter().greet("C"), "ret C")
+
+    # Shape C' — the same call bound to a local first. If C fails while C'
+    # passes, the defect is in the receiver-provenance of a CALL RESULT
+    # specifically, which is the filed diagnosis.
+    var c2: Greeter = make_greeter()
+    check("shape_c2_return_via_local", c2.greet("C2"), "ret C2")
+
+    # Shape D — trait-typed OPTIONAL field receiver. The SILENTLY WRONG one:
+    # dispatch succeeds but `self.prefix` reads empty, yielding " D".
+    var oh = OptHost(g: FriendlyGreeter(prefix: "optfield"))
+    if val og = oh.g:
+        check("shape_d_optional_field", og.greet("D"), "optfield D")
+    else:
+        failures = failures + 1
+        print("FAIL shape_d_optional_field optional unwrap produced nil\n")
+
+    # Shape E — trait-typed element read out of an ARRAY. Same erased-slot
+    # family as D; included so the next shape omission fails here.
+    var arr: [Greeter] = [FriendlyGreeter(prefix: "elem")]
+    check("shape_e_array_element", arr[0].greet("E"), "elem E")
+
+    if failures == 0:
+        print("TRAIT_RECEIVER PROBE: ALL PASS\n")
+    else:
+        print("TRAIT_RECEIVER PROBE: FAILURES\n")
+    0

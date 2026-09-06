@@ -1,0 +1,33 @@
+# Root-cause finding (2026-07-30) while attempting to fix "gap 10"
+# (cfg_arch_global_variants.spl): that fixture's wrong value turned out NOT
+# to be caused by missing/broken @cfg(<arch>) stripping (the stripping
+# mechanism already runs correctly in run_file_jit's shared
+# load_module_with_imports path, module_loader.rs:1655, confirmed by
+# hand-stripping the source and reproducing the identical wrong value with
+# NO @cfg present at all). The real, more general defect: a module-level
+# `val`/`var`'s value is stored raw/untagged and is never tag-boxed before
+# flowing into print()/string interpolation/formatting under JIT -- even
+# with NO cross-module import at all (this generalizes gap 9, whose
+# "cross-module" framing was too narrow: gap 9's own same-file function-call
+# case worked only because a function RETURN re-tags the value; a direct
+# reference, same-file or cross-file, does not). Copying to a local var
+# first does not help -- the corruption travels with the raw bit pattern,
+# not the read site. SIMPLE_JIT_STRICT does not catch it. See
+# doc/08_tracking/bug/jit_run_file_pipeline_gaps_2026-07-30.md section 9,
+# which additionally unifies this same defect with gap 8 (module-level val
+# from a function-call initializer reads 0) -- gap 8's raw value is 0
+# (write-side: the initializer never runs) instead of this fixture's 100,
+# but the read-side misinterpretation is bit-for-bit the same mechanism.
+#
+# FIXED 2026-07-30 (section 11 of the same doc): an unannotated module-level
+# `val`/`var` (parsed as Node::Let, not Node::Static -- a premise that had
+# to be re-verified by instrumentation after the first fix attempt targeted
+# the wrong AST arm) defaulted to TypeId::ANY, which skipped the boxing
+# rt_value_to_string performs for concrete-typed arguments. Now infers a
+# concrete type (I64/STRING) from a const-evaluable initializer, mirroring
+# the pre-existing Node::Const fix. known_good is now "both" in the harness.
+# Expected (both engines, correct): X=100
+val X = 100
+
+fn main():
+    print("X={X}")

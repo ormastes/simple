@@ -1,0 +1,84 @@
+use std.spec.*
+use compiler.mir.hwir.types.{CoreConfig}
+use compiler.mir.hwir.riscv_scalar_runtime_pipeline_v4.{
+    strict_riscv_scalar_runtime_pipeline_v4}
+use compiler.backend.backend.riscv_scalar_runtime_pipeline_v4_to_vhdl.{
+    compile_strict_riscv_scalar_runtime_pipeline_v4,
+    scalar_runtime_pipeline_v4_driver_closure_diagnostic}
+
+describe "strict runtime scalar pipeline v4 VHDL emission":
+    it "renders the exact ALU control system illegal pipeline and publishes every child hash":
+        val rebuilt = strict_riscv_scalar_runtime_pipeline_v4(
+            "runtime_pipeline_v4_rv32", CoreConfig.rv32())
+        expect(rebuilt.is_ok()).to_equal(true)
+        if rebuilt.is_ok():
+            val pipeline = rebuilt.ok().unwrap()
+            expect(scalar_runtime_pipeline_v4_driver_closure_diagnostic(
+                pipeline)).to_equal("")
+            val result = compile_strict_riscv_scalar_runtime_pipeline_v4(
+                "runtime_pipeline_v4_rv32", CoreConfig.rv32())
+            expect(result.is_success()).to_equal(true)
+            if result.is_success():
+                expect(result.route).to_equal(
+                    "hwir-gen2-scalar-runtime-pipeline-v4")
+                expect(result.hwir_graph_sha256).to_equal(
+                    pipeline.structural_sha256())
+                expect(result.vhdl).to_contain(
+                    "-- simple-hwir child-decoder=" +
+                    pipeline.decoder.structural_sha256())
+                expect(result.vhdl).to_contain(
+                    "-- simple-hwir child-uop-skid=" +
+                    pipeline.uop_skid.structural_sha256())
+                expect(result.vhdl).to_contain(
+                    "-- simple-hwir child-alu=" + pipeline.alu.structural_sha256())
+                expect(result.vhdl).to_contain(
+                    "-- simple-hwir child-control=" +
+                    pipeline.control.structural_sha256())
+                expect(result.vhdl).to_contain(
+                    "-- simple-hwir child-system=" +
+                    pipeline.system.structural_sha256())
+                expect(result.vhdl).to_contain(
+                    "-- simple-hwir child-illegal-provider=" +
+                    pipeline.illegal_provider.structural_sha256())
+                expect(result.vhdl).to_contain(
+                    "-- simple-hwir child-selector=" +
+                    pipeline.selector.structural_sha256())
+                expect(result.vhdl).to_contain(
+                    "-- simple-hwir child-completion-skid=" +
+                    pipeline.completion_skid.structural_sha256())
+                expect(result.vhdl).to_contain(
+                    "-- simple-hwir child-fault-owner=" +
+                    pipeline.fault_owner.structural_sha256())
+                expect(result.vhdl).to_contain(
+                    "-- simple-hwir child-defaults=" +
+                    pipeline.defaults.structural_sha256())
+                expect(result.vhdl).to_contain(
+                    "system: entity work." + pipeline.system.summary.name)
+                expect(result.vhdl).to_contain(
+                    "wire_system_uop_valid <= source_uop_skid_uop_valid")
+                expect(result.vhdl).to_contain(
+                    "wire_selector_system_valid <= source_system_completion_valid")
+                expect(result.vhdl).to_contain(
+                    "runtime_protocol_fault <= source_fault_owner_protocol_fault")
+
+    it "specializes canonical top and system widths for RV64":
+        val result = compile_strict_riscv_scalar_runtime_pipeline_v4(
+            "runtime_pipeline_v4_rv64", CoreConfig.rv64())
+        expect(result.is_success()).to_equal(true)
+        if result.is_success():
+            expect(result.vhdl).to_contain(
+                "completion_rd_value : out std_logic_vector(63 downto 0)")
+            expect(result.vhdl).to_contain(
+                "entity runtime_pipeline_v4_rv64_system is port(")
+            expect(result.vhdl).to_contain(
+                "entity runtime_pipeline_v4_rv64 is port(")
+
+    it "retains the dedicated route when canonical reconstruction rejects input":
+        val result = compile_strict_riscv_scalar_runtime_pipeline_v4(
+            "", CoreConfig.rv32())
+        expect(result.is_success()).to_equal(false)
+        expect(result.route).to_equal("hwir-gen2-scalar-runtime-pipeline-v4")
+        expect(result.vhdl).to_equal("")
+        expect(result.hwir_graph_sha256).to_equal("")
+        expect(result.diagnostic).to_contain(
+            "HWIR-E-RISCV-RUNTIME-PIPELINE-V4-ID")

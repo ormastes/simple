@@ -1,0 +1,60 @@
+#!/bin/sh
+# Host-native contract test for the test-only writer-red interposer.
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+INTERPOSER="$ROOT/scripts/check/lib/riscv-gen2-writer-red-failpoint.c"
+FIXTURE_SOURCE="$ROOT/scripts/check/lib/riscv-gen2-writer-red-fixture.c"
+work=$(mktemp -d "${TMPDIR:-/tmp}/riscv-g2-failpoint-test.XXXXXX")
+trap 'rm -rf -- "$work"' EXIT HUP INT TERM
+library="$work/failpoint.so"
+fixture="$work/fixture"
+cc -std=c11 -Wall -Wextra -Werror -fPIC -shared "$INTERPOSER" -ldl -o "$library"
+cc -std=c11 -Wall -Wextra -Werror "$FIXTURE_SOURCE" -o "$fixture"
+
+write_target="$work/denied-write.bin"
+write_hit="$work/write.hit"
+if env LD_PRELOAD="$library" RISCV_GEN2_TEST_DENY_KIND=write \
+        RISCV_GEN2_TEST_DENY_SUFFIX=/denied-write.bin \
+        RISCV_GEN2_TEST_FAILPOINT_MARKER="$write_hit" \
+        "$fixture" write "$write_target"; then
+    write_status=0
+else
+    write_status=$?
+fi
+[ "$write_status" -eq 41 ] || {
+    echo "writer-red failpoint test: write exit $write_status, expected 41" >&2
+    exit 1
+}
+[ ! -e "$write_target" ]
+[ "$(wc -l <"$write_hit")" -eq 1 ]
+grep -Fx "kind=write path=$write_target" "$write_hit" >/dev/null
+
+rename_source="$work/rename-source.bin"
+rename_target="$work/denied-rename.bin"
+rename_hit="$work/rename.hit"
+"$fixture" write "$rename_source"
+if env LD_PRELOAD="$library" RISCV_GEN2_TEST_DENY_KIND=rename \
+        RISCV_GEN2_TEST_DENY_SUFFIX=/denied-rename.bin \
+        RISCV_GEN2_TEST_FAILPOINT_MARKER="$rename_hit" \
+        "$fixture" rename "$rename_source" "$rename_target"; then
+    rename_status=0
+else
+    rename_status=$?
+fi
+[ "$rename_status" -eq 42 ] || {
+    echo "writer-red failpoint test: rename exit $rename_status, expected 42" >&2
+    exit 1
+}
+[ -f "$rename_source" ] && [ ! -e "$rename_target" ]
+[ "$(wc -l <"$rename_hit")" -eq 1 ]
+grep -Fx "kind=rename path=$rename_target" "$rename_hit" >/dev/null
+
+pass_target="$work/nonmatching.bin"
+pass_hit="$work/nonmatching.hit"
+env LD_PRELOAD="$library" RISCV_GEN2_TEST_DENY_KIND=write \
+    RISCV_GEN2_TEST_DENY_SUFFIX=/different.bin \
+    RISCV_GEN2_TEST_FAILPOINT_MARKER="$pass_hit" \
+    "$fixture" write "$pass_target"
+[ -f "$pass_target" ] && [ ! -e "$pass_hit" ]
+printf '%s\n' 'riscv_gen2_writer_red_failpoint_test=pass'

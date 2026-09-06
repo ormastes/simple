@@ -1,0 +1,42 @@
+# Repro: to_text() on a bool value erased to `Any` through a function
+# parameter boundary.
+#
+# STATUS (2026-08-07): tracked as item 4 in
+# doc/08_tracking/bug/tag_boxing_value_corruption_family_triage_2026-08-01.md
+# ("to_text on an erased Any bool", JIT only). Originally the JIT lane printed
+# `nil` for an erased `true` and `0` for an erased `false` when the bool was
+# passed through an `Any`-typed function parameter (a bool read out of an
+# `[Any]` array was always correct on every lane). Re-verified 2026-08-07
+# against the deployed bin/simple (bin/release/x86_64-unknown-linux-gnu/simple,
+# self-identifies as a bootstrap seed): JIT (default `bin/simple run`,
+# confirmed engaged via RUST_LOG=cranelift=debug Cranelift IR output) and
+# SIMPLE_EXECUTION_MODE=interpret both now render `erased_true=true` /
+# `erased_false=false` correctly. Native was NOT re-run this pass; its
+# "correct" status is carried over unverified from the original report. No
+# specific fixing commit was identified.
+#
+# NOTE: `bin/simple test` hard-defaults to the tree-walk interpreter, which
+# was correct on this defect even when the JIT was not (see
+# doc/07_guide/infra/testing.md "run and test are DIFFERENT ENGINES"). This
+# spec locks in interpreter behavior ONLY. It does not cover the JIT lane
+# where the defect actually lived -- that must be re-verified manually via
+# `bin/simple run` + RUST_LOG=cranelift=debug per the bug doc update, not by
+# this test runner.
+
+fn show_any_bool(v: Any) -> text:
+    return v.to_text()
+
+describe "to_text on a bool erased to Any":
+    it "renders a direct bool correctly":
+        expect(true.to_text()).to_equal("true")
+
+    it "renders a bool erased through an Any function parameter":
+        val t: Any = true
+        val f: Any = false
+        expect(show_any_bool(t)).to_equal("true")
+        expect(show_any_bool(f)).to_equal("false")
+
+    it "renders a bool erased through an Any array element":
+        val arr: [Any] = [true, false]
+        expect(arr[0].to_text()).to_equal("true")
+        expect(arr[1].to_text()).to_equal("false")

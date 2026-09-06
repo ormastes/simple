@@ -1,0 +1,99 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+for tool in cc fsck.fat mdir mtype mshowfat od cmp dd; do
+    if ! command -v "$tool" >/dev/null 2>&1; then
+        echo "missing FAT32 integrity checker dependency: $tool" >&2
+        exit 1
+    fi
+done
+
+TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/simple-fat32-integrity.XXXXXX")"
+trap 'rm -rf "$TMP_DIR"' EXIT HUP INT TERM
+
+MAKER="$TMP_DIR/make_os_disk"
+KERNEL="$TMP_DIR/kernel.elf"
+FS_IMAGE="$TMP_DIR/fs-exec.img"
+FONT_IMAGE="$TMP_DIR/desktop-fonts.img"
+
+cc -O2 -std=c99 -Wall -Wextra -Werror scripts/os/make_os_disk.c -o "$MAKER"
+printf 'SIMPLEOS FAT32 integrity fixture\n' > "$KERNEL"
+
+# Exercise the supported entrypoint so its profile validation and pinned font
+# manifest checks remain part of the evidence.
+sh scripts/os/make_os_disk.shs 128 "$FS_IMAGE" "$KERNEL" x86_64 fs-exec
+sh scripts/os/make_os_disk.shs 128 "$FONT_IMAGE" "$KERNEL" x86_64 desktop-fonts
+
+check_raw_metadata() {
+    image="$1"
+    prefix="$2"
+    dd if="$image" of="$TMP_DIR/$prefix.boot" bs=512 count=1 2>/dev/null
+    dd if="$image" of="$TMP_DIR/$prefix.boot-backup" bs=512 skip=6 count=1 2>/dev/null
+    dd if="$image" of="$TMP_DIR/$prefix.fsinfo" bs=512 skip=1 count=1 2>/dev/null
+    dd if="$image" of="$TMP_DIR/$prefix.fsinfo-backup" bs=512 skip=7 count=1 2>/dev/null
+    cmp "$TMP_DIR/$prefix.boot" "$TMP_DIR/$prefix.boot-backup"
+    cmp "$TMP_DIR/$prefix.fsinfo" "$TMP_DIR/$prefix.fsinfo-backup"
+    [ "$(od -An -tc -j 71 -N 11 "$image" | tr -d ' \n')" = "SIMPLEOS" ]
+    [ "$(od -An -tc -j 82 -N 8 "$image" | tr -d ' \n')" = "FAT32" ]
+    [ "$(od -An -tx1 -j 512 -N 4 "$image" | tr -d ' \n')" = "52526141" ]
+    [ "$(od -An -tx1 -j 996 -N 4 "$image" | tr -d ' \n')" = "72724161" ]
+    [ "$(od -An -tx1 -j 1020 -N 4 "$image" | tr -d ' \n')" = "000055aa" ]
+}
+
+check_fsck() {
+    image="$1"
+    label="$2"
+    output="$TMP_DIR/$label.fsck"
+    fsck.fat -vn "$image" >"$output" 2>&1
+    if grep -Eiq 'warning|differences between boot|bad magic|expected a valid|share clusters|orphaned|not valid|reclaimed|uninitialized' "$output"; then
+        cat "$output" >&2
+        echo "unexpected FAT32 diagnostic for $label" >&2
+        exit 1
+    fi
+}
+
+check_raw_metadata "$FS_IMAGE" fs-exec
+check_raw_metadata "$FONT_IMAGE" desktop-fonts
+check_fsck "$FS_IMAGE" fs-exec
+check_fsck "$FONT_IMAGE" desktop-fonts
+
+FONT_LIST="$TMP_DIR/fonts.txt"
+mdir -i "$FONT_IMAGE" -/ ::/SYS/FONTS >"$FONT_LIST"
+for font in \
+    'NotoSansSC[wght].ttf' \
+    'NotoSansDevanagari[wdth,wght].ttf' \
+    'NotoSansArabic[wdth,wght].ttf' \
+    'NotoSansBengali[wdth,wght].ttf' \
+    'NotoSerifSC[wght].ttf' \
+    'NotoSerifDevanagari[wdth,wght].ttf' \
+    'NotoNaskhArabic[wght].ttf' \
+    'NotoSerifBengali[wdth,wght].ttf' \
+    'NotoSansMono[wdth,wght].ttf' \
+    'Bungee-Regular.ttf' \
+    'Nunito[wght].ttf' \
+    'Caveat[wght].ttf' \
+    'RobotoSlab[wght].ttf' \
+    'UnifrakturCook-Bold.ttf' \
+    'PixelifySans[wght].ttf' \
+    'NotoEmoji[wght].ttf'
+do
+    grep -F "$font" "$FONT_LIST" >/dev/null
+done
+# mtools includes the mandatory "." and ".." directory entries in its summary:
+# 53 regular bundle files plus those two entries.
+grep -E '55 files' "$FONT_LIST" >/dev/null
+
+mtype -i "$FS_IMAGE" ::/HELLO.C >"$TMP_DIR/root-hello.c"
+mtype -i "$FS_IMAGE" ::/SYS/CLANGHEL.C >"$TMP_DIR/sys-clang-hello.c"
+cmp "$TMP_DIR/root-hello.c" "$TMP_DIR/sys-clang-hello.c"
+mshowfat -i "$FS_IMAGE" ::/HELLO.C >"$TMP_DIR/root-hello.chain"
+mshowfat -i "$FS_IMAGE" ::/SYS/CLANGHEL.C >"$TMP_DIR/sys-clang-hello.chain"
+if cmp -s "$TMP_DIR/root-hello.chain" "$TMP_DIR/sys-clang-hello.chain"; then
+    echo "duplicate files unexpectedly share a FAT chain" >&2
+    exit 1
+fi
+
+echo "PASS make_os_disk FAT32 integrity (fs-exec + desktop-fonts)"

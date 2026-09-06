@@ -1,0 +1,525 @@
+# @cover src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_font.spl 80%
+
+"""
+## Purpose and audience
+Executable contract for the Vulkan font atlas composite companion in
+`std.gc_async_mut.gpu.engine2d.backend_vulkan_font`: the frozen 13-word push-
+constant ABI, dispatch-group math, atlas replacement safety, pixel parity
+oracles, stage/promotion evidence gating, pinned SPIR-V identity, and the
+portable-toolchain provenance contract. Owned by the engine2d GPU team;
+engineers touching the font offload pipeline or its reproducible-build lane
+are the audience.
+## Operator workflow
+Run `simple run test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_vulkan_font_spec.spl`.
+Pure scenarios call the exported font-composite helpers with fixed inputs and
+compare packed bytes, statuses, or checksums; backend scenarios drive a
+`VulkanBackend`/`VulkanSession` in its unbacked state and assert the
+fail-closed evidence fields.
+## Compatibility and limitations
+No Vulkan device is required: every session scenario exercises the
+unavailable/rejected paths only. The SPIR-V scenario pins the exact artifact
+hash, so any regenaration of the shader is an intentional, reviewed change.
+## Verification guidance and troubleshooting
+An ABI failure means the push-constant layout drifted from the shader — stop
+and re-pin both sides together. A promotion-evidence failure means a field
+stopped gating; compare the scenario's mutated field against
+`vulkan_font_stage_evidence_ready`. Provenance-scenario failures mean the
+checker script's recorded keys moved; update the contract with the script
+owner, never silently.
+"""
+# Lifecycle: doc/01_research/ui/engine2d_gc_tier/analysis_2026-07-25.md ;
+# doc/03_plan/ui/gpu_full_render_offload_mdsoc_plus_plan.md ;
+# doc/04_architecture/engine2d_four_backend_capture.md ;
+# doc/05_design/gpu_dynamic_backend_full_offload.md
+# @manual_section: Vulkan font atlas composite
+
+use spec.{describe, it, expect}
+use std.io_runtime.{file_read}
+use std.gc_async_mut.gpu.engine2d.backend_vulkan_font.{
+    VULKAN_FONT_PARAMS_BYTES,
+    vulkan_font_atlas_composite_params, vulkan_font_dispatch_groups, vulkan_font_atlas_replacement_status,
+    vulkan_font_pixels_checksum, vulkan_font_pixels_equal, vulkan_font_promotion_ready,
+    vulkan_font_changed_pixel_count, vulkan_font_stage_evidence_ready
+}
+use std.gc_async_mut.gpu.engine2d.backend_vulkan_font_types.{VulkanFontCompositeEvidence}
+use std.gc_async_mut.gpu.engine2d.backend_vulkan.{VulkanBackend}
+use std.gc_async_mut.gpu.engine2d.backend_vulkan_font_spirv.{
+    FONT_ATLAS_COMPOSITE_VULKAN_SPIRV_SHA256,
+    FONT_ATLAS_COMPOSITE_VULKAN_SEMANTICS_VERSION,
+    spirv_font_atlas_composite
+}
+use std.gc_async_mut.gpu.engine2d.backend.{RenderBackend}
+use std.gc_async_mut.gpu.engine2d.vulkan_session.{VulkanSession}
+use std.gc_async_mut.text_layout.font_renderer.{FontRenderBatch, FontRenderQuad}
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use std.common.gpu.font_atlas_composite.{FONT_ATLAS_COMPOSITE_SEMANTICS_VERSION, font_atlas_composite_vulkan_glsl_source}
+
+
+fn _font_quad_batch(version: i64) -> FontRenderBatch:
+    FontRenderBatch(program_version: version, font_identity: "unit-font", face_generation: 1,
+        valid: true, atlas_width: 1, atlas_height: 1, atlas_pixels: [0xffffffffu32],
+        quads: [FontRenderQuad(codepoint: 65, byte_offset: 0, dst_x: 0, dst_y: 0,
+            width: 1, height: 1, atlas_x: 0, atlas_y: 0, color: 0xffffffffu32)],
+        atlas_generation: 1, dirty_rects: [])
+
+fn _complete_stage_evidence() -> VulkanFontCompositeEvidence:
+    VulkanFontCompositeEvidence(status: "promoted", reason: "pass",
+        artifact_mode: "precompiled-spirv", shader_handle: 1, pipeline_handle: 2,
+        atlas_buffer_handle: 3, params_buffer_handle: 4, descriptor_handle: 0,
+        descriptor_created: true, descriptor_destroyed: true, command_handle: 5,
+        quad_count: 1, dispatch_count: 1, submitted: true, completion_waited: true,
+        fence_handle: 6, fence_evidence_available: true, fence_destroyed: true,
+        device_name: "device", device_type: "discrete", driver_identity: "driver",
+        readback_source: "device_readback", readback_buffer_handle: 7,
+        readback_byte_count: 4, device_checksum: -7, oracle_checksum: -7,
+        parity: true, device_executed: true, promotion_ready: true,
+        artifact_identity: "precompiled-spirv:" + FONT_ATLAS_COMPOSITE_VULKAN_SPIRV_SHA256,
+        entry_name: "main", program_version: 1, emission_compile_ns: 1,
+        batch_identity: "batch", atlas_payload_sha256: "1111111111111111111111111111111111111111111111111111111111111111",
+        dirty_upload_ns: 0, queue_device_ns: 1, sync_wait_ns: 1,
+        present_readback_ns: 1, cpu_oracle_ns: 1,
+        present_mode: "not-applicable-offscreen", readback_nonblank_pixels: 1)
+
+describe "Vulkan font atlas composite companion":
+    it "packs the frozen 13-word ABI into 52 little-endian bytes":
+        step("Pack the fixed font-composite parameters through the ABI encoder")
+        # @req REQ-GPU-VKFONT-001
+        # @capture(protocol_binary): the 52-byte packed push-constant block
+        val p = vulkan_font_atlas_composite_params(2, 2, 4, 0, 0, 2, 2, 8, 9, 72, -11, -12, 0xAABBCCDDu32)
+        expect(VULKAN_FONT_PARAMS_BYTES).to_equal(52)  # oracle: the frozen 13-word i32 ABI is 52 bytes
+        expect(p.len()).to_equal(52)  # oracle: the encoder emits exactly the frozen word count
+        expect(p[0]).to_equal(2)  # oracle: word 0 packs the canvas width of 2
+        expect(p[40]).to_equal(0xF5)  # oracle: byte 40 holds the low byte of the packed color word
+        expect(p[43]).to_equal(0xFF)  # oracle: byte 43 holds the alpha byte of the packed color word
+        expect(p[48]).to_equal(0xDD)  # oracle: byte 48 holds the low byte of the tag word
+        expect(p[51]).to_equal(0xAA)  # oracle: byte 51 holds the high byte of the tag word
+
+    it "rejects parameter counts outside the shader i32 contract":
+        step("Encode parameters that break the negative, overflow, and arity contract")
+        # @req REQ-GPU-VKFONT-002
+        # @capture(statistics): zero-word encodings for each rejected parameter shape
+        expect(vulkan_font_atlas_composite_params(1, 1, -1, 0, 0, 1, 1, 1, 1, 1, 0, 0, 1u32).len()).to_equal(0)  # oracle: a negative dimension violates the i32 contract and encodes nothing
+        expect(vulkan_font_atlas_composite_params(1, 1, 2147483648, 0, 0, 1, 1, 1, 1, 1, 0, 0, 1u32).len()).to_equal(0)  # oracle: a width past i32 range encodes nothing
+        expect(vulkan_font_atlas_composite_params(1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 0, 0, 1u32).len()).to_equal(0)  # oracle: zero groups cannot be dispatched so nothing is encoded
+
+    it "ceil-dispatches bounded pixels in 64-thread groups":
+        step("Convert pixel extents to 64-thread workgroups at each boundary")
+        # @req REQ-GPU-VKFONT-003
+        # @capture(statistics): workgroup counts at the 0/1/64/65 dispatch boundaries
+        expect(vulkan_font_dispatch_groups(0)).to_equal(0)  # oracle: zero pixels need zero workgroups
+        expect(vulkan_font_dispatch_groups(1)).to_equal(1)  # oracle: ceil(1/64) is one workgroup
+        expect(vulkan_font_dispatch_groups(64)).to_equal(1)  # oracle: a full 64-thread group is exactly one dispatch
+        expect(vulkan_font_dispatch_groups(65)).to_equal(2)  # oracle: ceil(65/64) spills to a second workgroup
+        expect(vulkan_font_dispatch_groups(2147483648)).to_equal(0)  # oracle: the out-of-i32-range extent saturates to zero dispatches
+
+    it "preserves the old atlas unless cleanup succeeds":
+        step("Classify replacement across the upload and cleanup flag combinations")
+        # @req REQ-GPU-VKFONT-004
+        # @capture(statistics): replacement status for all four flag combinations
+        expect(vulkan_font_atlas_replacement_status(false, false, false)).to_equal("replace")
+        expect(vulkan_font_atlas_replacement_status(true, true, false)).to_equal("replace")
+        expect(vulkan_font_atlas_replacement_status(true, false, true)).to_equal("atlas-cleanup-failed")
+        expect(vulkan_font_atlas_replacement_status(true, false, false)).to_equal("cleanup-failed")
+
+    it "uses a deterministic nonzero pixel checksum":
+        step("Checksum the empty stream, a two-pixel stream, and its swap")
+        # @req REQ-GPU-VKFONT-005
+        # @capture(statistics): checksum stability and order sensitivity
+        expect(vulkan_font_pixels_checksum([])).to_equal(0)  # oracle: the empty stream leaves the running checksum at zero
+        val first = vulkan_font_pixels_checksum([0u32, 1u32])
+        expect(first).to_not_equal(0)
+        expect(vulkan_font_pixels_checksum([0u32, 1u32])).to_equal(first)
+        assert_not_equal(vulkan_font_pixels_checksum([1u32, 0u32]), first)
+
+    it "requires exact packed pixel equality for parity":
+        step("Compare pixel streams that are equal, differ in one pixel, and differ in length")
+        # @req REQ-GPU-VKFONT-006
+        # @capture(statistics): parity verdicts for equal, unequal, and length-mismatched streams
+        expect(vulkan_font_pixels_equal([0u32, 1u32], [0u32, 1u32])).to_equal(true)
+        expect(vulkan_font_pixels_equal([0u32, 1u32], [0u32, 2u32])).to_equal(false)
+        expect(vulkan_font_pixels_equal([0u32], [0u32, 1u32])).to_equal(false)
+
+    it "counts glyph changes instead of opaque background pixels":
+        step("Diff an opaque-background pair and a length-mismatched pair")
+        # @req REQ-GPU-VKFONT-007
+        # @capture(statistics): changed-pixel counts for background and mismatched streams
+        expect(vulkan_font_changed_pixel_count(
+            [0xff000000u32, 0xff000000u32],
+            [0xff000000u32, 0xffffffffu32])).to_equal(1)  # oracle: exactly one pixel leaves the opaque background
+        expect(vulkan_font_changed_pixel_count([0u32], [0u32, 1u32])).to_equal(0)  # oracle: a length mismatch short-circuits to zero counted changes
+
+    it "requires complete stage and promotion observations":
+        step("Flip each promotion-gating field off a complete evidence record")
+        # @req REQ-GPU-VKFONT-008
+        # @capture(statistics): readiness verdicts as each evidence field is poisoned
+        var evidence = _complete_stage_evidence()
+        expect(vulkan_font_stage_evidence_ready(evidence)).to_be(true)
+        evidence.atlas_payload_sha256 = "short"
+        expect(vulkan_font_stage_evidence_ready(evidence)).to_be(false)
+        evidence = _complete_stage_evidence()
+        evidence.queue_device_ns = 0
+        expect(vulkan_font_stage_evidence_ready(evidence)).to_be(false)
+        evidence = _complete_stage_evidence()
+        evidence.readback_nonblank_pixels = 0
+        expect(vulkan_font_stage_evidence_ready(evidence)).to_be(false)
+        evidence = _complete_stage_evidence()
+        evidence.submitted = false
+        expect(vulkan_font_stage_evidence_ready(evidence)).to_be(false)
+        evidence = _complete_stage_evidence()
+        evidence.readback_source = "host_snapshot"
+        expect(vulkan_font_stage_evidence_ready(evidence)).to_be(false)
+        evidence = _complete_stage_evidence()
+        evidence.parity = false
+        expect(vulkan_font_stage_evidence_ready(evidence)).to_be(false)
+        evidence = _complete_stage_evidence()
+        evidence.artifact_identity = "precompiled-spirv:0000000000000000000000000000000000000000000000000000000000000000"
+        expect(vulkan_font_stage_evidence_ready(evidence)).to_be(false)
+
+    it "wraps deterministically for a large pixel input":
+        step("Checksum a 64K-pixel stream twice and require stable nonzero output")
+        # @req REQ-GPU-VKFONT-009
+        # @capture(statistics): stable nonzero checksum over 65536 pixels
+        val pixels: [u32] = [0xfeedbeefu32; 65536]
+        val first = vulkan_font_pixels_checksum(pixels)
+        expect(first).to_not_equal(0)
+        expect(vulkan_font_pixels_checksum(pixels)).to_equal(first)
+
+    it "promotes only complete fenced device identity evidence":
+        step("Promote across artifact modes, dirty rects, and device identities")
+        # @req REQ-GPU-VKFONT-010
+        # @capture(statistics): promotion verdicts for each incomplete identity shape
+        expect(vulkan_font_promotion_ready("precompiled-spirv", 1, 1, true, true, 4, true,
+            7, true, true, "device", "discrete", "driver")).to_equal(true)
+        expect(vulkan_font_promotion_ready("precompiled-spirv", 1, 64, true, true, 4, true,
+            7, true, true, "device", "discrete", "driver")).to_equal(true)
+        expect(vulkan_font_promotion_ready("runtime-glsl", 1, 1, true, true, 4, true,
+            7, true, true, "device", "discrete", "driver")).to_equal(false)
+        expect(vulkan_font_promotion_ready("precompiled-spirv", 1, 1, true, true, 4, true,
+            0, false, false, "device", "discrete", "driver")).to_equal(false)
+        expect(vulkan_font_promotion_ready("precompiled-spirv", 1, 1, true, true, 4, true,
+            7, true, true, "", "discrete", "driver")).to_equal(false)
+        expect(vulkan_font_promotion_ready("precompiled-spirv", 1, 1, true, true, 4, false,
+            7, true, true, "device", "discrete", "driver")).to_equal(false)
+        expect(vulkan_font_promotion_ready("precompiled-spirv", 1, 1, true, true, 4, true,
+            7, true, true, "device", "cpu", "driver")).to_equal(false)
+
+    it "pins but rejects the stale font compositor SPIR-V semantics":
+        step("Hash the shipped SPIR-V, replay it through the session, and expect rejection")
+        # @req REQ-GPU-VKFONT-011
+        # @capture(protocol_binary): the pinned SPIR-V hash and the stale-artifact rejection record
+        val blob = spirv_font_atlas_composite()
+        expect(blob.len()).to_equal(7012)  # oracle: the pinned font-composite artifact is exactly 7012 bytes
+        expect(blob[0]).to_equal(0x03u8)
+        expect(blob[1]).to_equal(0x02u8)
+        expect(blob[2]).to_equal(0x23u8)
+        expect(blob[3]).to_equal(0x07u8)
+        expect(sha256_u8_hex(blob)).to_equal(FONT_ATLAS_COMPOSITE_VULKAN_SPIRV_SHA256)
+        expect(sha256_text(font_atlas_composite_vulkan_glsl_source())).to_equal("8a5c542279bbd37d03be5b9a2fea636f3171bb68cf4072d87162b382541d4444")
+        expect(FONT_ATLAS_COMPOSITE_VULKAN_SEMANTICS_VERSION).to_equal(FONT_ATLAS_COMPOSITE_SEMANTICS_VERSION)
+        val session = file_read("src/lib/gc_async_mut/gpu/engine2d/vulkan_session.spl")
+        expect(session).to_contain("self.install_font_atlas_pipeline(spirv_font_atlas_composite())")
+        var runtime = VulkanSession.create()
+        val rejected = runtime.install_font_atlas_pipeline(blob)
+        expect(rejected.status).to_equal("rejected")
+        expect(rejected.reason).to_equal("font-pipeline-semantics-mismatch")
+
+    it "requires retained portable-toolchain provenance and exact Vulkan identity":
+        step("Read the provenance checker and audit its recorded identity keys")
+        # @req REQ-GPU-VKFONT-012
+        # @capture(statistics): recorded provenance keys audited in the checker script
+        val checker = file_read("scripts/check/check-portable-compute-toolchains.shs")
+        expect(checker).to_contain("simple_invocation_path=")
+        expect(checker).to_contain("simple_invocation_sha256=")
+        expect(checker).to_contain("simple_runtime_path=")
+        expect(checker).to_contain("simple_runtime_sha256=")
+        expect(checker).to_contain("simple_runtime_format=$runtime_format")
+        expect(checker).to_contain("SIMPLE_RUNTIME_BIN")
+        expect(checker).to_contain("native_executable_format")
+        expect(checker).to_contain("canonical_wrapper_runtime")
+        expect(checker).to_contain("mach-o-fat")
+        expect(checker).to_contain("SIMPLE_BIN=\"bin/release/simple\"")
+        expect(checker).to_contain("$wrapper_dir/$triple/simple")
+        expect(checker).to_contain("$ROOT_DIR/release/$triple/simple")
+        expect(checker).to_contain("$ROOT_DIR/bin/release/$triple/simple")
+        expect(checker).to_contain("SIMPLE_EXEC_BIN=\"$runtime_path\"")
+        expect(checker).to_contain("simple_bin_path=")
+        expect(checker).to_contain("simple_bin_sha256=")
+        expect(checker).to_contain("emitter_source_sha256=")
+        expect(checker).to_contain("emitter_version_sha256=")
+        expect(checker).to_contain("generated_source_sha256=")
+        expect(checker).to_contain("record_tool_provenance cuda compiler")
+        expect(checker).to_contain("record_tool_provenance hip compiler")
+        expect(checker).to_contain("record_tool_provenance opencl compiler")
+        expect(checker).to_contain("record_tool_provenance metal compiler")
+        expect(checker).to_contain("record_tool_provenance metal linker")
+        expect(checker).to_contain("record_tool_provenance vulkan_font compiler")
+        expect(checker).to_contain("record_tool_provenance vulkan_font validator")
+        expect(checker).to_contain("record_vulkan_glslc_library_provenance")
+        expect(checker).to_contain("vulkan_font_compiler_library_provenance_status=")
+        expect(checker).to_contain("vulkan_font_compiler_library_path=")
+        expect(checker).to_contain("vulkan_font_compiler_library_sha256=")
+        expect(checker).to_contain("vulkan_font_compiler_format=$VULKAN_GLSLC_COMPILER_FORMAT")
+        expect(checker).to_contain("HOME=\"$VULKAN_GLSLC_CLEAN_HOME\"")
+        expect(checker).to_contain("capture_vulkan_glslc_compile_provenance a")
+        expect(checker).to_contain("capture_vulkan_glslc_compile_provenance b")
+        expect(checker).to_contain("finalize_vulkan_glslc_compile_provenance")
+        expect(checker).to_contain("vulkan_font_compiler_sha256_after_a=")
+        expect(checker).to_contain("vulkan_font_compiler_sha256_after_b=")
+        expect(checker).to_contain("vulkan_font_compiler_library_path_repro=")
+        expect(checker).to_contain("vulkan_font_compiler_loader_log_repro_sha256=")
+        expect(checker).to_contain("vulkan_font_repro_artifact_sha256=")
+        expect(checker).to_contain("vulkan_font_compile_deterministic=")
+        expect(checker).to_contain("vulkan_font_validated_input_sha256=")
+        expect(checker).to_contain("vulkan_font_final_artifact_sha256=")
+        expect(checker).to_contain("artifact-changed-before-validation")
+        expect(checker).to_contain("artifact-changed-during-validation")
+        expect(checker).to_contain("artifact-changed-before-evidence")
+        expect(checker).to_contain("nondeterministic-compiler-output")
+        expect(checker).to_contain("run_vulkan_glslc_compile \"$out_repro\" \"$src\"")
+        expect(checker).to_contain("missing-loaded-library-provenance")
+        expect(checker).to_contain("loaded-library-path-mismatch")
+        expect(checker).to_contain("multiple-loaded-library-provenance")
+        expect(checker).to_contain("compiler-changed-during-compile")
+        expect(checker).to_contain("producer-library-path-mismatch")
+        expect(checker).to_contain("producer-library-changed-during-compile")
+        expect(checker).to_contain("unsupported-loader-provenance-host")
+        expect(checker).to_contain("non-elf-compiler")
+        expect(checker).to_contain("glslang-diagnostic-only-missing-clean-loader-provenance")
+        expect(checker).to_contain("--vulkan-provenance-self-test")
+        expect(checker).to_contain("${target}_${role}_sha256=$tool_sha")
+        expect(checker).to_contain("_artifact_sha256=")
+        expect(checker).to_contain("_required_symbols=")
+        expect(checker).to_contain("8a5c542279bbd37d03be5b9a2fea636f3171bb68cf4072d87162b382541d4444")
+        expect(checker).to_contain("4b5f44e2803a55f6b94bcb3f443ff1c1d209aca7fe890ce1208a340e5c7358e8")
+        expect(checker).to_contain("--target-env=vulkan1.1")
+        expect(checker).to_contain("vulkan_font_artifact_equivalent=false")
+        expect(checker).to_contain("pinned-artifact-hash-mismatch")
+        expect(checker).to_contain("vulkan_font_candidate_compiled=")
+        expect(checker).to_contain("vulkan_font_artifact_validated=")
+        expect(checker).to_contain("vulkan_font_pinned_verified=")
+        expect(checker).to_contain("vulkan_font_semantics_revision=")
+        expect(checker).to_contain("vulkan_font_validator_result=pass")
+        expect(checker).to_contain("rm -f \"$out\" \"$font_out\"")
+        expect(checker).to_contain("rm -f \"$air\" \"$out\" \"$font_air\" \"$font_out\"")
+        expect(checker).to_contain("rm -f \"$out\" \"$out_repro\"")
+        expect(checker).to_contain("substr($0, length(k) + 2)")
+        expect(checker).to_contain("glslc --target-env=vulkan1.1 -DNAME=value")
+        expect(checker.contains("awk -F= -v k=")).to_equal(false)
+        expect(checker.contains("install_vulkan_font_spirv")).to_equal(false)
+
+    it "keeps CPU Vulkan and legacy submission out of promotion":
+        step("Read the font backend and audit its promotion contract")
+        # @req REQ-GPU-VKFONT-013
+        # @capture(statistics): source-contract booleans for the promotion gate
+        val font_backend_source = file_read("src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_font.spl")
+        val gates_promotion_on_discrete_device = font_backend_source.contains("device_type == \"discrete\"")
+        val keeps_legacy_submit_and_wait = font_backend_source.contains("vulkan_sffi_submit_and_wait(command)")
+        expect(gates_promotion_on_discrete_device).to_equal(true)  # oracle: promotion requires the discrete-device gate in the shipped backend
+        expect(keeps_legacy_submit_and_wait).to_equal(false)  # oracle: the legacy fenceless submission path was replaced by the fenced one
+
+    it "keeps Vulkan atlas synchronization full-upload only":
+        step("Read the font backend, session, and backend sources and audit the sync contract")
+        # @req REQ-GPU-VKFONT-014
+        # @capture(statistics): source-contract booleans for full-upload atlas sync and fenced submission
+        val font_backend_source = file_read("src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_font.spl")
+        val session = file_read("src/lib/gc_async_mut/gpu/engine2d/vulkan_session.spl")
+        val backend = file_read("src/lib/gc_async_mut/gpu/engine2d/backend_vulkan.spl")
+        expect(font_backend_source).to_contain("font_atlas_composite_cache_identity(")
+        expect(font_backend_source).to_contain("font_render_batch_atlas_owner_identity(batch), \"vulkan2d\", device_features")
+        expect(font_backend_source).to_contain("completed.batch_identity = font_render_batch_atlas_cache_identity(batch)")
+        expect(font_backend_source).to_contain("pipeline.artifact_identity, dependency_identity")
+        expect(font_backend_source).to_contain("_vulkan_font_pixels_to_bytes(batch.atlas_pixels)")
+        expect(font_backend_source).to_contain("if self.font_atlas_generation != batch.atlas_generation")
+        expect(font_backend_source).to_contain("self.font_atlas_owner_identity != owner_identity")
+        expect(font_backend_source).to_contain("self.font_atlas_generation = batch.atlas_generation")
+        expect(font_backend_source).to_contain("self.font_atlas_owner_identity = owner_identity")
+        val keeps_dirty_rect_partial_upload = font_backend_source.contains("batch.dirty_rects")
+        expect(keeps_dirty_rect_partial_upload).to_equal(false)  # oracle: atlas sync is full-upload; no partial dirty-rect path survives
+        expect(session).to_contain("self.shader_font_atlas, \"main\", 0")
+        expect(session).to_contain("precompiled-spirv")
+        expect(session).to_contain("runtime-glsl")
+        expect(backend.contains("pipe_font_atlas:")).to_equal(false)
+        expect(backend).to_contain("self._clear_borrowed_pipeline_handles()\n            self.session.release()")
+        expect(font_backend_source.index_of("vulkan_sffi_bind_buffer(descriptor, 2, params)") < font_backend_source.index_of("command = vulkan_sffi_begin_compute()")).to_equal(true)
+        expect(font_backend_source.index_of("vulkan_sffi_bind_pipeline(command") < font_backend_source.index_of("vulkan_sffi_bind_descriptors(command")).to_equal(true)
+        expect(font_backend_source).to_contain("descriptor_destroyed = vulkan_sffi_destroy_descriptor_set(descriptor)")
+        expect(font_backend_source).to_contain("partial-framebuffer-restore-failed")
+        val keeps_direct_runtime_extern = font_backend_source.contains("extern fn rt_vulkan_")
+        expect(keeps_direct_runtime_extern).to_equal(false)  # oracle: the backend must go through the SFFI surface, not direct rt_vulkan_ externs
+        expect(font_backend_source).to_contain("vulkan_sffi_fence_submission_supported()")
+        expect(font_backend_source).to_contain("vulkan_sffi_submit_and_wait_fence(command)")
+        expect(font_backend_source).to_contain("fence-completion-unknown")
+        expect(font_backend_source).to_contain("fence-cleanup-failed")
+        expect(font_backend_source.index_of("val old_freed = vulkan_sffi_free_buffer(self.d_font_atlas)") < font_backend_source.index_of("self.d_font_atlas = fresh")).to_equal(true)
+        expect(font_backend_source).to_contain("val fresh_freed = vulkan_sffi_free_buffer(fresh)")
+        expect(font_backend_source).to_contain("return _vulkan_font_evidence(pipeline, \"failed\", reason, self.d_font_atlas")
+        expect(font_backend_source.index_of("var checked: i64 = 0") < font_backend_source.index_of("val atlas_bytes = atlas_count * 4")).to_equal(true)
+        expect(font_backend_source.index_of("var checked: i64 = 0") < font_backend_source.index_of("vulkan_sffi_alloc_buffer(atlas_bytes")).to_equal(true)
+        expect(font_backend_source.index_of("var checked: i64 = 0") < font_backend_source.index_of("self.font_atlas_generation = batch.atlas_generation")).to_equal(true)
+
+    it "rejects active Vulkan session replacement without mutating atlas ownership":
+        step("Swap in an initialized session over an owned one and inspect state")
+        # @req REQ-GPU-VKFONT-015
+        # @capture(statistics): preserved atlas ownership fields across the rejected replacement
+        var state = VulkanBackend.create()
+        state.initialized = true
+        state.owns_session = true
+        state.d_font_atlas = 77
+        state.font_atlas_generation = 9
+        state.font_atlas_owner_identity = "old"
+        var incoming = VulkanSession.create()
+        incoming.is_initialized = true
+        incoming.device = 1
+        incoming.ref_count = 2
+        expect(state.init_with_session(4, 4, incoming)).to_equal(false)
+        expect(incoming.ref_count).to_equal(2)  # oracle: the rejected incoming session keeps its borrowed ref count of 2
+        expect(state.d_font_atlas).to_equal(77)  # oracle: the live atlas buffer handle 77 must survive a rejected replacement
+        expect(state.font_atlas_generation).to_equal(9)  # oracle: the live atlas generation 9 must not move on rejection
+        expect(state.font_atlas_owner_identity).to_equal("old")
+        expect(state.owns_session).to_equal(true)
+        var invalid = VulkanSession.create()
+        expect(state.init_with_session(0, 4, invalid)).to_equal(false)
+        expect(state.initialized).to_equal(true)
+        expect(state.owns_session).to_equal(true)
+        expect(state.d_font_atlas).to_equal(77)  # oracle: the atlas handle survives the invalid-dimension rejection too
+        expect(invalid.ref_count).to_equal(0)  # oracle: an unused session holds no references
+
+    it "rejects invalid Vulkan dimensions before retaining a session":
+        step("Init with a zero width over an initialized session and inspect ownership")
+        # @req REQ-GPU-VKFONT-016
+        # @capture(statistics): ownership verdict for the zero-width init
+        var state = VulkanBackend.create()
+        var incoming = VulkanSession.create()
+        incoming.is_initialized = true
+        incoming.device = 1
+        incoming.ref_count = 2
+        expect(state.init_with_session(0, 4, incoming)).to_equal(false)
+        expect(incoming.ref_count).to_equal(2)  # oracle: the caller's session is untouched, keeping ref count 2
+        expect(state.owns_session).to_equal(false)
+
+    it "rejects unavailable pipelines without touching Vulkan state":
+        step("Composite a batch with no pipeline installed and inspect evidence")
+        # @req REQ-GPU-VKFONT-017
+        # @capture(statistics): unavailable evidence record for the unbacked backend
+        var state = VulkanBackend.create()
+        val evidence = state.composite_font_batch(0, 0, _font_quad_batch(1))
+        expect(evidence.status).to_equal("unavailable")
+        expect(evidence.submitted).to_equal(false)
+        expect(evidence.device_executed).to_equal(false)
+        expect(evidence.promotion_ready).to_equal(false)
+        expect(state.d_font_atlas).to_equal(0)  # oracle: an unbacked backend retains no atlas buffer
+
+    it "rejects malformed artifacts before cached pipeline authority":
+        step("Install a truncated SPIR-V blob over ready pipeline handles")
+        # @req REQ-GPU-VKFONT-018
+        # @capture(protocol_json): invalid-spirv rejection record with preserved session fields
+        var session = VulkanSession.create()
+        session.shader_font_atlas = 11
+        session.pipe_font_atlas = 22
+        session.font_atlas_status = "ready"
+        session.font_atlas_artifact_mode = "precompiled-spirv"
+        session.font_atlas_artifact_identity = "retained"
+        val evidence = session.install_font_atlas_pipeline([0u8; 20])
+        expect(evidence.status).to_equal("rejected")
+        expect(evidence.reason).to_equal("invalid-spirv")
+        expect(session.shader_font_atlas).to_equal(11)  # oracle: the poisoned shader handle 11 must survive the rejected install
+        expect(session.pipe_font_atlas).to_equal(22)  # oracle: the poisoned pipeline handle 22 must survive the rejected install
+        expect(session.font_atlas_status).to_equal("ready")
+        expect(session.font_atlas_artifact_mode).to_equal("precompiled-spirv")
+        expect(session.font_atlas_artifact_identity).to_equal("retained")
+
+    it "reuses only the exact cached Vulkan font artifact":
+        step("Install the pinned artifact then a one-byte-mutated twin")
+        # @req REQ-GPU-VKFONT-019
+        # @capture(statistics): cache verdicts for exact and mutated artifact identity
+        val first = spirv_font_atlas_composite()
+        var changed = spirv_font_atlas_composite()
+        changed[4] = changed[4] + 1u8
+        var session = VulkanSession.create()
+        session.shader_font_atlas = 11
+        session.pipe_font_atlas = 22
+        session.font_atlas_status = "ready"
+        session.font_atlas_artifact_mode = "precompiled-spirv"
+        session.font_atlas_artifact_identity = "precompiled-spirv:" + FONT_ATLAS_COMPOSITE_VULKAN_SPIRV_SHA256
+        session.font_atlas_emission_compile_ns = 5
+        val cached = session.install_font_atlas_pipeline(first)
+        val rejected = session.install_font_atlas_pipeline(changed)
+        expect(cached.status).to_equal("rejected")
+        expect(cached.reason).to_equal("font-pipeline-semantics-mismatch")
+        expect(rejected.status).to_equal("rejected")
+        expect(rejected.reason).to_equal("font-pipeline-artifact-hash-mismatch")
+        expect(session.shader_font_atlas).to_equal(11)  # oracle: the seeded shader handle 11 survives both cache decisions
+        expect(session.pipe_font_atlas).to_equal(22)  # oracle: the seeded pipeline handle 22 survives both cache decisions
+        expect(session.font_atlas_artifact_identity).to_equal("precompiled-spirv:" + FONT_ATLAS_COMPOSITE_VULKAN_SPIRV_SHA256)
+
+    it "rejects unsupported program versions before atlas mutation":
+        step("Composite a batch stamped with a future program version")
+        # @req REQ-GPU-VKFONT-020
+        # @capture(statistics): rejection record for the unsupported program version
+        var state = VulkanBackend.create()
+        state.owns_session = true
+        state.session.is_initialized = true
+        state.session.device = 1
+        state.session.font_atlas_status = "ready"
+        state.session.font_atlas_artifact_mode = "precompiled-spirv"
+        state.session.shader_font_atlas = 1
+        state.session.pipe_font_atlas = 1
+        val evidence = state.composite_font_batch(0, 0, _font_quad_batch(2))
+        expect(evidence.status).to_equal("rejected")
+        expect(evidence.reason).to_equal("invalid-font-batch")
+        expect(state.d_font_atlas).to_equal(0)  # oracle: a version-rejected batch leaves no atlas buffer allocated
+
+    it "rejects an invalid quad before cache or parameter mutation":
+        step("Composite a quad whose atlas origin escapes the 2x2 atlas")
+        # @req REQ-GPU-VKFONT-021
+        # @capture(statistics): rejection record with every cached atlas field preserved
+        var state = VulkanBackend.create()
+        state.owns_session = true
+        state.session.is_initialized = true
+        state.session.device = 1
+        state.session.font_atlas_status = "ready"
+        state.session.font_atlas_artifact_mode = "precompiled-spirv"
+        state.session.shader_font_atlas = 1
+        state.session.pipe_font_atlas = 1
+        state.d_framebuffer = 1
+        state.w = 1
+        state.h = 1
+        state.d_font_atlas = 77
+        state.d_font_params = 88
+        state.font_atlas_width = 2
+        state.font_atlas_height = 2
+        state.font_atlas_generation = 9
+        val invalid = FontRenderBatch(program_version: 1, font_identity: "unit-font", face_generation: 1,
+            valid: true, atlas_width: 1, atlas_height: 1, atlas_pixels: [0xffffffffu32],
+            quads: [FontRenderQuad(codepoint: 65, byte_offset: 0, dst_x: 0, dst_y: 0,
+                width: 1, height: 1, atlas_x: 1, atlas_y: 0, color: 0xffffffffu32)],
+            atlas_generation: 10, dirty_rects: [])
+        val evidence = state.composite_font_batch(0, 0, invalid)
+        expect(evidence.status).to_equal("rejected")
+        expect(evidence.reason).to_equal("invalid-font-quad")
+        expect(state.d_font_atlas).to_equal(77)  # oracle: the seeded atlas buffer 77 is untouched by the rejected quad
+        expect(state.d_font_params).to_equal(88)  # oracle: the seeded params buffer 88 is untouched by the rejected quad
+        expect(state.font_atlas_width).to_equal(2)  # oracle: the cached atlas width 2 is untouched by the rejected quad
+        expect(state.font_atlas_height).to_equal(2)  # oracle: the cached atlas height 2 is untouched by the rejected quad
+        expect(state.font_atlas_generation).to_equal(9)  # oracle: the cached atlas generation 9 is untouched by the rejected quad
+
+    it "clears borrowed handles before shared-session release and stays idempotent":
+        step("Seed four borrowed handles, shut down twice, and re-read them")
+        # @req REQ-GPU-VKFONT-022
+        # @capture(statistics): cleared handle fields across a double shutdown
+        var state = VulkanBackend.create()
+        state.owns_session = true
+        state.session.ref_count = 1
+        state.shader_clear = 11
+        state.shader_blit = 12
+        state.pipe_clear = 21
+        state.pipe_blit = 22
+        state.shutdown()
+        expect(state.shader_clear).to_equal(0)  # oracle: shutdown releases every borrowed handle to the zero sentinel
+        expect(state.shader_blit).to_equal(0)  # oracle: shutdown releases every borrowed handle to the zero sentinel
+        expect(state.pipe_clear).to_equal(0)  # oracle: shutdown releases every borrowed handle to the zero sentinel
+        expect(state.pipe_blit).to_equal(0)  # oracle: shutdown releases every borrowed handle to the zero sentinel
+        expect(state.owns_session).to_equal(false)
+        state.shutdown()
+        expect(state.shader_clear).to_equal(0)  # oracle: a second shutdown stays at the zero sentinel
+        expect(state.pipe_clear).to_equal(0)  # oracle: a second shutdown stays at the zero sentinel

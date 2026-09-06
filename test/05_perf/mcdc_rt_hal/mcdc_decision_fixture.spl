@@ -1,0 +1,88 @@
+# Reproducible MC/DC hot-path fixture.  The cold mode selection and reporting
+# occur outside the measured interval; every lane executes this exact loop.
+
+use test.perf.bench.lib.timing.{bench_now_ns}
+use std.nogc_sync_mut.cli.{get_cli_args}
+use std.nogc_sync_mut.mcdc.static_probe.{
+    mcdc_static_probe_owner_ids, mcdc_static_probe_owner_recorded_count,
+    mcdc_static_probe_owner_dropped_count,
+    mcdc_static_probe_owner_overwritten_count,
+    mcdc_static_probe_owner_saturated
+}
+use std.nogc_sync_mut.mcdc.dynamic_probe.{
+    mcdc_dynamic_probe_controller_load_builtin_current_owner,
+    mcdc_dynamic_probe_is_published,
+    mcdc_dynamic_probe_owner_ids, mcdc_dynamic_probe_owner_recorded_count,
+    mcdc_dynamic_probe_owner_dropped_count,
+    mcdc_dynamic_probe_owner_overwritten_count,
+    mcdc_dynamic_probe_owner_saturated
+}
+
+fn bench_arg(name: text, fallback: text) -> text:
+    val prefix = "--" + name + "="
+    for argument in get_cli_args():
+        if argument.starts_with(prefix): return argument.substring(prefix.len())
+    fallback
+
+fn bench_flag(name: text) -> bool:
+    val expected = "--" + name
+    for argument in get_cli_args():
+        if argument == expected: return true
+    false
+
+@inline
+fn decision_workload(iterations: i64) -> u64:
+    var checksum: u64 = 0
+    var i: i64 = 0
+    while i < iterations:
+        val a = (i & 1) == 0
+        val b = (i % 3) != 0
+        val c = (i % 5) < 3
+        val d = (i % 7) == 1
+        if (a and b) or (c and not d):
+            checksum = checksum + i.to_u64() * 3 + 1
+        else:
+            checksum = checksum + i.to_u64() + 7
+        i = i + 1
+    checksum
+
+fn print_static_saturation():
+    val owners = mcdc_static_probe_owner_ids()
+    if owners.len() == 0:
+        print "recorded=0 dropped=0 overwritten=0 saturated=false"
+        return
+    val owner = owners[0]
+    print "recorded={mcdc_static_probe_owner_recorded_count(owner)} dropped={mcdc_static_probe_owner_dropped_count(owner)} overwritten={mcdc_static_probe_owner_overwritten_count(owner)} saturated={mcdc_static_probe_owner_saturated(owner)}"
+
+fn print_dynamic_saturation(load_ok: bool):
+    val owners = mcdc_dynamic_probe_owner_ids()
+    if owners.len() == 0:
+        print "recorded=0 dropped=0 overwritten=0 saturated=false dynamic_load_ok={load_ok} dynamic_published={mcdc_dynamic_probe_is_published()}"
+        return
+    val owner = owners[0]
+    print "recorded={mcdc_dynamic_probe_owner_recorded_count(owner)} dropped={mcdc_dynamic_probe_owner_dropped_count(owner)} overwritten={mcdc_dynamic_probe_owner_overwritten_count(owner)} saturated={mcdc_dynamic_probe_owner_saturated(owner)} dynamic_load_ok={load_ok} dynamic_published={mcdc_dynamic_probe_is_published()}"
+
+fn main():
+    val lane = bench_arg("lane", "off")
+    val measured_iterations = if bench_flag("empty"):
+        0
+    else:
+        4000000
+    # Loading is a cold operation before warmup. Dormant deliberately performs
+    # no controller load, so its measured path remains the closed epoch branch.
+    var dynamic_load_ok = false
+    if lane == "dynamic-enabled":
+        dynamic_load_ok = mcdc_dynamic_probe_controller_load_builtin_current_owner()
+
+    val warm_checksum = decision_workload(200000)
+    val start = bench_now_ns()
+    val checksum = decision_workload(measured_iterations)
+    val elapsed = bench_now_ns() - start
+    print "lane={lane} iterations={measured_iterations} elapsed_ns={elapsed} checksum={checksum} warm_checksum={warm_checksum}"
+
+    if lane == "static-on":
+        print_static_saturation()
+    elif lane == "dynamic-enabled" or lane == "dynamic-dormant":
+        print_dynamic_saturation(dynamic_load_ok)
+    else:
+        print "recorded=0 dropped=0 overwritten=0 saturated=false"

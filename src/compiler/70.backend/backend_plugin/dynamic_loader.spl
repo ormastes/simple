@@ -1,0 +1,176 @@
+# codex-impl: checked dynamic backend provider library lease.
+#
+# This boundary validates and retains the exact v1 entry symbol. Provider calls
+# route through the typed boxed-byte runtime bridge rather than this raw address.
+
+use std.sffi.dynamic.{DynLib}
+use std.nogc_sync_mut.io_runtime.{
+    file_copy, file_hash_sha256_or_empty, dir_remove_all
+}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir_raw}
+
+val DYNAMIC_BACKEND_PLUGIN_ENTRY_SYMBOL_V1 = "simple_backend_plugin_v1"
+
+enum DynamicBackendPluginLoadError:
+    LoadFailed(detail: text)
+    MissingSymbol(detail: text)
+    Unsupported(detail: text)
+
+impl DynamicBackendPluginLoadError:
+    fn code() -> text:
+        match self:
+            case LoadFailed(_): "BACKEND_PLUGIN_LOAD_FAILED"
+            case MissingSymbol(_): "BACKEND_PLUGIN_MISSING_SYMBOL"
+            case Unsupported(_): "BACKEND_PLUGIN_DYNAMIC_ABI_UNSUPPORTED"
+
+    fn diagnostic() -> text:
+        match self:
+            case LoadFailed(detail): detail
+            case MissingSymbol(detail): detail
+            case Unsupported(detail): detail
+
+class DynamicBackendPluginStagedArtifact:
+    """Private byte-stable provider artifact used for both hash and load."""
+    staged_path: text
+    staging_dir: text
+    build_id: text
+    closed: bool
+
+impl DynamicBackendPluginStagedArtifact:
+    me close() -> bool:
+        if self.closed:
+            return true
+        val removed = dir_remove_all(self.staging_dir)
+        if removed:
+            self.closed = true
+        removed
+
+fn dynamic_backend_staging_fail_v1(
+    staging_dir: text, detail: text
+) -> Result<DynamicBackendPluginStagedArtifact, DynamicBackendPluginLoadError>:
+    if staging_dir != "":
+        dir_remove_all(staging_dir)
+    Err(DynamicBackendPluginLoadError.LoadFailed(detail))
+
+fn stage_dynamic_backend_plugin_artifact_v1(
+    provider_path: text
+) -> Result<DynamicBackendPluginStagedArtifact, DynamicBackendPluginLoadError>:
+    """Copy once into a private directory, then identify the copied bytes."""
+    if provider_path == "":
+        return Err(DynamicBackendPluginLoadError.LoadFailed(
+            "dynamic backend provider path is required"))
+    val staging_dir = secure_temp_dir_raw(".", "simple-backend-plugin")
+    if staging_dir == "":
+        return Err(DynamicBackendPluginLoadError.LoadFailed(
+            "dynamic backend provider staging directory creation failed"))
+    # Keep an explicit suffix because Windows LoadLibrary appends ".dll" when
+    # a supplied path has no extension. Other hosts load this exact path.
+    val staged_path = staging_dir + "/provider.dll"
+    if not file_copy(provider_path, staged_path):
+        return dynamic_backend_staging_fail_v1(
+            staging_dir, "dynamic backend provider staging copy failed")
+    val build_id = file_hash_sha256_or_empty(staged_path)
+    if build_id.len() != 64:
+        return dynamic_backend_staging_fail_v1(
+            staging_dir, "dynamic backend staged provider digest is unavailable")
+    Ok(DynamicBackendPluginStagedArtifact(
+        staged_path, staging_dir, build_id, false))
+
+class DynamicBackendPluginLease:
+    """Loaded provider library pinned around one resolved v1 entry symbol.
+
+    A lease proves only checked load and exact-name symbol resolution. It is not
+    descriptor admission and deliberately offers no raw-call operation.
+    """
+    library: DynLib
+    provider_path: text
+    staging_dir: text
+    build_id: text
+    entry_symbol_address: i64
+    closed: bool
+
+impl DynamicBackendPluginLease:
+    fn symbol_name() -> text:
+        DYNAMIC_BACKEND_PLUGIN_ENTRY_SYMBOL_V1
+
+    fn is_open() -> bool:
+        not self.closed and self.entry_symbol_address > 0
+
+    me close() -> bool:
+        """Release the provider library once without invoking provider code."""
+        if self.closed:
+            return true
+        unsafe(capabilities: [ffi]):
+            self.library.close()
+        val cleanup_ok = dir_remove_all(self.staging_dir)
+        self.entry_symbol_address = 0
+        self.closed = true
+        cleanup_ok
+
+@unsafe(
+    reason: "loads an unverified backend provider and resolves one raw symbol without invoking it",
+    capabilities: [ffi, raw_ptr],
+)
+fn load_dynamic_backend_plugin_lease(
+    provider_path: text
+) -> Result<DynamicBackendPluginLease, DynamicBackendPluginLoadError>:
+    """Load a provider and retain its exact v1 symbol, failing closed."""
+    val staged_result = stage_dynamic_backend_plugin_artifact_v1(provider_path)
+    var staged = match staged_result:
+        case Ok(value): value
+        case Err(error): return Err(error)
+
+    val loaded = unsafe(capabilities: [ffi]):
+        DynLib.load_checked(staged.staged_path)
+    var library = match loaded:
+        case Ok(value): value
+        case Err(detail):
+            staged.close()
+            return Err(DynamicBackendPluginLoadError.LoadFailed(detail))
+
+    # A second digest closes the private-stage hash/load window. The directory
+    # is owner-only; any unexpected mutation still rejects admission.
+    val loaded_build_id = file_hash_sha256_or_empty(staged.staged_path)
+    if loaded_build_id != staged.build_id:
+        unsafe(capabilities: [ffi]):
+            library.close()
+        staged.close()
+        return Err(DynamicBackendPluginLoadError.LoadFailed(
+            "dynamic backend staged provider changed while loading"))
+
+    val resolved = unsafe(capabilities: [ffi, raw_ptr]):
+        library.sym_checked(DYNAMIC_BACKEND_PLUGIN_ENTRY_SYMBOL_V1)
+    val entry_symbol = match resolved:
+        case Ok(value): value
+        case Err(detail):
+            unsafe(capabilities: [ffi]):
+                library.close()
+            staged.close()
+            return Err(DynamicBackendPluginLoadError.MissingSymbol(
+                "missing " + DYNAMIC_BACKEND_PLUGIN_ENTRY_SYMBOL_V1
+                    + " in staged provider: " + detail
+            ))
+
+    Ok(DynamicBackendPluginLease(
+        library: library,
+        provider_path: staged.staged_path,
+        staging_dir: staged.staging_dir,
+        build_id: staged.build_id,
+        entry_symbol_address: entry_symbol,
+        closed: false
+    ))
+
+fn dynamic_backend_plugin_admission_status(
+    lease: DynamicBackendPluginLease
+) -> Result<bool, DynamicBackendPluginLoadError>:
+    """Report that the retained lease is ready for typed bridge activation."""
+    if not lease.is_open():
+        return Err(DynamicBackendPluginLoadError.LoadFailed(
+            "dynamic backend provider lease is closed"
+        ))
+    Ok(true)
+
+export DYNAMIC_BACKEND_PLUGIN_ENTRY_SYMBOL_V1
+export DynamicBackendPluginLoadError, DynamicBackendPluginStagedArtifact
+export DynamicBackendPluginLease, stage_dynamic_backend_plugin_artifact_v1
+export load_dynamic_backend_plugin_lease, dynamic_backend_plugin_admission_status

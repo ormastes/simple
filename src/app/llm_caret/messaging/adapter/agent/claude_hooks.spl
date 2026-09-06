@@ -1,0 +1,64 @@
+"""Claude Code hook adapter. Hook ingestion validates and enqueues only."""
+
+use app.llm_caret.messaging.domain.model.{AgentBinding, RoomMessage}
+use app.llm_caret.messaging.port.contracts.{AgentControlPort}
+use app.llm_caret.messaging.adapter.agent.session_registry.{AgentSessionRegistry, control_command}
+
+class ClaudeHooksAdapter:
+    registry: AgentSessionRegistry
+
+impl ClaudeHooksAdapter:
+    static fn new() -> ClaudeHooksAdapter:
+        ClaudeHooksAdapter(registry: AgentSessionRegistry.new())
+
+    me attach_session(binding: AgentBinding) -> text:
+        self.registry.attach("claude", binding)
+
+    me accept_hook(session_id: text, hook_name: text, payload: text) -> text:
+        val state = _claude_state(hook_name)
+        if state == "":
+            return "error:unknown_claude_hook"
+        self.registry.transition(session_id, state, payload)
+
+impl AgentControlPort for ClaudeHooksAdapter:
+    fn capabilities() -> [text]:
+        ["hooks", "context_injection", "task_updates", "subagents", "permissions"]
+
+    fn attach(binding: AgentBinding) -> text:
+        control_command("claude", "attach", binding.agent_id.value, binding.binding_id.value)
+
+    fn resume(session_id: text) -> text:
+        control_command("claude", "resume", session_id, "")
+
+    fn inject_context(session_id: text, context_manifest_id: text) -> text:
+        control_command("claude", "inject_context", session_id, context_manifest_id)
+
+    fn submit(session_id: text, message: RoomMessage) -> text:
+        control_command("claude", "submit", session_id, message.message_id.value)
+
+    fn steer(session_id: text, message: RoomMessage) -> text:
+        control_command("claude", "steer", session_id, message.message_id.value)
+
+    fn cancel(session_id: text, task_id: text) -> text:
+        control_command("claude", "cancel", session_id, task_id)
+
+    fn close(session_id: text) -> text:
+        control_command("claude", "close", session_id, "")
+
+fn _claude_state(hook_name: text) -> text:
+    match hook_name:
+        "SessionStart": "idle"
+        "UserPromptSubmit": "running"
+        "PreToolUse": "running"
+        "PostToolUse": "running"
+        "PostToolUseFailure": "blocked"
+        "PermissionRequest": "waiting_input"
+        "SubagentStart": "running"
+        "SubagentStop": "idle"
+        "TaskCreated": "running"
+        "TaskCompleted": "completed"
+        "Stop": "completed"
+        "SessionEnd": "idle"
+        _: ""
+
+export ClaudeHooksAdapter

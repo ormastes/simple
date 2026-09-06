@@ -1,0 +1,297 @@
+"""
+## Purpose and audience
+
+Exercises the macro hygiene system end to end: expansions must not capture
+outer variables, internal expansion variables must stay isolated, gensym'd
+names must be unique per invocation, and pattern/function nesting must keep
+scope boundaries. Written for compiler engineers owning the expansion pipeline
+and for language users who depend on macros behaving like functions with their
+own scope.
+
+## Operator workflow
+
+Run `simple run test/03_system/feature/usage/macro_hygiene_spec.spl`. Every
+scenario expands real macros on the host and reads back both the expansion
+result and the untouched outer bindings.
+
+## Compatibility and limitations
+
+Scenarios run on the interpreter's expansion pipeline; compile-time hygiene
+marks are covered by the macro checker's own unit lane, not here. Multi-intro
+gensym naming (suffixed expansion symbols) is still resolving upstream, so
+multi-intro macros are out of scope.
+
+## Verification guidance and troubleshooting
+
+Rerun the command above. A failure means the expansion leaked or captured an
+outer binding: the sum-style oracles pin outer value + expansion value
+together, so the failing sum names which half broke. Check the expansion
+pipeline before touching any expectation.
+"""
+# Lifecycle: doc/01_research/compiler/compiler_internals/compiler_interpreter_optimization_syntax_sugar_2026-04-29_local.md ;
+# doc/03_plan/versioned_codegen_backend_plugin.md ;
+# doc/04_architecture/compiler/00_compiler_architecture.md ;
+# doc/05_design/language/syntax/comma_decorator_design.md
+# @manual_section: macro-hygiene
+
+use std.spec.step
+
+describe "Basic Macro Hygiene":
+    # @manual scenario evidence
+    it "prevents variable capture":
+        # @req REQ-MACRO-HYG-001
+        step("Expand make_ten beside an outer x and add both worlds")
+        # @capture(statistics): outer x (5) and expansion result (10) summed
+        macro make_ten() -> (returns result: Int):
+            emit result:
+                val x = 10
+                x
+        val x = 5
+        val result = make_ten!()
+        expect(x + result).to_equal(15)  # oracle: outer 5 preserved + expansion's own 10
+
+    it "isolates macro internal variables":
+        # @req REQ-MACRO-HYG-002
+        step("Expand increment twice and require two independent results")
+        # @capture(statistics): two expansions each returning 1
+        macro increment() -> (returns result: Int):
+            emit result:
+                val temp = 1
+                temp
+        val a = increment!()
+        val b = increment!()
+        expect(a + b).to_equal(2)  # oracle: each expansion has a fresh temp, 1 + 1
+
+    it "preserves outer variable after macro":
+        # @req REQ-MACRO-HYG-003
+        step("Expand do_nothing beside an outer value and sum both worlds")
+        # @capture(statistics): outer value (42) preserved while expansion emitted 100
+        macro do_nothing() -> (returns result: Int):
+            emit result:
+                val value = 100
+                value
+        val value = 42
+        val emitted = do_nothing!()
+        expect(value + emitted).to_equal(142)  # oracle: outer 42 preserved + expansion's own 100
+
+describe "Nested Scope Hygiene":
+    it "handles nested scopes in macro":
+        # @req REQ-MACRO-HYG-004
+        step("Expand a macro whose body nests a conditional scope")
+        # @capture(statistics): nested-scope expansion returns 30
+        macro nested_scopes() -> (returns result: Int):
+            emit result:
+                val x = 10
+                val inner = if true: 20 else: 0
+                x + inner
+        expect(nested_scopes!()).to_equal(30)  # oracle: 10 + nested-if 20
+
+    it "handles nested macro calls":
+        # @req REQ-MACRO-HYG-005
+        step("Expand outer, which itself expands inner with the same name x")
+        # @capture(statistics): nested expansions with clashing names return 15
+        macro inner() -> (returns result: Int):
+            emit result:
+                val x = 5
+                x
+        macro outer() -> (returns result: Int):
+            emit result:
+                val x = 10
+                x + inner!()
+        expect(outer!()).to_equal(15)  # oracle: outer x 10 + inner's isolated x 5
+
+    it "handles nested blocks":
+        # @req REQ-MACRO-HYG-006
+        step("Expand a macro containing a nested block expression")
+        # @capture(statistics): nested-block expansion returns 6
+        macro nested_blocks() -> (returns result: Int):
+            emit result:
+                val a = 1
+                val b = if true: 2 + 3 else: 0
+                a + b
+        expect(nested_blocks!()).to_equal(6)  # oracle: 1 + block value 5
+
+describe "Gensym Uniqueness":
+    it "creates unique names across calls":
+        # @req REQ-MACRO-HYG-007
+        step("Expand counter three times and require three independent counts")
+        # @capture(statistics): three expansions each returning a fresh 1
+        macro counter() -> (returns result: Int):
+            emit result:
+                val count = 1
+                count
+        val first = counter!()
+        val second = counter!()
+        val third = counter!()
+        expect(first + second + third).to_equal(3)  # oracle: three gensym'd counts, 1 each
+
+    it "gensyms multiple variables":
+        # @req REQ-MACRO-HYG-008
+        step("Expand multi_vars beside three outer bindings and sum all six")
+        # @capture(statistics): outer 10+20+30 and expansion 1+2+3 summed
+        macro multi_vars() -> (returns result: Int):
+            emit result:
+                val a = 1
+                val b = 2
+                val c = 3
+                a + b + c
+        val x = 10
+        val y = 20
+        val z = 30
+        val result = multi_vars!()
+        expect(x + y + z + result).to_equal(66)  # oracle: outer 60 preserved + expansion's own 6
+
+describe "Pattern Matching Hygiene":
+    it "isolates pattern variables":
+        # @req REQ-MACRO-HYG-009
+        step("Expand a tuple-pattern macro beside outer x and y")
+        # @capture(statistics): outer 100+200 and expansion 10+20 summed
+        macro make_pair() -> (returns result: Int):
+            emit result:
+                val (x, y) = (10, 20)
+                x + y
+        val x = 100
+        val y = 200
+        val result = make_pair!()
+        expect(x + y + result).to_equal(330)  # oracle: outer 300 preserved + expansion's own 30
+
+    it "isolates tuple destructuring":
+        # @req REQ-MACRO-HYG-010
+        step("Expand a destructuring-swap macro beside outer a and b")
+        # @capture(statistics): outer 1+2 and expansion 10-5 summed
+        macro swap_values() -> (returns result: Int):
+            emit result:
+                val (a, b) = (5, 10)
+                b - a
+        val a = 1
+        val b = 2
+        val result = swap_values!()
+        expect(a + b + result).to_equal(8)  # oracle: outer 3 preserved + expansion's own 5
+
+    it "isolates array destructuring":
+        # @req REQ-MACRO-HYG-011
+        step("Expand an array-pattern macro beside outer x, y, z")
+        # @capture(statistics): outer 10+20+30 and expansion 1+2+3 summed
+        macro sum_array() -> (returns result: Int):
+            emit result:
+                val [x, y, z] = [1, 2, 3]
+                x + y + z
+        val x = 10
+        val y = 20
+        val z = 30
+        val result = sum_array!()
+        expect(x + y + z + result).to_equal(66)  # oracle: outer 60 preserved + expansion's own 6
+
+describe "Function Parameter Hygiene":
+    it "isolates function parameters":
+        # @req REQ-MACRO-HYG-012
+        step("Expand a macro that mints and calls a two-parameter function")
+        # @capture(statistics): minted add(3, 7) returns 10
+        macro func_test() -> (returns result: Int):
+            emit result:
+                fn add(x: Int, y: Int) -> Int:
+                    return x + y
+                add(3, 7)
+        expect(func_test!()).to_equal(10)  # oracle: expansion-local add computes 3 + 7
+
+    it "isolates function from outer scope":
+        # @req REQ-MACRO-HYG-013
+        step("Expand a minting macro beside an outer x and sum both worlds")
+        # @capture(statistics): outer x 100 preserved while expansion returned 10
+        macro func_macro() -> (returns result: Int):
+            emit result:
+                fn multiplier(x: Int) -> Int:
+                    return x * 2
+                multiplier(5)
+        val x = 100
+        val result = func_macro!()
+        expect(x + result).to_equal(110)  # oracle: outer 100 preserved + expansion's own 10
+
+    it "handles nested functions":
+        # @req REQ-MACRO-HYG-014
+        step("Expand a macro that nests inner inside outer and calls both")
+        # @capture(statistics): nested-function expansion returns 15
+        macro nested_func() -> (returns result: Int):
+            emit result:
+                fn outer(x: Int) -> Int:
+                    fn inner(y: Int) -> Int:
+                        return x + y
+                    return inner(5)
+                outer(10)
+        expect(nested_func!()).to_equal(15)  # oracle: inner(5) closes over outer's 10
+
+describe "Complex Macro Hygiene":
+    it "handles complex multi-scope macro":
+        # @req REQ-MACRO-HYG-015
+        step("Expand a macro mixing conditionals across several scopes")
+        # @capture(statistics): multi-scope expansion returns 2+3+4+1
+        macro complex() -> (returns result: Int):
+            emit result:
+                val temp = 1
+                val sum1 = if true: 2 else: 0
+                val sum2 = if true: 3 else: 0
+                val sum3 = if true: 4 else: 0
+                sum1 + sum2 + sum3 + temp
+        expect(complex!()).to_equal(10)  # oracle: 2 + 3 + 4 + temp 1
+
+    it "handles macro parameters":
+        # @req REQ-MACRO-HYG-016
+        step("Expand a parameterized macro beside an outer x and sum both worlds")
+        # @capture(statistics): outer x 5 preserved while expansion returned 32+10
+        macro use_param(value: Int) -> (returns result: Int):
+            emit result:
+                val x = value + 10
+                x
+        val x = 5
+        val result = use_param!(32)
+        expect(x + result).to_equal(47)  # oracle: outer 5 preserved + expansion's own 42
+
+    it "handles nested macros with same names":
+        # @req REQ-MACRO-HYG-017
+        step("Expand wrapper, which calls base twice beside its own temp")
+        # @capture(statistics): same-name nesting returns 5+10+20
+        macro base(n: Int) -> (returns result: Int):
+            emit result:
+                val temp = n * 2
+                temp
+        macro wrapper() -> (returns result: Int):
+            emit result:
+                val temp = 5
+                val a = base!(temp)
+                val b = base!(10)
+                temp + a + b
+        expect(wrapper!()).to_equal(35)  # oracle: wrapper temp 5 + base!(5) 10 + base!(10) 20
+
+describe "Macro Hygiene Edge Cases":
+    it "handles empty macro":
+        # @req REQ-MACRO-HYG-018
+        step("Expand an empty-bodied macro and read its unit-zero result")
+        # @capture(statistics): empty expansion returns 0
+        macro empty() -> (returns result: Int):
+            emit result:
+                0
+        expect(empty!()).to_equal(0)  # oracle: an empty body yields the zero value
+
+    it "handles macro with early return":
+        # @req REQ-MACRO-HYG-019
+        step("Expand early_return with a false condition and read the fallthrough")
+        # @capture(statistics): false condition falls through to the bound 42
+        macro early_return(cond: Bool) -> (returns result: Int):
+            emit result:
+                if cond:
+                    return 100
+                val x = 42
+                x
+        expect(early_return!(false)).to_equal(42)  # oracle: the false branch never reaches return 100
+
+    it "handles variable shadowing":
+        # @req REQ-MACRO-HYG-020
+        step("Expand a macro that shadows its own binding twice in one scope")
+        # @capture(statistics): shadow chain 10 -> 15 -> 30
+        macro shadow_test() -> (returns result: Int):
+            emit result:
+                val x = 10
+                val x = x + 5
+                val x = x * 2
+                x
+        expect(shadow_test!()).to_equal(30)  # oracle: 10 + 5 = 15, then 15 * 2 = 30

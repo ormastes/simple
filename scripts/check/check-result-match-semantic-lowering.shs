@@ -1,0 +1,190 @@
+#!/bin/sh
+# Fail-closed gate for E-BACKEND-LLVM-INST-ResultMatchSemantic.
+#
+# MirInstKind.ResultMatchSemantic is a VERIFICATION WITNESS, not an executable
+# instruction: the whole Result match is already emitted before the marker is
+# appended into the merge block
+# (src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl). It exists
+# only so the Lean backend can recover the match shape
+# (70.backend/backend/lean_mir_translate.spl, "witness_count") and for
+# perf_facts. Four executable backends used to REJECT it, which made every
+# Result-matching module native-unbuildable (7 occurrences measured on an
+# io_runtime fixture, 2026-08-24).
+#
+# This gate pins BOTH halves: the executable backends must skip it, and the
+# 50.mir emit site must still emit it (deleting the marker would silently
+# break the Lean verification backend).
+#
+# --selftest runs FIRST and is FATAL. Verdict is the LAST line on stdout:
+#   PASS — <n> case(s) checked      exit 0
+#   FAIL — ...                      exit 1
+#   ERROR — nothing was checked     exit 2
+#
+# Bug record: doc/08_tracking/bug/llvm_backend_no_result_match_semantic_2026-08-24.md
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+CHECKED=0
+FAILED=""
+RUN_NATIVE=0
+[ "$1" = "--native" ] && RUN_NATIVE=1
+
+# Files that must NOT reject the witness, and the reject-call text to look for.
+backend_reject_pattern() {
+    # $1 = file path relative to repo root
+    case "$1" in
+      *isel_x86_64.spl) printf 'x86_unsupported_inst(ctx, "ResultMatchSemantic"' ;;
+      *core_codegen.spl) printf '_unsupported_llvm_inst("ResultMatchSemantic"' ;;
+      *instruction_lowering.spl) printf '_unsupported_c_inst("ResultMatchSemantic"' ;;
+      *mir_interpreter.spl) printf '_unsupported_inst("ResultMatchSemantic"' ;;
+    esac
+}
+
+BACKENDS="src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl
+src/compiler/70.backend/backend/_CBackendTranslate/instruction_lowering.spl
+src/compiler/70.backend/backend/native/isel_x86_64.spl
+src/compiler/95.interp/mir_interpreter.spl"
+
+EMIT_SITE="src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl"
+LEAN_SITE="src/compiler/70.backend/backend/lean_mir_translate.spl"
+
+# ---------------------------------------------------------------- selftest ---
+selftest() {
+    st_dir=$(mktemp -d) || { echo "selftest: mktemp failed"; exit 2; }
+    st_fail=""
+
+    # Direction 1: a file that still REJECTS the witness must be detected.
+    printf '            case ResultMatchSemantic(_, _, _, _, _, _, _):\n                self._unsupported_llvm_inst("ResultMatchSemantic", inst.span)\n' > "$st_dir/core_codegen.spl"
+    if grep -qF "$(backend_reject_pattern core_codegen.spl)" "$st_dir/core_codegen.spl"; then
+        : # correctly detected as rejecting
+    else
+        st_fail="$st_fail rejecting-file-not-detected"
+    fi
+
+    # Direction 2: a fixed file must NOT be detected as rejecting.
+    printf '            case ResultMatchSemantic(_, _, _, _, _, _, _):\n                # verification witness; already lowered\n                ()\n' > "$st_dir/core_codegen_fixed.spl"
+    if grep -qF "$(backend_reject_pattern core_codegen.spl)" "$st_dir/core_codegen_fixed.spl"; then
+        st_fail="$st_fail fixed-file-false-positive"
+    fi
+
+    # Direction 3: a named arm must still exist (deleting the case entirely
+    # would fall into the E-BACKEND-LLVM-INST-Unknown panic arm).
+    if ! grep -q 'case ResultMatchSemantic' "$st_dir/core_codegen_fixed.spl"; then
+        st_fail="$st_fail named-arm-check-broken"
+    fi
+    printf 'case Nop: ()\n' > "$st_dir/no_arm.spl"
+    if grep -q 'case ResultMatchSemantic' "$st_dir/no_arm.spl"; then
+        st_fail="$st_fail missing-arm-false-negative"
+    fi
+
+    # Direction 4: emit-site presence check must discriminate.
+    printf 'MirInstKind.ResultMatchSemantic(\n' > "$st_dir/emit.spl"
+    grep -q 'MirInstKind.ResultMatchSemantic(' "$st_dir/emit.spl" || st_fail="$st_fail emit-present-not-detected"
+    printf 'nothing here\n' > "$st_dir/emit_gone.spl"
+    grep -q 'MirInstKind.ResultMatchSemantic(' "$st_dir/emit_gone.spl" && st_fail="$st_fail emit-absent-false-positive"
+
+    rm -rf "$st_dir"
+    if [ -n "$st_fail" ]; then
+        echo "SELFTEST FAILED:$st_fail"
+        echo "ERROR — nothing was checked (selftest failed)"
+        exit 2
+    fi
+}
+selftest
+
+# -------------------------------------------------------------------- scan ---
+for f in $BACKENDS; do
+    p="$ROOT/$f"
+    if [ ! -f "$p" ]; then
+        echo "ERROR — nothing was checked (missing file: $f)"
+        exit 2
+    fi
+    CHECKED=$((CHECKED + 1))
+    pat=$(backend_reject_pattern "$f")
+    if [ -z "$pat" ]; then
+        echo "ERROR — nothing was checked (no pattern for $f)"
+        exit 2
+    fi
+    if grep -qF "$pat" "$p"; then
+        FAILED="$FAILED $f(rejects-witness)"
+    elif ! grep -q 'case ResultMatchSemantic' "$p"; then
+        # No named arm at all: falls through to the Unknown-discriminant panic.
+        FAILED="$FAILED $f(no-named-arm)"
+    fi
+done
+
+# The witness must still be EMITTED and still CONSUMED by the Lean backend.
+for f in "$EMIT_SITE:MirInstKind.ResultMatchSemantic(" "$LEAN_SITE:case ResultMatchSemantic("; do
+    path=${f%%:*}; pat=${f#*:}
+    p="$ROOT/$path"
+    if [ ! -f "$p" ]; then
+        echo "ERROR — nothing was checked (missing file: $path)"
+        exit 2
+    fi
+    CHECKED=$((CHECKED + 1))
+    grep -qF "$pat" "$p" || FAILED="$FAILED $path(witness-no-longer-$( [ "$path" = "$EMIT_SITE" ] && echo emitted || echo consumed ))"
+done
+
+# ------------------------------------------------ optional end-to-end case ---
+if [ "$RUN_NATIVE" = "1" ]; then
+    SEED=${SIMPLE_SEED:-$ROOT/src/compiler_rust/target/release/simple}
+    if [ ! -x "$SEED" ]; then
+        echo "ERROR — nothing was checked (no seed binary at $SEED)"
+        exit 2
+    fi
+    nd=$(mktemp -d) || { echo "ERROR — nothing was checked (mktemp failed)"; exit 2; }
+    cat > "$nd/rm.spl" <<'SPL'
+fn divide(a: i64, b: i64) -> Result<i64, text>:
+    if b == 0:
+        return Err("div by zero")
+    Ok(a / b)
+
+fn main():
+    match divide(84, 2):
+        case Ok(v):
+            print("ok {v}")
+        case Err(e):
+            print("err {e}")
+    match divide(1, 0):
+        case Ok(v):
+            print("ok {v}")
+        case Err(e):
+            print("err {e}")
+SPL
+    timeout 1800 "$SEED" native-build "$nd/rm.spl" -o "$nd/rm.bin" > "$nd/nb.log" 2>&1
+    NB_RC=$?
+    CHECKED=$((CHECKED + 1))
+    if [ "$NB_RC" != "0" ]; then
+        FAILED="$FAILED native-build(NB_RC=$NB_RC)"
+    elif grep -q 'E-BACKEND-LLVM-INST-ResultMatchSemantic' "$nd/nb.log"; then
+        FAILED="$FAILED native-build(witness-signature-present)"
+    else
+        OUT=$("$nd/rm.bin" 2>&1)
+        RUN_RC=$?
+        CHECKED=$((CHECKED + 1))
+        if [ "$RUN_RC" != "0" ]; then
+            FAILED="$FAILED run(RUN_RC=$RUN_RC)"
+        else
+            case "$OUT" in
+              *"ok 42"*) ;;
+              *) FAILED="$FAILED run(missing-ok-arm-output)" ;;
+            esac
+            case "$OUT" in
+              *"err div by zero"*) ;;
+              *) FAILED="$FAILED run(missing-err-arm-output)" ;;
+            esac
+        fi
+    fi
+    rm -rf "$nd"
+fi
+
+# ----------------------------------------------------------------- verdict ---
+if [ "$CHECKED" -eq 0 ]; then
+    echo "ERROR — nothing was checked"
+    exit 2
+fi
+if [ -n "$FAILED" ]; then
+    echo "FAIL — $CHECKED case(s) checked, offender(s):$FAILED"
+    exit 1
+fi
+echo "PASS — $CHECKED case(s) checked"
+exit 0

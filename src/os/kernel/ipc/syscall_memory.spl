@@ -1,0 +1,138 @@
+# Memory Syscall Handlers — split from syscall.spl.
+# Contains _prot_to_vmflags, _handle_memory_map, _handle_memory_unmap,
+# _handle_memory_protect.
+
+use os.kernel.types.syscall_types.{SyscallArgs, SyscallResult}
+use os.kernel.types.memory_types.{PhysAddr, VirtAddr, PageFrame, VmFlags, VM_PRESENT, VM_WRITABLE, VM_USER, VM_NO_EXECUTE}
+use os.kernel.scheduler.scheduler.{Scheduler}
+use os.kernel.memory.vmm.{vmm_map_page, vmm_unmap_page, vmm_verify_user_write, vmm_read_pte, PAGE_SIZE, PTE_PRESENT, PTE_ADDR_MASK}
+use os.kernel.memory.memory_owned_pages.{memory_map_owned_pages, memory_release_owned_pages}
+use os.kernel.memory.memory_leveling_runtime.{memory_leveling_runtime_register_cpu_range}
+use os.kernel.memory.memory_swap_runtime.{memory_swap_runtime_poll_pmm_pressure, memory_swap_runtime_release_range}
+use os.kernel.ipc.syscall.{_next_mmap_addr, _is_kernel_addr, NULL_GUARD_LIMIT}
+
+# ============================================================================
+# Memory Syscall Handlers
+# ============================================================================
+
+fn _prot_to_vmflags(prot: u64) -> VmFlags:
+    """Convert mmap-style protection bits to VmFlags.
+
+    prot bit 0 = read, bit 1 = write, bit 2 = exec.
+    Pages are always present and user-accessible.
+    Non-executable unless exec bit is set.
+    """
+    var bits: u32 = VM_PRESENT | VM_USER
+    if (prot & 2) != 0:
+        bits = bits | VM_WRITABLE
+    if (prot & 4) == 0 or (prot & 2) != 0:
+        bits = bits | VM_NO_EXECUTE
+    VmFlags(bits: bits)
+
+fn _handle_memory_map(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult:
+    """Map memory (mmap) using PMM + VMM.
+
+    Args:
+      arg0: address hint (0 = kernel picks via bump allocator)
+      arg1: size in bytes (rounded up to PAGE_SIZE)
+      arg2: protection flags (bit 0=read, bit 1=write, bit 2=exec)
+      arg3: map flags (bit 0=fixed, bit 2=anonymous)
+    Returns: virtual address of mapped region, or -12 (ENOMEM) on failure.
+    """
+    val hint = args.arg0
+    val size = args.arg1
+    val prot = args.arg2
+
+    if size == 0 or size > 0x40000000:
+        return SyscallResult(value: -22)
+
+    val page_count = (size + PAGE_SIZE - 1) / PAGE_SIZE
+    if page_count == 0:
+        return SyscallResult(value: -22)
+
+    if hint != 0 and _is_kernel_addr(hint):
+        return SyscallResult(value: -1)
+
+    var base_addr: u64 = hint
+    if base_addr == 0:
+        base_addr = _next_mmap_addr
+
+    val flags = _prot_to_vmflags(prot)
+
+    if not memory_map_owned_pages(base_addr, page_count, flags):
+        return SyscallResult(value: -12)
+
+    val owner_id = scheduler.current.id
+    val registered = memory_leveling_runtime_register_cpu_range(base_addr, page_count * PAGE_SIZE, owner_id)
+    if not registered.ok:
+        memory_release_owned_pages(base_addr, page_count)
+        return SyscallResult(value: -12)
+
+    if hint == 0:
+        _next_mmap_addr = base_addr + page_count * PAGE_SIZE
+
+    _ = memory_swap_runtime_poll_pmm_pressure()
+
+    SyscallResult(value: base_addr as i64)
+
+fn _handle_memory_unmap(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult:
+    """Unmap memory (munmap) via VMM.
+
+    Args:
+      arg0: virtual address (must be page-aligned)
+      arg1: size in bytes (rounded up to PAGE_SIZE)
+    Returns: 0 on success, -22 (EINVAL) if address not page-aligned.
+    """
+    val addr = args.arg0
+    val size = args.arg1
+
+    if (addr % PAGE_SIZE) != 0:
+        return SyscallResult(value: -22)
+
+    if addr < NULL_GUARD_LIMIT or _is_kernel_addr(addr):
+        return SyscallResult(value: -1)
+
+    val page_count = (size + PAGE_SIZE - 1) / PAGE_SIZE
+    val owner_id = scheduler.current.id
+    val released = memory_swap_runtime_release_range(addr, page_count * PAGE_SIZE, owner_id)
+    if not released.ok:
+        return SyscallResult(value: -16)
+    memory_release_owned_pages(addr, page_count)
+
+    SyscallResult(value: 0)
+
+fn _handle_memory_protect(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult:
+    """Change memory protection (mprotect) via VMM.
+
+    Args:
+      arg0: virtual address (must be page-aligned)
+      arg1: size in bytes (rounded up to PAGE_SIZE)
+      arg2: new protection flags (bit 0=read, bit 1=write, bit 2=exec)
+    Returns: 0 on success, -22 (EINVAL) if address not page-aligned,
+             -14 (EFAULT) if a page in the range is not mapped.
+    """
+    val addr = args.arg0
+    val size = args.arg1
+    val prot = args.arg2
+
+    if (addr % PAGE_SIZE) != 0:
+        return SyscallResult(value: -22)
+
+    if addr < NULL_GUARD_LIMIT or _is_kernel_addr(addr):
+        return SyscallResult(value: -1)
+
+    val page_count = (size + PAGE_SIZE - 1) / PAGE_SIZE
+    val flags = _prot_to_vmflags(prot)
+
+    var offset: u64 = 0
+    while offset < page_count:
+        val virt = VirtAddr(addr: addr + offset * PAGE_SIZE)
+        val existing_pte = vmm_read_pte(virt)
+        if existing_pte == 0:
+            return SyscallResult(value: -14)
+        val phys_addr = existing_pte & PTE_ADDR_MASK
+        val phys = PhysAddr(addr: phys_addr)
+        vmm_map_page(virt, phys, flags)
+        offset = offset + 1
+
+    SyscallResult(value: 0)

@@ -1,0 +1,537 @@
+#!/bin/sh
+# check-no-direct-rt.shs — fail-closed gate on direct rt_* call sites in Simple product code.
+# Verdict is ALWAYS the last stdout line: PASS exit 0 / FAIL exit 1 / ERROR exit 2.
+# Counts are measured, never assumed. See:
+#   doc/03_plan/infra/binary_runtime_hardening/plan.md
+#   doc/01_research/infra/sspec_binary/binary_sspec_rt_hardening_frozen_design_2026-08-18.md
+# Usage: sh scripts/check/check-no-direct-rt.shs [--selftest-only] [--root DIR] [--roots r1,r2,...] [--offenders FILE]
+#
+# --roots (comma-separated repo-relative dirs, default "src,examples,tools,scripts,test"):
+# widened 2026-08-28 from src-only to also scan examples/, tools/, scripts/ and
+# test/ *.spl files (vendor and allowlisted providers still excluded). Passing
+# --roots src reproduces the OLD (pre-2026-08-28) src-only behaviour exactly —
+# the pre-push wiring in check-push-must-pass.shs deliberately still passes
+# --roots src so the mandatory gate's meaning does not change out from under
+# scripts/check/no_direct_rt_baseline.txt without a deliberate re-baseline.
+# The baseline file format is UNCHANGED (a single integer, first line) and is
+# always interpreted as "forbidden count for exactly the --roots this run
+# used" — a baseline recorded under one --roots set is not comparable to a run
+# under a different --roots set; regenerate deliberately (--generate-baseline)
+# when the --roots set for a lane changes. Do NOT run --generate-baseline to
+# paper over the newly-widened roots' real debt.
+#
+# ---- Which population is actually gated (adjudicated 2026-09-05) ----
+# Three invocations of this script exist, and they mean three different
+# things. Confusing them is what makes a bare run look like a failing gate:
+#
+#   1. THE NAMED GATE — config/check/must_check_gates.sdn rows
+#      `push-no-direct-rt` (push, blocking) and `no-direct-rt` (bootstrap,
+#      advisory) both spell the command `... --roots src`, dispatched by
+#      check-push-must-pass.shs. Measured 2026-09-05:
+#        PASS — 16244 file(s) scanned (roots=src, src=6230), forbidden=6230,
+#        extern_decls=6459 (baseline 7776)
+#      The gate is GREEN and src debt (6230) is 1546 BELOW the baseline.
+#
+#   2. THE MISSION-CRITICAL RELEASE LANE —
+#      check-simpleos-mission-critical-release.shs:348 runs this script BARE
+#      with --critical, deliberately covering all five roots with zero
+#      baseline grace (doc/07_guide/app/spipe/mission_critical_robust_sw.md
+#      § No-direct-rt lane). Honestly RED, as that guide records. Do NOT
+#      narrow this script's default ROOTS to make a bare run green: that
+#      would silently shrink this lane's scope, which is weakening a gate.
+#
+#   3. A BARE RUN WITHOUT --critical is the one combination NO wired lane
+#      uses: it measures the five-root population and compares it to the
+#      src-scoped baseline — precisely the incomparability the paragraph
+#      above warns about. Its "FAIL — ... 27454 exceeds baseline 7776" is a
+#      scope/mode mismatch, not gate debt. Tracked wide-roots residual,
+#      measured 2026-09-05:
+#        27454 total = src 6230 + examples 1344 + tools 14 + scripts 308
+#                    + test 19558   (extern_decls 13207)
+#      (mission_critical_robust_sw.md:45 records 27,685 on 2026-08-28; the
+#      231-site drop is real movement, not a re-baseline — nothing in this
+#      lane has a baseline to move.)
+#
+# Known measurement caveat, quantified 2026-09-05 and NOT yet fixed: RT_RE
+# matches any `rt_[a-z0-9_]*(` token, so compiler-owned PURE-SIMPLE functions
+# that merely follow an `rt_`-prefixed naming convention are counted as
+# runtime call sites. The allowlist already documents this for
+# src/lib/nogc_sync_mut/rt_hal/ (~160 sites). The largest single instance is
+# src/compiler/35.semantics/rt_criticality_validation.spl at 155 sites, none
+# of which is a runtime call: rt_expr_dispatches (50), rt_expr_allocates
+# (47), rt_block_dispatches (17), rt_block_allocates (17), rt_stable_fn_id,
+# rt_module_matches, ... are compiler predicates defined in Simple. The
+# permanent fix is a scanner rule excluding these prefixes; it is deliberately
+# NOT applied here because it changes --critical semantics for lane 2 and
+# needs its own selftest fixture.
+
+set -u
+
+ROOT="$(pwd)"
+SELFTEST_ONLY=0
+ROOTS="src,examples,tools,scripts,test"
+# --critical (or SIMPLE_RT_CRITICAL=1): phase-A error mode — ANY forbidden
+# direct rt_* call site fails, the baseline ratchet does not apply. This is
+# the "warning becomes error" lane for critical/mission-critical builds; the
+# default mode stays a ratchet until the product count reaches zero (phase C
+# then promotes critical behavior everywhere).
+CRITICAL=0
+[ "${SIMPLE_RT_CRITICAL:-0}" != "0" ] && CRITICAL=1
+# A VERIFICATION run must NEVER write the tracked baseline file. Only an
+# explicit, opt-in --generate-baseline may update it. Until 2026-08-23 the
+# ratchet rewrote scripts/check/no_direct_rt_baseline.txt as a side effect of
+# a plain (success-path) run whenever the count had improved, leaving a
+# modified tracked file in whatever working copy ran it — which a later
+# `git commit -a` from any lane then silently landed. See
+# doc/08_tracking/bug/no_direct_rt_baseline_auto_write_2026-08-18.md
+GENERATE_BASELINE=0
+# --offenders FILE: write the per-file forbidden-call tally ("<count> <path>")
+# to FILE instead of discarding it. Read-only reporting: it changes no verdict
+# and no exit code, it only makes the ratchet's debt actionable — without it
+# the offender tally is computed and then deleted, so only the top 5 are ever
+# visible and only on a FAIL.
+OFFENDERS_OUT=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --selftest-only) SELFTEST_ONLY=1 ;;
+    --generate-baseline) GENERATE_BASELINE=1 ;;
+    --offenders) shift; OFFENDERS_OUT="$1" ;;
+    --critical) CRITICAL=1 ;;
+    --root) shift; ROOT="$1" ;;
+    --roots) shift; ROOTS="$1" ;;
+    *) echo "ERROR — unknown argument: $1"; exit 2 ;;
+  esac
+  shift
+done
+
+ALLOWLIST="$ROOT/scripts/check/no_direct_rt_allowlist.txt"
+BASELINE_FILE="$ROOT/scripts/check/no_direct_rt_baseline.txt"
+# Call-position matches only; a line whose first non-space char is '#' is a
+# comment and never a call site (measured false positive: js/builtins/date.spl).
+RT_RE='^[^#]*\brt_[a-z0-9_]*\('
+# Declarations are boundary metadata, not runtime calls. They are measured
+# separately so neither class can disappear from the structured result.
+DECL_RE='^[[:space:]]*extern[[:space:]]+fn[[:space:]]+rt_[a-z0-9_]*\('
+
+# On Windows (Git Bash / MSYS / Cygwin) ripgrep emits native `\` path
+# separators while `find` emits `/`. That divergence made the manifest
+# equality check below fail for EVERY scan, so this guard returned ERR and
+# could never run on a Windows host. Normalizing rg's output to `/` is gated
+# on Windows only: on POSIX rg already emits `/`, and a literal backslash is
+# a legal character in a POSIX filename, so rewriting it there would corrupt
+# real paths. The Unix code path is byte-for-byte unchanged.
+case "$(uname -s 2>/dev/null)" in
+  MINGW*|MSYS*|CYGWIN*) RT_WIN_SEPS=1 ;;
+  *) RT_WIN_SEPS=0 ;;
+esac
+
+# There is a SECOND Windows divergence beyond separators: ripgrep is a native
+# Win32 binary, so it resolves an MSYS virtual path to its real Windows form
+# (`/tmp/x` -> `C:/Users/.../Temp/x`, `/c/Users/...` -> `C:/Users/...`) while
+# MSYS `find` keeps the virtual form. Both the manifest comparison and the
+# allowlist `rel=` derivation need rg's paths mapped back to the shell's view.
+# rt_win_native_root prints the native form rg will emit for a shell path.
+rt_win_native_root() {
+  if command -v cygpath >/dev/null 2>&1; then
+    cygpath -m "$1" 2>/dev/null || printf '%s' "$1"
+  else
+    printf '%s' "$1"
+  fi
+}
+
+# rt_normalize_seps <file> <shell-root> <native-root> <nul|nl>
+# Rewrites `\` to `/` and maps the native root prefix back to the shell root,
+# in place, on Windows only. Deliberately NOT a pipe on the rg invocation:
+# `rg ... | tr` would make `$?` report tr's status and silently launder a
+# scanner error into a pass.
+rt_normalize_seps() {
+  [ "$RT_WIN_SEPS" = "1" ] || return 0
+  [ -f "$1" ] || return 0
+  awk -v shroot="$2" -v natroot="$3" -v rs="$4" '
+    BEGIN { if (rs == "nul") { RS = "\0"; ORS = "\0" } }
+    {
+      gsub(/\\/, "/")
+      if (natroot != "" && index($0, natroot) == 1) {
+        $0 = shroot substr($0, length(natroot) + 1)
+      }
+      print
+    }
+  ' "$1" > "$1.norm" || return 1
+  mv -f "$1.norm" "$1" || return 1
+  return 0
+}
+
+# scan_dir <repo-root> <scan-root> <allowlist-file> [offender-output]
+# stdout: "scanned direct allowed forbidden declarations" counts.
+# <repo-root> is used only to compute repo-relative paths for allowlist
+# matching; <scan-root> is the directory actually walked (no auto /src
+# appending — callers pass the exact directory they want scanned).
+scan_dir() {
+  sd_repo_root="$1"; sd_scan_root="$2"; sd_allow="$3"; sd_off="${4:-}"
+  sd_scanned=0; sd_allowed=0; sd_forbidden=0; sd_decls=0
+  sd_native_root=$(rt_win_native_root "$sd_scan_root")
+  if ! command -v rg >/dev/null 2>&1; then
+    echo "ERR"
+    return
+  fi
+  # Build and compare NUL-delimited manifests before scanning. This proves the
+  # fast rg traversal sees the exact find-defined file set; hidden/ignored files
+  # cannot disappear, and either traversal fails closed instead of looking empty.
+  tmp_scan=$(mktemp -d) || { echo "ERR"; return; }
+  tmp_find_raw="$tmp_scan/find.raw"
+  tmp_rg_raw="$tmp_scan/rg.raw"
+  tmp_find="$tmp_scan/find.sorted"
+  tmp_rg="$tmp_scan/rg.sorted"
+  tmp_matches="$tmp_scan/matches"
+  tmp_decls="$tmp_scan/decls"
+  tmp_classified="$tmp_scan/classified"
+  if ! find "$sd_scan_root" -name '*.spl' -type f ! -path '*/vendor/*' -print0 > "$tmp_find_raw"; then
+    rm -f "$tmp_find_raw" "$tmp_rg_raw" "$tmp_find" "$tmp_rg" "$tmp_matches"; rmdir "$tmp_scan"
+    echo "ERR"
+    return
+  fi
+  rg --files --null --no-ignore --hidden --glob '*.spl' --glob '!**/vendor/**' "$sd_scan_root" > "$tmp_rg_raw"
+  st=$?
+  rt_normalize_seps "$tmp_rg_raw" "$sd_scan_root" "$sd_native_root" nul || st=99
+  # `rg --files` uses 1 for an empty but successful traversal.
+  if [ $st -gt 1 ]; then
+    rm -f "$tmp_find_raw" "$tmp_rg_raw" "$tmp_find" "$tmp_rg" "$tmp_matches"; rmdir "$tmp_scan"
+    echo "ERR"
+    return
+  fi
+  if ! LC_ALL=C sort -z "$tmp_find_raw" > "$tmp_find" || ! LC_ALL=C sort -z "$tmp_rg_raw" > "$tmp_rg" || ! cmp -s "$tmp_find" "$tmp_rg"; then
+    rm -f "$tmp_find_raw" "$tmp_rg_raw" "$tmp_find" "$tmp_rg" "$tmp_matches"; rmdir "$tmp_scan"
+    echo "ERR"
+    return
+  fi
+  # Count NUL terminators, not awk records. one-true-awk (/usr/bin/awk on
+  # macOS) does not honour RS="\0": a 2-record NUL-delimited stream comes back
+  # as NR=1, so this reported scanned=1 for the whole tree and the selftest's
+  # hidden/ignored fixture failed closed with ERROR on every BSD-awk host.
+  # `tr -dc` + `wc -c` is exact and portable.
+  if ! sd_scanned=$(tr -dc '\0' < "$tmp_find" | wc -c | tr -d ' \t'); then
+    rm -f "$tmp_find_raw" "$tmp_rg_raw" "$tmp_find" "$tmp_rg" "$tmp_matches"; rmdir "$tmp_scan"
+    echo "ERR"
+    return
+  fi
+  rg --count --no-ignore --hidden --glob '*.spl' --glob '!**/vendor/**' "$RT_RE" "$sd_scan_root" > "$tmp_matches"
+  st=$?
+  # The count outputs feed $f -> rel -> allowlist prefix matching, whose
+  # entries are `/`-separated. Normalizing only the manifest above would
+  # reclassify every allowlisted provider as forbidden.
+  rt_normalize_seps "$tmp_matches" "$sd_scan_root" "$sd_native_root" nl || st=99
+  # rg exit 1 means no matches; >1 is a scanner error.
+  if [ $st -gt 1 ]; then
+    rm -f "$tmp_find_raw" "$tmp_rg_raw" "$tmp_find" "$tmp_rg" "$tmp_matches"; rmdir "$tmp_scan"
+    echo "ERR"
+    return
+  fi
+  rg --count --no-ignore --hidden --glob '*.spl' --glob '!**/vendor/**' "$DECL_RE" "$sd_scan_root" > "$tmp_decls"
+  st=$?
+  rt_normalize_seps "$tmp_decls" "$sd_scan_root" "$sd_native_root" nl || st=99
+  if [ $st -gt 1 ]; then
+    rm -f "$tmp_find_raw" "$tmp_rg_raw" "$tmp_find" "$tmp_rg" "$tmp_matches" "$tmp_decls" "$tmp_classified"; rmdir "$tmp_scan"
+    echo "ERR"
+    return
+  fi
+  awk -F: '
+    FILENAME == ARGV[1] { matched[$1]=$2; order[++count]=$1; next }
+    { declarations[$1]=$2 }
+    END {
+      for (i=1; i<=count; i++) {
+        path=order[i]
+        print path ":" matched[path] ":" (declarations[path] + 0)
+      }
+    }
+  ' "$tmp_matches" "$tmp_decls" > "$tmp_classified"
+  while IFS=: read -r f matched declarations; do
+    [ -n "$f" ] || continue
+    sd_decls=$((sd_decls + declarations))
+    n=$((matched - declarations))
+    [ "$n" -gt 0 ] || continue
+    case "$f" in
+      "$sd_repo_root"/*) rel=${f#"$sd_repo_root"/} ;;
+      ./*) rel=${f#./} ;;
+      *) rel=$f ;;
+    esac
+    allowed=0
+    if [ -f "$sd_allow" ]; then
+      while IFS= read -r pre; do
+        case "$pre" in ''|'#'*) continue ;; esac
+        case "$pre" in
+          suffix:*) sfx=${pre#suffix:}; case "$rel" in *"$sfx") allowed=1; break ;; esac ;;
+          */) case "$rel" in "$pre"*) allowed=1; break ;; esac ;;
+          *) if [ "$rel" = "$pre" ]; then allowed=1; break; fi ;;
+        esac
+      done < "$sd_allow"
+    fi
+    if [ $allowed -eq 1 ]; then
+      sd_allowed=$((sd_allowed + n))
+    else
+      sd_forbidden=$((sd_forbidden + n))
+      if [ -n "$sd_off" ]; then echo "$n $rel" >> "$sd_off"; fi
+    fi
+  done < "$tmp_classified"
+  rm -f "$tmp_find_raw" "$tmp_rg_raw" "$tmp_find" "$tmp_rg" "$tmp_matches" "$tmp_decls" "$tmp_classified"
+  rmdir "$tmp_scan"
+  echo "$sd_scanned $((sd_allowed + sd_forbidden)) $sd_allowed $sd_forbidden $sd_decls"
+}
+
+# scan_roots <repo-root> <comma-roots> <allowlist-file> [offender-output]
+# Loops the comma-separated root list, skips a root that does not exist under
+# <repo-root>, aggregates totals, and prints:
+#   "scanned direct allowed forbidden declarations" on line 1 (aggregate)
+#   "<root> scanned direct allowed forbidden declarations" per existing root after
+# Any single root's scan_dir returning ERR fails the whole call closed (ERR).
+scan_roots() {
+  sr_repo_root="$1"; sr_roots_csv="$2"; sr_allow="$3"; sr_off="${4:-}"
+  sr_scanned=0; sr_direct=0; sr_allowed=0; sr_forbidden=0; sr_decls=0
+  sr_breakdown=""
+  sr_saved_ifs=$IFS
+  IFS=,
+  set -- $sr_roots_csv
+  IFS=$sr_saved_ifs
+  sr_any=0
+  for sr_root_name in "$@"; do
+    [ -n "$sr_root_name" ] || continue
+    sr_root_dir="$sr_repo_root/$sr_root_name"
+    if [ ! -d "$sr_root_dir" ]; then continue; fi
+    sr_any=1
+    sr_r=$(scan_dir "$sr_repo_root" "$sr_root_dir" "$sr_allow" "$sr_off")
+    if [ "$sr_r" = "ERR" ]; then
+      echo "ERR"
+      return
+    fi
+    set -- $sr_r
+    sr_scanned=$((sr_scanned + $1))
+    sr_direct=$((sr_direct + $2))
+    sr_allowed=$((sr_allowed + $3))
+    sr_forbidden=$((sr_forbidden + $4))
+    sr_decls=$((sr_decls + $5))
+    sr_breakdown="$sr_breakdown $sr_root_name=$4"
+    set -- $sr_root_name
+  done
+  if [ $sr_any -eq 0 ]; then
+    echo "ERR"
+    return
+  fi
+  echo "$sr_scanned $sr_direct $sr_allowed $sr_forbidden $sr_decls|$sr_breakdown"
+}
+
+# ---- selftest (runs first, always, fatal) ----
+selftest() {
+  st_dir=$(mktemp -d)
+  # fixture 1: forbidden direct call
+  mkdir -p "$st_dir/a/src/lib/x"
+  printf 'fn f():\n    y = rt_memcpy(a, b, n)\n' > "$st_dir/a/src/lib/x/bad.spl"
+  r=$(scan_dir "$st_dir/a" "$st_dir/a/src" /dev/null)
+  set -- $r
+  if [ "${4:-x}" != "1" ]; then echo "ERROR — selftest failed: forbidden call not counted (got '$r')"; rm -rf "$st_dir"; exit 2; fi
+  # fixture 2: allowlisted provider call
+  mkdir -p "$st_dir/b/src/lib/allowed"
+  printf 'fn f():\n    y = rt_memcpy(a, b, n)\n' > "$st_dir/b/src/lib/allowed/prov.spl"
+  printf 'src/lib/allowed/\n' > "$st_dir/allow.txt"
+  r=$(scan_dir "$st_dir/b" "$st_dir/b/src" "$st_dir/allow.txt")
+  set -- $r
+  if [ "${3:-x}" != "1" ] || [ "${4:-x}" != "0" ]; then echo "ERROR — selftest failed: provider call not classified allowed (got '$r')"; rm -rf "$st_dir"; exit 2; fi
+  # fixture 2a: an exact-file entry must not privilege a lookalike prefix.
+  mkdir -p "$st_dir/b1/src/lib/allowed"
+  printf 'fn f(): rt_memcpy(a, b, n)\n' > "$st_dir/b1/src/lib/allowed/provider.spl"
+  printf 'fn f(): rt_memcpy(a, b, n)\n' > "$st_dir/b1/src/lib/allowed/provider.spl.backup.spl"
+  printf 'src/lib/allowed/provider.spl\n' > "$st_dir/allow1.txt"
+  r=$(scan_dir "$st_dir/b1" "$st_dir/b1/src" "$st_dir/allow1.txt")
+  set -- $r
+  if [ "${3:-x}" != "1" ] || [ "${4:-x}" != "1" ]; then echo "ERROR — selftest failed: exact-file entry admitted a prefix lookalike (got '$r')"; rm -rf "$st_dir"; exit 2; fi
+  # fixture 2b: suffix-match provider (file named *_sffi.spl anywhere)
+  mkdir -p "$st_dir/b2/src/lib/deep/gpu"
+  printf 'fn f():\n    y = rt_memcpy(a, b, n)\n' > "$st_dir/b2/src/lib/deep/gpu/window_sffi.spl"
+  printf 'suffix:_sffi.spl\n' > "$st_dir/allow2.txt"
+  r=$(scan_dir "$st_dir/b2" "$st_dir/b2/src" "$st_dir/allow2.txt")
+  set -- $r
+  if [ "${3:-x}" != "1" ] || [ "${4:-x}" != "0" ]; then echo "ERROR — selftest failed: suffix provider not classified allowed (got '$r')"; rm -rf "$st_dir"; exit 2; fi
+  # fixture 3: empty tree must yield 0 scanned (caller turns that into ERROR)
+  mkdir -p "$st_dir/c/src"
+  r=$(scan_dir "$st_dir/c" "$st_dir/c/src" /dev/null)
+  set -- $r
+  if [ "${1:-x}" != "0" ]; then echo "ERROR — selftest failed: empty tree scanned nonzero (got '$r')"; rm -rf "$st_dir"; exit 2; fi
+  # fixture 4: explicit manifest includes hidden and gitignored source files
+  mkdir -p "$st_dir/d/src/lib/.hidden" "$st_dir/d/src/lib/ignored"
+  printf 'src/lib/ignored/\n' > "$st_dir/d/.gitignore"
+  printf 'fn f(): rt_hidden_call()\n' > "$st_dir/d/src/lib/.hidden/hidden.spl"
+  printf 'fn f(): rt_ignored_call()\n' > "$st_dir/d/src/lib/ignored/ignored.spl"
+  r=$(scan_dir "$st_dir/d" "$st_dir/d/src" /dev/null)
+  set -- $r
+  if [ "${1:-x}" != "2" ] || [ "${2:-x}" != "2" ] || [ "${4:-x}" != "2" ]; then echo "ERROR — selftest failed: hidden/ignored files not scanned equivalently (got '$r')"; rm -rf "$st_dir"; exit 2; fi
+  # fixture 5: traversal failure is an error, never an empty successful scan
+  r=$(scan_dir "$st_dir/missing" "$st_dir/missing/src" /dev/null 2>/dev/null)
+  if [ "$r" != "ERR" ]; then echo "ERROR — selftest failed: find error did not fail closed (got '$r')"; rm -rf "$st_dir"; exit 2; fi
+  # fixture 6: a plain VERIFICATION run must not modify the tracked baseline;
+  # only --generate-baseline may. Regression fence for the recurring
+  # baseline-auto-write defect (2026-08-23).
+  mkdir -p "$st_dir/b/src/lib" "$st_dir/b/scripts/check"
+  printf 'fn f(): rt_a()\n' > "$st_dir/b/src/lib/a.spl"
+  printf '99\n' > "$st_dir/b/scripts/check/no_direct_rt_baseline.txt"
+  st_before=$(cat "$st_dir/b/scripts/check/no_direct_rt_baseline.txt")
+  NO_DIRECT_RT_SELFTEST_CHILD=1 sh "$0" --root "$st_dir/b" --roots src >/dev/null 2>&1
+  st_after=$(cat "$st_dir/b/scripts/check/no_direct_rt_baseline.txt")
+  if [ "$st_before" != "$st_after" ]; then echo "ERROR — selftest failed: verification run rewrote the tracked baseline ($st_before -> $st_after)"; rm -rf "$st_dir"; exit 2; fi
+  # fixture 7: the explicit opt-in flag DOES update it
+  NO_DIRECT_RT_SELFTEST_CHILD=1 sh "$0" --root "$st_dir/b" --roots src --generate-baseline >/dev/null 2>&1
+  st_gen=$(cat "$st_dir/b/scripts/check/no_direct_rt_baseline.txt")
+  if [ "$st_gen" = "$st_before" ]; then echo "ERROR — selftest failed: --generate-baseline did not update the baseline (still '$st_gen')"; rm -rf "$st_dir"; exit 2; fi
+  # fixture 8: a missing baseline on a verification run is ERROR, never a
+  # silent write-and-PASS.
+  rm -f "$st_dir/b/scripts/check/no_direct_rt_baseline.txt"
+  NO_DIRECT_RT_SELFTEST_CHILD=1 sh "$0" --root "$st_dir/b" --roots src >/dev/null 2>&1
+  st_rc=$?
+  if [ "$st_rc" != "2" ] || [ -f "$st_dir/b/scripts/check/no_direct_rt_baseline.txt" ]; then echo "ERROR — selftest failed: missing baseline on verification run did not fail closed (rc=$st_rc)"; rm -rf "$st_dir"; exit 2; fi
+  # fixture 10: an extern declaration is measured but is not a call site.
+  mkdir -p "$st_dir/e/src/lib/x"
+  printf 'extern fn rt_decl(value: i64) -> i64\n' > "$st_dir/e/src/lib/x/decl.spl"
+  r=$(scan_dir "$st_dir/e" "$st_dir/e/src" /dev/null)
+  set -- $r
+  if [ "${4:-x}" != "0" ] || [ "${5:-x}" != "1" ]; then echo "ERROR — selftest failed: declaration not split from calls (got '$r')"; rm -rf "$st_dir"; exit 2; fi
+  # fixture 11: a real invocation remains forbidden and is not a declaration.
+  mkdir -p "$st_dir/f/src/lib/x"
+  printf 'fn f():\n    y = rt_call(1)\n' > "$st_dir/f/src/lib/x/call.spl"
+  r=$(scan_dir "$st_dir/f" "$st_dir/f/src" /dev/null)
+  set -- $r
+  if [ "${4:-x}" != "1" ] || [ "${5:-x}" != "0" ]; then echo "ERROR — selftest failed: call misclassified (got '$r')"; rm -rf "$st_dir"; exit 2; fi
+  # fixture 12: mixed input reconciles two declarations and one call.
+  mkdir -p "$st_dir/g/src/lib/x"
+  printf 'extern fn rt_a(x: i64) -> i64\nextern fn rt_b(x: i64) -> i64\nfn f():\n    y = rt_a(1)\n' > "$st_dir/g/src/lib/x/both.spl"
+  r=$(scan_dir "$st_dir/g" "$st_dir/g/src" /dev/null)
+  set -- $r
+  if [ "${4:-x}" != "1" ] || [ "${5:-x}" != "2" ]; then echo "ERROR — selftest failed: mixed declarations/call did not reconcile (got '$r')"; rm -rf "$st_dir"; exit 2; fi
+  # fixture 13: a call site under examples/ is counted by the default (all)
+  # --roots — proves the widened scan actually reaches examples/.
+  mkdir -p "$st_dir/h/src/lib" "$st_dir/h/examples/foo"
+  printf 'fn f(): rt_x()\n' > "$st_dir/h/examples/foo/demo.spl"
+  r=$(scan_roots "$st_dir/h" "src,examples,tools,scripts,test" /dev/null)
+  set -- ${r%%|*}
+  if [ "${4:-x}" != "1" ]; then echo "ERROR — selftest failed: examples/ call site not counted by default roots (got '$r')"; rm -rf "$st_dir"; exit 2; fi
+  # fixture 14: --roots src (the pre-push compatibility mode) must IGNORE the
+  # same examples/ call site — proves the escape hatch actually narrows scope.
+  r=$(scan_roots "$st_dir/h" "src" /dev/null)
+  set -- ${r%%|*}
+  if [ "${4:-x}" != "0" ]; then echo "ERROR — selftest failed: --roots src did not ignore examples/ call site (got '$r')"; rm -rf "$st_dir"; exit 2; fi
+  # fixture 15: --critical fails with exactly one forbidden site and passes
+  # with zero. Exercised end to end through the real CLI, not scan_roots.
+  mkdir -p "$st_dir/i/src/lib"
+  printf 'fn f(): rt_one()\n' > "$st_dir/i/src/lib/one.spl"
+  NO_DIRECT_RT_SELFTEST_CHILD=1 sh "$0" --root "$st_dir/i" --roots src --critical >/dev/null 2>&1
+  st_crit_rc=$?
+  if [ "$st_crit_rc" != "1" ]; then echo "ERROR — selftest failed: --critical did not FAIL on one forbidden site (rc=$st_crit_rc)"; rm -rf "$st_dir"; exit 2; fi
+  mkdir -p "$st_dir/j/src/lib" "$st_dir/j/scripts/check"
+  printf 'fn f(): pass_do_nothing()\n' > "$st_dir/j/src/lib/clean.spl"
+  printf '0\n' > "$st_dir/j/scripts/check/no_direct_rt_baseline.txt"
+  NO_DIRECT_RT_SELFTEST_CHILD=1 sh "$0" --root "$st_dir/j" --roots src --critical >/dev/null 2>&1
+  st_crit_rc2=$?
+  if [ "$st_crit_rc2" != "0" ]; then echo "ERROR — selftest failed: --critical did not PASS on zero forbidden sites (rc=$st_crit_rc2)"; rm -rf "$st_dir"; exit 2; fi
+  rm -rf "$st_dir"
+}
+
+if [ "${NO_DIRECT_RT_SELFTEST_CHILD:-0}" = "0" ]; then selftest; fi
+if [ $SELFTEST_ONLY -eq 1 ]; then
+  echo "PASS — 16 selftest fixture(s) checked"
+  exit 0
+fi
+
+# ---- real scan ----
+if [ ! -d "$ROOT/src" ]; then echo "ERROR — nothing was checked: no src/ under $ROOT"; exit 2; fi
+if [ -n "$OFFENDERS_OUT" ]; then OFF_FILE="$OFFENDERS_OUT"; else OFF_FILE="$(mktemp).off"; fi
+: > "$OFF_FILE"
+# Keep the tally only when the caller explicitly asked for it.
+rt_off_done() {
+  if [ -z "$OFFENDERS_OUT" ]; then rm -f "$OFF_FILE"; fi
+  return 0
+}
+counts=$(scan_roots "$ROOT" "$ROOTS" "$ALLOWLIST" "$OFF_FILE")
+if [ "$counts" = "ERR" ]; then
+  rt_off_done
+  echo "ERROR — nothing was checked: direct runtime scan failed"
+  exit 2
+fi
+agg="${counts%%|*}"
+breakdown="${counts#*|}"
+set -- $agg
+if [ $# -ne 5 ]; then
+  rt_off_done
+  echo "ERROR — nothing was checked: direct runtime scan failed"
+  exit 2
+fi
+scanned=$1
+direct_total=$2
+allowed=$3
+forbidden=$4
+decls=$5
+
+if [ $((allowed + forbidden)) -ne "$direct_total" ]; then
+  rt_off_done
+  echo "ERROR — count arithmetic does not balance"
+  exit 2
+fi
+
+echo "rt_boundary:"
+echo "  scanner_ran: true"
+echo "  roots: $ROOTS"
+echo "  scanned_files: $scanned"
+echo "  direct_total: $direct_total"
+echo "  allowed_provider: $allowed"
+echo "  forbidden_product: $forbidden"
+echo "  forbidden_by_root:$breakdown"
+echo "  extern_declarations: $decls"
+echo "  match_total_incl_declarations: $((direct_total + decls))"
+
+if [ "$scanned" -eq 0 ]; then rt_off_done; echo "ERROR — nothing was checked"; exit 2; fi
+
+# ---- critical mode: phase-A error, no ratchet grace ----
+if [ $CRITICAL -eq 1 ] && [ "$forbidden" -gt 0 ]; then
+  top=$(sort -rn "$OFF_FILE" | head -5 | awk '{printf "%s:%s ", $2, $1}')
+  rt_off_done
+  echo "fix: route through the std.* semantic API, or a sanctioned provider alias (see scripts/check/no_direct_rt_allowlist.txt)."
+  echo "FAIL — critical mode: $forbidden forbidden direct rt_* call site(s) (roots=$ROOTS,$breakdown), extern_decls=$decls; top offenders: $top"
+  exit 1
+fi
+
+# ---- baseline ratchet ----
+# Read-only unless --generate-baseline was passed.
+if [ ! -f "$BASELINE_FILE" ]; then
+  if [ $GENERATE_BASELINE -eq 1 ]; then
+    echo "$forbidden" > "$BASELINE_FILE"
+    rt_off_done
+    echo "PASS — $scanned file(s) scanned (roots=$ROOTS,$breakdown), forbidden=$forbidden, extern_decls=$decls (baseline recorded)"
+    exit 0
+  fi
+  rt_off_done
+  echo "ERROR — nothing was checked: no baseline at $BASELINE_FILE (run with --generate-baseline to record one)"
+  exit 2
+fi
+baseline=$(head -1 "$BASELINE_FILE" | tr -cd '0-9')
+if [ -z "$baseline" ]; then rt_off_done; echo "ERROR — baseline file unreadable: $BASELINE_FILE"; exit 2; fi
+
+if [ "$forbidden" -gt "$baseline" ]; then
+  top=$(sort -rn "$OFF_FILE" | head -5 | awk '{printf "%s:%s ", $2, $1}')
+  rt_off_done
+  # Fix-it guidance printed BEFORE the verdict — the verdict must stay the
+  # last stdout line per the check-script contract.
+  echo "fix: route through the std.* semantic API (e.g. std.io.file.read_text, std.nogc_sync_mut.compression.gzip.crc32_text),"
+  echo "     or — for a genuine runtime primitive — import a sanctioned provider alias:"
+  echo "         use runtime.primitive.{rt_memcpy as _memory_copy_primitive}   # provider dirs only, see scripts/check/no_direct_rt_allowlist.txt"
+  echo "     Never add a new 'extern fn rt_*' to product code. Process: doc/03_plan/infra/binary_runtime_hardening/plan.md"
+  echo "     If this FAIL is caused by the 2026-08-28 --roots widening (examples/tools/scripts/test), see"
+  echo "     doc/07_guide/app/spipe/mission_critical_robust_sw.md and pass --roots src to reproduce pre-widening scope."
+  echo "FAIL — forbidden direct rt_* count $forbidden exceeds baseline $baseline (roots=$ROOTS,$breakdown), extern_decls=$decls; top offenders: $top"
+  exit 1
+fi
+rt_off_done
+if [ $GENERATE_BASELINE -eq 1 ]; then
+  echo "$forbidden" > "$BASELINE_FILE"
+  echo "PASS — $scanned file(s) scanned (roots=$ROOTS,$breakdown), forbidden=$forbidden, extern_decls=$decls (baseline updated $baseline -> $forbidden)"
+  exit 0
+fi
+if [ "$forbidden" -lt "$baseline" ]; then
+  echo "note: forbidden count improved ($forbidden < baseline $baseline); tighten deliberately with --generate-baseline."
+fi
+echo "PASS — $scanned file(s) scanned (roots=$ROOTS,$breakdown), forbidden=$forbidden, extern_decls=$decls (baseline $baseline)"
+exit 0

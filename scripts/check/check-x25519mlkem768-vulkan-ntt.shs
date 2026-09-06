@@ -1,0 +1,61 @@
+#!/bin/sh
+set -eu
+
+repo_dir=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+glslang_bin=${GLSLANG_VALIDATOR:-glslangValidator}
+spirv_val_bin=${SPIRV_VAL:-spirv-val}
+cc_bin=${CC:-cc}
+artifact_dir=${X25519MLKEM768_VULKAN_ARTIFACT_DIR:-$repo_dir/build/evidence/x25519mlkem768/vulkan}
+forward_source="$repo_dir/src/os/crypto/x25519_mlkem768/kernels/ml_kem_ntt_forward.comp"
+inverse_source="$repo_dir/src/os/crypto/x25519_mlkem768/kernels/ml_kem_ntt_inverse.comp"
+probe_source="$repo_dir/test/fixtures/crypto/x25519mlkem768/vulkan_ntt_probe.c"
+
+if ! command -v "$glslang_bin" >/dev/null 2>&1; then
+    echo "STATUS: BLOCKED glslangValidator unavailable: $glslang_bin"
+    exit 2
+fi
+if ! command -v "$spirv_val_bin" >/dev/null 2>&1; then
+    echo "STATUS: BLOCKED spirv-val unavailable: $spirv_val_bin"
+    exit 2
+fi
+
+tmp_dir=$(mktemp -d /tmp/x25519mlkem768-vulkan-ntt.XXXXXX)
+cleanup() {
+    case "$tmp_dir" in
+        /tmp/x25519mlkem768-vulkan-ntt.*) rm -rf -- "$tmp_dir" ;;
+        *) echo "refusing unsafe cleanup target: $tmp_dir" >&2 ;;
+    esac
+}
+trap cleanup EXIT HUP INT TERM
+
+forward_spv="$tmp_dir/x25519mlkem768_ntt_forward.spv"
+inverse_spv="$tmp_dir/x25519mlkem768_ntt_inverse.spv"
+probe_bin="$tmp_dir/x25519mlkem768_vulkan_ntt_probe"
+"$glslang_bin" -V --target-env vulkan1.1 -o "$forward_spv" "$forward_source"
+"$glslang_bin" -V --target-env vulkan1.1 -o "$inverse_spv" "$inverse_source"
+"$spirv_val_bin" --target-env vulkan1.1 "$forward_spv"
+"$spirv_val_bin" --target-env vulkan1.1 "$inverse_spv"
+"$cc_bin" -std=c11 -O2 -Wall -Wextra -Werror \
+    -I"$repo_dir/test/fixtures/crypto/x25519mlkem768" \
+    "$probe_source" -lvulkan -o "$probe_bin"
+stage=1
+while [ "$stage" -le 7 ]; do
+    "$probe_bin" "$forward_spv" forward "$stage"
+    "$probe_bin" "$inverse_spv" inverse "$stage"
+    stage=$((stage + 1))
+done
+
+mkdir -p "$artifact_dir"
+cp "$forward_spv" "$artifact_dir/x25519mlkem768_ntt_forward.spv"
+cp "$inverse_spv" "$artifact_dir/x25519mlkem768_ntt_inverse.spv"
+cp "$probe_bin" "$artifact_dir/x25519mlkem768_vulkan_ntt_probe"
+echo "vulkan_forward_source_sha256=$(sha256sum "$forward_source" | awk '{print $1}')"
+echo "vulkan_inverse_source_sha256=$(sha256sum "$inverse_source" | awk '{print $1}')"
+echo "vulkan_forward_spirv_sha256=$(sha256sum "$forward_spv" | awk '{print $1}')"
+echo "vulkan_inverse_spirv_sha256=$(sha256sum "$inverse_spv" | awk '{print $1}')"
+echo "vulkan_probe_source_sha256=$(sha256sum "$probe_source" | awk '{print $1}')"
+echo "vulkan_probe_binary_sha256=$(sha256sum "$probe_bin" | awk '{print $1}')"
+echo "glslang_validator_sha256=$(sha256sum "$(command -v "$glslang_bin")" | awk '{print $1}')"
+echo "spirv_val_sha256=$(sha256sum "$(command -v "$spirv_val_bin")" | awk '{print $1}')"
+echo "vulkan_artifact_dir=$artifact_dir"
+echo "STATUS: PASS X25519MLKEM768 Vulkan forward/inverse physical evidence"

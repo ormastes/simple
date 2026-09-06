@@ -1,0 +1,120 @@
+#!/bin/sh
+# check-hosted-string-trim-case-raw-receiver.shs
+#
+# Fences the hosted-lane sibling of the 2026-08-11 freestanding heap-vs-raw
+# defects: rt_string_trim / rt_string_trim_start / rt_string_trim_end /
+# rt_string_to_lower / rt_string_to_upper in src/runtime/runtime_native.c
+# degraded on a raw, untagged char* receiver -- trim* silently passed the
+# raw pointer through unchanged, and to_lower/to_upper silently returned
+# nil. Reachable wherever MIR's ensure_tagged_str normalization is skipped
+# (gated on resolution_is_unresolved in
+# src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl).
+#
+# Bug: doc/08_tracking/bug/hosted_string_trim_case_raw_receiver_degrades_2026-08-11.md
+#
+# Two fail-closed checks:
+#   1. The selfcheck binary builds and passes. It first REPRODUCES the
+#      defect with the old predicate shape (exits 2 "vacuous" if it cannot),
+#      then asserts the fixed predicate, including negative controls that
+#      heap-string receivers and genuinely non-text small words are
+#      unaffected.
+#   2. runtime_native.c actually carries the fix: every one of the five
+#      functions calls the shared rt_string_promote_raw_receiver helper on
+#      its raw-receiver arm.
+#
+# Verdict is the LAST line of stdout:
+#   PASS  — <n> check(s) ...            exit 0
+#   FAIL  — ...                         exit 1
+#   ERROR — nothing was checked         exit 2
+
+set -u
+
+ROOT=$(cd "$(dirname "$0")/../.." 2>/dev/null && pwd)
+if [ -z "$ROOT" ] || [ ! -d "$ROOT/src/runtime" ]; then
+    echo "ERROR — nothing was checked (not in a repo clone: no src/runtime under '$ROOT')"
+    exit 2
+fi
+cd "$ROOT" || { echo "ERROR — nothing was checked (cannot cd to repo root)"; exit 2; }
+
+SELFCHECK="src/runtime/test/rt_string_trim_case_raw_receiver_selfcheck.c"
+IMPL="src/runtime/runtime_native.c"
+
+checks=0
+fails=0
+
+# ---- check 1: selfcheck builds and passes -----------------------------------
+if [ ! -f "$SELFCHECK" ]; then
+    echo "ERROR — nothing was checked (missing selfcheck source $SELFCHECK)"
+    exit 2
+fi
+
+CC=${CC:-cc}
+BIN=$(mktemp -t rt_trimcase_selfcheck.XXXXXX) || {
+    echo "ERROR — nothing was checked (cannot create temp file)"; exit 2; }
+trap 'rm -f "$BIN"' EXIT INT TERM HUP
+
+if ! "$CC" -O1 -Wall -o "$BIN" "$SELFCHECK" 2>&1; then
+    echo "selfcheck: BUILD FAILED"
+    echo "FAIL — selfcheck did not compile"
+    exit 1
+fi
+
+sc_out=$("$BIN" 2>&1)
+sc_rc=$?
+echo "$sc_out" | sed 's/^/  /'
+checks=$((checks + 1))
+if [ "$sc_rc" -eq 2 ]; then
+    echo "ERROR — nothing was checked (selfcheck vacuous: defect did not reproduce)"
+    exit 2
+fi
+if [ "$sc_rc" -ne 0 ]; then
+    fails=$((fails + 1))
+fi
+
+# ---- check 2: runtime_native.c actually carries the fix ---------------------
+if [ ! -f "$IMPL" ]; then
+    echo "ERROR — nothing was checked (missing $IMPL)"
+    exit 2
+fi
+
+FNS="rt_string_trim rt_string_trim_start rt_string_trim_end rt_string_ascii_case"
+for fn in $FNS; do
+    checks=$((checks + 1))
+    # The function's body (up to the next top-level '}' at column 0) must
+    # call the shared promotion helper.
+    body=$(awk -v fn="$fn" '
+        $0 ~ "^(static )?int64_t " fn "\\(" { grab=1 }
+        grab { print }
+        grab && /^}/ { exit }
+    ' "$IMPL")
+    if [ -z "$body" ]; then
+        echo "  FUNCTION NOT FOUND: $fn in $IMPL"
+        fails=$((fails + 1))
+        continue
+    fi
+    if printf '%s' "$body" | grep -q "rt_string_promote_raw_receiver"; then
+        echo "  fixed: $fn"
+    else
+        echo "  UNFIXED (no rt_string_promote_raw_receiver call): $fn"
+        fails=$((fails + 1))
+    fi
+done
+
+checks=$((checks + 1))
+if grep -q "^static int rt_string_promote_raw_receiver" "$IMPL"; then
+    echo "  helper defined: rt_string_promote_raw_receiver"
+else
+    echo "  MISSING helper definition: rt_string_promote_raw_receiver"
+    fails=$((fails + 1))
+fi
+
+if [ "$checks" -eq 0 ]; then
+    echo "ERROR — nothing was checked"
+    exit 2
+fi
+if [ "$fails" -ne 0 ]; then
+    echo "FAIL — $fails of $checks check(s) failed"
+    exit 1
+fi
+echo "PASS — $checks check(s) passed, hosted string trim/case raw-receiver degradation fenced"
+exit 0

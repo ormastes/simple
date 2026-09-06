@@ -1,0 +1,73 @@
+#!/bin/sh
+# Exact host-signing versus trusted Simple canonical-body roundtrip for every
+# supported 64-bit server target, plus cross-target substitution rejection.
+set -eu
+fail() { echo "simpleos-server-auth-multiarch: $*" >&2; exit 1; }
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/simpleos-server-auth-multiarch.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+
+compiler=${SIMPLEOS_ROUNDTRIP_COMPILER:-/mnt/data/bs2/fresh-admitted-f5c26e-20260821/stage3/x86_64-unknown-linux-gnu/stage2-admitted/simple}
+admission=$(dirname "$compiler")/admission.env
+if [ ! -x "$compiler" ] || [ ! -s "$admission" ]; then
+    echo 'SKIP SimpleOS server multiarch auth roundtrip: admitted Simple helper unavailable'
+    exit 0
+fi
+openssl genpkey -algorithm ED25519 -out "$tmp/private.pem" >/dev/null 2>&1
+openssl pkey -in "$tmp/private.pem" -pubout -out "$tmp/public.pem" >/dev/null 2>&1
+
+build_tool() {
+    arch=$1 entry=$2
+    env SIMPLE_COMPILER_ADMISSION="$admission" SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_LIB=src \
+        "$compiler" native-build --cache-dir "$tmp/cache-$arch" \
+        --source src/os --source src/lib --source src/app --entry-closure \
+        --entry "$entry" --backend llvm --opt-level=standard \
+        --output "$tmp/tool-$arch" >"$tmp/build-$arch.log" 2>&1 ||
+        fail "$arch trusted canonical-body producer build failed"
+}
+build_tool x86_64 src/app/x86_64_auth_contract/main.spl
+build_tool arm64 src/app/arm64_auth_contract/main.spl
+build_tool riscv64 src/app/rv64_auth_contract/main.spl
+
+sign_and_recompute() {
+    arch=$1 prefix=$2
+    out="$tmp/media-$arch"
+    env "SIMPLEOS_${prefix}_AUTH_CONTRACT_TOOL=$tmp/tool-$arch" \
+        "SIMPLEOS_${prefix}_AUTH_MOUNT_ID=1" \
+        "SIMPLEOS_${prefix}_AUTH_MOUNT_GENERATION=1" \
+        "SIMPLEOS_${prefix}_AUTH_FILE_ID=4294967297" \
+        "SIMPLEOS_${prefix}_AUTH_FILE_GENERATION=1" \
+        "SIMPLEOS_SERVER_AUTH_BODY_OUTPUT=$tmp/signed-$arch.body" \
+        sh scripts/os/sign_simpleos_servers_payload.shs "$arch" "$compiler" "$compiler" \
+        "$out" "$tmp/private.pem" "$tmp/public.pem" >/dev/null
+    field() { sed -n "s/^$1=//p" "$2"; }
+    "$tmp/tool-$arch" "$tmp/recomputed-$arch.body" \
+        "$(field image_hash "$out/SERVER.MAN")" \
+        "$(field kernel_hash "$out/SERVER.ADM")" \
+        "$(field trust_root_hash "$out/SERVER.ADM")" 1 1 4294967297 1
+    cmp -s "$tmp/signed-$arch.body" "$tmp/recomputed-$arch.body" ||
+        fail "$arch host-vs-Simple canonical body mismatch"
+    [ "$(sha256sum "$tmp/signed-$arch.body" | awk '{print $1}')" = \
+      "$(field manifest_hash "$out/SERVER.ADM")" ] ||
+        fail "$arch signed body digest mismatch"
+    printf '%s' "$(field signature_hex "$out/SERVER.SIG")" | xxd -r -p > "$tmp/signature-$arch.raw"
+    openssl pkeyutl -verify -rawin -pubin -inkey "$tmp/public.pem" \
+        -sigfile "$tmp/signature-$arch.raw" -in "$tmp/recomputed-$arch.body" >/dev/null 2>&1 ||
+        fail "$arch signature does not verify over Simple recompute"
+}
+sign_and_recompute x86_64 X86_64
+sign_and_recompute arm64 ARM64
+sign_and_recompute riscv64 RV64
+
+cmp -s "$tmp/recomputed-x86_64.body" "$tmp/recomputed-arm64.body" &&
+    fail 'x86_64 and ARM64 policy bodies are interchangeable'
+cmp -s "$tmp/recomputed-arm64.body" "$tmp/recomputed-riscv64.body" &&
+    fail 'ARM64 and RV64 policy bodies are interchangeable'
+if openssl pkeyutl -verify -rawin -pubin -inkey "$tmp/public.pem" \
+    -sigfile "$tmp/signature-x86_64.raw" -in "$tmp/recomputed-arm64.body" >/dev/null 2>&1; then
+    fail 'x86_64 signature accepted over ARM64 policy body'
+fi
+if openssl pkeyutl -verify -rawin -pubin -inkey "$tmp/public.pem" \
+    -sigfile "$tmp/signature-riscv64.raw" -in "$tmp/recomputed-x86_64.body" >/dev/null 2>&1; then
+    fail 'RV64 signature accepted over x86_64 policy body'
+fi
+echo 'PASS SimpleOS server host-vs-Simple auth roundtrip architectures=x86_64,arm64,riscv64 cross_arch=rejected'

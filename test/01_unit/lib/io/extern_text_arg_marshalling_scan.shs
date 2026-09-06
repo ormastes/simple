@@ -1,0 +1,57 @@
+#!/bin/sh
+# Class detector: "extern symbol registered but dispatched with the WRONG
+# MARSHALLING".
+#
+# The Simple `text` type lowers to a RuntimeString handle. A runtime symbol
+# whose C ABI declares `(ptr: *const u8, len: u64)` therefore needs its single
+# Simple-side `text` argument EXPANDED into two machine words at the call site.
+# That expansion is driven by hand-maintained ALLOWLISTS:
+#
+#   src/compiler_rust/compiler/src/codegen/instr/calls.rs   text_arg_indices()  (cranelift / JIT)
+#   src/compiler_rust/compiler/src/codegen/llvm/functions/calls.rs text_arg_indices()  (LLVM / AOT)
+#
+# A symbol absent from a list is NOT a link error and NOT a crash: the handle is
+# passed as `ptr` and whatever occupies the next argument register becomes
+# `len`. The callee then reports a plain, quiet negative result — `false`,
+# `-1` — at exit 0. That is how the whole `rt_io_file_*` text-taking half was
+# broken under JIT while the interpreter path was correct.
+#
+# Usage: sh extern_text_arg_marshalling_scan.shs [repo_root]
+# Output: `MISSING_INSTR <sym>` / `MISSING_LLVM <sym>` lines, then a
+#         `SCANNED <n> text-taking symbol(s)` receipt. n == 0 is a broken scan,
+#         never a pass.
+set -u
+ROOT="${1:-.}"
+cd "$ROOT" || exit 2
+
+INSTR=src/compiler_rust/compiler/src/codegen/instr/calls.rs
+LLVM=src/compiler_rust/compiler/src/codegen/llvm/functions/calls.rs
+[ -f "$INSTR" ] && [ -f "$LLVM" ] || { echo "ERROR missing codegen tables"; exit 2; }
+
+TMP="${TMPDIR:-/tmp}/.extern_text_arg.$$"
+mkdir -p "$TMP" || exit 2
+
+# 1. Runtime symbols whose C ABI takes a `*const u8` (a (ptr,len) pair).
+awk '
+  /extern "C" fn rt_[a-z0-9_]*/ {
+    match($0, /fn rt_[a-z0-9_]*/); cur = substr($0, RSTART+3, RLENGTH-3); pend = NR + 6
+  }
+  /\*const u8/ { if (NR <= pend && cur != "") { print cur; cur = "" } }
+' src/compiler_rust/runtime/src/value/sffi/file_io/*.rs | sort -u > "$TMP/abi"
+
+# 2. Of those, the ones src/lib declares to Simple with a `text` parameter.
+: > "$TMP/text"
+while read -r sym; do
+  if /usr/bin/grep -rhqE "extern fn $sym\([^)]*: *text" --include=*.spl src/lib 2>/dev/null; then
+    echo "$sym" >> "$TMP/text"
+  fi
+done < "$TMP/abi"
+
+# 3. Offenders, per table.
+while read -r sym; do
+  [ "$(/usr/bin/grep -c "\"$sym\"" "$INSTR")" -eq 0 ] && echo "MISSING_INSTR $sym"
+  [ "$(/usr/bin/grep -c "\"$sym\"" "$LLVM")" -eq 0 ] && echo "MISSING_LLVM $sym"
+done < "$TMP/text"
+
+echo "SCANNED $(wc -l < "$TMP/text" | tr -d ' ') text-taking symbol(s)"
+rm -rf "$TMP"

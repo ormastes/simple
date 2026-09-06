@@ -1,0 +1,67 @@
+use std.test.{describe, it, expect}
+use std.fs.{file_read}
+
+describe "x86-32 explicit user page-root owner static contract":
+    it "issues roots only from the bounded serialized owner":
+        val body = file_read("src/os/kernel/arch/x86_32/user_page_root_owner_v1.spl")
+        expect(body).to_contain("x86_32_user_root_max_live_v1() -> i64: 4")
+        expect(body).to_contain("mutex_raw_lock")
+        expect(body).to_contain("x86_32_user_root_create_v1")
+        expect(body).to_contain("_x86_32_root_next_generation_v1")
+
+    it "rejects duplicate physical provenance across every live root":
+        val body = file_read("src/os/kernel/arch/x86_32/user_page_root_owner_v1.spl")
+        expect(body).to_contain("_x86_32_phys_owned_v1")
+        expect(body).to_contain("for slot in _x86_32_root_slots_v1")
+        expect(body).to_contain("not _x86_32_phys_owned_v1(phys)")
+        expect(body).to_contain("if slot.root_phys == phys")
+        expect(body).to_contain("for table in slot.tables")
+
+    it "reports indeterminate publication without returning provisional ownership":
+        val body = file_read("src/os/kernel/arch/x86_32/user_page_root_owner_v1.spl")
+        expect(body).to_contain("RegisteredQuarantined")
+        expect(body).to_contain("CreatedQuarantined")
+        expect(body).to_contain("UnregisteredQuarantined")
+        expect(body).to_contain("_x86_32_root_quarantined_v1 = true")
+
+    it "states classic non-PAE execute-disable limitations honestly":
+        val body = file_read("src/os/kernel/arch/x86_32/user_page_root_owner_v1.spl")
+        expect(body).to_contain("ExecuteDisableUnavailable")
+        expect(body).to_contain("execution_authorized: false")
+        expect(body).to_contain("hardware_wx_enforced: false")
+        expect(body).to_contain("scheduler_adoption_permitted: false")
+        expect(body).to_contain("flags.writable() and not flags.no_execute()")
+
+    it "keeps scheduler CR3 and CPL3 readiness blocked":
+        val body = file_read("src/os/kernel/arch/x86_32/user_page_root_owner_v1.spl")
+        expect(body).to_contain("x86_32_user_root_scheduler_ready_v1() -> bool: false")
+        expect(body).to_contain("Scheduler CR3/CPL3 adoption is deliberately absent")
+
+    it "makes post-free destruction terminal rather than retryable":
+        val body = file_read("src/os/kernel/arch/x86_32/user_page_root_owner_v1.spl")
+        expect(body).to_contain("state: X8632UserRootStateV1.Destroyed")
+        expect(body).to_contain("Post-free failure remains terminal")
+
+    it "never treats a 4 MiB PDE as a private page-table pointer":
+        val body = file_read("src/os/kernel/arch/x86_32/user_page_root_owner_v1.spl")
+        expect(body).to_contain("_X86_32_PTE_PAGE_SIZE_V1")
+        expect(body).to_contain("_x86_32_owned_table_v1")
+
+    it "allocates leaf frames inside the provenance owner":
+        val body = file_read("src/os/kernel/arch/x86_32/user_page_root_owner_v1.spl")
+        expect(body).to_contain("x86_32_user_allocate_and_map_v1")
+        expect(body).to_contain("val leaf_frame = pmm_alloc_page()")
+
+    it "publishes table ownership before fallible leaf allocation":
+        val body = file_read("src/os/kernel/arch/x86_32/user_page_root_owner_v1.spl")
+        val table_publish = body.index_of("# Publish table ownership immediately")
+        val leaf_allocate = body.index_of("val leaf_frame = pmm_alloc_page()")
+        expect(table_publish).to_be_greater_than(0)
+        expect(leaf_allocate).to_be_greater_than(table_publish)
+
+    it "scrubs a leaf before publishing its present PTE":
+        val body = file_read("src/os/kernel/arch/x86_32/user_page_root_owner_v1.spl")
+        val scrub = body.index_of("_x86_32_zero_table_v1(phys)")
+        val publish = body.index_of("_x86_32_write_entry_v1(table, pt_index, pte)")
+        expect(scrub).to_be_greater_than(0)
+        expect(publish).to_be_greater_than(scrub)

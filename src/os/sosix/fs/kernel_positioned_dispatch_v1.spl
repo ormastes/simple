@@ -1,0 +1,94 @@
+"""Architecture-neutral installation state for positioned syscalls 134/135.
+
+The kernel/VFS owner stores this value beside its authenticated caller and
+backend state.  Installation accepts only a ready lifecycle owner.  Dispatch
+recognizes exactly the two registered-buffer positioned syscall IDs, threads
+every accepted registry/token mutation into the returned state, and fails
+closed while no honest live owner is installed.
+"""
+
+use os.kernel.types.syscall_types.{SyscallArgs, SyscallResult}
+use os.sosix.fs.positioned_dispatch_owner_v1.{
+    SosixFsPositionedDispatchOwnerV1,
+    sosix_fs_dispatch_positioned_with_owner_v1
+}
+use os.sosix.fs.positioned_syscall_v1.{
+    SOSIX_FS_PREAD_REGISTERED_V1, SOSIX_FS_PWRITE_REGISTERED_V1
+}
+use os.sosix.fs.service_vfs_backend_v1.SosixPositionedVfsBackendV1
+
+pub struct SosixFsKernelPositionedStateV1:
+    installed: bool
+    owner: SosixFsPositionedDispatchOwnerV1
+
+pub struct SosixFsKernelPositionedInstallResultV1:
+    accepted: bool
+    reason: text
+    state: SosixFsKernelPositionedStateV1
+
+pub struct SosixFsKernelPositionedDispatchV1:
+    recognized: bool
+    accepted: bool
+    reason: text
+    result: SyscallResult
+    state: SosixFsKernelPositionedStateV1
+
+export SosixFsKernelPositionedStateV1
+export SosixFsKernelPositionedInstallResultV1, SosixFsKernelPositionedDispatchV1
+
+fn _owner_ready_v1(owner: SosixFsPositionedDispatchOwnerV1) -> bool:
+    owner.registry_owner.service_endpoint != 0 and
+        owner.registry_owner.service_generation != 0 and
+        owner.operation_slot != 0 and owner.operation_generation != 0 and
+        owner.next_request_token != 0
+
+pub fn sosix_fs_kernel_positioned_state_v1(
+    owner: SosixFsPositionedDispatchOwnerV1
+) -> SosixFsKernelPositionedStateV1:
+    SosixFsKernelPositionedStateV1(installed: false, owner: owner)
+
+pub fn sosix_fs_kernel_install_positioned_owner_v1(
+    state: SosixFsKernelPositionedStateV1,
+    owner: SosixFsPositionedDispatchOwnerV1
+) -> SosixFsKernelPositionedInstallResultV1:
+    if not _owner_ready_v1(owner):
+        return SosixFsKernelPositionedInstallResultV1(
+            accepted: false, reason: "positioned-owner-not-ready", state: state)
+    SosixFsKernelPositionedInstallResultV1(
+        accepted: true, reason: "positioned-owner-installed",
+        state: SosixFsKernelPositionedStateV1(installed: true, owner: owner))
+
+pub fn sosix_fs_kernel_dispatch_positioned_v1(
+    state: SosixFsKernelPositionedStateV1,
+    args: SyscallArgs,
+    caller_authenticated: bool,
+    caller_process_id: u64,
+    backend: SosixPositionedVfsBackendV1
+) -> SosixFsKernelPositionedDispatchV1:
+    val recognized = args.id == SOSIX_FS_PREAD_REGISTERED_V1 or
+        args.id == SOSIX_FS_PWRITE_REGISTERED_V1
+    if not recognized:
+        return SosixFsKernelPositionedDispatchV1(
+            recognized: false, accepted: false,
+            reason: "not-positioned-syscall", result: SyscallResult(value: -38),
+            state: state)
+    if not state.installed or not _owner_ready_v1(state.owner):
+        return SosixFsKernelPositionedDispatchV1(
+            recognized: true, accepted: false,
+            reason: "positioned-owner-not-installed", result: SyscallResult(value: -95),
+            state: state)
+    val dispatched = sosix_fs_dispatch_positioned_with_owner_v1(
+        args, caller_authenticated, caller_process_id, state.owner, backend)
+    # The positioned dispatch owner is the sole transaction-policy owner.  It
+    # advances the request token and publishes the authoritative registry state;
+    # reconstructing those layers here duplicates policy and can diverge from
+    # the accepted transaction.
+    SosixFsKernelPositionedDispatchV1(
+        recognized: true, accepted: dispatched.accepted,
+        reason: dispatched.reason, result: dispatched.result,
+        state: SosixFsKernelPositionedStateV1(
+            installed: true, owner: dispatched.owner))
+
+export sosix_fs_kernel_positioned_state_v1
+export sosix_fs_kernel_install_positioned_owner_v1
+export sosix_fs_kernel_dispatch_positioned_v1

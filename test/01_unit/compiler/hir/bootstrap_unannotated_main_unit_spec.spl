@@ -1,0 +1,54 @@
+"""Bootstrap HIR/MIR regression for an unannotated Unit entry point."""
+
+use std.spec.{describe, expect, it, step}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_definitions.{HirTypeKind}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir_lowering.{MirLowering}
+
+extern fn rt_env_get(key: text) -> text?
+extern fn rt_env_set(key: text, value: text) -> bool
+extern fn rt_env_remove(key: text) -> bool
+
+describe "bootstrap unannotated main return type":
+    it "keeps a positional hello main Unit through HIR and MIR":
+        step("Lower the canonical positional hello shape in bootstrap mode")
+        val prior_bootstrap = rt_env_get("SIMPLE_BOOTSTRAP")
+        rt_env_set("SIMPLE_BOOTSTRAP", "1")
+        val source = "fn main():\n    print(\"hello\")\n"
+        val parsed = parse_full_frontend(source, "hello_world.spl", "hello_world", Logger(level: 0))
+        var hir_lowering = HirLowering.with_filename("hello_world.spl")
+        val hir = hir_lowering.lower_module(parsed)
+
+        var found = false
+        var hir_unit = false
+        var mir_clean = false
+        var mir_missing_return = false
+        for function_ in hir.functions.values():
+            if function_.name == "main":
+                found = true
+                match function_.return_type.kind:
+                    case HirTypeKind.Unit:
+                        hir_unit = true
+                    case _:
+                        hir_unit = false
+                var mir_lowering = MirLowering.new(hir.symbols)
+                val _mir = mir_lowering.lower_function(function_)
+                mir_clean = mir_lowering.errors.len() == 0
+                for diagnostic in mir_lowering.errors:
+                    if diagnostic.message.contains("E-SFFI-016"):
+                        mir_missing_return = true
+
+        if val prior_value = prior_bootstrap:
+            rt_env_set("SIMPLE_BOOTSTRAP", prior_value)
+        else:
+            rt_env_remove("SIMPLE_BOOTSTRAP")
+
+        step("Require Unit ABI and no fabricated missing-return diagnostic")
+        expect(found).to_equal(true)
+        expect(hir_lowering.errors.len()).to_equal(0)
+        expect(hir_unit).to_equal(true)
+        expect(mir_clean).to_equal(true)
+        expect(mir_missing_return).to_equal(false)

@@ -1,0 +1,791 @@
+use std.common.json.parser.{json_parse_with_error}
+use std.common.json.object_ops.{json_object_get}
+use std.common.json.array_ops.{json_array_get, json_array_length}
+use std.common.json.types.{json_get_type, json_to_string}
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use std.common.string_core.{text_to_bytes}
+use app.spipe_knowledge_provider.service.{SpipeProviderServiceV1}
+use app.spipe_knowledge_provider.service_deadline.*
+use app.spipe_knowledge_provider.lifecycle.{provider_generation_id}
+use std.common.search.document.{SearchDocument}
+use std.common.search.snapshot.{SearchSnapshot, SearchIndexDelta}
+use std.common.search.analyzer.{AnalyzerIdentity}
+use app.spipe_knowledge_provider.wire_types.{ProviderWireDispatchV1, ProviderWireOwnedDispatchV1, ProviderHostBindingV1, ProviderCandidateExpiryOwnedV1, ProviderInitializeCanonicalV1, ProviderInitializeBindingV1, provider_owned_silent, provider_owned_response}
+use app.spipe_knowledge_provider.wire_json.{wire_jtext, wire_jint, wire_has_exact_keys, wire_valid_id, wire_valid_hash, wire_json_string, wire_canonical_json_value}
+use app.spipe_knowledge_provider.wire_identity.{provider_candidate_uid}
+use app.spipe_knowledge_provider.wire_terminal.{wire_record_terminal_error_converged, wire_quarantine_generation_converged}
+use app.spipe_knowledge_provider.generation_quarantine.{generation_quarantine_replay}
+use app.spipe_knowledge_provider.wire_receipt.{wire_operation_receipt}
+use app.spipe_knowledge_provider.wire_query.{wire_query_receipt_valid, wire_echo_query_receipt, wire_sign_query_receipt, wire_dispatch_search, wire_dispatch_explain, wire_dispatch_stats, wire_stats_capability_available}
+use app.spipe_knowledge_provider.document_binding.{scoped_fields, scoped_facets, scoped_fields_controlled, scoped_facets_controlled}
+use app.spipe_knowledge_provider.query_clock.{QueryClockPort, SystemQueryClockV1, query_stop_reason}
+
+fn provider_initialize_canonical(canonical_payload: text) -> Result<ProviderInitializeCanonicalV1, text>:
+    val parsed = json_parse_with_error(canonical_payload)
+    if parsed.1 != "" or json_get_type(parsed.0) != "object":
+        return Err("invalid_request")
+    val canonical = _canonical_json_value(parsed.0)
+    if val Err(reason) = canonical:
+        return Err(reason)
+    if canonical.unwrap() != canonical_payload or not provider_valid_initialize(parsed.0):
+        return Err("invalid_request")
+    Ok(ProviderInitializeCanonicalV1(
+        request_id: _jtext(parsed.0, "request_id"),
+        operation: _jtext(parsed.0, "operation"),
+    ))
+
+fn provider_initialize_binding(canonical: ProviderInitializeCanonicalV1,
+                                service: SpipeProviderServiceV1,
+                                host: ProviderHostBindingV1) -> ProviderInitializeBindingV1:
+    val empty_root = "sha256:" + "0" * 64
+    ProviderInitializeBindingV1(
+        request_id: canonical.request_id,
+        workspace: host.workspace,
+        snapshot_id: host.snapshot_id,
+        scope_digest: host.scope_digest,
+        logical_root: if service.state.logical_root == "": empty_root else: service.state.logical_root,
+        provider_generation: host.provider_generation,
+    )
+fn provider_valid_protocol(object: any) -> bool:
+    _has_exact_keys(object, ["major", "minor"]) and _jint(object, "major", -1) == 1 and _jint(object, "minor", -1) == 0
+
+fn _jtext(object: any, key: text) -> text: wire_jtext(object, key)
+fn _jint(object: any, key: text, missing: i64) -> i64: wire_jint(object, key, missing)
+fn _has_exact_keys(object: any, expected: [text]) -> bool: wire_has_exact_keys(object, expected)
+fn _valid_id(value: text) -> bool: wire_valid_id(value)
+fn _valid_hash(value: text) -> bool: wire_valid_hash(value)
+fn _json_string(value: text) -> text: wire_json_string(value)
+fn _canonical_json_value(value: any) -> Result<text, text>: wire_canonical_json_value(value)
+fn _owned_silent(service: SpipeProviderServiceV1) -> ProviderWireOwnedDispatchV1: provider_owned_silent(service)
+fn _owned_response(payload: text, stop: bool, service: SpipeProviderServiceV1) -> ProviderWireOwnedDispatchV1:
+    provider_owned_response(payload, stop, service)
+
+fn _core_check(clock: QueryClockPort, request_id: text,
+               admitted_at_ms: i64,
+               deadline_ms: i64) -> Result<(), text>:
+    val reason = query_stop_reason(clock, request_id, admitted_at_ms, deadline_ms)
+    if reason != "": return Err(reason)
+    Ok(())
+
+fn _bound_prefix(service: SpipeProviderServiceV1, request_id: text, operation: text) -> text:
+    "\"ok\":true,\"operation\":" + _json_string(operation) + ",\"operation_receipt\":null,\"protocol\":{\"major\":1,\"minor\":0},\"provider_generation\":" + _json_string(provider_generation_id(service.state.provider_generation)) + ",\"query_receipt\":null,\"request_id\":" + _json_string(request_id)
+
+fn _bound_suffix(service: SpipeProviderServiceV1) -> text:
+    ",\"scope_digest\":" + _json_string(service.state.scope_digest) +
+        ",\"snapshot\":" + _json_string(service.state.snapshot_id) +
+        ",\"workspace\":" + _json_string(service.state.workspace)
+
+fn _success(service: SpipeProviderServiceV1, request_id: text, operation: text, result: text) -> text:
+    "{" + _bound_prefix(service, request_id, operation) +
+        ",\"result\":" + result + _bound_suffix(service) + "}"
+
+fn _success_receipt(service: SpipeProviderServiceV1, request_id: text,
+                    operation: text, receipt: text, result: text) -> text:
+    val prefix = _bound_prefix(service, request_id, operation).replace("\"operation_receipt\":null", "\"operation_receipt\":" + receipt)
+    "{" + prefix + ",\"result\":" + result + _bound_suffix(service) + "}"
+
+fn _domain_bytes(domain: text, canonical: text) -> [u8]:
+    var bytes = text_to_bytes(domain)
+    val size = canonical.bytes().len()
+    var shift = 56
+    while shift >= 0:
+        bytes.push(((size >> shift) & 255) as u8)
+        shift = shift - 8
+    val payload = canonical.bytes()
+    var i = 0
+    while i < payload.len():
+        bytes.push(payload[i])
+        i = i + 1
+    bytes
+
+fn _domain_hash(domain: text, canonical: text) -> text:
+    "sha256:" + sha256_u8_hex(_domain_bytes(domain, canonical))
+
+fn provider_payload_preimage(payload: any, operation: text) -> Result<text, text>:
+    if operation == "index_apply":
+        val operations = _canonical_json_value(json_object_get(payload,
+            "operations"))?
+        return Ok("{\"base_logical_root\":" +
+            _json_string(_jtext(payload, "base_logical_root")) +
+            ",\"operation_id\":" +
+            _json_string(_jtext(payload, "operation_id")) +
+            ",\"operations\":" + operations + "}")
+    if operation != "index_publish": return Err("invalid_operation")
+    Ok("{\"action\":" + _json_string(_jtext(payload, "action")) +
+        ",\"candidate_logical_root\":" + _json_string(_jtext(payload,
+            "candidate_logical_root")) + ",\"candidate_uid\":" +
+        _json_string(_jtext(payload, "candidate_uid")) +
+        ",\"expected_base_logical_root\":" + _json_string(_jtext(payload,
+            "expected_base_logical_root")) + ",\"operation_id\":" +
+        _json_string(_jtext(payload, "operation_id")) + "}")
+
+fn provider_payload_domain_bytes(payload: any, operation: text) -> Result<[u8], text>:
+    val canonical = provider_payload_preimage(payload, operation)?
+    if operation == "index_apply":
+        return Ok(_domain_bytes("SPKC-INDEX-APPLY-PAYLOAD-V1\0", canonical))
+    Ok(_domain_bytes("SPKC-INDEX-PUBLISH-PAYLOAD-V1\0", canonical))
+
+fn _domain_hash_controlled(domain: text, canonical: text,
+                           request_id: text, admitted_at_ms: i64,
+                           deadline_ms: i64,
+                           clock: QueryClockPort) -> Result<text, text>:
+    _core_check(clock, request_id, admitted_at_ms, deadline_ms)?
+    val hashed = _domain_hash(domain, canonical)
+    _core_check(clock, request_id, admitted_at_ms, deadline_ms)?
+    Ok(hashed)
+
+fn provider_payload_hash_controlled(payload: any, operation: text,
+                                    request_id: text,
+                                    admitted_at_ms: i64,
+                                    deadline_ms: i64,
+                                    clock: QueryClockPort) -> Result<text, text>:
+    _core_check(clock, request_id, admitted_at_ms, deadline_ms)?
+    val canonical = provider_payload_preimage(payload, operation)?
+    _core_check(clock, request_id, admitted_at_ms, deadline_ms)?
+    if operation == "index_apply":
+        return _domain_hash_controlled("SPKC-INDEX-APPLY-PAYLOAD-V1\0",
+            canonical, request_id, admitted_at_ms, deadline_ms, clock)
+    _domain_hash_controlled("SPKC-INDEX-PUBLISH-PAYLOAD-V1\0", canonical,
+        request_id, admitted_at_ms, deadline_ms, clock)
+
+fn provider_payload_hash(payload: any, operation: text) -> text:
+    provider_payload_hash_controlled(payload, operation, "", -1, 0,
+                                     SystemQueryClockV1.configured()).unwrap()
+
+fn provider_sign_query_receipt(service: SpipeProviderServiceV1, request_id: text,
+                               operation: text, canonical_payload: text) -> Result<text, text>:
+    wire_sign_query_receipt(service, request_id, operation, canonical_payload)
+
+fn provider_expire_candidate(mut service: SpipeProviderServiceV1,
+                             candidate_uid: text, expired_at_ms: i64) -> Result<ProviderCandidateExpiryOwnedV1, text>:
+    if not service.lifecycle_available() or
+            not service.candidate_authority.available():
+        return Err("provider_unavailable")
+    val binding = service.candidate_expiry_binding(candidate_uid)?
+    val observed_at_ms = service.candidate_authority.now_ms()
+    if expired_at_ms < 0 or expired_at_ms > 9007199254740991 or
+            observed_at_ms < 0 or observed_at_ms > 9007199254740991 or
+            (observed_at_ms <= 9007199254740991 - 300000 and
+             expired_at_ms > observed_at_ms + 300000):
+        return Err("invalid_request")
+    if expired_at_ms < binding.5:
+        return Err("candidate_not_expired")
+    val parsed_apply = json_parse_with_error(binding.3)
+    if parsed_apply.1 != "" or json_get_type(parsed_apply.0) != "object":
+        return Err("snapshot_corrupt")
+    val apply_receipt_id = _jtext(parsed_apply.0, "receipt_id")
+    if apply_receipt_id == "":
+        return Err("snapshot_corrupt")
+    val unsigned = "{\"apply_operation_id\":" + _json_string(binding.2) +
+        ",\"apply_receipt_id\":" + _json_string(apply_receipt_id) +
+        ",\"authority_generation\":" + service.candidate_authority.authority_generation().to_text() +
+        ",\"authority_id\":" + _json_string(service.candidate_authority.authority_id()) +
+        ",\"base_logical_root\":" + _json_string(binding.0) +
+        ",\"candidate_expires_at_ms\":" + binding.5.to_text() +
+        ",\"candidate_logical_root\":" + _json_string(binding.1) +
+        ",\"candidate_uid\":" + _json_string(candidate_uid) +
+        ",\"expired_at_ms\":" + expired_at_ms.to_text() +
+        ",\"key_id\":" + _json_string(service.candidate_authority.key_id()) +
+        ",\"outcome\":\"expired\",\"policy_digest\":" + _json_string(service.state.scope_digest) +
+        ",\"policy_version\":1,\"revocation_generation\":0,\"schema\":\"spipe-candidate-expiry-receipt-v1\",\"scope_digest\":" + _json_string(service.state.scope_digest) +
+        ",\"snapshot\":" + _json_string(service.state.snapshot_id) +
+        ",\"workspace\":" + _json_string(service.state.workspace) + "}"
+    val receipt_id = _domain_hash("SPKC-CANDIDATE-EXPIRY-RECEIPT-V1\0", unsigned).replace("sha256:", "cer-")
+    val signature = service.candidate_authority.sign(
+        _domain_bytes("SPKC-CANDIDATE-EXPIRY-RECEIPT-V1\0", unsigned))?
+    val with_id = unsigned.replace("\"revocation_generation\":", "\"receipt_id\":" + _json_string(receipt_id) + ",\"revocation_generation\":")
+    val receipt = with_id.replace("\"snapshot\":", "\"signature\":" + _json_string(signature) + ",\"snapshot\":")
+    val recorded_at_ms = service.next_transition_at_ms(expired_at_ms)?
+    service.expire_candidate(candidate_uid, receipt, expired_at_ms,
+        recorded_at_ms)?
+    Ok(ProviderCandidateExpiryOwnedV1(service: service, receipt: receipt))
+
+fn provider_initialize_result(service: SpipeProviderServiceV1, request_id: text) -> text:
+    val digest = "sha256:" + sha256_text("simple-spipe-knowledge-provider-v1")
+    val stats_available = if wire_stats_capability_available(): "true" else: "false"
+    # This stdio host completes one frame before reading the next, so it cannot
+    # honestly cancel an in-flight request. Cancellation remains a known but
+    # unnegotiated operation until a worker/queued host exists.
+    "{\"ok\":true,\"operation\":\"initialize\",\"request_id\":" + _json_string(request_id) + ",\"result\":{\"analyzer_ids\":[\"spipe-unicode-lex-v1\"],\"capabilities\":{\"cancel\":true,\"duplicate\":false,\"explain\":true,\"index_delta\":true,\"lexical\":true,\"phrase\":false,\"regex\":false,\"scope_partition\":\"independent\",\"semantic\":false,\"shutdown\":true,\"stats\":" + stats_available + ",\"symbols\":false,\"wildcard\":false},\"explanation_ids\":[\"bm25-explain-v1\"],\"implementation_digest\":" + _json_string(digest) + ",\"limits\":{\"max_deadline_ms\":30000,\"max_delta_documents\":1000,\"max_explanation_bytes_per_hit\":65536,\"max_explanation_fields\":5,\"max_explanation_terms\":128,\"max_field_value_bytes\":1048576,\"max_fields_per_document\":5,\"max_filters\":32,\"max_frame_bytes\":1048576,\"max_hits\":1000,\"max_page_bytes\":524288,\"max_query_bytes\":4096,\"max_query_tokens\":128,\"max_values_per_filter\":64,\"min_deadline_ms\":1},\"logical_index_ids\":[\"spipe-lexical-snapshot-v1\"],\"optional_fields\":[],\"protocol\":{\"major\":1,\"minor\":0},\"provider\":\"spipe-search-provider/1.0\",\"provider_ids\":[\"spipe-search-provider/1.0\"],\"score_ids\":[\"bm25-fixed-v1\"]}" + "}"
+
+fn provider_valid_initialize(root: any) -> bool:
+    if not _has_exact_keys(root, ["request_id", "operation", "protocol", "client", "required", "limits"]):
+        return false
+    val required = json_object_get(root, "required")
+    val limits = json_object_get(root, "limits")
+    if not _has_exact_keys(required, ["provider", "analyzer", "score", "explanation", "logical_index"]):
+        return false
+    if not _has_exact_keys(limits, ["max_frame_bytes"]):
+        return false
+    _jtext(root, "client") == "spipe" and
+        _jtext(required, "provider") == "spipe-search-provider/1.0" and
+        _jtext(required, "analyzer") == "spipe-unicode-lex-v1" and
+        _jtext(required, "score") == "bm25-fixed-v1" and
+        _jtext(required, "explanation") == "bm25-explain-v1" and
+        _jtext(required, "logical_index") == "spipe-lexical-snapshot-v1" and
+        _jint(limits, "max_frame_bytes", -1) == 1048576
+
+fn _scoped_document_preimage(value: any, request_id: text,
+                             admitted_at_ms: i64, deadline_ms: i64,
+                             clock: QueryClockPort) -> Result<text, text>:
+    _core_check(clock, request_id, admitted_at_ms, deadline_ms)?
+    if json_get_type(value) != "object":
+        return Err("invalid_request")
+    val fields = scoped_fields_controlled(json_object_get(value, "fields"),
+        false, request_id, admitted_at_ms, deadline_ms, clock)?
+    val facets = scoped_facets_controlled(json_object_get(value, "facets"),
+        request_id, admitted_at_ms, deadline_ms, clock)?
+    _core_check(clock, request_id, admitted_at_ms, deadline_ms)?
+    val canonical = "{\"document_id\":" + _json_string(_jtext(value, "document_id")) +
+        ",\"facets\":" + facets.0 +
+        ",\"fields\":" + fields.0 +
+        ",\"revision\":" + _json_string(_jtext(value, "revision")) +
+        ",\"scope_digest\":" + _json_string(_jtext(value, "scope_digest")) +
+        ",\"visibility_digest\":" + _json_string(_jtext(value, "visibility_digest")) + "}"
+    Ok(canonical)
+
+fn _scoped_document_hash(value: any, request_id: text,
+                         admitted_at_ms: i64, deadline_ms: i64,
+                         clock: QueryClockPort) -> Result<text, text>:
+    val preimage = _scoped_document_preimage(value, request_id,
+        admitted_at_ms, deadline_ms, clock)?
+    _core_check(clock, request_id, admitted_at_ms, deadline_ms)?
+    val hashed = "sha256:" + sha256_text(preimage)
+    _core_check(clock, request_id, admitted_at_ms, deadline_ms)?
+    Ok(hashed)
+
+fn _decode_document(value: any, expected_id: text,
+                    scope_digest: text, request_id: text,
+                    admitted_at_ms: i64, deadline_ms: i64,
+                    clock: QueryClockPort) -> Result<SearchDocument, text>:
+    _core_check(clock, request_id, admitted_at_ms, deadline_ms)?
+    if not _has_exact_keys(value, ["document_id", "revision", "fields", "facets", "visibility_digest", "scoped_content_hash", "scope_digest"]):
+        return Err("invalid_request")
+    val document_id = _jtext(value, "document_id")
+    val revision = _jtext(value, "revision")
+    if document_id != expected_id or not _valid_id(document_id) or
+            not _valid_id(revision) or _jtext(value, "scope_digest") != scope_digest or
+            not _valid_hash(_jtext(value, "visibility_digest")) or
+            not _valid_hash(_jtext(value, "scoped_content_hash")):
+        return Err("invalid_request")
+    if _scoped_document_hash(value, request_id, admitted_at_ms, deadline_ms,
+            clock)? != _jtext(value, "scoped_content_hash"):
+        return Err("precondition_conflict")
+    val raw_fields = json_object_get(value, "fields")
+    val raw_facets = json_object_get(value, "facets")
+    val fields = scoped_fields_controlled(raw_fields, false, request_id,
+        admitted_at_ms, deadline_ms, clock)?
+    val facets = scoped_facets_controlled(raw_facets, request_id,
+        admitted_at_ms, deadline_ms, clock)?
+    _core_check(clock, request_id, admitted_at_ms, deadline_ms)?
+    Ok(SearchDocument.of(document_id, revision, fields.1, facets.1))
+
+fn _decode_delta(payload: any, service: SpipeProviderServiceV1,
+                 request_id: text, admitted_at_ms: i64,
+                 deadline_ms: i64,
+                 clock: QueryClockPort) -> Result<(SearchIndexDelta, i64, i64, i64), text>:
+    val operations = json_object_get(payload, "operations")
+    if json_get_type(operations) != "array" or json_array_length(operations) > 1000:
+        return Err("invalid_request")
+    var upserts: [SearchDocument] = []
+    var deletes: [text] = []
+    var added = 0
+    var replaced = 0
+    var deleted = 0
+    var previous_id = ""
+    var i = 0
+    while i < json_array_length(operations):
+        _core_check(clock, request_id, admitted_at_ms, deadline_ms)?
+        val operation = json_array_get(operations, i)
+        if not _has_exact_keys(operation, ["kind", "document_id", "before_revision", "before_hash", "after"]):
+            return Err("invalid_request")
+        val kind = _jtext(operation, "kind")
+        val document_id = _jtext(operation, "document_id")
+        if not _valid_id(document_id) or (previous_id != "" and document_id <= previous_id):
+            return Err("invalid_request")
+        previous_id = document_id
+        val before_revision = json_object_get(operation, "before_revision")
+        val before_hash = json_object_get(operation, "before_hash")
+        val after = json_object_get(operation, "after")
+        var existing: SearchDocument? = nil
+        var d = 0
+        while d < service.state.snapshot_value.documents.len():
+            _core_check(clock, request_id, admitted_at_ms, deadline_ms)?
+            if service.state.snapshot_value.documents[d].id == document_id:
+                existing = service.state.snapshot_value.documents[d]
+            d = d + 1
+        if kind == "add":
+            if json_get_type(before_revision) != "null" or json_get_type(before_hash) != "null" or existing != nil:
+                return Err("precondition_conflict")
+            upserts.push(_decode_document(after, document_id,
+                service.state.scope_digest, request_id, admitted_at_ms,
+                deadline_ms, clock)?)
+            added = added + 1
+        elif kind == "replace":
+            val revision = json_to_string(before_revision)
+            val hash = json_to_string(before_hash)
+            if revision == nil or hash == nil or not _valid_hash(hash) or existing == nil or
+                    existing.unwrap().revision != revision or
+                    service.scoped_content_hash(document_id) != hash:
+                return Err("precondition_conflict")
+            upserts.push(_decode_document(after, document_id,
+                service.state.scope_digest, request_id, admitted_at_ms,
+                deadline_ms, clock)?)
+            replaced = replaced + 1
+        elif kind == "delete":
+            if json_get_type(after) != "null":
+                return Err("invalid_request")
+            val revision = json_to_string(before_revision)
+            val hash = json_to_string(before_hash)
+            if (revision == nil) != (hash == nil):
+                return Err("invalid_request")
+            if revision == nil:
+                if existing != nil:
+                    return Err("precondition_conflict")
+            else:
+                if not _valid_hash(hash) or existing == nil or existing.unwrap().revision != revision or
+                        service.scoped_content_hash(document_id) != hash:
+                    return Err("precondition_conflict")
+                deletes.push(document_id)
+                deleted = deleted + 1
+        else:
+            return Err("invalid_request")
+        i = i + 1
+    Ok((SearchIndexDelta.of(service.state.snapshot_value.snapshot_id, upserts, deletes), added, replaced, deleted))
+
+fn _delta_after_hashes(payload: any, request_id: text,
+                       admitted_at_ms: i64, deadline_ms: i64,
+                       clock: QueryClockPort) -> Result<([text], [text], [text]), text>:
+    val operations = json_object_get(payload, "operations")
+    var ids: [text] = []
+    var hashes: [text] = []
+    var preimages: [text] = []
+    var i = 0
+    while i < json_array_length(operations):
+        _core_check(clock, request_id, admitted_at_ms, deadline_ms)?
+        val operation = json_array_get(operations, i)
+        val kind = _jtext(operation, "kind")
+        if kind == "add" or kind == "replace":
+            val after = json_object_get(operation, "after")
+            ids.push(_jtext(operation, "document_id"))
+            hashes.push(_scoped_document_hash(after, request_id,
+                admitted_at_ms, deadline_ms, clock)?)
+            preimages.push(_scoped_document_preimage(after, request_id,
+                admitted_at_ms, deadline_ms, clock)?)
+        i = i + 1
+    Ok((ids, hashes, preimages))
+
+fn provider_dispatch_initialized(mut service: SpipeProviderServiceV1, root: any,
+                         request_id: text, operation: text,
+                         admitted_at_ms: i64, deadline_ms: i64,
+                         clock: QueryClockPort) -> ProviderWireOwnedDispatchV1:
+    if not _has_exact_keys(root, ["request_id", "operation", "protocol", "provider_generation", "workspace", "snapshot", "scope_digest", "query_receipt", "operation_receipt", "deadline_ms", "payload"]):
+        return _owned_silent(service)
+    if _jtext(root, "provider_generation") != provider_generation_id(service.state.provider_generation) or
+            _jtext(root, "workspace") != service.state.workspace or
+            _jtext(root, "snapshot") != service.state.snapshot_id or
+            _jtext(root, "scope_digest") != service.state.scope_digest:
+        return _owned_response(service.bound_error(request_id, operation, "binding_mismatch", "request binding mismatch"), false, service)
+    if service.state.generation_quarantined and operation != "index_apply" and
+            operation != "index_publish" and operation != "shutdown":
+        return _owned_response(service.bound_error(request_id, operation,
+            "fatal_provider_error", "provider generation is closed"),
+            false, service)
+    val payload = json_object_get(root, "payload")
+    if _jint(root, "deadline_ms", -1) != deadline_ms or
+            json_get_type(json_object_get(root, "operation_receipt")) != "null" or
+            deadline_ms < 1 or deadline_ms > 30000:
+        return _owned_response(service.bound_error(request_id, operation, "invalid_request", "invalid request envelope"), false, service)
+    if operation == "search" or operation == "explain":
+        if not service.lifecycle_available():
+            return _owned_response(service.bound_error(request_id, operation, "provider_unavailable", "receipt authority unavailable"), false, service)
+        if not wire_query_receipt_valid(service, root, operation, payload):
+            return _owned_response(wire_echo_query_receipt(service.bound_error(request_id, operation, "unauthorized", "invalid query receipt"), root), false, service)
+    elif json_get_type(json_object_get(root, "query_receipt")) != "null":
+        return _owned_response(service.bound_error(request_id, operation, "invalid_request", "unexpected query receipt"), false, service)
+    if val Err(reason) = _core_check(clock, request_id, admitted_at_ms,
+                                     deadline_ms):
+        val expired = service.bound_error(request_id, operation,
+            reason, "request stopped before dispatch")
+        return _owned_response(if operation == "search" or operation == "explain":
+            wire_echo_query_receipt(expired, root) else: expired, false, service)
+    if operation == "index_open":
+        if not _has_exact_keys(payload, ["mode", "logical_root"]):
+            return _owned_response(service.bound_error(request_id, operation, "invalid_request", "invalid index_open payload"), false, service)
+        val mode = _jtext(payload, "mode")
+        val raw_root = json_object_get(payload, "logical_root")
+        var logical_root: text? = nil
+        if json_get_type(raw_root) == "string":
+            val root_text = json_to_string(raw_root)
+            if not _valid_hash(root_text):
+                return _owned_response(service.bound_error(request_id, operation, "invalid_request", "invalid logical root"), false, service)
+            logical_root = root_text
+        elif json_get_type(raw_root) != "null":
+            return _owned_response(service.bound_error(request_id, operation, "invalid_request", "invalid logical root"), false, service)
+        if (mode == "create" and logical_root != nil) or
+                (mode == "open" and logical_root == nil) or
+                (mode != "create" and mode != "open"):
+            return _owned_response(service.bound_error(request_id, operation,
+                "invalid_request", "invalid index_open payload"), false, service)
+        if val Ok(opened) = service.wire_index_open(mode, logical_root):
+            val result = "{\"document_count\":" + opened.1.to_text() + ",\"logical_root\":" + _json_string(opened.0) + ",\"state\":" + _json_string(opened.2) + "}"
+            return _owned_response(_success(service, request_id, operation, result), false, service)
+        return _owned_response(service.bound_error(request_id, operation, "snapshot_not_found", "logical index not found"), false, service)
+    elif operation == "stats":
+        return wire_dispatch_stats(service, payload, request_id,
+                                   admitted_at_ms, deadline_ms, clock)
+    elif operation == "search":
+        return wire_dispatch_search(service, root, payload, request_id,
+                                    admitted_at_ms, deadline_ms, clock)
+    elif operation == "explain":
+        return wire_dispatch_explain(service, root, payload, request_id,
+                                     admitted_at_ms, deadline_ms, clock)
+    elif operation == "index_apply":
+        if not service.lifecycle_available():
+            return _owned_response(service.bound_error(request_id, operation, "provider_unavailable", "secure lifecycle ports unavailable"), false, service)
+        if not _has_exact_keys(payload, ["operation_id", "payload_hash", "base_logical_root", "operations"]):
+            return _owned_response(service.bound_error(request_id, operation, "invalid_request", "invalid index_apply payload"), false, service)
+        val operation_id = _jtext(payload, "operation_id")
+        val payload_hash = _jtext(payload, "payload_hash")
+        val base_root = _jtext(payload, "base_logical_root")
+        val computed_payload_hash = provider_payload_hash_controlled(payload,
+            operation, request_id, admitted_at_ms, deadline_ms, clock)
+        if val Err(reason) = computed_payload_hash:
+            return _owned_response(service.bound_error(request_id, operation,
+                reason, "apply hash interrupted"), false, service)
+        if not _valid_id(operation_id) or not _valid_hash(payload_hash) or
+                not _valid_hash(base_root) or
+                payload_hash != computed_payload_hash.unwrap():
+            return _owned_response(service.bound_error(request_id, operation, "invalid_request", "invalid apply binding"), false, service)
+        if val Ok(replayed) = service.replay_response(operation, operation_id, payload_hash):
+            if replayed != nil:
+                return _owned_response(replayed.unwrap(), false, service)
+        else:
+            return _owned_response(service.bound_error(request_id, operation, "operation_conflict", "operation id reused"), false, service)
+        if service.state.generation_quarantined:
+            return _owned_response(service.bound_error(request_id, operation,
+                "fatal_provider_error", "provider generation is closed"),
+                false, service)
+        if base_root != service.state.logical_root:
+            return _owned_response(service.bound_error(request_id, operation, "stale_base", "base root is not current"), false, service)
+        val decoded = _decode_delta(payload, service, request_id,
+            admitted_at_ms, deadline_ms, clock)
+        if val Err(reason) = decoded:
+            return _owned_response(service.bound_error(request_id, operation, reason, "index delta rejected"), false, service)
+        val delta = decoded.unwrap()
+        val outcome = if delta.1 + delta.2 + delta.3 == 0: "no_op" else: "applied"
+        if val Err(reason) = _core_check(clock, request_id, admitted_at_ms,
+                                         deadline_ms):
+            return _owned_response(service.bound_error(request_id, operation,
+                reason, "apply canonicalization interrupted"), false, service)
+        val operations_value = _canonical_json_value(json_object_get(payload,
+            "operations"))
+        if val Err(reason) = operations_value:
+            return _owned_response(service.bound_error(request_id, operation,
+                reason, "index operations rejected"), false, service)
+        val operations_preimage = operations_value.unwrap()
+        val after_hashes = _delta_after_hashes(payload, request_id,
+            admitted_at_ms, deadline_ms, clock)
+        if val Err(reason) = after_hashes:
+            return _owned_response(service.bound_error(request_id, operation, reason, "index hashes rejected"), false, service)
+        val bound_hashes = after_hashes.unwrap()
+        val transition_binding = service.candidate_transition_binding_controlled(delta.0,
+            operations_preimage, outcome, bound_hashes.0, bound_hashes.1,
+            bound_hashes.2, request_id, admitted_at_ms, deadline_ms, clock)
+        if val Err(reason) = transition_binding:
+            return _owned_response(service.bound_error(request_id, operation, reason,
+                "candidate commitment rejected"), false, service)
+        val candidate_root = transition_binding.unwrap().0
+        val candidate_root_preimage = transition_binding.unwrap().1
+        if val Err(reason) = _core_check(clock, request_id, admitted_at_ms,
+                                         deadline_ms):
+            return _owned_response(service.bound_error(request_id, operation,
+                reason, "candidate identity interrupted"), false, service)
+        val candidate_uid = provider_candidate_uid(service.state.workspace,
+            service.state.snapshot_id, service.state.scope_digest, base_root,
+            candidate_root, payload_hash)
+        if val Err(reason) = _core_check(clock, request_id, admitted_at_ms,
+                                         deadline_ms):
+            return _owned_response(service.bound_error(request_id, operation,
+                reason, "candidate identity interrupted"), false, service)
+        val transition_time = service.next_transition_at_ms(
+            service.receipt_authority.now_ms())
+        if val Err(reason) = transition_time:
+            return _owned_response(service.bound_error(request_id, operation,
+                reason, "transition authority failed"), false, service)
+        val created_at_ms = transition_time.unwrap()
+        val candidate_expires_at_ms = created_at_ms + 86400000
+        val result = "{\"added\":" + delta.1.to_text() + ",\"base_logical_root\":" + _json_string(base_root) + ",\"candidate_expires_at_ms\":" + candidate_expires_at_ms.to_text() + ",\"candidate_logical_root\":" + _json_string(candidate_root) + ",\"candidate_uid\":" + _json_string(candidate_uid) + ",\"deleted\":" + delta.3.to_text() + ",\"replaced\":" + delta.2.to_text() + ",\"status\":" + _json_string(outcome) + "}"
+        if val Err(reason) = _core_check(clock, request_id, admitted_at_ms,
+                                         deadline_ms):
+            return _owned_response(service.bound_error(request_id, operation,
+                reason, "apply result serialization interrupted"), false,
+                service)
+        val receipt = wire_operation_receipt(service, operation, operation_id,
+            payload_hash, base_root, candidate_root, candidate_uid, outcome)
+        if val Err(reason) = receipt:
+            return _owned_response(service.bound_error(request_id, operation, reason, "receipt signing failed"), false, service)
+        val response = _success_receipt(service, request_id, operation, receipt.unwrap(), result)
+        if val Err(reason) = service.record_apply_transaction_controlled(
+                operation_id, delta.0,
+                candidate_uid, candidate_root, candidate_root_preimage,
+                payload_hash, response,
+                receipt.unwrap(), "candidate", created_at_ms,
+                candidate_expires_at_ms, bound_hashes.0, bound_hashes.1,
+                bound_hashes.2, request_id, admitted_at_ms, deadline_ms,
+                clock):
+            if reason == "fatal_provider_error":
+                service.state.quarantine_generation()
+                return _owned_response(service.bound_error(request_id,
+                    operation, "fatal_provider_error",
+                    "provider generation is closed"), false, service)
+            return _owned_response(service.bound_error(request_id, operation, reason, "durable commit failed"), false, service)
+        return _owned_response(response, false, service)
+    elif operation == "index_publish":
+        if not service.lifecycle_available():
+            return _owned_response(service.bound_error(request_id, operation, "provider_unavailable", "secure lifecycle ports unavailable"), false, service)
+        if not _has_exact_keys(payload, ["operation_id", "payload_hash", "action", "candidate_uid", "expected_base_logical_root", "candidate_logical_root"]):
+            return _owned_response(service.bound_error(request_id, operation, "invalid_request", "invalid index_publish payload"), false, service)
+        val operation_id = _jtext(payload, "operation_id")
+        val payload_hash = _jtext(payload, "payload_hash")
+        val action = _jtext(payload, "action")
+        val candidate_uid = _jtext(payload, "candidate_uid")
+        val base_root = _jtext(payload, "expected_base_logical_root")
+        val candidate_root = _jtext(payload, "candidate_logical_root")
+        val computed_payload_hash = provider_payload_hash_controlled(payload,
+            operation, request_id, admitted_at_ms, deadline_ms, clock)
+        if val Err(reason) = computed_payload_hash:
+            return _owned_response(service.bound_error(request_id, operation,
+                reason, "publish hash interrupted"), false, service)
+        if not _valid_id(operation_id) or not _valid_id(candidate_uid) or
+                not _valid_hash(payload_hash) or not _valid_hash(base_root) or
+                not _valid_hash(candidate_root) or
+                (action != "publish" and action != "abort") or
+                payload_hash != computed_payload_hash.unwrap():
+            return _owned_response(service.bound_error(request_id, operation, "invalid_request", "invalid publish binding"), false, service)
+        if val Ok(replayed) = service.replay_response(operation, operation_id, payload_hash):
+            if replayed != nil:
+                return _owned_response(replayed.unwrap(), false, service)
+        else:
+            return _owned_response(service.bound_error(request_id, operation, "operation_conflict", "operation id reused"), false, service)
+        if service.state.generation_quarantined:
+            val tombstone = service.durable_lifecycle.load_generation_quarantine(
+                service.state.provider_generation)
+            if val Err(_) = tombstone:
+                return _owned_response(service.bound_error(request_id, operation,
+                    "fatal_provider_error", "generation quarantine unavailable"),
+                    false, service)
+            if tombstone.unwrap() != "":
+                val durable_replay = generation_quarantine_replay(
+                    tombstone.unwrap(), service.receipt_authority,
+                    service.state.provider_generation, service.state.workspace,
+                    service.state.snapshot_id, service.state.scope_digest,
+                    operation_id, payload_hash)
+                if val Ok(response) = durable_replay:
+                    if response != "": return _owned_response(response, false, service)
+                else:
+                    val reason = durable_replay.unwrap_err()
+                    if reason == "operation_conflict":
+                        return _owned_response(service.bound_error(request_id,
+                            operation, reason, "operation id reused"), false,
+                            service)
+                    if reason == "snapshot_corrupt":
+                        return _owned_response(service.bound_error(request_id,
+                            operation, "fatal_provider_error",
+                            "generation quarantine corrupt"), false, service)
+            return _owned_response(service.bound_error(request_id, operation,
+                "fatal_provider_error", "provider generation is closed"),
+                false, service)
+        var previous = service.state.logical_root
+        val candidate_status = service.candidate_state(candidate_uid, candidate_root, base_root)
+        if val Err(reason) = candidate_status:
+            return _owned_response(service.bound_error(request_id, operation, reason, "candidate rejected"), false, service)
+        if candidate_status.unwrap() != "staged":
+            return wire_record_terminal_error_converged(service, request_id,
+                operation, operation_id, payload_hash, candidate_uid,
+                "candidate is already terminal", admitted_at_ms,
+                deadline_ms, clock)
+        var outcome = ""
+        var result_root = previous
+        var published_sibling = false
+        var sibling_index = 0
+        while sibling_index < service.candidates.len():
+            if val Err(reason) = _core_check(clock, request_id,
+                    admitted_at_ms, deadline_ms):
+                return _owned_response(service.bound_error(request_id,
+                    operation, reason, "publish sibling scan interrupted"),
+                    false, service)
+            val sibling = service.candidates[sibling_index]
+            if sibling.uid != candidate_uid and sibling.base_root == base_root and
+                    sibling.state == "published":
+                published_sibling = true
+            sibling_index = sibling_index + 1
+        if action == "abort":
+            outcome = "aborted"
+        elif previous != base_root or published_sibling:
+            outcome = "stale_base"
+        else:
+            outcome = "published"
+            result_root = candidate_root
+        var result = "{\"candidate_uid\":" + _json_string(candidate_uid) + ",\"logical_root\":" + _json_string(result_root) + ",\"previous_logical_root\":" + _json_string(previous) + ",\"status\":" + _json_string(outcome) + "}"
+        var receipt = wire_operation_receipt(service, operation, operation_id,
+            payload_hash, base_root, result_root, candidate_uid, outcome)
+        if val Err(reason) = receipt:
+            return _owned_response(service.bound_error(request_id, operation, reason, "receipt signing failed"), false, service)
+        var response = _success_receipt(service, request_id, operation, receipt.unwrap(), result)
+        val terminal_time = service.next_transition_at_ms(
+            service.receipt_authority.now_ms())
+        if val Err(reason) = terminal_time:
+            return _owned_response(service.bound_error(request_id, operation,
+                reason, "transition authority failed"), false, service)
+        if val Err(reason) = service.record_terminal_response_controlled(
+                candidate_uid, operation_id,
+                payload_hash, response, receipt.unwrap(), outcome,
+                result_root,
+                terminal_time.unwrap(), request_id, admitted_at_ms,
+                deadline_ms, clock):
+            if reason != "lifecycle_conflict":
+                if reason == "fatal_provider_error":
+                    service.state.quarantine_generation()
+                    return _owned_response(service.bound_error(request_id,
+                        operation, "fatal_provider_error",
+                        "provider generation is closed"), false, service)
+                return _owned_response(service.bound_error(request_id, operation, reason, "durable commit failed"), false, service)
+            # Reload the winner before deciding this request's outcome. The
+            # signature above is intentionally discarded across this boundary.
+            if val Err(refresh_reason) = service.reload_lifecycle_after_conflict():
+                return _owned_response(service.bound_error(request_id, operation, refresh_reason, "lifecycle refresh failed"), false, service)
+            if val Ok(replayed) = service.replay_response(operation, operation_id, payload_hash):
+                if replayed != nil: return _owned_response(replayed.unwrap(), false, service)
+            else:
+                return _owned_response(service.bound_error(request_id, operation, "operation_conflict", "operation id reused"), false, service)
+            val refreshed_status = service.candidate_state(candidate_uid, candidate_root, base_root)
+            if val Err(status_reason) = refreshed_status:
+                return _owned_response(service.bound_error(request_id, operation, status_reason, "candidate rejected after lifecycle conflict"), false, service)
+            if refreshed_status.unwrap() != "staged":
+                return wire_record_terminal_error_converged(service, request_id,
+                operation, operation_id, payload_hash, candidate_uid,
+                    "candidate lost lifecycle CAS", admitted_at_ms,
+                    deadline_ms, clock)
+            previous = service.state.logical_root
+            var refreshed_sibling_published = false
+            var refreshed_sibling_index = 0
+            while refreshed_sibling_index < service.candidates.len():
+                if val Err(reason) = _core_check(clock, request_id,
+                        admitted_at_ms, deadline_ms):
+                    return _owned_response(service.bound_error(request_id,
+                        operation, reason,
+                        "refreshed sibling scan interrupted"), false, service)
+                val refreshed_sibling = service.candidates[refreshed_sibling_index]
+                if refreshed_sibling.uid != candidate_uid and
+                        refreshed_sibling.base_root == base_root and
+                        refreshed_sibling.state == "published":
+                    refreshed_sibling_published = true
+                refreshed_sibling_index = refreshed_sibling_index + 1
+            if action == "abort":
+                outcome = "aborted"
+                result_root = previous
+            elif previous != base_root or refreshed_sibling_published:
+                outcome = "stale_base"
+                result_root = previous
+            else:
+                outcome = "published"
+                result_root = candidate_root
+            result = "{\"candidate_uid\":" + _json_string(candidate_uid) + ",\"logical_root\":" + _json_string(result_root) + ",\"previous_logical_root\":" + _json_string(previous) + ",\"status\":" + _json_string(outcome) + "}"
+            receipt = wire_operation_receipt(service, operation, operation_id,
+                payload_hash, base_root, result_root, candidate_uid, outcome)
+            if val Err(sign_reason) = receipt:
+                return _owned_response(service.bound_error(request_id, operation, sign_reason, "receipt signing failed after lifecycle conflict"), false, service)
+            response = _success_receipt(service, request_id, operation, receipt.unwrap(), result)
+            val retry_terminal_time = service.next_transition_at_ms(
+                service.receipt_authority.now_ms())
+            if val Err(time_reason) = retry_terminal_time:
+                return _owned_response(service.bound_error(request_id, operation,
+                    time_reason, "transition authority failed after lifecycle conflict"), false, service)
+            if val Err(retry_reason) = service.record_terminal_response_controlled(
+                    candidate_uid, operation_id,
+                    payload_hash, response, receipt.unwrap(), outcome,
+                    result_root,
+                    retry_terminal_time.unwrap(), request_id, admitted_at_ms,
+                    deadline_ms, clock):
+                if retry_reason != "lifecycle_conflict":
+                    if retry_reason == "fatal_provider_error":
+                        service.state.quarantine_generation()
+                        return _owned_response(service.bound_error(request_id,
+                            operation, "fatal_provider_error",
+                            "provider generation is closed"), false, service)
+                    return _owned_response(service.bound_error(request_id, operation,
+                        retry_reason, "durable convergence failed"), false, service)
+                # A second CAS miss is bounded: reload once more and accept
+                # only durable truth. Never leak a generic CAS error when the
+                # candidate or this operation already has a terminal winner.
+                if val Err(refresh_reason) = service.reload_lifecycle_after_conflict():
+                    return _owned_response(service.bound_error(request_id,
+                        operation, refresh_reason,
+                        "final lifecycle refresh failed"), false, service)
+                if val Ok(replayed) = service.replay_response(operation,
+                        operation_id, payload_hash):
+                    if replayed != nil:
+                        return _owned_response(replayed.unwrap(), false, service)
+                else:
+                    return _owned_response(service.bound_error(request_id,
+                        operation, "operation_conflict",
+                        "operation id reused"), false, service)
+                val final_status = service.candidate_state(candidate_uid,
+                    candidate_root, base_root)
+                if val Err(status_reason) = final_status:
+                    return _owned_response(service.bound_error(request_id,
+                        operation, status_reason,
+                        "candidate rejected after final lifecycle refresh"), false, service)
+                if final_status.unwrap() != "staged":
+                    return wire_record_terminal_error_converged(service,
+                        request_id, operation, operation_id, payload_hash,
+                        candidate_uid, "candidate lost lifecycle CAS",
+                        admitted_at_ms, deadline_ms, clock)
+                return wire_quarantine_generation_converged(service,
+                    request_id, operation, operation_id, payload_hash,
+                    candidate_uid, candidate_root, base_root,
+                    admitted_at_ms, deadline_ms, clock)
+        return _owned_response(response, false, service)
+    elif operation == "cancel":
+        if not _has_exact_keys(payload, ["target_request_id"]):
+            return _owned_response(service.bound_error(request_id, operation, "invalid_request", "invalid cancel payload"), false, service)
+        val target = _jtext(payload, "target_request_id")
+        if not _valid_id(target):
+            return _owned_response(service.bound_error(request_id, operation,
+                "invalid_request", "invalid cancel payload"), false, service)
+        # Real §14.19 pending -> cancelled CAS via SpipeProviderStateV1.cancel:
+        # `known_request_ids`/`pending_request_ids`/`completed_request_ids`
+        # are populated at the single dispatch chokepoint
+        # (wire_dispatch.spl's admit_request/complete_request around every
+        # bound operation, cancel included), so this reflects genuine request
+        # history rather than a hardcoded outcome. Because this host reads
+        # and fully answers one frame before reading the next, no target can
+        # ever be observed mid-flight: a request already seen in this
+        # generation is always "already_complete" by the time a later cancel
+        # frame is decoded, and "cancelled" is unreachable under this
+        # concurrency model. That is the honest divergence filed for
+        # correction §2.4 -- the CAS and its states are real, only the
+        # "still running" disposition is unreachable here.
+        var owned_cancel = service
+        val outcome = owned_cancel.state.cancel(target)
+        if val Err(reason) = outcome:
+            return _owned_response(owned_cancel.bound_error(request_id,
+                operation, reason,
+                "target request never existed in this generation"), false,
+                owned_cancel)
+        return _owned_response(_success(owned_cancel, request_id, operation,
+            "{\"status\":" + _json_string(outcome.unwrap()) +
+                ",\"target_request_id\":" + _json_string(target) + "}"),
+            false, owned_cancel)
+    elif operation == "shutdown":
+        if not _has_exact_keys(payload, ["reason"]):
+            return _owned_response(service.bound_error(request_id, operation, "invalid_request", "invalid shutdown payload"), false, service)
+        val reason = _jtext(payload, "reason")
+        if reason != "normal" and reason != "fallback" and reason != "host_shutdown":
+            return _owned_response(service.bound_error(request_id, operation, "invalid_request", "invalid shutdown reason"), false, service)
+        if val Ok(_) = service.state.shutdown():
+            return _owned_response(_success(service, request_id, operation, "{\"status\":\"closing\"}"), true, service)
+    elif operation == "duplicate_candidates" or operation == "symbols_snapshot":
+        return _owned_response(service.bound_error(request_id, operation, "unsupported_capability", "capability not supported"), false, service)
+    _owned_response(service.bound_error(request_id, operation, "invalid_request", "request rejected"), false, service)

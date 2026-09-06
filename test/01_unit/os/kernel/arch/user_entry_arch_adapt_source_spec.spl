@@ -1,0 +1,69 @@
+# @cover src/os/kernel/arch_adapt/user_entry.spl 100%
+# Source-decision coverage for the compile-time user-entry boundary.
+
+use std.spec.{describe, it, expect, step}
+use app.io.mod.{file_read_text}
+
+val ADAPTER_PATH = "src/os/kernel/arch_adapt/user_entry.spl"
+val CONCRETE_OWNER = "os.kernel.arch.user_entry_bridge"
+val ADAPTER_OWNER = "os.kernel.arch_adapt.user_entry"
+val EXACT_ADAPTER_SOURCE = "# Compile-time User-Entry Adapter\n" +
+    "#\n" +
+    "# Loader and syscall owners import this boundary instead of reaching into the\n" +
+    "# concrete architecture tree. These public re-exports are resolved at compile\n" +
+    "# time: there is no runtime dispatch, allocation, or copied state in the adapter.\n" +
+    "\n" +
+    "pub use {CONCRETE_OWNER}.{{\n" +
+    "    dispatch_enter_user_blocking,\n" +
+    "    dispatch_fs_exec_user_handoff,\n" +
+    "}}\n"
+val ENTER_IMPORT =
+    "use {ADAPTER_OWNER}.{{dispatch_enter_user_blocking}}"
+val HANDOFF_IMPORT =
+    "use {ADAPTER_OWNER}.{{dispatch_fs_exec_user_handoff}}"
+
+val ENTER_CONSUMERS = [
+    "src/os/kernel/abi/syscall_shim.spl",
+    "src/os/kernel/abi/syscall_shim_process.spl",
+]
+val HANDOFF_CONSUMERS = [
+    "src/os/kernel/loader/arm64_fs_exec_spawn.spl",
+    "src/os/kernel/loader/arm32_fs_exec_spawn.spl",
+    "src/os/kernel/loader/riscv32_fs_exec_spawn.spl",
+    "src/os/kernel/loader/riscv64_fs_exec_spawn.spl",
+    "src/os/kernel/loader/x86_32_fs_exec_spawn.spl",
+    "src/os/kernel/loader/x86_64_fs_exec_spawn.spl",
+]
+
+describe "user-entry compile-time architecture adapter":
+    it "is exactly the allocation-free whole-file forwarding contract":
+        step("Read the complete adapter source")
+        val source = file_read_text(ADAPTER_PATH)
+
+        step("Require the exact two-symbol public re-export and nothing else")
+        expect(source).to_equal(EXACT_ADAPTER_SOURCE)
+        expect(source.count("pub use ")).to_equal(1)
+        expect(source.count(CONCRETE_OWNER)).to_equal(1)
+
+        step("Exclude runtime dispatch, state, allocation, and foreign aliases")
+        expect(source.contains("fn ")).to_equal(false)
+        expect(source.contains("match ")).to_equal(false)
+        expect(source.contains("var ")).to_equal(false)
+        expect(source.contains("new ")).to_equal(false)
+        expect(source.contains("extern fn")).to_equal(false)
+        expect(source.contains("rt_")).to_equal(false)
+
+    it "routes every syscall and filesystem-exec consumer through the adapter":
+        step("Require both syscall consumers to import only the adapter")
+        for path in ENTER_CONSUMERS:
+            val source = file_read_text(path)
+            expect(source.contains(ENTER_IMPORT)).to_equal(true)
+            expect(source.count(ADAPTER_OWNER)).to_equal(1)
+            expect(source.contains(CONCRETE_OWNER)).to_equal(false)
+
+        step("Require every target filesystem-exec consumer to import only the adapter")
+        for path in HANDOFF_CONSUMERS:
+            val source = file_read_text(path)
+            expect(source.contains(HANDOFF_IMPORT)).to_equal(true)
+            expect(source.count(ADAPTER_OWNER)).to_equal(1)
+            expect(source.contains(CONCRETE_OWNER)).to_equal(false)

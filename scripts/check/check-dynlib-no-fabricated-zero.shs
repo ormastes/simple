@@ -1,0 +1,33 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+source_file="$root/src/lib/nogc_sync_mut/sffi/dynamic.spl"
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT INT TERM
+
+awk '
+    /    fn call0\(/ { capture=1 }
+    /    fn call_checked\(/ { capture=0 }
+    capture { print }
+' "$source_file" >"$work/legacy-calls.spl"
+
+test "$(grep -Ec '^    fn (call[0-4]|call_n)\(' "$work/legacy-calls.spl")" -eq 6 || {
+    echo 'FAIL: expected six legacy DynLib call methods' >&2
+    exit 1
+}
+if grep -q 'return 0' "$work/legacy-calls.spl"; then
+    echo 'FAIL: legacy DynLib call still fabricates zero' >&2
+    exit 1
+fi
+test "$(grep -c 'panic("E-SFFI-001:' "$work/legacy-calls.spl")" -eq 12 || {
+    echo 'FAIL: invalid handles and missing symbols are not fail-closed' >&2
+    exit 1
+}
+grep -q 'panic("E-SFFI-014: integer bridge supports at most 8 arguments")' \
+    "$work/legacy-calls.spl" || {
+    echo 'FAIL: call_n does not reject unsupported arity' >&2
+    exit 1
+}
+
+echo 'PASS: six legacy DynLib calls preserve valid zero and reject bridge failure'

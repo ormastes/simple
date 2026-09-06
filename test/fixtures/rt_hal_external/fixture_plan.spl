@@ -1,0 +1,124 @@
+# Typed build and provider-admission plans for the test-only external RT/HAL
+# comparators. There is no PATH lookup or shell command surface.
+
+use std.common.env_access.model.*
+use std.common.rt_hal.model.{RtHalOperationKind}
+use std.nogc_sync_mut.rt_hal.exact_boundary.{
+    RtHalDigest256, RtHalExactRequest, RtHalCanonicalReceipt
+}
+
+const RT_HAL_FIXTURE_GOLDEN: u64 = 0x9e3779b97f4a7c15u64
+const RT_HAL_FIXTURE_FNV_PRIME: u64 = 0x00000100000001b3u64
+const RT_HAL_FIXTURE_EFFECT_DOMAIN: u64 = 0xd1b54a32d192ed03u64
+const RT_HAL_FIXTURE_TRACE_DOMAIN: u64 = 0x94d049bb133111ebu64
+
+fn fixture_digest_word(value: RtHalDigest256, lane: i64) -> u64:
+    if lane == 0: return value.word0 as u64
+    if lane == 1: return value.word1 as u64
+    if lane == 2: return value.word2 as u64
+    value.word3 as u64
+
+fn fixture_rotl(value: u64, amount: u64) -> u64:
+    val shift = amount % 64u64
+    if shift == 0u64: return value
+    (value << shift) | (value >> (64u64 - shift))
+
+fn fixture_mix64(value: u64) -> u64:
+    var mixed = value
+    mixed = mixed ^ (mixed >> 30u64)
+    mixed = mixed * 0xbf58476d1ce4e5b9u64
+    mixed = mixed ^ (mixed >> 27u64)
+    mixed = mixed * 0x94d049bb133111ebu64
+    mixed ^ (mixed >> 31u64)
+
+pub fn rt_hal_external_expected_receipt(
+    request: RtHalExactRequest, effect_trace: RtHalDigest256
+) -> RtHalCanonicalReceipt:
+    var outcome: [i64] = [0, 0, 0, 0]
+    var trace: [i64] = [0, 0, 0, 0]
+    val effect = request.operation == RtHalOperationKind.Effectful
+    var lane = 0
+    while lane < 4:
+        var base = fixture_digest_word(request.operation_digest, lane) ^
+            fixture_rotl(fixture_digest_word(request.input_digest, (lane + 1) % 4),
+                (7 + 11 * lane) as u64) ^
+            (RT_HAL_FIXTURE_GOLDEN + RT_HAL_FIXTURE_FNV_PRIME * (lane as u64))
+        if effect:
+            base = base ^ fixture_rotl(
+                fixture_digest_word(effect_trace, (lane + 2) % 4),
+                (13 + 7 * lane) as u64) ^ RT_HAL_FIXTURE_EFFECT_DOMAIN
+        outcome[lane] = fixture_mix64(base) as i64
+        trace[lane] = if effect:
+            fixture_digest_word(effect_trace, lane) as i64
+        else:
+            fixture_mix64(base ^ RT_HAL_FIXTURE_TRACE_DOMAIN) as i64
+        lane = lane + 1
+    RtHalCanonicalReceipt(
+        case_id: request.case_id,
+        outcome_digest: RtHalDigest256(
+            word0: outcome[0], word1: outcome[1],
+            word2: outcome[2], word3: outcome[3]),
+        error_digest: RtHalDigest256(word0: 0, word1: 0, word2: 0, word3: 0),
+        trace_digest: RtHalDigest256(
+            word0: trace[0], word1: trace[1],
+            word2: trace[2], word3: trace[3]),
+        observed_once: true)
+
+pub struct RtHalExternalFixtureConfig:
+    repo: text
+    cc: text
+    cc_hash: text
+    rustc: text
+    rustc_hash: text
+    c_output: text
+    rust_output: text
+
+fn tool(tool_id: text, path: text, digest: text) -> EnvToolIdentity:
+    EnvToolIdentity(tool_id: tool_id, canonical_path: path,
+        identity_hash: "sha256:" + digest)
+
+fn compile_instruction(tool_id: text, arguments: [text]) -> EnvAccessInstruction:
+    EnvAccessInstruction(
+        kind: EnvAccessKind.RunAllowedTool, resource: tool_id,
+        arguments: arguments, timeout_ms: 120000,
+        max_stdout_bytes: 4096, max_stderr_bytes: 8192
+    )
+
+pub fn rt_hal_external_build_plan(config: RtHalExternalFixtureConfig) -> EnvAccessPlan:
+    val c_source = config.repo + "/test/fixtures/rt_hal_external/rthal_scalar_provider.c"
+    val rust_source = config.repo + "/test/fixtures/rt_hal_external/rthal_scalar_provider.rs"
+    EnvAccessPlan(
+        plan_id: "rt-hal-external-build-v1", canonical_repo_root: config.repo,
+        instructions: [
+            compile_instruction("pinned-cc", [
+                "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror",
+                "-static", "-no-pie",
+                c_source, "-o", config.c_output
+            ]),
+            compile_instruction("pinned-rustc", [
+                "--edition=2021", "-C", "opt-level=3", "-C", "panic=abort",
+                "-C", "target-feature=+crt-static",
+                "-C", "relocation-model=static",
+                "-C", "link-arg=-static", "-C", "link-arg=-no-pie",
+                rust_source, "-o", config.rust_output
+            ])
+        ],
+        max_total_bytes: 24576, max_processes: 2,
+        allowed_tools: [
+            tool("pinned-cc", config.cc, config.cc_hash),
+            tool("pinned-rustc", config.rustc, config.rustc_hash)
+        ], allowed_hardware_probes: []
+    )
+
+pub fn rt_hal_external_provider_plan(config: RtHalExternalFixtureConfig, c_hash: text, rust_hash: text) -> EnvAccessPlan:
+    EnvAccessPlan(
+        plan_id: "rt-hal-external-providers-v1",
+        canonical_repo_root: config.repo, instructions: [],
+        # Declare the same outer envelope passed to isolated comparator setup:
+        # two children may run concurrently with 4 KiB aggregate output.
+        max_total_bytes: 4096, max_processes: 2,
+        allowed_tools: [
+            tool("rthal-c-v1", config.c_output, c_hash),
+            tool("rthal-rust-v1", config.rust_output, rust_hash)
+        ], allowed_hardware_probes: []
+    )

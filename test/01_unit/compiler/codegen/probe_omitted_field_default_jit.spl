@@ -1,0 +1,101 @@
+# Run-path probe: an OMITTED declared field must get its declared default.
+#
+# Executed as a SUBPROCESS by omitted_field_default_class_spec.spl under both
+# SIMPLE_EXECUTION_MODE=interpreter and =jit.
+#
+# Defect being pinned (2026-08-17): `lower_struct_init_fields`
+# (src/compiler_rust/compiler/src/hir/lower/expr/collections.rs) filled every
+# declared slot the construction site did not write with a `HirExprKind::Nil`
+# placeholder, discarding the field's declared `= default` entirely. MIR lowers
+# that placeholder to the raw nil tag `3` (TAG_SPECIAL | SPECIAL_NIL), which,
+# read back through an `i64`-typed field, surfaces as the literal integer `3`.
+# So `class D: var n: i64 = 0; var m: i64 = 7` constructed as `D()` printed
+# `n=3 m=3` under the JIT against `n=0 m=7` in the interpreter.
+#
+# DEFECT-CLASS SWEEP, not a single repro. The `3` is a tag leak, so the tell
+# generalises: any field whose JIT value equals "correct value + 3" — or is the
+# bare `3` — is this bug. The class is swept along three axes at once:
+#   (1) payload type: i64 / f64 / bool / text
+#   (2) how many fields are omitted: all, leading, trailing, interleaved
+#   (3) construction form: bare `D()`, positional, and named arguments
+# so a fix that only covers the all-omitted case fails here.
+#
+# Every oracle is an ABSOLUTE literal, never "the two engines agree".
+
+var failures: i64 = 0
+
+fn check(name: text, actual: text, expected: text):
+    if actual == expected:
+        print("PASS " + name)
+    else:
+        failures = failures + 1
+        print("FAIL " + name + " expected=" + expected + " actual=" + actual)
+
+# (1) Every field omitted — the originally reported shape.
+class AllOmitted:
+    var n: i64 = 0
+    var m: i64 = 7
+
+# (2) Mixed payload types, all omitted.
+class MixedTypes:
+    var i: i64 = 11
+    var f: f64 = 2.5
+    var b: bool = true
+    var s: text = "dflt"
+
+# (3) Some fields written, some omitted — leading / trailing / interleaved.
+class PartialFill:
+    var a: i64 = 1
+    var b: i64 = 2
+    var c: i64 = 30
+
+# (4) A field with NO declared default sits next to ones that have defaults.
+#     The undefaulted slot keeps whatever the language already gave it; the
+#     DEFAULTED neighbours must still be correct — that is the regression this
+#     axis guards.
+class SomeUndefaulted:
+    var tagged: i64 = 5
+    var plain: i64 = 0
+
+fn main():
+    # Axis 1: every field omitted. `3` here is the raw nil tag leaking.
+    val d = AllOmitted()
+    check("all_omitted_first_field", d.n.to_string(), "0")
+    check("all_omitted_second_field", d.m.to_string(), "7")
+
+    # Axis 2: the leak is type-independent — an f64 field reading 3.0, a bool
+    # reading true-because-3-is-nonzero, and a text field reading the tag are
+    # all the same defect wearing a different type.
+    val mt = MixedTypes()
+    check("mixed_i64_default", mt.i.to_string(), "11")
+    check("mixed_f64_default", mt.f.to_string(), "2.5")
+    check("mixed_bool_default", mt.b.to_string(), "true")
+    check("mixed_text_default", mt.s, "dflt")
+
+    # Axis 3: trailing omission — `a` written positionally, `b`/`c` defaulted.
+    val trailing = PartialFill(9)
+    check("trailing_written", trailing.a.to_string(), "9")
+    check("trailing_omitted_b", trailing.b.to_string(), "2")
+    check("trailing_omitted_c", trailing.c.to_string(), "30")
+
+    # Axis 3: leading + interleaved omission via NAMED arguments. Named
+    # construction routes through the same declared-order fill loop, so `a` and
+    # `c` must come from their declared defaults, not from the tag.
+    val interleaved = PartialFill(b: 20)
+    check("interleaved_omitted_a", interleaved.a.to_string(), "1")
+    check("interleaved_written_b", interleaved.b.to_string(), "20")
+    check("interleaved_omitted_c", interleaved.c.to_string(), "30")
+
+    # Axis 4: a defaulted field must survive next to a plain one.
+    val su = SomeUndefaulted()
+    check("defaulted_beside_plain", su.tagged.to_string(), "5")
+
+    # Direct tag-leak assertion: none of the defaulted i64 fields may read as
+    # the raw nil tag. Stated separately so the failure names the mechanism.
+    check("no_nil_tag_leak_all_omitted", (d.n == 3 or d.m == 3).to_string(), "false")
+    check("no_nil_tag_leak_partial", (interleaved.a == 3 or interleaved.c == 3).to_string(), "false")
+
+    if failures == 0:
+        print("OMITTED_FIELD_DEFAULT PROBE: ALL PASS")
+    else:
+        print("OMITTED_FIELD_DEFAULT PROBE: " + failures.to_string() + " FAILURE(S)")

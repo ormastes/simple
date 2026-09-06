@@ -1,0 +1,343 @@
+# File Operations - Pure Simple I/O
+# Extracted from mod.spl for modularity
+
+# Extern fn declarations (runtime resolves at file level)
+
+use std.io_runtime.{read_file_text, read_file_text_result, file_delete, file_copy}
+use std.nogc_sync_mut.fs.host_path.{host_path_native}
+@unsafe(reason: "raw file byte-write ABI; the provider borrows the caller-owned byte array", capabilities: [ffi])
+extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
+@unsafe(reason: "raw mmap text ABI; provider text ownership and nil-on-failure behavior are not admitted", capabilities: [ffi])
+extern fn rt_file_mmap_read_text(path: text) -> text
+@unsafe(reason: "raw nullable mmap byte-array ABI; nil means mapping or read failure", capabilities: [ffi])
+extern fn rt_file_mmap_read_bytes(path: text) -> [i64]?
+@unsafe(reason: "raw SHA-256 text ABI; provider may use nil for unreadable input and is not admitted", capabilities: [ffi])
+extern fn rt_file_hash_sha256(path: text) -> text
+@unsafe(reason: "acquires an OS-owned file descriptor that must be released exactly once", capabilities: [ffi])
+extern fn rt_file_lock(path: text, timeout_secs: i64) -> i64
+@unsafe(reason: "consumes a raw OS file-lock descriptor", capabilities: [ffi])
+extern fn rt_file_unlock(handle: i64) -> bool
+@unsafe(reason: "checked managed-text SFFI returns nil only for a foreign I/O contract failure", capabilities: [ffi])
+extern fn rt_file_read_text_at_checked(path: text, offset: i64, size: i64) -> text?
+@unsafe(reason: "raw positional file-write ABI; negative status is the provider failure sentinel", capabilities: [ffi])
+extern fn rt_file_write_text_at(path: text, offset: i64, data: text) -> i64
+@unsafe(reason: "raw memory-map ABI; the returned address is an unvalidated provider handle", capabilities: [ffi, raw_ptr])
+extern fn rt_mmap(path: text, size: i64, offset: i64, readonly: i64) -> i64
+@unsafe(reason: "raw memory-unmap ABI; address and extent must describe a live mapping", capabilities: [ffi, raw_ptr])
+extern fn rt_munmap(addr: i64, size: i64) -> bool
+@unsafe(reason: "raw memory-advice ABI; address and extent must describe a live mapping", capabilities: [ffi, raw_ptr])
+extern fn rt_madvise(addr: i64, size: i64, advice: i64) -> bool
+@unsafe(reason: "raw memory-sync ABI; address and extent must describe a live mapping", capabilities: [ffi, raw_ptr])
+extern fn rt_msync(addr: i64, size: i64) -> bool
+use std.io_runtime.{process_run}
+@unsafe(reason: "raw file-existence predicate; false conflates missing, inaccessible, and provider failure", capabilities: [ffi])
+extern fn rt_file_exists(path: text) -> bool
+@unsafe(reason: "raw no-follow regular-file predicate; false conflates path kind, access, and provider failure", capabilities: [ffi])
+extern fn rt_file_is_regular_no_follow(path: text) -> bool
+@unsafe(reason: "opens one no-follow file descriptor, verifies regular-file metadata, and returns at most the caller-owned bound", capabilities: [ffi])
+extern fn rt_file_read_regular_no_follow_bounded(path: text, max_bytes: i64) -> text?
+@unsafe(reason: "requests durable synchronization of an opened file", capabilities: [ffi])
+extern fn rt_file_fsync(path: text) -> bool
+# extern fn rt_file_write(path: text, content: text) -> bool  # Disabled - not in runtime extern registry
+@unsafe(reason: "raw atomic file-write status ABI; false is provider failure", capabilities: [ffi])
+extern fn rt_file_atomic_write(path: text, content: text) -> bool
+@unsafe(reason: "creates an OS-owned private staging directory", capabilities: [ffi])
+extern fn rt_secure_temp_dir(parent: text, prefix: text) -> text
+@unsafe(reason: "atomically transfers ownership of a staged file path", capabilities: [ffi])
+extern fn rt_file_publish_noreplace(staged_path: text, destination: text) -> i64
+@unsafe(reason: "raw file-size ABI; negative status is the provider failure sentinel", capabilities: [ffi])
+extern fn rt_file_size(path: text) -> i64
+@unsafe(reason: "raw file-stat ABI; zero and negative values are provider-defined failure states", capabilities: [ffi])
+extern fn rt_file_stat(path: text) -> i64
+
+# --- Shell helpers (local copies to avoid circular imports) ---
+# These are minimal copies needed for file operations.
+# The canonical versions live in process_ops.spl.
+
+fn _file_shell(command: text) -> (text, text, i64):
+    process_run("/bin/sh", ["-c", command])
+
+fn _file_shell_bool(command: text) -> bool:
+    val (out, err, code) = _file_shell(command)
+    code == 0
+
+# reason positional io file_ops API
+fn _file_shell_output(command: text, default: text) -> text:
+    val (out, err, code) = _file_shell(command)
+    if code == 0:
+        out
+    else:
+        default
+
+fn _file_shell_int(command: text, default: i64) -> i64:
+    val (out, err, code) = _file_shell(command)
+    if code == 0:
+        val trimmed = out.trim()
+        if trimmed.len() > 0:
+            int(trimmed)
+        else:
+            default
+    else:
+        default
+
+# ============================================================================
+# Core File Operations
+# ============================================================================
+
+fn file_exists(path: text) -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_file_exists(host_path_native(path))
+
+fn file_is_regular_no_follow(path: text) -> bool:
+    # ponytail: predicate + later hash is sufficient for local retained-test
+    # artifacts; replace with no-follow open/fstat/hash-on-fd for hostile races.
+    unsafe(capabilities: [ffi]):
+        rt_file_is_regular_no_follow(host_path_native(path))
+
+fn file_read_regular_no_follow_bounded(path: text, max_bytes: i64) -> Result<text, text>:
+    if max_bytes < 0:
+        return Err("bounded file read requires a non-negative limit")
+    var content: text? = nil
+    unsafe(capabilities: [ffi]):
+        content = rt_file_read_regular_no_follow_bounded(host_path_native(path), max_bytes)
+    if content.?:
+        Ok(content.unwrap())
+    else:
+        Err("regular no-follow bounded file read failed: {path}")
+
+fn file_size_raw(path: text) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_file_size(host_path_native(path))
+
+fn file_read(path: text) -> text:
+    # rt_file_read_text returns Option in bootstrap runtime — unwrap with ??
+    read_file_text(path)
+
+# reason positional io file_ops API
+fn file_write(path: text, content: text) -> bool:
+    file_delete(path)
+    unsafe(capabilities: [ffi]):
+        rt_file_write_text_at(host_path_native(path), 0, content) >= 0
+
+fn file_write_bytes(path: text, data: [u8]) -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_file_write_bytes(host_path_native(path), data)
+
+
+# reason positional io file_ops API
+fn file_atomic_write(path: text, content: text) -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_file_atomic_write(host_path_native(path), content)
+
+fn secure_temp_dir_raw(parent: text, prefix: text) -> text:
+    unsafe(capabilities: [ffi]):
+        rt_secure_temp_dir(parent, prefix)
+
+fn file_publish_noreplace_raw(staged_path: text, destination: text) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_file_publish_noreplace(staged_path, destination)
+
+fn secure_temp_dir(parent: text, prefix: text) -> Result<text, text>:
+    if parent == "" or prefix == "" or prefix.contains("/") or prefix.contains("\\"):
+        return Err("secure temporary directory requires a parent and a leaf-name prefix")
+    val path = secure_temp_dir_raw(parent, prefix)
+    if path == "":
+        return Err("secure temporary directory creation failed")
+    Ok(path)
+
+fn file_publish_noreplace(staged_path: text, destination: text) -> Result<bool, text>:
+    if staged_path == "" or destination == "":
+        return Err("publish paths must be non-empty")
+    val status = file_publish_noreplace_raw(staged_path, destination)
+    if status == 1:
+        return Ok(true)
+    if status == 0:
+        return Ok(false)
+    Err("publish without replacement failed")
+
+fn _timestamp_str() -> text:
+    val micros = _time_now_unix_micros()
+    "{micros}"
+
+# reason positional io file_ops API
+fn file_append(path: text, content: text) -> bool:
+    val current_size = unsafe(capabilities: [ffi]):
+        rt_file_size(host_path_native(path))
+    val offset = if current_size > 0: current_size else: 0
+    unsafe(capabilities: [ffi]):
+        rt_file_write_text_at(host_path_native(path), offset, content) >= 0
+
+fn file_stat(path: text) -> i64:
+    # Get file modification time in seconds since epoch (direct SFFI).
+    # Returns 0 if file doesn't exist or on error.
+    unsafe(capabilities: [ffi]):
+        rt_file_stat(host_path_native(path))
+
+fn file_modified_time(path: text) -> i64:
+    # Get file modification time in seconds since epoch.
+    # Uses direct syscall via SFFI (no subprocess spawning).
+    file_stat(path)
+
+fn file_remove(path: text) -> bool:
+    file_delete(path)
+
+fn file_hash_sha256(path: text) -> text:
+    unsafe(capabilities: [ffi]):
+        rt_file_hash_sha256(host_path_native(path))
+
+fn file_read_lines(path: text) -> Result<[text], text>:
+    match read_file_text_result(path):
+        Ok(content):
+            if content.len() == 0:
+                Ok([])
+            else:
+                Ok(content.split("\n"))
+        Err(error): Err(error)
+
+fn file_lock(path: text, timeout_secs: i64) -> i64:
+    var handle: i64 = -1
+    unsafe(capabilities: [ffi]):
+        handle = rt_file_lock(host_path_native(path), timeout_secs)
+    handle
+
+fn file_unlock(handle: i64) -> bool:
+    var released = false
+    unsafe(capabilities: [ffi]):
+        released = rt_file_unlock(handle)
+    released
+
+fn file_size(path: text) -> i64:
+    file_size_raw(path)
+
+# --- Memory-Mapped File I/O (SFFI wrappers) ---
+
+fn file_read_text(path: text) -> text:
+    read_file_text(path)
+
+# file_read_bytes is defined once in std.io_runtime; re-exported here.
+use std.io_runtime.{file_read_bytes}
+export file_read_bytes
+
+fn file_mmap_read_text(path: text) -> text:
+    unsafe(capabilities: [ffi]):
+        rt_file_mmap_read_text(host_path_native(path))
+
+# `rt_file_mmap_read_bytes` delegates to rt_file_read_bytes, which yields nil
+# on any fs::read error (missing/unreadable path). TOTAL with the documented
+# Preserve the provider's nullable failure state as Result.Err. A valid empty
+# mapping remains Ok([]).
+#
+# The provider is NOT total in every execution lane: the interpreter lane
+# raises `rt_file_mmap_read_bytes failed: <errno>` and aborts instead of
+# yielding nil, so a caller could never observe the documented Err. Reject an
+# empty or non-existent path here — through the typed `file_exists` alias, not
+# a fresh raw `rt_*` call site — so the typed Err contract holds in every lane
+# without fabricating bytes. A path that exists still goes to the provider, so
+# genuine provider failures are still reported as the provider sees them.
+fn file_mmap_read_bytes(path: text) -> Result<[i64], text>:
+    if path == "":
+        return Err("file mmap read requires a non-empty path")
+    if not file_exists(path):
+        return Err("file mmap read failed: {path}")
+    var bytes: [i64]? = nil
+    unsafe(capabilities: [ffi]):
+        bytes = rt_file_mmap_read_bytes(host_path_native(path))
+    if bytes == nil:
+        Err("file mmap read failed: {path}")
+    else:
+        Ok(bytes ?? [])
+
+# --- Offset-based File I/O ---
+
+# reason positional io file_ops API
+fn file_read_text_at(path: text, offset: i64, size: i64) -> Result<text, text>:
+    # Read text from file at specific offset without changing file position.
+    var value: text? = nil
+    unsafe(capabilities: [ffi]):
+        value = rt_file_read_text_at_checked(host_path_native(path), offset, size)
+    if value.?:
+        Ok(value.unwrap())
+    else:
+        Err("offset file read failed for '{path}' at {offset} ({size} bytes)")
+
+# reason positional io file_ops API
+fn file_write_text_at(path: text, offset: i64, data: text) -> i64:
+    # Write text to file at specific offset without changing file position.
+    unsafe(capabilities: [ffi]):
+        rt_file_write_text_at(host_path_native(path), offset, data)
+
+fn file_fsync(path: text) -> bool:
+    var synced = false
+    unsafe(capabilities: [ffi]):
+        synced = rt_file_fsync(host_path_native(path))
+    synced
+
+fn directory_fsync(path: text) -> bool:
+    var synced = false
+    unsafe(capabilities: [ffi]):
+        # POSIX synchronizes directory entries through the same fsync syscall;
+        # hosted backends that cannot open/sync directories fail closed here.
+        synced = rt_file_fsync(host_path_native(path))
+    synced
+
+fn file_fsync_cached(path: text) -> bool:
+    # Portable fallback mirrors file_fsync without forcing hosted file SFFI.
+    file_fsync(path)
+
+# --- Memory-Mapped File I/O ---
+
+# reason positional io file_ops API
+fn file_mmap(path: text, size: i64, offset: i64, readonly: bool) -> i64:
+    # Memory-map a file into process address space.
+    #
+    # Fail closed on arguments that can never name a mappable region — empty
+    # path, non-existent path, non-positive extent, negative offset — and
+    # return the documented invalid-handle sentinel -1 without entering the
+    # raw `rt_mmap` boundary. `rt_mmap` is not registered in every execution
+    # lane (the interpreter lane aborts with `unknown extern function:
+    # rt_mmap`), so without this guard the negative-handle contract this
+    # function promises is unobservable there. Existence is probed through the
+    # typed `file_exists` alias above rather than a new raw `rt_*` call site.
+    if path == "" or size <= 0 or offset < 0 or not file_exists(path):
+        return -1
+    unsafe(capabilities: [ffi, raw_ptr]):
+        rt_mmap(path, size, offset, if readonly: 1 else: 0)
+
+# reason positional io file_ops API
+fn file_munmap(addr: i64, size: i64) -> bool:
+    # Unmap a memory-mapped file region.
+    unsafe(capabilities: [ffi, raw_ptr]):
+        rt_munmap(addr, size)
+
+# reason positional io file_ops API
+fn file_madvise(addr: i64, size: i64, advice: i64) -> bool:
+    # Give advice about memory access patterns.
+    unsafe(capabilities: [ffi, raw_ptr]):
+        rt_madvise(addr, size, advice)
+
+# reason positional io file_ops API
+fn file_msync(addr: i64, size: i64) -> bool:
+    # Synchronize mapped memory with file on disk.
+    unsafe(capabilities: [ffi, raw_ptr]):
+        rt_msync(addr, size)
+
+# --- Additional File Functions ---
+
+use std.io_runtime.{rename_path}
+
+fn file_rename(src: text, dst: text) -> bool:
+    # rename-only contract via a uniquely-named forwarder: dodges the
+    # flattened-unit `file_rename` alias collision that left
+    # `runtime_file_rename` undefined under the seed compile lane.
+    rename_path(src, dst)
+
+# --- Internal helpers (need extern fns) ---
+
+use std.io_runtime.{time_now_unix_micros}
+use std.io_runtime.{getpid}
+
+fn _time_now_unix_micros() -> i64:
+    time_now_unix_micros()
+
+fn _getpid() -> i64:
+    getpid()

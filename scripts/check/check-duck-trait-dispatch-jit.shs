@@ -1,0 +1,48 @@
+#!/bin/sh
+# Gate: a method call through a TRAIT-TYPED receiver must execute on the
+# Cranelift JIT, not take the duck-dispatch trap.
+#
+# ENGINE: Cranelift JIT (`simple run` with SIMPLE_EXECUTION_MODE=jit).
+# The defect lives in MIR lowering + codegen, so an INTERPRETED spec cannot
+# exercise it — `bin/simple test` would pass with the bug present.
+#
+# Bugs: jit_game2d_backend_method_dispatch_sigsegv_2026-07-02 (row 8),
+#       native_with_trait_impl_no_vtable_duck_trap_2026-07-28 (row 17).
+# Before the fix, the impl-less-trait fixtures printed
+# "duck-typed virtual method call ..." and died with SIGILL (rc 132).
+#
+# Verdict line is the last line of stdout. Exit 0 PASS / 1 FAIL / 2 ERROR.
+set -u
+BIN="${SIMPLE_BIN:-bin/simple}"
+DIR="test/01_unit/compiler/codegen/duck_trait_dispatch"
+[ -x "$BIN" ] || { echo "ERROR — nothing was checked (no binary at $BIN)"; exit 2; }
+[ -d "$DIR" ] || { echo "ERROR — nothing was checked (missing $DIR)"; exit 2; }
+
+CHECKED=0
+FAILED=""
+check() {
+  f="$DIR/$1"; shift
+  expected="$*"
+  [ -f "$f" ] || { echo "ERROR — nothing was checked (missing $f)"; exit 2; }
+  out=$(SIMPLE_EXECUTION_MODE=jit "$BIN" run "$f" 2>&1)
+  rc=$?
+  CHECKED=$((CHECKED + 1))
+  got=$(printf '%s\n' "$out" | grep -v 'bootstrap seed only' | grep -v 'pure-Simple bin/simple' | tr '\n' '|')
+  if [ "$rc" -ne 0 ] || [ "$got" != "$expected|" ]; then
+    echo "  FAIL $f rc=$rc out=[$got] want=[$expected|]"
+    FAILED="$FAILED $f"
+  fi
+}
+
+check impl_ful_trait_receiver.spl "soft"
+check erased_any_receiver.spl "soft"
+check duck_trait_receiver_single_method.spl "soft"
+check duck_trait_receiver_multi_method.spl "soft|15|7|soft"
+
+[ "$CHECKED" -gt 0 ] || { echo "ERROR — nothing was checked"; exit 2; }
+if [ -n "$FAILED" ]; then
+  echo "FAIL — $CHECKED fixture(s) checked on the Cranelift JIT, failing:$FAILED"
+  exit 1
+fi
+echo "PASS — $CHECKED fixture(s) checked on the Cranelift JIT, 0 duck-dispatch traps"
+exit 0

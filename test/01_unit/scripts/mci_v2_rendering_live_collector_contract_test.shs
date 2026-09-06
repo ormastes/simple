@@ -1,0 +1,41 @@
+#!/bin/sh
+set -eu
+root=$(mktemp -d); trap 'rm -rf "$root"' EXIT HUP INT TERM
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$root/key.pem" >/dev/null 2>&1
+openssl pkey -in "$root/key.pem" -pubout -out "$root/public.pem" >/dev/null 2>&1
+h=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+out=build/test-mci-rendering-live-collector-$$
+trap 'rm -rf "$root" "$out"' EXIT HUP INT TERM
+repo=$(pwd -P); abs=$repo/$out; work=$abs/work
+build="sh scripts/check/build-vulkan-drawir-showcase-native.shs bin/simple $work/simple_showcase_vulkan $work/cache"
+run="/usr/bin/time -f %M -o $work/max-rss-kib env MCI_RENDERING_PROBE_DIR=$work/probe-source SIMPLE_SHOWCASE_CAPTURE=$work/device-readback.ppm SIMPLE_SHOWCASE_CPU_CAPTURE=$work/cpu-readback.ppm SIMPLE_SHOWCASE_FRAMES=20 $work/simple_showcase_vulkan"
+rdoc="RDOC_OUTPUT_DIR=$work/renderdoc RDOC_SIMPLE_BIN=$work/simple_showcase_vulkan sh scripts/tool/renderdoc-evidence.shs capture-simple"
+gate="BUILD_DIR=$work/renderdoc-gate RDOC_SIMPLE_EVIDENCE_ENV=$work/renderdoc/simple/evidence.env sh scripts/check/check-renderdoc-simple-gate.shs"
+hash_text() { printf '%s' "$1" | sha256sum | awk '{print $1}'; }
+{
+ echo policy_schema=mci-rendering-live-command-trust-v1
+ echo scope=fixture
+ echo collector_key_id=test-key
+ echo collector_public_key_sha256=$(sha256sum "$root/public.pem" | awk '{print $1}')
+ echo allow_fixture=true
+ echo command_engine2d_build_sha256=$(hash_text "$build")
+ echo command_engine2d_run_sha256=$(hash_text "$run")
+ echo command_renderdoc_capture_sha256=$(hash_text "$rdoc")
+ echo command_renderdoc_replay_gate_sha256=$(hash_text "$gate")
+} > "$root/trust.env"
+sh scripts/tool/collect-mci-v2-rendering-live.shs --output "$out" --mode fixture \
+ --signing-key "$root/key.pem" --key-id test-key --trust-policy "$root/trust.env" \
+ --run-id fixture-run --source-hash "$h" --configuration-hash "$h" \
+ --device fixture-device --driver fixture-driver --queue fixture-queue >"$root/stdout"
+grep -Fqx 'artifact_mode=fixture' "$out/collector-manifest.env"
+grep -Fqx 'release_eligible=false' "$out/collector-manifest.env"
+grep -Fqx 'nonpromotable_reason=contract-fixture-no-gpu-execution' "$out/collector-manifest.env"
+grep -Fq 'scripts/check/build-vulkan-drawir-showcase-native.shs' "$out/collector-manifest.env"
+grep -Fq 'scripts/tool/renderdoc-evidence.shs capture-simple' "$out/collector-manifest.env"
+grep -Fq 'scripts/check/check-renderdoc-simple-gate.shs' "$out/collector-manifest.env"
+grep -Fqx 'device_identity=fixture-device' "$out/collector-manifest.env"
+grep -Fqx 'driver_identity=fixture-driver' "$out/collector-manifest.env"
+grep -Fqx 'queue_identity=fixture-queue' "$out/collector-manifest.env"
+openssl dgst -sha256 -verify "$root/public.pem" -signature "$out/collector-manifest.sig" "$out/collector-manifest.env" >/dev/null
+if sed 's/artifact_mode=fixture/artifact_mode=live/' "$out/collector-manifest.env" > "$root/tampered" && openssl dgst -sha256 -verify "$root/public.pem" -signature "$out/collector-manifest.sig" "$root/tampered" >/dev/null 2>&1; then exit 1; fi
+echo mci-v2-rendering-live-collector-contract:PASS
