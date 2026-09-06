@@ -363,3 +363,131 @@ independent of blocker B: even with the compiler defect fixed, the sanity
 harness cannot produce admissible frontend evidence on a host without procfs.
 Both must be resolved before any macOS `--deploy` is possible, and blocker A is
 a design decision rather than a portability fix.
+
+## The Stage-4 direct lane: four gates cleared, stopped at a real C-bundle gap
+
+Because Stage-2 admission is unreachable (blockers A and B), the deploy attempt
+switched to the documented macOS Stage-4 ladder
+(`doc/03_plan/compiler/bootstrap/stage4_macos_deploy_2026-07-25.md`): drive the
+seed directly with `SIMPLE_BOOTSTRAP_STAGE4=1`, `--runtime-bundle
+core-c-bootstrap --entry-closure --mode one-binary --entry src/app/cli/main.spl`.
+That lane needs no admission receipt, no procfs, and no Stage-2 binary.
+
+**It compiles.** All ~1,600 modules of the full CLI closure build on macOS. Every
+failure below is at link/validation time, and each one was a real defect:
+
+| # | Gate | Verdict |
+|---|---|---|
+| 1 | Stage-4 C-provider symbol validation | `unexpected undefined [_tlv_bootstrap]` — **fixed** |
+| 2 | macOS system-owner probe | `Undefined symbols: _rt_string_len ... _borrow_string` — **fixed** |
+| 3 | Stage-4 archive core duplicate check | ``defines `rt_text_is_ascii` 2 times`` — **fixed** |
+| 4 | (same, remaining two names) | `rt_text_to_upper_ascii`, `rt_text_to_lower_ascii` — **fixed** |
+| 5 | Stage-4 requested-symbol ownership | **NOT fixed — see below** |
+
+### Gate 1 — `_tlv_bootstrap`
+
+`nm -u` on `stage4_c_providers/runtime_timestamp.o` lists exactly two undefined
+symbols: `_clock_gettime` and `__tlv_bootstrap`. `STAGE4_C_TIME_UNDEFINED`
+allowed only the first. clang emits `_tlv_bootstrap` into any Mach-O object
+declaring a thread-local, and `runtime_timestamp.c:15` defines
+`RT_TIME_THREAD_LOCAL` as `_Thread_local`, so every macOS build of that provider
+references it; dyld resolves it. Fixed with `STAGE4_C_PERMITTED_UNDEFINED`,
+subtracted from `unexpected_undefined` only — permitted, never required.
+
+### Gate 2 — the probe's `-U` list was one name short
+
+`validate_stage4_macos_system_ownership` passed `-Wl,-U,_rt_string_data` and
+`-Wl,-U,_rt_string_new`, while both `STAGE4_C_SQLITE_UNDEFINED` and
+`validate_stage4_system_library_ownership` list **three** runtime-owned names.
+`_rt_string_len` was missing, so `_borrow_string` in `runtime_sqlite.o` failed
+the strict probe on every macOS Stage-4 link. The stale comment said "these two
+ABI names". Fixed by adding the third.
+
+### Gates 3-4 — a real dual implementation, resolved without picking a winner
+
+`runtime_native.c` and `runtime_simd_case.c` both define `rt_text_is_ascii`,
+`rt_text_to_upper_ascii` and `rt_text_to_lower_ascii`, unguarded, so
+`libsimple_runtime.a` carried three duplicate definitions. They are **not**
+interchangeable:
+
+- nil / non-string: `runtime_native` returns 0, `runtime_simd_case` returns 1
+  ("vacuously ASCII");
+- `runtime_native` retries through `rt_string_promote_raw_receiver()`; the SIMD
+  file has no promotion path;
+- the SIMD converters allocate `RtCoreStringSimd` and return a pointer tagged
+  `RT_VALUE_TAG_HEAP_SIMD` — a different heap representation.
+
+Deleting either changes runtime string semantics product-wide, so neither was
+deleted. The SIMD entry points are now behind `SPL_SIMD_TEXT_CASE_PROVIDER`,
+default off: incumbent behaviour is bit-for-bit unchanged, the SIMD dispatch
+machinery is preserved for whoever finishes the lane, and the adoption
+conditions are written at the guard.
+
+### Gate 5 — six symbols have no C implementation (OPEN, real gap)
+
+```
+Build failed: Stage4 requested symbols have no archive owner:
+  rt_hosted_select_surface, rt_mmap_raw, rt_numeric.f64,
+  rt_sdl2_present_rgba, rt_webgpu_destroy_surface, rt_webgpu_shutdown
+```
+
+Measured against the authority archives:
+
+| symbol | `libsimple_native_all.a` | C runtime | source |
+|---|---|---|---|
+| `rt_hosted_select_surface` | defined (T) | — | `src/runtime/hosted/select.rs` |
+| `rt_webgpu_destroy_surface` | defined (T) | — | `src/runtime/hosted/webgpu.rs` |
+| `rt_webgpu_shutdown` | defined (T) | — | `src/runtime/hosted/webgpu.rs` |
+| `rt_mmap_raw` | — | — | header decls only (`unix_common.h`, `platform_win.h`) |
+| `rt_sdl2_present_rgba` | — | — | `runtime_audio.c` / `runtime.h`, not compiled in here |
+
+This is not a validator bug and not fixable by relaxing a gate. Three symbols
+exist **only** in the Rust runtime, which `--runtime-bundle core-c-bootstrap`
+deliberately does not link; two have no compiled definition at all on this
+platform. `SIMPLE_NO_STUB_FALLBACK=1` and the fabricated-stub ratchet correctly
+forbid papering over them.
+
+Note this differs from the 2026-07-25 deploy, which used the same bundle and
+succeeded: the entry closure from `src/app/cli/main.spl` has since grown
+webgpu / hosted-surface / SDL2 call paths with no C-side backing. Closing it
+means implementing those six in the C runtime (or moving them out of the CLI
+closure) — tracked by `doc/08_tracking/c_migration/`.
+
+`rt_numeric.f64` deserves its own look: a `.` in an extern symbol name is not a
+valid C identifier and looks like a lowering defect rather than a missing
+provider.
+
+### Gate 5, characterised: three distinct causes, all needing a decision
+
+Measured against the archives the lane actually links:
+
+- **`rt_hosted_select_surface`, `rt_webgpu_destroy_surface`, `rt_webgpu_shutdown`**
+  are defined (`T`) in `libsimple_native_all.a` — the Rust runtime. The
+  `hosted` / `all` / `rust-runtime` bundle (`NativeRuntimeLane::…`,
+  `config.rs:47-52`) links that archive, so switching bundles would resolve
+  these three. That changes what a Stage-4 binary *is* (Rust runtime rather
+  than the C bootstrap core), which is a deliberate design axis, not a flag to
+  flip in passing.
+
+- **`rt_mmap_raw`** (`unix_common.h:365`, `platform_win.h:522`) and
+  **`rt_sdl2_present_rgba`** (`runtime_sdl2.c:759`) exist in C and compile
+  cleanly here — SDL2 IS installed (`/opt/homebrew/include/SDL2/SDL.h`), and
+  `runtime_sdl2.c` is not among the 6 files the C-runtime gate skips. They are
+  simply **not in the `core-c-bootstrap` bundle**, which carries 23 objects out
+  of the 85 non-vendor `.c` files in `src/runtime/`. That 23-file set is the
+  minimal bootstrap core by design, and `runtime-source-list-parity` polices it.
+  Neither archive the lane links defines them, so no bundle choice fixes these
+  two: either the CLI entry closure must stop reaching SDL2/mmap paths, or the
+  core bundle must grow.
+
+- **`rt_numeric.f64`** is a different animal. `libsimple_native_all.a` carries
+  30 `rt_numeric*` symbols — `rt_numeric_add_f64`, `rt_numeric_contains_u64`
+  and so on — all spelled with underscores. `rt_numeric.f64` contains a `.`,
+  which is not a valid C identifier and cannot name any provider. This is a
+  lowering/naming defect, not a missing implementation, and it is worth
+  chasing independently of the bundle question.
+
+**Net:** the deploy is blocked on a design decision (which runtime bundle a
+macOS Stage-4 CLI should carry, and whether the CLI closure may reach GUI
+paths), plus one real defect (`rt_numeric.f64`). It is no longer blocked on
+anything that can be fixed by running the build differently.
