@@ -113,28 +113,3 @@ missing scripts are).
 directory is dead) is closed. The one remaining open item (write the two Python helper scripts) is
 intentionally *not* closed here and continues to live at
 `doc/08_tracking/todo/jupyter_e2e_helper_scripts_missing_2026-08-08.md`.
-
----
-
-## Reconciliation 2026-09-02 — the filed defect is gone; a DIFFERENT one is left
-
-The specific claim in this record's title and symptom -- that the spec
-references `test/system/jupyter/helpers/`, a path that never existed under the
-canonical `test/03_system/tools/jupyter/` tree -- is no longer true. The three
-helper references in
-`test/03_system/tools/jupyter/jupyter_notebook_server_system_spec.spl` are now
-all canonical (`:105`, `:131`, `:154`, all
-`test/03_system/tools/jupyter/helpers/...`). The record's `CLOSED (not
-reproducible)` header is correct; the bug database still indexing it as OPEN is
-the stale part.
-
-**Honest residue, stated rather than folded into the close:** the two named
-helpers (`run_server_check.py`, `run_notebook_server_test.py`) still do not
-exist -- `test/03_system/tools/jupyter/helpers/` holds only
-`wrapper_transport_roundtrip.py` -- so those `it` blocks still print `SKIP: ...
-not found` and still report green without running any assertion. That is a
-real, different defect (a green-on-missing-fixture path, not a stale path), and
-it cannot be repaired by this lane: the missing helpers are Python, and
-`.claude/rules` forbids adding Python to this tree. Whoever picks it up should
-either port the two helpers to `.shs`/`.spl` or make the missing-helper branch
-fail rather than pass.

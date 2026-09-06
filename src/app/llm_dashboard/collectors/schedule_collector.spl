@@ -8,8 +8,8 @@ use app.llm_dashboard.data.types.{ManagedTask, TaskKind, TaskState}
 use std.io_runtime.{file_exists}
 @unsafe(reason: "raw schedule/lock-file text ABI; collector results lack an error channel", capabilities: [ffi])
 extern fn rt_file_read_text(path: text) -> text
-use std.io_runtime.{dir_list}
-use std.io_runtime.{time_now_unix_micros}
+extern fn rt_dir_list(path: text) -> [text]
+extern fn rt_time_now_unix_micros() -> i64
 
 # =========================================================================
 # Claude Code Schedule Detection
@@ -18,15 +18,15 @@ use std.io_runtime.{time_now_unix_micros}
 fn collect_schedules() -> [ManagedTask]:
     """Scan for Claude Code scheduled tasks and active loops."""
     var tasks: [ManagedTask] = []
-    val now_ms = time_now_unix_micros() / 1000
+    val now_ms = rt_time_now_unix_micros() / 1000
 
     val sched_dir = _expand_home("~/.claude/schedules")
-    if file_exists(sched_dir):
-        val files = dir_list(sched_dir)
+    if rt_file_exists(sched_dir):
+        val files = rt_dir_list(sched_dir)
         for fname in files:
             if fname.ends_with(".json") or fname.ends_with(".sdn"):
                 val path = "{sched_dir}/{fname}"
-                val content = unsafe(capabilities: [ffi]): rt_file_read_text(path)
+                val content = rt_file_read_text(path)
                 val task = _parse_schedule_file(fname, content, now_ms)
                 if task.id != "":
                     tasks.push(task)
@@ -58,7 +58,7 @@ fn _parse_schedule_file(fname: text, content: text, now_ms: i64) -> ManagedTask:
 fn collect_daemons() -> [ManagedTask]:
     """Detect running Simple-native daemon processes via their lock files."""
     var tasks: [ManagedTask] = []
-    val now_ms = time_now_unix_micros() / 1000
+    val now_ms = rt_time_now_unix_micros() / 1000
 
     val d1 = _check_daemon(".build/daemon/test_daemon/lock", "test_daemon", "Test Daemon", now_ms)
     if d1.id != "":
@@ -73,9 +73,9 @@ fn collect_daemons() -> [ManagedTask]:
     return tasks
 
 fn _check_daemon(lock_path: text, daemon_id: text, daemon_name: text, now_ms: i64) -> ManagedTask:
-    if not file_exists(lock_path):
+    if not rt_file_exists(lock_path):
         return ManagedTask.new("", TaskKind.Daemon, "", "")
-    val pid_str = unsafe(capabilities: [ffi]): rt_file_read_text(lock_path).trim()
+    val pid_str = rt_file_read_text(lock_path).trim()
     var task = ManagedTask.new(daemon_id, TaskKind.Daemon, daemon_name, "")
     task.agent_id = pid_str
     task.state = TaskState.Active
@@ -93,8 +93,8 @@ fn _expand_home(path: text) -> text:
     return path
 
 fn _get_home_dir() -> text:
-    if file_exists("/Users"):
-        val entries = dir_list("/Users")
+    if rt_file_exists("/Users"):
+        val entries = rt_dir_list("/Users")
         if entries.len() > 0:
             return "/Users/{entries[0]}"
     return "/root"

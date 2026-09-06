@@ -1,42 +1,12 @@
 # bootstrap admission v2 is unconditionally fail-closed — no bootstrap can start (2026-08-17)
 
-Status: RESOLVED 2026-09-02 — re-verified against `origin/main` @ `1b76db1d6c3`.
-The three contradictory status lines below (a FIXED header sitting above two
-`OPEN` lines) are what kept this record stale-open; they are superseded by this
-line and preserved underneath for history.
-
-### Closure evidence (2026-09-02, source inspection)
-
-The unconditional failure this record is about is **gone**.
-`scripts/check/lib/bootstrap-planner-admission-bound.shs:282-287` now reads, in
-full:
-
-```sh
-bootstrap_planner_v2_verify() {
-    bootstrap_planner_v2_verify_bound "$1" "$2" || {
-        echo "bootstrap-policy-error: planner-admission-v2-unbound" >&2
-        return 1
-    }
-}
-```
-
-There is no `return 1` after a successful structural check and no
-`planner-admission-v2-producer-unavailable` message anywhere in the file — the
-verdict is now delegated to `bootstrap_planner_v2_verify_bound`, i.e. it depends
-on the receipt's content instead of always failing. The canonical producer the
-record said did not exist is present as
-`scripts/bootstrap/produce-bootstrap-planner-admission-v2.shs` (emits
-`schema=simple-bootstrap-planner-admission-v2` at `:284`, default output
-`planner-admission-v2.env` at `:279`).
-
-Not tested end to end: actually starting a bootstrap would consume a bootstrap
-cycle, which was out of scope for this pass (one was in flight). What is proved
-is the specific defect — "a gate whose producer does not exist, wired to always
-fail" — no longer holds.
+Status: FIXED 2026-08-17 — the missing canonical producer was written, and the
+verifier was **strengthened**, not weakened. See "Fix (2026-08-17)" at the
+bottom. History below is preserved.
 
 Previously: OPEN (P1)
 Status re-verified 2026-08-17 by source inspection (triage shard 00).
-**Status (historical):** OPEN — worked around, not fixed.
+**Status:** OPEN — worked around, not fixed.
 
 `scripts/check/lib/bootstrap-planner-admission-bound.shs` (working-copy edit
 02:14, also present on origin/main) ends `bootstrap_planner_v2_verify` with:

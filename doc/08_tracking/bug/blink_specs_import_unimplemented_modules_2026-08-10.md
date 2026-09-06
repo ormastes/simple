@@ -1,15 +1,9 @@
 # Four blink specs RED: they import blink modules that do not exist
 
 Date: 2026-08-10
-Status: RESOLVED (was OPEN P2)
+Status: OPEN (P2)
 Status re-verified 2026-08-17 by source inspection (triage shard 00).
 Status: CLOSED 2026-08-17 (all four missing owners implemented and verified)
-Status re-verified 2026-09-02 (fix/bugdb-batch-g triage): all four modules
-confirmed present on disk — `src/lib/blink/paint/paint_tree_walker.spl`,
-`src/lib/blink/input/event.spl`, `src/lib/blink/input/hit_test.spl`,
-`src/lib/blink/dom/form_state.spl`. The top-of-file status line was stale
-(still read OPEN) despite the body already recording the 2026-08-17 closure;
-corrected here rather than re-litigated.
 Lane verified: host x86_64-unknown-linux-gnu, `bin/simple` = Rust bootstrap seed,
 interpreter path (JIT fell back: `HIR lowering error: Cannot infer field type:
 struct 'CompileOptions' field 'mode' [in src/app/test_runner_new/main.spl]`).

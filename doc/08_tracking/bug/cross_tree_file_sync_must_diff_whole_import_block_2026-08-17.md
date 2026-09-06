@@ -1,24 +1,7 @@
 # Cross-tree file sync must diff the whole import block, not just the synced function
 
 - **Date:** 2026-08-17
-- **Status:** RESOLVED 2026-09-02 — the concrete instance is confirmed fixed at
-  `origin/main` @ `1b76db1d6c3`, and the process guidance below has been written
-  down, which is all this record ever asked for. Re-verified by source
-  inspection:
-  `src/compiler/80.driver/driver_hir_pipeline_lowering.spl:45` now carries the
-  whole import, not a partial one —
-  `use compiler.driver.driver_typecheck_severity.{TypecheckPassSeverity, typecheck_pass_severity}`
-  — and the symbol resolves: it is defined at
-  `src/compiler/80.driver/driver_typecheck_severity.spl:98` and used at
-  `driver_hir_pipeline_lowering.spl:964`
-  (`match typecheck_pass_severity():`). The `undefined reference to
-  typecheck_pass_severity` link failure therefore cannot recur from this site.
-  **No runnable regression test exists for this record and none is possible
-  here:** the failure is a stage-2 LINK error inside a bootstrap cycle, so
-  reproducing it requires a bootstrap (out of scope for this pass). The guard
-  that would generalise it — treating a compile-time `warning: unresolved call`
-  as fatal rather than deferring it to link — is the open follow-up.
-- **Status (historical):** OPEN (process defect; the concrete instance is fixed)
+- **Status:** OPEN (process defect; the concrete instance is fixed)
 - **Found by:** bootstrap cycle 4b, `simple-boot-snap`
 
 ## Symptom
