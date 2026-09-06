@@ -50,7 +50,7 @@ extern "C" {
     fn cuInit(flags: u32) -> CUresult;
     fn cuDeviceGetCount(count: *mut i32) -> CUresult;
     fn cuDeviceGet(device: *mut CUdevice, ordinal: i32) -> CUresult;
-    fn cuDeviceGetName(name: *mut i8, len: i32, dev: CUdevice) -> CUresult;
+    fn cuDeviceGetName(name: *mut std::os::raw::c_char, len: i32, dev: CUdevice) -> CUresult;
     fn cuDeviceGetAttribute(pi: *mut i32, attrib: i32, dev: CUdevice) -> CUresult;
     fn cuDeviceTotalMem_v2(bytes: *mut usize, dev: CUdevice) -> CUresult;
     fn cuCtxCreate_v2(ctx: *mut CUcontext, flags: u32, dev: CUdevice) -> CUresult;
@@ -67,7 +67,7 @@ extern "C" {
     fn cuMemsetD8_v2(dst: CUdeviceptr, value: u8, n: usize) -> CUresult;
     fn cuModuleLoadData(module: *mut CUmodule, image: *const c_void) -> CUresult;
     fn cuModuleUnload(hmod: CUmodule) -> CUresult;
-    fn cuModuleGetFunction(hfunc: *mut CUfunction, hmod: CUmodule, name: *const i8) -> CUresult;
+    fn cuModuleGetFunction(hfunc: *mut CUfunction, hmod: CUmodule, name: *const std::os::raw::c_char) -> CUresult;
     fn cuLaunchKernel(
         f: CUfunction,
         gridDimX: u32,
