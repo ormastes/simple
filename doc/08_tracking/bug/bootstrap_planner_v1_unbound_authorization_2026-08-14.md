@@ -1,65 +1,6 @@
 # Bootstrap planner v1 unbound authorization
 
-Status: RESOLVED-ON-THE-PRODUCTION-PATH 2026-09-02, **with one residual named
-below — do not read this as "v1 is gone", because it is not.** Verified against
-`origin/main` @ `1b76db1d6c3`.
-
-### What was checked (2026-09-02)
-
-**The defect is unreachable in production.** The only receipt the planner emits,
-and the only one the bootstrap scripts verify, is v2:
-`src/app/build/bootstrap_receipt_planner.spl:8` imports
-`bootstrap_authorization_receipt_v2` / `bootstrap_sha256_is_canonical_v2` and
-nothing else, validates all four admission hashes (`:14-20`), and builds the
-receipt at `:77`. On the script side,
-`/usr/bin/grep -rn "planner-admission-v2" scripts/` hits 10 files including
-`bootstrap-from-scratch.sh:439`, `resume-stage3-from-admitted.sh:26`,
-`resume-stage4-from-admitted.sh`,
-`produce-bootstrap-planner-admission-v2.shs:279,284`,
-`check-bootstrap-planner-admission-producer.shs` and
-`verify-bootstrap-planner-admission-bound.shs`. No script consumes a v1 planner
-receipt; the `*-admission-v1` strings that do exist in `scripts/`
-(`simple-bootstrap-lineage-admission-v1`, `simple-bootstrap-stage2-admission-v1`,
-`simpleos-executable-admission-v1`, …) are different schemas for different
-subsystems, not this one.
-
-### Residual — the v1 acceptor is still in the tree (was nearly missed)
-
-An initial pass over `scripts/` alone concluded "v1 no longer exists". That was
-wrong, and the correction is the useful part of this update:
-`src/app/build/targets/bootstrap_policy.spl` still contains the whole v1
-mechanism this record indicts —
-
-- `:28` `bootstrap_authorization_receipt_v1(target, reason)`, admitting on the
-  bare **prefix** test `target.starts_with("//bootstrap:") or
-  target.starts_with("//release:")` plus a typed reason, binding nothing else;
-- `:37` `bootstrap_authorization_error_v1(receipt, target)`, which returns `""`
-  (i.e. ACCEPTED) for any such receipt.
-
-It has no production caller — `/usr/bin/grep -rn` across `src/app/` and
-`test/01_unit|02_integration` finds references only inside that file plus one
-spec, `test/01_unit/app/build/bootstrap_policy_spec.spl:38`, which asserts the v1
-acceptor returns `""`. So it is unused product code kept alive by its own test,
-exactly the "prefix admission authorizes any target" surface v2 replaced.
-
-**Not deleted here** — removing it means removing its spec too, which is a
-scope call for the bootstrap-policy owner, not a triage pass. Recommended
-follow-up: delete `bootstrap_authorization_receipt_v1` /
-`bootstrap_authorization_error_v1` and their spec, per the repo rule against
-leaving unused code, so a future caller cannot re-adopt the unbound path.
-
-### Test status
-
-No new regression test was written. The v1 acceptor already has one
-(`bootstrap_policy_spec.spl:38`) and it passes — but it pins the WRONG
-behaviour for this record's purposes (it asserts prefix admission succeeds).
-The correct successor coverage is v2's structural binding, exercised by
-`scripts/check/lib/bootstrap-planner-admission-bound.shs`. A meaningful new
-test here would have to assert v1 is *unreachable*, which is a
-census/lint-shaped check, and it should be written as part of the deletion
-above rather than freezing the dead code in place.
-
-Previously: OPEN (P1)
+Status: OPEN (P1)
 Status re-verified 2026-08-17 by source inspection (triage shard 00).
 
 The version-1 planner receipt authorized any target with a bootstrap or release
