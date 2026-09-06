@@ -274,17 +274,26 @@ it cancels the running gate and re-queues you behind everything else. Get the
 commit message and the rebase right BEFORE the first push; amending a message
 afterwards costs a full queue cycle.
 
-**There is a receipt fast path for the idiom gate, and it does not work yet.**
-`code-idiom-gates` now consults a signed local-CI receipt
-(`simple.local-ci-receipt/v1`) and picks one of three modes: `sanity` (~60 s,
-receipt verify plus the conflict-class guards), `escalate` (sanity set plus only
-the gates whose declared `inputs` intersect a rebase diff) or `full` (everything,
-and every undecidable case). It is fail-closed: an unset `skip_ids` runs every
-gate. **Today every real PR here gets `full`**, for two measured reasons — the
-verifier reads jj `change-id` headers only, and 0 of the last 40 origin/main
-commits and 0 of PR #380's head commits carry one (the `git worktree add
---detach` + `gh pr create` route does not write it); and the receipt has no
-delivery mechanism a PR can use. So the "push ONCE" advice above still governs.
+**There is a receipt fast path for the idiom gate; it works, but nothing is
+admitted yet.** `code-idiom-gates` consults a signed local-CI receipt
+(`simple.local-ci-receipt/v1`) and picks one of FOUR modes: `sanity` (measured
+~8 s — receipt verify plus the conflict-class guards), `escalate` (sanity set
+plus only the gates whose declared `inputs` intersect a rebase diff), `docs`
+(changed paths are entirely documentation; never applies to `.github/**`) or
+`full` (everything, and every undecidable case). It is fail-closed: an unset
+`skip_ids` runs every gate.
+
+Identity binds the jj `change-id` header when present, else `git patch-id
+--stable` for non-merge commits, else unbindable. That fallback matters here:
+0 of the last 40 origin/main commits and 0 of PR #380's head commits carry a
+change-id header, because the `git worktree add --detach` + `gh pr create`
+route does not write one — so a real PR binds by patch-id today.
+
+**What still stops a PR taking the fast path** is not the mechanism but the
+setup: `config/check/ci_receipt_allowed_signers` ships with ZERO keys
+(deliberate, fail-closed), and the signer has no note-emission flag, so
+attaching the receipt to `refs/notes/ci-receipts` is a manual `git notes` step.
+Until a key is added, the "push ONCE" advice above still governs.
 Full details, key onboarding and the verdict-string troubleshooting table:
 [`doc/07_guide/infra/local_ci_receipt/operator_guide.md`](../../doc/07_guide/infra/local_ci_receipt/operator_guide.md).
 
