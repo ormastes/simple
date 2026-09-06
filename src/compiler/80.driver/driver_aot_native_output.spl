@@ -457,11 +457,15 @@ fn driver_native_disk_source_identity(source_path: text) -> text:
 # tag `native-capsule-receipt-invalid:<module>`. Measured 2026-09-06 on the
 # rejected stage-2, that tag is what a passing build and a failing build were
 # distinguished by -- which is to say, not at all. Name the sub-check and carry
-# the MEASURED values, because the values are the evidence: the object on disk is
-# 1080 bytes while the receipt records `size=16 content_hash=241`, i.e.
-# `FileFingerprint.from_file` fingerprinted a 16-byte truncation of a binary ELF
-# (`incremental_file_read_text` returned a short text instead of nil at the first
-# NUL run, so the sha256 fallback for binaries never ran). "" means valid.
+# the MEASURED values, because the values are the evidence. MEASURED: the object
+# on disk is 1080 bytes while the receipt records `size=16 content_hash=241`,
+# identically across two runs. INFERRED, not proven: that is consistent with
+# `incremental_file_read_text` returning a short text instead of nil at the ELF
+# header's first NUL run, so `FileFingerprint.from_file` took the text branch and
+# the sha256 fallback for binaries never ran. A value stable across RUNS is not
+# necessarily stable across CALLS within one run, and the receipt is written by
+# one call and validated by another -- which is exactly what the
+# expected-len/actual-len pair below exists to settle. "" means valid.
 pub fn driver_native_capsule_result_invalid_reason_v1(
     capsule: FrozenNativeModuleCapsuleV1) -> text:
     if not capsule.identity_valid():
@@ -1652,16 +1656,22 @@ impl CompilerDriver:
 # -- it is tracked separately in
 # doc/08_tracking/bug/stage2_aot_error_message_lost_invalid_heap_2026-09-06.md --
 # it removes that defect's ability to blind every failure on this path.
-# Measured 2026-09-06 on the rejected stage-2 (`simple.rejected`): this function
-# WAS called 222 times and printed 222 EMPTY lines. The log carries exactly one
-# blank line per failure, immediately before each of the 222 build-outcome
-# summaries, and not one `error: AOT compile error in ...` line -- so the
-# interpolated `print` collapsed the WHOLE string, its literal prefix included,
-# when one interpolated operand was the corrupt payload the bug record calls
-# `<invalid-heap:0x…>`. That is why four investigations read this path as "never
-# reached": a single bad operand silences the literal text around it.
+# CORRECTED 2026-09-06 -- an earlier revision of this comment claimed as measured
+# fact that this function ran 222 times and printed 222 empty lines. That claim is
+# REFUTED by later evidence from the same run: the object file (1080 bytes) and
+# its capsule-receipt were both present on disk, so `_compile_frozen_module_capsule`
+# returned `Ok` and this function was NOT on the failing path at all. The failing
+# path is the collection checkpoint below. What IS measured: the log carries one
+# unexplained blank line per failure and not one `error: AOT compile error in ...`
+# line; the ORIGIN of that blank line is unidentified, and this comment does not
+# claim otherwise.
 #
-# So the diagnostic must not depend on interpolation succeeding. Three
+# The hardening below is kept because it is correct for the path it guards, and
+# because the payload corruption it defends against is independently recorded in
+# doc/08_tracking/bug/stage2_aot_error_message_lost_invalid_heap_2026-09-06.md
+# (`err.to_text()` rendering as `<invalid-heap:0x…>`): a diagnostic that depends
+# on interpolating a possibly-corrupt operand can be silenced together with the
+# literal text around it. Three
 # independent statements, ordered most-robust first, so a collapse localises the
 # corruption instead of erasing the message:
 #   1. a pure-literal line -- no operands, so nothing can silence it. Its

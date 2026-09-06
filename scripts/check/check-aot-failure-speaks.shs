@@ -1,0 +1,272 @@
+#!/bin/sh
+# check-aot-failure-speaks.shs
+#
+# A FAILED native-build unit must state WHY it failed.
+#
+# WHY THIS EXISTS (measured 2026-09-06 on
+# build/bootstrap/stage2/aarch64-unknown-linux-gnu/simple.rejected):
+#
+# The Stage-2 sanity probe builds the hello-world fixture in POSITIONAL form and
+# fails like this, with every lowering checkpoint reporting zero errors:
+#
+#   [bootstrap-error-count] point=entry|post-lowering|post-diagnostics|post-store  count=0
+#   ERROR: 1 unit(s)
+#     reason: (none recorded -- BUG in the producer: a non-OK unit must carry a diagnostic)
+#   error: Stage 2 bootstrap compiler sanity failed
+#     UNDIAGNOSABLE: the stage failed with no error message of any kind.
+#
+# That "(none recorded)" line is not a cosmetic problem. It blinded FOUR
+# separate investigations on 2026-09-06 alone, because it is emitted by the
+# summary in two byte-identical forms for two different defects, and because the
+# raising sites communicated the reason only by return value -- a channel that,
+# on this binary, delivers nothing:
+#
+#   * `driver_native_collect_capsule_result_v1` -- the owner-only cache
+#     checkpoint -- never printed at ALL, and communicated its reason only by
+#     returning a bare tag, which arrived at the summary empty. This is the
+#     failing path: the object file (1080 bytes) AND its capsule-receipt were
+#     both present on disk, so the AOT compile had SUCCEEDED and the build
+#     failed anyway, with nothing said.
+#   * `_aot_compile_failure` -- the OTHER raising site -- reports by
+#     interpolating its operands. The payload on this lane can be the corrupt
+#     value recorded in
+#     doc/08_tracking/bug/stage2_aot_error_message_lost_invalid_heap_2026-09-06.md
+#     (`err.to_text()` rendering as `<invalid-heap:0x…>`), and a diagnostic built
+#     by interpolation can be silenced together with the literal text around it.
+#     It was hardened for that reason, NOT because it was shown to be on this
+#     failing path -- the evidence above says it was not.
+#
+# THIS GATE IS ABOUT ATTRIBUTABILITY, NOT ABOUT SUCCESS.
+#
+# It deliberately does NOT demand that the candidate build hello world. Demanding
+# success here would make it a duplicate of
+# check-stage2-hello-world-native-build.shs and would false-reject a compiler
+# that fails for a legitimate, well-reported reason -- the over-scoping failure
+# mode that has already cost this repo two blockers. What it demands is that a
+# failure NAME ITSELF. A build that succeeds passes. A build that fails passes
+# only if it said why.
+#
+# Concretely, on a non-zero exit the output must NOT contain the unattributed
+# shape, and MUST contain at least one raising-site line:
+#
+#   forbidden: "(none recorded" without a bracketed site tag
+#              ("[empty-at-record]" / "[lost-in-render]")
+#   required:  a pure-literal raising-site line -- one of
+#              "error: AOT compile error -- unit, reason and lengths follow"
+#              "error: native capsule collection failed"
+#
+# The pure-literal lines carry no interpolated operand, so nothing can silence
+# them; their presence is what proves the producer ran and spoke.
+#
+# Verdict is the LAST line on stdout:
+#   PASS  -- <n> invocation(s) executed, ...            exit 0
+#   FAIL  -- ...                                        exit 1
+#   ERROR -- nothing was checked (<reason>)             exit 2
+#
+# Non-vacuity is absolute: an invocation count of 0 is ERROR, never a pass. A
+# candidate that cannot be executed at all is ERROR -- absence of a runnable
+# binary is absence of evidence, not evidence of health.
+#
+# SCOPE LIMIT, stated rather than papered over: this gate exercises ONE argument
+# form (positional) on ONE backend (`--backend llvm`). It is the form and backend
+# the Stage-2 sanity probe uses and the one measured failing; it is not a sweep.
+# A cranelift-only attributability defect would not be caught here.
+#
+# Usage:
+#   sh scripts/check/check-aot-failure-speaks.shs --candidate <binary>
+#   sh scripts/check/check-aot-failure-speaks.shs --selftest
+
+set -u
+
+FIXTURE="scripts/check/cert/redeploy_gate/fixtures/hello_world.spl"
+LITERAL_AOT="error: AOT compile error -- unit, reason and lengths follow"
+LITERAL_COLLECT="error: native capsule collection failed"
+SILENT_MARKER="(none recorded"
+SITE_TAG_EMPTY="[empty-at-record]"
+SITE_TAG_LOST="[lost-in-render]"
+
+CANDIDATE=""
+DO_SELFTEST=0
+EV_INVOCATIONS=0
+
+repo_root() {
+  d=$(pwd)
+  while [ "$d" != "/" ]; do
+    if [ -d "$d/.git" ] || [ -f "$d/.git" ]; then printf '%s\n' "$d"; return 0; fi
+    d=$(dirname "$d")
+  done
+  return 1
+}
+
+# Classify ONE run's output. Echoes a verdict word plus a short explanation.
+#   ok        - exited 0, nothing to attribute
+#   spoke     - exited non-zero and named a reason
+#   silent    - exited non-zero with the unattributed shape (the defect)
+classify_run() {
+  _rc=$1
+  _log=$2
+  if [ "$_rc" -eq 0 ]; then
+    printf 'ok exit-0\n'
+    return 0
+  fi
+  # A "(none recorded" line is acceptable ONLY when it names its site, because
+  # the two fallbacks used to be byte-identical and therefore uninformative.
+  _bad=0
+  while IFS= read -r _line; do
+    case "$_line" in
+      *"$SILENT_MARKER"*)
+        case "$_line" in
+          *"$SITE_TAG_EMPTY"*|*"$SITE_TAG_LOST"*) : ;;
+          *) _bad=1 ;;
+        esac
+        ;;
+    esac
+  done < "$_log"
+  if [ "$_bad" -eq 1 ]; then
+    printf 'silent unattributed-none-recorded\n'
+    return 0
+  fi
+  if grep -qF "$LITERAL_AOT" "$_log" 2>/dev/null \
+     || grep -qF "$LITERAL_COLLECT" "$_log" 2>/dev/null; then
+    printf 'spoke raising-site-literal-present\n'
+    return 0
+  fi
+  printf 'silent no-raising-site-line-and-no-reason\n'
+}
+
+run_candidate() {
+  _bin=$1
+  _root=$2
+  _tmp=$3
+  mkdir -p "$_tmp/cache"
+  # Exit status is read DIRECTLY into a variable on the line after the
+  # invocation -- never through a pipe. A pipeline's $? is the LAST command's
+  # status and has produced false greens in this repo before.
+  ( cd "$_root" && timeout 900 "$_bin" native-build \
+      --backend llvm --runtime-bundle core-c-bootstrap --entry-closure \
+      --mode one-binary --threads 1 --cache-dir "$_tmp/cache" \
+      "$FIXTURE" --output "$_tmp/out.bin" ) > "$_tmp/run.log" 2>&1
+  _rc=$?
+  EV_INVOCATIONS=$((EV_INVOCATIONS + 1))
+  printf '%s\n' "$_rc"
+}
+
+selftest() {
+  _st_tmp=$(mktemp -d) || { echo "selftest: cannot mktemp"; return 1; }
+  _fail=0
+
+  # Fixture A: a failing run that names its reason via the AOT literal -> spoke
+  cat > "$_st_tmp/a.log" <<EOF
+[build] native_compile 0/1 step 5/6
+$LITERAL_AOT
+scripts.check.cert.redeploy_gate.fixtures.hello_world
+backend object-path status 1
+EOF
+  _r=$(classify_run 1 "$_st_tmp/a.log" | cut -d' ' -f1)
+  [ "$_r" = "spoke" ] || { echo "selftest A: expected spoke, got $_r"; _fail=1; }
+
+  # Fixture B: the MEASURED pre-fix shape -> silent (this is the regression fence)
+  cat > "$_st_tmp/b.log" <<'EOF'
+[bootstrap-error-count] point=post-store   count=0
+ERROR: 1 unit(s)
+  - scripts.check.cert.redeploy_gate.fixtures.hello_world
+      reason: (none recorded — BUG in the producer: a non-OK unit must carry a diagnostic)
+EOF
+  _r=$(classify_run 1 "$_st_tmp/b.log" | cut -d' ' -f1)
+  [ "$_r" = "silent" ] || { echo "selftest B: expected silent, got $_r"; _fail=1; }
+
+  # Fixture C: "(none recorded" that NAMES its site -> acceptable, and a raising
+  # line is present. The disambiguated fallback must not be treated as the defect.
+  cat > "$_st_tmp/c.log" <<EOF
+$LITERAL_COLLECT
+      reason: (none recorded $SITE_TAG_LOST — the stored diagnostic is non-empty; diagnostics-len=41)
+EOF
+  _r=$(classify_run 1 "$_st_tmp/c.log" | cut -d' ' -f1)
+  [ "$_r" = "spoke" ] || { echo "selftest C: expected spoke, got $_r"; _fail=1; }
+
+  # Fixture D: a clean success -> ok, regardless of content
+  echo "Native executable written" > "$_st_tmp/d.log"
+  _r=$(classify_run 0 "$_st_tmp/d.log" | cut -d' ' -f1)
+  [ "$_r" = "ok" ] || { echo "selftest D: expected ok, got $_r"; _fail=1; }
+
+  # Fixture E: a non-zero exit with NO reason of any kind and no "(none recorded"
+  # line at all -- silence by omission is still silence.
+  echo "[build] native_compile 0/1 step 5/6" > "$_st_tmp/e.log"
+  _r=$(classify_run 1 "$_st_tmp/e.log" | cut -d' ' -f1)
+  [ "$_r" = "silent" ] || { echo "selftest E: expected silent, got $_r"; _fail=1; }
+
+  rm -rf "$_st_tmp"
+  return $_fail
+}
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --candidate) shift; CANDIDATE=${1:-} ;;
+    --candidate=*) CANDIDATE=${1#--candidate=} ;;
+    --selftest) DO_SELFTEST=1 ;;
+    -h|--help) sed -n '2,70p' "$0"; exit 0 ;;
+    *) echo "unknown argument: $1" >&2; exit 2 ;;
+  esac
+  shift || true
+done
+
+# The selftest runs before every scan and is fatal. A gate whose own
+# classifier is broken is worse than no gate.
+if ! selftest; then
+  echo "ERROR — nothing was checked (selftest failed)"
+  exit 2
+fi
+if [ "$DO_SELFTEST" -eq 1 ]; then
+  echo "PASS — 5 selftest fixture(s) checked, classifier behaves"
+  exit 0
+fi
+
+ROOT=$(repo_root) || { echo "ERROR — nothing was checked (not inside a git repo)"; exit 2; }
+[ -n "$CANDIDATE" ] || { echo "ERROR — nothing was checked (no --candidate given)"; exit 2; }
+[ -f "$CANDIDATE" ] || { echo "ERROR — nothing was checked (candidate not found: $CANDIDATE)"; exit 2; }
+[ -x "$CANDIDATE" ] || { echo "ERROR — nothing was checked (candidate not executable: $CANDIDATE)"; exit 2; }
+[ -f "$ROOT/$FIXTURE" ] || { echo "ERROR — nothing was checked (fixture missing: $FIXTURE)"; exit 2; }
+
+case "$CANDIDATE" in
+  /*) ABS_CANDIDATE=$CANDIDATE ;;
+  *)  ABS_CANDIDATE=$(cd "$(dirname "$CANDIDATE")" && pwd)/$(basename "$CANDIDATE") ;;
+esac
+
+TMP=$(mktemp -d) || { echo "ERROR — nothing was checked (cannot mktemp)"; exit 2; }
+trap 'rm -rf "$TMP"' EXIT INT TERM
+
+RC=$(run_candidate "$ABS_CANDIDATE" "$ROOT" "$TMP")
+VERDICT_LINE=$(classify_run "$RC" "$TMP/run.log")
+KIND=$(printf '%s' "$VERDICT_LINE" | cut -d' ' -f1)
+WHY=$(printf '%s' "$VERDICT_LINE" | cut -d' ' -f2-)
+
+if [ "$EV_INVOCATIONS" -eq 0 ]; then
+  echo "ERROR — nothing was checked (0 invocations executed)"
+  exit 2
+fi
+
+# Quote the reason the producer gave, so a passing run is auditable and a human
+# reading CI output learns the actual failure without re-running anything.
+REASON=$(grep -n -A3 -F "$LITERAL_AOT" "$TMP/run.log" 2>/dev/null | head -8)
+[ -n "$REASON" ] || REASON=$(grep -n -A4 -F "$LITERAL_COLLECT" "$TMP/run.log" 2>/dev/null | head -8)
+[ -n "$REASON" ] || REASON=$(grep -n -F "$SILENT_MARKER" "$TMP/run.log" 2>/dev/null | head -4)
+if [ -n "$REASON" ]; then
+  echo "--- producer diagnostic (verbatim) ---"
+  printf '%s\n' "$REASON"
+  echo "--- end producer diagnostic ---"
+fi
+
+case "$KIND" in
+  ok)
+    echo "PASS — $EV_INVOCATIONS invocation(s) executed, candidate exited 0 (nothing to attribute)"
+    exit 0 ;;
+  spoke)
+    echo "PASS — $EV_INVOCATIONS invocation(s) executed, failure exit $RC is attributed ($WHY)"
+    exit 0 ;;
+  silent)
+    echo "FAIL — $EV_INVOCATIONS invocation(s) executed, failure exit $RC is UNATTRIBUTED ($WHY)"
+    exit 1 ;;
+  *)
+    echo "ERROR — nothing was checked (classifier returned '$KIND')"
+    exit 2 ;;
+esac
