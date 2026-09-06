@@ -1,0 +1,65 @@
+"""Layer A — BLAS FFI boundary declarations (T-BLAS-02).
+
+Layer A is primitive-only (i64/f64): this is the correct layer for raw types.
+Every symbol name here uses the `rt_blas_` prefix from architecture §6 and
+carries the cuBLAS **C API** function it maps to in an adjacent comment.
+
+## No Fortran mangled names — ever
+The scilib shim exports `rt_blas_*` with NO trailing underscore.  A platform
+Fortran name — the bare BLAS routine name with a trailing underscore, in
+either case — is a violation of anti-pattern #1 and must not appear anywhere
+in this file, not even inside a comment.
+
+## Divergence from the planned static `extern fn` block
+T-BLAS-02 sketched static `extern fn rt_blas_*` declarations.  The shipped
+boundary dispatches through `DynLoader` instead, because no shim in
+`src/runtime/scilib/` defines the `rt_blas_*` handle symbols today: a static
+`extern fn` with no runtime backing silently returns nil rather than failing
+(doc/08_tracking/bug/unregistered_extern_silent_nil_2026-08-01.md), so a
+declaration block here would be an unbacked-extern hazard that reads as
+working code.  The dynamic lookup reports `BackendUnavailable` instead, which
+is the honest failure.
+
+Import path: use std.common.science_math.ffi_blas.{blas_rt_symbol, ffi_blas_handle_create, ffi_blas_handle_destroy}
+"""
+
+use std.linalg.linalg_core.{BackendError, _scilib_call0, _scilib_call_n}
+
+# ---------------------------------------------------------------------------
+# Canonical Layer A symbol names
+# ---------------------------------------------------------------------------
+
+pub fn blas_rt_symbol(precision: text, op: text) -> text:
+    """Canonical rt_blas_* symbol name: 'rt_blas_' + precision + op.
+
+    precision: 'd' (double) or 's' (single)
+    op: 'gemm', 'dot', 'axpy', 'gemv', 'nrm2', 'scal', etc.
+
+    Yields e.g. `rt_blas_dgemm` — cuBLAS C API cublasDgemm_64.  Never a
+    trailing-underscore Fortran name.
+    """
+    "rt_blas_" + precision + op
+
+# ---------------------------------------------------------------------------
+# Handle lifecycle
+# ---------------------------------------------------------------------------
+
+pub fn ffi_blas_handle_create() -> Result<i64, BackendError>:
+    """Create a BLAS handle.  Returns the opaque handle as i64 (mock: always 1)."""
+    # cuBLAS C API: cublasCreate(cublasHandle_t*) — src/runtime/scilib/cublas_shim.c:73
+    # creates the process-wide handle on first use.
+    # GAP, stated rather than implied: no shim in src/runtime/scilib/ actually
+    # DEFINES `rt_blas_handle_create`, so this lookup fails on every backend
+    # today and the call returns BackendUnavailable. Do not read the citation
+    # as evidence the symbol resolves.
+    val h = _scilib_call0("rt_blas_handle_create")
+    if h == 0:
+        return Err(BackendError.BackendUnavailable("rt_blas_handle_create returned null handle"))
+    Ok(h)
+
+pub fn ffi_blas_handle_destroy(handle: i64) -> Result<i64, BackendError>:
+    """Destroy a BLAS handle obtained from ffi_blas_handle_create."""
+    # cuBLAS C API: cublasDestroy(cublasHandle_t). Same gap as
+    # ffi_blas_handle_create above — `rt_blas_handle_destroy` is defined by no shim.
+    val rc = _scilib_call_n("rt_blas_handle_destroy", [handle])
+    Ok(rc)

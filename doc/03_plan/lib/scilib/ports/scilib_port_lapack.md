@@ -173,7 +173,7 @@ AC: Layer C functions have no `lwork` parameter. Workspace is allocated in Layer
 ### T-LAPACK-04 — Layer A: cuSOLVER handle init + all `rt_lapack_*` extern decls
 
 **Effort:** ≤ 2 days  
-**Files:** `src/lib/common/science_math/ffi_lapack.spl`  
+**Files:** `src/lib/common/science_math/ffi_lapack.spl` — CREATED 2026-09-06 at exactly this path (superseding the line-8 note that it "was never created"); see the Acceptance Criteria Summary entry for what it holds and why the bindings are dynamic rather than `extern fn`.  
 **Deps:** T-BLAS-01 (BlasHandle structure reference), T-LAPACK-01..03
 
 Declare all Layer A `extern fn` bindings. Each LAPACK kernel has two externs: a `_buffersize` query and a compute call.  All pointer arguments are `i64` (opaque pointer-as-integer). All dimension arguments are `i64` (64-bit, matching cuSOLVER `_64` API where available).
@@ -623,6 +623,9 @@ AC: `SIMPLE_BLAS_BACKEND=cublas` passes GPU specs. `bin/simple test` never runs 
 ## Acceptance Criteria Summary (v1 gate)
 
 - [ ] All `rt_lapack_*` externs declared in `ffi_lapack.spl` (Layer A); no primitive-typed params at Layer B/C boundary
+  - clause 1 CLOSED 2026-09-06: `src/lib/common/science_math/ffi_lapack.spl` now exists and is the single LAPACK FFI boundary. The three native call sites that were inlined in Layer B (`src/lib/nogc_sync_mut/linalg/lapack_lapacke.spl` — two `rt_scilib_openblas_dgetrf_bits` dyncalls in `getrf`/`det`, one `rt_scilib_openblas_dnrm2_bits` in `nrm2`, plus the `dyn_openblas_available()` guard) were RELOCATED into it as `ffi_dgetrf_bits`/`ffi_dnrm2_bits`/`lapack_ffi_available`, all args `i64` per T-LAPACK-04; Layer B no longer imports `std.linalg.linalg_core` and no longer names a native symbol. Evidence: `scilib_port_lapack_spec.spl` REQ-SCILIB-LAPACK-01 8 passed/2 failed -> 9 passed/1 failed on `src/compiler_rust/target/debug/simple run`; planted control — renaming `ffi_lapack.spl` away returns the spec to 2 failures, restoring it returns 1. Feature specs `lapack_{gesv,inv,det}_spec.spl` stay 8/3/5 green under `SIMPLE_BLAS_BACKEND=mock`.
+  - clause 2 STILL OPEN: Layer B/C signatures remain primitive-typed (e.g. `gesv(n: i64, a_buf: [f64], b_buf: [f64])`), so the box stays unchecked.
+  - divergence (2026-09-06): the shims export `rt_lapack_dgesv`/`dgetrf`/`dgetrs` (`src/runtime/scilib/scilib_shim.h`) but they are loaded as *shared objects at run time*, so a static `extern fn` would be an unbacked extern that silently returns nil. Layer A therefore declares the reachable openblas bits-path symbols via `_scilib_call_n`, not `extern fn`. One LAPACK entry point is still outside this file: `dgesv`, via `lapack_dgesv_values` in `src/lib/nogc_sync_mut/linalg/fortran_wrapper.spl` (owned by another lane).
 - [x] `LinalgError`, `LapackInfo`, `Pivot`, `Workspace` defined; `LapackInfo` and `Workspace` not exported from the Layer C aggregator — verified 2026-09-05: `LapackInfo.new(0).decode().is_ok()` is now `true` (it aborted with "variable `Unit` not found" until `Ok(Unit)` was corrected to `Ok(())` at src/lib/common/science_math/lapack.spl:62), `Workspace.alloc(4).size()` → 4, and `grep -c 'LapackInfo\|Workspace' src/lib/nogc_async_mut/linalg/mod.spl` → 0; `scilib_port_lapack_spec.spl` REQ-SCILIB-LAPACK-02 green on `src/compiler_rust/target/debug/simple run`
   - divergence: `Workspace` is non-generic (`Workspace`, not `Workspace<T>`) in the as-built tree
   - note (2026-09-05): all four are defined — src/lib/common/science_math/lapack.spl:38 `pub enum LinalgError`, :56 `pub class LapackInfo`, :79 `pub class Pivot`, :102 `pub class Workspace` (non-generic) — but there is no `mod.spl`/re-export layer and `LapackInfo`/`Workspace` are `pub`, so the hiding half of this box is not met.

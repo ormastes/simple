@@ -1,0 +1,61 @@
+"""LAPACK Layer A — the single FFI boundary for the LAPACK providers.
+
+This is the file named by `doc/03_plan/lib/scilib/ports/scilib_port_lapack.md`
+T-LAPACK-04 ("Layer A: ... all `rt_lapack_*` extern decls").  Every native
+LAPACK call reachable from the Layer B providers goes through the thin
+wrappers below; Layer B (`lapack_lapacke.spl`, `lapack_cpu.spl`) and Layer C
+(`mod.spl`) never name a native symbol themselves.
+
+Import path: use std.common.science_math.ffi_lapack.{...}
+
+## Why these are dynamic calls, not `extern fn` declarations
+The scilib shims (`src/runtime/scilib/{mock,openblas,cusolver}_shim.c`) are
+loaded as *shared objects at run time*, selected by `SIMPLE_BLAS_BACKEND`.
+They are not linked into the compiler binary, so a static `extern fn
+rt_lapack_dgesv(...)` would be an unbacked extern — which silently returns nil
+rather than failing (see
+`doc/08_tracking/bug/unregistered_extern_silent_nil_2026-08-01.md`).  The
+boundary is therefore expressed as `_scilib_call_n(symbol, args)` against the
+dynamically loaded shim, with all pointer and dimension arguments as opaque
+`i64`, exactly as T-LAPACK-04 specifies.
+
+## Symbol scope, stated honestly
+The C shims export `rt_lapack_dgesv`, `rt_lapack_dgetrf` and `rt_lapack_dgetrs`
+(`src/runtime/scilib/scilib_shim.h`), but the entry points the Simple providers
+actually reach are the openblas bits-path wrappers `rt_scilib_openblas_*_bits`,
+which marshal f64 payloads as raw i64 bit patterns.  Those are the symbols
+declared here.  One further LAPACK entry point — `dgesv`, via
+`lapack_dgesv_values` — still lives in
+`src/lib/nogc_sync_mut/linalg/fortran_wrapper.spl`; folding it in is left to the
+lane that owns that file.
+"""
+
+use std.linalg.linalg_core.{_scilib_call_n, dyn_openblas_available}
+
+pub fn lapack_ffi_available() -> bool:
+    """True when the native LAPACK-bearing shim is loaded and callable.
+
+    Layer B must consult this before any call below; a false answer means the
+    provider returns a typed error, never a silent fallback.
+    """
+    dyn_openblas_available()
+
+pub fn ffi_dgetrf_bits(params_buf: i64, a_in: i64, out_buf: i64, pivot_buf: i64) -> i64:
+    """LU factorization with partial pivoting (`rt_scilib_openblas_dgetrf_bits`).
+
+    params_buf — 8-byte buffer holding n
+    a_in       — n*n input matrix, row-major, f64 bit patterns
+    out_buf    — n*n output buffer receiving the packed L/U factors
+    pivot_buf  — n-entry i64 buffer receiving the 1-based Fortran pivots
+
+    Returns the LAPACK `info` code: 0 on success, >0 for a singular pivot row.
+    """
+    _scilib_call_n("rt_scilib_openblas_dgetrf_bits", [params_buf, a_in, out_buf, pivot_buf])
+
+pub fn ffi_dnrm2_bits(x_in: i64, n: i64) -> i64:
+    """Euclidean norm (`rt_scilib_openblas_dnrm2_bits`).
+
+    x_in — n-entry vector of f64 bit patterns
+    Returns the result as an f64 bit pattern (decode with spl_bits_to_f64).
+    """
+    _scilib_call_n("rt_scilib_openblas_dnrm2_bits", [x_in, n])

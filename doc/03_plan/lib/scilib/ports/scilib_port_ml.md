@@ -578,22 +578,49 @@ Check:
 - [x] Zero `skip()` calls in any ml spec — verified: `/usr/bin/grep -rn "skip()" test/03_system/feature/scilib/ml_*_spec.spl src/lib/common/science_math/ml_*.spl` → 0 call sites across 4 files (shipped ml = `src/lib/common/science_math/ml_linear.spl`, `ml_metrics.spl`; specs `test/03_system/feature/scilib/ml_linear_spec.spl`, `ml_metrics_spec.spl`)
 - [ ] Zero TODO→NOTE conversions anywhere in ml source or specs
 - [ ] Zero primitive types (`f64`, `i64`, `bool`, `str`) in any public function signature or exported struct field
-- [ ] `nn/loss` and `nn/norm` are re-exported (grep for `pub use common.pure.nn`); no duplicate definition
-      — OPEN, and blocked on a plan-owner decision, not on implementation effort (2026-09-05).
-      The oracle (`test/03_system/plan_acceptance/scilib_port_ml_spec.spl`, `it "nn/loss and nn/norm
-      are re-exported"`) greps `src/lib/nogc_async_mut/ml` for the literal `pub use common.pure.nn`;
-      the count is 0 and the duplicate-definition half is already 0.
-      **The pinned path does not exist.** `src/lib/common/pure/` holds only `list.spl`; the real nn
-      is `src/lib/gc_async_mut/pure/nn/{loss,norm}.spl` (i.e. `std.gc_async_mut.pure.nn`). There is
-      therefore no spelling of `common.pure.nn` that resolves, and writing the literal line anyway
-      would be a text-match fake rather than a re-export.
-      Two viable closures, both outside an implementer's discretion:
-      (a) create `src/lib/common/pure/nn/{loss,norm}.spl` re-export shims so the pinned path becomes
-          real, or (b) move/rename the nn modules and amend the oracle to the real path.
-      **Extra hazard for either option:** `src/lib/gc_async_mut/pure/nn/loss.spl`'s own header states
-      the module is compiled-mode-only (`PureTensor<f64>` generics, "will only work in compiled mode,
-      not in the interpreter"). A facade re-export could break interpreter-mode loading of `std.ml`,
-      which every other ml spec depends on. Decide (a) vs (b) before anyone writes the line.
+- [x] `nn/loss` and `nn/norm` are re-exported (grep for `pub use common.pure.nn`); no duplicate definition
+      — CLOSED via option (a), 2026-09-06. The 2026-09-05 note below it was **empirically wrong** on
+      its central claim and is corrected here rather than deleted, because the wrong inference is an
+      easy one to repeat.
+      **What was claimed:** "there is no spelling of `common.pure.nn` that resolves", inferred from
+      `gc_async_mut/pure/nn/loss.spl` addressing its sibling as `std.pure.tensor` (variant stripped).
+      **What is actually true**, measured against `src/compiler_rust/target/debug/simple` with
+      throwaway probe modules:
+      - `use common.X` is a **stdlib-root-relative** spelling. It resolves *from a file inside
+        `src/lib/`* (proof: a probe at `src/lib/nogc_async_mut/…` importing `common.pure.<probe>`
+        returned the probe's value; and `src/lib/nogc_async_mut/gpu/__init__.spl:14` already ships
+        `use common.pure.list.{List}`). From a file *outside* `src/lib/` it fails E1034
+        "module path segment `common` not found", resolving `common` against the importing file's own
+        directory — which is what made it look unresolvable.
+      - Variant stripping is real but **`common/` wins ties**: with the same module name present in
+        both `common/` and `gc_async_mut/`, `std.pure.<name>` resolved to the `common/` copy.
+      - A `common/` file consisting only of `pub use std.gc_async_mut.pure.<name>.*` forwards
+        transparently — `std.pure.<name>` then yields the *gc* implementation's value.
+      - Creating a `common/pure/<dir>/` holding only *some* of a gc directory's files does **not**
+        shadow the rest: a module present only under `gc_async_mut/` still resolved, with a
+        with/without control run showing identical behaviour.
+      **What landed:** `src/lib/common/pure/nn/{loss,norm}.spl`, each a comment header plus one
+      `pub use std.gc_async_mut.pure.nn.<mod>.*` line (no definitions), and two
+      `pub use common.pure.nn.{loss,norm}.{…}` lines appended to `src/lib/nogc_async_mut/ml/mod.spl`.
+      Oracles: re-export count 0 → 2; duplicate-definition count stays 0.
+      **The compiled-mode-only hazard did not materialise.** Probes importing
+      `std.nogc_async_mut.ml.mod.{nll_loss, BatchNorm2d}` (the file directly) and
+      `std.nogc_async_mut.ml.{nll_loss, BatchNorm2d}` (the package, i.e. through `__init__.spl`'s
+      `export mod.*` — the spelling a real `std.ml` consumer writes) each printed their marker under
+      **both** the default lane and `SIMPLE_EXECUTION_MODE=interpret`. The seed hard-errors E1034 on
+      an unresolved import, so a printed marker is a real resolution, not a silent skip; the package
+      probe is what establishes that `export mod.*` surfaces `pub use` symbols.
+      **Direct regression evidence** that the forwarder does not shadow the real module:
+      `src/lib/gc_async_mut/pure/test/nn_spec.spl`, an existing `std.pure.nn` consumer, 5/5.
+      `ml_linear_spec` 29/29 and `ml_metrics_spec` 41/41 (under
+      `SIMPLE_BLAS_BACKEND=mock SIMPLE_EXECUTION_MODE=interpret`) are unchanged before and after,
+      but they are **unaffected-as-expected rather than evidence** — both import
+      `std.common.science_math.ml_*`, not `std.nogc_async_mut.ml`, so they never load the edited
+      module. Recorded so the next reader does not mistake them for coverage.
+      Unrelated observation, **not attributed** to this change (no control run): both ml probes emit
+      a JIT codegen warning naming `Trainer.train_step`, `train_epoch`, `evaluate_model` and drop to
+      the interpreter. Those are pre-existing `async_training` symbols untouched here.
+      Acceptance spec `scilib_port_ml_spec.spl`: 6/7 → **7/7, 0 failures**.
 - [x] `DType` and `Device` not defined in ml/ (nor referenced or re-exported — shipped ml operates on `[f64]`; the enums live only in ndarray) — verified src/lib/common/science_math/ndarray.spl:45 `pub enum DType`, :58 `pub enum Device`; `/usr/bin/grep -rn "enum DType\|enum Device" src/lib/common/science_math/ml_*.spl src/lib/nogc_async_mut/ml/` → 0 hits
 - [x] cuML not referenced anywhere in ml/ source — verified: `/usr/bin/grep -rni cuml src/lib/common/science_math/ src/lib/nogc_async_mut/ml/` → 0 hits
 - [x] PERF-SUGAR-003 observation entry promoted from `anticipated` to `observed` or `fixed` in `doc/08_tracking/feature/scilib_perf_sugar.md` — verified doc/08_tracking/feature/scilib_perf_sugar.md:105 `Status: fixed 2026-05-30` (entry header :100)

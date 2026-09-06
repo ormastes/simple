@@ -11,9 +11,9 @@ Design:
     rt_scilib_openblas_dgesv_bits.  The shim uses LAPACK_ROW_MAJOR, so no
     operand-swap is needed in Simple — row-major buffers are passed directly.
   - inv: composed on self.gesv over identity columns (same as CpuLapackProvider).
-  - getrf: delegates to rt_scilib_openblas_dgetrf_bits for LU factorization.
+  - getrf: delegates to ffi_lapack.ffi_dgetrf_bits (Layer A) for LU factorization.
   - det: composed on getrf_bits + diagonal product with pivot sign correction.
-  - nrm2: delegates to rt_scilib_openblas_dnrm2_bits.
+  - nrm2: delegates to ffi_lapack.ffi_dnrm2_bits (Layer A).
   - LP64 integer ABI: all LAPACK integers are i64.
   - Pivot arrays are fully encapsulated inside the shim; never exposed here.
 """
@@ -21,7 +21,7 @@ Design:
 use std.common.science_math.lapack_provider.{LapackProvider}
 use std.common.science_math.lapack.{LinalgError, LapackInfo}
 use std.nogc_sync_mut.linalg.fortran_wrapper.{lapack_dgesv_values}
-use std.linalg.linalg_core.{_scilib_call_n, dyn_openblas_available}
+use std.common.science_math.ffi_lapack.{lapack_ffi_available, ffi_dgetrf_bits, ffi_dnrm2_bits}
 use std.nogc_sync_mut.ptr.raw.{rt_alloc, rt_free, rt_ptr_read_i64, rt_ptr_write_i64, spl_f64_to_bits, spl_bits_to_f64}
 
 # ============================================================
@@ -61,7 +61,7 @@ pub class LapackeProvider:
     pub fn getrf(self, n: i64, a_buf: [f64]) -> Result<[f64], LinalgError>:
         if self._available == false:
             return Err(LinalgError.WorkspaceError)
-        if not dyn_openblas_available():
+        if not lapack_ffi_available():
             return Err(LinalgError.WorkspaceError)
         val a_count = n * n
         val a_bytes = a_count * 8
@@ -88,7 +88,7 @@ pub class LapackeProvider:
         while i < a_count:
             rt_ptr_write_i64(a_in, i * 8, spl_f64_to_bits(a_buf[i]))
             i = i + 1
-        val info = _scilib_call_n("rt_scilib_openblas_dgetrf_bits", [params_buf, a_in, out_buf, pivot_buf])
+        val info = ffi_dgetrf_bits(params_buf, a_in, out_buf, pivot_buf)
         var out: [f64] = []
         if info == 0:
             i = 0
@@ -138,7 +138,7 @@ pub class LapackeProvider:
     pub fn det(self, n: i64, a_buf: [f64]) -> Result<f64, LinalgError>:
         if self._available == false:
             return Err(LinalgError.WorkspaceError)
-        if not dyn_openblas_available():
+        if not lapack_ffi_available():
             return Err(LinalgError.WorkspaceError)
         val a_count = n * n
         val a_bytes = a_count * 8
@@ -165,7 +165,7 @@ pub class LapackeProvider:
         while i < a_count:
             rt_ptr_write_i64(a_in, i * 8, spl_f64_to_bits(a_buf[i]))
             i = i + 1
-        val info = _scilib_call_n("rt_scilib_openblas_dgetrf_bits", [params_buf, a_in, out_buf, pivot_buf])
+        val info = ffi_dgetrf_bits(params_buf, a_in, out_buf, pivot_buf)
         if info != 0:
             rt_free(params_buf)
             rt_free(a_in)
@@ -190,11 +190,11 @@ pub class LapackeProvider:
             product = 0.0 - product
         Ok(product)
 
-    # nrm2: Euclidean norm via rt_scilib_openblas_dnrm2_bits.
+    # nrm2: Euclidean norm via the Layer A ffi_dnrm2_bits wrapper.
     pub fn nrm2(self, n: i64, x_buf: [f64]) -> Result<f64, LinalgError>:
         if self._available == false:
             return Err(LinalgError.WorkspaceError)
-        if not dyn_openblas_available():
+        if not lapack_ffi_available():
             return Err(LinalgError.WorkspaceError)
         val bytes = n * 8
         val x_in = rt_alloc(bytes)
@@ -204,6 +204,6 @@ pub class LapackeProvider:
         while i < n:
             rt_ptr_write_i64(x_in, i * 8, spl_f64_to_bits(x_buf[i]))
             i = i + 1
-        val result_bits = _scilib_call_n("rt_scilib_openblas_dnrm2_bits", [x_in, n])
+        val result_bits = ffi_dnrm2_bits(x_in, n)
         rt_free(x_in)
         Ok(spl_bits_to_f64(result_bits))
