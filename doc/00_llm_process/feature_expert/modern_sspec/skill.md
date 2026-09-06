@@ -287,6 +287,16 @@ Read that section before writing or converting any `*_spec.spl`; the scaffold
   [`doc/08_tracking/bug/sspec_scorer_loopholes_var_tautology_comment_evidence_2026-09-05.md`](../../../08_tracking/bug/sspec_scorer_loopholes_var_tautology_comment_evidence_2026-09-05.md),
   `test/01_unit/app/sspec_maintain/scorer_loopholes_spec.spl`,
   `test/01_unit/app/sspec_maintain/scorer_loopholes_adjacent_spec.spl`.
+- **Lane-gated skips stopped capping SKIP-clean specs at 49 (2026-09-06,
+  `source_facts.spl`).** `_is_pending` flagged every `skip(...)` call, so a spec
+  that probes an absent lane (GPU, board, QEMU) and reports the documented
+  `skip:` outcome tripped ORA-001 — a rule whose own evidence text says
+  *unconditional* scaffold. A `skip(...)` reached only through an `if`/`elif`/
+  `else:` branch inside a scenario is now exempt; every other marker, an
+  unguarded `skip(...)`, and `real_assertion_count == 0` still fire.
+  Measured on `test/03_system/acceptance/gpu_tutorial_curriculum_acceptance_spec.spl`:
+  49/100 with 1 blocker → 84/100 with 0. Specs:
+  `test/01_unit/app/sspec_maintain/pending_detection_spec.spl`.
 - **Not changed, deliberately:** MNT-002 (mirror) and MNT-007 (lifecycle links)
   together cost at most 3.5 aggregate on SCAN and are true statements about the
   spec; a 90 is reachable with both outstanding, so neither rule was weakened.
