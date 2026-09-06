@@ -91,6 +91,18 @@ fn _calls_skip(trimmed_lower: text) -> bool:
         rest = rest.substring(index + 4)
     false
 
+fn _opens_lane_guard(trimmed_lower: text) -> bool:
+    """True when a scenario-body line opens a conditional branch.
+
+    A `skip(...)` inside such a branch is a lane-gated outcome — the spec
+    probed a lane (GPU driver, board, QEMU toolchain) and reported the
+    documented `skip:` result — not the "unconditional pending or fail-fast
+    scaffold" SSDOC-ORA-001 names. See
+    `doc/08_tracking/todo/sspec_maintain_lane_aware_scoring_2026-08-08.md`.
+    """
+    trimmed_lower.starts_with("if ") or trimmed_lower.starts_with("elif ") or
+        trimmed_lower.starts_with("else:")
+
 fn _is_pending(line: text, code_line: text) -> bool:
     # ORA-001 pending detection must fire only on a pending STATEMENT, not on
     # any line that mentions the keyword: specs that TEST pass_todo behavior,
@@ -280,6 +292,9 @@ fn extract_sspec_source_facts(path: text, source: text) -> SspecSourceFacts:
     var scenario_captures: i64 = 0
     var scenario_requirements: i64 = 0
     var scenario_pending = false
+    # Indent of the innermost open conditional inside the current scenario,
+    # or -1 when the walker is at the scenario body's own level.
+    var guard_indent: i64 = -1
     var scenario_source_only = false
     var scenario_local_arithmetic = false
     var scenario_magic_expected: i64 = 0
@@ -315,6 +330,13 @@ fn extract_sspec_source_facts(path: text, source: text) -> SspecSourceFacts:
         val line = raw.trim()
         val line_lower = line.lower()
         val indent = _indent_width(raw)
+        val opens_lane_guard = current_line > 0 and _opens_lane_guard(line_lower)
+        # A guard closes on the first non-blank line back at or above its own
+        # indent; an `elif`/`else:` at that same indent continues it.
+        if guard_indent >= 0 and line != "" and indent <= guard_indent and not opens_lane_guard:
+            guard_indent = -1
+        if opens_lane_guard:
+            guard_indent = indent
         if current_line > 0 and line != "" and indent <= current_indent:
             scenarios.push(_finish_scenario(current_name, current_line,
                 line_number - 1, scenario_steps, scenario_assertions,
@@ -357,6 +379,7 @@ fn extract_sspec_source_facts(path: text, source: text) -> SspecSourceFacts:
             scenario_captures = 0
             scenario_requirements = 0
             scenario_pending = false
+            guard_indent = -1
             scenario_source_only = false
             scenario_local_arithmetic = false
             scenario_magic_expected = 0
@@ -423,7 +446,16 @@ fn extract_sspec_source_facts(path: text, source: text) -> SspecSourceFacts:
             requirements = all_requirement_ids.len()
             scenario_requirements = scenario_requirement_ids.len()
         if current_line > 0 and _is_pending(line, code_lines[line_number - 1]):
-            scenario_pending = true
+            # Lane-gated skip: a `skip(...)` reached only through a probe
+            # branch reports the documented `skip:` outcome for an absent
+            # lane, so it is not the unconditional scaffold ORA-001 names.
+            # Every other marker (pass_todo/pending/fail("todo:) still
+            # flags wherever it sits, and a gated scenario with no real
+            # assertion still fails ORA-001 on real_assertion_count == 0.
+            val gated_skip = _calls_skip(code_lines[line_number - 1].trim().lower()) and
+                (opens_lane_guard or (guard_indent >= 0 and indent > guard_indent))
+            if not gated_skip:
+                scenario_pending = true
         # Source-text inspection is not system evidence, but reading a
         # GENERATED artifact (build output, tmp root) IS runtime observation
         # (2026-08-22): only flag when the read/assert targets src/ source or
