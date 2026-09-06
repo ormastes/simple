@@ -9,9 +9,10 @@
 
 ## Overview
 
-Tests default command behavior when no subcommand is specified.
-A cli block can define a default action that runs when the user
-invokes the program without a subcommand name.
+Tests default command behavior when no subcommand is specified, through the
+real parser (std.cli.cli_parser). The parser's contract for a default block is
+that a bare leading word is captured as the first positional, declared options
+still bind after it, and help text is generated from the declared surface.
 
 ## Syntax
 
@@ -27,52 +28,66 @@ cli:
         target: "debug"
 ```
 
+## Operator workflow
+
+Run this spec and confirm the Results line reports 0 failed. Each scenario
+builds a spec with the cli_spec* builders, parses a literal argv with
+parse_cli_args, and asserts on the accessor or help output.
+
+## Compatibility and limitations
+
+The parser has no first-class subcommand object; the command word is exercised
+as positional 0 and command options as declared options, which is the exact
+contract a default-block entry point relies on.
+
+## Verification guidance and troubleshooting
+
+If a scenario fails, re-run this file alone; the failing accessor or
+generate_help call plus its inline oracle comment name the regressed contract.
 """
+# Lifecycle: research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
 
+# @manual_section: cli args default command
 
+use std.spec.step
 
-# ============================================================================
-# CLI Args Default Command
-# ============================================================================
+use std.spec.{describe, it, expect}
+use std.cli.cli_parser.{cli_spec, cli_spec_program, cli_spec_flag, cli_spec_option, cli_spec_positional, parse_cli_args, parsed_flag, parsed_option, parsed_positional, generate_help}
 
 describe "CLI Args Default Command":
 
     context "default block":
         it "uses default block when no subcommand given":
-            # cli:
-            #     default:
-            #         positional file: text
-            # val args = cli.parse(["main.spl"])
-            # expect(args.file).to_equal("main.spl")
-            val file = "main.spl"
-            expect(file).to_equal("main.spl")
+            # @req REQ-SSPEC-FEATURE
+            # @capture(statistics): first positional value for the bare-file argv
+            step("parse a bare file argument with only the default positional declared")
+            val spec = cli_spec_positional(cli_spec(), "file", "Input file or directory", false)
+            val parsed = parse_cli_args(spec, ["main.spl"])
+            expect(parsed_positional(parsed, 0)).to_equal("main.spl")  # oracle: with no subcommand, the bare word lands in positional slot 0
 
         it "prefers subcommand over default when given":
-            # cli:
-            #     default:
-            #         positional file: text
-            #     command build:
-            #         target: "debug"
-            # val args = cli.parse(["build", "--target", "release"])
-            # expect(args.command).to_equal("build")
-            val command = "build"
-            expect(command).to_equal("build")
+            # @req REQ-SSPEC-FEATURE
+            # @capture(statistics): command word and target option for the build argv
+            step("parse an argv that names a command word before its options")
+            val spec = cli_spec_option(cli_spec_positional(cli_spec(), "file", "Input file", false), "target", "t", "Build target", "debug", [])
+            val parsed = parse_cli_args(spec, ["build", "--target", "release"])
+            expect(parsed_positional(parsed, 0)).to_equal("build")  # oracle: the leading command word is captured as positional 0, ahead of the default
+            expect(parsed_option(parsed, "target")).to_equal("release")  # oracle: the command's declared option still binds after the command word
 
     context "no default block":
         it "shows help when no subcommand and no default":
-            # cli:
-            #     command build:
-            #         target: "debug"
-            # Running with no args and no default block should show help
-            val shows_help = true
-            expect(shows_help).to_equal(true)
+            # @req REQ-SSPEC-FEATURE
+            # @capture(tui_grid): generated usage block for a commandless spec
+            step("generate help for a spec with no default and read the usage block")
+            val spec = cli_spec_option(cli_spec_program(cli_spec(), "app", "Demo program"), "target", "t", "Build target", "debug", [])
+            val help = generate_help(spec)
+            expect(help.contains("Usage:")).to_equal(true)  # oracle: generate_help always emits a Usage: line for a declared surface
+            expect(help.contains("app")).to_equal(true)  # oracle: the generated usage names the program so the operator sees what was invoked
 
         it "accepts global options without subcommand":
-            # cli:
-            #     verbose: false
-            #     command build:
-            #         target: "debug"
-            # val args = cli.parse(["--verbose"])
-            # Global options still parsed even without subcommand
-            val verbose = true
-            expect(verbose).to_equal(true)
+            # @req REQ-SSPEC-FEATURE
+            # @capture(statistics): verbose flag value for the option-only argv
+            step("parse an argv with only a global flag and no command word")
+            val spec = cli_spec_flag(cli_spec(), "verbose", "v", "Show detailed output")
+            val parsed = parse_cli_args(spec, ["--verbose"])
+            expect(parsed_flag(parsed, "verbose")).to_equal(true)  # oracle: declared options bind even when the argv carries no subcommand

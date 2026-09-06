@@ -1,0 +1,359 @@
+# BigInt facade for the RSA modexp path — Montgomery and Barrett reducers.
+#
+# This is the module named by `doc/03_plan/lib/crypto/rsa_modexp_montgomery_barrett.md`
+# Phase 1. It presents the plan's `bi_*` API over the base-2^30 limb
+# representation already shipped in `math/bignum/`, and adds the two modular
+# reducers the plan's Phases 2-3 call for.
+#
+# Representation: a bigint is an `[i64]` of little-endian limbs, each in
+# [0, LIMB_MASK], LIMB_BITS = 30 — byte-for-byte the same representation used by
+# `src/os/crypto/rsa_pss.spl` and `rsa_fallback.spl`.
+#
+# Pure functions only (src/lib/common tier): no I/O, no externs, no state, no
+# GC or allocator dependency, so the module stays usable from the freestanding
+# callers that motivated the original duplication in the RSA modules.
+#
+# Timing: `bi_montgomery_mul` has a data-independent execution path (fixed limb
+# counts, arithmetic carries, arithmetic conditional subtraction). Everything
+# built on `bignat.div_mod` — `bi_barrett_*`, and the setup helpers — is
+# VARIABLE TIME and is for public values only. See the note on
+# `bi_mod_exp_montgomery` for its one residual leak.
+#
+# Usage: use std.common.math.bigint.{bi_mul, MontgomeryCtx, bi_montgomery_mul, ...}
+
+use std.math.bignum.limb.{LIMB_BITS, LIMB_BASE, LIMB_MASK, add_limbs, sub_limbs}
+use std.math.bignum.bignat.{
+    normalize, cmp, add, sub, mul, modulo, div_mod,
+    bit_length, get_bit, is_zero
+}
+
+# =============================================================================
+# Phase 1 — shared bigint primitives
+# =============================================================================
+
+pub fn bi_normalize(a: [i64]) -> [i64]:
+    """Canonical form: trailing zero limbs dropped, zero is `[0]`."""
+    normalize(a)
+
+pub fn bi_cmp(a: [i64], b: [i64]) -> i64:
+    """Three-way compare: -1 if a < b, 0 if equal, 1 if a > b."""
+    cmp(a, b)
+
+pub fn bi_add(a: [i64], b: [i64]) -> [i64]:
+    """Sum of two bigints."""
+    add(a, b)
+
+pub fn bi_sub(a: [i64], b: [i64]) -> [i64]:
+    """Difference a - b, saturating at zero when b > a."""
+    sub(a, b)
+
+pub fn bi_mul(a: [i64], b: [i64]) -> [i64]:
+    """Schoolbook product of two bigints."""
+    mul(a, b)
+
+pub fn bi_mod(a: [i64], m: [i64]) -> [i64]:
+    """Remainder a mod m. Variable time — public operands only."""
+    modulo(a, m)
+
+pub fn bi_bit_length(a: [i64]) -> i64:
+    """Number of significant bits; zero has length 0."""
+    bit_length(a)
+
+pub fn bi_get_bit(a: [i64], index: i64) -> i64:
+    """Bit `index` of a, counting from the least significant bit."""
+    get_bit(a, index)
+
+pub fn bi_shift_left(a: [i64], bits: i64) -> [i64]:
+    """a << bits."""
+    if bits <= 0 or is_zero(a):
+        return normalize(a)
+    val whole = bits / LIMB_BITS
+    val part = bits % LIMB_BITS
+    var out: [i64] = []
+    var i: i64 = 0
+    while i < whole:
+        out.push(0)
+        i = i + 1
+    var carry: i64 = 0
+    var j: i64 = 0
+    while j < a.len():
+        val v = ((a[j] << part) | carry) & LIMB_MASK
+        carry = (a[j] << part) >> LIMB_BITS
+        out.push(v)
+        j = j + 1
+    if carry != 0:
+        out.push(carry)
+    normalize(out)
+
+pub fn bi_shift_right(a: [i64], bits: i64) -> [i64]:
+    """a >> bits (floor)."""
+    if bits <= 0:
+        return normalize(a)
+    val whole = bits / LIMB_BITS
+    val part = bits % LIMB_BITS
+    if whole >= a.len():
+        return [0]
+    var out: [i64] = []
+    var i = whole
+    while i < a.len():
+        var v = a[i] >> part
+        if part > 0 and i + 1 < a.len():
+            v = (v | (a[i + 1] << (LIMB_BITS - part))) & LIMB_MASK
+        out.push(v & LIMB_MASK)
+        i = i + 1
+    normalize(out)
+
+# =============================================================================
+# Phase 2 — Montgomery reduction
+# =============================================================================
+
+pub struct MontgomeryCtx:
+    n: [i64]
+    n_prime: i64
+    r_squared: [i64]
+    num_limbs: i64
+
+fn _pad(a: [i64], k: i64) -> [i64]:
+    var out: [i64] = []
+    var i: i64 = 0
+    while i < k:
+        if i < a.len():
+            out.push(a[i])
+        else:
+            out.push(0)
+        i = i + 1
+    out
+
+fn _inv_limb(n0: i64) -> i64:
+    """Inverse of an odd limb `n0` modulo 2^30, by Newton iteration.
+
+    `inv = n0` is already correct modulo 2^3; each iteration doubles the number
+    of correct bits, so 4 iterations cover 3 -> 6 -> 12 -> 24 -> 48 >= 30 bits.
+    """
+    var inv = n0 & LIMB_MASK
+    var i: i64 = 0
+    while i < 4:
+        val t = (n0 * inv) & LIMB_MASK
+        val d = (2 - t) & LIMB_MASK
+        inv = (inv * d) & LIMB_MASK
+        i = i + 1
+    inv & LIMB_MASK
+
+pub fn bi_montgomery_setup(modulus: [i64]) -> MontgomeryCtx:
+    """Build the Montgomery context for an ODD modulus.
+
+    R = 2^(LIMB_BITS * num_limbs), `n_prime` = -n^(-1) mod 2^LIMB_BITS, and
+    `r_squared` = R^2 mod n. Setup is variable time; the modulus is public.
+    An even modulus has no inverse mod 2^30 and yields a zero-limb context,
+    which every consumer below reports as zero rather than a wrong answer.
+    """
+    val n = normalize(modulus)
+    val k = n.len()
+    if is_zero(n) or (n[0] & 1) == 0:
+        return MontgomeryCtx(n: n, n_prime: 0, r_squared: [0], num_limbs: k)
+    val inv = _inv_limb(n[0])
+    val n_prime = (LIMB_BASE - inv) & LIMB_MASK
+    # R^2 = 2^(2 * LIMB_BITS * k), built as a limb array with a single 1 on top.
+    var r2: [i64] = []
+    var i: i64 = 0
+    while i < 2 * k:
+        r2.push(0)
+        i = i + 1
+    r2.push(1)
+    MontgomeryCtx(n: n, n_prime: n_prime, r_squared: modulo(r2, n), num_limbs: k)
+
+pub fn bi_montgomery_mul(a: [i64], b: [i64], ctx: MontgomeryCtx) -> [i64]:
+    """CIOS Montgomery multiply: returns a*b*R^(-1) mod n.
+
+    Both operands must already be reduced (< n) and in Montgomery form. The
+    loop shape depends only on `ctx.num_limbs`, and the final conditional
+    subtraction is selected arithmetically, so no branch and no memory index
+    depends on the operand VALUES — this path is constant time with respect to
+    the secret data it multiplies.
+    """
+    val k = ctx.num_limbs
+    if k <= 0 or ctx.n_prime == 0:
+        return [0]
+    val n = _pad(ctx.n, k)
+    val x = _pad(a, k)
+    val y = _pad(b, k)
+    var t = _pad([0], k + 2)
+    var i: i64 = 0
+    while i < k:
+        # t = t + x[i]*y
+        var carry: i64 = 0
+        var j: i64 = 0
+        while j < k:
+            val s = t[j] + x[i] * y[j] + carry
+            t[j] = s & LIMB_MASK
+            carry = s >> LIMB_BITS
+            j = j + 1
+        val s1 = t[k] + carry
+        t[k] = s1 & LIMB_MASK
+        t[k + 1] = t[k + 1] + (s1 >> LIMB_BITS)
+        # m = t[0] * n_prime mod 2^LIMB_BITS ; t = (t + m*n) / 2^LIMB_BITS
+        val m = (t[0] * ctx.n_prime) & LIMB_MASK
+        carry = 0
+        j = 0
+        while j < k:
+            val s2 = t[j] + m * n[j] + carry
+            t[j] = s2 & LIMB_MASK
+            carry = s2 >> LIMB_BITS
+            j = j + 1
+        val s3 = t[k] + carry
+        t[k] = s3 & LIMB_MASK
+        t[k + 1] = t[k + 1] + (s3 >> LIMB_BITS)
+        # shift down one limb
+        j = 0
+        while j <= k:
+            t[j] = t[j + 1]
+            j = j + 1
+        t[k + 1] = 0
+        i = i + 1
+    # Conditional subtraction: t = t - n when t >= n, selected arithmetically.
+    var diff = _pad([0], k + 1)
+    var borrow: i64 = 0
+    var p: i64 = 0
+    while p < k:
+        val pair = sub_limbs(t[p], n[p], borrow)
+        diff[p] = pair[0]
+        borrow = pair[1]
+        p = p + 1
+    val top = sub_limbs(t[k], 0, borrow)
+    diff[k] = top[0]
+    borrow = top[1]
+    val sel = 1 - borrow    # 1 when t >= n, 0 when the subtraction underflowed
+    var out: [i64] = []
+    p = 0
+    while p <= k:
+        out.push(t[p] + (diff[p] - t[p]) * sel)
+        p = p + 1
+    normalize(out)
+
+pub fn bi_to_montgomery(a: [i64], ctx: MontgomeryCtx) -> [i64]:
+    """Convert a plain value into Montgomery form: a*R mod n.
+
+    The input is reduced mod n first (variable time — `a` is a public base or a
+    plaintext block, never the exponent), then multiplied by R^2.
+    """
+    if ctx.n_prime == 0:
+        return [0]
+    bi_montgomery_mul(modulo(a, ctx.n), ctx.r_squared, ctx)
+
+pub fn bi_from_montgomery(a: [i64], ctx: MontgomeryCtx) -> [i64]:
+    """Convert out of Montgomery form: a*R^(-1) mod n."""
+    if ctx.n_prime == 0:
+        return [0]
+    bi_montgomery_mul(a, [1], ctx)
+
+# =============================================================================
+# Phase 3 — Montgomery modular exponentiation
+# =============================================================================
+
+pub fn bi_mod_exp_montgomery(base: [i64], exp: [i64], modulus: [i64]) -> [i64]:
+    """base^exp mod modulus via fixed 4-bit-window Montgomery exponentiation.
+
+    The window loop performs the same number of squarings and multiplies for
+    every exponent of a given bit length — including the window value 0, which
+    multiplies by the Montgomery identity rather than skipping. Requires an odd
+    modulus; an even one returns `[0]` rather than a wrong result.
+
+    TODO(crypto): the window table is indexed by a secret-dependent value, so
+    this is not cache-timing resistant. Closing that needs a constant-time
+    table scan (linear select over all 16 entries); it is deliberately not done
+    here because it multiplies the interpreter cost by 16 and this plan's
+    remaining budget is the 60s interpreter watchdog.
+    """
+    val ctx = bi_montgomery_setup(modulus)
+    if ctx.n_prime == 0:
+        return [0]
+    if cmp(ctx.n, [1]) == 0:
+        return [0]
+    # table[w] = base^w in Montgomery form
+    val m_base = bi_to_montgomery(base, ctx)
+    val one_mont = bi_montgomery_mul(ctx.r_squared, [1], ctx)
+    var table: [[i64]] = [one_mont]
+    var w: i64 = 1
+    while w < 16:
+        table.push(bi_montgomery_mul(table[w - 1], m_base, ctx))
+        w = w + 1
+    var bits = bit_length(exp)
+    if bits <= 0:
+        return [1]
+    # Round the scan up to a whole number of 4-bit windows.
+    while bits % 4 != 0:
+        bits = bits + 1
+    var acc = one_mont
+    var top = bits - 4
+    while top >= 0:
+        var s: i64 = 0
+        while s < 4:
+            acc = bi_montgomery_mul(acc, acc, ctx)
+            s = s + 1
+        val digit = (get_bit(exp, top + 3) << 3) | (get_bit(exp, top + 2) << 2) | (get_bit(exp, top + 1) << 1) | get_bit(exp, top)
+        acc = bi_montgomery_mul(acc, table[digit], ctx)
+        top = top - 4
+    bi_from_montgomery(acc, ctx)
+
+# =============================================================================
+# Barrett reduction — public-value (verify) path
+# =============================================================================
+
+pub struct BarrettCtx:
+    n: [i64]
+    mu: [i64]
+    k: i64
+
+pub fn bi_barrett_setup(modulus: [i64]) -> BarrettCtx:
+    """Precompute mu = floor(2^(2*LIMB_BITS*k) / n) for a k-limb modulus."""
+    val n = normalize(modulus)
+    val k = n.len()
+    if is_zero(n):
+        return BarrettCtx(n: n, mu: [0], k: 0)
+    var num: [i64] = []
+    var i: i64 = 0
+    while i < 2 * k:
+        num.push(0)
+        i = i + 1
+    num.push(1)
+    val qr = div_mod(num, n)
+    BarrettCtx(n: n, mu: qr[0], k: k)
+
+pub fn bi_barrett_reduce(a: [i64], ctx: BarrettCtx) -> [i64]:
+    """a mod n for a < n^2, using the precomputed Barrett constant.
+
+    VARIABLE TIME: the corrective subtraction loop runs a value-dependent
+    number of times (0-2). This reducer is for PUBLIC operands only — RSA
+    verification with a public exponent — never for private-key material.
+    """
+    if ctx.k <= 0:
+        return [0]
+    if cmp(a, ctx.n) < 0:
+        return normalize(a)
+    val q1 = bi_shift_right(a, LIMB_BITS * (ctx.k - 1))
+    val q2 = mul(q1, ctx.mu)
+    val q3 = bi_shift_right(q2, LIMB_BITS * (ctx.k + 1))
+    var r = sub(a, mul(q3, ctx.n))
+    while cmp(r, ctx.n) >= 0:
+        r = sub(r, ctx.n)
+    normalize(r)
+
+pub fn bi_mod_exp_barrett(base: [i64], exp: [i64], modulus: [i64]) -> [i64]:
+    """base^exp mod modulus via square-and-multiply with Barrett reduction.
+
+    VARIABLE TIME in both the exponent bits and the reduction corrections —
+    public-exponent RSA verification only. Kept as the independent
+    cross-check against `bi_mod_exp_montgomery`.
+    """
+    val ctx = bi_barrett_setup(modulus)
+    if ctx.k <= 0 or cmp(ctx.n, [1]) == 0:
+        return [0]
+    var acc: [i64] = [1]
+    var b = bi_barrett_reduce(base, ctx)
+    var i = bit_length(exp) - 1
+    while i >= 0:
+        acc = bi_barrett_reduce(mul(acc, acc), ctx)
+        if get_bit(exp, i) == 1:
+            acc = bi_barrett_reduce(mul(acc, b), ctx)
+        i = i - 1
+    normalize(acc)

@@ -64,7 +64,8 @@ use common.ui.draw_ir_v3.{
     draw_ir_v3_empty_scene, draw_ir_v3_command,
     draw_ir_v3_paint_append, draw_ir_v3_path_point_append,
     draw_ir_v3_path_span_append,
-    DRAW_IR_V3_KIND_PATH, DRAW_IR_V3_FLAG_NONE, DRAW_IR_V3_NO_ID,
+    DRAW_IR_V3_KIND_PATH, DRAW_IR_V3_KIND_EDGE,
+    DRAW_IR_V3_FLAG_NONE, DRAW_IR_V3_NO_ID,
     DRAW_IR_V3_VERB_MOVE, DRAW_IR_V3_VERB_LINE
 }
 use common.ui.draw_ir.{DRAW_IR_BACKEND_CPU}
@@ -81,7 +82,8 @@ use app.ui_showcase.showcase_core.{
 }
 use app.ui_showcase.hosts.host_2d.{Screen2dHost, screen_2d_parse_script}
 use app.ui_showcase.hosts.host_2d_engine.{
-    Screen2dEngineHost, showcase_engine_backend_supported
+    Screen2dEngineHost, showcase_engine_backend_supported,
+    showcase_run_with_exact_engine_backend
 }
 use app.ui_showcase.hosts.host_gui.{gui_event_to_host, gui_button_to_host}
 use app.ui_showcase.hosts.host_web.{
@@ -115,9 +117,30 @@ describe "exact Engine2D showcase backend admission":
         expect(source).to_contain("result.readback_source != \"device_readback\"")
         expect(source).to_contain("native_hits_after <= native_hits_before")
         expect(source).to_contain("cpu-simd-native-execution-required")
+        expect(source).to_contain("resolved-font-execution-required")
+        expect(source).to_contain("font_target={result.font_execution_target}")
+        expect(source).to_contain("engine-resize-rejected")
+        expect(source).to_contain("self.engine = replacement")
         expect(entry).to_contain("SIMPLE_SHOWCASE_BACKEND")
+        expect(entry).to_contain("val (final_w, final_h) = host.size()")
+        expect(entry).to_contain("raster_to_ppm_bytes(pixels, final_w, final_h)")
         expect(entry).to_contain("showcase status=blocked")
         expect(entry).to_contain("showcase status=pass")
+
+    it "recreates the exact software backend after an admitted resize":
+        # @req REQ-SSPEC-SYSTEM
+        step("Resize the exact backend between two rendered frames")
+        val host = Screen2dEngineHost.open(
+            64, 48, "resize 80,60", "software")!
+        val report = showcase_run_with_exact_engine_backend(
+            host, "exact_resize", 2)
+        val (w, h) = host.size()
+        expect(report.frames).to_equal(2)
+        expect(w).to_equal(80)
+        expect(h).to_equal(60)
+        expect(host.pixels().len()).to_equal(80 * 60)
+        expect(host.rejection_reason()).to_equal("")
+        host.shutdown()
 
 # --- HostInputEvent destructuring (the enum carries positional payloads) ---
 
@@ -206,6 +229,17 @@ describe "2d host — script ingress":
 
 describe "2d host — end to end through showcase_run":
 
+    it "uses an admitted scripted resize for the next frame and capture":
+        # @req REQ-SSPEC-SYSTEM
+        step("Resize a 2d host between two presented frames")
+        val host = Screen2dHost.open(64, 48, "resize 80,60")
+        val report = showcase_run(host, "spec2d_resize", 2)
+        val (w, h) = host.size()
+        expect(report.frames).to_equal(2)
+        expect(w).to_equal(80)
+        expect(h).to_equal(60)
+        expect(host.pixels().len()).to_equal(80 * 60)
+
     it "reports the scripted click and typed characters and paints a real frame":
         # @req REQ-SSPEC-SYSTEM
         step("reports the scripted click and typed characters and paints a real frame")
@@ -235,6 +269,27 @@ describe "2d host — end to end through showcase_run":
         expect(raster_to_ppm_bytes(px, 96, 72).len() > 96 * 72 * 3).to_equal(true)
 
 describe "scene rasterizer":
+
+    it "clips opaque rectangle fast fills exactly":
+        # @req REQ-SSPEC-SYSTEM
+        step("Fill an oversized opaque rectangle through a bounded clip")
+        val surface = RasterSurface.new(6, 5, RASTER_BG)
+        surface.set_clip(2, 1, 3, 2)
+        surface.fill_rect(-2, -2, 10, 10, 4294901760u32)
+        var changed = 0
+        var y = 0
+        while y < 5:
+            var x = 0
+            while x < 6:
+                val pixel = surface.pixels[(y * 6 + x).to_i64()]
+                if x >= 2 and x < 5 and y >= 1 and y < 3:
+                    expect(pixel).to_equal(4294901760u32)
+                    changed = changed + 1
+                else:
+                    expect(pixel).to_equal(RASTER_BG)
+                x = x + 1
+            y = y + 1
+        expect(changed).to_equal(6)
 
     it "reports zero painted commands for an empty scene and leaves it blank":
         # @req REQ-SSPEC-SYSTEM
@@ -363,8 +418,23 @@ describe "web host — scene projection":
         val html = web_scene_to_html(showcase_scene(st, 200, 150), 200, 150)
 
         expect(html.contains("data-glyph=")).to_equal(true)
-        expect(html.contains("background:rgba(")).to_equal(true)
+        expect(html.contains("box-shadow:")).to_equal(true)
+        expect(html.contains("currentColor")).to_equal(true)
+        expect(html.contains("aria-hidden=\"true\"")).to_equal(true)
+        expect(html.contains("<i style=\"position:absolute")).to_equal(false)
         expect(web_scene_unsupported_count(showcase_scene(st, 200, 150))).to_equal(0)
+
+    it "validates text and paths without constructing discarded markup":
+        # @req REQ-SSPEC-SYSTEM
+        step("Keep the unsupported preflight allocation-free")
+        val source = file_read("src/app/ui_showcase/hosts/host_web.spl")
+        expect(source.contains("val (ignored_html, valid)")).to_equal(false)
+        expect(source.contains("val (ignored_path, valid)")).to_equal(false)
+        expect(source).to_contain("web_text_valid(scene, i)")
+        expect(source).to_contain("web_path_valid(scene, i)")
+        expect(source).to_contain("val shadows = StringBuilder.new()")
+        expect(source).to_contain("val out = StringBuilder.new()")
+        expect(source).to_contain("val body = StringBuilder.new()")
 
     it "projects a valid line path through the web host boundary":
         # @req REQ-SSPEC-SYSTEM
@@ -474,11 +544,15 @@ describe "screen switching — menubar navigation":
         expect(showcase_screen(st)).to_equal("shapes")
         val scene = showcase_scene(st, 320, 240)
         var path_count = 0
+        var edge_count = 0
         for cmd in scene.commands:
             if cmd.kind == DRAW_IR_V3_KIND_PATH and cmd.paint_id != DRAW_IR_V3_NO_ID:
                 path_count = path_count + 1
+            if cmd.kind == DRAW_IR_V3_KIND_EDGE and cmd.path_span_id != DRAW_IR_V3_NO_ID:
+                edge_count = edge_count + 1
         # triangle + zigzag + diamond
         expect(path_count >= 3).to_equal(true)
+        expect(edge_count).to_equal(1)
         val px = raster_scene_argb(scene, 320, 240)
         expect(raster_distinct_pixel_count(px, 8) >= 4).to_equal(true)
 
@@ -487,6 +561,9 @@ describe "screen switching — menubar navigation":
         step("fonts screen expresses both the bitmap and vector text lanes")
         step("Build the tree, then the fonts extras batch carries a plain (bitmap-lane) text and a resolved-font (vector) text")
         var st = showcase_build("specfonts_")
+        st = showcase_apply(st, host_pointer_down(80, 10, 1), 320, 240)
+        st = showcase_apply(st, host_pointer_up(80, 10, 1), 320, 240)
+        expect(showcase_screen(st)).to_equal("fonts")
         val extras = showcase_composition_extras("specfonts_", "fonts", 320, 240, DRAW_IR_BACKEND_CPU)
         expect(extras.len()).to_equal(1)
         var plain_text = false
@@ -508,3 +585,7 @@ describe "screen switching — menubar navigation":
         st = showcase_apply(st, host_pointer_up(140, 10, 1), 320, 240)
         val scene = showcase_scene(st, 320, 240)
         expect(web_scene_unsupported_count(scene)).to_equal(0)
+        val html = web_scene_to_html(scene, 320, 240)
+        expect(html.contains("<svg")).to_equal(true)
+        expect(html.contains("fill:none;stroke:rgba(255,192,64,1);stroke-width:1px;")).to_equal(true)
+        expect(html.contains("stroke:none")).to_equal(false)

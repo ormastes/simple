@@ -583,13 +583,20 @@ class PostMonoVerifier:
         """`mangle_type` (40.mono/monomorphize/engine.spl) emits `unknown` for
         an unmangleable type and `param_<T>` for an unsubstituted type
         parameter. Either token in a specialized name is an unknown mangling."""
-        if name.contains("unknown"):
+        # NILNAME (2026-09-01): a HIR definition can reach this pass with a nil
+        # name, and `nil.contains(...)` is fatal — it aborted the whole MCP
+        # native build right after the `[mono]` receipt with
+        # `method \`contains\` not found on type \`nil\``. An unnamed symbol
+        # cannot carry a mangling token, so empty is the correct reading.
+        # Record: doc/08_tracking/bug/mcp_native_build_post_mono_nil_contains_2026-09-01.md
+        val mangled_name: text = name ?? ""
+        if mangled_name.contains("unknown"):
             self.r.unknown_mangling = self.r.unknown_mangling + 1
-            self.record("unknown type mangling", "specialized symbol `{name}` contains the `unknown` mangling token")
+            self.record("unknown type mangling", "specialized symbol `{mangled_name}` contains the `unknown` mangling token")
         else:
-            if name.contains("param_"):
+            if mangled_name.contains("param_"):
                 self.r.unknown_mangling = self.r.unknown_mangling + 1
-                self.record("unknown type mangling", "specialized symbol `{name}` mangles an unsubstituted type parameter")
+                self.record("unknown type mangling", "specialized symbol `{mangled_name}` mangles an unsubstituted type parameter")
 
     me is_template(type_params: [HirTypeParam], flagged: bool) -> bool:
         if flagged:
@@ -599,12 +606,15 @@ class PostMonoVerifier:
         type_params.len() > 0
 
     me enter(module_name: text, def_name: text):
-        self.symbol = "{module_name}.{def_name}"
-        self.in_specialization = def_name.contains("$")
+        # NILNAME (2026-09-01): see check_mangling — a nil def name is fatal on
+        # `.contains`/`.split`. An unnamed definition is not a specialization.
+        val entered_def_name: text = def_name ?? ""
+        self.symbol = "{module_name}.{entered_def_name}"
+        self.in_specialization = entered_def_name.contains("$")
         if self.in_specialization:
-            self.chain = "{module_name}.{def_name} (template {def_name.split("$")[0]})"
+            self.chain = "{module_name}.{entered_def_name} (template {entered_def_name.split("$")[0]})"
         else:
-            self.chain = "{module_name}.{def_name}"
+            self.chain = "{module_name}.{entered_def_name}"
 
     me check_template_callee(callee: HirExpr):
         if callee == nil:

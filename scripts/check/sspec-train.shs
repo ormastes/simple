@@ -1,0 +1,375 @@
+#!/bin/sh
+# sspec-train.shs — sspec scoring training/measurement harness.
+#
+# NOT a push gate. A loop tool: score one spec or a whole tree of
+# `*_spec.spl` files with the SSpec documentization scorer
+# (src/app/sspec_maintain/main.spl scan) and produce a per-rule histogram of
+# point loss, sorted by total deduction descending — the whole point is
+# telling you which rule_ids are costing the last points across a tree, not
+# just one spec's headline number.
+#
+# Scorer binary: the only verified working invocation on this host is the
+# Rust-seed bootstrap build running the scorer FROM SOURCE (bin/simple is a
+# bootstrap-only CLI with no `run`/`test`/`scan`):
+#   src/compiler_rust/target/bootstrap/simple run src/app/sspec_maintain/main.spl scan <path>
+# See doc/08_tracking/bug/stale_deployed_binaries_reject_current_language_sspec_scorer_unrunnable_2026-09-05.md.
+# Override with SIMPLE_SSPEC_BIN once a fresher self-hosted binary is deployed.
+#
+# Scored spec output (stdout, per spec) looks like:
+#   SSpec documentization score: 49/100
+#   source: ...
+#   mirror: ...
+#   findings: 10 blockers: 1
+#     narrative=... structure=... oracle=... ...
+#     raw=73; blocker cap makes effective=49        <- only printed when blockers > 0
+#     ...
+#   <path>:<line>:<col>: <severity> SSDOC-XXX-NNN [<dimension>] (-N): <message>
+#
+# Usage:
+#   sh scripts/check/sspec-train.shs <spec-or-dir> [more...] [--quiet]
+#   sh scripts/check/sspec-train.shs --selftest
+#
+# Env:
+#   SIMPLE_SSPEC_BIN        override the scorer binary (default: the bootstrap
+#                           seed above, resolved relative to the repo root)
+#   SSPEC_TARGET_SCORE      pass/fail threshold (default: 90)
+#   SIMPLE_WORKTREE_STORAGE_ROOT   report dir root (default: build/sspec-train
+#                                  under the repo root — never /tmp)
+#
+# The scorer's exit status is read directly into a variable on the line
+# right after the invocation, never through a pipe — a pipeline's `$?` is the
+# last command's status and has produced false greens in this repo before.
+#
+# Verdict is the LAST line of stdout, per .claude/rules/vcs.md convention:
+#   PASS  — <n> spec(s) scored, <k> at or above <target>       exit 0
+#   FAIL  — <n> spec(s) scored, <k> below <target>: <names>    exit 1
+#   ERROR — nothing was checked (<reason>)                     exit 2
+# A run that scored 0 specs is always ERROR, never a pass.
+
+set -u
+
+SELF="sspec-train.shs"
+
+ROOT=$(cd "$(dirname "$0")/../.." && pwd) || {
+    printf '%s: ERROR — nothing was checked (cannot resolve repo root)\n' "$SELF"
+    exit 2
+}
+cd "$ROOT" || {
+    printf '%s: ERROR — nothing was checked (cannot cd to repo root)\n' "$SELF"
+    exit 2
+}
+
+DEFAULT_SCORER="$ROOT/src/compiler_rust/target/bootstrap/simple"
+SCORER_BIN="${SIMPLE_SSPEC_BIN:-$DEFAULT_SCORER}"
+TARGET_SCORE="${SSPEC_TARGET_SCORE:-90}"
+
+QUIET=0
+SELFTEST=0
+SPEC_ARGS=""
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --selftest) SELFTEST=1; shift ;;
+        --quiet) QUIET=1; shift ;;
+        -*)
+            printf '%s: ERROR — nothing was checked (unknown argument: %s)\n' "$SELF" "$1"
+            exit 2
+            ;;
+        *)
+            SPEC_ARGS="$SPEC_ARGS
+$1"
+            shift
+            ;;
+    esac
+done
+
+# ---------------------------------------------------------------------------
+# storage root — never /tmp
+# ---------------------------------------------------------------------------
+storage_root() {
+    if [ -n "${SIMPLE_WORKTREE_STORAGE_ROOT:-}" ]; then
+        printf '%s/sspec-train\n' "$SIMPLE_WORKTREE_STORAGE_ROOT"
+    else
+        printf '%s/build/sspec-train\n' "$ROOT"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# find_specs <newline-separated paths> -> newline-separated *_spec.spl files
+# ---------------------------------------------------------------------------
+find_specs() {
+    list="$1"
+    printf '%s\n' "$list" | while IFS= read -r p; do
+        [ -z "$p" ] && continue
+        if [ -d "$p" ]; then
+            find "$p" -type f -name '*_spec.spl' 2>/dev/null
+        elif [ -f "$p" ]; then
+            printf '%s\n' "$p"
+        fi
+    done
+}
+
+# ---------------------------------------------------------------------------
+# run_scan <specs_file> <out_dir> <target_score>
+# Scores every spec in $specs_file with the real scorer, writes:
+#   $out_dir/specs.txt     path|effective|raw|blockers|verdict
+#   $out_dir/findings.txt  rule_id|dimension|deduction
+# Prints the count of specs it attempted (not the count it scored) to stdout.
+# ---------------------------------------------------------------------------
+run_scan() {
+    specs_file="$1"
+    out_dir="$2"
+    target="$3"
+
+    specs_out="$out_dir/specs.txt"
+    findings_out="$out_dir/findings.txt"
+    : > "$specs_out"
+    : > "$findings_out"
+
+    attempted=0
+    while IFS= read -r spec_path; do
+        [ -z "$spec_path" ] && continue
+        attempted=$((attempted + 1))
+        raw_capture="$out_dir/raw_$attempted.txt"
+
+        "$SCORER_BIN" run src/app/sspec_maintain/main.spl scan "$spec_path" > "$raw_capture" 2>/dev/null
+        rc=$?
+
+        effective=$(sed -E -n 's/^SSpec documentization score: ([0-9]+)\/100.*/\1/p' "$raw_capture" | head -n1)
+        if [ "$rc" -ne 0 ] || [ -z "$effective" ]; then
+            printf '%s: WARN — could not score %s (scorer rc=%s)\n' "$SELF" "$spec_path" "$rc" >&2
+            rm -f "$raw_capture"
+            continue
+        fi
+
+        raw_line=$(sed -E -n 's/^  raw=([0-9]+);.*/\1/p' "$raw_capture" | head -n1)
+        if [ -n "$raw_line" ]; then
+            raw_score="$raw_line"
+        else
+            raw_score="$effective"
+        fi
+
+        blockers=$(sed -E -n 's/^findings: [0-9]+ blockers: ([0-9]+).*/\1/p' "$raw_capture" | head -n1)
+        [ -z "$blockers" ] && blockers=0
+
+        if [ "$effective" -ge "$target" ]; then
+            verdict="PASS"
+        else
+            verdict="FAIL"
+        fi
+
+        printf '%s|%s|%s|%s|%s\n' "$spec_path" "$effective" "$raw_score" "$blockers" "$verdict" >> "$specs_out"
+
+        sed -E -n 's/^.*: (blocker|warning|advice) (SSDOC-[A-Za-z0-9-]+) \[([a-z]+)\] \(-([0-9]+)\):.*/\2|\3|\4/p' \
+            "$raw_capture" >> "$findings_out"
+
+        rm -f "$raw_capture"
+    done < "$specs_file"
+
+    echo "$attempted"
+}
+
+# ---------------------------------------------------------------------------
+# emit_report <out_dir> — stdout table + histogram (unless --quiet), SDN file
+# ---------------------------------------------------------------------------
+emit_report() {
+    out_dir="$1"
+    specs_out="$out_dir/specs.txt"
+    findings_out="$out_dir/findings.txt"
+    report_sdn="$out_dir/report.sdn"
+
+    if [ "$QUIET" -eq 0 ]; then
+        printf '\n=== per-spec scores (target=%s) ===\n' "$TARGET_SCORE"
+        awk -F'|' '{printf "%-70s eff=%-4s raw=%-4s blockers=%-3s %s\n", $1, $2, $3, $4, $5}' "$specs_out"
+
+        printf '\n=== per-rule histogram (sorted by total deduction desc) ===\n'
+        if [ -s "$findings_out" ]; then
+            awk -F'|' '{cnt[$1]++; sum[$1]+=$3; dim[$1]=$2} END {for (k in cnt) printf "%s|%s|%s|%s\n", sum[k], cnt[k], dim[k], k}' "$findings_out" \
+                | sort -t'|' -k1,1nr \
+                | awk -F'|' '{printf "%-20s %-16s fired=%-4s total_deduction=%s\n", $4, $3, $2, $1}'
+        else
+            printf '(no findings recorded)\n'
+        fi
+        printf '\n'
+    fi
+
+    {
+        printf '# sspec-train report — scorer=%s target_score=%s\n' "$SCORER_BIN" "$TARGET_SCORE"
+        printf '\n'
+        printf 'sspec_train_specs |path, effective, raw, blockers, verdict|\n'
+        awk -F'|' '{printf "    \"%s\", %s, %s, %s, \"%s\"\n", $1, $2, $3, $4, $5}' "$specs_out"
+        printf '\n'
+        printf 'sspec_train_rule_histogram |rule_id, dimension, fired, total_deduction|\n'
+        if [ -s "$findings_out" ]; then
+            awk -F'|' '{cnt[$1]++; sum[$1]+=$3; dim[$1]=$2} END {for (k in cnt) printf "%s|%s|%s|%s\n", sum[k], cnt[k], dim[k], k}' "$findings_out" \
+                | sort -t'|' -k1,1nr \
+                | awk -F'|' '{printf "    \"%s\", \"%s\", %s, %s\n", $4, $3, $2, $1}'
+        fi
+    } > "$report_sdn"
+
+    printf '%s: report written to %s\n' "$SELF" "$report_sdn" >&2
+}
+
+# ---------------------------------------------------------------------------
+# do_run <spec-args (newline separated)> <out_dir> <target_score>
+# Prints table/histogram (unless quiet), writes report.sdn, prints the
+# verdict line, and returns its exit code via `return`.
+# ---------------------------------------------------------------------------
+do_run() {
+    list_str="$1"
+    out_dir="$2"
+    target="$3"
+
+    if [ ! -x "$SCORER_BIN" ]; then
+        printf '%s: ERROR — nothing was checked (scorer binary not found: %s)\n' "$SELF" "$SCORER_BIN"
+        return 2
+    fi
+
+    mkdir -p "$out_dir" || {
+        printf '%s: ERROR — nothing was checked (cannot create %s)\n' "$SELF" "$out_dir"
+        return 2
+    }
+
+    specs_file="$out_dir/spec_list.txt"
+    find_specs "$list_str" > "$specs_file"
+
+    if [ ! -s "$specs_file" ]; then
+        printf '%s: ERROR — nothing was checked (no *_spec.spl files found)\n' "$SELF"
+        return 2
+    fi
+
+    run_scan "$specs_file" "$out_dir" "$target" > "$out_dir/attempted_count.txt"
+
+    specs_out="$out_dir/specs.txt"
+    if [ ! -s "$specs_out" ]; then
+        printf '%s: ERROR — nothing was checked (scorer produced no parsable score for any spec)\n' "$SELF"
+        return 2
+    fi
+
+    emit_report "$out_dir"
+
+    total=$(wc -l < "$specs_out" | tr -d ' ')
+    if [ "$total" -eq 0 ]; then
+        printf '%s: ERROR — nothing was checked (0 specs scored)\n' "$SELF"
+        return 2
+    fi
+
+    passed=$(awk -F'|' '$5=="PASS"{c++} END{print c+0}' "$specs_out")
+    failed=$((total - passed))
+
+    if [ "$failed" -eq 0 ]; then
+        printf '%s: PASS — %s spec(s) scored, %s at or above %s\n' "$SELF" "$total" "$passed" "$target"
+        return 0
+    fi
+
+    fail_names=$(awk -F'|' '$5=="FAIL"{print $1}' "$specs_out" | head -n5 | tr '\n' ',' | sed 's/,$//')
+    printf '%s: FAIL — %s spec(s) scored, %s below %s: %s\n' "$SELF" "$total" "$failed" "$target" "$fail_names"
+    return 1
+}
+
+# ---------------------------------------------------------------------------
+# selftest — 4 fixtures. Fatal: any failure aborts with exit 1/2 immediately.
+# ---------------------------------------------------------------------------
+run_selftest() {
+    if [ ! -x "$SCORER_BIN" ]; then
+        printf '%s: ERROR — nothing was checked (scorer binary not found: %s)\n' "$SELF" "$SCORER_BIN"
+        exit 2
+    fi
+
+    st_root="$(storage_root)/selftest.$$"
+    mkdir -p "$st_root" || {
+        printf '%s: ERROR — nothing was checked (cannot create %s)\n' "$SELF" "$st_root"
+        exit 2
+    }
+    trap 'rm -rf "$st_root"' EXIT
+
+    ran=0
+    fails=""
+
+    # (a) a spec that scores at/above target must PASS. The repo's own
+    # spipe_template.spl measures 86/100 on this scanner (a real fixture, not
+    # a synthetic string) — use a threshold it genuinely clears rather than
+    # hand-tuning a fixture to the scorer's rubric, which is not this
+    # harness's job to reverse-engineer.
+    ran=$((ran + 1))
+    a_dir="$st_root/a_pass"
+    mkdir -p "$a_dir"
+    cp "$ROOT/.claude/templates/spipe_template.spl" "$a_dir/pass_fixture_spec.spl"
+    a_out="$st_root/a_out"
+    do_run "$a_dir" "$a_out" 80
+    a_rc=$?
+    if [ "$a_rc" -ne 0 ]; then
+        fails="$fails a-pass-fixture-expected-PASS-got-rc-$a_rc"
+    fi
+
+    # (b) a spec with a blocker must FAIL. Locally-constructed-arithmetic
+    # oracle triggers SSDOC-ORA-002 (blocker), capping the effective score.
+    ran=$((ran + 1))
+    b_dir="$st_root/b_fail"
+    mkdir -p "$b_dir"
+    cat > "$b_dir/blocker_fixture_spec.spl" << 'SPEC'
+"""
+## Purpose and audience
+Blocker fixture for scripts/check/sspec-train.shs --selftest.
+"""
+use std.spec
+
+describe "Blocker fixture":
+    it "does something":
+        val x = 3
+        expect(x).to_equal(3)
+SPEC
+    b_out="$st_root/b_out"
+    do_run "$b_dir" "$b_out" "$TARGET_SCORE"
+    b_rc=$?
+    if [ "$b_rc" -ne 1 ]; then
+        fails="$fails b-blocker-fixture-expected-FAIL-got-rc-$b_rc"
+    fi
+
+    # (c) an empty directory must score 0 specs and force ERROR.
+    ran=$((ran + 1))
+    c_dir="$st_root/c_empty"
+    mkdir -p "$c_dir"
+    c_out="$st_root/c_out"
+    do_run "$c_dir" "$c_out" "$TARGET_SCORE"
+    c_rc=$?
+    if [ "$c_rc" -ne 2 ]; then
+        fails="$fails c-empty-dir-expected-ERROR-got-rc-$c_rc"
+    fi
+
+    # (d) a fake scorer path that does not exist must ERROR, not pass.
+    ran=$((ran + 1))
+    d_saved="$SCORER_BIN"
+    SCORER_BIN="$st_root/no-such-scorer-binary"
+    d_out="$st_root/d_out"
+    do_run "$a_dir" "$d_out" "$TARGET_SCORE"
+    d_rc=$?
+    SCORER_BIN="$d_saved"
+    if [ "$d_rc" -ne 2 ]; then
+        fails="$fails d-missing-scorer-expected-ERROR-got-rc-$d_rc"
+    fi
+
+    if [ -n "$fails" ]; then
+        printf '%s: FAIL — selftest: %s/%s fixture(s) misbehaved:%s\n' "$SELF" "$(printf '%s' "$fails" | wc -w | tr -d ' ')" "$ran" "$fails"
+        exit 1
+    fi
+
+    printf '%s: PASS — %s fixture(s) checked (selftest only, no real scan requested)\n' "$SELF" "$ran"
+    exit 0
+}
+
+# ---------------------------------------------------------------------------
+# main
+# ---------------------------------------------------------------------------
+if [ "$SELFTEST" -eq 1 ]; then
+    run_selftest
+fi
+
+if [ -z "$(printf '%s' "$SPEC_ARGS" | tr -d '\n')" ]; then
+    printf '%s: ERROR — nothing was checked (no spec or directory argument given)\n' "$SELF"
+    exit 2
+fi
+
+OUT_DIR="$(storage_root)/run.$$"
+do_run "$SPEC_ARGS" "$OUT_DIR" "$TARGET_SCORE"
+exit $?

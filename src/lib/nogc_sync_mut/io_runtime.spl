@@ -61,6 +61,8 @@ extern fn rt_file_delete(path: text) -> bool
 extern fn rt_file_copy(src: text, dst: text) -> bool
 @unsafe(reason: "raw nullable byte-array read; nil is invalid path, unreadable input, allocation, or runtime failure", capabilities: [ffi])
 extern fn rt_file_read_bytes(path: text) -> [u8]?
+@unsafe(reason: "checked managed-text SFFI returns nil only for a foreign I/O contract failure", capabilities: [ffi])
+extern fn rt_file_read_text_at_checked(path: text, offset: i64, size: i64) -> text?
 @unsafe(reason: "raw append status; false conflates input, permission, I/O, and runtime failure", capabilities: [ffi])
 extern fn rt_file_append_text(path: text, content: text) -> bool
 @unsafe(reason: "raw file digest; non-64-byte text is the unreadable or provider-failure sentinel", capabilities: [ffi])
@@ -303,6 +305,16 @@ pub fn file_hash_sha256_or_empty(path: text) -> text:
     if hash.len() == 64:
         return hash
     ""
+
+# Read `size` bytes starting at `offset`. The only ranged read in this module:
+# every other reader takes the whole file, which is not an option for callers
+# that must inspect the header of a multi-gigabyte artifact (a model shard, an
+# archive index) without paging it in. Returns nil when the path is unreadable
+# or the range lies past the end, so a caller can tell "no such range" from an
+# empty one.
+pub fn file_read_text_at(path: text, offset: i64, size: i64) -> text?:
+    unsafe(capabilities: [ffi]):
+        rt_file_read_text_at_checked(host_path_native(path), offset, size)
 
 pub fn file_size(path: text) -> i64:
     val size = unsafe(capabilities: [ffi]):
@@ -662,7 +674,7 @@ pub fn host_arch() -> text:
 
 export shell, shell_output, shell_bool, shell_output_trimmed, ShellResult, ProcessResult
 export file_read, file_read_nullable, read_file, read_file_text, file_write, write_file, file_write_exact, file_exists
-export file_delete, file_copy, file_size, file_size_raw, file_size_signed, file_hash_sha256, file_hash_sha256_or_empty
+export file_delete, file_copy, file_read_text_at, file_size, file_size_raw, file_size_signed, file_hash_sha256, file_hash_sha256_or_empty
 export file_read_bytes, file_write_bytes, file_append_text, remove_file_if_exists
 export dir_create, dir_create_all, is_dir, is_file, is_char_device, list_dir, mkdir_p
 export dir_list, dir_list_optional, dir_walk, dir_remove, dir_remove_all, dir_exists

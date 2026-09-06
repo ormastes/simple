@@ -175,7 +175,11 @@ fn all_lint_names() -> [text]:
      # WM/GUI/web/2D portable-lane dependency boundary (WML001/WML002) — allow
      # by default because it walks every import line; --wm-lane or --warn-all
      # turns it on. See wm_lane_boundary_lints.spl.
-     "wm_lane_boundary"]
+     "wm_lane_boundary",
+     # Simple 2D/GPU per-frame cost (G2DP001/G2DP002) — allow by default,
+     # same reasoning as wm_lane_boundary; --gpu-2d-perf or --warn-all turns
+     # it on. See gpu_2d_perf_lints.spl.
+     "gpu_2d_perf"]
 
 # Allocation-free membership for config and attribute parsing. Keep enumeration
 # in `all_lint_names`; hot membership must not rebuild and scan that array for
@@ -212,7 +216,8 @@ fn lint_name_is_known(name: text) -> bool:
              "freestanding_global_call_init" | "module_init_literal" |
              "raw_rt_access" | "const_ref_default" |
              "bare_primitive_internal" | "unwrapped_foreign_resource" |
-             "raw_sffi_call" | "silent_default" | "wm_lane_boundary": true
+             "raw_sffi_call" | "silent_default" | "wm_lane_boundary"
+             | "gpu_2d_perf": true
         case _: false
 
 # Build the default levels dict for all configurable lint names.
@@ -304,6 +309,9 @@ fn build_default_levels() -> Dict<String, String>:
     # [lints] entry. It must never run in a normal build — and cannot, since
     # compiler/90.tools/lint is not on the compile/build driver's import path.
     levels["wm_lane_boundary"] = "allow"
+    # DEFAULT OFF, same reasoning: gpu_2d_perf is opt-in via --gpu-2d-perf,
+    # --warn-all, or an explicit simple.sdn [lints] entry.
+    levels["gpu_2d_perf"] = "allow"
     levels
 
 # Per-tier default levels, layered on top of build_default_levels().
@@ -463,6 +471,7 @@ class LintCliPolicy:
     fix_all: bool
     fix_dry_run: bool
     wm_lane: bool
+    gpu_2d_perf: bool
     profile: Option<LintProfile>
     error: String
 
@@ -471,7 +480,7 @@ impl LintCliPolicy:
         var policy = LintCliPolicy(
             deny_all: false, warn_all: false, json_output: false,
             fix_mode: false, fix_all: false, fix_dry_run: false,
-            wm_lane: false, profile: nil, error: "")
+            wm_lane: false, gpu_2d_perf: false, profile: nil, error: "")
         var expect_profile = false
         for arg in args:
             if expect_profile:
@@ -487,6 +496,7 @@ impl LintCliPolicy:
             elif arg == "--fix-all": policy.fix_all = true
             elif arg == "--fix-dry-run": policy.fix_dry_run = true
             elif arg == "--wm-lane": policy.wm_lane = true
+            elif arg == "--gpu-2d-perf": policy.gpu_2d_perf = true
             elif arg == "--profile": expect_profile = true
             elif arg.starts_with("--profile="):
                 val profile_text = arg.slice(10, arg.len())
@@ -867,6 +877,8 @@ fn map_lint_code_to_config_name(code: String) -> String:
         return "too_many_arguments"
     if code == "WML001" or code == "WML002":
         return "wm_lane_boundary"
+    if code == "G2DP001" or code == "G2DP002" or code == "G2DP003":
+        return "gpu_2d_perf"
     if code == "ACC001":
         return "dummy_accessor"
     if code == "TYPE001" or code == "TYPE002":

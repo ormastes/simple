@@ -2,6 +2,29 @@
 
 > As an Office operator, I run one unique evidence campaign against `OFFICE_BINARY`, the standalone artifact produced by a Phase-3 compiler, and inspect the same Calc session through its terminal and semantic UI surfaces. `OFFICE_GATE_BINARY` executes orchestration and `SIMPLE_UI_CLIENT` drives the versioned access protocol; neither tool is the Office product or an application launch dependency. The scenarios never read a shared or prior evidence directory: one inline setup creates the run id and invokes the gate, then every scenario validates only that run's command, PTY, and protocol receipts.
 
+<!-- sdn-diagram:id=office_cli_tui_ui_access_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=office_cli_tui_ui_access_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+office_cli_tui_ui_access_spec -> std
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=office_cli_tui_ui_access_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 5 | 5 | 0 | 0 |
@@ -24,7 +47,7 @@ As an Office operator, I run one unique evidence campaign against `OFFICE_BINARY
 | Design | doc/05_design/office_cli_tui_ui_access.md |
 | Research | doc/01_research/local/office_cli_tui_ui_access.md |
 | Source | `test/03_system/app/office/feature/office_cli_tui_ui_access_spec.spl` |
-| Updated | 2026-08-11 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -188,6 +211,8 @@ that does not answer the public protocol, or stale evidence is a failure.
 
 #### should launch Calc and complete the live semantic formula workflow
 
+_Requirements: `REQ-OFFICE-CLI-UI-001`, `REQ-OFFICE-CLI-UI-002`, `REQ-OFFICE-CLI-UI-003`, `REQ-OFFICE-CLI-UI-004`, `REQ-OFFICE-CLI-UI-005`, `REQ-OFFICE-CLI-UI-006`, `REQ-OFFICE-CLI-UI-007`, `REQ-OFFICE-CLI-UI-008`, `REQ-OFFICE-CLI-UI-009`, `REQ-OFFICE-CLI-UI-010`_
+
 - should create one fresh deployed Office evidence run
    - Artifact capture: after_step
 - Create one unique deployed Office evidence run
@@ -299,6 +324,8 @@ expect(c1).to_contain("7")
 
 #### should fail closed for invalid commands, stale targets, and unsupported actions
 
+_Requirements: `REQ-SSPEC-SYSTEM`, `NFR-OFFICE-CLI-UI-001`, `NFR-OFFICE-CLI-UI-007`, `NFR-OFFICE-CLI-UI-008`_
+
 - should create one fresh deployed Office evidence run
    - Protocol capture: after_step
 - Create one unique deployed Office evidence run
@@ -390,6 +417,8 @@ expect(_gate_state_count()).to_equal(1)
 
 #### should retain bounded N1 performance and deterministic evidence
 
+_Requirements: `NFR-OFFICE-CLI-UI-002`, `NFR-OFFICE-CLI-UI-003`, `NFR-OFFICE-CLI-UI-004`, `NFR-OFFICE-CLI-UI-005`, `NFR-OFFICE-CLI-UI-006`, `NFR-OFFICE-CLI-UI-009`, `NFR-OFFICE-CLI-UI-010`_
+
 - should create one fresh deployed Office evidence run
    - Artifact capture: after_step
 - Create one unique deployed Office evidence run
@@ -456,6 +485,8 @@ expect(_gate_state_count()).to_equal(1)
 <summary>Advanced: should launch the real Calc HTML grid on the shared UI access session</summary>
 
 #### should launch the real Calc HTML grid on the shared UI access session
+
+_Requirements: `REQ-SSPEC-SYSTEM`, `NFR-OFFICE-CLI-UI-006`, `NFR-OFFICE-CLI-UI-008`_
 
 - should create one fresh deployed Office evidence run
    - Protocol capture: after_step
@@ -543,10 +574,10 @@ expect(_gate_state_count()).to_equal(1)
 
 ## Related Documentation
 
-- **Requirements:** `doc/02_requirements/feature/office_cli_tui_ui_access.md`
-- **Plan:** `doc/03_plan/sys_test/office_cli_tui_ui_access.md`
-- **Design:** `doc/05_design/office_cli_tui_ui_access.md`
-- **Research:** `doc/01_research/local/office_cli_tui_ui_access.md`
+- **Requirements:** [doc/02_requirements/feature/office_cli_tui_ui_access.md](doc/02_requirements/feature/office_cli_tui_ui_access.md)
+- **Plan:** [doc/03_plan/sys_test/office_cli_tui_ui_access.md](doc/03_plan/sys_test/office_cli_tui_ui_access.md)
+- **Design:** [doc/05_design/office_cli_tui_ui_access.md](doc/05_design/office_cli_tui_ui_access.md)
+- **Research:** [doc/01_research/local/office_cli_tui_ui_access.md](doc/01_research/local/office_cli_tui_ui_access.md)
 
 
 </details>
