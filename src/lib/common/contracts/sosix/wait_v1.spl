@@ -1,0 +1,267 @@
+"""Notification-oriented state for SOSIX compatibility wait adapters.
+
+This module never sleeps or spins. A completion publisher calls `notify`; an
+OS-specific adapter signals its event/condition only when that returns true.
+The awakened consumer calls `take_ready` until nil, then sleeps again.
+"""
+
+use std.common.contracts.sosix.operation_v1.{
+    SOSIX_OPERATION_CANCELED,
+    SOSIX_OPERATION_TIMED_OUT,
+    SosixOperationId
+}
+use std.common.contracts.sosix.completion_v1.SosixCompletion
+
+pub val SOSIX_WAIT_SET_MAX_OPERATIONS: i64 = 256
+
+class SosixWaitSet:
+    watched: [SosixOperationId]
+    ready: [SosixCompletion]
+    consumed: [SosixOperationId]
+    notification_generation: u64
+    consumed_notifications: u64
+    rejected_notifications: u64
+
+impl SosixWaitSet:
+    static fn create() -> SosixWaitSet:
+        SosixWaitSet(
+            watched: [],
+            ready: [],
+            consumed: [],
+            notification_generation: 0,
+            consumed_notifications: 0,
+            rejected_notifications: 0
+        )
+
+    fn watches(operation: SosixOperationId) -> bool:
+        for candidate in self.watched:
+            if candidate.slot == operation.slot and candidate.generation == operation.generation:
+                return true
+        false
+
+    me watch(operation: SosixOperationId) -> bool:
+        if operation.generation == 0 or self.watches(operation):
+            return false
+        if self.watched.len() >= SOSIX_WAIT_SET_MAX_OPERATIONS:
+            return false
+        self.watched = self.watched.push(operation)
+        true
+
+    fn consumed_before(operation: SosixOperationId) -> bool:
+        for candidate in self.consumed:
+            if candidate.slot == operation.slot and candidate.generation == operation.generation:
+                return true
+        false
+
+    me _remember_consumed(operation: SosixOperationId):
+        # One-shot per generation survives re-watching: a duplicated transport
+        # completion for an already consumed generation is rejected forever.
+        # Bounded: the oldest record is evicted at the watch limit.
+        if self.consumed.len() >= SOSIX_WAIT_SET_MAX_OPERATIONS:
+            self.consumed = self.consumed[1:]
+        self.consumed = self.consumed.push(operation)
+
+    me notify(completion: SosixCompletion) -> bool:
+        if not self.watches(completion.operation) or self.consumed_before(completion.operation):
+            self.rejected_notifications = self.rejected_notifications + 1
+            return false
+        for existing in self.ready:
+            if (existing.operation.slot == completion.operation.slot and
+                existing.operation.generation == completion.operation.generation):
+                return false
+        # Watches are one-shot. Removing the exact generation here prevents a
+        # duplicated transport completion from waking the consumer again even
+        # after the first ready record has been consumed.
+        var remaining: [SosixOperationId] = []
+        for candidate in self.watched:
+            if (candidate.slot != completion.operation.slot or
+                candidate.generation != completion.operation.generation):
+                remaining = remaining.push(candidate)
+        self.watched = remaining
+        self.ready = self.ready.push(completion)
+        self.notification_generation = self.notification_generation + 1
+        true
+
+    me remove_watch(operation: SosixOperationId):
+        var retained: [SosixOperationId] = []
+        for candidate in self.watched:
+            if candidate.slot != operation.slot or candidate.generation != operation.generation:
+                retained = retained.push(candidate)
+        self.watched = retained
+
+    me take_ready() -> SosixCompletion?:
+        if self.ready.is_empty():
+            return nil
+        val completion = self.ready[0]
+        self.ready = self.ready[1:]
+        self.remove_watch(completion.operation)
+        self._remember_consumed(completion.operation)
+        self.consumed_notifications = self.consumed_notifications + 1
+        completion
+
+    me take_ready_for(operation: SosixOperationId) -> SosixCompletion?:
+        """Take only the requested generation, preserving unrelated readiness."""
+        var retained: [SosixCompletion] = []
+        var matched: SosixCompletion? = nil
+        for completion in self.ready:
+            if (matched == nil and completion.operation.slot == operation.slot and
+                completion.operation.generation == operation.generation):
+                matched = completion
+            else:
+                retained = retained.push(completion)
+        if matched == nil:
+            return nil
+        self.ready = retained
+        self.remove_watch(operation)
+        self._remember_consumed(operation)
+        self.consumed_notifications = self.consumed_notifications + 1
+        matched
+
+    fn has_ready() -> bool:
+        not self.ready.is_empty()
+
+    fn ready_count() -> i64:
+        self.ready.len()
+
+export SOSIX_WAIT_SET_MAX_OPERATIONS, SosixWaitSet
+
+
+
+# --- sync wait adapter (formerly os.sosix.core.sync_wait_adapter): pure protocol state for
+# notification-backed synchronous waits. The platform adapter performs exactly one native wait
+# when `should_wait` is true and calls `before_wait` again on `retry`. Nothing here sleeps or spins.
+pub val SOSIX_NATIVE_WAIT_SIGNALED: u8 = 0
+pub val SOSIX_NATIVE_WAIT_TIMED_OUT: u8 = 1
+pub val SOSIX_NATIVE_WAIT_CANCELED: u8 = 2
+pub val SOSIX_NATIVE_WAIT_ERROR: u8 = 3
+
+pub val SOSIX_SYNC_WAIT_PENDING: u8 = 0
+pub val SOSIX_SYNC_WAIT_COMPLETED: u8 = 1
+pub val SOSIX_SYNC_WAIT_TIMED_OUT: u8 = 2
+pub val SOSIX_SYNC_WAIT_CANCELED: u8 = 3
+pub val SOSIX_SYNC_WAIT_ERROR: u8 = 4
+
+pub struct SosixSyncWaitDecision:
+    outcome: u8
+    should_wait: bool
+    retry: bool
+    cleanup_watch: bool
+    reason: text
+    wait_error_status: i32
+    completion: SosixCompletion
+
+class SosixSyncWaitState:
+    operation: SosixOperationId
+    expected_api_id: u32
+    observed_notification_generation: u64
+    finished: bool
+
+fn _empty_completion(operation: SosixOperationId, api_id: u32) -> SosixCompletion:
+    SosixCompletion(
+        operation: operation,
+        api_id: api_id,
+        status: 0,
+        transferred: 0,
+        partial_progress: false,
+        terminal_state: 0
+    )
+
+fn _decision(
+    state: SosixSyncWaitState,
+    outcome: u8,
+    should_wait: bool,
+    retry: bool,
+    cleanup_watch: bool,
+    reason: text,
+    wait_error_status: i32
+) -> SosixSyncWaitDecision:
+    SosixSyncWaitDecision(
+        outcome: outcome,
+        should_wait: should_wait,
+        retry: retry,
+        cleanup_watch: cleanup_watch,
+        reason: reason,
+        wait_error_status: wait_error_status,
+        completion: _empty_completion(state.operation, state.expected_api_id)
+    )
+
+fn _completion_decision(
+    state: SosixSyncWaitState, completion: SosixCompletion
+) -> SosixSyncWaitDecision:
+    if completion.api_id != state.expected_api_id:
+        return SosixSyncWaitDecision(
+            outcome: SOSIX_SYNC_WAIT_ERROR,
+            should_wait: false,
+            retry: false,
+            cleanup_watch: true,
+            reason: "completion-api-mismatch",
+            wait_error_status: 0,
+            completion: completion
+        )
+    var outcome = SOSIX_SYNC_WAIT_COMPLETED
+    var reason = "completed"
+    if completion.terminal_state == SOSIX_OPERATION_CANCELED:
+        outcome = SOSIX_SYNC_WAIT_CANCELED
+        reason = "operation-canceled"
+    elif completion.terminal_state == SOSIX_OPERATION_TIMED_OUT:
+        outcome = SOSIX_SYNC_WAIT_TIMED_OUT
+        reason = "operation-timed-out"
+    SosixSyncWaitDecision(
+        outcome: outcome,
+        should_wait: false,
+        retry: false,
+        cleanup_watch: true,
+        reason: reason,
+        wait_error_status: 0,
+        completion: completion
+    )
+
+impl SosixSyncWaitState:
+    static fn begin(
+        operation: SosixOperationId, expected_api_id: u32, wait_set: SosixWaitSet
+    ) -> SosixSyncWaitState:
+        """Begin after the caller successfully installs `operation` as a watch."""
+        SosixSyncWaitState(
+            operation: operation,
+            expected_api_id: expected_api_id,
+            observed_notification_generation: wait_set.notification_generation,
+            finished: false
+        )
+
+    me before_wait(wait_set: SosixWaitSet) -> SosixSyncWaitDecision:
+        """Recheck readiness after arming and immediately before native sleep."""
+        if self.finished:
+            return _decision(self, SOSIX_SYNC_WAIT_ERROR, false, false, true, "wait-already-finished", 0)
+        if val completion = wait_set.take_ready_for(self.operation):
+            self.finished = true
+            return _completion_decision(self, completion)
+        if wait_set.notification_generation != self.observed_notification_generation:
+            self.observed_notification_generation = wait_set.notification_generation
+            return _decision(self, SOSIX_SYNC_WAIT_PENDING, false, true, false, "notification-generation-changed", 0)
+        _decision(self, SOSIX_SYNC_WAIT_PENDING, true, false, false, "native-wait-required", 0)
+
+    me after_wait(
+        wait_set: SosixWaitSet, native_result: u8, wait_error_status: i32
+    ) -> SosixSyncWaitDecision:
+        """Classify one native wake; a raced completion wins over timeout/error."""
+        if self.finished:
+            return _decision(self, SOSIX_SYNC_WAIT_ERROR, false, false, true, "wait-already-finished", 0)
+        if val completion = wait_set.take_ready_for(self.operation):
+            self.finished = true
+            return _completion_decision(self, completion)
+        self.observed_notification_generation = wait_set.notification_generation
+        if native_result == SOSIX_NATIVE_WAIT_SIGNALED:
+            return _decision(self, SOSIX_SYNC_WAIT_PENDING, false, true, false, "spurious-wake", 0)
+        self.finished = true
+        if native_result == SOSIX_NATIVE_WAIT_TIMED_OUT:
+            return _decision(self, SOSIX_SYNC_WAIT_TIMED_OUT, false, false, true, "native-wait-timeout", 0)
+        if native_result == SOSIX_NATIVE_WAIT_CANCELED:
+            return _decision(self, SOSIX_SYNC_WAIT_CANCELED, false, false, true, "native-wait-canceled", 0)
+        val reason = if wait_error_status == 0: "native-wait-error" else: "native-wait-error-status"
+        _decision(self, SOSIX_SYNC_WAIT_ERROR, false, false, true, reason, wait_error_status)
+
+export SOSIX_NATIVE_WAIT_SIGNALED, SOSIX_NATIVE_WAIT_TIMED_OUT
+export SOSIX_NATIVE_WAIT_CANCELED, SOSIX_NATIVE_WAIT_ERROR
+export SOSIX_SYNC_WAIT_PENDING, SOSIX_SYNC_WAIT_COMPLETED, SOSIX_SYNC_WAIT_TIMED_OUT
+export SOSIX_SYNC_WAIT_CANCELED, SOSIX_SYNC_WAIT_ERROR
+export SosixSyncWaitDecision, SosixSyncWaitState
