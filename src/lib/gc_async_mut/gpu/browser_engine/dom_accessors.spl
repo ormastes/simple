@@ -248,25 +248,6 @@ fn _be_dom_push_escaped_html(
     # Preflight happens before html_escape_core's expanding replacements.
     state.push_known_length(html_escape_core(value), length)
 
-fn _be_dom_push_raw_html(
-    state: _BeDomHtmlSerializationState, value: text
-):
-    """Push `value` verbatim, with no entity escaping.
-
-    Per HTML5, `<script>`/`<style>` content is a raw-text element: it is
-    CDATA, not markup, and must round-trip unescaped. Escaping it (as the
-    generic `#text` path does) corrupts CSS/JS containing `<`, `>`, `&`, or
-    quotes — e.g. a `.a > .b {}` combinator would serialize as
-    `.a &gt; .b {}`, which the raw-text CSS cascade extractor
-    (`style_block_parse.spl`) then re-parses as a broken selector.
-    """
-    if not state.can_push_length(0):
-        return
-    val length = value.len().to_i64()
-    if not state.can_push_length(length):
-        return
-    state.push_known_length(value, length)
-
 fn _be_dom_push_html_attribute(
     state: _BeDomHtmlSerializationState, name: text, value: text
 ):
@@ -287,24 +268,16 @@ fn _be_dom_push_html_attribute(
 
 fn _be_dom_open_html_node(
     node: BeDomNode, render_only: bool,
-    state: _BeDomHtmlSerializationState, parent_tag: text
+    state: _BeDomHtmlSerializationState
 ) -> bool:
     """Emit a node's own opening markup.
 
     Returns true when the caller must still walk `node.children` and then emit
     the matching closing markup; false when the node is already complete (text
     node, void element) or the state has failed closed.
-
-    `parent_tag` is the tag name of `node`'s parent (empty for a root call
-    with no parent). It exists only to decide whether a `#text` child must be
-    emitted raw (inside `<script>`/`<style>`, per HTML5) or escaped
-    (everywhere else) — see `_be_dom_push_raw_html`.
     """
     if node.tag_name == "#text":
-        if parent_tag == "script" or parent_tag == "style":
-            _be_dom_push_raw_html(state, node.data)
-        else:
-            _be_dom_push_escaped_html(state, node.data)
+        _be_dom_push_escaped_html(state, node.data)
         return false
     if node.tag_name == "#document":
         return true
@@ -372,7 +345,7 @@ fn _be_dom_collect_html(
     if depth > BE_DOM_HTML_SERIALIZE_MAX_DEPTH:
         state.fail_closed()
         return
-    if not _be_dom_open_html_node(node, render_only, state, ""):
+    if not _be_dom_open_html_node(node, render_only, state):
         return
     # Frame `k` holds an already-opened node at DOM depth `depth + k`;
     # `frame_next` is the index of its next unvisited child.
@@ -394,9 +367,7 @@ fn _be_dom_collect_html(
                 state.fail_closed()
                 return
             val child = cursor.children[next_child]
-            val descend = _be_dom_open_html_node(
-                child, render_only, state, cursor.tag_name
-            )
+            val descend = _be_dom_open_html_node(child, render_only, state)
             if state.failed:
                 return
             if descend:
@@ -640,9 +611,10 @@ fn be_dom_get_event_listener_count(node: BeDomNode, event_type: text) -> i32:
 
 fn be_dom_create_event(node: BeDomNode, event_type: text, bubbles: bool, cancelable: bool) -> BeDomEvent:
     val target_id = be_dom_event_identity(node)
-    var event = BeDomEvent.create(event_type, "", bubbles, cancelable)
-    event.target_id = target_id
-    event.current_target_id = target_id
+    var event = BeDomEvent.create(
+        normalize_dom_event_type(event_type), "", target_id, target_id, "",
+        bubbles, cancelable
+    )
     event.target_tag = node.tag_name
     event.current_target_tag = node.tag_name
     event
@@ -928,7 +900,10 @@ fn _be_dom_dispatch_event_path_with_executor(
     executor: fn(BeDomEvent, BeDomNode, text, text) -> BeDomEvent
 ) -> BeDomEventDispatch:
     if path.len() == 0:
-        var event = BeDomEvent.create(event_type, "", bubbles, cancelable)
+        var event = BeDomEvent.create(
+            normalize_dom_event_type(event_type), "", "", "", "", bubbles,
+            cancelable
+        )
         return _be_dom_empty_dispatch(event, "")
     _be_dom_dispatch_event_path_with_event_executor(
         path,

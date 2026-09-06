@@ -4,16 +4,9 @@
 **Date:** 2026-08-17
 **Severity:** P1 — silent wrong-answer bug. No diagnostic, correct length, wrong
 contents. Found because it made X25519 compute the wrong shared secret.
-**Status:** RESOLVED IN SOURCE (2026-08-17), NOT YET DEPLOYED — root-caused and
-fixed in `rt_array_copy`
+**Status:** OPEN
+**Status:** ROOT-CAUSED and FIXED 2026-08-17 in `rt_array_copy`
 (`src/compiler_rust/runtime/src/value/collections.rs`), commit `a4cc6f61dfb`.
-Re-verified present in the current tree 2026-09-02 (the packed-u64 and
-byte-packed `memcpy` arms quoted below are live at
-`collections.rs:5170-5210`). This is a Rust-seed runtime change, so per the
-"Deployment note" below it only takes effect once `bin/simple` is redeployed
-from a fresh seed build — that redeploy was out of scope here (a bootstrap
-was running and must not be disturbed). The (previously duplicated) `OPEN`
-status line above is superseded by this one.
 
 ## Root cause — it was never "zeroing", it was a divide by eight
 

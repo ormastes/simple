@@ -288,12 +288,3 @@ small, contained change:
    zero/near-zero-size defined symbols matching known `@extern` declarations
    with no implementation) into `link_llvm_native`'s hosted branch, gated the
    same way the SimpleOS one is by `SIMPLE_NO_STUB_FALLBACK`/`SIMPLE_SAFETY_PROFILE`.
-
-## macOS release follow-up (2026-09-02)
-
-`bin/release/macos-arm64/simple` was invoked with
-`SIMPLE_NO_STUB_FALLBACK=1` on the focused non-entry module-global fixture.
-Cranelift reported build success while logging `Generating 652 stub functions
-for unresolved symbols...`; the resulting program exited 3 rather than the
-required 42. This confirms that this deployed artifact cannot be admitted for
-strict hosted builds and must not be used for GUI/CPU/SIMD evidence.
