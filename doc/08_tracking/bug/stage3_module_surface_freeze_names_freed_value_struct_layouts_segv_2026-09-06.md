@@ -128,10 +128,35 @@ validator still runs, still walks every root, and still reports cycles):
 
 ## Reproducer
 
-`build/segv-lane/transient_text_field.spl` — 90 lines, no compiler imports.
+`test/fixture/transient_scope/text_field_promotion.spl` (run by
+`scripts/check/check-transient-scope-text-field-promotion.shs`) — no compiler imports.
 Carrier class born and promoted in transient scope A; scope A ends; a fresh text
 is assigned into a field in scope B; `rt_transient_heap_promote(carrier)` is
 called exactly as `module_surfaces_promote` calls it; scope B ends; the freed
 storage is churned. Case A (no explicit field promotion) must report CORRUPT,
 case B (the fix) must report OK; any other combination is a failure.
 Native only — the transient scope externs are inert under an interpreter.
+
+## OPEN, and deliberately not claimed as explained: a live scope id during phase 3
+
+`roots`, `pending` and the `structs` dictionary — all allocated inside
+`validate_value_struct_layouts`, roughly 69 minutes after phase 2 finished —
+carry `transient_scope_id = 32` in the core (`0x0000002000000002` /
+`0x0000002000000003` at their headers; the layout is confirmed against the
+`RtCoreArray` / `RtCoreDict` definitions in the bootstrap-wt tree that built this
+binary, and `len`/`cap` read back as 918/1024 and 395, which is exactly the
+observed data).
+
+`rt_core_transient_scope_for_new_object()` returns nonzero only while a scope is
+`active && !paused`, so **some transient array scope was open and unpaused
+during phase 3**. Scope ids are monotonic, so id 32 is an early scope, not one
+opened just before validation. This is NOT explained here, and it is not the
+crash: the freed `logical_name` strings are established by reading the key string
+objects directly out of the core, and they were freed by an earlier scope's end,
+not by scope 32 (which never ended). But it means anything phase 3 allocates is
+owned by a scope that may still be reclaimed, which is a second latent hazard in
+the same machinery. Candidates to check with a phase-instrumented binary:
+`lower_streaming_surface_source` (`driver_hir_pipeline_lowering.spl:65,75` —
+`begin` and `pause` on the success path) and the phase-2 registry retention
+scope (`driver_source_pipeline_parsing.spl:538`), whose `end` return value is
+ignored on several paths.
