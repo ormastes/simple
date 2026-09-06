@@ -1,0 +1,94 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# design: doc/05_design/ml/slang/slang_master_plan.md ; live gate: scripts/check/check-slang-ggml-inference.shs
+
+"""
+## Purpose and audience
+Purpose: pin the contract an operator relies on when caret is pointed at a real
+local model root -- every model directory reaches a verdict, exactly the
+runnable ones claim to be runnable, every refusal carries its reason, and the
+runnable one answers a greeting with tokens a model produced.
+Audience: an operator running `caret --provider slang_local` against a
+downloaded model root such as /home/yoon/dev/model.
+
+## Operator workflow
+I point slang at my model root. It must tell me about EVERY model it finds --
+not only the ones it can run -- because the failure this guards against is not
+a crash, it is silence: a root holding three multi-gigabyte checkouts reporting
+nothing and looking healthy. Then I say hello to the runnable one through
+caret, and I must get real generated text back, tagged with the engine that
+produced it.
+
+## Compatibility and limitations
+Recognition runs whenever SLANG_MODEL_ROOT names a directory. Generation is
+additionally gated on SLANG_LIVE=1 because it loads tens of gigabytes of
+weights; the shell gate
+`sh scripts/check/check-slang-ggml-inference.shs --models DIR` drives the same
+caret command over every model in the root.
+"""
+
+use std.spec.{describe, it, expect, step, skip}
+use std.gc_async_mut.slang.entrypoints.llm.{slang_models, engine_backend_available}
+use app.llm_caret.provider.{dispatch_send}
+use std.io_runtime.{env_get, is_dir}
+
+fn _model_root() -> text:
+    val root = env_get("SLANG_MODEL_ROOT") ?? ""
+    if root == "" or not is_dir(root):
+        return ""
+    root
+
+# A refusal with an empty reason is the silent-drop failure this spec exists to
+# catch, so it is counted as an offender rather than ignored.
+fn _refusals_without_reason(root: text) -> i64:
+    var bad = 0
+    for m in slang_models(root):
+        if not m.runnable and m.reason.trim() == "":
+            bad = bad + 1
+    bad
+
+fn _runnable_ids(root: text) -> [text]:
+    if root == "":
+        return []
+    var ids: [text] = []
+    for m in slang_models(root):
+        if m.runnable:
+            ids.push(m.id)
+    ids
+
+describe "slang over a real local model root":
+
+    it "reports every model in the root, refusals included":
+        val root = _model_root()
+        if root == "":
+            skip("reports every model in the root, refusals included", "SLANG_MODEL_ROOT is not a directory")
+        else:
+            step("Point slang at the operator's model root")
+            val found = slang_models(root)
+
+            step("Every directory comes back described, none silently dropped")
+            expect(found.len()).to_be_greater_than(0)
+
+            step("No refusal is issued without a reason")
+            expect(_refusals_without_reason(root)).to_equal(0)
+
+    it "answers a greeting with generated tokens through caret":
+        val root = _model_root()
+        val live = env_get("SLANG_LIVE") ?? ""
+        val runnable = _runnable_ids(root)
+        if root == "" or live != "1" or not engine_backend_available() or runnable.len() == 0:
+            skip("answers a greeting with generated tokens through caret", "needs SLANG_LIVE=1, a built ggml backend, and a runnable model")
+        else:
+            step("Send hello to the runnable model through caret's own dispatch")
+            val answer = dispatch_send(
+                "slang_local", "Say hello in one short sentence.", runnable[0],
+                "", root, "", "", "", 1, 40, ""
+            )
+
+            step("Caret reports success, not a swallowed error")
+            expect(answer.is_error).to_equal(false)
+
+            step("The reply carries text the engine generated")
+            expect(answer.content.trim().len()).to_be_greater_than(0)
+
+            step("Provenance names the engine that produced it, so a stub cannot pass as a reply")
+            expect(answer.provider).to_equal("slang_local/ggml")
