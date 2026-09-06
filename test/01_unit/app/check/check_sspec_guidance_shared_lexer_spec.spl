@@ -77,19 +77,30 @@ describe "sspec guidance survives a triple quote in a comment":
         set_literal_spec.spl opens a docstring on line 1 and its
         `use std.spec.step` on line 19 is inside a ```simple fence within it —
         prose, not a statement. The lexer says so; the check must stay silent."""
-        step("Confirm independently that line 19 is inside the docstring opened on line 1")
+        step("Confirm independently that the import is inside the opening docstring")
+        # Located by SEARCH, never by line index: this is a file another lane
+        # owns, and a pinned index breaks the moment they edit above it. The
+        # sibling spec learned that the hard way when PR #387 shifted a file
+        # its corpus arm had pinned.
         val tq = "\"" + "\"" + "\""
         val path = "test/03_system/feature/usage/set_literal_spec.spl"
         val lines = file_read_text(path).split("\n")
-        expect(lines[0]).to_equal(tq)
+        var first_nonblank = ""
+        for line in lines:
+            if first_nonblank == "" and line.trim() != "":
+                first_nonblank = line.trim()
+        expect(first_nonblank).to_equal(tq)
+        var import_index: i64 = -1
         var closers_before_import: i64 = 0
         var i = 1
-        while i < 18:
-            if lines[i].contains(tq):
+        while i < lines.len():
+            if import_index < 0 and lines[i].trim().starts_with("use std.spec"):
+                import_index = i
+            elif import_index < 0 and lines[i].contains(tq):
                 closers_before_import = closers_before_import + 1
             i = i + 1
+        expect(import_index).to_be_greater_than(0)
         expect(closers_before_import).to_equal(0)
-        expect(lines[18]).to_equal("use std.spec.step")
 
         step("The guidance is not emitted for it")
         expect(check_sspec_guidance(file_read_text(path), path)).to_equal("")
@@ -104,8 +115,15 @@ describe "sspec guidance sabotage arm":
         expect(lines[0]).to_contain(tq)
         expect(lines[1]).to_equal("use std.spec.*")
 
-        step("The corpus file really has the comment on line 9 and a column-0 import on line 11")
+        step("The corpus file really carries a comment holding the delimiter, found by search")
         val corpus = file_read_text("test/01_unit/compiler/lexer/multiline_string_spec.spl").split("\n")
-        expect(corpus[8].starts_with("#")).to_equal(true)
-        expect(corpus[8]).to_contain(tq)
-        expect(corpus[10].starts_with("use std.spec")).to_equal(true)
+        var comment_with_tq: i64 = 0
+        for line in corpus:
+            if line.trim().starts_with("#") and line.contains(tq):
+                comment_with_tq = comment_with_tq + 1
+        expect(comment_with_tq).to_be_greater_than(0)
+        var column0_import: i64 = 0
+        for line in corpus:
+            if line.starts_with("use std.spec"):
+                column0_import = column0_import + 1
+        expect(column0_import).to_be_greater_than(0)

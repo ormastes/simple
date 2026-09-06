@@ -3,7 +3,7 @@
 use super::error::{VulkanError, VulkanResult};
 use ash::vk;
 use parking_lot::Mutex;
-use std::ffi::{CStr, CString};
+use std::ffi::{c_char, CStr, CString};
 use std::sync::Arc;
 
 /// Global Vulkan instance (singleton)
@@ -113,7 +113,7 @@ impl VulkanInstance {
 
         // Enable validation layers in debug builds
         let layer_names_raw: Vec<CString>;
-        let layer_names: Vec<*const i8>;
+        let layer_names: Vec<*const c_char>;
 
         #[cfg(debug_assertions)]
         {
