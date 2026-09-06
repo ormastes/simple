@@ -57,10 +57,10 @@ fn instruction_asm_arch(instruction: &str) -> AsmArch {
 
     // x86 / x86_64
     const X86_MNEMONICS: &[&str] = &[
-        "in", "out", "inb", "outb", "inw", "outw", "inl", "outl", "invlpg", "hlt", "cli", "sti",
-        "iret", "iretq", "lgdt", "lidt", "lldt", "ltr", "cpuid", "rdmsr", "wrmsr", "rdtsc",
-        "sysret", "sysexit", "swapgs", "pushfq", "popfq", "xchg", "movq", "movl", "movw", "movb",
-        "leaq", "lea", "int3", "ud2", "wbinvd", "clts", "stac", "clac", "sgdt", "sidt", "verr",
+        "in", "out", "inb", "outb", "inw", "outw", "inl", "outl", "invlpg", "hlt", "cli", "sti", "iret", "iretq",
+        "lgdt", "lidt", "lldt", "ltr", "cpuid", "rdmsr", "wrmsr", "rdtsc", "sysret", "sysexit", "swapgs", "pushfq",
+        "popfq", "xchg", "movq", "movl", "movw", "movb", "leaq", "lea", "int3", "ud2", "wbinvd", "clts", "stac",
+        "clac", "sgdt", "sidt", "verr",
     ];
     if X86_MNEMONICS.contains(&mnemonic) || text.starts_with(".intel_syntax") || text.starts_with(".att_syntax") {
         return AsmArch::X86;
@@ -93,8 +93,8 @@ fn instruction_asm_arch(instruction: &str) -> AsmArch {
 
     // ARM / AArch64
     const ARM_MNEMONICS: &[&str] = &[
-        "mrs", "msr", "dmb", "dsb", "isb", "wfe", "eret", "ldp", "stp", "ldr", "str", "bl", "blr",
-        "cbz", "cbnz", "svc", "hvc", "smc", "cpsie", "cpsid", "adrp",
+        "mrs", "msr", "dmb", "dsb", "isb", "wfe", "eret", "ldp", "stp", "ldr", "str", "bl", "blr", "cbz", "cbnz",
+        "svc", "hvc", "smc", "cpsie", "cpsid", "adrp",
     ];
     if ARM_MNEMONICS.contains(&mnemonic) {
         return AsmArch::Arm;
