@@ -1,0 +1,92 @@
+"""Reference hosted provider: services ring submissions with real positioned file I/O.
+
+A capability table maps file capabilities to host paths and a buffer table maps
+buffer references to byte strings, so the same `SosixHostedFs` lifecycle that
+specs drive with a scripted device runs against the filesystem of this host.
+
+# ponytail: the typed alias is path-positioned (`open` + `pread`/`pwrite` +
+# `close` per operation) and reports no errno; the upgrade path is the fd-level
+# extern pair named by plan task C1, which replaces `_STATUS_IO` with the real
+# negative errno and drops the two extra syscalls.
+"""
+
+# TODO: (sosix C4) replace this reference provider with a Linux io_uring provider
+# once the runtime exposes io_uring externs; the seed's async driver is a thread pool
+# over pread whose backend reports "rust-syscall", so there is nothing to bind yet.
+# TODO: (sosix C5) add the macOS and Windows providers on a host that has them; this
+# path is the portable fallback, not their replacement.
+use std.common.contracts.sosix.operation_v1.{SosixOperationId}
+use std.common.contracts.sosix.capability_ref_v1.{SosixCapabilityRef, SosixBufferRef}
+use std.common.contracts.sosix.file_operation_v1.{SOSIX_FS_READ_AT}
+use std.common.contracts.sosix.wait_v1.{SOSIX_NATIVE_WAIT_SIGNALED}
+use std.nogc_async_mut.io.{file_read_text_at, file_write_text_at}
+use std.nogc_async_mut.sosix.fs.{SosixHostedFs, SosixFsTaken}
+use std.nogc_async_mut.sosix.sync.{SosixSyncWaitDriver}
+
+# The alias reports failure without an errno; EIO is the documented stand-in for
+# every failure the driver can see (bad table slot, alias error, buffer window).
+pub val SOSIX_FILE_DRIVER_STATUS_IO: i32 = -5
+
+class SosixHostedFileDriver:
+    paths: [text]
+    buffers: [text]
+    services: u64
+
+    static fn create() -> SosixHostedFileDriver:
+        # Slot 0 stays unused so a zero capability never names a file.
+        SosixHostedFileDriver(paths: [""], buffers: [""], services: 0u64)
+
+    me open_path(path: text) -> SosixCapabilityRef:
+        self.paths.push(path)
+        SosixCapabilityRef(slot: (self.paths.len() - 1).to_u32(), generation: 1u32)
+
+    me buffer_from(bytes: text) -> SosixBufferRef:
+        self.buffers.push(bytes)
+        SosixBufferRef(slot: (self.buffers.len() - 1).to_u32(), generation: 1u32)
+
+    fn buffer_bytes(buffer: SosixBufferRef) -> text:
+        val slot = buffer.slot.to_i64()
+        if slot <= 0 or slot >= self.buffers.len(): "" else: self.buffers[slot]
+
+    fn _path_of(file: SosixCapabilityRef) -> text:
+        val slot = file.slot.to_i64()
+        if slot <= 0 or slot >= self.paths.len(): "" else: self.paths[slot]
+
+    me service(fs: SosixHostedFs) -> bool:
+        """Take the oldest submission, perform it on the host filesystem, publish the result."""
+        val taken = fs.take_next()
+        if not taken.taken:
+            return taken.canceled
+        self.services = self.services + 1u64
+        val request = taken.request
+        val path = self._path_of(request.file)
+        val buffer_slot = request.buffer.slot.to_i64()
+        if path == "" or buffer_slot <= 0 or buffer_slot >= self.buffers.len():
+            return fs.complete_taken(taken, SOSIX_FILE_DRIVER_STATUS_IO, 0u64)
+        if request.api_id == SOSIX_FS_READ_AT:
+            match file_read_text_at(path, request.file_offset.to_i64(), request.length.to_i64()):
+                case Ok(bytes):
+                    self.buffers[buffer_slot] = bytes
+                    fs.complete_taken(taken, 0, bytes.len().to_u64())
+                case Err(_):
+                    fs.complete_taken(taken, SOSIX_FILE_DRIVER_STATUS_IO, 0u64)
+        else:
+            # `fs._submit` admits only READ_AT and WRITE_AT, so this is the write leg.
+            val start = request.buffer_offset.to_i64()
+            val stop = start + request.length.to_i64()
+            val data = self.buffers[buffer_slot]
+            if start > data.len():
+                return fs.complete_taken(taken, SOSIX_FILE_DRIVER_STATUS_IO, 0u64)
+            val window = if stop > data.len(): data[start:data.len()] else: data[start:stop]
+            val written = file_write_text_at(path, request.file_offset.to_i64(), window)
+            if written < 0:
+                fs.complete_taken(taken, SOSIX_FILE_DRIVER_STATUS_IO, 0u64)
+            else:
+                fs.complete_taken(taken, 0, written.to_u64())
+
+impl SosixSyncWaitDriver for SosixHostedFileDriver:
+    fn wait_once(fs: SosixHostedFs, operation: SosixOperationId, deadline_ns: u64, attempt: u64) -> u8:
+        self.service(fs)
+        SOSIX_NATIVE_WAIT_SIGNALED
+
+export SosixHostedFileDriver, SOSIX_FILE_DRIVER_STATUS_IO
