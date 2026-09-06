@@ -154,11 +154,23 @@ SIMPLE_EXECUTION_MODE=interpret simple run <file>
 ```
 
 Positive control: a hello-world runs identically under the default and under
-`interpret`. With it set, the vk2d_bench reproducer above runs for >10 minutes
-without aborting and produces **no crash log**, where the JIT lane dumps core in
-seconds. It is slow — it is an interpreter — but it is a real escape hatch for
-anyone blocked by this on aarch64, and it was previously recorded as not
-working.
+`interpret`. On the vk2d_bench reproducer the JIT lane dumps core in seconds
+while the interpreter lane produces **no crash log at all**.
+
+**How far it actually gets, measured — do not overstate this.** At the gate's
+own size (800x600, 64 rects, 300 frames) it did NOT finish: killed at the 900 s
+timeout with no fps line. Shrunk to 64x64 / 1 rect / 1 frame it completes and
+emits a real result:
+
+```
+simple-vulkan-2d w=64 h=64 rects=1 frames=1 readback=true ms=48 fps~=20
+  draw_us=1217 batch_us=2083 present_us=38569 readback_us=7045
+```
+
+So `interpret` is a correctness escape hatch — it proves the Simple 2D lane
+works and yields per-stage numbers — but it is far too slow to stand in for the
+JIT/native lane in `check-vulkan-2d-c-compare.shs`. That gate still cannot
+produce a Simple leg until the JIT defect is fixed.
 
 ## Three states measured 2026-09-06 (the cheap fixes are ruled OUT)
 
