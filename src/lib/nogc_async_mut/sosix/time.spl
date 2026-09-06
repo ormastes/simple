@@ -1,0 +1,30 @@
+"""SOSIX time leaves: a synchronous monotonic snapshot and deadline arithmetic.
+
+`sosix_time_monotonic_now_ns` is a sync leaf by design (design §4.2): reading a
+clock never manufactures a Future. Deadlines are carried as absolute
+nanoseconds on the operation (`operation_v1.deadline_ns`, id
+`SOSIX_ID_HOST_TIMER_DEADLINE`) and expired through `SosixHostedFs.expire`.
+
+# ponytail: an asynchronous `sosix_time_deadline` operation on the ring is not
+# built; `expire` + these helpers cover every current caller. Add it when a
+# consumer needs a ring-woken timer rather than a deadline check.
+"""
+
+use std.nogc_sync_mut.io.time_ops.{time_now_nanos}
+
+@always_inline
+fn sosix_time_monotonic_now_ns() -> u64:
+    """Host monotonic clock in nanoseconds (domain: `time_ops.time_now_nanos`)."""
+    val now = time_now_nanos()
+    if now < 0: 0u64 else: now.to_u64()
+
+fn sosix_time_deadline_reached(deadline_ns: u64, now_ns: u64) -> bool:
+    """Deadline 0 means none; otherwise reached at or after `deadline_ns`."""
+    deadline_ns != 0u64 and now_ns >= deadline_ns
+
+fn sosix_time_deadline_after(now_ns: u64, timeout_ns: u64) -> u64:
+    """Absolute deadline for a relative timeout; saturates instead of wrapping."""
+    val limit: u64 = 18446744073709551615u64
+    if timeout_ns > limit - now_ns: limit else: now_ns + timeout_ns
+
+export sosix_time_monotonic_now_ns, sosix_time_deadline_reached, sosix_time_deadline_after
