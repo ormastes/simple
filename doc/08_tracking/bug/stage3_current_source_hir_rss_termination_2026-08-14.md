@@ -1215,3 +1215,55 @@ candidate: everything transitively reachable from `hir_module` is un-owned by
 `rt_transient_heap_promote` regardless of where the scope boundary is drawn, so
 if that closure is the owner, widening the scope reclaims nothing additional.
 Do not land it as this P0's fix on the strength of §6 alone.
+
+### 11. Closure-scale phase slopes on a 63-module entry, and the two lanes that could not be driven to HIR
+
+`src/app/info/main.spl` (entry closure **63 sources**) compiled by the same
+`./bin/simple run src/app/cli/bootstrap_main.spl compile --format=smf` lane,
+VmRSS sampled every 2 s from `/proc/<pid>/status` and joined to the driver's own
+`[build] <phase> N/63 ... +Tms` progress lines. **Non-streaming path**
+(`SIMPLE_BOOTSTRAP` unset, so `lower_and_check_impl`, which opens **no**
+transient scope at all — `rt_transient_array_scope_begin` appears once in
+`driver_hir_pipeline_lowering.spl`, at `:65`, on the streaming path only):
+
+| phase | VmRSS start -> end (KiB) | delta | per module |
+|---|---|---:|---:|
+| `source_closure` | 2,180,912 -> 2,475,072 | +294,160 | (JIT warm-up, not per-module) |
+| `parse` | 2,475,072 -> 3,438,312 | +963,240 | 14.9 MiB (warm-up contaminated) |
+| `surface_build` | 3,438,312 -> 3,464,824 | +26,512 | **0.41 MiB** |
+| `hir` | 3,464,824 -> 3,631,176 | +166,352 | **2.58 MiB** |
+
+The run then exited 1 on two pre-existing HIR diagnostics unrelated to memory
+(`unresolved name: rt_file_exists` at `src/app/info/main.spl:17:8`,
+`unresolved name: rt_env_cwd` at
+`src/lib/nogc_async_mut/env/platform.spl:21:20`), after completing `hir 63/63`.
+Peak VmHWM 3,705,852 KiB.
+
+**Read this narrowly.** It is a different runtime twin (Rust seed, §6
+Correction A), a different driver path (non-streaming retain-all, not the
+streaming path Stage 3 uses), and a much smaller and different module population
+than the 617-775 compiler-file closure Restart-12 measured. It does **not**
+attribute Stage 3's 63 MiB/module. What it does say is that the HIR phase's
+per-module allocation *volume* on a real 63-module closure is ~2.6 MiB — the
+same order as the parse phase and **~24x below** the Restart-12 HIR slope — so
+the Stage-3 figure is very unlikely to be the cost of the work itself. The
+`surface_build` slope (0.41 MiB/module) is the first quantitative evidence
+against the surface phase being the owner, and is the weakest of the three
+phases here.
+
+**Two lanes that could not be driven to HIR on this host, stated as blockers:**
+
+- **The Stage-3 streaming path.** With `SIMPLE_BOOTSTRAP=1
+  SIMPLE_STAGE3_STREAMING_SURFACES=1` (the gate at
+  `src/compiler/80.driver/driver_phase_gates.spl:50-62`), the streaming surface
+  build under the seed JIT runs at roughly **30-60 s per surface**: the
+  775-source closure managed 6 surfaces in 723 s before being stopped, and the
+  63-source closure managed 6 surfaces in 614 s (10 min 11 s CPU, RSS flat at
+  3,385,580 KiB) before being stopped. At that rate even the 63-source closure
+  needs ~40 min of surfaces before HIR begins, and the 775-source one ~12 h.
+  **The streaming path therefore cannot be driven to its HIR phase on this host
+  in a session**, which is why §5/§8/§11 are all non-streaming.
+- **The 775-source non-streaming closure** was SIGKILLed at parse 688/775 (§8).
+
+Neither is this bug's termination reproduced. Reproducing it still needs a
+Stage 2 and a canonical Stage 3, neither of which exists in this worktree.
