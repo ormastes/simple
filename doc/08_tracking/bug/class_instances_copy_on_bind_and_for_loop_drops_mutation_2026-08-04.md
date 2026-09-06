@@ -122,3 +122,55 @@ that the equivalent indexed write (**R**) performs.
 
 **Do not "fix" the mock specs by rewriting them to avoid `for`.** The specs are
 correct against the documented reference-type contract; the runtime is not.
+
+## Additional observation 2026-09-06 — a class-typed FIELD is copied too
+
+Same root defect, a third surface: storing a class instance into another
+class's field copies it, so mutation through the holder never reaches the
+original. Function-argument passing DOES alias correctly, which is what makes
+this one easy to miss.
+
+`repro_alias.spl` (macOS aarch64, `src/compiler_rust/target/debug/simple`,
+interpreter path):
+
+```
+class Box:
+    n: i64
+impl Box:
+    me bump():
+        self.n = self.n + 1
+
+class Holder:
+    b: Box
+impl Holder:
+    static fn create(b: Box) -> Holder:
+        Holder(b: b)
+    me bump():
+        self.b.bump()
+
+fn bump_arg(b: Box):
+    b.bump()
+
+fn main():
+    val x = Box(n: 0)
+    bump_arg(x)
+    print "after fn arg bump: {x.n} (expect 1)"      # -> 1   OK, aliased
+    val h = Holder(b: x)
+    h.bump()
+    print "after holder field bump: {x.n} (expect 2)" # -> 1   WRONG, copied
+    val h2 = Holder.create(x)
+    h2.bump()
+    print "after static-ctor bump: {x.n} (expect 3)"  # -> 1   WRONG, copied
+```
+
+**Field impact.** `parent_commit_piped_process_session_v1(cmd, args, gen, inbox)`
+stores the caller's `ParentCommitFrameInboxV1` in
+`ParentCommitPipedResultReaderV1.inbox`. After a successful poll the reader's
+copy holds the accepted frame (`accepted_frames=1, frames_len=1`) while the
+caller's inbox is still empty (`accepted_frames=0`), so `inbox.receive()`
+returns `ok=false` and the commit reports `empty-process-result-batch`. This
+blocks the first example of
+`test/03_system/plan_acceptance/parent_authoritative_actor_process_spec.spl`.
+Not worked around in library code deliberately: a registry or length-1-array
+field would be implementing around a broken language primitive inside the
+stdlib.

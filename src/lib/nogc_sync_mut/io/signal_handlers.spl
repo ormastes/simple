@@ -29,6 +29,7 @@ use std.nogc_sync_mut.io.signal_stubs.{signal_handler_install}
 val SIGHUP = 1    # Hangup (terminal closed)
 val SIGINT = 2    # Interrupt (Ctrl+C)
 val SIGKILL = 9   # Kill (cannot be caught)
+val SIGSEGV = 11  # Segmentation fault (synchronous fault; see on_segfault below)
 val SIGUSR2 = 12  # User-defined signal 2 (e.g. live memory-dump trigger)
 val SIGTERM = 15  # Termination request
 
@@ -120,6 +121,67 @@ fn install_sigusr2_handler(handler: fn()) -> bool:
     val installed = signal_handler_install(SIGUSR2, on_sigusr2)
     _sigusr2_handler_installed = installed
     installed
+
+# ============================================================================
+# SIGSEGV (synchronous fault) — supervisor-side callback registration
+# ============================================================================
+
+# User-suppliable segfault handler. Unlike every other handler in this module
+# it is NOT reached from a signal disposition; see on_segfault for why.
+var _segfault_handler: fn() = default_cleanup_handler
+var _segfault_handler_registered: bool = false
+
+fn on_segfault(handler: fn()) -> bool:
+    """
+    Register a callback to run when a SIGSEGV death is observed.
+
+    SIGSEGV is delivered SYNCHRONOUSLY with the faulting instruction, so it
+    cannot be handled with the latch-and-return discipline this module uses for
+    SIGINT/SIGTERM/SIGHUP/SIGUSR2: returning from the handler re-executes the
+    faulting instruction, which is an unbreakable fault loop. Installing a
+    disposition here would also sigaction-replace the C runtime's always-on
+    crash handler (rt_install_crash_handler, src/runtime/runtime.c), losing the
+    faulting address, the si_code fault classification and the backtrace.
+    signal_handler_install (signal_stubs.spl) refuses signal 11 for exactly
+    that reason, and this function deliberately does not try to route around it.
+
+    The callback therefore does not run inside the faulting process -- nothing
+    in that process is still running after the crash handler's _exit(139). It
+    runs in the SUPERVISOR: report_child_segfault() invokes it once a child has
+    been reaped with a SIGSEGV status, which is the only point at which Simple
+    code can observe a segfault and still be executing.
+
+    Args:
+        handler: Function to call when a supervised child dies of SIGSEGV
+
+    Returns: true once the callback is registered
+
+    Usage:
+        on_segfault(fn(): print "child segfaulted")
+        report_child_segfault(exit_code_of_reaped_child)
+    """
+    _segfault_handler = handler
+    _segfault_handler_registered = true
+    true
+
+fn exit_code_is_segfault(exit_code: i64) -> bool:
+    """True for the shell-convention exit code of a SIGSEGV death (128 + 11)."""
+    exit_code == 128 + SIGSEGV
+
+fn report_child_segfault(child_exit_code: i64) -> bool:
+    """
+    Dispatch the registered on_segfault callback for a reaped child.
+
+    Returns true only when the status really is a SIGSEGV death AND a callback
+    was registered, so a caller cannot mistake "nothing to report" for "handled".
+    """
+    if not exit_code_is_segfault(child_exit_code):
+        return false
+    if not _segfault_handler_registered:
+        return false
+    val handler = _segfault_handler
+    handler()
+    true
 
 # ============================================================================
 # Signal Handler Callbacks
@@ -245,6 +307,8 @@ fn signal_name(signal: i64) -> text:
         return "SIGTERM"
     elif signal == SIGKILL:
         return "SIGKILL"
+    elif signal == SIGSEGV:
+        return "SIGSEGV"
     elif signal == SIGUSR2:
         return "SIGUSR2"
     else:
