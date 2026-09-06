@@ -388,6 +388,9 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("memory_usage_percent", memory::memory_usage_percent);
     insert_simple!("rt_heap_registry_count", memory::rt_heap_registry_count);
     insert_simple!("rt_heap_live_bytes", memory::rt_heap_live_bytes);
+    insert_simple!("rt_heap_peak_bytes", memory::rt_heap_peak_bytes);
+    insert_simple!("rt_heap_alloc_count", memory::rt_heap_alloc_count);
+    insert_simple!("rt_heap_free_count", memory::rt_heap_free_count);
     insert_simple!("rt_heap_aux_live_bytes", memory::rt_heap_aux_live_bytes);
     insert_simple!("rt_heap_array_capacity_bytes", memory::rt_heap_array_capacity_bytes);
     insert_simple!("rt_heap_live_bytes_by_kind", memory::rt_heap_live_bytes_by_kind);

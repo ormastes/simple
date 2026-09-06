@@ -381,3 +381,102 @@ correctly, and the fix for it does not exist yet.
 - Classify rc=255/137 by the absence of the `[TIMEOUT: ...]` line before calling
   it a timeout. (Add: classify rc=1 by reading the error -- here it is `-lSDL2`.)
 - Do not mass-kill; reap only PIDs you started.
+
+## Addendum 2026-09-06 (lane GC, aarch64) — reclamation exists, works, and is measured
+
+This addendum **corrects three claims** that had been circulating about this row
+and records the first paired before/after measurement of the reclamation path.
+
+### Corrections
+
+1. **"Codegen declares the transient-scope symbols but emits none" is false.**
+   `rt_transient_array_scope_begin/_pause/_end` and `rt_transient_heap_promote`
+   are registered in `codegen/runtime_sffi.rs:368-371`, in the interpreter
+   extern table (`interpreter_extern/mod.rs:414`), and in the JIT symbol table
+   (`elf_utils.rs:497-500`). They are **called from `.spl`** at three sites:
+   `80.driver/driver_source_pipeline_parsing.spl:94`,
+   `80.driver/driver_hir_pipeline_lowering.spl:65`, and
+   `10.frontend/_FlatAstBridge/module_assembly.spl:116`. The begin -> pause ->
+   promote -> end protocol in `lower_streaming_surface_source` is **fully
+   paired on every path**, including each error path, which rolls back the flat
+   HIR row count before ending the scope. There is no missing `end`.
+
+2. **"The registry has zero frees, always" is false, and the earlier reading
+   that the seed interpreter bypasses the registry was an artifact.**
+   `rt_heap_alloc_count` / `rt_heap_free_count` were declared in `.spl` probes
+   but registered in **neither** extern table, so they were unbacked externs
+   returning nil — indistinguishable from a true 0 (the exact trap in
+   `unregistered_extern_silent_nil_2026-08-01`). With them registered, a probe
+   allocating 20,000 arrays inside a transient scope reports
+   `allocs=40284 frees=20000`: the scope reclaimed **exactly** what it tracked.
+
+3. **"`rt_core_reclaim_transient_immortal` deliberately skips strings"
+   (carried from `compiled_checker_multifile_rss_retention_2026-08-03`) is
+   stale.** `runtime_native.c` now reclaims a string when
+   `RT_CORE_STRING_FLAG_TRANSIENT` is set and `..._FLAG_SHARED` is not, and the
+   Rust `free_transient_heap` (`value/collections.rs:1870`) frees strings via
+   `rt_string_free`. Measured directly: 800k interpolated strings cost
+   **158,820 kB** unscoped and **1,404 kB** scoped, same exit status.
+
+### Measurement (natively compiled Simple, aarch64, this host)
+
+Fixtures do byte-identical work; only the transient scope differs. Peak RSS from
+`/usr/bin/time -v`; both fixtures return the same exit status, so the memory
+difference is reclamation, not less work.
+
+| fixture | work | peak RSS | wall | exit |
+|---|---|---:|---:|---:|
+| arrays, no scope | 3e6 arrays | **374,232 kB** | 0.92 s | 160 |
+| arrays, scope/1000 | 3e6 arrays | **1,056 kB** | 0.40 s | 160 |
+| strings, no scope | 8e5 strings | **158,820 kB** | 1.33 s | 31 |
+| strings, scope/1000 | 8e5 strings | **1,404 kB** | 0.65 s | 31 |
+
+**354x** and **113x** reductions, and the scoped build is also **2.3x faster** —
+reclaiming early keeps the working set in cache rather than costing time.
+
+### Metric correction: the `[heap]` brk figure is x86_64-specific
+
+The 37,543,764 kB single `[heap]` brk mapping quoted for a Stage-3 worker does
+not reproduce on this aarch64 host: glibc here services these allocations via
+**mmap**, and the brk mapping stays at **132 kB** while RSS climbs into the GB.
+`smaps_rollup` has no `[heap]` line at all. Report `Rss`/`Anonymous` from
+`smaps_rollup` plus `/usr/bin/time -v` peak; a brk-only budget would read as
+flat on this arch while the process leaks.
+
+### Runnable gate
+
+`scripts/check/check-transient-scope-reclaims.shs` builds both fixtures
+natively, requires an identical exit status (correctness before memory), and
+gates on a ratio plus an absolute cap. Discrimination is proven, not asserted:
+
+- as shipped: `PASS -- 2 fixture(s) measured, scoped 1056 kB vs unscoped 374224 kB (354x)`, exit 0
+- with the scope call sites removed (the pre-fix shape): `FAIL -- ... scoped-over-budget(374088kB>65536kB) reclamation-ineffective(ratio=1x<8x)`, exit 1
+
+### What is NOT fixed, and why
+
+**No new reclamation point was added to the compiler.** Coverage is
+`80.driver` (2 files) and `10.frontend` (1 file); `20.semantic`, `30.hir`,
+`40.mir`, `50.mir`, `60.opt` and `70.backend` have **zero** transient scopes.
+Adding one there was not done because it **cannot be validated on this tree**:
+
+> `native-build src/app/cli/bootstrap_main.spl` fails with **167 runtime symbols
+> referenced by generated code that have no definition in any linked object,
+> runtime archive, or system library** — `rt_cranelift_*` (79), `rt_math_*` (18),
+> `rt_io_file_*` (12), `rt_simd_*` (22), `rt_file_*`, `rt_mmap`/`rt_munmap`,
+> `rt_exec`, `rt_native_build`, `spl_backend_plugin_run_v1` and others. The
+> linker tolerates undefined symbols, so this would yield a NULL GOT slot per
+> name and SEGV on first call — the same shape as the 2026-08-21
+> `rt_unwrap_or_trap` incident.
+
+So no self-hosted compiler can be built here, and therefore no scope added to
+MIR/backend could be measured or shown safe. Per this row's own standard — a
+use-after-free in the compiler is worse than the memory — that work is left
+undone rather than landed unvalidated. **It is blocked on the 167-symbol gap,
+not on the reclamation design**, which the numbers above show works.
+
+The safe boundary, when the tree can build one, is the one
+`lower_streaming_surface_source` already demonstrates: begin -> work -> pause ->
+`rt_transient_heap_promote` for **every** escaping root -> end, failing closed
+if `begin` returns false. Note `TRANSIENT_HEAP_SCOPE` is `thread_local!` and
+`begin` returns false if a scope is already live, so any new site must be
+per-thread and must not nest inside an existing scope.

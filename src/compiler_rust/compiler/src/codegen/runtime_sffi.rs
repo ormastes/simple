@@ -369,6 +369,13 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_transient_array_scope_pause", &[], &[I8]),
     RuntimeFuncSpec::new("rt_transient_heap_promote", &[I64], &[I8]),
     RuntimeFuncSpec::new("rt_transient_array_scope_end", &[], &[I8]),
+    // Diagnostic heap counters. Compiled code needs these to observe whether a
+    // transient scope actually reclaimed: `alloc - free` climbing across a
+    // scope boundary is the signature of a scope that tracked nothing.
+    RuntimeFuncSpec::new("rt_heap_live_bytes", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_heap_peak_bytes", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_heap_alloc_count", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_heap_free_count", &[], &[I64]),
     RuntimeFuncSpec::new("rt_array_extend_i64", &[I64, I64, I64], &[I8]),
     RuntimeFuncSpec::new("rt_array_len", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_array_len_safe", &[I64], &[I64]),
