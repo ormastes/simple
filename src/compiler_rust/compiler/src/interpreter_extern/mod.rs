@@ -67,6 +67,7 @@ pub mod io;
 pub mod network;
 pub mod filesystem;
 pub mod file_io;
+pub mod secure_staging;
 pub mod io_file;
 pub mod terminal;
 pub mod torch;
@@ -1436,6 +1437,13 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_file_copy", file_io::rt_file_copy);
     insert_simple!("rt_crc32_text", file_io::rt_crc32_text);
     insert_simple!("rt_file_create_excl", file_io::rt_file_create_excl);
+    // Secure staging: both call the C in src/runtime/runtime_secure_staging.c
+    // that the native lane calls, so the interpreter cannot drift from it.
+    insert_simple!("rt_secure_temp_dir", secure_staging::rt_secure_temp_dir);
+    insert_simple!(
+        "rt_file_publish_noreplace",
+        secure_staging::rt_file_publish_noreplace
+    );
     insert_simple!("rt_mem_snapshot_open", file_io::rt_mem_snapshot_open);
     insert_simple!("rt_mem_snapshot_record", file_io::rt_mem_snapshot_record);
     insert_simple!("rt_mem_snapshot_close", file_io::rt_mem_snapshot_close);
