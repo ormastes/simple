@@ -756,6 +756,44 @@ fn parser_pending_asm_placement() -> text:
             out.push(spelling)
     out.join("|")
 
+# Trailing decimal run inside a decorator spelling's parentheses, e.g.
+# "unroll(4)" -> 4, "pipeline(ii=3)" -> 3, "memory(banks=2)" -> 2. Returns 0
+# when the spelling carries no digits, so a malformed decorator leaves the
+# slot at its "absent" default rather than inventing a factor.
+fn parser_decorator_trailing_int(spelling: text) -> i64:
+    val digits = "0123456789"
+    var value: i64 = 0
+    var seen = false
+    var i: i64 = 0
+    while i < spelling.len():
+        val d = digits.index_of(spelling[i:i + 1])
+        if d >= 0:
+            value = value * 10 + d
+            seen = true
+        elif seen:
+            break
+        i = i + 1
+    if seen: value else: 0
+
+# W3.2: route the pending `@unroll(n)` / `@pipeline(ii=n)` / `@memory(banks=n)`
+# kernel decorators onto the decl the parser just produced. Until this ran, the
+# three setters were imported (line 25) but never called, so the VHDL kernel
+# backend always saw the zero defaults.
+fn parser_apply_pending_kernel_attrs(decl_idx: i64):
+    if decl_idx < 0:
+        return
+    for spelling in PENDING_DECL_ATTRS:
+        val paren = spelling.index_of("(")
+        if paren < 0:
+            continue
+        val attr_name = spelling[0:paren]
+        if attr_name == "unroll":
+            decl_set_unroll_factor(decl_idx, parser_decorator_trailing_int(spelling))
+        elif attr_name == "pipeline":
+            decl_set_pipeline_ii(decl_idx, parser_decorator_trailing_int(spelling))
+        elif attr_name == "memory":
+            decl_set_memory_banks(decl_idx, parser_decorator_trailing_int(spelling))
+
 fn parser_record_enum_attributes(enum_name: text):
     if PENDING_DECL_ATTRS.len() > 0:
         ENUM_ATTRIBUTES.push(enum_name + "|" + PENDING_DECL_ATTRS.join("|"))
@@ -906,6 +944,7 @@ fn parse_module_body():
             val visible_decl = parse_module_decl_with_visibility(i, parsed_visibility)
             if visible_decl >= 0:
                 decl_set_asm_placement(visible_decl, parser_pending_asm_placement())
+                parser_apply_pending_kernel_attrs(visible_decl)
                 if PENDING_HARDWARE == 1:
                     decl_set_hardware(visible_decl, 1)
                     decl_set_clocked_args(visible_decl, PENDING_CLOCKED_ARGS)
@@ -930,6 +969,7 @@ fn parse_module_body():
             if par_kind_get() == 20:
                 val d = parse_fn_decl(1)  # 1 = is_async
                 decl_set_asm_placement(d, parser_pending_asm_placement())
+                parser_apply_pending_kernel_attrs(d)
                 module_add_decl(d)
                 parser_reset_pending_vhdl_decorators()
             else:
@@ -937,6 +977,7 @@ fn parse_module_body():
         elif par_kind_get() == 20:
             val d = parse_fn_decl(0)  # 0 = not async
             decl_set_asm_placement(d, parser_pending_asm_placement())
+            parser_apply_pending_kernel_attrs(d)
             if PENDING_HARDWARE == 1:
                 decl_set_hardware(d, 1)
                 decl_set_clocked_args(d, PENDING_CLOCKED_ARGS)
