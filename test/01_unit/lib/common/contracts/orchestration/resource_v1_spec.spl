@@ -1,0 +1,207 @@
+# Strict SDN decode profile for orchestration resources.
+#
+# @req ORCH-001 ORCH-003 ORCH-014
+#
+# **Requirements:** N/A
+# **Plan:** N/A
+# **Design:** N/A
+# **Research:** doc/01_research/os/container/simple_orchestrator_and_container_2026-09-06.md
+#
+# Requirements are the research doc's ORCH-001..016 table; the milestone table is
+# `.spipe/simple_orchestrator/state.md`; the design is §5 and §6 of the research
+# doc below. Dedicated `doc/02_requirements`/`03_plan`/`05_design` pages are the
+# next slice, not this one.
+#
+# ## Overview
+#
+# An operator authors an orchestration resource in ordinary SDN. This spec pins
+# the STRICT decode profile: what the canonical parser tolerates and an
+# orchestration document must not. The ordinary parser resolves a duplicate key
+# last-wins; here that is a refusal with a source location. An undeclared field
+# is a refusal, not an extension point. A quantity is canonicalized to an exact
+# integer or refused — never rounded. A platform that cannot provide the
+# requested isolation is refused, never downgraded.
+#
+# ## Examples
+#
+# Fixtures under `test/fixtures/orchestration/` are the worked examples:
+# `echo_deployment.sdn` is the accepted shape; the other four are each a single
+# deliberate defect (duplicate key, undeclared field, selector/template
+# mismatch, `native-container` on macos).
+#
+# Covers LANG-002 (duplicate keys), LANG-003 (unknown fields), LANG-007
+# (selector/template mismatch) and MAC-003 (macOS refuses native-container)
+# from the research doc's §14 acceptance catalog.
+use std.io_runtime.{file_read}
+use std.common.contracts.orchestration.resource_v1.*
+
+val FIXTURES = "test/fixtures/orchestration/"
+
+fn fixture(name: text) -> text:
+    file_read(FIXTURES + name) ?? ""
+
+# Decode a fixture and return the rejection, or a synthetic "accepted" marker so
+# a wrongly-accepted document cannot pass as a matching rejection.
+fn rejection_of(name: text) -> RejectionV1:
+    match decode_resource(fixture(name)):
+        case Err(r): r
+        case Ok(_): RejectionV1(kind: "accepted", path: "", message: "document was accepted", line: 0, col: 0)
+
+fn deployment_of(name: text) -> DeploymentV1:
+    val empty_meta = ObjectMetaV1(name: "", ns: "", labels: {})
+    val empty_spec = PodSpecV1(os_name: "", runtime_class: "", network_profile: "", containers: [])
+    match decode_resource(fixture(name)):
+        case Ok(res):
+            match res:
+                case ResourceV1.Deployment(d): d
+                case ResourceV1.Pod(_): DeploymentV1(meta: empty_meta, replicas: -1,
+                    selector_labels: {}, template: PodTemplateV1(labels: {}, spec: empty_spec))
+        case Err(_): DeploymentV1(meta: empty_meta, replicas: -1,
+            selector_labels: {}, template: PodTemplateV1(labels: {}, spec: empty_spec))
+
+describe "Orchestration resource authoring in SDN":
+
+    it "accepts the echo Deployment and canonicalizes its quantities to integers":
+        """
+        An operator writes a Deployment in ordinary SDN. Decoding yields the
+        canonical typed resource: CPU as whole millicores, memory as whole
+        bytes, so no floating-point amount ever reaches placement.
+        """
+        step("Read the echo-linux Deployment fixture")
+        val src = fixture("echo_deployment.sdn")
+        expect(src).to_contain("kind: Deployment")
+
+        step("Decode it under the strict profile")
+        val d = deployment_of("echo_deployment.sdn")
+
+        step("Confirm the object identity and replica intent survived")
+        expect(d.meta.name).to_equal("echo-linux")
+        expect(d.meta.ns).to_equal("ci")
+        expect(d.replicas).to_equal(2)
+        expect(d.selector_labels["app"]).to_equal("echo-linux")
+
+        step("Confirm the pod template carries one container on the linux native lane")
+        expect(d.template.spec.os_name).to_equal("linux")
+        expect(d.template.spec.runtime_class).to_equal("native-container")
+        expect(d.template.spec.network_profile).to_equal("endpoint-v1")
+        expect(d.template.spec.containers.len()).to_equal(1)
+
+        step("Confirm the container resolves to a locked artifact set, not an ad-hoc image")
+        val c = d.template.spec.containers[0]
+        expect(c.name).to_equal("echo")
+        expect(c.artifact_set_ref).to_equal("ci-echo")
+        expect(c.image).to_equal("")
+        expect(c.args.len()).to_equal(2)
+        expect(c.ports[0].name).to_equal("http")
+        expect(c.ports[0].container_port).to_equal(8080)
+
+        step("Confirm 250m/1000m became millicores and 64Mi/256Mi became bytes")
+        expect(c.resources.cpu_request_millis).to_equal(250)
+        expect(c.resources.cpu_limit_millis).to_equal(1000)
+        expect(c.resources.memory_request_bytes).to_equal(67108864)
+        expect(c.resources.memory_limit_bytes).to_equal(268435456)
+
+    it "refuses a duplicate key instead of silently keeping the last one":
+        """
+        The ordinary SDN parser resolves a repeated key last-wins. For an
+        orchestration document that is a silent change of intent, so the strict
+        profile refuses it and points at the repeated line.
+        """
+        step("Decode a Deployment whose metadata declares name twice")
+        val r = rejection_of("duplicate_key.sdn")
+
+        step("Confirm the document was refused as a duplicate key, not accepted")
+        expect(r.kind).to_equal("duplicate_key")
+        expect(r.path).to_equal("metadata.name")
+
+        step("Confirm the refusal names the offending source line")
+        expect(r.line).to_equal(6)
+        expect(r.col).to_equal(5)
+
+    it "refuses an undeclared field and names its schema path":
+        """
+        An undeclared field is a typo or an unsupported feature, never an
+        extension point: accepting it would silently drop the operator's intent.
+        """
+        step("Decode a pod template carrying an undeclared nodeSelector field")
+        val r = rejection_of("unknown_field.sdn")
+
+        step("Confirm the exact schema path is reported")
+        expect(r.kind).to_equal("unknown_field")
+        expect(r.path).to_equal("spec.template.spec.nodeSelector")
+        expect(r.message).to_contain("nodeSelector")
+
+        step("Confirm the refusal carries a source location")
+        expect(r.line).to_be_greater_than(0)
+
+    it "refuses a Deployment whose selector does not select its own template":
+        """
+        A selector that does not match the template it owns can never converge:
+        the controller would create pods it does not consider its own.
+        """
+        step("Decode a Deployment whose template label disagrees with the selector")
+        val r = rejection_of("selector_mismatch.sdn")
+
+        step("Confirm the mismatch is refused at the template labels")
+        expect(r.kind).to_equal("selector_template_mismatch")
+        expect(r.path).to_equal("spec.template.metadata.labels")
+
+    it "refuses native-container on macos instead of downgrading the isolation":
+        """
+        macOS has no verified native container equivalent. A native-container
+        request there is refused outright: silently running it as a plain host
+        process would report isolation the platform never provided.
+        """
+        step("Decode a macos pod template that asks for native-container")
+        val r = rejection_of("macos_native_container.sdn")
+
+        step("Confirm the combination is refused, with the honest alternatives named")
+        expect(r.kind).to_equal("unsupported_os_runtime_class")
+        expect(r.path).to_equal("spec.template.spec.runtimeClassName")
+        expect(r.message).to_contain("native-sandbox")
+
+    it "refuses a kind this contract version does not decode":
+        """
+        Job, Service and Node are named in the design but not yet decoded.
+        Until they are, such a document is refused rather than half-accepted.
+        """
+        step("Decode a document declaring an undecoded kind")
+        val doc = "apiVersion: " + ORCHESTRATION_API_VERSION_V1 + "\n" +
+                  "kind: Job\n" +
+                  "metadata:\n" +
+                  "    name: build-linux\n" +
+                  "spec:\n" +
+                  "    replicas: 1\n"
+        match decode_resource(doc):
+            case Ok(_): assert_true(false)
+            case Err(r):
+                step("Confirm the kind is reported as not decoded")
+                expect(r.kind).to_equal("unsupported_kind")
+                expect(r.path).to_equal("kind")
+
+    it "refuses an unparseable resource quantity rather than rounding it":
+        """
+        A quantity the decoder cannot turn into an exact integer is refused, so
+        no placement decision is ever made on a guessed amount.
+        """
+        step("Decode a Pod whose cpu request is not an integer core or millicore value")
+        val doc = "apiVersion: " + ORCHESTRATION_API_VERSION_V1 + "\n" +
+                  "kind: Pod\n" +
+                  "metadata:\n" +
+                  "    name: probe\n" +
+                  "spec:\n" +
+                  "    os:\n" +
+                  "        name: linux\n" +
+                  "    runtimeClassName: native-container\n" +
+                  "    containers:\n" +
+                  "        - name: probe\n" +
+                  "          image: \"registry.example/probe@sha256:aa\"\n" +
+                  "          resources:\n" +
+                  "              requests:\n" +
+                  "                  cpu: \"0.25\"\n"
+        match decode_resource(doc):
+            case Ok(_): assert_true(false)
+            case Err(r):
+                step("Confirm the quantity is refused at its own schema path")
+                expect(r.kind).to_equal("quantity")
+                expect(r.path).to_equal("spec.containers.0.resources.requests.cpu")
