@@ -71,6 +71,7 @@ CLI's own version banner, which is only reachable through that fast path.
 | `cd <other repo> && <abs>/bin/gh pr diff 1` | 1 | that repo's config decided, not Simple's |
 | `bin/gh pr create --body-file /missing` | 1 | refusal naming the file; never "mock file content" |
 | `bin/gh pr create --assignee bob` | 1 | allowlist refusal naming `--assignee` |
+| `bin/gh pr create --draft --json number` | 1 | refusal on the JSON path too, never `blocked-auth` |
 | `bin/devhub gh --help` | 0 | facade help, no backend required |
 
 ## Exclusions
@@ -84,7 +85,7 @@ those cannot: that a real process, invoked as `gh`, lands in the right place.
 
 ## Pass criteria
 
-The runner must discover one spec with eleven examples, all passing. Exits must
+The runner must discover one spec with twelve examples, all passing. Exits must
 match the matrix. A scenario that passes because a command was not found, or
 because `--version` answered while the routed commands did not, is not
 acceptance — scenario 1 asserts the GitHub CLI's own banner text, and the
@@ -254,6 +255,23 @@ describe "REQ-DEVHUB-GHSHIM-001: `gh` routes to the configured backend":
         # behind them, which is what makes the policy hold by construction.
         expect(exit_code).to_equal(1)  # oracle: pinned constant asserted by this scenario
         expect(stdout).to_contain("--assignee")
+
+    it "should apply the same refusals on the --json path an LLM uses":
+        # @req REQ-SSPEC-SYSTEM
+        step("should apply the same refusals on the --json path an LLM uses")
+        step("Request a draft pull request while also asking for JSON output")
+        # Regression guard for the worst defect found in review. The JSON
+        # branch used to run BEFORE translation, so adding `--json number`
+        # skipped every refusal and opened a NON-DRAFT pull request, exit 0.
+        # The bypass sat on the path automation uses, while the human path
+        # refused correctly — so the scenarios above all passed over it.
+        val (stdout, stderr, exit_code) = run_sh("DEVHUB_GIT_BACKEND=bitbucket BB_WORKSPACE=acme BB_REPO=widgets ./bin/gh pr create --title T --head work/x --draft --json number 2>&1")
+
+        step("Check the refusal fired, and no request reached the backend")
+        expect(exit_code).to_equal(1)  # oracle: pinned constant asserted by this scenario
+        expect(stdout).to_contain("--draft")
+        # Reaching the auth wall would mean the request was on its way out.
+        expect(stdout).to_not_contain("blocked-auth")
 
     it "should answer for the facade help without requiring any backend":
         # @req REQ-SSPEC-SYSTEM

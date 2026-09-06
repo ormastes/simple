@@ -150,15 +150,16 @@ fn _git_bitbucket(raw_args: [text], source: text) -> i64:
     val verb = rest[0]
     val verb_args = if rest.len() > 1: rest[1:] else: []
 
-    # JSON mode is the LLM/script path and is the one where output SHAPE is
-    # load-bearing, so it is served directly off the adapter and normalised
-    # to gh's field names. Human mode delegates to cmd_bb, whose tables are
-    # already right and which there is no reason to duplicate.
-    if noun == "pr" and wants_json(verb_args):
-        val (handled, rc) = _pr_json(verb, verb_args)
-        if handled:
-            return rc
-
+    # Translation runs FIRST, for every path. It is the single gate where the
+    # refuse-never-approximate policy is enforced, so nothing may route around
+    # it.
+    #
+    # This ordering is load-bearing and was wrong at first: the JSON branch used
+    # to run before translation, so `gh pr create --title T --head x --draft
+    # --json number` skipped every refusal and opened a NON-DRAFT pull request
+    # with exit 0. Worse than the ordinary silent-drop, because `--json` is
+    # exactly what an LLM or a script passes — the bypass lived on the primary
+    # audience's path while the human path was correctly refusing.
     val (ok, bb_args, err) = if noun == "pr":
         gh_pr_to_bb_argv(verb, verb_args)
     else:
@@ -167,6 +168,16 @@ fn _git_bitbucket(raw_args: [text], source: text) -> i64:
     if not ok:
         print_error(err)
         return 1
+
+    # Only now, with the flags accepted, choose how to render. JSON mode is the
+    # LLM/script path and the one where output SHAPE is load-bearing, so it is
+    # served directly off the adapter and normalised to gh's field names. Human
+    # mode delegates to cmd_bb, whose tables are already right.
+    if noun == "pr" and wants_json(verb_args):
+        val (handled, rc) = _pr_json(verb, verb_args)
+        if handled:
+            return rc
+
     handle_bb(bb_args)
 
 
@@ -175,6 +186,17 @@ fn _pr_json(verb: text, args: [text]) -> (bool, i64):
     output. Returns (handled, rc); handled=false means "fall through to the
     normal cmd_bb path", which is how verbs whose responses are not PR
     objects (approve, comment, status) keep working.
+
+    ONLY called after gh_pr_to_bb_argv has accepted the flags — it is a
+    renderer, not a gate, and must never be reachable before that check (see
+    the ordering note in _git_bitbucket).
+
+    Reads flags with flags.spl's `_extract_flag`, which is not value-aware, so
+    a body whose text is exactly `--title` and which sits before the real
+    `--title` would be mis-read. Left as-is: with the gate above in place this
+    needs a body that is precisely a flag name AND ordered ahead of that flag,
+    and fixing it means a value-aware reader in the shared flags module, which
+    every other facade also depends on.
 
     # ponytail: approve/comment/status emit backend-native JSON via cmd_bb
     # rather than a gh-shaped envelope. gh's own JSON for those is minimal and
