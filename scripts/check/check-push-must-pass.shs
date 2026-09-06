@@ -572,6 +572,39 @@ export MUST_CHECK_CONFLICT_UNION_DONE
 
 while read -r _local_ref _local_sha _remote_ref _remote_sha; do
     [ "$_local_sha" = "$ZERO" ] && continue
+    # A tag push carries no new commits, and every range-scoped gate below is
+    # therefore vacuous on it: `<predecessor>..<tag>` resolves to 0 commits, the
+    # guards correctly report `ERROR — nothing was checked` (exit 2) rather than
+    # a false pass, and the first blocking row kills the push. Measured
+    # 2026-09-07 pushing `v1.0.1-beta.1`: `BLOCKING gate push-conflict-markers
+    # failed (exit 2)`, on a commit that was already on origin/main and had
+    # already passed these same gates through PR #457 and #458. The release
+    # contract needs to push exactly one tag ref, so this path has to work
+    # without `--no-verify` — a release that routes around the hook protects
+    # nothing, and `--no-verify` disables every gate, not just the vacuous ones.
+    #
+    # Fail-closed, not skipped-by-name: the tag is admitted ONLY when its target
+    # commit is already an ancestor of the push remote's main, i.e. the content
+    # was gated when it landed. A tag pointing at unpublished content is
+    # refused, because that content has never been through the gates and a tag
+    # push is not the place to admit it.
+    case "$_local_ref" in
+        refs/tags/*)
+            _tag_commit=$(git -C "$ROOT" rev-parse --verify --quiet "${_local_sha}^{commit}") ||
+                die "tag $_local_ref does not resolve to a commit"
+            _tag_remote=${MUST_CHECK_PUSH_REMOTE:-}
+            case "$_tag_remote" in
+                ''|*[!A-Za-z0-9._/-]*) die "tag push requires the actual push remote name" ;;
+            esac
+            _tag_base=refs/remotes/$_tag_remote/main
+            git -C "$ROOT" rev-parse --verify --quiet "$_tag_base" >/dev/null ||
+                die "cannot verify $_tag_base; fetch it before pushing a tag"
+            git -C "$ROOT" merge-base --is-ancestor "$_tag_commit" "$_tag_base" ||
+                die "tag $_local_ref points at $_tag_commit, which is not published on $_tag_base; land the commit through a pull request first"
+            echo "push-must-check: tag $_local_ref -> $_tag_commit is already published on $_tag_base; 0 new commits, range gates do not apply"
+            continue
+            ;;
+    esac
     _ledger=$(git -C "$ROOT" show "$_local_sha:$LEDGER_REL" 2>/dev/null) || die "ledger is missing from $_local_sha"
     _manifest=$(git -C "$ROOT" show "$_local_sha:$MANIFEST_REL" 2>/dev/null) || die "manifest is missing from $_local_sha"
     load_committed_dispatcher "$_local_sha"
