@@ -1,12 +1,25 @@
 # @tag: system, gpu, scheduler, draw_ir
 # @evidence-display: links
 """
-# GPU scheduler hardening acceptance
-
-This system contract exercises the production bounded DrawIR queue. It proves
-deferred admission and terminal routing behavior only. It does not claim a
-native fence, physical device execution, presentation, or GPU residency.
+## Purpose and audience
+The production bounded DrawIR queue is what a browser/UI surface hands its
+frames to. This manual is for the engineers accepting that surface: it shows
+deferred admission, strict refusal with no CPU degrade, terminal routing, and
+the retained compatibility dispatch. Feature IDs: gpu_scheduler_hardening.
+Category: Application.
+## Operator workflow
+SIMPLE_LIB=src bin/simple test test/03_system/app/ui.browser/feature/gpu_scheduler_hardening_gpu_resident_rendering_spec.spl
+## Compatibility and limitations
+Runs on every host with no device attached. It proves deferred admission and
+terminal routing behavior only. It does not claim a native fence, physical
+device execution, presentation, or GPU residency.
+## Verification guidance and troubleshooting
+A RED here means the accepted queue contract changed. Queue routing is not
+device-execution evidence; fix the seam or the caller, never the spec.
 """
+# Lifecycle: doc/01_research/local/gpu_scheduler_hardening_gpu_resident_rendering.md ; doc/03_plan/ui/gpu_scheduler_hardening_gpu_resident_rendering.md ;
+# doc/04_architecture/gpu_scheduler_hardening_gpu_resident_rendering.md ; doc/05_design/gpu_scheduler_hardening_gpu_resident_rendering.md
+# @manual_section: primary
 
 use std.spec.*
 use common.ui.draw_ir.{DRAW_IR_BACKEND_GPU, draw_ir_batch, draw_ir_embedding_config, draw_ir_rect}
@@ -49,7 +62,22 @@ describe "GPU scheduler hardening acceptance":
         expect(completed.count).to_equal(1)
         expect(repeated.count).to_equal(0)
 
+    it "should refuse a GPU route with no device rather than fall back to the CPU":
+        # @req REQ-GPU-SCHED-PROFILE-001
+        step("Reserve an epoch against a queue whose GPU runtime is unavailable")
+        engine2d_host_gpu_runtime_reset()
+        val unavailable = engine2d_host_gpu_runtime_queue_with_backend_handle("vulkan", 1, 7, false, 4096)
+        step("Submit the bounded draw routing metadata")
+        val receipt = engine2d_draw_ir_runtime_queue_submit_deferred(scheduler_batch("strict-refusal"), true, unavailable)
+        step("Read the refusal instead of a silent CPU degrade")
+        expect(receipt.status).to_equal("rejected")
+        expect(receipt.terminal).to_be(true)
+        expect(receipt.accepted).to_be(false)
+        expect(receipt.packet_id).to_equal(0)
+        expect(receipt.diagnostic).to_contain("no CPU fallback")
+
     it "should preserve immediate dispatch only as compatibility routing":
+        # @req REQ-GPU-SCHED-PAYLOAD-001
         # @req REQ-GPU-SCHED-ASYNC-001 REQ-GPU-SCHED-PROOF-001
         step("Submit the legacy compatibility dispatch")
         engine2d_host_gpu_runtime_reset()

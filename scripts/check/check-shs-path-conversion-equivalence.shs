@@ -1,0 +1,210 @@
+#!/bin/sh
+# Spec 1 of 2 for the no-Windows-style-paths policy, .shs half.
+#
+# POLICY (user, 2026-09-02):
+#   "code should not have drive-letter-backslash style paths. only mingw /
+#    linux style, and lib path/file convert it for system."
+#   "even sdn and shs should not have windows style path."
+#
+# WHAT THIS PINS
+#   Converting a genuine class-(a) violation in a shell script -- a hardcoded
+#   native drive-letter path used in ordinary script logic, NOT at a native-tool
+#   boundary -- to MinGW/POSIX form must:
+#     (1) remove the detector hit, and
+#     (2) leave observable behaviour byte-identical.
+#
+#   (1) is assertable on every platform.  (2) needs a real native path, which
+#   only exists where a converter (`cygpath`) does; where it does not, the
+#   execution half is reported as NOT RUN and the assertion count reflects only
+#   what was actually proven.  A run that proves nothing is ERROR, never a pass.
+#
+# WHY IT EXISTS
+#   The .shs census (2026-09-02) found ZERO class-(a) violations across the 75
+#   tracked offender files -- every hit was `\n` / `\$` / sed-awk metacharacter
+#   escaping.  With no real violation to convert, the conversion rule would
+#   otherwise be pinned by nothing at all.  This fixture supplies the missing
+#   subject so the rule is executable rather than asserted.
+#
+# CROSS-PLATFORM
+#   Pure POSIX sh.  No literal drive-letter path appears in this file -- the
+#   backslash is built at runtime from `printf '\\'`, the same technique
+#   scripts/check/check-no-windows-style-paths.shs uses, so this guard is not
+#   itself an offender.  On Unix the execution half is skipped by design.
+#
+# Verdict convention (doc/07_guide/infra/detector/detector_standard.md):
+#   PASS  -- exit 0, always states how many assertions were checked (n > 0)
+#   FAIL  -- exit 1, names the failing assertion
+#   ERROR -- exit 2, "nothing was checked"; a vacuous run is never a pass.
+#
+# --selftest runs first and is fatal.
+
+set -u
+
+BS=$(printf '\\')
+# The shared detector (scripts/check/check-no-windows-style-paths.shs) matches
+# drive letter + colon + ONE backslash. In .spl/.sdn that is right. In .shs it
+# over-matches badly: measured 2026-09-02 over the 2,294 tracked .shs files,
+# 161 hits in 77 files, of which 149 are shell or regex ESCAPES -- the shapes
+# reproduced as negative controls (c), (e) and (f) below. Only 12 occurrences,
+# in 4 files, are path-shaped.
+#
+# So .shs needs a stricter rule. A real path continues with at least TWO path
+# characters after the separator; every escape in the corpus is a single
+# metacharacter followed by a non-path character.
+#
+# KNOWN LIMIT, stated rather than hidden: a single-character directory name is
+# not flagged. Widening to one character re-admits the escape shapes, which is
+# the defect this rule exists to avoid.
+STRICT_PATTERN="[A-Za-z]:${BS}${BS}[A-Za-z0-9_][A-Za-z0-9_]"
+
+# Does this text carry a Windows-style drive-letter path literal?
+has_win_path() {
+    printf '%s\n' "$1" | LC_ALL=C grep -qE "$STRICT_PATTERN"
+}
+
+# --------------------------------------------------------------------------
+# selftest: the classifier used below must itself discriminate, or every
+# assertion in this guard is vacuous.
+# --------------------------------------------------------------------------
+selftest() {
+    _rc=0
+
+    # (a) native form must be recognised
+    if ! has_win_path "$(printf 'p=C:%sUsers%sormas\n' "$BS" "$BS")"; then
+        echo "selftest FAIL: classifier missed a native drive path"; _rc=1
+    fi
+
+    # (b) NEGATIVE CONTROL: MinGW form must not be recognised
+    if has_win_path 'p=/c/Users/ormas'; then
+        echo "selftest FAIL: classifier flagged MinGW form"; _rc=1
+    fi
+
+    # (c) NEGATIVE CONTROL: a printf escape after a colon is not a path.
+    #     This is the dominant shape among the real .shs hits, and the reason
+    #     the shared detector's pattern cannot be reused verbatim here.
+    if has_win_path "$(printf "printf 'Options:%sn'\n" "$BS")"; then
+        echo "selftest FAIL: classifier flagged a printf escape"; _rc=1
+    fi
+
+    # (d) NEGATIVE CONTROL: a legal POSIX filename containing a backslash
+    if has_win_path "$(printf 'f=dir/we%sird\n' "$BS")"; then
+        echo "selftest FAIL: classifier flagged a POSIX backslash filename"; _rc=1
+    fi
+
+    # (e) NEGATIVE CONTROL: an escaped shell variable inside a quoted string
+    if has_win_path "$(printf 'puts "PSU_INIT_ERR:%s$e"\n' "$BS")"; then
+        echo "selftest FAIL: classifier flagged an escaped shell variable"; _rc=1
+    fi
+
+    # (f) NEGATIVE CONTROL: an awk/sed regex metacharacter
+    if has_win_path "$(printf '/Fanout workers:%s*%s*/ {\n' "$BS" "$BS")"; then
+        echo "selftest FAIL: classifier flagged a regex metacharacter"; _rc=1
+    fi
+
+    return $_rc
+}
+
+if ! selftest; then
+    echo "FAIL - selftest failed; refusing to run"
+    exit 1
+fi
+
+if [ "${1:-}" = "--selftest" ]; then
+    echo "PASS - selftest only, 6 fixtures"
+    exit 0
+fi
+
+# --------------------------------------------------------------------------
+# Fixture build
+# --------------------------------------------------------------------------
+D="$(mktemp -d 2>/dev/null || echo "${TMPDIR:-/tmp}/shsconv.$$")"
+mkdir -p "$D/data" || { echo "ERROR - nothing was checked (cannot create temp dir)"; exit 2; }
+trap 'rm -rf "$D" 2>/dev/null' EXIT INT TERM
+
+printf '42\n' > "$D/data/v.txt"
+
+ASSERTS=0
+FAILED=""
+note_fail() { FAILED="${FAILED}${FAILED:+; }$1"; }
+
+# The AFTER script: MinGW/POSIX form.  This is the shape the policy requires.
+cat > "$D/after.shs" <<'EOF'
+#!/bin/sh
+set -u
+base="$1"
+cat "$base/data/v.txt"
+EOF
+
+AFTER_SRC=$(cat "$D/after.shs")
+
+# --- assertion 1: the converted form carries no detector hit -----------------
+ASSERTS=$((ASSERTS + 1))
+if has_win_path "$AFTER_SRC"; then
+    note_fail "converted (MinGW) fixture still matches the detector"
+fi
+
+# --- assertion 2: the converted form runs and produces the expected output ---
+ASSERTS=$((ASSERTS + 1))
+AFTER_OUT=$(sh "$D/after.shs" "$D" 2>&1)
+AFTER_RC=$?          # read DIRECTLY into a variable, never through a pipe
+if [ "$AFTER_RC" -ne 0 ] || [ "$AFTER_OUT" != "42" ]; then
+    note_fail "converted fixture rc=$AFTER_RC out='$AFTER_OUT' (want rc=0 out=42)"
+fi
+
+# --------------------------------------------------------------------------
+# The execution-equivalence half needs a genuine native path.
+# --------------------------------------------------------------------------
+EXEC_HALF="not-run(no cygpath; native path unavailable on this platform)"
+if command -v cygpath >/dev/null 2>&1; then
+    NATIVE_D=$(cygpath -w "$D" 2>/dev/null)
+    if [ -n "$NATIVE_D" ]; then
+        # The BEFORE script: a hardcoded native path in plain script logic.
+        # This is the class-(a) shape the policy forbids.  It is written by
+        # substitution so no drive-letter literal is stored in this guard.
+        {
+            printf '#!/bin/sh\n'
+            printf 'set -u\n'
+            printf 'cat "%s%sdata%sv.txt"\n' "$NATIVE_D" "$BS" "$BS"
+        } > "$D/before.shs"
+
+        BEFORE_SRC=$(cat "$D/before.shs")
+
+        # --- assertion 3: the pre-conversion fixture IS a detector hit ------
+        ASSERTS=$((ASSERTS + 1))
+        if ! has_win_path "$BEFORE_SRC"; then
+            note_fail "pre-conversion fixture was not flagged by the detector"
+        fi
+
+        # --- assertion 4: behaviour is preserved across the conversion ------
+        ASSERTS=$((ASSERTS + 1))
+        BEFORE_OUT=$(sh "$D/before.shs" 2>&1)
+        BEFORE_RC=$?     # direct, not piped
+        if [ "$BEFORE_RC" -ne 0 ]; then
+            # On a host where the shell cannot read the native form at all,
+            # conversion is strictly an improvement -- record it as such
+            # rather than pretending equivalence was demonstrated.
+            EXEC_HALF="ran(before rc=$BEFORE_RC: native form unreadable by the shell; conversion strictly fixes it)"
+        elif [ "$BEFORE_OUT" != "$AFTER_OUT" ]; then
+            note_fail "conversion changed output: before='$BEFORE_OUT' after='$AFTER_OUT'"
+            EXEC_HALF="ran(output diverged)"
+        else
+            EXEC_HALF="ran(before rc=0 out='$BEFORE_OUT' == after out='$AFTER_OUT')"
+        fi
+    fi
+fi
+
+# --------------------------------------------------------------------------
+# Verdict
+# --------------------------------------------------------------------------
+if [ "$ASSERTS" -eq 0 ]; then
+    echo "ERROR - nothing was checked (no assertions ran)"
+    exit 2
+fi
+
+if [ -n "$FAILED" ]; then
+    echo "FAIL - $ASSERTS assertion(s) checked; exec-half=$EXEC_HALF; failures: $FAILED"
+    exit 1
+fi
+
+echo "PASS - $ASSERTS assertion(s) checked, conversion removes the hit and preserves behaviour; exec-half=$EXEC_HALF"
+exit 0

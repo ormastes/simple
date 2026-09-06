@@ -14,7 +14,8 @@ use os.apps.smux.api.{
     smux_reset_for_test,
     smux_list_sessions,
     smux_list_windows,
-    smux_list_panes
+    smux_list_panes,
+    smux_capture
 }
 use os.apps.smux.smux_app.{
     smux_help_text,
@@ -49,6 +50,36 @@ describe "smux app":
         val window = smux_list_windows(session.id)[0]
         val pane = smux_list_panes(session.id, window.id)[0]
         expect(pane.id != "").to_equal(true)
+
+    it "routes the full command to the named session only":
+        # @req REQ-SSPEC-OS
+        step("Create two sessions and address the second by name")
+        smux_reset_for_test()
+        expect(smux_run_cmd(["new", "first"])).to_equal(0)
+        expect(smux_run_cmd(["new", "second"])).to_equal(0)
+        expect(smux_run_cmd(["send", "second", "echo", "hello", "world"])).to_equal(0)
+
+        step("Capture both panes and require isolation plus complete argv joining")
+        val sessions = smux_list_sessions()
+        val first_window = smux_list_windows(sessions[0].id)[0]
+        val second_window = smux_list_windows(sessions[1].id)[0]
+        val first_pane = smux_list_panes(sessions[0].id, first_window.id)[0]
+        val second_pane = smux_list_panes(sessions[1].id, second_window.id)[0]
+        val first_capture = smux_capture(sessions[0].id, first_window.id,
+            first_pane.id, 100)
+        val second_capture = smux_capture(sessions[1].id, second_window.id,
+            second_pane.id, 100)
+        expect(first_capture.content).to_equal("")
+        expect(second_capture.content).to_contain("echo hello world")
+
+    it "fails when a command names an unknown session":
+        # @req REQ-SSPEC-OS
+        step("Reject every pane command before touching another session")
+        smux_reset_for_test()
+        expect(smux_run_cmd(["new", "known"])).to_equal(0)
+        expect(smux_run_cmd(["send", "missing", "echo", "unsafe"])).to_equal(1)
+        expect(smux_run_cmd(["capture", "missing"])).to_equal(1)
+        expect(smux_run_cmd(["split", "missing"])).to_equal(1)
 
     it "reports deferred features and exposes a filesystem app identity":
         # @req REQ-SSPEC-OS

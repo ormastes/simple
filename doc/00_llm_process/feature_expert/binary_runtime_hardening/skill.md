@@ -86,3 +86,41 @@ Parent initiative unifying: SSpec binary reference (stacked layout), direct `rt_
 - Compiler fixes proving the alias lane: strict-JIT fail-open closed;
   bare-assignment locals minted correctly (both in `src/compiler_rust`,
   deployed binary still needs rebuild+deploy to pick up the second).
+
+## RT API groups (2026-09-06)
+
+The migration now has a **group** axis, not just a per-symbol one. Every
+`rt_*` API is registered in `config/api/api_registry.sdn` with its group,
+lane, backing, migration class, typed alias and current direct call-site
+count; `scripts/check/check-rt-api-groups.shs` (advisory,
+`push-rt-api-groups`) fails a new ungrouped `rt_*` and any group whose sites
+exceed the recorded floor. Policy:
+`doc/04_architecture/runtime/rt_api/rt_api_group_policy.md`; measurements:
+`doc/01_research/runtime/rt_api/rt_api_group_census_2026-09-06.md`.
+
+Numbers worth keeping (base `ef8b58f3dab`, measured not estimated):
+
+- **4168** registered symbols; lanes both=707 c-only=1182 rust-only=1371
+  none=908. `lane` is **C/Rust**, not C/Simple — the Simple side is the
+  `twin` column (46 rows).
+- **180** groups (179 first-token families with >= 5 symbols, plus the
+  residual `misc` at 427 symbols / 846 sites). The residual is **not** named
+  `core` — `rt_core_*` is a real family.
+- **6388** forbidden direct call sites under `src/` -> **1786** symbols ->
+  **180** groups: a **35.5x** collapse. That ratio is the policy's whole
+  justification. Highest leverage first: `enum` 179 sites/7 symbols,
+  `bytes` 210/10, `env` 283/14, `time` 221/23.
+- The old **~12948** figure is stale. `--roots src` measures 6230
+  line-counted (baseline 7776, green); the new per-symbol census token-counts
+  6388; forbidden + allowlisted = 12439.
+- **48 of 180 groups are `unowned`** (no allowlisted provider). `--critical`
+  is honestly RED on exactly that.
+- **120 of 892 `rt_alias_map.sdn` entries** are neither defined nor called —
+  probably stale alias rows, untouched.
+
+Trap found and fixed on the way: the stdlib SDN parser could not read
+`name |h1, h2|` tables at all, so `config/check/must_check_gates.sdn` parsed
+to a bare string from Simple, and a `#` comment carrying a colon became a
+real dict key. Both fixed in `src/lib/common/sdn/parser.spl`, pinned by
+`test/01_unit/common/sdn_named_table_spec.spl`. Reader:
+`src/lib/common/api_registry.spl`.

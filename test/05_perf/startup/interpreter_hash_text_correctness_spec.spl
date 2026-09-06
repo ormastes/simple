@@ -1,6 +1,31 @@
-"""Explicitly-owned interpreter name hashing remains byte-for-byte FNV-1a."""
+"""
+## Purpose and audience
+Pins the interpreter's explicit name hashing to a byte-for-byte FNV-1a reference
+so environment lookups stay stable across interpreter and JIT lanes. Written for
+the compiler engineers who own src/compiler/10.frontend/core/interpreter/hashmap.spl
+and for operators verifying interpreter startup behavior.
+## Operator workflow
+Run `simple run test/05_perf/startup/interpreter_hash_text_correctness_spec.spl`
+and read the per-scenario verdict lines; the first failing scenario names the
+hashing behavior that regressed.
+## Compatibility and limitations
+The memo scenarios (2 and 3) and the source-contract scenario (4) are RED on the
+current tree by contract: the shipped hashmap.spl exposes only `hm_hash_text` —
+`hm_hash_memo_new`/`hm_hash_text_memoized` and the `InterpreterHashMemo` class
+are absent — and this spec keeps asserting the memo API so the drift stays loud
+instead of being papered over.
+## Verification guidance and troubleshooting
+Re-run the single file and compare against the FNV-1a reference in
+`reference_hash_text` below; a mismatch in scenario 1 means the shipped hash
+changed, and the scenario-4 verdict quotes the source it inspected.
+"""
+# Lifecycle: doc/01_research/domain/sspec_documentization_maintenance.md ;
+# doc/03_plan/sspec_modernization_plan.md ;
+# doc/04_architecture/sspec_documentization_maintenance.md ;
+# doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+# @manual_section: interpreter hash correctness
 
-use compiler.core.interpreter.hashmap.{hm_hash_memo_new, hm_hash_text, hm_hash_text_memoized}
+use compiler.core.interpreter.hashmap.{hm_hash_text, hm_hash_memo_new, hm_hash_text_memoized}
 use std.fs.{read_file}
 
 fn reference_hash_text(value: text) -> i64:
@@ -17,41 +42,56 @@ fn reference_hash_text(value: text) -> i64:
 
 describe "interpreter environment text hash":
     it "matches the materialized-byte reference for identifiers and UTF-8":
+        # @req REQ-PERF-STARTUP-HASH
+        # @capture(statistics): per-value FNV-1a verdicts for the identifier corpus
+        step("hash each identifier with the shipped hm_hash_text and the reference")
         val values: [text] = [
             "", "x", "eval_current_decl_id", "frame_locals",
             "café_binding", "λ_value", "数据"
         ]
         for value in values:
-            expect(hm_hash_text(value)).to_equal(reference_hash_text(value))
+            expect(hm_hash_text(value)).to_equal(reference_hash_text(value))  # oracle: FNV-1a over the materialized bytes is the authoritative reference
 
     it "is stable for repeated session-owned memo hits":
+        # @req REQ-PERF-STARTUP-HASH
+        # @capture(statistics): memo hit/miss counters after 1000 repeated lookups
+        step("look the same key up 1000 times through the session-owned memo")
         val memo = hm_hash_memo_new(8)
         val expected = reference_hash_text("module_loader_cache")
         var i: i64 = 0
         while i < 1000:
-            expect(hm_hash_text_memoized(memo, "module_loader_cache")).to_equal(expected)
+            expect(hm_hash_text_memoized(memo, "module_loader_cache")).to_equal(expected)  # oracle: the memo must return the same FNV-1a digest as the reference
             i = i + 1
-        expect(memo.keys.len()).to_equal(1)
-        expect(memo.misses).to_equal(1)
-        expect(memo.hits).to_equal(999)
+        expect(memo.keys.len()).to_equal(1)  # oracle: one distinct key was looked up
+        expect(memo.misses).to_equal(1)  # oracle: only the first lookup can miss
+        expect(memo.hits).to_equal(999)  # oracle: the remaining 999 lookups must be hits
 
     it "bounds a high-cardinality miss-heavy memo without changing hashes":
+        # @req REQ-PERF-STARTUP-HASH
+        # @capture(statistics): memo occupancy and hit/miss counters after 4096 distinct keys
+        step("insert 4096 distinct identifiers through the bounded memo")
         val memo = hm_hash_memo_new(8)
         var i: i64 = 0
         while i < 4096:
             val value = "identifier_{i}"
-            expect(hm_hash_text_memoized(memo, value)).to_equal(reference_hash_text(value))
+            expect(hm_hash_text_memoized(memo, value)).to_equal(reference_hash_text(value))  # oracle: bounding the memo must not change any digest
             i = i + 1
-        expect(memo.keys.len()).to_equal(8)
-        expect(memo.values.len()).to_equal(8)
-        expect(memo.misses).to_equal(4096)
-        expect(memo.hits).to_equal(0)
-        expect(hm_hash_text_memoized(memo, "identifier_4095")).to_equal(reference_hash_text("identifier_4095"))
-        expect(memo.hits).to_equal(1)
+        expect(memo.keys.len()).to_equal(8)  # oracle: the memo is bounded at 8 slots
+        expect(memo.values.len()).to_equal(8)  # oracle: values parallel the 8 bounded key slots
+        expect(memo.misses).to_equal(4096)  # oracle: every distinct key misses exactly once
+        expect(memo.hits).to_equal(0)  # oracle: no repeats happened during the sweep
+        expect(hm_hash_text_memoized(memo, "identifier_4095")).to_equal(reference_hash_text("identifier_4095"))  # oracle: re-looking the last key hits the retained slot
+        expect(memo.hits).to_equal(1)  # oracle: exactly one hit after the repeat lookup
 
     it "keeps mutable memo storage out of module globals":
-        val source = read_file("src/compiler/10.frontend/core/interpreter/hashmap.spl")
-        expect(source.contains("var hm_hash_cache_keys")).to_equal(false)
-        expect(source.contains("var hm_hash_cache_values")).to_equal(false)
-        expect(source.contains("var hm_hash_cache_next")).to_equal(false)
-        expect(source).to_contain("class InterpreterHashMemo:")
+        # @req REQ-PERF-STARTUP-HASH
+        # @capture(statistics): source-contract verdicts for the shipped hashmap.spl
+        step("inspect the shipped hashmap source for module-global memo storage")
+        val shipped_hash_source = read_file("src/compiler/10.frontend/core/interpreter/hashmap.spl")
+        val memo_keys_are_module_globals = shipped_hash_source.contains("var hm_hash_cache_keys")
+        expect(memo_keys_are_module_globals).to_equal(false)  # oracle: memo key storage must live in a session-owned struct, not a module global
+        val memo_values_are_module_globals = shipped_hash_source.contains("var hm_hash_cache_values")
+        expect(memo_values_are_module_globals).to_equal(false)  # oracle: memo value storage must live in a session-owned struct, not a module global
+        val memo_next_are_module_globals = shipped_hash_source.contains("var hm_hash_cache_next")
+        expect(memo_next_are_module_globals).to_equal(false)  # oracle: memo chain storage must live in a session-owned struct, not a module global
+        expect(shipped_hash_source).to_contain("class InterpreterHashMemo:")  # oracle: the session-owned memo struct is the contract this scenario pins (RED: absent from the shipped source)
