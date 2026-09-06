@@ -1,8 +1,25 @@
-# TUI Application Main Loop
+# TUI Application Entry
 #
-# This synchronous startup path is intentionally tiny. Rich parser-backed UI
-# rendering lives in the web/async/backend modules; this module is the hot
-# native terminal entrypoint used by startup-size audits.
+# `simple ui tui <file.ui.sdn>` runs the REAL parser-backed terminal UI
+# (`app.ui.tui.async_app.run_async_tui`) on the ordinary route. Until
+# 2026-09-06 this module was a stub that printed a literal banner and never
+# parsed the file, so every historical "TUI startup" number measured the stub;
+# see doc/08_tracking/bug/ui_tui_cli_entry_is_a_stub_2026-09-05.md.
+#
+# The stub body is retained VERBATIM behind the explicit `SIMPLE_UI_TUI_STUB=1`
+# environment variable so the startup-size audits keep the exact output they
+# assert on. Note that Simple imports are STATIC: the env variable preserves the
+# stub's OUTPUT, not the stub's import closure -- any audit that measures this
+# module's closure must move to `app.ui.tui.standalone`.
+#
+# The shared-WM route (`app.ui.tui.shared_wm_route`) is deliberately NOT
+# imported here: its closure drags `os.compositor`, os/drivers, os/kernel and
+# lib/skia into every `simple ui` mode. It lives behind its own program entry,
+# `src/app/ui/backend_entry_tui_shared_wm.spl`. See REQ-UI-SLIM-004 /
+# REQ-UI-SLIM-009 and doc/03_plan/ui/slim_kernel_plugin/plan.md.
+
+use app.ui.tui.async_app.{run_async_tui}
+use std.io_runtime.{env_get}
 
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_platform_name() -> text
@@ -19,12 +36,19 @@ fn read_user_input() -> text:
         return ""
     return line.trim()
 
-fn run_tui(file_path: text) -> i64:
-    """Start TUI mode for a .ui.sdn file."""
-    if not rt_file_exists(file_path):
-        print "Error: File not found: {file_path}"
-        return 1
+pub fn tui_entry_target() -> text:
+    """Name the route `run_tui` delegates to: "stub" or "async_app".
 
+    This is the observable CLI-wiring seam. It is "stub" only when the
+    startup-size audit sets `SIMPLE_UI_TUI_STUB=1`; every other value, and an
+    unset variable, selects the real parser-backed TUI.
+    """
+    if env_get("SIMPLE_UI_TUI_STUB") == "1":
+        return "stub"
+    return "async_app"
+
+pub fn run_tui_stub(file_path: text) -> i64:
+    """Startup-size audit stub: alternate screen, literal banner, one read."""
     ensure_ansi_support()
     print "\x1b[?1049h"
     print "\x1b[?25l"
@@ -36,3 +60,14 @@ fn run_tui(file_path: text) -> i64:
     print "\x1b[?1049l"
     print "UI closed."
     return 0
+
+fn run_tui(file_path: text) -> i64:
+    """Start TUI mode for a .ui.sdn file."""
+    if not rt_file_exists(file_path):
+        print "Error: File not found: {file_path}"
+        return 1
+
+    if tui_entry_target() == "stub":
+        return run_tui_stub(file_path)
+
+    run_async_tui(file_path)
