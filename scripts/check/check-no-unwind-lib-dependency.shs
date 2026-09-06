@@ -1,0 +1,166 @@
+#!/bin/sh
+# check-no-unwind-lib-dependency.shs — Lane B unwind ratchet.
+#
+# Simple has no exceptions, so no artifact may take a dependency on a SEPARATE
+# unwinder library (`libunwind*`, `libgcc_eh`). What it MAY NOT assert is "zero
+# `_Unwind_*` undefined symbols": that is impossible for any std-linked artifact.
+# Rust's prebuilt sysroot (`std`'s backtrace support, `compiler_builtins`,
+# `gimli`/`addr2line`/`object`) references `_Unwind_Backtrace`, `_Unwind_GetIP`
+# and friends unconditionally, and removing them needs `-Zbuild-std` with
+# `panic_immediate_abort` — which would also delete `RUST_BACKTRACE` crash
+# diagnostics. So this guard asserts the removable property instead:
+#
+#   (1) NEGATIVE: no `libunwind*` / `libgcc_eh` in the NEEDED list.
+#   (2) POSITIVE: `libgcc_s.so.1` IS in NEEDED, and every dynamic undefined
+#       `_Unwind_*` is `@GCC_*`-versioned — i.e. satisfied by libgcc_s, the
+#       library the compiler driver adds on its own. This is what makes the
+#       check non-vacuous: a stripped-of-everything artifact fails it.
+#   (3) SOURCE: no `-lunwind` / `"unwind"` link entry in the link configs.
+#
+# Verdict is the last line of stdout, per the repo convention:
+#   PASS — <n> assertion(s) checked, ...      exit 0
+#   FAIL — ...                                exit 1
+#   ERROR — nothing was checked (<reason>)    exit 2
+# A run that checked 0 artifacts AND 0 source configs is ERROR, never a pass.
+
+set -u
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd) || exit 2
+checked=0
+offenders=""
+
+fail() { printf 'FAIL — %s\n' "$1"; exit 1; }
+err()  { printf 'ERROR — nothing was checked (%s)\n' "$1"; exit 2; }
+
+# ---------------------------------------------------------------- selftest ---
+# Fatal, runs before every scan. Fixture 2 replicates the exact pre-fix shape:
+# a binary linked with `-lunwind` against a host that has libunwind.so.8.
+selftest() {
+    tmp=$(mktemp -d) || return 1
+    rc=0
+
+    printf 'int main(void){return 0;}\n' > "$tmp/m.c"
+
+    # -- fixture 1: a plain binary must be CLEAN (no libunwind in NEEDED).
+    if ! cc "$tmp/m.c" -o "$tmp/clean" 2>/dev/null; then
+        rm -rf "$tmp"; return 1
+    fi
+    if readelf -d "$tmp/clean" 2>/dev/null | grep -q 'libunwind'; then
+        echo "selftest: clean fixture unexpectedly needs libunwind" >&2; rc=1
+    fi
+
+    # -- fixture 2 (PRE-FIX SHAPE): copy libunwind.so.8 in as `libunwind.so`,
+    # exactly as scripts/bootstrap/bootstrap-from-scratch.sh's compat shim does,
+    # then link with -lunwind and WITHOUT --as-needed. NEEDED must gain
+    # libunwind.so.8 and the scanner must call it an offender.
+    uw=$(cc -print-file-name=libunwind.so.8 2>/dev/null)
+    if [ -f "$uw" ]; then
+        mkdir -p "$tmp/compat"
+        cp -pL "$uw" "$tmp/compat/libunwind.so" 2>/dev/null
+        # `--no-as-needed` MUST precede `-lunwind`: linker flags are positional,
+        # and placing it after silently produces a clean binary (a false green).
+        if cc "$tmp/m.c" -Wl,--no-as-needed -L"$tmp/compat" -lunwind \
+               -o "$tmp/dirty" 2>/dev/null; then
+            if ! readelf -d "$tmp/dirty" 2>/dev/null | grep -q 'libunwind'; then
+                echo "selftest: pre-fix fixture did not reproduce a libunwind NEEDED" >&2
+                rc=1
+            fi
+            if ! scan_artifact "$tmp/dirty" >/dev/null 2>&1; then
+                : # expected: scan_artifact reports the offender
+            else
+                echo "selftest: scanner PASSED an artifact that needs libunwind" >&2
+                rc=1
+            fi
+        fi
+    fi
+
+    # -- fixture 3: an artifact with no NEEDED at all must NOT pass the
+    # positive libgcc_s assertion (guards against a vacuous green).
+    if cc "$tmp/m.c" -static -o "$tmp/static" 2>/dev/null; then
+        if scan_artifact_positive "$tmp/static" >/dev/null 2>&1; then
+            echo "selftest: positive assertion passed on a static artifact" >&2
+            rc=1
+        fi
+    fi
+
+    rm -rf "$tmp"
+    return $rc
+}
+
+# Returns 0 when the artifact has NO separate-unwinder NEEDED entry.
+scan_artifact() {
+    _a=$1
+    _needed=$(readelf -d "$_a" 2>/dev/null | grep NEEDED)
+    [ -n "$_needed" ] || return 0
+    if printf '%s\n' "$_needed" | grep -qE 'libunwind|libgcc_eh'; then
+        printf '%s\n' "$_a"
+        return 1
+    fi
+    return 0
+}
+
+# Returns 0 when libgcc_s IS present and all dynamic _Unwind_* are @GCC_*-versioned.
+scan_artifact_positive() {
+    _a=$1
+    readelf -d "$_a" 2>/dev/null | grep NEEDED | grep -q 'libgcc_s' || return 1
+    _bad=$(nm -D --undefined-only "$_a" 2>/dev/null \
+           | grep -oE '_Unwind_[A-Za-z_]+(@[A-Za-z0-9_.]+)?' \
+           | grep -v '@GCC_')
+    [ -z "$_bad" ] || return 1
+    return 0
+}
+
+if ! selftest; then
+    echo "ERROR — nothing was checked (selftest failed)"
+    exit 2
+fi
+
+# ------------------------------------------------------------ source scan ---
+# Always available, no build required.
+lc="$repo_root/src/compiler_rust/common/src/platform/link_config.rs"
+na="$repo_root/src/compiler/70.backend/linker/_LinkerWrapper/native_all_support.spl"
+
+if [ -f "$lc" ]; then
+    checked=$((checked + 1))
+    if sed -n '/fn linux()/,/^    }/p' "$lc" | grep -q '"unwind"'; then
+        offenders="$offenders link_config.rs:linux():-lunwind"
+    fi
+fi
+if [ -f "$na" ]; then
+    checked=$((checked + 1))
+    # Strip `#` comment lines first: prose that merely NAMES the flag (including
+    # the comment this change added) must not be mistaken for a live link arg.
+    if grep -q '"linux"' "$na" && sed 's/#.*//' "$na" | grep -q '"\-lunwind"'; then
+        offenders="$offenders native_all_support.spl:-lunwind"
+    fi
+fi
+
+# ---------------------------------------------------------- artifact scan ---
+# Optional: only when a build output is present. Never a pass on its own.
+artifacts_checked=0
+for cand in \
+    "${CARGO_TARGET_DIR:-$repo_root/src/compiler_rust/target}/release/libsimple_runtime.so" \
+    "${CARGO_TARGET_DIR:-$repo_root/src/compiler_rust/target}/release/simple"
+do
+    [ -f "$cand" ] || continue
+    artifacts_checked=$((artifacts_checked + 1))
+    checked=$((checked + 1))
+    if ! scan_artifact "$cand" >/dev/null; then
+        offenders="$offenders $(basename "$cand"):NEEDED-libunwind"
+    fi
+    if ! scan_artifact_positive "$cand"; then
+        offenders="$offenders $(basename "$cand"):missing-libgcc_s-or-unversioned-_Unwind_"
+    fi
+done
+
+if [ "$checked" -eq 0 ]; then
+    err "no link config and no built artifact found"
+fi
+
+if [ -n "$offenders" ]; then
+    fail "$checked assertion(s) checked,$offenders"
+fi
+
+printf 'PASS — %s assertion(s) checked (%s artifact(s)), no separate-unwinder dependency\n' \
+    "$checked" "$artifacts_checked"
+exit 0
