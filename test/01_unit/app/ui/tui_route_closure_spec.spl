@@ -1,0 +1,111 @@
+"""
+## Purpose and audience
+
+Pins the static import closure of the ordinary (no-shared-WM) async TUI route
+for the engineers working the slim TUI/GUI kernel-plugin lane. An ordinary
+terminal UI must not drag the host compositor, GPU drivers, the kernel tree or
+Skia into its module graph just because a rarely-selected shared-window-manager
+route exists in the same product.
+
+## Operator workflow
+
+Run this spec and confirm the Results line reports 0 failed. Each scenario
+shells out to the seed compiler's `deps fast` closure printer and reads the
+real transitive module list it prints -- no log scraping, no mocking.
+
+## Compatibility and limitations
+
+The seed binary path comes from `SIMPLE_SEED`, defaulting to
+`src/compiler_rust/target/bootstrap/simple`. If that binary is absent the first
+oracle fails loudly and names the path; the spec never skips silently. The
+closure is a STATIC import closure, so it proves what the module graph
+reaches, not what a given run initialises. `deps fast` resolves only the
+imports it can root against a package path, so its file list is a LOWER bound
+on the true closure -- absence of a forbidden prefix here is necessary, not
+sufficient. That is exactly why scenario 2 exists: it proves the same command,
+run the same way, does report `src/os/compositor` for a module that reaches it.
+
+## Verification guidance and troubleshooting
+
+If scenario 1 fails, run the printed command by hand and look for the import
+edge that reintroduces the forbidden prefix -- the ordinary route module must
+never `use` the shared-WM route module (the dependency points the other way).
+If scenario 2 fails, the scan itself is suspect: it is the non-vacuity control
+proving `deps fast` really does report `src/os/compositor` when a module
+genuinely reaches it.
+"""
+# Lifecycle: plan: doc/03_plan/ui/slim_kernel_plugin/plan.md ; design: doc/05_design/ui/slim_kernel_plugin/design.md ; research: doc/01_research/ui/slim_kernel_plugin/repo_verification_addendum_2026-09-05.md
+# @cover src/app/ui.tui/async_app.spl
+# @cover src/app/ui.tui/shared_wm_route.spl
+# @manual_section: slim TUI route closure
+
+use std.spec.step
+
+use std.spec.{describe, it, expect}
+use std.io_runtime.{process_run, env_get, file_exists}
+
+val ORDINARY_ROUTE = "src/app/ui.tui/async_app.spl"
+val SHARED_WM_ROUTE = "src/app/ui.tui/shared_wm_route.spl"
+
+fn seed_path() -> text:
+    """Resolve the diagnostic seed binary used to print the closure."""
+    val from_env = env_get("SIMPLE_SEED")
+    if from_env == nil or from_env == "":
+        return "src/compiler_rust/target/bootstrap/simple"
+    return from_env
+
+fn closure_lines(module_path: text) -> [text]:
+    """Return every `deps fast` stdout line that names a repo source file."""
+    val seed = seed_path()
+    val (out, _err, _code) = process_run(seed, ["deps", "fast", module_path])
+    var kept: [text] = []
+    for line in out.split("\n"):
+        if line.contains("src/"):
+            kept.push(line.trim())
+    return kept
+
+fn closure_mentions(lines: [text], prefix: text) -> bool:
+    """True when any closure line names a file under the given path prefix."""
+    for line in lines:
+        if line.contains(prefix):
+            return true
+    return false
+
+describe "ordinary async TUI route import closure":
+
+    it "reaches no compositor driver kernel or skia module":
+        # @req REQ-UI-SLIM-004
+        # @capture(statistics): per-prefix hit counts over the ordinary route closure
+        step("confirm the diagnostic seed binary is present")
+        val seed = seed_path()
+        expect(file_exists(seed)).to_equal(true)  # oracle: SIMPLE_SEED (or the default src/compiler_rust/target/bootstrap/simple) must exist; this spec never skips
+
+        step("print the static import closure of the ordinary async TUI route")
+        val lines = closure_lines(ORDINARY_ROUTE)
+
+        step("prove the scan is non-vacuous before asserting absence")
+        expect(closure_mentions(lines, ORDINARY_ROUTE)).to_equal(true)  # oracle: deps fast echoes the queried module, so a zero-output run cannot pass
+        expect(closure_mentions(lines, "Direct imports:")).to_equal(false)  # oracle: the counted lines are file paths, not the header's import tally
+        expect(lines.len()).to_be_greater_than(4)  # oracle: the ordinary route still resolves the channel/thread/io_runtime chain; a run printing fewer than 5 src/ lines scanned nothing
+
+        step("assert every forbidden heavy-subsystem prefix is absent")
+        expect(closure_mentions(lines, "src/os/compositor")).to_equal(false)  # oracle: host compositor belongs to the shared-WM route only
+        expect(closure_mentions(lines, "src/os/drivers")).to_equal(false)  # oracle: GPU/input drivers arrive only via the compositor edge
+        expect(closure_mentions(lines, "src/os/kernel")).to_equal(false)  # oracle: kernel modules arrive only via the compositor edge
+        expect(closure_mentions(lines, "src/lib/skia")).to_equal(false)  # oracle: Skia is a GUI rasteriser, never needed by a terminal UI
+        expect(closure_mentions(lines, "src/lib/gc_async_mut/gpu")).to_equal(false)  # oracle: GPU tier arrives only via the compositor edge
+
+    it "still reaches the compositor from the shared WM route module":
+        # @req REQ-UI-SLIM-009
+        # @capture(statistics): control closure proving the scan detects a real compositor edge
+        step("confirm the diagnostic seed binary is present")
+        val seed = seed_path()
+        expect(file_exists(seed)).to_equal(true)  # oracle: same seed precondition as scenario 1
+
+        step("print the static import closure of the shared WM route module")
+        val lines = closure_lines(SHARED_WM_ROUTE)
+
+        step("assert the shared WM feature was preserved, not deleted")
+        expect(lines.len()).to_be_greater_than(4)  # oracle: same non-vacuity floor as scenario 1
+        expect(closure_mentions(lines, SHARED_WM_ROUTE)).to_equal(true)  # oracle: the shared-WM route module must still exist and be resolvable
+        expect(closure_mentions(lines, "src/os/compositor")).to_equal(true)  # oracle: loading less must never remove a feature -- the shared-WM route keeps its host compositor edge
