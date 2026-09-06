@@ -71,3 +71,17 @@ For each spec, a maintainer must choose:
 No product code or spec changes were made in this lane (out of scope per lane brief — import
 lines were correct; the missing piece is product-side symbol definitions, not a stale import).
 Both specs remain RED.
+
+## Addendum 2026-09-06 — third spec, same class
+
+`test/01_unit/lib/common/debug/evidence_bundle_writer_v1_spec.spl` (4 examples) imports
+`std.common.debug.evidence_bundle_writer_v1`, which is absent from `src/lib/common/debug/`
+on every ancestor of the PR tip. `git log --all --diff-filter=A` finds the module only in
+`a8244005f9b` ("chore: merge all share-history worktree branches into main"), which is
+NOT an ancestor of main — an orphaned sweep. The spec itself entered main in the same
+sweep as the other two (`e274cd33719`, 2026-08-27). Seed verdict on the PR tip:
+`outcome=ERROR declared>=4 executed=0` ("Cannot resolve module"). Left RED; a `# TODO`
+at its line 1 carries the pointer into `todo_db.sdn`. The landed writer is
+`src/app/cli_debug/evidence_write_v1.spl` (app layer, per the design's runtime-boundary
+decision); whether the orphaned lib-layer writer holds anything worth porting is an open
+question, not a fix.
