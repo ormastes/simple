@@ -1,0 +1,343 @@
+#!/bin/sh
+# check-dual-fs-effect-compare.shs — fail-closed gate for the switchable
+# pure-Simple <-> native file I/O wrapper and its differential effect
+# comparison (src/lib/nogc_sync_mut/dual_fs/__init__.spl, compared via
+# std.common.spec.dual_run's FsEffect / dual_check_fs_effect).
+#
+# WHY THIS EXISTS
+# ---------------
+# scripts/check/check-dual-run-shadow.shs is the value-comparing sibling of
+# this gate and cannot cover the case below. `std.file_system.file_write_text`
+# (src/lib/nogc_sync_mut/file_system/file_ops.spl:60, and the identical
+# nogc_async_mut twin at :59) validates its arguments and evaluates `true`
+# while performing no I/O. Measured on this tree:
+#
+#     returned=true exists=false size=-1
+#
+# A return-value comparison AGREES on that: both sides return `true`. Hours
+# were lost to a receipt that was never written while every checkpoint
+# reported success. The acceptance spec this gate runs asserts BOTH halves —
+# that dual_check_bool agrees, and that dual_check_fs_effect diverges naming
+# `exists` and `size` — so the gate proves the harness adds the missing axis
+# rather than merely that some spec is green.
+#
+# WHAT MAKES THIS BITE
+# --------------------
+# Running the spec is not enough on its own: a spec can be gutted to trivially
+# true assertions and stay green forever. So the gate ALSO requires the
+# discriminating assertions to still be present in the spec source. Fixture
+# (d) of the selftest proves a gutted spec is caught.
+#
+# OUTPUT CONTRACT (matches sibling scripts/check/*.shs gates) — the verdict is
+# the LAST line of stdout:
+#     PASS  — <n> check(s) run, <m> spec case(s), 0 undetected divergence(s)   exit 0
+#     FAIL  — ...                                                              exit 1
+#     ERROR — nothing was checked (<reason>)                                   exit 2
+# 0 checks or 0 spec cases is ERROR, never a pass. A missing `bin/simple` is
+# ERROR, never a pass: absence of a runner is absence of evidence.
+# `--selftest` runs before every scan and is fatal.
+#
+# The `simple test` exit status is read into a variable on the line right
+# after the invocation, never through a pipe — a pipeline's $? is the last
+# stage's status, which has produced false greens in this repo before.
+
+set -u
+
+REPO_ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+SPEC_DEFAULT="test/01_unit/lib/dual_fs/dual_fs_effect_compare_spec.spl"
+WRAPPER_DEFAULT="src/lib/nogc_sync_mut/dual_fs/__init__.spl"
+SIMPLE_BIN_DEFAULT="bin/simple"
+
+GREP=grep
+[ -x /usr/bin/grep ] && GREP=/usr/bin/grep
+
+usage() {
+    echo "usage: $0 [--spec PATH] [--wrapper PATH] [--simple-bin PATH] [--no-run] [--selftest-only]"
+}
+
+# --no-run exists for one honest reason: CI runners in this repo have no
+# deployed `bin/simple` (see .claude/rules/vcs.md on the guards that are
+# advisory for exactly that reason). Rather than let this gate ERROR on every
+# CI run — which would either block every PR or be routed around — --no-run
+# performs every check that does NOT need a runner: the selftest, the
+# switch-default check, and the spec-assertion check. Those are the checks
+# that catch a gutted spec and a drifted default, which is the decay mode a
+# static gate can actually see. It is NOT a substitute for the spec run, and
+# it says so in its own verdict text so a --no-run PASS can never be read as
+# "the differential comparison was exercised".
+
+# ---------------------------------------------------------------------------
+# run_spec <bin> <spec>
+#   Echoes "<rc> <total> <passed> <failed>" (numbers 0 when unparsed).
+# ---------------------------------------------------------------------------
+run_spec() {
+    rs_bin=$1
+    rs_spec=$2
+    rs_out=$(mktemp)
+
+    "$rs_bin" test "$rs_spec" >"$rs_out" 2>&1
+    rs_rc=$?
+
+    rs_line=$($GREP -a '^Results:' "$rs_out" | tail -1)
+    rs_total=$(echo "$rs_line" | sed -n 's/^Results: \([0-9]*\) total.*/\1/p')
+    rs_passed=$(echo "$rs_line" | sed -n 's/.*, \([0-9]*\) passed.*/\1/p')
+    rs_failed=$(echo "$rs_line" | sed -n 's/.*, \([0-9]*\) failed.*/\1/p')
+    [ -z "$rs_total" ] && rs_total=0
+    [ -z "$rs_passed" ] && rs_passed=0
+    [ -z "$rs_failed" ] && rs_failed=0
+
+    rm -f "$rs_out"
+    echo "$rs_rc $rs_total $rs_passed $rs_failed"
+}
+
+# ---------------------------------------------------------------------------
+# missing_assertions <spec>
+#   Prints one required-but-absent assertion tag per line. Empty output means
+#   the spec still carries every discriminating assertion. These are the exact
+#   claims that make the spec evidence rather than decoration:
+#     - the effect comparison must FAIL on the planted divergence
+#     - it must NAME `exists` and `size`
+#     - the return-value comparison must AGREE on the same case
+#     - the default provider must still be `native`
+# ---------------------------------------------------------------------------
+missing_assertions() {
+    ma_spec=$1
+    [ -f "$ma_spec" ] || { echo "SPEC_ABSENT"; return 0; }
+    $GREP -q 'assert_false(verdict.agree)' "$ma_spec"                    || echo "effect_divergence_asserted"
+    $GREP -q 'exists=false/true' "$ma_spec"                              || echo "exists_field_named"
+    $GREP -q 'size=-1/13' "$ma_spec"                                     || echo "size_field_named"
+    $GREP -q 'assert_true(value_verdict.agree)' "$ma_spec"               || echo "value_comparison_blindness"
+    $GREP -q 'assert_equal(fs_provider(), FS_PROVIDER_NATIVE)' "$ma_spec" || echo "default_provider_unchanged"
+}
+
+# ---------------------------------------------------------------------------
+# wrapper_defaults_native <wrapper>
+#   The switch must fall back to the native provider for anything that is not
+#   an explicit opt-in. A wrapper whose default drifted would silently change
+#   behaviour for every existing caller, which is the one thing this layer
+#   promised not to do.
+# ---------------------------------------------------------------------------
+wrapper_defaults_native() {
+    wd_path=$1
+    [ -f "$wd_path" ] || return 1
+    $GREP -q 'FS_PROVIDER_NATIVE' "$wd_path" || return 1
+    # The last statement of fs_provider() is the fallback.
+    wd_tail=$(sed -n '/^pub fn fs_provider() -> text:/,/^$/p' "$wd_path" \
+        | $GREP -v '^\s*#' | $GREP -v '^\s*$' | tail -1 | tr -d ' ')
+    [ "$wd_tail" = "FS_PROVIDER_NATIVE" ]
+}
+
+# ---------------------------------------------------------------------------
+# Self-test. Fatal — a gate that cannot prove it bites is not evidence.
+# Stub `simple` binaries + fixture files, so this costs milliseconds.
+# ---------------------------------------------------------------------------
+selftest() {
+    st_dir=$(mktemp -d)
+    st_fail=0
+    st_n=0
+
+    # (a) healthy agreeing run -> clean-pass-shaped
+    cat >"$st_dir/healthy" <<'STUB'
+#!/bin/sh
+echo "Results: 6 total, 6 passed, 0 failed"
+exit 0
+STUB
+    chmod +x "$st_dir/healthy"
+    echo 'describe "x":' >"$st_dir/spec.spl"
+    st_r=$(run_spec "$st_dir/healthy" "$st_dir/spec.spl")
+    st_n=$((st_n + 1))
+    if [ "$(echo "$st_r" | cut -d' ' -f4)" != "0" ] || [ "$(echo "$st_r" | cut -d' ' -f2)" -le 0 ]; then
+        echo "selftest: FAILED — healthy fixture not read as clean-pass-shaped"
+        st_fail=1
+    fi
+
+    # (b) a real spec failure is caught
+    cat >"$st_dir/red" <<'STUB'
+#!/bin/sh
+echo "Results: 6 total, 5 passed, 1 failed"
+exit 1
+STUB
+    chmod +x "$st_dir/red"
+    st_r=$(run_spec "$st_dir/red" "$st_dir/spec.spl")
+    st_n=$((st_n + 1))
+    if [ "$(echo "$st_r" | cut -d' ' -f4)" -le 0 ]; then
+        echo "selftest: FAILED — red fixture was not caught as a failure"
+        st_fail=1
+    fi
+
+    # (c) vacuous run (no Results line) -> total==0 so the caller must ERROR
+    cat >"$st_dir/vacuous" <<'STUB'
+#!/bin/sh
+echo "no test summary printed"
+exit 0
+STUB
+    chmod +x "$st_dir/vacuous"
+    st_r=$(run_spec "$st_dir/vacuous" "$st_dir/spec.spl")
+    st_n=$((st_n + 1))
+    if [ "$(echo "$st_r" | cut -d' ' -f2)" -ne 0 ]; then
+        echo "selftest: FAILED — vacuous fixture was not read as 0 total"
+        st_fail=1
+    fi
+
+    # (d) THE FIXTURE THAT MATTERS: a spec gutted to trivially-true assertions
+    #     is green, and must still be caught. Without this, the gate would
+    #     certify a harness that had stopped comparing anything.
+    cat >"$st_dir/gutted_spec.spl" <<'GUTTED'
+describe "gutted":
+    it "passes without asserting anything":
+        assert_true(true)
+GUTTED
+    st_missing=$(missing_assertions "$st_dir/gutted_spec.spl" | wc -l | tr -d ' ')
+    st_n=$((st_n + 1))
+    if [ "$st_missing" -ne 5 ]; then
+        echo "selftest: FAILED — gutted spec reported $st_missing missing assertion(s), expected 5"
+        st_fail=1
+    fi
+
+    # (e) an absent spec is not silently a pass
+    st_absent=$(missing_assertions "$st_dir/does_not_exist.spl")
+    st_n=$((st_n + 1))
+    if [ "$st_absent" != "SPEC_ABSENT" ]; then
+        echo "selftest: FAILED — absent spec was not reported as SPEC_ABSENT"
+        st_fail=1
+    fi
+
+    # (f) a wrapper whose switch defaults to something other than native
+    #     must be rejected: that would change behaviour for callers who never
+    #     opted in, which is the exact promise this layer makes.
+    cat >"$st_dir/bad_wrapper.spl" <<'BAD'
+pub val FS_PROVIDER_NATIVE: text = "native"
+pub fn fs_provider() -> text:
+    FS_PROVIDER_PURE
+
+BAD
+    st_n=$((st_n + 1))
+    if wrapper_defaults_native "$st_dir/bad_wrapper.spl"; then
+        echo "selftest: FAILED — a wrapper defaulting to pure was accepted"
+        st_fail=1
+    fi
+
+    # (g) ...and the honest shape is accepted, so (f) is not vacuously true.
+    cat >"$st_dir/good_wrapper.spl" <<'GOOD'
+pub val FS_PROVIDER_NATIVE: text = "native"
+pub fn fs_provider() -> text:
+    if raw == FS_PROVIDER_PURE:
+        return FS_PROVIDER_PURE
+    # a comment line must not be read as the fallback
+    FS_PROVIDER_NATIVE
+
+GOOD
+    st_n=$((st_n + 1))
+    if ! wrapper_defaults_native "$st_dir/good_wrapper.spl"; then
+        echo "selftest: FAILED — the honest wrapper shape was rejected"
+        st_fail=1
+    fi
+
+    rm -rf "$st_dir"
+
+    if [ "$st_fail" -ne 0 ]; then
+        echo "ERROR — nothing was checked (selftest failed)"
+        exit 2
+    fi
+    echo "selftest: $st_n fixture(s) passed"
+    SELFTEST_N=$st_n
+}
+
+# ---------------------------------------------------------------------------
+
+SPEC=$SPEC_DEFAULT
+WRAPPER=$WRAPPER_DEFAULT
+SIMPLE_BIN=$SIMPLE_BIN_DEFAULT
+SELFTEST_ONLY=0
+NO_RUN=0
+SELFTEST_N=0
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --spec)          SPEC=$2; shift 2 ;;
+        --wrapper)       WRAPPER=$2; shift 2 ;;
+        --simple-bin)    SIMPLE_BIN=$2; shift 2 ;;
+        --no-run)        NO_RUN=1; shift ;;
+        --selftest-only) SELFTEST_ONLY=1; shift ;;
+        -h|--help)       usage; exit 0 ;;
+        *) echo "unknown argument: $1"; usage; echo "ERROR — nothing was checked (bad argument)"; exit 2 ;;
+    esac
+done
+
+selftest
+
+if [ "$SELFTEST_ONLY" -eq 1 ]; then
+    echo "PASS — $SELFTEST_N fixture(s) checked, selftest only, no real spec run"
+    exit 0
+fi
+
+cd "$REPO_ROOT" || { echo "ERROR — nothing was checked (repo root unreachable)"; exit 2; }
+
+CHECKS=$SELFTEST_N
+OFFENDERS=""
+
+# --- 1. the wrapper's switch still defaults to today's behaviour -----------
+if [ ! -f "$WRAPPER" ]; then
+    echo "ERROR — nothing was checked (wrapper missing: $WRAPPER)"
+    exit 2
+fi
+CHECKS=$((CHECKS + 1))
+if ! wrapper_defaults_native "$WRAPPER"; then
+    OFFENDERS="$OFFENDERS switch-default-not-native"
+fi
+
+# --- 2. the spec still carries its discriminating assertions ---------------
+MISSING=$(missing_assertions "$SPEC")
+CHECKS=$((CHECKS + 1))
+if [ -n "$MISSING" ]; then
+    for m in $MISSING; do
+        OFFENDERS="$OFFENDERS spec-assertion-missing:$m"
+    done
+fi
+
+# --- 3. the spec actually runs green ---------------------------------------
+if [ "$NO_RUN" -eq 1 ]; then
+    if [ -n "$OFFENDERS" ]; then
+        echo "FAIL — $CHECKS check(s) run, spec NOT executed (--no-run),$OFFENDERS"
+        exit 1
+    fi
+    echo "PASS — $CHECKS static check(s) run, spec NOT executed (--no-run: no runner on this host; the differential comparison was NOT exercised)"
+    exit 0
+fi
+
+if [ ! -x "$SIMPLE_BIN" ]; then
+    # Absence of a runner is absence of evidence, never a pass.
+    echo "ERROR — nothing was checked (no runnable $SIMPLE_BIN; run scripts/setup/setup.shs)"
+    exit 2
+fi
+
+R=$(run_spec "$SIMPLE_BIN" "$SPEC")
+RC=$(echo "$R" | cut -d' ' -f1)
+TOTAL=$(echo "$R" | cut -d' ' -f2)
+FAILED=$(echo "$R" | cut -d' ' -f4)
+CHECKS=$((CHECKS + 1))
+
+if [ "$TOTAL" -eq 0 ]; then
+    echo "ERROR — nothing was checked (spec produced no Results line: $SPEC)"
+    exit 2
+fi
+if [ "$FAILED" -ne 0 ] || [ "$RC" -ne 0 ]; then
+    OFFENDERS="$OFFENDERS spec-red:$SPEC(rc=$RC,failed=$FAILED)"
+fi
+
+# --- census (informational, never a verdict) -------------------------------
+# The root risk this whole lane exists for: the registry is keyed on NAME
+# ALONE, so N definitions of one operation coexist and the winner is not
+# always the intended one. Reported so the number is visible, not gated —
+# repairing it is the migration plan's job, not this gate's.
+DEFS=$($GREP -rc 'fn file_write_text' src/lib --include='*.spl' 2>/dev/null \
+    | $GREP -v ':0$' | wc -l | tr -d ' ')
+echo "census: $DEFS file(s) under src/lib define file_write_text (flat registry keyed on name alone)"
+
+if [ -n "$OFFENDERS" ]; then
+    echo "FAIL — $CHECKS check(s) run, $TOTAL spec case(s),$OFFENDERS"
+    exit 1
+fi
+
+echo "PASS — $CHECKS check(s) run, $TOTAL spec case(s), 0 undetected divergence(s)"
+exit 0

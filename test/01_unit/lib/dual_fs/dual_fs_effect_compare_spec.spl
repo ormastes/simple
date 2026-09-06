@@ -1,0 +1,163 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-LIB
+# plan: doc/03_plan/runtime/native_to_pure_simple/native_surface_to_pure_simple_migration.md
+#
+# Acceptance for the switchable pure-Simple <-> native file I/O wrapper
+# (src/lib/nogc_sync_mut/dual_fs/__init__.spl).
+#
+# THE INCIDENT THIS REPLAYS
+# -------------------------
+# `std.file_system.file_write_text` (src/lib/nogc_sync_mut/file_system/
+# file_ops.spl:60, and the identical nogc_async_mut twin at :59) validates its
+# arguments and evaluates `true` while performing NO I/O. Measured on this
+# tree: `returned=true exists=false size=-1`. Every checkpoint reported
+# success and no receipt was ever written.
+#
+# The discriminating fact, asserted below: a RETURN-VALUE comparison
+# (`dual_check_bool`, the existing std.common.spec.dual_run vocabulary and
+# what scripts/check/check-dual-run-shadow.shs compares) AGREES on that case,
+# because both sides return `true`. Only the EFFECT comparison catches it.
+# A spec that merely showed the effect comparison failing would not prove the
+# harness adds anything; the pair of assertions is the evidence.
+#
+# NO ANNOTATION LIE: the pair is annotated at mode=effect-compare and writes
+# no dual_run ledger rows, so check-dual-run-shadow.shs reads it through the
+# spec's Results line exactly as it reads the mode=value-legacy tranches.
+#
+# @dual_pair: fs_write_text_effect_vs_native mode=effect-compare ref=rt_file_write_text cand=std.dual_fs.fs_write_text_pure
+
+use std.spec.step
+
+use std.spec.{describe, it, assert_true, assert_false, assert_equal}
+use std.common.spec.dual_run.{FsEffect, dual_check_fs_effect, dual_check_bool, dual_summarize, fs_effect_diff_fields}
+use std.dual_fs.{
+    fs_provider,
+    FS_PROVIDER_NATIVE,
+    dual_fs_write_text,
+    dual_fs_read_text,
+    dual_fs_write_text_diff,
+    fs_write_text_native,
+    fs_write_text_pure,
+    probe_effect,
+    scrub,
+    ensure_dir,
+}
+
+# The planted divergence. This is a byte-for-byte restatement of the shape of
+# src/lib/nogc_sync_mut/file_system/file_ops.spl:60 — argument validation, then
+# success, then nothing. It is planted rather than imported so the spec keeps
+# asserting the harness's discrimination even after that mock is repaired.
+fn stub_write_returns_true_without_writing(path: text, content: text) -> bool:
+    if path == "":
+        return false
+    true
+
+# The sandbox directory is created EXPLICITLY, never by leaning on a writer's
+# own parent-directory retry. Whether that retry runs is one of the things
+# under test, and on this tree it demonstrably does not:
+# doc/08_tracking/bug/io_runtime_file_write_resolves_to_retryless_twin_2026-09-06.md
+# records `use std.io_runtime.{file_write}` resolving to a same-signature
+# definition with no retry, so a fixture that depended on it would be
+# measuring its own setup.
+fn sandbox(name: text) -> text:
+    ensure_dir("build/dual_fs")
+    "build/dual_fs/{name}"
+
+describe "dual_fs — switchable pure/native file I/O with effect comparison":
+
+    # @manual scenario evidence
+    it "defaults to today's behaviour when the switch is unset":
+        # @req REQ-SSPEC-LIB
+        step("SIMPLE_FS_PROVIDER unset resolves to the native provider")
+        # The gate runs this spec with the switch unset, which is how every
+        # existing caller runs. If this ever reports anything but `native`, the
+        # wrapper has changed behaviour for callers who never opted in.
+        assert_equal(fs_provider(), FS_PROVIDER_NATIVE)
+
+    # @manual scenario evidence
+    it "the wrapper really writes through the default provider":
+        # @req REQ-SSPEC-LIB
+        step("dual_fs_write_text with the switch unset produces a real file")
+        val p = sandbox("default_provider.out")
+        scrub(p)
+        val returned = dual_fs_write_text(p, "wrapper-bytes")
+        val effect = probe_effect(p, returned, "")
+        assert_true(effect.returned)
+        assert_true(effect.exists)
+        assert_equal(effect.size, 13)
+        assert_equal(dual_fs_read_text(p), "wrapper-bytes")
+
+    # @manual scenario evidence
+    it "the probe distinguishes an absent file from an empty one":
+        # @req REQ-SSPEC-LIB
+        step("absent is size=-1, an existing empty file is size=0")
+        # Load-bearing, not a detail: if absent and empty both probed as 0, a
+        # writer that creates nothing and a writer that truncates to zero would
+        # compare EQUAL, and the whole harness would be blind again.
+        val absent = sandbox("never_created.out")
+        scrub(absent)
+        val ea = probe_effect(absent, true, "")
+        assert_false(ea.exists)
+        assert_equal(ea.size, -1)
+
+        val empty = sandbox("empty.out")
+        scrub(empty)
+        fs_write_text_native(empty, "")
+        val ee = probe_effect(empty, true, "")
+        assert_true(ee.exists)
+        assert_equal(ee.size, 0)
+        assert_true(fs_effect_diff_fields(ea, ee) != "")
+
+    # @manual scenario evidence
+    it "return-value comparison AGREES on a write that never wrote":
+        # @req REQ-SSPEC-LIB
+        step("dual_check_bool cannot see the mock — this is the blind spot")
+        val p = sandbox("value_blind.out")
+        scrub(p)
+        val stub_returned = stub_write_returns_true_without_writing(p, "receipt-bytes")
+        val native_returned = fs_write_text_native(sandbox("value_blind_native.out"), "receipt-bytes")
+        val value_verdict = dual_check_bool("write_text", stub_returned, native_returned)
+        # Both `true`. The existing return-value vocabulary certifies agreement
+        # for an operation that produced no file at all.
+        assert_true(value_verdict.agree)
+        assert_false(probe_effect(p, stub_returned, "").exists)
+
+    # @manual scenario evidence
+    it "effect comparison FAILS on the same write, naming the diverged fields":
+        # @req REQ-SSPEC-LIB
+        step("planted divergence: success return, no bytes on disk")
+        val verdict = dual_fs_write_text_diff(
+            "file_write_text",
+            sandbox("planted_a.out"),
+            sandbox("planted_b.out"),
+            "receipt-bytes",
+            stub_write_returns_true_without_writing,
+            fs_write_text_native)
+        assert_false(verdict.agree)
+        # The report must NAME the observable, not just say "diverged" — the
+        # named field is what turns a red gate into a diagnosis.
+        assert_true(verdict.pair_name.contains("exists=false/true"))
+        assert_true(verdict.pair_name.contains("size=-1/13"))
+        # And the return value is NOT among the diverged fields: both sides
+        # returned true. That absence is the incident, stated as an assertion.
+        assert_false(verdict.pair_name.contains("returned="))
+
+    # @manual scenario evidence
+    it "the pure-Simple and native providers agree on effects":
+        # @req REQ-SSPEC-LIB
+        step("native vs pure twin equivalence over the same content")
+        val contents = ["", "a", "twin-bytes", "line1\nline2\n", "naïve 日本語"]
+        var verdicts = [dual_check_fs_effect("seed", FsEffect(returned: true, err: "", exists: true, size: 0, digest: "", mode: 0), FsEffect(returned: true, err: "", exists: true, size: 0, digest: "", mode: 0))]
+        var i = 0
+        while i < contents.len():
+            verdicts = verdicts.push(dual_fs_write_text_diff(
+                "native_vs_pure[{i}]",
+                sandbox("twin_a_{i}.out"),
+                sandbox("twin_b_{i}.out"),
+                contents[i],
+                fs_write_text_native,
+                fs_write_text_pure))
+            i = i + 1
+        val summary = dual_summarize(verdicts)
+        assert_equal(summary.divergent, 0)
+        assert_true(summary.total > 5)

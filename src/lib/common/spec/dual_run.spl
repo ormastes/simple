@@ -110,6 +110,79 @@ pub fn dual_check_bytes(name: text, simple_result: [i64], oracle_result: [i64]) 
         oracle_repr: "len={oracle_result.len()}",
     )
 
+# ---------------------------------------------------------------------------
+# EFFECT comparison (added 2026-09-06, lane C).
+#
+# Every dual_check_* above compares a RETURN VALUE. That is exactly the blind
+# spot that let two incidents run for hours:
+#
+#   * `std.file_system.file_write_text` (src/lib/nogc_sync_mut/file_system/
+#     file_ops.spl:60 and the nogc_async_mut twin at :59) is a MOCK — it
+#     validates its arguments and then evaluates `true`, performing no I/O.
+#     Reproduced on this tree: `returned=true exists=false size=-1`.
+#   * An unregistered extern returns nil instead of failing
+#     (doc/08_tracking/bug/unregistered_extern_silent_nil_2026-08-01.md).
+#
+# `dual_check_bool("write", mock_result, native_result)` AGREES on that mock:
+# both sides return `true`. The divergence is not in the value, it is in the
+# world. So an effect pair carries an observation of the FILESYSTEM taken
+# AFTER the call, and the comparison is field-wise so the report can name
+# which observable actually differed.
+#
+# FsEffect is deliberately a plain record of already-observed facts: this
+# module is `common/` (pure), so it never performs the observation itself.
+# The probe that fills it lives in std.dual_fs (FFI), and MUST read the world
+# through raw runtime externs rather than through either implementation under
+# test — a mocked reader would otherwise corroborate a mocked writer.
+struct FsEffect:
+    returned: bool      # what the operation under test returned
+    err: text           # error signal, "" when none
+    exists: bool        # does the path exist afterwards
+    size: i64           # byte length afterwards, -1 when absent
+    digest: text        # content digest afterwards, "" when absent
+    mode: i64           # permission bits afterwards, -1 when absent
+
+pub fn fs_effect_repr(e: FsEffect) -> text:
+    val r = if e.returned: "true" else: "false"
+    val x = if e.exists: "true" else: "false"
+    "returned={r} err='{e.err}' exists={x} size={e.size} digest={e.digest} mode={e.mode}"
+
+# Field-wise comparison. Returns "" on agreement, otherwise a text naming
+# EVERY field that differed with both sides' values. Naming the field is the
+# whole point: "DIVERGE write_text" is not actionable, but
+# "exists=false/true size=0/13" says immediately that one side did not write.
+pub fn fs_effect_diff_fields(a: FsEffect, b: FsEffect) -> text:
+    var diff = ""
+    if a.returned != b.returned:
+        val ar = if a.returned: "true" else: "false"
+        val br = if b.returned: "true" else: "false"
+        diff = diff + " returned={ar}/{br}"
+    if a.err != b.err:
+        diff = diff + " err='{a.err}'/'{b.err}'"
+    if a.exists != b.exists:
+        val ax = if a.exists: "true" else: "false"
+        val bx = if b.exists: "true" else: "false"
+        diff = diff + " exists={ax}/{bx}"
+    if a.size != b.size:
+        diff = diff + " size={a.size}/{b.size}"
+    if a.digest != b.digest:
+        diff = diff + " digest={a.digest}/{b.digest}"
+    if a.mode != b.mode:
+        diff = diff + " mode={a.mode}/{b.mode}"
+    diff
+
+# Effect pairs reuse DualVerdict so they aggregate through dual_summarize and
+# report through dual_verdict_report exactly like every value pair — one
+# ledger, one summary, one verdict convention.
+pub fn dual_check_fs_effect(name: text, simple_effect: FsEffect, oracle_effect: FsEffect) -> DualVerdict:
+    val diff = fs_effect_diff_fields(simple_effect, oracle_effect)
+    DualVerdict(
+        pair_name: if diff == "": name else: "{name} [diverged:{diff} ]",
+        agree: diff == "",
+        simple_repr: fs_effect_repr(simple_effect),
+        oracle_repr: fs_effect_repr(oracle_effect),
+    )
+
 struct DualSummary:
     total: i64
     divergent: i64
