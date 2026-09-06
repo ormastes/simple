@@ -99,10 +99,9 @@ impl Lowerer {
                 // TypeId::ANY branch of `get_field_info`). Count breaks ties
                 // between candidates that agree on the index, which produce
                 // an identical byte offset either way.
-                if best_global
-                    .as_ref()
-                    .is_some_and(|(best_idx, _, best_count, _)| idx > *best_idx || (idx == *best_idx && count <= *best_count))
-                {
+                if best_global.as_ref().is_some_and(|(best_idx, _, best_count, _)| {
+                    idx > *best_idx || (idx == *best_idx && count <= *best_count)
+                }) {
                     continue;
                 }
                 best_global = Some((idx, field_type.clone(), count, struct_name.clone()));
@@ -956,11 +955,11 @@ impl Lowerer {
                                         if fname == field {
                                             let count = fields.len();
                                             // Smallest index wins -- memory-safe, see
-                                    // the proof on the TypeId::ANY branch.
-                                    if best
-                                        .as_ref()
-                                        .is_none_or(|(i, _, c)| idx < *i || (idx == *i && count > *c))
-                                    {
+                                            // the proof on the TypeId::ANY branch.
+                                            if best
+                                                .as_ref()
+                                                .is_none_or(|(i, _, c)| idx < *i || (idx == *i && count > *c))
+                                            {
                                                 best = Some((idx, *fty, count));
                                             }
                                         }
@@ -971,11 +970,11 @@ impl Lowerer {
                                         if f.name == field {
                                             let count = fields.len();
                                             // Smallest index wins -- memory-safe, see
-                                    // the proof on the TypeId::ANY branch.
-                                    if best
-                                        .as_ref()
-                                        .is_none_or(|(i, _, c)| idx < *i || (idx == *i && count > *c))
-                                    {
+                                            // the proof on the TypeId::ANY branch.
+                                            if best
+                                                .as_ref()
+                                                .is_none_or(|(i, _, c)| idx < *i || (idx == *i && count > *c))
+                                            {
                                                 best = Some((idx, f.ty, count));
                                             }
                                         }

@@ -155,8 +155,8 @@ mod tests {
     use cranelift_module::Linkage;
 
     use super::{
-        boxed_text_arg_indices, linkage_is_defined_local, sffi_alias_target,
-        sffi_alias_target_shadowed, text_arg_indices,
+        boxed_text_arg_indices, linkage_is_defined_local, sffi_alias_target, sffi_alias_target_shadowed,
+        text_arg_indices,
     };
 
     /// doc/08_tracking/bug/module_fn_shadowed_by_builtin_name_2026-08-21.md:
