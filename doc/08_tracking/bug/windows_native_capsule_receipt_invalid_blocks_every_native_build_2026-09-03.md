@@ -67,3 +67,61 @@ a path component while the raw cache key always contains one.
 a running `simple_mcp_server.exe` on Windows still requires this wall to come
 down. The interpreted MCP server (`bin/simple run src/app/mcp/main.spl`) is
 unaffected and continues to answer real MCP protocol.
+
+## NOT Windows-specific — reproduced on aarch64 Linux (2026-09-06)
+
+The title and scope above name Windows. The same verdict reproduces on this
+aarch64 Linux host with the Rust seed
+(`bin/release/aarch64-unknown-linux-gnu/simple`), at `4699194f81e`, on the
+gate's own in-tree fixture:
+
+```
+simple native-build --backend cranelift --runtime-bundle core-c-bootstrap \
+  --entry-closure --mode one-binary --threads 1 --cache-dir <tmp> \
+  --entry scripts/check/cert/redeploy_gate/fixtures/hello_world.spl --output <tmp>/hw.bin
+-> rc=1
+   [cranelift-direct] emit /tmp/simple_cranelift_scripts.check.cert.redeploy_gate.fixtures.hello_world.o
+   ERROR: 1 unit(s)
+     - scripts.check.cert.redeploy_gate.fixtures.hello_world
+         reason: native-capsule-receipt-invalid:scripts.check.cert.redeploy_gate.fixtures.hello_world
+```
+
+Same shape as the Windows bare-invocation row: codegen completes and the object
+file is emitted, then `driver_native_capsule_result_v1_valid`
+(`80.driver/driver_aot_native_output.spl:365-376`) rejects the receipt. Dropping
+`--entry-closure`, and building an out-of-tree `/tmp` fixture, both give the
+identical verdict. So the backend is not the variable either — Windows was LLVM,
+this is cranelift-direct.
+
+**Not a shared-`/tmp` race, ruled out by measurement.** The emitted object is
+`/tmp/simple_cranelift_<module>.o` — module name only, no pid or session
+component — so on a multi-session box a concurrent build of the same fixture
+could plausibly overwrite it between emit and the fingerprint check. It does
+not: the first reproduction on this host used an out-of-tree `/tmp` fixture
+whose module name (`.tmp.claude_1000._home_yoon_dev_simple.<session-uuid>.
+scratchpad.hw.hw`) is unique to one session, hence a unique object path, and it
+failed with `native-capsule-receipt-invalid` identically.
+
+This is what `scripts/check/check-stage2-hello-world-native-build.shs` fails on
+when the candidate is the **Rust seed** on this host:
+
+```
+FAIL — 2 case(s) checked, simple:entry-form:fail(build exited 1)
+```
+
+Scope that verdict carefully — it is candidate-specific, not tree-specific:
+
+- Seed candidate (`bin/simple`): FAIL, cause `native-capsule-receipt-invalid`.
+  Identical before and after the unrelated `llm_caret` hyphen-duplicate cleanup
+  of 2026-09-06.
+- Stage-2 candidate
+  (`build/bootstrap/stage2/aarch64-unknown-linux-gnu/simple`): **PASS — 2
+  case(s) checked**, on the cleaned tree *and* on the still-uncleaned main
+  worktree.
+
+So this gate is not evidence about the hyphen/underscore collision in either
+direction. That defect only fires on the `--entry` form without
+`--entry-closure`, which this gate never uses; its guard is in
+`80.driver/driver_source_loading.spl:253` and emits a wholly different message,
+which appears **zero** times in any build log on this host. See
+`native_build_blocked_by_hyphen_underscore_module_collisions_2026-07-28.md`.
