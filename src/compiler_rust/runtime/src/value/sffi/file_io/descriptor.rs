@@ -231,3 +231,60 @@ mod tests {
         }
     }
 }
+
+/// Positioned read into a caller-owned buffer (exact `pread(2)` alias).
+///
+/// Returns the byte count read (0 at end of file), or `-errno` on failure —
+/// the io_uring completion convention, chosen over `-1` + thread errno because
+/// an interpreted caller cannot read errno before it is clobbered.
+#[no_mangle]
+pub unsafe extern "C" fn rt_fd_pread(fd: i32, buffer: *mut u8, len: i64, offset: i64) -> i64 {
+    #[cfg(unix)]
+    {
+        if buffer.is_null() || len < 0 || offset < 0 {
+            return -(libc::EINVAL as i64);
+        }
+        let n = libc::pread(fd, buffer as *mut libc::c_void, len as usize, offset as libc::off_t);
+        if n < 0 {
+            -(std::io::Error::last_os_error().raw_os_error().unwrap_or(libc::EIO) as i64)
+        } else {
+            n as i64
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (fd, buffer, len, offset);
+        // ENOSYS. Spelled literally rather than as `libc::ENOSYS` so this
+        // non-unix branch does not depend on the libc crate exposing that
+        // constant for Windows targets, which cannot be verified on the
+        // aarch64 Linux host this landed from.
+        -38
+    }
+}
+
+/// Positioned write from a caller-owned buffer (exact `pwrite(2)` alias).
+/// Same return convention as [`rt_fd_pread`].
+#[no_mangle]
+pub unsafe extern "C" fn rt_fd_pwrite(fd: i32, buffer: *const u8, len: i64, offset: i64) -> i64 {
+    #[cfg(unix)]
+    {
+        if buffer.is_null() || len < 0 || offset < 0 {
+            return -(libc::EINVAL as i64);
+        }
+        let n = libc::pwrite(fd, buffer as *const libc::c_void, len as usize, offset as libc::off_t);
+        if n < 0 {
+            -(std::io::Error::last_os_error().raw_os_error().unwrap_or(libc::EIO) as i64)
+        } else {
+            n as i64
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (fd, buffer, len, offset);
+        // ENOSYS. Spelled literally rather than as `libc::ENOSYS` so this
+        // non-unix branch does not depend on the libc crate exposing that
+        // constant for Windows targets, which cannot be verified on the
+        // aarch64 Linux host this landed from.
+        -38
+    }
+}
