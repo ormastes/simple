@@ -1,20 +1,77 @@
-use std.spec.{describe, it, expect}
+"""
+## Purpose and audience
+
+Executable specification for the frontend parser's owner-import contract —
+which module each parser file imports its token names, AST mutators, and
+visibility enum from — for compiler owners who move a frontend helper to a
+new terminal owner.
+
+## Operator workflow
+
+Run this spec with the repo test runner and confirm zero failed scenarios.
+Each scenario reads one parser source file once and asserts specific import
+and call-site substrings against genuinely named locals.
+
+## Compatibility and limitations
+
+These are source-contract scenarios: they pin import wiring, not parser
+runtime behavior (covered by dedicated parser specs). A failure means a
+parser file's `use` list or a call site moved.
+
+## Verification guidance and troubleshooting
+
+Re-run after any change to `enum_module_body.spl`, `fn_struct_decls.spl`, or
+`heuristic.spl`. A failing scenario names the exact substring expected; grep
+the named source file for it to see what changed.
+"""
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+# @manual_section: frontend owner import contract
+
+use std.spec.{describe, it, expect, step}
 use std.io_runtime.{read_file}
 
 describe "frontend owner imports remain explicit":
     it "enum declaration parser imports the canonical token-name owner":
+        # @req REQ-FRONTEND-OWNER-001
+        # @capture(statistics): token-owner import string and call-site presence
+        step("Read the enum declaration parser and pin its token-name import")
         val source = read_file("src/compiler/10.frontend/core/_ParserDecls/enum_module_body.spl")
-        expect(source.contains("use compiler.core.tokens.{TOK_KW_AS, TOK_KW_CE, TOK_PIPE, TOK_ASSIGN, tok_kind_name}")).to_equal(true)
-        expect(source.contains("tok_kind_name(par_kind_get())")).to_equal(true)
+        val imports_canonical_token_names = source.contains(
+            "use compiler.core.tokens.{TOK_KW_AS, TOK_KW_CE, TOK_PIPE, TOK_ASSIGN, tok_kind_name}")
+        val calls_tok_kind_name_at_the_expected_site = source.contains(
+            "tok_kind_name(par_kind_get())")
+        expect(imports_canonical_token_names).to_equal(true)
+        expect(calls_tok_kind_name_at_the_expected_site).to_equal(true)
 
     it "function declaration parser imports the AST parameter-mutator owner":
+        # @req REQ-FRONTEND-OWNER-002
+        # @capture(statistics): parameter-mutator import string and call-site presence
+        step("Read the function declaration parser and pin its AST mutator import")
         val source = read_file("src/compiler/10.frontend/core/_ParserDecls/fn_struct_decls.spl")
-        expect(source.contains("use compiler.frontend.core._Ast.decl_nodes.{decl_set_param_muts}")).to_equal(true)
-        expect(source.contains("decl_set_param_muts(fn_decl_idx, param_muts)")).to_equal(true)
+        val open_brace = "{"
+        val close_brace = "}"
+        val imports_decl_set_param_muts = source.contains(
+            "use compiler.frontend.core._Ast.decl_nodes." + open_brace + "decl_set_param_muts" + close_brace)
+        val calls_decl_set_param_muts_at_the_expected_site = source.contains(
+            "decl_set_param_muts(fn_decl_idx, param_muts)")
+        expect(imports_decl_set_param_muts).to_equal(true)
+        expect(calls_decl_set_param_muts_at_the_expected_site).to_equal(true)
 
     it "heuristic outline parser imports the canonical visibility owner":
+        # @req REQ-FRONTEND-OWNER-003
+        # @capture(statistics): visibility-owner import string and both enum-branch call sites
+        step("Read the heuristic outline parser and pin its Visibility enum import")
         val source = read_file("src/compiler/10.frontend/treesitter/heuristic.spl")
-        expect(source.contains("use compiler.common.dependency.visibility.{Visibility}")).to_equal(true)
-        expect(source.contains("fn heuristic_parse_visibility(vis: text) -> Visibility:")).to_equal(true)
-        expect(source.contains("if vis == \"pub\":\n            Visibility.Public")).to_equal(true)
-        expect(source.contains("Visibility.Private")).to_equal(true)
+        val open_brace = "{"
+        val close_brace = "}"
+        val imports_visibility_enum = source.contains(
+            "use compiler.common.dependency.visibility." + open_brace + "Visibility" + close_brace)
+        val declares_heuristic_parse_visibility = source.contains(
+            "fn heuristic_parse_visibility(vis: text) -> Visibility:")
+        val returns_public_for_pub_marker = source.contains(
+            "if vis == \"pub\":\n            Visibility.Public")
+        val falls_back_to_private = source.contains("Visibility.Private")
+        expect(imports_visibility_enum).to_equal(true)
+        expect(declares_heuristic_parse_visibility).to_equal(true)
+        expect(returns_public_for_pub_marker).to_equal(true)
+        expect(falls_back_to_private).to_equal(true)
