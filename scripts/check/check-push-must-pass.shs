@@ -10,6 +10,7 @@ ROOT=$(CDPATH= cd -- "$ROOT" 2>/dev/null && pwd -P) || {
 }
 LEDGER_REL=${MUST_CHECK_LEDGER_REL:-doc/08_tracking/check/must_check_db.sdn}
 MANIFEST_REL=${MUST_CHECK_MANIFEST_REL:-config/check/must_check_gates.sdn}
+SELF_REL=scripts/check/check-push-must-pass.shs
 ZERO=0000000000000000000000000000000000000000
 MAX_PUSH_REF_ROWS=2
 MAX_EVIDENCE_BYTES=67108864
@@ -367,10 +368,29 @@ run_manifest_push_gates() {
                 run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-process-wait-eintr-retry.shs" || { rm -f "$_push_rows"; return 1; } ;;
             'push-plan-acceptance-swept:tree:sh scripts/check/check-plan-acceptance-swept.shs')
                 run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-plan-acceptance-swept.shs" || { rm -f "$_push_rows"; return 1; } ;;
-            *) rm -f "$_push_rows"; return 2 ;;
+            *)
+                # Fail-closed, and never silent: until 2026-09-06 this arm returned
+                # 2 without a word, so the caller reported "one or more gates
+                # failed" after a run in which no blocking gate had failed.
+                echo "push-must-check: manifest row '$_id' (mode $_mode, command \"$_command\") at $_ref matches no dispatch arm in $SELF_REL — refusing the row (fail-closed)" >&2
+                rm -f "$_push_rows"; return 2 ;;
         esac
     done < "$_push_rows"
     rm -f "$_push_rows"
+}
+
+# The manifest is read from the COMMIT being pushed, so the dispatch arms must be
+# the ones committed with it. The working tree can sit on another lineage (a
+# detached worktree, a peer session's branch): on 2026-09-06 a push of a commit
+# whose manifest declared push-parser-source-global-ratchet was refused because
+# the checked-out tree predated that gate and had no arm for it. Redefine
+# run_manifest_push_gates from the pushed commit's copy of this script when that
+# copy carries one; an older commit without it keeps the running definition.
+load_committed_dispatcher() {
+    _committed_self=$(git -C "$ROOT" show "$1:$SELF_REL" 2>/dev/null) || return 0
+    _committed_fn=$(printf '%s\n' "$_committed_self" | sed -n '/^run_manifest_push_gates() {$/,/^}$/p')
+    [ -n "$_committed_fn" ] || return 0
+    eval "$_committed_fn"
 }
 
 run_conflict_tree_union() {
@@ -492,6 +512,7 @@ while read -r _local_ref _local_sha _remote_ref _remote_sha; do
     [ "$_local_sha" = "$ZERO" ] && continue
     _ledger=$(git -C "$ROOT" show "$_local_sha:$LEDGER_REL" 2>/dev/null) || die "ledger is missing from $_local_sha"
     _manifest=$(git -C "$ROOT" show "$_local_sha:$MANIFEST_REL" 2>/dev/null) || die "manifest is missing from $_local_sha"
+    load_committed_dispatcher "$_local_sha"
     _fp=$(fingerprint_rev "$_local_sha") || die "cannot fingerprint $_local_sha"
     EVIDENCE_REV=$_local_sha
     _predecessor=$_remote_sha
