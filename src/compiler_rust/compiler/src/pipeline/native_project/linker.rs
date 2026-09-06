@@ -1687,25 +1687,56 @@ int main(int argc, char** argv) {
                     cmd.arg(format!("-l{stem}"));
                     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
                     cmd.arg("-Wl,--as-needed");
-                    // RUNPATH, not LD_LIBRARY_PATH. `$ORIGIN` first so the
-                    // binary keeps working when it is moved together with the
-                    // copy of the runtime placed beside it below; the build
-                    // directory second, so it also runs in place.
+                    // RUNPATH, not LD_LIBRARY_PATH: a binary that only runs
+                    // with the right env var set is a trap the bootstrap would
+                    // fall into. `$ORIGIN` only -- deliberately NOT the build
+                    // directory. An absolute rpath would let a failed
+                    // copy-beside still look like it worked, and would bake a
+                    // build path into a shipped compiler. The copy below is the
+                    // single mechanism, and it is fail-closed.
                     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
                     {
                         cmd.arg("-Wl,-rpath,$ORIGIN");
                         cmd.arg("-Wl,-rpath,$ORIGIN/../lib");
-                        cmd.arg(format!("-Wl,-rpath,{}", dir.display()));
-                        // Without --disable-new-dtags a modern ld emits RUNPATH,
-                        // which is NOT inherited by the runtime's own
-                        // dependencies. Keep the default (RUNPATH) but record
-                        // both origins so a relocated binary still resolves.
                     }
                     #[cfg(target_os = "macos")]
-                    {
-                        cmd.arg("-Wl,-rpath,@loader_path");
-                        cmd.arg(format!("-Wl,-rpath,{}", dir.display()));
-                    }
+                    cmd.arg("-Wl,-rpath,@loader_path");
+
+                    // Core-C supplement, appended AFTER the shared runtime.
+                    //
+                    // The shared runtime is the Rust runtime crate built as a
+                    // cdylib; it is not a superset of the static
+                    // `libsimple_runtime.a`. Measured on this host: the archive
+                    // defines 2,043 `rt_*`, the `.so` exports 1,646, and the
+                    // 397-symbol difference splits into 165 that are present in
+                    // the `.so` but not exported and 232 that are absent from it
+                    // entirely (audio/GPU providers feature-gated out of the
+                    // cdylib). Of the symbols the Stage4 object closure actually
+                    // demands, 122 fall in that gap, and 121 of them are the
+                    // C-only entry points -- `rt_iocp_*`, `rt_kqueue_*`,
+                    // `rt_event_ports_*`, `rt_alloc`, `rt_mmap_raw` and friends
+                    // -- which live in `runtime_native.c` and the
+                    // `platform/*.h` bodies it includes, i.e. exactly the
+                    // archive this lane is replacing as the PRIMARY runtime.
+                    //
+                    // So the composition is additive, not a swap: the `.so`
+                    // supplies the 1,646 Rust-side symbols the core-C archive
+                    // never had (the cause of the 167 unresolved symbols), and
+                    // the archive still supplies the C-only remainder.
+                    //
+                    // Ordering matters and is safe here in a way it is not for
+                    // two archives. Members are pulled only for symbols still
+                    // undefined at this point, and a static definition never
+                    // COLLIDES with a shared-object one -- the executable's copy
+                    // simply wins for the whole process, including calls made
+                    // from inside the runtime. That is why this needs no
+                    // `--allow-multiple-definition`, unlike the Windows
+                    // native_all + core-C layering below.
+                    let core_c = build_core_c_runtime_library(&temp_dir.join("dynamic_runtime_core_c_supplement"))
+                        .ok_or_else(|| {
+                            "failed to build the core-C supplement for the dynamic-runtime lane".to_string()
+                        })?;
+                    cmd.arg(core_c);
                 } else if *is_native_all {
                     #[cfg(target_os = "macos")]
                     {
@@ -2015,7 +2046,18 @@ int main(int argc, char** argv) {
                 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
                 if let Some((runtime_lib, _)) = selected_runtime.as_ref() {
                     // ponytail: ELF archives resolve left-to-right; stubs may reference runtime helpers.
-                    cmd.arg(runtime_lib);
+                    //
+                    // A shared object is deliberately NOT repeated here. Unlike
+                    // an archive it is not consumed left-to-right -- every
+                    // DT_NEEDED library is searched for every remaining
+                    // undefined symbol -- so the earlier `-L`/`-l` already
+                    // covers the stub object. Appending the bare path would
+                    // additionally record that PATH as a second DT_NEEDED entry
+                    // (the runtime carries no SONAME), baking a build directory
+                    // into the produced compiler.
+                    if !super::config::is_shared_runtime_library(runtime_lib) {
+                        cmd.arg(runtime_lib);
+                    }
                 }
             }
         }

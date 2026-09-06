@@ -3939,12 +3939,14 @@ fn test_stage4_compiler_entry_authorization_requires_both_envs_and_exact_entry()
 
 /// The Stage4 compiler entry may link the SHARED runtime.
 ///
-/// Pre-fix this test fails on its first assertion: `selected_runtime_library`
-/// short-circuited every authorized Stage4 entry onto the core-C static archive
-/// and hard-errored with "Stage4 compiler entry requires the core-c-bootstrap
-/// runtime lane" for any other lane, so `libsimple_runtime.so` was unreachable
-/// and the link died with 167 unresolved `rt_*` symbols. Simple does not unwind,
-/// so nothing about that archive was load-bearing for the compiler binary.
+/// Pre-fix this test fails at the lane assertion: `dynamic-runtime` was not a
+/// name `resolve_runtime_lane` knew, so it fell through to `core-c-bootstrap`,
+/// and `selected_runtime_library` then short-circuited every authorized Stage4
+/// entry onto the core-C static archive -- hard-erroring "Stage4 compiler entry
+/// requires the core-c-bootstrap runtime lane" for any other lane. The shared
+/// `libsimple_runtime.so` was therefore unreachable and the Stage4 link died
+/// with 167 unresolved `rt_*` symbols. Simple does not unwind, so nothing about
+/// that archive was load-bearing for the compiler binary.
 ///
 /// The other two assertions pin the scope of the change: the lane is refused for
 /// a non-Stage4 entry, and it is never inferred -- only an explicit
