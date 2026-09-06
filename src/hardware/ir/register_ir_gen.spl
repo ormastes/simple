@@ -1,0 +1,198 @@
+# RegisterIR -> C header generator (workstream G, deliverable 1).
+#
+# Reads a RegisterIR definition in SDN and emits the C view of it. The proof of
+# correctness is byte-identity with the committed hand-written header:
+#
+#   bin/simple run src/hardware/ir/register_ir_gen.spl --check
+#   bin/simple run src/hardware/ir/register_ir_gen.spl --emit /tmp/out.h
+#
+# Register facts (aperture base, stride, channel/way counts, register offsets,
+# command values, geometry, status masks, memory pools) are STRUCTURED in the
+# SDN. Prose comment blocks, the C struct declarations and the function
+# prototypes are declared `kind: text` passthrough sections: they are not
+# register facts and are carried verbatim so byte-identity is achievable today.
+
+use std.common.sdn.parser.{parse}
+use std.common.sdn.value.{SdnValue}
+use std.io_runtime.{file_read, file_write, exit}
+use std.sffi.cli.{cli_get_args}
+
+val DEFAULT_SPEC: text = "spec/hw/cosmos_nfc/register_ir.sdn"
+
+fn sdn_get(v: SdnValue, key: text) -> SdnValue:
+    match v:
+        case Dict(entries):
+            if entries.contains_key(key): entries[key] else: SdnValue.Null
+        case _:
+            SdnValue.Null
+
+fn sdn_text(v: SdnValue) -> text:
+    match v:
+        case String(s): s
+        case Int(i): i.to_text()
+        case Bool(b): if b: "true" else: "false"
+        case _: ""
+
+fn sdn_int(v: SdnValue) -> i64:
+    match v:
+        case Int(i): i
+        case _: 0
+
+fn sdn_items(v: SdnValue) -> [SdnValue]:
+    match v:
+        case Array(items): items
+        case _: []
+
+fn spaces(n: i64) -> text:
+    var out: text = ""
+    var i: i64 = 0
+    while i < n:
+        out = out + " "
+        i = i + 1
+    out
+
+# `pad` is the 1-based column at which the macro value starts.
+fn define_line(name: text, value: text, pad: i64) -> text:
+    var gap: i64 = pad - 9 - name.len()
+    if gap < 1:
+        gap = 1
+    "#define " + name + spaces(gap) + value
+
+fn emit_defines(entries: [SdnValue]) -> [text]:
+    var out: [text] = []
+    for e in entries:
+        out = out.push(define_line(sdn_text(sdn_get(e, "name")),
+                                   sdn_text(sdn_get(e, "value")),
+                                   sdn_int(sdn_get(e, "pad"))))
+    out
+
+fn emit_section(section: SdnValue, pools: [SdnValue]) -> [text]:
+    val kind: text = sdn_text(sdn_get(section, "kind"))
+    var out: [text] = []
+    if kind == "text":
+        for line in sdn_items(sdn_get(section, "lines")):
+            out = out.push(sdn_text(line))
+    else:
+        if kind == "defines":
+            out = emit_defines(sdn_items(sdn_get(section, "defines")))
+        else:
+            if kind == "guarded_defines":
+                out = out.push("#if " + sdn_text(sdn_get(section, "cond")))
+                for line in emit_defines(sdn_items(sdn_get(section, "defines"))):
+                    out = out.push(line)
+                out = out.push("#endif")
+            else:
+                if kind == "ifndef_define":
+                    val nm: text = sdn_text(sdn_get(section, "name"))
+                    out = out.push("#ifndef " + nm)
+                    out = out.push(define_line(nm, sdn_text(sdn_get(section, "value")),
+                                               sdn_int(sdn_get(section, "pad"))))
+                    out = out.push("#endif")
+                else:
+                    if kind == "ifndef_defaults":
+                        val dv: text = sdn_text(sdn_get(section, "value"))
+                        val dp: i64 = sdn_int(sdn_get(section, "pad"))
+                        for p in pools:
+                            if sdn_text(sdn_get(p, "default_zero")) == "true":
+                                val pn: text = sdn_text(sdn_get(p, "name"))
+                                out = out.push("#ifndef " + pn)
+                                out = out.push(define_line(pn, dv, dp))
+                                out = out.push("#endif")
+                    else:
+                        if kind == "cond_defines":
+                            out = emit_cond_defines(section, pools)
+                        else:
+                            out = out.push("/* unknown RegisterIR section kind: " + kind + " */")
+    out
+
+fn emit_cond_defines(section: SdnValue, pools: [SdnValue]) -> [text]:
+    val sym: text = sdn_text(sdn_get(section, "symbol"))
+    val pad: i64 = sdn_int(sdn_get(section, "pad"))
+    val req: text = sdn_text(sdn_get(section, "requires"))
+    var names: [text] = []
+    if req != "" and req != "none":
+        for p in pools:
+            if sdn_text(sdn_get(p, req)) == "true":
+                names = names.push(sdn_text(sdn_get(p, "name")))
+    var out: [text] = []
+    if names.len() == 0:
+        out = out.push("#if " + sdn_text(sdn_get(section, "base_cond")))
+    else:
+        out = out.push("#if " + sdn_text(sdn_get(section, "base_cond")) + " && \\")
+        var i: i64 = 0
+        while i < names.len():
+            if i + 1 < names.len():
+                out = out.push("    defined(" + names[i] + ") && \\")
+            else:
+                out = out.push("    defined(" + names[i] + ")")
+            i = i + 1
+    out = out.push(define_line(sym, "1", pad))
+    out = out.push("#else")
+    out = out.push(define_line(sym, "0", pad))
+    out = out.push("#endif")
+    out
+
+fn collect_pools(sections: [SdnValue]) -> [SdnValue]:
+    var pools: [SdnValue] = []
+    for s in sections:
+        if sdn_text(sdn_get(s, "id")) == "memory_pool":
+            for e in sdn_items(sdn_get(s, "defines")):
+                pools = pools.push(e)
+    pools
+
+fn render(doc: SdnValue) -> text:
+    val emit: SdnValue = sdn_get(doc, "emit")
+    val sections: [SdnValue] = sdn_items(sdn_get(emit, "sections"))
+    val pools: [SdnValue] = collect_pools(sections)
+    var lines: [text] = []
+    for s in sections:
+        for line in emit_section(s, pools):
+            lines = lines.push(line)
+    lines.join("\n") + "\n"
+
+fn load(spec_path: text) -> Result<SdnValue, text>:
+    parse(file_read(spec_path))
+
+fn main() -> ():
+    val args: [text] = cli_get_args()
+    var mode: text = "--check"
+    var out_path: text = ""
+    var spec_path: text = DEFAULT_SPEC
+    var i: i64 = 0
+    while i < args.len():
+        if args[i] == "--emit":
+            mode = "--emit"
+            if i + 1 < args.len():
+                out_path = args[i + 1]
+                i = i + 1
+        else:
+            if args[i] == "--check":
+                mode = "--check"
+            else:
+                if args[i] == "--spec":
+                    if i + 1 < args.len():
+                        spec_path = args[i + 1]
+                        i = i + 1
+        i = i + 1
+
+    match load(spec_path):
+        case Err(msg):
+            print("ERROR: cannot parse " + spec_path + ": " + msg)
+            exit(2)
+        case Ok(doc):
+            val target: text = sdn_text(sdn_get(sdn_get(doc, "emit"), "target"))
+            val generated: text = render(doc)
+            if mode == "--emit":
+                val dest: text = if out_path != "": out_path else: target
+                file_write(dest, generated)
+                print("GEN-OK wrote " + dest + " (" + generated.len().to_text() + " bytes)")
+            else:
+                val committed: text = file_read(target)
+                if committed == generated:
+                    print("byte-identical: " + target + " (" + generated.len().to_text() + " bytes)")
+                else:
+                    print("MISMATCH: generated output differs from " + target)
+                    print("  generated bytes: " + generated.len().to_text())
+                    print("  committed bytes: " + committed.len().to_text())
+                    exit(1)
+    ()

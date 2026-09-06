@@ -25,8 +25,16 @@ One i64 per page stands in for the 4 KiB main payload; {lba, seq} stand in for O
 """
 
 use nvme_types.*
+use nvme_payload.*
 use fil_nand.*   # NandRead (shared FIL read result {data, lba, seq, ecc, err})
 use fil_ecc.*
+
+fn nand_device_erase_counter_next(v: i64) -> i64:
+    if v < 0:
+        return 1
+    if v >= FW_SAFE_I64_LIMIT:
+        return FW_SAFE_I64_LIMIT
+    v + 1
 
 # ── ONFI command opcodes ──────────────────────────────────────────────────────
 val ONFI_READ_1ST:  i64 = 0x00   # read setup
@@ -51,10 +59,13 @@ val STATUS_BUSY_FAIL: i64 = 0xE1  # STATUS_IDLE + STATUS_FAIL
 
 # ── NandDevice: one ONFI-driven NAND chip ─────────────────────────────────────
 struct NandDevice:
-    page_data:  [i64]   # NUM_PAGES, main payload byte
-    oob_lba:    [i64]   # NUM_PAGES, spare-area logical addr (UNMAP if unwritten)
-    oob_seq:    [i64]   # NUM_PAGES, spare-area write sequence number
-    oob_ecc:    [i64]   # NUM_PAGES, spare-area ECC stored at program time
+    page_data:  [PageData]  # NUM_PAGES, the REAL page main area (PAGE_WORDS
+                            # words = PAGE_BYTES). D3 of the payload plan; the
+                            # i64 seam below is preserved through the shim.
+    oob:        [OobData]  # NUM_PAGES, spare area {lba, seq, parity, meta}.
+                           # D2 of the payload plan: one array in place of the
+                           # former parallel oob_lba/oob_seq/oob_ecc triple.
+                           # ECC stays the scalar fil_ecc computes, in parity[0].
     page_err:   [i64]   # NUM_PAGES, injected bit-flip count (0 normally)
     programmed: [i64]   # NUM_PAGES, 1 = page holds data (NAND cannot overwrite)
     bad_block:  [i64]   # NUM_BLOCKS, 1 = block retired
@@ -63,10 +74,10 @@ struct NandDevice:
     erase_fail: [i64]   # NUM_BLOCKS, 1 = next erase of this block fails
     cmd:        i64     # latched command byte
     addr:       i64     # latched row address: page ppn (read/prog) or block (erase)
-    din:        i64     # main data-in latch
+    din:        PageData # main data-in latch (the ONFI page register)
     din_lba:    i64     # OOB data-in latch (logical addr)
     din_seq:    i64     # OOB data-in latch (sequence)
-    dout:       i64     # main data-out latch (post-read)
+    dout:       PageData # main data-out latch (the ONFI page register)
     dout_lba:   i64     # OOB data-out latch
     dout_seq:   i64     # OOB data-out latch
     dout_ecc:   i64     # OOB ECC data-out latch
@@ -74,18 +85,14 @@ struct NandDevice:
     status:     i64     # ONFI status register
 
 fn nand_device_new() -> NandDevice:
-    var page_data:  [i64] = []
-    var oob_lba:    [i64] = []
-    var oob_seq:    [i64] = []
-    var oob_ecc:    [i64] = []
+    var page_data:  [PageData] = []
+    var oob:        [OobData] = []
     var page_err:   [i64] = []
     var programmed: [i64] = []
     var i: i64 = 0
     while i < NUM_PAGES:
-        page_data.push(0)
-        oob_lba.push(UNMAP)
-        oob_seq.push(0)
-        oob_ecc.push(0)
+        page_data.push(page_zero())
+        oob.push(oob_erased())
         page_err.push(0)
         programmed.push(0)
         i = i + 1
@@ -102,20 +109,29 @@ fn nand_device_new() -> NandDevice:
         erase_fail.push(0)
         i = i + 1
 
-    NandDevice(page_data: page_data, oob_lba: oob_lba, oob_seq: oob_seq, oob_ecc: oob_ecc, page_err: page_err, programmed: programmed, bad_block: bad_block, blk_erase: blk_erase, prog_fail: prog_fail, erase_fail: erase_fail, cmd: 0, addr: -1, din: 0, din_lba: UNMAP, din_seq: 0, dout: 0, dout_lba: UNMAP, dout_seq: 0, dout_ecc: 0, dout_err: 0, status: STATUS_IDLE)
+    NandDevice(page_data: page_data, oob: oob, page_err: page_err, programmed: programmed, bad_block: bad_block, blk_erase: blk_erase, prog_fail: prog_fail, erase_fail: erase_fail, cmd: 0, addr: NULL_IDX, din: page_zero(), din_lba: UNMAP, din_seq: 0, dout: page_zero(), dout_lba: UNMAP, dout_seq: 0, dout_ecc: 0, dout_err: 0, status: STATUS_IDLE)
 
 # ── Low-level ONFI bus protocol (param-into-scalar latches; exec reads scalars) ─
 impl NandDevice:
+    me page_ready(ppn: i64) -> bool:
+        ppn_in_range(ppn) and ppn < me.page_data.len() and ppn < me.oob.len() and ppn < me.page_err.len() and ppn < me.programmed.len()
+
+    me block_ready(blk: i64) -> bool:
+        block_in_range(blk) and blk < me.bad_block.len() and blk < me.blk_erase.len() and blk < me.prog_fail.len() and blk < me.erase_fail.len()
+
+    me block_pages_ready(blk: i64) -> bool:
+        me.block_ready(blk) and block_first_ppn(blk) + PAGES_PER_BLOCK <= me.page_data.len() and block_first_ppn(blk) + PAGES_PER_BLOCK <= me.oob.len() and block_first_ppn(blk) + PAGES_PER_BLOCK <= me.page_err.len() and block_first_ppn(blk) + PAGES_PER_BLOCK <= me.programmed.len()
+
     # Latch a command byte. RESET clears the latches; the 2nd byte of a sequence
     # is what exec() dispatches on.
     me cmd_latch(op: i64):
         me.cmd = op
         if op == ONFI_RESET:
-            me.addr = -1
-            me.din = 0
+            me.addr = NULL_IDX
+            me.din = page_zero()
             me.din_lba = UNMAP
             me.din_seq = 0
-            me.dout = 0
+            me.dout = page_zero()
             me.dout_ecc = 0
             me.status = STATUS_IDLE
 
@@ -123,8 +139,17 @@ impl NandDevice:
     me addr_latch(ppn: i64):
         me.addr = ppn
 
-    # Host presents the main page byte to be programmed.
+    # Host presents the main page payload to be programmed. The word-wide form
+    # is kept for callers above D3 that still speak i64. D11 DELETED the shared
+    # narrowing shim, so the word-0 derivation is written out here, at the one
+    # scalar seam that needs it, rather than behind an importable helper a new
+    # caller could reach for.
     me data_in(value: i64):
+        var p: PageData = page_zero()
+        p.words[0] = value
+        me.din = p
+
+    me data_in_page(value: PageData):
         me.din = value
 
     # Host presents the OOB (spare-area) bytes to be programmed.
@@ -146,7 +171,7 @@ impl NandDevice:
     me exec_read():
         val ppn: i64 = me.addr
         if not me.page_ready(ppn):
-            me.dout = 0
+            me.dout = page_zero()
             me.dout_lba = UNMAP
             me.dout_seq = 0
             me.dout_ecc = 0
@@ -154,9 +179,9 @@ impl NandDevice:
             me.status = STATUS_BUSY_FAIL
             return
         me.dout = me.page_data[ppn]
-        me.dout_lba = me.oob_lba[ppn]
-        me.dout_seq = me.oob_seq[ppn]
-        me.dout_ecc = me.oob_ecc[ppn]
+        me.dout_lba = me.oob[ppn].lba
+        me.dout_seq = me.oob[ppn].seq
+        me.dout_ecc = me.oob[ppn].parity[0]
         me.dout_err = me.page_err[ppn]
         me.status = STATUS_IDLE
 
@@ -168,17 +193,35 @@ impl NandDevice:
         if not me.page_ready(ppn):
             me.status = STATUS_BUSY_FAIL
             return
-        if me.prog_fail[blk] == 1:
+        val blk: i64 = ppn_block(ppn)
+        if not me.block_ready(blk):
+            me.status = STATUS_BUSY_FAIL
+            return
+        if me.bad_block[blk] != 0:
+            me.status = STATUS_BUSY_FAIL
+            return
+        if me.prog_fail[blk] != 0:
             me.prog_fail[blk] = 0
             me.status = STATUS_BUSY_FAIL
             return
-        if me.programmed[ppn] == 1:
+        if me.programmed[ppn] != 0:
             me.status = STATUS_BUSY_FAIL
             return
         me.page_data[ppn] = me.din
-        me.oob_lba[ppn] = me.din_lba
-        me.oob_seq[ppn] = me.din_seq
-        me.oob_ecc[ppn] = ecc_compute(me.din, me.din_lba, me.din_seq)
+        # Single-owner mutation: never bind a temporary OobData and write back.
+        me.oob[ppn].lba = me.din_lba
+        me.oob[ppn].seq = me.din_seq
+        # ECC is still the scalar fil_ecc computes over word 0; D4 widens it.
+        # D4: slot 0 is the legacy word-0 scalar (kept because NandRead.ecc /
+        # FmcResult.ecc / the dout_ecc latch are all i64); slots 1..CODEWORDS_PER_PAGE
+        # carry the REAL per-codeword SEC-DED parity over all PAGE_WORDS words of
+        # the page register. Written through the single owner me.oob[ppn].
+        me.oob[ppn].parity[0] = ecc_compute(page_word(me.din, 0), me.din_lba, me.din_seq)
+        val cwp: [i64] = ecc_page_compute(me.din, me.din_lba, me.din_seq)
+        var ci: i64 = 0
+        while ci < CODEWORDS_PER_PAGE:
+            me.oob[ppn].parity[1 + ci] = cwp[ci]
+            ci = ci + 1
         me.programmed[ppn] = 1
         me.status = STATUS_IDLE
 
@@ -189,7 +232,10 @@ impl NandDevice:
         if not me.block_pages_ready(blk):
             me.status = STATUS_BUSY_FAIL
             return
-        if me.erase_fail[blk] == 1:
+        if me.bad_block[blk] != 0:
+            me.status = STATUS_BUSY_FAIL
+            return
+        if me.erase_fail[blk] != 0:
             me.erase_fail[blk] = 0
             me.status = STATUS_BUSY_FAIL
             return
@@ -197,33 +243,44 @@ impl NandDevice:
         var pg: i64 = 0
         while pg < PAGES_PER_BLOCK:
             val ppn: i64 = first + pg
-            me.page_data[ppn] = 0
-            me.oob_lba[ppn] = UNMAP
-            me.oob_seq[ppn] = 0
-            me.oob_ecc[ppn] = 0
+            me.page_data[ppn] = page_zero()
+            me.oob[ppn] = oob_erased()
             me.page_err[ppn] = 0
             me.programmed[ppn] = 0
             pg = pg + 1
-        me.blk_erase[blk] = me.blk_erase[blk] + 1
+        me.blk_erase[blk] = nand_device_erase_counter_next(me.blk_erase[blk])
         me.status = STATUS_IDLE
 
     me data_out() -> i64:
+        page_word(me.dout, 0)
+
+    me data_out_page() -> PageData:
         me.dout
 
     me status_reg() -> i64:
+        if me.status < 0 or me.status > 255:
+            me.status = STATUS_BUSY_FAIL
         me.status
 
     # ── High-level FIL seam (drop-in for fil_nand.Nand; drives the ONFI bus) ───
     # Program one page (main + OOB). Returns NAND_OK / NAND_BAD_BLOCK / NAND_PROG_FAIL.
     me program(ppn: i64, lba: i64, seq: i64, data: i64) -> i64:
+        # Residual word-0 derivation at the legacy scalar entry point (D11).
+        var p: PageData = page_zero()
+        p.words[0] = data
+        me.program_page(ppn, lba, seq, p)
+
+    me program_page(ppn: i64, lba: i64, seq: i64, data: PageData) -> i64:
         if not me.page_ready(ppn):
             return NAND_BAD_BLOCK
         val blk: i64 = ppn_block(ppn)
-        if me.bad_block[blk] == 1:
+        if not me.block_ready(blk):
+            return NAND_BAD_BLOCK
+        if me.bad_block[blk] != 0:
             return NAND_BAD_BLOCK
         me.cmd_latch(ONFI_PROG_1ST)
         me.addr_latch(ppn)
-        me.data_in(data)
+        me.data_in_page(data)
         me.oob_in(lba, seq)
         me.cmd_latch(ONFI_PROG_2ND)
         me.exec()
@@ -237,7 +294,10 @@ impl NandDevice:
         me.addr_latch(ppn)
         me.cmd_latch(ONFI_READ_2ND)
         me.exec()
-        NandRead(data: me.dout, lba: me.dout_lba, seq: me.dout_seq, ecc: me.dout_ecc, err: me.dout_err)
+        var err: i64 = me.dout_err
+        if err < 0:
+            err = 0
+        NandRead(data: page_word(me.dout, 0), lba: me.dout_lba, seq: me.dout_seq, ecc: me.dout_ecc, err: err)
 
     # Erase one block. Returns NAND_OK / NAND_BAD_BLOCK / NAND_ERASE_FAIL.
     me erase_block(blk: i64) -> i64:
@@ -281,7 +341,48 @@ impl NandDevice:
             return
         me.page_err[ppn] = n
 
+    # The per-codeword parity slots (OobData.parity[1..CODEWORDS_PER_PAGE]).
+    # Separate from read_page() because the ONFI data-out ECC latch (dout_ecc)
+    # is a scalar i64 and FmcResult mirrors it; widening that latch means editing
+    # fil_fmc.spl and fil_nand_emu.spl, both frozen for this workstream. Returns
+    # an EMPTY list for a not-ready page, so a caller cannot mistake "no parity
+    # stored" for "parity happens to be zero".
+    me read_page_parity(ppn: i64) -> [i64]:
+        var out: [i64] = []
+        if not me.page_ready(ppn):
+            return out
+        var i: i64 = 0
+        while i < CODEWORDS_PER_PAGE:
+            if 1 + i < me.oob[ppn].parity.len():
+                out.push(me.oob[ppn].parity[1 + i])
+            i = i + 1
+        out
+
+    # Overwrite ONE page word, leaving OOB (and so the stored parity) untouched —
+    # the widened sibling of corrupt_page_data, which can only reach word 0.
+    # This is what lets a check corrupt codeword 3 (page words 384..511).
+    me corrupt_page_word(ppn: i64, widx: i64, v: i64):
+        if not me.page_ready(ppn):
+            return
+        if widx < 0:
+            return
+        if widx >= me.page_data[ppn].words.len():
+            return
+        me.page_data[ppn].words[widx] = v
+
+    # Read the full page main area (D4/D5 adopt this).
+    me read_page_data(ppn: i64) -> PageData:
+        if not me.page_ready(ppn):
+            return page_zero()
+        me.page_data[ppn]
+
     me corrupt_page_data(ppn: i64, data: i64):
+        # Residual word-0 derivation at the legacy scalar entry point (D11).
+        var p: PageData = page_zero()
+        p.words[0] = data
+        me.corrupt_page(ppn, p)
+
+    me corrupt_page(ppn: i64, data: PageData):
         if not me.page_ready(ppn):
             return
         me.page_data[ppn] = data
@@ -334,6 +435,9 @@ fn nand_device_selftest() -> i64:
     # Bad block -> program rejected.
     dev.set_bad(7)
     fail = fail + expect_eq(dev.program(block_first_ppn(7), 1, 1, 1), NAND_BAD_BLOCK, "program to bad block -> BAD_BLOCK")
+    dev.bad_block[10] = 7
+    fail = fail + expect_eq(dev.program(block_first_ppn(10), 1, 1, 1), NAND_BAD_BLOCK, "corrupted nonzero device bad-block marker fails closed")
+    fail = fail + expect_eq(dev.erase_block(10), NAND_BAD_BLOCK, "corrupted nonzero device bad-block marker blocks erase")
 
     # One-shot program fault then recovery.
     dev.inject_prog_fail(4)
@@ -341,11 +445,21 @@ fn nand_device_selftest() -> i64:
     fail = fail + expect_eq(dev.program(p4, 5, 5, 0x33), NAND_PROG_FAIL, "inject_prog_fail -> PROG_FAIL")
     fail = fail + expect_eq(dev.program(p4, 5, 5, 0x33), NAND_OK, "program ok after one-shot clears")
     fail = fail + expect_eq(dev.read_page(p4).data, 0x33, "post-recovery read round-trips")
+    dev.prog_fail[11] = 7
+    val p11: i64 = block_first_ppn(11)
+    fail = fail + expect_eq(dev.program(p11, 11, 11, 0x44), NAND_PROG_FAIL, "corrupted nonzero program fault fails once")
+    fail = fail + expect_eq(dev.program(p11, 11, 11, 0x44), NAND_OK, "corrupted program fault clears after one failure")
+    val p12: i64 = block_first_ppn(12)
+    dev.programmed[p12] = 7
+    fail = fail + expect_eq(dev.program(p12, 12, 12, 0x45), NAND_PROG_FAIL, "corrupted nonzero programmed marker blocks overwrite")
 
     # One-shot erase fault.
     dev.inject_erase_fail(8)
     fail = fail + expect_eq(dev.erase_block(8), NAND_ERASE_FAIL, "inject_erase_fail -> ERASE_FAIL")
     fail = fail + expect_eq(dev.erase_block(8), NAND_OK, "erase ok after one-shot clears")
+    dev.erase_fail[13] = 7
+    fail = fail + expect_eq(dev.erase_block(13), NAND_ERASE_FAIL, "corrupted nonzero erase fault fails once")
+    fail = fail + expect_eq(dev.erase_block(13), NAND_OK, "corrupted erase fault clears after one failure")
 
     # Injected bit-flip count surfaces in the read error field (FIL ECC consumes it).
     val pf: i64 = block_first_ppn(9)
@@ -378,6 +492,33 @@ fn nand_device_selftest() -> i64:
     fail = fail + expect_eq(dev.read_page(NUM_PAGES).err, 2, "out-of-range device read reports uncorrectable")
     fail = fail + expect_eq(dev.erase_block(NUM_BLOCKS), NAND_BAD_BLOCK, "out-of-range device erase fails closed")
     fail = fail + expect_eq(dev.erase_count(NUM_BLOCKS), 0, "out-of-range device erase count is inert")
+
+    # ── D3 non-vacuity: the media stores a REAL page, not a word ──────────────
+    # Every assertion above passes through word 0 and so would still pass on the
+    # old one-i64-per-page media. These drive the page-wide seam directly and
+    # fail on any stand-in that keeps only the first word.
+    val ppn_w: i64 = block_first_ppn(5)
+    var wide = page_zero()
+    wide.words[0] = 0x11
+    wide.words[1] = 0x22
+    wide.words[PAGE_WORDS - 1] = 0x33
+    fail = fail + expect_eq(dev.program_page(ppn_w, 77, 9, wide), NAND_OK, "program_page returns NAND_OK")
+    var back: PageData = dev.read_page_data(ppn_w)
+    fail = fail + expect_eq(page_word_count(back), PAGE_WORDS, "stored page is PAGE_WORDS wide")
+    fail = fail + expect_eq(page_word(back, 0), 0x11, "page word 0 round-trips")
+    fail = fail + expect_eq(page_word(back, 1), 0x22, "page word 1 round-trips (a word the old stand-in DROPPED)")
+    fail = fail + expect_eq(page_word(back, PAGE_WORDS - 1), 0x33, "page LAST word round-trips")
+    fail = fail + expect_eq(page_word(back, 2), 0, "unwritten interior word reads 0")
+    fail = fail + expect_eq(bool_to_int(page_eq(back, wide)), 1, "whole page compares equal to what was programmed")
+    # The narrow seam still sees word 0, so the layers above D3 are unaffected.
+    fail = fail + expect_eq(dev.read_page(ppn_w).data, 0x11, "narrow read_page still yields word 0 for un-migrated callers")
+    fail = fail + expect_eq(dev.read_page(ppn_w).lba, 77, "page-wide program still writes the OOB lba")
+    # Erase must clear the WHOLE page, not just word 0.
+    fail = fail + expect_eq(dev.erase_block(5), NAND_OK, "erase the page-wide test block")
+    var cleared: PageData = dev.read_page_data(ppn_w)
+    fail = fail + expect_eq(page_word(cleared, 0), 0, "erase clears word 0")
+    fail = fail + expect_eq(page_word(cleared, PAGE_WORDS - 1), 0, "erase clears the LAST word too")
+
     var dt = nand_device_new()
     dt.page_data = []
     fail = fail + expect_eq(dt.program(0, 1, 1, 1), NAND_BAD_BLOCK, "truncated device page data program fails closed")

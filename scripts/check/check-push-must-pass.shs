@@ -155,6 +155,16 @@ validate_ledger_text() {
         function unquote(v) { v=trim(v); sub(/^"/, "", v); sub(/"$/, "", v); return v }
         function fail() { bad=1 }
         FNR == NR {
+            # The column layout is PINNED, not inferred. Every field index below
+            # ($3 push_blocking, $5 command, $6 ci_job, $7 inputs) is only
+            # correct for this exact header, so a manifest whose header differs
+            # must be rejected rather than parsed with shifted fields — a
+            # shifted read is how a registry silently stops registering.
+            if ($0 ~ /^must_check_gates[[:space:]]*\|/) {
+                if ($0 != "must_check_gates |id, tier, push_blocking, mode, command, ci_job, inputs, description|") fail()
+                header_seen=1
+                next
+            }
             if ($0 ~ /^[[:space:]]+[a-z0-9][a-z0-9-]*,[[:space:]]*bootstrap,/) {
                 id=trim($1)
                 if (id in manifest_seen) fail()
@@ -162,6 +172,10 @@ validate_ledger_text() {
                 manifest_order[++manifest_count]=id
                 manifest_blocking[id]=trim($3)
                 manifest_command[id]=unquote($5)
+                # ci_job and inputs are bare tokens; a quote in either means the
+                # description leaked left because a column is missing.
+                if (trim($6) == "" || trim($6) ~ /"/) fail()
+                if (trim($7) == "" || trim($7) ~ /"/) fail()
             }
             next
         }
@@ -186,6 +200,7 @@ validate_ledger_text() {
         }
         END {
             if (schema != "simple.must-check-ledger/v3" || !manifest_count || !ledger_count) fail()
+            if (!header_seen) fail()
             unpromoted=(fingerprint == "unrecorded" && allow_unpromoted == 1)
             if (!unpromoted && fingerprint != want_fp) fail()
             if (manifest_count != ledger_count) fail()
@@ -292,11 +307,22 @@ run_manifest_push_gates() {
     _push_rows=$(mktemp) || return 2
     printf '%s\n' "$_manifest" | awk '/^[[:space:]]+[a-z0-9][a-z0-9-]*,[[:space:]]*push,/ {print}' > "$_push_rows"
     [ -s "$_push_rows" ] || { rm -f "$_push_rows"; return 2; }
-    while IFS=, read -r _id _tier _blocking _mode _command _description; do
+    # The manifest carries `ci_job` and `inputs` between `command` and
+    # `description` (see the header of config/check/must_check_gates.sdn). They
+    # are read explicitly rather than swallowed into `_description` so a row
+    # that lost the columns is REJECTED here instead of silently reinterpreted:
+    # a shifted field would make the `$_id:$_mode:$_command` key stop matching
+    # its dispatch case, which lands on the fail-closed `*)` arm and blocks
+    # every push with no explanation.
+    while IFS=, read -r _id _tier _blocking _mode _command _ci_job _inputs _description; do
         _id=$(printf '%s' "$_id" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
         _mode=$(printf '%s' "$_mode" | tr -d ' ')
         _command=$(printf '%s' "$_command" | sed 's/^[[:space:]]*"//;s/"[[:space:]]*$//')
         [ -n "$_command" ] || { rm -f "$_push_rows"; return 2; }
+        _ci_job=$(printf '%s' "$_ci_job" | tr -d ' ')
+        _inputs=$(printf '%s' "$_inputs" | tr -d ' ')
+        case "$_ci_job" in ''|*'"'*) rm -f "$_push_rows"; return 2 ;; esac
+        case "$_inputs" in ''|*'"'*) rm -f "$_push_rows"; return 2 ;; esac
         _blocking=$(printf '%s' "$_blocking" | tr -d ' ')
         case "$_id:$_mode:$_command" in
             'push-conflict-tree:range:sh scripts/check/check-no-conflict-tree-push.shs')
@@ -361,6 +387,14 @@ run_manifest_push_gates() {
                 run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-windows-checkout-damage-push.shs" --scan-only "$_range" || { rm -f "$_push_rows"; return 1; } ;;
             'push-no-direct-rt:tree:sh scripts/check/check-no-direct-rt.shs --roots src')
                 run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-no-direct-rt.shs" --roots src || { rm -f "$_push_rows"; return 1; } ;;
+            'push-local-ci-receipt-selftest:tree:sh scripts/check/verify-local-ci-receipt.shs --selftest')
+                # Advisory by manifest (push_blocking=false): the verifier lands
+                # in a parallel lane, and a blocking row pointing at a file that
+                # does not exist yet would block every push in between. The
+                # selftest is what is pinned here, not a live receipt — CI
+                # verifies receipts, the push tier only proves the verifier's
+                # fail-closed fixtures still discriminate.
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/verify-local-ci-receipt.shs" --selftest || { rm -f "$_push_rows"; return 1; } ;;
             'push-plan-acceptance-swept:tree:sh scripts/check/check-plan-acceptance-swept.shs')
                 run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-plan-acceptance-swept.shs" || { rm -f "$_push_rows"; return 1; } ;;
             *) rm -f "$_push_rows"; return 2 ;;

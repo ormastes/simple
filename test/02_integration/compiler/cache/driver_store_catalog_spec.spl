@@ -1,0 +1,132 @@
+# @req REQ-CSM-007 REQ-CSM-008 REQ-CSM-009
+# @cover src/compiler/80.driver/cache/journal/action_root_journal_v1.spl 85%
+# @cover src/compiler/80.driver/cache/journal/checkpoint_superblock_v1.spl 85%
+# @cover src/compiler/80.driver/cache/catalog/cache_catalog_projection.spl 85%
+# @cover src/compiler/80.driver/cache/gateway/cache_writer_v1.spl 85%
+# @cover src/compiler/80.driver/cache/gateway/cache_gateway_adapter.spl 85%
+
+use std.spec.{describe, it, expect}
+use std.spec.step
+use std.common.crypto.sha256 (sha256_text)
+use compiler.common.cache_contract.cache_gateway_v1.*
+use compiler.common.cache_contract.direct_read_pin_v1 (DirectReadPinV1)
+use compiler.common.cache_contract.errors_v1 (CacheErrorCodeV1)
+use compiler.driver.cache.journal.action_root_journal_v1.*
+use compiler.driver.cache.journal.checkpoint_superblock_v1.*
+use compiler.driver.cache.catalog.cache_catalog_projection.*
+use compiler.driver.cache.gateway.cache_writer_v1.*
+use compiler.driver.cache.gateway.cache_gateway_adapter.*
+use compiler.driver.cache.summary.summary_store_v1.{SummaryStoreV1, VirtualSourceStoreAdapterV1}
+use common.cache_host_authority_v1 (cache_host_open_root_v1)
+use common.cache_daemon_host_authority_v1.{cache_host_authenticate_peer_v1,
+    cache_host_acquire_exclusive_lock_v1, cache_host_boot_identity_v1,
+    cache_host_advance_writer_epoch_v1, cache_host_publish_readiness_v1}
+
+fn digest(ch: text) -> text:
+    ch.repeat(64)
+
+describe "action-root journal recovery":
+    it "accepts a checksummed prefix and quarantines a torn tail":
+        step("Recover only complete ordered journal records")
+        val journal = ActionRootJournalV1.empty(7)
+        journal.append(digest("a"), "file_ast", digest("b"), digest("c")).unwrap()
+        journal.append(digest("d"), "public_summary", digest("e"), digest("f")).unwrap()
+        val recovered = recover_action_root_journal_v1(journal.bytes + "2|torn", 7)
+        expect(recovered.records.len()).to_equal(2)
+        expect(recovered.accepted_bytes).to_equal(journal.bytes.len())
+        expect(recovered.quarantined_tail).to_equal(true)
+
+    it "rejects checksum corruption without accepting later records":
+        step("Stop recovery at the first corrupt record")
+        val journal = ActionRootJournalV1.empty(2)
+        journal.append(digest("a"), "file_ast", digest("b"), digest("c")).unwrap()
+        val corrupt = journal.bytes.slice(0, journal.bytes.len() - 2) + "0\n"
+        val recovered = recover_action_root_journal_v1(corrupt, 2)
+        expect(recovered.records.len()).to_equal(0)
+        expect(recovered.quarantined_tail).to_equal(true)
+
+describe "two-generation checkpoint selection":
+    it "falls back to the prior valid generation after a torn newest slot":
+        step("Select the highest checksum-valid superblock slot")
+        val journal = "record-one\n"
+        val superblock = CheckpointSuperblockV1.empty()
+        val first = superblock.publish(journal, digest("a"))
+        val second = superblock.publish(journal, digest("b"))
+        superblock.slot_b = Some(CheckpointSlotV1(generation: second.generation,
+            journal_bytes: second.journal_bytes, journal_digest: second.journal_digest,
+            catalog_digest: second.catalog_digest, checksum: digest("0")))
+        val selected = superblock.select(journal)
+        expect(selected.present).to_equal(true)
+        expect(selected.slot?.generation).to_equal(first.generation)
+
+describe "rebuildable catalog and private writer authority":
+    it "rebuilds equivalent projection state from authoritative journal records":
+        step("Discard and replay the PureDB catalog projection")
+        val journal = ActionRootJournalV1.empty(9)
+        val first = journal.append(digest("a"), "file_ast", digest("b"), digest("c")).unwrap()
+        val second = journal.append(digest("d"), "public_summary", digest("e"), digest("f")).unwrap()
+        val catalog = CacheCatalogProjectionV1.memory().unwrap()
+        catalog.rebuild([first, second], 9).unwrap()
+        val before = catalog.digest().unwrap()
+        catalog.clear().unwrap()
+        catalog.rebuild(journal.recover().records, 9).unwrap()
+        expect(catalog.digest().unwrap()).to_equal(before)
+        expect(catalog.lookup(digest("d")).unwrap().object_digest).to_equal(digest("e"))
+
+    it "quarantines same-action different-output nondeterminism":
+        step("Make conflicting action roots permanently non-authoritative")
+        val journal = ActionRootJournalV1.empty(3)
+        val catalog = CacheCatalogProjectionV1.memory().unwrap()
+        val first = journal.append(digest("a"), "file_ast", digest("b"), digest("c")).unwrap()
+        val conflict = journal.append(digest("a"), "file_ast", digest("d"), digest("c")).unwrap()
+        catalog.apply(first, 3).unwrap()
+        catalog.apply(conflict, 3).unwrap()
+        expect(catalog.lookup(digest("a")).unwrap().quarantined).to_equal(true)
+
+    it "rejects unsupported opaque host receipts before journal mutation":
+        step("Require runtime-authenticated writer authority instead of plain fields")
+        val journal = ActionRootJournalV1.empty(4)
+        val catalog = CacheCatalogProjectionV1.memory().unwrap()
+        val root = cache_host_open_root_v1("build/test-artifacts/cache-writer-forgery")
+        val peer = cache_host_authenticate_peer_v1(root, -1)
+        val lock = cache_host_acquire_exclusive_lock_v1(root, peer)
+        val boot = cache_host_boot_identity_v1(lock)
+        val host_epoch = cache_host_advance_writer_epoch_v1(lock, boot)
+        val nonce: [u8] = [1, 2, 3]
+        val readiness = cache_host_publish_readiness_v1(lock, host_epoch, nonce)
+        val result = cache_writer_append_host_admitted_v1(peer, readiness, nonce, host_epoch,
+            journal, catalog, digest("a"), "file_ast", digest("b"), digest("c"))
+        expect(result.is_err()).to_equal(true)
+        expect(journal.bytes).to_equal("")
+
+describe "generation-first cache gateway":
+    it "never promotes a catalog row to a hit without anchored CAS bytes":
+        step("Validate the extended pin then fail closed as a typed miss")
+        val catalog = CacheCatalogProjectionV1.memory().unwrap()
+        catalog.apply(ActionRootRecordV1(sequence: 0, action_digest: digest("a"),
+            object_kind: "file_ast", object_digest: digest("b"), manifest_digest: digest("c")), 6).unwrap()
+        val summary = SummaryStoreV1.memory().unwrap()
+        val gateway = CacheGatewayAdapterV1(catalog: catalog,
+            summaries: VirtualSourceStoreAdapterV1.new(summary, digest("9")),
+            cache_root: "/tmp/simple-cache-gateway-test",
+            process_instance_nonce: digest("1"), boot_identity_digest: digest("2"),
+            reader_admission_epoch: 8, journal_generation: 6,
+            pinned_manifest_digest: digest("3"), monotonic_now: 100, next_pin: 0)
+        expect(gateway.begin_direct_read(10).is_err()).to_equal(true)
+
+    it "rejects a pin from a different journal generation":
+        step("Compare generation before consulting the catalog")
+        val catalog = CacheCatalogProjectionV1.memory().unwrap()
+        val summary = SummaryStoreV1.memory().unwrap()
+        val gateway = CacheGatewayAdapterV1(catalog: catalog,
+            summaries: VirtualSourceStoreAdapterV1.new(summary, digest("9")),
+            cache_root: "/tmp/simple-cache-gateway-test",
+            process_instance_nonce: digest("1"), boot_identity_digest: digest("2"),
+            reader_admission_epoch: 8, journal_generation: 6,
+            pinned_manifest_digest: digest("3"), monotonic_now: 100, next_pin: 0)
+        val pin = DirectReadPinV1(pin_id: digest("4"), process_instance_nonce: digest("1"),
+            boot_identity_digest: digest("2"), reader_admission_epoch: 8,
+            journal_superblock_generation: 5, pinned_manifest_digest: digest("3"),
+            created_monotonic: 100, expires_monotonic: 110,
+            namespace_entry_digest: digest("5"))
+        expect(gateway.lookup_verified_action(digest("a"), pin).is_err()).to_equal(true)

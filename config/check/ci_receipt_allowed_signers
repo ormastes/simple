@@ -1,0 +1,59 @@
+# Allowed signers for local-CI receipts (schema simple.local-ci-receipt/v1).
+#
+# Consumed verbatim by `ssh-keygen -Y verify -f <this file>` from
+#   scripts/check/verify-local-ci-receipt.shs
+# and, when --allowed-signers is passed, by
+#   scripts/check/sign-local-ci-receipt.shs
+#
+# THIS FILE IS DELIBERATELY EMPTY OF KEYS. That is the fail-closed default: an
+# allowlist with no key admits nobody, every receipt verification returns
+# non-zero, and CI therefore runs the full gate set. That is the correct
+# behaviour until a real key is reviewed and added — a receipt feature that
+# starts out trusting somebody is a receipt feature that starts out broken.
+# scripts/check/verify-local-ci-receipt.shs pins this: its selftest case (c2)
+# fails if this shipped file ever admits a signer.
+#
+# SECURITY (F6): this file MUST be read from the BASE ref, never from a pull
+# request head. A PR that could edit its own allowlist could sign its own
+# receipt with its own key and skip the gates it was meant to satisfy. The
+# workflow reads it with `pull_request_target` semantics, the same precedent
+# `review-admission.yml` already sets.
+#
+# TRUST CLASS: a key here proves WHO produced a receipt, not that the gates
+# truly ran. This is the same trust class as review-admission.yml's
+# `self_attestation` input. Add a key only for a signer you would already trust
+# to self-attest.
+#
+# FORMAT — one signer per line, no leading whitespace:
+#
+#   <principal> namespaces="simple-ci-receipt" <keytype> <base64-key>
+#
+#   <principal>  the identity the signer passes as --identity, and which the
+#                verifier passes to `ssh-keygen -Y verify -I`. Constrained to
+#                [A-Za-z0-9._@+-] by both scripts; an email-shaped id is
+#                conventional.
+#   namespaces=  MUST be exactly "simple-ci-receipt". Without it the key would
+#                be accepted for every sshsig namespace, so a signature the
+#                signer produced for some unrelated purpose (git commit
+#                signing, for instance) could be replayed as a CI receipt.
+#   <keytype>    ssh-ed25519 is the expected type; the key material is the
+#                whole second and third fields of the signer's .pub file.
+#
+# TO ADD A REAL KEY
+#   1. Generate a key used for NOTHING else:
+#          ssh-keygen -t ed25519 -C ci-receipt-<who> -f ~/.ssh/simple_ci_receipt
+#   2. Append one line, taking the key material verbatim from the .pub file:
+#          printf '%s namespaces="simple-ci-receipt" %s\n' \
+#              <principal> "$(cat ~/.ssh/simple_ci_receipt.pub | cut -d" " -f1,2)" \
+#              >> config/check/ci_receipt_allowed_signers
+#   3. Land that line through review on the BASE branch. Adding a key in the
+#      same PR whose gates it would let you skip is exactly the attack this
+#      file exists to prevent, and reviewers should reject it.
+#
+# EXAMPLE (commented out on purpose — this is not a usable key):
+# ci-receipt@example.invalid namespaces="simple-ci-receipt" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleExampleExampleExampleExampleExampl
+#
+# TODO(upgrade path, F4): once a full-CLI pure-Simple binary is deployed to CI,
+# add a Simple twin verifier over src/lib/common/crypto/ed25519.spl so the
+# receipt check no longer depends on OpenSSH being present on the runner. Do
+# not build it before that binary exists — today CI runners have no bin/simple.

@@ -1,0 +1,113 @@
+# codex-impl: deterministic projection from frozen frontend nodes to FileAstV1.
+
+use compiler.common.cache_contract.file_ast_v1.{FileAstNodeV1, FileAstV1}
+
+pub struct FrozenFrontendNodeV1:
+    kind: i64
+    flags: i64
+    source_start: i64
+    source_end: i64
+    payload: text
+    children: [i64]
+
+fn _sorted_unique_text_v1(values: [text]) -> [text]:
+    var result: [text] = []
+    for value in values:
+        if result.contains(value):
+            continue
+        var inserted = false
+        var next: [text] = []
+        for current in result:
+            if not inserted and value < current:
+                next.push(value)
+                inserted = true
+            next.push(current)
+        if not inserted:
+            next.push(value)
+        result = next
+    result
+
+fn _text_index_v1(values: [text], needle: text) -> i64:
+    for index in 0..values.len():
+        if values[index] == needle:
+            return index
+    -1
+
+fn _filled_i64_v1(count: i64, value: i64) -> [i64]:
+    var result: [i64] = []
+    for _index in 0..count:
+        result.push(value)
+    result
+
+pub fn build_file_ast_v1(
+    source_blob_digest: text,
+    grammar_digest: text,
+    compiler_owner_digest: text,
+    source_length: i64,
+    strings: [text],
+    frozen_nodes: [FrozenFrontendNodeV1],
+    root_node: i64,
+    public_summary_digest: text,
+    semantic_read_set_digest: text,
+) -> Result<FileAstV1, text>:
+    if source_blob_digest == "" or grammar_digest == "" or compiler_owner_digest == "":
+        return Err("frontend AST identity digest is empty")
+    if source_length < 0:
+        return Err("frontend AST source length is negative")
+    if frozen_nodes.len() == 0 or root_node < 0 or root_node >= frozen_nodes.len():
+        return Err("frontend AST root is outside the frozen node table")
+
+    val payloads = _sorted_unique_text_v1([for node in frozen_nodes: node.payload])
+    val string_table = _sorted_unique_text_v1(strings)
+    var old_to_new = _filled_i64_v1(frozen_nodes.len(), -1)
+    var parent_counts = _filled_i64_v1(frozen_nodes.len(), 0)
+    var queue: [i64] = [root_node]
+    old_to_new[root_node] = 0
+    var output: [FileAstNodeV1] = []
+    var cursor = 0
+
+    while cursor < queue.len():
+        val old_index = queue[cursor]
+        val input = frozen_nodes[old_index]
+        if input.source_start < 0 or input.source_end < input.source_start or input.source_end > source_length:
+            return Err("frontend AST node has an invalid source range")
+
+        val first_child = queue.len()
+        for child in input.children:
+            if child < 0 or child >= frozen_nodes.len():
+                return Err("frontend AST child is outside the frozen node table")
+            if child == root_node:
+                return Err("frontend AST root cannot be a child")
+            parent_counts[child] = parent_counts[child] + 1
+            if parent_counts[child] != 1:
+                return Err("frontend AST node has multiple parents")
+            if old_to_new[child] != -1:
+                return Err("frontend AST contains a cycle or duplicate child")
+            old_to_new[child] = queue.len()
+            queue.push(child)
+
+        output.push(FileAstNodeV1(
+            kind: input.kind,
+            flags: input.flags,
+            source_start: input.source_start,
+            source_end: input.source_end,
+            first_child: first_child,
+            child_count: input.children.len(),
+            payload_index: _text_index_v1(payloads, input.payload),
+        ))
+        cursor = cursor + 1
+
+    if output.len() != frozen_nodes.len():
+        return Err("frontend AST contains unreachable nodes")
+
+    Ok(FileAstV1(
+        source_blob_digest: source_blob_digest,
+        grammar_digest: grammar_digest,
+        compiler_owner_digest: compiler_owner_digest,
+        string_table: string_table,
+        nodes: output,
+        payload_tables: payloads,
+        root_node: 0,
+        public_summary_digest: public_summary_digest,
+        semantic_read_set_digest: semantic_read_set_digest,
+    ))

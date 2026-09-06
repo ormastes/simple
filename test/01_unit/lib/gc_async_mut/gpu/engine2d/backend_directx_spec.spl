@@ -1,20 +1,35 @@
 # @cover src/lib/gc_async_mut/gpu/engine2d/backend_directx.spl
 # @tag: unit, engine2d, directx
+# @manual_section: directx-engine2d-backend
 
 """
 # DirectX 2D Engine backend contract
 
-## Overview
+## Purpose and audience
 
 Pins the Engine2D DirectX backend surface for both Linux DXVK/vkd3d routing and
 native Windows D3D11 routing. The platform probe drives expected evidence
 strings, so Windows-only behavior still has structured evidence on Linux.
+Audience: Engine2D backend owners and the host GPU lane maintainers.
 
 **Requirements:** doc/02_requirements/feature/host_gpu_lane.md
 **Research:** doc/01_research/language/host_gpu_lane/later_gpu_host_grammar.md
 **Plan:** doc/03_plan/agent_tasks/gui_web_gpu_host_platform_matrix.md
 **Architecture:** doc/04_architecture/ui/simple_gui_stack.md
 **Design:** doc/05_design/host_gpu_lane.md
+
+## Operator workflow
+
+Run
+`./src/compiler_rust/target/bootstrap/simple run test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_directx_spec.spl`.
+Scenarios that need a real device branch on the platform probe and degrade to
+probe-evidence assertions on hosts without DXVK/D3D11.
+
+## Compatibility and limitations
+
+Device-readback scenarios degrade to probe-evidence assertions on hosts
+without DXVK/D3D11, and the Windows-routing scenarios are documented platform
+limitations on Linux rather than regressions.
 
 ## Syntax
 
@@ -38,13 +53,13 @@ expect(readback.source).to_equal("swapchain_present")
 expect(readback.backend_handle).to_equal(77)
 ```
 
-Initialized readback target after present:
+Initialized readback target after present (emulated ICD, no device):
 
 ```simple
 b.clear(0xFF224466)
 b.present()
 val readback = b.read_pixels_with_source()
-expect(readback.source).to_equal("device_readback")
+expect(readback.source).to_equal("emulated_icd_readback")
 expect(readback.backend_handle).to_be_greater_than(0)
 expect(readback.pixel_count).to_equal(16)
 ```
@@ -56,13 +71,27 @@ expect(readback.pixel_count).to_equal(16)
   handle fallback is active.
 - `swapchain_present` is presentation provenance, not backend
   `device_readback` proof.
-- DirectX may report `device_readback` only after an initialized readback
-  target has uploaded and read back the expected pixel count with a positive
-  readback handle. Checksum is evidence, not the validity gate, because an
-  all-zero frame is valid and may checksum to zero.
+- DirectX may report `device_readback` ONLY from the native Windows D3D11 path
+  (`native_hardware`, checked identity). The DXVK/vkd3d path never may: its
+  readback target is serviced by the emulated Vulkan ICD, whose queue submit
+  and present are still "pending rt_dlopen for real libvulkan"
+  (`src/lib/nogc_async_mut/gpu/vulkan_icd_sffi.spl:203,218`), so the pixels are
+  the CPU-rasterized ones this backend uploaded. That checked round-trip
+  reports `emulated_icd_readback` — a distinct provenance that no consumer
+  accepts as device proof. Checksum is evidence, not the validity gate, because
+  an all-zero frame is valid and may checksum to zero.
+
+## Verification guidance and troubleshooting
+
+Rerun the command above on a host with DXVK or native D3D11 for the
+device-readback scenarios; on a probe-only host a failure in the probe
+scenarios means the platform evidence contract regressed, while a failure in
+the Windows-routing scenarios on a Linux host is the documented platform
+limitation, not a regression.
 """
 
 use std.spec
+use std.io_runtime.{shell_output}
 use std.gc_async_mut.gpu.engine2d.backend_directx.{DirectXBackend, DxPlatformProbe, dx_platform_probe, probe_directx}
 use std.gc_async_mut.gpu.engine2d.backend_probe.{BackendStatus}
 use std.gc_async_mut.gpu.engine2d.backend.{RenderBackend}
@@ -71,16 +100,25 @@ describe "DirectX 2D backend — platform probe":
     # @manual scenario evidence
 
     it "probe returns a DxPlatformProbe with a non-empty platform field":
+        # @req REQ-HOST-GPU-LANE-001
+        # @capture(statistics): platform identifier reported by dx_platform_probe
+        step("Run the DirectX platform probe and read its platform field")
         val probe = dx_platform_probe()
         val plat_ok = probe.platform == "linux-dxvk" or probe.platform == "windows-native"
         expect(plat_ok).to_equal(true)
 
     it "probe leaf field is a recognized platform value":
+        # @req REQ-HOST-GPU-LANE-001
+        # @capture(statistics): leaf evidence reported by dx_platform_probe
+        step("Run the DirectX platform probe and read its leaf field")
         val probe = dx_platform_probe()
         val leaf_ok = probe.leaf == "leaf=dlopen" or probe.leaf == "leaf=structured"
         expect(leaf_ok).to_equal(true)
 
     it "probe evidence string contains platform and leaf":
+        # @req REQ-HOST-GPU-LANE-001
+        # @capture(statistics): structured evidence string from the probe
+        step("Run the DirectX platform probe and inspect its evidence string")
         val probe = dx_platform_probe()
         val ev = probe.evidence
         val has_platform = ev.contains("platform=")
@@ -89,6 +127,9 @@ describe "DirectX 2D backend — platform probe":
         expect(has_leaf).to_equal(true)
 
     it "probe_directx returns Initialized or Failed status (not silent green)":
+        # @req REQ-HOST-GPU-LANE-001
+        # @capture(statistics): probe_directx status on this host
+        step("Run the full DirectX probe and read its backend status")
         val result = probe_directx()
         val valid = (
             result.status == BackendStatus.Initialized or
@@ -98,15 +139,30 @@ describe "DirectX 2D backend — platform probe":
         expect(valid).to_equal(true)
 
     it "probe_directx reason contains platform-specific evidence":
+        # @req REQ-HOST-GPU-LANE-001
+        # @capture(statistics): probe_directx reason string on this host
+        step("Run the full DirectX probe and inspect its reason string")
         val result = probe_directx()
         val has_leaf = result.reason.contains("leaf=")
         expect(has_leaf).to_equal(true)
 
+    # NOTE (2026-09-05, pre-existing RED on macOS): this scenario fails on a
+    # host with neither DXVK nor native D3D11 — api_name does not answer
+    # "directx" there. Kept RED deliberately; not filed.
     it "probe_directx api_name distinguishes native Windows from emulation":
+        # @req REQ-HOST-GPU-LANE-001
+        # @capture(statistics): probe_directx api_name on this host
+        step("Run the full DirectX probe and read its api_name")
         val result = probe_directx()
         expect(result.api_name).to_equal("directx")
 
+    # NOTE (2026-09-05, pre-existing RED on macOS): repeat-probe leak check
+    # fails on hosts without DXVK/D3D11 for the same platform reason as the
+    # api_name scenario. Kept RED deliberately; not filed.
     it "probe_directx can repeat without leaking the probe device":
+        # @req REQ-HOST-GPU-LANE-001
+        # @capture(statistics): api_name and reason across two consecutive probes
+        step("Run the DirectX probe twice and compare both evidence sets")
         val first = probe_directx()
         val second = probe_directx()
         expect(first.api_name).to_equal("directx")
@@ -117,12 +173,23 @@ describe "DirectX 2D backend — platform probe":
 
 describe "DirectX 2D backend — init and name":
 
+    # NOTE (2026-09-05, pre-existing RED on macOS): backend naming falls
+    # outside both routed names on a host with no DirectX at all. Kept RED
+    # deliberately; not filed.
     it "reported backend name distinguishes native Windows from emulation":
+        # @req REQ-HOST-GPU-LANE-001
+        # @capture(statistics): backend name versus the host-routed expectation
+        step("Create the DirectX backend and read its reported name")
         val b = DirectXBackend.create()
         val expected = if get_host_os() == "windows": "directx" else: "directx-software-emulation"
         expect(b.name()).to_equal(expected)
 
+    # NOTE (2026-09-05, pre-existing RED on macOS): same platform limitation
+    # as the routed-name scenario above. Kept RED deliberately; not filed.
     it "reported backend name always identifies directx":
+        # @req REQ-HOST-GPU-LANE-001
+        # @capture(statistics): backend name prefix and full name
+        step("Create the DirectX backend and check the reported name prefix")
         val b = DirectXBackend.create()
         val reported = b.name()
         expect(reported).to_start_with("directx")
@@ -130,6 +197,9 @@ describe "DirectX 2D backend — init and name":
         expect(reported).to_equal(expected)
 
     it "native queue uses the frozen header and fixed CLEAR/FILL records":
+        # @req REQ-HOST-GPU-LANE-001
+        # @capture(bit_table): frozen native command words for CLEAR and FILL
+        step("Stage an initialized native queue and record one CLEAR and one FILL")
         var b = DirectXBackend.create()
         b.sw.init(4, 4)
         b.native_hardware = true
@@ -146,6 +216,9 @@ describe "DirectX 2D backend — init and name":
         b.shutdown()
 
     it "unsupported operations poison native receipt eligibility":
+        # @req REQ-HOST-GPU-LANE-001
+        # @capture(bit_table): receipt eligibility and cached-handle state after each unsupported op
+        step("Issue an unsupported draw line and then an unsupported clear on an eligible queue")
         var b = DirectXBackend.create()
         b.sw.init(4, 4)
         b.native_hardware = true
@@ -157,19 +230,22 @@ describe "DirectX 2D backend — init and name":
         b.native_cached_pixels = [0xFF112233u32]
         b.draw_line(0, 0, 3, 3, 0xFFFFFFFF, 1)
         expect(b.native_receipt_eligible).to_equal(false)
-        expect(b.native_cached_handle).to_equal(0)
-        expect(b.native_cached_pixels.len()).to_equal(0)
+        expect(b.native_cached_handle).to_equal(0)  # oracle: an unsupported op must flush the staged readback handle to zero
+        expect(b.native_cached_pixels.len()).to_equal(0)  # oracle: an unsupported op must flush the staged pixel cache to empty
         b.native_receipt_eligible = true
         b.native_attempted = true
         b.native_cached_handle = 88
         b.native_cached_pixels = [0xFF445566u32]
         b.clear(0xFF000000)
         expect(b.native_receipt_eligible).to_equal(false)
-        expect(b.native_cached_handle).to_equal(0)
-        expect(b.native_cached_pixels.len()).to_equal(0)
+        expect(b.native_cached_handle).to_equal(0)  # oracle: an unsupported op must flush the staged readback handle to zero
+        expect(b.native_cached_pixels.len()).to_equal(0)  # oracle: an unsupported op must flush the staged pixel cache to empty
         b.shutdown()
 
     it "opaque IMAGE is queued inline after a valid initializer":
+        # @req REQ-HOST-GPU-LANE-001
+        # @capture(bit_table): native words for the inline IMAGE and the blended partial record
+        step("Queue an opaque image and a blended partial image on an eligible queue")
         var b = DirectXBackend.create()
         b.sw.init(2, 1)
         b.native_hardware = true
@@ -198,7 +274,14 @@ describe "DirectX 2D backend — init and name":
         expect(partial.native_words[16]).to_equal(2u32)
         partial.shutdown()
 
+    # NOTE (2026-09-05, pre-existing RED on macOS): this source-contract
+    # scenario fails on this host because the runtime facade files are not
+    # readable from the test runner working directory here. Kept RED
+    # deliberately; not filed.
     it "backend owns no direct DirectX runtime extern":
+        # @req REQ-HOST-GPU-LANE-001
+        # @capture(statistics): extern ownership contract across backend, facade, and runtime source
+        step("Read the backend, facade, and runtime sources and check the extern contract")
         val backend = file_read("src/lib/gc_async_mut/gpu/engine2d/backend_directx.spl")
         val facade = file_read("src/lib/nogc_sync_mut/gpu/engine2d/sffi_directx.spl")
         val runtime = file_read("src/runtime/runtime_directx_core.c")
@@ -219,12 +302,18 @@ describe "DirectX 2D backend — init and name":
         expect(runtime).to_contain("out[0] = (uint32_t)identity;")
 
     it "readback defaults to CPU mirror provenance before device init":
+        # @req REQ-HOST-GPU-LANE-001
+        # @capture(statistics): readback provenance and handle before init
+        step("Read pixels from a fresh backend before any device init")
         val b = DirectXBackend.create()
         val readback = b.read_pixels_with_source()
         expect(readback.source).to_equal("cpu_mirror")
-        expect(readback.backend_handle).to_equal(0)
+        expect(readback.backend_handle).to_equal(0)  # oracle: no device init means no backend handle exists yet
 
     it "reports swapchain presentation provenance without claiming device readback":
+        # @req REQ-HOST-GPU-LANE-001
+        # @capture(statistics): readback provenance for a staged swapchain handle
+        step("Stage an initialized swapchain handle and read pixels back")
         var b = DirectXBackend.create()
         b.initialized = true
         b.swapchain_handle = 77
@@ -232,72 +321,104 @@ describe "DirectX 2D backend — init and name":
         val readback = b.read_pixels_with_source()
 
         expect(readback.source).to_equal("swapchain_present")
-        expect(readback.backend_handle).to_equal(77)
+        expect(readback.backend_handle).to_equal(77)  # oracle: 77 is the swapchain handle this scenario staged, echoed as presentation provenance
 
-    it "reports checked device readback for an eligible frame":
+    it "reports emulated-ICD provenance, never device readback, on the DXVK path":
+        # @req REQ-HOST-GPU-LANE-001
+        # @capture(gui_image): checked emulated-ICD readback of a cleared 4x4 frame
+        step("Init a non-native surface, clear it, present, and read back the checked round-trip")
         var b = DirectXBackend.create()
         val ok = b.init(4, 4)
         if ok:
             b.clear(0xFF224466)
             b.present()
             val readback = b.read_pixels_with_source()
-            expect(readback.source).to_equal("device_readback")
+            if b.native_hardware:
+                # Native Windows D3D11: a real device really did execute and
+                # read back, so device provenance here is genuine.
+                expect(readback.source).to_equal("device_readback")
+            else:
+                expect(readback.source).to_equal("emulated_icd_readback")
+                expect(readback.source).to_not_equal("device_readback")  # oracle: the emulated ICD never submits to a queue, so it may not stamp device provenance
             expect(readback.backend_handle).to_be_greater_than(0)
-            expect(readback.pixel_count).to_equal(16)
+            expect(readback.pixel_count).to_equal(16)  # oracle: a 4x4 frame is sixteen pixels
             expect(readback.checksum).to_be_greater_than(0)
             expect(readback.pixels[0]).to_equal(0xFF224466)
         else:
-            val probe = dx_platform_probe()
-            expect(probe.leaf).to_contain("leaf=")
+            # No DXVK device came up, so nothing was uploaded and nothing was
+            # read back. The honest answer is the CPU mirror — a backend that
+            # stamps device provenance here is fabricating it.
+            val readback = b.read_pixels_with_source()
+            expect(readback.source).to_equal("cpu_mirror")
+            expect(readback.source).to_not_equal("device_readback")  # oracle: no device came up, so no device provenance may be claimed
+            expect(readback.backend_handle).to_equal(0)  # oracle: a failed init leaves no handle to echo
 
     it "accepts all-zero checked readback frames":
+        # @req REQ-HOST-GPU-LANE-001
+        # @capture(gui_image): checked emulated-ICD readback of a cleared-to-zero 4x4 frame
+        step("Init a non-native surface, clear to zero, present, and read back the valid empty frame")
         var b = DirectXBackend.create()
         val ok = b.init(4, 4)
         if ok:
             b.clear(0)
             b.present()
             val readback = b.read_pixels_with_source()
-            expect(readback.source).to_equal("device_readback")
+            if b.native_hardware:
+                expect(readback.source).to_equal("device_readback")
+            else:
+                expect(readback.source).to_equal("emulated_icd_readback")
+                expect(readback.source).to_not_equal("device_readback")  # oracle: an all-zero frame is still only an emulated round-trip, not device proof
             expect(readback.backend_handle).to_be_greater_than(0)
-            expect(readback.pixel_count).to_equal(16)
-            expect(readback.checksum).to_equal(0)
-            expect(readback.pixels[0]).to_equal(0)
+            expect(readback.pixel_count).to_equal(16)  # oracle: a 4x4 frame is sixteen pixels
+            expect(readback.checksum).to_equal(0)  # oracle: an all-zero frame is valid and checksums to zero by design
+            expect(readback.pixels[0]).to_equal(0)  # oracle: an all-zero frame reads back a zero first pixel
         else:
-            val probe = dx_platform_probe()
-            expect(probe.leaf).to_contain("leaf=")
+            val readback = b.read_pixels_with_source()
+            expect(readback.source).to_equal("cpu_mirror")
+            expect(readback.source).to_not_equal("device_readback")  # oracle: no device came up, so no device provenance may be claimed
+            expect(readback.backend_handle).to_equal(0)  # oracle: a failed init leaves no handle to echo
 
     it "init returns a bool (true or false — device available or not)":
+        # @req REQ-HOST-GPU-LANE-001
+        # @capture(statistics): init verdict type on this host
+        step("Init a 64x64 surface and check the verdict is a plain boolean")
         var b = DirectXBackend.create()
         val ok = b.init(64, 64)
         val valid = ok == true or ok == false
         expect(valid).to_equal(true)
 
     it "width and height match after init":
+        # @req REQ-HOST-GPU-LANE-001
+        # @capture(statistics): reported surface dimensions after init
+        step("Init a 128x96 surface and read back the reported dimensions")
         var b = DirectXBackend.create()
         val ok = b.init(128, 96)
         if ok:
-            expect(b.width()).to_equal(128)
-            expect(b.height()).to_equal(96)
+            expect(b.width()).to_equal(128)  # oracle: init was requested with width 128
+            expect(b.height()).to_equal(96)  # oracle: init was requested with height 96
         else:
             # Not initialized: width/height are 0
-            expect(b.width()).to_equal(0)
+            expect(b.width()).to_equal(0)  # oracle: a backend that never initialized reports zero width
 
     it "shutdown after init does not panic":
+        # @req REQ-HOST-GPU-LANE-001
+        # @capture(statistics): backend identity after a full shutdown cycle
+        step("Init and shut down a 32x32 surface, then query the backend name")
         var b = DirectXBackend.create()
         b.init(32, 32)
         b.shutdown()
-        expect(1).to_equal(1)
-
-
-describe "DirectX 2D backend — drawing (init required, CPU parity)":
+        expect(b.name()).to_start_with("directx")
 
     it "clear then read_pixels returns buffer of correct length when init succeeds":
+        # @req REQ-HOST-GPU-LANE-001
+        # @capture(statistics): CPU pixel buffer length after a clear
+        step("Init an 8x8 surface, clear it, and read the full pixel buffer")
         var b = DirectXBackend.create()
         val ok = b.init(8, 8)
         if ok:
             b.clear(0xFF0000FF)
             val pixels = b.read_pixels()
-            expect(pixels.len()).to_equal(64)
+            expect(pixels.len()).to_equal(64)  # oracle: an 8x8 surface reads back sixty-four pixels
         else:
             # init failed (no DXVK/Vulkan): assert leaf evidence from probe
             val probe = dx_platform_probe()
@@ -305,6 +426,9 @@ describe "DirectX 2D backend — drawing (init required, CPU parity)":
             expect(leaf_ok).to_equal(true)
 
     it "draw_rect_filled then read_pixels returns non-empty buffer":
+        # @req REQ-HOST-GPU-LANE-001
+        # @capture(statistics): CPU pixel buffer length after a filled rect
+        step("Init a 16x16 surface, fill a rect, and read the pixel buffer")
         var b = DirectXBackend.create()
         val ok = b.init(16, 16)
         if ok:
@@ -317,25 +441,36 @@ describe "DirectX 2D backend — drawing (init required, CPU parity)":
             expect(probe.platform).to_equal("linux-dxvk")
 
     it "draw_line does not panic":
+        # @req REQ-HOST-GPU-LANE-001
+        # @capture(statistics): CPU pixel buffer length after a diagonal line
+        step("Init a 32x32 surface, draw a diagonal line, and read the pixel buffer")
         var b = DirectXBackend.create()
         val ok = b.init(32, 32)
         if ok:
             b.clear(0xFFFFFFFF)
             b.draw_line(0, 0, 31, 31, 0xFF000000, 1)
             val pixels = b.read_pixels()
-            expect(pixels.len()).to_equal(1024)
+            expect(pixels.len()).to_equal(1024)  # oracle: a 32x32 surface reads back 1024 pixels
         else:
-            expect(1).to_equal(1)
+            val probe = dx_platform_probe()
+            val leaf_ok = probe.leaf == "leaf=dlopen" or probe.leaf == "leaf=structured"
+            expect(leaf_ok).to_equal(true)
 
     it "present does not panic after init":
+        # @req REQ-HOST-GPU-LANE-001
+        # @capture(statistics): backend identity after a present cycle
+        step("Init a 16x16 surface, clear, present, and query the backend name")
         var b = DirectXBackend.create()
         val ok = b.init(16, 16)
         if ok:
             b.clear(0xFFAAAAAA)
             b.present()
-        expect(1).to_equal(1)
+        expect(b.name()).to_start_with("directx")
 
     it "CPU parity: clear to red matches expected pixel value at (0,0)":
+        # @req REQ-HOST-GPU-LANE-001
+        # @capture(gui_image): first pixel of a cleared-to-red 4x4 CPU frame
+        step("Init a 4x4 surface, clear to red, and read the first pixel")
         var cpu_b = DirectXBackend.create()
         val ok = cpu_b.init(4, 4)
         if ok:
@@ -350,14 +485,60 @@ describe "DirectX 2D backend — drawing (init required, CPU parity)":
             expect(leaf_ok).to_equal(true)
 
 
+describe "DirectX 2D backend — emulated-ICD provenance is not device provenance":
+    """The DXVK/vkd3d readback path cannot be reached live on a host with no
+    DXVK device (`init()` returns false here and no readback target is ever
+    created), so the live scenarios above degrade to CPU-mirror refusal
+    checks. The provenance stamp itself is therefore pinned by anchored source
+    shape — the same technique
+    `test/01_unit/lib/gc_async_mut/gpu/session/adapter_honesty_spec.spl` uses
+    for the unreachable adapter paths. It discriminates: restoring the
+    `device_readback` stamp in `backend_directx.spl` flips the first two
+    scenarios below RED."""
+
+    it "the emulated readback path stamps emulated_icd_readback exactly once":
+        # @req REQ-HOST-GPU-LANE-001
+        # @capture(statistics): provenance stamp on the non-native readback return
+        step("Grep the backend source for the provenance stamp on the emulated readback return")
+        val src = "src/lib/gc_async_mut/gpu/engine2d/backend_directx.spl"
+        val cmd = '/usr/bin/grep -c -F \'engine2d_readback_with_handle(readback.pixels, "emulated_icd_readback"\' ' + src
+        expect(shell_output(cmd).trim()).to_equal("1")  # oracle: exactly one non-native readback return exists and it must carry the emulated stamp
+
+    it "no readback.pixels return in the backend claims device_readback":
+        # @req REQ-HOST-GPU-LANE-001
+        # @capture(statistics): count of device_readback stamps on the emulated return
+        step("Grep the backend source for a device_readback stamp on the emulated readback return")
+        val src = "src/lib/gc_async_mut/gpu/engine2d/backend_directx.spl"
+        # `grep -c` exits 1 on zero matches and shell_output returns "" for a
+        # non-zero exit; piping through `head -1` makes the pipeline's status
+        # head's (0) so the genuine count "0" survives, instead of collapsing
+        # to the same empty string a broken command would produce.
+        val cmd = '/usr/bin/grep -c -F \'engine2d_readback_with_handle(readback.pixels, "device_readback"\' ' + src + ' | /usr/bin/head -1'
+        expect(shell_output(cmd).trim()).to_equal("0")  # oracle: the emulated ICD never touches a device, so this stamp must not exist
+
+    it "the native path keeps its genuine device_readback identity stamp":
+        # @req REQ-HOST-GPU-LANE-001
+        # @capture(statistics): count of identity-carrying device_readback stamps
+        step("Grep the backend source for the native identity-checked device readback return")
+        val src = "src/lib/gc_async_mut/gpu/engine2d/backend_directx.spl"
+        val cmd = '/usr/bin/grep -c -F \'engine2d_readback_with_identity(self.native_cached_pixels, "device_readback"\' ' + src
+        expect(shell_output(cmd).trim()).to_equal("1")  # oracle: the native Windows path is genuine and must not be collateral damage of this fix
+
+
 describe "DirectX 2D backend — dispatch chain evidence":
 
     it "leaf evidence from icd_probe is a recognized value":
+        # @req REQ-HOST-GPU-LANE-001
+        # @capture(statistics): dispatch-chain leaf evidence on this host
+        step("Run the platform probe and classify its leaf evidence")
         val probe = dx_platform_probe()
         val leaf_ok = probe.leaf == "leaf=dlopen" or probe.leaf == "leaf=structured"
         expect(leaf_ok).to_equal(true)
 
     it "on Linux without prefix, leaf is structured (DXVK dispatch chain still routes)":
+        # @req REQ-HOST-GPU-LANE-001
+        # @capture(statistics): device_ok verdict type from the probe
+        step("Run the platform probe and check the device verdict is a plain boolean")
         val probe = dx_platform_probe()
         # The dispatch chain is real regardless of leaf; assert chain integrity
         # by checking that device_ok is a bool (no panic)
@@ -365,6 +546,9 @@ describe "DirectX 2D backend — dispatch chain evidence":
         expect(ok_is_bool).to_equal(true)
 
     it "probe_directx reason identifies the platform backend":
+        # @req REQ-HOST-GPU-LANE-001
+        # @capture(statistics): probe_directx reason naming the routed backend
+        step("Run the full DirectX probe and check the reason names the dispatch chain")
         val result = probe_directx()
         val has_dxvk = result.reason.contains("dxvk-d3d11")
         expect(has_dxvk).to_equal(true)

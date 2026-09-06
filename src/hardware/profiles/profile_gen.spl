@@ -1,0 +1,532 @@
+"""
+profile_gen — the four-axis NVMe controller profile generator (plan G5, D1/D2).
+
+    ControllerProfile x MediaProfile x BoardProfile x OffloadProfile
+        -> validated ProductProfile -> generated artifacts
+
+Reads the nested-SDN axis files under `spec/profiles/`, closes the validation
+equations of the plan section 2.2, consults the source-origin ledger, and emits
+into `spec/profiles/generated/<board>/`.
+
+Deviation from the plan, stated so it does not look accidental: the plan writes
+`profiles/` and `generated/<board>/` at an unspecified root. This implementation
+places them at `spec/profiles/` and `spec/profiles/generated/<board>/`, which is
+the tree this workstream owns.
+
+Run from the REPO ROOT (paths below are repo-relative):
+
+    bin/simple run src/hardware/profiles/profile_gen.spl --list
+    bin/simple run src/hardware/profiles/profile_gen.spl --validate <board>
+    bin/simple run src/hardware/profiles/profile_gen.spl --emit <board>
+    bin/simple run src/hardware/profiles/profile_gen.spl --check <board>
+
+Every mode prints a VERDICT as its LAST line. Exit codes are NOT evidence in
+this repo (`bin/simple run` returns 193 on success); read the verdict.
+"""
+
+use std.common.sdn.parser.{parse}
+use std.common.sdn.value.{SdnValue}
+use std.io_runtime.{file_read, file_write}
+use std.fs.{file_exists, dir_create_all}
+use std.sffi.cli.{cli_get_args}
+
+val PROFILE_ROOT: text = "spec/profiles"
+val LEDGER_PATH: text = "doc/08_tracking/hardware/nvme_profile_source_origin.sdn"
+
+# ── SDN accessors (same shape as src/hardware/ir/register_ir_gen.spl) ────────
+fn sdn_get(v: SdnValue, key: text) -> SdnValue:
+    match v:
+        case Dict(entries):
+            if entries.contains_key(key): entries[key] else: SdnValue.Null
+        case _:
+            SdnValue.Null
+
+fn sdn_at(v: SdnValue, a: text, b: text) -> SdnValue:
+    sdn_get(sdn_get(v, a), b)
+
+fn sdn_text(v: SdnValue) -> text:
+    match v:
+        case String(s): s
+        case Int(i): i.to_text()
+        case Bool(b): if b: "true" else: "false"
+        case _: ""
+
+# The nested SDN reader does not decode `0x...` literals (it yields 0 or a
+# String). Hex is load-bearing here — the Cosmos+ apertures are hex — so decode
+# it explicitly rather than silently reading every aperture as zero.
+fn parse_num(t: text) -> i64:
+    val s: text = t.trim()
+    if s.len() == 0:
+        return 0
+    val digits: text = "0123456789ABCDEF"
+    var i: i64 = 0
+    var base: i64 = 10
+    if s.len() > 2 and s[0] == "0" and (s[1] == "x" or s[1] == "X"):
+        base = 16
+        i = 2
+    var acc: i64 = 0
+    while i < s.len():
+        val d: i64 = digits.index_of(s[i].to_upper())
+        if d < 0 or d >= base:
+            return acc
+        acc = acc * base + d
+        i = i + 1
+    acc
+
+fn sdn_int(v: SdnValue) -> i64:
+    match v:
+        case Int(i): i
+        case Bool(b): if b: 1 else: 0
+        case String(s): parse_num(s)
+        case _: 0
+
+fn sdn_items(v: SdnValue) -> [SdnValue]:
+    match v:
+        case Array(items): items
+        case _: []
+
+fn snake(id: text) -> text:
+    var out: text = ""
+    var i: i64 = 0
+    while i < id.len():
+        val c: text = id[i]
+        val lower: text = c.to_lower()
+        if c != lower and i > 0:
+            out = out + "_"
+        out = out + lower
+        i = i + 1
+    out
+
+fn hex(n: i64) -> text:
+    if n == 0:
+        return "0x0"
+    val digits: text = "0123456789ABCDEF"
+    var v: i64 = n
+    var out: text = ""
+    while v > 0:
+        out = digits[v % 16] + out
+        v = v / 16
+    "0x" + out
+
+# Non-cryptographic content digest. Deliberately NOT called a SHA: this is a
+# change detector for the regeneration gate, not a security primitive.
+fn digest(s: text) -> text:
+    val table: text = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
+    var h: i64 = 2166136261
+    var i: i64 = 0
+    while i < s.len():
+        var code: i64 = table.index_of(s[i])
+        if code < 0:
+            code = 95
+        h = (h * 31 + code * (i % 13 + 1)) % 1000000007
+        i = i + 1
+    "content-digest-v1:" + h.to_text() + ":len=" + s.len().to_text()
+
+# ── Origin ledger (table SDN). Scanned line-wise: the nested parser does not
+# read table rows, and this needs exactly two columns (profile, review_status).
+fn ledger_status(profile: text) -> text:
+    if not file_exists(LEDGER_PATH):
+        return "missing"
+    for line in file_read(LEDGER_PATH).split("\n"):
+        val t: text = line.trim()
+        if t.len() > 0 and t[0] != "#" and t.contains(",") and t.contains(profile):
+            var cols: [text] = []
+            for c in t.split(","):
+                cols = cols.push(c.trim().replace("\"", ""))
+            if cols.len() >= 12 and cols[1] == profile:
+                return cols[11]
+    "missing"
+
+# ── The composed product profile ────────────────────────────────────────────
+struct Product:
+    board_id:      text
+    ok:            i64          # 1 = all four axes loaded
+    board:         SdnValue
+    controller:    SdnValue
+    media:         SdnValue
+    offload:       SdnValue
+
+fn product_missing(board_id: text) -> Product:
+    Product(board_id: board_id, ok: 0, board: SdnValue.Null, controller: SdnValue.Null, media: SdnValue.Null, offload: SdnValue.Null)
+
+fn load_axis(kind: text, id: text) -> SdnValue:
+    val path: text = PROFILE_ROOT + "/" + kind + "/" + snake(id) + ".sdn"
+    if not file_exists(path):
+        return SdnValue.Null
+    match parse(file_read(path)):
+        case Ok(doc): sdn_get(doc, kind)
+        case Err(m): SdnValue.Null
+
+fn is_null(v: SdnValue) -> bool:
+    match v:
+        case Null: true
+        case _: false
+
+fn load_product(board_id: text) -> Product:
+    val b: SdnValue = load_axis("board", board_id)
+    if is_null(b):
+        return product_missing(board_id)
+    val c: SdnValue = load_axis("controller", sdn_text(sdn_get(b, "controller")))
+    val m: SdnValue = load_axis("media", sdn_text(sdn_get(b, "media")))
+    val o: SdnValue = load_axis("offload", sdn_text(sdn_get(b, "offload")))
+    if is_null(c) or is_null(m) or is_null(o):
+        return product_missing(board_id)
+    Product(board_id: board_id, ok: 1, board: b, controller: c, media: m, offload: o)
+
+# ── Validation: the closure equations (plan section 2.2) ─────────────────────
+fn total_pages(p: Product) -> i64:
+    val g: SdnValue = sdn_get(p.media, "geometry")
+    sdn_int(sdn_at(p.board, "wiring", "channels"))
+        * sdn_int(sdn_at(p.board, "wiring", "ways_per_channel"))
+        * sdn_int(sdn_get(g, "luns_per_way"))
+        * sdn_int(sdn_get(g, "planes_per_lun"))
+        * sdn_int(sdn_get(g, "blocks_per_plane"))
+        * sdn_int(sdn_get(g, "pages_per_block"))
+
+fn windows_overlap(p: Product) -> bool:
+    val ws: [SdnValue] = sdn_items(sdn_at(p.controller, "mmio", "windows"))
+    var i: i64 = 0
+    while i < ws.len():
+        var j: i64 = i + 1
+        while j < ws.len():
+            val ab: i64 = sdn_int(sdn_get(ws[i], "base"))
+            val ae: i64 = ab + sdn_int(sdn_get(ws[i], "span"))
+            val bb: i64 = sdn_int(sdn_get(ws[j], "base"))
+            val be: i64 = bb + sdn_int(sdn_get(ws[j], "span"))
+            if ab < be and bb < ae:
+                return true
+            j = j + 1
+        i = i + 1
+    false
+
+# Returns the list of FAILED equations; empty means the profile closes.
+fn validate(p: Product) -> [text]:
+    var bad: [text] = []
+    val g: SdnValue = sdn_get(p.media, "geometry")
+    val pages: i64 = total_pages(p)
+    if pages <= 0:
+        bad = bad.push("num_pages > 0 (got " + pages.to_text() + ")")
+
+    val cap: i64 = sdn_int(sdn_get(p.board, "namespace_capacity_lbas"))
+    val usable: i64 = pages * sdn_int(sdn_get(g, "sectors_per_page"))
+    if cap > usable:
+        bad = bad.push("namespace_capacity_lbas <= usable_pages x sectors_per_page (" + cap.to_text() + " > " + usable.to_text() + ")")
+
+    val meta: i64 = sdn_int(sdn_get(p.board, "metadata_bytes_per_page"))
+    val room: i64 = sdn_int(sdn_get(g, "oob_bytes")) - sdn_int(sdn_at(p.media, "ecc", "parity_bytes_per_page")) - sdn_int(sdn_get(p.board, "reserved_oob_bytes"))
+    if meta > room:
+        bad = bad.push("metadata_bytes_per_page <= oob - parity - reserved (" + meta.to_text() + " > " + room.to_text() + ")")
+
+    val bufs: i64 = sdn_int(sdn_get(p.board, "max_inflight_writes")) * sdn_int(sdn_get(p.board, "per_write_buffers"))
+    val pool: i64 = sdn_int(sdn_get(p.board, "write_buffer_pool"))
+    if bufs > pool:
+        bad = bad.push("max_inflight_writes x per_write_buffers <= write_buffer_pool (" + bufs.to_text() + " > " + pool.to_text() + ")")
+
+    val qs: SdnValue = sdn_at(p.controller, "nvme", "queues")
+    val need: i64 = sdn_int(sdn_get(qs, "io_max")) * sdn_int(sdn_get(qs, "depth_max"))
+    val ctx: i64 = sdn_int(sdn_get(p.controller, "command_context_capacity"))
+    if need > ctx:
+        bad = bad.push("io_max x depth_max <= command_context_capacity (" + need.to_text() + " > " + ctx.to_text() + ")")
+
+    val pbits: i64 = sdn_int(sdn_at(p.controller, "address", "physical_bits"))
+    var top: i64 = 0
+    for w in sdn_items(sdn_at(p.controller, "mmio", "windows")):
+        val e: i64 = sdn_int(sdn_get(w, "base")) + sdn_int(sdn_get(w, "span"))
+        if e > top:
+            top = e
+    # Compare BIT WIDTHS, not 2^n: doubling to 2^64 overflows i64 and made this
+    # equation fire on a perfectly legal 64-bit controller.
+    var bits_needed: i64 = 0
+    var t: i64 = top
+    while t > 0:
+        bits_needed = bits_needed + 1
+        t = t / 2
+    if bits_needed > pbits:
+        bad = bad.push("every mmio window fits address.physical_bits (top " + hex(top) + " needs " + bits_needed.to_text() + " bits > " + pbits.to_text() + ")")
+
+    if windows_overlap(p):
+        bad = bad.push("mmio windows do not overlap")
+
+    if sdn_int(sdn_get(g, "channels_hint")) != sdn_int(sdn_at(p.board, "wiring", "channels")):
+        bad = bad.push("board.wiring.channels == media.geometry.channels_hint")
+    if sdn_int(sdn_get(g, "ways_per_channel")) != sdn_int(sdn_at(p.board, "wiring", "ways_per_channel")):
+        bad = bad.push("board.wiring.ways_per_channel == media.geometry.ways_per_channel")
+
+    # raw_nand => the controller must actually supply a NAND path.
+    if sdn_text(sdn_get(p.media, "kind")) == "raw_nand":
+        if sdn_text(sdn_at(p.media, "ecc", "scheme")) == "none":
+            bad = bad.push("media.kind == raw_nand => ecc.scheme != none")
+        if sdn_text(sdn_at(p.controller, "dma", "cache_maintenance")) == "":
+            bad = bad.push("media.kind == raw_nand => controller declares dma.cache_maintenance")
+    # No real media => C5 is a category error.
+    if sdn_text(sdn_get(p.media, "kind")) != "raw_nand":
+        if sdn_text(sdn_get(p.board, "evidence_required")) == "C5" or sdn_text(sdn_get(p.board, "evidence_required")) == "C6":
+            bad = bad.push("evidence_required " + sdn_text(sdn_get(p.board, "evidence_required")) + " requires media.kind == raw_nand")
+    bad
+
+# ── Emission ────────────────────────────────────────────────────────────────
+fn banner(p: Product, file: text) -> [text]:
+    var out: [text] = []
+    out = out.push("# GENERATED by src/hardware/profiles/profile_gen.spl for board " + p.board_id + ".")
+    out = out.push("# Inputs: spec/profiles/{board,controller,media,offload}/*.sdn. DO NOT EDIT.")
+    out = out.push("# A fix belongs in the generator or the profile, never in this artifact.")
+    out = out.push("")
+    out
+
+fn emit_consts(p: Product) -> text:
+    val qs: SdnValue = sdn_at(p.controller, "nvme", "queues")
+    val g: SdnValue = sdn_get(p.media, "geometry")
+    var out: [text] = banner(p, "consts.spl")
+    out = out.push("# Typed accessors. Every constant is returned from a NULLARY FUNCTION, not a")
+    out = out.push("# module-level `val`: a module-level val holding a struct binds")
+    out = out.push("# zero-initialized when passed as an argument on this toolchain.")
+    out = out.push("")
+    out = out.push("fn profile_board_id() -> text: \"" + p.board_id + "\"")
+    out = out.push("fn profile_controller_id() -> text: \"" + sdn_text(sdn_get(p.controller, "id")) + "\"")
+    out = out.push("fn profile_media_id() -> text: \"" + sdn_text(sdn_get(p.media, "id")) + "\"")
+    out = out.push("fn profile_offload_id() -> text: \"" + sdn_text(sdn_get(p.offload, "id")) + "\"")
+    out = out.push("fn profile_transport() -> text: \"" + sdn_text(sdn_get(p.board, "transport_profile")) + "\"")
+    out = out.push("fn profile_bound() -> i64: " + sdn_int(sdn_get(p.board, "bound")).to_text())
+    out = out.push("")
+    out = out.push("fn cfg_channels() -> i64: " + sdn_int(sdn_at(p.board, "wiring", "channels")).to_text())
+    out = out.push("fn cfg_ways_per_channel() -> i64: " + sdn_int(sdn_at(p.board, "wiring", "ways_per_channel")).to_text())
+    out = out.push("fn cfg_planes_per_lun() -> i64: " + sdn_int(sdn_get(g, "planes_per_lun")).to_text())
+    out = out.push("fn cfg_blocks_per_plane() -> i64: " + sdn_int(sdn_get(g, "blocks_per_plane")).to_text())
+    out = out.push("fn cfg_pages_per_block() -> i64: " + sdn_int(sdn_get(g, "pages_per_block")).to_text())
+    out = out.push("fn cfg_page_bytes() -> i64: " + sdn_int(sdn_get(g, "page_bytes")).to_text())
+    out = out.push("fn cfg_oob_bytes() -> i64: " + sdn_int(sdn_get(g, "oob_bytes")).to_text())
+    out = out.push("fn cfg_total_pages() -> i64: " + total_pages(p).to_text())
+    out = out.push("")
+    out = out.push("fn cfg_admin_queues() -> i64: " + sdn_int(sdn_get(qs, "admin")).to_text())
+    out = out.push("fn cfg_io_queue_max() -> i64: " + sdn_int(sdn_get(qs, "io_max")).to_text())
+    out = out.push("fn cfg_queue_depth_max() -> i64: " + sdn_int(sdn_get(qs, "depth_max")).to_text())
+    out = out.push("fn cfg_outstanding_max() -> i64: " + sdn_int(sdn_at(p.controller, "nvme", "outstanding_max")).to_text())
+    out = out.push("fn cfg_dma_max_transfer() -> i64: " + sdn_int(sdn_at(p.controller, "dma", "max_transfer")).to_text())
+    out = out.push("fn cfg_dma_alignment() -> i64: " + sdn_int(sdn_at(p.controller, "dma", "alignment")).to_text())
+    out = out.push("")
+    out = out.push("# Typed MMIO window accessors (base, span) per declared window.")
+    for w in sdn_items(sdn_at(p.controller, "mmio", "windows")):
+        val n: text = sdn_text(sdn_get(w, "name"))
+        out = out.push("fn mmio_" + n + "_base() -> i64: " + sdn_int(sdn_get(w, "base")).to_text() + "   # " + hex(sdn_int(sdn_get(w, "base"))))
+        out = out.push("fn mmio_" + n + "_span() -> i64: " + sdn_int(sdn_get(w, "span")).to_text())
+        out = out.push("fn mmio_" + n + "_access() -> text: \"" + sdn_text(sdn_get(w, "access")) + "\"")
+    out.join("\n") + "\n"
+
+fn emit_caps(p: Product) -> text:
+    var out: [text] = banner(p, "caps.spl")
+    out = out.push("# Capability predicates. The OFFLOAD axis decides whether a unit is in")
+    out = out.push("# circuit; the firmware source is identical either way.")
+    out = out.push("")
+    out = out.push("fn cap_has_sgl() -> bool: " + sdn_text(sdn_at(p.controller, "nvme", "sgl")))
+    out = out.push("fn cap_has_iommu() -> bool: " + (if sdn_text(sdn_at(p.controller, "protection", "iommu")) == "none": "false" else: "true"))
+    out = out.push("fn cap_raw_nand_media() -> bool: " + (if sdn_text(sdn_get(p.media, "kind")) == "raw_nand": "true" else: "false"))
+    out = out.push("fn cap_block_backend_media() -> bool: " + (if sdn_text(sdn_get(p.media, "kind")) == "block_backend": "true" else: "false"))
+    out = out.push("fn cap_coherent_dma() -> bool: " + sdn_text(sdn_at(p.controller, "dma", "coherent")))
+    out = out.push("fn cap_differential_required() -> bool: " + sdn_text(sdn_get(p.offload, "differential_required")))
+    out = out.push("")
+    val units: SdnValue = sdn_get(p.offload, "units")
+    match units:
+        case Dict(e):
+            for k in e.keys():
+                out = out.push("fn offload_" + k + "_in_circuit() -> bool: " + (if sdn_text(e[k]) == "circuit": "true" else: "false"))
+        case _: ()
+    out.join("\n") + "\n"
+
+fn emit_conformance(p: Product) -> text:
+    val qs: SdnValue = sdn_at(p.controller, "nvme", "queues")
+    var out: [text] = banner(p, "conformance_params.sdn")
+    out = out.push("conformance:")
+    out = out.push("  board: " + p.board_id)
+    out = out.push("  transport_profile: " + sdn_text(sdn_get(p.board, "transport_profile")))
+    out = out.push("  bound: " + sdn_int(sdn_get(p.board, "bound")).to_text())
+    out = out.push("  io_queues: " + sdn_int(sdn_get(qs, "io_max")).to_text())
+    out = out.push("  queue_depth: " + sdn_int(sdn_get(qs, "depth_max")).to_text())
+    out = out.push("  outstanding_max: " + sdn_int(sdn_at(p.controller, "nvme", "outstanding_max")).to_text())
+    out = out.push("  max_transfer_bytes: " + sdn_int(sdn_at(p.controller, "dma", "max_transfer")).to_text())
+    out = out.push("  total_pages: " + total_pages(p).to_text())
+    out = out.push("  read_page_ns: " + sdn_int(sdn_at(p.media, "timing_ns", "read_page")).to_text())
+    out = out.push("  program_page_ns: " + sdn_int(sdn_at(p.media, "timing_ns", "program_page")).to_text())
+    out = out.push("  erase_block_ns: " + sdn_int(sdn_at(p.media, "timing_ns", "erase_block")).to_text())
+    out.join("\n") + "\n"
+
+fn emit_aop_facts(p: Product) -> text:
+    var out: [text] = banner(p, "aop_facts.sdn")
+    out = out.push("aop_facts:")
+    out = out.push("  board: " + p.board_id)
+    out = out.push("  allowed_regions:")
+    for w in sdn_items(sdn_at(p.controller, "mmio", "windows")):
+        out = out.push("    - name: " + sdn_text(sdn_get(w, "name")))
+        out = out.push("      base: " + hex(sdn_int(sdn_get(w, "base"))))
+        out = out.push("      span: " + hex(sdn_int(sdn_get(w, "span"))))
+        out = out.push("      access: " + sdn_text(sdn_get(w, "access")))
+    out = out.push("  iommu: " + sdn_text(sdn_at(p.controller, "protection", "iommu")))
+    out = out.push("  axi_firewall: " + sdn_text(sdn_at(p.controller, "protection", "axi_firewall")))
+    out = out.push("  mpu_regions: " + sdn_int(sdn_at(p.controller, "protection", "mpu_regions")).to_text())
+    out.join("\n") + "\n"
+
+fn emit_doc(p: Product) -> text:
+    var out: [text] = []
+    out = out.push("<!-- GENERATED by src/hardware/profiles/profile_gen.spl. DO NOT EDIT. -->")
+    out = out.push("")
+    out = out.push("# ProductProfile: " + p.board_id)
+    out = out.push("")
+    out = out.push("| axis | id |")
+    out = out.push("|---|---|")
+    out = out.push("| controller | " + sdn_text(sdn_get(p.controller, "id")) + " |")
+    out = out.push("| media | " + sdn_text(sdn_get(p.media, "id")) + " (" + sdn_text(sdn_get(p.media, "kind")) + ") |")
+    out = out.push("| board | " + p.board_id + " rev " + sdn_text(sdn_get(p.board, "revision")) + " |")
+    out = out.push("| offload | " + sdn_text(sdn_get(p.offload, "id")) + " |")
+    out = out.push("")
+    out = out.push("Evidence required: **" + sdn_text(sdn_get(p.board, "evidence_required")) + "**; current: **" + sdn_text(sdn_get(p.board, "certification_current")) + "**.")
+    out = out.push("Substrate bound: **" + (if sdn_int(sdn_get(p.board, "bound")) == 1: "yes" else: "NO — declared but unbound") + "**.")
+    out = out.push("Origin ledger review_status: **" + ledger_status(sdn_text(sdn_get(p.board, "origin"))) + "**.")
+    out = out.push("")
+    out = out.push("## Offload placement")
+    out = out.push("")
+    out = out.push("| unit | placement |")
+    out = out.push("|---|---|")
+    match sdn_get(p.offload, "units"):
+        case Dict(e):
+            for k in e.keys():
+                out = out.push("| " + k + " | " + sdn_text(e[k]) + " |")
+        case _: ()
+    out = out.push("")
+    out = out.push("## Unsupported")
+    out = out.push("")
+    for u in sdn_items(sdn_get(p.board, "unsupported")):
+        out = out.push("- " + sdn_text(u))
+    out = out.push("")
+    out.join("\n") + "\n"
+
+struct Artifact:
+    name: text
+    body: text
+
+fn artifacts(p: Product) -> [Artifact]:
+    var a: [Artifact] = []
+    a = a.push(Artifact(name: "consts.spl", body: emit_consts(p)))
+    a = a.push(Artifact(name: "caps.spl", body: emit_caps(p)))
+    a = a.push(Artifact(name: "conformance_params.sdn", body: emit_conformance(p)))
+    a = a.push(Artifact(name: "aop_facts.sdn", body: emit_aop_facts(p)))
+    a = a.push(Artifact(name: "profile.md", body: emit_doc(p)))
+    var all: text = ""
+    for x in a:
+        all = all + x.name + "\n" + x.body
+    a.push(Artifact(name: "FINGERPRINT", body: digest(all) + "\n"))
+
+fn out_dir(board: text) -> text:
+    PROFILE_ROOT + "/generated/" + snake(board)
+
+# ── Modes ───────────────────────────────────────────────────────────────────
+fn boards() -> [text]:
+    ["SimpleFpgaRv32", "CosmosPlusReference", "NvmeChaReference"]
+
+fn report_validate(board: text) -> i64:
+    val p: Product = load_product(board)
+    if p.ok == 0:
+        print("  " + board + ": one or more axis files missing or unparseable")
+        return 1
+    val bad: [text] = validate(p)
+    if bad.len() == 0:
+        print("  " + board + ": 10 equation(s) close")
+        return 0
+    for b in bad:
+        print("  " + board + ": FAILED " + b)
+    1
+
+fn main() -> ():
+    val args: [text] = cli_get_args()
+    var mode: text = "--list"
+    var board: text = ""
+    var i: i64 = 0
+    while i < args.len():
+        val a: text = args[i]
+        if a == "--list" or a == "--validate" or a == "--emit" or a == "--check":
+            mode = a
+            if i + 1 < args.len():
+                board = args[i + 1]
+                i = i + 1
+        i = i + 1
+
+    if mode == "--list":
+        var n: i64 = 0
+        for b in boards():
+            val p: Product = load_product(b)
+            val st: text = if p.ok == 1: ledger_status(sdn_text(sdn_get(p.board, "origin"))) else: "unloadable"
+            print("  " + b + "  loaded=" + p.ok.to_text() + "  ledger=" + st)
+            n = n + 1
+        print("PASS — " + n.to_text() + " board profile(s) listed")
+        return ()
+
+    var targets: [text] = boards()
+    if board != "":
+        targets = [board]
+
+    if mode == "--validate":
+        var fails: i64 = 0
+        var n: i64 = 0
+        for b in targets:
+            fails = fails + report_validate(b)
+            n = n + 1
+        if n == 0:
+            print("ERROR — nothing was checked")
+            return ()
+        if fails > 0:
+            print("FAIL — " + n.to_text() + " board(s) validated, " + fails.to_text() + " did not close")
+        else:
+            print("PASS — " + n.to_text() + " board(s) validated, all equations close")
+        return ()
+
+    # --emit / --check both require the ledger gate to be open.
+    var n: i64 = 0
+    var blocked: i64 = 0
+    var diffs: i64 = 0
+    var files: i64 = 0
+    for b in targets:
+        val p: Product = load_product(b)
+        if p.ok == 0:
+            print("  " + b + ": axis files missing")
+            blocked = blocked + 1
+        else:
+            val bad: [text] = validate(p)
+            val st: text = ledger_status(sdn_text(sdn_get(p.board, "origin")))
+            if bad.len() > 0:
+                print("  " + b + ": BLOCKED — equations do not close (" + bad.len().to_text() + ")")
+                blocked = blocked + 1
+            else:
+                if st != "approved":
+                    print("  " + b + ": BLOCKED by origin ledger — review_status=" + st + " (emission refused)")
+                    blocked = blocked + 1
+                else:
+                    val d: text = out_dir(b)
+                    if mode == "--emit":
+                        dir_create_all(d)
+                    for art in artifacts(p):
+                        val path: text = d + "/" + art.name
+                        if mode == "--emit":
+                            file_write(path, art.body)
+                            print("  wrote " + path + " (" + art.body.len().to_text() + " bytes)")
+                        else:
+                            if not file_exists(path):
+                                print("  MISSING " + path)
+                                diffs = diffs + 1
+                            else:
+                                if file_read(path) != art.body:
+                                    print("  DIFFERS " + path)
+                                    diffs = diffs + 1
+                        files = files + 1
+                    n = n + 1
+    if n == 0 and blocked == 0:
+        print("ERROR — nothing was checked")
+        return ()
+    if mode == "--emit":
+        print("PASS — " + n.to_text() + " board(s) emitted, " + files.to_text() + " file(s) written, " + blocked.to_text() + " blocked")
+    else:
+        if diffs > 0:
+            print("FAIL — " + files.to_text() + " file(s) compared, " + diffs.to_text() + " differ from the generator")
+        else:
+            if files == 0:
+                print("ERROR — nothing was checked")
+            else:
+                print("PASS — " + files.to_text() + " generated file(s) compared, 0 diffs, " + blocked.to_text() + " board(s) blocked")
+    ()

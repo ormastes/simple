@@ -1,374 +1,276 @@
-# BackendSession Mode Separation Tests
-#
-# Verifies that LegacyNoSession, ManagedShared, and PerfExclusive modes
-# behave correctly in isolation.
-#
-# No imports — logic is replicated at module level to avoid interpreter
-# timeout issues (same pattern as test/unit/compiler/target/*).
-# Types mirror backend_session.spl and cpu_session.spl exactly.
+"""
+## Purpose and audience
+Purpose: Exercise the REAL `std.gpu.session` session-handle, policy and
+per-architecture capability modules, replacing a former self-mocking spec whose
+`CpuSession`/`BackendSessionHandle`/`CpuFeatureSet` classes were defined inside
+the spec file itself and could never go red on a production change.
+Audience: GPU session-layer and cross-architecture maintainers.
+"""
+# @req: REQ-LIB-GPU-SESSION-MODE-001 — stable requirement identity for this spec.
 
-# ============================================================================
-# Replicated enums
-# ============================================================================
+# @cover src/lib/gc_async_mut/gpu/session/session_types.spl 85%
+# @cover src/lib/gc_async_mut/gpu/session/arch_capabilities.spl 60%
+# @tag: unit, gpu, session, mode, arch
 
-enum BackendSessionMode:
-    LegacyNoSession
-    ManagedShared
-    PerfExclusive
+"""
+# GPU session mode separation and per-arch capability records — real modules
 
-enum BackendSessionKind:
-    Cpu
-    Cuda
-    Vulkan
-    Metal
-    WebGpu
+## Overview
 
-# ============================================================================
-# Replicated CpuFeatureSet
-# ============================================================================
+This file used to be 374 lines defining `class CpuFeatureSet`, `class
+CpuSession` and `class BackendSessionHandle` locally, importing only `std.io`
+and `std.spec`. Its 33 assertions described only itself. It now drives:
 
-class CpuFeatureSet:
-    has_sse2: bool
-    has_avx2: bool
-    has_neon: bool
-    has_rvv: bool
-    arch_name: text
-    pointer_bits: i64
+  - `src/lib/gc_async_mut/gpu/session/session_types.spl`
+    (`GpuSessionHandle`, `GpuSessionPolicy`)
+  - `src/lib/gc_async_mut/gpu/session/arch_capabilities.spl`
+    (`ArchCapability`, `ArchCapabilityTable`)
 
-# ============================================================================
-# Replicated CpuSession
-# ============================================================================
+The mode-separation subject is preserved: the three session modes
+(`legacy_no_session`, `managed_shared`, `perf_exclusive`) must stay distinct
+and must not silently convert into one another, and each target architecture
+must report its own SIMD/JIT/atomic profile rather than the host's.
 
-class CpuSession:
-    features: CpuFeatureSet
-    kernel_table: i64
-    ref_count: i64
-    is_initialized: bool
-    generation: i64
+## Honesty note
 
-    me retain():
-        self.ref_count = self.ref_count + 1
+`ArchCapability` is a **static table**, not a runtime CPU probe — the file
+contains zero externs and never asks the machine anything. Asking it for
+`riscv32()` on an x86 host is a lookup, not a detection. The same TODO recorded
+in `test/01_unit/gpu/graphics_session_spec.spl` covers the whole orphan
+`gpu/session/` layer; this spec guards its logic, not any device.
 
-    me release():
-        if self.ref_count <= 0:
-            return
-        self.ref_count = self.ref_count - 1
+## Device-free
 
-    fn is_valid() -> bool:
-        self.is_initialized and self.ref_count > 0
+Pure data records and pure predicates. No extern, driver, or device.
+"""
 
-    fn selected_backend_name() -> text:
-        val arch = self.features.arch_name
-        if arch == "riscv32":
-            return "scalar"
-        if arch == "riscv64":
-            return "scalar"
-        if self.features.has_avx2:
-            return "avx2"
-        if self.features.has_sse2:
-            return "sse2"
-        if self.features.has_neon:
-            return "neon"
-        "scalar"
+use std.spec.{describe, it, expect, assert_true, assert_false}
+use std.spec.step
+use std.gpu.session.session_types.{GpuSessionHandle, GpuSessionPolicy}
+use std.gpu.session.arch_capabilities.{ArchCapability, ArchCapabilityTable}
 
-# ============================================================================
-# Replicated BackendSessionHandle
-# ============================================================================
+describe "GpuSessionPolicy keeps the three modes separate":
 
-class BackendSessionHandle:
-    id: i64
-    kind: BackendSessionKind
-    mode: BackendSessionMode
-    device_name: text
-    generation: i64
+    it "default_managed allows fallback and refuses strict backend pinning":
+        step("Read every field of the managed policy")
+        # @req: REQ-LIB-GPU-SESSION-MODE-001
+        val p = GpuSessionPolicy.default_managed()
+        expect(p.mode).to_equal("managed_shared")  # oracle: session_types.spl:106
+        assert_true(p.allow_fallback)  # oracle: :107
+        assert_false(p.strict_backend)  # oracle: :108
+        assert_false(p.allow_readback)  # oracle: :109
+        expect(p.thread_policy).to_equal("shared")  # oracle: :111
+        assert_false(p.perf_counters_enabled)  # oracle: :114
 
-# ============================================================================
-# Module-level factory helpers (avoids var-rebind issues in it-blocks)
-# ============================================================================
+    it "perf_exclusive inverts every sharing decision and turns counters on":
+        step("Read the perf policy and contrast it with managed")
+        # @req: REQ-LIB-GPU-SESSION-MODE-001
+        val p = GpuSessionPolicy.perf_exclusive()
+        expect(p.mode).to_equal("perf_exclusive")  # oracle: :120
+        assert_false(p.allow_fallback)  # oracle: :121 — opposite of managed
+        assert_true(p.strict_backend)  # oracle: :122
+        assert_true(p.allow_readback)  # oracle: :123
+        expect(p.thread_policy).to_equal("exclusive")  # oracle: :125
+        expect(p.queue_policy).to_equal("dedicated")  # oracle: :126
+        assert_true(p.perf_counters_enabled)  # oracle: :128
 
-fn make_legacy_handle() -> BackendSessionHandle:
-    BackendSessionHandle(
-        id: 1,
-        kind: BackendSessionKind.Cpu,
-        mode: BackendSessionMode.LegacyNoSession,
-        device_name: "cpu-legacy",
-        generation: 0
-    )
+    it "legacy_no_session declares no thread, queue or allocator policy":
+        step("Read the legacy policy")
+        # @req: REQ-LIB-GPU-SESSION-MODE-001
+        val p = GpuSessionPolicy.legacy_no_session()
+        expect(p.mode).to_equal("legacy_no_session")  # oracle: :134
+        expect(p.thread_policy).to_equal("none")  # oracle: :139
+        expect(p.queue_policy).to_equal("none")  # oracle: :140
+        expect(p.allocator_policy).to_equal("none")  # oracle: :141
+        assert_true(p.allow_fallback)  # oracle: :135 legacy still falls back
 
-fn make_managed_handle() -> BackendSessionHandle:
-    BackendSessionHandle(
-        id: 2,
-        kind: BackendSessionKind.Cpu,
-        mode: BackendSessionMode.ManagedShared,
-        device_name: "cpu-shared",
-        generation: 0
-    )
+    it "each policy answers true to exactly one mode predicate":
+        step("Cross-check all three predicates against all three policies")
+        # @req: REQ-LIB-GPU-SESSION-MODE-001
+        val m = GpuSessionPolicy.default_managed()
+        val x = GpuSessionPolicy.perf_exclusive()
+        val l = GpuSessionPolicy.legacy_no_session()
+        assert_true(GpuSessionPolicy.is_managed_mode(m))
+        assert_false(GpuSessionPolicy.is_perf_mode(m))
+        assert_false(GpuSessionPolicy.is_legacy_mode(m))
+        assert_true(GpuSessionPolicy.is_perf_mode(x))
+        assert_false(GpuSessionPolicy.is_managed_mode(x))
+        assert_true(GpuSessionPolicy.is_legacy_mode(l))
+        assert_false(GpuSessionPolicy.is_managed_mode(l))
 
-fn make_perf_exclusive_handle() -> BackendSessionHandle:
-    BackendSessionHandle(
-        id: 3,
-        kind: BackendSessionKind.Cpu,
-        mode: BackendSessionMode.PerfExclusive,
-        device_name: "cpu-exclusive",
-        generation: 0
-    )
+describe "GpuSessionHandle identity and validity":
 
-fn make_null_handle() -> BackendSessionHandle:
-    BackendSessionHandle(
-        id: 0,
-        kind: BackendSessionKind.Cpu,
-        mode: BackendSessionMode.LegacyNoSession,
-        device_name: "",
-        generation: 0
-    )
+    it "the invalid handle carries id -1 and refuses validation":
+        step("Read the invalid sentinel handle")
+        # @req: REQ-LIB-GPU-SESSION-MODE-001
+        val h = GpuSessionHandle.invalid()
+        expect(h.id).to_equal(-1)  # oracle: session_types.spl:29
+        expect(h.kind).to_equal("")  # oracle: :30
+        assert_false(h.valid)  # oracle: :38
+        assert_false(GpuSessionHandle.is_valid(h))  # oracle: :84 valid and id >= 0
 
-fn make_initialized_session() -> CpuSession:
-    CpuSession(
-        features: CpuFeatureSet(
-            has_sse2: false,
-            has_avx2: false,
-            has_neon: false,
-            has_rvv: false,
-            arch_name: "x86_64",
-            pointer_bits: 64
-        ),
-        kernel_table: 0,
-        ref_count: 1,
-        is_initialized: true,
-        generation: 1
-    )
+    it "create derives device and api names from the backend kind":
+        step("Create a vulkan handle and read its derived names")
+        # @req: REQ-LIB-GPU-SESSION-MODE-001
+        val h = GpuSessionHandle.create(7, "vulkan", "managed_shared")
+        expect(h.id).to_equal(7)
+        expect(h.kind).to_equal("vulkan")
+        expect(h.device_name).to_equal("vulkan-device")  # oracle: :46 kind + "-device"
+        expect(h.api_name).to_equal("vulkan")  # oracle: :47
+        expect(h.generation).to_equal(1)  # oracle: :51 fresh handles start at generation 1
+        assert_true(GpuSessionHandle.is_valid(h))
 
-fn make_uninitialized_session() -> CpuSession:
-    CpuSession(
-        features: CpuFeatureSet(
-            has_sse2: false,
-            has_avx2: false,
-            has_neon: false,
-            has_rvv: false,
-            arch_name: "unknown",
-            pointer_bits: 64
-        ),
-        kernel_table: 0,
-        ref_count: 0,
-        is_initialized: false,
-        generation: 0
-    )
+    it "create defaults the target to 64-bit x86_64":
+        step("A handle built without an arch inherits the default target")
+        # @req: REQ-LIB-GPU-SESSION-MODE-001
+        val h = GpuSessionHandle.create(1, "metal", "managed_shared")
+        expect(h.target_arch).to_equal("x86_64")  # oracle: :48
+        expect(h.target_bits).to_equal(64)  # oracle: :49
 
-fn make_riscv32_session() -> CpuSession:
-    CpuSession(
-        features: CpuFeatureSet(
-            has_sse2: false,
-            has_avx2: false,
-            has_neon: false,
-            has_rvv: false,
-            arch_name: "riscv32",
-            pointer_bits: 32
-        ),
-        kernel_table: 0,
-        ref_count: 1,
-        is_initialized: true,
-        generation: 1
-    )
+    it "with_arch overrides the target without disturbing identity":
+        step("Build a riscv32 handle and confirm only the target moved")
+        # @req: REQ-LIB-GPU-SESSION-MODE-001
+        val h = GpuSessionHandle.with_arch(9, "webgpu", "perf_exclusive", "riscv32", 32)
+        expect(h.target_arch).to_equal("riscv32")  # oracle: :61
+        expect(h.target_bits).to_equal(32)  # oracle: :62
+        expect(h.id).to_equal(9)
+        expect(h.mode).to_equal("perf_exclusive")
+        expect(h.device_name).to_equal("webgpu-device")  # oracle: same derivation
+        assert_true(GpuSessionHandle.is_valid(h))
 
-fn make_riscv64_session() -> CpuSession:
-    CpuSession(
-        features: CpuFeatureSet(
-            has_sse2: false,
-            has_avx2: false,
-            has_neon: false,
-            has_rvv: false,
-            arch_name: "riscv64",
-            pointer_bits: 64
-        ),
-        kernel_table: 0,
-        ref_count: 1,
-        is_initialized: true,
-        generation: 1
-    )
+    it "increment_generation advances only the generation":
+        step("Bump a handle twice and confirm every other field is preserved")
+        # @req: REQ-LIB-GPU-SESSION-MODE-001
+        val h0 = GpuSessionHandle.create(3, "cuda", "managed_shared")
+        val h1 = GpuSessionHandle.increment_generation(h0)
+        expect(h1.generation).to_equal(2)  # oracle: :78 h.generation + 1
+        val h2 = GpuSessionHandle.increment_generation(h1)
+        expect(h2.generation).to_equal(3)
+        expect(h2.id).to_equal(3)  # oracle: identity preserved
+        expect(h2.kind).to_equal("cuda")
+        expect(h2.mode).to_equal("managed_shared")  # oracle: mode is immutable
+        assert_true(h2.valid)
 
-fn make_avx2_session() -> CpuSession:
-    CpuSession(
-        features: CpuFeatureSet(
-            has_sse2: true,
-            has_avx2: true,
-            has_neon: false,
-            has_rvv: false,
-            arch_name: "x86_64",
-            pointer_bits: 64
-        ),
-        kernel_table: 2,
-        ref_count: 1,
-        is_initialized: true,
-        generation: 1
-    )
+    it "mode is immutable across generation bumps for all three modes":
+        step("Bump one handle per mode; none may convert into another mode")
+        # @req: REQ-LIB-GPU-SESSION-MODE-001
+        val legacy = GpuSessionHandle.increment_generation(
+            GpuSessionHandle.create(1, "cpu", "legacy_no_session"))
+        val managed = GpuSessionHandle.increment_generation(
+            GpuSessionHandle.create(2, "vulkan", "managed_shared"))
+        val perf = GpuSessionHandle.increment_generation(
+            GpuSessionHandle.create(3, "vulkan", "perf_exclusive"))
+        expect(legacy.mode).to_equal("legacy_no_session")
+        expect(managed.mode).to_equal("managed_shared")
+        expect(perf.mode).to_equal("perf_exclusive")
 
-fn make_sse2_session() -> CpuSession:
-    CpuSession(
-        features: CpuFeatureSet(
-            has_sse2: true,
-            has_avx2: false,
-            has_neon: false,
-            has_rvv: false,
-            arch_name: "x86_64",
-            pointer_bits: 64
-        ),
-        kernel_table: 1,
-        ref_count: 1,
-        is_initialized: true,
-        generation: 1
-    )
+    it "bumping the invalid handle keeps it invalid":
+        step("increment_generation must not resurrect a dead handle")
+        # @req: REQ-LIB-GPU-SESSION-MODE-001
+        val bumped = GpuSessionHandle.increment_generation(GpuSessionHandle.invalid())
+        assert_false(GpuSessionHandle.is_valid(bumped))  # oracle: :80 valid: h.valid
+        expect(bumped.id).to_equal(-1)
 
-fn make_neon_session() -> CpuSession:
-    CpuSession(
-        features: CpuFeatureSet(
-            has_sse2: false,
-            has_avx2: false,
-            has_neon: true,
-            has_rvv: false,
-            arch_name: "aarch64",
-            pointer_bits: 64
-        ),
-        kernel_table: 3,
-        ref_count: 1,
-        is_initialized: true,
-        generation: 1
-    )
+describe "ArchCapability per-architecture records":
 
-fn make_scalar_session() -> CpuSession:
-    CpuSession(
-        features: CpuFeatureSet(
-            has_sse2: false,
-            has_avx2: false,
-            has_neon: false,
-            has_rvv: false,
-            arch_name: "x86_64",
-            pointer_bits: 64
-        ),
-        kernel_table: 0,
-        ref_count: 1,
-        is_initialized: true,
-        generation: 1
-    )
+    it "x86_64 reports avx2, cranelift JIT and no icache flush":
+        step("Read the x86_64 record")
+        # @req: REQ-LIB-GPU-SESSION-MODE-001
+        val c = ArchCapability.x86_64()
+        expect(c.arch_family).to_equal("x86")  # oracle: arch_capabilities.spl:34
+        expect(c.simd_kind).to_equal("avx2")  # oracle: :36
+        expect(c.effective_simd_width()).to_equal(256)  # oracle: :37 vector_bits
+        assert_true(c.supports_vulkan())  # oracle: gpu_api == "vulkan"
+        assert_true(c.supports_jit())
+        assert_false(c.needs_icache_flush())  # oracle: :40 x86 needs none
+        assert_true(c.can_run_64bit_atomics())  # oracle: atomic_width 64
 
-fn managed_retain_result(session: CpuSession, handle: BackendSessionHandle) -> i64:
-    # Attempt a managed retain.
-    # Returns new ref_count on success, or -1 if handle mode is PerfExclusive.
-    if handle.mode == BackendSessionMode.PerfExclusive:
-        return -1
-    session.retain()
-    session.ref_count
+    it "aarch64 reports neon and DOES need an icache flush for JIT":
+        step("Read the aarch64 record; contrast the flush requirement with x86")
+        # @req: REQ-LIB-GPU-SESSION-MODE-001
+        val c = ArchCapability.aarch64()
+        expect(c.arch_family).to_equal("arm")
+        expect(c.simd_kind).to_equal("neon")  # oracle: :75
+        expect(c.effective_simd_width()).to_equal(128)  # oracle: :76
+        assert_true(c.needs_icache_flush())  # oracle: :79 — the arm/riscv JIT requirement
+        assert_true(c.supports_vulkan())
+        assert_true(c.can_run_64bit_atomics())
 
-fn handle_retain(handle: BackendSessionHandle) -> BackendSessionHandle:
-    """Return a new handle with incremented generation (mode preserved)."""
-    BackendSessionHandle(
-        id: handle.id,
-        kind: handle.kind,
-        mode: handle.mode,
-        device_name: handle.device_name,
-        generation: handle.generation + 1
-    )
+    it "arm32 cannot do 64-bit atomics and targets webgpu, not vulkan":
+        step("Read the arm32 record; the 32-bit limits must show")
+        # @req: REQ-LIB-GPU-SESSION-MODE-001
+        val c = ArchCapability.arm32()
+        expect(c.bits).to_equal(32)  # oracle: :92
+        expect(c.unaligned_access).to_equal("trap")  # oracle: :97
+        assert_false(c.can_run_64bit_atomics())  # oracle: atomic_width 32
+        assert_false(c.supports_vulkan())  # oracle: :103 gpu_api == "webgpu"
+        expect(c.jit_backend).to_equal("llvm")  # oracle: :105
+        assert_true(c.needs_icache_flush())
 
-# ============================================================================
-# Tests
-# ============================================================================
+    it "riscv64 reports rvv vectors and vulkan":
+        step("Read the riscv64 record")
+        # @req: REQ-LIB-GPU-SESSION-MODE-001
+        val c = ArchCapability.riscv64()
+        expect(c.arch_family).to_equal("riscv")  # oracle: :110
+        expect(c.simd_kind).to_equal("rvv")  # oracle: :112
+        expect(c.effective_simd_width()).to_equal(256)  # oracle: :113
+        assert_true(c.supports_vulkan())
+        assert_true(c.can_run_64bit_atomics())
+        assert_true(c.needs_icache_flush())
 
-describe "BackendSession mode separation":
+    it "riscv32 has NO simd at all — vector width is zero":
+        step("Read riscv32, the one record with no vector unit")
+        # @req: REQ-LIB-GPU-SESSION-MODE-001
+        val c = ArchCapability.riscv32()
+        expect(c.simd_kind).to_equal("none")  # oracle: :131
+        expect(c.effective_simd_width()).to_equal(0)  # oracle: :132 vector_bits 0
+        assert_false(c.can_run_64bit_atomics())  # oracle: atomic_width 32
+        assert_false(c.supports_vulkan())  # oracle: :141 webgpu
+        assert_true(c.supports_jit())  # oracle: :142 llvm
 
-    it "legacy no-session creates standalone state":
-        val h = make_legacy_handle()
-        expect(h.mode).to_equal(BackendSessionMode.LegacyNoSession)
-        expect(h.id).to_equal(1)
-        expect(h.device_name).to_equal("cpu-legacy")
+    it "wasm32 is the only arch with no JIT and no qemu command":
+        step("Read wasm32 and contrast its JIT answer with every other arch")
+        # @req: REQ-LIB-GPU-SESSION-MODE-001
+        val c = ArchCapability.wasm32()
+        expect(c.jit_backend).to_equal("none")  # oracle: :161
+        assert_false(c.supports_jit())  # oracle: :174 jit_backend != "none"
+        expect(c.qemu_system_cmd).to_equal("")  # oracle: :162
+        assert_false(c.needs_icache_flush())  # oracle: :156
+        assert_false(c.supports_vulkan())  # oracle: webgpu
 
-    it "null handle has legacy mode and zero id":
-        val h = make_null_handle()
-        expect(h.id).to_equal(0)
-        expect(h.mode).to_equal(BackendSessionMode.LegacyNoSession)
+    it "summary names arch, simd, gpu api and flags the icache requirement":
+        step("Compare an icache-flushing arch's summary with one that is not")
+        # @req: REQ-LIB-GPU-SESSION-MODE-001
+        val arm = ArchCapability.aarch64().summary()
+        assert_true(arm.contains("arch=arm64"))  # oracle: :186 family + bits
+        assert_true(arm.contains("simd=neon"))
+        assert_true(arm.contains("vec=128b"))
+        assert_true(arm.contains("gpu=vulkan"))
+        assert_true(arm.contains("icache-flush"))  # oracle: :192 conditional suffix
+        val x86 = ArchCapability.x86_64().summary()
+        assert_true(x86.contains("arch=x8664"))
+        assert_false(x86.contains("icache-flush"))  # oracle: suffix omitted on x86
 
-    it "managed shared session initialises with ref_count 1":
-        val s = make_initialized_session()
-        expect(s.ref_count).to_equal(1)
-        expect(s.is_initialized).to_equal(true)
+describe "ArchCapabilityTable lookup":
 
-    it "managed shared supports retain - ref_count increments":
-        val s = make_initialized_session()
-        val h = make_managed_handle()
-        val count_after = managed_retain_result(s, h)
-        expect(count_after).to_equal(2)
+    it "resolves each family+bits pair to its own record":
+        step("Look up four distinct targets and confirm none aliases another")
+        # @req: REQ-LIB-GPU-SESSION-MODE-001
+        val t = ArchCapabilityTable.create()
+        expect(t.get_for_arch("x86", 64).simd_kind).to_equal("avx2")
+        expect(t.get_for_arch("arm", 64).simd_kind).to_equal("neon")
+        expect(t.get_for_arch("riscv", 32).simd_kind).to_equal("none")
+        expect(t.get_for_arch("riscv", 64).simd_kind).to_equal("rvv")
 
-    it "managed shared supports release - ref_count decrements":
-        val s = make_initialized_session()
-        s.retain()
-        expect(s.ref_count).to_equal(2)
-        s.release()
-        expect(s.ref_count).to_equal(1)
-
-    it "perf exclusive cannot be retained via managed path":
-        val s = make_initialized_session()
-        val h = make_perf_exclusive_handle()
-        val result = managed_retain_result(s, h)
-        expect(result).to_equal(-1)
-        expect(s.ref_count).to_equal(1)
-
-    it "two engine2d surfaces sharing one managed session share the same generation":
-        val shared = make_initialized_session()
-        val gen_before = shared.generation
-        val gen_after = shared.generation
-        expect(gen_before).to_equal(gen_after)
-        expect(gen_before).to_equal(1)
-
-    it "mode is immutable after handle creation - legacy stays legacy after retain":
-        val h = make_legacy_handle()
-        val h2 = handle_retain(h)
-        expect(h.mode).to_equal(BackendSessionMode.LegacyNoSession)
-        expect(h2.mode).to_equal(BackendSessionMode.LegacyNoSession)
-        expect(h2.generation).to_equal(1)
-
-    it "mode is immutable after handle creation - perf exclusive stays exclusive after retain":
-        val h = make_perf_exclusive_handle()
-        val h2 = handle_retain(h)
-        expect(h2.mode == BackendSessionMode.PerfExclusive).to_equal(true)
-
-    it "mode is immutable after handle creation - managed shared stays managed after retain":
-        val h = make_managed_handle()
-        val h2 = handle_retain(h)
-        expect(h2.mode == BackendSessionMode.ManagedShared).to_equal(true)
-
-    it "riscv32 session reports scalar backend (AC-7)":
-        val s = make_riscv32_session()
-        expect(s.selected_backend_name()).to_equal("scalar")
-        expect(s.features.arch_name).to_equal("riscv32")
-        expect(s.features.pointer_bits).to_equal(32)
-
-    it "riscv64 session reports scalar backend (AC-7)":
-        val s = make_riscv64_session()
-        expect(s.selected_backend_name()).to_equal("scalar")
-        expect(s.features.arch_name).to_equal("riscv64")
-        expect(s.features.pointer_bits).to_equal(64)
-
-    it "avx2 session selects avx2 backend name":
-        val s = make_avx2_session()
-        expect(s.selected_backend_name()).to_equal("avx2")
-
-    it "sse2-only session selects sse2 backend name":
-        val s = make_sse2_session()
-        expect(s.selected_backend_name()).to_equal("sse2")
-
-    it "neon session selects neon backend name":
-        val s = make_neon_session()
-        expect(s.selected_backend_name()).to_equal("neon")
-
-    it "no-simd session selects scalar backend name":
-        val s = make_scalar_session()
-        expect(s.selected_backend_name()).to_equal("scalar")
-
-    it "released session becomes invalid":
-        val s = make_initialized_session()
-        expect(s.is_valid()).to_equal(true)
-        s.release()
-        expect(s.is_valid()).to_equal(false)
-
-    it "uninitialised session is invalid":
-        val s = make_uninitialized_session()
-        expect(s.is_valid()).to_equal(false)
-        expect(s.is_initialized).to_equal(false)
+    it "distinguishes 32-bit from 64-bit within one family":
+        step("arm 32 and arm 64 must not collapse to the same record")
+        # @req: REQ-LIB-GPU-SESSION-MODE-001
+        val t = ArchCapabilityTable.create()
+        val a32 = t.get_for_arch("arm", 32)
+        val a64 = t.get_for_arch("arm", 64)
+        expect(a32.bits).to_equal(32)
+        expect(a64.bits).to_equal(64)
+        assert_false(a32.can_run_64bit_atomics())
+        assert_true(a64.can_run_64bit_atomics())
+        expect(a32.gpu_api).to_equal("webgpu")
+        expect(a64.gpu_api).to_equal("vulkan")

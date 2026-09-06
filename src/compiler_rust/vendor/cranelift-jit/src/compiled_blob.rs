@@ -82,12 +82,36 @@ impl CompiledBlob {
                     let iptr = at as *mut u32;
                     // The offset encoded in the `bl` instruction is the
                     // number of bytes divided by 4.
-                    let diff = ((base as isize) - (at as isize)) >> 2;
-                    // Sign propagating right shift disposes of the
-                    // included bits, so the result is expected to be
-                    // either all sign bits or 0, depending on if the original
-                    // value was negative or positive.
-                    assert!((diff >> 26 == -1) || (diff >> 26 == 0));
+                    let mut target = base;
+                    let mut diff = ((target as isize) - (at as isize)) >> 2;
+                    // LOCAL PATCH (see memory.rs `aarch64_arena`): the field is
+                    // `imm26`, a *signed* 26-bit word offset, so the encodable
+                    // range is [-2^25, 2^25) words = +/-128 MiB -- the check must
+                    // be `diff >> 25`. Upstream tests `diff >> 26`, which is one
+                    // bit too loose: a displacement in the 128..256 MiB band
+                    // passed the assert and was then truncated into a branch to
+                    // a completely wrong address, which on this repo showed up as
+                    // a SIGSEGV in JIT code rather than as the documented abort.
+                    let fits = |d: isize| (d >> 25 == -1) || (d >> 25 == 0);
+                    if !fits(diff) || crate::memory::force_veneers() {
+                        // Out of reach for a direct `bl`: route the call through
+                        // a long-branch veneer placed inside the same code arena
+                        // as the call site, exactly as a linker does.
+                        if let Some(veneer) =
+                            crate::memory::install_far_call_veneer(at as *const u8, target)
+                        {
+                            target = veneer;
+                            diff = ((target as isize) - (at as isize)) >> 2;
+                        }
+                    }
+                    assert!(
+                        fits(diff),
+                        "AArch64 direct call is {} bytes away, out of the +/-128 MiB reach of \
+                         `bl`, and no veneer could be placed within range (JIT code arena \
+                         exhausted or unavailable). See \
+                         doc/08_tracking/bug/jit_aarch64_branch_relocation_out_of_range_abort_2026-09-05.md",
+                        (target as isize) - (at as isize)
+                    );
                     // The lower 26 bits of the `bl` instruction form the
                     // immediate offset argument.
                     let chop = 32 - 26;
