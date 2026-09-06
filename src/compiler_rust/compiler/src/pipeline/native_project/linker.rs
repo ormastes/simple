@@ -23,6 +23,82 @@ fn uses_msvc_flags(flavor: LinkerFlavor) -> bool {
     flavor == LinkerFlavor::Msvc
 }
 
+/// Translate a `SIMPLE_LINKER` value into the pair the C driver needs.
+///
+/// Returns `(fuse_ld_name, probe_binary)`:
+///   * `fuse_ld_name` is what goes after `-fuse-ld=`. It is a NAME, never a
+///     path — `ld` in particular must be spelled `bfd`, because that is the
+///     spelling both clang and gcc understand.
+///   * `probe_binary` is the concrete `ld.*` program the driver will actually
+///     search PATH for. Probing that exact spelling matters: on hosts where
+///     `ld` is a symlink to mold, a `which ld`-style probe for `bfd` succeeds
+///     while `-fuse-ld=bfd` then fails, and a probe for bare `mold` succeeds
+///     while a driver too old to accept `-fuse-ld=mold` looks for `ld.mold`.
+///
+/// The accepted alias set is deliberately identical to `find_requested_linker`
+/// in `src/compiler/70.backend/linker/mold.spl` — the Simple-side linker
+/// wrapper — so the two link paths cannot disagree about what a given
+/// `SIMPLE_LINKER` value means. Pure function: no environment, no process
+/// spawn, so it is directly unit-testable.
+pub fn linker_alias(name: &str) -> Result<(&'static str, &'static str), String> {
+    let requested = name.trim().to_ascii_lowercase();
+    if requested.is_empty() {
+        return Err("empty SIMPLE_LINKER override".to_string());
+    }
+    match requested.as_str() {
+        "mold" => Ok(("mold", "ld.mold")),
+        "lld" | "ld.lld" | "lld-link" => Ok(("lld", "ld.lld")),
+        "ld" | "gnu" | "bfd" => Ok(("bfd", "ld.bfd")),
+        // No `gold` arm on purpose: the Simple-side table does not accept it,
+        // and an alias one path honours and the other rejects is exactly the
+        // disagreement this mirroring exists to prevent.
+        _ => Err(format!("Unsupported SIMPLE_LINKER value: {name}")),
+    }
+}
+
+/// Human-readable name of the linker family, for the "requested but not
+/// found" diagnostic. Mirrors the wording used by the Simple-side wrapper.
+fn linker_family_label(fuse_ld_name: &str) -> &'static str {
+    match fuse_ld_name {
+        "mold" => "mold",
+        "lld" => "LLD",
+        _ => "ld",
+    }
+}
+
+/// Resolve the `SIMPLE_LINKER` preference into a `-fuse-ld=<name>` value.
+///
+/// * unset  -> `Ok(None)`. No alias lookup, no probe, no process spawn, so the
+///   emitted link command is byte-identical to what it was before this
+///   function existed. This is the bootstrap's link path; the default must not
+///   move.
+/// * set    -> resolve the alias and verify the concrete `ld.*` binary is
+///   runnable. Fails closed on an unsupported value and on a supported value
+///   whose linker is not installed — the previous behaviour was to ignore the
+///   variable entirely and silently link with whatever `cc` defaults to, which
+///   on hosts where `/usr/bin/ld` is mold meant every bootstrap link
+///   front-loaded mold's 8 GiB virtual reservation and died under memory
+///   contention.
+fn requested_linker_driver_name() -> Result<Option<&'static str>, String> {
+    let raw = match std::env::var_os("SIMPLE_LINKER") {
+        Some(v) => v,
+        None => return Ok(None),
+    };
+    let raw = raw.to_string_lossy().into_owned();
+    let (fuse_ld_name, probe_binary) = linker_alias(&raw)?;
+    let available = std::process::Command::new(probe_binary)
+        .arg("--version")
+        .output()
+        .is_ok_and(|o| o.status.success());
+    if !available {
+        return Err(format!(
+            "SIMPLE_LINKER={raw} requested but {} was not found (looked for `{probe_binary}` on PATH)",
+            linker_family_label(fuse_ld_name)
+        ));
+    }
+    Ok(Some(fuse_ld_name))
+}
+
 /// The native entry stub initializes argc/argv through the core-C ABI.  These
 /// getters must therefore be exported by that same capsule.  Leaving them out
 /// of the C roots localizes their weak core-C definitions and lets the Rust
@@ -682,6 +758,14 @@ impl NativeProjectBuilder {
         let live = temp_dir.join("stage4_live_entry.o");
         let cc = target_c_compiler(effective_target());
         let mut command = std::process::Command::new(&cc);
+        // `-Wl,-r` below is a real linker invocation, so it must honour the
+        // same SIMPLE_LINKER preference as the final link — otherwise a run
+        // that asked for lld still spawns the default linker here. The caller
+        // (`link_objects`) already resolved and validated the value, so this
+        // lookup cannot introduce a new failure mode; it only re-reads it.
+        if let Some(name) = requested_linker_driver_name()? {
+            command.arg(format!("-fuse-ld={name}"));
+        }
         #[cfg(target_os = "linux")]
         command
             .arg("-nostdlib")
@@ -1075,6 +1159,12 @@ int main(int argc, char** argv) {
 
     /// Link object files into a native binary using LinkerBuilder.
     pub(crate) fn link_objects(&self, object_paths: &[PathBuf], imports: &ModuleImports) -> Result<(), String> {
+        // Resolve the `SIMPLE_LINKER` preference FIRST, before any archive is
+        // built or any object is projected: an unsupported or uninstallable
+        // value is a configuration error, and reporting it after several
+        // minutes of runtime-capsule work would be indistinguishable from the
+        // silent-ignore behaviour this replaces.
+        let requested_linker = requested_linker_driver_name()?;
         let temp_dir = object_paths[0].parent().ok_or("no parent for object path")?;
 
         let cross_target = effective_target();
@@ -1312,6 +1402,22 @@ int main(int argc, char** argv) {
         let is_msvc = uses_msvc_flags(cross_target.linker_flavor());
         let is_clang_cl = is_msvc && cc.contains("clang-cl");
         let mut cmd = std::process::Command::new(&cc);
+        // Honour SIMPLE_LINKER. `-fuse-ld=<name>` is used rather than invoking
+        // the linker binary directly because this is the HOSTED link: the C
+        // driver contributes crt1/crti/crtn, the libc and libgcc search paths,
+        // and the sysroot for a cross target. Selecting the linker program
+        // ourselves would mean reconstructing all of that by hand, which is
+        // exactly the kind of change that breaks a bootstrap. One extra
+        // argument, emitted only when the variable is set, keeps the default
+        // command byte-identical.
+        //
+        // Skipped for a real MSVC driver (`cl.exe` has no `-fuse-ld`);
+        // clang-cl does accept it, so it stays enabled there.
+        if let Some(name) = requested_linker {
+            if !is_msvc || is_clang_cl {
+                cmd.arg(format!("-fuse-ld={name}"));
+            }
+        }
         if !is_msvc {
             cmd.arg("-fPIC");
         }
@@ -2772,6 +2878,7 @@ pub(crate) fn normalize_windows_pe_metadata(path: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod linker_tests {
     use super::*;
+
     use crate::pipeline::native_project::tools::hosted_linux_cross_compiler;
     use simple_common::target::{Target, TargetArch, TargetOS};
 

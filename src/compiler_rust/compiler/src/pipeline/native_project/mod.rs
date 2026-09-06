@@ -13,6 +13,14 @@ mod compiler;
 mod discovery;
 pub(crate) mod inline_asm_emit;
 mod linker;
+/// Re-exported so `tests/simple_linker_preference.rs` can pin the
+/// `SIMPLE_LINKER` alias contract. The crate's `--lib` test target does not
+/// compile at present (three pre-existing errors in
+/// `interpreter_extern/wsffi.rs`, `interpreter_extern/mod.rs` and
+/// `native_project/tests.rs`), so a `#[cfg(test)]` module here would be a
+/// check that can never run. An integration test builds the crate without
+/// `cfg(test)` and therefore does run.
+pub use linker::linker_alias;
 mod imports;
 mod mangle;
 mod module_global_init;
