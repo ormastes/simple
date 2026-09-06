@@ -14,8 +14,9 @@ use super::tools::{
     build_core_c_runtime_library, build_stage4_c_runtime_library, build_stage4_cli_c_provider_archives,
     build_stage4_runtime_capsule_archive, build_stage4_rust_runtime_projection_archive, find_archive_tool,
     find_c_compiler, find_compiler_rt_builtins, find_cxx_compiler, find_hosted_runtime_rlib,
-    find_msvc_compiler_rt_builtins, find_objcopy_tool, is_system_symbol, nm_command, strip_llvm_constructors,
-    target_c_compiler, target_cxx_compiler, terminfo_link_args, validate_stage4_cli_c_provider_archive_disjointness,
+    find_msvc_compiler_rt_builtins, find_objcopy_tool,
+    is_system_symbol, nm_command, strip_llvm_constructors, target_c_compiler, target_cxx_compiler, terminfo_link_args,
+    validate_stage4_cli_c_provider_archive_disjointness,
 };
 
 fn uses_msvc_flags(flavor: LinkerFlavor) -> bool {
@@ -847,7 +848,13 @@ int main(int argc, char** argv) {
         let output = std::process::Command::new(&cxx)
             .args(argv)
             .output()
-            .map_err(|e| format!("compile main stub: failed to spawn `{} {}`: {e}", cxx, argv.join(" ")))?;
+            .map_err(|e| {
+                format!(
+                    "compile main stub: failed to spawn `{} {}`: {e}",
+                    cxx,
+                    argv.join(" ")
+                )
+            })?;
         if !output.status.success() {
             // clang-cl (like cl.exe) writes diagnostics to STDOUT, not stderr --
             // capturing only stderr here previously produced a message ending

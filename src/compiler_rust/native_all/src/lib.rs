@@ -15,16 +15,8 @@ pub use simple_runtime;
 #[cfg(feature = "driver-compat")]
 pub use simple_driver;
 
-// The `rt_mem_snapshot_*` / `rt_phase_profile_record` provider used to be
-// defined a SECOND time here, in a local `mem_snapshot_provider` module.
-// `simple-runtime` already defines the same `#[no_mangle]` symbols, and this
-// crate depends on it, so both sets landed in one link unit: rust-lld failed
-// the `simple-native-all` test binary with `duplicate symbol`, which aborted
-// the entire `cargo test` run before a single test executed. The (canonical,
-// `run_id=`-emitting) body was moved into `simple-runtime::mem_snapshot`; the
-// symbols still reach `libsimple_native_all.a` through the `pub use
-// simple_runtime` above, so nothing is lost from the staticlib.
-pub use simple_runtime::mem_snapshot::{
+mod mem_snapshot_provider;
+pub use mem_snapshot_provider::{
     rt_mem_snapshot_close, rt_mem_snapshot_open, rt_mem_snapshot_record, rt_phase_profile_record,
 };
 

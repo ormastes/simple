@@ -478,10 +478,24 @@ impl ParallelBuilder:
                             skipped: self.stats.skipped,
                             parallel_batches: self.stats.parallel_batches)
         else:
-            # Parallel build: batch-concurrent execution
+            # "Batch-concurrent" here means the ready set is CHUNKED by
+            # max_workers -- it does NOT mean the chunk runs concurrently. The
+            # inner `while chunk_idx < chunk_end` below calls `compile_fn` one
+            # unit at a time, in this process, with no spawn and no thread, so
+            # the total work is identical to the sequential branch above and
+            # `--threads N` only moves a chunk boundary. Same honest-downgrade
+            # notice as the unstable-mode print above: a silent downgrade under
+            # a name that promises parallelism is the defect class this file
+            # already refuses to repeat. The real implementations are
+            # `build_parallel()` and `build_supervised()`; both have ZERO
+            # callers because `compile_fn` closes over in-memory frozen MIR
+            # capsules that cannot cross a process boundary (see the comment in
+            # `build()` above and doc/03_plan/infra/unstable_mode_build_side.md).
             val max_workers = self.config.effective_threads()
             if self.config.verbose:
-                print "[PARALLEL] batch-concurrent mode, {max_workers} workers"
+                print "[PARALLEL] batch mode, chunk size {max_workers} -- "
+                    + "units still compile SEQUENTIALLY in this process "
+                    + "(build() is in-process; --threads sets chunk size only)"
 
             while not self.graph.is_complete():
                 val ready = self.graph.ready_units()

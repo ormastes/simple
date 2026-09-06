@@ -1,9 +1,7 @@
 # Pre-push hook: a WIP guard's selftest commits fixtures into the invoking repo, hijacking HEAD
 
 **Date:** 2026-08-21
-**Status:** OPEN, partially fixed (P1 — makes the pre-push hook unusable; forced a `--no-verify` landing).
-This record's own "RESOLVED 2026-08-21" section below OVERSTATED the fix —
-corrected 2026-09-02, see "Re-audit 2026-09-02" at the end.
+**Status:** OPEN (P1 — makes the pre-push hook unusable; forced a `--no-verify` landing)
 **Found by:** landing lane for `4b88aebf00b` (cherry-pick of `c089809a253` onto `origin/main`)
 
 ## Symptom
@@ -85,61 +83,3 @@ that reads as a failing verdict from a script that never ran.
 - `check-ghdl-gate-rc-swallow.shs`, untracked at the time of the incident, is
   now git-tracked, so the landing worktree that triggered this no longer
   reproduces.
-
-## Re-audit 2026-09-02 — item 1 is real but currently RED; item 2 does not exist
-
-Checked each of the three claims above against the current tree, live, not
-from prose:
-
-1. **Static census guard exists and runs, but currently FAILS.**
-   `scripts/check/check-guard-selftests-isolated.shs --selftest` passes
-   (`5/5 fixtures correct`), but a real scan
-   (`sh scripts/check/check-guard-selftests-isolated.shs`, no args) reports:
-   ```
-   == guard scripts that mutate the invoking repository ==
-   normalize-line-endings-precommit.shs
-   FAIL — 1527 guard script(s) checked, 1 mutate the invoking repo: normalize-line-endings-precommit.shs
-   ```
-   This record's own text asserted the census found "exactly one hit,
-   `normalize-line-endings.shs` — a FIXER... not a selftest leak" as if that
-   were an accepted, accounted-for exception. It is not: the guard has no
-   allowlist for it and reports it as a hard FAIL (also note the filename
-   drifted to `normalize-line-endings-precommit.shs`, not
-   `normalize-line-endings.shs`). Whether this file is a legitimate exception
-   or a real defect was never adjudicated; either way the guard as shipped
-   is RED on `main` right now for a case its own record already knew about
-   and, unresolved, added a new regression test won't fix that judgment call.
-2. **The claimed dynamic hook wiring ("2. Dynamic half, in the hook") does not
-   exist.** `/usr/bin/grep -n "run_guard\|HEAD moved\|snapshot"
-   scripts/check/pre-push-conflict-tree-guard.shs` and the same against
-   `scripts/check/check-push-must-pass.shs` (the script
-   `pre-push-conflict-tree-guard.shs` actually `exec`s into, per
-   `.claude/rules/vcs.md`'s "What ACTUALLY runs on push" section) both return
-   zero hits. No HEAD-snapshot-around-every-guard-invocation logic is present
-   in either file. This is the exact "manifest row without matching dispatch
-   wiring" drift `.claude/rules/vcs.md` already warns is endemic to this
-   guard family — it applies to this record's own claimed fix, not just to
-   other guards.
-3. **`check-guard-selftests-isolated.shs` itself is not wired into any push
-   gate** — it exists and runs standalone but is absent from both
-   `config/check/must_check_gates.sdn`'s push tier and
-   `check-push-must-pass.shs`'s dispatch `case`. So even where item 1's
-   detection logic is correct, it currently enforces nothing on push.
-
-**Net effect:** the underlying defect class (a guard's `--selftest`
-committing into the invoking repo) is NOT proven closed. The static detector
-that could catch it is unwired from push and is itself failing on an
-unadjudicated case. Left OPEN. This is a repo-wide push-gate wiring change
-(new `must_check_gates.sdn` row + matching dispatch case, per the pattern
-`.claude/rules/vcs.md` documents, plus the `normalize-line-endings-precommit.shs`
-judgment call, plus the dynamic HEAD-snapshot wiring item 2 claimed but never
-built) — too large and too security-sensitive for a single small self-contained
-fix in this pass. See the two guards actually verified isolated (item-by-item,
-live, HEAD/status unchanged) in
-`doc/08_tracking/bug/seed_builds_guard_selftest_commits_into_real_repo_2026-08-19.md`'s
-2026-09-02 update and in the new regression guard
-`scripts/check/check-guard-selftest-repo-isolation.shs`, which is a narrower,
-already-working dynamic check covering exactly the two guards previously
-confirmed to have the isolation fix (`check-ghdl-gate-rc-swallow.shs`,
-`check-seed-builds-push.shs`) — a starting point for closing this record
-properly, not a substitute for the full wiring work above.
