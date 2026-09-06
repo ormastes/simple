@@ -136,3 +136,32 @@ without a Stage-2 rebuild. `check-aot-failure-speaks.shs --candidate` still
 reports `FAIL — 1 invocation(s) executed, failure exit 1 is UNATTRIBUTED
 (unattributed-none-recorded)` on it, and will keep doing so until a Stage 2 is
 rebuilt from a tree containing `a820c8fd10e`.
+
+## Follow-up measurements (same day)
+
+**Both runtime lanes carried each defect; both are fixed.** `src/runtime/runtime.c`
+had the identical `strlen()` truncation in its own `rt_file_read_text`, and
+`src/runtime/simple_core/core_string.spl` (the pure-Simple twin) had the
+identical `rt_string_len`-has-a-literal-fallback / `rt_string_data`-does-not
+asymmetry. Fixing only `runtime_native.c` would have left the
+`push-rt-dual-implementation` pair divergent, which is how the next bundle
+regresses. `core_fs.spl`'s `rt_file_read_text` already reads `bytes_read` bytes
+and needed no change.
+
+**The Stage-2 source is `a76e52cc8bd` (2026-09-06 22:48) or near it, and its
+`driver_native_collect_capsule_result_v1` has the same ordering as HEAD's:**
+receipt check at `:476`, `build_cache.save()` at `:483`, `return ""` at `:484`,
+trailing `"native-capsule-fingerprint-failed:{module_name}"` at `:485`. So the
+"the receipt checkpoint is not the failing sub-check" reading above is not an
+artifact of reading current source: in BOTH revisions the `build_cache.sdn`
+`O_WRONLY|O_CREAT|O_TRUNC` open that `strace` records as the failing process's
+LAST syscall is reachable only after every sub-check has passed.
+
+**Tested and REFUTED: `return ""` inside `if val` / `match` falling through.**
+That shape would explain everything (all checks pass, cache saved, unit ERROR,
+empty reason) via the documented text-crossing defect. A Stage-2-compiled probe
+returning `""` from inside both an `if val` block and a `case Ok(...)` arm, with
+a `"FELL-THROUGH"` sentinel as the trailing expression, prints `len=0` for both.
+It does NOT fall through — in Stage 2's *output*. Stage 2 itself is Stage 1's
+output, and Stage 1 was not measured, so the hypothesis is refuted for the
+generation that could be tested and remains open for the one that could not.

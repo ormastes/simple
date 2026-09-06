@@ -1772,10 +1772,35 @@ int64_t rt_file_read_text(const uint8_t* path_ptr, uint64_t path_len) {
      * it cannot tell "missing" from "empty". The Rust definition returns NIL
      * for an unreadable path, and Simple callers spell `... ?? ""`, which only
      * fires on nil -- so probe openability first or the `??` arm is dead. */
-    { FILE* probe = fopen(path, "rb"); if (!probe) return rt_nil; fclose(probe); }
-    char* content = spl_file_read(path);
-    if (!content) return rt_nil;
-    int64_t result = rt_string_new((const uint8_t*)content, (uint64_t)strlen(content));
+    /* Read to EOF into a growable buffer and keep the BYTE COUNT. strlen() on
+     * spl_file_read's result stopped at the first NUL, so a binary file came
+     * back as a NON-nil short text -- an ELF object's e_ident has a NUL at
+     * offset 7, so a 1080-byte aarch64 `.o` read back as 7 bytes, and
+     * FileFingerprint.from_file's sha256 fallback (which fires only on nil)
+     * became dead code. Identical defect and fix in the runtime_native.c lane;
+     * the two are paired by the push-rt-dual-implementation ratchet and must not
+     * diverge. Do NOT size from fseek/ftell -- procfs and sysfs report 0, which
+     * is the incident spl_file_read's own comment records. */
+    FILE* f = fopen(path, "rb");
+    if (!f) return rt_nil;
+    size_t cap = 4096;
+    size_t len = 0;
+    char* content = (char*)malloc(cap);
+    if (!content) { fclose(f); return rt_nil; }
+    for (;;) {
+        if (len >= cap) {
+            size_t new_cap = cap * 2;
+            char* grown = (char*)realloc(content, new_cap);
+            if (!grown) { free(content); fclose(f); return rt_nil; }
+            content = grown;
+            cap = new_cap;
+        }
+        size_t n = fread(content + len, 1, cap - len, f);
+        len += n;
+        if (n == 0) break;
+    }
+    fclose(f);
+    int64_t result = rt_string_new((const uint8_t*)content, (uint64_t)len);
     free(content);
     return result;
 }
