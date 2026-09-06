@@ -5,6 +5,12 @@ description: GitHub and Jira/Confluence integration — setup, push, wiki, and a
 
 # Repo & Pull Request Skill — Dispatcher
 
+Search aliases: `self approve`, `approve PR`, `author cannot approve`.
+
+For `self approve`, `approve PR`, or a same-author GitHub rejection, run
+`spipe self-review-guide`. The supported action is `SPipe Self Review
+Admission` on the exact reviewed head, never provider `APPROVED`.
+
 Unified skill for GitHub, Bitbucket, and Jira/Confluence operations:
 setup, push, wiki, and PR review (with 3-level review state machine).
 
@@ -26,8 +32,8 @@ setup, push, wiki, and PR review (with 3-level review state machine).
 | `wiki jira` | `/repo_and_pull_req wiki jira` | Create/update Confluence page |
 | `wiki` | `/repo_and_pull_req wiki` | Update both wikis |
 | `review <pr#>` | `/repo_and_pull_req review 42 --target=gh --level=1` | Single-pass PR review (L1, current behavior) |
-| `review <pr#> --level=2` | `/repo_and_pull_req review 42 --level=2` | Bot-approves + auto-merges (poll 60s, 24h cap) |
-| `review <pr#> --level=3` | `/repo_and_pull_req review 42 --level=3` | Wait for human approval + merge (poll 5m, 7d cap) |
+| `review <pr#> --level=2` | `/repo_and_pull_req review 42 --level=2` | Exact-head scoped admission for same-author credentials, or eligible independent provider approval; then merge (poll 60s, 24h cap) |
+| `review <pr#> --level=3` | `/repo_and_pull_req review 42 --level=3` | Wait for eligible independent provider `User`-account approval + merge (poll 5m, 7d cap; account type is not proof of human operation) |
 | `review loop <pr#>` | `/repo_and_pull_req review loop 42 --level=2` | Start scheduled review loop at the level's cadence |
 | `review stop <pr#>` | `/repo_and_pull_req review stop 42` | Stop review loop (cancels schedule for any level) |
 
@@ -36,14 +42,14 @@ setup, push, wiki, and PR review (with 3-level review state machine).
 | Flag        | Default                                                                                                | Notes |
 |-------------|--------------------------------------------------------------------------------------------------------|-------|
 | `--target=` | detect from `git remote get-url origin` (`github.com`→`gh`, `bitbucket.org`→`bb`); **error** if neither matches | Routes to git/, bb/, or jira/ sub-skill tree |
-| `--level=`  | `1`                                                                                                    | 1=one-shot/opportunistic-merge (current), 2=bot-approve+auto-merge, 3=wait-human+merge |
+| `--level=`  | `1`                                                                                                    | 1=one-shot/opportunistic-merge, 2=scoped admission or eligible independent provider approval + merge, 3=wait for eligible independent provider `User` account + merge |
 
 `--target=jira` is **NOT valid with `--level=2|3`** — Jira tracks
 tickets, not code review. Reject the combination with a clear error:
 
 ```
 ERROR: --target=jira only supports --level=1. Use --target=gh or
-       --target=bb for L2/L3 bot/human approval and auto-merge.
+       --target=bb for L2/L3 review admission/approval and auto-merge.
 ```
 
 Older state files (no `level`/`target` keys) default to `level=1` and
@@ -92,7 +98,7 @@ LEVEL="${LEVEL:-1}"
 
 # Validate target+level combo
 if [ "$TARGET" = "jira" ] && [ "$LEVEL" != "1" ]; then
-  echo "ERROR: --target=jira only supports --level=1. Use --target=gh|bb for L2/L3." >&2
+  echo "ERROR: --target=jira only supports --level=1. Use --target=gh|bb for L2/L3 admission/approval." >&2
   exit 2
 fi
 ```
