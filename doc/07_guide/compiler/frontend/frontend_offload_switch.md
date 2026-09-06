@@ -42,8 +42,11 @@ With `SIMPLE_INTERP_TRACE=1` the driver prints one line:
 Native-build warm caching folds the same decision into its identity digest as
 `frontend_offload_requested=`, `frontend_offload_selected=`,
 `frontend_offload_reason=`, `frontend_offload_source=` rows (or one
-`frontend_offload_error=` row), derived by the shared `frontend_offload_rows`
-helper so it cannot drift from the driver's receipt. A switch change therefore
+`frontend_offload_error=` row), built by `frontend_offload_rows`. That helper and
+the driver's `dtrace` line are two separate assemblies over the same primitives
+(`resolve_frontend_offload` + `frontend_offload_decision` + `offload_mode_text`),
+so the mode spellings cannot drift even though the two receipts are built
+independently. A switch change therefore
 never reuses a warm artifact built under another decision; adding the rows
 invalidated every pre-existing warm identity once.
 
