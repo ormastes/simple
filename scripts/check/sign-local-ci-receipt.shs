@@ -1,0 +1,678 @@
+#!/bin/sh
+# Produce and sign a local-CI receipt (schema simple.local-ci-receipt/v1).
+#
+# The receipt is a signed statement that this signer ran the mandatory-check
+# rows of a manifest TIER over one exact source TREE, produced by one exact set
+# of jj CHANGES, and observed the recorded verdicts.
+#
+# The signer records verdicts FAITHFULLY. It is not the gate: it will sign a
+# receipt containing a non-pass row (and say so in its own verdict line, exit
+# 1) because scripts/check/verify-local-ci-receipt.shs is the thing that
+# decides admissibility, and a signer that refused to record a failure would
+# quietly turn "the gates failed" into "no receipt exists", which is a weaker
+# statement.
+#
+# BINDINGS (user directive 2026-09-06: "sign on changes not commit"):
+#   identities — one rebase-stable identity per covered commit, each tagged
+#                with its KIND and resolved in this fixed order:
+#                  `change <id>` — the jj change-id header inside the git
+#                     commit object (`git cat-file commit <sha>`); no jj binary
+#                     needed. jj preserves it across rebase/amend/force-push.
+#                  `patch <id>`  — `git show <sha> | git patch-id --stable`,
+#                     for NON-MERGE commits only. MEASURED 2026-09-06: zero of
+#                     the last 40 origin/main commits and zero of PR #380's
+#                     head commits carry a change-id header, because commits
+#                     reaching GitHub come from merge commits or from this
+#                     repo's plain-git `git worktree add --detach` + `gh pr
+#                     create` landing route. Without this fallback the feature
+#                     would never engage on a real PR. A patch-id hashes the
+#                     DIFF only, so it too survives rebase and cherry-pick.
+#                  otherwise UNBINDABLE and the signer FAILs — no third
+#                     fallback. `git patch-id` is undefined for a MERGE commit
+#                     (and for an empty diff), so those are unbindable, never
+#                     silently skipped.
+#                The kind is part of the signed bytes, so a receipt of patch
+#                identities can never be verified against change identities.
+#   tree       — `git rev-parse <rev>^{tree}`: the exact content.
+# Both are bound; they answer different questions.
+#
+# CANONICAL SERIALIZATION (byte-reproducible on identical state):
+#   schema: simple.local-ci-receipt/v1
+#   tier: <tier>
+#   tree: <40-hex>
+#   manifest_sha: <40-hex blob sha of the manifest AS OF THAT TREE>
+#   signer_identity: <token>
+#   session_id: <token>
+#   signed_at_utc: <YYYY-MM-DDTHH:MM:SSZ>
+#   identities: <n>
+#   identity: <kind> <val>  x n, kind in {change, patch}, deduplicated,
+#                           sorted ascending on "<kind> <val>" (LC_ALL=C)
+#   rows: <m>
+#   row: <id> <status>      x m, deduplicated, sorted ascending (LC_ALL=C)
+#   end: simple.local-ci-receipt/v1
+# Fixed field order + sorted sets means two runs on identical state produce
+# byte-identical payloads. `signed_at_utc` and `session_id` are inputs, not
+# ambient state: pin them with --signed-at / --session-id to reproduce bytes.
+#
+# Verdict line is ALWAYS the last line of stdout:
+#   PASS  — <n> row(s) signed, receipt binds tree <sha> (signer <id>)   exit 0
+#   FAIL  — <reason naming the offending row/field>                     exit 1
+#   ERROR — nothing was checked (<reason>)                              exit 2
+# Non-vacuity is absolute: 0 rows is ERROR, never PASS.
+#
+# Usage:
+#   sh scripts/check/sign-local-ci-receipt.shs --key <ssh_key> --identity <id> \
+#       [--results FILE | --run] [options]
+#   sh scripts/check/sign-local-ci-receipt.shs --selftest
+#
+#   --key FILE              ssh private key to sign with (required)
+#   --identity ID           signer identity; becomes sshsig -I and must be a
+#                           principal in the allowed-signers file (required)
+#   --results FILE          verdict source: lines `<row-id> <status>`; blank
+#                           lines and #-comments ignored. Its id set must equal
+#                           the manifest's ids for the tier.
+#   --run                   instead of --results, execute each manifest row's
+#                           command from the repository root and derive
+#                           pass/fail from its exit status. Slow; several rows
+#                           need a deployed bin/simple.
+#   --out FILE              receipt path (default $SIMPLE_CI_RECEIPT_FILE or
+#                           doc/08_tracking/check/local_ci_receipt.v1.txt).
+#                           The signature is written to <out>.sig.
+#   --rev REV               revision to bind (default HEAD)
+#   --changes SPEC          revision or range whose commits carry the covered
+#                           change-ids (default: the single --rev commit)
+#   --tier TIER             manifest tier to cover (default push)
+#   --session-id ID         session identity (default $SIMPLE_SESSION_ID or
+#                           `local`)
+#   --signed-at TS          pin the timestamp (default: now, UTC)
+#   --allowed-signers FILE  when given, the freshly signed receipt is verified
+#                           against it before this script reports success
+#   --root DIR              repository root (default: git toplevel)
+set -u
+export LC_ALL=C
+
+SIG_NAMESPACE=simple-ci-receipt
+SCHEMA_ID=simple.local-ci-receipt/v1
+MANIFEST_REL=${SIMPLE_CI_RECEIPT_MANIFEST_REL:-config/check/must_check_gates.sdn}
+DEFAULT_RECEIPT_REL=doc/08_tracking/check/local_ci_receipt.v1.txt
+
+pass_verdict() {
+    printf 'PASS — %s row(s) signed, receipt binds tree %s (signer %s)\n' "$1" "$2" "$3"
+    exit 0
+}
+fail_verdict() {
+    printf 'FAIL — %s\n' "$1"
+    exit 1
+}
+error_verdict() {
+    printf 'ERROR — nothing was checked (%s)\n' "$1"
+    exit 2
+}
+
+mktempdir() {
+    mktemp -d 2>/dev/null || mktemp -d -t local-ci-receipt
+}
+
+require_ssh_keygen() {
+    command -v ssh-keygen >/dev/null 2>&1 || return 1
+    command -v ssh >/dev/null 2>&1 || return 1
+    _sshv=$(ssh -V 2>&1)
+    _major=$(printf '%s\n' "$_sshv" | sed -n 's/.*OpenSSH_\([0-9][0-9]*\)\.\([0-9][0-9]*\).*/\1/p' | sed -n 1p)
+    case "$_major" in ''|*[!0-9]*) return 2 ;; esac
+    [ "$_major" -ge 8 ] || return 3
+    return 0
+}
+
+# Rebase-stable identities for a revision spec, canonically ordered.
+#
+# Resolution order per commit, identical to the verifier's (they must agree
+# byte for byte or nothing would ever verify):
+#   1. `change <id>` from the jj `change-id` git commit header
+#   2. `patch <id>`  from `git show <sha> | git patch-id --stable`, for
+#      non-merge commits only — patch-id is UNDEFINED for a merge
+#   3. otherwise MISSING, i.e. unbindable; no third fallback
+# Canonical order: deduplicated "<kind> <value>" entries sorted ascending as
+# bytes. Sorting is what makes the payload reproducible across rebases and
+# different commit-walk orders; including the kind keeps mixed sets stable.
+identities_for_spec() {
+    _spec=$1
+    case "$_spec" in
+        *..*) _revs=$(git -C "$ROOT" rev-list "$_spec" 2>/dev/null) ;;
+        *)    _revs=$(git -C "$ROOT" rev-list -n 1 "$_spec" 2>/dev/null) ;;
+    esac
+    _rl_rc=$?
+    [ "$_rl_rc" -eq 0 ] || return 1
+    [ -n "$_revs" ] || return 2
+    for _sha in $_revs; do
+        _body=$(git -C "$ROOT" cat-file commit "$_sha" 2>/dev/null)
+        _cf_rc=$?
+        if [ "$_cf_rc" -ne 0 ]; then
+            printf 'MISSING %s\n' "$_sha"
+            continue
+        fi
+        _cid=$(printf '%s\n' "$_body" | awk '
+            /^$/ { exit }
+            $1 == "change-id" { print $2; exit }
+        ')
+        if [ -n "$_cid" ]; then
+            printf 'change %s\n' "$_cid"
+            continue
+        fi
+        _nparents=$(printf '%s\n' "$_body" | awk '
+            /^$/ { exit }
+            $1 == "parent" { n++ }
+            END { print n+0 }
+        ')
+        if [ "$_nparents" -gt 1 ]; then
+            printf 'MISSING %s\n' "$_sha"
+            continue
+        fi
+        # The VALUE decides here, not an exit status: this is a pipeline, whose
+        # $? would be patch-id's rather than git show's, and patch-id emits
+        # nothing for a merge or an empty diff. Emptiness is the fail signal.
+        _pid=$(git -C "$ROOT" show "$_sha" 2>/dev/null | git -C "$ROOT" patch-id --stable 2>/dev/null | awk 'NR==1 {print $1}')
+        case "$_pid" in
+            ''|*[!0-9a-f]*) printf 'MISSING %s\n' "$_sha" ;;
+            *) printf 'patch %s\n' "$_pid" ;;
+        esac
+    done | sort -u
+}
+
+# Manifest rows for a tier, as of a tree: "<id>\t<command>", sorted by id.
+# Same parse idiom as check-push-must-pass.shs validate_ledger_text().
+manifest_rows_at_tree() {
+    git -C "$ROOT" show "$1:$MANIFEST_REL" 2>/dev/null |
+        awk -F, -v tier="$2" '
+            function trim(v) { gsub(/^[ \t]+|[ \t]+$/, "", v); return v }
+            function unquote(v) { v=trim(v); sub(/^"/, "", v); sub(/"$/, "", v); return v }
+            $0 ~ /^[ \t]+[a-z0-9][a-z0-9-]*,/ {
+                id = trim($1)
+                if (trim($2) != tier) next
+                if (id in seen) { printf("DUPLICATE\t%s\n", id); next }
+                seen[id] = 1
+                printf("%s\t%s\n", id, unquote($5))
+            }
+        ' | sort
+}
+
+run_scan() {
+    command -v git >/dev/null 2>&1 || error_verdict "git is not on PATH"
+
+    require_ssh_keygen
+    _sshrc=$?
+    case "$_sshrc" in
+        0) ;;
+        1) error_verdict "ssh-keygen is not installed; a receipt cannot be signed" ;;
+        2) error_verdict "cannot parse an OpenSSH version out of \`ssh -V\`" ;;
+        3) error_verdict "OpenSSH is older than 8.0; sshsig (ssh-keygen -Y) is unavailable" ;;
+        *) error_verdict "ssh precondition check failed" ;;
+    esac
+
+    [ -n "$KEY" ] || error_verdict "--key is required"
+    [ -f "$KEY" ] || error_verdict "signing key $KEY does not exist"
+    [ ! -L "$KEY" ] || error_verdict "signing key $KEY is a symlink"
+    [ -n "$IDENTITY" ] || error_verdict "--identity is required"
+    case "$IDENTITY" in
+        *[!A-Za-z0-9._@+-]*) error_verdict "--identity \"$IDENTITY\" contains characters outside [A-Za-z0-9._@+-]" ;;
+    esac
+    case "$SESSION_ID" in
+        ''|*[!A-Za-z0-9._@+-]*) error_verdict "--session-id \"$SESSION_ID\" contains characters outside [A-Za-z0-9._@+-]" ;;
+    esac
+    [ -n "$RESULTS" ] || [ "$RUN_GATES" = 1 ] ||
+        error_verdict "one of --results FILE or --run is required"
+    [ -z "$RESULTS" ] || [ "$RUN_GATES" = 0 ] ||
+        error_verdict "--results and --run are mutually exclusive"
+    [ -z "$RESULTS" ] || [ -f "$RESULTS" ] ||
+        error_verdict "results file $RESULTS does not exist"
+
+    if [ -z "$ROOT" ]; then
+        ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || ROOT=""
+    fi
+    [ -n "$ROOT" ] || error_verdict "cannot locate the repository root"
+    ROOT=$(CDPATH= cd -- "$ROOT" 2>/dev/null && pwd -P) ||
+        error_verdict "cannot canonicalize the repository root"
+
+    [ -n "$OUT" ] || OUT="$ROOT/$DEFAULT_RECEIPT_REL"
+    [ -n "$CHANGES" ] || CHANGES=$REV
+
+    if [ -z "$SIGNED_AT" ]; then
+        SIGNED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null) || SIGNED_AT=""
+    fi
+    case "$SIGNED_AT" in
+        ????-??-??T??:??:??Z) ;;
+        *) error_verdict "cannot produce an ISO-8601 UTC timestamp (got \"$SIGNED_AT\")" ;;
+    esac
+
+    TREE=$(git -C "$ROOT" rev-parse --verify --quiet "$REV^{tree}" 2>/dev/null) || TREE=""
+    [ -n "$TREE" ] || error_verdict "cannot resolve $REV^{tree} in $ROOT"
+    MANIFEST_SHA=$(git -C "$ROOT" rev-parse --verify --quiet "$TREE:$MANIFEST_REL" 2>/dev/null) || MANIFEST_SHA=""
+    [ -n "$MANIFEST_SHA" ] || error_verdict "tree $TREE has no $MANIFEST_REL"
+
+    WORK=$(mktempdir) || error_verdict "cannot create a temporary directory"
+    # shellcheck disable=SC2064
+    trap "rm -rf '$WORK'" EXIT INT TERM
+
+    # --- change-ids --------------------------------------------------------
+    identities_for_spec "$CHANGES" > "$WORK/changes"
+    _cid_rc=$?
+    case "$_cid_rc" in
+        0) ;;
+        2) error_verdict "revision spec \"$CHANGES\" selects no commit" ;;
+        *) error_verdict "cannot enumerate commits for \"$CHANGES\"" ;;
+    esac
+    if grep -q '^MISSING ' "$WORK/changes" 2>/dev/null; then
+        _nocid=$(awk '$1=="MISSING" {printf "%s ", $2}' "$WORK/changes" | sed 's/ *$//')
+        fail_verdict "commit(s) resolve to no rebase-stable identity and are therefore unbindable (no jj change-id header, and no patch-id — a merge commit or an empty diff): $_nocid"
+    fi
+    NCHANGES=$(awk 'END {print NR+0}' "$WORK/changes")
+    [ "$NCHANGES" -gt 0 ] || error_verdict "no identity could be resolved for \"$CHANGES\""
+
+    # --- manifest rows -----------------------------------------------------
+    manifest_rows_at_tree "$TREE" "$TIER" > "$WORK/manifest"
+    if grep -q '^DUPLICATE' "$WORK/manifest" 2>/dev/null; then
+        _dup=$(awk -F'\t' '$1=="DUPLICATE" {print $2; exit}' "$WORK/manifest")
+        fail_verdict "manifest row id \"$_dup\" is declared twice in $MANIFEST_REL at tree $TREE"
+    fi
+    awk -F'\t' '{print $1}' "$WORK/manifest" > "$WORK/manifest_ids"
+    NROWS=$(awk 'END {print NR+0}' "$WORK/manifest_ids")
+    [ "$NROWS" -gt 0 ] ||
+        error_verdict "$MANIFEST_REL at tree $TREE declares no row in tier \"$TIER\""
+
+    # --- verdicts ----------------------------------------------------------
+    if [ "$RUN_GATES" = 1 ]; then
+        : > "$WORK/verdicts"
+        while IFS="$(printf '\t')" read -r _id _cmd; do
+            [ -n "$_id" ] || continue
+            ( cd "$ROOT" && sh -c "$_cmd" ) >/dev/null 2>&1
+            _gate_rc=$?
+            if [ "$_gate_rc" -eq 0 ]; then
+                printf '%s pass\n' "$_id" >> "$WORK/verdicts"
+            else
+                printf '%s fail\n' "$_id" >> "$WORK/verdicts"
+            fi
+        done < "$WORK/manifest"
+    else
+        awk '
+            /^[ \t]*#/ { next }
+            /^[ \t]*$/ { next }
+            { gsub(/^[ \t]+|[ \t]+$/, ""); print $1, $2 }
+        ' "$RESULTS" > "$WORK/verdicts"
+    fi
+    sort -u "$WORK/verdicts" > "$WORK/verdicts_sorted"
+    awk '{print $1}' "$WORK/verdicts_sorted" > "$WORK/verdict_ids"
+
+    if [ "$(sort -u "$WORK/verdict_ids" | awk 'END {print NR+0}')" \
+         != "$(awk 'END {print NR+0}' "$WORK/verdict_ids")" ]; then
+        _dupv=$(sort "$WORK/verdict_ids" | uniq -d | tr '\n' ' ' | sed 's/ *$//')
+        fail_verdict "verdict source records row(s) more than once with differing status: $_dupv"
+    fi
+
+    _missing=$(comm -23 "$WORK/manifest_ids" "$WORK/verdict_ids" | tr '\n' ' ' | sed 's/ *$//')
+    _extra=$(comm -13 "$WORK/manifest_ids" "$WORK/verdict_ids" | tr '\n' ' ' | sed 's/ *$//')
+    [ -z "$_missing" ] ||
+        fail_verdict "no verdict recorded for manifest row(s) in tier \"$TIER\": $_missing"
+    [ -z "$_extra" ] ||
+        fail_verdict "verdict recorded for row(s) absent from the manifest in tier \"$TIER\": $_extra"
+
+    _badstatus=$(awk '$2 !~ /^[a-z][a-z]*$/ {printf "%s ", $1}' "$WORK/verdicts_sorted" | sed 's/ *$//')
+    [ -z "$_badstatus" ] ||
+        fail_verdict "row(s) with a malformed status token: $_badstatus"
+
+    # --- canonical payload -------------------------------------------------
+    _outdir=$(dirname -- "$OUT")
+    mkdir -p "$_outdir" 2>/dev/null || error_verdict "cannot create $_outdir"
+    {
+        printf 'schema: %s\n' "$SCHEMA_ID"
+        printf 'tier: %s\n' "$TIER"
+        printf 'tree: %s\n' "$TREE"
+        printf 'manifest_sha: %s\n' "$MANIFEST_SHA"
+        printf 'signer_identity: %s\n' "$IDENTITY"
+        printf 'session_id: %s\n' "$SESSION_ID"
+        printf 'signed_at_utc: %s\n' "$SIGNED_AT"
+        printf 'identities: %s\n' "$NCHANGES"
+        while IFS= read -r _c; do printf 'identity: %s\n' "$_c"; done < "$WORK/changes"
+        printf 'rows: %s\n' "$NROWS"
+        while read -r _id _st; do printf 'row: %s %s\n' "$_id" "$_st"; done < "$WORK/verdicts_sorted"
+        printf 'end: %s\n' "$SCHEMA_ID"
+    } > "$WORK/receipt"
+
+    cp "$WORK/receipt" "$OUT" || error_verdict "cannot write $OUT"
+
+    rm -f "$OUT.sig"
+    ssh-keygen -Y sign -f "$KEY" -n "$SIG_NAMESPACE" "$OUT" >/dev/null 2>&1
+    _sign_rc=$?
+    [ "$_sign_rc" -eq 0 ] ||
+        fail_verdict "ssh-keygen -Y sign failed (exit $_sign_rc) for key $KEY"
+    [ -s "$OUT.sig" ] ||
+        fail_verdict "ssh-keygen -Y sign produced no signature at $OUT.sig"
+
+    # --- optional self-verification against a real allowed-signers file ----
+    if [ -n "$ALLOWED" ]; then
+        [ -f "$ALLOWED" ] || error_verdict "allowed-signers file $ALLOWED does not exist"
+        ssh-keygen -Y verify -f "$ALLOWED" -I "$IDENTITY" -n "$SIG_NAMESPACE" -s "$OUT.sig" < "$OUT" >/dev/null 2>&1
+        _sv_rc=$?
+        [ "$_sv_rc" -eq 0 ] ||
+            fail_verdict "the freshly signed receipt does not verify as \"$IDENTITY\" against $ALLOWED (identity is not a principal there, or the key is not listed)"
+    fi
+
+    _notpass=$(awk '$2 != "pass" {printf "%s(%s) ", $1, $2}' "$WORK/verdicts_sorted" | sed 's/ *$//')
+    printf 'receipt: %s\n' "$OUT"
+    printf 'signature: %s\n' "$OUT.sig"
+    printf 'binds %s identity(ies): %s\n' "$NCHANGES" "$(tr '\n' ',' < "$WORK/changes" | sed 's/,$//')"
+
+    [ "$NROWS" -gt 0 ] || error_verdict "0 row(s) were recorded"
+    if [ -n "$_notpass" ]; then
+        fail_verdict "row(s) not pass: $_notpass; the receipt was written and signed but the verifier will reject it"
+    fi
+    pass_verdict "$NROWS" "$TREE" "$IDENTITY"
+}
+
+# ===========================================================================
+# Selftest — runs BEFORE every scan and is FATAL.
+# ===========================================================================
+ST_FAILURES=0
+ST_CASES=0
+
+st_report() {
+    ST_CASES=$((ST_CASES + 1))
+    if [ "$1" = ok ]; then
+        printf 'selftest: ok   %s\n' "$2"
+    else
+        printf 'selftest: FAIL %s — %s\n' "$2" "$3"
+        ST_FAILURES=$((ST_FAILURES + 1))
+    fi
+}
+
+# st_expect <name> <expected_exit> <pattern|""> -- <args...>
+st_expect() {
+    _name=$1; _want=$2; _pat=$3; shift 3
+    _out=$(sh "$SELF" "$@" 2>/dev/null)
+    _rc=$?
+    _last=$(printf '%s\n' "$_out" | sed -n '$p')
+    if [ "$_rc" -ne "$_want" ]; then
+        st_report bad "$_name" "exit $_rc, expected $_want (last line: $_last)"
+        return
+    fi
+    case "$_want:$_last" in
+        0:PASS\ *|1:FAIL\ *|2:ERROR\ *) ;;
+        *) st_report bad "$_name" "verdict line \"$_last\" does not match exit $_rc"; return ;;
+    esac
+    if [ -n "$_pat" ]; then
+        case "$_last" in
+            *"$_pat"*) ;;
+            *) st_report bad "$_name" "verdict line does not mention \"$_pat\": $_last"; return ;;
+        esac
+    fi
+    st_report ok "$_name"
+}
+
+st_commit() {
+    _repo=$1; _tree=$2; _cid=$3; _parents=${4:-}
+    {
+        printf 'tree %s\n' "$_tree"
+        for _p in $_parents; do printf 'parent %s\n' "$_p"; done
+        printf 'author Fixture <fixture@example.invalid> 1757116800 +0000\n'
+        printf 'committer Fixture <fixture@example.invalid> 1757116800 +0000\n'
+        [ "$_cid" = "-" ] || printf 'change-id %s\n' "$_cid"
+        printf '\nfixture commit\n'
+    } | git -C "$_repo" hash-object -t commit -w --stdin --literally
+}
+
+ST_MANIFEST='# fixture manifest
+must_check_gates |id, tier, push_blocking, mode, command, description|
+    alpha-gate, push, true, tree, "true", "alpha"
+    beta-gate, push, true, tree, "true", "beta"
+    gamma-gate, bootstrap, true, receipt, "false", "gamma"
+'
+
+run_selftest() {
+    # Children spawned by st_expect must NOT re-run this selftest: it is the
+    # scan-time guard, and letting each fixture re-enter it makes the suite
+    # quadratic. Set once, here, for every child process.
+    SIMPLE_CI_RECEIPT_IN_SELFTEST=1
+    export SIMPLE_CI_RECEIPT_IN_SELFTEST
+    command -v git >/dev/null 2>&1 || { echo "selftest: git is not on PATH"; return 1; }
+    require_ssh_keygen
+    _rc=$?
+    [ "$_rc" -eq 0 ] || { echo "selftest: ssh-keygen precondition failed (rc=$_rc)"; return 1; }
+
+    T=$(mktempdir) || { echo "selftest: cannot create temp dir"; return 1; }
+    # shellcheck disable=SC2064
+    trap "rm -rf '$T'" EXIT INT TERM
+
+    ssh-keygen -q -t ed25519 -N '' -C good -f "$T/good" >/dev/null 2>&1 ||
+        { echo "selftest: cannot generate the good key"; return 1; }
+    ssh-keygen -q -t ed25519 -N '' -C rogue -f "$T/rogue" >/dev/null 2>&1 ||
+        { echo "selftest: cannot generate the rogue key"; return 1; }
+    printf '%s namespaces="%s" %s' ci@fixture "$SIG_NAMESPACE" "$(cat "$T/good.pub")" > "$T/allowed"
+    printf '%s namespaces="%s" %s' ci@fixture "$SIG_NAMESPACE" "$(cat "$T/rogue.pub")" > "$T/allowed_rogue_only"
+
+    REPO=$T/repo
+    mkdir -p "$REPO/config/check"
+    printf '%s' "$ST_MANIFEST" > "$REPO/config/check/must_check_gates.sdn"
+    ( unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE; cd "$REPO" && git init -q . ) >/dev/null 2>&1 ||
+        { echo "selftest: cannot init fixture repo"; return 1; }
+    TREE_A=$( ( unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE; cd "$REPO" && git add -A >/dev/null 2>&1 && git write-tree ) ) ||
+        { echo "selftest: write-tree failed"; return 1; }
+
+    st_tree() { ( unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE; cd "$REPO" && git add -A >/dev/null 2>&1 && git write-tree ); }
+    printf 'b\n' > "$REPO/b.fixture"; TREE_B=$(st_tree)
+    printf 'd\n' > "$REPO/d.fixture"; TREE_D=$(st_tree)
+    rm -f "$REPO/b.fixture" "$REPO/d.fixture"
+    TREE_A2=$(st_tree)
+    [ "$TREE_A2" = "$TREE_A" ] || { echo "selftest: fixture tree A is not reproducible"; return 1; }
+
+    CID1=kmqrsvwxyzabcdefghijklmnopqrstuv
+    CID2=zzqrsvwxyzabcdefghijklmnopqrstuv
+    C_A=$(st_commit "$REPO" "$TREE_A" "$CID1")
+    C_NOCID=$(st_commit "$REPO" "$TREE_A" -)
+    # A merge commit with no change-id: git patch-id is undefined for it.
+    C_MERGE=$(st_commit "$REPO" "$TREE_B" - "$C_A $C_NOCID")
+    # A two-commit range mixing both identity kinds: the first carries a
+    # change-id, the second does not and must fall back to a patch-id.
+    C_MIX1=$(st_commit "$REPO" "$TREE_B" "$CID2" "$C_A")
+    C_MIX2=$(st_commit "$REPO" "$TREE_D" - "$C_MIX1")
+    C_MIX_RANGE="$C_A..$C_MIX2"
+
+    printf 'alpha-gate pass\nbeta-gate pass\n' > "$T/results_ok"
+    printf '# comment\n\nbeta-gate pass\nalpha-gate pass\n' > "$T/results_reordered"
+    printf 'alpha-gate pass\n' > "$T/results_missing"
+    printf 'alpha-gate pass\nbeta-gate pass\nzeta-gate pass\n' > "$T/results_extra"
+    printf 'alpha-gate pass\nbeta-gate fail\n' > "$T/results_failing"
+
+    TS=2026-09-06T00:00:00Z
+    A_="--root $REPO --key $T/good --identity ci@fixture --session-id sess1 --signed-at $TS --rev $C_A"
+
+    # (S1) a complete all-pass results file signs and PASSes
+    # shellcheck disable=SC2086
+    st_expect "(S1) complete results sign and PASS" 0 "" \
+        $A_ --results "$T/results_ok" --out "$T/r1.txt" --allowed-signers "$T/allowed"
+
+    # (S2) the produced receipt verifies with the sibling verifier
+    if [ -x "$SELF_DIR/verify-local-ci-receipt.shs" ] || [ -f "$SELF_DIR/verify-local-ci-receipt.shs" ]; then
+        SIMPLE_CI_RECEIPT_IN_SELFTEST=1 sh "$SELF_DIR/verify-local-ci-receipt.shs" \
+            --root "$REPO" --allowed-signers "$T/allowed" --rev "$C_A" --receipt "$T/r1.txt" >/dev/null 2>&1
+        _vrc=$?
+        if [ "$_vrc" -eq 0 ]; then
+            st_report ok "(S2) the signed receipt verifies end to end"
+        else
+            st_report bad "(S2) the signed receipt verifies end to end" "verifier exit $_vrc"
+        fi
+    else
+        st_report bad "(S2) the signed receipt verifies end to end" "verify-local-ci-receipt.shs is missing"
+    fi
+
+    # (S3) canonical payload is byte-identical across two runs on identical state
+    # shellcheck disable=SC2086
+    sh "$SELF" $A_ --results "$T/results_ok" --out "$T/r2.txt" >/dev/null 2>&1
+    if cmp -s "$T/r1.txt" "$T/r2.txt"; then
+        st_report ok "(S3) canonical payload byte-identical across two runs"
+    else
+        st_report bad "(S3) canonical payload byte-identical across two runs" "payloads differ"
+    fi
+
+    # (S4) input order does not change the canonical bytes
+    # shellcheck disable=SC2086
+    sh "$SELF" $A_ --results "$T/results_reordered" --out "$T/r3.txt" >/dev/null 2>&1
+    if cmp -s "$T/r1.txt" "$T/r3.txt"; then
+        st_report ok "(S4) canonical payload invariant under results reordering"
+    else
+        st_report bad "(S4) canonical payload invariant under results reordering" "payloads differ"
+    fi
+
+    # (S5) a missing manifest row FAILs
+    # shellcheck disable=SC2086
+    st_expect "(S5) missing row FAILs" 1 "no verdict recorded" \
+        $A_ --results "$T/results_missing" --out "$T/r4.txt"
+
+    # (S6) a row absent from the manifest FAILs
+    # shellcheck disable=SC2086
+    st_expect "(S6) extra non-manifest row FAILs" 1 "absent from the manifest" \
+        $A_ --results "$T/results_extra" --out "$T/r5.txt"
+
+    # (S7) a non-pass row is recorded faithfully, signed, and reported FAIL
+    # shellcheck disable=SC2086
+    st_expect "(S7) non-pass row signs but reports FAIL" 1 "not pass" \
+        $A_ --results "$T/results_failing" --out "$T/r6.txt"
+    if [ -s "$T/r6.txt" ] && [ -s "$T/r6.txt.sig" ]; then
+        st_report ok "(S7b) the non-pass receipt was still written and signed"
+    else
+        st_report bad "(S7b) the non-pass receipt was still written and signed" "receipt or signature missing"
+    fi
+
+    # (S8) a tier with no manifest rows ERRORs, never PASSes
+    # shellcheck disable=SC2086
+    st_expect "(S8) empty tier ERRORs" 2 "" \
+        $A_ --tier nosuchtier --results "$T/results_ok" --out "$T/r7.txt"
+
+    # (S9) a commit with NO change-id header binds via patch-id and signs. This
+    # is the real-PR case: measured 2026-09-06, zero of PR #380's head commits
+    # carry a change-id header, so without this lane nothing would ever sign.
+    st_expect "(S9) commit without a change-id header signs via patch-id" 0 "" \
+        --root "$REPO" --key "$T/good" --identity ci@fixture --session-id sess1 \
+        --signed-at "$TS" --rev "$C_NOCID" --results "$T/results_ok" \
+        --out "$T/r8.txt" --allowed-signers "$T/allowed"
+    if grep -q '^identity: patch [0-9a-f][0-9a-f]*$' "$T/r8.txt" 2>/dev/null; then
+        st_report ok "(S9b) the receipt records the identity KIND as patch"
+    else
+        st_report bad "(S9b) the receipt records the identity KIND as patch" "no 'identity: patch <id>' line in $T/r8.txt"
+    fi
+
+    # (S9c) that patch-id receipt verifies end to end against the same commit
+    SIMPLE_CI_RECEIPT_IN_SELFTEST=1 sh "$SELF_DIR/verify-local-ci-receipt.shs" \
+        --root "$REPO" --allowed-signers "$T/allowed" --rev "$C_NOCID" --receipt "$T/r8.txt" >/dev/null 2>&1
+    _pvrc=$?
+    if [ "$_pvrc" -eq 0 ]; then
+        st_report ok "(S9c) the patch-id receipt verifies end to end"
+    else
+        st_report bad "(S9c) the patch-id receipt verifies end to end" "verifier exit $_pvrc"
+    fi
+
+    # (S9d) a MERGE commit has no patch-id and must be unbindable, not skipped
+    st_expect "(S9d) merge commit FAILs as unbindable" 1 "unbindable" \
+        --root "$REPO" --key "$T/good" --identity ci@fixture --session-id sess1 \
+        --signed-at "$TS" --rev "$C_MERGE" --results "$T/results_ok" --out "$T/r8m.txt"
+
+    # (S9e) mixed-kind identity sets are canonically ordered and byte-stable
+    sh "$SELF" --root "$REPO" --key "$T/good" --identity ci@fixture --session-id sess1 \
+        --signed-at "$TS" --rev "$C_A" --changes "$C_MIX_RANGE" --results "$T/results_ok" \
+        --out "$T/mix1.txt" >/dev/null 2>&1
+    sh "$SELF" --root "$REPO" --key "$T/good" --identity ci@fixture --session-id sess1 \
+        --signed-at "$TS" --rev "$C_A" --changes "$C_MIX_RANGE" --results "$T/results_ok" \
+        --out "$T/mix2.txt" >/dev/null 2>&1
+    _mixkinds=$(awk '/^identity: /{print $2}' "$T/mix1.txt" 2>/dev/null | sort -u | tr '\n' ',' | sed 's/,$//')
+    if cmp -s "$T/mix1.txt" "$T/mix2.txt" && [ "$_mixkinds" = "change,patch" ]; then
+        st_report ok "(S9e) mixed change+patch identity set is canonical and byte-stable"
+    else
+        st_report bad "(S9e) mixed change+patch identity set is canonical and byte-stable" "kinds=[$_mixkinds], payloads differ or set not mixed"
+    fi
+
+    # (S10) neither --results nor --run is an ERROR, never a silent empty receipt
+    # shellcheck disable=SC2086
+    st_expect "(S10) no verdict source ERRORs" 2 "" $A_ --out "$T/r9.txt"
+
+    # (S11) a missing signing key is ERROR, never a pass
+    st_expect "(S11) missing signing key ERRORs" 2 "" \
+        --root "$REPO" --key "$T/no-such-key" --identity ci@fixture --session-id sess1 \
+        --signed-at "$TS" --rev "$C_A" --results "$T/results_ok" --out "$T/r10.txt"
+
+    # (S12) self-verification against an allowlist that lacks our key FAILs
+    # shellcheck disable=SC2086
+    st_expect "(S12) self-verify against a foreign allowlist FAILs" 1 "does not verify" \
+        $A_ --results "$T/results_ok" --out "$T/r11.txt" --allowed-signers "$T/allowed_rogue_only"
+
+    # (S13) --run derives verdicts from real exit statuses
+    # shellcheck disable=SC2086
+    st_expect "(S13) --run derives verdicts from exit statuses" 0 "" \
+        $A_ --run --out "$T/r12.txt" --allowed-signers "$T/allowed"
+
+    printf 'selftest: %s case(s), %s failure(s)\n' "$ST_CASES" "$ST_FAILURES"
+    [ "$ST_CASES" -gt 0 ] || return 1
+    [ "$ST_FAILURES" -eq 0 ]
+}
+
+# ===========================================================================
+# Argument parsing
+# ===========================================================================
+SELF=$0
+SELF_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd -P) || SELF_DIR=.
+
+SELFTEST_ONLY=0
+KEY=""
+IDENTITY=""
+RESULTS=""
+RUN_GATES=0
+OUT=""
+REV=HEAD
+CHANGES=""
+TIER=push
+SESSION_ID=${SIMPLE_SESSION_ID:-local}
+SIGNED_AT=""
+ALLOWED=""
+ROOT=""
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --selftest) SELFTEST_ONLY=1 ;;
+        --key) shift; [ $# -gt 0 ] || error_verdict "--key needs a value"; KEY=$1 ;;
+        --identity) shift; [ $# -gt 0 ] || error_verdict "--identity needs a value"; IDENTITY=$1 ;;
+        --results) shift; [ $# -gt 0 ] || error_verdict "--results needs a value"; RESULTS=$1 ;;
+        --run) RUN_GATES=1 ;;
+        --out) shift; [ $# -gt 0 ] || error_verdict "--out needs a value"; OUT=$1 ;;
+        --rev) shift; [ $# -gt 0 ] || error_verdict "--rev needs a value"; REV=$1 ;;
+        --changes) shift; [ $# -gt 0 ] || error_verdict "--changes needs a value"; CHANGES=$1 ;;
+        --tier) shift; [ $# -gt 0 ] || error_verdict "--tier needs a value"; TIER=$1 ;;
+        --session-id) shift; [ $# -gt 0 ] || error_verdict "--session-id needs a value"; SESSION_ID=$1 ;;
+        --signed-at) shift; [ $# -gt 0 ] || error_verdict "--signed-at needs a value"; SIGNED_AT=$1 ;;
+        --allowed-signers) shift; [ $# -gt 0 ] || error_verdict "--allowed-signers needs a value"; ALLOWED=$1 ;;
+        --root) shift; [ $# -gt 0 ] || error_verdict "--root needs a value"; ROOT=$1 ;;
+        -h|--help) sed -n '2,76p' "$0"; exit 0 ;;
+        *) error_verdict "unknown argument \"$1\"" ;;
+    esac
+    shift
+done
+
+[ -n "$OUT" ] || OUT=${SIMPLE_CI_RECEIPT_FILE:-}
+
+if [ "$SELFTEST_ONLY" = 1 ]; then
+    run_selftest
+    _st=$?
+    if [ "$_st" -ne 0 ]; then
+        printf 'FAIL — signer selftest failed (%s of %s case(s))\n' "$ST_FAILURES" "$ST_CASES"
+        exit 1
+    fi
+    printf 'PASS — %s selftest case(s) signed, receipt binds tree fixtures (signer selftest)\n' "$ST_CASES"
+    exit 0
+fi
+
+# --selftest runs BEFORE every scan and is FATAL.
+if [ "${SIMPLE_CI_RECEIPT_IN_SELFTEST:-0}" != 1 ]; then
+    _st_out=$(SIMPLE_CI_RECEIPT_IN_SELFTEST=1 sh "$SELF" --selftest 2>&1)
+    _st_rc=$?
+    if [ "$_st_rc" -ne 0 ]; then
+        printf '%s\n' "$_st_out"
+        error_verdict "the mandatory signer selftest failed; no receipt was produced"
+    fi
+fi
+
+run_scan
