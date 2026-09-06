@@ -310,3 +310,45 @@ writer lands and the reader defect is fixed: R0 diagnose-from-dump (exact
 build/session/capture identity, then semantic replay) without rerunning the
 failing program — this is a target, not a landed capability, as of this
 writing.
+
+**Reader repaired 2026-09-05.** The `receipt_id` defect above is fixed:
+`DebugReceiptV1` now carries `receipt_id`, issued by `service_v1.spl` as
+`"receipt-<session>-<n>"`, and `service_v1.spl` also defines
+`central_debug_service_v1_session_count()` (OPEN sessions only) and
+`central_debug_service_v1_record_outcome(...)` (delegates to `_record`). The
+policy constructors `debug_policy_observe_only_v1`/`_development_v1` live in
+`service_v1`, not `contracts_v1` — import them from there.
+`inspect_debug_evidence_bundle_v1` now completes end to end on a valid bundle:
+contract spec 7/7, `evidence_inspect_v1_spec.spl` 5/5 on the bootstrap seed.
+**Still non-compiling** and untouched: `src/app/cli_debug/probe_executor_v1.spl`
+and `src/app/debug/interpreter_service_adapter_v1.spl`, which call
+`central_debug_service_v1_apply_probe`, `_authorize_at`, `_record_at`,
+`_receipts`, and reference `DebugProbeKindV1` / `DebugRootOperationV1.Probe` —
+none of which exist. Contracts to settle first:
+`doc/08_tracking/bug/debug_service_v1_probe_and_adapter_call_undefined_symbols_2026-09-05.md`.
+Note also `test/fixtures/debug/evidence_bundle_v1` is NOT a valid bundle (no
+artifact digest, no `receipts_digest`) — use `evidence_bundle_contract_v1`.
+
+**Writer landed 2026-09-06 (Wave 2).** `src/app/cli_debug/evidence_write_v1.spl`,
+`write_debug_evidence_bundle_v1(root, build_id, artifact_paths)`; CLI
+`simple debug write <root> --build-id sha256:<hex> <artifact>...`. Copies existing
+files into `<root>/artifacts/` and emits `manifest.sdn`, `receipts.sdn` (the
+authorize+record pair of one `Evidence`/`Passive` `write-bundle`) and
+`normalized/state_capsule.sdn`; output is accepted by
+`inspect_debug_evidence_bundle_v1` (`evidence_write_v1_spec.spl` 5/5, seed).
+NOT done: no core/minidump/trace CAPTURE, no ELF-core parser, no capability above
+`Unverified` — a bundle proves identity and integrity, never replayability.
+
+**Writer hardened 2026-09-06 (PR #371 tip `bbf48c3f4f8`).** Receipts are stamped through
+`central_debug_service_v1_authorize_at` / `_record_at` with the SAME `now_ns` the manifest
+uses, and `receipts.sdn` emits `captured_at_ns` so it matches `DebugReceiptV1` (the
+round-trip example asserts the reader recovers a positive timestamp). Landmines: (1) a
+literal NUL byte inside a `contains("...")` string literal makes grep call the source
+"binary" — write `"\0"`; BSD awk cannot match `\x00`, find it with `tr -d` + `cmp`.
+(2) CLI acceptance (`simple debug write` then `inspect`) is verified BY HAND only — no
+system spec; `todo_db.sdn` row 0. (3) A THIRD spec, `evidence_bundle_writer_v1_spec.spl`,
+imports `std.common.debug.evidence_bundle_writer_v1`, which exists only in orphaned sweep
+ref `a8244005f9b` — RED, recorded in `debug_specs_import_removed_modules_2026-09-06.md`.
+
+## Lane docs (2026-09-05)
+- design: `doc/05_design/app/debug/debug_capability_truth_wave0_design.md` · plan: `doc/03_plan/app/debug/dump_replay_wave_plan.md` · state: `.spipe/debug_capability_truth_wave0/state.md` · receipt contract: `doc/07_guide/app/debug/state_capability_receipt_contract.md`
