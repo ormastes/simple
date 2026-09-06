@@ -108,6 +108,19 @@ classify_log() {
     echo "OK"
 }
 
+# The Rust seed INTERPRETS shard_mem_clamp.spl, so it parses `--threads`
+# correctly and would sail through this probe without ever exercising native
+# codegen -- a green that means nothing. The seed identifies itself on stderr;
+# refuse it rather than report a vacuous pass. Echoes "SEED" or "NATIVE".
+classify_binary() {
+    _bin=$1
+    _out=$(timeout 60 "$_bin" --version 2>&1)
+    case "$_out" in
+        *"bootstrap seed only"*|*"Rust-built Simple binary"*) echo "SEED" ;;
+        *) echo "NATIVE" ;;
+    esac
+}
+
 # ---------------------------------------------------------------------------
 # Selftest — fatal, runs before any real scan.
 # ---------------------------------------------------------------------------
@@ -155,6 +168,20 @@ run_selftest() {
         *) echo "selftest: malformed line not caught: $_v" >&2; _failures=$((_failures + 1)) ;;
     esac
 
+    # 6. The Rust seed must be REFUSED, not probed: it interprets the clamp and
+    #    would pass without exercising native codegen at all.
+    printf '#!/bin/sh\necho "WARNING: this Rust-built Simple binary is a bootstrap seed only; do not use it as the normal tool." >&2\n' \
+        > "$_dir/fake-seed"
+    chmod +x "$_dir/fake-seed"
+    _v=$(classify_binary "$_dir/fake-seed")
+    [ "$_v" = "SEED" ] || { echo "selftest: seed banner not detected: $_v" >&2; _failures=$((_failures + 1)); }
+
+    # 7. A binary that does not announce itself as the seed must be probed.
+    printf '#!/bin/sh\necho "simple 1.0.0-rc.1"\n' > "$_dir/fake-native"
+    chmod +x "$_dir/fake-native"
+    _v=$(classify_binary "$_dir/fake-native")
+    [ "$_v" = "NATIVE" ] || { echo "selftest: non-seed binary misclassified: $_v" >&2; _failures=$((_failures + 1)); }
+
     rm -rf "$_dir"
     if [ "$_failures" -ne 0 ]; then
         echo "ERROR — nothing was checked (selftest failed: $_failures fixture(s))"
@@ -164,7 +191,7 @@ run_selftest() {
 
 run_selftest
 if [ "$selftest_only" -eq 1 ]; then
-    echo "PASS — 5 selftest fixture(s) checked, 0 failures"
+    echo "PASS — 7 selftest fixture(s) checked, 0 failures"
     exit 0
 fi
 
@@ -187,6 +214,11 @@ fi
 
 if [ -z "$binary" ] || [ ! -x "$binary" ]; then
     echo "ERROR — nothing was checked (no executable simple binary; pass --binary <path>)"
+    exit 2
+fi
+
+if [ "$(classify_binary "$binary")" = "SEED" ]; then
+    echo "ERROR — nothing was checked ($binary is the Rust seed; it INTERPRETS the clamp and would pass without exercising native codegen. Pass --binary <a natively built simple>)"
     exit 2
 fi
 

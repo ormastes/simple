@@ -4247,6 +4247,34 @@ pub extern "C" fn rt_string_to_int(string: RuntimeValue) -> i64 {
     }
 }
 
+/// Receiver-dispatched `.to_i64()` / `.to_int()` for the native lanes when the
+/// receiver TYPE WAS ERASED. Twin of the C runtime's `rt_to_int_dynamic`
+/// (`src/runtime/runtime_native.c`); both must exist, because a natively built
+/// program links exactly one of the two runtimes and the compiler emits this
+/// call without knowing which.
+///
+/// The LLVM codegen used to match `to_i64`/`to_int` in an unconditional
+/// integer-cast block and emit a coercion to i64. A `text` handle IS an i64 in
+/// this ABI, so that coercion was the IDENTITY and `text.to_i64()` evaluated to
+/// the handle's own word. Measured 2026-09-07 on the aarch64 Stage 2 candidate:
+/// `native_build_shard_threads` compiled all three of its
+/// `args[i].to_i64() ?? 0` sites to no call at all, so `--threads 1` became a
+/// heap address and the build fanned out to 79 shard workers for a single unit.
+///
+/// Routing bare `to_i64` unconditionally to `rt_string_to_int` is NOT the fix:
+/// that returns 0 for a non-string, which would silently zero every erased
+/// NUMERIC `.to_i64()`. Dispatch on the receiver instead, with an IDENTITY
+/// fallback that is byte-identical to the cast block's previous behaviour for
+/// everything that is not a heap string — so the genuinely-i64 case is
+/// bit-for-bit unchanged.
+#[no_mangle]
+pub extern "C" fn rt_to_int_dynamic(value: RuntimeValue) -> i64 {
+    match value.heap_type() {
+        Some(HeapObjectType::String) => rt_string_to_int(value),
+        _ => value.to_raw() as i64,
+    }
+}
+
 /// Task #118 canonical `int(text)` semantics: a TOTAL, non-erroring,
 /// leading-numeric-prefix parse — never fails. Skips leading whitespace, an
 /// optional `+`/`-` sign, then reads the longest run of leading ASCII
