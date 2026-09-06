@@ -1,6 +1,6 @@
 # Committed `.spipe/policy/vcs.sdn` is rejected by its own canonical contract
 
-**Status:** OPEN
+**Status:** RESOLVED 2026-09-06
 **Found:** 2026-09-05
 **Severity:** blocks the `sj plan` PASS branch from binding to the canonical parser
 
@@ -87,3 +87,52 @@ RED and must not be wired into any gate tier.
 No spec parses the committed file — every existing policy spec uses an inline
 payload, which is why this survived. A regression spec that loads the real
 `.spipe/policy/vcs.sdn` should land with the fix.
+
+---
+
+## Resolution (2026-09-06)
+
+`bin/devhub lifecycle policy-check` now returns
+`{"status":"ok","schema":"spipe-vcs/3","protected_ref_count":7}`, rc 0.
+
+The user chose the **split fix**: each side was wrong about one row, so each side
+changed once.
+
+| row | change | why |
+|---|---|---|
+| `review/*` | `.spipe/policy/vcs.sdn` `force: deny` -> `lease_only` | research doc 1 section 7.1 gives review refs as "lease/CAS allowed"; the canonical contract was right |
+| `candidate/*` | canonical expectation `release` -> `candidate` | candidate refs are abandonable staging, so the lighter profile the committed file already declared was right |
+
+**A third defect surfaced underneath those two**, and it was not a policy
+disagreement at all: `direct_protected_ref_update: deny` WAS present at
+`vcs.sdn:61`, but `parse_lifecycle_vcs_policy` only read that key at indent 6
+inside `ordinary_change:`, while the file declares it at indent 4 as a BLANKET
+deny across every authoring mode. The parser was rejecting the policy for being
+*stricter* than the form it knew. Fixed to accept both.
+
+That is now the third indent-fragility bug in this one function (schema clobber,
+section bleed, this). They are not three unrelated defects: it is a hand-rolled
+line scanner doing a job that wants a real SDN parse. Treat a fourth as a signal
+to replace the function rather than patch it again.
+
+## Regression lock
+
+The root cause of the whole episode was that **no spec ever read the committed
+file** -- every policy spec used an inline payload, so the tree could diverge from
+2026-08-27 to 2026-09-05 with everything green.
+`test/01_unit/app/sj/protected_target_resolution_spec.spl` now parses
+`.spipe/policy/vcs.sdn` by path through `parse_canonical_lifecycle_vcs_policy`
+and asserts valid, schema, seven refs, and both repaired rows by name.
+
+Proven to discriminate, not merely to pass: reverting `review/*` to `deny` takes
+the file from `16 total, 16 passed` to `15 passed, 1 failed` with
+`expected deny to equal lease_only`, and restoring returns it to 16/16 with the
+policy file byte-identical.
+
+## Still open, deliberately
+
+`plan_integration_with_policy:81` remains canonical-bound while
+`resolve_protected_target` uses the basic parser. Now that the committed policy
+satisfies both, that split can be collapsed to one validator -- but that is a
+behaviour change to the plan path and belongs in its own change, not this fix.
+

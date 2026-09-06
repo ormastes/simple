@@ -11,6 +11,7 @@ use std.spec.{describe, it, expect, step}
 use std.io.{file_read}
 use std.scv.lifecycle.model.{Approval, GateBundle}
 use app.sj.gate_manifest.{parse_gate_manifest, plan_protected_gate_manifest}
+use app.sj.lifecycle_policy.{parse_canonical_lifecycle_vcs_policy, lifecycle_policy_ref}
 use app.sj.integrate_plan.{
     IntegrateRequest,
     LegacyPlanReport,
@@ -214,3 +215,29 @@ describe "The legacy argv plan consults the policy and the gate manifest":
         expect(printed).to_contain("would require gate: push-conflict-tree")
         expect(printed).to_contain("gate bundle      : LIFECYCLE_GATE_INCOMPLETE")
         expect(printed).to_contain("gate manifest pin: distinct pinned BASE and HEAD revisions are required")
+
+describe "The committed protected-ref policy satisfies the canonical contract":
+    # @manual show
+    it "parses the committed .spipe/policy/vcs.sdn as canonically valid with all seven refs":
+        # @req REQ-SSPEC-APP
+        # @ac: AC-5
+        step("Parse the file that ships in the repository, not an inline payload")
+        val policy = parse_canonical_lifecycle_vcs_policy(_committed_policy())
+
+        step("The canonical contract accepts it")
+        expect(policy.valid).to_be(true)
+        expect(policy.error).to_equal("")
+        expect(policy.schema).to_equal("spipe-vcs/3")
+
+        step("All seven protected-ref classes are present")
+        expect(policy.refs.len()).to_equal(7)
+
+        step("The two rows that diverged on 2026-09-05 stay agreed")
+        # review/* is lease_only, not deny: research doc section 7.1 gives review refs as
+        # "lease/CAS allowed". candidate/* uses the candidate profile, not release: candidate
+        # refs are abandonable staging. If either side is edited back, this fails loudly --
+        # the earlier divergence survived from 2026-08-27 only because no spec read this file.
+        val review = lifecycle_policy_ref(policy, "review/CHG-1").?
+        expect(review.force).to_equal("lease_only")
+        val candidate = lifecycle_policy_ref(policy, "candidate/1.0.0/RC-1").?
+        expect(candidate.gate_profile).to_equal("candidate")
