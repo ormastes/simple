@@ -457,6 +457,12 @@ did not reproduce here).
   `env_keys=`, gated on the existing `SIMPLE_DEBUG_FIELD_ACCESS`. This is the
   attributability this record complained was missing.
 - `SIMPLE_TRAP_SELF_WRITE=1` on `CowEnv::insert` (capped at 8 reports).
+  **Removed before landing (2026-09-06):** this trap sat in `CowEnv::insert`,
+  the hottest env path, and cost a `key == "self"` compare on every insert.
+  The `[self-write-trap]` instrumentation in `function_exec.rs`
+  (`SIMPLE_DEBUG_FIELD_ACCESS`) covers the same defect class at the three
+  outer-frame write sites. The `[self-slot-write]` transcripts quoted above
+  are historical evidence from that session; the knob no longer exists.
 
 ### Reproduce test, RED-before / GREEN-after against the fix's OWN parent
 

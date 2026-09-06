@@ -1295,7 +1295,10 @@ fn park_written_back_arguments(
         }
         // Drop the caller's Arc, keeping the name bound so the write-back's
         // `contains_key` gate still passes.
-        trap_self_write("park", &func.name, caller_name, &Value::Bool(false));
+        // No trap here: this site writes `Value::Nil`, which `trap_self_write`
+        // classifies as benign and ignores, so a truthful call is a guaranteed
+        // no-op. (It previously passed a synthetic `Value::Bool(false)` purely
+        // to force the trap to fire, which reported a value never written.)
         outer_env.insert(caller_name.clone(), Value::Nil);
         crate::perf_counters::bump(&crate::perf_counters::PARK_ARG_OK, 1);
         parked.push((caller_name.clone(), param_name.clone()));
