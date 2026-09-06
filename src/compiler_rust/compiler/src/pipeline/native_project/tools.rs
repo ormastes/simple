@@ -414,6 +414,19 @@ fn build_c_runtime_library(build_dir: &Path, include_stage4_hosted: bool) -> Opt
         // see the TU header; behavioural tests in
         // src/runtime/test/rt_core_exports_behaviour_selfcheck.c.
         "runtime_core_exports.c",
+        // Backend-plugin transport (spl_backend_plugin_run_v1), backing
+        // compiler.backend.backend_plugin.transport. Same never-an-archive-member
+        // class as runtime_terminal.c and runtime_simd_case.c above: the symbol
+        // is defined in src/runtime/runtime_backend_plugin.c and declared in
+        // runtime.h, but this list never carried the TU, so a core-lane native
+        // link of any entry whose closure reaches the backend-plugin transport
+        // left it undefined. Surfaced by the Stage4 compiler DRIVER entry on the
+        // dynamic-runtime lane, where it was the ONLY unresolved symbol left
+        // after the shared runtime and the core-C supplement resolved everything
+        // else. Measured before adding: the TU defines exactly one global symbol
+        // and has ZERO overlap with the 1,302 symbols defined by the other
+        // members of this list.
+        "runtime_backend_plugin.c",
         "runtime_value.h",
         "runtime.h",
         "runtime_packed_span.h",
