@@ -88,6 +88,49 @@
 #   --allowed-signers FILE  when given, the freshly signed receipt is verified
 #                           against it before this script reports success
 #   --root DIR              repository root (default: git toplevel)
+#   --note                  after a successful signature, attach the receipt to
+#                           git notes on refs/notes/ci-receipts, keyed by the
+#                           --rev COMMIT sha, so CI can read it. See NOTE
+#                           DELIVERY below.
+#   --push-note             additionally push refs/notes/ci-receipts to
+#                           --note-remote. Requires --note. NOT the default:
+#                           attaching locally and publishing to a shared ref
+#                           are separate decisions, and a signing command that
+#                           silently writes to a remote is a surprise.
+#   --note-remote NAME      remote for --push-note: a remote name, a path, or a
+#                           URL (default origin). A URL matters here: per
+#                           .claude/rules/vcs.md origin's HTTPS token is dead
+#                           and pushes go over the SSH URL.
+#
+# NOTE DELIVERY (must match .github/workflows/repo-hygiene.yml, which is the
+# consumer and is NOT changed by this script):
+#   ref        refs/notes/ci-receipts
+#   key        the --rev COMMIT sha — the PR HEAD, never a merge commit. The
+#              workflow reads `git notes --ref=ci-receipts show "$HEAD_SHA"`.
+#              A commit with 2+ parents is REFUSED here: patch-id is undefined
+#              for a merge, so such a receipt could never verify anyway.
+#   payload    the receipt bytes immediately followed by the sshsig block,
+#              i.e. exactly `cat <receipt> <receipt>.sig`. The workflow splits
+#              them again at the first `-----BEGIN SSH SIGNATURE-----` line.
+#              The note is created from a blob written with `git hash-object`
+#              and attached with `git notes add -C <blob>`, NOT `-F FILE`:
+#              `-F` runs the message through stripspace, `-C` reuses the blob
+#              verbatim, so the bytes CI reads are byte-identical to the bytes
+#              that were signed.
+#   non-pass   a receipt whose own verdict is not PASS is NEVER attached. The
+#              signer still writes and signs it (see above), but publishing it
+#              would advertise an inadmissible receipt as admissible.
+#   re-sign    `-f` semantics are deliberate. After a rebase the head sha
+#              changes, so the new note lands on the NEW sha and the note on
+#              the old sha is left in place — it is keyed by a commit no PR
+#              head references any more and is inert. Re-signing the SAME sha
+#              (gates re-run, no rebase) overwrites in place instead of
+#              erroring "Cannot add notes. Found existing notes".
+#   push       `git push <remote> refs/notes/ci-receipts` is a fast-forward
+#              push on a ref that does not auto-merge. If another developer
+#              has pushed a note since this clone last fetched it, the push is
+#              rejected and this script FAILs saying the note IS attached
+#              locally, and naming the fetch+`git notes merge` recovery.
 set -u
 export LC_ALL=C
 
@@ -95,9 +138,12 @@ SIG_NAMESPACE=simple-ci-receipt
 SCHEMA_ID=simple.local-ci-receipt/v1
 MANIFEST_REL=${SIMPLE_CI_RECEIPT_MANIFEST_REL:-config/check/must_check_gates.sdn}
 DEFAULT_RECEIPT_REL=doc/08_tracking/check/local_ci_receipt.v1.txt
+# Deliberately a constant, not a flag or an env knob: repo-hygiene.yml hardcodes
+# this ref, so a configurable one could only ever drift away from the consumer.
+NOTE_REF=ci-receipts
 
 pass_verdict() {
-    printf 'PASS — %s row(s) signed, receipt binds tree %s (signer %s)\n' "$1" "$2" "$3"
+    printf 'PASS — %s row(s) signed, receipt binds tree %s (signer %s)%s\n' "$1" "$2" "$3" "${4:-}"
     exit 0
 }
 fail_verdict() {
@@ -195,6 +241,60 @@ manifest_rows_at_tree() {
         ' | sort
 }
 
+# Attach the signed receipt to refs/notes/ci-receipts, keyed by a commit sha.
+#
+# Sets NOTE_SUFFIX (the verdict-line suffix) on success; calls
+# fail_verdict/error_verdict itself on any problem. It must NOT be invoked in
+# a command substitution: fail_verdict's exit would only leave the subshell.
+# Every git exit status is read DIRECTLY into a variable on the line after the
+# command — never through a pipe.
+attach_receipt_note() {
+    _note_sha=$1
+
+    # `git notes add` writes a commit and therefore needs an identity. Supply
+    # a fallback only when the repository has none, so a configured user is
+    # never overridden.
+    _cfg_name=$(git -C "$ROOT" config user.name 2>/dev/null) || _cfg_name=""
+    _cfg_email=$(git -C "$ROOT" config user.email 2>/dev/null) || _cfg_email=""
+    if [ -z "$_cfg_name" ] || [ -z "$_cfg_email" ]; then
+        GIT_AUTHOR_NAME=${GIT_AUTHOR_NAME:-local-ci-receipt-signer}
+        GIT_AUTHOR_EMAIL=${GIT_AUTHOR_EMAIL:-local-ci-receipt-signer@invalid}
+        GIT_COMMITTER_NAME=$GIT_AUTHOR_NAME
+        GIT_COMMITTER_EMAIL=$GIT_AUTHOR_EMAIL
+        export GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL
+    fi
+
+    # The exact bytes the workflow expects: receipt then sshsig, no separator.
+    cat "$OUT" "$OUT.sig" > "$WORK/note_payload"
+    _cat_rc=$?
+    [ "$_cat_rc" -eq 0 ] ||
+        fail_verdict "cannot assemble the note payload from $OUT and $OUT.sig"
+    [ -s "$WORK/note_payload" ] ||
+        fail_verdict "the assembled note payload is empty"
+
+    _note_blob=$(git -C "$ROOT" hash-object -w --stdin < "$WORK/note_payload" 2>/dev/null)
+    _blob_rc=$?
+    [ "$_blob_rc" -eq 0 ] && [ -n "$_note_blob" ] ||
+        fail_verdict "cannot write the note payload as a git blob (git hash-object exit $_blob_rc)"
+
+    git -C "$ROOT" notes --ref="$NOTE_REF" add -f -C "$_note_blob" "$_note_sha" >/dev/null 2>&1
+    _notes_rc=$?
+    [ "$_notes_rc" -eq 0 ] ||
+        fail_verdict "cannot attach the receipt note to $_note_sha on refs/notes/$NOTE_REF (git notes add exit $_notes_rc)"
+
+    _suffix="; note attached to $_note_sha on refs/notes/$NOTE_REF"
+
+    if [ "$PUSH_NOTE" = 1 ]; then
+        git -C "$ROOT" push "$NOTE_REMOTE" "refs/notes/$NOTE_REF" >/dev/null 2>&1
+        _push_rc=$?
+        [ "$_push_rc" -eq 0 ] ||
+            fail_verdict "the note IS attached locally to $_note_sha, but pushing refs/notes/$NOTE_REF to \"$NOTE_REMOTE\" failed (git push exit $_push_rc); notes refs do not auto-merge, so recover with: git fetch $NOTE_REMOTE refs/notes/$NOTE_REF:refs/notes/${NOTE_REF}-remote && git notes --ref=$NOTE_REF merge -s ours refs/notes/${NOTE_REF}-remote && git push $NOTE_REMOTE refs/notes/$NOTE_REF"
+        _suffix="$_suffix, pushed to $NOTE_REMOTE"
+    fi
+
+    NOTE_SUFFIX=$_suffix
+}
+
 run_scan() {
     command -v git >/dev/null 2>&1 || error_verdict "git is not on PATH"
 
@@ -224,6 +324,11 @@ run_scan() {
         error_verdict "--results and --run are mutually exclusive"
     [ -z "$RESULTS" ] || [ -f "$RESULTS" ] ||
         error_verdict "results file $RESULTS does not exist"
+    [ "$PUSH_NOTE" = 0 ] || [ "$ATTACH_NOTE" = 1 ] ||
+        error_verdict "--push-note requires --note; there is nothing to push without attaching a note first"
+    case "$NOTE_REMOTE" in
+        ''|*[!A-Za-z0-9._@:/+-]*) error_verdict "--note-remote \"$NOTE_REMOTE\" contains characters outside [A-Za-z0-9._@:/+-]" ;;
+    esac
 
     if [ -z "$ROOT" ]; then
         ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || ROOT=""
@@ -247,6 +352,21 @@ run_scan() {
     [ -n "$TREE" ] || error_verdict "cannot resolve $REV^{tree} in $ROOT"
     MANIFEST_SHA=$(git -C "$ROOT" rev-parse --verify --quiet "$TREE:$MANIFEST_REL" 2>/dev/null) || MANIFEST_SHA=""
     [ -n "$MANIFEST_SHA" ] || error_verdict "tree $TREE has no $MANIFEST_REL"
+
+    # The note key is resolved (and rejected) BEFORE any gate is run, so a
+    # merge --rev fails fast instead of after a long --run.
+    NOTE_SHA=""
+    if [ "$ATTACH_NOTE" = 1 ]; then
+        NOTE_SHA=$(git -C "$ROOT" rev-parse --verify --quiet "$REV^{commit}" 2>/dev/null) || NOTE_SHA=""
+        [ -n "$NOTE_SHA" ] ||
+            error_verdict "--note needs a COMMIT to key the note by, and \"$REV\" does not resolve to one"
+        _rl=$(git -C "$ROOT" rev-list --parents -n 1 "$NOTE_SHA" 2>/dev/null) || _rl=""
+        [ -n "$_rl" ] ||
+            error_verdict "cannot enumerate the parents of $NOTE_SHA"
+        _nparents=$(printf '%s\n' "$_rl" | awk '{print NF - 1; exit}')
+        [ "$_nparents" -lt 2 ] ||
+            fail_verdict "--rev $NOTE_SHA is a merge commit ($_nparents parents); a ci-receipt note must be keyed by the PR HEAD commit, never a merge tip (patch-id is undefined for a merge, so such a receipt could never verify)"
+    fi
 
     WORK=$(mktempdir) || error_verdict "cannot create a temporary directory"
     # shellcheck disable=SC2064
@@ -362,9 +482,16 @@ run_scan() {
 
     [ "$NROWS" -gt 0 ] || error_verdict "0 row(s) were recorded"
     if [ -n "$_notpass" ]; then
+        if [ "$ATTACH_NOTE" = 1 ]; then
+            fail_verdict "row(s) not pass: $_notpass; the receipt was written and signed but NO note was attached — an inadmissible receipt must not be published on refs/notes/$NOTE_REF"
+        fi
         fail_verdict "row(s) not pass: $_notpass; the receipt was written and signed but the verifier will reject it"
     fi
-    pass_verdict "$NROWS" "$TREE" "$IDENTITY"
+
+    if [ "$ATTACH_NOTE" = 1 ]; then
+        attach_receipt_note "$NOTE_SHA"
+    fi
+    pass_verdict "$NROWS" "$TREE" "$IDENTITY" "$NOTE_SUFFIX"
 }
 
 # ===========================================================================
@@ -606,6 +733,137 @@ run_selftest() {
     st_expect "(S13) --run derives verdicts from exit statuses" 0 "" \
         $A_ --run --out "$T/r12.txt" --allowed-signers "$T/allowed"
 
+    # --- git-note delivery -------------------------------------------------
+    BARE=$T/remote.git
+    git init -q --bare "$BARE" >/dev/null 2>&1 ||
+        { echo "selftest: cannot init the bare fixture remote"; return 1; }
+    st_note_show() { git -C "$REPO" notes --ref=ci-receipts show "$1" 2>/dev/null; }
+
+    # (S14) --note attaches a note CI can read back byte for byte
+    # shellcheck disable=SC2086
+    st_expect "(S14) --note signs and attaches a ci-receipt note" 0 "note attached to $C_A" \
+        $A_ --results "$T/results_ok" --out "$T/n1.txt" --allowed-signers "$T/allowed" --note
+    st_note_show "$C_A" > "$T/n1.note"
+    _show_rc=$?
+    if [ "$_show_rc" -ne 0 ] || [ ! -s "$T/n1.note" ]; then
+        st_report bad "(S14b) the note is readable the way the workflow reads it" "git notes show exit $_show_rc"
+    else
+        # EXACTLY the split repo-hygiene.yml performs on the note.
+        awk '/^-----BEGIN SSH SIGNATURE-----/ { exit } { print }' "$T/n1.note" > "$T/n1.receipt"
+        sed -n '/^-----BEGIN SSH SIGNATURE-----/,$p' "$T/n1.note" > "$T/n1.receipt.sig"
+        if cmp -s "$T/n1.receipt" "$T/n1.txt" && cmp -s "$T/n1.receipt.sig" "$T/n1.txt.sig"; then
+            st_report ok "(S14b) the note splits back byte-identically to receipt + sshsig"
+        else
+            st_report bad "(S14b) the note splits back byte-identically to receipt + sshsig" "split payload differs from the signed files"
+        fi
+        SIMPLE_CI_RECEIPT_IN_SELFTEST=1 sh "$SELF_DIR/verify-local-ci-receipt.shs" \
+            --root "$REPO" --allowed-signers "$T/allowed" --rev "$C_A" \
+            --receipt "$T/n1.receipt" --signature "$T/n1.receipt.sig" >/dev/null 2>&1
+        _nvrc=$?
+        if [ "$_nvrc" -eq 0 ]; then
+            st_report ok "(S14c) the note's payload verifies as CI verifies it"
+        else
+            st_report bad "(S14c) the note's payload verifies as CI verifies it" "verifier exit $_nvrc"
+        fi
+    fi
+
+    # (S15) a non-pass receipt is signed but NEVER published as a note
+    # shellcheck disable=SC2086
+    st_expect "(S15) non-pass receipt refuses to attach a note" 1 "NO note was attached" \
+        --root "$REPO" --key "$T/good" --identity ci@fixture --session-id sess1 \
+        --signed-at "$TS" --rev "$C_NOCID" --results "$T/results_failing" \
+        --out "$T/n2.txt" --note
+    st_note_show "$C_NOCID" >/dev/null 2>&1
+    _absent_rc=$?
+    if [ "$_absent_rc" -ne 0 ]; then
+        st_report ok "(S15b) no note exists on the non-pass commit"
+    else
+        st_report bad "(S15b) no note exists on the non-pass commit" "a note was published for an inadmissible receipt"
+    fi
+
+    # (S16) re-sign after a head change attaches to the NEW sha; the old note
+    # survives on the old sha, and a same-sha re-sign overwrites in place.
+    C_RESIGN=$(st_commit "$REPO" "$TREE_D" "$CID2" "$C_A")
+    st_expect "(S16) re-sign after a head change attaches to the new sha" 0 "note attached to $C_RESIGN" \
+        --root "$REPO" --key "$T/good" --identity ci@fixture --session-id sess1 \
+        --signed-at "$TS" --rev "$C_RESIGN" --results "$T/results_ok" \
+        --out "$T/n3.txt" --note
+    st_note_show "$C_RESIGN" > "$T/n3.note" 2>/dev/null
+    _new_rc=$?
+    st_note_show "$C_A" > "$T/n1.note.again" 2>/dev/null
+    _old_rc=$?
+    if [ "$_new_rc" -eq 0 ] && [ "$_old_rc" -eq 0 ] && cmp -s "$T/n1.note" "$T/n1.note.again"; then
+        st_report ok "(S16b) the old sha's note is left intact alongside the new one"
+    else
+        st_report bad "(S16b) the old sha's note is left intact alongside the new one" "new_rc=$_new_rc old_rc=$_old_rc, or the old note changed"
+    fi
+    # shellcheck disable=SC2086
+    st_expect "(S16c) re-signing the SAME sha overwrites in place (-f)" 0 "note attached to $C_A" \
+        $A_ --results "$T/results_reordered" --out "$T/n4.txt" --note
+
+    # (S17) no push by default; --push-note publishes byte-identical bytes
+    git --git-dir="$BARE" rev-parse --verify --quiet refs/notes/ci-receipts >/dev/null 2>&1
+    _bare_rc=$?
+    if [ "$_bare_rc" -ne 0 ]; then
+        st_report ok "(S17) --note alone pushed nothing to the remote"
+    else
+        st_report bad "(S17) --note alone pushed nothing to the remote" "refs/notes/ci-receipts exists on the remote without --push-note"
+    fi
+    # shellcheck disable=SC2086
+    st_expect "(S17b) --push-note publishes the note ref" 0 "pushed to $BARE" \
+        $A_ --results "$T/results_ok" --out "$T/n5.txt" --note --push-note --note-remote "$BARE"
+    git --git-dir="$BARE" notes --ref=ci-receipts show "$C_A" > "$T/n5.remote" 2>/dev/null
+    _rem_rc=$?
+    cat "$T/n5.txt" "$T/n5.txt.sig" > "$T/n5.expected"
+    if [ "$_rem_rc" -eq 0 ] && cmp -s "$T/n5.remote" "$T/n5.expected"; then
+        st_report ok "(S17c) the pushed note is byte-identical to receipt + sshsig"
+    else
+        st_report bad "(S17c) the pushed note is byte-identical to receipt + sshsig" "remote show exit $_rem_rc, or bytes differ"
+    fi
+
+    # (S17d) a REJECTED push is a FAIL, never a PASS — and the local attach that
+    # already happened is reported as such. Simulated by rewinding the local
+    # note ref behind the remote so the push is non-fast-forward.
+    _remote_tip=$(git --git-dir="$BARE" rev-parse --verify --quiet refs/notes/ci-receipts 2>/dev/null) || _remote_tip=""
+    _local_before=$(git -C "$REPO" rev-parse --verify --quiet refs/notes/ci-receipts 2>/dev/null) || _local_before=""
+    if [ -z "$_remote_tip" ] || [ -z "$_local_before" ]; then
+        st_report bad "(S17d) a rejected push FAILs and says the note is attached locally" "no note ref to rewind (remote=$_remote_tip local=$_local_before)"
+    else
+        # Advance the remote once more, then rewind the LOCAL ref behind it.
+        sh "$SELF" --root "$REPO" --key "$T/good" --identity ci@fixture \
+            --session-id sess1 --signed-at "$TS" --rev "$C_NOCID" \
+            --results "$T/results_ok" --out "$T/n8.txt" --note --push-note \
+            --note-remote "$BARE" >/dev/null 2>&1
+        _adv_rc=$?
+        git -C "$REPO" update-ref refs/notes/ci-receipts "$_local_before" >/dev/null 2>&1
+        _rew_rc=$?
+        if [ "$_adv_rc" -ne 0 ] || [ "$_rew_rc" -ne 0 ]; then
+            st_report bad "(S17d) a rejected push FAILs and says the note is attached locally" "fixture setup failed (advance=$_adv_rc rewind=$_rew_rc)"
+        else
+            # shellcheck disable=SC2086
+            st_expect "(S17d) a rejected push FAILs and says the note is attached locally" 1 "IS attached locally" \
+                $A_ --results "$T/results_ok" --out "$T/n9.txt" --note --push-note --note-remote "$BARE"
+            st_note_show "$C_A" >/dev/null 2>&1
+            _still_rc=$?
+            if [ "$_still_rc" -eq 0 ]; then
+                st_report ok "(S17e) the local attach survived the rejected push"
+            else
+                st_report bad "(S17e) the local attach survived the rejected push" "no local note on $C_A after the rejected push"
+            fi
+        fi
+    fi
+
+    # (S18) a merge --rev is refused as a note key even when --changes binds
+    st_expect "(S18) merge --rev refuses to key a note" 1 "merge commit" \
+        --root "$REPO" --key "$T/good" --identity ci@fixture --session-id sess1 \
+        --signed-at "$TS" --rev "$C_MERGE" --changes "$C_A" --results "$T/results_ok" \
+        --out "$T/n6.txt" --note
+
+    # (S19) --push-note without --note is a usage ERROR, never a silent no-op
+    # shellcheck disable=SC2086
+    st_expect "(S19) --push-note without --note ERRORs" 2 "requires --note" \
+        $A_ --results "$T/results_ok" --out "$T/n7.txt" --push-note
+
     printf 'selftest: %s case(s), %s failure(s)\n' "$ST_CASES" "$ST_FAILURES"
     [ "$ST_CASES" -gt 0 ] || return 1
     [ "$ST_FAILURES" -eq 0 ]
@@ -630,6 +888,11 @@ SESSION_ID=${SIMPLE_SESSION_ID:-local}
 SIGNED_AT=""
 ALLOWED=""
 ROOT=""
+ATTACH_NOTE=0
+PUSH_NOTE=0
+NOTE_REMOTE=origin
+NOTE_SUFFIX=""
+NOTE_SHA=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -646,7 +909,10 @@ while [ $# -gt 0 ]; do
         --signed-at) shift; [ $# -gt 0 ] || error_verdict "--signed-at needs a value"; SIGNED_AT=$1 ;;
         --allowed-signers) shift; [ $# -gt 0 ] || error_verdict "--allowed-signers needs a value"; ALLOWED=$1 ;;
         --root) shift; [ $# -gt 0 ] || error_verdict "--root needs a value"; ROOT=$1 ;;
-        -h|--help) sed -n '2,76p' "$0"; exit 0 ;;
+        --note) ATTACH_NOTE=1 ;;
+        --push-note) PUSH_NOTE=1 ;;
+        --note-remote) shift; [ $# -gt 0 ] || error_verdict "--note-remote needs a value"; NOTE_REMOTE=$1 ;;
+        -h|--help) sed -n '2,133p' "$0"; exit 0 ;;
         *) error_verdict "unknown argument \"$1\"" ;;
     esac
     shift
