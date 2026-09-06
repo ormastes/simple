@@ -235,3 +235,11 @@ Background: `doc/07_guide/runtime/process_kill_safety.md` (session-killing
   processes; the defense is guards at every kill call site.
 - Lint automation for unguarded kills — revisit only if a new incident shows
   the manual rule is insufficient.
+
+## Acceptance
+
+Runnable oracles for the remaining open boxes: `test/03_system/plan_acceptance/process_safety_plan_spec.spl`
+(tagged `@tag:in-development`; one `it` per open box — see
+`doc/03_plan/agent_tasks/plan_remains_acceptance_2026-09-05.md`).
+Slug collision: this file and `compiler/dependency_analysis/plan.md` are both
+`plan.md`, so the slug carries the parent directory (`process_safety_plan`).

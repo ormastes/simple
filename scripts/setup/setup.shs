@@ -151,7 +151,7 @@ fi
 
 # Production launches only an admitted cached native server.
 
-_MCP_PROBE_WRAPPER_VERSION="simple_mcp_server:4.1.4-search-call"
+_MCP_PROBE_WRAPPER_VERSION="simple_mcp_server:4.2.0-probe-flag"
 
 _mcp_probe_identity() {
   awk 'NR == 1 { print $1 }' "$1.sha256" 2>/dev/null || printf ''
@@ -198,6 +198,25 @@ mcp_probe_native() {
   fi
   # Stale or missing stamp: delete it before probing so a probe failure leaves no stamp
   _mcp_probe_stamp_delete "${probe_native}"
+
+  # Fast path: the candidate's own --probe flag. It prints version, build id and
+  # tool count and exits 0 without MCP framing or handler imports, so it costs a
+  # process start instead of a four-message JSON-RPC handshake. Admission is
+  # positive-only: exit 0 AND the documented "simple-mcp probe ok" marker on
+  # stdout. An older native that does not know the flag fails one of those and
+  # falls through to the full handshake below, which stays the authority.
+  # stdin comes from /dev/null and the timeout is short, because a native that
+  # predates the flag treats --probe as no argument at all, starts serving MCP on
+  # stdin, and would otherwise block until the long handshake timeout.
+  probe_flag_out="$(probe_timeout "${SIMPLE_MCP_NATIVE_PROBE_QUICK_TIMEOUT:-2}" \
+    "${probe_native}" --probe </dev/null 2>>"${log_dir}/simple_mcp_stderr.log")" && \
+  probe_flag_status=0 || probe_flag_status=$?
+  if [ "${probe_flag_status}" = "0" ] && printf '%s' "${probe_flag_out}" | grep -q 'simple-mcp probe ok'; then
+    _mcp_probe_stamp_write "${probe_native}" || true
+    printf 'probe_flag_ok wrapper=simple_mcp_server native=%s stamp=written\n' "${probe_native}" >>"${log_dir}/simple_mcp_startup.log"
+    return 0
+  fi
+  printf 'probe_flag_unsupported wrapper=simple_mcp_server native=%s rc=%s fallback=full_handshake\n' "${probe_native}" "${probe_flag_status}" >>"${log_dir}/simple_mcp_startup.log"
 
   probe_tmp="$(mktemp "${TMPDIR:-/tmp}/simple_mcp_probe.XXXXXX")" || probe_tmp=""
   if [ -z "${probe_tmp}" ]; then

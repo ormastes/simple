@@ -1,0 +1,280 @@
+# @tag:in-development
+"""
+## Purpose and audience
+Acceptance oracles for the open remains of doc/03_plan/agent_tasks/parent_authoritative_actor_process.md.
+## Operator workflow
+bin/simple test test/03_system/plan_acceptance/parent_authoritative_actor_process_spec.spl
+## Compatibility and limitations
+Tagged in-development: these pin the promised INTERFACE and fail until the
+plan's remaining checkboxes are implemented.
+"""
+# doc-path: doc/03_plan/agent_tasks/parent_authoritative_actor_process.md
+# @req REQ-PAAP-001
+# lifecycle: research doc/01_research/domain/sspec_documentization_maintenance.md ; architecture doc/04_architecture/sspec_documentization_maintenance.md ; design doc/05_design/app/testing/in_development_tag.md
+# @manual_section: parent-authoritative actor/process open remains
+
+# Each `it` below quotes one open `- [ ]` line from the "E1 completion
+# checklist" / "E2 completion checklist" sections of the plan verbatim in its
+# name, so the mapping back to the plan is mechanical. All three remaining
+# open checkboxes live under those two headings; every other checkbox in the
+# plan is already `[x]`.
+#
+# Symbols referenced here are the real, already-landed public functions the
+# plan's own text and its companion
+# doc/03_plan/sys_test/parent_authoritative_actor_process.md name for each
+# step: `parent_commit_piped_process_session_v1`
+# (src/lib/nogc_async_mut/parent_commit_piped_process.spl),
+# `parent_commit_owner_v1` / `commit_process_result_frames_with_candidate`
+# (src/lib/nogc_async_mut/parent_commit_owner.spl),
+# `parent_commit_frame_inbox_v1_for_generation`
+# (src/lib/nogc_async_mut/parent_commit_inbox.spl),
+# `parse_spipe_file` / `generate_feature_doc`
+# (src/app/spipe_docgen/spipe_docgen/{parser,generator}.spl, re-exported from
+# spipe_docgen/__init__.spl -- the plan's own "spipe-docgen" gate #3), and
+# `analyze_sspec_pair_text` (src/app/sspec_maintain/analyzer.spl,
+# re-exported from sspec_maintain/__init__.spl -- the plan's own
+# "sspec-maintain" gate #5/#6).
+
+use std.spec.{describe, it, expect, step}
+use std.nogc_sync_mut.io.file_ops.{file_read, file_exists}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.structural.parallel_commit.commit_contracts.{
+    ParallelCommitOrder,
+    ParallelConflictPolicy,
+    ParallelResultKind,
+    result_envelope_v1
+}
+use std.common.structural.parallel_commit.commit_engine.{parallel_commit_state_v1}
+use std.common.structural.parallel_commit.result_envelope_codec.{encode_result_envelope}
+use std.common.structural.transfer.process_frame_codec.{
+    process_transfer_frame_v1,
+    process_transfer_text_line_encode
+}
+use std.common.structural.transfer.transfer_contracts.{
+    ParallelExecutionDomain,
+    ParallelTransferMode,
+    ParallelTransferPayload,
+    transfer_envelope_v1
+}
+use std.nogc_async_mut.parent_commit_inbox.{parent_commit_frame_inbox_v1_for_generation}
+use std.nogc_async_mut.parent_commit_owner.{
+    parent_commit_candidate_v1,
+    parent_commit_owner_v1
+}
+use std.nogc_async_mut.parent_commit_piped_process.{parent_commit_piped_process_session_v1}
+use std.common.spec.evidence.model.{
+    EvidenceStatus,
+    canonical_evidence,
+    evidence_node,
+    oracle_spec,
+    check_exact
+}
+use std.common.spec.evidence.evidence_comparator.{compare_evidence}
+use std.thread_sffi.{thread_sleep}
+use app.spipe_docgen.spipe_docgen.{parse_spipe_file, generate_feature_doc}
+use app.sspec_maintain.{analyze_sspec_pair_text}
+
+# ---------------------------------------------------------------------------
+# Shared fixture paths named directly by the plan and its sys_test companion.
+# ---------------------------------------------------------------------------
+
+val e1_spec_path = "test/03_system/feature/language/parent_commit_piped_result_spec.spl"
+val e1_mirror_path = "doc/06_spec/03_system/feature/language/parent_commit_piped_result_spec.md"
+
+fn regenerate_manual_sha(spec_path: text, output_dir: text) -> text:
+    val parsed = match parse_spipe_file(spec_path):
+        case Ok(doc): doc
+        case Err(e): fail("parse_spipe_file failed for {spec_path}: {e}")
+    val output_path = match generate_feature_doc(parsed, output_dir):
+        case Ok(path): path
+        case Err(e): fail("generate_feature_doc failed for {spec_path}: {e}")
+    # `file_read` is `(text) -> text` across the whole tree (6009 call sites),
+    # not a `Result`, so the read is guarded fail-closed here instead: a
+    # missing or empty manual must abort the oracle, never hash to a
+    # deterministic-looking empty digest.
+    if not file_exists(output_path):
+        fail("generated manual {output_path} does not exist")
+    val written = file_read(output_path)
+    if written.len() == 0:
+        fail("could not read generated manual {output_path}")
+    sha256_text(written.trim() + "\n")
+
+# The committed mirror is NOT raw spipe-docgen output: `sspec-maintain
+# documentize` (src/app/sspec_maintain/documentize.spl:16
+# compose_sspec_documentized_manual) wraps the docgen manual in a provenance
+# block and a scorecard block. Those two blocks are exactly what the THIRD
+# oracle in this file needs -- "mirror PASS" is `mirror.contains(source_sha)`,
+# and the source sha lives only in the provenance block. So hashing the whole
+# committed file against raw docgen output could never pass while that oracle
+# passes: the two would contradict each other on one committed artifact.
+# The claim that is both true and strong is byte-exact equality over
+# everything docgen OWNS, with the two generated wrappers removed by the same
+# algorithm documentize used to add them. Nothing docgen produces is exempted.
+fn strip_generated_section(content: text, start_marker: text, end_marker: text) -> text:
+    val start = content.find(start_marker)
+    if start < 0:
+        return content
+    val suffix = content[start:].find(end_marker)
+    if suffix < 0:
+        return content[:start].trim() + "\n"
+    val end_offset = start + suffix + end_marker.len()
+    (content[:start] + content[end_offset:]).trim() + "\n"
+
+fn committed_manual_sha(manual_path: text) -> text:
+    if not file_exists(manual_path):
+        fail("committed manual {manual_path} does not exist")
+    val content = file_read(manual_path)
+    if content.len() == 0:
+        fail("could not read committed manual {manual_path}")
+    var base = strip_generated_section(content,
+        "<!-- sspec-maintain:scorecard:start -->",
+        "<!-- sspec-maintain:scorecard:end -->")
+    base = strip_generated_section(base,
+        "<!-- sspec-maintain:provenance:start -->",
+        "<!-- sspec-maintain:provenance:end -->")
+    if base.len() == 0:
+        fail("committed manual {manual_path} has no docgen-owned content")
+    sha256_text(base)
+
+describe "parent_authoritative_actor_process.md — open completion-checklist checkboxes":
+
+    it "Obtain an admitted pure-Simple native verdict.":
+        step("Obtain an admitted pure-Simple native verdict")
+        # @req REQ-PAAP-001
+        # @capture: the compare_evidence protocol/domain result below is the
+        # retained evidence for this oracle.
+        # The plan's own admission concept (Rust-seed vs. admitted
+        # pure-Simple Stage-4 binary identity) has no Simple-callable public
+        # function anywhere in src/ (verified by grep across src/lib and
+        # src/app) -- "admitted" is a runner/binary-provenance fact,
+        # observable only from outside the running process, not a library
+        # API a spec can call. This is this file's flagged too-vague
+        # checkbox for that reason: no oracle here can distinguish which
+        # binary executed it.
+        #
+        # The strongest available library-level pin is that the production
+        # process-transport path this environment is actually running right
+        # now -- the same real-child/session/commit/evidence boundary
+        # parent_commit_piped_result_spec.spl exercises -- must itself
+        # produce a genuine `EvidenceStatus.passed` verdict end to end.
+        val owner = parent_commit_owner_v1(
+            parallel_commit_state_v1(1, 900),
+            ParallelCommitOrder.TaskIdThenSequence,
+            ParallelConflictPolicy.Reject)
+        val generation = owner.issue_process_session_generation()
+        val expected_min_generation = 0
+        expect(generation > expected_min_generation).to_equal(true)
+
+        val inbox = parent_commit_frame_inbox_v1_for_generation(1, generation)
+        # base_revision must equal the owner's live revision (1, above): the
+        # commit engine rejects any envelope built against a different base as
+        # "stale-base-revision", which is the anti-lost-update guard and must
+        # not be relaxed. Committing it advances revision 1 -> 2.
+        val result = result_envelope_v1(1, 11, 0, 11,
+            ParallelResultKind.Patch, 1111, "child-11")
+        val envelope = transfer_envelope_v1(11, generation,
+            ParallelExecutionDomain.Process,
+            ParallelExecutionDomain.Parent,
+            ParallelTransferMode.Copy,
+            ParallelTransferPayload.EncodedCopy,
+            0, false)
+        val line = process_transfer_text_line_encode(process_transfer_frame_v1(
+            envelope, encode_result_envelope(result))).trim()
+        val session = parent_commit_piped_process_session_v1(
+            "/bin/sh", ["-c", "printf '%s\\n' '" + line + "'"],
+            generation, inbox)
+        val expected_min_handle = 0
+        expect(session.status().process_handle > expected_min_handle).to_equal(true)
+
+        var accepted_total = 0
+        var polls = 0
+        val max_polls = 80
+        while polls < max_polls and accepted_total == 0:
+            val read = session.poll(2)
+            accepted_total = accepted_total + read.accepted
+            polls = polls + 1
+            if accepted_total == 0:
+                thread_sleep(5)
+
+        val expected_accepted = 1
+        expect(accepted_total).to_equal(expected_accepted)
+
+        val received = inbox.receive()
+        val candidate = parent_commit_candidate_v1(901, [1111])
+        val frames = if received.ok: [received.frame] else: []
+        val outcome = owner.commit_process_result_frames_with_candidate(frames, candidate)
+
+        session.close()
+
+        val evidence = canonical_evidence(
+            "protocol",
+            "parent-commit-admitted-native-verdict/v1",
+            [
+                evidence_node("transport.accepted", "{accepted_total}"),
+                evidence_node("commit.receipt_ok", "{outcome.commit.receipt.ok}"),
+                evidence_node("commit.after_revision", "{outcome.mutation.after_revision}")
+            ]
+        )
+        val oracle = oracle_spec(
+            "parent-commit-admitted-native-verdict/v1",
+            [
+                check_exact("transport.accepted", "1"),
+                check_exact("commit.receipt_ok", "true"),
+                check_exact("commit.after_revision", "2")
+            ]
+        )
+        val comparison = compare_evidence(evidence, oracle)
+        print "native verdict evidence accepted={accepted_total} receipt_ok={outcome.commit.receipt.ok} reason={outcome.commit.receipt.reason} after_revision={outcome.mutation.after_revision} summary={comparison.summary}"
+        val expected_status = EvidenceStatus.passed
+        expect(comparison.status).to_equal(expected_status)
+        val expected_summary = "3 check(s) passed"
+        expect(comparison.summary).to_equal(expected_summary)
+
+    it "Regenerate the manual through pure-Simple `spipe-docgen`.":
+        step("Regenerate the manual through pure-Simple spipe-docgen")
+        # @req REQ-PAAP-001
+        # @capture: the freshly generated manual file written by
+        # generate_feature_doc is the retained evidence for this oracle.
+        expect(file_exists(e1_spec_path)).to_equal(true)
+        expect(file_exists(e1_mirror_path)).to_equal(true)
+        val expected_manual_sha = committed_manual_sha(e1_mirror_path)
+        val actual_manual_sha = regenerate_manual_sha(
+            e1_spec_path,
+            "/tmp/parent_authoritative_actor_process_plan_acceptance/mirror")
+        expect(actual_manual_sha).to_equal(expected_manual_sha)
+
+    it "Obtain the seven-score `sspec-maintain` verdict, blocker=0, mirror PASS, traceability PASS, and zero stubs.":
+        step("Obtain the seven-score sspec-maintain verdict, blocker=0, mirror PASS, traceability PASS, and zero stubs")
+        # @req REQ-PAAP-001
+        # @capture: the analyze_sspec_pair_text report below (score,
+        # mirror_state) is the retained evidence for this oracle.
+        # Fail-closed reads: `file_read` is `(text) -> text`, so an unreadable
+        # file would otherwise be scored as an empty spec and pass vacuously.
+        val source = file_read(e1_spec_path)
+        if source.len() == 0:
+            fail("could not read {e1_spec_path}")
+        val mirror = file_read(e1_mirror_path)
+        if mirror.len() == 0:
+            fail("could not read {e1_mirror_path}")
+        val report = analyze_sspec_pair_text(e1_spec_path, source, Some(mirror))
+
+        # "blocker=0" and "zero stubs" are the same gate: SSDOC-ORA-001 (the
+        # "No real executed assertion" / pending-scaffold rule,
+        # src/app/sspec_maintain/rules.spl) is itself a blocker finding, so a
+        # blocker_count of 0 also means zero stub/scaffold findings.
+        val expected_blocker_count = 0
+        expect(report.score.blocker_count).to_equal(expected_blocker_count)
+
+        # "mirror PASS" means the mirror embeds the current source hash.
+        val expected_mirror_state = "current"
+        expect(report.mirror_state).to_equal(expected_mirror_state)
+
+        # "traceability PASS" means no SSDOC-TRC-001 deduction fired, i.e.
+        # the traceability dimension score stays at its full 100.
+        val expected_traceability_score = 100
+        expect(report.score.traceability).to_equal(expected_traceability_score)
+
+        # The overall seven-score verdict must be release-ready (aggregate
+        # of all seven dimensions with a zero blocker count).
+        val expected_release_ready = true
+        expect(report.score.release_ready).to_equal(expected_release_ready)

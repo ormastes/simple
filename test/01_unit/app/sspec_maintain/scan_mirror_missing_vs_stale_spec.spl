@@ -1,0 +1,88 @@
+"""
+## Purpose and audience
+Generalization spec for
+doc/08_tracking/bug/sspec_scan_manual_findings_fire_without_mirror_2026-09-05.md,
+probing the adjacent case the reproduction spec does not cover: whether the
+analyzer can tell "mirror absent" apart from "mirror exists on disk but is
+empty/stale". Written for the same audience (owners of
+`src/app/sspec_maintain/analyzer.spl` and `main.spl`) who need to see that
+`Option<text>` is not enough signal at the `analyze_sspec_pair_text` boundary
+-- `None` and `Some("")` are supposed to mean different things (no mirror vs
+an empty mirror file that DOES exist), but the CLI's `file_read` (which
+returns `""` both when a file does not exist and, in principle, when it does
+exist and is genuinely empty) cannot distinguish them, so every caller that
+goes through `main.spl:204` collapses the two into the same buggy
+`Some("")` shape.
+## Operator workflow
+bin/simple test test/01_unit/app/sspec_maintain/scan_mirror_missing_vs_stale_spec.spl
+## Compatibility and limitations
+Calls `analyze_sspec_pair_text` directly, mirroring the house pattern used by
+`scorer_loopholes_spec.spl` in this directory.
+## Verification guidance and troubleshooting
+The first two scenarios below are expected to PASS today (they document the
+analyzer's already-correct handling of `None` and of a mirror that genuinely
+exists with real, current content). The third scenario is expected to FAIL
+(RED) -- it is the same defect as the reproduction spec, viewed from the
+"adjacent case" angle: an analyzer-level `Some("")` is currently indistinguishable
+in its finding set from a mirror that exists but is stale/incomplete, when it
+should instead be indistinguishable from `None`. Do not weaken any assertion
+to force a pass -- see .claude/rules/testing.md.
+"""
+# Lifecycle: doc/08_tracking/bug/sspec_scan_manual_findings_fire_without_mirror_2026-09-05.md
+# @manual_section: scan-mirror-missing-vs-stale
+
+use std.spec.*
+use std.crypto.sha256.{sha256_text}
+use app.sspec_maintain.analyzer.{analyze_sspec_pair_text}
+use app.sspec_maintain.model.{SspecDocumentizationReport}
+
+fn rule_ids(report: SspecDocumentizationReport) -> [text]:
+    var ids: [text] = []
+    for finding in report.findings:
+        if not ids.contains(finding.rule_id):
+            ids.push(finding.rule_id)
+    ids
+
+fn fixture_source() -> text:
+    val req_id = "REQ" + "-MIRRORCASE-001"
+    "describe \"x\":\n    it \"reports the outcome\":\n        # @req " + req_id + "\n        step(\"Act\")\n        # @capture: evidence_manifest(\"mirror_case\")\n        val observed = 1\n        expect(observed).to_equal(1)\n"
+
+describe "sspec-maintain scan distinguishes absent, empty, and real mirrors":
+
+    it "reports mirror_state=missing and only MNT-002 for None (true absence)":
+        # @req REQ-MIRROR-STATE-MISSING
+        step("Score the fixture with mirror=None")
+        val report = analyze_sspec_pair_text("mirror_case_absent_spec.spl", fixture_source(), None)
+        step("Verify the report's own mirror_state field says missing, and only MNT-002 fired")
+        # @capture: evidence_manifest("mirror_state_missing") -> scan_mirror_missing_vs_stale_spec.evidence.sdn
+        expect(report.mirror_state).to_equal("missing")
+        val ids = rule_ids(report)
+        expect(ids).to_contain("SSDOC-MNT-002")
+        expect(ids).to_not_contain("SSDOC-MNT-005")
+        expect(ids).to_not_contain("SSDOC-EVD-002")
+
+    it "reports mirror_state=current and no MNT-002 for a real, up-to-date mirror":
+        # @req REQ-MIRROR-STATE-CURRENT
+        step("Score the fixture with a mirror whose content embeds the source's own hash, plus real professional sections")
+        val src = fixture_source()
+        val real_mirror = "## Purpose and audience\nReal manual.\n## Operator workflow\nrun it\n## Compatibility and limitations\nnone\n## Verification guidance and troubleshooting\nsee logs\nstep: Act\nevidence: mirror_case\nsource_hash:" + sha256_text(src)
+        val report = analyze_sspec_pair_text("mirror_case_current_spec.spl", src, Some(real_mirror))
+        step("Verify a genuinely current mirror is not charged the absence rule")
+        # @capture: evidence_manifest("mirror_state_current") -> scan_mirror_missing_vs_stale_spec.evidence.sdn
+        expect(report.mirror_state).to_equal("current")
+        val ids = rule_ids(report)
+        expect(ids).to_not_contain("SSDOC-MNT-002")
+
+    it "CONFIRMED BUG: an absent mirror (Some(\"\"), the CLI's shape for a missing file) scores identically to a stale-but-EXISTING empty mirror instead of identically to None":
+        # @req REQ-MIRROR-ABSENT-VS-STALE-CONFUSED
+        step("Score the fixture with mirror=Some(\"\") -- the shape file_read produces both for a missing file and for a genuinely empty existing file")
+        val report = analyze_sspec_pair_text("mirror_case_empty_spec.spl", fixture_source(), Some(""))
+        step("Per the documented contract this must behave like true absence (mirror_state=missing, only MNT-002) -- it instead behaves like a stale, inspected manual")
+        # @capture: evidence_manifest("mirror_absent_vs_stale_confused") -> scan_mirror_missing_vs_stale_spec.evidence.sdn
+        expect(report.mirror_state).to_equal("missing")
+        val ids = rule_ids(report)
+        expect(ids).to_contain("SSDOC-MNT-002")
+        expect(ids).to_not_contain("SSDOC-MNT-005")
+        expect(ids).to_not_contain("SSDOC-MNT-008")
+        expect(ids).to_not_contain("SSDOC-EVD-002")
+        expect(ids).to_not_contain("SSDOC-EVD-003")

@@ -1,0 +1,213 @@
+# Purpose and audience: executable specification evidence for the gpu_frontend_offload lane (Wave 0).
+# @req AC-1 resolve_frontend_offload honors CLI > env > config > default(off); unknown text is Err
+# @req AC-2 off -> selected CpuReference, fallback_reason ""
+# @req AC-3 on|resident + allow-cpu demotes with parse_mode_unimplemented; require-requested is Err
+# @req AC-4 frontend_offload_profile touches only LexStructure/Parse and validates
+# design: doc/05_design/compiler/frontend/gpu_frontend_offload_switch_design.md
+
+use std.spec.*
+use compiler.common.structural_contracts.{
+    OffloadMode, OffloadFallbackPolicy, validate_offload_profile,
+    FrontendOffloadInputs, FrontendOffloadSwitch,
+    parse_frontend_offload_value, resolve_frontend_offload,
+    frontend_offload_profile, frontend_offload_decision,
+    frontend_offload_parse_mode_text, frontend_offload_receipt_line, frontend_offload_rows
+}
+
+fn inputs(cli: text, env: text, config: text) -> FrontendOffloadInputs:
+    FrontendOffloadInputs(cli: cli, env: env, config: config, fallback_cli: "", fallback_env: "", fallback_config: "")
+
+fn inputs_with_fallback(mode: text, fallback: text) -> FrontendOffloadInputs:
+    FrontendOffloadInputs(cli: mode, env: "", config: "", fallback_cli: fallback, fallback_env: "", fallback_config: "")
+
+fn resolved(cli: text, env: text, config: text) -> FrontendOffloadSwitch:
+    resolve_frontend_offload(inputs(cli, env, config)).unwrap()
+
+fn err_text(r: Result<FrontendOffloadSwitch, text>) -> text:
+    match r:
+        case Ok(_): ""
+        case Err(e): e
+
+describe "Frontend offload switch resolution":
+    """
+    The compiler frontend leaves the CPU only when one typed switch says so.
+    The switch is resolved from CLI, env, and project config, in that order.
+    """
+
+    it "lets the CLI value beat env and config":
+        # @req AC-1
+        step("Resolve the frontend offload switch from CLI, env, and config")
+        val sw = resolved("resident", "on", "off")
+        expect(sw.mode).to_equal(OffloadMode.ResidentGpu)
+        expect(sw.source).to_equal("cli")
+        expect(sw.raw).to_equal("resident")
+
+    it "lets the env value beat config when the CLI is absent":
+        # @req AC-1
+        step("Resolve the frontend offload switch from CLI, env, and config")
+        val sw = resolved("", "on", "off")
+        expect(sw.mode).to_equal(OffloadMode.HybridVectorGpu)
+        expect(sw.source).to_equal("env")
+
+    it "uses the config value when CLI and env are absent":
+        # @req AC-1
+        step("Resolve the frontend offload switch from CLI, env, and config")
+        val sw = resolved("", "", "resident")
+        expect(sw.mode).to_equal(OffloadMode.ResidentGpu)
+        expect(sw.source).to_equal("config")
+
+    it "defaults to CPU reference from source default when nothing is set":
+        # @req AC-1
+        step("Default to CPU reference when nothing is set")
+        val sw = resolved("", "", "")
+        expect(sw.mode).to_equal(OffloadMode.CpuReference)
+        expect(sw.auto).to_equal(false)
+        expect(sw.fallback).to_equal(OffloadFallbackPolicy.AllowCpu)
+        expect(sw.source).to_equal("default")
+        expect(sw.raw).to_equal("off")
+
+    it "accepts off, on, resident, and auto":
+        # @req AC-1
+        step("Resolve the frontend offload switch from CLI, env, and config")
+        expect(parse_frontend_offload_value("off").unwrap().mode).to_equal(OffloadMode.CpuReference)
+        expect(parse_frontend_offload_value("on").unwrap().mode).to_equal(OffloadMode.HybridVectorGpu)
+        expect(parse_frontend_offload_value("resident").unwrap().mode).to_equal(OffloadMode.ResidentGpu)
+        val auto = parse_frontend_offload_value("auto").unwrap()
+        expect(auto.mode).to_equal(OffloadMode.CpuReference)
+        expect(auto.auto).to_equal(true)
+
+    it "treats hybrid as an alias of on":
+        # @req AC-1
+        step("Resolve the frontend offload switch from CLI, env, and config")
+        val sw = resolved("hybrid", "", "")
+        expect(sw.mode).to_equal(OffloadMode.HybridVectorGpu)
+        expect(sw.raw).to_equal("hybrid")
+
+    it "rejects an unknown value naming the value and its source":
+        # @req AC-1
+        step("Resolve the frontend offload switch from CLI, env, and config")
+        val e = err_text(resolve_frontend_offload(inputs("", "bogus", "")))
+        expect(e).to_contain("bogus")
+        expect(e).to_contain("env")
+
+    it "resolves the fallback policy from require-requested":
+        # @req AC-3
+        step("Refuse to demote under require-requested")
+        val sw = resolve_frontend_offload(inputs_with_fallback("on", "require-requested")).unwrap()
+        expect(sw.fallback).to_equal(OffloadFallbackPolicy.RequireRequested)
+        val e = err_text(resolve_frontend_offload(inputs_with_fallback("on", "sometimes")))
+        expect(e).to_contain("sometimes")
+
+describe "Frontend offload profile":
+    it "changes only the LexStructure and Parse stage modes and still validates":
+        # @req AC-4
+        step("Resolve the frontend offload switch from CLI, env, and config")
+        val profile = frontend_offload_profile(resolved("resident", "", ""))
+        expect(profile.stage_modes.len()).to_equal(8)
+        expect(profile.stage_modes[1]).to_equal(OffloadMode.ResidentGpu)
+        expect(profile.stage_modes[2]).to_equal(OffloadMode.ResidentGpu)
+        for i in [0, 3, 4, 5, 6, 7]:
+            expect(profile.stage_modes[i]).to_equal(OffloadMode.CpuReference)
+        expect(validate_offload_profile(profile)).to_equal(Ok(()))
+
+describe "Frontend offload decision":
+    """
+    "On" never silently succeeds: while GPU parsing is unimplemented the
+    decision either demotes with a reason receipt or refuses outright.
+    """
+
+    it "keeps CPU reference with no reason when the switch is off":
+        # @req AC-2
+        step("Default to CPU reference when nothing is set")
+        val d = frontend_offload_decision(resolved("", "", ""), false).unwrap()
+        expect(d.requested).to_equal(OffloadMode.CpuReference)
+        expect(d.selected).to_equal(OffloadMode.CpuReference)
+        expect(d.fallback_reason).to_equal("")
+
+    it "demotes auto with the auto-profile reason instead of looking like off":
+        # @req AC-3
+        step("Demote honestly when GPU parsing is unimplemented")
+        val d = frontend_offload_decision(resolved("auto", "", ""), false).unwrap()
+        expect(d.selected).to_equal(OffloadMode.CpuReference)
+        expect(d.fallback_reason).to_equal("auto_profile_not_implemented_wave_1")
+        expect(frontend_offload_receipt_line(d, "cli")).to_equal(
+            "[frontend-offload] requested=cpu_reference selected=cpu_reference reason=auto_profile_not_implemented_wave_1 source=cli")
+
+    it "refuses auto under require-requested because no crossover evidence is retained":
+        # @req AC-3
+        step("Refuse to demote under require-requested")
+        val switch = resolve_frontend_offload(inputs_with_fallback("auto", "require-requested")).unwrap()
+        val d = frontend_offload_decision(switch, false)
+        expect(d.is_err()).to_equal(true)
+        expect(d.unwrap_err()).to_equal("frontend_offload_required_mode_unavailable: auto")
+
+    it "refuses resident under require-requested":
+        # @req AC-3
+        step("Refuse to demote under require-requested")
+        val switch = resolve_frontend_offload(inputs_with_fallback("resident", "require-requested")).unwrap()
+        val d = frontend_offload_decision(switch, false)
+        expect(d.is_err()).to_equal(true)
+        expect(d.unwrap_err()).to_equal("frontend_offload_required_mode_unavailable: resident_gpu")
+
+    it "emits canonical warm-receipt rows from one env reading":
+        # @req AC-5
+        step("Record the offload decision receipt")
+        expect(frontend_offload_rows("on", "").join("|")).to_equal(
+            "frontend_offload_requested=hybrid_vector_gpu|frontend_offload_selected=cpu_reference|frontend_offload_reason=parse_mode_unimplemented|frontend_offload_source=env")
+        expect(frontend_offload_rows("", "").join("|")).to_equal(
+            "frontend_offload_requested=cpu_reference|frontend_offload_selected=cpu_reference|frontend_offload_reason=|frontend_offload_source=default")
+        expect(frontend_offload_rows("on", "require-requested").join("|")).to_equal(
+            "frontend_offload_error=frontend_offload_required_mode_unavailable: hybrid_vector_gpu")
+
+    it "demotes on to CPU reference with parse_mode_unimplemented under allow-cpu":
+        # @req AC-3
+        step("Demote honestly when GPU parsing is unimplemented")
+        val d = frontend_offload_decision(resolved("on", "", ""), false).unwrap()
+        expect(d.requested).to_equal(OffloadMode.HybridVectorGpu)
+        expect(d.selected).to_equal(OffloadMode.CpuReference)
+        expect(d.fallback_reason).to_equal("parse_mode_unimplemented")
+
+    it "demotes resident to CPU reference with parse_mode_unimplemented under allow-cpu":
+        # @req AC-3
+        step("Demote honestly when GPU parsing is unimplemented")
+        val d = frontend_offload_decision(resolved("resident", "", ""), false).unwrap()
+        expect(d.requested).to_equal(OffloadMode.ResidentGpu)
+        expect(d.selected).to_equal(OffloadMode.CpuReference)
+        expect(d.fallback_reason).to_equal("parse_mode_unimplemented")
+
+    it "refuses to demote on under require-requested":
+        # @req AC-3
+        step("Refuse to demote under require-requested")
+        val sw = resolve_frontend_offload(inputs_with_fallback("on", "require-requested")).unwrap()
+        val r = frontend_offload_decision(sw, false)
+        match r:
+            case Ok(_): expect("Ok").to_equal("Err")
+            case Err(e): expect(e).to_equal("frontend_offload_required_mode_unavailable: hybrid_vector_gpu")
+
+    it "selects the requested mode when GPU parsing is available":
+        # @req AC-3
+        step("Demote honestly when GPU parsing is unimplemented")
+        val d = frontend_offload_decision(resolved("on", "", ""), true).unwrap()
+        expect(d.selected).to_equal(OffloadMode.HybridVectorGpu)
+        expect(d.fallback_reason).to_equal("")
+
+    it "maps the selected mode to the parse mode text":
+        # @req AC-2
+        step("Record the offload decision receipt")
+        val off = frontend_offload_decision(resolved("", "", ""), false).unwrap()
+        expect(frontend_offload_parse_mode_text(off)).to_equal("cpu_reference")
+        val on = frontend_offload_decision(resolved("on", "", ""), true).unwrap()
+        expect(frontend_offload_parse_mode_text(on)).to_equal("hybrid_vector_gpu")
+        val resident = frontend_offload_decision(resolved("resident", "", ""), true).unwrap()
+        expect(frontend_offload_parse_mode_text(resident)).to_equal("resident_gpu")
+
+    it "records the receipt line with requested, selected, reason, and source":
+        # @req AC-3
+        step("Record the offload decision receipt")
+        val sw = resolved("", "on", "")
+        val d = frontend_offload_decision(sw, false).unwrap()
+        expect(frontend_offload_receipt_line(d, sw.source)).to_equal(
+            "[frontend-offload] requested=hybrid_vector_gpu selected=cpu_reference reason=parse_mode_unimplemented source=env")
+        val off = frontend_offload_decision(resolved("", "", ""), false).unwrap()
+        expect(frontend_offload_receipt_line(off, "default")).to_equal(
+            "[frontend-offload] requested=cpu_reference selected=cpu_reference reason= source=default")

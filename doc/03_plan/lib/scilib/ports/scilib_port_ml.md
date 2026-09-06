@@ -2,7 +2,9 @@
 
 **Phase:** v1.1 — Implemented — committed a7e0cd9c2b (2026-05-18). Source in src/lib/common/science_math/ + src/lib/nogc_sync_mut/linalg/. Test specs in test/03_system/feature/scilib/.
 **Area:** `std.ml` — sklearn-shape estimators, preprocessing, model selection, metrics
-**Physical location:** `src/lib/gc_async_mut/ml/`
+**Physical location:** planned `src/lib/gc_async_mut/ml/` (absent as of 2026-09-05); shipped as `src/lib/common/science_math/ml_linear.spl` + `ml_metrics.spl` (plus async helpers in `src/lib/nogc_async_mut/ml/`); specs `test/03_system/feature/scilib/ml_linear_spec.spl`, `ml_metrics_spec.spl`
+
+**Spec paths below (2026-09-05):** the `test/03_system/feature/scilib/ml_*_spec.spl` names are the PLANNED per-task specs; only `ml_linear_spec.spl` and `ml_metrics_spec.spl` exist in that directory (`ls test/03_system/feature/scilib/ | grep ^ml_`). Every other basename is still to be created.
 **Import:** `use std.ml`
 **Scope:** DISJOINT from ndarray, blas, lapack, cuda_fortran, df, math_block, perf_sugar agents
 
@@ -50,7 +52,7 @@ Define all public ML types that are not models or traits:
 
 No primitive types in any field or signature. All struct fields use typed wrappers.
 
-Spec: `test/ml/types_spec.spl` — construct each error variant, verify MlError.DimensionMismatch carries Shape args, verify re-exports resolve without ambiguity.
+Spec: `test/03_system/feature/scilib/ml_types_spec.spl` — construct each error variant, verify MlError.DimensionMismatch carries Shape args, verify re-exports resolve without ambiguity.
 
 ---
 
@@ -78,7 +80,7 @@ trait Transformer:
 
 Note: `score` on a `Transformer` is not required; it is an `Estimator`-only method. If a type wants both traits it implements both independently (composition, not mixin inheritance).
 
-Spec: `test/ml/traits_spec.spl` — implement a trivial `IdentityTransformer` struct conforming to `Transformer` trait; verify `fit_transform` default impl fires without override; verify `MlError.NotFitted` is returned from `transform` before `fit`.
+Spec: `test/03_system/feature/scilib/ml_traits_spec.spl` — implement a trivial `IdentityTransformer` struct conforming to `Transformer` trait; verify `fit_transform` default impl fires without override; verify `MlError.NotFitted` is returned from `transform` before `fit`.
 
 ---
 
@@ -104,7 +106,7 @@ struct StandardScaler:
 - All ops use NDArray methods (axis-parameterised); no free-function sum/mean/std at ml level
 - PERF-SUGAR-003 note: if interpreter is slow on NDArray<Float64> generic dispatch, document observed cost in `scilib_perf_sugar.md` entry PERF-SUGAR-003 and proceed (watchful, not blocking)
 
-Spec: `test/ml/standard_scaler_spec.spl` — fit on 3×2 matrix, verify mean_ shape is (2,), transform produces zero-mean unit-variance columns, inverse_transform recovers original within Float64 tolerance.
+Spec: `test/03_system/feature/scilib/ml_standard_scaler_spec.spl` — fit on 3×2 matrix, verify mean_ shape is (2,), transform produces zero-mean unit-variance columns, inverse_transform recovers original within Float64 tolerance.
 
 ---
 
@@ -127,7 +129,7 @@ struct MinMaxScaler:
 - `transform(x)`: guard NotFitted; apply scale and shift
 - `inverse_transform(x)`: reverse
 
-Spec: `test/ml/minmax_scaler_spec.spl` — fit on known matrix, verify output range is [0,1], verify inverse recovers original.
+Spec: `test/03_system/feature/scilib/ml_minmax_scaler_spec.spl` — fit on known matrix, verify output range is [0,1], verify inverse recovers original.
 
 ---
 
@@ -148,7 +150,7 @@ struct LabelEncoder:
 - `inverse_transform(y: NDArray<Index>) -> Result<NDArray<text>, MlError>`: reverse lookup; out-of-range index → `MlError.InvalidInput`
 - No primitive integer output — return type is `NDArray<Index>`
 
-Spec: `test/ml/label_encoder_spec.spl` — fit ["cat","dog","bird"], verify transform("dog")=Index(1), inverse_transform(Index(0))="bird", unknown label returns Err.
+Spec: `test/03_system/feature/scilib/ml_label_encoder_spec.spl` — fit ["cat","dog","bird"], verify transform("dog")=Index(1), inverse_transform(Index(0))="bird", unknown label returns Err.
 
 ---
 
@@ -180,7 +182,7 @@ struct OneHotEncoder:
 - Do not use `Option<NDArray<text>>` with raw text primitives in field; `text` is the Simple text type (non-primitive)
 - Record PERF-SUGAR-003 observation if generic `NDArray<text>` dispatch is slow in interpreter
 
-Spec: `test/ml/one_hot_encoder_spec.spl` — fit 2-column text array, verify output shape, verify Ignore mode emits zeros for unknown, verify Error mode returns Err, verify inverse_transform round-trips.
+Spec: `test/03_system/feature/scilib/ml_one_hot_encoder_spec.spl` — fit 2-column text array, verify output shape, verify Ignore mode emits zeros for unknown, verify Error mode returns Err, verify inverse_transform round-trips.
 
 ---
 
@@ -210,7 +212,7 @@ Returns `(x_train, x_test, y_train, y_test)`.
 - No variadic arrays (Python's `*arrays` form) — Simple lacks that; accept x and y explicitly; multi-array variant is a follow-up
 - Generic `<T>` dispatch: note PERF-SUGAR-003; proceed
 
-Spec: `test/ml/train_test_split_spec.spl` — 100-row array, test_size=Float64(0.2), verify row counts sum to 100, verify seed reproducibility.
+Spec: `test/03_system/feature/scilib/ml_train_test_split_spec.spl` — 100-row array, test_size=Float64(0.2), verify row counts sum to 100, verify seed reproducibility.
 
 ---
 
@@ -236,7 +238,7 @@ fn KFold.split(self, x: NDArray<Float64>) -> [(NDArray<Index>, NDArray<Index>)]
 - n_splits < Index(2) → `MlError.InvalidInput` (return in a Result-wrapping variant or panic — use Result)
 - Return type is `[(NDArray<Index>, NDArray<Index>)]` — list of index-pair tuples; no primitive int arrays
 
-Spec: `test/ml/kfold_spec.spl` — n=10, n_splits=5: verify 5 pairs, each test set size 2, union of all test sets = all row indices (no overlap, no gap).
+Spec: `test/03_system/feature/scilib/ml_kfold_spec.spl` — n=10, n_splits=5: verify 5 pairs, each test set size 2, union of all test sets = all row indices (no overlap, no gap).
 
 ---
 
@@ -270,7 +272,7 @@ Algorithm:
 
 Risk: step 2 requires per-class index grouping — a mini-groupby over NDArray<Index>. Do NOT import std.df for this; implement a local `group_by_label` helper using NDArray operations only (sort + scan). This keeps std.ml disjoint from std.df at the implementation level (even though df is a sibling area).
 
-Spec: `test/ml/stratified_kfold_spec.spl` — 12 samples, 3 classes (4 each), n_splits=3: verify each fold test set has exactly 1 sample per class (4 total), train set 8 samples; verify no index appears in both train and test for the same fold.
+Spec: `test/03_system/feature/scilib/ml_stratified_kfold_spec.spl` — 12 samples, 3 classes (4 each), n_splits=3: verify each fold test set has exactly 1 sample per class (4 total), train set 8 samples; verify no index appears in both train and test for the same fold.
 
 ---
 
@@ -309,7 +311,7 @@ Algorithm per fold:
 
 PERF-SUGAR-003 note: generic `<E: Estimator>` dispatch in interpreter mode may be slow. If test runtime exceeds 30s for n=5 folds, record observed cost in PERF-SUGAR-003 entry and continue.
 
-Spec: `test/ml/cross_val_score_spec.spl` — use `LinearRegression` as estimator (T-ML-12), synthetic 20×1 data with known linear relationship, 5-fold CV with R2 scoring; verify all 5 scores are Float64 and NDArray shape is (5,).
+Spec: `test/03_system/feature/scilib/ml_cross_val_score_spec.spl` — use `LinearRegression` as estimator (T-ML-12), synthetic 20×1 data with known linear relationship, 5-fold CV with R2 scoring; verify all 5 scores are Float64 and NDArray shape is (5,).
 
 ---
 
@@ -346,7 +348,7 @@ fn Pipeline.predict<Steps>(self, x: NDArray<Float64>) -> Result<NDArray<Float64>
 - Do NOT attempt runtime step dispatch via type-erased list; no dyn Estimator, no vtable
 - File a feature request in `compiler_requests.md` for "heterogeneous tuple dispatch for Pipeline" once PERF-SUGAR-003 is resolved, so v2 can use the cleaner `Pipeline<Steps>` form
 
-Spec: `test/ml/pipeline_spec.spl` — `Pipeline2<StandardScaler, LinearRegression>`: fit on synthetic data, verify predict returns NDArray<Float64> of correct shape, verify scaler state is set after fit. Use SIMPLE_BLAS_BACKEND=mock.
+Spec: `test/03_system/feature/scilib/ml_pipeline_spec.spl` — `Pipeline2<StandardScaler, LinearRegression>`: fit on synthetic data, verify predict returns NDArray<Float64> of correct shape, verify scaler state is set after fit. Use SIMPLE_BLAS_BACKEND=mock.
 
 **ColumnTransformer (partial — v1.1 scope):**
 
@@ -368,7 +370,7 @@ enum RemainderPolicy { Drop | Passthrough }
 - Column indices use `[Index]` (typed), not `[i64]`
 - More than 2 transformer steps deferred to v2 (same tuple-dispatch limitation as Pipeline)
 
-Spec: `test/ml/column_transformer_spec.spl` — two-column matrix, step1=StandardScaler on col 0, step2=MinMaxScaler on col 1, verify output shape and column independence.
+Spec: `test/03_system/feature/scilib/ml_column_transformer_spec.spl` — two-column matrix, step1=StandardScaler on col 0, step2=MinMaxScaler on col 1, verify output shape and column independence.
 
 ---
 
@@ -392,7 +394,7 @@ struct LinearRegression:
 - `score(x, y)`: call `metrics.r2(y, self.predict(x)?)` (T-ML-15)
 - Cross-area dep: `T-LAPACK-gesv` for the normal equation solve
 
-Spec: `test/ml/linear_regression_spec.spl` — fit on `y = 2x + 1` with noise, verify coef_ close to Float64(2.0), predict on new x, verify r2 > Float64(0.99). SIMPLE_BLAS_BACKEND=mock (mock gesv returns identity-like solution; spec must use data where mock is still valid — use pre-solved fixture).
+Spec: `test/03_system/feature/scilib/ml_linear_regression_spec.spl` — fit on `y = 2x + 1` with noise, verify coef_ close to Float64(2.0), predict on new x, verify r2 > Float64(0.99). SIMPLE_BLAS_BACKEND=mock (mock gesv returns identity-like solution; spec must use data where mock is still valid — use pre-solved fixture).
 
 ---
 
@@ -415,7 +417,7 @@ struct Ridge:
 - `predict(x)` and `score(x, y)`: same pattern as LinearRegression
 - Cross-area dep: T-LAPACK-gesv
 
-Spec: `test/ml/ridge_spec.spl` — verify Ridge with alpha=Float64(0.0) produces same coef_ as LinearRegression on same data (to within tolerance); verify alpha=Float64(1000.0) shrinks coef_ toward zero. Use mock backend with pre-solved fixtures.
+Spec: `test/03_system/feature/scilib/ml_ridge_spec.spl` — verify Ridge with alpha=Float64(0.0) produces same coef_ as LinearRegression on same data (to within tolerance); verify alpha=Float64(1000.0) shrinks coef_ toward zero. Use mock backend with pre-solved fixtures.
 
 ---
 
@@ -439,7 +441,7 @@ Spec: `test/ml/ridge_spec.spl` — verify Ridge with alpha=Float64(0.0) produces
 - Have a `new()` constructor that compiles without error
 - Have at least one spec asserting the Err return (so the stub is testable)
 
-Spec: `test/ml/stubs_spec.spl` — construct each stub model, call fit, assert Err(MlError.InvalidInput) is returned.
+Spec: `test/03_system/feature/scilib/ml_stubs_spec.spl` — construct each stub model, call fit, assert Err(MlError.InvalidInput) is returned.
 
 ---
 
@@ -477,7 +479,7 @@ Implementation notes:
 - `classification_report<T>`: per-class precision/recall/F1 computed from confusion matrix; text formatting using `std.common.text` (compose, do not reimplement string ops)
 - No free-function `sum`/`mean` used at module scope — always called as `.sum()` / `.mean()` on NDArray instance
 
-Spec: `test/ml/metrics_spec.spl`:
+Spec: `test/03_system/feature/scilib/ml_metrics_spec.spl`:
 - `mse`: y_true=[1,2,3], y_pred=[1,2,3] → Float64(0.0); y_pred=[2,3,4] → Float64(1.0)
 - `r2`: perfect prediction → Float64(1.0); mean prediction → Float64(0.0)
 - `accuracy<Index>`: 3/4 correct → Float64(0.75)
@@ -530,7 +532,7 @@ Verify: `use std.ml` in a test file should resolve all public names without ambi
 
 Run `bin/simple build lint` on the assembled module. Zero primitive-type leaks in any exported signature.
 
-Spec: `test/ml/mod_spec.spl` — import `use std.ml`, reference one name from each major group (MlError, Estimator, StandardScaler, Pipeline2, LinearRegression, metrics.mse); verify compilation and basic construction without errors.
+Spec: `test/03_system/feature/scilib/ml_mod_spec.spl` — import `use std.ml`, reference one name from each major group (MlError, Estimator, StandardScaler, Pipeline2, LinearRegression, metrics.mse); verify compilation and basic construction without errors.
 
 ---
 
@@ -539,7 +541,7 @@ Spec: `test/ml/mod_spec.spl` — import `use std.ml`, reference one name from ea
 ### T-ML-17: End-to-end pipeline integration spec
 **Phase:** v1.1
 **Effort:** ≤1 day
-**File:** `test/ml/pipeline_e2e_spec.spl`
+**File:** `test/03_system/feature/scilib/ml_pipeline_e2e_spec.spl`
 **Deps:** T-ML-11 (Pipeline2), T-ML-03 (StandardScaler), T-ML-12 (LinearRegression), T-ML-07 (train_test_split), T-ML-15 (metrics)
 
 Write a single spec file that exercises the canonical sklearn workflow in Simple:
@@ -568,18 +570,33 @@ Run the complete ml spec suite:
 
 ```
 SIMPLE_BLAS_BACKEND=mock bin/simple test src/lib/gc_async_mut/ml/
-SIMPLE_BLAS_BACKEND=mock bin/simple test test/ml/
+SIMPLE_BLAS_BACKEND=mock bin/simple test test/03_system/feature/scilib/ml_
 bin/simple build lint src/lib/gc_async_mut/ml/
 ```
 
 Check:
-- [ ] Zero `skip()` calls in any ml spec
+- [x] Zero `skip()` calls in any ml spec — verified: `/usr/bin/grep -rn "skip()" test/03_system/feature/scilib/ml_*_spec.spl src/lib/common/science_math/ml_*.spl` → 0 call sites across 4 files (shipped ml = `src/lib/common/science_math/ml_linear.spl`, `ml_metrics.spl`; specs `test/03_system/feature/scilib/ml_linear_spec.spl`, `ml_metrics_spec.spl`)
 - [ ] Zero TODO→NOTE conversions anywhere in ml source or specs
 - [ ] Zero primitive types (`f64`, `i64`, `bool`, `str`) in any public function signature or exported struct field
 - [ ] `nn/loss` and `nn/norm` are re-exported (grep for `pub use common.pure.nn`); no duplicate definition
-- [ ] `DType` and `Device` not defined in ml/ — only re-exported
-- [ ] cuML not referenced anywhere in ml/ source
-- [ ] PERF-SUGAR-003 observation entry promoted from `anticipated` to `observed` or `fixed` in `doc/08_tracking/feature/scilib_perf_sugar.md`
+      — OPEN, and blocked on a plan-owner decision, not on implementation effort (2026-09-05).
+      The oracle (`test/03_system/plan_acceptance/scilib_port_ml_spec.spl`, `it "nn/loss and nn/norm
+      are re-exported"`) greps `src/lib/nogc_async_mut/ml` for the literal `pub use common.pure.nn`;
+      the count is 0 and the duplicate-definition half is already 0.
+      **The pinned path does not exist.** `src/lib/common/pure/` holds only `list.spl`; the real nn
+      is `src/lib/gc_async_mut/pure/nn/{loss,norm}.spl` (i.e. `std.gc_async_mut.pure.nn`). There is
+      therefore no spelling of `common.pure.nn` that resolves, and writing the literal line anyway
+      would be a text-match fake rather than a re-export.
+      Two viable closures, both outside an implementer's discretion:
+      (a) create `src/lib/common/pure/nn/{loss,norm}.spl` re-export shims so the pinned path becomes
+          real, or (b) move/rename the nn modules and amend the oracle to the real path.
+      **Extra hazard for either option:** `src/lib/gc_async_mut/pure/nn/loss.spl`'s own header states
+      the module is compiled-mode-only (`PureTensor<f64>` generics, "will only work in compiled mode,
+      not in the interpreter"). A facade re-export could break interpreter-mode loading of `std.ml`,
+      which every other ml spec depends on. Decide (a) vs (b) before anyone writes the line.
+- [x] `DType` and `Device` not defined in ml/ (nor referenced or re-exported — shipped ml operates on `[f64]`; the enums live only in ndarray) — verified src/lib/common/science_math/ndarray.spl:45 `pub enum DType`, :58 `pub enum Device`; `/usr/bin/grep -rn "enum DType\|enum Device" src/lib/common/science_math/ml_*.spl src/lib/nogc_async_mut/ml/` → 0 hits
+- [x] cuML not referenced anywhere in ml/ source — verified: `/usr/bin/grep -rni cuml src/lib/common/science_math/ src/lib/nogc_async_mut/ml/` → 0 hits
+- [x] PERF-SUGAR-003 observation entry promoted from `anticipated` to `observed` or `fixed` in `doc/08_tracking/feature/scilib_perf_sugar.md` — verified doc/08_tracking/feature/scilib_perf_sugar.md:105 `Status: fixed 2026-05-30` (entry header :100)
 
 If any item fails: do not ship, fix at root cause. No cover-up suppression.
 
@@ -676,7 +693,7 @@ src/lib/gc_async_mut/ml/
   metrics.spl                            # T-ML-15
   mod.spl                                # T-ML-16
 
-test/ml/
+test/03_system/feature/scilib/ml_
   types_spec.spl
   traits_spec.spl
   standard_scaler_spec.spl
@@ -696,3 +713,9 @@ test/ml/
   mod_spec.spl
   pipeline_e2e_spec.spl                  # T-ML-17
 ```
+
+## Acceptance
+
+Runnable oracles for the remaining open boxes: `test/03_system/plan_acceptance/scilib_port_ml_spec.spl`
+(tagged `@tag:in-development`; one `it` per open box — see
+`doc/03_plan/agent_tasks/plan_remains_acceptance_2026-09-05.md`).

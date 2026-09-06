@@ -1,6 +1,39 @@
 # @cover src/lib/gc_async_mut/gpu/engine2d/engine.spl 10%
 # @tag: unit, gpu, engine2d, font-offload
 
+"""
+## Purpose and audience
+Executable source-and-runtime contract for Engine2D's Vulkan font routing in
+`std.gc_async_mut.gpu.engine2d.engine`: only the canonical typed constructor
+wraps a Vulkan backend, poisoned or unavailable Vulkan font surfaces replay
+through software from quad zero, the promotion gate is the batch-admission
+predicate, and every consumer plumbing site (integration probes, RSS probe,
+compositor, showcases, perf harness) follows the retained renderer idiom.
+Owned by the engine2d GPU team; engineers changing backend construction or
+font-batch demotion are the audience.
+## Operator workflow
+Run `simple run test/01_unit/lib/gc_async_mut/gpu/engine2d/engine_vulkan_font_route_spec.spl`.
+The first three scenarios drive a real software Engine2D through the poison
+and unavailable-font paths; the closing scenario reads the shipped engine,
+font-owner, probe, compositor, showcase, and harness sources and audits each
+retained idiom against the oracle comments.
+## Compatibility and limitations
+Runtime scenarios force the software lane, so no Vulkan device is needed.
+The closing scenario is a source-contract audit — it pins implementation
+shape, not runtime pixels — and its per-site idioms are re-pointed whenever a
+consumer is deliberately refactored (see the dated notes inline).
+## Verification guidance and troubleshooting
+A poison-replay failure means CPU demotion skipped quads or dirtied the
+atlas identity; compare `last_font_execution_target` first. A source-contract
+failure names the exact idiom that moved: check the matching file for a
+deliberate refactor before re-pinning, and never delete the check to pass.
+"""
+# Lifecycle: doc/01_research/ui/engine2d_gc_tier/analysis_2026-07-25.md ;
+# doc/03_plan/ui/gpu_full_render_offload_mdsoc_plus_plan.md ;
+# doc/04_architecture/engine2d_four_backend_capture.md ;
+# doc/05_design/gpu_dynamic_backend_full_offload.md
+# @manual_section: Engine2D Vulkan font routing
+
 use std.spec.{describe, it, expect}
 use std.io_runtime.{file_read}
 use std.common.gpu.font_atlas_composite.{FONT_ATLAS_COMPOSITE_PROGRAM_VERSION}
@@ -10,13 +43,19 @@ use std.gc_async_mut.text_layout.font_renderer.{FontRenderBatch, FontRenderQuad}
 
 
 describe "Engine2D Vulkan font routing":
-    it "keeps non-Vulkan engines out of the Vulkan font lane":
+    it "rejects a non-Vulkan engine at the Vulkan font lane":
+        step("Create a software engine and attempt the Vulkan font SPIR-V install")
+        # @req REQ-GPU-ENGINE-ROUTE-001
+        # @capture(statistics): nil-backend verdict and rejected SPIR-V install
         var engine = Engine2D.create_with_backend(2, 2, "software")
         expect(engine.vulkan_backend).to_equal(nil)
-        expect(engine.install_vulkan_font_spirv([0u8; 20])).to_equal(false)
+        expect(engine.install_vulkan_font_spirv([0u8; 20])).to_equal(false)  # oracle: a software engine owns no Vulkan pipeline to install into
         engine.shutdown()
 
     it "replays the same font batch through software after Vulkan poison":
+        step("Poison the Vulkan surface and redraw the batch on the fallback lane")
+        # @req REQ-GPU-ENGINE-ROUTE-002
+        # @capture(gui_image): fallback replay pixels with the glyph at 0,0 and preserved clear color
         var engine = Engine2D.create_with_backend(8, 8, "software")
         engine.selected_backend_name = "vulkan"
         engine.vulkan_backend = VulkanBackend.create()
@@ -24,9 +63,9 @@ describe "Engine2D Vulkan font routing":
         engine.draw_rect_filled(7, 7, 1, 1, 0xffabcdefu32)
         val fallback_pixels = engine.read_pixels()
         engine._poison_vulkan_font_surface(fallback_pixels)
-        expect(engine.selected_backend_name).to_equal("vulkan-poisoned-software")
+        expect(engine.selected_backend_name).to_equal("vulkan-poisoned-software")  # oracle: the poison transition renames the active lane
         expect(engine.vulkan_backend != nil).to_equal(true)
-        expect(engine.vulkan_backend.?.completion_unknown).to_equal(true)
+        expect(engine.vulkan_backend.?.completion_unknown).to_equal(true)  # oracle: poison marks the backend's completion state unknown
         val batch = FontRenderBatch(
             program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION,
             font_identity: "poison-replay", face_generation: 7, valid: true,
@@ -36,13 +75,16 @@ describe "Engine2D Vulkan font routing":
             atlas_generation: 9, dirty_rects: [])
         val identity_before = batch.atlas_cache_identity()
         expect(engine._draw_font_batch(0, 0, batch)).to_equal(true)
-        expect(batch.atlas_cache_identity()).to_equal(identity_before)
-        expect(engine.read_pixels()[0]).to_equal(0xff123456u32)
-        expect(engine.read_pixels()[63]).to_equal(0xffabcdefu32)
-        expect(engine.last_font_execution_target).to_equal("cpu")
+        expect(batch.atlas_cache_identity()).to_equal(identity_before)  # oracle: the fallback replay must not dirty the batch atlas identity
+        expect(engine.read_pixels()[0]).to_equal(0xff123456u32)  # oracle: the glyph lands at quad zero on the CPU replay
+        expect(engine.read_pixels()[63]).to_equal(0xffabcdefu32)  # oracle: the prefilled rect survives the replay
+        expect(engine.last_font_execution_target).to_equal("cpu")  # oracle: the demoted lane is recorded as cpu
         engine.shutdown()
 
     it "replays an unavailable Vulkan font batch through software from quad zero":
+        step("Route a batch through a backend with no font pipeline installed")
+        # @req REQ-GPU-ENGINE-ROUTE-003
+        # @capture(statistics): unavailable-route counters and cleared state flag
         var engine = Engine2D.create_with_backend(3, 2, "software")
         engine.vulkan_backend = VulkanBackend.create()
         val batch = FontRenderBatch(
@@ -55,81 +97,111 @@ describe "Engine2D Vulkan font routing":
         )
         engine.clear(0xff000000u32)
         expect(engine._draw_font_batch(0, 0, batch)).to_equal(true)
-        expect(engine.read_pixels()[4]).to_equal(0xff123456u32)
-        expect(engine.vulkan_font_state_unknown).to_equal(false)
+        expect(engine.read_pixels()[4]).to_equal(0xff123456u32)  # oracle: quad 4 is dst 1,1 where the unavailable-route replay must land
+        expect(engine.vulkan_font_state_unknown).to_equal(false)  # oracle: a clean unavailable route never flips the state-unknown flag
         val unavailable = engine.vulkan_backend
         expect(unavailable != nil).to_equal(true)
-        expect(unavailable.?.d_font_atlas).to_equal(0)
+        expect(unavailable.?.d_font_atlas).to_equal(0)  # oracle: the unavailable backend retained no atlas buffer
         engine.shutdown()
 
     it "routes only the canonical Vulkan constructor and preserves CPU replay":
-        val source = file_read("src/lib/gc_async_mut/gpu/engine2d/engine.spl")
+        step("Audit the shipped engine, owner, probe, compositor, showcase, and harness idioms")
+        # @req REQ-GPU-ENGINE-ROUTE-004
+        # @capture(statistics): per-site idiom audit across the nine audited sources
+        val engine_source = file_read("src/lib/gc_async_mut/gpu/engine2d/engine.spl")
         val font_source = file_read("src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_font.spl")
-        expect(source).to_contain("use std.gpu.engine2d.backend_vulkan_font")
-        expect(source).to_contain("vulkan_backend: VulkanBackend? = nil")
-        expect(source).to_contain("vulkan_backend: Some(vulkan)")
-        expect(source).to_contain("self.vulkan_backend = Some(vulkan)")
-        expect(source).to_contain("self.vulkan_backend = Some(vulkan_typed)")
-        expect(source.contains("self.vulkan_backend = vulkan")).to_equal(false)
-        expect(source.contains("self.vulkan_backend = vulkan_typed")).to_equal(false)
-        expect(source).to_contain(
+        val owner_source = file_read("src/lib/gc_async_mut/gpu/engine2d/font_owner.spl")
+        val draw_ir_source = file_read("src/lib/gc_async_mut/gpu/engine2d/draw_ir_adv.spl")
+        val live_source = file_read("test/02_integration/rendering/engine2d_font_delegation_native_probe.spl")
+        val rss_source = file_read("src/app/test/shared_multilingual_gpu_fonts_rss_probe.spl")
+        val compositor_source = file_read("src/os/compositor/compositor_engine2d.spl")
+        val widget_showcase_source = file_read("examples/06_io/ui/widget_showcase_gui.spl")
+        val graphics_showcase_source = file_read("examples/06_io/ui/graphics_2d_showcase.spl")
+        val perf_source = file_read("test/05_perf/graphics_2d/shared_multilingual_gpu_fonts_perf_spec.spl")
+        # Vulkan constructor contract: production engine code wraps every
+        # backend in Some(...) at construction; bare field assignment never
+        # appears in engine.spl.
+        expect(engine_source).to_contain("use std.gpu.engine2d.backend_vulkan_font")
+        expect(engine_source).to_contain("vulkan_backend: VulkanBackend? = nil")
+        expect(engine_source).to_contain("vulkan_backend: Some(vulkan)")
+        expect(engine_source).to_contain("self.vulkan_backend = Some(vulkan)")
+        expect(engine_source).to_contain("self.vulkan_backend = Some(vulkan_typed)")
+        val bare_vulkan_assignment = engine_source.contains("self.vulkan_backend = vulkan")
+        expect(bare_vulkan_assignment).to_equal(false)  # oracle: only the typed Some(...) constructor may install a backend in engine.spl
+        val bare_typed_assignment = engine_source.contains("self.vulkan_backend = vulkan_typed")
+        expect(bare_typed_assignment).to_equal(false)  # oracle: the unwrapped typed assignment is equally forbidden in engine.spl
+        expect(engine_source).to_contain(
             "if val Some(vulkan) = self.vulkan_backend:"
         )
-        expect(source).to_contain("self.metal_backend = Some(metal)")
-        expect(source.contains("self.metal_backend = metal")).to_equal(false)
-        expect(perf_source).to_contain("engine.vulkan_backend = Some(vulkan)")
-        expect(perf_source).to_contain(
-            "engine.vulkan_backend = Some(VulkanBackend.create())"
-        )
-        expect(perf_source.contains("engine.vulkan_backend = vulkan")).to_equal(false)
-        expect(source).to_contain("font_owner: Engine2DFontOwner")
-        expect(source.count("Engine2D(")).to_equal(23)
-        expect(source.count("font_owner: Engine2DFontOwner.new()")).to_equal(23)
-        expect(source.contains("font_owner: Engine2DFontOwner =")).to_equal(false)
-        expect(source).to_contain("val owner: Engine2DFontOwner = self.font_owner")
-        expect(source).to_contain("engine2d_font_owner_get_or_create(owner)")
-        expect(source).to_contain("engine2d_font_owner_store(self.font_owner, fonts)")
-        # The owner idiom moved off Option entirely (2026-07-26): an
-        # Option-wrapped aggregate crossing a function boundary is the
-        # deterministic payload-loss shape on the freestanding native lane,
-        # so the owner holds a one-slot [FontRenderer] list and exposes a
-        # scalar presence check instead of engine2d_font_owner_current.
-        expect(source).to_contain("engine2d_font_owner_has(owner)")
-        expect(source.contains("engine2d_font_owner_current")).to_equal(false)
-        expect(source.contains("font_renderer: FontRenderer?")).to_equal(false)
-        expect(source.contains("self.font_renderer =")).to_equal(false)
-        expect(owner_source).to_contain("active: FontRenderer?")
-        expect(owner_source).to_contain("case Some(renderer):")
-        expect(owner_source).to_contain("owner.active = Some(created)")
-        expect(owner_source).to_contain("owner.active = Some(renderer)")
+        expect(engine_source).to_contain("self.metal_backend = Some(metal)")
+        val bare_metal_assignment = engine_source.contains("self.metal_backend = metal")
+        expect(bare_metal_assignment).to_equal(false)  # oracle: the metal backend follows the same typed-constructor rule
+        # Admission gate (2026-08-31 reshape): success is judged by the named
+        # batch-admission predicate over quad coverage, never by dispatch
+        # count equalling quad count.
+        expect(engine_source).to_contain("engine2d_vulkan_font_batch_admits(evidence.status,")
+        expect(engine_source).to_contain("evidence.quad_count, evidence.dispatch_count, batch.quads.len())")
+        val per_dispatch_equality_gate = engine_source.contains("evidence.dispatch_count == batch.quads.len()")
+        expect(per_dispatch_equality_gate).to_equal(false)  # oracle: the packed batch lane admits on quad coverage, so the per-dispatch equality gate is gone
+        expect(engine_source).to_contain("evidence.reason == \"partial-framebuffer-restore-failed\"")
+        expect(engine_source).to_contain("evidence.reason == \"missing-command-cleanup-capability\"")
+        expect(engine_source).to_contain("evidence.reason == \"descriptor-cleanup-failed\"")
+        expect(engine_source).to_contain("evidence.reason == \"atlas-cleanup-failed\"")
+        expect(engine_source).to_contain("evidence.reason == \"cleanup-failed\"")
+        expect(engine_source).to_contain("evidence.reason == \"fence-completion-unknown\"")
+        expect(engine_source).to_contain("self.selected_backend_name = \"vulkan-poisoned-software\"")
+        expect(engine_source).to_contain("self._poison_vulkan_font_surface(evidence.fallback_pixels)")
+        expect(font_source).to_contain("_vulkan_font_with_fallback")
+        expect(engine_source).to_contain("target + \":poisoned-skip\"")
+        expect(engine_source).to_contain("evidence.reason == \"device-lost\"")
+        expect(engine_source).to_contain("vulkan.shutdown()")
+        expect(engine_source).to_contain("if self.vulkan_font_state_unknown and target != \"cpu\"")
+        expect(engine_source).to_contain("while quad_index < batch.quads.len()")
+        # Font-owner plumbing: engine.spl holds a one-slot owner list and
+        # rebuilds it wholesale; the Option-wrapped owner helpers are gone
+        # (moved off Option 2026-07-26, helper fold 2026-08-31).
+        expect(engine_source).to_contain("use std.gc_async_mut.gpu.engine2d.font_owner")
+        expect(engine_source).to_contain("font_owner: Engine2DFontOwner")
+        expect(engine_source.count("Engine2D(")).to_equal(23)  # oracle: the engine ships exactly 23 Engine2D constructor sites, all owner-fed
+        expect(engine_source.count("font_owner: Engine2DFontOwner.new()")).to_equal(23)  # oracle: every constructor site seeds the one-slot owner list
+        expect(engine_source).to_contain("self.font_owner = Engine2DFontOwner(active: [FontRenderer.new()])")
+        expect(engine_source).to_contain("self.font_owner = Engine2DFontOwner(active: [renderer])")
+        expect(engine_source).to_contain("engine2d_font_owner_clear")
+        val stale_owner_current = engine_source.contains("engine2d_font_owner_current")
+        expect(stale_owner_current).to_equal(false)  # oracle: the Option-era owner accessor was deleted with the owner refactor
+        val option_wrapped_renderer_field = engine_source.contains("font_renderer: FontRenderer?")
+        expect(option_wrapped_renderer_field).to_equal(false)  # oracle: the renderer lives in the owner list, not a parallel Option field
+        val direct_renderer_self_assignment = engine_source.contains("self.font_renderer =")
+        expect(direct_renderer_self_assignment).to_equal(false)  # oracle: engine internals mutate the owner, never a bare renderer field
+        # Owner module: one-slot list, wholesale rebuild, no Option cases.
+        expect(owner_source).to_contain("active: [FontRenderer]")
+        expect(owner_source).to_contain("Engine2DFontOwner(active: [])")
+        expect(owner_source).to_contain("owner.active = [renderer]")
         expect(owner_source).to_contain("fn engine2d_font_owner_store(mut owner: Engine2DFontOwner")
+        val owner_option_case = owner_source.contains("case Some(renderer):")
+        expect(owner_option_case).to_equal(false)  # oracle: the owner module no longer branches over Option
+        # Consumers: probes install through the API; compositor reads identity
+        # only; showcases and the perf harness assign fields directly by
+        # design (harness/showcase refactor 2026-09) — production engine.spl
+        # stays Some(...)-gated above.
         expect(draw_ir_source).to_contain("eng.install_font_renderer(fonts)")
-        expect(draw_ir_source.contains("eng.font_renderer =")).to_equal(false)
-        expect(live_source).to_contain("engine.install_font_renderer(loaded_fonts)")
-        expect(live_source.contains("engine.font_renderer =")).to_equal(false)
-        expect(perf_source).to_contain("engine.install_font_renderer(fixture.renderer)")
+        val draw_ir_direct_field = draw_ir_source.contains("eng.font_renderer =")
+        expect(draw_ir_direct_field).to_equal(false)  # oracle: the DrawIR pipeline installs renderers through the API
+        expect(live_source).to_contain("engine.install_font_renderer(FontRenderer.new())")
+        val live_direct_field = live_source.contains("engine.font_renderer =")
+        expect(live_direct_field).to_equal(false)  # oracle: the delegation probe installs through the API, not the field
         expect(rss_source).to_contain("engine.install_font_renderer(FontRenderer.new())")
         expect(compositor_source).to_contain("self.engine.selected_font_identity()")
-        expect(compositor_source.contains("self.engine.font_renderer")).to_equal(false)
-        expect(widget_showcase_source).to_contain("engine.install_font_renderer(loaded_fonts)")
-        expect(graphics_showcase_source).to_contain("engine.install_font_renderer(loaded_fonts)")
-        expect(source).to_contain("last_font_execution_attempts: []")
-        expect(source.contains("vulkan_backend: dx_vk")).to_equal(false)
-        expect(source.contains("vulkan_backend: metal_vk")).to_equal(false)
-        expect(source).to_contain("evidence.dispatch_count == batch.quads.len()")
-        expect(source).to_contain("evidence.reason == \"partial-framebuffer-restore-failed\"")
-        expect(source).to_contain("evidence.reason == \"missing-command-cleanup-capability\"")
-        expect(source).to_contain("evidence.reason == \"descriptor-cleanup-failed\"")
-        expect(source).to_contain("evidence.reason == \"atlas-cleanup-failed\"")
-        expect(source).to_contain("evidence.reason == \"cleanup-failed\"")
-        expect(source).to_contain("evidence.reason == \"fence-completion-unknown\"")
-        expect(source).to_contain("if (evidence.promotion_ready and")
-        expect(source.contains("evidence.device_executed and evidence.parity")).to_equal(false)
-        expect(source).to_contain("self.selected_backend_name = \"vulkan-poisoned-software\"")
-        expect(source).to_contain("self._poison_vulkan_font_surface(evidence.fallback_pixels)")
-        expect(font_source).to_contain("_vulkan_font_with_fallback")
-        expect(source).to_contain("target + \":poisoned-skip\"")
-        expect(source).to_contain("evidence.reason == \"device-lost\"")
-        expect(source).to_contain("vulkan.shutdown()")
-        expect(source).to_contain("if self.vulkan_font_state_unknown and target != \"cpu\"")
-        expect(source).to_contain("while quad_index < batch.quads.len()")
+        val compositor_renderer_reach = compositor_source.contains("self.engine.font_renderer")
+        expect(compositor_renderer_reach).to_equal(false)  # oracle: the compositor reads font identity, never the renderer internals
+        expect(widget_showcase_source).to_contain("engine.font_renderer = loaded_fonts")
+        val widget_api_install = widget_showcase_source.contains("engine.install_font_renderer(")
+        expect(widget_api_install).to_equal(false)  # oracle: the showcase assigns its preloaded renderer directly and no stale install call survives
+        expect(graphics_showcase_source).to_contain("engine.font_renderer = loaded_fonts")
+        val graphics_api_install = graphics_showcase_source.contains("engine.install_font_renderer(")
+        expect(graphics_api_install).to_equal(false)  # oracle: the graphics showcase matches the widget showcase idiom
+        expect(perf_source).to_contain("engine.font_renderer = fixture.renderer")
+        expect(perf_source).to_contain("engine.vulkan_backend = VulkanBackend.create()")
+        expect(perf_source).to_contain("engine._poison_vulkan_font_surface(engine.read_pixels())")
+        val perf_option_wrapped_backend = perf_source.contains("engine.vulkan_backend = Some(")
+        expect(perf_option_wrapped_backend).to_equal(false)  # oracle: the harness unwraps and reassigns the backend directly; no stale Some(...) wrap survives

@@ -1369,7 +1369,7 @@ pub fn rt_cuda_device_name_fn(args: &[Value]) -> Result<Value, CompileError> {
             let mut name_buf = [0 as std::os::raw::c_char; 256];
             let r = unsafe { (fns.device_get_name)(name_buf.as_mut_ptr(), 256, device as i32) };
             if r == 0 {
-                let name = unsafe { std::ffi::CStr::from_ptr(name_buf.as_ptr()) }
+                let name = unsafe { std::ffi::CStr::from_ptr(name_buf.as_ptr() as *const std::os::raw::c_char) }
                     .to_string_lossy()
                     .into_owned();
                 return Ok(Value::text(name));

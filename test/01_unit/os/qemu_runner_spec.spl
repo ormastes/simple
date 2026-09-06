@@ -1,3 +1,32 @@
+"""
+## Purpose and audience
+Freezes the QEMU runner's scenario catalog, command assembly, serial
+acceptance gates, and board-protection routing for the SimpleOS lane
+owners: which architectures boot which media, which exit codes and serial
+markers accept a lane, and which scenarios map to which board protection
+gates. Command-assembly scenarios drive the real builder APIs; the
+compiler-contract scenarios mediate shipped-source assertions through
+genuinely-named contract locals.
+## Operator workflow
+src/compiler_rust/target/bootstrap/simple run test/01_unit/os/qemu_runner_spec.spl
+## Compatibility and limitations
+Runs without a hypervisor: every scenario assembles commands or reads
+shipped sources, none launches QEMU. The protection-gate, RISC-V -bios,
+X25519, physical-NVMe, and x64-desktop-smoke scenarios are RED against the
+current runner sources; those REDs are the oracle, not a defect of this
+spec.
+## Verification guidance and troubleshooting
+A command-assembly failure means a QEMU lane's device topology moved; a
+serial-acceptance failure means a lane could accept an unhardened boot; a
+compiler-contract failure means the runner's frontend delegation drifted
+from the pure-Simple contract.
+"""
+# Lifecycle: doc/01_research/os/simpleos/simpleos_qemu_validation.md ;
+# doc/03_plan/agent_tasks/simpleos_cross_host_qemu_board_gpu_2d_parity.md ;
+# doc/04_architecture/sosix_qemu_direct_kernel_evidence_v2.md ;
+# doc/05_design/sosix_qemu_direct_kernel_evidence_v2.md
+# @manual_section: qemu-runner-serial-routing
+
 use os.qemu_runner.{
     build_qemu_command, build_qemu_command_with_options,
     get_all_targets, get_gui_target, get_qemu_target, get_target,
@@ -197,6 +226,9 @@ fn expect_tool_app_validation_reference(cmd: text, app_name: text, marker: text,
 
 describe "Qemu runner serial routing":
     it "does not accept non-x86 QEMU exit code 1 as success":
+        # @req REQ-QEMU-RUNNER-EXIT-GATE-001
+        step("Offer QEMU exit code 1 to the non-x86 targets and require rejection")
+        # @capture: evidence_manifest("qemu_exit_gate_non_x86") -> qemu_runner_spec.evidence.sdn
         val arm64 = get_target(Architecture.Arm64)
         val arm32 = get_target(Architecture.Arm32)
         val rv64 = get_target(Architecture.Riscv64)
@@ -206,6 +238,9 @@ describe "Qemu runner serial routing":
         expect(is_qemu_success(arm64, 0)).to_equal(true)
 
     it "keeps isa-debug-exit success limited to x86 scenarios":
+        # @req REQ-QEMU-RUNNER-ISA-DEBUG-EXIT-002
+        step("Compare the isa-debug-exit port semantics for x64 against arm64 and rv64")
+        # @capture: evidence_manifest("qemu_isa_debug_exit_scope") -> qemu_runner_spec.evidence.sdn
         val x64 = scenario_x64_desktop_uefi()
         val arm64 = scenario_arm64_virtio_fat32_smf()
         val rv64 = scenario_riscv64_virtio_fat32_smf()
@@ -216,6 +251,9 @@ describe "Qemu runner serial routing":
         expect(scenario_qemu_exit_success(arm64, 0)).to_equal(true)
 
     it "exposes a runner-facing protection serial acceptance gate":
+        # @req REQ-QEMU-RUNNER-PROTECTION-GATE-003
+        step("Offer hardened, detect-mode, and fault-missing serials to the protection gate")
+        # @capture: evidence_manifest("qemu_protection_serial_gate") -> qemu_runner_spec.evidence.sdn
         val an505_serial = "[BOOT] Platform: MPS2-AN505 (QEMU)\n[MPU] Enabled, 8 regions available, 4 configured\nSimpleOS Lite v0.5"
         expect(qemu_protection_serial_accepts_hardening("mps2-an505", "enforce", "qemu", an505_serial)).to_equal(true)
         expect(qemu_protection_serial_reason("mps2-an505", "enforce", "none", an505_serial)).to_equal("missing-runtime-check")
@@ -228,6 +266,9 @@ describe "Qemu runner serial routing":
         expect(qemu_protection_serial_reason("stm32u585-uno-q", "fault-test", "real-board", fault_missing)).to_equal("missing-fault-recovery")
 
     it "maps known QEMU scenarios to board protection gates":
+        # @req REQ-QEMU-RUNNER-BOARD-GATES-004
+        step("Resolve the board id and hardening gate for the x64, rv64, and arm64 lanes")
+        # @capture: evidence_manifest("qemu_board_protection_map") -> qemu_runner_spec.evidence.sdn
         val x64 = scenario_x64_net_user()
         val x64_serial = "[BOOT64] call _start\n[harden] text_write_trap=pass\nTEST PASSED"
         expect(qemu_scenario_protection_board_id(x64)).to_equal("x86_64-q35")
@@ -243,6 +284,9 @@ describe "Qemu runner serial routing":
         expect(qemu_scenario_protection_serial_reason(arm64, "enforce", "protection_probe=pass")).to_equal("unsupported-qemu-board:arm64-virtio-fat32-smf")
 
     it "enumerates 32-bit x86 as a first-class target":
+        # @req REQ-QEMU-RUNNER-X8632-TARGET-005
+        step("Scan the target catalog for the 32-bit x86 entry")
+        # @capture: evidence_manifest("qemu_x8632_catalog_entry") -> qemu_runner_spec.evidence.sdn
         var found_x86_32 = false
         for target in get_all_targets():
             if target.arch == Architecture.X86:
@@ -252,6 +296,9 @@ describe "Qemu runner serial routing":
         expect(found_x86_32).to_equal(true)
 
     it "launches the x86_32 kernel lane through the compatible QEMU frontend":
+        # @req REQ-QEMU-RUNNER-X8632-FRONTEND-006
+        step("Assemble the x86_32 command and require the qemu32 frontend on the pc machine")
+        # @capture: evidence_manifest("qemu_x8632_frontend") -> qemu_runner_spec.evidence.sdn
         val target = get_target(Architecture.X86)
         val cmd = build_qemu_command(target)
         expect(target.qemu_system).to_equal("qemu-system-i386")
@@ -264,6 +311,9 @@ describe "Qemu runner serial routing":
         expect(cmd).to_contain("build/os/simpleos_x86_32.elf")
 
     it "builds normal targets from the shared platform catalog":
+        # @req REQ-QEMU-RUNNER-CATALOG-007
+        step("Compare x86_64 and arm32 catalog entries against their shipped boot products")
+        # @capture: evidence_manifest("qemu_shared_catalog_targets") -> qemu_runner_spec.evidence.sdn
         val x86_64 = get_target(Architecture.X86_64)
         expect(x86_64.entry).to_equal("examples/09_embedded/simple_os/arch/x86_64/boot_stage1_entry.spl")
         expect(x86_64.linker_script).to_equal("examples/09_embedded/simple_os/arch/x86_64/linker.ld")
@@ -276,6 +326,9 @@ describe "Qemu runner serial routing":
         expect(arm32.qemu_system).to_equal("qemu-system-arm")
 
     it "routes default ARM QEMU targets to the fs-exec acceptance lane":
+        # @req REQ-QEMU-RUNNER-ARM-FSEXEC-008
+        step("Resolve the default ARM QEMU targets and require the fs-exec entries")
+        # @capture: evidence_manifest("qemu_arm_fsexec_routing") -> qemu_runner_spec.evidence.sdn
         val arm64 = get_qemu_target(Architecture.Arm64)
         expect(arm64.entry).to_equal("examples/09_embedded/simple_os/arch/arm64/fs_exec_entry.spl")
         expect(arm64.output).to_equal("build/os/simpleos_arm64_fs_exec.elf")
@@ -284,6 +337,9 @@ describe "Qemu runner serial routing":
         expect(arm32.output).to_equal("build/os/simpleos_arm32_fs_exec.elf")
 
     it "requires four-app fs launch markers for ARM acceptance lanes":
+        # @req REQ-QEMU-RUNNER-ARM-MARKERS-009
+        step("Read the arm64 acceptance marker set and require exactly the four production apps")
+        # @capture: evidence_manifest("qemu_arm_marker_contract") -> qemu_runner_spec.evidence.sdn
         val markers = arm_fs_exec_required_marker_fragments(scenario_arm64_virtio_fat32_smf())
         expect(markers).to_contain("[desktop-e2e] process-backed:ok app=simple_compiler pid=")
         expect(markers).to_contain("[desktop-e2e] process-backed:ok app=simple_loader pid=")
@@ -303,6 +359,9 @@ describe "Qemu runner serial routing":
             fail("missing arm64 acceptance lane")
 
     it "keeps ARM and RV64 marker helper surfaces aligned with catalog lanes":
+        # @req REQ-QEMU-RUNNER-MARKER-ALIGNMENT-010
+        step("Compare each marker helper against its platform catalog lane")
+        # @capture: evidence_manifest("qemu_marker_alignment") -> qemu_runner_spec.evidence.sdn
         val arm64_lane = simpleos_platform_qemu_lane("arm64", "arm64-virtio-fat32-smf")
         if val lane = arm64_lane:
             expect(arm_fs_exec_required_marker_fragments(scenario_arm64_virtio_fat32_smf())).to_equal(lane.required_serial_markers)
@@ -322,6 +381,9 @@ describe "Qemu runner serial routing":
             fail("missing riscv64 hosted lane")
 
     it "routes default RISC-V QEMU targets to fs-backed acceptance lanes":
+        # @req REQ-QEMU-RUNNER-RISCV-FSEXEC-011
+        step("Resolve the default RISC-V QEMU targets and require the SMF fs entries")
+        # @capture: evidence_manifest("qemu_riscv_fsexec_routing") -> qemu_runner_spec.evidence.sdn
         val rv64 = get_qemu_target(Architecture.Riscv64)
         expect(rv64.entry).to_equal("examples/09_embedded/simple_os/arch/riscv64/smoke_entry.spl")
         expect(rv64.output).to_equal("build/os/simpleos_riscv64_smf_fs.elf")
@@ -330,13 +392,16 @@ describe "Qemu runner serial routing":
         expect(rv32.output).to_equal("build/os/simpleos_riscv32_smf_fs.elf")
 
     it "defines ARM VirtIO FAT32 SMF execution scenarios":
+        # @req REQ-QEMU-RUNNER-ARM-SCENARIOS-012
+        step("Build the arm64 and arm32 scenarios and align them with the catalog")
+        # @capture: evidence_manifest("qemu_arm_virtio_scenarios") -> qemu_runner_spec.evidence.sdn
         val arm64 = scenario_arm64_virtio_fat32_smf()
         expect(arm64.name).to_equal("arm64-virtio-fat32-smf")
         expect(arm64.arch).to_equal(Architecture.Arm64)
         expect(arm64.qemu_extra).to_contain("virtio-blk-device,drive=armdisk")
         expect(arm64.qemu_extra).to_contain("file=build/os/fat32-arm64.img,if=none,id=armdisk,format=raw")
         expect(arm64.qemu_extra).to_contain("-semihosting-config")
-        expect(scenario_test_timeout_ms(arm64)).to_equal(60000)
+        expect(scenario_test_timeout_ms(arm64)).to_equal(60000)  # oracle: media-backed fs-exec lanes get a 60 s acceptance budget
         expect(scenario_lane_kind(arm64)).to_equal(SimpleOsLaneKind.FsExec)
 
         val arm64_lane = simpleos_platform_qemu_lane("arm64", "arm64-virtio-fat32-smf")
@@ -352,7 +417,7 @@ describe "Qemu runner serial routing":
         expect(arm32.qemu_extra).to_contain("virtio-blk-device,drive=armdisk")
         expect(arm32.qemu_extra).to_contain("file=build/os/fat32-arm32.img,if=none,id=armdisk,format=raw")
         expect(arm32.qemu_extra).to_contain("-semihosting-config")
-        expect(scenario_test_timeout_ms(arm32)).to_equal(60000)
+        expect(scenario_test_timeout_ms(arm32)).to_equal(60000)  # oracle: media-backed fs-exec lanes get a 60 s acceptance budget
         expect(scenario_lane_kind(arm32)).to_equal(SimpleOsLaneKind.FsExec)
 
         val arm32_lane = simpleos_platform_qemu_lane("arm32", "arm32-virtio-fat32-smf")
@@ -363,6 +428,9 @@ describe "Qemu runner serial routing":
             fail("missing arm32 virtio lane")
 
     it "builds QEMU commands with ARM loader and VirtIO block disks":
+        # @req REQ-QEMU-RUNNER-ARM-COMMANDS-013
+        step("Assemble the arm64/arm32 commands and require the loader and VirtIO disks")
+        # @capture: evidence_manifest("qemu_arm_command_assembly") -> qemu_runner_spec.evidence.sdn
         val arm64 = scenario_arm64_virtio_fat32_smf()
         val cmd = build_scenario_command(arm64, "build/os/simpleos_arm64_fs_exec.bin")
         expect(cmd[0]).to_equal("qemu-system-aarch64")
@@ -396,17 +464,23 @@ describe "Qemu runner serial routing":
             fail("missing arm32 virtio lane")
 
     it "looks up ARM SMF scenarios by name":
+        # @req REQ-QEMU-RUNNER-ARM-LOOKUP-014
+        step("Resolve both ARM scenarios by name and check the FAT32 media paths")
+        # @capture: evidence_manifest("qemu_arm_name_lookup") -> qemu_runner_spec.evidence.sdn
         expect(scenario_name_or_missing("arm64-virtio-fat32-smf")).to_equal("arm64-virtio-fat32-smf")
         expect(scenario_name_or_missing("arm32-virtio-fat32-smf")).to_equal("arm32-virtio-fat32-smf")
         expect(arm_fs_exec_disk_image_path(Architecture.Arm64)).to_equal("build/os/fat32-arm64.img")
         expect(arm_fs_exec_disk_image_path(Architecture.Arm32)).to_equal("build/os/fat32-arm32.img")
 
     it "dispatches named ARM scenarios through catalog-backed lane kind, serial markers, and media":
+        # @req REQ-QEMU-RUNNER-ARM-DISPATCH-015
+        step("Dispatch both ARM scenarios by name and align every field with the catalog")
+        # @capture: evidence_manifest("qemu_arm_catalog_dispatch") -> qemu_runner_spec.evidence.sdn
         val arm64 = get_scenario("arm64-virtio-fat32-smf")
         if val resolved_arm64 = arm64:
             val target = scenario_target(resolved_arm64)
             expect(scenario_lane_kind(resolved_arm64)).to_equal(SimpleOsLaneKind.FsExec)
-            expect(scenario_test_timeout_ms(resolved_arm64)).to_equal(60000)
+            expect(scenario_test_timeout_ms(resolved_arm64)).to_equal(60000)  # oracle: media-backed fs-exec lanes get a 60 s acceptance budget
             val lane = simpleos_platform_qemu_lane("arm64", resolved_arm64.name)
             if val resolved_lane = lane:
                 expect(arm_fs_exec_required_marker_fragments(resolved_arm64)).to_equal(resolved_lane.required_serial_markers)
@@ -422,7 +496,7 @@ describe "Qemu runner serial routing":
         if val resolved_arm32 = arm32:
             val target = scenario_target(resolved_arm32)
             expect(scenario_lane_kind(resolved_arm32)).to_equal(SimpleOsLaneKind.FsExec)
-            expect(scenario_test_timeout_ms(resolved_arm32)).to_equal(60000)
+            expect(scenario_test_timeout_ms(resolved_arm32)).to_equal(60000)  # oracle: media-backed fs-exec lanes get a 60 s acceptance budget
             val lane = simpleos_platform_qemu_lane("arm32", resolved_arm32.name)
             if val resolved_lane = lane:
                 expect(arm_fs_exec_required_marker_fragments(resolved_arm32)).to_equal(resolved_lane.required_serial_markers)
@@ -435,12 +509,15 @@ describe "Qemu runner serial routing":
             fail("missing arm32 scenario")
 
     it "defines RISC-V VirtIO FAT32 SMF execution scenarios":
+        # @req REQ-QEMU-RUNNER-RISCV-SCENARIOS-016
+        step("Build the rv64/rv32 scenarios and align them with the catalog")
+        # @capture: evidence_manifest("qemu_riscv_virtio_scenarios") -> qemu_runner_spec.evidence.sdn
         val rv64 = scenario_riscv64_virtio_fat32_smf()
         expect(rv64.name).to_equal("riscv64-virtio-fat32-smf")
         expect(rv64.arch).to_equal(Architecture.Riscv64)
         expect(rv64.qemu_extra).to_contain("virtio-blk-device,drive=rvdisk")
         expect(rv64.qemu_extra).to_contain("file=build/os/fat32-riscv64.img,if=none,id=rvdisk,format=raw")
-        expect(scenario_test_timeout_ms(rv64)).to_equal(60000)
+        expect(scenario_test_timeout_ms(rv64)).to_equal(60000)  # oracle: media-backed fs-exec lanes get a 60 s acceptance budget
         expect(scenario_lane_kind(rv64)).to_equal(SimpleOsLaneKind.FsExec)
 
         val rv64_lane = simpleos_platform_qemu_lane("riscv64", "riscv64-virtio-fat32-smf")
@@ -455,9 +532,12 @@ describe "Qemu runner serial routing":
         expect(rv32.arch).to_equal(Architecture.Riscv32)
         expect(rv32.qemu_extra).to_contain("virtio-blk-device,drive=rvdisk")
         expect(rv32.qemu_extra).to_contain("file=build/os/fat32-riscv32.img,if=none,id=rvdisk,format=raw")
-        expect(scenario_test_timeout_ms(rv32)).to_equal(60000)
+        expect(scenario_test_timeout_ms(rv32)).to_equal(60000)  # oracle: media-backed fs-exec lanes get a 60 s acceptance budget
 
     it "builds QEMU commands with RISC-V kernels and VirtIO block disks":
+        # @req REQ-QEMU-RUNNER-RISCV-COMMANDS-017
+        step("Assemble the rv64/rv32 commands and require the OpenSBI firmware handoff")
+        # @capture: evidence_manifest("qemu_riscv_command_assembly") -> qemu_runner_spec.evidence.sdn
         val rv64 = scenario_riscv64_virtio_fat32_smf()
         val cmd64 = build_scenario_command(rv64, "build/os/simpleos_riscv64_smf_fs.elf")
         expect(cmd64[0]).to_equal("qemu-system-riscv64")
@@ -489,6 +569,9 @@ describe "Qemu runner serial routing":
         expect(target32.output).to_equal("build/os/simpleos_riscv32_smf_fs.elf")
 
     it "keeps RV64 media-backed scenario targets aligned with catalog lanes":
+        # @req REQ-QEMU-RUNNER-RISCV-ALIGNMENT-018
+        step("Align the rv64 media and hosted targets with their catalog lanes")
+        # @capture: evidence_manifest("qemu_riscv_catalog_alignment") -> qemu_runner_spec.evidence.sdn
         val rv64 = scenario_riscv64_virtio_fat32_smf()
         val rv64_target = scenario_target(rv64)
         val rv64_lane = simpleos_platform_qemu_lane("riscv64", "riscv64-virtio-fat32-smf")
@@ -512,11 +595,14 @@ describe "Qemu runner serial routing":
             fail("missing riscv64 hosted lane")
 
     it "dispatches named RISC-V scenarios to resolved catalog lanes":
+        # @req REQ-QEMU-RUNNER-RISCV-DISPATCH-019
+        step("Dispatch the media, hosted, and rv32 scenarios and align every catalog field")
+        # @capture: evidence_manifest("qemu_riscv_catalog_dispatch") -> qemu_runner_spec.evidence.sdn
         val media = get_scenario("riscv64-virtio-fat32-smf")
         if val resolved_media = media:
             val target = scenario_target(resolved_media)
             expect(scenario_lane_kind(resolved_media)).to_equal(SimpleOsLaneKind.FsExec)
-            expect(scenario_test_timeout_ms(resolved_media)).to_equal(60000)
+            expect(scenario_test_timeout_ms(resolved_media)).to_equal(60000)  # oracle: media-backed fs-exec lanes get a 60 s acceptance budget
             val lane = simpleos_platform_qemu_lane("riscv64", resolved_media.name)
             if val resolved_lane = lane:
                 expect(_scenario_required_marker_fragments(resolved_media)).to_equal(resolved_lane.required_serial_markers)
@@ -532,7 +618,7 @@ describe "Qemu runner serial routing":
         if val resolved_hosted = hosted:
             val target = scenario_target(resolved_hosted)
             expect(scenario_lane_kind(resolved_hosted)).to_equal(SimpleOsLaneKind.HostedCompileSmoke)
-            expect(scenario_test_timeout_ms(resolved_hosted)).to_equal(120000)
+            expect(scenario_test_timeout_ms(resolved_hosted)).to_equal(120000)  # oracle: the hosted compile smoke builds a full kernel, budgeted at 120 s
             val lane = simpleos_platform_qemu_lane("riscv64", resolved_hosted.name)
             if val resolved_lane = lane:
                 expect(riscv64_hosted_required_marker_fragments()).to_equal(resolved_lane.required_serial_markers)
@@ -548,7 +634,7 @@ describe "Qemu runner serial routing":
         if val resolved_rv32 = rv32:
             val target = scenario_target(resolved_rv32)
             expect(scenario_lane_kind(resolved_rv32)).to_equal(SimpleOsLaneKind.FsExec)
-            expect(scenario_test_timeout_ms(resolved_rv32)).to_equal(60000)
+            expect(scenario_test_timeout_ms(resolved_rv32)).to_equal(60000)  # oracle: media-backed fs-exec lanes get a 60 s acceptance budget
             val lane = simpleos_platform_qemu_lane("riscv32", resolved_rv32.name)
             if val resolved_lane = lane:
                 expect(_scenario_required_marker_fragments(resolved_rv32)).to_equal(resolved_lane.required_serial_markers)
@@ -562,6 +648,9 @@ describe "Qemu runner serial routing":
             fail("missing riscv32 media scenario")
 
     it "scopes RISC-V SMF native builds to arch-local sources":
+        # @req REQ-QEMU-RUNNER-RISCV-BUILD-SCOPE-020
+        step("Assemble the rv64/rv32 native-build args and require arch-local source scoping")
+        # @capture: evidence_manifest("qemu_riscv_build_scope") -> qemu_runner_spec.evidence.sdn
         val rv64_target = scenario_target(scenario_riscv64_virtio_fat32_smf())
         val rv64_args = os_native_build_args(rv64_target, "llvm")
         expect(rv64_args).to_contain("--log")
@@ -579,6 +668,9 @@ describe "Qemu runner serial routing":
         expect(os_native_build_sources(rv32_target)[0]).to_equal("build/os/generated")
 
     it "requires bounded frontend and native-build compiler contracts":
+        # @req REQ-QEMU-RUNNER-COMPILER-CONTRACTS-021
+        step("Read the five runner sources and pin the std-io and frontend delegation contract")
+        # @capture: evidence_manifest("qemu_compiler_contracts") -> qemu_runner_spec.evidence.sdn
         val source = rt_file_read_text("src/os/_QemuRunner/os_build_run.spl")
         val targets_source = rt_file_read_text("src/os/_QemuRunner/runner_targets.spl")
         val catalog_source = rt_file_read_text("src/os/_QemuRunner/scenario_catalog.spl")
@@ -592,11 +684,16 @@ describe "Qemu runner serial routing":
         expect(source).to_contain("use std.nogc_sync_mut.io.file_ops.{file_delete, file_exists, file_read}")
         expect(source).to_contain("use std.nogc_sync_mut.io.process_ops.{process_run_timeout}")
         expect(source).to_contain("use std.nogc_sync_mut.ffi.io.{file_write_text, path_absolute}")
-        expect(source.contains("rt_process_")).to_equal(false)
-        expect(source.contains("rt_file_")).to_equal(false)
-        expect(source.contains("rt_dir_")).to_equal(false)
-        expect(source.contains("rt_env_")).to_equal(false)
-        expect(source.contains("rt_time_")).to_equal(false)
+        val bans_process_externs = source.contains("rt_process_")
+        expect(bans_process_externs).to_equal(false)  # oracle: the runner owner calls std process_ops, never runtime externs
+        val bans_file_externs = source.contains("rt_file_")
+        expect(bans_file_externs).to_equal(false)  # oracle: the runner owner calls std file_ops, never runtime externs
+        val bans_dir_externs = source.contains("rt_dir_")
+        expect(bans_dir_externs).to_equal(false)  # oracle: the runner owner calls std dir_ops, never runtime externs
+        val bans_env_externs = source.contains("rt_env_")
+        expect(bans_env_externs).to_equal(false)  # oracle: the runner owner calls std env_ops, never runtime externs
+        val bans_time_externs = source.contains("rt_time_")
+        expect(bans_time_externs).to_equal(false)  # oracle: the runner owner calls std time_ops, never runtime externs
         expect(targets_source).to_contain("use std.nogc_sync_mut.io.dir_ops.{dir_create_all}")
         expect(targets_source).to_contain("use std.nogc_sync_mut.io.env_ops.{env_get}")
         expect(targets_source).to_contain("use std.nogc_sync_mut.io.file_ops.{file_exists, file_read}")
@@ -652,7 +749,8 @@ describe "Qemu runner serial routing":
         expect(source).to_contain("_candidate_frontend_smoke(candidate)")
         expect(source).to_contain("_run_candidate_admission_pinned(candidate, probe_args, 5000)")
         expect(source).to_contain("_run_candidate_pinned(simple_bin, args, timeout_ms)")
-        expect(source.contains("process_run_timeout(simple_bin, args, timeout_ms)")).to_equal(false)
+        val bans_unpinned_run = source.contains("process_run_timeout(simple_bin, args, timeout_ms)")
+        expect(bans_unpinned_run).to_equal(false)  # oracle: every candidate run goes through the pinned admission wrapper
         expect(source).to_contain("env_set(\"SIMPLE_BOOTSTRAP\", old_bootstrap)")
         expect(source).to_contain("env_set(\"SIMPLE_LIB\", old_lib)")
         expect(source).to_contain("env_set(\"SIMPLE_BOOT_MINIMAL\", old_boot_minimal)")
@@ -660,8 +758,10 @@ describe "Qemu runner serial routing":
         expect(source).to_contain("env_set(\"SIMPLE_OS_LOG_MODE\", old_log_mode)")
         expect(source).to_contain("env_set(\"PATH\", old_path)")
         expect(source).to_contain("env_set(\"SIMPLE_SSH_LIVE_BUILD_MARKER\", old_build_marker)")
-        expect(source.contains("test/05_perf/io_parity/startup_simple.spl")).to_equal(false)
-        expect(source.contains("frontend_exit_code")).to_equal(false)
+        val bans_perf_fixture_probe = source.contains("test/05_perf/io_parity/startup_simple.spl")
+        expect(bans_perf_fixture_probe).to_equal(false)  # oracle: admission probes use their own fixture, not a perf lane artifact
+        val bans_frontend_exit_variable = source.contains("frontend_exit_code")
+        expect(bans_frontend_exit_variable).to_equal(false)  # oracle: the removed frontend-exit-code side channel must stay removed
         expect(source).to_contain("\"--backend\", backend_name")
         expect(source).to_contain("\"--mode\", \"definitely-invalid-mode\"")
         expect(source).to_contain("exit_code == 1 and (stdout + \"\\n\" + stderr).contains(diagnostic)")
@@ -669,6 +769,9 @@ describe "Qemu runner serial routing":
         expect(source).to_contain("phase=tooling FAILED: no runnable pure-Simple compiler")
 
     it "lets callers disable compiled OS logging through native-build args":
+        # @req REQ-QEMU-RUNNER-LOG-OFF-022
+        step("Set SIMPLE_OS_LOG_MODE to off and rebuild the native-build args")
+        # @capture: evidence_manifest("qemu_log_mode_off") -> qemu_runner_spec.evidence.sdn
         expect(rt_env_set("SIMPLE_OS_LOG_MODE", "off")).to_equal(true)
         val x64_target = get_target(Architecture.X86_64)
         val x64_args = os_native_build_args(x64_target, "llvm")
@@ -679,12 +782,18 @@ describe "Qemu runner serial routing":
         expect(rt_env_set("SIMPLE_OS_LOG_MODE", "on")).to_equal(true)
 
     it "looks up RISC-V SMF scenarios by name":
+        # @req REQ-QEMU-RUNNER-RISCV-LOOKUP-023
+        step("Resolve both RISC-V SMF scenarios by name and check the FAT32 media paths")
+        # @capture: evidence_manifest("qemu_riscv_name_lookup") -> qemu_runner_spec.evidence.sdn
         expect(scenario_name_or_missing("riscv64-virtio-fat32-smf")).to_equal("riscv64-virtio-fat32-smf")
         expect(scenario_name_or_missing("riscv32-virtio-fat32-smf")).to_equal("riscv32-virtio-fat32-smf")
         expect(riscv_fs_exec_disk_image_path(Architecture.Riscv64)).to_equal("build/os/fat32-riscv64.img")
         expect(riscv_fs_exec_disk_image_path(Architecture.Riscv32)).to_equal("build/os/fat32-riscv32.img")
 
     it "defines a truthful RV64 hosted preflight scenario":
+        # @req REQ-QEMU-RUNNER-RV64-HOSTED-024
+        step("Build the hosted scenario and verify its networking, budget, and command")
+        # @capture: evidence_manifest("qemu_rv64_hosted_preflight") -> qemu_runner_spec.evidence.sdn
         val hosted = scenario_riscv64_hosted()
         expect(hosted.name).to_equal("riscv64-hosted")
         expect(hosted.arch).to_equal(Architecture.Riscv64)
@@ -692,7 +801,7 @@ describe "Qemu runner serial routing":
         expect(hosted.qemu_extra).to_contain("user,id=n0,hostfwd=tcp::2222-:22,hostfwd=tcp::8080-:80")
         expect(hosted.qemu_extra).to_contain("virtio-net-pci,netdev=n0,disable-legacy=on")
         expect(scenario_name_or_missing("riscv64-hosted")).to_equal("riscv64-hosted")
-        expect(scenario_test_timeout_ms(hosted)).to_equal(120000)
+        expect(scenario_test_timeout_ms(hosted)).to_equal(120000)  # oracle: the hosted compile smoke builds a full kernel, budgeted at 120 s
         expect(scenario_lane_kind(hosted)).to_equal(SimpleOsLaneKind.HostedCompileSmoke)
 
         val hosted_lane = simpleos_platform_qemu_lane("riscv64", "riscv64-hosted")
@@ -712,6 +821,9 @@ describe "Qemu runner serial routing":
         expect(hosted_target.output).to_equal("build/os/simpleos_riscv64_hosted.elf")
 
     it "defines an RV64 X25519 diagnostic lane with live helper build inputs":
+        # @req REQ-QEMU-RUNNER-X25519-LANE-025
+        step("Build the X25519 probe scenario and check its build inputs and exit policy")
+        # @capture: evidence_manifest("qemu_x25519_probe_lane") -> qemu_runner_spec.evidence.sdn
         val probe = scenario_rv64_x25519_probe()
         expect(probe.name).to_equal("rv64-x25519-probe")
         expect(probe.arch).to_equal(Architecture.Riscv64)
@@ -734,6 +846,9 @@ describe "Qemu runner serial routing":
         expect(scenario_qemu_exit_success(probe, -1)).to_equal(true)
 
     it "uses per-platform x86_64 FAT32 media for filesystem scenarios":
+        # @req REQ-QEMU-RUNNER-X64-MEDIA-026
+        step("Assemble the x64-nvme-fat32 command and require the x86_64 media image")
+        # @capture: evidence_manifest("qemu_x64_fat32_media") -> qemu_runner_spec.evidence.sdn
         val scenario = get_scenario("x64-nvme-fat32")
         expect(scenario_name_or_missing("x64-nvme-fat32")).to_equal("x64-nvme-fat32")
         if val resolved = scenario:
@@ -741,11 +856,14 @@ describe "Qemu runner serial routing":
             expect(cmd).to_contain("file=build/os/fat32-x86_64.img,if=none,id=nvm,format=raw")
 
     it "exposes the q35 pure NVMe perf catalog lane as a runnable x86_64 scenario":
+        # @req REQ-QEMU-RUNNER-Q35-NVME-027
+        step("Assemble the q35 pure-NVMe command and check both NVMe namespaces")
+        # @capture: evidence_manifest("qemu_q35_pure_nvme") -> qemu_runner_spec.evidence.sdn
         val scenario = get_scenario("x86_64-q35-pure-nvme-perf")
         expect(scenario_name_or_missing("x86_64-q35-pure-nvme-perf")).to_equal("x86_64-q35-pure-nvme-perf")
         if val resolved = scenario:
             expect(scenario_lane_kind(resolved)).to_equal(SimpleOsLaneKind.Smoke)
-            expect(scenario_test_timeout_ms(resolved)).to_equal(30000)
+            expect(scenario_test_timeout_ms(resolved)).to_equal(30000)  # oracle: the q35 pure-NVMe smoke is a 30 s lane
             val target = scenario_target(resolved)
             expect(target.entry).to_equal("examples/09_embedded/simple_os/arch/x86_64/q35_pure_nvme_perf_entry.spl")
             expect(target.output).to_equal("build/os/simpleos_x86_64_pure_nvme_perf.elf")
@@ -760,6 +878,9 @@ describe "Qemu runner serial routing":
             expect("missing").to_equal("x86_64-q35-pure-nvme-perf")
 
     it "delegates physical NVMe perf scenario serial acceptance to the real hardware gate":
+        # @req REQ-QEMU-RUNNER-PHYSICAL-NVME-028
+        step("Offer real-device and q35 serials to the physical acceptance gate")
+        # @capture: evidence_manifest("qemu_physical_nvme_gate") -> qemu_runner_spec.evidence.sdn
         val scenario = QemuScenario(
             name: "x86_64-physical-nvme-perf",
             arch: Architecture.X86_64,
@@ -797,6 +918,9 @@ describe "Qemu runner serial routing":
         expect(qemu_scenario_serial_acceptance_reason(scenario, "", q35)).to_equal("missing-physical-nvme-marker:hardware_target=real-nvme")
 
     it "keeps x64 desktop smoke diskless and leaves storage to the disk lane":
+        # @req REQ-QEMU-RUNNER-X64-DISKLESS-029
+        step("Compare the smoke and disk scenario commands for storage attachment")
+        # @capture: evidence_manifest("qemu_x64_diskless_smoke") -> qemu_runner_spec.evidence.sdn
         val smoke = get_scenario("x64-desktop-test")
         expect(scenario_name_or_missing("x64-desktop-test")).to_equal("x64-desktop-test")
         if val resolved_smoke = smoke:
@@ -812,12 +936,15 @@ describe "Qemu runner serial routing":
             expect(disk_cmd).to_contain("file=build/os/fat32-x86_64.img,if=none,id=nvm,format=raw")
 
     it "defines a UEFI-native x64 desktop disk boot scenario":
+        # @req REQ-QEMU-RUNNER-UEFI-DESKTOP-030
+        step("Point SIMPLEOS_OVMF_CODE at the pflash image and assemble the UEFI boot")
+        # @capture: evidence_manifest("qemu_uefi_desktop_boot") -> qemu_runner_spec.evidence.sdn
         expect(rt_env_set("SIMPLEOS_OVMF_CODE", "build/test-ovmf/OVMF_CODE.fd")).to_equal(true)
         expect(ovmf_code_path()).to_equal("build/test-ovmf/OVMF_CODE.fd")
         val scenario = scenario_x64_desktop_uefi()
         expect(scenario.name).to_equal("x64-desktop-uefi")
         expect(scenario.arch).to_equal(Architecture.X86_64)
-        expect(scenario_test_timeout_ms(scenario)).to_equal(180000)
+        expect(scenario_test_timeout_ms(scenario)).to_equal(180000)  # oracle: the UEFI desktop boot chain gets a 180 s budget
 
         val resolved = get_scenario("x64-desktop-uefi")
         if val s = resolved:

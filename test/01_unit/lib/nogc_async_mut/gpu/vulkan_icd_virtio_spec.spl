@@ -1,12 +1,36 @@
-# Purpose and audience: executable specification evidence for the owning engineering team.
-# @req REQ-SSPEC-LIB
-# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
-
-# Purpose and audience: executable specification evidence for the owning engineering team.
-# @req REQ-SSPEC-LIB
-# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
-
 # @cover src/lib/nogc_async_mut/gpu/vulkan_icd_virtio.spl
+
+"""
+## Purpose and audience
+Executable contract for the Virtio Venus ICD transport in
+`std.nogc_async_mut.gpu.vulkan_icd_virtio`: local connect bookkeeping, honest
+unavailable reporting for every call that would reach the (unwired) venus
+transport, typed not-connected/invalid-instance errors, and handle-free
+failures — never a fabricated success. Owned by the GPU platform team;
+engineers wiring a real virtio-gpu venus device are the audience.
+## Operator workflow
+Run `simple run test/01_unit/lib/nogc_async_mut/gpu/vulkan_icd_virtio_spec.spl`.
+Each scenario drives the `venus_icd_*` functions directly against the module's
+global transport state and checks the returned `VenusCallResult` fields or
+connection flags justified in the oracle comment.
+## Compatibility and limitations
+No real virtio-gpu venus transport exists on this host, so every transport
+call reports "unavailable" by design (fail-closed fix of 2026-08-11, see the
+bug record in the lifecycle notes). `connect` records local intent only and
+never proves a device exists. Scenarios mutate module-global transport state
+and always disconnect before finishing.
+## Verification guidance and troubleshooting
+An unavailable-vs-ok failure means the transport path started fabricating
+success again — treat as a defect, do not soften. A not-connected failure
+means a scenario leaked connection state from an earlier scenario. Handle
+mismatch failures mean the result adapter dropped its typed status.
+"""
+# Lifecycle: doc/01_research/ui/render_path/gui_web_2d_path_assessment_2026-06-12.md ;
+# doc/03_plan/ui/gpu_full_render_offload_mdsoc_plus_plan.md ;
+# doc/04_architecture/ui/engine_2d.md ;
+# doc/05_design/platform/top4_sffi_wrappers_plan.md
+# Failure record: doc/08_tracking/bug/vulkan_icd_virtio_and_gpu_probe_report_no_real_device_enumeration_2026-08-11.md
+# @manual_section: Virtio Venus ICD transport
 
 use std.spec
 use std.spec.step
@@ -23,89 +47,123 @@ use std.nogc_async_mut.gpu.vulkan_icd_virtio.{
     venus_icd_protocol_version
 }
 
-# 2026-08-11: updated for the fail-closed fix (see
-# doc/08_tracking/bug/vulkan_icd_virtio_and_gpu_probe_report_no_real_device_enumeration_2026-08-11.md).
+# 2026-08-11: updated for the fail-closed fix (see the failure record above).
 # There is no real virtio-gpu venus transport wired up, so every operation
 # that reaches `_venus_transport_send` now honestly reports "unavailable"
 # instead of fabricating success. `venus_icd_connect` only records local
 # intent (device path bookkeeping) — it never proves a device exists — so
 # "connected" state must NOT flip these to is_ok: true.
 describe "Virtio Venus ICD transport":
-    # @manual scenario evidence
     it "connect with valid device path succeeds":
+        step("Connect a named device path with a 256-slot ring")
+        # @req REQ-GPU-VIRTIO-ICD-001
+        # @capture(statistics): connect verdict for a non-empty device path
         val ok = venus_icd_connect("/dev/vgpu0", 256)
-        expect(ok).to_equal(true)
+        expect(ok).to_equal(true)  # oracle: connect records local intent, so a non-empty path is accepted
         venus_icd_disconnect()
 
     it "connect with empty path fails":
+        step("Attempt a connect with an empty device path")
+        # @req REQ-GPU-VIRTIO-ICD-002
+        # @capture(statistics): connect verdict for the empty path
         val ok = venus_icd_connect("", 256)
-        expect(ok).to_equal(false)
+        expect(ok).to_equal(false)  # oracle: an unnamed device cannot be recorded as connected intent
 
     it "is_connected reflects state":
+        step("Toggle the transport and observe the connection flag both ways")
+        # @req REQ-GPU-VIRTIO-ICD-003
+        # @capture(statistics): connection flag across connect and disconnect
         venus_icd_connect("/dev/vgpu0", 256)
-        expect(venus_icd_is_connected()).to_equal(true)
+        expect(venus_icd_is_connected()).to_equal(true)  # oracle: connect flips the module-global connection flag on
         venus_icd_disconnect()
-        expect(venus_icd_is_connected()).to_equal(false)
+        expect(venus_icd_is_connected()).to_equal(false)  # oracle: disconnect clears the same flag
 
     it "create_instance reports unavailable, not a fabricated success":
+        step("Create an instance on the connected transport with no device")
+        # @req REQ-GPU-VIRTIO-ICD-004
+        # @capture(protocol_json): unavailable VenusCallResult for create_instance
         venus_icd_connect("/dev/vgpu0", 256)
         val result = venus_icd_create_instance()
-        expect(result.is_ok).to_equal(false)
-        expect(result.handle).to_equal(0)
+        expect(result.is_ok).to_equal(false)  # oracle: no venus device exists, so the transport must report unavailable
+        expect(result.handle).to_equal(0)  # oracle: an unavailable call must never mint a handle
         venus_icd_disconnect()
 
     it "create_device with valid instance still reports unavailable":
+        step("Create a device from the unavailable instance result")
+        # @req REQ-GPU-VIRTIO-ICD-005
+        # @capture(protocol_json): unavailable VenusCallResult for create_device
         venus_icd_connect("/dev/vgpu0", 256)
         val inst = venus_icd_create_instance()
         val dev = venus_icd_create_device(inst.handle)
-        expect(dev.is_ok).to_equal(false)
-        expect(dev.handle).to_equal(0)
+        expect(dev.is_ok).to_equal(false)  # oracle: device creation rides the same unwired transport as the instance
+        expect(dev.handle).to_equal(0)  # oracle: no device handle may be minted without a device
         venus_icd_disconnect()
 
     it "create_device with invalid instance fails":
+        step("Create a device from the zero handle")
+        # @req REQ-GPU-VIRTIO-ICD-006
+        # @capture(protocol_json): invalid-instance VenusCallResult
         venus_icd_connect("/dev/vgpu0", 256)
         val result = venus_icd_create_device(0)
-        expect(result.is_ok).to_equal(false)
-        expect(result.error).to_equal("invalid-instance")
+        expect(result.is_ok).to_equal(false)  # oracle: handle zero names no instance
+        expect(result.error).to_equal("invalid-instance")  # oracle: the typed error names the invalid instance, not a transport fault
         venus_icd_disconnect()
 
     it "allocate_memory reports unavailable, issues no handle":
+        step("Allocate memory through the unwired transport")
+        # @req REQ-GPU-VIRTIO-ICD-007
+        # @capture(protocol_json): unavailable VenusCallResult for allocate_memory
         venus_icd_connect("/dev/vgpu0", 256)
         val inst = venus_icd_create_instance()
         val dev = venus_icd_create_device(inst.handle)
         val mem = venus_icd_allocate_memory(dev.handle, 4096)
-        expect(mem.is_ok).to_equal(false)
-        expect(mem.handle).to_equal(0)
+        expect(mem.is_ok).to_equal(false)  # oracle: memory allocation reaches the unwired transport like every other call
+        expect(mem.handle).to_equal(0)  # oracle: no memory handle may be issued without a device
         venus_icd_disconnect()
 
     it "create_buffer reports unavailable, issues no handle":
+        step("Create a buffer through the unwired transport")
+        # @req REQ-GPU-VIRTIO-ICD-008
+        # @capture(protocol_json): unavailable VenusCallResult for create_buffer
         venus_icd_connect("/dev/vgpu0", 256)
         val inst = venus_icd_create_instance()
         val dev = venus_icd_create_device(inst.handle)
         val buf = venus_icd_create_buffer(dev.handle, 2048)
-        expect(buf.is_ok).to_equal(false)
-        expect(buf.handle).to_equal(0)
+        expect(buf.is_ok).to_equal(false)  # oracle: buffer creation reaches the unwired transport like every other call
+        expect(buf.handle).to_equal(0)  # oracle: no buffer handle may be issued without a device
         venus_icd_disconnect()
 
-    it "destroy_instance accepted":
+    it "destroy_instance leaves transport state intact":
+        step("Destroy the created instance and re-read the connection flag")
+        # @req REQ-GPU-VIRTIO-ICD-009
+        # @capture(statistics): connection persistence across destroy_instance
         venus_icd_connect("/dev/vgpu0", 256)
         val inst = venus_icd_create_instance()
         venus_icd_destroy_instance(inst.handle)
-        expect(1).to_equal(1)
+        expect(venus_icd_is_connected()).to_equal(true)  # oracle: destroy_instance only emits the protocol message and never tears down transport state
         venus_icd_disconnect()
 
     it "disconnect resets state":
+        step("Connect then disconnect and confirm the flag is clear")
+        # @req REQ-GPU-VIRTIO-ICD-010
+        # @capture(statistics): cleared connection flag after disconnect
         venus_icd_connect("/dev/vgpu0", 256)
         venus_icd_disconnect()
-        expect(venus_icd_is_connected()).to_equal(false)
+        expect(venus_icd_is_connected()).to_equal(false)  # oracle: disconnect is the single transition back to the unconnected state
 
     it "protocol_version returns expected value":
+        step("Read the protocol version on a connected transport")
+        # @req REQ-GPU-VIRTIO-ICD-011
+        # @capture(statistics): protocol version reported while connected
         venus_icd_connect("/dev/vgpu0", 256)
-        expect(venus_icd_protocol_version()).to_equal(1)
+        expect(venus_icd_protocol_version()).to_equal(1)  # oracle: connect pins the module's Venus protocol version to 1
         venus_icd_disconnect()
 
     it "operations fail when not connected":
+        step("Create an instance without any prior connect")
+        # @req REQ-GPU-VIRTIO-ICD-012
+        # @capture(protocol_json): not-connected VenusCallResult
         venus_icd_disconnect()
         val result = venus_icd_create_instance()
-        expect(result.is_ok).to_equal(false)
-        expect(result.error).to_equal("not-connected")
+        expect(result.is_ok).to_equal(false)  # oracle: no call may proceed from the unconnected state
+        expect(result.error).to_equal("not-connected")  # oracle: the typed error names the missing connection, not a device fault

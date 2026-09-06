@@ -19,6 +19,8 @@ use std.nogc_async_mut.gpu.engine2d.backend_lane.{
     engine2d_host_gpu_lane_schedule
 }
 use std.nogc_async_mut.gpu.engine2d.host_gpu_event_queue.{
+    ENGINE2D_HOST_GPU_RUNTIME_KIND_DRAW_IR,
+    ENGINE2D_HOST_GPU_RUNTIME_LANE_GPU,
     Engine2dHostGpuRuntimeDispatchResult,
     Engine2dHostGpuRuntimeDrainResult,
     Engine2dHostGpuRuntimeQueue,
@@ -26,6 +28,7 @@ use std.nogc_async_mut.gpu.engine2d.host_gpu_event_queue.{
     engine2d_host_gpu_event,
     engine2d_host_gpu_event_handler_decision,
     engine2d_host_gpu_event_submit_to_runtime_payload_text,
+    engine2d_host_gpu_runtime_emit_packet,
     engine2d_host_gpu_runtime_submit_with_payload,
     engine2d_host_gpu_runtime_drain,
     engine2d_host_gpu_runtime_dispatch_draw_ir
@@ -52,6 +55,40 @@ struct Engine2dDrawIrQueueDispatchResult:
     runtime_dispatch: Engine2dHostGpuRuntimeDispatchResult
     queued_for_gpu: bool
     payload: Engine2dDrawIrPayloadSummary
+
+struct Engine2dDrawIrDeferredReceipt:
+    batch_id: text
+    queue_handle: i64
+    backend_handle: i64
+    packet_id: i64
+    packet_bytes: i64
+    command_count: i64
+    command_checksum: i64
+    accepted: bool
+    queued: bool
+    terminal: bool
+    status: text
+    routing_evidence_only: bool
+    device_execution_proven: bool
+    diagnostic: text
+
+fn _engine2d_draw_ir_deferred_receipt(batch: DrawIrBatch, queue: Engine2dHostGpuRuntimeQueue, packet_id: i64, packet_bytes: i64, command_count: i64, command_checksum: i64, accepted: bool, queued: bool, terminal: bool, status: text, diagnostic: text) -> Engine2dDrawIrDeferredReceipt:
+    Engine2dDrawIrDeferredReceipt(
+        batch_id: batch.batch_id,
+        queue_handle: queue.queue_handle,
+        backend_handle: queue.backend_handle,
+        packet_id: packet_id,
+        packet_bytes: packet_bytes,
+        command_count: command_count,
+        command_checksum: command_checksum,
+        accepted: accepted,
+        queued: queued,
+        terminal: terminal,
+        status: status,
+        routing_evidence_only: true,
+        device_execution_proven: false,
+        diagnostic: diagnostic
+    )
 
 fn _engine2d_draw_ir_empty_submit(unit_id: text, status: text, diagnostic: text) -> Engine2dHostGpuRuntimeSubmitResult:
     Engine2dHostGpuRuntimeSubmitResult(submitted: false, status: status, queue_handle: 0, event_id: unit_id, packet_id: 0, packet_bytes: 0, payload_summary: "", diagnostic: diagnostic)
@@ -146,9 +183,62 @@ fn engine2d_draw_ir_runtime_queue_dispatch_only(batch: DrawIrBatch, gpu_availabl
     val payload = engine2d_draw_ir_payload_summary(batch, packet_bytes)
     engine2d_draw_ir_runtime_queue_dispatch(batch, plan.selected_backend, plan.command_count, packet_bytes, payload, queue)
 
+fn engine2d_draw_ir_runtime_queue_submit_deferred(batch: DrawIrBatch, gpu_available: bool, queue: Engine2dHostGpuRuntimeQueue) -> Engine2dDrawIrDeferredReceipt:
+    """Enqueue one bounded DrawIR route without draining or completing it.
+
+    The packet contains only bounded routing metadata plus the caller-owned
+    backend handle. It neither serializes DrawIR text nor claims that a packed
+    payload is registered at that handle. The returned receipt proves queue
+    admission only; callers advance the canonical runtime queue with
+    `engine2d_host_gpu_runtime_submit_pending` and
+    `engine2d_host_gpu_runtime_complete_pending`.
+    """
+    val plan = simple_2d_draw_ir_adv_plan(batch, gpu_available)
+    val packet_bytes = plan.command_count * 64
+    val checksum = engine2d_draw_ir_payload_checksum(batch)
+    if plan.selected_backend != DRAW_IR_BACKEND_GPU:
+        return _engine2d_draw_ir_deferred_receipt(batch, queue, 0, packet_bytes, plan.command_count, checksum, false, false, true, "host", "Draw IR batch selected CPU path")
+    val lane_result = engine2d_host_gpu_lane_schedule(
+        ENGINE2D_HOST_GPU_LANE_HOST,
+        ENGINE2D_HOST_GPU_LANE_GPU,
+        "draw_ir_delta",
+        packet_bytes,
+        queue.max_packet_bytes,
+        false,
+        false,
+        queue.runtime_available,
+        plan.command_count
+    )
+    val event = engine2d_host_gpu_event(batch.batch_id, ENGINE2D_HOST_GPU_LANE_GPU, "draw_ir_delta", packet_bytes, queue.max_packet_bytes, false, false, false, queue.runtime_available)
+    val decision = engine2d_host_gpu_event_handler_decision(event, lane_result)
+    if not decision.accepted or not decision.queue_required:
+        return _engine2d_draw_ir_deferred_receipt(batch, queue, 0, packet_bytes, plan.command_count, checksum, false, false, true, "rejected", decision.reason)
+    # Strict profile: an unavailable GPU backend schedules ok with
+    # fallback_explicit set, which means "the caller may run this on the CPU".
+    # A deferred GPU route has no CPU lane to fall back to, so it must reject
+    # here instead of queueing a packet no device will ever execute.
+    if lane_result.fallback_explicit:
+        return _engine2d_draw_ir_deferred_receipt(batch, queue, 0, packet_bytes, plan.command_count, checksum, false, false, true, "rejected", "GPU backend unavailable; deferred routing has no CPU fallback lane")
+    if queue.queue_handle <= 0:
+        return _engine2d_draw_ir_deferred_receipt(batch, queue, 0, packet_bytes, plan.command_count, checksum, false, false, true, "runtime_unavailable", "runtime queue handle is not registered")
+    if queue.backend_handle <= 0:
+        return _engine2d_draw_ir_deferred_receipt(batch, queue, 0, packet_bytes, plan.command_count, checksum, false, false, true, "invalid_backend_handle", "positive backend handle required for deferred Draw IR routing")
+    if packet_bytes > queue.max_packet_bytes:
+        return _engine2d_draw_ir_deferred_receipt(batch, queue, 0, packet_bytes, plan.command_count, checksum, false, false, true, "packet_too_large", "packet exceeds runtime queue limit")
+    val packet_id = engine2d_host_gpu_runtime_emit_packet(ENGINE2D_HOST_GPU_RUNTIME_LANE_GPU, ENGINE2D_HOST_GPU_RUNTIME_KIND_DRAW_IR, packet_bytes, queue.backend_handle)
+    if packet_id <= 0:
+        return _engine2d_draw_ir_deferred_receipt(batch, queue, 0, packet_bytes, plan.command_count, checksum, false, false, true, "queue_full_or_emit_failed", "bounded runtime queue rejected the packet")
+    if dbg_stage_on() or dbg_events_on():
+        dbg_stage("gpu_queue", "queued_deferred")
+        dbg_event_hop(batch.batch_id, "enqueue", "status=queued packet_id={packet_id} bytes={packet_bytes} deferred=true")
+    dbg_count("host_gpu.queued", 1)
+    _engine2d_draw_ir_deferred_receipt(batch, queue, packet_id, packet_bytes, plan.command_count, checksum, true, true, false, "queued", "Draw IR routing metadata queued for deferred completion")
+
 export Engine2dDrawIrPayloadSummary
 export Engine2dDrawIrQueueDispatchResult
+export Engine2dDrawIrDeferredReceipt
 export engine2d_draw_ir_payload_checksum
 export engine2d_draw_ir_payload_summary
 export engine2d_draw_ir_runtime_queue_dispatch
 export engine2d_draw_ir_runtime_queue_dispatch_only
+export engine2d_draw_ir_runtime_queue_submit_deferred

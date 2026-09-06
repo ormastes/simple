@@ -156,6 +156,7 @@
 # Only `src/` is scanned, not `test/`/`scripts/`/`doc/`.
 
 use std.nogc_sync_mut.io.dir_ops.{dir_walk}
+use compiler.frontend.core.source_facts.{simple_code_lines, simple_string_continuation_lines}
 use std.nogc_sync_mut.io.file_ops.{file_read}
 
 val SCAN_ROOT = "src"
@@ -356,9 +357,13 @@ fn _count_occurrences(hay: text, needle: text) -> i64:
 fn scan_file_lines(path: text, content: text) -> [ObligationSite]:
     var sites: [ObligationSite] = []
     val lines = content.split("\n")
+    # Element i pairs with lines[i]. A comment that merely MENTIONS `"""` used
+    # to flip a per-line parity count here, and the next obligation site was
+    # dropped as prose (45 src files carry that shape, measured 2026-09-06).
+    val code_lines = simple_code_lines(content)
+    val string_continuation = simple_string_continuation_lines(content)
     var current_fn = ""
     var current_container = ""  # "struct" while inside a struct/class field block
-    var in_docstring = false
     var i = 0
     while i < lines.len():
         val raw = lines[i]
@@ -369,14 +374,9 @@ fn scan_file_lines(path: text, content: text) -> [ObligationSite]:
         # documentation text is not an arithmetic/div obligation site.
         # Excluded here rather than only at _is_field_decl's narrower gate
         # (that gate only protects the "init" category).
-        var is_doc_line = in_docstring
-        val quote_count = _count_occurrences(trimmed, '"""')
-        if quote_count > 0:
-            is_doc_line = true
-            var qi = 0
-            while qi < quote_count:
-                in_docstring = not in_docstring
-                qi = qi + 1
+        # A line inside a string opened earlier, or a line that is itself only a
+        # string (a docstring opener, closer, or one-liner), is prose.
+        val is_doc_line = string_continuation[i] or code_lines[i].trim() == "\"\""
 
         if indent == 0 and trimmed != "":
             if trimmed.starts_with("struct ") or trimmed.starts_with("class "):

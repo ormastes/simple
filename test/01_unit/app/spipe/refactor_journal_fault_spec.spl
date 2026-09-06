@@ -1,12 +1,28 @@
-# Purpose and audience: executable specification evidence for the S1-B
-# write-ahead journal, proving transactionality under fault injection.
-# @req REQ-SPIPE-S1B
-# plan: doc/03_plan/infra/spipe/spipe_knowledge_compiler_refined_plan.md (S1-B)
-#
-# Fault injection = truncate/corrupt the on-disk JOURNAL at each recorded
-# phase boundary and re-open via `recover_transaction`, which reads only from
-# disk (never the in-memory `RefactorJournal`). Per phase this asserts the
-# corpus lands EITHER fully-old or fully-new — never half-applied.
+"""
+## Purpose and audience
+Executable specification evidence for the S1-B write-ahead journal, proving
+transactionality under fault injection. For engineers relying on the
+move/rename transaction's atomicity.
+
+## Operator workflow
+Run `bin/simple test test/01_unit/app/spipe/refactor_journal_fault_spec.spl`
+to verify fault tolerance at every journal phase boundary.
+
+## Compatibility and limitations
+Runs on all platforms with file I/O support. Uses in-memory fault injection
+(truncation) rather than real process signals.
+
+## Verification guidance and troubleshooting
+A failure indicates incomplete recovery logic. Each scenario phase (planned,
+staged, rewrites_applied, move_applied, committed) must recover to either
+fully-old or fully-new, never a mix. A corrupted backup must not be trusted
+to restore content.
+"""
+# Lifecycle: doc/01_research/infra/spipe/ ;
+# doc/03_plan/infra/spipe/ ;
+# doc/04_architecture/app/spipe/ ;
+# doc/05_design/app/spipe/
+# @manual_section: fault-injection
 
 use std.spec.*
 use std.io_runtime.{file_read, file_write, file_exists, file_delete, dir_create_all}
@@ -40,6 +56,7 @@ describe "refactor journal — fault injection at every transition":
 
     it "a crash right after PLANNED leaves the corpus untouched (fully old)":
         # @req REQ-SPIPE-S1B
+        # @capture(bit_table): recovery outcome and file contents post-crash
         step("Begin a transaction, then crash before staging")
         val dir = _work_dir("planned")
         val journal_path = dir + "/txn.journal"
@@ -66,6 +83,7 @@ describe "refactor journal — fault injection at every transition":
 
     it "a crash right after STAGED restores every path from backup (fully old)":
         # @req REQ-SPIPE-S1B
+        # @capture(bit_table): backed-up file restoration and recovery outcome
         step("Stage backups, then crash before any rewrite is applied")
         val dir = _work_dir("staged")
         val journal_path = dir + "/txn.journal"
@@ -92,6 +110,7 @@ describe "refactor journal — fault injection at every transition":
 
     it "a crash right after REWRITES_APPLIED restores referencing files (fully old, move not yet done)":
         # @req REQ-SPIPE-S1B
+        # @capture(bit_table): rewrite rollback and file state after recovery
         step("Apply rewrites to referencing files, then crash before the move")
         val dir = _work_dir("rewrites_applied")
         val journal_path = dir + "/txn.journal"
@@ -117,6 +136,7 @@ describe "refactor journal — fault injection at every transition":
 
     it "a crash right after MOVE_APPLIED restores the move and the referencing files (fully old)":
         # @req REQ-SPIPE-S1B
+        # @capture(bit_table): move and file restoration after crash recovery
         step("Apply rewrites and the move, then crash before commit")
         val dir = _work_dir("move_applied")
         val journal_path = dir + "/txn.journal"
@@ -145,6 +165,7 @@ describe "refactor journal — fault injection at every transition":
 
     it "a crash right after COMMITTED leaves the corpus fully new and cleans up":
         # @req REQ-SPIPE-S1B
+        # @capture(bit_table): final committed state and cleanup verification
         step("Run the transaction to completion, then recover")
         val dir = _work_dir("committed")
         val journal_path = dir + "/txn.journal"
@@ -172,6 +193,7 @@ describe "refactor journal — fault injection at every transition":
 
     it "a corrupted BACKUP hash is never trusted to restore content":
         # @req REQ-SPIPE-S1B
+        # @capture(bit_table): corrupted backup detection and selective restore
         step("Corrupt a backup entry's recorded hash, then recover")
         val dir = _work_dir("corrupt_hash")
         val journal_path = dir + "/txn.journal"
