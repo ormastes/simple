@@ -1,0 +1,158 @@
+#!/bin/sh
+# check-no-mock-file-system-io.shs
+#
+# `src/lib/*/file_system/file_ops.spl` says so in its own header: "Mock
+# implementations for pure Simple demonstration". Its `file_write_text` is
+#
+#     if path == "" or content == nil: return false
+#     true
+#
+# -- it writes NOTHING and returns `true`. Its `file_read_text` consults
+# `file_exists_mock`. Six same-arity `file_write_text` definitions exist across
+# the stdlib, and which one a call site binds to is decided by the seed's
+# co-compiled-collision fallback ("last definition wins"), so importing the mock
+# is a latent, seed-dependent silent-success bug rather than an obvious one.
+#
+# Incident 2026-09-01: `src/compiler/80.driver/driver_aot_native_output.spl`
+# imported `file_write_text` from `std.file_system` for the native capsule
+# receipt. Under the WM-Vulkan lane's seed the mock won; the receipt was never
+# written, the write reported success, and the (correct) validator later failed
+# every module with `native-capsule-receipt-invalid` -- native-build emitted no
+# binary at all, on a clean hello world. Fixed by binding to the uniquely-named,
+# rt-backed `file_write_exact` / `file_read_nullable` from `std.io_runtime`.
+#
+# This is a RATCHET, not a zero-bar: the tree already carries a population of
+# these imports (baseline file below) and they cannot all be audited at once.
+# It fails on any NEW one, and on a stale baseline entry, exactly like
+# check-unbacked-extern-ratchet.shs.
+#
+# Verdict is the LAST line of stdout:
+#   PASS — <n> import site(s) checked, 0 new, 0 stale        exit 0
+#   FAIL — ...                                              exit 1
+#   ERROR — nothing was checked                             exit 2
+#
+# Known limit, stated rather than papered over: scan() matches only single-line
+# `use std.file_system.{...}` import lists. A multi-line import list evades it.
+# Every current site in the tree is single-line; widen the scanner if that stops
+# being true rather than assuming the population is complete.
+#
+# Flags: --selftest (runs first, always, and is fatal)
+#        --generate-baseline  (reviewed updates ONLY -- read the diff first)
+
+set -u
+
+ROOT=${ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}
+BASELINE="$ROOT/scripts/check/mock_file_system_io_baseline.txt"
+
+# Names whose mock definition silently succeeds or silently reports absence.
+# Read/write/exists primitives only -- pure path helpers are not affected.
+MOCK_IO_NAMES='file_write_text|file_read_text|file_write_bytes|file_read_bytes|file_append_text|file_exists|file_create|file_delete'
+
+scan() {
+    # $1 = tree root. Emits "<relpath>:<name>" per offending import, sorted.
+    _root=$1
+    find "$_root/src" -name '*.spl' -type f 2>/dev/null \
+    | grep -v '/vendor/' \
+    | while IFS= read -r f; do
+        # Only the mock module family, and only `use ... .{...}` import lists.
+        grep -hE '^[[:space:]]*use[[:space:]]+(std|lib)(\.[a-z_]+)?\.file_system\.\{' "$f" 2>/dev/null \
+        | tr -d ' \t' \
+        | sed 's/.*{//; s/}.*//' \
+        | tr ',' '\n' \
+        | grep -xE "$MOCK_IO_NAMES" \
+        | while IFS= read -r n; do
+            printf '%s:%s\n' "${f#"$_root"/}" "$n"
+          done
+      done | LC_ALL=C sort -u
+}
+
+selftest() {
+    t=$(mktemp -d) || { echo "ERROR — nothing was checked (mktemp failed)"; exit 2; }
+    trap 'rm -rf "$t"' EXIT
+    rc=0
+
+    # fixture 1: a clean tree must produce zero offenders
+    mkdir -p "$t/clean/src/a"
+    printf 'use std.io_runtime.{file_write_exact}\n' > "$t/clean/src/a/ok.spl"
+    if [ -n "$(scan "$t/clean")" ]; then
+        echo "selftest FAIL: clean fixture produced offenders"; rc=1
+    fi
+
+    # fixture 2: the incident's exact import shape must be detected
+    mkdir -p "$t/bad/src/a"
+    printf 'use std.file_system.{file_write_text, file_read_text}\n' > "$t/bad/src/a/bad.spl"
+    got=$(scan "$t/bad")
+    case "$got" in
+      *"src/a/bad.spl:file_write_text"*) : ;;
+      *) echo "selftest FAIL: incident import shape not detected (got: $got)"; rc=1 ;;
+    esac
+    case "$got" in
+      *"src/a/bad.spl:file_read_text"*) : ;;
+      *) echo "selftest FAIL: file_read_text not detected"; rc=1 ;;
+    esac
+
+    # fixture 3: a non-IO name from the same module is NOT an offender
+    mkdir -p "$t/pathonly/src/a"
+    printf 'use std.file_system.{file_move, dir_walk_files}\n' > "$t/pathonly/src/a/p.spl"
+    if [ -n "$(scan "$t/pathonly")" ]; then
+        echo "selftest FAIL: non-IO names flagged"; rc=1
+    fi
+
+    # fixture 4: vendored code is not scanned at all
+    mkdir -p "$t/vend/src/vendor/x"
+    printf 'use std.file_system.{file_write_text}\n' > "$t/vend/src/vendor/x/v.spl"
+    if [ -n "$(scan "$t/vend")" ]; then
+        echo "selftest FAIL: vendored code scanned"; rc=1
+    fi
+
+    # fixture 5: an empty tree must yield 0 sites so the caller is forced to ERROR
+    mkdir -p "$t/empty/src"
+    if [ -n "$(scan "$t/empty")" ]; then
+        echo "selftest FAIL: empty tree produced offenders"; rc=1
+    fi
+
+    trap - EXIT; rm -rf "$t"
+    [ "$rc" -eq 0 ] || { echo "FAIL — selftest failed"; exit 1; }
+}
+
+selftest
+
+CURRENT=$(scan "$ROOT")
+
+if [ "${1:-}" = "--generate-baseline" ]; then
+    printf '%s\n' "$CURRENT" > "$BASELINE"
+    echo "wrote $BASELINE ($(printf '%s\n' "$CURRENT" | grep -c .) entries)"
+    exit 0
+fi
+
+N=$(printf '%s\n' "$CURRENT" | grep -c .)
+if [ "$N" -eq 0 ]; then
+    echo "ERROR — nothing was checked (scan found 0 import sites; scanner or tree is wrong)"
+    exit 2
+fi
+if [ ! -f "$BASELINE" ]; then
+    echo "ERROR — nothing was checked (missing baseline $BASELINE)"
+    exit 2
+fi
+
+NEW=$(printf '%s\n' "$CURRENT" | LC_ALL=C comm -23 - "$BASELINE")
+STALE=$(printf '%s\n' "$CURRENT" | LC_ALL=C comm -13 - "$BASELINE")
+
+if [ -n "$NEW" ]; then
+    echo "FAIL — $N import site(s) checked, NEW mock std.file_system I/O import(s):"
+    printf '%s\n' "$NEW" | sed 's/^/  /'
+    echo "  std.file_system is a MOCK: its file_write_text writes nothing and returns true."
+    echo "  Use std.io_runtime.{file_write_exact, file_read_nullable, write_file} instead."
+    echo "FAIL — $N import site(s) checked, $(printf '%s\n' "$NEW" | grep -c .) new"
+    exit 1
+fi
+if [ -n "$STALE" ]; then
+    echo "FAIL — $N import site(s) checked, stale baseline entr(ies) (no longer present):"
+    printf '%s\n' "$STALE" | sed 's/^/  /'
+    echo "  Removing an offender is good -- re-run with --generate-baseline to ratchet down."
+    echo "FAIL — $N import site(s) checked, $(printf '%s\n' "$STALE" | grep -c .) stale"
+    exit 1
+fi
+
+echo "PASS — $N import site(s) checked, 0 new, 0 stale"
+exit 0

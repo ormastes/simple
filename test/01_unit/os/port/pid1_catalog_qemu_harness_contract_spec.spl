@@ -2,21 +2,54 @@
 # @cover scripts/qemu/qemu_rv64_pid1_catalog_test.shs 100%
 # @cover scripts/os/build_pid1_kernel_riscv64.shs 100%
 # @req REQ-005
-"""# PID1 catalogue media and QEMU handoff contract
 
-## Overview
-
-The PID1 QEMU lane must use real target service images staged at the fixed
-short FAT aliases required by early boot. It must boot the RV64 kernel entry
-which calls `os_main_prepare_pid1`; historical SMF fixture probes are not
-substitutes for this contract.
 """
+## Purpose and audience
+
+Executable source-contract specification for the PID1 catalogue media and
+QEMU handoff lane: the media builder, the RV64 QEMU harness, and the RV64
+PID1 kernel build must stage real target service images at the fixed short
+FAT aliases required by early boot and boot the kernel entry that calls
+os_main_prepare_pid1. Historical SMF fixture probes are not substitutes
+for this contract. Audience: SimpleOS port owners confirming the lane
+contract still holds before a change lands.
+
+## Operator workflow
+
+1. Run `bin/simple test test/01_unit/os/port/pid1_catalog_qemu_harness_contract_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the PID1 lane contract.
+
+## Compatibility and limitations
+
+These are source-contract scenarios: they read the build and harness
+scripts and pin their load-bearing literals, not runtime behavior. Known
+RED scenarios (2026-09-05) name contract lines the scripts have drifted
+from; they stay RED until the scripts are repaired.
+
+## Verification guidance and troubleshooting
+
+Re-run the single file to reproduce; a failing scenario names the script
+and the missing contract literal. Add the missing literal to the script —
+never relax the assertion — or update the contract deliberately with the
+script owner.
+"""
+
+# Lifecycle:
+# doc/01_research/domain/sspec_documentization_maintenance.md
+# doc/03_plan/sspec_modernization_plan.md
+# doc/04_architecture/sspec_documentization_maintenance.md
+# doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+# @manual_section: pid1-qemu-lane-contract
+# @manual: primary
 
 use std.spec.{describe, it, expect}
 use std.io_runtime.{file_read}
 
 describe "PID1 catalogue media and QEMU handoff contract":
     it "builds service images before invoking the strict media consumer":
+        # @req REQ-005
+        # @capture(statistics): contract literals pinned in the media builder script
+        step("Read the media builder and pin its staging pipeline literals")
         val source = file_read("scripts/os/build_pid1_catalog_media.shs")
         expect(source).to_contain("build_root_service_catalog.shs")
         expect(source).to_contain("pid1_catalog_disk_bake.spl")
@@ -29,6 +62,9 @@ describe "PID1 catalogue media and QEMU handoff contract":
         expect(source).to_contain("SUCCESS: PID1 catalogue media ready")
 
     it "uses the os_main RV64 boot entry and NVMe-backed catalogue disk":
+        # @req REQ-005
+        # @capture(statistics): contract literals pinned in the QEMU harness script
+        step("Read the QEMU harness and pin its boot-entry and disk literals")
         val source = file_read("scripts/qemu/qemu_rv64_pid1_catalog_test.shs")
         expect(source).to_contain("entry=src/os/kernel/arch/riscv64/boot.spl")
         expect(source).to_contain("target=riscv64-unknown-none")
@@ -38,6 +74,9 @@ describe "PID1 catalogue media and QEMU handoff contract":
         expect(source).to_contain("[pid1] userspace handoff pid=")
 
     it "builds the real RV64 PID1 kernel instead of a userspace smoke payload":
+        # @req REQ-005
+        # @capture(statistics): contract literals pinned in the RV64 kernel build script
+        step("Read the kernel build script and pin its native-build literals")
         val source = file_read("scripts/os/build_pid1_kernel_riscv64.shs")
         expect(source).to_contain("SIMPLE_BUILD_COMPILER must name the admitted fresh Stage2 compiler")
         expect(source).to_contain("native-build --target \"$TARGET\" --help")
@@ -53,6 +92,9 @@ describe "PID1 catalogue media and QEMU handoff contract":
         expect(source).to_contain("os_main_prepare_pid1")
 
     it "fails closed unless the ELF entry address is the canonical kernel boot function":
+        # @req REQ-005
+        # @capture(statistics): ELF-entry guard literals across build script, boot source, and linker
+        step("Read the three entry-guard sources and pin the canonical-entry literals")
         val source = file_read("scripts/os/build_pid1_kernel_riscv64.shs")
         val boot = file_read("src/os/kernel/arch/riscv64/boot.spl")
         val native_linker = file_read("src/compiler_rust/compiler/src/pipeline/native_project/linker.rs")
@@ -67,14 +109,24 @@ describe "PID1 catalogue media and QEMU handoff contract":
         expect(native_linker).to_contain("cmd.arg(format!(\"--entry={}\", sym));")
 
     it "pins the field guard runtime ABI that a fresh RV64 compiler must declare":
+        # @req REQ-005
+        # @capture(statistics): rt_struct_receiver_valid ABI pinned in codegen sources
+        step("Read the codegen sources and pin the field-guard ABI literals")
         val runtime_specs = file_read("src/compiler_rust/compiler/src/codegen/runtime_sffi.rs")
         val field_lowering = file_read("src/compiler_rust/compiler/src/codegen/instr/fields.rs")
         expect(runtime_specs).to_contain("RuntimeFuncSpec::new(\"rt_struct_receiver_valid\", &[I64, I64, I64], &[I8])")
         expect(field_lowering).to_contain("call_runtime_3(ctx, builder, \"rt_struct_receiver_valid\", receiver, offset, width)")
 
     it "uses dedicated UART capture and a PCI virtio network backend":
+        # NOTE (legitimately RED, 2026-09-05): this scenario asserts the harness
+        # contract; it currently fails on one of the pinned literals below —
+        # repair the script literal, never relax the assertion.
+        # @req REQ-005
+        # @capture(statistics): UART and network backend literals pinned in the harness script
+        step("Read the QEMU harness and pin its headless graphics, UART, and NIC literals")
         val source = file_read("scripts/qemu/qemu_rv64_pid1_catalog_test.shs")
-        expect(source.contains("-nographic")).to_equal(false)
+        val uses_nographic = source.contains("-nographic")
+        expect(uses_nographic).to_equal(false)  # oracle: a captured-run harness must never run headless-merged with -nographic
         expect(source).to_contain("-display none")
         expect(source).to_contain("-chardev \"file,id=pid1_uart,path=$SERIAL_LOG,append=off\"")
         expect(source).to_contain("-serial chardev:pid1_uart")
@@ -82,6 +134,9 @@ describe "PID1 catalogue media and QEMU handoff contract":
         expect(source).to_contain("-device virtio-net-pci,netdev=pid1net")
 
     it "fails closed until lifecycle instrumentation is emitted by trusted runtime owners":
+        # @req REQ-005
+        # @capture(statistics): lifecycle evidence literals pinned in the harness script
+        step("Read the QEMU harness and pin its lifecycle-evidence literals")
         val source = file_read("scripts/qemu/qemu_rv64_pid1_catalog_test.shs")
         expect(source).to_contain("runtime_lifecycle_instrumentation_present")
         expect(source).to_contain("EVIDENCE INSTRUMENTATION MISSING")
@@ -93,6 +148,9 @@ describe "PID1 catalogue media and QEMU handoff contract":
         expect(source).to_contain("serial_has_required_lifecycle_evidence")
 
     it "requires explicitly baked test media before expecting a net fault lifecycle":
+        # @req REQ-005
+        # @capture(statistics): net-fault media literals pinned across harness and builder
+        step("Read both scripts and pin the net-fault media literals")
         val source = file_read("scripts/qemu/qemu_rv64_pid1_catalog_test.shs")
         val media = file_read("scripts/os/build_pid1_catalog_media.shs")
         expect(source).to_contain("--test-net-fault-after-ready")
@@ -102,6 +160,9 @@ describe "PID1 catalogue media and QEMU handoff contract":
         expect(media).to_contain("--test-net-fault-after-ready")
 
     it "requires physical short aliases instead of accepting a marker-only image":
+        # @req REQ-005
+        # @capture(statistics): short FAT alias literals pinned in the harness script
+        step("Read the QEMU harness and pin the physical short-alias literals")
         val source = file_read("scripts/qemu/qemu_rv64_pid1_catalog_test.shs")
         expect(source).to_contain("INIT    SMF")
         expect(source).to_contain("VFS     SMF")

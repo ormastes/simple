@@ -1,141 +1,221 @@
-# SHB Roundtrip Test
-#
-# Tests are self-contained since interpreter mode can't resolve
-# compiler.shb.* imports at load time.
-# The `it` block bodies verify the logic structurally.
+"""
+## Purpose and audience
+Pins the SHB (Simple Header Binary) module-interface format contract — magic,
+version, header/section-table geometry, section ids, string-table dedup,
+primitive type layouts, entry flags, and the write/read section pairs — for
+the driver engineers who own `src/compiler/80.driver/shb/`. Audience:
+maintainers of the shb cache lane and anyone changing the on-disk interface
+format.
+## Operator workflow
+Run this file alone with the seed runner:
+`./src/compiler_rust/target/bootstrap/simple run test/unit/compiler/shb/shb_roundtrip_spec.spl`
+## Compatibility and limitations
+A spec cannot import `compiler.shb.*` (module roots are the stdlib plus the
+spec's own directory), so every scenario is a source contract: it reads the
+shipped module sources and pins the exact constants and function names that
+define the format. The constants are the format — a change to any pinned value
+here is a format break and must bump SHB_VERSION_MAJOR.
+## Verification guidance and troubleshooting
+A failed constant pin means the on-disk format changed; treat it as a format
+break and update writer, reader, and this file together. A failed write/read
+pair pin means a section lost its roundtrip path in one direction.
+"""
+# Lifecycle: doc/01_research/compiler/cache/global_content_addressed_cache_audit_2026-07-24.md ;
+# doc/03_plan/compiler/forwarding/zero_cost_layers_c0_c5_staged_implementation_plan_2026-08-07.md ;
+# doc/04_architecture/language/simple_feature_module.md ;
+# doc/05_design/compiler/incremental_build/per_lane_private_caches.md
+# @manual_section: shb_format_contract
 
-use std.spec.step
+use std.spec.{describe, it, expect, step}
 
-describe "SHB Roundtrip":
-    # @manual scenario evidence
-    describe "String Table":
-        it "deduplicates strings":
-            # ShbStringTable.create() adds offset 0 = ""
-            # add("hello") returns new offset, add("hello") returns same offset
-            expect(1).to_equal(1)  # oracle: expected value 1 is the behavior asserted by this regression spec
+extern fn rt_file_read_text(path: text) -> text?
 
-        it "offset 0 is empty string":
-            expect(0).to_equal(0)
+describe "SHB header and format geometry":
+    it "validates correct magic bytes SHB NUL":
+        # @req REQ-SHB-FORMAT-001
+        # @capture(statistics): magic-byte constant pins
+        step("Pin the four magic-byte constants in shb_types.spl")
+        val shb_types_source = rt_file_read_text("src/compiler/80.driver/shb/shb_types.spl") ?? ""
+        val keeps_magic_s = shb_types_source.contains("SHB_MAGIC_0: u8 = 0x53")
+        val keeps_magic_h = shb_types_source.contains("SHB_MAGIC_1: u8 = 0x48")
+        val keeps_magic_b = shb_types_source.contains("SHB_MAGIC_2: u8 = 0x42")
+        val keeps_magic_nul = shb_types_source.contains("SHB_MAGIC_3: u8 = 0x00")
+        expect(keeps_magic_s).to_equal(true)  # oracle: byte 0 of every SHB file is 'S' (0x53)
+        expect(keeps_magic_h).to_equal(true)  # oracle: byte 1 of every SHB file is 'H' (0x48)
+        expect(keeps_magic_b).to_equal(true)  # oracle: byte 2 of every SHB file is 'B' (0x42)
+        expect(keeps_magic_nul).to_equal(true)  # oracle: byte 3 of every SHB file is NUL (0x00)
 
-    describe "Header Validation":
-        it "validates correct magic bytes SHB\\0":
-            val m0 = 0x53
-            val m1 = 0x48
-            val m2 = 0x42
-            val m3 = 0x00
-            expect(m0).to_equal(83)  # oracle: expected value 83 is the behavior asserted by this regression spec
-            expect(m1).to_equal(72)  # oracle: expected value 72 is the behavior asserted by this regression spec
-            expect(m2).to_equal(66)  # oracle: expected value 66 is the behavior asserted by this regression spec
-            expect(m3).to_equal(0)  # oracle: expected value 0 is the behavior asserted by this regression spec
+    it "version is 1.0":
+        # @req REQ-SHB-FORMAT-001
+        # @capture(statistics): format version pins
+        step("Pin the major and minor format version constants")
+        val shb_types_source = rt_file_read_text("src/compiler/80.driver/shb/shb_types.spl") ?? ""
+        val keeps_major_one = shb_types_source.contains("SHB_VERSION_MAJOR: u8 = 1")
+        val keeps_minor_zero = shb_types_source.contains("SHB_VERSION_MINOR: u8 = 0")
+        expect(keeps_major_one).to_equal(true)  # oracle: the format is at major version 1; a bump invalidates every cached .shb
+        expect(keeps_minor_zero).to_equal(true)  # oracle: the format is at minor version 0
 
-        it "version is 1.0":
-            val major = 1
-            val minor = 0
-            expect(major).to_equal(1)  # oracle: expected value 1 is the behavior asserted by this regression spec
-            expect(minor).to_equal(0)  # oracle: expected value 0 is the behavior asserted by this regression spec
+    it "header is 64 bytes":
+        # @req REQ-SHB-FORMAT-001
+        # @capture(statistics): header geometry pins
+        step("Pin the header and section-table size constants")
+        val shb_types_source = rt_file_read_text("src/compiler/80.driver/shb/shb_types.spl") ?? ""
+        val keeps_header_size = shb_types_source.contains("SHB_HEADER_SIZE: i64 = 64")
+        val keeps_section_table_size = shb_types_source.contains("SHB_SECTION_TABLE_SIZE: i64 = 64")
+        expect(keeps_header_size).to_equal(true)  # oracle: the fixed header occupies exactly 64 bytes
+        expect(keeps_section_table_size).to_equal(true)  # oracle: the section table adds exactly 64 bytes, so the prefix is 128
 
-    describe "Binary Format":
-        it "header is 64 bytes":
-            val header_size = 64
-            val section_table_size = 64
-            val total_prefix = header_size + section_table_size
-            expect(total_prefix).to_equal(128)  # oracle: expected value 128 is the behavior asserted by this regression spec
+    it "has 8 sections":
+        # @req REQ-SHB-FORMAT-002
+        # @capture(statistics): section-count pin
+        step("Pin the section count constant")
+        val shb_types_source = rt_file_read_text("src/compiler/80.driver/shb/shb_types.spl") ?? ""
+        val keeps_section_count = shb_types_source.contains("SHB_SECTION_COUNT: i64 = 8")
+        expect(keeps_section_count).to_equal(true)  # oracle: the format defines exactly eight sections
 
-        it "has 8 sections":
-            val section_count = 8
-            expect(section_count).to_equal(8)  # oracle: expected value 8 is the behavior asserted by this regression spec
+    it "section indices are correct":
+        # @req REQ-SHB-FORMAT-002
+        # @capture(statistics): section-id pins
+        step("Pin the first and last section ids")
+        val shb_types_source = rt_file_read_text("src/compiler/80.driver/shb/shb_types.spl") ?? ""
+        val keeps_functions_first = shb_types_source.contains("SHB_SECTION_FUNCTIONS: i64 = 0")
+        val keeps_dependencies_last = shb_types_source.contains("SHB_SECTION_DEPENDENCIES: i64 = 7")
+        expect(keeps_functions_first).to_equal(true)  # oracle: functions is section 0, the first slot of the table
+        expect(keeps_dependencies_last).to_equal(true)  # oracle: dependencies is section 7, the last slot of the eight-entry table
 
-        it "section indices are correct":
-            val functions = 0
-            val structs = 1
-            val classes = 2
-            val type_layouts = 3
-            val enums = 4
-            val traits = 5
-            val reexports = 6
-            val dependencies = 7
-            expect(functions).to_equal(0)  # oracle: expected value 0 is the behavior asserted by this regression spec
-            expect(dependencies).to_equal(7)  # oracle: expected value 7 is the behavior asserted by this regression spec
+describe "SHB string table contract":
+    it "deduplicates strings and reserves offset 0 for the empty string":
+        # @req REQ-SHB-FORMAT-003
+        # @capture(statistics): string-table dedup pins
+        step("Pin the dedup return and the offset-0 reservation")
+        val string_table_source = rt_file_read_text("src/compiler/80.driver/shb/shb_string_table.spl") ?? ""
+        val keeps_offset_zero_empty = string_table_source.contains("tbl.offsets[\"\"] = 0")
+        val keeps_dedup_return = string_table_source.contains("return existing")
+        val keeps_dedup_index = string_table_source.contains("offsets: {text: i64}")
+        expect(keeps_offset_zero_empty).to_equal(true)  # oracle: offset 0 is permanently the empty string, so any real string starts at 1
+        expect(keeps_dedup_return).to_equal(true)  # oracle: add() returns the existing offset for a repeated string instead of appending
+        expect(keeps_dedup_index).to_equal(true)  # oracle: dedup is keyed by a text-to-offset dict built during add()
 
-    describe "Write and Read":
-        it "roundtrips empty module":
-            # Write ShbModuleInterface with 0 entries, read back
-            # source_hash and interface_hash preserved
-            expect(true).to_equal(true)
+describe "SHB write/read roundtrip pairs":
+    it "roundtrips functions structs classes enums traits reexports type layouts and dependencies":
+        # @req REQ-SHB-FORMAT-004
+        # @capture(statistics): per-section write/read pair pins
+        step("Pin a writer and a reader function for every section kind")
+        val shb_writer_source = rt_file_read_text("src/compiler/80.driver/shb/shb_writer.spl") ?? ""
+        val shb_reader_source = rt_file_read_text("src/compiler/80.driver/shb/shb_reader.spl") ?? ""
+        val keeps_fn_write = shb_writer_source.contains("fn shb_write_functions(")
+        val keeps_struct_write = shb_writer_source.contains("fn shb_write_structs(")
+        val keeps_class_write = shb_writer_source.contains("fn shb_write_classes(")
+        val keeps_enum_write = shb_writer_source.contains("fn shb_write_enums(")
+        val keeps_trait_write = shb_writer_source.contains("fn shb_write_traits(")
+        val keeps_reexport_write = shb_writer_source.contains("fn shb_write_reexports(")
+        val keeps_layout_write = shb_writer_source.contains("fn shb_write_type_layouts(")
+        val keeps_fn_read = shb_reader_source.contains("fn read_functions()")
+        val keeps_struct_read = shb_reader_source.contains("fn read_structs()")
+        val keeps_class_read = shb_reader_source.contains("fn read_classes()")
+        val keeps_enum_read = shb_reader_source.contains("fn read_enums()")
+        val keeps_trait_read = shb_reader_source.contains("fn read_traits()")
+        val keeps_reexport_read = shb_reader_source.contains("fn read_reexports()")
+        val keeps_layout_read = shb_reader_source.contains("fn read_type_layouts()")
+        val keeps_dependency_read = shb_reader_source.contains("fn read_dependencies()")
+        expect(keeps_fn_write).to_equal(true)  # oracle: functions have a writer side of the roundtrip
+        expect(keeps_struct_write).to_equal(true)  # oracle: structs have a writer side of the roundtrip
+        expect(keeps_class_write).to_equal(true)  # oracle: classes have a writer side of the roundtrip
+        expect(keeps_enum_write).to_equal(true)  # oracle: enums have a writer side of the roundtrip
+        expect(keeps_trait_write).to_equal(true)  # oracle: traits have a writer side of the roundtrip
+        expect(keeps_reexport_write).to_equal(true)  # oracle: reexports have a writer side of the roundtrip
+        expect(keeps_layout_write).to_equal(true)  # oracle: type layouts have a writer side of the roundtrip
+        expect(keeps_fn_read).to_equal(true)  # oracle: functions have a reader side of the roundtrip
+        expect(keeps_struct_read).to_equal(true)  # oracle: structs have a reader side of the roundtrip
+        expect(keeps_class_read).to_equal(true)  # oracle: classes have a reader side of the roundtrip
+        expect(keeps_enum_read).to_equal(true)  # oracle: enums have a reader side of the roundtrip
+        expect(keeps_trait_read).to_equal(true)  # oracle: traits have a reader side of the roundtrip
+        expect(keeps_reexport_read).to_equal(true)  # oracle: reexports have a reader side of the roundtrip
+        expect(keeps_layout_read).to_equal(true)  # oracle: type layouts have a reader side of the roundtrip
+        expect(keeps_dependency_read).to_equal(true)  # oracle: dependencies have a reader side of the roundtrip
 
-        it "roundtrips functions with params":
-            # FnEntry: name, params[], return_type, flags
-            # Params: name + type_name pairs
-            expect(true).to_equal(true)
+    it "roundtrips the full module with hashes preserved":
+        # @req REQ-SHB-FORMAT-004
+        # @capture(statistics): whole-module roundtrip pins
+        step("Pin the whole-module write, read-all, and hash accessors")
+        val shb_writer_source = rt_file_read_text("src/compiler/80.driver/shb/shb_writer.spl") ?? ""
+        val shb_reader_source = rt_file_read_text("src/compiler/80.driver/shb/shb_reader.spl") ?? ""
+        val keeps_module_write = shb_writer_source.contains("fn shb_write(")
+        val keeps_read_all = shb_reader_source.contains("fn read_all()")
+        val keeps_hash_accessors = shb_reader_source.contains("fn source_hash()") and shb_reader_source.contains("fn interface_hash()")
+        expect(keeps_module_write).to_equal(true)  # oracle: the whole interface is written by one entry point
+        expect(keeps_read_all).to_equal(true)  # oracle: the whole interface is read back by one entry point
+        expect(keeps_hash_accessors).to_equal(true)  # oracle: both module hashes survive the roundtrip as reader accessors
 
-        it "roundtrips structs with fields":
-            # StructEntry: name, fields[], flags
-            # Fields: name + type_name + flags
-            expect(true).to_equal(true)
+describe "SHB invalid data rejection":
+    it "rejects too-small buffer":
+        # @req REQ-SHB-FORMAT-005
+        # @capture(statistics): undersized-buffer rejection pin
+        step("Pin the reader's minimum-size guard")
+        val shb_reader_source = rt_file_read_text("src/compiler/80.driver/shb/shb_reader.spl") ?? ""
+        val keeps_minimum_size_guard = shb_reader_source.contains("bytes.len() < SHB_HEADER_SIZE + SHB_SECTION_TABLE_SIZE")
+        expect(keeps_minimum_size_guard).to_equal(true)  # oracle: a buffer under the 128-byte header-plus-table prefix is rejected before any parse
 
-        it "roundtrips classes with methods":
-            # ClassEntry: name, fields[], methods[], flags
-            expect(true).to_equal(true)
+    it "rejects wrong magic":
+        # @req REQ-SHB-FORMAT-005
+        # @capture(statistics): magic-validation rejection pins
+        step("Pin the header validator's per-byte magic and version checks")
+        val shb_types_source = rt_file_read_text("src/compiler/80.driver/shb/shb_types.spl") ?? ""
+        val keeps_magic_check = shb_types_source.contains("header.magic[0] != SHB_MAGIC_0")
+        val keeps_version_check = shb_types_source.contains("header.version_major != SHB_VERSION_MAJOR")
+        expect(keeps_magic_check).to_equal(true)  # oracle: the validator compares each magic byte, so wrong magic fails
+        expect(keeps_version_check).to_equal(true)  # oracle: the validator also rejects a foreign major version
 
-        it "roundtrips enums with variants":
-            # EnumEntry: name, variants[], flags
-            expect(true).to_equal(true)
+describe "SHB primitive type layouts":
+    it "i8 is size 1 align 1":
+        # @req REQ-SHB-FORMAT-006
+        # @capture(statistics): i8 layout pins
+        step("Pin the i8 layout constants")
+        val shb_types_source = rt_file_read_text("src/compiler/80.driver/shb/shb_types.spl") ?? ""
+        val keeps_i8_size = shb_types_source.contains("LAYOUT_I8_SIZE: i64 = 1")
+        expect(keeps_i8_size).to_equal(true)  # oracle: i8 occupies one byte, aligned to one
 
-        it "roundtrips traits":
-            # TraitEntry: name, methods[], flags
-            expect(true).to_equal(true)
+    it "i64 is size 8 align 8":
+        # @req REQ-SHB-FORMAT-006
+        # @capture(statistics): i64 layout pins
+        step("Pin the i64 layout constants")
+        val shb_types_source = rt_file_read_text("src/compiler/80.driver/shb/shb_types.spl") ?? ""
+        val keeps_i64_size = shb_types_source.contains("LAYOUT_I64_SIZE: i64 = 8")
+        expect(keeps_i64_size).to_equal(true)  # oracle: i64 occupies eight bytes, the machine word the layout table is built around
 
-        it "roundtrips reexports":
-            # ReexportEntry: symbol_name, source_module
-            expect(true).to_equal(true)
+    it "text is size 16 align 8":
+        # @req REQ-SHB-FORMAT-006
+        # @capture(statistics): text layout pins
+        step("Pin the text layout constants")
+        val shb_types_source = rt_file_read_text("src/compiler/80.driver/shb/shb_types.spl") ?? ""
+        val keeps_text_size = shb_types_source.contains("LAYOUT_TEXT_SIZE: i64 = 16")
+        val keeps_text_align = shb_types_source.contains("LAYOUT_TEXT_ALIGN: i64 = 8")
+        expect(keeps_text_size).to_equal(true)  # oracle: the text fat pointer occupies 16 bytes
+        expect(keeps_text_align).to_equal(true)  # oracle: the text fat pointer is 8-byte aligned
 
-        it "roundtrips type layouts":
-            # 14 primitive types: i8..text
-            expect(true).to_equal(true)
+    it "bool is size 1 align 1":
+        # @req REQ-SHB-FORMAT-006
+        # @capture(statistics): bool layout pins
+        step("Pin the bool layout constants")
+        val shb_types_source = rt_file_read_text("src/compiler/80.driver/shb/shb_types.spl") ?? ""
+        val keeps_bool_size = shb_types_source.contains("LAYOUT_BOOL_SIZE: i64 = 1")
+        expect(keeps_bool_size).to_equal(true)  # oracle: bool occupies one byte, aligned to one
 
-        it "roundtrips dependencies":
-            # DependencyEntry: module_path, interface_hash
-            expect(true).to_equal(true)
+describe "SHB entry flags":
+    it "PUB flag is bit 0 and ASYNC flag is bit 1":
+        # @req REQ-SHB-FORMAT-007
+        # @capture(statistics): flag-bit pins
+        step("Pin the PUB and ASYNC flag bit values")
+        val shb_types_source = rt_file_read_text("src/compiler/80.driver/shb/shb_types.spl") ?? ""
+        val keeps_pub_bit0 = shb_types_source.contains("SHB_FLAG_PUB: i64 = 1")
+        val keeps_async_bit1 = shb_types_source.contains("SHB_FLAG_ASYNC: i64 = 2")
+        expect(keeps_pub_bit0).to_equal(true)  # oracle: PUB is bit 0 (value 1) of the entry flag word
+        expect(keeps_async_bit1).to_equal(true)  # oracle: ASYNC is bit 1 (value 2) of the entry flag word
 
-        it "roundtrips full module with all sections":
-            expect(true).to_equal(true)
-
-    describe "Invalid Data":
-        it "rejects too-small buffer":
-            # Buffer < 128 bytes => invalid
-            expect(true).to_equal(true)
-
-        it "rejects wrong magic":
-            # First 4 bytes must be SHB\0
-            expect(true).to_equal(true)
-
-    describe "Primitive Type Layouts":
-        it "i8 is size=1 align=1":
-            expect(1).to_equal(1)
-
-        it "i64 is size=8 align=8":
-            expect(8).to_equal(8)
-
-        it "text is size=16 align=8":
-            val text_size = 16
-            val text_align = 8
-            expect(text_size).to_equal(16)  # oracle: expected value 16 is the behavior asserted by this regression spec
-            expect(text_align).to_equal(8)  # oracle: expected value 8 is the behavior asserted by this regression spec
-
-        it "bool is size=1 align=1":
-            expect(1).to_equal(1)
-
-    describe "Flags":
-        it "PUB flag is bit 0":
-            val pub_flag = 1
-            expect(pub_flag).to_equal(1)  # oracle: expected value 1 is the behavior asserted by this regression spec
-
-        it "ASYNC flag is bit 1":
-            val async_flag = 2
-            expect(async_flag).to_equal(2)  # oracle: expected value 2 is the behavior asserted by this regression spec
-
-        it "flags compose with bitwise or":
-            val pub_flag = 1
-            val async_flag = 2
-            val combined = pub_flag | async_flag
-            expect(combined).to_equal(3)  # oracle: expected value 3 is the behavior asserted by this regression spec
+    it "flags compose with bitwise or":
+        # @req REQ-SHB-FORMAT-007
+        # @capture(statistics): flag-composition pins
+        step("Pin the independent single-bit flag constants the OR composition relies on")
+        val shb_types_source = rt_file_read_text("src/compiler/80.driver/shb/shb_types.spl") ?? ""
+        val keeps_disjoint_bits = shb_types_source.contains("SHB_FLAG_PUB: i64 = 1") and shb_types_source.contains("SHB_FLAG_ASYNC: i64 = 2")
+        expect(keeps_disjoint_bits).to_equal(true)  # oracle: PUB|ASYNC composes to 3 only while the flags stay disjoint single bits

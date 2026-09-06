@@ -6,6 +6,7 @@ Configuration files for build, test, packaging, and tooling.
 
 | Entry | Description |
 |---|---|
+| `api` | API group registry (`api_registry.sdn`) — one schema for every callable API surface |
 | `bootstrap.sdn` | Bootstrap configuration |
 | `critical_files.sdn` | Critical file guard configuration |
 | `critical_mode.sdn` | Mission-critical mode: dynamic-acquire lint severity + gpu.backend manifest pin |

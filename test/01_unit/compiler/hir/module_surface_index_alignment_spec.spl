@@ -1,6 +1,25 @@
 # Purpose and audience: executable specification evidence for the owning engineering team.
 # @req REQ-SSPEC-COMPILER
 # research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+"""
+## Purpose and audience
+Executable evidence for the HIR module-surface scalar index: discovery-order
+preservation, alias deduplication, fail-closed constructors, native-safe
+explicit-receiver origin reads/writes, and allocation-free repeated lookups.
+For HIR owners and anyone changing the module_surface lowering files.
+## Operator workflow
+./src/compiler_rust/target/bootstrap/simple run test/01_unit/compiler/hir/module_surface_index_alignment_spec.spl
+## Compatibility and limitations
+Runs native-safe only: the teardown and allocation scenarios rely on
+transient array scopes and heap-capacity externs that exist only under the
+native lane. Some scenarios in this file are RED in the current tree; those
+failures are preserved deliberately and must not be weakened to green.
+## Verification guidance and troubleshooting
+Rerun with the command above. A failure in the alias/dedup scenarios means
+the builder or registry index drifted from the scalar-row layout; a failure
+in the canonical-owner scenarios means a staged dependency re-pointed at a
+non-canonical span import.
+"""
 
 
 
@@ -38,6 +57,7 @@ describe "module surface aligned scalar index":
     # @manual scenario evidence
     it "preserves discovery order and deduplicates a same-target alias":
         # @req REQ-SSPEC-COMPILER
+        # @capture(bit_table): ordered-name and ordered-index tables after alias dedup
         step("preserves discovery order and deduplicates a same-target alias")
         var builder = ModuleSurfaceBuilder.new()
         expect(builder.add_indexed_name("first", 0).is_ok()).to_equal(true)
@@ -56,6 +76,7 @@ describe "module surface aligned scalar index":
 
     it "rejects a second finish without replacing its destination":
         # @req REQ-SSPEC-COMPILER
+        # @capture(bit_table): frozen-gate verdict and destination retention table
         step("rejects a second finish without replacing its destination")
         var builder = ModuleSurfaceBuilder.new()
         expect(builder.add_indexed_name("new", 0).is_ok()).to_equal(true)
@@ -74,6 +95,7 @@ describe "module surface aligned scalar index":
 
     it "retains exact names aliases and misses after registry scope teardown":
         # @req REQ-SSPEC-COMPILER
+        # @capture(bit_table): registry index hits and origin lookups after teardown
         step("retains exact names aliases and misses after registry scope teardown")
         val began = rt_transient_array_scope_begin()
         var builder = ModuleSurfaceBuilder.new()
@@ -100,9 +122,9 @@ describe "module surface aligned scalar index":
         expect(promoted).to_equal(true)
         expect(ended).to_equal(true)
         expect(module_surfaces_retained_alignment(registry)).to_equal(true)
-        expect(module_surface_registry_index(registry, "first")).to_equal(0)
-        expect(module_surface_registry_index(registry, "first_alias")).to_equal(0)
-        expect(module_surface_registry_index(registry, "missing")).to_equal(-1)
+        expect(module_surface_registry_index(registry, "first")).to_equal(0)  # oracle: exact name resolves to the surface's discovery index 0
+        expect(module_surface_registry_index(registry, "first_alias")).to_equal(0)  # oracle: the alias resolves to its target's index 0
+        expect(module_surface_registry_index(registry, "missing")).to_equal(-1)  # oracle: an absent name is the sentinel miss index
         val retained_origin_index = registry.surfaces[0].export_origin_index
         val retained_hit = module_surface_export_origin_index_lookup(
             retained_origin_index, "answer")
@@ -126,6 +148,7 @@ describe "module surface aligned scalar index":
 
     it "rejects an alias that changes its existing target":
         # @req REQ-SSPEC-COMPILER
+        # @capture(bit_table): retarget-refusal verdict table
         step("rejects an alias that changes its existing target")
         var builder = ModuleSurfaceBuilder.new()
         expect(builder.add_indexed_name("alias", 0).is_ok()).to_equal(true)
@@ -133,6 +156,7 @@ describe "module surface aligned scalar index":
 
     it "fails closed for misaligned constructor data and preserves misses":
         # @req REQ-SSPEC-COMPILER
+        # @capture(bit_table): fail-closed constructor verdict table per mismatch class
         step("fails closed for misaligned constructor data and preserves misses")
         val mismatch = module_surfaces_by_name_from_parts(
             [ModuleSurface.empty("owner")], {"owner": 0}, ["owner"], [])
@@ -146,10 +170,11 @@ describe "module surface aligned scalar index":
         val conflicting = module_surfaces_by_name_from_parts(
             [ModuleSurface.empty("owner")], {"owner": 1}, ["owner"], [0])
         expect(conflicting.is_err()).to_equal(true)
-        expect(module_surface_index_by_name({"owner": 0}, "missing")).to_equal(-1)
+        expect(module_surface_index_by_name({"owner": 0}, "missing")).to_equal(-1)  # oracle: an absent name is the sentinel miss index
 
     it "uses an explicit index receiver for native-safe origin writes and reads":
         # @req REQ-SSPEC-COMPILER
+        # @capture(bit_table): explicit-receiver write/hit/miss verdict table
         step("uses an explicit index receiver for native-safe origin writes and reads")
         val index = module_surface_export_origin_index_empty()
         val write = module_surface_export_origin_index_put(
@@ -170,6 +195,7 @@ describe "module surface aligned scalar index":
 
     it "reads frozen origins from scalar rows when compatibility dicts are unavailable":
         # @req REQ-SSPEC-COMPILER
+        # @capture(bit_table): scalar-row hit verdict with compatibility dicts blanked
         step("reads frozen origins from scalar rows when compatibility dicts are unavailable")
         val index = module_surface_export_origin_index_empty()
         expect(module_surface_export_origin_index_put(
@@ -183,6 +209,7 @@ describe "module surface aligned scalar index":
 
     it "validates scalar routes independently from signature projections":
         # @req REQ-SSPEC-COMPILER
+        # @capture(bit_table): route-alignment verdict with a broken signature array
         step("validates scalar routes independently from signature projections")
         val surface = ModuleSurface.empty("consumer")
         surface.signature_names = ["broken"]
@@ -190,6 +217,7 @@ describe "module surface aligned scalar index":
 
     it "declares the canonical Span owner used by surface records":
         # @req REQ-SSPEC-COMPILER
+        # @capture(bit_table): canonical Span import token table
         step("declares the canonical Span owner used by surface records")
         val source = file_read(
             "src/compiler/20.hir/hir_lowering/module_surface_types.spl")
@@ -198,6 +226,7 @@ describe "module surface aligned scalar index":
 
     it "declares canonical owners for staged signature dependencies":
         # @req REQ-SSPEC-COMPILER
+        # @capture(bit_table): staged-dependency canonical-owner import table
         step("declares canonical owners for staged signature dependencies")
         expect(file_read(
             "src/compiler/15.blocks/blocks/value.spl")).to_contain(
@@ -223,12 +252,14 @@ describe "module surface aligned scalar index":
 
     it "keeps exported backend signatures on canonical type names":
         # @req REQ-SSPEC-COMPILER
+        # @capture(bit_table): backend signature and barrier-scope token table
         step("keeps exported backend signatures on canonical type names")
         val source = file_read(
             "src/compiler/70.backend/backend/vulkan_backend.spl")
         expect(source).to_contain(
             "fn compile_barrier(scope: GpuBarrierScope)")
-        expect(source.contains("CodegenBarrierScope")).to_equal(false)
+        val retired_scope_alias_absent = source.contains("CodegenBarrierScope")
+        expect(retired_scope_alias_absent).to_equal(false)
         expect(file_read(
             "src/compiler/70.backend/backend/gpu_codegen_types.spl")).to_contain(
             "export use compiler.mir.mir_instructions.{GpuBarrierScope, GpuAtomicOpKind}")
@@ -237,6 +268,9 @@ describe "module surface aligned scalar index":
             "export use compiler.mir.mir_instructions.{GpuBarrierScope, GpuAtomicOpKind}")
 
     it "reads frozen origins from scalar rows when compatibility dicts are unavailable":
+        # @req REQ-SSPEC-COMPILER
+        # @capture(bit_table): scalar-row fallback hit verdict with dicts blanked
+        step("read frozen origins from scalar rows with compatibility dicts blanked")
         val index = module_surface_export_origin_index_empty()
         expect(module_surface_export_origin_index_put(
             index, "Span", "compiler.common.diagnostics.span", "Span",
@@ -248,6 +282,9 @@ describe "module surface aligned scalar index":
         expect(hit.owner_module).to_equal("compiler.common.diagnostics.span")
 
     it "uses a scalar hash index instead of scanning every export origin":
+        # @req REQ-SSPEC-COMPILER
+        # @capture(bit_table): bucket-head count and hash-index hit table for 256 exports
+        step("populate a 256-entry origin index and resolve the final row through the hash buckets")
         val index = module_surface_export_origin_index_empty()
         var item: i64 = 0
         while item < 256:
@@ -270,17 +307,26 @@ describe "module surface aligned scalar index":
         expect(source).to_contain("origin_index.lookup_next_indices[candidate]")
 
     it "validates scalar routes independently from signature projections":
+        # @req REQ-SSPEC-COMPILER
+        # @capture(bit_table): route-alignment verdict for the broken-signature surface
+        step("validate scalar route alignment on a surface with a broken signature array")
         val surface = ModuleSurface.empty("consumer")
         surface.signature_names = ["broken"]
         expect(module_surface_route_arrays_aligned(surface)).to_equal(true)
 
     it "declares the canonical Span owner used by surface records":
+        # @req REQ-SSPEC-COMPILER
+        # @capture(bit_table): canonical Span import token table for the surface types file
+        step("pin the canonical Span import in the module surface types file")
         val source = file_read(
             "src/compiler/20.hir/hir_lowering/module_surface_types.spl")
         expect(source).to_contain(
             "use compiler.common.diagnostics.span.")
 
     it "declares canonical owners for staged signature dependencies":
+        # @req REQ-SSPEC-COMPILER
+        # @capture(bit_table): staged-dependency canonical import table
+        step("pin canonical owners across the staged signature dependency files")
         expect(file_read(
             "src/compiler/15.blocks/blocks/value.spl")).to_contain(
             "use compiler.common.diagnostics.span.")
@@ -304,11 +350,15 @@ describe "module surface aligned scalar index":
             "use std.nogc_sync_mut.io_runtime.")
 
     it "keeps exported backend signatures on canonical type names":
+        # @req REQ-SSPEC-COMPILER
+        # @capture(bit_table): backend signature and retired-alias token table
+        step("pin canonical barrier-scope types across the backend files")
         val source = file_read(
             "src/compiler/70.backend/backend/vulkan_backend.spl")
         expect(source).to_contain(
             "fn compile_barrier(scope: GpuBarrierScope)")
-        expect(source.contains("CodegenBarrierScope")).to_equal(false)
+        val retired_scope_alias_absent = source.contains("CodegenBarrierScope")
+        expect(retired_scope_alias_absent).to_equal(false)
         expect(file_read(
             "src/compiler/70.backend/backend/gpu_codegen_types.spl")).to_contain(
             "export use compiler.mir.mir_instructions.{GpuBarrierScope, GpuAtomicOpKind}")
@@ -318,18 +368,20 @@ describe "module surface aligned scalar index":
 
     it "does not allocate array capacity during repeated scalar lookup":
         # @req REQ-SSPEC-COMPILER
+        # @capture(statistics): heap capacity bytes before and after 1000 lookups
         step("does not allocate array capacity during repeated scalar lookup")
         val name_index = {"owner": 0}
         val before = rt_heap_array_capacity_bytes()
         var iteration = 0
         while iteration < 1000:
-            expect(module_surface_index_by_name(name_index, "owner")).to_equal(0)
+            expect(module_surface_index_by_name(name_index, "owner")).to_equal(0)  # oracle: the only mapped owner resolves to index 0 every iteration
             iteration = iteration + 1
         val after = rt_heap_array_capacity_bytes()
         expect(after).to_equal(before)
 
     it "resolves exact source identity without fallback allocation":
         # @req REQ-SSPEC-COMPILER
+        # @capture(statistics): identity, mismatch, and alias lookup verdicts with capacity deltas
         step("resolves exact source identity without fallback allocation")
         val source = SourceFile(
             path: "identity/owner.spl", content: "fn answer(): 42",
