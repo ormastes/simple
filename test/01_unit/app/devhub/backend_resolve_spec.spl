@@ -1,0 +1,154 @@
+# devhub — git backend resolution unit tests.
+#
+# Feature: `git.default_backend` precedence chain (design doc D1's named drift)
+# Category: DevHub, CLI, Config
+# Status: Implemented
+#
+# The precedence chain is the part of this feature a user is most likely to be
+# surprised by ("why did it open a PR on the wrong host?"), so every rung is
+# pinned here, including which rung WINS when several are set at once, and
+# the fact that an unresolved backend is an error rather than a guess.
+#
+# All functions under test are pure: the chain is exercised by passing each
+# rung's value in, so no config file, environment, or git remote is touched.
+#
+# Source: src/app/devhub/backend_resolve.spl
+# Research: doc/01_research/app/tools/devhub/devhub_cli_wrapper_forwarding_2026-09-06.md §4
+
+use app.devhub.backend_resolve.{
+    normalize_backend,
+    sniff_backend_from_remote_url,
+    pick_git_backend,
+    parse_repo_devhub_config,
+    strip_inline_comment,
+    unresolved_backend_message
+}
+
+
+describe "devhub git backend resolution":
+
+    describe "normalize_backend":
+        it "accepts canonical names and devhub's own command aliases":
+            expect(normalize_backend("github")).to_equal("github")
+            expect(normalize_backend("gh")).to_equal("github")
+            expect(normalize_backend("bitbucket")).to_equal("bitbucket")
+            expect(normalize_backend("bb")).to_equal("bitbucket")
+
+        it "is case- and whitespace-insensitive":
+            expect(normalize_backend("  GitHub ")).to_equal("github")
+
+        it "rejects an unknown name instead of passing it through":
+            # A typo must surface as "no backend resolved, here is how to set
+            # one", not as a route to a backend that does not exist.
+            expect(normalize_backend("gitbub")).to_equal("")
+            expect(normalize_backend("gitlab")).to_equal("")
+            expect(normalize_backend("")).to_equal("")
+
+    describe "sniff_backend_from_remote_url":
+        it "recognises both SSH and HTTPS remote forms":
+            expect(sniff_backend_from_remote_url("git@github.com:ormastes/simple.git")).to_equal("github")
+            expect(sniff_backend_from_remote_url("https://github.com/ormastes/simple.git")).to_equal("github")
+            expect(sniff_backend_from_remote_url("git@bitbucket.org:acme/widgets.git")).to_equal("bitbucket")
+            expect(sniff_backend_from_remote_url("https://acme@bitbucket.org/acme/widgets.git")).to_equal("bitbucket")
+
+        it "returns empty for a host we do not implement":
+            expect(sniff_backend_from_remote_url("git@gitlab.com:acme/widgets.git")).to_equal("")
+            expect(sniff_backend_from_remote_url("")).to_equal("")
+
+    describe "pick_git_backend precedence":
+        it "puts the --backend flag above everything else":
+            val (backend, source) = pick_git_backend("bitbucket", "github", "github", "github", "git@github.com:o/s.git")
+            expect(backend).to_equal("bitbucket")
+            expect(source).to_equal("--backend flag")
+
+        it "puts the environment above both config files":
+            val (backend, source) = pick_git_backend("", "bitbucket", "github", "github", "git@github.com:o/s.git")
+            expect(backend).to_equal("bitbucket")
+            expect(source).to_equal("DEVHUB_GIT_BACKEND")
+
+        it "puts the repo config above the user config":
+            # The repo's committed answer beats a personal default, so a
+            # developer whose own config says github still gets bitbucket when
+            # working in a bitbucket repo.
+            val (backend, source) = pick_git_backend("", "", "bitbucket", "github", "")
+            expect(backend).to_equal("bitbucket")
+            expect(source).to_contain(".spipe/config.sdn")
+
+        it "puts the user config above the remote sniff":
+            val (backend, source) = pick_git_backend("", "", "", "bitbucket", "git@github.com:o/s.git")
+            expect(backend).to_equal("bitbucket")
+            expect(source).to_contain("~/.config/itf/config.sdn")
+
+        it "falls back to the remote host when nothing is configured":
+            # This is what makes a fresh clone work with zero configuration.
+            val (backend, source) = pick_git_backend("", "", "", "", "git@bitbucket.org:acme/widgets.git")
+            expect(backend).to_equal("bitbucket")
+            expect(source).to_equal("git remote origin")
+
+        it "resolves nothing when every rung is empty":
+            val (backend, source) = pick_git_backend("", "", "", "", "")
+            expect(backend).to_equal("")
+            expect(source).to_equal("")
+
+        it "skips a rung holding an unrecognised value rather than failing outright":
+            # A stale config naming a backend devhub no longer implements must
+            # not shadow a perfectly good git remote.
+            val (backend, source) = pick_git_backend("", "", "perforce", "", "git@github.com:o/s.git")
+            expect(backend).to_equal("github")
+            expect(source).to_equal("git remote origin")
+
+    describe "unresolved_backend_message":
+        it "names every way to fix it":
+            val msg = unresolved_backend_message()
+            expect(msg).to_contain("--backend")
+            expect(msg).to_contain("DEVHUB_GIT_BACKEND")
+            expect(msg).to_contain(".spipe/config.sdn")
+            expect(msg).to_contain("origin")
+
+    describe "strip_inline_comment":
+        it "drops a trailing comment from a config value":
+            expect(strip_inline_comment("github          # github | bitbucket")).to_equal("github")
+
+        it "leaves a value with no comment untouched, trimmed":
+            expect(strip_inline_comment("  bitbucket  ")).to_equal("bitbucket")
+
+        it "requires whitespace before the hash, so a hash-led token survives":
+            expect(strip_inline_comment("#42")).to_equal("#42")
+
+    describe "parse_repo_devhub_config":
+        it "reads the devhub section of a .spipe/config.sdn":
+            val content = "spipe:\n  upstream: https://example.invalid/x.git\n\ndevhub:\n  git_backend: bitbucket\n  bb_workspace: acme\n  bb_repo: widgets\n"
+            val cfg = parse_repo_devhub_config(content)
+            expect(cfg.git_backend).to_equal("bitbucket")
+            expect(cfg.bb_workspace).to_equal("acme")
+            expect(cfg.bb_repo).to_equal("widgets")
+
+        it "ignores same-named keys in other sections":
+            # A bare grep for `git_backend:` would wrongly match this.
+            val content = "other:\n  git_backend: github\n\ndevhub:\n  git_backend: bitbucket\n"
+            expect(parse_repo_devhub_config(content).git_backend).to_equal("bitbucket")
+
+        it "strips inline comments from values":
+            val content = "devhub:\n  git_backend: github          # github | bitbucket\n"
+            expect(parse_repo_devhub_config(content).git_backend).to_equal("github")
+
+        it "ignores commented-out keys":
+            val content = "devhub:\n  git_backend: github\n  # bb_workspace: acme\n"
+            val cfg = parse_repo_devhub_config(content)
+            expect(cfg.git_backend).to_equal("github")
+            expect(cfg.bb_workspace).to_equal("")
+
+        it "records a token ENV VAR NAME, never a secret":
+            # .spipe/config.sdn is git-tracked, so only the variable's name
+            # may appear there; the secret stays in the environment.
+            val content = "devhub:\n  bitbucket_token_env: BB_TOKEN\n"
+            val cfg = parse_repo_devhub_config(content)
+            expect(cfg.token_envs.len()).to_equal(1)
+            expect(cfg.token_envs[0].0).to_equal("bitbucket")
+            expect(cfg.token_envs[0].1).to_equal("BB_TOKEN")
+
+        it "returns empty defaults for content with no devhub section":
+            val cfg = parse_repo_devhub_config("spipe:\n  upstream: https://example.invalid/x.git\n")
+            expect(cfg.git_backend).to_equal("")
+            expect(cfg.bb_workspace).to_equal("")
+            expect(cfg.token_envs.len()).to_equal(0)

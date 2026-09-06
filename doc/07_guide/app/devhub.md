@@ -107,12 +107,94 @@ devhub tasks close 42 --backend github
 Requires: `gh` CLI (github backend) or `acli`/Jira curl credentials (jira
 backend).
 
-## Facade: `git` — `github`/`gh` + `bb`/`b`
+## Facade: `git` — `gh`/`git` (routing) + `github`, `bb`/`b` (explicit)
 
-There is no `devhub git` verb — the "git" facade is two separate top-level
-commands, one per host.
+`devhub gh` (alias `devhub git`) is **one gh-shaped command that works against
+whichever backend this repository is on**. It resolves the backend, then either
+passes straight through to the real `gh` (GitHub) or translates gh's flags into
+Bitbucket's and normalises Bitbucket's JSON back into gh's field names.
 
-### `github` (alias `gh`)
+```bash
+devhub gh pr create --title T --body B --base main --head work/x
+devhub gh pr list --state open --json number,title,headRefName
+devhub gh pr merge 42 --squash
+```
+
+The two host-specific commands below (`github`, `bb`) still exist and are
+unchanged; use them to address one host explicitly.
+
+### Replacing `gh` outright (`bin/gh`)
+
+The reason devhub went unused was mechanical: people and agents type `gh`, and
+nothing was in the way. `bin/gh` is a shim that fixes that — put the repo's
+`bin/` ahead of the real `gh` on `PATH` and every existing habit, script, and
+agent instruction routes through devhub with **no change to what anyone types**:
+
+```bash
+export PATH="/path/to/repo/bin:$PATH"
+gh pr create --title T --base main --head work/x   # -> devhub, or -> real gh
+```
+
+Two properties worth knowing:
+
+- **It is free on GitHub.** The shim resolves the backend in POSIX shell
+  (~0.078 s) and, for `github`, `exec`s the real `gh` without entering Simple
+  at all — so it is byte-identical to not having a shim. Only a non-GitHub
+  backend pays the ~12 s interpreter startup, and only because there is real
+  translation to do.
+- **It cannot recurse.** devhub's GitHub adapter shells out to `gh`; with the
+  shim on `PATH` that would loop forever. The shim resolves the real binary
+  first and exports `DEVHUB_REAL_GH`, which the adapter prefers.
+
+Escape hatches: `DEVHUB_GH_PASSTHROUGH=1` forces the real `gh` unconditionally;
+`DEVHUB_GIT_BACKEND=<github|bitbucket>` overrides resolution for one command.
+
+### Which backend? (resolution order)
+
+Highest precedence first — the first rung that yields a known backend wins, and
+the source is named in errors so a surprising choice is traceable:
+
+| # | Rung | Set it with |
+|---|---|---|
+| 1 | `--backend` flag | `devhub gh --backend bitbucket pr list` |
+| 2 | environment | `DEVHUB_GIT_BACKEND=bitbucket` |
+| 3 | repo config (committed, shared) | `.spipe/config.sdn` → `devhub:` → `git_backend:` |
+| 4 | user config | `~/.config/itf/config.sdn` → `git:` → `default_backend:` |
+| 5 | remote host sniff | an `origin` pointing at `github.com` / `bitbucket.org` |
+
+Nothing resolved is an **error naming every way to fix it**, never a guess.
+
+Bitbucket coordinates resolve on the same shape:
+`--workspace`/`--repo` > `BB_WORKSPACE`/`BB_REPO` > `.spipe/config.sdn`
+(`bb_workspace`, `bb_repo`) > `~/.config/itf/config.sdn` (`[bitbucket]`).
+
+```sdn
+# .spipe/config.sdn — tracked by git, so NAMES of secrets only, never secrets
+devhub:
+  git_backend: bitbucket
+  bb_workspace: acme
+  bb_repo: widgets
+  bitbucket_token_env: BB_TOKEN
+```
+
+Credentials resolve `[token_env]` (read `$NAME` from the environment) >
+`[token_cmd]` (run a command, e.g. `pass show ...`) > `auth.sdn` plaintext.
+
+### What translation does and does not do
+
+On a non-GitHub backend, gh flags are renamed (`--head`→`--source`,
+`--base`→`--dest`), `--state closed` becomes Bitbucket's `DECLINED`, and
+`gh pr merge`/`review --approve`/`comment` are renested onto Bitbucket's
+top-level `merge`/`approve`/`comment post`. `--json` output is re-keyed to gh's
+names (`number`, `headRefName`, `baseRefName`, `author.login`, `url`, `body`,
+`isDraft`).
+
+**A gh flag with no backend equivalent is refused by name, never dropped**
+(`--draft`, `--fill`, `--web`, `--template`, `--admin`, `--auto`, `--search`).
+A silently-dropped `--base` would open a PR against the wrong branch and still
+exit 0; a refusal is strictly safer than an approximation.
+
+### `github` (alias `gh` when routed — see above)
 
 Thin wrapper around the real `gh` CLI: `list` gets reformatted into a table
 (or `--json`/`--jq`); every other verb is a **verbatim passthrough** to `gh`
@@ -327,6 +409,20 @@ Honest, currently-open gaps — do not expect these to work:
   cap, they refuse and point you at the real `mc` CLI.
 - **`bb`**: no free-text search verb; list endpoints cap at 10 pages
   (`_capped:true` in `--json` past the cap).
+- **`gh` facade covers `pr` and `repo` only** on non-GitHub backends. `issue`
+  is not routed (Bitbucket issues are a different product from Jira, which the
+  `tasks` facade already covers). On the `github` backend everything works,
+  because it is a passthrough.
+- **`gh --json` is gh-shaped for PR objects only.** `pr view/list/create/merge`
+  are re-keyed to gh's field names; `approve`/`comment`/`status` still emit
+  backend-native JSON. gh's own JSON for those is minimal and nothing here
+  parses it.
+- **No `bin/mc` or `bin/jira` shim yet.** The same interception pattern applies
+  to the `storage` and `tasks` facades, which are already mc- and gh-shaped.
+  Only `gh` is shimmed, because that is where the demonstrated bypass was.
+- **`bin/gh` is opt-in.** Nothing puts `bin/` on `PATH` for you. On a GitHub
+  repo installing it changes no behaviour (it `exec`s the real `gh`); it earns
+  its keep when the backend is not GitHub.
 - **`email` on the `outlook` (Graph) provider**: only `inbox`/`read`/`archive`
   work; `search`/`send`/`reply`/`forward`/`label`/`star`/`draft` return an
   explicit gap error rather than running. Use `outlook_imap` (mail-cli) for

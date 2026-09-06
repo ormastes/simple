@@ -1,0 +1,242 @@
+# devhub — the `git` facade (aliases: `gh`).
+#
+# ONE gh-shaped command that works against whichever git-hosting backend the
+# repo is actually on. This is the facade the design doc listed in its table
+# of five and that had never been built: `devhub github` was a pure passthrough
+# to the real `gh`, `devhub bb` was a separate command with a different flag
+# vocabulary, and nothing read a configured backend and routed. That is the
+# mechanical reason devhub was bypassed for every pull request.
+#
+#   devhub gh pr create --title T --body B --base main --head work/x
+#
+# ...opens a PR on GitHub or on Bitbucket, unchanged, depending only on config.
+#
+# Reached three ways:
+#   bin/gh …          the PATH shim (the point of the exercise — see bin/gh)
+#   devhub gh …       explicit
+#   devhub git …      explicit, facade's own name
+#
+# Output shape: on the github backend, output is the real gh's, byte for byte.
+# On any other backend, `--json` output is NORMALISED to gh's field names
+# (number/title/state/url/headRefName/baseRefName/author.login/...), because
+# the whole point is that a caller — human or LLM — reads back the shape it
+# already knows. Translation lives in gh_compat.spl and is pure/unit-tested.
+#
+# Research: doc/01_research/app/tools/devhub/devhub_cli_wrapper_forwarding_2026-09-06.md
+# Design:   doc/05_design/app/devhub/devhub_overview.md (facade `git`, D1)
+#
+# TODO(devhub-shim-mc-jira): apply the same PATH-shim + resolver pattern to the
+#   `storage` and `tasks` facades (`bin/mc`, `bin/jira`). Both already imitate the
+#   dominant CLI, so only interception is missing. Not built here because `gh` is
+#   the only facade with a demonstrated bypass, and one proven shim beats three
+#   speculative ones.
+# TODO(devhub-git-issue-verb): route `gh issue` on non-GitHub backends. Left out
+#   because Bitbucket issues are a different product from Jira, which the `tasks`
+#   facade already covers gh-shaped — routing them here needs a decision about
+#   which tracker `gh issue` means on a bitbucket repo, not just a translation table.
+
+use app.devhub.backend_resolve.{resolve_git_backend, resolve_bb_coordinates, unresolved_backend_message}
+use app.devhub.cmd_github.{handle_github}
+use app.devhub.cmd_bb.{handle_bb}
+use app.devhub.adapter_bitbucket.{BbClient, bb_get_pr, bb_list_prs, bb_create_pr_with_body, bb_merge_pr}
+use app.devhub.gh_compat.{gh_pr_to_bb_argv, gh_repo_to_bb_argv, bb_pr_to_gh_json, gh_state_to_bb}
+use app.devhub.flags.{_extract_flag, _has_flag, _remove_flags, _positional_args}
+use app.devhub.output.{print_error, format_json_output, wants_json}
+
+
+fn handle_git(args: [text]) -> i64:
+    """Dispatch `devhub git` / `devhub gh` against the resolved backend."""
+    if args.len() == 0:
+        _print_git_help()
+        return 0
+
+    # --help must answer without resolving a backend: a user asking how to
+    # use the command has by definition not configured it yet.
+    if args[0] == "-h" or args[0] == "--help" or args[0] == "help":
+        _print_git_help()
+        return 0
+    if args[0] == "--version" or args[0] == "version":
+        # `gh --version` is probed by tooling to decide whether gh exists at
+        # all, so it must answer without touching config or the network.
+        print "devhub gh (gh-compatible facade)"
+        return 0
+
+    val (backend, source) = resolve_git_backend(args)
+    if backend == "":
+        print_error(unresolved_backend_message())
+        return 1
+
+    # --backend is devhub's own flag; neither the real gh nor cmd_bb knows it.
+    val rest = _remove_flags(args, ["--backend"])
+
+    match backend:
+        "github":
+            # Byte-identical passthrough. No translation, no normalisation:
+            # on GitHub the famous shape IS the native shape.
+            handle_github(rest)
+        "bitbucket":
+            _git_bitbucket(rest, source)
+        _:
+            print_error("backend `{backend}` (from {source}) is not implemented.\n  implemented: github, bitbucket")
+            1
+
+
+fn _git_bitbucket(args: [text], source: text) -> i64:
+    """Run a gh-shaped command against the Bitbucket backend."""
+    val noun = args[0]
+    val rest = if args.len() > 1: args[1:] else: []
+
+    if noun != "pr" and noun != "repo":
+        print_error("`gh {noun}` is not supported on the bitbucket backend (selected by {source}).\n  supported nouns: pr, repo")
+        return 1
+    if rest.len() == 0:
+        print_error("usage: gh {noun} <verb> [flags]")
+        return 1
+
+    val verb = rest[0]
+    val verb_args = if rest.len() > 1: rest[1:] else: []
+
+    # JSON mode is the LLM/script path and is the one where output SHAPE is
+    # load-bearing, so it is served directly off the adapter and normalised
+    # to gh's field names. Human mode delegates to cmd_bb, whose tables are
+    # already right and which there is no reason to duplicate.
+    if noun == "pr" and wants_json(verb_args):
+        val (handled, rc) = _pr_json(verb, verb_args)
+        if handled:
+            return rc
+
+    val (ok, bb_args, err) = if noun == "pr":
+        gh_pr_to_bb_argv(verb, verb_args)
+    else:
+        gh_repo_to_bb_argv(verb, verb_args)
+
+    if not ok:
+        print_error(err)
+        return 1
+    handle_bb(bb_args)
+
+
+fn _pr_json(verb: text, args: [text]) -> (bool, i64):
+    """Serve `gh pr <verb> --json` from the Bitbucket adapter with gh-shaped
+    output. Returns (handled, rc); handled=false means "fall through to the
+    normal cmd_bb path", which is how verbs whose responses are not PR
+    objects (approve, comment, status) keep working.
+
+    # ponytail: approve/comment/status emit backend-native JSON via cmd_bb
+    # rather than a gh-shaped envelope. gh's own JSON for those is minimal and
+    # no caller in this repo parses it; add a mapping here if one appears.
+    """
+    val (ws, repo) = resolve_bb_coordinates(args)
+    if ws == "" or repo == "":
+        print_error("bitbucket workspace/repo unknown.\n  set --workspace/--repo, BB_WORKSPACE/BB_REPO, or .spipe/config.sdn devhub: bb_workspace/bb_repo")
+        return (true, 1)
+    val client = BbClient.from_env()
+
+    match verb:
+        "view":
+            val positionals = _positional_args(args)
+            if positionals.len() == 0:
+                print_error("PR number required. Usage: gh pr view <NUMBER> --json <fields>")
+                return (true, 1)
+            val (ok, _pr, raw) = bb_get_pr(client, ws, repo, _parse_i64(positionals[0]))
+            if not ok:
+                print_error(raw)
+                return (true, 1)
+            print format_json_output(bb_pr_to_gh_json(raw), args)
+            (true, 0)
+        "list":
+            val gh_state = _extract_flag(args, "--state", "open")
+            val bb_state = gh_state_to_bb(gh_state)
+            if bb_state == "":
+                print_error("unknown --state value `{gh_state}` (expected open, closed, merged, or all)")
+                return (true, 1)
+            val limit = _parse_i64_or(_extract_flag(args, "--limit", "30"), 30)
+            val (list_ok, _prs, list_raw, _capped) = bb_list_prs(client, ws, repo, bb_state, limit)
+            if not list_ok:
+                print_error(list_raw)
+                return (true, 1)
+            print format_json_output(bb_pr_to_gh_json(list_raw), args)
+            (true, 0)
+        "create":
+            val title = _extract_flag(args, "--title", _extract_flag(args, "-t", ""))
+            val head = _extract_flag(args, "--head", _extract_flag(args, "-H", ""))
+            if title == "" or head == "":
+                print_error("--title and --head are required (Bitbucket cannot infer the source branch)")
+                return (true, 1)
+            val base = _extract_flag(args, "--base", _extract_flag(args, "-B", ""))
+            val body = _extract_flag(args, "--body", _extract_flag(args, "-b", ""))
+            var reviewers: [text] = []
+            var i: i64 = 0
+            while i < args.len():
+                if (args[i] == "--reviewer" or args[i] == "-r") and i + 1 < args.len():
+                    reviewers = reviewers + [args[i + 1]]
+                i = i + 1
+            val (create_ok, _created, create_raw) = bb_create_pr_with_body(client, ws, repo, title, head, base, reviewers, body)
+            if not create_ok:
+                print_error(create_raw)
+                return (true, 1)
+            print format_json_output(bb_pr_to_gh_json(create_raw), args)
+            (true, 0)
+        "merge":
+            val merge_positionals = _positional_args(args)
+            if merge_positionals.len() == 0:
+                print_error("PR number required. Usage: gh pr merge <NUMBER>")
+                return (true, 1)
+            # gh's default merge is a merge commit; carry that across rather
+            # than inheriting cmd_bb's own "squash" default, which would make
+            # `gh pr merge N` do something different from what gh does.
+            var strategy = "merge_commit"
+            for arg in args:
+                if arg == "--squash" or arg == "-s":
+                    strategy = "squash"
+                else if arg == "--rebase":
+                    strategy = "fast_forward"
+            val (merge_ok, _merged, merge_raw) = bb_merge_pr(client, ws, repo, _parse_i64(merge_positionals[0]), strategy, true)
+            if not merge_ok:
+                print_error(merge_raw)
+                return (true, 1)
+            print format_json_output(bb_pr_to_gh_json(merge_raw), args)
+            (true, 0)
+        _:
+            (false, 0)
+
+
+fn _parse_i64(s: text) -> i64:
+    _parse_i64_or(s, 0)
+
+
+fn _parse_i64_or(s: text, fallback: i64) -> i64:
+    """Digits-only parse with an explicit fallback. Leading `#` is tolerated
+    so `gh pr view #12` behaves like `gh pr view 12` — devhub's own tables
+    print PR ids with a `#`, so users paste them back that way."""
+    var result: i64 = 0
+    var seen = false
+    for ch in s:
+        if ch >= "0" and ch <= "9":
+            result = result * 10 + (ch.to_i64() - "0".to_i64())
+            seen = true
+    if not seen:
+        return fallback
+    result
+
+
+fn _print_git_help():
+    print "devhub gh — gh-compatible CLI over your configured git backend"
+    print ""
+    print "Usage: devhub gh <pr|repo> <verb> [flags]      (alias: devhub git)"
+    print "       bin/gh <pr|repo> <verb> [flags]         (PATH shim: replaces the real gh)"
+    print ""
+    print "Backend resolution (highest precedence first):"
+    print "  --backend <github|bitbucket>"
+    print "  DEVHUB_GIT_BACKEND"
+    print "  .spipe/config.sdn        devhub: git_backend:"
+    print "  ~/.config/itf/config.sdn git: default_backend:"
+    print "  the host of `git remote get-url origin`"
+    print ""
+    print "pr    create, view, list, merge, review --approve, comment, status"
+    print "repo  view, list"
+    print ""
+    print "On the github backend every command is a byte-identical passthrough to"
+    print "the real gh. On other backends, gh flags are translated and --json output"
+    print "is normalised to gh's field names; a gh flag with no backend equivalent"
+    print "is refused by name rather than silently dropped."

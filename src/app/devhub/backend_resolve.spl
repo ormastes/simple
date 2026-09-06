@@ -1,0 +1,259 @@
+# devhub — git backend resolution.
+#
+# ONE resolver for the question "which git-hosting backend is this repo on,
+# and with what workspace/repo coordinates". Everything that needs a backend
+# asks here; nothing re-derives it.
+#
+# Precedence (design doc D1, generalised to `git` — which is exactly the rung
+# the design doc flagged as missing: "git.default_backend does not exist yet"):
+#
+#   --backend FLAG                       caller's explicit intent
+#   > DEVHUB_GIT_BACKEND env             session / CI override
+#   > .spipe/config.sdn [devhub]         the repo's committed, shared answer
+#   > ~/.config/itf/config.sdn [git]     the user's own default
+#   > `git remote get-url origin` host   zero-config: a fresh clone just works
+#   > (nothing)                          an ERROR naming what to set, never a
+#                                        silent default
+#
+# The same chain is implemented in POSIX sh in `bin/gh`, which must resolve
+# the backend WITHOUT paying the 12-second Simple startup cost on the hot
+# github path. The two are kept in step by
+# git_backend_resolution_spec.spl, which asserts the shim and this module
+# agree on the same inputs.
+#
+# Design: doc/05_design/app/devhub/devhub_overview.md (D1)
+# Research: doc/01_research/app/tools/devhub/devhub_cli_wrapper_forwarding_2026-09-06.md
+
+use std.nogc_sync_mut.env.{env_get}
+use std.nogc_sync_mut.file_system.file_ops.{file_read_text, file_exists}
+use std.nogc_sync_mut.io.process_ops.{process_run}
+use std.io_runtime.{cwd}
+use app.devhub.config.{ItfConfig, load_config, parse_sdn_sections}
+use app.devhub.flags.{_extract_flag}
+
+
+val KNOWN_GIT_BACKENDS = ["github", "bitbucket"]
+
+
+class RepoDevhubConfig:
+    """The `devhub:` section of a repo's `.spipe/config.sdn`.
+
+    Deliberately NOT merged into ItfConfig: this is repo-scoped and
+    git-tracked, while ItfConfig is user-scoped and (for auth.sdn) secret.
+    Keeping them distinct is what lets the precedence chain place them on
+    different rungs.
+    """
+    git_backend: text
+    bb_workspace: text
+    bb_repo: text
+    token_envs: [(text, text)]  # (provider, ENV VAR NAME) — never a secret
+
+    static fn empty() -> RepoDevhubConfig:
+        RepoDevhubConfig(git_backend: "", bb_workspace: "", bb_repo: "", token_envs: [])
+
+
+# ============================================================================
+# Pure decision functions (no I/O — this is what the specs drive)
+# ============================================================================
+
+fn normalize_backend(name: text) -> text:
+    """Fold aliases onto canonical backend names; "" for anything unknown.
+
+    Unknown returns "" rather than passing the string through, so a typo
+    (`--backend gitbub`) surfaces as "no backend resolved, here is how to set
+    one" instead of being routed somewhere that does not exist.
+    """
+    val lowered = name.trim().lower()
+    match lowered:
+        "github" | "gh":
+            "github"
+        "bitbucket" | "bb":
+            "bitbucket"
+        _:
+            ""
+
+
+fn sniff_backend_from_remote_url(url: text) -> text:
+    """Map a git remote URL onto a backend; "" when the host is not one we
+    implement. Handles both SSH (`git@host:owner/repo.git`) and HTTPS forms
+    because a substring test on the host is enough for both."""
+    if url == "":
+        return ""
+    val lowered = url.lower()
+    if lowered.contains("bitbucket.org"):
+        return "bitbucket"
+    if lowered.contains("github.com"):
+        return "github"
+    ""
+
+
+fn pick_git_backend(flag: text, env_value: text, repo_value: text, user_value: text, remote_url: text) -> (text, text):
+    """The precedence chain as a pure function: returns (backend, source).
+
+    `source` names the rung that decided, so errors and `--verbose` output can
+    tell the user WHERE a surprising backend came from — the single most
+    common confusion with layered config. On no decision, returns ("", "").
+    """
+    val from_flag = normalize_backend(flag)
+    if from_flag != "":
+        return (from_flag, "--backend flag")
+    val from_env = normalize_backend(env_value)
+    if from_env != "":
+        return (from_env, "DEVHUB_GIT_BACKEND")
+    val from_repo = normalize_backend(repo_value)
+    if from_repo != "":
+        return (from_repo, ".spipe/config.sdn [devhub] git_backend")
+    val from_user = normalize_backend(user_value)
+    if from_user != "":
+        return (from_user, "~/.config/itf/config.sdn [git] default_backend")
+    val from_remote = sniff_backend_from_remote_url(remote_url)
+    if from_remote != "":
+        return (from_remote, "git remote origin")
+    ("", "")
+
+
+fn unresolved_backend_message() -> text:
+    """The error shown when every rung came up empty. Names each way to fix
+    it — an error that does not say what to do is a dead end."""
+    "cannot determine the git backend for this repository.\n" +
+    "  set one of (highest precedence first):\n" +
+    "    --backend <github|bitbucket>\n" +
+    "    DEVHUB_GIT_BACKEND=<github|bitbucket>\n" +
+    "    .spipe/config.sdn  ->  devhub:\\n      git_backend: <github|bitbucket>\n" +
+    "    ~/.config/itf/config.sdn  ->  git:\\n    default_backend: <github|bitbucket>\n" +
+    "  or add an `origin` remote pointing at github.com or bitbucket.org."
+
+
+fn strip_inline_comment(value: text) -> text:
+    """Drop a trailing ` # comment` from a config value.
+
+    Applied ONLY to the repo-level `devhub:` section, whose values are
+    slugs and identifiers, never free text. It is deliberately not applied in
+    config.spl's shared parser: a [token_cmd] value is a shell command and a
+    URL can carry a `#` fragment, so stripping there would corrupt real
+    values. `bin/gh`'s awk strips the same way for the same keys, which is
+    what keeps the two implementations agreeing.
+
+    Requires whitespace before the `#`, so a value that is itself a `#`-led
+    token is left alone.
+    """
+    val idx = value.find(" #")
+    if idx < 0:
+        return value.trim()
+    value[0:idx].trim()
+
+
+fn parse_repo_devhub_config(content: text) -> RepoDevhubConfig:
+    """Extract the `devhub:` section from `.spipe/config.sdn` content.
+
+    Shares config.spl's parser (parse_sdn_sections) rather than growing a
+    second one — notably so this inherits the first-colon-split fix instead
+    of re-introducing the bug it closed.
+
+    Recognised keys: git_backend, bb_workspace, bb_repo, and
+    `<provider>_token_env` (e.g. `bitbucket_token_env: BB_TOKEN`), which
+    records the NAME of an environment variable, never a secret. That matters
+    because `.spipe/config.sdn` is a git-TRACKED file.
+    """
+    var out = RepoDevhubConfig.empty()
+    for entry in parse_sdn_sections(content):
+        if entry.0 == "devhub":
+            val key = entry.1
+            val value = strip_inline_comment(entry.2)
+            if key == "git_backend":
+                out = RepoDevhubConfig(git_backend: value, bb_workspace: out.bb_workspace, bb_repo: out.bb_repo, token_envs: out.token_envs)
+            else if key == "bb_workspace":
+                out = RepoDevhubConfig(git_backend: out.git_backend, bb_workspace: value, bb_repo: out.bb_repo, token_envs: out.token_envs)
+            else if key == "bb_repo":
+                out = RepoDevhubConfig(git_backend: out.git_backend, bb_workspace: out.bb_workspace, bb_repo: value, token_envs: out.token_envs)
+            else if key.ends_with("_token_env"):
+                val provider = key[0:key.len() - 10]
+                out = RepoDevhubConfig(git_backend: out.git_backend, bb_workspace: out.bb_workspace, bb_repo: out.bb_repo, token_envs: out.token_envs + [(provider, value)])
+    out
+
+
+# ============================================================================
+# I/O wrappers
+# ============================================================================
+
+fn find_repo_root() -> text:
+    """Walk up from the cwd looking for `.spipe/config.sdn`; "" if not found.
+
+    Anchored on that file rather than `.git` because devhub's repo-scoped
+    config IS that file — a worktree or a submodule checkout with a `.git`
+    file but no `.spipe/` has nothing here for us to read.
+    """
+    var dir = cwd()
+    var guard: i64 = 0
+    while dir != "" and guard < 64:
+        if file_exists("{dir}/.spipe/config.sdn"):
+            return dir
+        val slash = dir.rfind("/")
+        if slash <= 0:
+            return ""
+        dir = dir[0:slash]
+        guard = guard + 1
+    ""
+
+
+fn load_repo_devhub_config() -> RepoDevhubConfig:
+    """Load the `devhub:` section of the enclosing repo's `.spipe/config.sdn`."""
+    val root = find_repo_root()
+    if root == "":
+        return RepoDevhubConfig.empty()
+    val content = file_read_text("{root}/.spipe/config.sdn")
+    if content == nil:
+        return RepoDevhubConfig.empty()
+    parse_repo_devhub_config(content)
+
+
+fn git_remote_origin_url() -> text:
+    """`git remote get-url origin`, or "" if there is no origin / no git."""
+    val (stdout, _stderr, code) = process_run("git", ["remote", "get-url", "origin"])
+    if code != 0:
+        return ""
+    stdout.trim()
+
+
+fn resolve_git_backend(args: [text]) -> (text, text):
+    """Resolve the git backend for the current invocation: (backend, source).
+
+    ("", "") means unresolved — the caller prints unresolved_backend_message()
+    and exits non-zero. Never guesses.
+    """
+    val flag = _extract_flag(args, "--backend", "")
+    val repo_cfg = load_repo_devhub_config()
+    val user_cfg = load_config()
+    pick_git_backend(flag, env_get("DEVHUB_GIT_BACKEND"), repo_cfg.git_backend, user_cfg.git_default_backend, git_remote_origin_url())
+
+
+fn resolve_bb_coordinates(args: [text]) -> (text, text):
+    """Resolve (workspace, repo) for the bitbucket backend.
+
+    Precedence mirrors the backend chain: explicit flag > env > repo config >
+    user config. The env vars keep their existing BB_WORKSPACE / BB_REPO
+    names so every current caller and script keeps working unchanged — this
+    only ADDS the two config rungs the design doc recorded as missing
+    ("cmd_bb.spl still resolves those from --workspace/--repo flags or
+    BB_WORKSPACE/BB_REPO env vars only, not from config.sdn").
+    """
+    val repo_cfg = load_repo_devhub_config()
+    val user_cfg = load_config()
+
+    var ws = _extract_flag(args, "--workspace", "")
+    if ws == "":
+        ws = env_get("BB_WORKSPACE")
+    if ws == "":
+        ws = repo_cfg.bb_workspace
+    if ws == "":
+        ws = user_cfg.bb_workspace
+
+    var repo = _extract_flag(args, "--repo", "")
+    if repo == "":
+        repo = env_get("BB_REPO")
+    if repo == "":
+        repo = repo_cfg.bb_repo
+    if repo == "":
+        repo = user_cfg.bb_repo
+
+    (ws, repo)

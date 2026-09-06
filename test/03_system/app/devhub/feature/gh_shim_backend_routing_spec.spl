@@ -1,0 +1,220 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-SYSTEM
+# research: doc/01_research/app/tools/devhub/devhub_cli_wrapper_forwarding_2026-09-06.md ; design: doc/05_design/app/devhub/devhub_overview.md
+
+# @cover bin/gh 85%
+# @cover src/app/devhub/cmd_git.spl 45%
+# @cover src/app/devhub/backend_resolve.spl 30%
+"""
+# DevHub `gh` shim: backend routing at the process boundary
+
+**Requirement ID:** REQ-DEVHUB-GHSHIM-001
+**Category:** Application
+**Status:** Implemented
+**Design:** doc/05_design/app/devhub/devhub_overview.md
+**Research:** doc/01_research/app/tools/devhub/devhub_cli_wrapper_forwarding_2026-09-06.md
+
+## Overview
+
+This process-boundary specification runs the real `bin/gh` shim as a
+subprocess. It proves that a caller typing `gh` reaches the GitHub CLI
+unchanged when the repository is on GitHub, and reaches DevHub's translation
+layer when it is not — decided entirely by configuration, with no change to
+what the caller types. No backend credentials and no network access are used:
+every scenario stops at a translation decision, a refusal, or a configuration
+error, before any HTTP request is made.
+
+## User outcome
+
+DevHub had every adapter it needed and was still bypassed for every pull
+request, because agents and humans type `gh` and nothing was in the way. After
+this change, `gh pr create ...` is a DevHub command whenever DevHub has
+something to add, and is the untouched GitHub CLI whenever it does not.
+
+## Failure reproduced before the fix
+
+`devhub gh` was a pure passthrough to the system `gh` binary, and `devhub bb`
+was a separate command with a different flag vocabulary (`--source`/`--dest`
+rather than `--head`/`--base`). Nothing read a configured backend and routed
+between them, so using DevHub required knowing which backend the repository
+was on and picking the right subcommand by hand — the exact knowledge a
+wrapper exists to remove. Asking DevHub for `gh --backend bitbucket pr list`
+answered `error: unknown github command: --backend`.
+
+## Two process-level hazards this specification exists to pin
+
+**Recursion.** `adapter_github.spl` shells out to the bare name `gh`, resolved
+through `PATH`. With the shim ahead of the real binary that is
+shim -> devhub -> gh_run -> shim, forever, forking a ~12-second process each
+cycle. The shim exports `DEVHUB_REAL_GH` with the real binary's absolute path,
+resolved while it can still see an unshadowed `PATH`, and the adapter prefers
+it. Scenario 1 fails by hanging or by exhausting the process table if that
+guard regresses.
+
+**Startup cost.** `bin/devhub --version` costs about twelve seconds, because
+the standard library is read as source on every process start. Routing every
+`gh` call through Simple would make the shim a tax that gets routed around
+within a day. Backend resolution therefore happens in POSIX shell, and the
+GitHub case never enters Simple at all. Scenario 1 asserts the real GitHub
+CLI's own version banner, which is only reachable through that fast path.
+
+## Process matrix
+
+| Invocation | Expected exit | Required visible evidence |
+|---|---:|---|
+| `DEVHUB_GIT_BACKEND=github bin/gh --version` | 0 | the real `gh version` banner |
+| `DEVHUB_GIT_BACKEND=bitbucket bin/gh pr diff 1` | 1 | refusal naming `gh pr diff` |
+| `DEVHUB_GIT_BACKEND=bitbucket bin/gh pr create --draft` | 1 | refusal naming `--draft` |
+| `DEVHUB_GIT_BACKEND=bitbucket bin/gh pr list` | 1 | error naming the config keys to set |
+| `PATH=bin:$PATH gh --version` | 0 | real `gh` banner, terminates (non-recursion) |
+| `bin/gh --backend github pr diff` | 1 | GitHub handler answered, not Bitbucket |
+| `bin/devhub gh --help` | 0 | facade help, no backend required |
+
+## Exclusions
+
+The scenarios deliberately do not contact GitHub, Bitbucket, or any other
+remote. They do not validate credentials, API compatibility, or the content of
+a created pull request. Translation itself is pinned exhaustively and offline
+in `test/01_unit/app/devhub/gh_compat_spec.spl`; the precedence chain in
+`test/01_unit/app/devhub/backend_resolve_spec.spl`. This file proves only what
+those cannot: that a real process, invoked as `gh`, lands in the right place.
+
+## Pass criteria
+
+The runner must discover one spec with eight examples, all passing. Exits must
+match the matrix. A scenario that passes because a command was not found, or
+because `--version` answered while the routed commands did not, is not
+acceptance — scenario 1 asserts the GitHub CLI's own banner text, and the
+bitbucket scenarios assert DevHub's own refusal wording.
+
+## Evidence boundary
+
+A pass proves shim resolution, non-recursion, and routing on this checkout. It
+does not prove remote backend availability or that a created pull request has
+the intended contents.
+"""
+
+use std.spec.step
+
+use std.spec.*
+use app.io.mod.{process_run}
+
+
+fn run_sh(script: text) -> (text, text, i64):
+    """Run a shell line so each scenario can set the environment variable that
+    selects the backend. The shim reads it as its highest-precedence rung."""
+    process_run("/bin/sh", ["-c", script])
+
+
+describe "REQ-DEVHUB-GHSHIM-001: `gh` routes to the configured backend":
+
+    it "should reach the real GitHub CLI, not devhub, when the backend is github":
+        # @req REQ-DEVHUB-GHSHIM-001
+        # @req REQ-SSPEC-SYSTEM
+        step("should reach the real GitHub CLI when the backend is github")
+        step("Invoke the shim with the github backend selected")
+        val (stdout, stderr, exit_code) = run_sh("DEVHUB_GIT_BACKEND=github ./bin/gh --version")
+
+        step("Check that the GitHub CLI's own banner is what came back")
+        # Only reachable through the sh fast path: devhub's own facade prints
+        # a different string. This is simultaneously the non-recursion proof —
+        # a recursing shim never returns at all.
+        expect(exit_code).to_equal(0)  # oracle: pinned constant asserted by this scenario
+        expect(stdout).to_contain("gh version")
+
+    it "should route to devhub, not the GitHub CLI, when the backend is bitbucket":
+        # @req REQ-SSPEC-SYSTEM
+        step("should route to devhub when the backend is bitbucket")
+        step("Ask for a verb the GitHub CLI has and Bitbucket does not")
+        val (stdout, stderr, exit_code) = run_sh("DEVHUB_GIT_BACKEND=bitbucket ./bin/gh pr diff 1 2>&1")
+
+        step("Check that devhub refused by name and listed what it does support")
+        # The real gh would have run `pr diff` happily, so this wording is
+        # itself the evidence that the call did NOT reach the GitHub CLI.
+        expect(exit_code).to_equal(1)  # oracle: pinned constant asserted by this scenario
+        expect(stdout).to_contain("gh pr diff")
+        expect(stdout).to_contain("not supported on the bitbucket backend")
+
+    it "should refuse a gh flag with no Bitbucket equivalent instead of dropping it":
+        # @req REQ-SSPEC-SYSTEM
+        step("should refuse a gh flag with no Bitbucket equivalent")
+        step("Request a draft pull request, which Bitbucket Cloud cannot create")
+        val (stdout, stderr, exit_code) = run_sh("DEVHUB_GIT_BACKEND=bitbucket ./bin/gh pr create --title T --head work/x --base main --draft 2>&1")
+
+        step("Check the refusal names the offending flag")
+        # A silently-dropped flag would have opened a NON-draft PR and exited
+        # 0, which is the failure mode this refusal exists to prevent.
+        expect(exit_code).to_equal(1)  # oracle: pinned constant asserted by this scenario
+        expect(stdout).to_contain("--draft")
+        expect(stdout).to_contain("bitbucket")
+
+    it "should translate gh flag names into the Bitbucket vocabulary":
+        # @req REQ-SSPEC-SYSTEM
+        step("should translate gh flag names into the Bitbucket vocabulary")
+        step("Create a pull request using gh's --head/--base spelling")
+        val (stdout, stderr, exit_code) = run_sh("DEVHUB_GIT_BACKEND=bitbucket BB_WORKSPACE=acme BB_REPO=widgets ./bin/gh pr create --title T --head work/x --base main 2>&1")
+
+        step("Check the request reached the authentication boundary")
+        # Reaching "no Bitbucket token configured" proves --head became
+        # --source: an untranslated invocation stops earlier, at the
+        # "--title and --source are required" argument guard, and would never
+        # reach the adapter at all.
+        expect(exit_code).to_equal(1)  # oracle: pinned constant asserted by this scenario
+        expect(stdout).to_contain("no Bitbucket token configured")
+
+    it "should name the configuration keys to set when coordinates are unknown":
+        # @req REQ-SSPEC-SYSTEM
+        step("should name the configuration keys to set when coordinates are unknown")
+        step("Request a JSON listing with no workspace or repository configured")
+        val (stdout, stderr, exit_code) = run_sh("DEVHUB_GIT_BACKEND=bitbucket BB_WORKSPACE= BB_REPO= ./bin/gh pr list --json number 2>&1")
+
+        step("Check the error is actionable rather than a bare failure")
+        expect(exit_code).to_equal(1)  # oracle: pinned constant asserted by this scenario
+        expect(stdout).to_contain("workspace/repo unknown")
+        expect(stdout).to_contain(".spipe/config.sdn")
+
+    it "should not recurse when the shim actually shadows the real gh on PATH":
+        # @req REQ-SSPEC-SYSTEM
+        step("should not recurse when the shim shadows the real gh on PATH")
+        step("Put the repository's bin directory ahead of the real gh and invoke a bare `gh`")
+        # This is the deployed configuration — the one the whole feature is
+        # for — and the only one in which the recursion hazard is live. Every
+        # other scenario calls ./bin/gh by path, where PATH is unshadowed and
+        # the hazard cannot occur.
+        val (stdout, stderr, exit_code) = run_sh("PATH=\"$PWD/bin:$PATH\" DEVHUB_GIT_BACKEND=github gh --version")
+
+        step("Check a bare `gh` still reaches the real GitHub CLI and terminates")
+        # A regressed guard does not fail here, it HANGS: shim -> devhub ->
+        # gh_run -> shim, forking a ~12-second process per cycle. The runner's
+        # timeout is what turns that into a visible failure.
+        expect(exit_code).to_equal(0)  # oracle: pinned constant asserted by this scenario
+        expect(stdout).to_contain("gh version")
+
+    it "should let an explicit --backend outrank the shim's own resolution":
+        # @req REQ-SSPEC-SYSTEM
+        step("should let an explicit --backend outrank the shim's own resolution")
+        step("Select bitbucket in the environment but pass --backend github on the command line")
+        val (stdout, stderr, exit_code) = run_sh("DEVHUB_GIT_BACKEND=bitbucket ./bin/gh --backend github pr diff 2>&1")
+
+        step("Check the GitHub handler answered, not the Bitbucket one")
+        # Regression guard for a real defect: the shim first handed its
+        # resolved backend over as an injected `--backend` flag, which landed
+        # BEFORE the caller's own copy. _extract_flag returns the first match,
+        # so the caller's explicit choice silently lost to the shim's guess.
+        # The backend is now passed as the environment rung instead, which is
+        # exactly where the documented precedence puts it.
+        expect(exit_code).to_equal(1)  # oracle: pinned constant asserted by this scenario
+        expect(stdout).to_contain("unknown github pr command")
+
+    it "should answer for the facade help without requiring any backend":
+        # @req REQ-SSPEC-SYSTEM
+        step("should answer for the facade help without requiring any backend")
+        step("Ask devhub for the git facade help")
+        # A user asking how to use the command has by definition not
+        # configured it yet, so help must not resolve a backend first.
+        val (stdout, stderr, exit_code) = run_sh("./bin/devhub gh --help 2>&1")
+
+        step("Check the help names the facade and its resolution order")
+        expect(exit_code).to_equal(0)  # oracle: pinned constant asserted by this scenario
+        expect(stdout).to_contain("gh-compatible CLI over your configured git backend")
+        expect(stdout).to_contain("DEVHUB_GIT_BACKEND")

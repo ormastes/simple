@@ -7,8 +7,29 @@
 # invocation + actionable-error detection; cmd_github.spl owns table/JSON
 # formatting on top of `gh ... --json ...` output.
 
+use std.nogc_sync_mut.env.{env_get}
 use std.nogc_sync_mut.io.process_ops.{process_run}
 use app.devhub.retry.{ITF_RETRY_MAX_ATTEMPTS, itf_retry_wait}
+
+
+fn gh_binary() -> text:
+    """The `gh` executable to invoke.
+
+    RECURSION GUARD. `bin/gh` is a devhub shim that shadows the real gh on
+    PATH so that a caller typing `gh` is routed to devhub. This adapter used
+    to invoke the bare name `"gh"`, resolved through PATH — which, with the
+    shim installed, means shim -> devhub -> gh_run -> shim -> ... forever,
+    forking a ~12-second process each cycle. A fork bomb, not a slow path.
+
+    The shim exports DEVHUB_REAL_GH holding the ABSOLUTE path of the real
+    binary, resolved while it could still see an unshadowed PATH. Preferring
+    it here is what makes the shim safe. Unset (no shim installed, or devhub
+    invoked directly) falls back to the bare name, exactly as before.
+    """
+    val real = env_get("DEVHUB_REAL_GH")
+    if real != "":
+        return real
+    "gh"
 
 
 fn _gh_rate_limited(stderr: text) -> bool:
@@ -29,7 +50,7 @@ fn gh_run(args: [text]) -> (bool, text, text):
     var attempt = 0
     var result = ("", "", -1)
     while attempt < ITF_RETRY_MAX_ATTEMPTS:
-        result = process_run("gh", args)
+        result = process_run(gh_binary(), args)
         val stderr = result.1
         val code = result.2
         attempt = attempt + 1
@@ -41,7 +62,7 @@ fn gh_run(args: [text]) -> (bool, text, text):
 
 fn gh_available() -> bool:
     """True if the `gh` binary is on PATH and runnable."""
-    val (_stdout, _stderr, code) = process_run("gh", ["--version"])
+    val (_stdout, _stderr, code) = process_run(gh_binary(), ["--version"])
     code == 0
 
 
