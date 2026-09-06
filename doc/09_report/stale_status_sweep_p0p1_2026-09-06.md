@@ -26,6 +26,20 @@ under `build/sweep/` and are wired into no gate.
 | Per-row wall budget | 420 s (`SWEEP_TIMEOUT=420`) |
 | Measured cost of one spec | 4.0 s wall for a 12-example crypto spec — **not** the 1-3 min budgeted, and not the ~310 s `Session setup` cost quoted for whole-suite runs in `.claude/rules/commands.md` |
 
+**Side effects the sweep DID cause, and their reversal.** Running 155 real
+repros is not free: three of them write to the tree. `bin/simple run
+test/perf/db/db_bench_driver.spl` (the JIT-lane run of
+`interp_run_cross_module_db_option_mutation_2026-06-13`) rewrote
+`doc/09_report/perf/perf_baseline_db_2026-06-13.md` and
+`doc/10_metrics/perf/perf_baseline_db_table.md`;
+`scripts/check/check-portable-compute-toolchains.shs` created
+`doc/09_report/portable_compute_toolchains_2026-09-06.md`; and one repro
+dropped a binary-named junk file in the repo root. All four were reverted
+(`git checkout --` on the two tracked docs, delete on the two untracked files)
+and `git status --short` in this worktree is clean apart from this report and
+the two harness scripts. Anyone re-running this sweep should expect the same
+four and revert them the same way.
+
 Side-effect check, run before the fan-out: a single `bin/simple test <spec>`
 left `git status --short` **empty** in this worktree, and the shared main
 worktree's `doc/08_tracking/test/test_db.sdn` and `test_result.md` kept their
