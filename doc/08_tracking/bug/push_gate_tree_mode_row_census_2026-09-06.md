@@ -55,9 +55,53 @@ comm -23 /tmp/mkeys.txt /tmp/dkeys.txt   # MUST be empty
 ```
 
 Measured 2026-09-06: 33 push rows, 37 arms, 0 unmatched. The 4 surplus arms
-(`push-no-direct-rt:tree:...` without `--roots src`, `push-outline-parse-terminates`,
-`push-signature-type-import-provenance`, `push-use-target-resolves`) are inert
-dead code, harmless but worth deleting when someone is in the file.
+(`push-no-direct-rt:tree:...` **without** `--roots src`,
+`push-outline-parse-terminates`, `push-signature-type-import-provenance`,
+`push-use-target-resolves`) match no manifest row and are never executed. The
+`push-no-direct-rt` one is actively misleading: an arm sharing an id with a live
+row but carrying a different command reads like the manifest row is wrong, when
+in fact the live row matches a *second*, correct arm further down.
+
+### Do NOT simply delete those 4 arms (tried 2026-09-06, reverted)
+
+Deleting them was attempted and **turned the BLOCKING `push-guard-wiring` gate
+red**, from a clean detached checkout:
+
+```
+check-guard-wiring: FAIL — 1595 guard(s) checked, 3 NEW unwired (734 baselined as known debt)
+  unwired_guard=check-outline-parse-terminates.shs
+  unwired_guard=check-signature-type-import-provenance.shs
+  unwired_guard=check-use-target-resolves.shs
+```
+
+**`check-guard-wiring.shs` counts a DEAD dispatch arm as wiring.** Those three
+guards' only recognised wiring was an unreachable case arm; each also has a
+`bootstrap`-tier manifest row, and guard-wiring does not credit that. So the
+repo currently has three guards that guard-wiring reports as wired while nothing
+can ever execute them from the push path — the same false-assurance shape as the
+wrong-tree defect itself, one level up. (`check-no-direct-rt.shs` survived the
+deletion because its live `--roots src` arm remains.)
+
+The deletion was reverted rather than "fixed" by editing the guard-wiring
+baseline: the red is CORRECT, and silencing it would destroy the finding. The
+real repair is either to credit `bootstrap`-tier rows as wiring in
+`check-guard-wiring.shs`, or to give those three guards genuine push/CI rows —
+both out of scope here, both now visible. Anyone deleting the dead arms must do
+that first.
+
+### The hook is bypassed on the PR flow anyway
+
+Worth stating plainly, because it bounds what any of this buys: `main` is
+ruleset-protected, so work lands by pushing a `work/*` topic branch and merging a
+PR. Topic pushes in this repo are made with `--no-verify` (the hook ends
+`BLOCKING gate push-rules-quick failed` on unmodified `origin/main`), and
+`--no-verify` skips `check-push-must-pass.shs` **entirely** — dispatcher, every
+row, blocking and advisory alike. So these gates being correct is necessary and
+not sufficient: the gates now read the right tree *when they run*, and on the
+current landing path they do not run. Two follow-ups are implied and neither is
+done here: repair `push-rules-quick` so the hook can run unassisted, and mirror
+the push tier into the PR's required CI job so bypassing the local hook does not
+bypass the gate.
 
 ## The fix pattern
 
@@ -89,6 +133,32 @@ template, and every conversion follows it exactly:
    confirming the selftest goes rc=2.
 6. Manifest row and dispatch arm move together, in one commit.
 
+### How to prove a new fixture actually discriminates
+
+A fixture that only catches a CRASH is worthless — the regression being guarded
+against is silent, not loud. Inject the rot in its real shape: leave
+materialisation succeeding and point the scan paths back at the working
+checkout, then confirm the selftest fails with the fixture's own message.
+Measured for the two gates converted so far:
+
+```
+=== type-walk fixture 7 ===                  (rot: MAT/PROJ/ALLOW resolved against $ROOT)
+clean selftest rc=0
+rotted selftest rc=2
+  selftest: fixture 7 --rev did not read committed content: FAIL — 6 constructor(s) checked; unprojected and unallowlisted: Brandnew
+restored rc=0
+
+=== no-mock-fs-io fixture 6 ===              (rot: SCAN_ROOT="$ROOT" after a successful archive)
+clean rc=0
+rotted rc=1
+  selftest FAIL: --rev did not read committed content, got [FAIL — 2 import site(s) checked, 1 new]
+restored rc=0
+```
+
+Note both rotted runs produce a real wrong-tree VERDICT (`FAIL — Brandnew`,
+`FAIL — 1 new`) rather than an error — that is exactly the shape that slipped
+past everyone on 2026-09-06, and it is what the fixtures now catch.
+
 ## The 24 rows
 
 `B` = push_blocking. Status as of this commit.
@@ -101,12 +171,12 @@ template, and every conversion follows it exactly:
 | 4 | `push-ui-slim-pack-inventory` | `check-ui-slim-pack-inventory.shs` | no | `--rev`; also needs `config/ui/pack_prefixes.sdn` from the rev | TODO |
 | 5 | `push-c-runtime-compiles` | `check-c-runtime-compiles-push.shs` | **yes** | **materialise + `--root`** — it must feed real `.c`/`.h` files to `clang -fsyntax-only`. Already accepts `--root`, so the dispatch change is `git archive <rev> -- src/runtime` into a temp dir and pass it. Include paths must resolve inside the materialised tree. | TODO |
 | 6 | `push-no-direct-rt` | `check-no-direct-rt.shs --roots src` | **yes** | `--rev` over `':(glob)src/**/*.spl'` plus `no_direct_rt_baseline.txt` and `no_direct_rt_allowlist.txt` from the rev. Already accepts `--root`. Largest single win after the two below. | TODO |
-| 7 | `push-guard-wiring` | `check-guard-wiring.shs` | **yes** | `--rev`, but it enumerates guards with `git ls-files` and inspects installed hooks. Under `git archive` there is no `.git`, so enumeration must switch to `git ls-tree -r --name-only $REV --`. The *installed-hook* half is genuinely about the working machine, not the pushed commit, and must stay tree-scoped — this row needs SPLITTING, not a flag. | TODO (needs design) |
+| 7 | `push-guard-wiring` | `check-guard-wiring.shs` | **yes** | `--rev`. Design settled, no split needed: the guard ENUMERATION switches from `git ls-files` to `git ls-tree -r --name-only $REV --` (a `git archive` extraction has no `.git`, so `ls-files` there returns nothing — fail-closed, but broken), while the installed-hook check stays on the working machine, since "is the hook installed here" really is a property of this host. One script, `--rev` gating one loop. | TODO |
 | 8 | `push-sosix-capsule-boundaries` | `check-sosix-capsule-boundaries.shs` | no | `--rev`; small (105 lines), accepts `--root` | TODO |
 | 9 | `push-perf-regression-tests` | `check-perf-regression-tests.shs` | no | `--rev` over source text | TODO |
 | 10 | `push-process-wait-eintr-retry` | `check-process-wait-eintr-retry.shs` | no | `--rev`; small (91 lines) | TODO |
 | 11 | `push-interpreter-extern-registry-gap` | `check-interpreter-extern-registry-gap.shs --scan-only` | **yes** | `--rev`; accepts `--root`. **RED at origin/main — see below.** | TODO |
-| 12 | `push-sffi-v2-authority` | `check-sffi-v2-authority.shs` | **yes** | 102-line wrapper over 46 separate `scripts/audit/*.shs` guards with **zero selftest**. Per-script `--rev` is infeasible; the right answer is `git worktree add --detach` and run the wrapper with cwd inside it. **RED at origin/main — see below.** | TODO (needs worktree approach) |
+| 12 | `push-sffi-v2-authority` | `check-sffi-v2-authority.shs` | **yes** | 102-line wrapper over 46 separate `scripts/audit/*.shs` guards with **zero selftest**. Per-script `--rev` is infeasible, but the fix is still one commit: `git worktree add --detach $WORK $REV` then run the wrapper with cwd inside `$WORK`. A detached worktree (not `git archive`) is required precisely because the 46 sub-guards may run git themselves. Add the missing selftest in the same change — a 46-guard wrapper with no fixtures cannot be shown to discriminate at all. **RED at origin/main — see below.** | TODO |
 | 13 | `push-type-walk-constructor-parity` | `check-type-walk-constructor-parity.shs --scan-only` | **yes** | `--rev` — reads exactly 3 files | **DONE** |
 | 14 | `push-shs-path-conversion-equivalence` | `check-shs-path-conversion-equivalence.shs` | no | scan half is source text → `--rev`. The *exec* half needs `cygpath` and is NOT RUN off Windows; that half is genuinely host-scoped. | TODO (split) |
 | 15 | `push-shs-native-tool-boundary-preserved` | `check-shs-native-tool-boundary-preserved.shs` | no | as above | TODO (split) |
@@ -141,6 +211,14 @@ runtime-source-list-parity rc=0 PASS — 135 file(s) checked, 0 drift
 sffi-v2-authority          rc=1 FAIL — 12 of 46 guard(s) failed
 type-walk                  rc=0 PASS — 12 constructor(s) checked, 0 unprojected and unallowlisted
 ```
+
+A side observation from the same run, not a red but worth one line:
+`no-direct-rt` reports `forbidden=6206 (baseline 7776)` — the population is
+**1,570 sites BELOW its own baseline**. A ratchet sitting 20% under its floor has
+stopped ratcheting: 1,570 new forbidden call sites could land before it noticed.
+Ratcheting the baseline down to the measured value is a separate, reviewed
+change (`--generate-baseline` after reading the diff), deliberately not made
+here.
 
 **Two BLOCKING push gates are red on `main` itself**, in a clean checkout, with
 no local edits to blame:
