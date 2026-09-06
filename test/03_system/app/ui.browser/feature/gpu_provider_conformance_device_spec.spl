@@ -1,0 +1,122 @@
+"""
+## Purpose and audience
+Runs the real Engine2D GPU provider probes on this host and records what each
+provider (Vulkan, Metal, DirectX) actually reports. The reader is an engineer
+asking "on this machine, which GPU providers exist, and is any of them good
+enough for the scheduler to trust with an unattended submission lane?".
+Category: Runtime.
+## Operator workflow
+SIMPLE_LIB=src bin/release/macos-arm64/simple test test/03_system/app/ui.browser/feature/gpu_provider_conformance_device_spec.spl
+SIMPLE_GPU_TEST=1 SIMPLE_LIB=src bin/release/macos-arm64/simple test test/03_system/app/ui.browser/feature/gpu_provider_conformance_device_spec.spl
+## Compatibility and limitations
+The first scenario is ungated and passes on a host with no GPU at all: probing
+an absent backend must produce an unavailable report, never a crash. The
+per-provider scenarios need SIMPLE_GPU_TEST=1 and that provider actually
+present, and skip cleanly otherwise. A probe result is routing evidence only —
+nothing in this file proves device execution.
+## Verification guidance and troubleshooting
+Retained evidence is each provider's report: availability, device name, driver
+identity, and the named gaps. A RED on the "none is full" scenario after fence
+and phase externs land is EXPECTED, not a defect — see the step that says so
+and update this spec together with the provider that changed.
+"""
+# Lifecycle: doc/01_research/local/gpu_scheduler_hardening_gpu_resident_rendering.md ;
+# doc/03_plan/ui/gpu_scheduler_hardening_gpu_resident_rendering.md ;
+# doc/04_architecture/gpu_scheduler_hardening_gpu_resident_rendering.md ;
+# doc/05_design/gpu_scheduler_hardening_gpu_resident_rendering.md
+# @manual_section: primary
+
+use std.spec.*
+use std.spec.step
+use std.gc_async_mut.gpu.engine2d.gpu_provider_probes.{
+    engine2d_gpu_probe_all,
+    engine2d_gpu_probe_directx,
+    engine2d_gpu_probe_metal,
+    engine2d_gpu_probe_vulkan
+}
+use std.common.gpu.engine2d.gpu_provider_conformance.{
+    ENGINE2D_GPU_GRADE_FULL,
+    ENGINE2D_GPU_GRADE_ROUTING_ONLY,
+    Engine2dGpuProviderReport,
+    engine2d_gpu_provider_conformance,
+    engine2d_gpu_provider_conformance_summary
+}
+use std.common.gpu.engine2d.gpu_epoch.{ENGINE2D_GPU_PROFILE_SCENE_REQUIRED}
+
+# @step: Read the GPU lane admission variable from the caller's environment
+fn gpu_lane_enabled() -> bool:
+    get_env("SIMPLE_GPU_TEST") == "1"
+
+fn vulkan_lane_ready() -> bool:
+    gpu_lane_enabled() and engine2d_gpu_probe_vulkan().available
+
+fn metal_lane_ready() -> bool:
+    gpu_lane_enabled() and engine2d_gpu_probe_metal().available
+
+fn directx_lane_ready() -> bool:
+    gpu_lane_enabled() and engine2d_gpu_probe_directx().available
+
+# @step: Grade one provider report against the scene-required profile
+fn grade_of(report: Engine2dGpuProviderReport) -> text:
+    engine2d_gpu_provider_conformance(report, ENGINE2D_GPU_PROFILE_SCENE_REQUIRED).grade
+
+describe "Engine2D GPU provider conformance on this host":
+
+    it "probes every provider without a device and grades none of them full":
+        # @req REQ-GPU-SCHED-PROVIDER-001
+        # @req REQ-GPU-SCHED-VERIFY-001
+        step("Probe all three providers; a backend that is absent must report unavailable, not crash")
+        val reports = engine2d_gpu_probe_all()
+        step("Verify one report came back per provider, each naming a distinct provider")
+        expect(reports.len()).to_equal(3)  # oracle: src/lib/gc_async_mut/gpu/engine2d/gpu_provider_probes.spl engine2d_gpu_probe_all
+        assert_not_equal(reports[0].provider, reports[1].provider)
+        assert_not_equal(reports[1].provider, reports[2].provider)
+        assert_not_equal(reports[0].provider, reports[2].provider)
+        # @capture(exec): the graded summary of every provider on this host
+        step("UPDATE THIS STEP WHEN FENCES LAND: no provider in this tree exposes a fence token or distinct lifecycle phases, so none may grade full today; when the fence and phase externs named in gpu_provider_probes.spl land, this assertion must be changed together with the provider that gained them")
+        var index = 0
+        while index < reports.len():
+            val summary = engine2d_gpu_provider_conformance_summary(engine2d_gpu_provider_conformance(reports[index], ENGINE2D_GPU_PROFILE_SCENE_REQUIRED))
+            assert_not_equal(summary, "")
+            assert_not_equal(grade_of(reports[index]), ENGINE2D_GPU_GRADE_FULL)
+            index = index + 1
+
+    skip_if(fn(): not vulkan_lane_ready(), "needs SIMPLE_GPU_TEST=1 and a Vulkan device")(
+        "reports a present Vulkan device with an identity and a routing-only grade",
+        fn():
+            # @req REQ-GPU-SCHED-VERIFY-001
+            step("Probe Vulkan on this host")
+            val report = engine2d_gpu_probe_vulkan()
+            # @capture(exec): the Vulkan device identity this host reported
+            step("Verify the device is named and the grade is routing-only, not full")
+            assert_true(report.available)
+            assert_not_equal(report.device_name, "")
+            expect(grade_of(report)).to_equal(ENGINE2D_GPU_GRADE_ROUTING_ONLY)
+    )
+
+    skip_if(fn(): not metal_lane_ready(), "needs SIMPLE_GPU_TEST=1 and a Metal device")(
+        "reports a present Metal device with an identity and a routing-only grade",
+        fn():
+            # @req REQ-GPU-SCHED-VERIFY-001
+            step("Probe Metal on this host")
+            val report = engine2d_gpu_probe_metal()
+            # @capture(exec): the Metal device identity this host reported
+            step("Verify the device is named and the grade is routing-only, not full")
+            assert_true(report.available)
+            assert_not_equal(report.device_name, "")
+            expect(grade_of(report)).to_equal(ENGINE2D_GPU_GRADE_ROUTING_ONLY)
+    )
+
+    skip_if(fn(): not directx_lane_ready(), "needs SIMPLE_GPU_TEST=1 and a D3D11/DXVK adapter")(
+        "reports a present DirectX adapter with an identity and a routing-only grade",
+        fn():
+            # @req REQ-GPU-SCHED-VERIFY-001
+            step("Probe DirectX (D3D11 via DXVK) on this host")
+            val report = engine2d_gpu_probe_directx()
+            # @capture(exec): the D3D11 adapter identity this host reported
+            step("Verify the adapter is named, the api level stays D3D11, and the grade is routing-only")
+            assert_true(report.available)
+            assert_not_equal(report.device_name, "")
+            expect(report.api_level).to_equal("d3d11-dxvk")
+            expect(grade_of(report)).to_equal(ENGINE2D_GPU_GRADE_ROUTING_ONLY)
+    )
