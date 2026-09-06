@@ -3546,5 +3546,78 @@ fn is_known_system_name(name: &str) -> bool {
             | "madvise"
             | "mremap"
             | "mincore"
+            // glibc/POSIX names that were missing here and therefore became
+            // weak-stub candidates on this host. This is the same defect the
+            // "clock_getres/recvmsg/..." comment above records, and it is not
+            // cosmetic: a fabricated stub returns the tagged-nil sentinel 3, so
+            // a stubbed `bcmp` reports "different" for every comparison. On
+            // aarch64 clang lowers equality-only memcmp to `bcmp`, so every
+            // `text == text` and `starts_with` in a native-built binary
+            // silently returned false — which is exactly how the Stage-3
+            // admission planner rejected its own valid --bootstrap-reason.
+            // A weak definition in the executable also wins over libc's, so
+            // the linker never had a chance to fix it.
+            | "bcmp"
+            | "strncasecmp"
+            | "strcasecmp"
+            | "strpbrk"
+            | "strtok_r"
+            | "atoi"
+            | "remove"
+            | "fgetc"
+            | "isatty"
+            | "chmod"
+            | "fchmod"
+            | "fsync"
+            | "ftruncate"
+            | "pread"
+            | "pwrite"
+            | "openat"
+            | "mkdirat"
+            | "unlinkat"
+            | "faccessat"
+            | "getgid"
+            | "getpgid"
+            | "setpgid"
+            | "gethostname"
+            | "getpeername"
+            | "getsockname"
+            | "shutdown"
+            | "setrlimit"
+            | "sched_yield"
+            | "localtime_r"
+            | "dladdr"
+            | "wait4"
+            | "waitid"
+            | "sigismember"
+            | "sigpending"
+            | "sigwait"
+            | "tcgetattr"
+            | "tcsetattr"
+            | "pthread_once"
+            | "pthread_sigmask"
+            | "pthread_testcancel"
+            | "pthread_setcancelstate"
+            | "pthread_mutex_trylock"
+            | "pthread_cond_timedwait"
+            | "pthread_attr_init"
+            | "pthread_attr_destroy"
+            | "pthread_attr_setdetachstate"
+            | "__pthread_register_cancel"
+            | "__pthread_unregister_cancel"
+            | "__assert_fail"
+            | "__clear_cache"
+            | "__sigsetjmp"
+            // glibc's locale/ctype tables and its C23 scanf/strtol renames.
+            // glibc >= 2.38 emits the `__isoc23_*` spellings, so a host on a
+            // newer glibc than this list anticipated stubs them out.
+            | "__ctype_b_loc"
+            | "__ctype_tolower_loc"
+            | "__ctype_toupper_loc"
+            | "__isoc99_sscanf"
+            | "__isoc23_sscanf"
+            | "__isoc23_strtol"
+            | "__isoc23_strtoll"
+            | "__isoc23_strtoull"
     )
 }

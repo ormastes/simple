@@ -111,8 +111,34 @@ fn hir_cache_path(key: text) -> text:
 fn hir_cache_header() -> text:
     HIR_CACHE_ENTRY_VERSION + " " + hir_codec_header() + " " + frontend_parse_cache_scope()
 
+# `has` MUST apply the same validity test `hir_cache_load` does. The KEY folds
+# source + closure digests, but the HEADER additionally folds
+# frontend_parse_cache_scope(), which carries `frontend-exe=<sha256 of the
+# compiler binary>`. So rebuilding the seed invalidates every entry WITHOUT
+# moving any key: the file is still at hir_cache_path(key), and an
+# existence-only `has` reports a hit for content `load` will reject.
+#
+# That divergence silently disabled the whole HIR shard pre-pass. The shard
+# skip at driver_hir_pipeline_lowering.spl:247 reads
+#   `if ... or hir_cache_has(key) or not hir_shard_owns(path): continue`
+# so every shard treated all 102 modules as already cached and lowered NOTHING,
+# while the real build called `hir_cache_load`, failed the header check, and
+# re-lowered all 102 serially.
+#
+# Measured on the live MCP-server build, 2026-09-05 (seed
+# src/compiler_rust/target/bootstrap/simple, sha256 c855e1e0763034f3..., rebuilt
+# 06:45 between two builds of the same target):
+#   [hir-shard] done shard=N/20 lowered=0 claimed=0 levels=10   (x20)
+#   [hir-cache] hits=0 misses=102 stores=102                    (real build)
+# Reproduced identically in the 02:03 build of the same target. On disk, 114 of
+# 216 entries carried a header from a superseded compiler identity.
 fn hir_cache_has(key: text) -> bool:
-    key != "" and hir_cache_enabled() and file_exists(hir_cache_path(key))
+    if key == "" or not hir_cache_enabled():
+        return false
+    val path = hir_cache_path(key)
+    if not file_exists(path):
+        return false
+    _hir_cache_entry_header_valid(path)
 
 # nil for a miss, a foreign/corrupt entry, or a truncated one: every one of
 # those is "lower it in process", and the caller must not need to tell them
@@ -162,6 +188,18 @@ fn hir_cache_load(key: text) -> HirModule?:
     _hir_cache_last_warnings = warnings
     _hir_cache_hits = _hir_cache_hits + 1
     decoded
+
+# The header half of hir_cache_load's validity test, without decoding the body.
+# Deliberately placed AFTER hir_cache_load so that load remains the FIRST
+# existence -> read -> parse sequence in this file: hir_cache_file_exists_facade_contract_spec
+# pins that ordering by source position, and it is a real contract, not an
+# accident of layout.
+fn _hir_cache_entry_header_valid(path: text) -> bool:
+    val raw = file_read_nullable(path) ?? ""
+    val nl = raw.index_of("\n")
+    if raw == "" or nl < 0:
+        return false
+    raw.substring(0, nl) == hir_cache_header()
 
 fn hir_cache_last_warnings() -> [text]:
     _hir_cache_last_warnings
@@ -255,18 +293,30 @@ fn _hir_shard_owns_static(path: text) -> bool:
         return true
     (driver_parse_shard_hash(path) % count) == index
 
+# _hir_shard_claimed is what the `claimed=` field of the receipt reports, so it
+# must be incremented on EVERY path that takes ownership, not just the queue
+# one. Before this, both static-split fallbacks returned true without counting,
+# so a shard that legitimately owned modules still printed `claimed=0` — the
+# receipt could not distinguish "owned nothing" from "owned but never counted",
+# which is exactly the ambiguity a receipt exists to remove.
+fn _hir_shard_owns_static_counted(path: text) -> bool:
+    val owned = _hir_shard_owns_static(path)
+    if owned:
+        _hir_shard_claimed = _hir_shard_claimed + 1
+    owned
+
 fn hir_shard_owns(path: text) -> bool:
     if not hir_shard_active():
         return true
     val queue_dir = _hir_shard_queue_dir()
     if queue_dir == "":
-        return _hir_shard_owns_static(path)
+        return _hir_shard_owns_static_counted(path)
     val marker = "{queue_dir}/{driver_parse_shard_hash(path)}-{path.len()}.claim"
     if file_exists(marker):
         return false
     val fd = file_lock("{queue_dir}/.lock", 30)
     if fd < 0:
-        return _hir_shard_owns_static(path)
+        return _hir_shard_owns_static_counted(path)
     var claimed = false
     if not file_exists(marker):
         claimed = file_write(marker, hir_shard_spec())
