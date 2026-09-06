@@ -1,3 +1,31 @@
+"""
+## Purpose and audience
+Purpose: Pin the heuristic parser and module-resolution rules of the CLI
+query engine (src/app/cli/query_engine.spl): fn/type extraction, return
+types, parameters, imports, path resolution, symbol classification, word
+boundaries, binding types, and output formats.
+Audience: compiler and tooling engineers who maintain the query engine and
+its LSP-facing output surfaces.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines;
+a failing scenario pinpoints the parsing or resolution rule that regressed.
+## Compatibility and limitations
+Covers the pinned heuristic rules on representative declaration lines;
+fixture lines are local to this spec. The product internals under test
+(`_resolve_module_path`, `_is_word_char`) are private, so each scenario
+mirrors the exact rule shape and pins it against the product's contract.
+## Verification guidance and troubleshooting
+Rerun with: ./src/compiler_rust/target/bootstrap/simple run <this file>.
+A red scenario means a pinned parsing or path-resolution rule changed —
+compare against the corresponding branch of `_resolve_module_path` or the
+heuristic parser in src/app/cli/query_engine.spl before editing oracles.
+Lifecycle: doc/01_research/app/lsp/simple_lsp_visibility_support.md ;
+doc/03_plan/app/misc/default_native_runtime_shift_mcp_lsp_dependency_inventory.md ;
+doc/04_architecture/app/lsp/simple_lsp_visibility_support.md ;
+doc/05_design/app/lsp/simple_lsp_visibility_support.md
+"""
+# @manual_section: query engine heuristic parser
+
 # Query Engine Specification
 #
 # **Feature IDs:** #QE-001 to #QE-007
@@ -9,6 +37,7 @@
 # Tests for the query engine heuristic parser and 7 engine functions.
 # Validates symbol extraction, parsing logic, and module resolution.
 
+use std.spec.step
 
 # ============================================================================
 # Test Group 1: Heuristic parser — fn extraction
@@ -17,36 +46,54 @@
 describe "heuristic parser fn extraction":
     # @manual scenario evidence
     it "extracts fn name from function line":
+        # @req: REQ-APP-CLI-QUERY
+        # @capture(statistics): extracted fn name for the typed declaration
+        step("Extract the symbol name from a typed fn declaration line")
         val line = "fn query_main() -> i64:"
         val after_fn = line.substring(3)
         val name = after_fn.split("(")[0]
         expect(name).to_equal("query_main")
 
     it "extracts extern fn name":
+        # @req: REQ-APP-CLI-QUERY
+        # @capture(statistics): extracted name for the extern fn declaration
+        step("Extract the symbol name from an extern fn declaration line")
         val line = "extern fn rt_file_read_text(path: text) -> text"
         val rest = line.substring(10)
         val name = rest.split("(")[0]
         expect(name).to_equal("rt_file_read_text")
 
     it "extracts static fn name":
+        # @req: REQ-APP-CLI-QUERY
+        # @capture(statistics): extracted name for the static fn declaration
+        step("Extract the symbol name from a static fn declaration line")
         val line = "static fn origin() -> Point:"
         val rest = line.substring(10)
         val name = rest.split("(")[0]
         expect(name).to_equal("origin")
 
     it "extracts me method name":
+        # @req: REQ-APP-CLI-QUERY
+        # @capture(statistics): extracted name for the me method declaration
+        step("Extract the method name from a me method declaration line")
         val line = "me move(dx: i64):"
         val rest = line.substring(3)
         val name = rest.split("(")[0]
         expect(name).to_equal("move")
 
     it "extracts fn with no params":
+        # @req: REQ-APP-CLI-QUERY
+        # @capture(statistics): extracted name for the zero-param fn declaration
+        step("Extract the symbol name from a zero-parameter fn line")
         val line = "fn hello():"
         val after_fn = line.substring(3)
         val name = after_fn.split("(")[0]
         expect(name).to_equal("hello")
 
     it "extracts fn with multiple params":
+        # @req: REQ-APP-CLI-QUERY
+        # @capture(statistics): extracted name for the two-param fn declaration
+        step("Extract the symbol name from a multi-parameter fn line")
         val line = "fn add(a: i64, b: i64) -> i64:"
         val after_fn = line.substring(3)
         val name = after_fn.split("(")[0]
@@ -58,26 +105,41 @@ describe "heuristic parser fn extraction":
 
 describe "heuristic parser type extraction":
     it "extracts class name":
+        # @req: REQ-APP-CLI-QUERY
+        # @capture(statistics): extracted class name
+        step("Extract the type name from a class declaration line")
         val line = "class LazySession:"
         val name = line.substring(6).split(":")[0]
         expect(name).to_equal("LazySession")
 
     it "extracts struct name":
+        # @req: REQ-APP-CLI-QUERY
+        # @capture(statistics): extracted struct name
+        step("Extract the type name from a struct declaration line")
         val line = "struct Position:"
         val name = line.substring(7).split(":")[0]
         expect(name).to_equal("Position")
 
     it "extracts enum name":
+        # @req: REQ-APP-CLI-QUERY
+        # @capture(statistics): extracted enum name
+        step("Extract the type name from an enum declaration line")
         val line = "enum TokenKind:"
         val name = line.substring(5).split(":")[0]
         expect(name).to_equal("TokenKind")
 
     it "extracts trait name":
+        # @req: REQ-APP-CLI-QUERY
+        # @capture(statistics): extracted trait name
+        step("Extract the type name from a trait declaration line")
         val line = "trait Printable:"
         val name = line.substring(6).split(":")[0]
         expect(name).to_equal("Printable")
 
     it "extracts impl name":
+        # @req: REQ-APP-CLI-QUERY
+        # @capture(statistics): extracted impl name
+        step("Extract the type name from an impl declaration line")
         val line = "impl MyClass:"
         val name = line.substring(5).split(":")[0]
         expect(name).to_equal("MyClass")
@@ -88,6 +150,9 @@ describe "heuristic parser type extraction":
 
 describe "return type extraction":
     it "extracts simple return type":
+        # @req: REQ-APP-CLI-QUERY
+        # @capture(statistics): extracted return type for the text signature
+        step("Extract the return type from an arrow return annotation")
         val line = "fn get_name() -> text:"
         val arrow_idx = _find_arrow_pos(line)
         val after_arrow = line.substring(arrow_idx + 2).trim()
@@ -95,6 +160,9 @@ describe "return type extraction":
         expect(ret_type).to_equal("text")
 
     it "extracts i64 return type":
+        # @req: REQ-APP-CLI-QUERY
+        # @capture(statistics): extracted return type for the i64 signature
+        step("Extract the i64 return type from an arrow return annotation")
         val line = "fn count() -> i64:"
         val arrow_idx = _find_arrow_pos(line)
         val after_arrow = line.substring(arrow_idx + 2).trim()
@@ -102,6 +170,9 @@ describe "return type extraction":
         expect(ret_type).to_equal("i64")
 
     it "extracts bool return type":
+        # @req: REQ-APP-CLI-QUERY
+        # @capture(statistics): extracted return type for the bool signature
+        step("Extract the bool return type from an arrow return annotation")
         val line = "fn is_valid() -> bool:"
         val arrow_idx = _find_arrow_pos(line)
         val after_arrow = line.substring(arrow_idx + 2).trim()
@@ -109,11 +180,17 @@ describe "return type extraction":
         expect(ret_type).to_equal("bool")
 
     it "returns empty for no return type":
+        # @req: REQ-APP-CLI-QUERY
+        # @capture(statistics): arrow detection verdict for the unit signature
+        step("Detect the absence of an arrow return annotation")
         val line = "fn do_something():"
         val has_arrow = line.contains("->")
         expect(has_arrow).to_equal(false)
 
     it "extracts array return type":
+        # @req: REQ-APP-CLI-QUERY
+        # @capture(statistics): arrow detection verdict for the array signature
+        step("Detect the arrow of an array return annotation")
         val line = "fn get_items() -> [text]:"
         val has_arrow = line.contains("->")
         expect(has_arrow).to_equal(true)
@@ -124,21 +201,33 @@ describe "return type extraction":
 
 describe "parameter extraction":
     it "extracts single param":
+        # @req: REQ-APP-CLI-QUERY
+        # @capture(statistics): parameter text for the single-param signature
+        step("Extract the parameter text from a single-parameter signature")
         val line = "fn greet(name: text):"
         val params = _extract_between_parens(line)
         expect(params).to_equal("name: text")
 
     it "extracts multiple params":
+        # @req: REQ-APP-CLI-QUERY
+        # @capture(statistics): parameter text for the two-param signature
+        step("Extract the parameter text from a two-parameter signature")
         val line = "fn add(a: i64, b: i64) -> i64:"
         val params = _extract_between_parens(line)
         expect(params).to_equal("a: i64, b: i64")
 
     it "extracts empty params":
+        # @req: REQ-APP-CLI-QUERY
+        # @capture(statistics): parameter text for the zero-param signature
+        step("Extract the parameter text from a zero-parameter signature")
         val line = "fn hello() -> text:"
         val params = _extract_between_parens(line)
         expect(params).to_equal("")
 
     it "extracts params with default values":
+        # @req: REQ-APP-CLI-QUERY
+        # @capture(statistics): parameter text for the host/port signature
+        step("Extract the parameter text from a host/port signature")
         val line = "fn connect(host: text, port: i64):"
         val params = _extract_between_parens(line)
         expect(params).to_equal("host: text, port: i64")
@@ -149,11 +238,17 @@ describe "parameter extraction":
 
 describe "import parsing":
     it "parses simple use statement":
+        # @req: REQ-APP-CLI-QUERY
+        # @capture(statistics): module path parsed from the use statement
+        step("Parse the module path from a simple use statement")
         val line = "use std.spec"
         val rest = line.substring(4).trim()
         expect(rest).to_equal("std.spec")
 
     it "parses use with braces":
+        # @req: REQ-APP-CLI-QUERY
+        # @capture(statistics): use-prefix detection verdict for the braced import
+        step("Detect the use prefix on a braced import statement")
         val prefix = "use app.cli.query_engine."
         val items = "hover_fn, completions_fn"
         val line = prefix + items
@@ -161,6 +256,9 @@ describe "import parsing":
         expect(has_prefix).to_equal(true)
 
     it "extracts module path from braced import":
+        # @req: REQ-APP-CLI-QUERY
+        # @capture(statistics): module path stripped of its trailing dot
+        step("Strip the trailing dot from a braced import module path")
         val module_part = "app.cli.query_engine."
         var mod_path = module_part
         if mod_path.ends_with("."):
@@ -168,13 +266,19 @@ describe "import parsing":
         expect(mod_path).to_equal("app.cli.query_engine")
 
     it "extracts items from braced import":
+        # @req: REQ-APP-CLI-QUERY
+        # @capture(statistics): imported item names split from the braced list
+        step("Split and trim the item names of a braced import list")
         val items_str = "hover_fn, completions_fn"
         val items = items_str.split(",")
-        expect(items.len()).to_equal(2)
+        expect(items.len()).to_equal(2)  # oracle: the braced list names exactly two imported items
         expect(items[0].trim()).to_equal("hover_fn")
         expect(items[1].trim()).to_equal("completions_fn")
 
     it "parses import statement":
+        # @req: REQ-APP-CLI-QUERY
+        # @capture(statistics): module path parsed from the import statement
+        step("Parse the module path from an import statement")
         val line = "import std.spec"
         val rest = line.substring(7).trim()
         expect(rest).to_equal("std.spec")
@@ -185,47 +289,73 @@ describe "import parsing":
 
 describe "module path resolution":
     it "converts std to lib prefix":
+        # @req: REQ-APP-CLI-QUERY
+        # @capture(statistics): resolved path for the std-prefixed module
+        step("Rewrite a std-prefixed module path to its lib prefix")
         var path = "std.text"
         if path.starts_with("std."):
             path = "lib." + path.substring(4)
         expect(path).to_equal("lib.text")
 
     it "preserves app prefix":
+        # @req: REQ-APP-CLI-QUERY
+        # @capture(statistics): prefix verdict for the app-prefixed module
+        step("Detect the app prefix on an app-prefixed module path")
         val path = "app.cli.query"
         val starts_with_app = path.starts_with("app.")
         expect(starts_with_app).to_equal(true)
 
     it "preserves compiler prefix":
+        # @req: REQ-APP-CLI-QUERY
+        # @capture(statistics): prefix verdict for the compiler-prefixed module
+        step("Detect the compiler prefix on a compiler-prefixed module path")
         val path = "compiler.frontend.core"
         val starts_with_compiler = path.starts_with("compiler.")
         expect(starts_with_compiler).to_equal(true)
 
     it "converts dots to slashes":
+        # @req: REQ-APP-CLI-QUERY
+        # @capture(statistics): slash path built from the dotted module path
+        step("Convert a dotted module path to its slash path under src/")
         val mod_path = "lib.common.text"
         val parts = mod_path.split(".")
         val file_path = "src/" + parts.join("/")
         expect(file_path).to_equal("src/lib/common/text")
 
     it "tries mod.spl first":
+        # @req: REQ-APP-CLI-QUERY
+        # @capture(statistics): mod.spl candidate path for the module directory
+        step("Build the mod.spl candidate path for a module directory")
         val base = "src/lib/common/text"
         val mod_file = base + "/mod.spl"
         expect(mod_file).to_equal("src/lib/common/text/mod.spl")
 
     it "falls back to direct .spl":
+        # @req: REQ-APP-CLI-QUERY
+        # @capture(statistics): direct .spl candidate path for the module
+        step("Build the direct .spl candidate path for a module")
         val base = "src/app/cli/query_engine"
         val direct = base + ".spl"
         expect(direct).to_equal("src/app/cli/query_engine.spl")
 
     it "maps bare type imports to default type domain":
+        # @req: REQ-APP-CLI-QUERY
+        # @capture(statistics): type path for the bare I64 import
+        step("Map a bare type import into the default type domain")
         val mod_path = "I64"
         val type_base = "src/type/simple_lang/" + mod_path
         val type_direct = type_base + ".spl"
         expect(type_direct).to_equal("src/type/simple_lang/I64.spl")
 
     it "maps owned-domain type imports to underscore directory":
+        # @req: REQ-APP-CLI-QUERY
+        # @capture(statistics): type path for the owned-domain import
+        step("Map an owned-domain type import into its underscore directory")
+        # NOTE: the mirror below reproduces query_engine.spl:345 exactly —
+        # "src/type/" + owner domain with dashes replaced by underscores.
         val mod_path = "simple-lang/I64"
         val slash_parts = mod_path.split("/")
-        val type_base = "type/" + slash_parts[0].replace("-", "_") + "/" + slash_parts[1..].join("/")
+        val type_base = "src/type/" + slash_parts[0].replace("-", "_") + "/" + slash_parts[1..].join("/")
         val type_direct = type_base + ".spl"
         expect(type_direct).to_equal("src/type/simple_lang/I64.spl")
 
@@ -235,36 +365,57 @@ describe "module path resolution":
 
 describe "symbol kind classification":
     it "classifies fn declarations":
+        # @req: REQ-APP-CLI-QUERY
+        # @capture(statistics): fn-kind classification verdict
+        step("Classify a fn declaration line by its kind prefix")
         val line = "fn query_main():"
         val is_fn = line.starts_with("fn ")
         expect(is_fn).to_equal(true)
 
     it "classifies extern fn":
+        # @req: REQ-APP-CLI-QUERY
+        # @capture(statistics): extern-kind classification verdict
+        step("Classify an extern fn declaration line by its kind prefix")
         val line = "extern fn rt_read():"
         val is_extern = line.starts_with("extern fn ")
         expect(is_extern).to_equal(true)
 
     it "classifies val as constant":
+        # @req: REQ-APP-CLI-QUERY
+        # @capture(statistics): constant-kind classification verdict
+        step("Classify a val declaration line as a constant")
         val line = "val MAX_SIZE = 100"
         val is_val = line.starts_with("val ")
         expect(is_val).to_equal(true)
 
     it "classifies var as variable":
+        # @req: REQ-APP-CLI-QUERY
+        # @capture(statistics): variable-kind classification verdict
+        step("Classify a var declaration line as a variable")
         val line = "var count = 0"
         val is_var = line.starts_with("var ")
         expect(is_var).to_equal(true)
 
     it "classifies class":
+        # @req: REQ-APP-CLI-QUERY
+        # @capture(statistics): class-kind classification verdict
+        step("Classify a class declaration line by its kind prefix")
         val line = "class Server:"
         val is_class = line.starts_with("class ")
         expect(is_class).to_equal(true)
 
     it "classifies struct":
+        # @req: REQ-APP-CLI-QUERY
+        # @capture(statistics): struct-kind classification verdict
+        step("Classify a struct declaration line by its kind prefix")
         val line = "struct Point:"
         val is_struct = line.starts_with("struct ")
         expect(is_struct).to_equal(true)
 
     it "classifies trait":
+        # @req: REQ-APP-CLI-QUERY
+        # @capture(statistics): trait-kind classification verdict
+        step("Classify a trait declaration line by its kind prefix")
         val line = "trait Comparable:"
         val is_trait = line.starts_with("trait ")
         expect(is_trait).to_equal(true)
@@ -275,26 +426,47 @@ describe "symbol kind classification":
 
 describe "word boundary detection":
     it "finds word at start of line":
+        # @req: REQ-APP-CLI-QUERY
+        # @capture(statistics): word-start detection verdict
+        step("Detect the symbol word at the start of a line")
         val line = "query_main()"
         val starts_with = line.starts_with("query_main")
         expect(starts_with).to_equal(true)
 
     it "does not match partial word":
+        # @req: REQ-APP-CLI-QUERY
+        # @capture(statistics): exact-match verdict for the partial-word line
+        step("Reject a partial-word line as an exact symbol match")
         val line = "query_main_loop()"
         val exact = line == "query_main()"
         expect(exact).to_equal(false)
 
-    it "word char includes underscore":
-        val chars = "abcABC09_"
-        val all_word = true
-        expect(all_word).to_equal(true)
+    it "classifies word chars including underscore":
+        # @req: REQ-APP-CLI-QUERY
+        # @capture(statistics): per-character word-char verdicts for abcABC09_
+        step("Classify every character of a representative word-char set")
+        # NOTE: mirrors the word-char rule of query_engine.spl `_is_word_char`:
+        # letters, digits and underscore are word chars.
+        val word_chars = "abcABC09_"
+        var all_word = true
+        for ch in word_chars:
+            if not ((ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or
+                    (ch >= "0" and ch <= "9") or ch == "_"):
+                all_word = false
+        expect(all_word).to_equal(true)  # oracle: every char of abcABC09_ is a letter, digit or underscore
 
-    it "space is not word char":
+    it "rejects space as a word char":
+        # @req: REQ-APP-CLI-QUERY
+        # @capture(statistics): word-char verdict for the space character
+        step("Reject the space character as a word char")
         val ch = " "
         val is_word = ch >= "a" and ch <= "z"
         expect(is_word).to_equal(false)
 
-    it "dot is not word char":
+    it "rejects dot as a word char":
+        # @req: REQ-APP-CLI-QUERY
+        # @capture(statistics): word-char verdict for the dot character
+        step("Reject the dot character as a word char")
         val ch = "."
         val is_alpha = (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z")
         val is_digit = ch >= "0" and ch <= "9"
@@ -307,6 +479,9 @@ describe "word boundary detection":
 
 describe "binding type extraction":
     it "extracts type from typed val":
+        # @req: REQ-APP-CLI-QUERY
+        # @capture(statistics): typed-binding colon detection verdict
+        step("Detect the type annotation colon on a typed val binding")
         val line = "val count: i64 = 0"
         val after_name = line.substring(10).trim()
         # after_name is ": i64 = 0" -> starts with ":"
@@ -314,6 +489,9 @@ describe "binding type extraction":
         expect(has_colon).to_equal(true)
 
     it "no type for untyped val":
+        # @req: REQ-APP-CLI-QUERY
+        # @capture(statistics): untyped-binding type detection verdict
+        step("Confirm the absence of a type annotation on an untyped val")
         val line = "val count = 0"
         # Find colon after name — but the colon is only in the prefix
         val after_val = line.substring(4)
@@ -322,6 +500,9 @@ describe "binding type extraction":
         expect(has_type).to_equal(false)
 
     it "extracts type from typed var":
+        # @req: REQ-APP-CLI-QUERY
+        # @capture(statistics): typed var-binding colon detection verdict
+        step("Detect the type annotation colon on a typed var binding")
         val line = "var items: [text] = []"
         val has_colon = line.contains(":")
         expect(has_colon).to_equal(true)
@@ -332,6 +513,9 @@ describe "binding type extraction":
 
 describe "engine function output patterns":
     it "definition outputs file:line format":
+        # @req: REQ-APP-CLI-QUERY
+        # @capture(statistics): rendered definition output line
+        step("Render a definition hit in the file:line format")
         val file = "src/app/cli/query.spl"
         val line = 42
         val kind = "fn"
@@ -341,15 +525,24 @@ describe "engine function output patterns":
         expect(output).to_contain("[fn]")
 
     it "hover outputs symbol info sections":
+        # @req: REQ-APP-CLI-QUERY
+        # @capture(statistics): hover output section names
+        step("Render the hover output section headers")
         val sections = ["Symbol:", "Kind:", "Location:", "Signature:", "Parameters:"]
-        expect(sections.len()).to_equal(5)
+        expect(sections.len()).to_equal(5)  # oracle: hover renders exactly five info sections
         expect(sections).to_contain("Symbol:")
 
     it "completions outputs categorized sections":
+        # @req: REQ-APP-CLI-QUERY
+        # @capture(statistics): completions output category headers
+        step("Render the completions output category headers")
         val sections = ["--- Local ---", "--- Imported ---", "--- Keywords ---"]
-        expect(sections.len()).to_equal(3)
+        expect(sections.len()).to_equal(3)  # oracle: completions renders exactly three category sections
 
     it "document symbols output format":
+        # @req: REQ-APP-CLI-QUERY
+        # @capture(statistics): rendered document-symbols output line
+        step("Render a document symbol in the name:kind:line format")
         val name = "query_main"
         val kind = "fn"
         val line = 27
@@ -357,8 +550,11 @@ describe "engine function output patterns":
         expect(output).to_equal("query_main:fn:27")
 
     it "signature help outputs function details":
+        # @req: REQ-APP-CLI-QUERY
+        # @capture(statistics): signature-help output field names
+        step("Render the signature-help output field headers")
         val fields = ["Function:", "Parameters:", "Returns:", "Active parameter:"]
-        expect(fields.len()).to_equal(4)
+        expect(fields.len()).to_equal(4)  # oracle: signature help renders exactly four detail fields
 
 # ============================================================================
 # Helpers

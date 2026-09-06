@@ -386,6 +386,18 @@ SPL_HOSTED_UNAVAILABLE_WEAK int64_t rt_vulkan_is_available(void) {
 SPL_HOSTED_UNAVAILABLE_WEAK int64_t rt_vulkan_device_count(void) {
     return spl_hosted_provider_i64_probe("rt_vulkan_provider_device_count");
 }
+
+/*
+ * C twin of the Rust lane's `cfg(not(feature = "vulkan"))` arm of
+ * rt_vulkan_readback_u32_checksum (vulkan_graphics_runtime_buffer.rs): the
+ * core C runtime has no Vulkan device, so it is always the unavailable
+ * fallback. -1 is the documented failure sentinel there (a real checksum is
+ * in [0, 2^31-2]); a Vulkan-featured provider overrides this weak definition.
+ */
+SPL_HOSTED_UNAVAILABLE_WEAK int64_t rt_vulkan_readback_u32_checksum(int64_t data, int64_t pixel_count, int64_t handle, int64_t offset) {
+    (void)data; (void)pixel_count; (void)handle; (void)offset;
+    return -1;
+}
 #endif
 
 /*
@@ -7214,6 +7226,28 @@ int64_t rt_array_get(SplArray* a, int64_t idx) {
         return (int64_t)((uint8_t*)array->data)[idx];
     }
     return ((int64_t*)array->data)[idx];
+}
+
+/* C twin of the Rust lane's rt_vulkan_copy_u32_slots
+ * (vulkan_graphics_runtime_buffer.rs): copy `count` leading SLOTS from `src`
+ * into the caller-owned `dst`, never raw u32 bytes, so the destination keeps
+ * the tagging the source already has. Fails closed (-1) rather than copying a
+ * partial prefix — a short copy would leave the tail holding an earlier frame,
+ * the silent-stale-pixels failure the readback path exists to avoid. Both
+ * arrays must share one element representation for a slot copy to mean the
+ * same thing on both sides, so differing BYTES/packed flags are refused. */
+int64_t rt_vulkan_copy_u32_slots(int64_t dst, int64_t src, int64_t count) {
+    if (count < 0) return -1;
+    if (count == 0) return 0;
+    RtCoreArray* dst_array = rt_core_as_array(dst);
+    RtCoreArray* src_array = rt_core_as_array(src);
+    if (!dst_array || !src_array || !dst_array->data || !src_array->data) return -1;
+    if (dst_array->len < count || src_array->len < count) return -1;
+    if (dst_array->flags != src_array->flags) return -1;
+    if (dst_array->data == src_array->data) return count;
+    size_t slot = (dst_array->flags & RT_CORE_ARRAY_FLAG_BYTES) ? 1 : sizeof(int64_t);
+    memcpy(dst_array->data, src_array->data, (size_t)count * slot);
+    return count;
 }
 
 int64_t rt_array_get_text(SplArray* a, int64_t idx) {
