@@ -1,5 +1,21 @@
 use std.spec.{describe, it, expect}
 use std.io_runtime.{read_file}
+# rt_dma_* has no host-lane runtime backing: the pre-existing public dma_alloc
+# also fails with `unknown extern function: rt_dma_alloc` under the interpreter,
+# so this seam is pinned structurally, not by executing the wrappers.
+
+val DMA_MIGRATED_DRIVERS = [
+    "src/os/drivers/virtio/virtio_rng_mmio.spl",
+    "src/os/drivers/virtio/virtio_input_mmio.spl",
+    "src/os/drivers/virtio/virtio_snd_dma_resources.spl",
+    "src/os/drivers/virtio/_VirtioBlk/driver_class.spl",
+    "src/os/drivers/virtio/_VirtioBlk/driver_operations.spl",
+    "src/os/drivers/nvme/_NvmeDriver/dma_allocation.spl",
+    "src/os/drivers/nvme/_NvmeDriver/driver_operations.spl",
+    "src/os/drivers/nvme/nvme_queue.spl",
+    "src/os/drivers/audio/hda_dma_resources.spl",
+    "src/os/services/vfs/vfs_block_adapters.spl",
+]
 
 
 describe "OS DMA DirectIoResult durability":
@@ -11,3 +27,11 @@ describe "OS DMA DirectIoResult durability":
         expect(source.contains("static fn durable_ok(bytes_transferred: i64, latency_us: i64) -> DirectIoResult:")).to_equal(true)
         expect(source.contains("durable: true")).to_equal(true)
         expect(source.contains("\",durable=\" + self.durable.to_text()")).to_equal(true)
+
+describe "DMA rt_dma_* owner seam":
+    it "leaves no driver declaring or calling rt_dma_* outside the owner":
+        for path in DMA_MIGRATED_DRIVERS:
+            val src = read_file(path)
+            expect(src.contains("std.io.dma")).to_equal(true)
+            expect(src.contains("extern fn rt_dma_")).to_equal(false)
+            expect(src.contains("    rt_dma_")).to_equal(false)
