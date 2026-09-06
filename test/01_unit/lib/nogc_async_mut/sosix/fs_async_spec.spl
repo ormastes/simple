@@ -1,0 +1,160 @@
+"""Hosted SOSIX positioned reads run over the canonical SimpleRing with one lifecycle and exact wakes."""
+
+use std.spec.*
+use std.common.contracts.execution.simple_ring_async_v1.{TaskPollResult}
+use std.common.contracts.sosix.operation_v1.{SOSIX_OPERATION_TIMED_OUT, SOSIX_OPERATION_FREE, SOSIX_OPERATION_COMPLETED}
+use std.common.contracts.sosix.capability_ref_v1.{SosixCapabilityRef, SosixBufferRef}
+use std.common.contracts.sosix.error_v1.{
+    SOSIX_ERROR_INVALID_CAPABILITY, SOSIX_ERROR_INVALID_BUFFER, SOSIX_ERROR_QUEUE_FULL, SOSIX_ERROR_NATIVE
+}
+use std.nogc_async_mut.sosix.fs.{SosixHostedFs, SosixFsSubmit}
+
+fn setup_sosix_software_ring(capacity: i64) -> SosixHostedFs:
+    match SosixHostedFs.create(91u64, 7u64, capacity):
+        case Ok(fs): fs
+        case Err(_):
+            fail("unresolved sosix oracle: hosted fs could not be created")
+            SosixHostedFs.create(91u64, 7u64, capacity).unwrap()
+
+fn file_cap() -> SosixCapabilityRef:
+    SosixCapabilityRef(slot: 3, generation: 1)
+
+fn buffer_ref() -> SosixBufferRef:
+    SosixBufferRef(slot: 5, generation: 1)
+
+fn submit_read(fs: SosixHostedFs, length: u64, deadline_ns: u64) -> SosixFsSubmit:
+    fs.read_at(file_cap(), buffer_ref(), 0u64, 0u64, length, deadline_ns)
+
+fn check_single_wake(fs: SosixHostedFs, submit: SosixFsSubmit) -> text:
+    match fs.poll(submit.operation):
+        case TaskPollResult.Ready(_): "ready"
+        case TaskPollResult.Pending(token):
+            if val expected = submit.token:
+                if token.slot == expected.slot and token.generation.value == expected.generation.value:
+                    return "pending-on-own-token"
+                return "pending-on-wrong-token"
+            "pending-without-token"
+
+describe "SOSIX hosted positioned read over SimpleRing":
+    it "admits a read, services it, and delivers exactly one typed completion":
+        # @req REQ-SOSIX-FS-ASYNC
+        step("Reserve and commit a positioned read on the hosted ring")
+        val fs = setup_sosix_software_ring(2)
+        val submit = submit_read(fs, 16u64, 0u64)
+        expect(submit.accepted).to_be(true)
+        expect(fs.occupancy()).to_equal(1u64)
+        step("Pending polls name the exact ring token that will wake them")
+        expect(check_single_wake(fs, submit)).to_equal("pending-on-own-token")
+        step("Complete the operation and wake exactly one token")
+        expect(fs.service_one(0, 16u64)).to_be(true)
+        expect(fs.pump()).to_equal(1)
+        expect(fs.telemetry().provider_takes).to_equal(1u64)
+        expect(fs.telemetry().completions).to_equal(1u64)
+        expect(fs.telemetry().commits).to_equal(1u64)
+        match fs.poll(submit.operation):
+            case TaskPollResult.Ready(result):
+                match result:
+                    case Ok(completion):
+                        expect(completion.transferred).to_equal(16u64)
+                        expect(completion.terminal_state).to_equal(SOSIX_OPERATION_COMPLETED)
+                    case Err(_): fail("completed read reported an error")
+            case TaskPollResult.Pending(_): fail("completed read still pending")
+        step("Retire the lease before releasing the slot")
+        expect(fs.release(submit.operation).accepted).to_be(true)
+        expect(fs.occupancy()).to_equal(0u64)
+
+    it "retires a canceled submission so its slot can be released":
+        step("Cancel before the provider takes the submission")
+        val fs = setup_sosix_software_ring(1)
+        val submit = submit_read(fs, 8u64, 0u64)
+        expect(fs.cancel(submit.operation).accepted).to_be(true)
+        expect(fs.release(submit.operation).accepted).to_be(false)
+        step("The provider honors the cancel request and the ring retires the lease")
+        expect(fs.service_one(0, 8u64)).to_be(true)
+        expect(fs.pump()).to_equal(1)
+        expect(fs.telemetry().cancellations).to_equal(1u64)
+        step("Release succeeds and the slot is free again")
+        expect(fs.release(submit.operation).accepted).to_be(true)
+        expect(fs.occupancy()).to_equal(0u64)
+
+    it "delivers a completion that arrived before the first poll":
+        step("Service and pump before the consumer ever polls")
+        val fs = setup_sosix_software_ring(1)
+        val submit = submit_read(fs, 8u64, 0u64)
+        expect(fs.service_one(0, 8u64)).to_be(true)
+        expect(fs.pump()).to_equal(1)
+        step("The first poll observes the result instead of losing it")
+        expect(check_single_wake(fs, submit)).to_equal("ready")
+
+    it "rejects invalid descriptors as values before touching the ring":
+        step("Reject an invalid capability and an empty transfer")
+        val fs = setup_sosix_software_ring(1)
+        val bad_cap = fs.read_at(SosixCapabilityRef(slot: 0, generation: 0), buffer_ref(), 0u64, 0u64, 8u64, 0u64)
+        expect(bad_cap.accepted).to_be(false)
+        expect(bad_cap.error.kind).to_equal(SOSIX_ERROR_INVALID_CAPABILITY)
+        val empty = submit_read(fs, 0u64, 0u64)
+        expect(empty.accepted).to_be(false)
+        expect(empty.error.kind).to_equal(SOSIX_ERROR_INVALID_BUFFER)
+        step("No slot was reserved for either rejection")
+        expect(fs.occupancy()).to_equal(0u64)
+        expect(fs.telemetry().reservations).to_equal(0u64)
+
+    it "reports a full queue as a typed error and keeps control of the ring":
+        step("Reject a stale generation and a full queue")
+        val fs = setup_sosix_software_ring(1)
+        val first = submit_read(fs, 4u64, 0u64)
+        expect(first.accepted).to_be(true)
+        val second = submit_read(fs, 4u64, 0u64)
+        expect(second.accepted).to_be(false)
+        expect(second.error.kind).to_equal(SOSIX_ERROR_QUEUE_FULL)
+        expect(fs.occupancy()).to_equal(1u64)
+        step("The admitted operation still completes normally")
+        expect(fs.service_one(0, 4u64)).to_be(true)
+        expect(fs.pump()).to_equal(1)
+        expect(check_single_wake(fs, first)).to_equal("ready")
+
+    it "cannot release a timed-out slot until the ring retires the lease":
+        step("Expire the deadline while the provider still owns the submission")
+        val fs = setup_sosix_software_ring(1)
+        val submit = submit_read(fs, 32u64, 5u64)
+        val expired = fs.expire(submit.operation, 10u64)
+        expect(expired.accepted).to_be(true)
+        expect(expired.slot.state).to_equal(SOSIX_OPERATION_TIMED_OUT)
+        step("Refuse release: the buffer is still leased to the provider")
+        val early = fs.release(submit.operation)
+        expect(early.accepted).to_be(false)
+        expect(early.reason).to_equal("lease-not-retired")
+        step("A late completion retires the lease without a second terminal result")
+        expect(fs.service_one(0, 32u64)).to_be(true)
+        expect(fs.pump()).to_equal(0)
+        expect(fs.late_completions).to_equal(1u64)
+        match fs.poll(submit.operation):
+            case TaskPollResult.Ready(result):
+                match result:
+                    case Ok(_): fail("timed-out read reported success")
+                    case Err(error): expect(error.transferred).to_equal(0u64)
+            case TaskPollResult.Pending(_): fail("timed-out read still pending")
+        step("Release now succeeds and the slot is free")
+        val released = fs.release(submit.operation)
+        expect(released.accepted).to_be(true)
+        expect(released.slot.state).to_equal(SOSIX_OPERATION_FREE)
+
+    it "keeps each operation's result independent of its sibling":
+        step("Submit two reads and let the first fail natively")
+        val fs = setup_sosix_software_ring(2)
+        val first = submit_read(fs, 8u64, 0u64)
+        val second = submit_read(fs, 8u64, 0u64)
+        expect(fs.service_one(-5, 0u64)).to_be(true)
+        expect(fs.service_one(0, 8u64)).to_be(true)
+        expect(fs.pump()).to_equal(2)
+        step("The failure is typed native and the sibling succeeded")
+        match fs.poll(first.operation):
+            case TaskPollResult.Ready(result):
+                match result:
+                    case Ok(_): fail("failed read reported success")
+                    case Err(error):
+                        expect(error.kind).to_equal(SOSIX_ERROR_NATIVE)
+                        expect(error.native_code).to_equal(-5)
+            case TaskPollResult.Pending(_): fail("failed read still pending")
+        expect(check_single_wake(fs, second)).to_equal("ready")
+        expect(fs.take_completion() != nil).to_be(true)
