@@ -22,13 +22,14 @@
 | Is the wrong value observable? | **Yes** — offset 16 of a hosted `RuntimeClosure` is `capture_count`, explicitly zero-initialised, so the result is a clean small non-negative integer. |
 | Already fixed? | **No.** PR #257 is `state: OPEN`, `mergedAt: null`. No `baremetal` field exists on `InstrContext`. |
 | Is the defect one-directional? | **No** — it is **two-way**. See "The symmetric half". |
+| Does gating on `is_baremetal()` fix it? | **No** — both runtimes link into one hosted binary. See "Fix shape". |
 
 ## The collision, from source
 
 Two *different* heap-kind spaces are overlaid on the same first byte, and they
 disagree on precisely dict and closure — the two are **swapped**:
 
-| kind byte | hosted (`runtime/src/value/heap.rs:8-16`) | freestanding RtCore (`src/runtime/runtime_native.c:248-253`) |
+| kind byte | Rust runtime — `HeapObjectType` (`runtime/src/value/heap.rs:8-16`, `#[repr(u8)]` at `:6`) | C RtCore runtime — `RT_VALUE_HEAP_*` (`src/runtime/runtime_native.c:248-253`) |
 |---|---|---|
 | `0x02` | `Array = 0x02` | `RT_VALUE_HEAP_ARRAY 0x02U` — agree |
 | `0x03` | `Dict = 0x03` | `RT_VALUE_HEAP_CLOSURE 0x03U` — **collide** |
@@ -163,24 +164,63 @@ Any fix must close both directions, not just tag 6.
 
 ## Fix shape (NOT implemented here, per the filing request)
 
-The function needs to know which tag space it is decoding. Two shapes, in preference
-order:
+**First, a correction to the obvious-looking fix — it would cause a regression.**
+The two tag spaces are *not* "hosted vs baremetal", and gating on
+`Target::is_baremetal()` (`src/compiler_rust/common/src/target.rs:732`) is the wrong
+discriminator. `runtime_native.c` is the general **C RtCore runtime**, not a
+baremetal-only file, and it is linked into **hosted** builds. Measured from
+`src/compiler_rust/compiler/src/pipeline/native_project/linker.rs:1624-1652`, the
+Stage-2 hosted link puts the Rust `native_all` archive *and* the core-C archive on the
+same command line:
 
-1. **Thread the target in.** Give `inline_runtime_len_value` a `baremetal: bool`
-   (or take `&InstrContext`), fed from `Target::is_baremetal()`
-   (`src/compiler_rust/common/src/target.rs:732`) — the same mechanism PR #257 proposes
-   for `InstrContext`. Then select *one* of two tag tables: hosted `{1:str@8, 2:arr@8,
-   3:dict@8}` with closure absent (falls to `-1`), or freestanding `{0x02:arr@8,
-   0x06:dict@16}` with closure (`0x03`) absent (falls to `-1`). This is the correct fix
-   and it lands naturally on top of #257.
-2. **Interim, if #257 is not close:** delete the `is_spldict` arm and restore `-1` for
-   tag 6. That re-breaks the SimpleOS in-guest `.len()` case the arm was added for
-   (`28ff5e05494`, 2026-07-14) and would need its own record, so it is a mitigation, not
-   a fix. Prefer (1).
+```
+    // Those live in runtime_native.c, which the core-C
+    // archive compiles and nothing else in this build does.
+    // Supply it as an ADDITIONAL archive, exactly like the
+    // Stage 4 supplement above, rather than replacing
+    // native_all ...
+    ...
+    // ~514 of which native_all defines
+    // too (measured -- the same class 8ca87866c6 recorded
+    // as 475 collisions).
+```
 
-Note that arrays and strings agree across both spaces (`0x02` is array in both;
-`RtCoreArray` keeps `len` at offset 8, `runtime_native.c:1018-1026`), so only the
-dict/closure pair needs to become target-conditional.
+So on a hosted target, ~514-560 `rt_*` symbols are defined by **both** runtimes and the
+winner is decided by archive order and `/FORCE:MULTIPLE` first-wins — per symbol, at
+link time. A target-triple gate cannot see that. Worse, both allocators can be live in
+one process, so the tag space a given heap object belongs to is a property of *which
+runtime allocated it*, not of the target being compiled.
+
+The two runtimes do not even agree on the sentinel. Rust `rt_len`
+(`collections.rs:2406-2414`) returns `-1` for an unhandled type; C `rt_len`
+(`runtime_native.c:3071-3076`) returns `0`, and handles only string and array — no dict
+arm at all, which is the actual reason the `is_spldict` arm was bolted into codegen in
+the first place.
+
+Fix directions, in preference order:
+
+1. **Stop overloading the byte.** Make the two runtimes agree on the heap-kind
+   numbering — the cheapest form is to move `RT_VALUE_HEAP_CLOSURE`/`RT_VALUE_HEAP_DICT`
+   onto `HeapObjectType`'s `0x06`/`0x03` (array `0x02` and the string magic already
+   agree, so only this pair moves). Then one table decodes both and the gate question
+   disappears. This is the durable fix and it is the one worth costing.
+2. **Decode defensively instead of guessing.** Before trusting an offset, validate the
+   candidate — e.g. require the object's own `size`/`cap` field to be consistent with the
+   length being loaded, and fall through to the `-1` sentinel when it is not. Slower, but
+   it degrades to "unknown" rather than to a fabricated number.
+3. **Do not** simply thread `is_baremetal()` in. Per the linker evidence above that
+   would select the Rust table on hosted native-builds that are actually linked against
+   RtCore, breaking dict `.len()` — trading this silent wrong answer for a different one.
+   If a static gate is pursued at all, the axis must be *which runtime ABI this module is
+   linked against*, which the codegen does not currently know and would have to be
+   plumbed.
+4. **Interim mitigation only:** delete the `is_spldict` arm and restore `-1` for tag 6.
+   That re-breaks the SimpleOS in-guest `.len()` case the arm was added for
+   (`28ff5e05494`, 2026-07-14) and needs its own record. Not a fix.
+
+Note arrays and strings agree across both spaces (`0x02` is array in both; `RtCoreArray`
+keeps `len` at offset 8, `runtime_native.c:1018-1026`), so only the dict/closure pair is
+in scope.
 
 ## What was NOT established
 
@@ -199,6 +239,10 @@ dict/closure pair needs to become target-conditional.
   was not audited for the same collision — it may or may not share the defect.
 - **Whether the `28ff5e05494` in-guest bug is still live** (i.e. whether removing the arm
   would actually regress anything today) was not checked.
+- **Which runtime actually wins for `rt_len` on any given hosted link** was not
+  determined — only that both archives are present and that first-wins ordering decides
+  it per symbol (`linker.rs:1624-1652`). Establishing the winner needs an `nm` on a real
+  link artifact, which requires a build and was therefore out of scope.
 - `git blame` on the arm points at `ae55a7467197` (2026-08-11, "fix(vcs): restore tree
   wiped by 6f86ff32a7d"), which is a tree-restore and hides authorship. The real
   introduction is `28ff5e05494` (2026-07-14), found via `git log -S"is_spldict"`.
