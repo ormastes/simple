@@ -169,9 +169,18 @@ scan_wiring() {
         # (.github is a dot-directory and rg honours .gitignore by default);
         # rg skips binaries like -I and lists names like -l.
         if command -v rg >/dev/null 2>&1; then
+            # rg is often a NATIVE binary (Windows/MSYS, and this is the only
+            # tool here that is): it rewrites an absolute POSIX argument like
+            # /tmp/x into C:/Users/.../Temp/x and emits '\' separators, so its
+            # output never string-equals the find-produced paths used as BFS
+            # edge keys -- every guard then looks orphaned (measured
+            # 2026-09-06: 0 reached, selftest red). Search RELATIVE dirs from
+            # inside $_root, then re-normalise separators and re-prefix. On
+            # Linux this is byte-identical to passing absolute dirs.
             # shellcheck disable=SC2046
-            rg -F -f "$_wd/guards" -l --no-ignore --hidden $(cat "$_wd/searchdirs") \
-                2>/dev/null > "$_wd/reffiles" || :
+            ( cd "$_root" && rg -F -f "$_wd/guards" -l --no-ignore --hidden \
+                $(sed "s#^$_root/##" "$_wd/searchdirs") 2>/dev/null ) |
+                tr '\\' '/' | sed "s#^#$_root/#" > "$_wd/reffiles" || :
         else
             # shellcheck disable=SC2046
             $GREP -r -I -l -F -f "$_wd/guards" $(cat "$_wd/searchdirs") \
