@@ -178,9 +178,112 @@ fn _take_visible(s: text, max_cols: i32) -> text:
 # Screen Buffer
 # =========================================================================
 
+# Row-table copy instrumentation.
+#
+# `_screen_replace_row` allocates a whole new row table for a single row
+# change, so its call count is the cost oracle for batched drawing. The
+# counter is module state, read/reset through the two free functions below;
+# it never affects rendering.
+var _screen_row_copy_count = 0
+
+fn screen_row_copy_count() -> i32:
+    """Number of row-table copies performed since the last reset."""
+    return _screen_row_copy_count
+
+fn screen_row_copy_reset() -> i32:
+    """Reset the row-table copy counter and return the value it had."""
+    val prev = _screen_row_copy_count
+    _screen_row_copy_count = 0
+    return prev
+
+fn _is_single_cell(ch: text) -> bool:
+    """True when ch provably occupies exactly one terminal cell.
+
+    One visible token and no ANSI escape. A combining sequence, a
+    multi-character string and a styled character all answer false and are
+    routed through the historical per-cell writer unchanged.
+    """
+    if ch.contains("\u{001b}"):
+        return false
+    return _split_visible(ch).len() == 1
+
+fn _splice_row(line: text, width: i32, col: i32, content: text) -> text:
+    """Splice content into line at visual column col, returning the new line.
+
+    This is put_text's row logic with no buffer involvement, so a batched
+    drawer can apply it repeatedly to a local line and publish once.
+    """
+    val line_tokens = _split_visible(line)
+    val available_width = width - col
+    val clipped_text = _take_visible(content, available_width)
+    # Measure visual width of text being inserted
+    val text_vis_width = _visible_width(clipped_text)
+
+    # Build prefix: first `col` visible columns from old line
+    var prefix = ""
+    var i = 0
+    while i < col:
+        if i < line_tokens.len():
+            prefix = "{prefix}{line_tokens[i]}"
+        else:
+            prefix = "{prefix} "
+        i = i + 1
+
+    # Build suffix: visible columns after the inserted text
+    val after_col = col + text_vis_width
+    var suffix = ""
+    var j = after_col
+    while j < width:
+        if j < line_tokens.len():
+            suffix = "{suffix}{line_tokens[j]}"
+        else:
+            suffix = "{suffix} "
+        j = j + 1
+
+    # Style management across the splice boundary.
+    # Scan the overwritten range to determine:
+    # 1) Did we lose a RESET? → emit RESET before content
+    # 2) What style was active at the suffix start? → re-emit it
+    #    before the suffix so tokens that inherited contextually
+    #    keep their style.
+    var lost_reset = false
+    var scan_style = ""
+    # Scan prefix tokens to find active style at end of prefix
+    var k = 0
+    while k < col and k < line_tokens.len():
+        val (new_s, had_r) = _scan_token_style(line_tokens[k], scan_style)
+        scan_style = new_s
+        k = k + 1
+    val prefix_active = scan_style
+    # Scan the overwritten range
+    k = col
+    while k < after_col and k < line_tokens.len():
+        val (new_s, had_r) = _scan_token_style(line_tokens[k], scan_style)
+        if had_r:
+            lost_reset = true
+        scan_style = new_s
+        k = k + 1
+    val style_entering_suffix = scan_style
+
+    # Gap: only emit RESET if the prefix has an active style
+    # AND the overwritten range lost a RESET (or we're inserting
+    # into an active style run where content should be plain)
+    val gap = if prefix_active != "" and (lost_reset or prefix_active != style_entering_suffix): RESET else: ""
+
+    # Restore: re-emit suffix style if the first suffix token
+    # doesn't carry its own escape but had an inherited style
+    var suffix_restore = ""
+    if style_entering_suffix != "" and after_col < line_tokens.len():
+        val first_suffix = line_tokens[after_col]
+        if not first_suffix.contains("\u{001b}["):
+            suffix_restore = style_entering_suffix
+
+    return "{prefix}{gap}{clipped_text}{suffix_restore}{suffix}{RESET}"
+
 fn _screen_replace_row(buffer: [text], row: i32, value: text) -> [text]:
     if buffer.len() == 0:
         return []
+    _screen_row_copy_count = _screen_row_copy_count + 1
     var result: [text] = [buffer[0]; buffer.len()]
     var i = 0
     while i < buffer.len():
@@ -218,74 +321,8 @@ class Screen:
         if col < 0 or col >= self.width:
             return self
 
-        var new_buffer = self.buffer
-        # Split existing line into visible-column tokens
-        val line_tokens = _split_visible(new_buffer[row])
-        val available_width = self.width - col
-        val clipped_text = _take_visible(text_content, available_width)
-        # Measure visual width of text being inserted
-        val text_vis_width = _visible_width(clipped_text)
-
-        # Build prefix: first `col` visible columns from old line
-        var prefix = ""
-        var i = 0
-        while i < col:
-            if i < line_tokens.len():
-                prefix = "{prefix}{line_tokens[i]}"
-            else:
-                prefix = "{prefix} "
-            i = i + 1
-
-        # Build suffix: visible columns after the inserted text
-        val after_col = col + text_vis_width
-        var suffix = ""
-        var j = after_col
-        while j < self.width:
-            if j < line_tokens.len():
-                suffix = "{suffix}{line_tokens[j]}"
-            else:
-                suffix = "{suffix} "
-            j = j + 1
-
-        # Style management across the splice boundary.
-        # Scan the overwritten range to determine:
-        # 1) Did we lose a RESET? → emit RESET before text_content
-        # 2) What style was active at the suffix start? → re-emit it
-        #    before the suffix so tokens that inherited contextually
-        #    keep their style.
-        var lost_reset = false
-        var scan_style = ""
-        # Scan prefix tokens to find active style at end of prefix
-        var k = 0
-        while k < col and k < line_tokens.len():
-            val (new_s, had_r) = _scan_token_style(line_tokens[k], scan_style)
-            scan_style = new_s
-            k = k + 1
-        val prefix_active = scan_style
-        # Scan the overwritten range
-        k = col
-        while k < after_col and k < line_tokens.len():
-            val (new_s, had_r) = _scan_token_style(line_tokens[k], scan_style)
-            if had_r:
-                lost_reset = true
-            scan_style = new_s
-            k = k + 1
-        val style_entering_suffix = scan_style
-
-        # Gap: only emit RESET if the prefix has an active style
-        # AND the overwritten range lost a RESET (or we're inserting
-        # into an active style run where text_content should be plain)
-        val gap = if prefix_active != "" and (lost_reset or prefix_active != style_entering_suffix): RESET else: ""
-
-        # Restore: re-emit suffix style if the first suffix token
-        # doesn't carry its own escape but had an inherited style
-        var suffix_restore = ""
-        if style_entering_suffix != "" and after_col < line_tokens.len():
-            val first_suffix = line_tokens[after_col]
-            if not first_suffix.contains("\u{001b}["):
-                suffix_restore = style_entering_suffix
-
-        new_buffer = _screen_replace_row(new_buffer, row, "{prefix}{gap}{clipped_text}{suffix_restore}{suffix}{RESET}")
+        val new_line = _splice_row(self.buffer[row], self.width, col, text_content)
+        val new_buffer = _screen_replace_row(self.buffer, row, new_line)
         return Screen(width: self.width, height: self.height, buffer: new_buffer)
 
     fn put_styled(row: i32, col: i32, text_content: text, style: text) -> Screen:
@@ -323,15 +360,39 @@ class Screen:
         return Screen(width: self.width, height: self.height, buffer: new_buffer)
 
     fn draw_hline(row: i32, col: i32, length: i32, ch: text) -> Screen:
-        """Draw a horizontal line."""
-        var s = self
+        """Draw a horizontal line.
+
+        When ch is provably a single terminal cell and the run starts on
+        screen, the whole span is spliced into one local row and published
+        as ONE new Screen — the row table is copied once instead of once
+        per cell. Every other input falls through to the historical
+        per-cell writer unchanged. The buffer this Screen holds is never
+        mutated either way.
+        """
+        if length <= 0:
+            return self
+        if row < 0 or row >= self.height:
+            return self
+        if col < 0 or not _is_single_cell(ch):
+            # Fallback: multi-cell / styled / combining ch, or a run that
+            # starts left of column 0 (where put_text drops whole cells).
+            var s = self
+            var fi = 0
+            while fi < length:
+                val fc = col + fi
+                if fc < self.width:
+                    s = s.put_text(row, fc, ch)
+                fi = fi + 1
+            return s
+        var line = self.buffer[row]
         var i = 0
         while i < length:
             val c = col + i
             if c < self.width:
-                s = s.put_text(row, c, ch)
+                line = _splice_row(line, self.width, c, ch)
             i = i + 1
-        return s
+        val new_buffer = _screen_replace_row(self.buffer, row, line)
+        return Screen(width: self.width, height: self.height, buffer: new_buffer)
 
     fn draw_vline(row: i32, col: i32, length: i32, ch: text) -> Screen:
         """Draw a vertical line."""

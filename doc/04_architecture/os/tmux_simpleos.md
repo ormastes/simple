@@ -277,3 +277,10 @@ The service should expose counters/timings for:
 - copy-mode parity
 - mouse parity
 - controlling-terminal/PTY subsystem promotion into a general OS service
+# CLI routing invariant
+
+The `smux send`, `capture`, and `split` entrypoints resolve the requested
+session name before selecting its active window and pane. They must never fall
+back to the first session, because that crosses an operator-visible isolation
+boundary. Multi-word commands are reconstructed from the complete remaining
+argument vector before delivery.

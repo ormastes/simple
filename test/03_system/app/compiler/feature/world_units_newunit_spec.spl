@@ -1,10 +1,39 @@
-use std.spec
+"""
+## Purpose and audience
+Executable contract for the compiler's world-units surface: parser-side
+newunit declarations must land in the compile-start registry as nominal 1:1
+Count wrappers, derived units must carry exact rational SI factors, and
+currency units must keep their ISO code as identity. For compiler engineers
+touching src/compiler/30.types/units and src/lib/common/units.
+## Operator workflow
+./src/compiler_rust/target/bootstrap/simple run test/03_system/app/compiler/feature/world_units_newunit_spec.spl
+## Compatibility and limitations
+The newunit scenario depends on parser-side newunit records and is RED in
+the current tree; its failure is preserved deliberately and must not be
+weakened to green. The derived and currency scenarios run against the
+stdlib world-units model only, so they need no compiler build.
+## Verification guidance and troubleshooting
+Rerun with the command above. A failure in the exact-factor scenario means
+the ratio normalization drifted from exact rational arithmetic; a failure
+in the currency scenario means the unit-expression identity contract
+changed. The newunit scenario failing reports a real registry defect —
+file it, never soften the scenario.
+"""
+# Lifecycle: doc/01_research/compiler/types/README.md ;
+# doc/03_plan/lib/misc/world_units_newunit.md ;
+# doc/04_architecture/lib/world_units_newunit.md ;
+# doc/05_design/language/language_features/types/world_units_newunit.md
 
+use std.spec
+use std.common.units.model.world_units.{exact_ratio, exact_ratio_equal, unit_expression_scaled, unit_expression_div}
+
+# @manual_section: world units and newunit
 describe "World units and newunit":
     describe "REQ-WUN-001: nominal wrappers":
         it "a newunit declaration is recorded as a nominal 1:1 wrapper":
             # @req REQ-SSPEC-SYSTEM
             # @req REQ-WUN-001
+            # @capture(statistics): registry entry fields for the registered newunit wrapper
             step("register a newunit declaration the way the parser does")
             step("rebuild the compile-start registry and look the wrapper up")
             val idx = newunit_register("WunUserId", "wuid", TYPE_I64)
@@ -17,17 +46,29 @@ describe "World units and newunit":
                     expect(entry.kind).to_equal("i64")
                     expect(entry.klass).to_equal(UnitClass.Count)
                     # nominal wrappers carry an identity base factor (1/1)
-                    expect(entry.base_factor.numerator).to_equal(1)
-                    expect(entry.base_factor.denominator).to_equal(1)
+                    expect(entry.base_factor.numerator).to_equal(1)  # oracle: identity factor numerator is exactly 1
+                    expect(entry.base_factor.denominator).to_equal(1)  # oracle: identity factor denominator is exactly 1
                 case None:
                     assert_true(false)
 
     describe "REQ-WUN-004: exact derived units":
         it "records km/h as exact factor":
-            val factor = "5/18"
-            expect(factor).to_equal("5/18")
+            # @req REQ-WUN-004
+            # @capture(statistics): normalized km/h scale numerator and denominator
+            step("Compose km/h from km and hour scale expressions and read the normalized SI factor")
+            val kilometre = unit_expression_scaled(exact_ratio(1000, 1), "m")
+            val hour = unit_expression_scaled(exact_ratio(3600, 1), "s")
+            val kilometre_per_hour = unit_expression_div(kilometre, hour)
+            expect(kilometre_per_hour.scale.numerator).to_equal(5)  # oracle: 1000/3600 normalizes to 5/18 — the exact km/h-to-m/s factor
+            expect(kilometre_per_hour.scale.denominator).to_equal(18)  # oracle: 1000/3600 normalizes to 5/18 — the exact km/h-to-m/s factor
 
     describe "REQ-WUN-006: currency identity":
         it "uses ISO code for dollars":
-            val currency = "USD"
-            expect(currency).to_equal("USD")
+            # @req REQ-WUN-006
+            # @capture(statistics): USD unit-expression id and identity-scale verdict
+            step("Build the USD unit expression and compare its scale to the identity ratio")
+            val usd = unit_expression_scaled(exact_ratio(1, 1), "USD")
+            val iso_code_is_the_unit_id = usd.factors[0].unit_id == "USD"
+            val scale_is_identity = exact_ratio_equal(usd.scale, exact_ratio(1, 1))
+            expect(iso_code_is_the_unit_id).to_equal(true)  # oracle: the ISO 4217 code is the currency's unit identity
+            expect(scale_is_identity).to_equal(true)  # oracle: currency is nominal — identity conversion factor
