@@ -1045,3 +1045,103 @@ box where 83 of 121 GiB were held by other agents' processes at the time (101
 GiB free immediately after). It is recorded as a truncated run, not as a
 reproduction of this bug's termination: the record's own 2026-08-14 warning
 applies — a kill without a monotonic HIR-phase RSS trace is not a repro.
+
+### 9. Appendix — the two C fixtures, verbatim, so the numbers can be re-run
+
+Both link the same way. `stubs.c` defines the 28 unrelated `spl_*` /
+`rt_process_*` / `rt_simd_*` / `rt_getcwd` / `rt_is_dir` / `rt_dir_remove_all` /
+`rt_sleep_ms_native` / `rt_text_slice_audit_*` symbols the translation unit
+references as `void name(void) { abort(); }` — none is on the allocation path,
+and any call aborts loudly rather than being silently absent:
+
+```bash
+~/dev/llvm/install/bin/clang -O2 -o probe main.c stubs.c \
+    src/runtime/runtime_native.c -lm -lpthread
+```
+
+`main.c` (§6 — scope vs no scope; `./probe <N> <0|1>`):
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+#include <stdint.h>
+
+void*  rt_alloc(int64_t size);
+int8_t rt_transient_array_scope_begin(void);
+int8_t rt_transient_array_scope_end(void);
+
+int main(int argc, char** argv) {
+    if (argc < 3) { fprintf(stderr, "usage: probe N SCOPED\n"); return 1; }
+    long n = atol(argv[1]);
+    int scoped = atoi(argv[2]);
+    long batch = 4000;
+    long done = 0;
+    volatile long sink = 0;
+    while (done < n) {
+        long take = (n - done) < batch ? (n - done) : batch;
+        if (scoped) {
+            if (!rt_transient_array_scope_begin()) { fprintf(stderr, "begin failed\n"); return 2; }
+        }
+        for (long i = 0; i < take; i++) {
+            int64_t* p = (int64_t*)rt_alloc(32);
+            if (!p) { fprintf(stderr, "alloc failed\n"); return 3; }
+            p[0] = i; p[1] = i; p[2] = i; p[3] = i;
+            sink += p[0];
+        }
+        if (scoped) {
+            if (!rt_transient_array_scope_end()) { fprintf(stderr, "end failed\n"); return 4; }
+        }
+        done += take;
+    }
+    printf("n=%ld scoped=%d sink=%ld\n", n, scoped, (long)sink);
+    return 0;
+}
+```
+
+`main2.c` (§7 — active window vs paused window; `./probe2 4000 4000 <paused>`):
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+#include <stdint.h>
+
+void*  rt_alloc(int64_t size);
+int8_t rt_transient_array_scope_begin(void);
+int8_t rt_transient_array_scope_pause(void);
+int8_t rt_transient_array_scope_end(void);
+
+/* Replays the Stage-3 driver's sequence in lower_streaming_surface_source:
+   begin -> allocate (parse + lower) -> pause -> allocate (promotion-time work)
+   -> end. ACTIVE blocks are registered owned; PAUSED blocks are registered with
+   the owned bit clear, so rt_core_reclaim_transient_raw skips them. */
+int main(int argc, char** argv) {
+    if (argc < 4) { fprintf(stderr, "usage: probe2 BATCHES ACTIVE PAUSED\n"); return 1; }
+    long batches = atol(argv[1]);
+    long active  = atol(argv[2]);
+    long paused  = atol(argv[3]);
+    volatile long sink = 0;
+    for (long b = 0; b < batches; b++) {
+        if (!rt_transient_array_scope_begin()) { fprintf(stderr, "begin failed at %ld\n", b); return 2; }
+        for (long i = 0; i < active; i++) {
+            int64_t* p = (int64_t*)rt_alloc(32);
+            if (!p) return 3;
+            p[0] = i; sink += p[0];
+        }
+        if (!rt_transient_array_scope_pause()) { fprintf(stderr, "pause failed\n"); return 4; }
+        for (long i = 0; i < paused; i++) {
+            int64_t* p = (int64_t*)rt_alloc(32);
+            if (!p) return 5;
+            p[0] = i; sink += p[0];
+        }
+        if (!rt_transient_array_scope_end()) { fprintf(stderr, "end failed\n"); return 6; }
+    }
+    printf("batches=%ld active=%ld paused=%ld sink=%ld\n", batches, active, paused, (long)sink);
+    return 0;
+}
+```
+
+The Simple-lane fixtures of §1/§2 are the `Node` / `Node8` / `[i64]` loops
+already quoted there; the scoped variant wraps each 1/1000th of the loop in
+`extern fn rt_transient_array_scope_begin() -> bool` /
+`rt_transient_array_scope_end() -> bool` and prints both return values on the
+first batch, so a silently-refused scope cannot be mistaken for a flat curve.
