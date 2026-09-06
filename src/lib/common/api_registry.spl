@@ -1,0 +1,183 @@
+"""
+# API registry reader
+
+One reader for `config/api/api_registry.sdn` — the database that answers
+"which group does this API belong to, and who is allowed to call it".
+
+The registry is deliberately ONE schema across every API surface in the tree
+(`rt`, `hal`, `sosix`, `stdlib`) rather than one database per surface: the
+question a caller asks is the same in each case, so a second shape would only
+mean a second reader and a second way to drift. A surface is a column, not a
+file.
+
+The file carries exactly two SDN tables:
+
+    api_groups  |surface, group, symbols, sites, provider, access|
+    api_symbols |surface, group, symbol, lane, backing, class, sites, twin, alias, desc|
+
+`api_groups` is the group index — its `provider` is the allowlisted path that
+is permitted to hold direct calls into the group, and `access` is `group`
+(call it through the group's provider), `sosix` (SOSIX is the required path)
+or `unowned` (no provider has been named yet — an open item, not a licence).
+
+`api_symbols` is one row per exported symbol. `sites` is the forbidden direct
+call-site count recorded when the registry was generated; the per-group sum is
+what `scripts/check/check-rt-api-groups.shs` ratchets.
+
+Policy: `doc/04_architecture/runtime/rt_api/rt_api_group_policy.md`.
+Generator: `scripts/check/gen-api-registry.shs` — rows are derived, never
+hand-written.
+"""
+
+use std.common.sdn.parser.{parse}
+use std.common.sdn.value.{SdnValue}
+use std.common.text.{parse_i64}
+
+
+struct ApiGroup:
+    surface: text
+    name: text
+    symbols: i64
+    sites: i64
+    provider: text
+    access: text
+
+
+struct ApiSymbol:
+    surface: text
+    group: text
+    symbol: text
+    lane: text
+    backing: text
+    class_name: text
+    sites: i64
+    twin: text
+    alias: text
+    desc: text
+
+
+struct ApiRegistry:
+    groups: [ApiGroup]
+    symbols: [ApiSymbol]
+
+
+fn cell_text(row: [SdnValue], index: i64) -> text:
+    if index >= row.len(): return ""
+    match row[index]:
+        case String(s): s
+        case Int(i): i.to_text()
+        case Bool(b): if b: "true" else: "false"
+        case _: ""
+
+
+fn cell_int(row: [SdnValue], index: i64) -> i64:
+    if index >= row.len(): return 0
+    match row[index]:
+        case Int(i): i
+        case String(s): parse_i64(s)
+        case _: 0
+
+
+fn table_of(root: SdnValue, name: text) -> Result<SdnValue, text>:
+    match root.get(name):
+        case Some(v): Ok(v)
+        case None: Err("api registry has no table '" + name + "'")
+
+
+fn read_groups(value: SdnValue) -> [ApiGroup]:
+    var out: [ApiGroup] = []
+    match value:
+        case Table(_, rows):
+            for row in rows:
+                out = out.push(ApiGroup(
+                    surface: cell_text(row, 0),
+                    name: cell_text(row, 1),
+                    symbols: cell_int(row, 2),
+                    sites: cell_int(row, 3),
+                    provider: cell_text(row, 4),
+                    access: cell_text(row, 5)))
+        case _:
+            pass
+    out
+
+
+fn read_symbols(value: SdnValue) -> [ApiSymbol]:
+    var out: [ApiSymbol] = []
+    match value:
+        case Table(_, rows):
+            for row in rows:
+                out = out.push(ApiSymbol(
+                    surface: cell_text(row, 0),
+                    group: cell_text(row, 1),
+                    symbol: cell_text(row, 2),
+                    lane: cell_text(row, 3),
+                    backing: cell_text(row, 4),
+                    class_name: cell_text(row, 5),
+                    sites: cell_int(row, 6),
+                    twin: cell_text(row, 7),
+                    alias: cell_text(row, 8),
+                    desc: cell_text(row, 9)))
+        case _:
+            pass
+    out
+
+
+"""Parse registry text. An empty symbol table is an error, never an empty
+success: a reader that silently returns nothing is how a gate built on it
+turns into a vacuous pass."""
+fn api_registry_parse(source: text) -> Result<ApiRegistry, text>:
+    val root = parse(source)
+    match root:
+        case Err(e): return Err(e)
+        case Ok(value):
+            val groups_tbl = table_of(value, "api_groups")
+            match groups_tbl:
+                case Err(e): return Err(e)
+                case Ok(gt):
+                    val symbols_tbl = table_of(value, "api_symbols")
+                    match symbols_tbl:
+                        case Err(e): return Err(e)
+                        case Ok(st):
+                            val symbols = read_symbols(st)
+                            if symbols.len() == 0:
+                                return Err("api registry has 0 symbol rows")
+                            Ok(ApiRegistry(groups: read_groups(gt), symbols: symbols))
+
+
+"""Every group declared for one surface."""
+fn api_registry_groups(reg: ApiRegistry, surface: text) -> [ApiGroup]:
+    var out: [ApiGroup] = []
+    for g in reg.groups:
+        if g.surface == surface: out = out.push(g)
+    out
+
+
+"""The group a symbol belongs to, or "" when it is not registered. An
+unregistered symbol is precisely what the group gate fails on."""
+fn api_registry_group_of(reg: ApiRegistry, symbol: text) -> text:
+    for s in reg.symbols:
+        if s.symbol == symbol: return s.group
+    ""
+
+
+"""The provider path that may hold direct calls into a group, or "" when the
+group is unowned."""
+fn api_registry_provider_of(reg: ApiRegistry, surface: text, group: text) -> text:
+    for g in reg.groups:
+        if g.surface == surface and g.name == group:
+            if g.access == "unowned": return ""
+            return g.provider
+    ""
+
+
+"""Every symbol in one group."""
+fn api_registry_symbols_in(reg: ApiRegistry, surface: text, group: text) -> [ApiSymbol]:
+    var out: [ApiSymbol] = []
+    for s in reg.symbols:
+        if s.surface == surface and s.group == group: out = out.push(s)
+    out
+
+
+export ApiGroup, ApiSymbol, ApiRegistry
+export api_registry_parse, api_registry_groups, api_registry_group_of
+export api_registry_provider_of, api_registry_symbols_in

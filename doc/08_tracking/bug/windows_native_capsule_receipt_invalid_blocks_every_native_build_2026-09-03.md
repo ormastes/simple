@@ -1,7 +1,9 @@
 # No `native-build` invocation completes a binary on this Windows host (2026-09-03)
 
-- **Status:** OPEN — filed from the module-global MIR lowering lane, not fixed
-  there.
+- **Status:** FIXED 2026-09-06 — root-caused and repaired in
+  `src/compiler/80.driver/driver_aot_native_output.spl`. A three-line hello
+  world now `native-build`s end to end on this Windows host and RUNS. Evidence
+  and the exact remaining caveats are in "2026-09-06 resolution" below.
 - **Severity:** blocking for any Windows `native-build` deliverable. It is why
   the MCP lane cannot yet show a running `simple_mcp_server.exe` even after the
   MIR defect in front of it was cleared.
@@ -67,3 +69,107 @@ a path component while the raw cache key always contains one.
 a running `simple_mcp_server.exe` on Windows still requires this wall to come
 down. The interpreted MCP server (`bin/simple run src/app/mcp/main.spl`) is
 unaffected and continues to answer real MCP protocol.
+
+## 2026-09-06 resolution
+
+### The premise had a NEW wall in front of it (re-measured, not assumed)
+
+The deployed `bin/simple.exe` (2026-09-02) can no longer even reach the capsule
+code: it dies at `parse: in ".../src/compiler/00.common/structural_contracts/
+frontend_offload_switch.spl": function arguments: expected Comma, found Colon`.
+That is the `auto`-as-named-arg-label defect
+(`auto_keyword_rejected_as_named_argument_label_2026-09-05.md`), whose fix is in
+the Rust seed SOURCE but not in the deployed binary; `656971284f3` then dropped
+the positional-construction workaround, so the deployed seed cannot parse the
+tree. Rebuilding the seed (`cargo build --release --bin simple`, MSVC env
+sourced) clears it. Note `native-build` spawns its worker through
+`resolve_simple_binary()`, which prefers `bin/simple.exe` — the fresh build only
+takes effect with `SIMPLE_BINARY=<fresh seed>` set.
+
+### Root cause: the receipt was never written, and the write reported success
+
+Diagnostics were added first (item 1 of "What would unblock"), splitting the six
+causes into named invariants. The very first run named it:
+
+```
+reason: native-capsule-receipt-invalid:build.laneF.hello:receipt-missing:
+        build/native_cache\s14310ba542f20eb64d4390d12776cfa5\object.build.laneF.hello.o.capsule-receipt
+```
+
+`ls` confirmed: object present, receipt absent — while the producer's
+`if not _sffi_file_write_text(receipt_path, receipt)` had NOT fired.
+
+`_sffi_file_write_text` called `file_write_text`, imported as
+`use std.file_system.{file_write_text, file_read_text}`.
+`src/lib/nogc_sync_mut/file_system/file_ops.spl:60` is a **stub**: it rejects an
+empty path or nil content and then `return true` — it never writes a byte.
+The name is additionally ambiguous; the same run's own JIT warning says it:
+
+> public function `file_write_text` has 3 co-compiled definitions with 2
+> differing signatures ((text,text)->() vs (text,text)->bool); ... falling back
+> to the last definition when types are ambiguous
+
+Both variants take `(text, text)`, so arg-type matching cannot separate them and
+the fallback picks whichever definition happens to be last. On this host it
+landed on the stub. (The `(text,text)->()` sibling,
+`src/lib/nogc_sync_mut/env/config.spl:235`, is no better on Windows — it shells
+out to `/bin/sh -c "echo ... > path"`.) It was never a path-form, hash, or CRLF
+problem.
+
+### Fix (producer side; the validator was correct and was NOT weakened)
+
+`src/compiler/80.driver/driver_aot_native_output.spl`:
+
+1. `_sffi_file_write_text` / `_sffi_file_read_text` now call
+   `file_write_exact` / `file_read_nullable` from `std.io_runtime` — both are
+   single-definition names (a repo-wide census finds exactly one `fn` for each)
+   backed by one direct `rt_file_write_text` / `rt_file_read_text` call, so they
+   are real and unambiguous.
+2. New `driver_native_capsule_result_reason_v1` returns `""` or the ONE failing
+   invariant; `driver_native_capsule_result_valid_v1` is now
+   `reason == ""`, and the verdict is
+   `native-capsule-receipt-invalid:{module}:{reason}`. Every branch is the same
+   fail-closed condition as before — nothing is accepted that was rejected.
+
+### Verification transcript (2026-09-06, this host)
+
+Seed: `src/compiler_rust/target/release/simple.exe`, rebuilt 14:19, 39,194,112 B.
+(A first rebuild silently failed with `failed to remove file ... simple.exe:
+Access is denied` — the known Windows locked-exe trap; the exe was moved aside
+and rebuilt.)
+
+| run | result |
+|---|---|
+| before fix | `native-capsule-receipt-invalid:...:receipt-missing:...` (rc 1) |
+| after fix, no MSVC env | past codegen, past the capsule gate, dies at `error: LLVM native linking failed: No C compiler found` |
+| after fix, MSVC env sourced | **rc 0**, `build/laneF/out/hello.exe` (1,183,744 B) produced, executed, printed `hi`, exit 0 |
+
+The receipt now exists and is byte-correct (973 B, LF-only, `od -c` verified:
+`native-capsule-result-v1\nnative-capsule-v1|17:build.laneF.hello|64:955f...`).
+The `.cache_scope`, `phase.marker`, and `native-module-witness-shadow-v1.receipt`
+files in the same directory also appear for the first time — they were being
+silently no-op'd by the same stub.
+
+### Not proven / still open
+
+- **The stdlib stub itself is untouched.** `std.file_system.file_write_text`
+  still returns `true` without writing, and `file_write_text` still has 3
+  co-compiled definitions over 2 signatures. Every other caller of that import
+  is silently no-op'ing on some hosts. This lane fixed only the capsule
+  producer's import; the stub and the name collision need their own record.
+  Same shape applies to `file_read_text`, `dir_create`, `dir_list`, `env_get`,
+  `file_size`, `process_wait`, `shell` and ~10 more names the same run warns
+  about.
+- **Only a hello world was verified.** `native-build src/app/mcp/main.spl` was
+  not run, so a running `simple_mcp_server.exe` is still unproven.
+- **The deployed `bin/simple.exe` was NOT replaced** (other lanes hold it), so
+  the fix requires the fresh seed plus `SIMPLE_BINARY` until a bootstrap
+  redeploy lands.
+- **No regression spec was added** for the capsule-reason split.
+- The `main resolves to image base` defect did not appear on this fixture; it
+  was neither reproduced nor cleared here.
+- **Warm/cross-run reuse:** a second `native-build` of the same fixture over the
+  now-populated cache also exits 0, so the cross-process receipt-validation path
+  (`driver_aot_native_output.spl:~1097-1108`) does not reject the receipt. Whether
+  it took a genuine cache HIT or silently recompiled was NOT distinguished — the
+  worker log is truncated and carried no `cache_hit`/`native_cache` line.

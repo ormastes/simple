@@ -1210,6 +1210,7 @@ int         rt_mem_snapshot_record(int64_t fd, int64_t seq,
                     int64_t hir_names, int64_t hir_symbols,
                     int64_t hir_functions, int64_t hir_constants,
                     int64_t hir_enums, int64_t hir_structs, int64_t hir_classes);
+int         rt_phase_profile_record(int64_t fd, int64_t seq, const char* message, int64_t message_len);
 int         rt_mem_snapshot_close(int64_t fd);
 int64_t     rt_process_rss_kib(void);
 int64_t     rt_process_hwm_kib(void);
@@ -1594,6 +1595,22 @@ int64_t  rt_sdl2_get_display_usable_w(int64_t index);
 int64_t  rt_sdl2_get_display_usable_h(int64_t index);
 
 /* ===== Panic / Abort ===== */
+
+/* SPL_WEAK: portable spelling of `__attribute__((weak))`.
+ *
+ * cl.exe (MSVC proper) has no `__attribute__` syntax at all -- it is a hard
+ * parse error (C2143/C2059), which is what blocked the embedded runtime-compile
+ * path on the Windows MSVC lane. MSVC has no weak-symbol concept either, so the
+ * only portable expansion there is nothing: the definition becomes strong.
+ *
+ * CROSS-PLATFORM: gated on `_MSC_VER && !__clang__`, so clang-cl (which DOES
+ * accept the attribute, and whose weak-external lowering the SPL_CLI_ARGS_WEAK
+ * note below depends on) is byte-identical, as are Linux, macOS and FreeBSD. */
+#if defined(_MSC_VER) && !defined(__clang__)
+#  define SPL_WEAK
+#else
+#  define SPL_WEAK __attribute__((weak))
+#endif
 
 #ifdef _MSC_VER
 __declspec(noreturn) void spl_panic(const char* msg);

@@ -1,93 +1,127 @@
 """
-# File Watcher Change Detection and Rebuild Cycle
+## Purpose and audience
+Executable evidence for the polling file-watch engine
+(`src/lib/nogc_async_mut/file_system/event_watch.spl`): ignore policy,
+monotonic event sequencing, single-delivery polling, rename pairing,
+overflow collapse, and the explicit native-bridge refusal. Written for the
+tooling team that owns the watch-rebuild cycle used by the compiler driver.
 
-**Category:** Tooling
-**Status:** In Progress
+## Operator workflow
+Run this file with the pure-Simple binary, e.g.
+`./src/compiler_rust/target/bootstrap/simple run test/03_system/feature/watcher/watcher_basics_spec.spl`
+and read the per-scenario verdicts; every scenario is interpreter-runnable
+and needs no QEMU, GUI, or display session.
 
-## Overview
+## Compatibility and limitations
+Disk-change detection is exercised through the engine's documented
+deterministic injection API (`fswatch_inject`) because the directory-scan
+layer (`dir_walk`/`dir_list`) is shell-backed and returns empty on hosts
+without a working `popen` capture; the injected-event paths are identical
+to the ones the disk reconciler enqueues.
 
-Tests the file watcher's change detection mechanism and rebuild cycle including
-filesystem event filtering, debouncing, and incremental rebuild triggering.
-Verifies that file changes are detected reliably and trigger the correct actions.
+## Verification guidance and troubleshooting
+A failure here means the event engine's core contract moved: re-run the
+file, read the first failing expect, and compare against
+`fswatch_poll`/`fswatch_pair_renames` semantics in the product source.
+An empty event list where events were injected points at the ignore
+policy, not at polling.
 """
-# # File Watcher Change Detection and Rebuild Cycle
-#
-# **Feature ID:** #TOOL-007
-# **Category:** Tooling
-# **Status:** Active
-#
-# ## Overview
-#
-# The file watcher monitors source files for modifications and automatically
-# triggers a rebuild when changes are detected. This spec exercises the core
-# watch-rebuild cycle: basic change detection on arithmetic expressions, handling
-# of multiple file operations (e.g., list mutations), correctness of recalculated
-# values after a simulated change, preservation of mutable state across loop-based
-# rebuilds, and graceful recovery when an error occurs during the cycle.
-#
-# ## Syntax
-#
-# ```simple
-# # Basic change detection -- values recomputed on rebuild
-# val sum = x + y
-# expect(sum).to_equal(3)
-#
-# # Multiple file operations trigger watcher
-# var data = [1, 2, 3]
-# data.push(4)
-# expect(data.len()).to_equal(4)
-#
-# # State preserved correctly across rebuild iterations
-# var counter = 0
-# for i in [1, 2, 3]:
-# counter = counter + i
-# expect(counter).to_equal(6)
-# ```
-#
-# ## Key Concepts
-#
-# | Concept | Description |
-# |---------|-------------|
-# | Change detection | Watcher identifies modified source files and initiates rebuild |
-# | Automatic rebuild | Compilation is re-triggered without manual intervention |
-# | State management | Mutable variables are correctly reset or preserved across rebuilds |
-# | Error recovery | The watcher continues operating after a build error instead of crashing |
+# Lifecycle: doc/01_research/domain/sspec_documentization_maintenance.md ;
+# doc/03_plan/sspec_modernization_plan.md ;
+# doc/04_architecture/sspec_documentization_maintenance.md ;
+# doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+# @manual_section: file watcher engine basics
 
-
+use std.spec.*
 use std.spec.step
+use std.nogc_async_mut.file_system.event_watch.{fswatch_open, fswatch_inject, fswatch_mark_overflow, fswatch_poll, fswatch_pair_renames, fswatch_ignored, fswatch_native_open}
 
-describe "File Watcher":
-    # @manual scenario evidence
-    # Verifies file watcher integration including change detection, automatic
-    # rebuilding, state management, and error recovery capabilities.
-    context "when monitoring source files":
-        it "detects basic changes":
-            # Test basic functionality that would be monitored
-            val x = 1
-            val y = 2
-            val sum = x + y
-            expect(sum).to_equal(3)
+describe "File watcher engine basics":
+    it "filters ignored paths by substring before an event is queued":
+        # @req REQ-WATCHER-001
+        # @capture(bit_table): ignore-policy verdicts for one ignored and one watched path
+        step("Query the ignore policy for a build-output path and a source path")
+        val ignored_hit = fswatch_ignored([".build", ".git"], ".build/cache/o.spl")
+        val ignored_miss = fswatch_ignored([".build", ".git"], "src/main.spl")
+        expect(ignored_hit).to_equal(true)  # oracle: the .build prefix is on the configured ignore list
+        expect(ignored_miss).to_equal(false)  # oracle: source paths under src/ are never on the ignore list
 
-        it "handles multiple file operations":
-            var data = [1, 2, 3]
-            data.push(4)
-            expect(data.len()).to_equal(4)
+    it "queues injected events with monotonic sequence tokens":
+        # @req REQ-WATCHER-002
+        # @capture(bit_table): pending queue seq/kind rows after two injections
+        step("Inject a created and a modified event into a fresh watch state")
+        val st0 = fswatch_open("/tmp/simple_fswatch_basics_spec", [".build"])
+        val st1 = fswatch_inject(st0, "created", "a.spl", "")
+        val st2 = fswatch_inject(st1, "modified", "a.spl", "")
+        expect(st2.pending.len()).to_equal(2)  # oracle: two injections must queue exactly two events
+        expect(st2.pending[0].seq).to_equal(1)  # oracle: the sequence counter starts at 1 on a fresh watch
+        expect(st2.pending[1].seq).to_equal(2)  # oracle: sequence tokens increase monotonically per event
+        expect(st2.pending[1].kind).to_equal("modified")  # oracle: the second injection is the modified event
 
-    context "when rebuilding on changes":
-        it "recalculates simple math":
-            # Test that code produces correct values after changes
-            val result = 21 * 2
-            expect(result).to_equal(42)
+    it "delivers each queued event exactly once on the next poll":
+        # @req REQ-WATCHER-003
+        # @capture(bit_table): delivered event counts for the first and second poll
+        step("Inject two events, poll, then poll a second time")
+        val st0 = fswatch_open("/tmp/simple_fswatch_basics_spec", [".build"])
+        val st1 = fswatch_inject(st0, "created", "a.spl", "")
+        val st2 = fswatch_inject(st1, "modified", "a.spl", "")
+        val (st3, delivered) = fswatch_poll(st2)
+        val (st4, redelivered) = fswatch_poll(st3)
+        expect(delivered.len()).to_equal(2)  # oracle: the first poll drains both queued events
+        expect(st3.pending.len()).to_equal(0)  # oracle: the pending queue is empty after the drain
+        expect(redelivered.len()).to_equal(0)  # oracle: no event may be delivered twice by a later poll
 
-        it "maintains state correctly":
-            # Test that state is preserved/reset correctly
-            var counter = 0
-            for i in [1, 2, 3]:
-                counter = counter + i
-            expect(counter).to_equal(6)
+    it "rejects injected events for ignored paths":
+        # @req REQ-WATCHER-001
+        # @capture(bit_table): delivered event count after injecting an ignored path
+        step("Inject an event whose path is covered by the ignore policy")
+        val st0 = fswatch_open("/tmp/simple_fswatch_basics_spec", [".build"])
+        val st1 = fswatch_inject(st0, "modified", ".build/cache/o.o", "")
+        val (_, delivered) = fswatch_poll(st1)
+        expect(delivered.len()).to_equal(0)  # oracle: an ignored path is refused at injection, so polling delivers nothing
 
-    context "when handling errors":
-        it "recovers from errors gracefully":
-            # Test error handling
-            val success = true
-            expect(success).to_equal(true)
+    it "pairs rename_from and rename_to sharing a cookie into one renamed event":
+        # @req REQ-WATCHER-004
+        # @capture(bit_table): paired event kind/path/related for a cookie-matched rename
+        step("Inject a cookie-matched rename pair and run the pairing pass")
+        val st0 = fswatch_open("/tmp/simple_fswatch_basics_spec", [])
+        val st1 = fswatch_inject(st0, "rename_from", "old.spl", "cookie-1")
+        val st2 = fswatch_inject(st1, "rename_to", "new.spl", "cookie-1")
+        val (_, raw) = fswatch_poll(st2)
+        val paired = fswatch_pair_renames(raw)
+        expect(paired.len()).to_equal(1)  # oracle: two raw rename halves collapse into a single paired event
+        expect(paired[0].kind).to_equal("renamed")  # oracle: the paired kind is the consumer-facing renamed
+        expect(paired[0].path).to_equal("new.spl")  # oracle: the paired event names the destination path
+        expect(paired[0].related).to_equal("old.spl")  # oracle: the paired event carries the source path in related
+
+    it "keeps an unpaired rename_from as its raw event":
+        # @req REQ-WATCHER-004
+        # @capture(bit_table): event list after pairing a lone rename_from
+        step("Inject only the rename_from half and run the pairing pass")
+        val st0 = fswatch_open("/tmp/simple_fswatch_basics_spec", [])
+        val st1 = fswatch_inject(st0, "rename_from", "old.spl", "cookie-2")
+        val (_, raw) = fswatch_poll(st1)
+        val paired = fswatch_pair_renames(raw)
+        expect(paired.len()).to_equal(1)  # oracle: an unpaired half must not be dropped by the pairing pass
+        expect(paired[0].kind).to_equal("rename_from")  # oracle: without its rename_to the raw half survives unchanged
+
+    it "collapses lost events into a single overflow event and resnapshots":
+        # @req REQ-WATCHER-005
+        # @capture(bit_table): poll results immediately after marking overflow
+        step("Mark the watch overflowed and poll for the collapsed event")
+        val st0 = fswatch_open("/tmp/simple_fswatch_basics_spec", [])
+        val st1 = fswatch_mark_overflow(st0)
+        val (st2, delivered) = fswatch_poll(st1)
+        val (_, after) = fswatch_poll(st2)
+        expect(delivered.len()).to_equal(1)  # oracle: an overflow collapses the whole queue into ONE event
+        expect(delivered[0].kind).to_equal("overflow")  # oracle: the collapsed event is the overflow marker
+        expect(st2.overflowed).to_equal(false)  # oracle: the overflow flag is consumed by the poll that reports it
+        expect(after.len()).to_equal(0)  # oracle: the resnapshot leaves no follow-up events queued
+
+    it "rejects the native notify bridge until the extraction lands":
+        # @req REQ-WATCHER-006
+        # @capture(bit_table): native-bridge refusal message content checks
+        step("Ask the native bridge to open a watch that has no native backend")
+        val refusal = fswatch_native_open("/tmp/simple_fswatch_basics_spec")
+        expect(refusal.contains("ERROR")).to_equal(true)  # oracle: the unlanded bridge must fail explicitly, never pretend to watch
+        expect(refusal.contains("fswatch_open")).to_equal(true)  # oracle: the refusal names the polling replacement API

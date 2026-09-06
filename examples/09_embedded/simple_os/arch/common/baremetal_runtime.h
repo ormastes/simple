@@ -58,6 +58,22 @@ typedef int64_t RuntimeValue;
 #define TRUE_VALUE     ENCODE_INT(1)
 #define FALSE_VALUE    ENCODE_INT(0)
 
+/* The values CODEGEN actually produces and consumes for a Simple `bool`.
+ *
+ * These are TAG_SPECIAL payloads, not encoded ints, so they are NOT the same as
+ * TRUE_VALUE (8) / FALSE_VALUE (0) above -- see
+ * doc/08_tracking/bug/baremetal_bool_macros_disagree_with_codegen_tags_2026-09-01.md,
+ * which tracks that older pair's disagreement with codegen as its own defect.
+ * These two are added, and the older pair deliberately left alone, so that
+ * fixing the tagged-bool decode does not silently change every existing
+ * TRUE_VALUE / FALSE_VALUE call site as a side effect.
+ *
+ * Source of truth: src/compiler_rust/compiler/src/codegen/llvm/instructions.rs
+ * (`tagged_bool_const`: true = 11, false = 19). Pinned by
+ * scripts/check/check-baremetal-tagged-bool-decode.shs. */
+#define TAGGED_BOOL_TRUE   ((RuntimeValue)11)
+#define TAGGED_BOOL_FALSE  ((RuntimeValue)19)
+
 /* ===================================================================
  * Heap object types
  * =================================================================== */

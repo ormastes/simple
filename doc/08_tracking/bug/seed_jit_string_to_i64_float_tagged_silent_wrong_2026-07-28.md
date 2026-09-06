@@ -147,3 +147,20 @@ types** in Simple source:
 `core_bdd.spl` is the native/freestanding SPipe BDD subset and does not run
 through the seed interpreter, so the two do not collide today. If that file
 ever runs interpreted, the declarations disagree about the encoding.
+
+## Re-probed 2026-09-06 — NOT REPRODUCIBLE
+
+Binary probed: `bin/release/aarch64-unknown-linux-gnu/simple` (Rust seed,
+aarch64). Both engines exercised: `SIMPLE_EXECUTION_MODE=interpret` (tree-walk)
+and `env -u SIMPLE_EXECUTION_MODE` (default Cranelift JIT). Probe sources are
+listed with each entry; they were run on both lanes and compared.
+
+`"42".to_i64()` renders `42` and compares equal to the integer `42` on both
+lanes:
+
+```
+TO_I64=42   EQ42=yes      # interpret
+TO_I64=42   EQ42=yes      # jit
+```
+
+Probe `_scratch/p_str.spl`. Not fixed by this session.

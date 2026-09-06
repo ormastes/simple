@@ -1,140 +1,103 @@
-# Purpose and audience: executable specification evidence for the owning engineering team.
-# @req REQ-SSPEC-LIB
-# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
-
-# Purpose and audience: executable specification evidence for the owning engineering team.
-# @req REQ-SSPEC-LIB
-# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
-
 """
-# H2 HPACK Encode/Decode Specification
-
-**Feature IDs:** #AC-1-hpack
-**Category:** Stdlib
-**Difficulty:** 3/5
-**Status:** Draft
-**Artifacts:** N/A
+## Purpose and audience
+Executable evidence that the RFC 7541 HPACK encoder and decoder in
+src/lib/nogc_async_mut/http/h2/h2_hpack.spl preserve HTTP/2 header lists:
+indexed static-table fields, literal fields without indexing, and full
+encode-decode round trips. Written for the engineers who own the HTTP/2
+h2 stack and for reviewers confirming HPACK behavior after a change.
+## Operator workflow
+Run:
+    bin/simple test test/01_unit/lib/nogc_async_mut/http/h2/h2_hpack_spec.spl
+Every scenario must pass; a failure is a regression in HPACK encoding or
+decoding.
+## Compatibility and limitations
+Static-table-only HPACK: the dynamic table is deferred by h2_hpack.spl, so
+these scenarios never exercise dynamic-table indices or Huffman string
+coding. Scenarios call the product API hpack_encode and hpack_decode
+directly; no stub values are asserted.
+## Verification guidance and troubleshooting
+Each failing scenario names the RFC 7541 section it pins; re-read that
+section together with hpack_encode/hpack_decode in h2_hpack.spl. A
+round-trip failure usually means hpack_decode mis-dispatched on the first
+byte pattern; check the §6 dispatch table first.
 """
+# Lifecycle: doc/01_research/lib/networking/net_http_sendfile_routing.md ;
+# doc/03_plan/lib/networking/net_tcp_socket_data_path.md ;
+# doc/04_architecture/ui/web/ui_web_http_core_migration.md ;
+# doc/05_design/lib/networking/net_http_sendfile_routing.md
+# @manual_section: h2-hpack
 
 use std.spec
 use std.spec.step
-# @req: REQ-SSPEC-LOCAL-001 — behavior under test holds under execution.
-"""
-## Purpose and audience
-
-Purpose: the behavior asserted in this spec  Audience: engineers reading this spec to confirm the behavior still holds.
-
-## Operator workflow
-
-1. Run `bin/simple test test/01_unit/lib/nogc_async_mut/http/h2/h2_hpack_spec.spl`.
-2. Every scenario must pass; a failure is a regression in the behavior under test.
-
-## Compatibility and limitations
-
-Covers the behavior asserted here; platform-specific behavior is out of scope.
-"""
-
-# doc-path: doc/01_research/local/h2_hpack_spec.md
-# doc-path: doc/03_plan/sys_test/h2_hpack_spec.md
-# doc-path: doc/04_architecture/h2_hpack_spec.md
-# doc-path: doc/05_design/h2_hpack_spec_oracles.md
-# @manual: primary
-
+use std.http.h2.h2_hpack.{hpack_static_table, hpack_encode, hpack_decode, HpackEntry}
 
 describe "HPACK encoder and decoder":
-    # @manual scenario evidence
     """
-    ## HPACK RFC 7541 — Static Table Encode/Decode
+    ## HPACK RFC 7541 — static table encode and decode
 
-    Validates that hpack_encode and hpack_decode correctly handle:
-    - Indexed header field representations (static table lookups)
-    - Literal header field representations (no indexing)
-    - Round-trip fidelity for custom headers
+    Real encoder/decoder evidence: every scenario drives the shipped
+    hpack_encode and hpack_decode implementations over the RFC 7541
+    Appendix A static table.
     """
 
     it "encodes indexed header field from static table":
-        """
-        RFC 7541 §6.1 — Indexed Header Field Representation.
-        Static table entry 2 is ":method: GET". Encoding that pair must
-        produce the single-byte 0x82 (bit pattern 1_0000010).
-        """
-        # Stub: simulate encode output for a known static-table entry
-        val name = ":method"
-        val value = "GET"
-        # Static table index 2 → encoded as 0x82 (indexed representation, bit7=1, index=2)
-        val encoded_byte: u8 = 0x82
-        val result_bytes = [encoded_byte]
-        expect(result_bytes.len()).to_equal(1)
-        expect(result_bytes[0]).to_equal(0x82)
+        # @req REQ-LIB-H2_HPACK-001
+        # @capture(protocol_binary): encoded byte block for the static :method GET header
+        step("Encode the :method GET header through the RFC 7541 static table")
+        val table = hpack_static_table()
+        var headers: [HpackEntry] = []
+        headers.push(HpackEntry(name: ":method", value: "GET"))
+        val encoded = hpack_encode(headers, table)
+        expect(encoded.bytes.len()).to_equal(1)  # oracle: §6.1 indexed representation is a single byte for index <= 63
+        expect(encoded.bytes[0]).to_equal(0x82)  # oracle: §6.1 — bit7 set plus static index 2 is 1_0000010
 
     it "decodes indexed header field from static table":
-        """
-        RFC 7541 §6.1 — A single byte 0x82 (bit7=1, index=2) decodes to
-        (':method', 'GET') from the static table.
-        """
+        # @req REQ-LIB-H2_HPACK-001
+        # @capture(protocol_json): decoded header pair for indexed byte 0x82
+        step("Decode the single indexed byte 0x82 against the static table")
+        val table = hpack_static_table()
         val buf: [u8] = [0x82]
-        # Stub decode: index 2 in RFC 7541 Appendix A → :method = GET
-        val expected_name = ":method"
-        val expected_value = "GET"
-        # Verify stub contract: byte has high bit set → indexed representation
-        val is_indexed = (buf[0] & 0x80) == 0x80
-        expect(is_indexed).to_equal(true)
-        # Index extracted from lower 7 bits = 2
-        val index = buf[0] & 0x7F
-        expect(index).to_equal(2)
-        expect(expected_name).to_equal(":method")
-        expect(expected_value).to_equal("GET")
+        val decoded = hpack_decode(buf, table)
+        expect(decoded.headers.len()).to_equal(1)  # oracle: one indexed field decodes to exactly one header pair
+        expect(decoded.headers[0].name).to_equal(":method")  # oracle: RFC 7541 Appendix A index 2 is :method
+        expect(decoded.headers[0].value).to_equal("GET")  # oracle: RFC 7541 Appendix A index 2 is :method GET
+        expect(decoded.bytes_consumed).to_equal(1)  # oracle: the single indexed byte is the whole block
 
     it "encodes literal header field without indexing":
-        """
-        RFC 7541 §6.2.2 — Literal Header Field Without Indexing.
-        First byte 0x00 signals literal-no-index. Name and value follow
-        as length-prefixed strings.
-        """
-        val name = "x-custom-header"
-        val value = "custom-value"
-        # Literal without indexing: first byte = 0x00, then name len + bytes, value len + bytes
-        val first_byte: u8 = 0x00
-        expect(first_byte).to_equal(0x00)
-        # Name length encoding: 15 chars → 0x0F
-        val name_len = name.len()
-        expect(name_len).to_equal(15)
-        # Value length encoding: 12 chars → 0x0C
-        val value_len = value.len()
-        expect(value_len).to_equal(12)
+        # @req REQ-LIB-H2_HPACK-002
+        # @capture(protocol_binary): encoded byte block for a custom literal header
+        step("Encode a custom header that is absent from the static table")
+        val table = hpack_static_table()
+        var headers: [HpackEntry] = []
+        headers.push(HpackEntry(name: "x-custom-header", value: "custom-value"))
+        val encoded = hpack_encode(headers, table)
+        expect(encoded.bytes[0]).to_equal(0x00)  # oracle: §6.2.2 literal without indexing with new name starts 0x00
+        expect(encoded.bytes[1]).to_equal(15)  # oracle: raw H=0 string literal carries a 7-bit length, name is 15 chars
+        expect(encoded.bytes[17]).to_equal(12)  # oracle: value length byte follows 1 prefix + 1 name length + 15 name chars
+        expect(encoded.bytes.len()).to_equal(30)  # oracle: 1 + 1 + 15 + 1 + 12 bytes for the full literal block
 
     it "decodes literal header field without indexing":
-        """
-        RFC 7541 §6.2.2 — A byte sequence starting with 0x00 followed by
-        a length-prefixed name and value decodes to the correct header pair.
-        """
-        # Simulate: 0x00 | 0x03 "foo" | 0x03 "bar"
-        val name_bytes: [u8] = [0x66, 0x6F, 0x6F]  # "foo"
-        val value_bytes: [u8] = [0x62, 0x61, 0x72]  # "bar"
-        # First byte 0x00: bits 7-4 all zero → literal without indexing, new name
-        val first_byte: u8 = 0x00
-        val is_literal_no_index = (first_byte & 0xF0) == 0x00
-        expect(is_literal_no_index).to_equal(true)
-        # Name length prefix = 3
-        val name_len_prefix: u8 = 0x03
-        expect(name_bytes.len()).to_equal(name_len_prefix as i32)
-        # Value length prefix = 3
-        val value_len_prefix: u8 = 0x03
-        expect(value_bytes.len()).to_equal(value_len_prefix as i32)
+        # @req REQ-LIB-H2_HPACK-002
+        # @capture(protocol_json): decoded header pair for a literal block
+        step("Decode a literal-without-indexing block back into the header pair")
+        val table = hpack_static_table()
+        var headers: [HpackEntry] = []
+        headers.push(HpackEntry(name: "foo", value: "bar"))
+        val encoded = hpack_encode(headers, table)
+        val decoded = hpack_decode(encoded.bytes, table)
+        expect(decoded.headers.len()).to_equal(1)  # oracle: one literal field decodes to exactly one header pair
+        expect(decoded.headers[0].name).to_equal("foo")  # oracle: the literal name must survive the block unchanged
+        expect(decoded.headers[0].value).to_equal("bar")  # oracle: the literal value must survive the block unchanged
 
     it "round-trips custom header through encode-decode":
-        """
-        A header pair not present in the static table must survive a
-        full encode → decode cycle with name and value intact.
-        """
-        val original_name = "x-request-id"
-        val original_value = "abc-123"
-        # Simulate encode: literal-no-index format
-        # 0x00 | name_len(12) | name_bytes | value_len(7) | value_bytes
-        val encoded_len = 1 + 1 + original_name.len() + 1 + original_value.len()
-        expect(encoded_len).to_equal(22)
-        # Simulate decode restores the original pair
-        val decoded_name = "x-request-id"
-        val decoded_value = "abc-123"
-        expect(decoded_name).to_equal(original_name)
-        expect(decoded_value).to_equal(original_value)
+        # @req REQ-LIB-H2_HPACK-003
+        # @capture(protocol_json): round-trip header pair and consumed byte count
+        step("Round-trip x-request-id through encode and then decode")
+        val table = hpack_static_table()
+        var headers: [HpackEntry] = []
+        headers.push(HpackEntry(name: "x-request-id", value: "abc-123"))
+        val encoded = hpack_encode(headers, table)
+        val decoded = hpack_decode(encoded.bytes, table)
+        expect(decoded.headers[0].name).to_equal("x-request-id")  # oracle: a custom name must survive a full encode-decode cycle
+        expect(decoded.headers[0].value).to_equal("abc-123")  # oracle: a custom value must survive a full encode-decode cycle
+        expect(decoded.bytes_consumed).to_equal(encoded.bytes.len())  # oracle: the decoder consumes exactly the encoded block
