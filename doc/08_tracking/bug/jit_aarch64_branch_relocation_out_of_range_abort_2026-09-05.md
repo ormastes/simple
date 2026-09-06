@@ -68,3 +68,18 @@ memory pressure or with ASLR forcing distant mappings, on a module large enough
 to need multiple code allocations. A targeted alternative is to assert in
 `JitCompiler::compile_module` that all code regions land within 128 MB and see
 how often that is violated in normal runs.
+
+## Second and third observations (2026-09-05, SOSIX unification lane)
+
+`bin/simple lint src/lib/nogc_async_mut/sosix/file_driver.spl` (87 lines) dumped
+core with the same `assertion failed: (diff >> 26 == -1) || (diff >> 26 == 0)`
+(`.simple/logs/crash_2422254.log`, `JitCompiler::compile_module` via
+`ExecCore::run_file_jit`), and `bin/simple lint src/lib/nogc_async_mut/sosix/fs.spl`
+(276 lines) aborted the same way on its second run after reporting
+`NOT LINTED: 1 file(s) could not be parsed` on its first. `lint sync.spl` in
+between passed. Same binary: `bin/release/aarch64-unknown-linux-gnu/simple`,
+2026-09-04 14:46. So it reproduces on demand under `lint` of these files, and
+`--mode=interpreter` does not avoid it (both files dumped core again:
+`crash_2425695.log`, `crash_2425892.log`). No lint verdict is obtainable for
+these two files on this host until the seed is fixed; the lane records them as
+**not linted**, not as clean.
