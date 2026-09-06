@@ -70,6 +70,12 @@ while IFS='|' read -r sev id bucket repro runner lane; do
     case "$verdict" in
         *"NOT a pass"*|*"nothing was checked"*|*"ERROR — "*) cls="NO-EVIDENCE" ;;
     esac
+    # A spec that could not be parsed, or that executed zero examples, is not
+    # evidence in EITHER direction — it is a rotted spec. Distinguish it from a
+    # genuine failure, which a bare rc!=0 would otherwise conflate.
+    case "$verdict" in
+        *"reason=parse-error"*|*"executed=0 "*) cls="SPEC-ROTTED" ;;
+    esac
     [ "$rc" = "124" ] && cls="TIMEOUT"
 
     if [ -z "$cls" ]; then
@@ -106,6 +112,14 @@ while IFS='|' read -r sev id bucket repro runner lane; do
         fi
     fi
 
+    # Mirror of the pin rule: a pin-inverted spec that now FAILS is the positive
+    # signal — the deliberately-wrong assertions flipped red, which is what a
+    # real fix looks like from here. It is a fixed-candidate needing the
+    # assertions inverted, not a broken row.
+    if [ "$cls" = "STILL-BROKEN" ] && [ -n "$pin" ]; then
+        cls="PIN-FLIPPED"
+    fi
+
     if [ "$cls" = "PASSED" ] || [ "$cls" = "PASSED-NOVERDICT" ]; then
         if [ -n "$pin" ]; then
             # Green on an inversion-pinning spec == the defect is still live.
@@ -118,6 +132,19 @@ while IFS='|' read -r sev id bucket repro runner lane; do
         else
             cls="LIKELY-FIXED"
         fi
+    fi
+
+    # Fold in the second (JIT) lane where it was run. A codegen row that is
+    # green in BOTH the interpret lane and the JIT lane is real evidence — but
+    # only for those two lanes. The native/AOT and pure-Simple `native-build`
+    # lanes are still untested here, so this is DUAL-LANE-GREEN, not "fixed".
+    jf="$ROOT/build/sweep/res_jit/$id"
+    if [ -f "$jf" ] && [ "$cls" = "LANE-SUSPECT" ]; then
+        jv=$(cut -d'|' -f4 < "$jf")
+        case "$jv" in
+            *"outcome=OK"*) cls="DUAL-LANE-GREEN"; verdict="$verdict  ||JIT|| $jv" ;;
+            *"outcome=ERROR"*|*"outcome=FAIL"*) cls="STILL-BROKEN"; lane="jit-lane-red"; verdict="$jv" ;;
+        esac
     fi
 
     echo "$sev|$id|$cls|$conf|$bucket|$rc|$lane|$verdict"
