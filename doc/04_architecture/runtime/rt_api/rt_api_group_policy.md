@@ -323,7 +323,7 @@ that gate: after the five providers named in §2 it reads
 `PASS — 16261 file(s) scanned (roots=src, src=6145), forbidden=6145 ...
 (baseline 7776)`, down from 6261, still far under its own floor.
 
-**Wiring.** Still `push_blocking: false`. It is green at tip and costs ~1s
+**Wiring.** Still `push_blocking: false` and lands RED: 2 unregistered, 1 ungrouped, 7 groups over budget. Costs ~1s
 with no `bin/simple`, so blocking is technically possible — but
 `rt-call-site-census.shs` ERRORs without `rg` on PATH, and as a blocking gate
 that would block every push from a host without it. Promote to blocking once
