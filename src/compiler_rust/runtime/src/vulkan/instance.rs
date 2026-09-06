@@ -158,16 +158,28 @@ impl VulkanInstance {
         #[cfg(feature = "vulkan")]
         {
             extension_names_raw.push(ash::khr::surface::NAME.to_owned());
-            let headless_available = unsafe {
+            // Enumerate ONCE, then gate every optional surface extension on what
+            // the loader actually advertises. Requesting an unadvertised
+            // extension makes vkCreateInstance fail outright, which took down
+            // the whole Vulkan path -- including headless compute rendering that
+            // needs no surface at all -- on any host without the matching
+            // windowing system. Measured 2026-09-06 on a headless box:
+            // "loader_validate_instance_extensions: Extension VK_KHR_xlib_surface
+            // not found in list of known instance extensions", rt_vulkan_init -> 0,
+            // and every engine2d Vulkan gate died with no verdict line.
+            let available_exts: Vec<std::ffi::CString> = unsafe {
                 entry
                     .enumerate_instance_extension_properties(None)
                     .map(|extensions| {
-                        extensions.iter().any(|extension| {
-                            CStr::from_ptr(extension.extension_name.as_ptr()) == ash::ext::headless_surface::NAME
-                        })
+                        extensions
+                            .iter()
+                            .map(|e| CStr::from_ptr(e.extension_name.as_ptr()).to_owned())
+                            .collect()
                     })
-                    .unwrap_or(false)
+                    .unwrap_or_default()
             };
+            let has_ext = |name: &CStr| available_exts.iter().any(|e| e.as_c_str() == name);
+            let headless_available = has_ext(ash::ext::headless_surface::NAME);
             if headless_available {
                 extension_names_raw.push(ash::ext::headless_surface::NAME.to_owned());
                 headless_surface_enabled = true;
@@ -179,11 +191,17 @@ impl VulkanInstance {
 
             #[cfg(target_os = "linux")]
             {
-                // Prefer Wayland if available, fall back to X11
-                if std::env::var("WAYLAND_DISPLAY").is_ok() {
+                // Prefer Wayland when the session advertises it, fall back to
+                // X11 -- but only ever request one the loader actually has. A
+                // headless host has neither, and that is not an error: the
+                // compute/offscreen paths do not need a window surface.
+                let want_wayland = std::env::var("WAYLAND_DISPLAY").is_ok();
+                if want_wayland && has_ext(ash::khr::wayland_surface::NAME) {
                     extension_names_raw.push(ash::khr::wayland_surface::NAME.to_owned());
-                } else {
+                } else if has_ext(ash::khr::xlib_surface::NAME) {
                     extension_names_raw.push(ash::khr::xlib_surface::NAME.to_owned());
+                } else if has_ext(ash::khr::wayland_surface::NAME) {
+                    extension_names_raw.push(ash::khr::wayland_surface::NAME.to_owned());
                 }
             }
 

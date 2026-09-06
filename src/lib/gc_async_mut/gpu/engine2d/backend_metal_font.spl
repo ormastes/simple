@@ -127,6 +127,12 @@ class MetalFontBackendState:
     packed_pool: [i64]
     packed_pool_bytes: [i64]
     pending_pool_index: i64
+    # Warm host staging. The packed words and the 4-byte word count were
+    # allocated and freed once per text batch; both are now kept and grown only
+    # when a bigger batch arrives, matching how the device buffers are pooled.
+    staging_host: i64
+    staging_bytes: i64
+    word_count_host: i64
     pending_command: i64
     pending_encoder: i64
     pending_glyph_count: i64
@@ -141,6 +147,7 @@ class MetalFontBackendState:
         MetalFontBackendState(atlas_buffer: 0, atlas_bytes: 0, atlas_generation: -1,
             atlas_owner_identity: "", font_artifact_sha256: "",
             packed_pool: [], packed_pool_bytes: [], pending_pool_index: 0,
+            staging_host: 0, staging_bytes: 0, word_count_host: 0,
             pending_command: 0, pending_encoder: 0, pending_glyph_count: 0,
             frame_text_count: 0, frame_command_count: 0, frame_commit_count: 0,
             frame_wait_count: 0, completion_unknown: false)
@@ -209,6 +216,30 @@ class MetalFontBackendState:
         self.frame_command_count = self.frame_command_count + 1
         true
 
+    me _ensure_staging(bytes: i64) -> bool:
+        """Keep one host staging block, growing it only when it is too small."""
+        if bytes <= 0:
+            return false
+        if self.staging_host != 0 and self.staging_bytes >= bytes:
+            return true
+        val fresh = rt_alloc(bytes)
+        if fresh == 0:
+            return false
+        if self.staging_host != 0:
+            rt_free(self.staging_host)
+        self.staging_host = fresh
+        self.staging_bytes = bytes
+        true
+
+    me _ensure_word_count_host() -> bool:
+        if self.word_count_host != 0:
+            return true
+        val fresh = rt_alloc(4)
+        if fresh == 0:
+            return false
+        self.word_count_host = fresh
+        true
+
     me _packed_slot(session: MetalSession) -> i64:
         """Take the next warm pool slot, growing the pool only on a new high water."""
         val index = self.pending_pool_index
@@ -229,6 +260,13 @@ class MetalFontBackendState:
             metal_sffi_free_buffer(self.atlas_buffer)
         for slot in self.packed_pool:
             metal_sffi_free_buffer(slot)
+        if self.staging_host != 0:
+            rt_free(self.staging_host)
+        if self.word_count_host != 0:
+            rt_free(self.word_count_host)
+        self.staging_host = 0
+        self.staging_bytes = 0
+        self.word_count_host = 0
         self.packed_pool = []
         self.packed_pool_bytes = []
         self.pending_pool_index = 0
@@ -354,19 +392,18 @@ class MetalFontBackendState:
         if slot == 0:
             return 0
         val packed_bytes = packed.len().to_i64() * 4
-        val host = rt_alloc(packed_bytes)
-        if host == 0:
+        if not self._ensure_staging(packed_bytes):
             return 0
+        val host = self.staging_host
         val written = metal_write_u32s_to_ptr(host, packed)
         var ok = written == packed.len().to_i64()
         if ok:
             ok = metal_buffer_upload_ptr(slot, host, packed_bytes) != 0
-        rt_free(host)
         if not ok:
             return 0
-        val word_host = rt_alloc(4)
-        if word_host == 0:
+        if not self._ensure_word_count_host():
             return 0
+        val word_host = self.word_count_host
         unsafe(capabilities: [ffi, raw_ptr]):
             rt_ptr_write_i32(word_host, 0, packed.len() as i32)
         val encoder = self.pending_encoder
@@ -376,7 +413,6 @@ class MetalFontBackendState:
         ok = ok and (metal_set_bytes_ptr(encoder, word_host, 4, 3) != 0)
         ok = ok and metal_sffi_dispatch_compute(
             encoder, session.pipe_font_atlas_composite_packed, groups, glyph_count, 1, 64, 1, 1)
-        rt_free(word_host)
         if not ok:
             self._discard_pending(true)
             return 0
