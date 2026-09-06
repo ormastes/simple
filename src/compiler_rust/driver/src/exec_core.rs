@@ -1020,8 +1020,7 @@ impl ExecCore {
                             // unchanged blast radius outside the unresolved-import family.
                             if jit_failure_must_propagate(
                                 &jit_err,
-                                std::env::var_os("SIMPLE_JIT_STRICT_ALL")
-                                    .is_some_and(|value| value != "0"),
+                                std::env::var_os("SIMPLE_JIT_STRICT_ALL").is_some_and(|value| value != "0"),
                             ) {
                                 return Err(jit_err);
                             }

@@ -114,11 +114,7 @@ pub fn to_native_arg(path: &str) -> std::borrow::Cow<'_, str> {
 
     // MSYS drive form: `/<letter>` optionally followed by `/` + remainder.
     // Must be `/x` exactly or `/x/...` — `/usr` and `/tmp/f` are not drives.
-    let msys_drive = if b.len() >= 2
-        && b[0] == b'/'
-        && b[1].is_ascii_alphabetic()
-        && (b.len() == 2 || b[2] == b'/')
-    {
+    let msys_drive = if b.len() >= 2 && b[0] == b'/' && b[1].is_ascii_alphabetic() && (b.len() == 2 || b[2] == b'/') {
         Some(b[1] as char)
     } else {
         None
