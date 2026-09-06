@@ -665,6 +665,37 @@ pub(crate) fn runtime_symbol_is_codegen_root(name: &str) -> bool {
             | "rt_enum_discriminant"
             | "rt_enum_id"
             | "rt_enum_payload"
+            // P1 fix (2026-09-06): the `.is_some()` / `.is_none()` /
+            // `.is_ok()` / `.is_err()` arms in
+            // codegen/instr/closures_structs.rs::try_compile_builtin_method_call
+            // synthesize these calls from a MIR `MethodCallStatic` whose
+            // `func_name` is the SIMPLE method name (`"is_some"`). The runtime
+            // symbol therefore never appears in `referenced_call_names`, so
+            // without an entry here `runtime_funcs.get("rt_is_some")` returns
+            // None, the arm bails to `Ok(None)`, and the caller emits
+            // `rt_function_not_found("is_some")` — the hard-stop shape of
+            // doc/08_tracking/bug/jit_is_some_is_none_method_dispatch_gap_2026-08-17.md
+            // ("Runtime error: Function 'is_some' not found", exit 70).
+            //
+            // It presented as INTERMITTENT, which is why it read as a dispatch
+            // bug rather than a declaration bug: a program that also pulls in
+            // stdlib naming `rt_is_some` in its own MIR (e.g. anything using
+            // `parse_i64`) gets the symbol declared as a side effect and the
+            // arm fires normally. Same class, same cure, as `rt_contains`
+            // above — which is precisely why `.contains()` never showed this.
+            //
+            // Scoped to these two, and measured that way. The sibling
+            // `is_ok`/`is_err` arm calls `rt_enum_check_discriminant` and has
+            // the same structural hazard, but it is NOT listed here: a genuine
+            // `Result` receiver is lowered earlier and emits
+            // `rt_enum_check_discriminant` as a real MIR `Call`
+            // (`SIMPLE_DUMP_MIR` confirms), so the symbol is already in
+            // `referenced_call_names` and an entry here would be dead. Whether
+            // an ERASED `is_ok` receiver can reach the Cranelift arm with the
+            // symbol undeclared was not established; if such a case is ever
+            // observed failing the same way, this is where it belongs.
+            | "rt_is_some"
+            | "rt_is_none"
             | "rt_value_as_u64"
             | "rt_string_eq"
             // P0 fix (2026-07-22): rt_text_cmp_any backs the codegen/instr/core.rs
@@ -1885,6 +1916,7 @@ impl<M: Module> CodegenBackend<M> {
                 &self.function_return_types,
                 &self.enum_defs,
                 self.tag_runtime_pool_join_result,
+                self.target.is_baremetal(),
             )
         }));
         match body_result {
@@ -3057,6 +3089,27 @@ mod tests {
         assert!(runtime_symbol_is_codegen_root("rt_string_bytes"));
         assert!(runtime_symbol_is_codegen_root("rt_enum_discriminant"));
         assert!(runtime_symbol_is_codegen_root("rt_enum_id"));
+    }
+
+    /// jit_is_some_is_none_method_dispatch_gap_2026-08-17, hard-stop shape.
+    ///
+    /// The `.is_some()`/`.is_none()`/`.is_ok()`/`.is_err()` Cranelift arms
+    /// synthesize these calls from a `MethodCallStatic` whose `func_name` is
+    /// the SIMPLE method name, so the runtime symbol never reaches
+    /// `referenced_call_names`. Without a codegen-root entry the arm bails and
+    /// the JIT aborts with `Function 'is_some' not found` (exit 70). The
+    /// `rt_contains` assertion is the CONTROL: it is the same shape and has
+    /// always been rooted, which is exactly why `.contains()` never failed.
+    #[test]
+    fn option_presence_predicate_runtime_symbols_are_retained() {
+        assert!(runtime_symbol_is_codegen_root("rt_is_some"));
+        assert!(runtime_symbol_is_codegen_root("rt_is_none"));
+        assert!(runtime_symbol_is_codegen_root("rt_contains"));
+        // NOT rooted, on purpose: a genuine `Result` receiver emits
+        // `rt_enum_check_discriminant` as a real MIR Call, so it is already in
+        // `referenced_call_names`. Asserted so that adding it later is a
+        // deliberate act with a repro behind it.
+        assert!(!runtime_symbol_is_codegen_root("rt_enum_check_discriminant"));
     }
 
     #[test]

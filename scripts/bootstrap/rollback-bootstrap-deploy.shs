@@ -1,33 +1,31 @@
 #!/bin/sh
+# Bootstrap Gate 5R rollback: given <canonical-triple>, restore
+# bin/release/<triple>/simple from the retained
+# bin/release/<triple>/simple.pre_deploy written by
+# bootstrap-from-scratch.sh's deploy step, verify the restored SHA-256
+# against the pre-deploy hash, and re-run the arithmetic smoke
+# (-c 'print(1+1)'), printing a rollback receipt (command, exit status,
+# path, pre/post/restored hashes, smoke output).
+# See doc/08_tracking/todo/rollback_bootstrap_deploy_script_missing_2026-08-08.md.
+#
+# Usage:
+#   sh scripts/bootstrap/rollback-bootstrap-deploy.shs [<canonical-triple>]
+#   sh scripts/bootstrap/rollback-bootstrap-deploy.shs --dry-run [<canonical-triple>]
+#   sh scripts/bootstrap/rollback-bootstrap-deploy.shs --selftest
+#
+# Fail-closed: absence of a deploy receipt is ERROR (exit 2), never a pass.
+# Verdict line (last line of stdout), matching the scripts/check/*.shs
+# convention documented in .claude/rules/vcs.md:
+#   PASS  — <n> artifact(s) restored, ...          exit 0
+#   FAIL  — ...                                    exit 1
+#   ERROR — nothing was rolled back (<reason>)     exit 2
 set -eu
 
+SELF=$(basename "$0")
 repo_root="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)"
 cd "${repo_root}"
-if [ "$#" -gt 0 ]; then
-  platform=$1
-else
-  host_os=$(uname -s)
-  host_arch=$(uname -m)
-  case "${host_os}:${host_arch}" in
-    Linux:x86_64) platform=x86_64-unknown-linux-gnu ;;
-    Linux:aarch64|Linux:arm64) platform=aarch64-unknown-linux-gnu ;;
-    Darwin:x86_64) platform=x86_64-apple-darwin ;;
-    Darwin:arm64|Darwin:aarch64) platform=aarch64-apple-darwin ;;
-    FreeBSD:x86_64|FreeBSD:amd64) platform=x86_64-unknown-freebsd-elf ;;
-    FreeBSD:aarch64|FreeBSD:arm64) platform=aarch64-unknown-freebsd-elf ;;
-    MINGW*:x86_64|MSYS*:x86_64) platform=x86_64-pc-windows-gnu ;;
-    *) echo "error: unsupported host; pass the canonical platform triple" >&2; exit 2 ;;
-  esac
-fi
-case "${platform}" in '.'|'..'|*[!A-Za-z0-9._-]*|'') echo "error: invalid platform" >&2; exit 2;; esac
-deploy_dir="bin/release/${platform}"
-receipt="${deploy_dir}/bootstrap-deploy-receipt.env"
-rollback_receipt="${deploy_dir}/bootstrap-rollback-receipt.env"
-lock="${deploy_dir}/.bootstrap-deploy.lock"
-[ ! -L "bin" ] && [ ! -L "bin/release" ] && [ ! -L "${deploy_dir}" ] || { echo "error: symlinked deployment path" >&2; exit 2; }
-mkdir "${lock}" 2>/dev/null || { echo "error: deployment is locked" >&2; exit 2; }
-trap 'rm -rf "${lock}"' EXIT
-trap 'exit 130' HUP INT TERM
+
+SELFTEST_EXPECTED=3
 
 hash_file() {
   if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'
@@ -35,7 +33,9 @@ hash_file() {
   elif command -v sha256 >/dev/null 2>&1; then sha256 -q "$1"
   else echo "error: no SHA-256 tool" >&2; return 1; fi
 }
+
 value() { sed -n "s/^$1=//p" "${receipt}" | awk 'NR==1 { value=$0 } END { if (NR==1) print value }'; }
+
 bounded_smoke() {
   smoke_out="${deploy_dir}/.rollback-smoke-out.$$"
   "$1" -c 'print(1+1)' >"${smoke_out}" 2>/dev/null &
@@ -50,35 +50,264 @@ bounded_smoke() {
   rm -f "${smoke_out}"
   return "${smoke_status}"
 }
+
 fail_receipt() {
   { echo "schema=bootstrap-rollback-receipt-v1"; echo "platform=${platform}"; echo "rollback_status=fail"; echo "reason=$1"; echo "platform_acceptance_claimed=false"; } > "${rollback_receipt}.tmp.$$"
   mv "${rollback_receipt}.tmp.$$" "${rollback_receipt}"
   echo "error: rollback failed: $1" >&2
+  echo "${SELF}: FAIL — $1"
   exit 1
 }
 
-[ -f "${receipt}" ] && [ ! -L "${receipt}" ] || fail_receipt receipt
-[ "$(value schema)" = "bootstrap-deploy-receipt-v1" ] || fail_receipt schema
-[ "$(value platform)" = "${platform}" ] || fail_receipt platform
+# error_receipt: nothing exists to act on (no receipt, no backup, malformed
+# provenance) — this is ERROR (exit 2), distinct from fail_receipt's FAIL
+# (exit 1, evidence exists but is untrustworthy or unsafe to use).
+error_receipt() {
+  echo "error: rollback failed: $1" >&2
+  echo "${SELF}: ERROR — nothing was rolled back ($1)"
+  exit 2
+}
+
+detect_platform() {
+  host_os=$(uname -s)
+  host_arch=$(uname -m)
+  case "${host_os}:${host_arch}" in
+    Linux:x86_64) echo x86_64-unknown-linux-gnu ;;
+    Linux:aarch64|Linux:arm64) echo aarch64-unknown-linux-gnu ;;
+    Darwin:x86_64) echo x86_64-apple-darwin ;;
+    Darwin:arm64|Darwin:aarch64) echo aarch64-apple-darwin ;;
+    FreeBSD:x86_64|FreeBSD:amd64) echo x86_64-unknown-freebsd-elf ;;
+    FreeBSD:aarch64|FreeBSD:arm64) echo aarch64-unknown-freebsd-elf ;;
+    MINGW*:x86_64|MSYS*:x86_64) echo x86_64-pc-windows-gnu ;;
+    *) return 1 ;;
+  esac
+}
+
+# ---------------------------------------------------------------------------
+# --selftest: three isolated subprocess fixtures under mktemp -d, never
+# touching this repo's real bin/release/** or bin/simple. Each fixture copies
+# THIS script's own current source into a private tmp tree and runs it there
+# as a child (SIMPLE_ROLLBACK_SELFTEST_CHILD=1 skips the recursive selftest).
+# Runs before every real invocation and is FATAL on failure (house
+# convention; see scripts/check/check-tree-size-push.shs).
+# ---------------------------------------------------------------------------
+build_fixture_common() {
+  fx=$1
+  mkdir -p "${fx}/scripts/bootstrap" "${fx}/scripts/setup" "${fx}/bin/release/selftest-platform"
+  cp "${repo_root}/scripts/bootstrap/rollback-bootstrap-deploy.shs" "${fx}/scripts/bootstrap/rollback-bootstrap-deploy.shs"
+  chmod 755 "${fx}/scripts/bootstrap/rollback-bootstrap-deploy.shs"
+  printf '%s\n' '#!/bin/sh' 'exit 0' > "${fx}/scripts/setup/setup.shs"
+  chmod 755 "${fx}/scripts/setup/setup.shs"
+}
+
+write_fixture_binary() {
+  # $1 = path, $2 = generation marker word
+  printf '%s\n' '#!/bin/sh' '# enum construction: unregistered enum' "# $2-generation" 'echo 2' > "$1"
+  chmod 755 "$1"
+}
+
+write_fixture_receipt() {
+  # $1 = fixture root, $2 = current sha256, $3 = backup sha256
+  {
+    echo "schema=bootstrap-deploy-receipt-v1"
+    echo "platform=selftest-platform"
+    echo "current_path=bin/release/selftest-platform/simple"
+    echo "current_sha256=$2"
+    echo "backup_path=bin/release/selftest-platform/simple.pre_deploy"
+    echo "backup_sha256=$3"
+    echo "deployment_status=pass"
+    echo "platform_acceptance_claimed=false"
+  } > "$1/bin/release/selftest-platform/bootstrap-deploy-receipt.env"
+}
+
+run_fixture() {
+  # $1 = fixture root; writes stdout/stderr to $1/out and $1/err, sets $rc
+  set +e
+  SIMPLE_ROLLBACK_SELFTEST_CHILD=1 sh "$1/scripts/bootstrap/rollback-bootstrap-deploy.shs" selftest-platform \
+    >"$1/out" 2>"$1/err"
+  rc=$?
+  set -e
+}
+
+# Fixture 1: a normal rollback restores the previous binary (must PASS).
+selftest_case_normal() {
+  fx=$(mktemp -d)
+  build_fixture_common "${fx}"
+  write_fixture_binary "${fx}/bin/release/selftest-platform/simple" current
+  write_fixture_binary "${fx}/bin/release/selftest-platform/simple.pre_deploy" backup
+  cur_hash=$(hash_file "${fx}/bin/release/selftest-platform/simple")
+  back_hash=$(hash_file "${fx}/bin/release/selftest-platform/simple.pre_deploy")
+  write_fixture_receipt "${fx}" "${cur_hash}" "${back_hash}"
+  ln -s "${fx}/bin/release/selftest-platform/simple" "${fx}/bin/simple"
+  run_fixture "${fx}"
+  out=$(cat "${fx}/out")
+  ok=1
+  [ "${rc}" -eq 0 ] || ok=0
+  case "${out}" in *"rollback_status=pass"*) ;; *) ok=0 ;; esac
+  case "${out}" in *"PASS — "*) ;; *) ok=0 ;; esac
+  grep -q backup-generation "${fx}/bin/release/selftest-platform/simple" 2>/dev/null || ok=0
+  grep -q current-generation "${fx}/bin/release/selftest-platform/simple.pre_deploy" 2>/dev/null || ok=0
+  rm -rf "${fx}"
+  [ "${ok}" -eq 1 ]
+}
+
+# Fixture 2: no prior deploy recorded — must ERROR, never a pass.
+selftest_case_no_deploy() {
+  fx=$(mktemp -d)
+  build_fixture_common "${fx}"
+  write_fixture_binary "${fx}/bin/release/selftest-platform/simple" current
+  # Deliberately no bootstrap-deploy-receipt.env and no .pre_deploy: nothing
+  # was ever deployed through this mechanism for this platform.
+  run_fixture "${fx}"
+  out=$(cat "${fx}/out")
+  ok=1
+  [ "${rc}" -eq 2 ] || ok=0
+  case "${out}" in *"ERROR — nothing was rolled back"*) ;; *) ok=0 ;; esac
+  rm -rf "${fx}"
+  [ "${ok}" -eq 1 ]
+}
+
+# Fixture 3: a rollback that would leave bin/simple dangling — must FAIL.
+selftest_case_dangling() {
+  fx=$(mktemp -d)
+  build_fixture_common "${fx}"
+  write_fixture_binary "${fx}/bin/release/selftest-platform/simple" current
+  write_fixture_binary "${fx}/bin/release/selftest-platform/simple.pre_deploy" backup
+  cur_hash=$(hash_file "${fx}/bin/release/selftest-platform/simple")
+  back_hash=$(hash_file "${fx}/bin/release/selftest-platform/simple.pre_deploy")
+  write_fixture_receipt "${fx}" "${cur_hash}" "${back_hash}"
+  # bin/simple points at a path that does not exist: already dangling, and a
+  # completed rollback would still leave it dangling.
+  ln -s "${fx}/bin/release/selftest-platform/simple-ghost" "${fx}/bin/simple"
+  run_fixture "${fx}"
+  out=$(cat "${fx}/out")
+  ok=1
+  [ "${rc}" -eq 1 ] || ok=0
+  case "${out}" in *"FAIL — "*) ;; *) ok=0 ;; esac
+  grep -q current-generation "${fx}/bin/release/selftest-platform/simple" 2>/dev/null || ok=0
+  grep -q backup-generation "${fx}/bin/release/selftest-platform/simple.pre_deploy" 2>/dev/null || ok=0
+  rm -rf "${fx}"
+  [ "${ok}" -eq 1 ]
+}
+
+selftest() {
+  selftest_case_normal || { echo "${SELF}: SELFTEST FAIL: a normal rollback did not restore the previous binary" >&2; return 1; }
+  selftest_case_no_deploy || { echo "${SELF}: SELFTEST FAIL: a rollback with no prior deploy recorded did not ERROR" >&2; return 1; }
+  selftest_case_dangling || { echo "${SELF}: SELFTEST FAIL: a rollback that would leave bin/simple dangling did not FAIL" >&2; return 1; }
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# Argument parsing
+# ---------------------------------------------------------------------------
+dry_run=0
+do_selftest=0
+platform=""
+for arg in "$@"; do
+  case "${arg}" in
+    --dry-run) dry_run=1 ;;
+    --selftest) do_selftest=1 ;;
+    -*)
+      echo "error: unknown flag '${arg}'" >&2
+      echo "${SELF}: ERROR — nothing was rolled back (unknown flag ${arg})"
+      exit 2
+      ;;
+    *)
+      if [ -n "${platform}" ]; then
+        echo "error: multiple platform arguments given" >&2
+        echo "${SELF}: ERROR — nothing was rolled back (multiple platform arguments)"
+        exit 2
+      fi
+      platform=${arg}
+      ;;
+  esac
+done
+
+if [ "${SIMPLE_ROLLBACK_SELFTEST_CHILD:-0}" != "1" ]; then
+  if ! selftest; then
+    echo "${SELF}: ERROR — selftest failed; the rollback script is not trustworthy" >&2
+    echo "${SELF}: ERROR — nothing was rolled back (selftest failed)"
+    exit 2
+  fi
+fi
+
+if [ "${do_selftest}" -eq 1 ]; then
+  echo "${SELF}: PASS — ${SELFTEST_EXPECTED} fixture(s) checked (selftest only, rollback skipped)"
+  exit 0
+fi
+
+if [ -z "${platform}" ]; then
+  if ! platform=$(detect_platform); then
+    echo "error: unsupported host; pass the canonical platform triple" >&2
+    echo "${SELF}: ERROR — nothing was rolled back (unsupported host $(uname -s):$(uname -m))"
+    exit 2
+  fi
+fi
+case "${platform}" in '.'|'..'|*[!A-Za-z0-9._-]*|'') echo "error: invalid platform" >&2; echo "${SELF}: ERROR — nothing was rolled back (invalid platform)"; exit 2;; esac
+
+deploy_dir="bin/release/${platform}"
+receipt="${deploy_dir}/bootstrap-deploy-receipt.env"
+rollback_receipt="${deploy_dir}/bootstrap-rollback-receipt.env"
+lock="${deploy_dir}/.bootstrap-deploy.lock"
+[ ! -L "bin" ] && [ ! -L "bin/release" ] && [ ! -L "${deploy_dir}" ] || { echo "error: symlinked deployment path" >&2; echo "${SELF}: ERROR — nothing was rolled back (symlinked deployment path)"; exit 2; }
+mkdir "${lock}" 2>/dev/null || { echo "error: deployment is locked" >&2; echo "${SELF}: ERROR — nothing was rolled back (deployment is locked)"; exit 2; }
+trap 'rm -rf "${lock}"' EXIT
+trap 'exit 130' HUP INT TERM
+
+if [ -L "${receipt}" ]; then fail_receipt receipt_symlink; fi
+[ -f "${receipt}" ] || error_receipt "no deploy receipt recorded for platform ${platform} (expected ${receipt})"
+[ "$(value schema)" = "bootstrap-deploy-receipt-v1" ] || error_receipt "deploy receipt has unexpected schema (expected bootstrap-deploy-receipt-v1)"
+[ "$(value platform)" = "${platform}" ] || error_receipt "deploy receipt platform mismatch (expected ${platform})"
 current="$(value current_path)"; backup="$(value backup_path)"
 [ "${current}" = "${deploy_dir}/simple" ] || [ "${current}" = "${deploy_dir}/simple.exe" ] || fail_receipt current_path
 [ "${backup}" = "${current}.pre_deploy" ] || fail_receipt backup_path
-[ -f "${current}" ] && [ ! -L "${current}" ] || fail_receipt current_file
-[ -f "${backup}" ] && [ ! -L "${backup}" ] || fail_receipt backup_file
+[ -f "${current}" ] && [ ! -L "${current}" ] || error_receipt "current binary ${current} is missing or a symlink"
+[ -f "${backup}" ] && [ ! -L "${backup}" ] || error_receipt "retained backup ${backup} is missing or a symlink (nothing to roll back to)"
 expected_current_hash="$(value current_sha256)"
 expected_backup_hash="$(value backup_sha256)"
 [ "$(hash_file "${current}")" = "${expected_current_hash}" ] || fail_receipt current_hash
 [ "$(hash_file "${backup}")" = "${expected_backup_hash}" ] || fail_receipt backup_hash
 
+# A rollback is refused, never completed, if it would leave bin/simple — the
+# repo's single canonical compiler entrypoint (see .claude/rules/structure.md)
+# — a dangling symlink. bin/simple already broken before we touch anything
+# means completing the rollback would still leave it broken.
+if [ -L "bin/simple" ] && [ ! -e "bin/simple" ]; then
+  fail_receipt dangling_bin_simple
+fi
+
 candidate="${current}.rollback_candidate.$$"
-old="${current}.rollback_old.$$"
 install -m755 "${backup}" "${candidate}"
 [ "$(hash_file "${candidate}")" = "${expected_backup_hash}" ] || { rm -f "${candidate}"; fail_receipt candidate_hash; }
 marker='enum construction: unregistered enum'
-if ! { grep -a -q "${marker}" "${candidate}" 2>/dev/null && [ "$(bounded_smoke "${candidate}" 2>/dev/null)" = "2" ]; }; then
+if ! grep -a -q "${marker}" "${candidate}" 2>/dev/null; then
   rm -f "${candidate}"
   fail_receipt rollback_smoke
 fi
+set +e
+smoke_output="$(bounded_smoke "${candidate}" 2>/dev/null)"
+smoke_rc=$?
+set -e
+if [ "${smoke_rc}" -ne 0 ] || [ "${smoke_output}" != "2" ]; then
+  rm -f "${candidate}"
+  fail_receipt rollback_smoke
+fi
+
+if [ "${dry_run}" -eq 1 ]; then
+  rm -f "${candidate}"
+  echo "dry_run=true"
+  echo "platform=${platform}"
+  echo "would_restore=${current}"
+  echo "from_backup=${backup}"
+  echo "current_sha256=${expected_current_hash}"
+  echo "restored_sha256_would_be=${expected_backup_hash}"
+  echo "smoke_output=${smoke_output}"
+  echo "${SELF}: DRY-RUN — would restore 1 artifact(s): ${current} (from ${backup}, sha256 ${expected_backup_hash})"
+  exit 0
+fi
+
+pre_rollback_hash="${expected_current_hash}"
+old="${current}.rollback_old.$$"
 install -m755 "${current}" "${old}"
 rm -f "${receipt}" "${rollback_receipt}"
 mv "${candidate}" "${current}"
@@ -90,13 +319,19 @@ backup_tmp="${backup}.tmp.$$"
 install -m755 "${old}" "${backup_tmp}"
 mv "${backup_tmp}" "${backup}"
 rm -f "${old}"
+restored_hash="$(hash_file "${current}")"
 {
   echo "schema=bootstrap-rollback-receipt-v1"
   echo "platform=${platform}"
+  echo "command=$0 ${platform}"
   echo "current_path=${current}"
-  echo "current_sha256=$(hash_file "${current}")"
+  echo "pre_rollback_sha256=${pre_rollback_hash}"
+  echo "current_sha256=${restored_hash}"
+  echo "restored_sha256=${restored_hash}"
   echo "backup_path=${backup}"
   echo "backup_sha256=$(hash_file "${backup}")"
+  echo "smoke_output=${smoke_output}"
+  echo "exit_status=0"
   echo "timestamp_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   echo "rollback_status=pass"
   echo "platform_acceptance_claimed=false"
@@ -104,3 +339,4 @@ rm -f "${old}"
 mv "${rollback_receipt}.tmp.$$" "${rollback_receipt}"
 echo "rollback_status=pass"
 echo "rollback_receipt=${rollback_receipt}"
+echo "${SELF}: PASS — 1 artifact(s) restored (${current} <- ${backup}, sha256 ${restored_hash})"

@@ -128,6 +128,11 @@ static void rv_report_heap_exhausted(void)
 }
 #define RV_HEAP_EXHAUSTED_REPORT() rv_report_heap_exhausted()
 #define BAREMETAL_ENABLE_ALIGNED_ALLOC 1
+/* Kernel-stack guard at the allocation funnel (see boot_entry.c). Defined in
+ * boot_entry.c, the one riscv64 boot TU with no duplicate twin, so this hook
+ * cannot be shadowed by the OTHER definition the way rt_index_set was. */
+void rv64_stack_guard_check(void);
+#define RV_ALLOC_GUARD_CHECK() rv64_stack_guard_check()
 #include "../../common/baremetal_bump_heap.h"
 
 /* Width-independent helpers shared with riscv32 (rv_memzero, rv_fence, le/rd
@@ -1090,8 +1095,43 @@ RuntimeValue rt_value_int(RuntimeValue value)
     return ENCODE_INT(value);
 }
 
+/* The TAGGED-BOOL arm is load-bearing and was missing until 2026-09-01.
+ *
+ * simpleos_raw_or_encoded_int is `IS_INT(v) ? DECODE_INT(v) : v` -- it decodes
+ * TAG_INT and passes EVERYTHING ELSE through verbatim. A Simple bool is not
+ * TAG_INT: codegen encodes `true` as 11 and `false` as 19, both TAG_SPECIAL.
+ * So an unboxed `false` came back as 19, and every consumer that tests the
+ * result for non-zero read it as TRUE -- 19 is non-zero, and so is 11, so BOTH
+ * bools answered true.
+ *
+ * That is the whole of the riscv64 row-2 hang. `parse_statement` destructures
+ * `try_parse_bare_ident_string_call()`'s `return (false, 0)` early exit through
+ * rt_tuple_get -> rt_value_unbox_int -> `bnez`; the flag read `true`, so
+ * parse_expr() was never called, no token was consumed, and parse_block()'s
+ * `while true:` spun allocating until the bump arena was gone.
+ *
+ * The contract this restores is not invented here. It is what the canonical
+ * hosted runtime does (src/compiler_rust/runtime/src/value/sffi/value_ops.rs:80-87,
+ * SPECIAL_TRUE -> 1, SPECIAL_FALSE -> 0), what the codegen comments already
+ * describe as the decision table ("tagged true/false -> 1/0",
+ * codegen/instr/mod.rs:1598), and what the SIBLING freestanding implementation
+ * in arch/common/boot/freestanding_value_registry_impl.h:112-119 already
+ * implements. This definition was simply an incomplete port of the same name.
+ *
+ * The literals 11 and 19 are spelled out rather than using the
+ * TAGGED_BOOL_TRUE/FALSE macros in arch/common/baremetal_runtime.h: this file
+ * is #included into a TU that does not see that header (it was tried, and the
+ * build failed with "use of undeclared identifier 'TAGGED_BOOL_TRUE'"), and the
+ * sibling implementation in freestanding_value_registry_impl.h:112 spells them
+ * out the same way.
+ *
+ * Do NOT push the bool arm down into simpleos_raw_or_encoded_int: its other
+ * callers pass sizes, capacities and lengths, where a raw 11 or 19 is a
+ * legitimate count and must NOT be rewritten to 1 or 0. */
 RuntimeValue rt_value_unbox_int(RuntimeValue value)
 {
+    if (value == 11) return 1;  /* tagged true  */
+    if (value == 19) return 0;  /* tagged false */
     return (RuntimeValue)(int64_t)simpleos_raw_or_encoded_int(value);
 }
 
@@ -1116,6 +1156,11 @@ RuntimeValue rt_string_byte_at(RuntimeValue str, RuntimeValue index)
 
 /* Substring containment for text; element containment for an array. The hosted
  * rt_contains is polymorphic over both, so this is too. */
+/* Forward declaration: rt_contains's dict arm delegates here, but the dict
+ * section (and the RuntimeDict type) is defined later in this TU. Signature
+ * matches src/runtime/runtime.h:746 and the definition below. */
+int8_t rt_dict_contains(int64_t dict, int64_t key);
+
 RuntimeValue rt_contains(RuntimeValue collection, RuntimeValue value)
 {
     if (!IS_HEAP(collection)) return 0;
@@ -1145,6 +1190,39 @@ RuntimeValue rt_contains(RuntimeValue collection, RuntimeValue value)
             if (rt_string_eq(items[i], value)) return 1;
         }
         return 0;
+    }
+
+    /* DICT arm -- hosted parity, and the SAME defect family as the tag-11 gap
+     * in the inline `.len()` path and the dict arm added to rt_len above.
+     * `.has` / `.contains` / `.contains_key` on a Dict lower to rt_contains,
+     * NOT to rt_dict_contains (codegen/llvm/emitter.rs:324 and
+     * codegen/instr/closures_structs.rs:117 map all of them to "rt_contains"),
+     * and the hosted rt_contains answers dicts via rt_core_dict_has
+     * (runtime_native.c). This port handled only HEAP_STRING and HEAP_ARRAY
+     * and fell through to `return 0`, so EVERY `dict.has(k)` answered FALSE
+     * in-guest on a dict that provably held the key.
+     *
+     * MEASURED 2026-09-01, in-guest under real OpenSBI v1.4 fw_payload, nonce
+     * 8d03ec284ec3be32, from the build-and-run row's own run half:
+     *
+     *     FAIL run error: function 'add' not found
+     *       [PROBE hit=N hasidx=Y dictlen=2 vals=2]
+     *
+     * i.e. the interpreter's name index held BOTH functions (dictlen=2, built
+     * from the same 2 module functions, vals=2), and `.has("add")` still said
+     * no. resolve_function_by_name then fail-closed on has_fn_index and never
+     * ran the linear scan that would have found it.
+     *
+     * Key rule is delegated to rt_dict_contains (defined at the dict section
+     * below) so the two cannot drift. It is CALLED, not spelled inline: the
+     * RuntimeDict type is not declared until line ~2101, well after this
+     * function, so an inline `RuntimeDict *d = ...` here is an undeclared-type
+     * error that fails this whole TU and cascades into the link. (Measured --
+     * that is exactly what the first attempt at this fix did.) A file-scope
+     * forward declaration is placed immediately above rt_contains; its
+     * signature matches src/runtime/runtime.h:746 and the definition below. */
+    if (h->type == HEAP_DICT) {
+        return rt_dict_contains((int64_t)collection, (int64_t)value) ? 1 : 0;
     }
     return 0;
 }
@@ -1799,6 +1877,78 @@ RuntimeValue rt_unwrap_or_trap(RuntimeValue value)
         serial_puts("\r\n[TRAP] rt_unwrap_or_trap: unwrapped a nil optional\r\n");
         rt_qemu_exit_failure();
         for (;;) { __asm__ volatile("wfi"); }
+    }
+    /* AND IT MUST ALSO ACTUALLY UNWRAP. Until 2026-09-01 this function's ONLY
+     * check was the `== NIL_VALUE` one above, so a boxed `Some(x)` was returned
+     * VERBATIM -- the caller got the 24-byte RuntimeEnum WRAPPER where the
+     * payload belonged. That is not a cosmetic divergence: the wrapper is
+     * handed on as a struct/class receiver, and the first field load past its
+     * 32-byte allocation slot reads the NEXT bump allocation's HeapHeader.
+     *
+     * That is exactly the riscv64 in-guest build-and-run row's blocker
+     * (doc/08_tracking/bug/riscv64_in_guest_interp_resets_on_cross_function_call_2026-09-01.md).
+     * The interpreter resolves a CALLEE through
+     * `resolve_function_by_name(...) -> HirFunction?` and then
+     * `cf_target_hit.unwrap()` (70.backend/backend/interpreter_calls.spl:138,181),
+     * so `call_hir_function` received a Some-box instead of the HirFunction.
+     * Its by-value COW copy of the 248-byte `fn_` parameter then read offset 32
+     * of a 32-byte object and found `0x0000003200000001` -- which, read through
+     * this TU's own `HeapHeader {uint32_t type; uint32_t size;}`, is
+     * type=1 (HEAP_STRING) size=50: a neighbouring RuntimeString's header. It
+     * carries TAG_HEAP in its low bits, so the clone's tag test accepted it and
+     * dereferenced `size << 32` as an address -> scause=5 load access fault at
+     * stval=0x3200000000. The interpreter row stayed GREEN throughout because
+     * it reaches call_hir_function only via the `.values()` + typed-local path
+     * (interpreter.spl:190-196), which never wraps an optional.
+     *
+     * This is NOT a new behaviour invented here. It is a PORT of semantics that
+     * already exist twice in this tree, and the same defect was already
+     * diagnosed and fixed on the x86_64 freestanding sibling:
+     *   - src/runtime/runtime_native.c:12972 (the hosted C definition)
+     *   - src/runtime/simple_core/core_values.spl:142 (the canonical pure-Simple one)
+     *   - examples/09_embedded/simple_os/arch/common/boot/freestanding_value_registry_impl.h:149,
+     *     whose comment describes this identical failure -- "every `.unwrap()`
+     *     fell through returning the WRAPPER instead of the payload ... the
+     *     first field load off it faults" -- for the L5 VFS blocker
+     *     (vfs_l5_fat32core_open_faults_on_new_file_write_2026-08-31.md).
+     * That fix landed in the COMMON header and in the x86_64 lane; riscv64
+     * carries its own duplicate definition in THIS file, which shadows the
+     * sibling for this lane and was never brought along. A tree-wide grep for
+     * rt_unwrap_or_trap finds the GOOD sibling and looks green -- the exact
+     * duplicate-definition trap this boot directory has been bitten by before.
+     *
+     * DISCRIMINANT FORMS: both are accepted, deliberately. The hosted C
+     * definition accepts `discriminant == 0 || == SPL_HASH_SOME` for Some and
+     * `1 || SPL_HASH_NONE` for None, because simple-core constructs canonical
+     * Options with ORDINAL discriminants (Some=0, None=1) while native lowering
+     * identifies Ok/Err by the stable 32-bit variant-name hashes. Accepting
+     * only the hashes would leave this function still returning the wrapper for
+     * an ordinal-built Option. Mirrored here rather than narrowed.
+     *
+     * Identification is by heap header, the same basis rt_enum_id /
+     * rt_enum_discriminant / rt_enum_payload in this TU already use, so a
+     * non-enum value still returns verbatim exactly as before. */
+    if (!IS_HEAP(value)) return value;
+    RuntimeEnum *e = (RuntimeEnum *)DECODE_PTR(value);
+    if (!e || e->hdr.type != HEAP_ENUM) return value;
+    {
+        const uint32_t some_hash = 4053299545u, none_hash = 2371748697u;
+        const uint32_t ok_hash   = 2405352012u, err_hash  = 4200179024u;
+        if (e->enum_id == 1u) {
+            if (e->discriminant == 0u || e->discriminant == some_hash) return e->payload;
+            if (e->discriminant == 1u || e->discriminant == none_hash) {
+                serial_puts("\r\n[TRAP] rt_unwrap_or_trap: .unwrap() called on None\r\n");
+                rt_qemu_exit_failure();
+                for (;;) { __asm__ volatile("wfi"); }
+            }
+            return value;
+        }
+        if (e->discriminant == ok_hash) return e->payload;
+        if (e->discriminant == err_hash) {
+            serial_puts("\r\n[TRAP] rt_unwrap_or_trap: .unwrap() called on Err\r\n");
+            rt_qemu_exit_failure();
+            for (;;) { __asm__ volatile("wfi"); }
+        }
     }
     return value;
 }

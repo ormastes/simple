@@ -1,0 +1,151 @@
+#!/bin/sh
+# stale-status-classify.shs — turn build/sweep/res/* into a classified table.
+#
+# Reads nothing but its own sweep output. Writes only to stdout.
+# Emits: SEVERITY|id|CLASS|CONFIDENCE|bucket|rc|lane|verdict
+#
+# Classes:
+#   LIKELY-FIXED   spec ran, verdict is a clean pass, no lane flag
+#   STILL-BROKEN   spec ran and failed
+#   LANE-SUSPECT   spec passed but the row is stage-lane or codegen-shellout,
+#                  so the seed/interpreter lane cannot have exercised the defect
+#   NO-EVIDENCE    the runner explicitly refused to certify (ERROR / "NOT a pass")
+#   TIMEOUT        killed at the wall budget
+#   SPEC-MISSING   the named repro is not on disk
+#   NO-REPRO       nothing runnable was found for the row
+
+set -u
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+RES="$ROOT/build/sweep/res"
+PLAN="$ROOT/build/sweep/plan.txt"
+SRCMAP="$ROOT/build/sweep/srcmap.txt"   # id<TAB>owning source file, from the input list
+
+# MEASURED 2026-09-06, not inferred: a probe spec run under `bin/simple test`
+# printed `LANE_PROBE exec_mode=interpret runtime_mode=interpreter`, and
+# test/01_unit/compiler/class_reference_semantics_spec.spl's own header states
+# the same divergence ("under `bin/simple test` every field/array store
+# VALUE-COPIES ... under the default JIT (`bin/simple run`) all cases alias").
+# So EVERY spec body runs interpreted. A codegen/JIT/native-class row therefore
+# cannot be certified fixed by a green spec here, whether or not it shells out.
+codegen_class() {
+    case "$1" in
+        *jit*|*native*|*codegen*|*_mir_*|*llvm*|*aot*|*cranelift*|*machine_code*)
+            return 0 ;;
+    esac
+    case "${2:-}" in
+        *50.mir*|*60.*|*70.*|*backend*|*compiler_rust*|*codegen*)
+            return 0 ;;
+    esac
+    return 1
+}
+
+while IFS='|' read -r sev id bucket repro runner lane; do
+    # 13 MANUAL-NONE rows were superseded by an appended RUN-DERIVED-SHS row
+    # for the same id. Emit the superseding row only, so the counts stay 1:1
+    # with the 272 input rows.
+    if [ "$bucket" = "MANUAL-NONE" ]; then
+        grep -qF "|$id|RUN-DERIVED-SHS|" "$PLAN" && continue
+    fi
+
+    conf="declared"
+    case "$bucket" in
+        RUN-DERIVED|RUN-DERIVED-SHS) conf="record-derived" ;;
+    esac
+
+    rf="$RES/$id"
+    if [ ! -f "$rf" ]; then
+        case "$bucket" in
+            SPEC-MISSING) echo "$sev|$id|SPEC-MISSING|n/a|$bucket|-|$lane|named repro absent from disk: $repro" ;;
+            MANUAL-*)     echo "$sev|$id|NO-REPRO|n/a|$bucket|-|$lane|not runnable on this host: $repro" ;;
+            *)            echo "$sev|$id|NOT-REACHED|$conf|$bucket|-|$lane|queued but not executed" ;;
+        esac
+        continue
+    fi
+
+    line=$(cat "$rf")
+    rc=$(echo "$line" | cut -d'|' -f3)
+    verdict=$(echo "$line" | cut -d'|' -f4)
+
+    cls=""
+    case "$verdict" in
+        *"NOT a pass"*|*"nothing was checked"*|*"ERROR — "*) cls="NO-EVIDENCE" ;;
+    esac
+    # A spec that could not be parsed, or that executed zero examples, is not
+    # evidence in EITHER direction — it is a rotted spec. Distinguish it from a
+    # genuine failure, which a bare rc!=0 would otherwise conflate.
+    case "$verdict" in
+        *"reason=parse-error"*|*"executed=0 "*) cls="SPEC-ROTTED" ;;
+    esac
+    [ "$rc" = "124" ] && cls="TIMEOUT"
+
+    if [ -z "$cls" ]; then
+        case "$verdict" in
+            *"outcome=OK"*)
+                # A spec that executed nothing is not a pass.
+                case "$verdict" in
+                    *"executed=0 "*) cls="NO-EVIDENCE" ;;
+                    *)               cls="PASSED" ;;
+                esac ;;
+            *"outcome=ERROR"*|*"outcome=FAIL"*) cls="STILL-BROKEN" ;;
+            *"FAIL — "*)                        cls="STILL-BROKEN" ;;
+            *"PASS — "*)                        cls="PASSED" ;;
+            *)
+                if [ "$rc" = "0" ]; then cls="PASSED-NOVERDICT"; else cls="STILL-BROKEN"; fi ;;
+        esac
+    fi
+
+    # Inversion-pinning specs: some specs deliberately assert the WRONG
+    # (currently-observed) result so the defect stays executable and loud. For
+    # those, a GREEN run means the bug is still present — the exact inverse of
+    # the usual reading. Detected mechanically so it cannot be missed by eye.
+    pin=""
+    if [ -f "$ROOT/$repro" ]; then
+        if grep -qiE 'PINS CURRENT BEHAVIOR|divergence pinned|asserts the WRONG|pin the (current|broken)|pins the (current|broken)|re-pin' "$ROOT/$repro" 2>/dev/null; then
+            pin="pin-inverted"
+        fi
+    fi
+
+    srcfile=$(awk -F'\t' -v k="$id" '$1==k{print $2; exit}' "$SRCMAP" 2>/dev/null)
+    if [ "$lane" = "-" ] || [ -z "$lane" ]; then
+        if [ "$runner" = "simple-test" ] && codegen_class "$id" "${srcfile:-}"; then
+            lane="codegen-interpret-lane"
+        fi
+    fi
+
+    # Mirror of the pin rule: a pin-inverted spec that now FAILS is the positive
+    # signal — the deliberately-wrong assertions flipped red, which is what a
+    # real fix looks like from here. It is a fixed-candidate needing the
+    # assertions inverted, not a broken row.
+    if [ "$cls" = "STILL-BROKEN" ] && [ -n "$pin" ]; then
+        cls="PIN-FLIPPED"
+    fi
+
+    if [ "$cls" = "PASSED" ] || [ "$cls" = "PASSED-NOVERDICT" ]; then
+        if [ -n "$pin" ]; then
+            # Green on an inversion-pinning spec == the defect is still live.
+            cls="STILL-BROKEN"
+            lane="pin-inverted-green"
+        elif [ "$lane" != "-" ] && [ -n "$lane" ]; then
+            cls="LANE-SUSPECT"
+        elif [ "$cls" = "PASSED-NOVERDICT" ]; then
+            cls="NO-EVIDENCE"
+        else
+            cls="LIKELY-FIXED"
+        fi
+    fi
+
+    # Fold in the second (JIT) lane where it was run. A codegen row that is
+    # green in BOTH the interpret lane and the JIT lane is real evidence — but
+    # only for those two lanes. The native/AOT and pure-Simple `native-build`
+    # lanes are still untested here, so this is DUAL-LANE-GREEN, not "fixed".
+    jf="$ROOT/build/sweep/res_jit/$id"
+    if [ -f "$jf" ] && [ "$cls" = "LANE-SUSPECT" ]; then
+        jv=$(cut -d'|' -f4 < "$jf")
+        case "$jv" in
+            *"outcome=OK"*) cls="DUAL-LANE-GREEN"; verdict="$verdict  ||JIT|| $jv" ;;
+            *"outcome=ERROR"*|*"outcome=FAIL"*) cls="STILL-BROKEN"; lane="jit-lane-red"; verdict="$jv" ;;
+        esac
+    fi
+
+    echo "$sev|$id|$cls|$conf|$bucket|$rc|$lane|$verdict"
+done < "$PLAN"
