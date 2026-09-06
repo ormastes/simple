@@ -69,6 +69,11 @@ lane; Wave 4 consumes its interface and does not design it.
   this parse breakage wearing a different mask. A `P(auto: true)` probe (or any
   positive capability probe) in whatever gate admits a deployed seed would name
   the cause directly. See `.claude/rules/bootstrap.md` on binary identity.
+- **GFO-009 — `frontend_offload_profile` has zero production callers.** It builds
+  the `CompilerOffloadProfile` the Wave-1 per-stage dispatcher will need, and is
+  covered by a spec, but nothing in `src/` calls it. Either wire it when Wave 1
+  lands or delete it; today the design's "resolves into `CompilerOffloadProfile`"
+  is true of the decision path only.
 - **GFO-008 — `simple-gpu` is not in the cargo workspace.** `src/compiler_rust/gpu/`
   declares `version.workspace = true` but is absent from the workspace `members`,
   so it compiles in no lane here: `cargo check -p simple-gpu` reports no such
