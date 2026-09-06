@@ -955,3 +955,93 @@ reclaimed bytes vs. RSS delta — which is what would actually rank the four
 candidates above. That transaction cannot run in this worktree (no Stage 2, no
 Stage 3, and the sanctioned bootstrap was explicitly out of scope for this
 lane), so the row stays **OPEN**.
+
+### 7. MEASURED: the PAUSED window inside the Stage-3 HIR scope leaks at the full 48 B/alloc while the active window is reclaimed 100%
+
+Candidate 2 of §6's unranked list is no longer speculation. A second C fixture
+replays the driver's exact sequence from
+`src/compiler/80.driver/driver_hir_pipeline_lowering.spl:65-100` —
+`begin` -> allocate (the parse + lower window) -> `pause` -> allocate (the
+promotion window) -> `end` — linked the same way against
+`src/runtime/runtime_native.c`:
+
+```bash
+~/dev/llvm/install/bin/clang -O2 -o probe2 main2.c stubs.c \
+    src/runtime/runtime_native.c -lm -lpthread
+/usr/bin/time -v ./probe2 4000 4000 <paused_per_batch>
+```
+
+Every row performs the **same 16,000,000 active allocations** (4,000 batches x
+4,000) and differs only in how many blocks are allocated after `pause`:
+
+| paused per batch | total paused allocs | max RSS (KiB) | RSS above the p=0 floor | B per paused alloc |
+|---:|---:|---:|---:|---:|
+| 0 | 0 | 2,008 | — | — |
+| 10 | 40,000 | 3,928 | 1,920 KiB | 49.2 |
+| 100 | 400,000 | 20,728 | 18,720 KiB | 47.9 |
+| 1,000 | 4,000,000 | 189,528 | 187,520 KiB | **48.0** |
+
+The 16M **active** allocations cost 2,008 KiB in every row — fully reclaimed.
+The **paused** allocations cost **48.0 B each, permanently**, the identical
+slope §6 measured for an allocation made with no scope at all. Mechanism, in
+source: `rt_core_transient_raw_register` passes
+`owned = !rt_core_transient_array_scope_paused`
+(`src/runtime/runtime_native.c:1512-1514`), and
+`rt_core_reclaim_transient_raw` frees only entries carrying
+`RT_CORE_TRANSIENT_RAW_OWNED_BIT` (`:1553`). A paused-window block is recorded,
+then skipped by the reclaim, then erased from the table by
+`rt_core_transient_raw_clear` (`:1567`) — leaked *and* untracked.
+
+**What executes inside that window on Stage 3.** Between
+`rt_transient_array_scope_pause()`
+(`driver_hir_pipeline_lowering.spl:75`) and
+`driver_end_transient_parse_scope()` (`:98`) the driver runs four promotion
+walkers: `rt_transient_heap_promote(hir_module)` (`:79`),
+`lowering.promote_diagnostics_transient_owner()` (`:83`, itself three more
+`rt_transient_heap_promote` calls — `src/compiler/20.hir/hir_lowering/types.spl:564-571`),
+`bootstrap_hir_modules_promote_last()` (`:90`), and
+`driver_promote_frontend_registry_owners()` (`:94`). Every `rt_alloc` any of
+those makes is retained for the life of the process.
+
+**Arithmetic bridge to Restart-12, stated as a hypothesis with its own falsifier.**
+63 MiB/module / 48 B = **~1.38 million leaked blocks per module**. The
+2026-08-22 instrumentation measured **38,060 promoted nodes** for module 1, so
+this window would have to allocate ~36 blocks per promoted node to account for
+the whole slope. That is a *testable* number, not a conclusion: it is refuted if
+an instrumented Stage 3 shows the paused window allocating materially fewer than
+~1.4M blocks per module, in which case the remaining candidates from §6 (the
+promoted graph itself, the pre-HIR surface phase, the unscoped loop body) carry
+the balance. **No Stage-3 run was made in this lane, so the bridge is unverified
+and must not be quoted as the located owner.**
+
+**How to test it cheaply on the next Stage 3.** `rt_core_transient_raw_register_state`
+already sees every block and already knows the paused flag; a counter pair
+(blocks and bytes registered with the owned bit clear, per scope) reported
+alongside the existing `hir-promotion` / `hir-promotion-total` snapshot rows
+would settle the attribution in one transaction, with no representation change
+and no behaviour change.
+
+### 8. Closure-scale control, and one lane that died
+
+Non-streaming full closure (775 sources, `src/app/cli/bootstrap_main.spl`),
+seed JIT, parse phase, VmRSS joined to the driver's own progress lines:
+
+| parse module | VmRSS (KiB) |
+|---:|---:|
+| 0 | 3,412,876 |
+| 160 | 3,737,276 |
+| 320 | 4,096,484 |
+| 480 | 4,512,004 |
+| 640 | 4,824,028 |
+| 688 | 4,929,612 |
+
+Linear at **2,204 KiB/module** over 688 modules (segment slopes 2,136 and 2,264
+KiB/module), i.e. ~2.15 MiB/module — three orders of magnitude below the
+Restart-12 HIR-phase 63 MiB/module, so the parse phase is not the shape this
+P0 is about.
+
+That run was **SIGKILLed (rc=137) at parse 688/775, 4,929,612 KiB**, on a shared
+box where 83 of 121 GiB were held by other agents' processes at the time (101
+GiB free immediately after). It is recorded as a truncated run, not as a
+reproduction of this bug's termination: the record's own 2026-08-14 warning
+applies — a kill without a monotonic HIR-phase RSS trace is not a repro.
