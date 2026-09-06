@@ -1,510 +1,480 @@
-# Purpose and audience: executable specification evidence for the owning engineering team.
-# @req REQ-SSPEC-FEATURE
-# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
-
 """
 ## Purpose and audience
-
-# Target Architecture Specification
-
-**Feature IDs:** #BM-ARCH-001
-**Category:** Bare-Metal / Architecture
-**Difficulty:** 2/5
-**Status:** In Progress
-
-## Overview
-
-Multi-architecture support for bare-metal development including:
-- 8-bit architectures (AVR, MCS51)
-- 16-bit architectures (MSP430)
-- 32-bit architectures (x86, ARM, RISC-V 32)
-- 64-bit architectures (x86_64, AArch64, RISC-V 64)
-
-## Key Concepts
-
-| Concept | Description |
-|---------|-------------|
-| bits() | Native word size: 8, 16, 32, or 64 |
-| pointer_bytes() | Pointer size in bytes (2/4/8) |
-| stack_align() | Stack alignment requirement |
-| is_harvard() | Harvard vs von Neumann architecture |
-| endianness() | Little or Big endian |
-
-## Implementation Notes
-
-- 8-bit architectures use 16-bit pointers for >256 byte addressing
-- Stack alignment varies by architecture (1/2/4/16 bytes)
-- Harvard architectures have separate code/data memory
-
-This specification is maintained for compiler and library engineers reviewing FEATURE-USAGE behavior, and for operators verifying a build.
-
+Pins the shipped architecture model (src/lib/common/target.spl) — native word
+size, pointer width, stack alignment, atomic width, Harvard/von Neumann class,
+endianness, baremetal target triples, and per-arch layout config — to real
+product oracles so a codegen-affecting target change fails loudly. Written for
+the compiler backend engineers who own the target model and for operators
+verifying bare-metal codegen lanes.
 ## Operator workflow
-
-Run `bin/simple test --no-session-daemon test/feature/usage/target_arch_spec.spl` and confirm the Results line reports 0 failed. Each scenario names the requirement it traces to and starts with a Verify step.
-
+Run `simple run test/feature/usage/target_arch_spec.spl` and confirm the Results
+line reports 0 failed. Each scenario parses an architecture through the shipped
+`parse_target_arch` and asserts the product's own accessor output against the
+inline oracle comment.
 ## Compatibility and limitations
-
-Covers only the behavior explicitly asserted below on the current toolchain. No external standard or cross-version contract is claimed; numeric oracles are explained inline where they appear.
-
-## Recovery and troubleshooting
-
-If a scenario fails, re-run the single spec file, read the first failing Verify step, and compare the reported value against the inline oracle comment before bisecting recent changes.
-"""
-use std.spec.{step}
+Covers every architecture the shipped model enumerates; scenarios for a class of
+archs (e.g. all 8-bit targets) assert each named member of that class. The
+RISC-V 32 baremetal triple is pinned to the shipped contract
+("riscv32imac-unknown-none-elf"); the pre-modernization draft claimed a triple
+the product never produced.
+## Verification guidance and troubleshooting
+Re-run the single spec file and compare the reported value against the inline
+`# oracle:` comment on the failing line; a mismatch means the target model in
+src/lib/common/target.spl changed and codegen lanes built against it need review.
 # @manual: primary
-# REQ-FEATURE-USAGE-001
-# doc-path: doc/01_research/app/
-# doc-path: doc/03_plan/app/
-# doc-path: doc/04_architecture/app/
-# doc-path: doc/05_design/app/
+REQ-SSPEC-FEATURE
+doc/01_research/domain/sspec_documentization_maintenance.md
+doc/03_plan/sspec_modernization_plan.md
+doc/04_architecture/sspec_documentization_maintenance.md
+doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+"""
+# @req: REQ-SSPEC-FEATURE
+# @manual_section: target architecture model
+
+use std.spec.{describe, it, expect, step}
+use std.common.target.{TargetArch, TargetConfig, parse_target_arch}
+
 describe "Target Architecture Bit Widths":
-    # @manual scenario evidence
-    # Verify correct bit width for each architecture class.
+    # Native word size and pointer width per architecture class.
 
     context "8-bit Architectures":
-        # AVR and MCS51 are 8-bit microcontrollers.
-
         it "AVR has 8-bit native word":
             # @req REQ-SSPEC-FEATURE
-            step("AVR has 8-bit native word")
-            # evidence(protocol_json): asserted result fields below are the complete typed oracle
-            # ATmega/ATtiny are 8-bit processors.
-            val AVR_BITS = 8
-            expect(AVR_BITS).to_equal(8)  # oracle: AVR_BITS must equal 8 — authoritative contract constant
+            # @capture(statistics): AVR native word size from the shipped target model
+            step("parse AVR and read its native word size")
+            val avr = parse_target_arch("avr") ?? TargetArch.Host
+            expect(avr.bits()).to_equal(8)  # oracle: ATmega/ATtiny are 8-bit processors
 
         it "MCS51 has 8-bit native word":
             # @req REQ-SSPEC-FEATURE
-            step("MCS51 has 8-bit native word")
-            # evidence(protocol_json): asserted result fields below are the complete typed oracle
-            # Intel 8051 family are 8-bit processors.
-            val MCS51_BITS = 8
-            expect(MCS51_BITS).to_equal(8)  # oracle: MCS51_BITS must equal 8 — authoritative contract constant
+            # @capture(statistics): MCS51 native word size from the shipped target model
+            step("parse MCS51 and read its native word size")
+            val mcs51 = parse_target_arch("mcs51") ?? TargetArch.Host
+            expect(mcs51.bits()).to_equal(8)  # oracle: Intel 8051 family are 8-bit processors
 
         it "8-bit architectures use 16-bit pointers":
             # @req REQ-SSPEC-FEATURE
-            step("8-bit architectures use 16-bit pointers")
-            # evidence(protocol_json): asserted result fields below are the complete typed oracle
-            # For >256 byte address space.
-            val POINTER_BYTES_8BIT = 2
-            expect(POINTER_BYTES_8BIT).to_equal(2)  # oracle: POINTER_BYTES_8BIT must equal 2 — authoritative contract constant
+            # @capture(statistics): 8-bit pointer widths from the shipped target model
+            step("read pointer widths for both 8-bit targets")
+            val avr = parse_target_arch("avr") ?? TargetArch.Host
+            val mcs51 = parse_target_arch("mcs51") ?? TargetArch.Host
+            expect(avr.pointer_bytes()).to_equal(2)  # oracle: 8-bit parts address >256 bytes through 16-bit pointers
+            expect(mcs51.pointer_bytes()).to_equal(2)  # oracle: 8051 DPTR is 16-bit
 
     context "16-bit Architectures":
-        # MSP430 is a 16-bit ultra-low-power microcontroller.
-
         it "MSP430 has 16-bit native word":
             # @req REQ-SSPEC-FEATURE
-            step("MSP430 has 16-bit native word")
-            # evidence(protocol_json): asserted result fields below are the complete typed oracle
-            val MSP430_BITS = 16
-            expect(MSP430_BITS).to_equal(16)  # oracle: MSP430_BITS must equal 16 — authoritative contract constant
+            # @capture(statistics): MSP430 native word size from the shipped target model
+            step("parse MSP430 and read its native word size")
+            val msp430 = parse_target_arch("msp430") ?? TargetArch.Host
+            expect(msp430.bits()).to_equal(16)  # oracle: MSP430 is a 16-bit ultra-low-power MCU
 
         it "16-bit architectures use 16-bit pointers":
             # @req REQ-SSPEC-FEATURE
-            step("16-bit architectures use 16-bit pointers")
-            # evidence(protocol_json): asserted result fields below are the complete typed oracle
-            val POINTER_BYTES_16BIT = 2
-            expect(POINTER_BYTES_16BIT).to_equal(2)  # oracle: POINTER_BYTES_16BIT must equal 2 — authoritative contract constant
+            # @capture(statistics): MSP430 pointer width from the shipped target model
+            step("read the MSP430 pointer width")
+            val msp430 = parse_target_arch("msp430") ?? TargetArch.Host
+            expect(msp430.pointer_bytes()).to_equal(2)  # oracle: a 16-bit word address space needs 16-bit pointers
 
     context "32-bit Architectures":
-        # x86, ARM Cortex-M, RISC-V 32.
-
         it "x86 has 32-bit native word":
             # @req REQ-SSPEC-FEATURE
-            step("x86 has 32-bit native word")
-            # evidence(protocol_json): asserted result fields below are the complete typed oracle
-            val X86_BITS = 32
-            expect(X86_BITS).to_equal(32)  # oracle: X86_BITS must equal 32 — authoritative contract constant
+            # @capture(statistics): x86 native word size from the shipped target model
+            step("parse x86 and read its native word size")
+            val x86 = parse_target_arch("x86") ?? TargetArch.Host
+            expect(x86.bits()).to_equal(32)  # oracle: IA-32 has 32-bit registers
 
         it "ARM Cortex-M has 32-bit native word":
             # @req REQ-SSPEC-FEATURE
-            step("ARM Cortex-M has 32-bit native word")
-            # evidence(protocol_json): asserted result fields below are the complete typed oracle
-            val ARM_BITS = 32
-            expect(ARM_BITS).to_equal(32)  # oracle: ARM_BITS must equal 32 — authoritative contract constant
+            # @capture(statistics): ARM native word size from the shipped target model
+            step("parse ARM and read its native word size")
+            val arm = parse_target_arch("arm") ?? TargetArch.Host
+            expect(arm.bits()).to_equal(32)  # oracle: Cortex-M is ARMv7-M, a 32-bit profile
 
         it "RISC-V 32 has 32-bit native word":
             # @req REQ-SSPEC-FEATURE
-            step("RISC-V 32 has 32-bit native word")
-            # evidence(protocol_json): asserted result fields below are the complete typed oracle
-            val RISCV32_BITS = 32
-            expect(RISCV32_BITS).to_equal(32)  # oracle: RISCV32_BITS must equal 32 — authoritative contract constant
+            # @capture(statistics): RV32 native word size from the shipped target model
+            step("parse RV32 and read its native word size")
+            val riscv32 = parse_target_arch("riscv32") ?? TargetArch.Host
+            expect(riscv32.bits()).to_equal(32)  # oracle: RV32I base ISA is 32-bit
 
         it "32-bit architectures use 32-bit pointers":
             # @req REQ-SSPEC-FEATURE
-            step("32-bit architectures use 32-bit pointers")
-            # evidence(protocol_json): asserted result fields below are the complete typed oracle
-            val POINTER_BYTES_32BIT = 4
-            expect(POINTER_BYTES_32BIT).to_equal(4)  # oracle: POINTER_BYTES_32BIT must equal 4 — authoritative contract constant
+            # @capture(statistics): 32-bit pointer widths from the shipped target model
+            step("read pointer widths for x86, ARM, and RV32")
+            val x86 = parse_target_arch("x86") ?? TargetArch.Host
+            val arm = parse_target_arch("arm") ?? TargetArch.Host
+            val riscv32 = parse_target_arch("riscv32") ?? TargetArch.Host
+            expect(x86.pointer_bytes()).to_equal(4)  # oracle: flat 32-bit address space
+            expect(arm.pointer_bytes()).to_equal(4)  # oracle: ARMv7-M has a 32-bit address space
+            expect(riscv32.pointer_bytes()).to_equal(4)  # oracle: RV32 XLEN defines the pointer width
 
     context "64-bit Architectures":
-        # x86_64, AArch64, RISC-V 64.
-
         it "x86_64 has 64-bit native word":
             # @req REQ-SSPEC-FEATURE
-            step("x86_64 has 64-bit native word")
-            # evidence(protocol_json): asserted result fields below are the complete typed oracle
-            val X86_64_BITS = 64
-            expect(X86_64_BITS).to_equal(64)  # oracle: X86_64_BITS must equal 64 — authoritative contract constant
+            # @capture(statistics): x86_64 native word size from the shipped target model
+            step("parse x86_64 and read its native word size")
+            val x86_64 = parse_target_arch("x86_64") ?? TargetArch.Host
+            expect(x86_64.bits()).to_equal(64)  # oracle: AMD64 has 64-bit registers
 
         it "AArch64 has 64-bit native word":
             # @req REQ-SSPEC-FEATURE
-            step("AArch64 has 64-bit native word")
-            # evidence(protocol_json): asserted result fields below are the complete typed oracle
-            val AARCH64_BITS = 64
-            expect(AARCH64_BITS).to_equal(64)  # oracle: AARCH64_BITS must equal 64 — authoritative contract constant
+            # @capture(statistics): AArch64 native word size from the shipped target model
+            step("parse AArch64 and read its native word size")
+            val aarch64 = parse_target_arch("aarch64") ?? TargetArch.Host
+            expect(aarch64.bits()).to_equal(64)  # oracle: AArch64 state is 64-bit
 
         it "RISC-V 64 has 64-bit native word":
             # @req REQ-SSPEC-FEATURE
-            step("RISC-V 64 has 64-bit native word")
-            # evidence(protocol_json): asserted result fields below are the complete typed oracle
-            val RISCV64_BITS = 64
-            expect(RISCV64_BITS).to_equal(64)  # oracle: RISCV64_BITS must equal 64 — authoritative contract constant
+            # @capture(statistics): RV64 native word size from the shipped target model
+            step("parse RV64 and read its native word size")
+            val riscv64 = parse_target_arch("riscv64") ?? TargetArch.Host
+            expect(riscv64.bits()).to_equal(64)  # oracle: RV64I base ISA is 64-bit
 
         it "64-bit architectures use 64-bit pointers":
             # @req REQ-SSPEC-FEATURE
-            step("64-bit architectures use 64-bit pointers")
-            # evidence(protocol_json): asserted result fields below are the complete typed oracle
-            val POINTER_BYTES_64BIT = 8
-            expect(POINTER_BYTES_64BIT).to_equal(8)  # oracle: POINTER_BYTES_64BIT must equal 8 — authoritative contract constant
+            # @capture(statistics): 64-bit pointer widths from the shipped target model
+            step("read pointer widths for x86_64, AArch64, and RV64")
+            val x86_64 = parse_target_arch("x86_64") ?? TargetArch.Host
+            val aarch64 = parse_target_arch("aarch64") ?? TargetArch.Host
+            val riscv64 = parse_target_arch("riscv64") ?? TargetArch.Host
+            expect(x86_64.pointer_bytes()).to_equal(8)  # oracle: flat 64-bit address space
+            expect(aarch64.pointer_bytes()).to_equal(8)  # oracle: AArch64 VA is 64-bit
+            expect(riscv64.pointer_bytes()).to_equal(8)  # oracle: RV64 XLEN defines the pointer width
 
 describe "Stack Alignment":
-    # Verify correct stack alignment for each architecture.
+    # ABI-required stack alignment per architecture.
 
     it "8-bit architectures have 1-byte stack alignment":
         # @req REQ-SSPEC-FEATURE
-        step("8-bit architectures have 1-byte stack alignment")
-        # evidence(protocol_json): asserted result fields below are the complete typed oracle
-        val AVR_STACK_ALIGN = 1
-        val MCS51_STACK_ALIGN = 1
-        expect(AVR_STACK_ALIGN).to_equal(1)  # oracle: AVR_STACK_ALIGN must equal 1 — authoritative contract constant
-        expect(MCS51_STACK_ALIGN).to_equal(1)  # oracle: MCS51_STACK_ALIGN must equal 1 — authoritative contract constant
+        # @capture(statistics): 8-bit stack alignments from the shipped target model
+        step("read stack alignment for AVR and MCS51")
+        val avr = parse_target_arch("avr") ?? TargetArch.Host
+        val mcs51 = parse_target_arch("mcs51") ?? TargetArch.Host
+        expect(avr.stack_align()).to_equal(1)  # oracle: AVR has no ABI stack-alignment requirement
+        expect(mcs51.stack_align()).to_equal(1)  # oracle: 8051 pushes byte-width returns
 
     it "16-bit architectures have 2-byte stack alignment":
         # @req REQ-SSPEC-FEATURE
-        step("16-bit architectures have 2-byte stack alignment")
-        # evidence(protocol_json): asserted result fields below are the complete typed oracle
-        val MSP430_STACK_ALIGN = 2
-        expect(MSP430_STACK_ALIGN).to_equal(2)  # oracle: MSP430_STACK_ALIGN must equal 2 — authoritative contract constant
+        # @capture(statistics): MSP430 stack alignment from the shipped target model
+        step("read the MSP430 stack alignment")
+        val msp430 = parse_target_arch("msp430") ?? TargetArch.Host
+        expect(msp430.stack_align()).to_equal(2)  # oracle: MSP430 pushes 16-bit returns
 
     it "32-bit x86 has 4-byte stack alignment":
         # @req REQ-SSPEC-FEATURE
-        step("32-bit x86 has 4-byte stack alignment")
-        # evidence(protocol_json): asserted result fields below are the complete typed oracle
-        val X86_STACK_ALIGN = 4
-        expect(X86_STACK_ALIGN).to_equal(4)  # oracle: X86_STACK_ALIGN must equal 4 — authoritative contract constant
+        # @capture(statistics): x86 stack alignment from the shipped target model
+        step("read the x86 stack alignment")
+        val x86 = parse_target_arch("x86") ?? TargetArch.Host
+        expect(x86.stack_align()).to_equal(4)  # oracle: i386 ABI keeps the stack 4-byte aligned
 
     it "64-bit x86_64 has 16-byte stack alignment":
         # @req REQ-SSPEC-FEATURE
-        step("64-bit x86_64 has 16-byte stack alignment")
-        # evidence(protocol_json): asserted result fields below are the complete typed oracle
-        # SSE requires 16-byte alignment.
-        val X86_64_STACK_ALIGN = 16
-        expect(X86_64_STACK_ALIGN).to_equal(16)  # oracle: X86_64_STACK_ALIGN must equal 16 — authoritative contract constant
+        # @capture(statistics): x86_64 stack alignment from the shipped target model
+        step("read the x86_64 stack alignment")
+        val x86_64 = parse_target_arch("x86_64") ?? TargetArch.Host
+        expect(x86_64.stack_align()).to_equal(16)  # oracle: the System V AMD64 ABI requires 16-byte alignment for SSE spills
 
     it "AArch64 has 16-byte stack alignment":
         # @req REQ-SSPEC-FEATURE
-        step("AArch64 has 16-byte stack alignment")
-        # evidence(protocol_json): asserted result fields below are the complete typed oracle
-        val AARCH64_STACK_ALIGN = 16
-        expect(AARCH64_STACK_ALIGN).to_equal(16)  # oracle: AARCH64_STACK_ALIGN must equal 16 — authoritative contract constant
+        # @capture(statistics): AArch64 stack alignment from the shipped target model
+        step("read the AArch64 stack alignment")
+        val aarch64 = parse_target_arch("aarch64") ?? TargetArch.Host
+        expect(aarch64.stack_align()).to_equal(16)  # oracle: AAPCS64 requires 16-byte SP alignment
 
 describe "Maximum Atomic Width":
-    # Verify maximum atomic operation width for each architecture.
+    # Widest single-instruction atomic load/store/CAS width per architecture.
 
     it "8-bit architectures support 8-bit atomics":
         # @req REQ-SSPEC-FEATURE
-        step("8-bit architectures support 8-bit atomics")
-        # evidence(protocol_json): asserted result fields below are the complete typed oracle
-        val AVR_MAX_ATOMIC = 8
-        expect(AVR_MAX_ATOMIC).to_equal(8)  # oracle: AVR_MAX_ATOMIC must equal 8 — authoritative contract constant
+        # @capture(statistics): 8-bit atomic widths from the shipped target model
+        step("read atomic widths for AVR and MCS51")
+        val avr = parse_target_arch("avr") ?? TargetArch.Host
+        val mcs51 = parse_target_arch("mcs51") ?? TargetArch.Host
+        expect(avr.max_atomic_width()).to_equal(8)  # oracle: AVR atomics are single-byte with interrupts masked
+        expect(mcs51.max_atomic_width()).to_equal(8)  # oracle: 8051 has no wider indivisible access
 
     it "16-bit architectures support 16-bit atomics":
         # @req REQ-SSPEC-FEATURE
-        step("16-bit architectures support 16-bit atomics")
-        # evidence(protocol_json): asserted result fields below are the complete typed oracle
-        val MSP430_MAX_ATOMIC = 16
-        expect(MSP430_MAX_ATOMIC).to_equal(16)  # oracle: MSP430_MAX_ATOMIC must equal 16 — authoritative contract constant
+        # @capture(statistics): MSP430 atomic width from the shipped target model
+        step("read the MSP430 atomic width")
+        val msp430 = parse_target_arch("msp430") ?? TargetArch.Host
+        expect(msp430.max_atomic_width()).to_equal(16)  # oracle: MSP430 atomics mask interrupts over one word
 
     it "x86 supports 64-bit atomics via cmpxchg8b":
         # @req REQ-SSPEC-FEATURE
-        step("x86 supports 64-bit atomics via cmpxchg8b")
-        # evidence(protocol_json): asserted result fields below are the complete typed oracle
-        val X86_MAX_ATOMIC = 64
-        expect(X86_MAX_ATOMIC).to_equal(64)  # oracle: X86_MAX_ATOMIC must equal 64 — authoritative contract constant
+        # @capture(statistics): x86 atomic width from the shipped target model
+        step("read the x86 atomic width")
+        val x86 = parse_target_arch("x86") ?? TargetArch.Host
+        expect(x86.max_atomic_width()).to_equal(64)  # oracle: cmpxchg8b is the widest i386 atomic
 
     it "x86_64 supports 128-bit atomics via cmpxchg16b":
         # @req REQ-SSPEC-FEATURE
-        step("x86_64 supports 128-bit atomics via cmpxchg16b")
-        # evidence(protocol_json): asserted result fields below are the complete typed oracle
-        val X86_64_MAX_ATOMIC = 128
-        expect(X86_64_MAX_ATOMIC).to_equal(128)  # oracle: X86_64_MAX_ATOMIC must equal 128 — authoritative contract constant
+        # @capture(statistics): x86_64 atomic width from the shipped target model
+        step("read the x86_64 atomic width")
+        val x86_64 = parse_target_arch("x86_64") ?? TargetArch.Host
+        expect(x86_64.max_atomic_width()).to_equal(128)  # oracle: cmpxchg16b is the widest AMD64 atomic (DCAS)
 
 describe "Harvard Architecture Detection":
-    # Verify Harvard vs von Neumann architecture detection.
+    # Harvard vs von Neumann classification per architecture.
 
     it "AVR is Harvard architecture":
         # @req REQ-SSPEC-FEATURE
-        step("AVR is Harvard architecture")
-        # evidence(protocol_json): asserted result fields below are the complete typed oracle
-        # AVR has separate program (flash) and data (SRAM) memory.
-        val AVR_IS_HARVARD = true
-        expect(AVR_IS_HARVARD).to_equal(true)
+        # @capture(statistics): AVR memory model class from the shipped target model
+        step("classify the AVR memory model")
+        val avr = parse_target_arch("avr") ?? TargetArch.Host
+        expect(avr.is_harvard()).to_equal(true)  # oracle: AVR keeps flash program memory separate from SRAM data
 
     it "MCS51 is Harvard architecture":
         # @req REQ-SSPEC-FEATURE
-        step("MCS51 is Harvard architecture")
-        # evidence(protocol_json): asserted result fields below are the complete typed oracle
-        # 8051 has separate CODE, DATA, XDATA spaces.
-        val MCS51_IS_HARVARD = true
-        expect(MCS51_IS_HARVARD).to_equal(true)
+        # @capture(statistics): MCS51 memory model class from the shipped target model
+        step("classify the MCS51 memory model")
+        val mcs51 = parse_target_arch("mcs51") ?? TargetArch.Host
+        expect(mcs51.is_harvard()).to_equal(true)  # oracle: 8051 has separate CODE, DATA, and XDATA spaces
 
     it "x86 is von Neumann architecture":
         # @req REQ-SSPEC-FEATURE
-        step("x86 is von Neumann architecture")
-        # evidence(protocol_json): asserted result fields below are the complete typed oracle
-        # x86 has unified address space.
-        val X86_IS_HARVARD = false
-        expect(X86_IS_HARVARD).to_equal(false)
+        # @capture(statistics): x86 memory model class from the shipped target model
+        step("classify the x86 memory model")
+        val x86 = parse_target_arch("x86") ?? TargetArch.Host
+        expect(x86.is_harvard()).to_equal(false)  # oracle: x86 executes from a unified address space
 
     it "ARM Cortex-M is von Neumann architecture":
         # @req REQ-SSPEC-FEATURE
-        step("ARM Cortex-M is von Neumann architecture")
-        # evidence(protocol_json): asserted result fields below are the complete typed oracle
-        val ARM_IS_HARVARD = false
-        expect(ARM_IS_HARVARD).to_equal(false)
+        # @capture(statistics): ARM memory model class from the shipped target model
+        step("classify the ARM memory model")
+        val arm = parse_target_arch("arm") ?? TargetArch.Host
+        expect(arm.is_harvard()).to_equal(false)  # oracle: Cortex-M presents one unified memory map
 
 describe "Endianness":
-    # Verify byte order for each architecture.
+    # Byte order per architecture.
 
     context "Little-Endian Architectures":
         it "AVR is little-endian":
             # @req REQ-SSPEC-FEATURE
-            step("AVR is little-endian")
-            # evidence(protocol_json): asserted result fields below are the complete typed oracle
-            val AVR_LITTLE_ENDIAN = true
-            expect(AVR_LITTLE_ENDIAN).to_equal(true)
+            # @capture(statistics): AVR byte order from the shipped target model
+            step("read the AVR byte order")
+            val avr = parse_target_arch("avr") ?? TargetArch.Host
+            expect(avr.endianness() == TargetArch.MCS51.endianness()).to_equal(false)  # oracle: AVR stores the low byte first; only MCS51 in this model is big-endian
 
         it "x86 is little-endian":
             # @req REQ-SSPEC-FEATURE
-            step("x86 is little-endian")
-            # evidence(protocol_json): asserted result fields below are the complete typed oracle
-            val X86_LITTLE_ENDIAN = true
-            expect(X86_LITTLE_ENDIAN).to_equal(true)
+            # @capture(statistics): x86 byte order from the shipped target model
+            step("read the x86 byte order")
+            val x86 = parse_target_arch("x86") ?? TargetArch.Host
+            expect(x86.endianness() == TargetArch.MCS51.endianness()).to_equal(false)  # oracle: x86 differs from the one big-endian target in the model
 
         it "x86_64 is little-endian":
             # @req REQ-SSPEC-FEATURE
-            step("x86_64 is little-endian")
-            # evidence(protocol_json): asserted result fields below are the complete typed oracle
-            val X86_64_LITTLE_ENDIAN = true
-            expect(X86_64_LITTLE_ENDIAN).to_equal(true)
+            # @capture(statistics): x86_64 byte order from the shipped target model
+            step("read the x86_64 byte order")
+            val x86_64 = parse_target_arch("x86_64") ?? TargetArch.Host
+            expect(x86_64.endianness() == TargetArch.MCS51.endianness()).to_equal(false)  # oracle: x86_64 differs from the one big-endian target in the model
 
         it "MSP430 is little-endian":
             # @req REQ-SSPEC-FEATURE
-            step("MSP430 is little-endian")
-            # evidence(protocol_json): asserted result fields below are the complete typed oracle
-            val MSP430_LITTLE_ENDIAN = true
-            expect(MSP430_LITTLE_ENDIAN).to_equal(true)
+            # @capture(statistics): MSP430 byte order from the shipped target model
+            step("read the MSP430 byte order")
+            val msp430 = parse_target_arch("msp430") ?? TargetArch.Host
+            expect(msp430.endianness() == TargetArch.MCS51.endianness()).to_equal(false)  # oracle: MSP430 stores the low byte first
 
     context "Big-Endian Architectures":
         it "MCS51 is big-endian":
             # @req REQ-SSPEC-FEATURE
-            step("MCS51 is big-endian")
-            # evidence(protocol_json): asserted result fields below are the complete typed oracle
-            # 8051 stores MSB first.
-            val MCS51_BIG_ENDIAN = true
-            expect(MCS51_BIG_ENDIAN).to_equal(true)
+            # @capture(statistics): MCS51 byte order from the shipped target model
+            step("read the MCS51 byte order")
+            val mcs51 = parse_target_arch("mcs51") ?? TargetArch.Host
+            expect(mcs51.endianness() == TargetArch.AVR.endianness()).to_equal(false)  # oracle: 8051 pushes the MSB first, unlike every little-endian target
+            expect(mcs51.endianness() == TargetArch.MCS51.endianness()).to_equal(true)  # oracle: the model holds exactly one big-endian class and MCS51 is it
 
 describe "Target Triple Generation":
-    # Verify target triple string format for bare-metal.
+    # Baremetal (no-OS) target triple strings per architecture.
 
     context "8-bit Triples":
         it "AVR triple is avr-unknown-unknown":
             # @req REQ-SSPEC-FEATURE
-            step("AVR triple is avr-unknown-unknown")
-            # evidence(protocol_json): asserted result fields below are the complete typed oracle
-            val AVR_TRIPLE = "avr-unknown-unknown"
-            expect(AVR_TRIPLE).to_equal("avr-unknown-unknown")
+            # @capture(statistics): AVR baremetal triple from the shipped target model
+            step("generate the AVR baremetal triple")
+            val avr = parse_target_arch("avr") ?? TargetArch.Host
+            expect(avr.triple_str_baremetal()).to_equal("avr-unknown-unknown")  # oracle: the shipped triple generator emits this exact string for AVR
 
         it "MCS51 triple is mcs51-unknown-unknown":
             # @req REQ-SSPEC-FEATURE
-            step("MCS51 triple is mcs51-unknown-unknown")
-            # evidence(protocol_json): asserted result fields below are the complete typed oracle
-            val MCS51_TRIPLE = "mcs51-unknown-unknown"
-            expect(MCS51_TRIPLE).to_equal("mcs51-unknown-unknown")
+            # @capture(statistics): MCS51 baremetal triple from the shipped target model
+            step("generate the MCS51 baremetal triple")
+            val mcs51 = parse_target_arch("mcs51") ?? TargetArch.Host
+            expect(mcs51.triple_str_baremetal()).to_equal("mcs51-unknown-unknown")  # oracle: the shipped triple generator emits this exact string for MCS51
 
     context "16-bit Triples":
         it "MSP430 triple is msp430-none-elf":
             # @req REQ-SSPEC-FEATURE
-            step("MSP430 triple is msp430-none-elf")
-            # evidence(protocol_json): asserted result fields below are the complete typed oracle
-            val MSP430_TRIPLE = "msp430-none-elf"
-            expect(MSP430_TRIPLE).to_equal("msp430-none-elf")
+            # @capture(statistics): MSP430 baremetal triple from the shipped target model
+            step("generate the MSP430 baremetal triple")
+            val msp430 = parse_target_arch("msp430") ?? TargetArch.Host
+            expect(msp430.triple_str_baremetal()).to_equal("msp430-none-elf")  # oracle: the shipped triple generator emits this exact string for MSP430
 
     context "32-bit Triples":
         it "x86 baremetal triple is i686-unknown-none":
             # @req REQ-SSPEC-FEATURE
-            step("x86 baremetal triple is i686-unknown-none")
-            # evidence(protocol_json): asserted result fields below are the complete typed oracle
-            val X86_TRIPLE = "i686-unknown-none"
-            expect(X86_TRIPLE).to_equal("i686-unknown-none")
+            # @capture(statistics): x86 baremetal triple from the shipped target model
+            step("generate the x86 baremetal triple")
+            val x86 = parse_target_arch("x86") ?? TargetArch.Host
+            expect(x86.triple_str_baremetal()).to_equal("i686-unknown-none")  # oracle: the shipped triple generator emits this exact string for x86
 
         it "ARM baremetal triple is thumbv7m-none-eabi":
             # @req REQ-SSPEC-FEATURE
-            step("ARM baremetal triple is thumbv7m-none-eabi")
-            # evidence(protocol_json): asserted result fields below are the complete typed oracle
-            val ARM_TRIPLE = "thumbv7m-none-eabi"
-            expect(ARM_TRIPLE).to_equal("thumbv7m-none-eabi")
+            # @capture(statistics): ARM baremetal triple from the shipped target model
+            step("generate the ARM baremetal triple")
+            val arm = parse_target_arch("arm") ?? TargetArch.Host
+            expect(arm.triple_str_baremetal()).to_equal("thumbv7m-none-eabi")  # oracle: the shipped triple generator emits this exact string for ARMv7-M
 
-        it "RISC-V 32 baremetal triple is riscv32gc-unknown-none-elf":
+        it "RISC-V 32 baremetal triple is riscv32imac-unknown-none-elf":
             # @req REQ-SSPEC-FEATURE
-            step("RISC-V 32 baremetal triple is riscv32gc-unknown-none-elf")
-            # evidence(protocol_json): asserted result fields below are the complete typed oracle
-            val RISCV32_TRIPLE = "riscv32gc-unknown-none-elf"
-            expect(RISCV32_TRIPLE).to_equal("riscv32gc-unknown-none-elf")
+            # @capture(statistics): RV32 baremetal triple from the shipped target model
+            step("generate the RV32 baremetal triple")
+            val riscv32 = parse_target_arch("riscv32") ?? TargetArch.Host
+            expect(riscv32.triple_str_baremetal()).to_equal("riscv32imac-unknown-none-elf")  # oracle: the shipped generator emits the imac ISA string for RV32 (the pre-modernization draft's riscv32gc triple never existed in the product)
 
     context "64-bit Triples":
         it "x86_64 baremetal triple is x86_64-unknown-none":
             # @req REQ-SSPEC-FEATURE
-            step("x86_64 baremetal triple is x86_64-unknown-none")
-            # evidence(protocol_json): asserted result fields below are the complete typed oracle
-            val X86_64_TRIPLE = "x86_64-unknown-none"
-            expect(X86_64_TRIPLE).to_equal("x86_64-unknown-none")
+            # @capture(statistics): x86_64 baremetal triple from the shipped target model
+            step("generate the x86_64 baremetal triple")
+            val x86_64 = parse_target_arch("x86_64") ?? TargetArch.Host
+            expect(x86_64.triple_str_baremetal()).to_equal("x86_64-unknown-none")  # oracle: the shipped triple generator emits this exact string for x86_64
 
         it "AArch64 baremetal triple is aarch64-unknown-none":
             # @req REQ-SSPEC-FEATURE
-            step("AArch64 baremetal triple is aarch64-unknown-none")
-            # evidence(protocol_json): asserted result fields below are the complete typed oracle
-            val AARCH64_TRIPLE = "aarch64-unknown-none"
-            expect(AARCH64_TRIPLE).to_equal("aarch64-unknown-none")
+            # @capture(statistics): AArch64 baremetal triple from the shipped target model
+            step("generate the AArch64 baremetal triple")
+            val aarch64 = parse_target_arch("aarch64") ?? TargetArch.Host
+            expect(aarch64.triple_str_baremetal()).to_equal("aarch64-unknown-none")  # oracle: the shipped triple generator emits this exact string for AArch64
 
         it "RISC-V 64 baremetal triple is riscv64gc-unknown-none-elf":
             # @req REQ-SSPEC-FEATURE
-            step("RISC-V 64 baremetal triple is riscv64gc-unknown-none-elf")
-            # evidence(protocol_json): asserted result fields below are the complete typed oracle
-            val RISCV64_TRIPLE = "riscv64gc-unknown-none-elf"
-            expect(RISCV64_TRIPLE).to_equal("riscv64gc-unknown-none-elf")
+            # @capture(statistics): RV64 baremetal triple from the shipped target model
+            step("generate the RV64 baremetal triple")
+            val riscv64 = parse_target_arch("riscv64") ?? TargetArch.Host
+            expect(riscv64.triple_str_baremetal()).to_equal("riscv64gc-unknown-none-elf")  # oracle: the shipped triple generator emits this exact string for RV64
 
 describe "Target Configuration":
-    # Verify target configuration for resource-limited devices.
+    # Per-architecture layout knobs from TargetConfig.for_arch.
 
     context "8-bit Configuration":
         it "AVR has 256 byte default stack":
             # @req REQ-SSPEC-FEATURE
-            step("AVR has 256 byte default stack")
-            # evidence(protocol_json): asserted result fields below are the complete typed oracle
-            val AVR_DEFAULT_STACK = 256
-            expect(AVR_DEFAULT_STACK).to_equal(256)  # oracle: AVR_DEFAULT_STACK must equal 256 — authoritative contract constant
+            # @capture(statistics): AVR layout config from the shipped target model
+            step("read the AVR default stack size")
+            val avr_config = TargetConfig.for_arch(TargetArch.AVR)
+            expect(avr_config.default_stack_size).to_equal(256)  # oracle: 8-bit MCUs get a compact 256-byte default stack in the shipped layout model
 
         it "8-bit has 1-byte heap alignment":
             # @req REQ-SSPEC-FEATURE
-            step("8-bit has 1-byte heap alignment")
-            # evidence(protocol_json): asserted result fields below are the complete typed oracle
-            val HEAP_ALIGN_8BIT = 1
-            expect(HEAP_ALIGN_8BIT).to_equal(1)  # oracle: HEAP_ALIGN_8BIT must equal 1 — authoritative contract constant
+            # @capture(statistics): AVR heap alignment from the shipped target model
+            step("read the AVR heap alignment")
+            val avr_config = TargetConfig.for_arch(TargetArch.AVR)
+            expect(avr_config.heap_align).to_equal(1)  # oracle: byte-addressed SRAM needs no allocator alignment
 
         it "8-bit has 0 tag bits":
             # @req REQ-SSPEC-FEATURE
-            step("8-bit has 0 tag bits")
-            # evidence(protocol_json): asserted result fields below are the complete typed oracle
-            # No room for tagged pointers.
-            val TAG_BITS_8BIT = 0
-            expect(TAG_BITS_8BIT).to_equal(0)  # oracle: TAG_BITS_8BIT must equal 0 — authoritative contract constant
+            # @capture(statistics): AVR tag-bit count from the shipped target model
+            step("read the AVR pointer tag-bit budget")
+            val avr_config = TargetConfig.for_arch(TargetArch.AVR)
+            expect(avr_config.tag_bits).to_equal(0)  # oracle: a 16-bit pointer on an 8-bit part has no spare low bits for tagging
 
     context "16-bit Configuration":
         it "MSP430 has 512 byte default stack":
             # @req REQ-SSPEC-FEATURE
-            step("MSP430 has 512 byte default stack")
-            # evidence(protocol_json): asserted result fields below are the complete typed oracle
-            val MSP430_DEFAULT_STACK = 512
-            expect(MSP430_DEFAULT_STACK).to_equal(512)  # oracle: MSP430_DEFAULT_STACK must equal 512 — authoritative contract constant
+            # @capture(statistics): MSP430 layout config from the shipped target model
+            step("read the MSP430 default stack size")
+            val msp430_config = TargetConfig.for_arch(TargetArch.MSP430)
+            expect(msp430_config.default_stack_size).to_equal(512)  # oracle: the shipped layout model reserves 512 bytes for 16-bit MCU stacks
 
         it "16-bit has 2-byte heap alignment":
             # @req REQ-SSPEC-FEATURE
-            step("16-bit has 2-byte heap alignment")
-            # evidence(protocol_json): asserted result fields below are the complete typed oracle
-            val HEAP_ALIGN_16BIT = 2
-            expect(HEAP_ALIGN_16BIT).to_equal(2)  # oracle: HEAP_ALIGN_16BIT must equal 2 — authoritative contract constant
+            # @capture(statistics): MSP430 heap alignment from the shipped target model
+            step("read the MSP430 heap alignment")
+            val msp430_config = TargetConfig.for_arch(TargetArch.MSP430)
+            expect(msp430_config.heap_align).to_equal(2)  # oracle: 16-bit words must stay word-aligned
 
     context "32-bit Configuration":
         it "32-bit has 4-byte heap alignment":
             # @req REQ-SSPEC-FEATURE
-            step("32-bit has 4-byte heap alignment")
-            # evidence(protocol_json): asserted result fields below are the complete typed oracle
-            val HEAP_ALIGN_32BIT = 4
-            expect(HEAP_ALIGN_32BIT).to_equal(4)  # oracle: HEAP_ALIGN_32BIT must equal 4 — authoritative contract constant
+            # @capture(statistics): 32-bit heap alignment from the shipped target model
+            step("read the x86 heap alignment")
+            val x86_config = TargetConfig.for_arch(TargetArch.X86)
+            expect(x86_config.heap_align).to_equal(4)  # oracle: 32-bit slots keep natural word alignment
 
         it "32-bit has 2 tag bits":
             # @req REQ-SSPEC-FEATURE
-            step("32-bit has 2 tag bits")
-            # evidence(protocol_json): asserted result fields below are the complete typed oracle
-            val TAG_BITS_32BIT = 2
-            expect(TAG_BITS_32BIT).to_equal(2)  # oracle: TAG_BITS_32BIT must equal 2 — authoritative contract constant
+            # @capture(statistics): 32-bit tag-bit count from the shipped target model
+            step("read the x86 pointer tag-bit budget")
+            val x86_config = TargetConfig.for_arch(TargetArch.X86)
+            expect(x86_config.tag_bits).to_equal(2)  # oracle: a 4-byte-aligned 32-bit slot leaves 2 low bits for inline tagging
 
     context "64-bit Configuration":
         it "64-bit has 8-byte heap alignment":
             # @req REQ-SSPEC-FEATURE
-            step("64-bit has 8-byte heap alignment")
-            # evidence(protocol_json): asserted result fields below are the complete typed oracle
-            val HEAP_ALIGN_64BIT = 8
-            expect(HEAP_ALIGN_64BIT).to_equal(8)  # oracle: HEAP_ALIGN_64BIT must equal 8 — authoritative contract constant
+            # @capture(statistics): 64-bit heap alignment from the shipped target model
+            step("read the x86_64 heap alignment")
+            val x86_64_config = TargetConfig.for_arch(TargetArch.X86_64)
+            expect(x86_64_config.heap_align).to_equal(8)  # oracle: the uniform 8-byte Value slot is 8-byte aligned
 
         it "64-bit has 3 tag bits":
             # @req REQ-SSPEC-FEATURE
-            step("64-bit has 3 tag bits")
-            # evidence(protocol_json): asserted result fields below are the complete typed oracle
-            # 8-byte aligned pointers allow 3 low bits.
-            val TAG_BITS_64BIT = 3
-            expect(TAG_BITS_64BIT).to_equal(3)  # oracle: TAG_BITS_64BIT must equal 3 — authoritative contract constant
+            # @capture(statistics): 64-bit tag-bit count from the shipped target model
+            step("read the x86_64 pointer tag-bit budget")
+            val x86_64_config = TargetConfig.for_arch(TargetArch.X86_64)
+            expect(x86_64_config.tag_bits).to_equal(3)  # oracle: 8-byte aligned pointers leave 3 low bits for inline type tags
 
 describe "FPU Availability":
-    # Verify hardware FPU detection.
+    # Hardware floating-point unit detection per architecture.
 
     it "AVR has no FPU":
         # @req REQ-SSPEC-FEATURE
-        step("AVR has no FPU")
-        # evidence(protocol_json): asserted result fields below are the complete typed oracle
-        val AVR_HAS_FPU = false
-        expect(AVR_HAS_FPU).to_equal(false)
+        # @capture(statistics): AVR FPU detection from the shipped target model
+        step("probe the AVR for a hardware FPU")
+        val avr = parse_target_arch("avr") ?? TargetArch.Host
+        expect(avr.has_fpu()).to_equal(false)  # oracle: AVR is soft-float only
 
     it "MCS51 has no FPU":
         # @req REQ-SSPEC-FEATURE
-        step("MCS51 has no FPU")
-        # evidence(protocol_json): asserted result fields below are the complete typed oracle
-        val MCS51_HAS_FPU = false
-        expect(MCS51_HAS_FPU).to_equal(false)
+        # @capture(statistics): MCS51 FPU detection from the shipped target model
+        step("probe the MCS51 for a hardware FPU")
+        val mcs51 = parse_target_arch("mcs51") ?? TargetArch.Host
+        expect(mcs51.has_fpu()).to_equal(false)  # oracle: the 8051 family has no floating-point unit
 
     it "MSP430 has no FPU":
         # @req REQ-SSPEC-FEATURE
-        step("MSP430 has no FPU")
-        # evidence(protocol_json): asserted result fields below are the complete typed oracle
-        val MSP430_HAS_FPU = false
-        expect(MSP430_HAS_FPU).to_equal(false)
+        # @capture(statistics): MSP430 FPU detection from the shipped target model
+        step("probe the MSP430 for a hardware FPU")
+        val msp430 = parse_target_arch("msp430") ?? TargetArch.Host
+        expect(msp430.has_fpu()).to_equal(false)  # oracle: MSP430 float support is software-emulated
 
     it "ARM Cortex-M0/M3 has no FPU":
         # @req REQ-SSPEC-FEATURE
-        step("ARM Cortex-M0/M3 has no FPU")
-        # evidence(protocol_json): asserted result fields below are the complete typed oracle
-        # M4F has FPU but requires feature flag.
-        val ARM_HAS_FPU = false
-        expect(ARM_HAS_FPU).to_equal(false)
+        # @capture(statistics): ARM FPU detection from the shipped target model
+        step("probe the ARM target for a hardware FPU")
+        val arm = parse_target_arch("arm") ?? TargetArch.Host
+        expect(arm.has_fpu()).to_equal(false)  # oracle: the model targets M0/M3 (the M4F FPU needs an explicit feature flag and is not enabled here)
 
     it "x86 has FPU":
         # @req REQ-SSPEC-FEATURE
-        step("x86 has FPU")
-        # evidence(protocol_json): asserted result fields below are the complete typed oracle
-        val X86_HAS_FPU = true
-        expect(X86_HAS_FPU).to_equal(true)
+        # @capture(statistics): x86 FPU detection from the shipped target model
+        step("probe the x86 target for a hardware FPU")
+        val x86 = parse_target_arch("x86") ?? TargetArch.Host
+        expect(x86.has_fpu()).to_equal(true)  # oracle: every i686-class part shipped with an x87 FPU
 
     it "x86_64 has FPU":
         # @req REQ-SSPEC-FEATURE
-        step("x86_64 has FPU")
-        # evidence(protocol_json): asserted result fields below are the complete typed oracle
-        val X86_64_HAS_FPU = true
-        expect(X86_64_HAS_FPU).to_equal(true)
+        # @capture(statistics): x86_64 FPU detection from the shipped target model
+        step("probe the x86_64 target for a hardware FPU")
+        val x86_64 = parse_target_arch("x86_64") ?? TargetArch.Host
+        expect(x86_64.has_fpu()).to_equal(true)  # oracle: SSE2 is architectural on AMD64
 
     it "AArch64 has FPU":
         # @req REQ-SSPEC-FEATURE
-        step("AArch64 has FPU")
-        # evidence(protocol_json): asserted result fields below are the complete typed oracle
-        val AARCH64_HAS_FPU = true
-        expect(AARCH64_HAS_FPU).to_equal(true)
+        # @capture(statistics): AArch64 FPU detection from the shipped target model
+        step("probe the AArch64 target for a hardware FPU")
+        val aarch64 = parse_target_arch("aarch64") ?? TargetArch.Host
+        expect(aarch64.has_fpu()).to_equal(true)  # oracle: FP/ASIMD registers are architectural in AArch64 state
