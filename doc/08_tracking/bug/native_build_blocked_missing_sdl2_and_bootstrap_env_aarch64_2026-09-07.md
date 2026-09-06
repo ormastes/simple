@@ -111,3 +111,54 @@ Fix order: make this one call site carry a real message (read the field, do not
 interpolate the struct), rebuild Stage 2, and only then chase why the backend
 returns `Err` at `SIMPLE_BOOTSTRAP=0`. Until then every instance of this class
 costs a bisect, which is what both the Windows records and this one paid.
+
+## The real message, recovered — and the actual cause
+
+The empty reason is a **message-loss defect, not a missing message**. The
+interpreted Rust seed and the natively-compiled Stage-2 binary run the same
+`.spl` driver on the same fixture and disagree about whether the diagnostic
+survives:
+
+```
+seed,    SIMPLE_BOOTSTRAP=0, --backend cranelift:
+  reason: AOT compile error in ...hello_world:
+          scalar object-path AOT is available only for builtin LLVM
+stage2,  SIMPLE_BOOTSTRAP=0, --backend cranelift:
+  reason: (none recorded — BUG in the producer ...)
+```
+
+So the producer does record a reason; it is destroyed somewhere between
+`_compile_selected_module`'s `Err(...)` and `build_result.errors` when that path
+is itself natively compiled. `parallel.spl:474` pushes it as
+`errors.push((build_unit.path, msg))` into a `[(text, text)]` — a text word
+inside a tuple inside an array, which is exactly the borrowed-payload hazard the
+surrounding code comments keep warning about
+(`driver_aot_native_output.spl:1626-1628`, `backend_types.spl:385-392`). That is
+the first thing to check.
+
+Trying `compileerror_to_text(err)` bound to a `val` at
+`_finish_selected_module_compile` (`:1672`) does **not** fix it — measured, then
+reverted. That arm is not on this path: the failure comes from the
+`backend_session` branch above it.
+
+### Why the gate fails: cranelift cannot do object-path AOT
+
+The recovered message names the cause outright. `candidate_frontend_admission.shs:98`
+defaults `CANDIDATE_FRONTEND_BACKEND=cranelift`, and the scalar object-path AOT
+route is builtin-LLVM-only. Backend sweep on the seed at `SIMPLE_BOOTSTRAP=0`:
+
+| backend | result |
+|---|---|
+| `llvm` | rc=0, executable runs, prints `hello` |
+| `cranelift` | rc=1, "scalar object-path AOT is available only for builtin LLVM" |
+| `llvm-lib` | rc=1 |
+
+`--backend llvm` at `SIMPLE_BOOTSTRAP=0` **works on the seed**. It does not work
+on the Stage-2 binary, which fails at `0` on both backends — so the Stage-2
+artifact appears to carry no builtin-LLVM provider even though Stage 2 was built
+with `--backend=llvm`. That is the next thing to establish, and it is what
+actually blocks admission.
+
+This supersedes the earlier framing above: `SIMPLE_BOOTSTRAP` is the
+*discriminator* because the `=1` path routes around the object-path AOT route
+entirely, not because the env var is itself meaningful.
