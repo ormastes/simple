@@ -349,7 +349,12 @@ impl CompilerDriver:
             validation_module_values.push(hir_module)
             if is_requested_bootstrap_entry:
                 phase_entry_hir = Some(hir_module)
-            log_phase("phase3:hir:file:done {source.path} module={source.module_name} funcs={hir_module.functions.len()}")
+            # Concrete key count, not `.len()`: the seed-compiled Stage-2 binary
+            # returns -1 from Dict.len() on aarch64 (every one of the 771
+            # Stage-3 modules logged funcs=-1), which the non-streaming loop
+            # already sidesteps the same way.
+            val streaming_function_count: i64 = driver_dict_entry_count(hir_module.functions)
+            log_phase("phase3:hir:file:done {source.path} module={source.module_name} funcs={streaming_function_count}")
             # Report EVERY module, not a 16-module cadence: a stall inside a
             # batch was indistinguishable from normal work, and `current` was
             # stale by up to 15 modules. One append per module against a
@@ -359,6 +364,11 @@ impl CompilerDriver:
                 2, 6, 0, 0, "running")
             hir_loop_pos = hir_loop_pos + 1
 
+        # Post-loop receipts (2026-09-05). The Stage-3 worker SEGV'd four times
+        # with `[build] hir 771/771` as its last line and nothing after it, so
+        # the fault is somewhere between here and streaming_source_reclaim:done
+        # below. Each step now leaves a marker so a crash names its own step.
+        log_phase("phase3:hir:loop:done modules={progress_hir_done}")
         if hir_cache_enabled():
             print hir_cache_summary()
         if hir_shard_mode:
@@ -383,6 +393,7 @@ impl CompilerDriver:
         self.ctx.hir_modules = phase_hir_modules
         self.ctx.hir_module_count_value = streaming_hir_module_count
         self.ctx.bootstrap_entry_hir = phase_entry_hir
+        log_phase("phase3:hir:ctx_publish:done modules={streaming_hir_module_count} errors={self.ctx.error_count_value}")
         # Poisoned/error-bearing HIR is deliberately excluded from every
         # downstream aggregate pass. Validate layouts only for a clean phase.
         # DIRECT FIELD READ, not `self.ctx.has_errors()`. Measured: the probe
@@ -396,6 +407,7 @@ impl CompilerDriver:
         # driver_orchestration.spl.
         if (self.ctx.error_count_value > 0):
             return (self.ctx, false)
+        log_phase("phase3:hir:validate:start keys={validation_module_keys.len()} values={validation_module_values.len()}")
         var validation_error_count: i64 = 0
         for validation_error in driver_validate_value_struct_layouts(
                 validation_module_keys, validation_module_values,
@@ -409,11 +421,14 @@ impl CompilerDriver:
             if validation_errors_shown > 10:
                 validation_errors_shown = 10
             eprint("[post-hir-validation-fatal-count] count={validation_error_count} shown={validation_errors_shown}")
+        log_phase("phase3:hir:validate:done errors={validation_error_count}")
         if (self.ctx.error_count_value > 0):
             return (self.ctx, false)
         ast_reset()
+        log_phase("phase3:hir:ast_reset:done")
         self.ctx.modules = {}
         lexer_release_parse_source_globals()
+        log_phase("phase3:hir:lexer_release:done")
         # DIAGNOSTIC GATE (2026-09-03, default OFF -- behaviour unchanged unless
         # SIMPLE_KEEP_SOURCE_CONTENTS=1). This reclaim is UNCONDITIONAL on the
         # streaming path, while the non-streaming equivalent at
@@ -433,6 +448,7 @@ impl CompilerDriver:
             log_phase("phase3:streaming_source_reclaim:SKIPPED (SIMPLE_KEEP_SOURCE_CONTENTS=1)")
         else:
             reclaimed_sources = self.ctx.reclaim_source_contents()
+            log_phase("phase3:streaming_source_reclaim:sources:done reclaimed={reclaimed_sources}")
             reclaimed_streaming_owners = self.ctx.reclaim_streaming_source_contents_owner()
         log_phase("phase3:streaming_source_reclaim:done sources={reclaimed_sources} owners={reclaimed_streaming_owners}")
         self.ctx.evict_sources()
@@ -922,6 +938,7 @@ impl CompilerDriver:
             log_build_progress("hir", "modules", hir_loop_pos,
                 self.ctx.sources.len(), name, 2, 6, 0, 0, "running")
 
+        log_phase("phase3:hir:loop:done modules={hir_loop_pos}")
         # Step 3b: ParserTrait coherence checking (Check mode only)
         # ParserTrait coherence errors (orphan rules, overlapping impls, blanket conflicts)
         # are surfaced through the trait solver in the HmInferContext above.
@@ -976,12 +993,20 @@ impl CompilerDriver:
         phase_ctx.hir_modules = phase_hir_modules
         phase_ctx.hir_module_count_value = retained_hir_module_count
         phase_ctx.bootstrap_entry_hir = phase_entry_hir
+        # Same post-loop receipts as the streaming path (see its loop:done
+        # comment): a crash between the last file:done and the first pass
+        # summary used to leave no marker at all.
+        log_phase("phase3:hir:ctx_publish:done modules={retained_hir_module_count} errors={phase_ctx.error_count_value}")
         if phase_ctx.has_errors():
             return (phase_ctx, false)
+        log_phase("phase3:hir:validate:start keys={validation_module_keys.len()} values={validation_module_values.len()}")
+        var legacy_validation_error_count: i64 = 0
         for validation_error in driver_validate_value_struct_layouts(
                 validation_module_keys, validation_module_values,
                 phase_ctx.hir_modules):
+            legacy_validation_error_count = legacy_validation_error_count + 1
             phase_ctx.add_error(validation_error)
+        log_phase("phase3:hir:validate:done errors={legacy_validation_error_count}")
         if phase_ctx.has_errors():
             return (phase_ctx, false)
 

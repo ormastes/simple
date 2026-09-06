@@ -3,7 +3,7 @@ import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const moduleRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
-import { linkPlan, readConfiguredDocRoot } from "./host_links.js";
+import { linkPlan, readConfiguredDocRoot, readConfiguredExampleProject } from "./host_links.js";
 import { surfaceNames } from "./host_surface.js";
 function commandDoctor(hostRoot) {
   const root = resolve(hostRoot || resolve(moduleRoot, "..", ".."));
@@ -29,18 +29,21 @@ function commandDoctor(hostRoot) {
   }
 
   const docRoot = readConfiguredDocRoot(root);
+  // The example project's path is host-configurable; hardcoding it made doctor
+  // report every correctly-linked surface as host_bad_link.
+  const example = readConfiguredExampleProject(root);
   const docLink = join(root, ".spipe/doc");
   const docTarget = relative(dirname(docLink), join(root, docRoot));
   const hostChecks = [
     ["compatibility_submodule", join(root, ".spipe/spipe"), "exists"],
-    ["example_project_submodule", join(root, "examples/spipe"), "exists"],
-    ["spipe_project_link", join(root, ".spipe/spipe_project"), relative(join(root, ".spipe"), join(root, "examples/spipe"))],
+    ["example_project_submodule", join(root, example), "exists"],
+    ["spipe_project_link", join(root, ".spipe/spipe_project"), relative(join(root, ".spipe"), join(root, example))],
     ["doc_link", docLink, docTarget],
-    ["domain_expert_link", join(root, ".spipe/domain_expert"), relative(join(root, ".spipe"), join(root, "examples/spipe/doc/00_llm_process/domain_expert"))],
-    ["template_link", join(root, ".spipe/template"), relative(join(root, ".spipe"), join(root, "examples/spipe/doc/00_llm_process/template"))],
-    ["spipe_docs_link", join(root, ".spipe/spipe_docs"), relative(join(root, ".spipe"), join(root, "examples/spipe/doc/00_llm_process/spipe"))],
-    ["project_expert_spipe_link", join(root, ".spipe/project_expert/spipe"), relative(join(root, ".spipe/project_expert"), join(root, "examples/spipe/doc/00_llm_process/project_expert/simple"))],
-    ["tool_expert_spipe_link", join(root, ".spipe/tool_expert/spipe_submodule"), relative(join(root, ".spipe/tool_expert"), join(root, "examples/spipe/doc/00_llm_process/tool_expert/spipe_submodule"))]
+    ["domain_expert_link", join(root, ".spipe/domain_expert"), relative(join(root, ".spipe"), join(root, example, "doc/00_llm_process/domain_expert"))],
+    ["template_link", join(root, ".spipe/template"), relative(join(root, ".spipe"), join(root, example, "doc/00_llm_process/template"))],
+    ["spipe_docs_link", join(root, ".spipe/spipe_docs"), relative(join(root, ".spipe"), join(root, example, "doc/00_llm_process/spipe"))],
+    ["project_expert_spipe_link", join(root, ".spipe/project_expert/spipe"), relative(join(root, ".spipe/project_expert"), join(root, example, "doc/00_llm_process/project_expert/simple"))],
+    ["tool_expert_spipe_link", join(root, ".spipe/tool_expert/spipe_submodule"), relative(join(root, ".spipe/tool_expert"), join(root, example, "doc/00_llm_process/tool_expert/spipe_submodule"))]
   ];
   for (const [name, path, expected] of hostChecks) {
     if (!existsSync(path)) {
