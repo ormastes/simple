@@ -13,6 +13,11 @@ use app.check.targets.{expand_check_targets}
 
 val OUTPUT_LIMIT = 12000
 val CHECK_WORKER_TIMEOUT_MS = 300000
+# The worker entry is interpreted from SOURCE by whichever binary is chosen
+# below, so a deployed release binary older than the current tree can fail to
+# PARSE it. That is a failure of the worker, never of the user's target files.
+val CHECK_WORKER_ENTRY = "src/app/check/main.spl"
+val CHECK_WORKER_FALLBACK = "bin/simple"
 # Every worker invocation pays a fixed ~15-25s cost before main() even runs,
 # re-interpreting src/app/check/main.spl and its `compiler.core.parser` import
 # closure from source. Measured 2026-08-10 (load 79-117, so these overstate):
@@ -152,11 +157,27 @@ fn check_files_from_args(args: [text]) -> [text]:
         i = i + 1
     files
 
+# A worker invocation that could not even load `CHECK_WORKER_ENTRY` says nothing
+# about the files it was asked to check. The entry's own parse/compile failure is
+# reported on stderr and names the entry path; the checker reports real target
+# findings as "<path>: <error>" on stdout instead, so the two never collide.
+# Retry once on `bin/simple` -- the binary that dispatched us, which by
+# construction can load the entry.
+fn worker_entry_load_failed(stderr: text) -> bool:
+    stderr.contains("compile failed") and stderr.contains(CHECK_WORKER_ENTRY)
+
+fn run_worker(worker_bin: text, worker_args: [text], timeout_ms: i64) -> (text, text, i32):
+    val (stdout, stderr, code) = process_run_timeout(worker_bin, worker_args, timeout_ms)
+    if code != 0 and worker_bin != CHECK_WORKER_FALLBACK and worker_entry_load_failed(stderr):
+        eprint "check: worker {worker_bin} cannot load {CHECK_WORKER_ENTRY}; retrying on {CHECK_WORKER_FALLBACK} (that deployed binary is stale and needs a redeploy)"
+        return process_run_timeout(CHECK_WORKER_FALLBACK, worker_args, timeout_ms)
+    (stdout, stderr, code)
+
 fn run_single_worker(worker_bin: text, args: [text], as_json: bool) -> i64:
-    var worker_args = ["run", "src/app/check/main.spl"]
+    var worker_args = ["run", CHECK_WORKER_ENTRY]
     for arg in args:
         worker_args.push(arg)
-    val (stdout, stderr, code) = process_run_timeout(worker_bin, worker_args, CHECK_WORKER_TIMEOUT_MS)
+    val (stdout, stderr, code) = run_worker(worker_bin, worker_args, CHECK_WORKER_TIMEOUT_MS)
     print_bounded_stdout(stdout, as_json)
     if code != 0:
         print_bounded_stderr(stderr)
@@ -168,13 +189,13 @@ fn run_worker_chunk(
     chunk: [text],
     as_json: bool
 ) -> i64:
-    var worker_args = ["run", "src/app/check/main.spl"]
+    var worker_args = ["run", CHECK_WORKER_ENTRY]
     for file in chunk:
         worker_args.push(file)
     for arg in check_presentation_args(args):
         worker_args.push(arg)
     var timeout_ms = CHECK_WORKER_TIMEOUT_MS + chunk.len() * CHECK_CHUNK_TIMEOUT_PER_FILE_MS
-    val (stdout, stderr, code) = process_run_timeout(worker_bin, worker_args, timeout_ms)
+    val (stdout, stderr, code) = run_worker(worker_bin, worker_args, timeout_ms)
     # A failing multi-file chunk is re-run one file at a time by the caller, so
     # printing here would duplicate every diagnostic. Single-file invocations
     # are terminal and always print.

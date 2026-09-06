@@ -8,10 +8,11 @@ doc/03_plan/app/editor/editor_markdown_editing_subsystem.md.
 ## Operator workflow
 bin/simple test test/03_system/plan_acceptance/editor_markdown_editing_subsystem_spec.spl
 ## Compatibility and limitations
-Tagged in-development: these pin the promised INTERFACE and fail until the
-plan's remaining checkboxes are implemented.
+These oracles now pass against the real implementation, so the spec is no
+longer tagged in-development. The last red box needed a `simple check` worker
+fix, recorded in
+doc/08_tracking/bug/simple_check_worker_resolves_stale_release_binary_2026-09-06.md.
 """
-# @tag:in-development
 # doc-path: doc/03_plan/app/editor/editor_markdown_editing_subsystem.md
 
 use std.spec.{step}
@@ -145,24 +146,29 @@ describe "Editor markdown editing subsystem plan: open remains":
         expect(combined.contains("HIR type-inference failure")).to_equal(false)
         expect(code).to_equal(0) # oracle: process_run exit code; 0 == the deployed type checker reported no failures
 
-    it "checkbox: the four Phase 7 spec files the plan promises all EXIST (their passing is asserted by running them, not here)":
+    it "checkbox: the four Phase 7 spec files the plan promises all PASS":
         # @req REQ-EDITOR-MD-009
-        step("The four Phase 7 spec files the plan promises to create must exist and pass")
+        step("Run each of the four Phase 7 spec files the plan promises and require a passing verdict")
         val specs: [text] = [
             "test/01_unit/lib/editor/md_block_model_spec.spl",
             "test/01_unit/lib/editor/md_command_dispatch_spec.spl",
             "test/01_unit/lib/editor/md_vim_motions_spec.spl",
             "test/01_unit/lib/editor/md_table_ops_spec.spl"
         ]
-        var existing = 0
+        val simple_binary = _simple_binary()
+        var passing = 0
         var i = 0
         while i < specs.len():
-            if file_exists(specs[i]):
-                existing = existing + 1
+            if not file_exists(specs[i]):
+                fail("Phase 7 spec file is missing: " + specs[i])
+            val (stdout, stderr, code) = process_run(simple_binary, ["run", specs[i]])
+            val combined = stdout + stderr
+            # evidence(pinned oracle): the runner's own per-file verdict line
+            # carries failed=<n>; a passing file reports failed=0 AND exits 0.
+            # Existence alone says nothing about whether the file passes, which
+            # is exactly what the earlier version of this scenario asserted.
+            if code == 0 and combined.contains("failed=0") and combined.contains(specs[i]):
+                passing = passing + 1
             i = i + 1
-        step("Assert all four Phase 7 spec files exist")
-        expect(existing).to_equal(4) # oracle: the plan's Phase 7 lists exactly 4 spec files to create
-        # NOTE(2026-09-05): this scenario checks EXISTENCE only. It was previously
-        # named "All spec files pass in interpreter mode", which it never asserted —
-        # a green here said nothing about whether any of the four passes. Their
-        # passing is established by running them directly; see the plan's citation.
+        step("Assert all four Phase 7 spec files pass")
+        expect(passing).to_equal(4) # oracle: the plan's Phase 7 lists exactly 4 spec files to create, and all 4 must pass
