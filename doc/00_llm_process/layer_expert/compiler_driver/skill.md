@@ -105,3 +105,5 @@ A truncated closure does not fail here — it fails much later in HIR as
 `unresolved type`, attributed to the wrong file. Verify closure size at
 `[build] source_closure N/N` before believing any HIR error attribution.
 See `doc/08_tracking/bug/simpleos_wm_vulkan_cross_arch_rows_blocked_2026-08-31.md`.
+
+- 2026-09-05 gpu_frontend_offload: default-off frontend offload switch (`structural_contracts/frontend_offload_switch.spl`, driver gate in `80.driver/driver_source_pipeline_parsing.spl`) — see `doc/00_llm_process/feature_expert/gpu_frontend_offload/skill.md`.
