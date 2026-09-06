@@ -250,3 +250,70 @@ the seed engines; the `while nil:` form on the seed; and the repo-wide
 truthiness table (`0`, `""`, empty collections) that the 2026-08-04 disposition
 called for — this change pins only the nil/presence case, which both readings
 already agree on.
+
+### 2026-09-06 (same lane, second hunk): `not nil` was a THIRD blind spot, and this file's own docstring was wrong about it
+
+The 2026-08-17 sweep listed `not nil` among the seven failing forms. The
+pure-Simple `lower_cond_expr` docstring asserted that `not`, like `and`/`or`,
+"already funnel[s] its operands back through the condition path via their own
+lowering". Verified 2026-09-06: **only `and`/`or` do.**
+`_MirLoweringExpr/expr_dispatch.spl`'s `case Unary(op, operand)` lowered its
+operand with the plain value dispatcher `lower_expr` for every operator, `Not`
+included, so `if not nil:` negated the RAW non-zero RT_NIL word (3) and took the
+FALSE branch where the presence rule requires TRUE — an inversion, not merely a
+missed rewrite. `HirUnaryOp.Not` is the LOGICAL negation (`BitNot` is the
+separate bitwise operator, `20.hir/hir_operators.spl:59-66`), so its operand is
+unambiguously in condition position.
+
+Measured in the same harness, with the first hunk already applied so the delta
+is attributable to this one alone:
+
+```
+before: D_not_nil: calls=[]            <- operand read raw
+after:  D_not_nil: calls=[rt_is_some]
+```
+
+Mechanism of the fix: `lower_cond_expr` was split into `lower_cond_operand`
+(the presence rewrite, byte-for-byte the old body) and `lower_cond_expr`
+(= `lower_cond_operand` + the pre-existing MC/DC decision probe). The `Not` arm
+calls `lower_cond_operand`, NOT `lower_cond_expr` — the operand of a `not` is
+not itself a decision, and routing it through the probing wrapper would emit a
+second MC/DC condition probe for it. Every pre-existing caller of
+`lower_cond_expr` is unchanged, so MC/DC instrumentation is bit-identical.
+
+The docstring's incorrect `not` claim was corrected in place rather than
+deleted, with the correction naming what it used to say.
+
+Spec grew from 3 to 5 examples; the two new ones are a defect example and its
+control. Discrimination measured with ONLY the `expr_dispatch.spl` hunk reverted:
+
+```
+not-hunk reverted: Results: 5 total, 4 passed, 1 failed
+                   (the single failure is "presence-tests the operand of a logical not";
+                    "leaves the operand of a logical not over a plain bool alone" stays green)
+both hunks applied: Results: 5 total, 5 passed, 0 failed
+```
+
+Blast radius for this hunk is wider than the first — it touches EVERY `not` in
+compiled code — so it was measured, not assumed. For any operand that is not
+nil-shaped, `lower_cond_operand` and `lower_expr` emit identical MIR, which is
+what the second control example pins. Suite evidence on the same tree:
+
+```
+test/03_system/compiler/mir_system_spec.spl              Results: 33 total, 33 passed, 0 failed
+test/02_integration/e2e/ast_mir_integration_2_spec.spl   Results: 10 total, 10 passed, 0 failed
+test/02_integration/e2e/mir_backend_integration_1_spec.spl Results: 10 total, 10 passed, 0 failed
+```
+
+Pre-existing RED, NOT caused by either hunk (verified by re-running with
+`mir_lowering_stmts.spl` restored to its pre-fix content — identical result):
+`test/03_system/compiler/controlflow_bool_codegen_regression_spec.spl`
+`Results: 2 total, 0 passed, 2 failed` before and after.
+
+Forms now covered in pure-Simple, all through the single `lower_cond_operand`
+chokepoint reached by `if` (`mir_lowering_stmts.spl:2744`), if-chain arms
+(`:2920`) and `while` (`:3089`), plus the `and`/`or` operand recursion
+(`expr_dispatch.spl:2464,2495`) and now the `not` operand: bare `if nil:`,
+`while nil:`, `not nil`, `nil and x`, `x or nil`, and a call returning a nil
+optional. That is 6 of the 7 forms the 2026-08-17 sweep enumerated; the seventh
+is the seed's own engine behaviour, which is untouched.

@@ -104,6 +104,15 @@ fn call_returning_optional_text_condition() -> HirExpr:
         span: zero_span()
     )
 
+fn not_of(inner: HirExpr) -> HirExpr:
+    """`not inner` — a LOGICAL negation (HirUnaryOp.BitNot is the bitwise one)."""
+    HirExpr(
+        kind: HirExprKind.Unary(HirUnaryOp.Not, inner),
+        has_type_: true,
+        type_: HirType(kind: HirTypeKind.Bool, span: zero_span()),
+        span: zero_span()
+    )
+
 fn bool_literal_condition() -> HirExpr:
     HirExpr(
         kind: HirExprKind.BoolLit(true),
@@ -151,4 +160,28 @@ describe "pure-Simple condition lowering emits a presence test for nil-shaped co
         val names = lowered_call_names(cond)
 
         step("Then NO presence predicate is emitted — rewriting every condition would miscompile ordinary branching")
+        expect(names).to_not_contain("rt_is_some")
+
+    it "presence-tests the operand of a logical not":
+        # @req REQ-SSPEC-COMPILER
+        step("presence-tests the operand of a logical not")
+        step("Given `not nil` — the docstring on lower_cond_operand used to claim `not` already routed its operand through the condition path; it did not, it used the plain value dispatcher")
+        val cond = not_of(nil_literal_condition())
+
+        step("When 50.mir lowers it in condition position")
+        val names = lowered_call_names(cond)
+
+        step("Then the operand is presence-tested — negating the raw non-zero RT_NIL word 3 inverted the branch, so `if not nil:` went FALSE where the presence rule requires TRUE")
+        expect(names).to_contain("rt_is_some")
+
+    it "leaves the operand of a logical not over a plain bool alone":
+        # @req REQ-SSPEC-COMPILER
+        step("leaves the operand of a logical not over a plain bool alone")
+        step("Given `not true` — the control for the previous example")
+        val cond = not_of(bool_literal_condition())
+
+        step("When 50.mir lowers it in condition position")
+        val names = lowered_call_names(cond)
+
+        step("Then NO presence predicate is emitted — only nil-shaped operands change")
         expect(names).to_not_contain("rt_is_some")

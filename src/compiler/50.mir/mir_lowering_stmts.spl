@@ -2591,7 +2591,7 @@ impl MirLowering:
             index = index - 1
         self.builder = b
 
-    me lower_cond_expr(cond: HirExpr) -> LocalId:
+    me lower_cond_operand(cond: HirExpr) -> LocalId:
         """Lower an expression that sits in boolean/condition position.
 
         `.?` is an existence check whose VALUE is `T?` -- the payload when
@@ -2614,8 +2614,21 @@ impl MirLowering:
         the seed's first cut hand-built the and/or/not nodes here instead of
         routing through the dispatcher, which perturbed the JIT's extern set
         and demoted a whole module to the interpreter (a ~1000x perf cliff).
-        `not`/`and`/`or` already funnel their operands back through the
-        condition path via their own lowering, so they need nothing here.
+        `and`/`or` funnel their operands back through the condition path via
+        their own lowering (`_MirLoweringExpr/expr_dispatch.spl`'s Binary
+        And/Or arms call `lower_cond_expr` on each side), so they need nothing
+        here.
+
+        CORRECTION (bug jit_if_nil_takes_true_branch_2026-08-04, 2026-09-06):
+        this docstring used to say `not` did the same. It did not. The
+        `case Unary(op, operand)` arm lowered its operand with the plain
+        `lower_expr`, so `if not nil:` inverted the RAW non-zero RT_NIL word
+        (3) and took the FALSE branch where the presence rule requires TRUE.
+        That arm now calls `lower_cond_operand` for `HirUnaryOp.Not`
+        specifically -- `Not` is the LOGICAL negation (`BitNot` is the
+        separate bitwise one), so a condition-position read of its operand is
+        exactly right, and `lower_cond_operand` rather than `lower_cond_expr`
+        so no extra MC/DC probe is emitted for a non-decision node.
         """
         val result = match cond.kind:
             case HirExprKind.ExistsCheck(exists_base):
@@ -2697,6 +2710,19 @@ impl MirLowering:
                     is_some_res_bare ?? LocalId(id: 0)
                 else:
                     cond_local
+        result
+
+    me lower_cond_expr(cond: HirExpr) -> LocalId:
+        """`lower_cond_operand` plus MC/DC decision-coverage instrumentation.
+
+        Split out from `lower_cond_operand` so a caller that needs the
+        presence rewrite for a SUB-expression -- concretely `not X`, see
+        `_MirLoweringExpr/expr_dispatch.spl`'s `case Unary(op, operand)` --
+        can get it without also emitting a second MC/DC condition probe for a
+        node that is not itself a decision. Every existing caller keeps the
+        exact behaviour it had: this function is the old body verbatim.
+        """
+        val result = self.lower_cond_operand(cond)
         # Compound logical nodes are compositions, not atomic conditions.
         # Their recursively evaluated leaves pass through this same function
         # and are probed exactly where evaluation actually occurred.
