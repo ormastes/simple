@@ -1,29 +1,3 @@
-# Purpose and audience: executable specification evidence for the owning engineering team.
-# @req REQ-SSPEC-UNIT
-# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
-
-"""
-## Purpose and audience
-
-# VMM VMA Operations Specification
-
-**Feature IDs:** #OS-010
-**Category:** Runtime
-**Difficulty:** 3/5
-**Status:** Implemented
-**Requirements:** N/A
-**Plan:** N/A
-**Design:** N/A
-**Research:** N/A
-
-## Overview
-
-Tests for VMA (Virtual Memory Area) data model and operations:
-vma_add, vma_find, vma_remove, vma_split, overlap rejection.
-
-Tests operate on ProcessVmSpace with stub pml4 values — no real page
-tables are required. All assertions use type-level struct fields only.
-
 use std.spec.{describe, it, expect}
 use os.kernel.types.vmspace_types.{
     VmArea, ProcessVmSpace,
@@ -31,6 +5,40 @@ use os.kernel.types.vmspace_types.{
     VMA_READ, VMA_WRITE, VMA_EXEC, VMA_COW
 }
 use os.kernel.memory.vmm_vma.{vma_add, vma_find, vma_remove, vma_split}
+
+# @req: REQ-SSPEC-OS — behavior under test holds under execution.
+"""
+## Purpose and audience
+
+Executable specification for the VMM's virtual-memory-area data model and
+operations: vma_add, vma_find, vma_remove, vma_split, and overlap
+rejection. Audience: kernel memory engineers confirming VMA bookkeeping
+still holds before a change lands.
+
+## Operator workflow
+
+1. Run `bin/simple test test/01_unit/os/kernel/memory/vmm_vma_spec.spl`.
+2. Every scenario must pass; a failure is a regression in VMA handling.
+
+## Compatibility and limitations
+
+Scenarios operate on ProcessVmSpace with stub pml4 values — no real page
+tables are required; all assertions use type-level struct fields only.
+
+## Verification guidance and troubleshooting
+
+Re-run the single file to reproduce; a failing scenario names the VMA
+operation and the expected bookkeeping value. Overlap rejection is pinned
+to the -EEXIST code, so a changed error code fails loudly rather than
+silently.
+"""
+# Lifecycle:
+# doc/01_research/domain/sspec_documentization_maintenance.md
+# doc/03_plan/sspec_modernization_plan.md
+# doc/04_architecture/sspec_documentization_maintenance.md
+# doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+# @manual_section: vmm-vma-operations
+# @manual: primary
 
 # ============================================================================
 # Helpers
@@ -80,28 +88,40 @@ fn _make_file(start: u64, len: u64, backing: u64, offset: u64) -> VmArea:
 describe "VmArea construction":
     # @manual scenario evidence
     it "creates anon area with correct fields":
+        # @req REQ-SSPEC-OS
+        # @capture(bit_table): start, len, kind, and flags of a constructed anon VmArea
+        step("Construct an anonymous RW area at 0x400000")
         val area = _make_anon(0x400000, 0x1000)
-        expect(area.start).to_equal(0x400000)
-        expect(area.len).to_equal(0x1000)
-        expect(area.kind).to_equal(VMA_ANON)
-        expect(area.flags).to_equal(VMA_READ | VMA_WRITE)
+        expect(area.start).to_equal(0x400000)  # oracle: constructor stores the requested base verbatim
+        expect(area.len).to_equal(0x1000)  # oracle: constructor stores the requested length verbatim
+        expect(area.kind).to_equal(VMA_ANON)  # oracle: the helper requests the anonymous kind
+        expect(area.flags).to_equal(VMA_READ | VMA_WRITE)  # oracle: the helper requests read plus write permission
 
     it "creates file-backed area with backing handle":
+        # @req REQ-SSPEC-OS
+        # @capture(bit_table): kind, backing handle, and offset of a file-backed VmArea
+        step("Construct a file-backed RX area backed by handle 42")
         val area = _make_file(0x600000, 0x2000, 42, 0x100)
-        expect(area.kind).to_equal(VMA_FILE)
-        expect(area.backing).to_equal(42)  # oracle: expected value 42 is the behavior asserted by this regression spec
-        expect(area.backing_offset).to_equal(0x100)
+        expect(area.kind).to_equal(VMA_FILE)  # oracle: the helper requests the file-backed kind
+        expect(area.backing).to_equal(42)  # oracle: expected handle 42 is the behavior asserted by this regression spec
+        expect(area.backing_offset).to_equal(0x100)  # oracle: the helper stores the requested file offset verbatim
 
     it "VMA_COW flag is distinct from VMA_WRITE":
+        # @req REQ-SSPEC-OS
+        # @capture(bit_table): VMA_COW coexisting with VMA_WRITE in one flag word
+        step("Combine copy-on-write with write permission in one flag word")
         val cow_flags = VMA_READ | VMA_WRITE | VMA_COW
-        expect(cow_flags & VMA_COW).to_be_greater_than(0)
-        expect(cow_flags & VMA_WRITE).to_be_greater_than(0)
-        expect(VMA_COW).to_equal(8)  # oracle: expected value 8 is the behavior asserted by this regression spec
+        expect(cow_flags & VMA_COW).to_be_greater_than(0)  # oracle: combining the flags must keep the COW bit set
+        expect(cow_flags & VMA_WRITE).to_be_greater_than(0)  # oracle: combining the flags must keep the write bit set
+        expect(VMA_COW).to_equal(8)  # oracle: expected bit value 8 is the behavior asserted by this regression spec
 
     it "VMA kind constants are distinct":
-        expect(VMA_ANON).to_equal(0)
-        expect(VMA_FILE).to_equal(1)
-        expect(VMA_SHARED).to_equal(2)
+        # @req REQ-SSPEC-OS
+        # @capture(bit_table): numeric values of the anon, file, and shared kind constants
+        step("Read the three VMA kind constants from the product module")
+        expect(VMA_ANON).to_equal(0)  # oracle: expected kind value 0 is the behavior asserted by this regression spec
+        expect(VMA_FILE).to_equal(1)  # oracle: expected kind value 1 is the behavior asserted by this regression spec
+        expect(VMA_SHARED).to_equal(2)  # oracle: expected kind value 2 is the behavior asserted by this regression spec
 
 # ============================================================================
 # Test Group 2: ProcessVmSpace construction
@@ -109,14 +129,23 @@ describe "VmArea construction":
 
 describe "ProcessVmSpace construction":
     it "starts with zero VMAs":
+        # @req REQ-SSPEC-OS
+        # @capture(statistics): vma_count of a freshly built address space
+        step("Build an empty address space and read its VMA count")
         val space = _make_space()
         expect(space.vma_count).to_equal(0)  # oracle: expected value 0 is the behavior asserted by this regression spec
 
     it "stores pml4 address":
+        # @req REQ-SSPEC-OS
+        # @capture(statistics): pml4 stub value round-trip
+        step("Build an address space with a stub pml4 at 0xDEAD0000")
         val space = _make_space()
-        expect(space.pml4).to_equal(0xDEAD0000)
+        expect(space.pml4).to_equal(0xDEAD0000)  # oracle: constructor stores the stub table address verbatim
 
     it "stores id":
+        # @req REQ-SSPEC-OS
+        # @capture(statistics): space id round-trip
+        step("Build an address space numbered 1")
         val space = _make_space()
         expect(space.id).to_equal(1)  # oracle: expected value 1 is the behavior asserted by this regression spec
 
@@ -126,14 +155,20 @@ describe "ProcessVmSpace construction":
 
 describe "vma_add":
     it "adds single VMA — count becomes 1":
+        # @req REQ-SSPEC-OS
+        # @capture(statistics): result code and vma_count after the first insert
+        step("Insert one anonymous area into an empty space")
         var space = _make_space()
         val area = _make_anon(0x400000, 0x1000)
         val result = vma_add(space, area)
         space = result.space
-        expect(result.code).to_equal(0)
-        expect(space.vma_count).to_equal(1)
+        expect(result.code).to_equal(0)  # oracle: zero is the product success code
+        expect(space.vma_count).to_equal(1)  # oracle: the inserted area is the only one tracked
 
     it "adds two non-overlapping VMAs":
+        # @req REQ-SSPEC-OS
+        # @capture(statistics): result codes and vma_count after two disjoint inserts
+        step("Insert two areas that do not overlap")
         var space = _make_space()
         val a1 = _make_anon(0x400000, 0x1000)
         val a2 = _make_anon(0x402000, 0x1000)
@@ -141,11 +176,14 @@ describe "vma_add":
         space = r1.space
         val r2 = vma_add(space, a2)
         space = r2.space
-        expect(r1.code).to_equal(0)
-        expect(r2.code).to_equal(0)
-        expect(space.vma_count).to_equal(2)
+        expect(r1.code).to_equal(0)  # oracle: the first disjoint insert succeeds
+        expect(r2.code).to_equal(0)  # oracle: the second disjoint insert succeeds
+        expect(space.vma_count).to_equal(2)  # oracle: both areas stay tracked
 
     it "rejects overlapping VMA — returns -EEXIST":
+        # @req REQ-SSPEC-OS
+        # @capture(statistics): second-insert result code for an overlapping range
+        step("Attempt to insert an area overlapping an existing one")
         var space = _make_space()
         val a1 = _make_anon(0x400000, 0x2000)
         val a2 = _make_anon(0x401000, 0x1000)  # overlaps a1
@@ -153,11 +191,14 @@ describe "vma_add":
         space = r1.space
         val r2 = vma_add(space, a2)
         space = r2.space
-        expect(r1.code).to_equal(0)
-        expect(r2.code).to_equal(-17)
-        expect(space.vma_count).to_equal(1)
+        expect(r1.code).to_equal(0)  # oracle: the first insert succeeds
+        expect(r2.code).to_equal(-17)  # oracle: -17 is the product's -EEXIST overlap rejection
+        expect(space.vma_count).to_equal(1)  # oracle: the rejected insert must not add an area
 
     it "rejects VMA touching the end of existing one at exact boundary — no overlap":
+        # @req REQ-SSPEC-OS
+        # @capture(statistics): boundary-adjacent insert result code and vma_count
+        step("Insert an area starting exactly at the previous area's end")
         var space = _make_space()
         val a1 = _make_anon(0x400000, 0x1000)
         val a2 = _make_anon(0x401000, 0x1000)  # starts exactly at end of a1
@@ -165,9 +206,9 @@ describe "vma_add":
         space = r1.space
         val r2 = vma_add(space, a2)
         space = r2.space
-        expect(r1.code).to_equal(0)
-        expect(r2.code).to_equal(0)   # adjacent, not overlapping
-        expect(space.vma_count).to_equal(2)
+        expect(r1.code).to_equal(0)  # oracle: the first insert succeeds
+        expect(r2.code).to_equal(0)   # oracle: adjacent, not overlapping
+        expect(space.vma_count).to_equal(2)  # oracle: an end-touching insert is legal and tracked
 
 # ============================================================================
 # Test Group 4: vma_find
@@ -175,27 +216,36 @@ describe "vma_add":
 
 describe "vma_find":
     it "finds VMA by address inside it":
+        # @req REQ-SSPEC-OS
+        # @capture(bit_table): start and len of the area found at an interior address
+        step("Look up an address in the middle of a mapped area")
         var space = _make_space()
         val area = _make_anon(0x400000, 0x4000)
         space = vma_add(space, area).space
         val found = vma_find(space, 0x401000)
         if val Some(a) = found:
-            expect(a.start).to_equal(0x400000)
-            expect(a.len).to_equal(0x4000)
+            expect(a.start).to_equal(0x400000)  # oracle: 0x401000 falls inside the area based at 0x400000
+            expect(a.len).to_equal(0x4000)  # oracle: the found area keeps its full 0x4000 length
         else:
-            expect(0).to_equal(1)   # force failure if nil
+            assert_true(false)  # oracle: vma_find must locate the area; reaching here means it returned nil
 
     it "returns nil for unmapped address":
+        # @req REQ-SSPEC-OS
+        # @capture(statistics): lookup verdict for an address outside every VMA
+        step("Look up an address no area covers")
         var space = _make_space()
         val area = _make_anon(0x400000, 0x1000)
         space = vma_add(space, area).space
         val found = vma_find(space, 0x800000)
         # 0x800000 is outside any VMA — vma_count stays 1 (nothing removed)
-        expect(space.vma_count).to_equal(1)  # oracle: expected value 1 is the behavior asserted by this regression spec
+        expect(space.vma_count).to_equal(1)  # oracle: the failed lookup must not disturb the mapping
         if val Some(_a) = found:
-            expect(0).to_equal(1)   # should be nil — fail if reached
+            assert_true(false)  # oracle: 0x800000 is outside every VMA so vma_find must return nil
 
     it "finds correct VMA among multiple":
+        # @req REQ-SSPEC-OS
+        # @capture(bit_table): start address of the area found among three mappings
+        step("Look up an address covered by the third of three areas")
         var space = _make_space()
         val a1 = _make_anon(0x400000, 0x1000)
         val a2 = _make_anon(0x402000, 0x1000)
@@ -205,19 +255,22 @@ describe "vma_find":
         space = vma_add(space, a3).space
         val found = vma_find(space, 0x500800)
         if val Some(a) = found:
-            expect(a.start).to_equal(0x500000)
+            expect(a.start).to_equal(0x500000)  # oracle: 0x500800 falls inside the area based at 0x500000
         else:
-            expect(0).to_equal(1)  # oracle: expected value 1 is the behavior asserted by this regression spec
+            assert_true(false)  # oracle: vma_find must locate the area; reaching here means it returned nil
 
     it "does not find address exactly at end (exclusive)":
+        # @req REQ-SSPEC-OS
+        # @capture(statistics): lookup verdict for the first byte past a mapping's end
+        step("Look up the first byte past the end of a mapped area")
         var space = _make_space()
         val area = _make_anon(0x400000, 0x1000)
         space = vma_add(space, area).space
         val found = vma_find(space, 0x401000)  # one byte past end
         # The VMA ends at 0x401000 (exclusive), so nothing should match
-        expect(space.vma_count).to_equal(1)  # oracle: expected value 1 is the behavior asserted by this regression spec
+        expect(space.vma_count).to_equal(1)  # oracle: the failed lookup must not disturb the mapping
         if val Some(_a) = found:
-            expect(0).to_equal(1)   # should be nil — fail if reached
+            assert_true(false)  # oracle: VMA end is exclusive so vma_find must return nil at 0x401000
 
 # ============================================================================
 # Test Group 5: vma_remove / split semantics
@@ -225,23 +278,35 @@ describe "vma_find":
 
 describe "vma_remove":
     it "removing entire VMA reduces count to 0":
+        # NOTE (legitimately RED, 2026-09-05): os.kernel.memory.vmm_vma.vma_remove
+        # returns a bare i32 and takes ProcessVmSpace by value, so it cannot hand
+        # back an updated space — `space = vma_remove(...)` clobbers `space` with
+        # an i64 and the scenario fails at load ("undefined field 'vma_count'").
+        # Unblock: vma_remove must return an updated-space result like vma_add's
+        # VmaAddResult / vma_split's VmaSplitResult.
+        # @req REQ-SSPEC-OS
+        # @capture(statistics): vma_count before and after a full-area removal
+        step("Remove a mapped area in its entirety")
         var space = _make_space()
         val area = _make_anon(0x400000, 0x4000)
         space = vma_add(space, area).space
-        expect(space.vma_count).to_equal(1)
+        expect(space.vma_count).to_equal(1)  # oracle: the setup insert leaves exactly one area
 
         val found_before = vma_find(space, 0x401000)
         if val Some(_a) = found_before:
-            expect(_a.start).to_equal(0x400000)
+            expect(_a.start).to_equal(0x400000)  # oracle: the interior address resolves to the area based at 0x400000
 
         space = vma_remove(space, 0x400000, 0x4000)
-        expect(space.vma_count).to_equal(0)
+        expect(space.vma_count).to_equal(0)  # oracle: removing the only area empties the space
         # After removal, vma_count is 0 — scan returns nil implicitly
         val found_after = vma_find(space, 0x401000)
         if val Some(_b) = found_after:
-            expect(0).to_equal(1)   # should be nil — fail if reached
+            assert_true(false)  # oracle: after removal vma_find must return nil at the removed range
 
     it "splitting a VMA produces two smaller VMAs":
+        # @req REQ-SSPEC-OS
+        # @capture(bit_table): start and len of both fragments after the split
+        step("Split a four-page area at its midpoint")
         var space = _make_space()
         val area = _make_anon(0x400000, 0x4000)
         space = vma_add(space, area).space
@@ -249,13 +314,16 @@ describe "vma_remove":
         val split_result = vma_split(space, 0x402000)
         space = split_result.space
 
-        expect(split_result.code).to_equal(0)
-        expect(space.vma_count).to_equal(2)
-        expect(space.areas[0].len).to_equal(0x2000)
-        expect(space.areas[1].start).to_equal(0x402000)
-        expect(space.areas[1].len).to_equal(0x2000)
+        expect(split_result.code).to_equal(0)  # oracle: zero is the product success code
+        expect(space.vma_count).to_equal(2)  # oracle: one split turns a single area into two
+        expect(space.areas[0].len).to_equal(0x2000)  # oracle: the left fragment keeps the first half
+        expect(space.areas[1].start).to_equal(0x402000)  # oracle: the right fragment starts at the split point
+        expect(space.areas[1].len).to_equal(0x2000)  # oracle: the right fragment keeps the second half
 
     it "backing_offset of right fragment is correct after split":
+        # @req REQ-SSPEC-OS
+        # @capture(statistics): backing offset of the right fragment after the split
+        step("Split a file-backed area and read the right fragment's offset")
         var space = _make_space()
         val area = _make_file(0x500000, 0x8000, 7, 0x1000)
         space = vma_add(space, area).space
@@ -263,5 +331,5 @@ describe "vma_remove":
         val split_result = vma_split(space, 0x504000)
         space = split_result.space
 
-        expect(split_result.code).to_equal(0)
-        expect(space.areas[1].backing_offset).to_equal(0x1000 + 0x4000)
+        expect(split_result.code).to_equal(0)  # oracle: zero is the product success code
+        expect(space.areas[1].backing_offset).to_equal(0x1000 + 0x4000)  # oracle: the right fragment advances its file offset by the split distance

@@ -316,6 +316,31 @@ pub(crate) fn core_c_target_flags(
     flags
 }
 
+/// C11-atomics flags required by the MSVC-style drivers, and by nobody else.
+///
+/// Measured 2026-09-06 (cl 19.44.35207, MSVC 2022 14.44): without BOTH
+/// `-std:c11` and `-experimental:c11atomics`, cl.exe stops at
+/// `fatal error C1189: "C atomics require C11 or later"` inside
+/// `<vcruntime_c11_stdatomic.h>` before it ever reaches a runtime source, so
+/// `runtime.c` / `runtime_native.c` cannot compile at all. With both, they
+/// compile clean (the GNU-shaped `-f*` / `-std=gnu11` flags around them are
+/// merely ignored with `warning D9002`). clang-cl 18.1.8 accepts both too --
+/// it needs neither, and reports `-experimental:c11atomics` as unused -- so
+/// one flag set covers both MSVC drivers.
+///
+/// Gated on the compiler BINARY, not on `LinkerFlavor::Msvc`: that flavor can
+/// also resolve to plain `clang` (see `MSVC_C_COMPILERS` in `cc_detect`),
+/// whose GNU driver rejects `-std:c11`. Every gcc/clang lane on Linux/macOS
+/// gets an empty slice, so their argument vectors stay byte-identical.
+fn msvc_c11_atomics_flags(cc: &str) -> &'static [&'static str] {
+    let base = Path::new(cc).file_name().and_then(|n| n.to_str()).unwrap_or(cc);
+    if simple_common::platform::cc_detect::is_msvc_compiler(cc) || base.contains("clang-cl") {
+        &["-std:c11", "-experimental:c11atomics"]
+    } else {
+        &[]
+    }
+}
+
 pub(crate) fn find_core_c_runtime_source_root() -> Option<PathBuf> {
     let mut candidates = Vec::new();
 
@@ -515,6 +540,7 @@ fn build_c_runtime_library(build_dir: &Path, include_stage4_hosted: bool) -> Opt
             .arg("-fno-stack-protector")
             .arg("-fPIC")
             .arg("-std=gnu11")
+            .args(msvc_c11_atomics_flags(&cc))
             .arg("-DSIMPLE_CORE_C_STANDALONE=1")
             // Selects runtime_memory.c as THE memory provider and compiles out
             // runtime_native.c's mutually-exclusive fallback copies of the same
@@ -642,6 +668,7 @@ pub(crate) fn build_sqlite_runtime_object(build_dir: &Path) -> Option<PathBuf> {
         .arg("-fno-stack-protector")
         .arg("-fPIC")
         .arg("-std=gnu11")
+        .args(msvc_c11_atomics_flags(&cc))
         .arg("-DSIMPLE_CORE_C_STANDALONE=1")
         .args(core_c_target_flags(target, source, riscv_vector))
         .arg(format!("-I{}", runtime_root.display()))
@@ -1737,6 +1764,7 @@ pub(crate) fn build_stage4_cli_c_provider_archives(build_dir: &Path) -> Result<V
             .arg("-fno-builtin")
             .arg("-fPIC")
             .arg("-std=gnu11")
+            .args(msvc_c11_atomics_flags(&cc))
             .args(core_c_target_flags(target, spec.source, riscv_vector))
             .arg(format!("-I{}", runtime_root.display()))
             .arg(format!("-I{}", runtime_root.join("platform").display()))

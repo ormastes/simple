@@ -80,6 +80,7 @@ pub(crate) fn inline_runtime_len_value(
     // case `d.len()`/`d.is_empty()` on an untyped-receiver dict fall through to
     // the -1 sentinel under the Cranelift JIT fast path.
     let is_dict = builder.ins().icmp_imm(IntCC::Equal, object_type, 3);
+    // TODO: [codegen][P1] Reconcile the two heap-kind numbering schemes (HeapObjectType::Closure = 0x06 in runtime/src/value/heap.rs:14 vs RT_VALUE_HEAP_DICT 0x06 / RT_VALUE_HEAP_CLOSURE 0x03 in src/runtime/runtime_native.c:250,252) and add an acceptance test that .len() on a hosted closure returns -1 rather than its capture count -- see doc/08_tracking/bug/cranelift_inline_len_heap_tag_space_collision_dict_closure_2026-09-06.md (PR #403)
     // simple-core SplDict (freestanding / SimpleOS native-build) uses tag byte 6
     // with layout {tag@0, cap@8, len@16, items@32} — unlike RuntimeDict (tag 3,
     // len@8). Without this case `.len()`/`.values()` on an untyped/ANY-erased

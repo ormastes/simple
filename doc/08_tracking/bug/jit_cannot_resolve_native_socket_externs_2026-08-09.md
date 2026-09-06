@@ -227,3 +227,33 @@ re-run both engines.
 The current spec pin stays RED-on-fix by design and is **unchanged** by this
 investigation: measured behaviour has not moved, so flipping the assertion now
 would assert a fiction.
+
+## Re-verification 2026-09-06 (bug-db closeout pass) — STILL OPEN, confirmed by fresh run
+
+Ran `test/03_system/feature/usage/networking_spec.spl` on this host's deployed
+seed (`bin/release/aarch64-unknown-linux-gnu/simple`):
+
+```
+✗ binds, closes and rebinds real sockets under SIMPLE_EXECUTION_MODE=jit
+  FAIL tcp bind error code (got 3, want 0)
+  FAIL tcp close succeeds (got 100, want 0)
+  FAIL second tcp bind error code (got 3, want 0)
+  FAIL second tcp close succeeds (got 100, want 0)
+  FAIL udp bind error code (got 3, want 0)
+PROBE VERDICT: FAIL (5 checks wrong)
+✗ records that tcp bind does NOT actually compile in JIT mode
+  expected WARNING: ... to contain unresolved external symbol 'native_tcp_bind'
+SPEC FILE VERDICT: ... outcome=ERROR declared>=13 executed=13 passed=11 failed=2
+Results: 13 total, 11 passed, 2 failed
+```
+
+Confirms this doc's own "end-to-end JIT socket EXECUTION is unproven" caveat:
+the old hard-failure symptom (`unresolved external symbol 'native_tcp_bind'`)
+is indeed gone, but real JIT socket execution is not fixed either — it now
+fails a different way (bind returns error code 3, close returns error code
+100, instead of linking). The manifest-registration fix did not, on its own,
+make JIT networking work. `bin/simple test` under the interpreter passes
+("binds, closes and rebinds real sockets under the interpreter" — green).
+**Conclusion: STILL BROKEN under JIT.** The `bug_db.sdn` row's
+`fix-implemented-verification-pending` status should not be read as "JIT
+sockets work" — they do not, on this host, today.

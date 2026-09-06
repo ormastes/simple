@@ -413,6 +413,19 @@ jobs:
         run: |
           sh scripts/check/check-tui-standalone-closure.shs
 
+      # Slim-UI import-closure gate, self-test half (NFR-UI-SLIM-002,
+      # doc/02_requirements/nfr/ui_slim_kernel_plugin.md). The real closure
+      # run needs a built seed for `deps fast`, which this runner does not have,
+      # so it lives in rust-bootstrap-multiplatform.yml after the Build step.
+      # --selftest exercises the scan logic against 5 synthetic deps listings
+      # (clean -> PASS, forbidden hit -> FAIL, empty output -> ERROR, seed
+      # exit 3 -> ERROR, missing seed -> ERROR) with no binary at all, and is
+      # fail-closed: 5/5 or exit 2.
+      - name: Slim-UI closure gate self-test
+        if: ${{ !cancelled() }}
+        run: |
+          sh scripts/check/check-ui-slim-closure.shs --selftest
+
       # Workspace root write guard: enforces the root-directory placement policy
       # / FILE.md manifests across the tree (git + POSIX sh only, no rg needed).
       - name: Workspace root write guard
@@ -430,6 +443,21 @@ jobs:
       # stale silently, which is how a two-revisions-behind pre-push hook ran
       # without any of that session's fail-open fixes.
       # See doc/08_tracking/bug/check_script_wiring_orphans_2026-08-01.md.
+      # Lifecycle-reachability ratchet. Wired here 2026-09-06: the script landed
+      # green but referenced by nothing, which made check-guard-wiring (below)
+      # report it as NEW unwired. That one unwired file failed the guard-wiring
+      # step, which failed this whole required job, which left every open PR
+      # BLOCKED -- 25 of them at once, with the ruleset's
+      # strict_required_status_checks_policy=true re-running the queue on every
+      # merge. The guard itself was never broken: it reports
+      # "PASS -- 135 symbol(s) checked, 0 new, 0 stale". It just needed an
+      # enforcement surface, which is exactly what the guard-wiring ratchet
+      # exists to demand.
+      - name: Lifecycle-reachability ratchet gate
+        if: ${{ !cancelled() }}
+        run: |
+          sh scripts/check/check-lifecycle-reachability.shs
+
       - name: Guard-wiring ratchet gate
         if: ${{ !cancelled() && (!contains(steps.receipt.outputs.skip_ids, '|ci-guard-wiring|')) }}
         run: |
