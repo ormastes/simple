@@ -244,6 +244,27 @@ fn driver_native_classify_module_failure_v1(detail: text) -> BuildOutcomeKind:
 # Record one FAILED module and keep going. The whole point of accumulating
 # rather than returning: ONE build must name EVERY bad module, instead of each
 # defect costing a full ~20-minute run to discover.
+# Last line of defence for the "(none recorded — BUG in the producer)" summary.
+#
+# `BuildOutcomeSet.reason_block_for` is right that a non-OK unit must carry a
+# diagnostic, and it is right to say so loudly rather than print silence. But it
+# can only print what the producer handed it, and the AOT lane's `Err` payload
+# is destroyed on the compiled stage-2 crossing (see `_aot_compile_failure`), so
+# the summary was accusing the producer of a bug it could not avoid. The real
+# reason is already on stdout by the time this runs; what this restores is the
+# INVARIANT -- every non-OK unit carries a non-empty, self-describing reason
+# that names where the text was lost, so the summary is never mistaken for
+# "failed for no reason".
+#
+# This is deliberately NOT a substitute for the payload fix: an empty detail
+# here is itself evidence of the crossing defect, and says so.
+fn driver_native_nonempty_failure_detail(detail: text) -> text:
+    if detail != "":
+        return detail
+    "diagnostic lost crossing the AOT Result boundary (see the 'error: AOT "
+        + "compile error' line above for the real reason); tracked in "
+        + "doc/08_tracking/bug/stage2_aot_error_message_lost_invalid_heap_2026-09-06.md"
+
 fn driver_native_record_module_failure(outcomes: BuildOutcomeSet, unit_id: i64,
                                        name: text, detail: text):
     outcomes.record(BuildUnitOutcome(
@@ -1263,7 +1284,8 @@ impl CompilerDriver:
                     case Err(e):
                         module_unit_id = module_unit_id + 1
                         driver_native_record_module_failure(module_outcomes,
-                            module_unit_id, name, e)
+                            module_unit_id, name,
+                            driver_native_nonempty_failure_detail(e))
                         cache_miss_count = cache_miss_count + 1
             else:
                 # `unstable` and `unit_timeout_ms` were omitted here. Partial
@@ -1334,7 +1356,8 @@ impl CompilerDriver:
                     for unit_err in build_result.errors:
                         module_unit_id = module_unit_id + 1
                         driver_native_record_module_failure(module_outcomes,
-                            module_unit_id, unit_err[0], unit_err[1])
+                            module_unit_id, unit_err[0],
+                            driver_native_nonempty_failure_detail(unit_err[1]))
                     val first_err = build_result.errors[0]
                     log_build_progress("native_compile", "modules",
                         cache_hit_count + build_result.stats.completed,
@@ -1537,6 +1560,30 @@ impl CompilerDriver:
 # Single-ParserModule Compilation Helper (for ParallelBuilder)
 # ============================================================================
 
+# Emit an AOT failure reason at its RAISING site, then return it.
+#
+# The `Err` payload of this lane does not survive the return crossing on the
+# compiled self-hosted (stage-2) binary. It first surfaced as
+# `AOT compile error in <unit>: <invalid-heap:0x…>` -- the payload rendered as a
+# misdecoded tagged word -- and, once the raising site moved behind
+# `_finish_selected_module_compile`, degraded further to an EMPTY payload, which
+# `BuildOutcomeSet.reason_block_for` prints as
+# "(none recorded — BUG in the producer: a non-OK unit must carry a diagnostic)".
+# Measured 2026-09-06: the SAME source interpreted under the seed prints the real
+# text ("scalar object-path AOT is available only for builtin LLVM"), so the
+# message is correct where it is raised and is destroyed only on the way out.
+#
+# Printing here makes the diagnostic independent of that crossing: if the payload
+# is lost the operator still has the reason, and the summary's fallback below
+# still names a non-empty producer site. This does NOT paper over the ABI defect
+# -- it is tracked separately in
+# doc/08_tracking/bug/stage2_aot_error_message_lost_invalid_heap_2026-09-06.md --
+# it removes that defect's ability to blind every failure on this path.
+fn _aot_compile_failure(name: text, detail: text) -> Result<text, text>:
+    print "error: AOT compile error in {name}: {detail}"
+    _sffi_stdout_flush()
+    Err("AOT compile error in {name}: {detail}")
+
 fn _compile_frozen_module_capsule(
     batch: FrozenNativeModuleCapsuleBatchV1, backend_name: text, target: text,
     is_release: bool, opt_level: i64, provider_receipt_hash: text,
@@ -1544,15 +1591,15 @@ fn _compile_frozen_module_capsule(
 ) -> Result<text, text>:
     """Compile one parent-frozen module capsule without CompileContext/cache access."""
     if not batch.ok:
-        return Err("AOT compile error in {name}: invalid-capsule-batch")
+        return _aot_compile_failure(name, "invalid-capsule-batch")
     val capsule = frozen_native_capsule_batch_find_v1(batch, name)
     if not capsule.ok or capsule.module_name != name:
-        return Err("AOT compile error in {name}: capsule-not-found")
+        return _aot_compile_failure(name, "capsule-not-found")
     if not driver_native_capsule_inputs_valid_v1(capsule, backend_name, target,
         is_release, opt_level, provider_receipt_hash):
-        return Err("AOT compile error in {name}: capsule-identity-mismatch")
+        return _aot_compile_failure(name, "capsule-identity-mismatch")
     if capsule.storage_snapshot.registry_identity != batch.registry_identity:
-        return Err("AOT compile error in {name}: capsule-registry-mismatch")
+        return _aot_compile_failure(name, "capsule-registry-mismatch")
     val trace = (env_get_nullable("SIMPLE_COMPILER_TRACE") ?? "") == "1"
     if trace:
         print "[NATIVE] compiling module: {name}"
@@ -1568,18 +1615,18 @@ fn _compile_frozen_module_capsule(
         case Err(error): return Err(error)
         case Ok(object_path):
             if not capsule.identity_valid():
-                return Err("AOT compile error in {name}: capsule-mir-lease-violated")
+                return _aot_compile_failure(name, "capsule-mir-lease-violated")
             if object_path != capsule.object_path:
-                return Err("AOT compile error in {name}: capsule-object-path-mismatch")
+                return _aot_compile_failure(name, "capsule-object-path-mismatch")
             val object_fp = FileFingerprint.from_file(object_path)
             if not object_fp.?:
-                return Err("AOT compile error in {name}: capsule-object-fingerprint-failed")
+                return _aot_compile_failure(name, "capsule-object-fingerprint-failed")
             val receipt_path = capsule.object_path + ".capsule-receipt"
             var receipt = ""
             if val fp = object_fp:
                 receipt = "native-capsule-result-v1\n{capsule.capsule_identity}\n{capsule.object_path}\n{fp.size}\n{fp.content_hash}\n"
             if not _sffi_file_write_text(receipt_path, receipt):
-                return Err("AOT compile error in {name}: capsule-receipt-write-failed")
+                return _aot_compile_failure(name, "capsule-receipt-write-failed")
             Ok(object_path)
 
 fn _compile_selected_module(backend_name: text, is_release: bool, opt_level: i64,
@@ -1588,11 +1635,11 @@ fn _compile_selected_module(backend_name: text, is_release: bool, opt_level: i64
                             frozen_target_cpu: text,
                             backend_session: BackendSession?) -> Result<text, text>:
     if not storage_snapshot.ok or storage_snapshot.module_name != name:
-        return Err("AOT compile error in {name}: storage-snapshot-module-mismatch")
+        return _aot_compile_failure(name, "storage-snapshot-module-mismatch")
     if (env_get_nullable("SIMPLE_COMPILER_TRACE") ?? "") == "1":
         print "[NATIVE] select module:done"
     if mir_module.functions.keys().len() == 0:
-        return Err("AOT compile error in {name}: MIR module has no functions")
+        return _aot_compile_failure(name, "MIR module has no functions")
     val empty_native_obj = env_get_nullable("SIMPLE_BOOTSTRAP_EMPTY_NATIVE_OBJ") ?? ""
     if empty_native_obj == "1":
         val c_path = "{output_base}.{name}.bootstrap_empty.c"
@@ -1613,7 +1660,7 @@ fn _compile_selected_module(backend_name: text, is_release: bool, opt_level: i64
         val diagnostic_dir = secure_temp_dir_raw(
             dirname(obj_path), "simple-aot-diagnostic")
         if diagnostic_dir == "":
-            return Err("AOT compile error in {name}: diagnostic staging unavailable")
+            return _aot_compile_failure(name, "diagnostic staging unavailable")
         val diagnostic_path = diagnostic_dir + "/message"
         val status = session.compile_aot_into_path(
             mir_module, is_release, opt_level, frozen_target_cpu,
@@ -1627,7 +1674,7 @@ fn _compile_selected_module(backend_name: text, is_release: bool, opt_level: i64
                 case Err(_): ()
             if not dir_remove(diagnostic_dir, true):
                 detail = "{detail}; diagnostic staging cleanup failed: {diagnostic_dir}"
-            return Err("AOT compile error in {name}: {detail}")
+            return _aot_compile_failure(name, detail)
         match file_read_regular_no_follow_bounded(diagnostic_path, 4096):
             case Ok(message):
                 if message != "":
@@ -1637,7 +1684,7 @@ fn _compile_selected_module(backend_name: text, is_release: bool, opt_level: i64
             print "warning: published object; diagnostic staging cleanup failed: {diagnostic_dir}"
         if (not file_is_regular_no_follow(obj_path)
             or file_size_raw(obj_path) <= 0):
-            return Err("AOT compile error in {name}: invalid object output")
+            return _aot_compile_failure(name, "invalid object output")
         return Ok(obj_path)
     _finish_selected_module_compile(
         compile_module_with_backend_target_cpu_storage_bindings(
@@ -1651,7 +1698,10 @@ fn _finish_selected_module_compile(
     # Keep Result and optional object-code payloads inside their binding scope.
     match compiled:
         case Err(err):
-            Err("AOT compile error in {name}: {err.to_text()}")
+            # Render the payload to text HERE, inside the arm that binds it.
+            # `_aot_compile_failure` then emits it before this frame returns,
+            # so the reason survives even when the Err crossing does not.
+            _aot_compile_failure(name, err.to_text())
         case Ok(module):
             if val obj_bytes = module.object_code:
                 val obj_path = "{output_base}.{name}.o"
@@ -1663,8 +1713,9 @@ fn _finish_selected_module_compile(
                     case Ok(_):
                         Ok(obj_path)
                     case Err(e):
-                        Err("Failed to write object file {obj_path}: {e}")
+                        _aot_compile_failure(name,
+                            "failed to write object file {obj_path}: {e}")
             else:
-                Err("Backend produced no object code for {name}")
+                _aot_compile_failure(name, "backend produced no object code")
         case _:
-            Err("AOT compile error in {name}: backend result not Ok")
+            _aot_compile_failure(name, "backend result not Ok")

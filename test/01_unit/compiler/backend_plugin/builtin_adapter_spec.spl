@@ -8,6 +8,8 @@ use compiler.backend.backend_plugin.registry.{BUILTIN_MIR_ABI_DIGEST_V1}
 use compiler.backend.backend_plugin.loader.{load_backend}
 use compiler.backend.backend_plugin.session.{BackendSession}
 use compiler.common.attributes.{vhdl_hardware_metadata_default}
+use std.io_runtime.{file_exists, file_size_raw}
+use app.io.{shell}
 use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_types.{SymbolId}
 use compiler.mir.mir.*
@@ -77,6 +79,45 @@ describe "built-in backend compile adapter":
         expect(llvm_output.object_code.len()).to_be_greater_than(0)
         expect(cranelift_output.has_object_code).to_equal(true)
         expect(cranelift_output.object_code.len()).to_be_greater_than(0)
+
+    it "publishes an object through a retained Cranelift session's object-path AOT":
+        # Regression fence for the positional native-build blocker (2026-09-06).
+        #
+        # `BuiltinBackendCompileAdapter.compile_aot_into_path` used to refuse
+        # EVERY non-LLVM backend outright -- "scalar object-path AOT is
+        # available only for builtin LLVM", status 1, no object written. That
+        # is a statement about the emitter, not about the backend: the very
+        # same adapter's `compile_aot_module` (exercised by the case above)
+        # produces Cranelift object code happily.
+        #
+        # It mattered because an admitted BackendSession makes the pure-Simple
+        # driver take the object-path branch UNCONDITIONALLY
+        # (driver_aot_native_output.spl, `_compile_selected_module`), so
+        # `native-build --backend cranelift <file>.spl` in its POSITIONAL form
+        # -- the only form that runs the pure-Simple driver at all, since
+        # `--entry` delegates to the Rust seed extern at
+        # bootstrap_main.spl:378-382 -- failed with no object and, because the
+        # Err payload does not survive the compiled stage-2 crossing, no
+        # readable reason either.
+        #
+        # Pre-fix this case FAILS at the very first expect: status is 1.
+        step("Stage a private directory for the object and its diagnostic")
+        val stage_dir = "/tmp/unit_builtin_adapter_cranelift_object_path"
+        _ = shell("rm -rf '{stage_dir}' && mkdir -p '{stage_dir}'")
+        val object_path = "{stage_dir}/probe.o"
+        val diagnostic_path = "{stage_dir}/message"
+
+        step("Compile representative MIR straight into an object path")
+        val session = load_backend(builtin_compile_request("cranelift")).ok().unwrap()
+        val status = session.compile_aot_into_path(
+            representative_plugin_mir(), false, 0, "generic", [],
+            object_path, diagnostic_path)
+
+        step("The object-path route succeeds and publishes a non-empty object")
+        expect(status).to_equal(0)
+        expect(file_exists(object_path)).to_equal(true)
+        expect(file_size_raw(object_path)).to_be_greater_than(0)
+        _ = shell("rm -rf '{stage_dir}'")
 
     it "rejects unknown target text before factory creation without fallback":
         step("Request a target with no exact built-in target mapping")
