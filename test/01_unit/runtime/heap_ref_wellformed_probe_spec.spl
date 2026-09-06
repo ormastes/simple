@@ -16,8 +16,8 @@
 #   * a `== nil` guard cannot fire: a zeroed payload is not the nil/None
 #     representation.
 #
-# The fix is `rt_heap_ref_wellformed`, a FORMATION probe: 1 only for a
-# heap-tagged pointer outside the zero page. It performs NO registry probe,
+# The fix is `rt_heap_ref_wellformed`, a FORMATION probe: 1 for tagged heap
+# references and raw/untagged class references outside the zero page. It performs NO registry probe,
 # so it can never false-reject a live object -- that is the property that
 # makes it safe to call at a fail-closed handoff.
 #
@@ -72,6 +72,7 @@ describe "the probe answers FORMATION, never liveness":
         # a hardening guard into an outage; this case pins that it does not.
         val check = file_read(SELFCHECK_C)
         expect(check).to_contain("rt_heap_ref_wellformed(heap_tagged) == 1")
+        expect(check).to_contain("rt_heap_ref_wellformed(untagged) == 1")
         expect(check).to_contain("wellformed without a registry probe")
 
     it "treats a scalar (tagged-integer) payload as malformed by design":
@@ -80,11 +81,10 @@ describe "the probe answers FORMATION, never liveness":
         val check = file_read(SELFCHECK_C)
         expect(check).to_contain("rt_heap_ref_wellformed(24) == 0")
 
-    it "is two masked comparisons, with no registry call in its body":
+    it "is one masked zero-page comparison, with no registry call in its body":
         # A registry probe here would break the never-false-reject property
         # above, so the body is pinned verbatim rather than by name only.
         val runtime = file_read(RUNTIME_C)
-        expect(runtime).to_contain("if ((((uint64_t)value) & RT_VALUE_TAG_MASK) != RT_VALUE_TAG_HEAP) return 0;")
         expect(runtime).to_contain("return (((uint64_t)value) & ~RT_VALUE_TAG_MASK) >= 4096 ? 1 : 0;")
 
 describe "the bootstrap capsule executes the probe self-check":
