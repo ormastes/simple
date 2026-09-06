@@ -1,0 +1,70 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-GFO-003
+# design: doc/05_design/compiler/frontend/gpu_frontend_offload_switch_design.md ; plan: doc/03_plan/agent_tasks/gpu_frontend_offload.md
+"""
+# Frontend offload switch observed through `simple run`
+
+**Category:** Compiler / Driver
+**Status:** Implemented (receipt cases need a pure-Simple binary)
+
+## Purpose and Audience
+
+Runs a hello world through the binary named by `SIMPLE_BIN` (default
+`/home/yoon/dev/simple/bin/simple`). The default path must stay unchanged. The
+two switch cases are only observable through the pure-Simple driver; the
+deployed `bin/simple` is the Rust seed, which ignores the switch, so they are
+skipped unless `SIMPLE_BIN` names a self-hosted binary.
+"""
+use std.spec.*
+use std.io_runtime.{process_run, env_get, env_set, file_write, mkdir_p}
+
+val SIMPLE_BIN_DEFAULT: text = "/home/yoon/dev/simple/bin/simple"
+val SEED_SKIP_REASON: text = "deployed bin/simple is the Rust seed; pure-Simple driver not deployed"
+
+fn probe_binary() -> text:
+    val override = env_get("SIMPLE_BIN")
+    if override != "":
+        return override
+    SIMPLE_BIN_DEFAULT
+
+fn probe_source() -> text:
+    var dir = env_get("TMPDIR")
+    if dir == "":
+        dir = "/tmp"
+    dir = "{dir}/frontend_offload_driver_spec"
+    expect(mkdir_p(dir)).to_equal(true)
+    val path = "{dir}/hello.spl"
+    expect(file_write(path, "# frontend offload probe\nval greeting = \"hello offload\"\nprint greeting\n")).to_equal(true)
+    path
+
+fn run_probe(offload: text, fallback: text, trace: text) -> (text, text, i64):
+    env_set("SIMPLE_FRONTEND_OFFLOAD", offload)
+    env_set("SIMPLE_FRONTEND_OFFLOAD_FALLBACK", fallback)
+    env_set("SIMPLE_INTERP_TRACE", trace)
+    val result = process_run(probe_binary(), ["run", probe_source()])
+    env_set("SIMPLE_FRONTEND_OFFLOAD", "")
+    env_set("SIMPLE_FRONTEND_OFFLOAD_FALLBACK", "")
+    env_set("SIMPLE_INTERP_TRACE", "")
+    result
+
+describe "frontend offload switch through simple run":
+    it "keeps the default path unchanged":
+        val (out, _err, code) = run_probe("", "", "")
+        expect(code).to_equal(0)
+        expect(out).to_contain("hello offload")
+
+    if env_get("SIMPLE_BIN") == "":
+        skip("Record the offload decision receipt", SEED_SKIP_REASON)
+        skip("Refuse to demote under require-requested", SEED_SKIP_REASON)
+    else:
+        it "Record the offload decision receipt":
+            val (out, err, code) = run_probe("on", "allow-cpu", "1")
+            expect(code).to_equal(0)
+            expect(out).to_contain("hello offload")
+            expect(err).to_contain(
+                "[frontend-offload] requested=hybrid_vector_gpu selected=cpu_reference reason=parse_mode_unimplemented source=env")
+
+        it "Refuse to demote under require-requested":
+            val (_out, err, code) = run_probe("on", "require-requested", "")
+            expect(code).to_not_equal(0)
+            expect(err).to_contain("frontend_offload_required_mode_unavailable")
