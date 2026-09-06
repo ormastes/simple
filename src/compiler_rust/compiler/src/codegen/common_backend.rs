@@ -1837,6 +1837,7 @@ impl<M: Module> CodegenBackend<M> {
                 &self.function_return_types,
                 &self.enum_defs,
                 self.tag_runtime_pool_join_result,
+                self.target.is_baremetal(),
             )
         }));
         match body_result {

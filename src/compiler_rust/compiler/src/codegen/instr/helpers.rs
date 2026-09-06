@@ -40,9 +40,17 @@ pub(crate) fn get_vreg_or_default<M: Module>(
     builder.ins().iconst(types::I64, 3)
 }
 
+/// `baremetal` selects the freestanding heap-tag vocabulary. It MUST come from
+/// the compilation target (`Target::is_baremetal()`, `common/src/target.rs`,
+/// threaded in as `InstrContext::baremetal`) and never be assumed: the
+/// freestanding tag numbers below OVERLAP hosted `HeapObjectType` values
+/// (`runtime/src/value/heap.rs`), so applying them on a hosted build turns an
+/// honest `-1` sentinel into a confidently wrong length read out of an
+/// unrelated field.
 pub(crate) fn inline_runtime_len_value(
     builder: &mut FunctionBuilder,
     value: cranelift_codegen::ir::Value,
+    baremetal: bool,
 ) -> cranelift_codegen::ir::Value {
     let invalid = builder.ins().iconst(types::I64, -1);
     let tag_mask = builder.ins().iconst(types::I64, 7);
@@ -96,11 +104,24 @@ pub(crate) fn inline_runtime_len_value(
     // (baremetal_runtime_core.inc.c:2060-2068), so len sits at offset 8 -- the
     // SAME offset as strings and arrays, and NOT SplDict's offset 16. It
     // therefore joins the offset-8 group, not the spldict branch.
-    let is_bm_dict = builder.ins().icmp_imm(IntCC::Equal, object_type, 11);
+    //
+    // TARGET-GATED, and it has to be: hosted `HeapObjectType::Unique` is 0x0B
+    // == 11 (runtime/src/value/heap.rs:19), so an ungated tag-11 arm would make
+    // `.len()` on a hosted Unique load its offset-8 word -- not a length -- and
+    // report it as one. That is the same silent-wrong-answer class this arm
+    // exists to remove, only aimed at the hosted lane. The predicate is
+    // `Target::is_baremetal()` (common/src/target.rs), the same one
+    // common_backend.rs already uses to disable PIC for freestanding targets;
+    // it reaches here as `InstrContext::baremetal`.
     // RuntimeString, RuntimeArray and RuntimeDict store len at offset 8.
     let has_len_str_arr = builder.ins().bor(is_string, is_array);
     let has_len_rt = builder.ins().bor(has_len_str_arr, is_dict);
-    let has_len_rt2 = builder.ins().bor(has_len_rt, is_bm_dict);
+    let has_len_rt2 = if baremetal {
+        let is_bm_dict = builder.ins().icmp_imm(IntCC::Equal, object_type, 11);
+        builder.ins().bor(has_len_rt, is_bm_dict)
+    } else {
+        has_len_rt
+    };
     let has_len = builder.ins().bor(has_len_rt2, is_spldict);
     builder.ins().brif(has_len, len_block, &[], done_block, &[invalid]);
     builder.seal_block(type_block);

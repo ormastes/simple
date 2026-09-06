@@ -317,7 +317,7 @@ fn compile_inline_len<M: Module>(
     let result = if trusted_array {
         inline_runtime_array_len_value(builder, value)
     } else {
-        inline_runtime_len_value(builder, value)
+        inline_runtime_len_value(builder, value, ctx.baremetal)
     };
     ctx.vreg_values.insert(*dest, result);
     Ok(true)
