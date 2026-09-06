@@ -47,12 +47,12 @@ not by raising the ceiling.
 registry's own `sites` column, which its mandatory generator rewrites (`misc`
 846→836), and `misc` counts as a group. Both are the things Lane 2 exists to fix.
 
-### Lane 2 — ungrouped rt_ is a lint error (item 2)
+### Lane 2 — ungrouped rt_ is an advisory lint check (item 2)
 `work/rt-api-groups-enforce-2026-09-06` (PR #419). `check-rt-api-groups.shs` +
 frozen `rt_api_group_baseline.txt`.
 **Two defects found on review, both open:** the manifest description claims
 "green at tip" while the gate measures `FAIL — 37 unregistered, 5 over budget`;
-and the title says ungrouped API is "a real error" while the manifest row is
+and the manifest row is
 `push_blocking=false`, i.e. advisory — it blocks nothing.
 **Two suspected defects were tested and did NOT reproduce** — recorded so they
 are not re-raised: `RT_API_GEN_BASELINE=1` in the env does not launder a PASS
