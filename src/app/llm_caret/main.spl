@@ -66,17 +66,16 @@ use app.llm_caret.chat_tui.{
     SessionResumeResult,
     SessionHooks
 }
-use app.llm_caret.json_helpers.{build_message_json, ja}
+use app.llm_caret.json_helpers.{build_message_json, ja, extract_json_bool}
 use app.llm_caret.server.{handle_route, build_error_response,
     build_chat_completion_response, build_anthropic_response,
+    build_chat_completion_stream_response, build_anthropic_stream_response,
     parse_chat_request_content, parse_chat_request_model}
 use app.llm_caret.session.{Session, save_session, load_session, list_session_ids, gen_session_id}
 use app.llm_caret.gui.{caret_gui_html, caret_gui_prompt,
     caret_gui_json_content, caret_gui_json_error}
 use app.llm_caret.messaging.cli.{run_messaging_cli}
 use app.llm_caret.workspace_cli.{run_workspace_cli}
-use app.ui.electron.app_launcher.{resolve_workspace_electron_app_launch,
-    electron_app_launch_args}
 
 # ============================================================================
 # Argument parsing (pure - unit-testable without a live process)
@@ -453,10 +452,31 @@ fn proxy_handle(method: text, path: text, body: text,
         if resp.is_error:
             return (502, build_error_response(resp.error, 502))
         if path == "/v1/messages":
-            return (200, build_anthropic_response(resp.content, resp.model, resp.stop_reason))
-        return (200, build_chat_completion_response(resp.content, resp.model, resp.stop_reason))
+            return (200, build_anthropic_response(resp.content, resp.model, resp.stop_reason,
+                resp.input_tokens, resp.output_tokens))
+        return (200, build_chat_completion_response(resp.content, resp.model, resp.stop_reason,
+            resp.input_tokens, resp.output_tokens))
     val body_text = handle_route(method, path, body)
     (status_for_path(path), body_text)
+
+# SSE sibling of proxy_handle for `"stream": true` requests. Kept as a
+# separate function (not a proxy_handle branch) so proxy_handle's existing
+# (i64, text) signature and callers are untouched. Same content/model
+# extraction and error mapping as proxy_handle; only the success path
+# differs in body shape and content-type.
+fn proxy_handle_stream(path: text, body: text,
+                       dispatch: fn(text, text) -> LLMResponse) -> (i64, text, text):
+    val content = parse_chat_request_content(body)
+    if content == "":
+        return (400, "application/json; charset=utf-8", build_error_response("messages required", 400))
+    val model = parse_chat_request_model(body)
+    val resp = dispatch(content, model)
+    if resp.is_error:
+        return (502, "application/json; charset=utf-8", build_error_response(resp.error, 502))
+    if path == "/v1/messages":
+        return (200, "text/event-stream", build_anthropic_stream_response(resp.content, resp.model,
+            resp.stop_reason, resp.input_tokens, resp.output_tokens))
+    (200, "text/event-stream", build_chat_completion_stream_response(resp.content, resp.model, resp.stop_reason))
 
 fn _proxy_dispatch(content: text, model: text) -> LLMResponse:
     var use_model = model
@@ -467,7 +487,7 @@ fn _proxy_dispatch(content: text, model: text) -> LLMResponse:
                    RT_CLI_PATH, RT_SYSTEM_PROMPT, "", 0, RT_MAX_TOKENS, messages_json)
 
 fn _to_http_status(code: i64) -> HttpStatus:
-    if code == 200: return HttpStatus.OK
+    if code == 200: return HttpStatus.Ok
     if code == 400: return HttpStatus.BadRequest
     if code == 401: return HttpStatus.Unauthorized
     if code == 404: return HttpStatus.NotFound
@@ -564,16 +584,26 @@ fn _http_handle(req: HttpRequest) -> HttpResponse:
     val guard = guard_request(req.header("Authorization"), req.body, required_token(), req.remote_addr, current_time_ms())
     var code = guard.1
     var body = guard.2
+    var content_type = "application/json; charset=utf-8"
     if guard.0:
-        val result = proxy_handle(method, req.path, req.body, _proxy_dispatch)
-        code = result.0
-        body = result.1
+        val wants_stream = (method == "POST" and
+            (req.path == "/v1/chat/completions" or req.path == "/v1/messages") and
+            extract_json_bool(req.body, "stream"))
+        if wants_stream:
+            val result = proxy_handle_stream(req.path, req.body, _proxy_dispatch)
+            code = result.0
+            content_type = result.1
+            body = result.2
+        else:
+            val result = proxy_handle(method, req.path, req.body, _proxy_dispatch)
+            code = result.0
+            body = result.1
     # Access log: level-gated via SIMPLE_LOG (default off - std.log's
     # documented behavior), so this costs ~nothing when not enabled.
     log_info("llm_caret.server", method + " " + req.path + " " + req.remote_addr + " -> " + code.to_text())
     HttpResponse(
         status: _to_http_status(code),
-        headers: [("Content-Type", "application/json; charset=utf-8")],
+        headers: [("Content-Type", content_type)],
         body: body
     )
 
@@ -696,22 +726,37 @@ fn _gui_handle_connection(stream: TcpStream):
             val _written = _gui_write_response(stream, response.0, response.1, response.2)
     val _closed = stream.close()
 
+fn _caret_electron_binary() -> text:
+    val app_binary = "tools/electron-shell/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron"
+    if file_exists(app_binary):
+        return app_binary
+    val shim = "tools/electron-shell/node_modules/.bin/electron"
+    if file_exists(shim):
+        return shim
+    ""
+
 fn _gui_ready(host: text, port: i32, shell: text) -> bool:
     val url = "http://{host}:{port}/"
     print "llm_caret GUI ready at {url} shell={shell}"
     if shell == "electron":
-        val launch = resolve_workspace_electron_app_launch()
-        if not launch.ready:
-            print "Error: Caret Electron launch unavailable: {launch.reason}"
+        val electron = _caret_electron_binary()
+        if electron == "":
+            print "Error: Electron is not installed under tools/electron-shell/node_modules"
             return false
         var electron_env: {text: text} = {}
         electron_env["SIMPLE_ELECTRON_TITLE"] = "LLM Caret — Electron"
         electron_env["SIMPLE_ELECTRON_WIDTH"] = "900"
         electron_env["SIMPLE_ELECTRON_HEIGHT"] = "680"
+        var electron_args = ["--no-sandbox"]
         val debug_port = env_get("LLM_CARET_ELECTRON_DEBUG_PORT") ?? ""
+        if debug_port != "":
+            electron_args.push("--remote-debugging-port=" + debug_port)
+        electron_args.push("tools/electron-shell")
+        electron_args.push("--url")
+        electron_args.push(url)
         val pid = process_spawn_async_env(
-            launch.binary,
-            electron_app_launch_args(launch.package_dir, url, debug_port),
+            electron,
+            electron_args,
             electron_env)
         if pid <= 0:
             print "Error: failed to launch Electron"

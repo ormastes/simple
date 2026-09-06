@@ -1292,7 +1292,44 @@ pub fn rt_process_is_running(args: &[Value]) -> Result<Value, CompileError> {
             Ok(None) => Ok(Value::Bool(true)), // still running
             _ => Ok(Value::Bool(false)),       // exited or error
         },
-        None => Ok(Value::Bool(false)), // not tracked
+        // Not one of OUR children. `false` here is wrong: a pid we did not
+        // spawn can be perfectly alive. The C runtime
+        // (src/runtime/runtime_process.c:54) already gets this right — it
+        // falls back to `kill(pid, 0)` when waitpid reports ECHILD — and the
+        // interpreter must match, or callers silently get "dead" for every
+        // process they did not spawn themselves.
+        //
+        // This was reported as a caret bug: `cs`'s roster showed every agent
+        // as `exited: pane pid <N> is not running` while `tmux list-panes`
+        // said `dead=0`, because tmux — not cs — is the pane's parent.
+        // See doc/08_tracking/bug/interpreter_process_is_running_false_for_unspawned_pid_2026-09-06.md
+        None => Ok(Value::Bool(pid_is_live(pid))),
+    }
+}
+
+/// Liveness probe for a pid this process did not spawn.
+///
+/// Signal 0 performs the permission and existence checks without delivering a
+/// signal. EPERM means the process exists but belongs to another user, which
+/// is still "alive" for our purposes — treating it as dead is the bug this
+/// exists to avoid.
+fn pid_is_live(pid: i64) -> bool {
+    if pid <= 0 {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
+        if rc == 0 {
+            return true;
+        }
+        std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    }
+    #[cfg(not(unix))]
+    {
+        // No cheap portable probe here; report unknown as not-running rather
+        // than claiming liveness we did not verify.
+        false
     }
 }
 

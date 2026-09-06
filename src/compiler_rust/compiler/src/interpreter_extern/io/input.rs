@@ -38,14 +38,17 @@ pub fn input(args: &[Value]) -> Result<Value, CompileError> {
 
     use std::io::{self, BufRead};
     let stdin = io::stdin();
-    let line = stdin
-        .lock()
-        .lines()
-        .next()
-        .transpose()
-        .map_err(|e| crate::error::factory::input_error(&e))?
-        .unwrap_or_default();
-    Ok(Value::text(line))
+    // `.lines().next()` yields `None` at EOF. Map that to `Value::Nil` rather
+    // than `unwrap_or_default()`-ing it into `""` — a blank line and EOF must
+    // stay distinguishable, matching the C runtime's `rt_stdin_read_line`
+    // (src/runtime/runtime_native.c:2262, returns NULL at EOF) and the
+    // `-> text?` extern contract declared at every `.spl` call site (e.g.
+    // src/lib/nogc_sync_mut/io/pipe.spl:185). See
+    // doc/08_tracking/bug/seed_interpreter_stdin_read_line_erases_eof_2026-09-06.md.
+    match stdin.lock().lines().next().transpose().map_err(|e| crate::error::factory::input_error(&e))? {
+        Some(line) => Ok(Value::text(line)),
+        None => Ok(Value::Nil),
+    }
 }
 
 /// Read a single character from stdin
