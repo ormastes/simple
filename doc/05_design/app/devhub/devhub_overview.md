@@ -76,8 +76,9 @@ configured underneath.
 |---|---|---|---|
 | `task_manager` | github | `adapter_github.spl` (`gh_run`, subprocess wrapper around real `gh`) | passthrough |
 | `task_manager` | jira | `adapter_jira.spl` (acli-backed) + `adapter_jira_curl.spl` (REST v3 fallback) | acli-first, curl-fallback |
-| `git` | github | `adapter_github.spl` | passthrough |
-| `git` | bitbucket | `adapter_bitbucket.spl` + `adapter_bitbucket_curl.spl` twin | PR-scoped only today |
+| `git` | *(router)* | `cmd_git.spl` + `backend_resolve.spl` + `gh_compat.spl`, reached as `devhub gh` / `devhub git` / `bin/gh` | **landed 2026-09-06** — resolves the backend, then delegates below |
+| `git` | github | `adapter_github.spl` | passthrough (byte-identical to the real `gh`) |
+| `git` | bitbucket | `adapter_bitbucket.spl` + `adapter_bitbucket_curl.spl` twin | PR-scoped; gh argv translated in, Bitbucket JSON normalised to gh field names out |
 | `wiki` | confluence | `adapter_confluence.spl` | REST, ~1:1 with `cmd_wiki.spl` |
 | `wiki` | github | `wiki_git.spl` (`wiki_git_list/read/write/delete/search`, git-shell over `<repo>.wiki.git`) + `cmd_wiki.spl` (`_wiki_github_list/view/edit/create/delete/search`) | **done** — landed directly in the shared `wiki_git.spl` module rather than the originally proposed standalone `adapter_github_wiki.spl` (§7 G14–G16 note) |
 | `web_storage` | minio | `adapter_minio.spl` (SigV4, zero shell-out) | primary |
@@ -115,6 +116,24 @@ workspace/repo config defaults — `cmd_bb.spl` still resolves those from
 `--workspace`/`--repo` flags or `BB_WORKSPACE`/`BB_REPO` env vars only, not
 from `config.sdn`.
 
+**CLOSED 2026-09-06.** All three of the "still missing" items above now exist:
+`ItfConfig` gained `git_default_backend` (`[git] default_backend`),
+`bb_workspace` and `bb_repo` (`[bitbucket] workspace` / `repo`), plus
+`token_envs` (a `[token_env]` section mapping a provider to the **NAME** of an
+environment variable). Resolution moved into one module,
+`src/app/devhub/backend_resolve.spl`, which serves the full chain
+`--backend > DEVHUB_GIT_BACKEND > .spipe/config.sdn [devhub] > ~/.config/itf/config.sdn > git remote origin > error`.
+
+Two structural additions this pass:
+- **A repo-scoped config rung.** `.spipe/config.sdn` gained a `devhub:` section
+  (`git_backend`, `bb_workspace`, `bb_repo`, `<provider>_token_env`). It is
+  git-**tracked**, which is exactly why it records only the *name* of a
+  credential's environment variable and never a secret. It parses through
+  `config.spl`'s own `parse_sdn_sections` rather than a second parser, so it
+  inherits the first-colon-split fix instead of re-introducing that bug.
+- **`bin/gh`**, a PATH shim implementing the same chain in POSIX sh, so the
+  common github case never pays the ~12s Simple startup. See §7a below.
+
 **Devhub alias (later):** once broader devhub tooling wants a
 `~/.config/devhub/` path, the same file is expected to also resolve there
 (or the `itf` path symlinked/aliased) — not yet implemented, tracked under
@@ -146,7 +165,7 @@ apply devhub-wide.
 
 | # | Decision | Rule |
 |---|---|---|
-| **D1** | `--backend {jira\|github\|all}` / `{github\|bitbucket}` / `{confluence\|github}` precedence | Explicit `--backend` flag > per-facade config default (`tasks.default_backend`, `wiki.default_backend` — real `ItfConfig` fields, gap G6, confirmed in `config.spl`) > error listing which backends are configured. **Confirmed 2026-07-20 for `tasks`/`wiki`** (`cmd_tasks.spl` `_tasks_backend_default()`, mirrored in `cmd_wiki.spl`). **Drift:** `git.default_backend` does not exist yet — `git`/`bb` backend selection still has no config-default step, only `--backend` or per-command flags (§7 G6 still-open note). |
+| **D1** | `--backend {jira\|github\|all}` / `{github\|bitbucket}` / `{confluence\|github}` precedence | Explicit `--backend` flag > per-facade config default (`tasks.default_backend`, `wiki.default_backend` — real `ItfConfig` fields, gap G6, confirmed in `config.spl`) > error listing which backends are configured. **Confirmed 2026-07-20 for `tasks`/`wiki`** (`cmd_tasks.spl` `_tasks_backend_default()`, mirrored in `cmd_wiki.spl`). **Drift CLOSED 2026-09-06:** `git_default_backend` is now a real `ItfConfig` field and the `git` facade exists as `cmd_git.spl` (`devhub gh` / `devhub git`), resolving through `backend_resolve.spl`. The chain is *longer* than the other two facades' by design — it adds a repo-scoped `.spipe/config.sdn [devhub] git_backend` rung above the user config, and a `git remote origin` host sniff below it, so a fresh clone of a Bitbucket repo works with zero configuration while a team's committed answer still beats a personal default. |
 | **D2** | `--search` / free-text query is backend-native, never translated | gh's `-S/--search` and `gh search issues/prs` take GitHub search-qualifier syntax verbatim; Jira's equivalent is JQL. devhub passes each straight through per-backend (matches `_jira_search`/`_github_list` contracts exactly). `--backend all` with a raw query prints a warning that the same string goes to both engines verbatim and results may differ in kind, not just content. **Confirmed 2026-07-20, with a minor nuance**: `_jira_build_list_jql(...)` (`cmd_tasks.spl:182`) wraps `--search` as `text ~ "{search}"` before handing it to Jira — a JQL free-text clause, not a byte-for-byte passthrough — while the GitHub path passes `--search`/`-S` through unchanged. Consistent with "backend-native," just not a literal string copy on the Jira side. |
 | **D3** | `@me` / assignee synthesis | GitHub's `"@me"` is a literal gh resolves server-side — pass through unchanged. Jira has no such literal in JQL; `--assignee @me` must synthesize `assignee = currentUser()` inside the adapter layer (gap G1), not the CLI layer. **Confirmed 2026-07-20** — implemented exactly as `_jira_build_list_jql(...)` in `cmd_tasks.spl:182` (private helper, not in the adapter file as originally proposed — naming drift only, behavior matches). |
 | **D4** | `--state {open\|closed\|all}` mapping | Clean 1:1 for GitHub. For Jira, mapped through JQL `statusCategory`: `open` → `statusCategory != Done`, `closed` → `statusCategory = Done`, `all` → omit clause. Lives in the same `_jira_build_list_jql` gap-fn as D3. **Confirmed 2026-07-20**, byte-for-byte match in source. |
@@ -277,6 +296,72 @@ expose:
 
 **Test evidence for this pass:** `bin/simple test test/01_unit/app/devhub/`
 → 25 spec files, 661 tests, 0 failed (2026-07-20).
+
+---
+
+## 7a. `bin/gh` — why interception, and why it is written in sh
+
+Devhub's adapters were complete and devhub was still bypassed for every pull
+request. The cause was mechanical: `gh` is on `PATH`, devhub is not in the way,
+and `devhub gh pr create` is strictly more typing than `gh pr create` for no
+gain on a GitHub repo. A rule telling agents to prefer devhub is the weakest
+enforcement surface available — this repo already learned that about pre-push
+guards. So the facade is reached by **replacing `gh`**, not by asking people to
+type something else.
+
+Three constraints shaped the implementation, each verified before it was written:
+
+1. **It must not recurse.** `adapter_github.spl` invoked the bare name `gh`
+   through `PATH`. With a shim ahead of the real binary that is a fork bomb, not
+   a slow path. The shim resolves the real binary while it can still see an
+   unshadowed `PATH` and exports `DEVHUB_REAL_GH`; `gh_binary()` prefers it.
+2. **It must not be slow.** `bin/devhub --version` costs **12.0 s** (measured
+   2026-09-06) because the stdlib is read as source per process. So backend
+   resolution is duplicated in POSIX sh, and the github case `exec`s the real
+   `gh` without entering Simple at all — measured **0.138 s** (re-timed after
+   the `$PWD` walk-up landed; 0.078 s before that loop existed), versus 12 s if it
+   routed through the interpreter. A wrapper that taxes the common path gets
+   uninstalled; this one is free on it. It is also what
+   `.claude/rules/code-style.md` asks for ("production wrappers should execute
+   cached compiled artifacts, not raw source") — satisfied here by not executing
+   raw source on the hot path at all.
+3. **The duplication must not drift.** The sh and Simple chains read the same
+   sources in the same order, **both anchored on the caller's working
+   directory** — `bin/gh` walks up from `$PWD` for `.spipe/config.sdn` and
+   sniffs `git remote` without `-C`, mirroring `find_repo_root()` in
+   `backend_resolve.spl`. That anchoring is the whole feature and was the first
+   version's worst bug: the shim originally read *its own* repository, so a
+   developer with Simple's `bin/` on `PATH` working in a Bitbucket-hosted
+   checkout got Simple's committed `git_backend: github` and was sent to the
+   real `gh` — breaking precisely the case the shim exists for, while every
+   test passed because they all ran from the Simple root.
+   `gh_shim_backend_routing_spec.spl` runs the real shim as a subprocess and
+   asserts both halves agree, including the PATH-shadowed configuration where
+   the recursion hazard is live and a scratch repository whose config differs
+   from Simple's.
+
+A fourth constraint emerged from the same review and is worth stating
+separately, because it generalises: **the refusal policy must be an allowlist.**
+The named refuse-lists (`--draft`, `--web`, `--admin`, …) are a *blocklist*, and
+a blocklist only catches what someone thought of. `gh pr create --body-file` —
+the exact form `.claude/rules/vcs.md` prescribes for opening a pull request —
+matched no rename and no refusal, reached the Bitbucket command layer, was never
+read, and would have opened a PR with an empty body and exit 0. Each verb now
+declares the flags it can actually translate and refuses everything else by
+name, so the policy holds by construction rather than by a list staying
+complete. `--body-file` itself is resolved to an inline `--body` in
+`cmd_git.spl` (reading a file is I/O; `gh_compat.spl` stays pure).
+
+The shim hands its resolved backend to devhub as the **environment** rung, not
+as an injected `--backend` flag. The flag form was the first implementation and
+was wrong: `_extract_flag` returns the first match, so the shim's own copy
+landed ahead of the caller's and an explicit `gh --backend github …` silently
+lost to the shim's guess. As an env value it sits exactly where §5 D1 puts it.
+
+**Installation is opt-in.** Nothing puts `bin/` on `PATH` automatically. On this
+repository — which is on GitHub — the shim's only effect would be to `exec` the
+real `gh`, so mandating it here would add a moving part for no behaviour change.
+It earns its keep on a checkout whose backend is not GitHub.
 
 ---
 

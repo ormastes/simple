@@ -112,3 +112,7 @@ Verification commands are recorded in `doc/03_plan/agent_tasks/tiny_ui_web_wm.md
 - product evidence follow-up (2026-08-16): `b170f8bd370fbdef992873a6f29d4dd8d1cd0faa` adds built-in/ROM/VFS navigation scenarios, and `cda76b5e357d2af31281f5ddf386229b7f1720fa` retains validated presented pixels in preallocated storage with mutation-isolation coverage. Both have runner-independent static evidence only.
 - no-GC audit (2026-08-16): recorded B-14 for post-initialization Web/GUI transient arena growth; no zero-allocation claim is permitted until its source and instrumented runtime gate are complete.
 - B-14 implementation (2026-08-16): retained twelve constructor-owned backing stores across six Web/GUI arena owners; converted consumers to logical extents and reset-in-place; added real integration/system reuse assertions and a hand-mirrored nine-scenario manual. Runtime and allocator PASS remain blocked on an admitted pure-Simple binary.
+
+## Ownership transfer (2026-09-06)
+
+Perf-only edits to `src/lib/nogc_sync_mut/tiny/gui/state.spl`, `tiny/tui/{cell,render}.spl`, and `tiny/engine2d/software.spl` are transferred to lane `ui_slim_kernel_plugin` (A04/A05/A07: P03/P04/P05/P10/P11). Public contracts, B-10..B-14 repair sources, and the fail-closed system rows stay owned here and are not to be weakened. Return of ownership: when `.spipe/ui_slim_kernel_plugin/state.md` marks Wave 2 Tiny done.
