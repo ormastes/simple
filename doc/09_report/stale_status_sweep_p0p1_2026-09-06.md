@@ -162,7 +162,7 @@ record-derived row without a hand check.**
 155 rows actually reached, 47 (30%) are fixed-candidates (`LIKELY-FIXED` +
 `DUAL-LANE-GREEN`) and 79 (51%) are confirmed still failing. Of the 47
 candidates, hand verification (§4) disqualified a large fraction — the honest
-clean-close shortlist is **6 rows**, not 47. Extrapolating the 8/15 ratio to
+clean-close shortlist is **5 rows**, not 47. Extrapolating the 8/15 ratio to
 272 rows would have overstated the free wins by roughly an order of magnitude.
 
 The full 272-row classified table, one row per input row with the verbatim
@@ -197,11 +197,18 @@ nothing, which is a tracking defect in its own right:
 ## 4. Hand verification
 
 18 fixed-candidates were read by hand: the bug record's stated defect against
-the example names of the spec that actually ran. **12 of the 18 do not survive
+the example names of the spec that actually ran. **13 of the 18 do not survive
 the check.** The pattern that kills them is uniform — the spec is green, and it
 is green about something adjacent to the defect.
 
-### 4.1 Survives — recommend a status change (6)
+**One more row of the swallow class, flagged but NOT hand-checked:**
+`test_runner_phantom_failed_after_all_examples_pass_2026-07-20` sits in
+`LIKELY-FIXED` on a declared repro. It is the same shape as row 8 below — a bug
+whose symptom is *the runner reporting the wrong outcome* cannot be detected by
+reading that runner's outcome. **Do not close it without a negative control**
+(a spec engineered to fail, which must be reported as failing).
+
+### 4.1 Survives — recommend a status change (5)
 
 | # | Row | Verdict line as printed | Why it holds |
 |---|---|---|---|
@@ -210,9 +217,8 @@ is green about something adjacent to the defect.
 | 3 | `struct_shorthand_arg_order_binds_wrong_field_2026-07-20` | `SPEC FILE VERDICT: test/feature/usage/struct_shorthand_spec.spl outcome=OK declared>=15 executed=15 passed=15 failed=0 skipped=0 dropped=0` | The record quotes the two failing examples by name, and both — *uses explicit then shorthand*, *mixes shorthand with explicit named argument* — are in this spec and now pass. Declared repro, right lane (record localises the defect to "interpreter or HIR lowering"). |
 | 4 | `x25519_extern_not_registered_interp_2026-06-15` | `SPEC FILE VERDICT: test/01_unit/lib/common/crypto/typed/asym_spec.spl outcome=OK declared>=13 executed=13 passed=13 failed=0 skipped=0 dropped=0` | Record: `Status: Source fixed 2026-07-15; existing KAT and standalone run verification pending`. This run IS that pending verification — *shared secret hex matches oracle*, *shared secret len is 32* are x25519 KAT examples and pass. Note the record says **P3**, while the DB row says P1; the severity should be reconciled too. |
 | 5 | `aes128_ccm_rfc3610_kat_mismatch_2026-07-20` | `SPEC FILE VERDICT: test/unit/lib/crypto/aes128_ccm_rfc3610_kat_spec.spl outcome=OK declared>=12 executed=12 passed=12 failed=0 skipped=0 dropped=0` | The record names this exact spec as the exercising surface and the symptom is RFC 3610 §8 KAT mismatch on vectors #1/#4/#7. All three vectors' encrypt+decrypt examples pass, plus tamper-rejection. The record's instruction "**Do not touch the expected vectors**" is satisfied — the spec still asserts the canonical RFC values. |
-| 6 | `engine2d_factory_returns_dict_under_test_runner_2026-08-19` | `SPEC FILE VERDICT: test/02_integration/rendering/engine2d_drawing_spec.spl outcome=OK declared>=2 executed=2 passed=2 failed=0 skipped=0 dropped=0` | The defect is defined as happening **under `bin/simple test`** ("`Engine2D.create_with_backend(...)` returns a dict"), so the interpret lane is the correct and only relevant lane. *draw_rect_filled fills correct region* and *clear fills entire framebuffer* both require a real Engine2D, not a dict. Record-derived, but the lane and the mechanism line up exactly. **Weakest of the six** — the spec does not name the bug id. |
 
-### 4.2 Fails the check — a green spec that does not cover the defect (12)
+### 4.2 Fails the check — a green spec that does not cover the defect (13)
 
 | # | Row | Verdict line as printed | Why the pass is not a fix |
 |---|---|---|---|
@@ -227,13 +233,14 @@ is green about something adjacent to the defect.
 | 15 | `array_at_returns_nil_for_every_index_2026-08-01` | `... array_at_option_spec.spl outcome=OK declared>=11 executed=11 passed=11 failed=0 ...` (green in the JIT lane too) | Record's own lane table: interpreter FIXED, JIT FIXED, native LLVM FIXED to JIT parity — "**The pure-Simple `native-build` lane is still OPEN** (no `at` arm in its MIR lowering)". Exactly the lane no harness on this host can reach. Narrow the row to `native-build`; do not close. |
 | 16 | `dict_class_field_contains_key_after_insert_2026-08-08` | `... dict_class_field_contains_key_after_insert_spec.spl outcome=OK declared>=3 executed=3 passed=3 failed=0 ...` | The spec's own third example is titled *"...(interpreter-only; **native SEGFAULTs**, see bug doc)"*. The interpreter half is genuinely fixed; the native half is still a segfault by the spec's own admission. Split, do not close. |
 | 17 | `enum_impl_static_fn_scoping_2026-07-29` | interpret: `... static_fn_spec.spl outcome=OK declared>=26 executed=26 passed=26 failed=0 ...`; JIT: same 26/26 | Genuinely encouraging — the record's stated failure lane is "silent wrong values on the default JIT engine", and the JIT lane is now 26/26. But the record is a *scoping study* with a "Why this is not a small fix" section covering more surface than this one spec. Recommend: re-scope the row against the study's own checklist, not a blanket close. |
+| 6 | `engine2d_factory_returns_dict_under_test_runner_2026-08-19` | `SPEC FILE VERDICT: test/02_integration/rendering/engine2d_drawing_spec.spl outcome=OK declared>=2 executed=2 passed=2 failed=0 skipped=0 dropped=0` | The lane is right — the defect is defined as happening under `bin/simple test`. But the mechanism is **symbol resolution inside `it` blocks**, not Engine2D: the record's own related-list names `module_named_like_its_class_shadows_it_inside_it_blocks_2026-08-04` as the "same root fact 1", and **that row is still open**. *draw_rect_filled fills correct region* passing proves Engine2D constructed correctly *in that one file*; it cannot distinguish "the registry shadowing is fixed" from "this spec's import shape happens not to trigger it". Record-derived, and the spec never names the bug id. Not closeable on this evidence. |
 | 18 | `interp_run_enum_single_field_payload_corrupt_2026-06-15` | JIT lane: `... bytes/bits_spec.spl outcome=OK declared>=13 executed=13 passed=13 failed=0 ...` | Defect is specifically on `bin/simple run` (JIT), and the JIT lane is now green over 13 bit-packing round-trip examples that would expose an `n >> 3` payload shift. Record-derived spec though — it does not name the bug id, and the record's minimal repro (`enum Tok: Literal(b: i64)`) is not directly present. Promising; needs the minimal repro run before closing. |
 
 ---
 
 ## 5. Recommended status changes
 
-### 5.1 Close (6) — `open` -> `fixed`
+### 5.1 Close (5) — `open` -> `fixed`
 
 Every one of these has BOTH a clean on-lane verdict line quoted in §4.1 AND a
 bug record whose own text supports the change.
@@ -243,7 +250,6 @@ bug record whose own text supports the change.
 3. `struct_shorthand_arg_order_binds_wrong_field_2026-07-20`
 4. `x25519_extern_not_registered_interp_2026-06-15` (**also reconcile severity**: the record says P3, the DB row says P1)
 5. `aes128_ccm_rfc3610_kat_mismatch_2026-07-20`
-6. `engine2d_factory_returns_dict_under_test_runner_2026-08-19`
 
 ### 5.2 Narrow the scope, keep open (4)
 
@@ -257,13 +263,27 @@ still-broken remainder justifies keeping it open under a tighter title.
 | `gc_analysis_desugar_dropped_method_bodies_2026-08-02` | `mod.spl` + the 41 of 45 unfixed `(was: impl ...)` blocks |
 | `duplicate_public_symbols_differing_return_types_jit_misdispatch_2026-08-09` | still live; **update the measured scale from 373 to 22** collisions |
 
-### 5.3 Rows that are worse than recorded (3)
+### 5.3 Rows whose recorded evidence is stale (2)
+
+**No row among the 155 reached turned out to be WORSE than its record says.**
+The brief anticipated a few; measurement found none. Every row that failed
+failed in the way its record already describes. The pessimistic half of the
+drift hypothesis is not supported here — which is itself a result, and is
+stated rather than padded.
+
+What did degrade is the *evidence*, not the defect. Two rows have lost the
+repro their record names:
 
 | Row | Recorded | Measured today |
 |---|---|---|
-| `class_field_reference_semantics_diverge_2026-08-06` | open | Confirmed still diverging — its pinning spec is green, which is the failure signal. No drift, but the row deserves a note that its spec reads inverted. |
-| `text_len_bytes_vs_index_codepoints_2026-07-02` | open, with a named repro | `SPEC-ROTTED` — the named repro no longer parses or executes zero examples. The row has lost its evidence. |
+| `text_len_bytes_vs_index_codepoints_2026-07-02` | open, with a named repro | `SPEC-ROTTED` — the named repro no longer parses, or executes zero examples. The row has lost its evidence and nobody can verify it as written. |
 | `web_renderer_layout_paint_hang_resolution_independent_2026-07-14` | open, with a named repro | `SPEC-ROTTED`, same failure. |
+
+Related but not in this class:
+`class_field_reference_semantics_diverge_2026-08-06` is exactly as recorded —
+still diverging (§4.2 row 13). It needs no status change, only a note on the row
+that its spec is inversion-pinned, so a future reader does not mistake the green
+verdict for a fix.
 
 ### 5.4 Tracking-hygiene changes, no engineering (2 classes)
 
