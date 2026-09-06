@@ -195,5 +195,18 @@ fi
 { echo "c_status=$c_status"; echo "c_reason=$c_reason"; echo "c_fps_x1000=$c_fps"; } > "$OUT_DIR/c.env"
 { echo "simple_status=$simple_status"; echo "simple_reason=$simple_reason"; echo "simple_fps_x1000=$s_fps"; } > "$OUT_DIR/simple.env"
 
-aggregate "$c_fps" "$s_fps" "$c_status" "$simple_status" "$c_reason" "$simple_reason" \
-    | tee "$OUT_DIR/evidence.env"
+# `aggregate | tee` returned TEE's status, so a `compare_status=fail` run still
+# exited 0 and the gate could not fail. Capture, then propagate (2026-09-06).
+agg_out=$(aggregate "$c_fps" "$s_fps" "$c_status" "$simple_status" "$c_reason" "$simple_reason")
+agg_rc=$?
+printf '%s\n' "$agg_out" > "$OUT_DIR/evidence.env"
+printf '%s\n' "$agg_out"
+
+agg_status=$(printf '%s\n' "$agg_out" | awk -F= '$1 == "compare_status" { print $2; exit }')
+case "$agg_status" in
+    pass)    echo "PASS — 2 leg(s) checked (c, simple), ratio_x1000=$(printf '%s\n' "$agg_out" | awk -F= '$1 == "compare_ratio_x1000" { print $2; exit }'), 0 below budget" ;;
+    skipped) echo "ERROR — nothing was checked ($(printf '%s\n' "$agg_out" | awk -F= '$1 == "compare_reason" { print $2; exit }'))"; exit 2 ;;
+    fail)    echo "FAIL — 2 leg(s) checked (c, simple), $(printf '%s\n' "$agg_out" | awk -F= '$1 == "compare_reason" { print $2; exit }')" ;;
+    *)       echo "ERROR — nothing was checked (no compare_status in aggregate output)"; exit 2 ;;
+esac
+exit "$agg_rc"
