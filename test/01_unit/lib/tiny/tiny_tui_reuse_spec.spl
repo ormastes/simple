@@ -1,0 +1,254 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-LIB
+# research: doc/01_research/ui/slim_kernel_plugin/simple_slim_ui_parallel_agent_briefs_2026-09-05.md ; plan: doc/03_plan/ui/slim_kernel_plugin/plan.md ; architecture: doc/04_architecture/tiny_ui_web_wm.md ; design: doc/05_design/ui/slim_kernel_plugin/design.md
+
+# @cover src/lib/nogc_sync_mut/tiny/tui/cell.spl 80%
+# @cover src/lib/nogc_sync_mut/tiny/tui/render.spl 80%
+# @req REQ-UI-SLIM-007
+# @req REQ-UI-SLIM-010
+"""
+# Tiny TUI reusable frame buffer
+
+**Category:** Library / Tiny UI profile
+**Plan:** doc/03_plan/ui/slim_kernel_plugin/plan.md
+**Design:** doc/05_design/ui/slim_kernel_plugin/design.md
+
+## Purpose and Audience
+
+`tiny_tui_render` allocates a whole cell grid on every frame and rebuilds a
+glyph array for every piece of text it draws. A terminal front end redraws
+continuously, so both costs repeat forever. This scenario is how a Tiny UI
+engineer confirms the reuse route added for that — a caller-owned
+`TinyCellBuffer` filled in place by `tiny_tui_render_into` — is a pure cost
+change and not a behaviour change.
+
+Three things are proven here, and they are the three ways a buffer-reuse
+optimisation normally goes wrong:
+
+- **Parity.** The reused buffer must produce byte-identical rows to the
+  allocating route across text, wide (multi-byte) glyphs, clipped nodes,
+  resize up then back down, a stale parent generation, and two consecutive
+  frames whose text changed between them. A reset that only blanks part of the
+  grid shows up here as a ghost glyph from the previous frame.
+- **Snapshot safety (REQ-UI-SLIM-010).** `tiny_tui_render` keeps returning a
+  fresh value snapshot. Two retained results from different frames must stay
+  different after the private reused buffer is rendered again — a private
+  scratch buffer that leaks into a published snapshot is the failure this
+  requirement exists to prevent.
+- **Allocation (REQ-UI-SLIM-007).** Bounded operation is claimed with a
+  counter, not with an assumption about `push`. A warmed fixed scene rendered
+  ten times into the reused buffer performs zero buffer allocations, and text
+  drawing costs at most one glyph read per visible column rather than one per
+  character of the source string.
+
+## Scope and Preconditions
+
+Pure library scenarios: no filesystem, no terminal, no runtime allocator
+instrumentation. The counters are module state in the two owned modules and
+never affect rendering. `tiny_cell_buffer_alloc_count` counts backing-store
+allocations (`create` and `with_capacity`); `tiny_tui_glyph_read_count` counts
+single-glyph reads performed while drawing text.
+
+Capacity is fixed at construction. A viewport whose cell product exceeds the
+buffer's capacity is an explicit `TINY_ERR_CAPACITY` receipt and leaves the
+buffer's previous contents untouched — it never silently grows.
+"""
+# @req: REQ-LIB-TINY-001 — stable requirement identity for this spec.
+
+use std.spec.*
+use std.tiny.common.status.{TINY_ERR_CAPACITY, TINY_OK}
+use std.tiny.common.types.{TinyHandle, TinyRect}
+use std.tiny.gui.component.{TINY_COMPONENT_BUTTON, TINY_COMPONENT_CHECKBOX, TINY_COMPONENT_LIST, TINY_COMPONENT_PANE, TINY_COMPONENT_TEXT, TINY_COMPONENT_TEXT_INPUT}
+use std.tiny.gui.state.{TinyGuiState}
+use std.tiny.tui.cell.{TinyCellBuffer, tiny_cell_buffer_alloc_count, tiny_cell_buffer_alloc_reset}
+use std.tiny.tui.render.{tiny_tui_glyph_read_count, tiny_tui_glyph_read_reset, tiny_tui_render, tiny_tui_render_into}
+
+fn _rows_of(buffer: TinyCellBuffer) -> text:
+    """Every logical row of a buffer joined into one comparable string."""
+    var out = "{buffer.width}x{buffer.height}:"
+    var y = 0
+    while y < buffer.height:
+        out = out + buffer.row_text(y) + "|"
+        y = y + 1
+    out
+
+fn _text_scene(value: text) -> TinyGuiState:
+    """A fixed three-control scene whose text-input caption is `value`."""
+    var state = TinyGuiState.bounded(4)
+    val root = TinyHandle.invalid()
+    state.add(root, TINY_COMPONENT_TEXT_INPUT, TinyRect(x: 1, y: 1, width: 8, height: 3), value)
+    state.add(root, TINY_COMPONENT_CHECKBOX, TinyRect(x: 1, y: 4, width: 8, height: 1), "On")
+    state.add(root, TINY_COMPONENT_BUTTON, TinyRect(x: 1, y: 6, width: 8, height: 3), "Go")
+    state.focused_index = 2
+    state
+
+# ============================================================================
+# Primary Scenarios
+# ============================================================================
+# @manual_section: Tiny TUI reusable frame buffer
+
+describe "Tiny TUI reusable frame buffer":
+
+    it "renders a corpus into a reused buffer byte-identically to the allocating route":
+        # @req REQ-UI-SLIM-007
+        step("render each corpus scene through tiny_tui_render and tiny_tui_render_into")
+        step("Verify: both routes produce identical logical rows")
+        # @capture(bit_table): allocating-route rows versus reused-buffer rows
+        var scratch = TinyCellBuffer.with_capacity(14 * 10)
+
+        # plain text and a focused control
+        var plain = _text_scene("Hi")
+        val plain_fresh = tiny_tui_render(plain, 12, 10)
+        expect(tiny_tui_render_into(plain, TinyRect(x: 0, y: 0, width: 12, height: 10), scratch).code).to_equal(TINY_OK)
+        expect(_rows_of(scratch)).to_equal(_rows_of(plain_fresh))
+
+        # multi-byte glyphs must advance one cell per scalar, not per byte
+        var wide = _text_scene("aé漢b")
+        val wide_fresh = tiny_tui_render(wide, 12, 10)
+        expect(tiny_tui_render_into(wide, TinyRect(x: 0, y: 0, width: 12, height: 10), scratch).code).to_equal(TINY_OK)
+        expect(_rows_of(scratch)).to_equal(_rows_of(wide_fresh))
+        expect(scratch.row_text(2)).to_contain("aé漢")
+
+        # a node clipped at the buffer edge
+        var clipped = TinyGuiState.bounded(1)
+        clipped.add(TinyHandle.invalid(), TINY_COMPONENT_BUTTON, TinyRect(x: 3, y: 1, width: 8, height: 3), "Wide")
+        val clipped_fresh = tiny_tui_render(clipped, 6, 3)
+        expect(tiny_tui_render_into(clipped, TinyRect(x: 0, y: 0, width: 6, height: 3), scratch).code).to_equal(TINY_OK)
+        expect(_rows_of(scratch)).to_equal(_rows_of(clipped_fresh))
+
+        # resize up, then back down: the shrink must not leave stale rows
+        expect(tiny_tui_render_into(plain, TinyRect(x: 0, y: 0, width: 14, height: 8), scratch).code).to_equal(TINY_OK)
+        expect(_rows_of(scratch)).to_equal(_rows_of(tiny_tui_render(plain, 14, 8)))
+        expect(tiny_tui_render_into(clipped, TinyRect(x: 0, y: 0, width: 6, height: 3), scratch).code).to_equal(TINY_OK)
+        expect(_rows_of(scratch)).to_equal(_rows_of(clipped_fresh))
+
+        # a stale parent generation must be skipped by both routes alike
+        var stale = TinyGuiState.bounded(3)
+        stale.add(TinyHandle.invalid(), TINY_COMPONENT_LIST, TinyRect(x: 0, y: 0, width: 12, height: 2), "")
+        stale.add(stale.handle_at(0), TINY_COMPONENT_TEXT, TinyRect(x: 0, y: 0, width: 8, height: 1), "first")
+        var orphan = stale.nodes[1]
+        orphan.parent = TinyHandle(index: 0, generation: orphan.parent.generation + 41)
+        stale.nodes[1] = orphan
+        val stale_fresh = tiny_tui_render(stale, 12, 4)
+        expect(tiny_tui_render_into(stale, TinyRect(x: 0, y: 0, width: 12, height: 4), scratch).code).to_equal(TINY_OK)
+        expect(_rows_of(scratch)).to_equal(_rows_of(stale_fresh))
+        expect(scratch.row_text(0)).to_not_contain(">")
+
+        # two frames with changed text between them
+        var frame_one = _text_scene("AAAA")
+        var frame_two = _text_scene("B")
+        expect(tiny_tui_render_into(frame_one, TinyRect(x: 0, y: 0, width: 12, height: 10), scratch).code).to_equal(TINY_OK)
+        expect(scratch.row_text(2)).to_contain("AAAA")
+        expect(tiny_tui_render_into(frame_two, TinyRect(x: 0, y: 0, width: 12, height: 10), scratch).code).to_equal(TINY_OK)
+        expect(_rows_of(scratch)).to_equal(_rows_of(tiny_tui_render(frame_two, 12, 10)))
+        expect(scratch.row_text(2)).to_not_contain("AAAA")
+
+        # a child-local pane still resolves through the shared pane tree
+        var nested = TinyGuiState.bounded(2)
+        nested.add(TinyHandle.invalid(), TINY_COMPONENT_PANE, TinyRect(x: 2, y: 1, width: 6, height: 4), "")
+        nested.add(nested.handle_at(0), TINY_COMPONENT_BUTTON, TinyRect(x: 1, y: 1, width: 6, height: 3), "Go")
+        expect(tiny_tui_render_into(nested, TinyRect(x: 0, y: 0, width: 12, height: 8), scratch).code).to_equal(TINY_OK)
+        expect(_rows_of(scratch)).to_equal(_rows_of(tiny_tui_render(nested, 12, 8)))
+
+    it "keeps two retained snapshots distinct after the reused buffer is redrawn":
+        # @req REQ-UI-SLIM-010
+        step("retain two tiny_tui_render results from different frames")
+        step("Verify: redrawing the private reused buffer mutates neither snapshot")
+        # @capture(bit_table): retained snapshot rows before and after reuse
+        var first = _text_scene("AAAA")
+        var second = _text_scene("BBBB")
+        val snapshot_one = tiny_tui_render(first, 12, 10)
+        val snapshot_two = tiny_tui_render(second, 12, 10)
+        val before_one = _rows_of(snapshot_one)
+        val before_two = _rows_of(snapshot_two)
+        expect(before_one == before_two).to_equal(false)
+
+        var scratch = TinyCellBuffer.with_capacity(12 * 10)
+        expect(tiny_tui_render_into(second, TinyRect(x: 0, y: 0, width: 12, height: 10), scratch).code).to_equal(TINY_OK)
+        expect(tiny_tui_render_into(first, TinyRect(x: 0, y: 0, width: 12, height: 10), scratch).code).to_equal(TINY_OK)
+
+        expect(_rows_of(snapshot_one)).to_equal(before_one)
+        expect(_rows_of(snapshot_two)).to_equal(before_two)
+        expect(_rows_of(snapshot_one) == _rows_of(snapshot_two)).to_equal(false)
+        expect(snapshot_one.row_text(2)).to_contain("AAAA")
+        expect(snapshot_two.row_text(2)).to_contain("BBBB")
+
+    it "allocates no buffer for a warmed fixed scene and reads at most one glyph per visible column":
+        # @req REQ-UI-SLIM-007
+        step("warm the reused buffer, then render the same scene ten times")
+        step("Verify: zero buffer allocations and column-bounded glyph reads")
+        # @capture(bit_table): allocation and glyph-read counters
+        var scene = _text_scene("Hi")
+        var scratch = TinyCellBuffer.with_capacity(12 * 10)
+        val viewport = TinyRect(x: 0, y: 0, width: 12, height: 10)
+        expect(tiny_tui_render_into(scene, viewport, scratch).code).to_equal(TINY_OK)
+
+        tiny_cell_buffer_alloc_reset()
+        var frame = 0
+        while frame < 10:
+            expect(tiny_tui_render_into(scene, viewport, scratch).code).to_equal(TINY_OK)
+            frame = frame + 1
+        expect(tiny_cell_buffer_alloc_count()).to_equal(0)  # oracle: 0 — REQ-UI-SLIM-007 warmed fixed scene allocates no buffer
+
+        # the allocating route still allocates exactly one buffer per frame
+        tiny_cell_buffer_alloc_reset()
+        tiny_tui_render(scene, 12, 10)
+        tiny_tui_render(scene, 12, 10)
+        expect(tiny_cell_buffer_alloc_count()).to_equal(2)  # oracle: 2 — one backing store per tiny_tui_render call
+
+        # a long caption clipped to five columns costs five glyph reads, not fifty
+        var long_caption = TinyGuiState.bounded(1)
+        long_caption.add(TinyHandle.invalid(), TINY_COMPONENT_TEXT, TinyRect(x: 0, y: 0, width: 5, height: 1), "0123456789012345678901234567890123456789012345678")
+        tiny_tui_glyph_read_reset()
+        expect(tiny_tui_render_into(long_caption, TinyRect(x: 0, y: 0, width: 12, height: 3), scratch).code).to_equal(TINY_OK)
+        expect(tiny_tui_glyph_read_count()).to_equal(5)  # oracle: 5 — one read per visible column of the clipped caption
+        expect(scratch.row_text(0)).to_start_with("01234")
+        expect(scratch.row_text(0)).to_not_contain("5")
+
+    it "reports an explicit capacity receipt instead of growing the reused buffer":
+        # @req REQ-UI-SLIM-007
+        step("render a viewport larger than the reused buffer capacity")
+        step("Verify: TINY_ERR_CAPACITY receipt and untouched previous contents")
+        # @capture(bit_table): capacity receipt and preserved buffer state
+        var scene = _text_scene("Hi")
+        var scratch = TinyCellBuffer.with_capacity(12 * 10)
+        expect(scratch.capacity()).to_equal(120)  # oracle: 120 — fixed capacity from construction
+        expect(tiny_tui_render_into(scene, TinyRect(x: 0, y: 0, width: 12, height: 10), scratch).code).to_equal(TINY_OK)
+        val kept = _rows_of(scratch)
+
+        val receipt = tiny_tui_render_into(scene, TinyRect(x: 0, y: 0, width: 13, height: 10), scratch)
+        expect(receipt.code).to_equal(TINY_ERR_CAPACITY)
+        expect(receipt.is_ok()).to_equal(false)
+        expect(scratch.capacity()).to_equal(120)  # oracle: 120 — capacity never grows
+        expect(scratch.width).to_equal(12)
+        expect(scratch.height).to_equal(10)
+        expect(_rows_of(scratch)).to_equal(kept)
+
+    it "normalizes invalid dimension products through both routes":
+        # @req REQ-UI-SLIM-007
+        step("render negative and zero dimension products through both routes")
+        step("Verify: an empty bounded buffer and an ok receipt, never a fault")
+        # @capture(bit_table): normalized dimensions for invalid products
+        val fresh = tiny_tui_render(TinyGuiState.bounded(0), -2, -3)
+        expect(fresh.width).to_equal(0)
+        expect(fresh.height).to_equal(0)
+        expect(fresh.cells.len()).to_equal(0)
+
+        var empty_scratch = TinyCellBuffer.with_capacity(0)
+        expect(empty_scratch.capacity()).to_equal(0)  # oracle: 0 — a zero-capacity buffer is legal and bounded
+        var scene = _text_scene("Hi")
+        expect(tiny_tui_render_into(scene, TinyRect(x: 0, y: 0, width: -2, height: -3), empty_scratch).code).to_equal(TINY_OK)
+        expect(empty_scratch.width).to_equal(0)
+        expect(empty_scratch.height).to_equal(0)
+
+        # a zero product keeps the surviving axis, exactly as the allocating route does
+        var scratch = TinyCellBuffer.with_capacity(120)
+        expect(tiny_tui_render_into(scene, TinyRect(x: 0, y: 0, width: 0, height: 9), scratch).code).to_equal(TINY_OK)
+        expect(scratch.width).to_equal(0)
+        expect(scratch.height).to_equal(9)
+        expect(_rows_of(scratch)).to_equal(_rows_of(tiny_tui_render(scene, 0, 9)))
+        expect(tiny_tui_render_into(scene, TinyRect(x: 0, y: 0, width: 7, height: -1), scratch).code).to_equal(TINY_OK)
+        expect(scratch.width).to_equal(7)
+        expect(scratch.height).to_equal(0)
+        expect(_rows_of(scratch)).to_equal(_rows_of(tiny_tui_render(scene, 7, -1)))
+        expect(scratch.glyph_at(0, 0)).to_equal("")
