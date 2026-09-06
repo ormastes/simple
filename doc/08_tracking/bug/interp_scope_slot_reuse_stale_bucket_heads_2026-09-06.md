@@ -116,8 +116,11 @@ observe that `env_push_scope` recycles a slot incorrectly.
 ## Regression spec
 
 `test/01_unit/compiler_core/interpreter/env_scope_slot_reuse_spec.spl`
-(5 `it` blocks: 2 reproduction, 3 generalization — repeated recycles, two
-nesting levels, scope-stack balance).
+(7 `it` blocks: 2 reproduction, 5 generalization — repeated recycles, two
+nesting levels, scope-stack balance, and the two OTHER readers of the same
+bucket chain, `env_assign` (`env.spl:113`) and `env_lookup` (`env.spl:143`),
+which walk `buckets[scope_bucket]` into the same keys array and were exposed
+to the identical stale head).
 
 Lane: `SIMPLE_TEST_RUNNER_RUST=1 bin/simple test <spec>` on the Rust seed
 `bin/release/aarch64-unknown-linux-gnu/simple` (50093192 bytes, 2026-09-06
@@ -127,8 +130,8 @@ from the working tree on every run. No JIT or native-lane claim is made.
 Measured in one tree with one binary, `git stash` toggling only `env.spl`:
 
 ```
-env_scope_slot_reuse_spec.spl   defect present : Passed: 0   Failed: 5
-                                fixed          : Passed: 5   Failed: 0
+env_scope_slot_reuse_spec.spl   defect present : Passed: 0   Failed: 7
+                                fixed          : Passed: 7   Failed: 0
 
 while_body_scope_spec.spl       defect present : Passed: 3   Failed: 3
                                 fixed          : Passed: 6   Failed: 0
