@@ -1185,6 +1185,30 @@ pub fn rt_process_spawn_guarded(args: &[Value]) -> Result<Value, CompileError> {
     process_spawn(args, true)
 }
 
+/// Exit status as the caller's `rt_process_wait` contract wants it: the code for
+/// a normal exit, `-(128 + signo)` for a signal death, `-1` only when neither is
+/// available. `ExitStatus::code()` returns `None` for a signal death, so the
+/// long-standing `code().unwrap_or(-1)` discarded WTERMSIG and rendered every
+/// signal death as a bare -1 -- which the caller shows as 255 and the bootstrap
+/// then reported as "worker was KILLED ... signal number discarded by an older
+/// runtime". That was indistinguishable from an OOM, a SIGSEGV and a failed
+/// wait, and cost four investigations on one Stage-3 crash. `runtime_process.c`
+/// was fixed on 2026-09-05; this is the same rule for its Rust twins.
+/// See doc/08_tracking/bug/stage3_worker_reaped_silently_in_hir_typecheck_2026-09-05.md
+fn wait_status_to_code(status: std::process::ExitStatus) -> i64 {
+    if let Some(code) = status.code() {
+        return code as i64;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(signo) = status.signal() {
+            return -(128 + signo as i64);
+        }
+    }
+    -1
+}
+
 /// Wait for a spawned process to complete
 ///
 /// Callable from Simple as: `rt_process_wait(pid, timeout_ms)`
@@ -1223,7 +1247,7 @@ pub fn rt_process_wait(args: &[Value]) -> Result<Value, CompileError> {
             match poll {
                 Ok(Some(status)) => {
                     SPAWNED_PROCESSES.lock().unwrap().remove(&pid);
-                    return Ok(Value::Int(status.code().unwrap_or(-1) as i64));
+                    return Ok(Value::Int(wait_status_to_code(status)));
                 }
                 Ok(None) if std::time::Instant::now() >= deadline => return Ok(Value::Int(-2)),
                 Ok(None) => std::thread::sleep(std::time::Duration::from_millis(10)),
@@ -1238,7 +1262,7 @@ pub fn rt_process_wait(args: &[Value]) -> Result<Value, CompileError> {
     let mut processes = SPAWNED_PROCESSES.lock().unwrap();
     match processes.remove(&pid) {
         Some(mut child) => match child.wait() {
-            Ok(status) => Ok(Value::Int(status.code().unwrap_or(-1) as i64)),
+            Ok(status) => Ok(Value::Int(wait_status_to_code(status))),
             Err(_) => Ok(Value::Int(-1)),
         },
         None => {
