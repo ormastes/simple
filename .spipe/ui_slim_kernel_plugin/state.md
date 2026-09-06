@@ -37,6 +37,7 @@ plan-done (research, design, plan written 2026-09-05; implementation Wave 0 not 
 - [x] implement (Wave 1) — 2026-09-05: A03 screen batching (40→1 row copies, 11/11), P08 shared_wm_route split (async_app closure 343→9, 2/2), A02 composition_adapter (6/6), A01 `check-ui-slim-closure.shs` (selftest 5/5). All evidence is SEED-LANE (diagnostic), not a certified pure-Simple PASS.
 - [ ] verify — needs deployed pure-Simple `ui`; the closure gate must run as a push-tier manifest row (`config/check/must_check_gates.sdn`) once green
 - [~] Wave 2 — A06 landed 2026-09-05 (`event_wait.spl`, blocking recv, single file read; 9/9 seed lane, sabotage bites; commit `9b4bde48`). Gate hardened to ERROR on unresolved import edges (`cf7f3843`) and wired as advisory push row `push-ui-slim-closure` (`8cbc097d`). Open: Tiny (after transfer), packs, and the `simple ui tui` stub wiring decision.
+- [~] Wave 2 cont. (2026-09-06, seed lane): A07 span fill `ba74a4d4` (10000→0 per-pixel checks, 22-case parity), ANSI splice fix `b0d1310a` (screen_ansi 23/23), TUI wiring `f131dfa0` (`simple ui tui` runs the real app; stub behind `SIMPLE_UI_TUI_STUB=1`; `tui_shared_wm` backend entry), A05 buffer reuse `a1fdf293` (0 allocs warmed), deps bare-import fix `49ebe141` (host_gui closure 2→40), A04 linear layout `a63af020` (n=201: 601 steps vs 40200), session skia split `7794d60b` (async_app closure skia 20→0). Open: deps dotted-directory resolution (in flight), packs (A10), Wave 3.
 - [ ] Wave 3 (measure, certify)
 - [ ] ship
 

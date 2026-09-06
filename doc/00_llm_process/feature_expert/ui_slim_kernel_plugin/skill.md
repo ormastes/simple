@@ -24,6 +24,10 @@ Own the split of TUI/GUI products into composition kernel + selected providers +
 
 Research/design/plan done 2026-09-05; Wave 1 landed the same day on the seed lane (diagnostic): `screen.spl` single-cell hline batching (`screen_row_copy_count` oracle, 40→1), `shared_wm_route.spl` split (async_app closure 343→9 files), `ui/composition_adapter.spl` (`admit_static`), and `scripts/check/check-ui-slim-closure.shs` (fail-closed, `--selftest`). Gate usage: `sh scripts/check/check-ui-slim-closure.shs src/app/ui.tui/async_app.spl src/os/compositor src/os/drivers src/os/kernel src/lib/skia src/lib/gc_async_mut/gpu`. Caveat: seed `deps fast` resolves package-rooted imports only — a lower bound. Instrumentation: `screen_row_copy_count` (screen.spl) is an always-on module `var` bumped in `_screen_replace_row`; per the log-retention convention it stays as a diagnostic hook and must be gated or removed after Wave 3 certification. Blockers: no certified baseline on macOS (bootstrap shim), Tiny files owned by the open `tiny_ui_web_wm` lane, `kernel_plugin` layer absent, 800-module cap not redeployed. Do not repeat dynSMF default-on, SIMD-first, or a TUI rewrite.
 
+## Wave 2 state (2026-09-06)
+
+`simple ui tui` now runs `run_async_tui` (stub only under `SIMPLE_UI_TUI_STUB=1`; shared-WM TUI via backend key `tui_shared_wm`). `UISession.submit_widget_draw_ir` lives in `ui/session_draw_ir.spl` — GUI/browser callers must `use nogc_sync_mut.ui.session_draw_ir.{}`; a missing import fails loudly. Tiny: `resolved_panes` is linear with bounded per-parent metadata (`metadata_valid()`, `child_ordinal_of`), `tiny_tui_render_into` reuses a caller-owned buffer, `fill_clipped` uses `_fill_span`. Diagnostic counters (all module `var`s, gate/remove after Wave 3): `screen_row_copy_count`, `tiny_cell_buffer_alloc_count`, `tiny_software_*_count`, the layout step counter, `event_wait` wake counter.
+
 ## Seed-lane facts that shape specs here (2026-09-05)
 
 - `thread_spawn`/`thread_spawn_with_args` run their closure synchronously under the seed interpreter; `run()` loops cannot be exercised live on this lane — model arrival-over-time instead.
