@@ -41,7 +41,7 @@ describe "packed Draw IR generation storage and bounded handoff":
         match store.seal(admitted):
             DrawIrPackedSealV3.Sealed(value): sealed = value
             DrawIrPackedSealV3.Refused(reason): expect(false).to_equal(true)
-        expect(sealed.content_hash.len()).to_equal(64)
+        expect(sealed.content_hash.len()).to_equal(16)  # oracle: _draw_ir_packed_hash_v3 renders one FNV-1a u64 as 16 hex digits
         expect(store.publish(sealed)).to_equal(DRAW_IR_PACKED_REASON_OK)
         match store.take():
             DrawIrPackedHandoffV3.Ready(value):
@@ -147,3 +147,45 @@ describe "packed Draw IR generation storage and bounded handoff":
             DrawIrPackedAdmissionV3.Admitted(value): ref = value
             DrawIrPackedAdmissionV3.Refused(reason): expect(false).to_equal(true)
         expect(store.complete(ref)).to_equal(DRAW_IR_PACKED_REASON_STATE)
+
+    it "seals identical rows to one incremental digest and different rows to another":
+        # @req REQ-GPU-SCHED-PAYLOAD-002
+        step("Seal two separate arenas over the same row values")
+        var left = DrawIrPackedGenerationStoreV3.bounded(51u64, 1u32, 2u32, 1u32)
+        var right = DrawIrPackedGenerationStoreV3.bounded(51u64, 1u32, 2u32, 1u32)
+        var other = DrawIrPackedGenerationStoreV3.bounded(51u64, 1u32, 2u32, 1u32)
+        var left_ref = DrawIrPackedGenerationRefV3(arena_id: 0u64, generation: 0u64, slot: 0u32)
+        var right_ref = left_ref
+        var other_ref = left_ref
+        match left.admit(2u32):
+            DrawIrPackedAdmissionV3.Admitted(value): left_ref = value
+            DrawIrPackedAdmissionV3.Refused(reason): expect(false).to_equal(true)
+        match right.admit(2u32):
+            DrawIrPackedAdmissionV3.Admitted(value): right_ref = value
+            DrawIrPackedAdmissionV3.Refused(reason): expect(false).to_equal(true)
+        match other.admit(2u32):
+            DrawIrPackedAdmissionV3.Admitted(value): other_ref = value
+            DrawIrPackedAdmissionV3.Refused(reason): expect(false).to_equal(true)
+        expect(left.write(left_ref, 101u64)).to_equal(DRAW_IR_PACKED_REASON_OK)
+        expect(left.write(left_ref, 202u64)).to_equal(DRAW_IR_PACKED_REASON_OK)
+        expect(right.write(right_ref, 101u64)).to_equal(DRAW_IR_PACKED_REASON_OK)
+        expect(right.write(right_ref, 202u64)).to_equal(DRAW_IR_PACKED_REASON_OK)
+        step("Seal a third arena whose second row differs by one")
+        expect(other.write(other_ref, 101u64)).to_equal(DRAW_IR_PACKED_REASON_OK)
+        expect(other.write(other_ref, 203u64)).to_equal(DRAW_IR_PACKED_REASON_OK)
+        var left_hash = ""
+        var right_hash = ""
+        var other_hash = ""
+        match left.seal(left_ref):
+            DrawIrPackedSealV3.Sealed(value): left_hash = value.content_hash
+            DrawIrPackedSealV3.Refused(reason): expect(false).to_equal(true)
+        match right.seal(right_ref):
+            DrawIrPackedSealV3.Sealed(value): right_hash = value.content_hash
+            DrawIrPackedSealV3.Refused(reason): expect(false).to_equal(true)
+        match other.seal(other_ref):
+            DrawIrPackedSealV3.Sealed(value): other_hash = value.content_hash
+            DrawIrPackedSealV3.Refused(reason): expect(false).to_equal(true)
+        step("Compare the three sealed digests")
+        expect(right_hash).to_equal(left_hash)
+        expect(other_hash).to_not_equal(left_hash)
+        expect(left_hash.len()).to_equal(16)  # oracle: _draw_ir_packed_hash_v3 renders one FNV-1a u64 as 16 hex digits
