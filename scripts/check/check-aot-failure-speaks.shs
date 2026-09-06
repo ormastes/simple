@@ -134,6 +134,13 @@ classify_run() {
   printf 'silent no-raising-site-line-and-no-reason\n'
 }
 
+# Runs the candidate and sets RUN_RC in the CALLER's shell.
+#
+# Deliberately not `RC=$(run_candidate ...)`: a command substitution runs in a
+# SUBSHELL, so the invocation counter incremented inside it is discarded and the
+# caller sees 0 invocations -- which this gate reports as ERROR. That is the
+# fail-closed direction, but it means the gate never checks anything. Assign to a
+# caller-visible variable instead of echoing.
 run_candidate() {
   _bin=$1
   _root=$2
@@ -146,9 +153,8 @@ run_candidate() {
       --backend llvm --runtime-bundle core-c-bootstrap --entry-closure \
       --mode one-binary --threads 1 --cache-dir "$_tmp/cache" \
       "$FIXTURE" --output "$_tmp/out.bin" ) > "$_tmp/run.log" 2>&1
-  _rc=$?
+  RUN_RC=$?
   EV_INVOCATIONS=$((EV_INVOCATIONS + 1))
-  printf '%s\n' "$_rc"
 }
 
 selftest() {
@@ -235,7 +241,9 @@ esac
 TMP=$(mktemp -d) || { echo "ERROR — nothing was checked (cannot mktemp)"; exit 2; }
 trap 'rm -rf "$TMP"' EXIT INT TERM
 
-RC=$(run_candidate "$ABS_CANDIDATE" "$ROOT" "$TMP")
+RUN_RC=0
+run_candidate "$ABS_CANDIDATE" "$ROOT" "$TMP"
+RC=$RUN_RC
 VERDICT_LINE=$(classify_run "$RC" "$TMP/run.log")
 KIND=$(printf '%s' "$VERDICT_LINE" | cut -d' ' -f1)
 WHY=$(printf '%s' "$VERDICT_LINE" | cut -d' ' -f2-)
