@@ -806,7 +806,19 @@ impl RenderBackend for MetalBackend:
     me submit_batch() -> bool:
         # Font work is the one thing this backend defers: a frame's text rides
         # in a single command buffer that is committed here.
-        self.font.flush() >= 0
+        val flushed = self.font.flush() >= 0
+        if self.font.frame_text_count == 0:
+            # No text this frame, so the per-frame batch contract has nothing
+            # to say; the flush verdict is the whole answer.
+            return flushed
+        # A frame that DID draw text must have cost exactly one command buffer,
+        # one commit and one wait. Until now `frame_batch_contract_met()` had no
+        # caller at all, so the contract was only ever asserted against literal
+        # integers in specs and never against the counters a real frame
+        # produced — a submit that fanned out per glyph reported success just
+        # the same. Evaluate it here, where the bool is actually consumed
+        # (src/lib/gc_async_mut/gpu/engine2d/draw_ir_adv.spl:2909,3212).
+        flushed and self.font.frame_batch_contract_met()
 
     me present():
         self.font.flush()
@@ -2387,7 +2399,10 @@ impl MetalBackend:
             self.gpu_frame_complete = self._commit_gpu_only_cpu_composite()
             return
         if not self.gpu_only:
-            self.mirror.draw_rect_blend(x, y, w, h, color)
+            # Must forward `mode`: draw_rect_blend() applies the default blend,
+            # so the caller's requested mode was silently dropped on this lane
+            # while the gpu_only branch above honoured it.
+            self.mirror.draw_rect_blend_mode(x, y, w, h, color, mode)
         self.gpu_frame_complete = false
 
 export MetalBackend
