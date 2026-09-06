@@ -409,7 +409,16 @@ fn run_tests(options: TestOptions) -> TestRunResult:
 
     for file_path in files:
         # Only check system thresholds every 20 tests (avoids 100ms CPU sleep per check)
-        if updated_options.self_protect and tests_run % 20 == 0:
+        # `tests_run > 0` is load-bearing, not a micro-optimisation. Without it
+        # the very first iteration checks, and a violation there shuts the run
+        # down with `Completed tests: 0` — a checkpoint recording no progress,
+        # so `simple test --resume` re-checks the same still-loaded machine and
+        # shuts down again: a livelock that can never advance. Measured
+        # 2026-09-06: six of eight plan-acceptance sweep shards died exactly
+        # this way ("cpu=82.0%>75.0% AND memory=79.0%>75.0%", "Completed tests:
+        # 0"), emitting no per-spec marker for any of the 28 specs they held.
+        # The periodic-checkpoint branch below already carried this guard.
+        if updated_options.self_protect and tests_run > 0 and tests_run % 20 == 0:
             val (violated, reason) = system_exceeds_threshold(updated_options.cpu_threshold, updated_options.mem_threshold)
             if violated:
                 shutdown_graceful(reason, completed_files, total_passed, total_failed, total_skipped)
