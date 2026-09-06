@@ -61,3 +61,29 @@ Applied to `encoding/base58.spl` and `hpack/decoder.spl` (§6.1 + _decode_string
 The same pattern appears ~238 times across `compress/*` and elsewhere — most work
 (only the Err-arm-taken paths crash), so a blanket rewrite is unwarranted; the
 seed fix is the real solution.
+
+## Re-probed 2026-09-06 — NOT REPRODUCIBLE
+
+Binary probed: `bin/release/aarch64-unknown-linux-gnu/simple` (Rust seed,
+aarch64). Both engines exercised: `SIMPLE_EXECUTION_MODE=interpret` (tree-walk)
+and `env -u SIMPLE_EXECUTION_MODE` (default Cranelift JIT). Probe sources are
+listed with each entry; they were run on both lanes and compared.
+
+The record's exact minimal reproducer now returns correctly from `f` on both
+lanes:
+
+```
+ERR_OK=bad     OK_OK=42      # interpret
+ERR_OK=bad     OK_OK=42      # jit
+```
+
+(`f(Err("bad"))` propagates the Err instead of binding `x` to it, and
+`f(Ok(41))` returns `Ok(42)`.) Probe `_scratch/retmatch.spl`.
+
+The "proper fix" this record specified — a control-flow-carrying error variant
+propagated to the function boundary — IS implemented, under a different name
+than the proposed `CompileError::EarlyReturn`: `interpreter/expr/control.rs`
+now does `Control::Return(v) => return Err(CompileError::TryError(Box::new(v)))`
+at five sites (`:167`, `:280`, `:304`, `:320`, `:362`). Grepping for
+`EarlyReturn` finds nothing, which is why this can look unfixed. Not fixed by
+this session.
