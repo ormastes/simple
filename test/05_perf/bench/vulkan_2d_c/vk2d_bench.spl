@@ -124,12 +124,32 @@ class Vk2dBench:
             if readback:
                 val rb = self.engine.read_pixels_with_source()
                 # Fold a stride sample so the readback is real consumed work.
-                var acc: i64 = 0
-                var i: i64 = 0
+                # The stride SCALES with the surface: a fixed +4096 sampled
+                # exactly one pixel at 64x64 (n == 4096), so the checksum read
+                # the same -15461356 for a frame with 800 rect pixels and for a
+                # blank one. `n / 4096` keeps the sample count at ~4096 pixels
+                # spread across the whole surface at any size.
+                # The fold is 32-bit FNV-1a, NOT xor. Xor over N equal samples
+                # cancels for even N, exactly the bug this file already had at
+                # the frame level. Here `acc = ((acc ^ px) * 16777619) & M` is,
+                # for a fixed px, a bijection on acc (16777619 is odd, so it is
+                # invertible mod 2^32) and for a fixed acc a bijection on px.
+                # So two equal-length sample sequences that differ at ANY index
+                # fold to different values: the last differing step yields
+                # different accs and every later step preserves the difference.
+                # Rendered and blank frames at one size have equal sample
+                # counts, hence differ iff any sampled pixel differs.
+                # Max intermediate is (2^32-1)*16777619 < 2^56, so i64 is safe.
                 val n = rb.pixels.len()
+                var stride: i64 = n / 4096
+                if stride < 1:
+                    stride = 1
+                var acc: i64 = 2166136261
+                var i: i64 = 0
                 while i < n:
-                    acc = acc ^ rb.pixels[i].to_i32().to_i64()
-                    i = i + 4096
+                    val px = rb.pixels[i].to_i32().to_i64() & 0xFFFFFFFF
+                    acc = ((acc ^ px) * 16777619) & 0xFFFFFFFF
+                    i = i + stride
                 if not checksum_latched:
                     checksum = acc
                     checksum_latched = true
