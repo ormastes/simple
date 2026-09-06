@@ -155,3 +155,38 @@ bootstrap_build_jobs_verify_receipt() {
   [ "$(bootstrap_build_jobs_receipt_value memory_budget_policy "$bbj_file")" = \
     external-not-derived-from-jobs ] || return 1
 }
+
+# Clamp a CPU-derived worker count by the memory actually available.
+#
+# The counts above are derived from CPU count alone. Each native-build worker
+# is a whole interpreted compiler graph and plateaus around 3.2 GiB of private
+# anonymous heap (measured 2026-09-06 on aarch64: 738 module loads, parse
+# 454 MB + eval 1406 MB retained, flat from t=15s). CPU-derived counts
+# therefore authorize a memory footprint nobody checked: on a 20-CPU/121 GB
+# host the incremental profile asks for 10 workers (~32 GB, sampled 31.6 GB)
+# and clean-release asks for 20 (~65 GB). With any sibling lane running, that
+# is the 2026-09-06 global OOM, which killed the user systemd manager and with
+# it every session on the box.
+#
+# Reads MemAvailable (not MemFree: page cache is reclaimable and counting it
+# as used would clamp to 1 on any warm host). Missing or unparsable meminfo
+# leaves the count untouched -- this bounds a known overshoot, it is not an
+# admission gate, and it must never make a bootstrap unrunnable.
+BOOTSTRAP_WORKER_MEM_MIB_DEFAULT=3300
+
+bootstrap_build_jobs_memory_clamp() {
+  bbj_want=$1
+  bbj_budget=${SIMPLE_BOOTSTRAP_WORKER_MEM_MIB:-$BOOTSTRAP_WORKER_MEM_MIB_DEFAULT}
+  bbj_meminfo=${BOOTSTRAP_MEMINFO_PATH:-/proc/meminfo}
+  case "$bbj_budget" in ''|*[!0-9]*|0) bbj_budget=$BOOTSTRAP_WORKER_MEM_MIB_DEFAULT ;; esac
+  [ -r "$bbj_meminfo" ] || { printf '%s\n' "$bbj_want"; return 0; }
+  bbj_avail_kb=$(awk '/^MemAvailable:/ { print $2; exit }' "$bbj_meminfo" 2>/dev/null)
+  case "$bbj_avail_kb" in ''|*[!0-9]*) printf '%s\n' "$bbj_want"; return 0 ;; esac
+  bbj_fit=$(( bbj_avail_kb / 1024 / bbj_budget ))
+  [ "$bbj_fit" -ge 1 ] || bbj_fit=1
+  if [ "$bbj_want" -gt "$bbj_fit" ]; then
+    printf '%s\n' "$bbj_fit"
+  else
+    printf '%s\n' "$bbj_want"
+  fi
+}

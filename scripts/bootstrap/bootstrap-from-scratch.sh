@@ -1108,7 +1108,14 @@ case "${jobs}" in
     exit 1
     ;;
 esac
-echo "Native build jobs: ${jobs} (host CPUs: ${host_cpus})"
+. "${repo_root}/scripts/bootstrap/bootstrap-build-jobs-policy.shs"
+jobs_cpu_derived="${jobs}"
+jobs=$(bootstrap_build_jobs_memory_clamp "${jobs}")
+if [ "${jobs}" != "${jobs_cpu_derived}" ]; then
+  echo "Native build jobs: ${jobs} (host CPUs: ${host_cpus}; clamped from ${jobs_cpu_derived} by available memory)"
+else
+  echo "Native build jobs: ${jobs} (host CPUs: ${host_cpus})"
+fi
 selfhost_jobs="${jobs}"
 if [ "${execution_profile}" = "incremental" ] && [ "${selfhost_jobs}" -gt 2 ]; then
   selfhost_jobs=2

@@ -1,0 +1,102 @@
+#!/bin/sh
+# The bootstrap's native-build worker count must respect available memory.
+#
+# Why this exists: the worker count was derived from CPU count alone, and each
+# native-build worker is a whole interpreted compiler graph plateauing around
+# 3.2 GiB. On 2026-09-06 that authorized ~32 GB on a 20-CPU host (sampled
+# 31.6 GB across 153 processes) and ~65 GB under clean-release; with sibling
+# lanes on the same box it produced a global OOM that killed the user systemd
+# manager and every session with it.
+#
+# It also pins the WIRING. scripts/bootstrap/bootstrap-build-jobs-policy.shs
+# calls itself "the canonical policy" and had ZERO callers anywhere in the
+# tree -- a policy nothing consults is not a policy. Case 7 fails if the
+# bootstrap stops calling it.
+#
+# Verdict is the last line of stdout:
+#   PASS — <n> case(s) checked, 0 failed     exit 0
+#   FAIL — <n> case(s) checked, <k> failed   exit 1
+#   ERROR — nothing was checked (<reason>)   exit 2
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+policy="$root/scripts/bootstrap/bootstrap-build-jobs-policy.shs"
+wrapper="$root/scripts/bootstrap/bootstrap-from-scratch.sh"
+[ -r "$policy" ] || { echo "ERROR — nothing was checked (missing $policy)"; exit 2; }
+[ -r "$wrapper" ] || { echo "ERROR — nothing was checked (missing $wrapper)"; exit 2; }
+
+# shellcheck source=/dev/null
+. "$policy"
+command -v bootstrap_build_jobs_memory_clamp >/dev/null 2>&1 || {
+    echo "ERROR — nothing was checked (policy defines no bootstrap_build_jobs_memory_clamp)"
+    exit 2
+}
+
+work=$(mktemp -d "${TMPDIR:-/tmp}/jobs-mem-clamp.XXXXXX") || {
+    echo "ERROR — nothing was checked (cannot create work dir)"; exit 2
+}
+trap 'rm -rf "$work"' EXIT INT TERM
+
+meminfo() {
+    printf 'MemTotal:       126000000 kB\nMemAvailable:    %s kB\n' "$1" >"$work/meminfo"
+    printf '%s\n' "$work/meminfo"
+}
+
+CHECKED=0
+FAILED=0
+expect() {
+    ex_label=$1 ex_want=$2 ex_got=$3
+    CHECKED=$((CHECKED + 1))
+    [ "$ex_got" = "$ex_want" ] || {
+        echo "  case '$ex_label': want $ex_want, got $ex_got" >&2
+        FAILED=$((FAILED + 1))
+    }
+}
+
+# 1. Tight memory clamps a CPU-derived count down. 10 GiB / 3300 MiB = 3.
+expect 'clamps under memory pressure' 3 \
+    "$(BOOTSTRAP_MEMINFO_PATH=$(meminfo 10485760) bootstrap_build_jobs_memory_clamp 20)"
+
+# 2. Ample memory leaves the CPU-derived count untouched -- the clamp bounds an
+#    overshoot, it never inflates and never becomes the binding constraint on a
+#    big host.
+expect 'ample memory does not clamp' 20 \
+    "$(BOOTSTRAP_MEMINFO_PATH=$(meminfo 419430400) bootstrap_build_jobs_memory_clamp 20)"
+
+# 3. A count already below what fits is returned unchanged.
+expect 'already-small count unchanged' 2 \
+    "$(BOOTSTRAP_MEMINFO_PATH=$(meminfo 10485760) bootstrap_build_jobs_memory_clamp 2)"
+
+# 4. Less memory than one worker needs still yields 1: a bootstrap that cannot
+#    start is worse than one that thrashes, and the caller has no fallback.
+expect 'floors at one worker' 1 \
+    "$(BOOTSTRAP_MEMINFO_PATH=$(meminfo 524288) bootstrap_build_jobs_memory_clamp 8)"
+
+# 5/6. Unreadable or unparsable meminfo leaves the count untouched. Deliberately
+#      fail-open: this bounds a known overshoot, it is not an admission gate,
+#      and it must never make a bootstrap unrunnable on a host without procfs.
+expect 'missing meminfo does not clamp' 20 \
+    "$(BOOTSTRAP_MEMINFO_PATH=$work/absent bootstrap_build_jobs_memory_clamp 20)"
+printf 'MemTotal: 126000000 kB\nMemAvailable: not-a-number\n' >"$work/bad"
+expect 'unparsable meminfo does not clamp' 20 \
+    "$(BOOTSTRAP_MEMINFO_PATH=$work/bad bootstrap_build_jobs_memory_clamp 20)"
+
+# 7. A per-worker budget override is honoured: 10 GiB / 1024 MiB = 10.
+expect 'per-worker budget override honoured' 10 \
+    "$(SIMPLE_BOOTSTRAP_WORKER_MEM_MIB=1024 BOOTSTRAP_MEMINFO_PATH=$(meminfo 10485760) \
+       bootstrap_build_jobs_memory_clamp 20)"
+
+# 8. Wiring: the bootstrap must actually call the clamp. Without this the fix
+#    silently reverts to CPU-only the next time someone edits the wrapper.
+CHECKED=$((CHECKED + 1))
+if ! grep -Fq 'bootstrap_build_jobs_memory_clamp' "$wrapper"; then
+    echo "  case 'wrapper calls the clamp': bootstrap-from-scratch.sh never calls it" >&2
+    FAILED=$((FAILED + 1))
+fi
+
+[ "$CHECKED" -gt 0 ] || { echo "ERROR — nothing was checked (no cases ran)"; exit 2; }
+if [ "$FAILED" -gt 0 ]; then
+    echo "FAIL — $CHECKED case(s) checked, $FAILED failed"
+    exit 1
+fi
+echo "PASS — $CHECKED case(s) checked, 0 failed"
