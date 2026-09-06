@@ -2,6 +2,7 @@
 
 **Use when:** Investigating bugs, analyzing errors, profiling, debugging runtime behavior.
 **Skills:** `/debug`, `/mcp-failure-analysis`
+**Mandatory step order + host-verified commands:** `.claude/skills/lib/debug_ladder.md`
 
 ## Quick Debugging
 

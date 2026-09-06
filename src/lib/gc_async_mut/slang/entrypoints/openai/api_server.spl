@@ -15,6 +15,8 @@
 
 use std.gc_async_mut.slang.entrypoints.openai.protocol.{ApiResponse, openai_error_response, openai_models_response}
 use std.gc_async_mut.slang.entrypoints.openai.serving_models.{discover_models, model_ids}
+use std.gc_async_mut.slang.model_executor.model_loader.native_formats.{scan_model_root}
+use std.gc_async_mut.slang.engine.llm_engine.{engine_backend_available}
 use std.gc_async_mut.slang.entrypoints.openai.serving_chat.{serve_chat_completions}
 
 fn _strip_query(path: text) -> text:
@@ -29,8 +31,18 @@ fn _normalize(path: text) -> text:
         return bare.slice(0, bare.len() - 1)
     bare
 
+# Everything under the model root that slang RECOGNISES, whether or not it can
+# run it. Listing only runnable models would leave a client unable to tell an
+# empty directory from three models in a format this build cannot execute --
+# which is exactly what /v1/models did before, silently, for real HuggingFace
+# checkouts. The reason a model is not runnable is reported by
+# /v1/chat/completions, which is where a client asks for one.
 fn serve_models(model_root: text) -> ApiResponse:
-    openai_models_response(model_ids(discover_models(model_root)), "slang")
+    var ids = model_ids(discover_models(model_root))
+    for m in scan_model_root(model_root, engine_backend_available()):
+        if m.format != "slang-pack" and m.format != "unknown":
+            ids.push(m.id)
+    openai_models_response(ids, "slang")
 
 fn slang_api_dispatch(method: text, path: text, body: text, model_root: text) -> ApiResponse:
     val route = _normalize(path)

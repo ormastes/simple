@@ -1,0 +1,922 @@
+"""
+## Purpose and audience
+Acceptance oracles for the open remains of
+doc/03_plan/app/simpleos/simpleos_nodejs_ai_cli_migration.md.
+## Operator workflow
+bin/simple test test/03_system/plan_acceptance/simpleos_nodejs_ai_cli_migration_spec.spl
+## Compatibility and limitations
+Tagged in-development: these pin the promised INTERFACE and fail until the
+plan's remaining checkboxes are implemented.
+
+AUDIT 2026-09-05 — this file previously reported 43/43 GREEN against a plan
+with 44 open boxes, which contradicted its own docstring above. Root cause:
+18 of the 43 scenarios asserted a substring of ai_cli_full_node_blocker(),
+which is a single hardcoded string literal at
+src/os/ai_cli_js_node_contract.spl:709. That is a literal compared with
+itself through a function call: it holds whether or not a single syscall,
+QuickJS build, or libuv file exists, so those scenarios could not fail. A
+further group asserted the NOT-done state (marker absent, runtime_status ==
+"blocked-runtime-artifact") — green there means the box is still OPEN, which
+is an inverted acceptance oracle, and runtime_status is itself a hardcoded
+literal in _ai_cli_qemu_lane (contract :489-524).
+
+Every scenario now additionally asserts the DONE state its checkbox
+promises, read out of real tree state (kernel syscall-handler source, the
+POSIX honesty matrix, Rust target specs, staged bundles, captured serial
+logs). Original assertions are retained, never deleted. Scenarios whose box
+is genuinely open are therefore RED — that is the honest result the
+@tag:in-development marker exists for. Scenarios that go GREEN name a box
+that is closeable with the cited evidence.
+## Verification guidance / troubleshooting
+A load failure on the os.ai_cli_js_node_contract import means the manifest
+contract module moved; re-grep src/os/ai_cli_js_node_contract.spl for the
+listed symbols before assuming a real regression. A failure reading
+kernel_abi_files means src/os/kernel/abi/ was reorganised — re-list that
+directory and update the constant, do not weaken the oracle.
+"""
+# @tag:in-development
+# doc-path: doc/03_plan/app/simpleos/simpleos_nodejs_ai_cli_migration.md
+# @manual_section SimpleOS Node.js AI CLI migration remains
+
+use std.spec.{step}
+use std.spec.{describe, context, it, expect}
+use os.ai_cli_js_node_contract.{
+    AiCliManifest, AiCliQemuLane,
+    ai_cli_full_node_blocker,
+    bun_informed_simple_js_runtime_profile,
+    claude_cli_smoke_manifest,
+    codex_cli_smoke_manifest,
+    gemini_cli_smoke_manifest,
+    ai_cli_qemu_lane,
+    ai_cli_qemu_lanes,
+    ai_cli_qemu_missing_markers,
+    ai_cli_qemu_serial_accepts_lane
+}
+use std.nogc_sync_mut.io.file_ops.{file_read, file_exists}
+
+val posix_profiles_path = "doc/02_requirements/os/posix_profiles.md"
+
+# The complete kernel ABI syscall-shim surface. Phase 0's already-closed
+# boxes (plan lines 134/136/138/140) cite `spl_handle_*` functions in exactly
+# these files as their evidence, so the same grep is the honest oracle for
+# the boxes that are still open.
+val kernel_abi_files = [
+    "src/os/kernel/abi/syscall_shim.spl",
+    "src/os/kernel/abi/syscall_shim_device.spl",
+    "src/os/kernel/abi/syscall_shim_file.spl",
+    "src/os/kernel/abi/syscall_shim_g11g12g13.spl",
+    "src/os/kernel/abi/syscall_shim_ipc.spl",
+    "src/os/kernel/abi/syscall_shim_net.spl",
+    "src/os/kernel/abi/syscall_shim_positioned.spl",
+    "src/os/kernel/abi/syscall_shim_process.spl",
+    "src/os/kernel/abi/syscall_shim_time_log_sysinfo.spl"
+]
+
+# Phase 2's first checkbox names this exact path.
+val libuv_core_path = "src/runtime/vendor/libuv/simpleos-core.c"
+
+# check-ai-cli-qemu-lanes.shs:30 stages host-side package files under this
+# root, mirroring the guest paths the manifests declare.
+val ai_cli_staging_root = "build/os/ai-cli-runtime-staging"
+
+fn read_if_exists(path: text) -> text:
+    if file_exists(path):
+        return file_read(path)
+    ""
+
+fn kernel_abi_source() -> text:
+    var joined = ""
+    for p in kernel_abi_files:
+        joined = joined + read_if_exists(p)
+    joined
+
+fn handlers_present(src: text, names: [text]) -> u64:
+    var n = 0u64
+    for name in names:
+        if src.contains("fn spl_handle_" + name + "("):
+            n = n + 1u64
+    n
+
+fn manifest_marker_hits(manifest: AiCliManifest, fragment: text) -> u64:
+    var n = 0u64
+    for m in manifest.qemu_marker_fragments:
+        if m.contains(fragment):
+            n = n + 1u64
+    n
+
+fn lane_serial_capture(lane: AiCliQemuLane) -> text:
+    read_if_exists(lane.serial_log_path)
+
+fn staged_guest_path(guest_path: text) -> text:
+    ai_cli_staging_root + guest_path
+
+describe "plan: app/simpleos/simpleos_nodejs_ai_cli_migration remains":
+
+    context "Phase 0: Kernel Syscall Surface Audit":
+
+        it "open, read, write, close, stat, fstat, lstat":
+            step("grep the real kernel ABI syscall-shim source for a spl_handle_* implementation of each of the seven file-I/O calls this checkbox names")
+            # @req REQ-PLAN-AI-CLI-NODE-001
+            # AUDIT 2026-09-05, verdict 2 (vacuous): the previous oracle
+            # asserted ai_cli_full_node_blocker().contains(...) — a literal
+            # compared with itself, green whether or not any syscall exists.
+            # Real oracle: the same spl_handle_* grep the plan's own CLOSED
+            # Phase 0 boxes cite as evidence (plan lines 134/136/138/140).
+            val blocker = ai_cli_full_node_blocker()
+            expect(blocker.contains("no-full-node-v8-libuv-artifact")).to_equal(true)
+            val abi = kernel_abi_source()
+            # non-vacuity: the search space must be real and the matcher must
+            # be able to find something, otherwise "0 found" proves nothing.
+            expect(abi.len() > 20000u64).to_equal(true)
+            expect(handlers_present(abi, ["file_open", "file_read", "file_write", "file_close", "file_stat"])).to_equal(5u64)
+            # the discriminating half: fstat and lstat are named by the box
+            # and have no handler anywhere in the ABI surface.
+            expect(handlers_present(abi, ["fstat", "lstat"])).to_equal(2u64)
+            # @capture(assertion): the two handler counts read out of the real
+            # kernel ABI source, plus the non-vacuity length guard, are this
+            # scenario's retained evidence.
+
+        it "socket, connect, bind, listen, accept, send, recv":
+            step("grep the kernel ABI source for the seven networking spl_handle_net_* handlers the plan's already-closed line 134 cites")
+            # @req REQ-PLAN-AI-CLI-NODE-002
+            # AUDIT 2026-09-05, verdict 2 -> now a real oracle. This box is
+            # already [x] in the plan (line 134) with named evidence; the
+            # oracle re-derives that evidence instead of trusting it.
+            val blocker = ai_cli_full_node_blocker()
+            expect(blocker.contains("no-full-node-v8-libuv-artifact")).to_equal(true)
+            val abi = kernel_abi_source()
+            expect(abi.len() > 20000u64).to_equal(true)
+            expect(handlers_present(abi, ["net_socket", "net_connect", "net_bind", "net_listen", "net_accept", "net_send_to", "net_recv_from"])).to_equal(7u64)
+            # @capture(assertion): the seven-handler count read out of the
+            # real kernel ABI source is this scenario's retained evidence.
+
+        it "poll (or select — libuv posix-poll.c needs one)":
+            step("grep the kernel ABI source for spl_handle_poll, the handler the plan's already-closed line 136 cites")
+            # @req REQ-PLAN-AI-CLI-NODE-003
+            # AUDIT 2026-09-05, verdict 2 -> real oracle re-deriving the
+            # evidence the plan's [x] on line 136 claims.
+            val blocker = ai_cli_full_node_blocker()
+            expect(blocker.contains("libuv-artifact")).to_equal(true)
+            val abi = kernel_abi_source()
+            expect(abi.len() > 20000u64).to_equal(true)
+            expect(handlers_present(abi, ["poll"])).to_equal(1u64)
+            # @capture(assertion): the poll-handler count read out of the real
+            # kernel ABI source is this scenario's retained evidence.
+
+        it "pipe, dup2, fcntl (O_NONBLOCK, F_GETFL, F_SETFL)":
+            step("grep the kernel ABI source for the pipe/dup2/fcntl handlers AND for the three fcntl commands the checkbox names in its parenthetical")
+            # @req REQ-PLAN-AI-CLI-NODE-004
+            # AUDIT 2026-09-05, verdict 2 -> real oracle. Note the box names
+            # not just fcntl but three specific commands; a handler that
+            # exists without them does not satisfy the box.
+            val blocker = ai_cli_full_node_blocker()
+            expect(blocker.contains("no-full-node-v8-libuv-artifact")).to_equal(true)
+            val abi = kernel_abi_source()
+            expect(abi.len() > 20000u64).to_equal(true)
+            expect(handlers_present(abi, ["pipe", "dup2", "fcntl"])).to_equal(3u64)
+            expect(abi.contains("F_GETFL")).to_equal(true)
+            expect(abi.contains("F_SETFL")).to_equal(true)
+            expect(abi.contains("O_NONBLOCK")).to_equal(true)
+            # @capture(assertion): the three-handler count plus the three
+            # fcntl-command greps over the real kernel ABI source are this
+            # scenario's retained evidence.
+
+        it "mmap, mprotect, munmap (for QuickJS memory)":
+            step("grep the kernel ABI source for the mmap/mprotect/munmap handlers the plan's already-closed line 138 cites")
+            # @req REQ-PLAN-AI-CLI-NODE-005
+            # AUDIT 2026-09-05, verdict 2 -> real oracle re-deriving the
+            # evidence the plan's [x] on line 138 claims.
+            val blocker = ai_cli_full_node_blocker()
+            expect(blocker.contains("no-full-node-v8-libuv-artifact")).to_equal(true)
+            val abi = kernel_abi_source()
+            expect(abi.len() > 20000u64).to_equal(true)
+            expect(handlers_present(abi, ["sys_mmap", "mprotect", "munmap"])).to_equal(3u64)
+            # @capture(assertion): the three-handler count read out of the
+            # real kernel ABI source is this scenario's retained evidence.
+
+        it "pthread_create, pthread_join, pthread_mutex_*, pthread_cond_*":
+            step("grep the kernel ABI source for pthread handlers and cross-check the POSIX honesty matrix, which records these as ENOSYS stubs")
+            # @req REQ-PLAN-AI-CLI-NODE-006
+            # AUDIT 2026-09-05, verdict 2 -> real oracle. The honesty matrix
+            # already records these as ENOSYS, so a green here would have to
+            # come from a real handler landing, not from a constant.
+            val blocker = ai_cli_full_node_blocker()
+            expect(blocker.contains("libuv-artifact")).to_equal(true)
+            val abi = kernel_abi_source()
+            expect(abi.len() > 20000u64).to_equal(true)
+            # non-vacuity: prove the matcher finds handlers in this same source
+            expect(handlers_present(abi, ["yield"])).to_equal(1u64)
+            expect(handlers_present(abi, ["pthread_create", "pthread_join"])).to_equal(2u64)
+            val profiles = read_if_exists(posix_profiles_path)
+            expect(profiles.contains("pthread_create/join/detach")).to_equal(true)
+            # the box is satisfied only once the matrix stops saying ENOSYS
+            var pthread_enosys_rows = 0u64
+            for line in profiles.split("\n"):
+                if line.contains("pthread") and line.contains("ENOSYS"):
+                    pthread_enosys_rows = pthread_enosys_rows + 1u64
+            expect(pthread_enosys_rows).to_equal(0u64)
+            # @capture(assertion): the pthread handler count and the count of
+            # surviving ENOSYS rows in the real honesty matrix are this
+            # scenario's retained evidence.
+
+        it "clock_gettime, nanosleep":
+            step("grep the kernel ABI source for the clock_gettime and sleep handlers the plan's already-closed line 140 cites")
+            # @req REQ-PLAN-AI-CLI-NODE-007
+            # AUDIT 2026-09-05, verdict 2 -> real oracle re-deriving the
+            # evidence the plan's [x] on line 140 claims. The plan closed this
+            # box as "clock_gettime, sleep", not nanosleep — assert what the
+            # kernel actually provides and record the naming divergence.
+            val blocker = ai_cli_full_node_blocker()
+            expect(blocker.contains("no-full-node-v8-libuv-artifact")).to_equal(true)
+            val abi = kernel_abi_source()
+            expect(abi.len() > 20000u64).to_equal(true)
+            expect(handlers_present(abi, ["clock_gettime", "sleep"])).to_equal(2u64)
+            # @capture(assertion): the two-handler count read out of the real
+            # kernel ABI source is this scenario's retained evidence.
+
+        it "getenv, getcwd, getpid, getuid":
+            step("grep the kernel ABI source for a spl_handle_* implementation of each of the four process-identity calls this checkbox names")
+            # @req REQ-PLAN-AI-CLI-NODE-008
+            # AUDIT 2026-09-05, verdict 2 -> real oracle. getcwd and getpid
+            # have handlers; getenv and getuid do not, and the honesty matrix
+            # (posix_profiles.md:55) records getuid/getgid as a stub.
+            val blocker = ai_cli_full_node_blocker()
+            expect(blocker.contains("no-full-node-v8-libuv-artifact")).to_equal(true)
+            val abi = kernel_abi_source()
+            expect(abi.len() > 20000u64).to_equal(true)
+            expect(handlers_present(abi, ["getcwd", "getpid"])).to_equal(2u64)
+            expect(handlers_present(abi, ["getenv", "getuid"])).to_equal(2u64)
+            # @capture(assertion): the two handler counts read out of the real
+            # kernel ABI source are this scenario's retained evidence.
+
+        it "Document gaps as concrete implementation tasks":
+            step("read the POSIX honesty matrix this checkbox delivers and count its documented pthread gap rows, each of which must name an owning source file and an honest ENOSYS status")
+            # @req REQ-PLAN-AI-CLI-NODE-009
+            # AUDIT 2026-09-05, verdict 1 (genuinely passing) — retained
+            # unchanged. Real, tree-state oracle on the actual deliverable:
+            # the plan records this box as shipped as the POSIX honesty matrix
+            # doc/02_requirements/os/posix_profiles.md. A "documented gap" is
+            # only concrete if the row states BOTH the honest failure mode
+            # (ENOSYS) and the owning file; a row that merely names a call is
+            # not a task. Every value below is read out of that file.
+            expect(file_exists(posix_profiles_path)).to_equal(true)
+            val profiles = file_read(posix_profiles_path)
+            val required_pthread_rows = [
+                "pthread_create/join/detach",
+                "pthread mutex/rwlock/attr",
+                "pthread_cond_*",
+                "pthread_rwlock_*"
+            ]
+            var documented_gap_rows = 0u64
+            for row_name in required_pthread_rows:
+                for line in profiles.split("\n"):
+                    if line.contains(row_name) and line.contains("ENOSYS") and line.contains("src/os/libc/"):
+                        documented_gap_rows = documented_gap_rows + 1u64
+            expect(documented_gap_rows).to_equal(4u64)  # oracle: the plan's Phase 0 gap line cites four pthread_* row families in posix_profiles.md
+            # @capture(assertion): the matching honesty-matrix rows counted
+            # above are this scenario's retained evidence.
+
+    context "Phase 1: QuickJS on SimpleOS":
+
+        it "Cross-compile QuickJS to x86_64-simpleos, riscv64-simpleos, aarch64-simpleos":
+            step("require a cross-compiled QuickJS artifact for each of the three *-simpleos triples the checkbox names")
+            # @req REQ-PLAN-AI-CLI-NODE-010
+            # AUDIT 2026-09-05, verdict 3 (testing the wrong thing): the
+            # previous oracle asserted the shipped runtime profile does NOT
+            # say "quickjs" — a true and interesting divergence, but it is
+            # evidence that the box will never close, not that it has. Both
+            # halves are kept: the divergence is retained as context, and the
+            # checkbox's own promise (three cross-compiled artifacts) is now
+            # the discriminating assertion.
+            val profile = bun_informed_simple_js_runtime_profile()
+            expect(profile.js_engine_strategy.contains("quickjs")).to_equal(false)
+            # non-vacuity: the strategy field must be real, non-empty text
+            expect(profile.js_engine_strategy.len() > 10u64).to_equal(true)
+            var quickjs_artifacts = 0u64
+            for triple in ["x86_64-simpleos", "riscv64-simpleos", "aarch64-simpleos"]:
+                if file_exists("build/os/quickjs/" + triple + "/qjs"):
+                    quickjs_artifacts = quickjs_artifacts + 1u64
+            expect(quickjs_artifacts).to_equal(3u64)
+            # @capture(assertion): the real profile field plus the per-triple
+            # artifact count are this scenario's retained evidence.
+
+        it "Boot in QEMU, run qjs -e \"console.log('hello')\" via serial":
+            step("read the real captured x86 serial log and require the qjs console.log output the checkbox names")
+            # @req REQ-PLAN-AI-CLI-NODE-011
+            # AUDIT 2026-09-05, verdict 2 -> real oracle on the actual
+            # serial capture the checkbox promises.
+            val blocker = ai_cli_full_node_blocker()
+            expect(blocker.contains("no-full-node-v8-libuv-artifact")).to_equal(true)
+            val lane = ai_cli_qemu_lane(claude_cli_smoke_manifest(), "x86")
+            val serial = lane_serial_capture(lane)
+            expect(lane.serial_log_path.len() > 0u64).to_equal(true)
+            expect(file_exists(lane.serial_log_path)).to_equal(true)
+            expect(serial.contains("hello")).to_equal(true)
+            # @capture(assertion): the existence of the real serial log at the
+            # lane's own path and its captured content are this scenario's
+            # retained evidence.
+
+        it "Verify: ES2023 features work (async/await, modules, generators)":
+            step("read the real captured x86 serial log and require an ES2023 conformance marker for each of the three feature families the checkbox names")
+            # @req REQ-PLAN-AI-CLI-NODE-012
+            # AUDIT 2026-09-05, verdict 2 -> real oracle on captured serial.
+            val blocker = ai_cli_full_node_blocker()
+            expect(blocker.contains("no-full-node-v8-libuv-artifact")).to_equal(true)
+            val lane = ai_cli_qemu_lane(claude_cli_smoke_manifest(), "x86")
+            val serial = lane_serial_capture(lane)
+            var es2023_features = 0u64
+            for feature in ["async-await", "modules", "generators"]:
+                if serial.contains("es2023:" + feature):
+                    es2023_features = es2023_features + 1u64
+            expect(es2023_features).to_equal(3u64)
+            # @capture(assertion): the per-feature marker count read out of
+            # the real serial capture is this scenario's retained evidence.
+
+        it "Serial marker: [ai-cli] quickjs:hello target=<arch>":
+            step("require the quickjs:hello marker both DECLARED in the shipped manifest contract and EMITTED into the real captured serial log")
+            # @req REQ-PLAN-AI-CLI-NODE-013
+            # AUDIT 2026-09-05, verdict 3 (inverted oracle): the previous
+            # assertion required the marker to be ABSENT, so green meant the
+            # box was still open — an acceptance oracle that can never accept.
+            # The absence check is retained as a state record; the checkbox's
+            # own promise (marker present, and actually emitted) is now the
+            # discriminating assertion.
+            val manifest = claude_cli_smoke_manifest()
+            # non-vacuity: the marker list must be a real, non-empty list
+            expect(manifest.qemu_marker_fragments.len() > 0u64).to_equal(true)
+            val lane = ai_cli_qemu_lane(manifest, "x86")
+            val serial = lane_serial_capture(lane)
+            expect(manifest_marker_hits(manifest, "quickjs:hello")).to_equal(1u64)
+            expect(serial.contains("[ai-cli] quickjs:hello target=")).to_equal(true)
+            # @capture(assertion): the marker-hit count over the shipped
+            # manifest list and the serial-capture containment check are this
+            # scenario's retained evidence.
+
+        # "Binary size target: <2MB per arch" has NO observable oracle in this
+        # tree: no QuickJS artifact is built for any *-simpleos triple, and the
+        # plan names no output path, size-budget field or gate script to measure
+        # against — AiCliRuntimeProfile carries no size budget. Measuring a
+        # nonexistent binary against a path we invented would be a fabricated
+        # test, so it is recorded in
+        # scripts/check/plan_acceptance_exemptions.txt instead.
+
+    context "Phase 2: libuv Port":
+
+        it "Create src/runtime/vendor/libuv/simpleos-core.c (~150 lines)":
+            step("require the exact file path this checkbox names to exist and to be a non-trivial C source, not an empty placeholder")
+            # @req REQ-PLAN-AI-CLI-NODE-015
+            # AUDIT 2026-09-05, verdict 2 -> real oracle. The checkbox names
+            # an exact path and an approximate size; both are checkable.
+            val blocker = ai_cli_full_node_blocker()
+            expect(blocker.contains("libuv-artifact")).to_equal(true)
+            expect(file_exists(libuv_core_path)).to_equal(true)
+            val core = read_if_exists(libuv_core_path)
+            expect(core.len() > 1000u64).to_equal(true)
+            expect(core.contains("uv_")).to_equal(true)
+            # @capture(assertion): the existence, size, and content of the
+            # real file at the checkbox's own path are this scenario's
+            # retained evidence.
+
+        it "Use posix-poll.c backend, disable epoll/kqueue":
+            step("read the real simpleos-core.c and require the posix-poll backend to be selected and epoll/kqueue to be disabled")
+            # @req REQ-PLAN-AI-CLI-NODE-016
+            # AUDIT 2026-09-05, verdict 2 -> real oracle on the port's own
+            # source. Non-vacuity is enforced by requiring the file to exist
+            # first, so an absent file FAILS rather than silently matching
+            # nothing.
+            val blocker = ai_cli_full_node_blocker()
+            expect(blocker.contains("libuv-artifact")).to_equal(true)
+            expect(file_exists(libuv_core_path)).to_equal(true)
+            val core = read_if_exists(libuv_core_path)
+            expect(core.contains("posix-poll")).to_equal(true)
+            expect(core.contains("UV_HAVE_KQUEUE")).to_equal(false)
+            # @capture(assertion): the backend-selection and
+            # epoll/kqueue-exclusion greps over the real port source are this
+            # scenario's retained evidence.
+
+        it "Build flags: -U__linux__ -DSIMPLEOS":
+            step("require both build flags the checkbox names to appear in a real build file for the libuv port")
+            # @req REQ-PLAN-AI-CLI-NODE-017
+            # AUDIT 2026-09-05, verdict 2 -> real oracle over the port's build
+            # description.
+            val blocker = ai_cli_full_node_blocker()
+            expect(blocker.contains("libuv-artifact")).to_equal(true)
+            val build_desc = read_if_exists("src/runtime/vendor/libuv/Makefile") + read_if_exists("src/runtime/vendor/libuv/CMakeLists.txt") + read_if_exists("src/runtime/vendor/libuv/build.shs")
+            expect(build_desc.len() > 0u64).to_equal(true)
+            expect(build_desc.contains("-U__linux__")).to_equal(true)
+            expect(build_desc.contains("-DSIMPLEOS")).to_equal(true)
+            # @capture(assertion): the two flag greps over the real build
+            # description, guarded by a non-empty length check, are this
+            # scenario's retained evidence.
+
+        it "Stub non-critical: uv_interface_addresses -> UV_ENOSYS":
+            step("read the real simpleos-core.c and require uv_interface_addresses to be defined and to return UV_ENOSYS")
+            # @req REQ-PLAN-AI-CLI-NODE-018
+            # AUDIT 2026-09-05, verdict 2 -> real oracle on the stub itself.
+            val blocker = ai_cli_full_node_blocker()
+            expect(blocker.contains("libuv-artifact")).to_equal(true)
+            expect(file_exists(libuv_core_path)).to_equal(true)
+            val core = read_if_exists(libuv_core_path)
+            expect(core.contains("uv_interface_addresses")).to_equal(true)
+            expect(core.contains("UV_ENOSYS")).to_equal(true)
+            # @capture(assertion): the symbol and return-code greps over the
+            # real port source are this scenario's retained evidence.
+
+        it "Stub non-critical: uv_resident_set_memory -> 0":
+            step("read the real simpleos-core.c and require uv_resident_set_memory to be defined")
+            # @req REQ-PLAN-AI-CLI-NODE-019
+            # AUDIT 2026-09-05, verdict 2 -> real oracle on the stub itself.
+            val blocker = ai_cli_full_node_blocker()
+            expect(blocker.contains("libuv-artifact")).to_equal(true)
+            expect(file_exists(libuv_core_path)).to_equal(true)
+            val core = read_if_exists(libuv_core_path)
+            expect(core.contains("uv_resident_set_memory")).to_equal(true)
+            # @capture(assertion): the symbol grep over the real port source
+            # is this scenario's retained evidence.
+
+        it "Real impl: uv_exepath, uv_uptime, uv_hrtime, uv_cpu_info":
+            step("read the real simpleos-core.c and require a definition for each of the four functions this checkbox names")
+            # @req REQ-PLAN-AI-CLI-NODE-020
+            # AUDIT 2026-09-05, verdict 2 -> real oracle counting the four
+            # named symbols in the port source.
+            val blocker = ai_cli_full_node_blocker()
+            expect(blocker.contains("libuv-artifact")).to_equal(true)
+            expect(file_exists(libuv_core_path)).to_equal(true)
+            val core = read_if_exists(libuv_core_path)
+            var real_impls = 0u64
+            for sym in ["uv_exepath", "uv_uptime", "uv_hrtime", "uv_cpu_info"]:
+                if core.contains(sym):
+                    real_impls = real_impls + 1u64
+            expect(real_impls).to_equal(4u64)
+            # @capture(assertion): the four-symbol count over the real port
+            # source is this scenario's retained evidence.
+
+        it "Thread pool: verify pthreads work under SimpleOS":
+            step("require real pthread kernel handlers, since the honesty matrix currently records every pthread family as an ENOSYS stub")
+            # @req REQ-PLAN-AI-CLI-NODE-021
+            # AUDIT 2026-09-05, verdict 2 -> real oracle. This is the same
+            # underlying capability as REQ-...-006; "verify pthreads work"
+            # cannot be satisfied while the matrix says ENOSYS.
+            val blocker = ai_cli_full_node_blocker()
+            expect(blocker.contains("libuv-artifact")).to_equal(true)
+            val abi = kernel_abi_source()
+            expect(abi.len() > 20000u64).to_equal(true)
+            expect(handlers_present(abi, ["pthread_create", "pthread_join"])).to_equal(2u64)
+            val profiles = read_if_exists(posix_profiles_path)
+            expect(profiles.contains("pthread")).to_equal(true)
+            expect(profiles.contains("pthread_create/join/detach")).to_equal(true)
+            var enosys_pthread = 0u64
+            for line in profiles.split("\n"):
+                if line.contains("pthread") and line.contains("ENOSYS"):
+                    enosys_pthread = enosys_pthread + 1u64
+            expect(enosys_pthread).to_equal(0u64)
+            # @capture(assertion): the pthread handler count and the surviving
+            # ENOSYS row count over the real honesty matrix are this
+            # scenario's retained evidence.
+
+        it "Test: uv_run event loop spins, timer fires, TCP connect works":
+            step("require the captured serial log to carry a distinct result marker for each of the three behaviours this checkbox names")
+            # @req REQ-PLAN-AI-CLI-NODE-022
+            # AUDIT 2026-09-05, verdict 2 -> real oracle on captured serial.
+            val blocker = ai_cli_full_node_blocker()
+            expect(blocker.contains("libuv-artifact")).to_equal(true)
+            val lane = ai_cli_qemu_lane(codex_cli_smoke_manifest(), "x86")
+            val serial = lane_serial_capture(lane)
+            var uv_results = 0u64
+            for marker in ["uv_run:spin", "uv_timer:fired", "uv_tcp:connected"]:
+                if serial.contains(marker):
+                    uv_results = uv_results + 1u64
+            expect(uv_results).to_equal(3u64)
+            # @capture(assertion): the three-marker count read out of the real
+            # serial capture is this scenario's retained evidence.
+
+        it "Serial marker: [ai-cli] libuv:ready target=<arch>":
+            step("require the libuv:ready marker both DECLARED in the shipped Codex manifest and EMITTED into the real captured serial log")
+            # @req REQ-PLAN-AI-CLI-NODE-023
+            # AUDIT 2026-09-05, verdict 3 (inverted oracle): the previous
+            # assertion required the marker to be ABSENT. Retained as a state
+            # record; the checkbox's promise is now the discriminating half.
+            val manifest = codex_cli_smoke_manifest()
+            expect(manifest.qemu_marker_fragments.len() > 0u64).to_equal(true)
+            val lane = ai_cli_qemu_lane(manifest, "x86")
+            val serial = lane_serial_capture(lane)
+            expect(manifest_marker_hits(manifest, "libuv:ready")).to_equal(1u64)
+            expect(serial.contains("[ai-cli] libuv:ready target=")).to_equal(true)
+            # @capture(assertion): the marker-hit count over the shipped
+            # manifest list and the serial-capture containment check are this
+            # scenario's retained evidence.
+
+    context "Phase 3: Node.js Compat Layer":
+
+        it "Serial marker: [ai-cli] node-compat:ready target=<arch>":
+            step("require the node-compat:ready marker both DECLARED in the shipped Gemini manifest and EMITTED into the real captured serial log")
+            # @req REQ-PLAN-AI-CLI-NODE-024
+            # AUDIT 2026-09-05, verdict 3 (inverted oracle): the previous
+            # assertion required the marker to be ABSENT, so green meant the
+            # box was still open. Every other Phase 3 line is already
+            # [x]-checked; this is the one remaining line, and it closes only
+            # when the marker is both declared and emitted.
+            val manifest = gemini_cli_smoke_manifest()
+            expect(manifest.qemu_marker_fragments.len() > 0u64).to_equal(true)
+            val lane = ai_cli_qemu_lane(manifest, "arm")
+            val serial = lane_serial_capture(lane)
+            expect(manifest_marker_hits(manifest, "node-compat:ready")).to_equal(1u64)
+            expect(serial.contains("[ai-cli] node-compat:ready target=")).to_equal(true)
+            # @capture(assertion): the marker-hit count over the shipped
+            # manifest list and the serial-capture containment check are this
+            # scenario's retained evidence.
+
+    context "Phase 4: CLI Bundle + Smoke Test — Claude Code":
+
+        it "Bundle with esbuild: esbuild --bundle --platform=node --target=es2022":
+            step("require the staged bundle artifact the manifest's entry_path names to actually exist under the lane staging root")
+            # @req REQ-PLAN-AI-CLI-NODE-025
+            # AUDIT 2026-09-05, verdict 3 (testing the wrong thing): the
+            # previous oracle asserted entry_path == "/sys/apps/claude/claude.js",
+            # a string constant in the contract file. That pins the bundle's
+            # TARGET NAME, not that any bundle was produced — and `esbuild`
+            # appears nowhere in src/ or scripts/. The entry_path pin is
+            # retained; the staged artifact is now the discriminating half.
+            val manifest = claude_cli_smoke_manifest()
+            expect(manifest.entry_path).to_equal("/sys/apps/claude/claude.js")
+            val staged = staged_guest_path(manifest.entry_path)
+            expect(file_exists(staged)).to_equal(true)
+            expect(read_if_exists(staged).len() > 0u64).to_equal(true)
+            # @capture(assertion): the entry_path field plus the existence and
+            # non-emptiness of the staged bundle at
+            # build/os/ai-cli-runtime-staging/sys/apps/claude/claude.js are
+            # this scenario's retained evidence.
+
+        it "Identify native addon deps, find pure-JS alternatives":
+            step("require the manifest to record its native-addon findings as an explicit unsupported_features list, not merely to hold a process grant")
+            # @req REQ-PLAN-AI-CLI-NODE-026
+            # AUDIT 2026-09-05, verdict 3 (testing the wrong thing): the
+            # previous oracle asserted process_grants.contains("simple"), a
+            # capability grant that says nothing about whether native addon
+            # deps were identified. Retained; the deliverable of this box is a
+            # recorded finding, so require unsupported_features to name at
+            # least one native addon and a pure-JS alternative.
+            val manifest = claude_cli_smoke_manifest()
+            expect(manifest.process_grants.contains("simple")).to_equal(true)
+            var addon_findings = 0u64
+            for entry in manifest.unsupported_features:
+                if entry.contains("native-addon"):
+                    addon_findings = addon_findings + 1u64
+            expect(manifest.unsupported_features.len() > 0u64).to_equal(true)
+            expect(addon_findings > 0u64).to_equal(true)
+            # @capture(assertion): the process_grants field plus the
+            # native-addon finding count over the real unsupported_features
+            # list are this scenario's retained evidence.
+
+        it "Test: claude --version prints version string":
+            step("require the captured x86 serial log to carry the claude --version output this checkbox names, not merely the declared args")
+            # @req REQ-PLAN-AI-CLI-NODE-027
+            # AUDIT 2026-09-05, verdict 3: the previous oracle asserted
+            # manifest.args == ["--version"], the declared INVOCATION. The box
+            # promises the invocation PRINTS a version string. args pin
+            # retained; the printed output is now the discriminating half.
+            val manifest = claude_cli_smoke_manifest()
+            expect(manifest.args).to_equal(["--version"])
+            val lane = ai_cli_qemu_lane(manifest, "x86")
+            val serial = lane_serial_capture(lane)
+            expect(serial.contains("claude")).to_equal(true)
+            expect(serial.contains("cli-version:")).to_equal(true)
+            # @capture(assertion): the args field plus the version output read
+            # out of the real serial capture are this scenario's retained
+            # evidence.
+
+        it "Serial marker: [ai-cli] cli-smoke:start app=claude":
+            step("require the cli-smoke:start marker both DECLARED in the manifest and EMITTED into the real captured serial log")
+            # @req REQ-PLAN-AI-CLI-NODE-028
+            # AUDIT 2026-09-05, verdict 3: the declaration check was a genuine
+            # positive over a real list, but the checkbox promises a SERIAL
+            # marker — i.e. one actually emitted during a boot. The declared
+            # marker is a contract constant and cannot prove emission. Both
+            # halves retained.
+            val manifest = claude_cli_smoke_manifest()
+            var found_marker = false
+            var i = 0u64
+            while i < manifest.qemu_marker_fragments.len():
+                if manifest.qemu_marker_fragments[i] == "[ai-cli] cli-smoke:start app=claude":
+                    found_marker = true
+                i = i + 1u64
+            expect(found_marker).to_equal(true)
+            val lane = ai_cli_qemu_lane(manifest, "x86")
+            val serial = lane_serial_capture(lane)
+            expect(serial.contains("[ai-cli] cli-smoke:start app=claude")).to_equal(true)
+            # @capture(assertion): the declared-marker scan and the
+            # emitted-marker check over the real serial capture are this
+            # scenario's retained evidence.
+
+    context "Phase 4: CLI Bundle + Smoke Test — Codex CLI (Track B)":
+
+        it "Add x86_64-unknown-simpleos Rust target (reuse stage1 sysroot)":
+            step("require the x86_64-unknown-simpleos Rust target spec file and the crt0 the plan's already-closed line 200 cites")
+            # @req REQ-PLAN-AI-CLI-NODE-029
+            # AUDIT 2026-09-05, verdict 3: the previous oracle asserted
+            # package_id == "simpleos-ai-cli-codex", a string built by
+            # _ai_cli_manifest from the app id — nothing to do with a Rust
+            # target. Retained; the real oracle is the target JSON the plan's
+            # own [x] on line 200 cites as evidence.
+            val manifest = codex_cli_smoke_manifest()
+            expect(manifest.package_id).to_equal("simpleos-ai-cli-codex")
+            expect(file_exists("src/os/toolchain/rust/x86_64-unknown-simpleos.json")).to_equal(true)
+            expect(read_if_exists("src/os/toolchain/rust/x86_64-unknown-simpleos.json").len() > 0u64).to_equal(true)
+            expect(file_exists("src/os/libc/simpleos_crt0.S")).to_equal(true)
+            # @capture(assertion): the package_id field plus the existence and
+            # non-emptiness of the real Rust target spec and crt0 are this
+            # scenario's retained evidence.
+
+        it "Cross-compile Codex Rust binary":
+            step("require a built Codex binary artifact, not merely the declared guest entry path")
+            # @req REQ-PLAN-AI-CLI-NODE-030
+            # AUDIT 2026-09-05, verdict 3: the step text says "read the
+            # runtime_kind field" but the assertion read entry_path — and
+            # entry_path is a contract constant naming a .js path, while this
+            # checkbox promises a cross-compiled RUST binary. Note the
+            # unresolved contradiction: _ai_cli_manifest hardcodes
+            # runtime_kind = "node-compatible" for all three apps
+            # (contract :237) while the plan calls Codex Track B / Rust. Both
+            # facts are pinned; the built artifact is the discriminating half.
+            val manifest = codex_cli_smoke_manifest()
+            expect(manifest.entry_path).to_equal("/sys/apps/codex/codex.js")
+            expect(manifest.runtime_kind).to_equal("node-compatible")
+            expect(file_exists("build/os/ai-cli-runtime-staging/sys/apps/codex/codex")).to_equal(true)
+            # @capture(assertion): the entry_path and runtime_kind fields plus
+            # the cross-compiled binary's existence are this scenario's
+            # retained evidence.
+
+        it "Test: codex --version":
+            step("require the captured x86 serial log to carry the codex --version output, not merely the declared args")
+            # @req REQ-PLAN-AI-CLI-NODE-031
+            # AUDIT 2026-09-05, verdict 3: args is the declared invocation,
+            # not its result. Retained; the printed output discriminates.
+            val manifest = codex_cli_smoke_manifest()
+            expect(manifest.args).to_equal(["--version"])
+            val lane = ai_cli_qemu_lane(manifest, "x86")
+            val serial = lane_serial_capture(lane)
+            expect(serial.contains("codex")).to_equal(true)
+            expect(serial.contains("cli-version:")).to_equal(true)
+            # @capture(assertion): the args field plus the version output read
+            # out of the real serial capture are this scenario's retained
+            # evidence.
+
+        it "Add RISC-V and AArch64 targets":
+            step("require the RISC-V and AArch64 Rust target spec files this checkbox promises, alongside the QEMU lane enumeration")
+            # @req REQ-PLAN-AI-CLI-NODE-032
+            # AUDIT 2026-09-05, verdict 3 (testing the wrong thing): the
+            # previous oracle scanned ai_cli_qemu_lanes() for riscv/arm
+            # targets — but that function hardcodes exactly three lanes
+            # (contract :527-533) regardless of any Rust target existing, so
+            # it was green before this checkbox was written and would stay
+            # green if every target spec were deleted. This box is in the
+            # Codex Rust track, so the real oracle is the target specs. The
+            # lane scan is retained.
+            val manifest = codex_cli_smoke_manifest()
+            val lanes = ai_cli_qemu_lanes(manifest)
+            var has_riscv = false
+            var has_arm = false
+            var i = 0u64
+            while i < lanes.len():
+                if lanes[i].target == "riscv":
+                    has_riscv = true
+                if lanes[i].target == "arm":
+                    has_arm = true
+                i = i + 1u64
+            expect(has_riscv and has_arm).to_equal(true)
+            expect(file_exists("src/os/toolchain/rust/riscv64gc-unknown-simpleos.json")).to_equal(true)
+            expect(file_exists("src/os/toolchain/rust/aarch64-unknown-simpleos.json")).to_equal(true)
+            expect(read_if_exists("src/os/toolchain/rust/riscv64gc-unknown-simpleos.json").contains("simpleos")).to_equal(true)
+            expect(read_if_exists("src/os/toolchain/rust/aarch64-unknown-simpleos.json").contains("simpleos")).to_equal(true)
+            # @capture(assertion): the lane scan plus the existence and
+            # content of the two real Rust target spec files are this
+            # scenario's retained evidence.
+
+        it "Serial marker: [ai-cli] cli-smoke:start app=codex":
+            step("require the cli-smoke:start marker both DECLARED in the manifest and EMITTED into the real captured serial log")
+            # @req REQ-PLAN-AI-CLI-NODE-033
+            # AUDIT 2026-09-05, verdict 3: declaration is a contract constant
+            # and cannot prove emission. Both halves retained.
+            val manifest = codex_cli_smoke_manifest()
+            var found_marker = false
+            var i = 0u64
+            while i < manifest.qemu_marker_fragments.len():
+                if manifest.qemu_marker_fragments[i] == "[ai-cli] cli-smoke:start app=codex":
+                    found_marker = true
+                i = i + 1u64
+            expect(found_marker).to_equal(true)
+            val lane = ai_cli_qemu_lane(manifest, "x86")
+            val serial = lane_serial_capture(lane)
+            expect(serial.contains("[ai-cli] cli-smoke:start app=codex")).to_equal(true)
+            # @capture(assertion): the declared-marker scan and the
+            # emitted-marker check over the real serial capture are this
+            # scenario's retained evidence.
+
+    context "Phase 4: CLI Bundle + Smoke Test — Gemini CLI":
+
+        it "Bundle core package + 69 deps with esbuild":
+            step("require the staged Gemini bundle artifact to exist and to be large enough to plausibly carry a bundled dependency tree")
+            # @req REQ-PLAN-AI-CLI-NODE-034
+            # AUDIT 2026-09-05, verdict 3: entry_path is the bundle's target
+            # NAME, a contract constant; it cannot show a bundle was produced.
+            # Retained; the staged artifact discriminates.
+            val manifest = gemini_cli_smoke_manifest()
+            expect(manifest.entry_path).to_equal("/sys/apps/gemini/gemini.js")
+            val staged = staged_guest_path(manifest.entry_path)
+            expect(file_exists(staged)).to_equal(true)
+            expect(read_if_exists(staged).len() > 0u64).to_equal(true)
+            # @capture(assertion): the entry_path field plus the existence and
+            # non-emptiness of the staged bundle are this scenario's retained
+            # evidence.
+
+        it "Stub/replace node-pty with terminal passthrough":
+            step("require the manifest to record node-pty explicitly among its unsupported_features, since needs_terminal is a hardcoded default")
+            # @req REQ-PLAN-AI-CLI-NODE-035
+            # AUDIT 2026-09-05, verdict 2 (vacuous — default value): the
+            # previous oracle asserted needs_terminal == true, which
+            # _ai_cli_manifest hardcodes to true for ALL THREE apps
+            # (contract :240). It would hold identically whether or not
+            # node-pty was ever stubbed. Retained as a record; the real oracle
+            # is an explicit node-pty finding.
+            val manifest = gemini_cli_smoke_manifest()
+            expect(manifest.needs_terminal).to_equal(true)
+            var node_pty_findings = 0u64
+            for entry in manifest.unsupported_features:
+                if entry.contains("node-pty"):
+                    node_pty_findings = node_pty_findings + 1u64
+            expect(manifest.unsupported_features.len() > 0u64).to_equal(true)
+            expect(node_pty_findings > 0u64).to_equal(true)
+            # @capture(assertion): the needs_terminal field plus the node-pty
+            # finding count over the real unsupported_features list are this
+            # scenario's retained evidence.
+
+        it "Stub React/Ink rendering to serial console output":
+            step("require React/Ink output to actually appear on the captured serial channel, not merely that the marker list is non-empty")
+            # @req REQ-PLAN-AI-CLI-NODE-036
+            # AUDIT 2026-09-05, verdict 2 (vacuous): the previous oracle
+            # asserted qemu_marker_fragments.len() > 0 — true for every
+            # manifest ever constructed by _ai_cli_manifest, and unrelated to
+            # React/Ink. Retained as a non-vacuity guard; the real oracle is
+            # rendered output on the serial channel.
+            val manifest = gemini_cli_smoke_manifest()
+            expect(manifest.qemu_marker_fragments.len() > 0u64).to_equal(true)
+            val lane = ai_cli_qemu_lane(manifest, "arm")
+            val serial = lane_serial_capture(lane)
+            expect(serial.contains("ink:render")).to_equal(true)
+            # @capture(assertion): the non-empty marker list plus the
+            # ink:render output read out of the real serial capture are this
+            # scenario's retained evidence.
+
+        it "Test: gemini --version":
+            step("require the captured arm serial log to carry the gemini --version output, not merely the declared args")
+            # @req REQ-PLAN-AI-CLI-NODE-037
+            # AUDIT 2026-09-05, verdict 3: args is the declared invocation,
+            # not its result. Retained; the printed output discriminates.
+            val manifest = gemini_cli_smoke_manifest()
+            expect(manifest.args).to_equal(["--version"])
+            val lane = ai_cli_qemu_lane(manifest, "arm")
+            val serial = lane_serial_capture(lane)
+            expect(serial.contains("gemini")).to_equal(true)
+            expect(serial.contains("cli-version:")).to_equal(true)
+            # @capture(assertion): the args field plus the version output read
+            # out of the real serial capture are this scenario's retained
+            # evidence.
+
+        it "Serial marker: [ai-cli] cli-smoke:start app=gemini":
+            step("require the cli-smoke:start marker both DECLARED in the manifest and EMITTED into the real captured serial log")
+            # @req REQ-PLAN-AI-CLI-NODE-038
+            # AUDIT 2026-09-05, verdict 3: declaration is a contract constant
+            # and cannot prove emission. Both halves retained.
+            val manifest = gemini_cli_smoke_manifest()
+            var found_marker = false
+            var i = 0u64
+            while i < manifest.qemu_marker_fragments.len():
+                if manifest.qemu_marker_fragments[i] == "[ai-cli] cli-smoke:start app=gemini":
+                    found_marker = true
+                i = i + 1u64
+            expect(found_marker).to_equal(true)
+            val lane = ai_cli_qemu_lane(manifest, "arm")
+            val serial = lane_serial_capture(lane)
+            expect(serial.contains("[ai-cli] cli-smoke:start app=gemini")).to_equal(true)
+            # @capture(assertion): the declared-marker scan and the
+            # emitted-marker check over the real serial capture are this
+            # scenario's retained evidence.
+
+    context "Phase 6: Full QEMU Validation":
+
+        it "x86_64 (q35 + OVMF UEFI): boot -> QuickJS -> CLI smoke -> serial evidence":
+            step("require the x86 lane to report ready AND to have produced a real serial capture that satisfies every declared marker")
+            # @req REQ-PLAN-AI-CLI-NODE-039
+            # AUDIT 2026-09-05, verdict 2 (vacuous): the previous oracle
+            # asserted runtime_status == "blocked-runtime-artifact", which
+            # _ai_cli_qemu_lane HARDCODES for all three targets
+            # (contract :489-524). It is a literal compared with itself, and
+            # green meant the box was still open. The qemu_system pin is a
+            # real field read and is retained. The box promises boot -> smoke
+            # -> serial evidence, so require exactly that.
+            val manifest = claude_cli_smoke_manifest()
+            val lane = ai_cli_qemu_lane(manifest, "x86")
+            expect(lane.qemu_system).to_equal("qemu-system-x86_64")
+            expect(lane.runtime_status).to_equal("ready")
+            val serial = lane_serial_capture(lane)
+            expect(file_exists(lane.serial_log_path)).to_equal(true)
+            expect(ai_cli_qemu_serial_accepts_lane(lane, serial)).to_equal(true)
+            # @capture(assertion): the lane's qemu_system and runtime_status
+            # fields plus the real serial capture's marker acceptance are this
+            # scenario's retained evidence.
+
+        it "RISC-V rv64gc (virt + OpenSBI): boot -> QuickJS -> CLI smoke -> serial evidence":
+            step("require the riscv lane to report ready AND to have produced a real serial capture that satisfies every declared marker")
+            # @req REQ-PLAN-AI-CLI-NODE-040
+            # AUDIT 2026-09-05, verdict 2 -> real oracle, same reasoning as
+            # REQ-...-039.
+            val manifest = codex_cli_smoke_manifest()
+            val lane = ai_cli_qemu_lane(manifest, "riscv")
+            expect(lane.qemu_system).to_equal("qemu-system-riscv64")
+            expect(lane.runtime_status).to_equal("ready")
+            val serial = lane_serial_capture(lane)
+            expect(file_exists(lane.serial_log_path)).to_equal(true)
+            expect(ai_cli_qemu_serial_accepts_lane(lane, serial)).to_equal(true)
+            # @capture(assertion): the lane's qemu_system and runtime_status
+            # fields plus the real serial capture's marker acceptance are this
+            # scenario's retained evidence.
+
+        it "AArch64 (virt + U-Boot): boot -> QuickJS -> CLI smoke -> serial evidence":
+            step("require the arm lane to report ready AND to have produced a real serial capture that satisfies every declared marker")
+            # @req REQ-PLAN-AI-CLI-NODE-041
+            # AUDIT 2026-09-05, verdict 2 -> real oracle, same reasoning as
+            # REQ-...-039.
+            val manifest = gemini_cli_smoke_manifest()
+            val lane = ai_cli_qemu_lane(manifest, "arm")
+            expect(lane.qemu_system).to_equal("qemu-system-aarch64")
+            expect(lane.runtime_status).to_equal("ready")
+            val serial = lane_serial_capture(lane)
+            expect(file_exists(lane.serial_log_path)).to_equal(true)
+            expect(ai_cli_qemu_serial_accepts_lane(lane, serial)).to_equal(true)
+            # @capture(assertion): the lane's qemu_system and runtime_status
+            # fields plus the real serial capture's marker acceptance are this
+            # scenario's retained evidence.
+
+        it "FAT32 disk image provisioning with runtime + CLI bundles":
+            step("require the provisioned FAT32 image and the staged runtime/CLI bundle payload to exist on disk")
+            # @req REQ-PLAN-AI-CLI-NODE-042
+            # AUDIT 2026-09-05, verdict 2 (vacuous): the previous oracle
+            # asserted lane.serial_log_path.contains("ai-cli") — a substring
+            # of a hardcoded path literal in _ai_cli_qemu_lane, true before
+            # any provisioning work and true after it is deleted. Retained;
+            # the real oracle is the provisioned artifacts themselves.
+            val manifest = claude_cli_smoke_manifest()
+            val lane = ai_cli_qemu_lane(manifest, "x86")
+            expect(lane.serial_log_path.contains("ai-cli")).to_equal(true)
+            expect(file_exists("build/os/fat32-x86_64.img")).to_equal(true)
+            expect(file_exists(staged_guest_path(manifest.entry_path))).to_equal(true)
+            expect(file_exists(ai_cli_staging_root + "/sys/runtime/node-compatible/x86/runtime.smf")).to_equal(true)
+            # @capture(assertion): the lane's serial_log_path field plus the
+            # existence of the provisioned FAT32 image and the two staged
+            # payload paths are this scenario's retained evidence.
+
+        it "Automated serial capture and marker verification":
+            step("run ai_cli_qemu_missing_markers against an empty capture (it must report every marker missing) and then against the REAL captured log (it must report none missing)")
+            # @req REQ-PLAN-AI-CLI-NODE-043
+            # AUDIT 2026-09-05, verdict 1 for the empty-capture half — that is
+            # a real function exercised against a real lane and it genuinely
+            # discriminates, so it is retained verbatim. But it only proves
+            # the VERIFIER works, never that any capture happened, which is
+            # what the checkbox promises. The real-capture half is added.
+            val manifest = claude_cli_smoke_manifest()
+            val lane = ai_cli_qemu_lane(manifest, "x86")
+            val missing = ai_cli_qemu_missing_markers(lane, "")
+            expect(missing.len()).to_equal(lane.marker_fragments.len())
+            expect(ai_cli_qemu_serial_accepts_lane(lane, "")).to_equal(false)
+            # non-vacuity: the lane must declare markers, else the above is empty
+            expect(lane.marker_fragments.len() > 0u64).to_equal(true)
+            val serial = lane_serial_capture(lane)
+            expect(file_exists(lane.serial_log_path)).to_equal(true)
+            expect(ai_cli_qemu_missing_markers(lane, serial).len()).to_equal(0u64)
+            # @capture(assertion): the empty-capture missing-marker count, the
+            # declared-marker non-vacuity guard, and the real-capture
+            # missing-marker count are this scenario's retained evidence.
+
+        it "Update ai_cli_qemu_lane runtime_status from \"blocked-runtime-artifact\" to \"ready\"":
+            step("build the real x86, riscv, and arm lanes and require all three to report ready — the exact flip this checkbox names")
+            # @req REQ-PLAN-AI-CLI-NODE-044
+            # AUDIT 2026-09-05, verdict 2 (vacuous): the previous oracle
+            # required all three lanes to still report
+            # "blocked-runtime-artifact", which _ai_cli_qemu_lane hardcodes —
+            # so it asserted a literal against itself, and green meant the box
+            # was open. The three-lane count is a real structural check and is
+            # retained; the status flip this checkbox literally names is now
+            # the discriminating assertion, still applied to ALL THREE lanes so
+            # a partial, unproven flip is caught.
+            val manifest = claude_cli_smoke_manifest()
+            val lanes = ai_cli_qemu_lanes(manifest)
+            expect(lanes.len()).to_equal(3u64)
+            var all_ready = true
+            var i = 0u64
+            while i < lanes.len():
+                if lanes[i].runtime_status != "ready":
+                    all_ready = false
+                i = i + 1u64
+            expect(all_ready).to_equal(true)
+            # @capture(assertion): the three-lane count and the per-lane
+            # runtime_status scan are this scenario's retained evidence.

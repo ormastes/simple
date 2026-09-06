@@ -1,0 +1,285 @@
+# Engine2D feature showcase — every drawing primitive, timed individually.
+#
+# PURPOSE (three at once)
+#   1. demos the whole Simple 2D primitive surface, not the DrawIR path the
+#      existing src/app/ui_showcase drives;
+#   2. gives a PER-PRIMITIVE cost, so "Simple 2D is slow" becomes a specific
+#      list of which primitives are slow;
+#   3. renders identically on any backend, so running it twice (cpu vs vulkan)
+#      and diffing the framebuffers is a rendering-bug detector — the 16 emu_*
+#      primitives share CPU code across backends, so a divergence can only come
+#      from the ~13 GPU-native ones.
+#
+# The scene is defined HERE, in one place, and both runs execute the same code.
+# There is deliberately no scene file: for a Simple-vs-Simple comparison a
+# shared in-file definition cannot drift, whereas two parsers could.
+#
+# Classification per doc/03_plan/ui/engine2d_vulkan_showcase_parity_plan.md.
+#   Run: VK2D_BACKEND=cpu|vulkan VK2D_DUMP_FB=<path> simple run <this>
+
+use std.io_runtime.{time_now_unix_micros, file_write_bytes}
+use app.io.mod.{env_get}
+use gpu.engine2d.engine.{Engine2D}
+
+const W: i32 = 800
+const H: i32 = 600
+
+var TIMES: [text] = []
+
+fn _mark(name: text, t0: i64):
+    TIMES.push("feat {name} us={time_now_unix_micros() - t0}")
+
+# --- GPU-native tier -------------------------------------------------------
+
+fn _gpu_native(e: Engine2D):
+    var t = time_now_unix_micros()
+    e.draw_rect_filled(20, 20, 120, 80, 0xFF3366CCu32)
+    _mark("draw_rect_filled", t)
+
+    t = time_now_unix_micros()
+    e.draw_rect(160, 20, 120, 80, 0xFFCC6633u32)
+    _mark("draw_rect", t)
+
+    t = time_now_unix_micros()
+    e.draw_line(300, 20, 420, 100, 0xFF33CC66u32, 3)
+    _mark("draw_line", t)
+
+    t = time_now_unix_micros()
+    e.draw_circle_filled(500, 60, 40, 0xFFCC3366u32)
+    _mark("draw_circle_filled", t)
+
+    t = time_now_unix_micros()
+    e.draw_triangle_filled(580, 100, 640, 20, 700, 100, 0xFF66CC33u32)
+    _mark("draw_triangle_filled", t)
+
+    t = time_now_unix_micros()
+    e.draw_gradient_rect(20, 120, 160, 80, 0xFF000088u32, 0xFF8800FFu32)
+    _mark("draw_gradient_rect", t)
+
+    t = time_now_unix_micros()
+    e.draw_shadow_rect(200, 120, 100, 60, 6, 6, 4, 0xFF101010u32)
+    _mark("draw_shadow_rect", t)
+
+# --- CPU emu_* tier --------------------------------------------------------
+
+fn _cpu_emu(e: Engine2D):
+    var t = time_now_unix_micros()
+    e.draw_circle(360, 155, 35, 0xFFFFCC00u32)
+    _mark("draw_circle", t)
+
+    t = time_now_unix_micros()
+    e.draw_ellipse(460, 155, 45, 30, 0xFF00CCFFu32)
+    _mark("draw_ellipse", t)
+
+    t = time_now_unix_micros()
+    e.draw_ellipse_filled(570, 155, 45, 30, 0xFFFF00CCu32)
+    _mark("draw_ellipse_filled", t)
+
+    t = time_now_unix_micros()
+    e.draw_arc(680, 155, 40, 0, 270, 0xFFCCFF00u32, 3)
+    _mark("draw_arc", t)
+
+    t = time_now_unix_micros()
+    e.draw_bezier(20, 230, 80, 200, 140, 280, 200, 230, 0xFF00FF88u32, 2)
+    _mark("draw_bezier", t)
+
+    t = time_now_unix_micros()
+    e.draw_rounded_rect(220, 220, 120, 70, 16, 0xFF8844FFu32)
+    _mark("draw_rounded_rect", t)
+
+    t = time_now_unix_micros()
+    e.draw_rounded_rect_outline(360, 220, 120, 70, 16, 0xFF44FF88u32, 3)
+    _mark("draw_rounded_rect_outline", t)
+
+    t = time_now_unix_micros()
+    e.draw_rect_thick(500, 220, 110, 70, 0xFFFF8844u32, 5)
+    _mark("draw_rect_thick", t)
+
+    t = time_now_unix_micros()
+    e.draw_circle_thick(680, 255, 35, 0xFF4488FFu32, 5)
+    _mark("draw_circle_thick", t)
+
+    t = time_now_unix_micros()
+    e.draw_triangle_outline(40, 320, 110, 380, 40, 380, 0xFFFF4488u32, 3)
+    _mark("draw_triangle_outline", t)
+
+    t = time_now_unix_micros()
+    e.draw_gradient_rect_h(150, 315, 150, 70, 0xFF884400u32, 0xFF0044FFu32)
+    _mark("draw_gradient_rect_h", t)
+
+    t = time_now_unix_micros()
+    e.draw_radial_gradient(380, 350, 45, 0xFFFFFFFFu32, 0xFF202080u32)
+    _mark("draw_radial_gradient", t)
+
+    var xs: [i32] = [470, 540, 570, 520, 460]
+    var ys: [i32] = [320, 315, 380, 395, 370]
+    t = time_now_unix_micros()
+    e.draw_polygon_filled(xs, ys, 5, 0xFF22AA88u32)
+    _mark("draw_polygon_filled", t)
+
+    var lxs: [i32] = [620, 660, 700, 740]
+    var lys: [i32] = [320, 380, 320, 380]
+    t = time_now_unix_micros()
+    e.draw_polyline(lxs, lys, 4, 0xFFAA2288u32, 2)
+    _mark("draw_polyline", t)
+
+# --- Forced-readback tier (the measured perf offenders) --------------------
+
+fn _readback_tier(e: Engine2D):
+    var t = time_now_unix_micros()
+    e.draw_rect_blend(40, 420, 120, 70, 0x803366CCu32)
+    _mark("draw_rect_blend", t)
+
+    # Second identical call: separates FIRST-CALL cost (host mirror warm-up)
+    # from steady-state per-call cost. Reporting the first as "the cost of
+    # draw_rect_blend" would be wrong if the mirror is only built once.
+    t = time_now_unix_micros()
+    e.draw_rect_blend(40, 500, 120, 40, 0x803366CCu32)
+    _mark("draw_rect_blend_2nd", t)
+
+    t = time_now_unix_micros()
+    e.draw_blur_rect(200, 420, 110, 70, 4)
+    _mark("draw_blur_rect", t)
+
+    t = time_now_unix_micros()
+    e.draw_rect_blend_mode(350, 420, 110, 70, 0x80FF8800u32, 1)
+    _mark("draw_rect_blend_mode", t)
+
+# --- Image tier ------------------------------------------------------------
+
+fn _image_tier(e: Engine2D):
+    # Deterministic 16x16 checkerboard: content must not vary between runs or
+    # the parity diff would report a false divergence.
+    var img: [u32] = [0u32; 256]
+    var i = 0
+    while i < 256:
+        val x = i % 16
+        val y = i / 16
+        if (x + y) % 2 == 0:
+            img[i] = 0xFFEE4444u32
+        else:
+            img[i] = 0xFF4444EEu32
+        i = i + 1
+
+    var t = time_now_unix_micros()
+    e.draw_image(500, 420, 16, 16, img)
+    _mark("draw_image", t)
+
+    t = time_now_unix_micros()
+    e.draw_image_scaled(540, 420, 64, 64, 16, 16, img)
+    _mark("draw_image_scaled", t)
+
+    t = time_now_unix_micros()
+    e.draw_image_blend(620, 420, 16, 16, img)
+    _mark("draw_image_blend", t)
+
+# --- Text tier ------------------------------------------------------------
+#
+# draw_text/draw_text_bg are GPU-native (vulkan SPIR-V glyph path) while the
+# cpu backend uses its own rasterizer, so unlike the shared emu_* primitives
+# these are a REAL divergence candidate — which is precisely why they belong
+# in the parity gate rather than being left out.
+fn _text_tier(e: Engine2D):
+    var t = time_now_unix_micros()
+    e.draw_text(30, 560, "Simple 2D", 0xFFFFFFFFu32, 16)
+    _mark("draw_text", t)
+
+    t = time_now_unix_micros()
+    e.draw_text_bg(200, 560, "showcase", 0xFF000000u32, 0xFFCCCCCCu32, 16)
+    _mark("draw_text_bg", t)
+
+# --- Gradient-stop + transform tier ---------------------------------------
+
+fn _advanced_tier(e: Engine2D):
+    var stops: [u32] = [0xFFFF0000u32, 0xFF00FF00u32, 0xFF0000FFu32]
+    var pos: [i32] = [0, 500, 1000]
+    var t = time_now_unix_micros()
+    e.draw_gradient_rect_stops(320, 460, 120, 60, stops, pos, 0)
+    _mark("draw_gradient_rect_stops", t)
+
+    t = time_now_unix_micros()
+    e.draw_radial_gradient_rect_stops(470, 490, 40, stops, pos)
+    _mark("draw_radial_gradient_rect_stops", t)
+
+    var img: [u32] = [0u32; 256]
+    var i = 0
+    while i < 256:
+        val x = i % 16
+        val y = i / 16
+        if (x + y) % 2 == 0:
+            img[i] = 0xFF22FFAAu32
+        else:
+            img[i] = 0xFFAA22FFu32
+        i = i + 1
+
+    # Identity-ish affine in milli-units: scale 2x, no rotation.
+    t = time_now_unix_micros()
+    e.draw_image_transform(700, 440, 16, 16, 2000, 0, 0, 2000, 0, 0, img)
+    _mark("draw_image_transform", t)
+
+    t = time_now_unix_micros()
+    e.draw_image_scaled_blend(700, 500, 48, 48, 16, 16, img)
+    _mark("draw_image_scaled_blend", t)
+
+fn _clip_tier(e: Engine2D):
+    var t = time_now_unix_micros()
+    e.set_clip(660, 500, 80, 60)
+    e.draw_rect_filled(600, 460, 200, 140, 0xFF00AA55u32)
+    _mark("set_clip+fill", t)
+
+fn main():
+    var backend = env_get("VK2D_BACKEND").trim()
+    if backend == "":
+        backend = "vulkan"
+    val e = Engine2D.create_with_backend_fast(W, H, backend)
+    if e.backend_name() != backend:
+        print "showcase status=blocked reason=backend-unavailable requested={backend} got={e.backend_name()}"
+        return
+
+    val t_all = time_now_unix_micros()
+    var t = time_now_unix_micros()
+    e.clear(0xFF141414u32)
+    _mark("clear", t)
+
+    _gpu_native(e)
+    _cpu_emu(e)
+    _readback_tier(e)
+    _image_tier(e)
+    _text_tier(e)
+    _advanced_tier(e)
+    _clip_tier(e)
+
+    t = time_now_unix_micros()
+    e.submit_batch()
+    _mark("submit_batch", t)
+    t = time_now_unix_micros()
+    e.present()
+    _mark("present", t)
+
+    val rb = e.read_pixels_with_source()
+    val n = rb.pixels.len()
+    var nonclear: i64 = 0
+    var j: i64 = 0
+    while j < n:
+        if (rb.pixels[j].to_i32().to_i64() & 0xFFFFFFFF) != 4279505940:
+            nonclear = nonclear + 1
+        j = j + 1
+
+    for line in TIMES:
+        print line
+    print "showcase backend={backend} w={W} h={H} pixels={n} nonclear={nonclear} total_us={time_now_unix_micros() - t_all} src={rb.source}"
+
+    val dump_path = env_get("VK2D_DUMP_FB").trim()
+    if dump_path != "":
+        var raw: [u8] = [0u8; n * 4]
+        var k: i64 = 0
+        while k < n:
+            val pv = rb.pixels[k].to_i32().to_i64() & 0xFFFFFFFF
+            val o = k * 4
+            raw[o] = (pv & 255).to_i32().to_u8()
+            raw[o + 1] = ((pv >> 8) & 255).to_i32().to_u8()
+            raw[o + 2] = ((pv >> 16) & 255).to_i32().to_u8()
+            raw[o + 3] = ((pv >> 24) & 255).to_i32().to_u8()
+            k = k + 1
+        if file_write_bytes(dump_path, raw):
+            print "dump: wrote {n * 4} bytes to {dump_path}"

@@ -78,6 +78,9 @@ extern fn rt_vulkan_copy_from_buffer_regions(data: [u8], handle: i64, regions: [
 extern fn rt_vulkan_copy_from_buffer_strided(data: [u8], handle: i64, src_offset: i64, row_bytes: i64, row_count: i64, src_stride: i64) -> bool
 @unsafe(reason: "raw Vulkan ABI; foreign implementation is not compiler-validated", capabilities: [ffi])
 extern fn rt_vulkan_read_buffer_bytes(handle: i64, byte_count: i64, offset: i64) -> [u8]
+@unsafe(reason: "raw Vulkan one-call pixel readback ABI; foreign implementation is not compiler-validated", capabilities: [ffi])
+extern fn rt_vulkan_readback_u32_checksum(pixels: [u32], pixel_count: i64, handle: i64, offset: i64) -> i64
+extern fn rt_vulkan_copy_u32_slots(dst: [u32], src: [u32], count: i64) -> i64
 @unsafe(reason: "raw Vulkan ABI; foreign implementation is not compiler-validated", capabilities: [ffi])
 extern fn rt_byte_array_new_len(len: i64) -> [u8]
 @unsafe(reason: "raw Vulkan ABI; foreign implementation is not compiler-validated", capabilities: [ffi])
@@ -875,6 +878,79 @@ fn vulkan_sffi_copy_from_buffer(data: [u8], handle: i64, offset: i64) -> bool:
 @unsafe(reason: "raw Vulkan buffer-read facade", capabilities: [ffi])
 fn vulkan_sffi_read_buffer_bytes(handle: i64, byte_count: i64, offset: i64) -> [u8]:
     _vulkan_read_buffer_bytes_abi(handle, byte_count, offset)
+
+@unsafe(reason: "raw Vulkan one-call pixel readback facade", capabilities: [ffi])
+fn vulkan_sffi_readback_u32_into(dest: [u32], handle: i64, pixel_count: i32, offset: i64) -> i64:
+    """Download pixels into a CALLER-OWNED [u32] and return the readback
+    identity checksum. Returns -1 on failure (a valid checksum is >= 0).
+
+    Why this shape and not `-> ([u32], i64)`: returning a large array inside a
+    TUPLE deep-copies its elements. Measured 800x600 (480,000 px) under JIT,
+    that copy alone cost ~12.1 ms per frame -- larger than the download and
+    the native fill combined (~3.6 ms). Passing the destination in and
+    returning only a scalar keeps the array by-reference (assignment of the
+    same array measures 22 us), and lets the caller reuse one buffer across
+    frames instead of allocating 480,000 elements every frame.
+    See doc/02_requirements/nfr/engine2d_vulkan_2d_perf.md."""
+    if pixel_count <= 0:
+        return -1
+    if dest.len().to_i64() < pixel_count.to_i64():
+        return -1
+    if gpu_sffi_uses_interpreter_array_abi():
+        val bytes = _vulkan_read_buffer_bytes_abi(handle, pixel_count.to_i64() * 4, offset)
+        if bytes.len().to_i64() != pixel_count.to_i64() * 4:
+            return -1
+        var i: i64 = 0
+        var checksum: i64 = 0
+        while i < pixel_count.to_i64():
+            val off = i * 4
+            val px = bytes[off].to_i64() | (bytes[off + 1].to_i64() << 8) | (bytes[off + 2].to_i64() << 16) | (bytes[off + 3].to_i64() << 24)
+            dest[i] = px.to_i32().to_u32()
+            checksum = (checksum + px) % 2147483647
+            i = i + 1
+        return checksum
+    rt_vulkan_readback_u32_checksum(dest, pixel_count.to_i64(), handle, offset)
+
+@unsafe(reason: "raw Vulkan pixel-slot bulk copy facade", capabilities: [ffi])
+fn vulkan_sffi_copy_u32_into(dest: [u32], src: [u32], count: i32) -> bool:
+    """Bulk-copy `count` pixels from `src` into a CALLER-OWNED `dest`.
+
+    The readback facade must hand its caller an array the backend does not
+    retain, so it cannot simply return the retained host mirror. The
+    element-at-a-time Simple loop that made that copy is O(pixels) interpreted
+    work: measured ~482 ms per 7680x4320 frame and ~2x that at 8192x8192 --
+    by itself more than half the frame, and larger than the GPU transfer it
+    accompanies by two orders of magnitude. This routes the same copy through
+    one native slot memcpy.
+
+    Sized for the 8K defaults: there is no threshold and no chunking, because
+    a single contiguous copy is exactly what the largest targets want and
+    small framebuffers lose nothing by taking the same path. Returns false on
+    any validation failure so the caller can fall back rather than consume a
+    partially-written destination."""
+    if count < 0:
+        return false
+    if count == 0:
+        return true
+    if dest.len().to_i64() < count.to_i64() or src.len().to_i64() < count.to_i64():
+        return false
+    if not gpu_sffi_uses_interpreter_array_abi():
+        if rt_vulkan_copy_u32_slots(dest, src, count.to_i64()) == count.to_i64():
+            return true
+    # Fall back to the element loop on ANY native refusal. Externs that pass a
+    # runtime array are rejected outright on the interpreter path, and
+    # `gpu_sffi_uses_interpreter_array_abi()` does not predict that reliably:
+    # whether a given method reaches the JIT or the interpreter is decided per
+    # function, so a lane can answer "native ABI" and still execute this call
+    # interpreted. Treating the refusal as a readback FAILURE returned an empty
+    # framebuffer and made both pixel gates unable to compare anything. Correct
+    # pixels on every lane come first; the speedup applies wherever the native
+    # call is genuinely available.
+    var i: i64 = 0
+    while i < count.to_i64():
+        dest[i] = src[i]
+        i = i + 1
+    true
 
 @unsafe(reason: "raw Vulkan strided buffer-read facade", capabilities: [ffi])
 fn vulkan_sffi_read_buffer_strided_bytes(handle: i64, src_offset: i64, row_bytes: i64, row_count: i64, src_stride: i64) -> [u8]:

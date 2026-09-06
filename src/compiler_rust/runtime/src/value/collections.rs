@@ -5212,12 +5212,36 @@ pub extern "C" fn rt_array_copy(array: RuntimeValue) -> RuntimeValue {
             return result;
         }
 
+        // GENERIC (tagged) layout. This is NOT a rare path: `[0u32; n]` lowers
+        // to rt_array_repeat -> rt_array_new, which sets neither U64_PACKED nor
+        // BYTE_PACKED, so every `[u32]`/`[i64]`/`[f64]`/class array binding
+        // reaches here -- the two packed branches above are near-dead for
+        // source-level `val b = a`.
+        //
+        // The old body pushed element-by-element through `rt_array_push`. That
+        // is one non-inlined extern call, one heap-handle untag, one capacity
+        // compare and one length store PER ELEMENT: measured 12.8 ms for a
+        // 480,000-element `[u32]` versus 3.9 ms for a hand-written Simple
+        // `while` loop, i.e. the runtime's own copy was 3.2x SLOWER than
+        // interpreted/JIT-ed source (engine2d perf register defect #7, which is
+        // why `backend_vulkan.spl:1504` still carries a hand loop).
+        //
+        // Bulk-copy the tagged words instead. This is semantics-preserving:
+        // `rt_array_push`'s generic branch is exactly `*data.add(len) = value;
+        // len += 1` after a capacity check (see rt_array_push_grow) -- no
+        // retain, no write barrier, no GC bookkeeping -- and `rt_array_new(len)`
+        // pre-allocates capacity `len`, so the growth branch could never fire
+        // for this loop anyway. Heap-pointer elements stay shared, which is what
+        // "shallow copy" already meant.
         let result = rt_array_new(len);
         if result.is_nil() {
             return result;
         }
-        for item in (*arr).as_slice() {
-            rt_array_push(result, *item);
+        let dst = as_typed_ptr!(mut result, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);
+        if len > 0 && !(*arr).data.is_null() && !(*dst).data.is_null() {
+            debug_assert!((*dst).capacity >= len);
+            std::ptr::copy_nonoverlapping((*arr).data, (*dst).data, len as usize);
+            (*dst).len = len;
         }
         result
     }
@@ -5743,15 +5767,26 @@ pub extern "C" fn rt_array_repeat(value: RuntimeValue, count: i64) -> RuntimeVal
         return rt_array_new(0);
     }
 
-    let result = rt_array_new(count as u64);
+    // Uninitialized, NOT alloc_zeroed: every slot is overwritten by the fill
+    // below, so zeroing first is a second full pass over the buffer. That is
+    // free for small arrays and very much not for large ones — a
+    // `[0u32; 7680*4320]` framebuffer is 265 MB of RuntimeValue slots
+    // (537 MB at 8192x8192), and the redundant pass was measured at ~150 ms
+    // and ~282 ms respectively.
+    let result = rt_array_new_uninit(count as u64);
     if result.is_nil() {
         return result;
     }
 
     let arr = as_typed_ptr!(mut result, HeapObjectType::Array, RuntimeArray, result);
     unsafe {
+        // Fill BEFORE publishing `len`. With an uninitialized buffer a GC scan
+        // that observed len = count would walk arbitrary words as tagged
+        // values; with the old alloc_zeroed they were harmlessly nil. Ordering
+        // is what keeps this safe, so do not hoist the length store.
+        let data = (*arr).data;
+        std::slice::from_raw_parts_mut(data, count as usize).fill(value);
         (*arr).len = count as u64;
-        (*arr).as_mut_slice().fill(value);
     }
     result
 }

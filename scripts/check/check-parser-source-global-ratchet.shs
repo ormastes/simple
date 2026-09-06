@@ -1,0 +1,136 @@
+#!/bin/sh
+# check-parser-source-global-ratchet.shs — fail-closed ratchet on global parser
+# source state (`current_core_source_get` / `current_core_source_set`) in Simple
+# product code.
+#
+# Why: doc/03_plan/platform/structural_compute/parser_framework_plan.md claims
+# migrated consumers "receive owner-bound diagnostics rather than publishing
+# parser globals after a call returns". That is true at the consumer layer, but
+# the global is still the lexer's own source of truth (8 sites in 2 files,
+# measured 2026-09-05). While it survives, two parsers can disagree about which
+# source they are reading and the SourceSnapshot identity contract is advisory.
+# This gate does NOT remove a global. It freezes the count so the eventual
+# removal is visible and a regrowth is a FAIL.
+#
+# Design rationale and the wider audit:
+#   doc/05_design/platform/structural_compute/parser_sharing_contract_v1.md
+#
+# Verdict is ALWAYS the last stdout line: PASS exit 0 / FAIL exit 1 / ERROR 2.
+# A run that scanned 0 files is ERROR, never a pass — absence of evidence is
+# not evidence. --selftest runs first, unconditionally, and is fatal.
+#
+# Usage: sh scripts/check/check-parser-source-global-ratchet.shs \
+#            [--root DIR] [--generate-baseline] [--selftest-only]
+
+set -u
+
+ROOT="$(pwd)"
+GENERATE_BASELINE=0
+SELFTEST_ONLY=0
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --root) ROOT="${2:-}"; [ -n "$ROOT" ] || { echo "ERROR — --root needs a directory"; exit 2; }; shift 2 ;;
+    --generate-baseline) GENERATE_BASELINE=1; shift ;;
+    --selftest-only) SELFTEST_ONLY=1; shift ;;
+    --selftest) SELFTEST_ONLY=1; shift ;;
+    *) echo "ERROR — unknown argument: $1"; exit 2 ;;
+  esac
+done
+
+PATTERN='current_core_source_get\|current_core_source_set'
+
+# scan_dir DIR -> prints "<files_scanned> <hit_sites>"
+# Counts *sites* (grep -o style, one per occurrence), not files, so moving a
+# global from one file to another cannot silently reduce the number.
+scan_dir() {
+  _dir="$1"
+  if [ ! -d "$_dir" ]; then echo "0 0"; return; fi
+  _list=$(find "$_dir" -name '*.spl' -type f 2>/dev/null | grep -v '/vendor/')
+  if [ -z "$_list" ]; then echo "0 0"; return; fi
+  _files=$(printf '%s\n' "$_list" | wc -l | tr -d ' ')
+  _sites=$(printf '%s\n' "$_list" | xargs grep -o "$PATTERN" 2>/dev/null | wc -l | tr -d ' ')
+  echo "$_files $_sites"
+}
+
+# read_scan DIR -> sets SCAN_FILES / SCAN_SITES (avoids `set --` under `set -u`)
+read_scan() {
+  SCAN_FILES=$(scan_dir "$1" | cut -d' ' -f1)
+  SCAN_SITES=$(scan_dir "$1" | cut -d' ' -f2)
+}
+
+# ---------------------------------------------------------------- selftest
+# Three fixtures against the real scanner: a clean tree must report 0 sites; a
+# tree with two globals must report exactly 2; an empty tree must report 0
+# files so the caller is forced to ERROR rather than passing vacuously.
+run_selftest() {
+  _tmp="${TMPDIR:-/tmp}/parser-source-ratchet-selftest.$$"
+  rm -rf "$_tmp"; mkdir -p "$_tmp/clean/src" "$_tmp/dirty/src" "$_tmp/empty"
+
+  printf 'fn f() -> text:\n    "hello"\n' > "$_tmp/clean/src/a.spl"
+  printf 'fn g(s: text) -> text:\n    s\n' > "$_tmp/clean/src/b.spl"
+
+  printf 'fn h() -> text:\n    current_core_source_get()\n' > "$_tmp/dirty/src/a.spl"
+  printf 'fn i(s: text):\n    current_core_source_set(s)\n' > "$_tmp/dirty/src/b.spl"
+
+  read_scan "$_tmp/clean/src"
+  if [ "$SCAN_FILES" -ne 2 ] || [ "$SCAN_SITES" -ne 0 ]; then
+    rm -rf "$_tmp"; echo "ERROR — selftest fixture 'clean' expected 2 files / 0 sites, got $SCAN_FILES / $SCAN_SITES"; exit 2
+  fi
+  read_scan "$_tmp/dirty/src"
+  if [ "$SCAN_FILES" -ne 2 ] || [ "$SCAN_SITES" -ne 2 ]; then
+    rm -rf "$_tmp"; echo "ERROR — selftest fixture 'dirty' expected 2 files / 2 sites, got $SCAN_FILES / $SCAN_SITES"; exit 2
+  fi
+  read_scan "$_tmp/empty"
+  if [ "$SCAN_FILES" -ne 0 ]; then
+    rm -rf "$_tmp"; echo "ERROR — selftest fixture 'empty' expected 0 files, got $SCAN_FILES"; exit 2
+  fi
+  rm -rf "$_tmp"
+}
+
+run_selftest
+if [ $SELFTEST_ONLY -eq 1 ]; then
+  echo "PASS — 3 selftest fixture(s) checked, scanner behaves"
+  exit 0
+fi
+
+# ------------------------------------------------------------------- scan
+[ -d "$ROOT/src" ] || { echo "ERROR — nothing was checked (no src/ under $ROOT)"; exit 2; }
+
+read_scan "$ROOT/src"
+scanned="$SCAN_FILES"
+sites="$SCAN_SITES"
+
+if [ "$scanned" -eq 0 ]; then
+  echo "ERROR — nothing was checked (0 .spl files under $ROOT/src)"
+  exit 2
+fi
+
+BASELINE_FILE="$ROOT/scripts/check/parser_source_global_baseline.txt"
+
+if [ $GENERATE_BASELINE -eq 1 ]; then
+  echo "$sites" > "$BASELINE_FILE"
+  echo "PASS — $scanned file(s) scanned, parser-source globals=$sites (baseline written)"
+  exit 0
+fi
+
+[ -f "$BASELINE_FILE" ] || { echo "ERROR — nothing was checked (missing baseline $BASELINE_FILE)"; exit 2; }
+baseline=$(head -1 "$BASELINE_FILE" | tr -cd '0-9')
+[ -n "$baseline" ] || { echo "ERROR — nothing was checked (baseline unreadable: $BASELINE_FILE)"; exit 2; }
+
+if [ "$sites" -gt "$baseline" ]; then
+  offenders=$(find "$ROOT/src" -name '*.spl' -type f 2>/dev/null | grep -v '/vendor/' \
+    | xargs grep -l "$PATTERN" 2>/dev/null \
+    | sed "s|^$ROOT/||" | tr '\n' ' ')
+  echo "fix: take the source from the owning SourceSnapshot / ParseReceipt rather than the"
+  echo "     global lexer source. See doc/05_design/platform/structural_compute/parser_sharing_contract_v1.md"
+  echo "     Do NOT run --generate-baseline to absorb a new global; that is the debt this gate exists to stop."
+  echo "FAIL — $scanned file(s) scanned, parser-source globals=$sites exceeds baseline $baseline; files: $offenders"
+  exit 1
+fi
+
+if [ "$sites" -lt "$baseline" ]; then
+  echo "note: parser-source globals improved ($sites < baseline $baseline); tighten deliberately with --generate-baseline."
+fi
+echo "PASS — $scanned file(s) scanned, parser-source globals=$sites (baseline $baseline)"
+exit 0

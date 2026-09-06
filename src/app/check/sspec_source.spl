@@ -1,6 +1,12 @@
-fn _triple_quote_count(line: text) -> i64:
-    val stripped = line.replace("\"\"\"", "")
-    (line.len() - stripped.len()) / 3
+# Which lines are inside a string is CoreLexer's fact. The previous per-line
+# triple-quote parity count treated ANY line containing `"""` as a docstring
+# boundary — including a comment that merely mentions the delimiter — and
+# then skipped every following line until the next one. Replaying that tracker
+# over the tree on 2026-09-05: in 6 spec files a comment holding `"""` hid the
+# `use std.spec` import or the first top-level `describe`, so this guidance was
+# never emitted for them. (287 more have the import inside their header
+# docstring's code fence; that is prose, and both versions stay silent.)
+use compiler.frontend.core.source_facts.{simple_code_lines, simple_string_continuation_lines}
 
 
 fn _is_spec_import(line: text) -> bool:
@@ -15,12 +21,17 @@ fn _is_spec_import(line: text) -> bool:
 fn check_sspec_guidance(source: text, path: text) -> text:
     var has_spec_import = false
     var has_describe = false
-    var in_triple_string = false
-    for line in source.split("\n"):
-        val triple_quotes = _triple_quote_count(line)
-        if in_triple_string or triple_quotes > 0:
-            if triple_quotes % 2 == 1:
-                in_triple_string = not in_triple_string
+    val lines = source.split("\n")
+    val code_lines = simple_code_lines(source)
+    val string_continuation = simple_string_continuation_lines(source)
+    var i = 0
+    while i < lines.len():
+        val line = lines[i]
+        val index = i
+        i = i + 1
+        # Inside a string opened earlier, or a line that is itself only a
+        # string (a docstring opener or a one-line docstring): not a statement.
+        if string_continuation[index] or code_lines[index].trim() == "\"\"":
             continue
         val trimmed = line.trim()
         if _is_spec_import(line):

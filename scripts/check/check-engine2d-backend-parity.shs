@@ -1,0 +1,95 @@
+#!/bin/sh
+# check-engine2d-backend-parity.shs — Simple-vs-Simple rendering parity.
+#
+# THE CONTRACT
+#   test/05_perf/bench/vulkan_2d_c/feature_showcase.spl draws every Engine2D primitive from
+#   ONE in-file scene definition. This gate runs it on two backends and
+#   compares the framebuffers byte for byte.
+#
+# WHY THIS FINDS RENDERING BUGS CHEAPLY
+#   Of the 34 drawing primitives in the vulkan backend, 16 delegate to shared
+#   CPU `emu_*` code and render identically on both backends by construction.
+#   So any divergence here is necessarily in the ~13 GPU-native primitives —
+#   a small, high-value surface, located without a C reference, a GPU debugger
+#   or a golden image.
+#
+#   It is also a stronger check than comparing against C: C's rasterizer
+#   differs from `emu_*` by construction, so a C diff can only be tolerance-
+#   based for shapes. Both sides here are Simple, so bit-exactness is the
+#   correct bar for EVERY primitive.
+#
+# VERDICT (last line of stdout)
+#   PASS  — <n> bytes compared across <k> primitives, 0 differing
+#   FAIL  — <n> bytes compared, <k> differing (first at byte <o> = pixel ...)
+#   ERROR — nothing was compared (<reason>)
+#
+# Fail-closed: a missing dump, an empty dump or a size mismatch is never a
+# pass. "We could not look" must not read as "the backends agree".
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+OUT="$ROOT/build/engine2d-backend-parity"
+SEED="$ROOT/src/compiler_rust/target/vulkan/release/simple"
+SHOWCASE="test/05_perf/bench/vulkan_2d_c/feature_showcase.spl"
+ICD=${VK_ICD_FILENAMES:-/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json}
+A=${PARITY_BACKEND_A:-cpu}
+B=${PARITY_BACKEND_B:-vulkan}
+ATTEMPTS=${VK2D_ATTEMPTS:-4}
+# Showcase framebuffer width, needed to turn a byte offset into a pixel
+# coordinate. Hardcoding it made the reported x/y silently wrong at any other
+# resolution.
+SHOW_W=${PARITY_W:-800}
+
+err() { echo "ERROR — nothing was compared ($1)"; exit 2; }
+
+[ -x "$SEED" ] || err "no vulkan seed binary at $SEED"
+[ -f "$ROOT/$SHOWCASE" ] || err "no showcase at $SHOWCASE"
+
+mkdir -p "$OUT"
+FA="$OUT/$A.bin"; FB="$OUT/$B.bin"
+rm -f "$FA" "$FB"
+
+run_leg() {
+    backend=$1; dump=$2; n=0
+    while [ "$n" -lt "$ATTEMPTS" ]; do
+        n=$((n + 1))
+        ( cd "$ROOT" && SIMPLE_RUST_SEED_WARNING=0 SIMPLE_LIB=src \
+            VK_ICD_FILENAMES="$ICD" VK2D_BACKEND="$backend" VK2D_DUMP_FB="$dump" \
+            "$SEED" run "$SHOWCASE" >"$OUT/$backend.log" 2>/dev/null ) || true
+        [ -s "$dump" ] && break
+    done
+    echo "$n"
+}
+
+a_attempts=$(run_leg "$A" "$FA")
+[ -s "$FA" ] || err "backend $A produced no dump after $ATTEMPTS attempt(s)"
+b_attempts=$(run_leg "$B" "$FB")
+[ -s "$FB" ] || err "backend $B produced no dump after $ATTEMPTS attempt(s)"
+
+a_size=$(wc -c < "$FA" | tr -d ' ')
+b_size=$(wc -c < "$FB" | tr -d ' ')
+[ "$a_size" -gt 0 ] || err "$A dump is empty"
+prims=$(grep -c '^feat ' "$OUT/$A.log" 2>/dev/null || echo 0)
+[ "$prims" -gt 0 ] || err "showcase reported 0 primitives — nothing was drawn"
+
+echo "parity_backends=$A,$B attempts=$a_attempts,$b_attempts primitives=$prims"
+if [ "$a_size" -ne "$b_size" ]; then
+    echo "FAIL — dumps differ in SIZE: $A $a_size bytes, $B $b_size bytes"
+    exit 1
+fi
+
+cmp -s "$FA" "$FB"
+cmp_rc=$?
+if [ "$cmp_rc" -eq 0 ]; then
+    echo "PASS — $a_size bytes compared across $prims primitives, 0 differing"
+    exit 0
+fi
+differing=$(cmp -l "$FA" "$FB" 2>/dev/null | wc -l | tr -d ' ')
+first=$(cmp "$FA" "$FB" 2>&1 | sed -n 's/.*[bc][yh][ta][er] \([0-9]*\).*/\1/p' | head -1)
+loc=""
+if [ -n "$first" ]; then
+    px=$(( (first - 1) / 4 ))
+    loc=" = pixel $px (x=$(( px % SHOW_W )), y=$(( px / SHOW_W )))"
+fi
+echo "FAIL — $a_size bytes compared, $differing differing (first at byte ${first:-unknown}${loc})"
+exit 1

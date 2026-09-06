@@ -7,18 +7,23 @@ Audience: engineers wiring an OpenAI-compatible client (llm_caret's
 
 ## Operator workflow
 I point a client at the slang server. I ask it which models it has, and the
-answer must be exactly the packs sitting on disk — no more, no fewer. I send
-a chat request. Because only phase A1 (the weight loader) of
-doc/05_design/ml/slang/slang_master_plan.md is implemented, there is no
-attention kernel, no KV cache, no worker and no engine, so I must get an
-explicit, structured "model not runnable" refusal that announces itself as a
-stub — never invented prose that I could mistake for a real answer.
+answer must be exactly what slang recognises on disk — the native packs plus
+the GGUF and safetensors checkouts — no more, no fewer. I send a chat request.
+For a slang pack there is still no native executor (phases A3/A4/A5 of
+doc/05_design/ml/slang/slang_master_plan.md are absent: no streaming loader, no
+paged KV cache, no scheduler), so I must get an explicit, structured "model not runnable"
+refusal that announces itself as a stub — never invented prose that I could
+mistake for a real answer.
 
 ## Compatibility and limitations
-This build is an ANNOUNCED STUB for inference: `/v1/chat/completions` cannot
-return generated text and says so in its payload (`"stub":true`). Streaming is
-out of scope and is rejected. Fixtures are real directories written under
-build/test/ and read back through the phase-A1 manifest parser.
+For a slang PACK this build remains an ANNOUNCED STUB: `/v1/chat/completions`
+cannot return generated text for one and says so in its payload
+(`"stub":true`). A GGUF model with the ggml backend built is served for real by
+the engine; that path is exercised by the live gate
+scripts/check/check-slang-ggml-inference.shs, not here, because it needs a
+46 GB model on disk. Streaming is out of scope and is rejected. Fixtures are
+real directories written under build/test/ and read back through the phase-A1
+manifest parser.
 """
 
 use std.spec.step
@@ -27,6 +32,7 @@ use std.spec.{describe, it, expect}
 use std.gc_async_mut.slang.entrypoints.openai.protocol.{parse_chat_request, openai_error_response, openai_models_response, json_string_field, json_int_field, json_array_object_count}
 use std.gc_async_mut.slang.entrypoints.openai.serving_models.{discover_models, model_ids, find_model, read_model_entry}
 use std.gc_async_mut.slang.entrypoints.openai.api_server.{slang_api_dispatch}
+use std.gc_async_mut.slang.engine.llm_engine.{engine_set_lib_path}
 use std.io_runtime.{dir_create_all, file_write, dir_remove_all}
 
 fn valid_manifest(model_id: text) -> text:
@@ -45,6 +51,13 @@ fn populated_root() -> text:
     file_write(root + "/pack-b/manifest.sdn", valid_manifest("slang-demo-b"))
     file_write(root + "/not-a-pack/readme.txt", "no manifest here")
     file_write(root + "/broken/manifest.sdn", "{\"schema_version\":0,\"model_id\":\"\"}")
+    root
+
+fn gguf_root() -> text:
+    val root = "build/test/slang_openai_a6/gguf"
+    dir_remove_all(root)
+    dir_create_all(root + "/tiny-gguf")
+    file_write(root + "/tiny-gguf/model-00001-of-00001.gguf", "GGUF not a loadable model, only the magic")
     root
 
 fn empty_root() -> text:
@@ -148,6 +161,26 @@ describe "POST /v1/chat/completions never fabricates a completion":
         val response = slang_api_dispatch("POST", "/v1/chat/completions", "{\"model\":\"slang-demo-a\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}", populated_root())
         expect(response.body.find("\"choices\"") < 0).to_equal(true)
         expect(response.body.find("\"content\"") < 0).to_equal(true)
+
+describe "a recognised model that is not a slang pack is routed to the engine":
+    it "lists a GGUF directory in /v1/models even though no pack manifest exists":
+        step("Verify: the silent-omission bug cannot return through the HTTP surface")
+        val response = slang_api_dispatch("GET", "/v1/models", "", gguf_root())
+        expect(response.status).to_equal(200)
+        expect(response.body.find("tiny-gguf") >= 0).to_equal(true)
+
+    it "refuses it with a reason and without the pack stub flag when no backend is configured":
+        step("Verify: the engine refusal is distinct from the slang-pack stub, and explains itself")
+        # Point the engine at a library that does not exist, so this scenario is
+        # decided by routing rather than by whether the host happens to have a
+        # ggml build. Without this the test would pass for different reasons on
+        # different machines.
+        engine_set_lib_path("build/test/slang_openai_a6/no-such-backend.so")
+        val response = slang_api_dispatch("POST", "/v1/chat/completions", "{\"model\":\"tiny-gguf\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}", gguf_root())
+        expect(response.status).to_equal(503)
+        expect(json_string_field(response.body, "code")).to_equal("model_not_runnable")
+        expect(response.body.find("\"stub\":false") >= 0).to_equal(true)
+        expect(json_string_field(response.body, "message").len() > 0).to_equal(true)
 
 describe "routing and envelopes":
     it "answers 404 for an unknown route":

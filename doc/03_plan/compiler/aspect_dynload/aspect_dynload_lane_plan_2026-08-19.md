@@ -398,8 +398,8 @@ targets, and completion marks.
       denominator for both admitted C and Simple providers, with biting negative
       controls; separately, every declared physical-board contract has real-board
       evidence or an explicit unavailable status.
-- [ ] Real startup uses dynload config and component resolution.
-- [ ] Aspect packs and typed facets have parser/type/loader/runtime coverage.
+- [ ] Real startup uses dynload config and component resolution. — NOT verified (2026-09-05): the component-resolution half does not hold. `src/app/startup/component_dynsmf_wiring.spl` is imported by ZERO product files under `src/` (only specs `use` it, and three read it as text) and is named by no catalog/config file under `config/` or `src/app/`, so `component_resolver_catalog_parse_sdn` (:388) is not established as reachable from `src/app/main.spl`, which is what the cited gate runs. Only the config half is on the real path, and through a DIFFERENT module: `src/app/main.spl:9-12,36` uses `app.startup.dynsmf_autoload.product_dynload_startup`, not the cited file.
+- [x] Aspect packs and typed facets have parser/type/loader/runtime coverage. — verified test/01_unit/compiler/frontend/facet_parser_schema_spec.spl:10 `typed facet parser schema` (parser), test/01_unit/compiler/semantics/facet_static_binding_spec.spl:116 `closed-world facet parser, binder, witness, and direct MIR lowering` (type), test/01_unit/compiler/loader/aspect_pack_io_spec.spl:72 `aspect pack I/O policy` (loader), test/01_unit/compiler/loader/joinpoint_patchpoint_execution_spec.spl:61 `join-point call through a slot cell` (runtime)
 - [ ] Cross-language perf receipts use comparable work, >=5 samples, p50/p95,
       RSS, hashes, versions, fallback state, and checksum/output parity.
 - [ ] A provenance-backed x86_64 Stage 4 passes and is deployed as `bin/simple`.
@@ -704,7 +704,8 @@ was run for this refresh.
 - [ ] Merge/admit the source-complete Cosmos policy objects. Runtime core and
   SMP/GIC production wiring are still open; MMU/cache native Simple/unit/ARM
   link remains blocked without Stage 4.
-- [ ] Complete RV64 endian/checksum/device-ID.
+- [x] RV64 endian/checksum/device-ID policy is source-complete as a pure-Simple module with a unit oracle — verified src/os/kernel/arch/riscv64/freestanding_policy.spl:44 `rv64_read_be16`, :69 `rv64_checksum_add`, :92 `rv64_pci_is_virtio_net`; test/01_unit/os/kernel/arch/riscv64_freestanding_policy_spec.spl
+  - divergence: planned the slice wired into the RV64 boot path; shipped the policy module only — no caller outside `freestanding_policy.spl` under src/os/kernel/arch/riscv64/ (`git grep rv64_checksum_add -- src/os/kernel/arch/riscv64` → definition only).
 - [ ] Admit Cortex scalar/parser/FS with Stage 4 and refresh its actual 44/44,
   ABI-object, and three combined-board-link evidence; source/diagnostic 4/4 is
   not that admission.
@@ -721,3 +722,9 @@ was run for this refresh.
   TTY lane, and `/tmp/jjtest`; no JJ workspace removal is authorized yet.
 - [x] Preserve active processes: the latest cleanup pass found no stale
   Codex/Claude process and killed none.
+
+## Acceptance
+
+Runnable oracles for the remaining open boxes: `test/03_system/plan_acceptance/aspect_dynload_lane_plan_spec.spl`
+(tagged `@tag:in-development`; one `it` per open box — see
+`doc/03_plan/agent_tasks/plan_remains_acceptance_2026-09-05.md`).

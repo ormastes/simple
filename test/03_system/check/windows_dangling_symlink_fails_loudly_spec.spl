@@ -1,0 +1,170 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-SYSTEM
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+"""
+## Purpose and audience
+Purpose: verify that a symlink the materialiser cannot resolve fails LOUDLY
+rather than being left behind as path text a compiler will silently parse.
+Audience: maintainers of this spec and reviewers of the behavior it proves.
+
+# A Dangling Symlink Must Fail Loudly, Never Degrade To Path Text
+
+Generalization spec for
+`doc/08_tracking/bug/windows_git_symlinks_materialize_as_path_text_2026-09-02.md`.
+
+The reproducing spec
+(`windows_symlinked_spl_readable_as_code_spec.spl`) shows the happy path: a
+`.spl` placeholder becomes real code once materialised. This spec covers the
+failure mode that made the original defect so expensive to diagnose — the
+materialiser's *silent* branch.
+
+`scripts/setup/materialize-symlinks-windows.shs` counts a placeholder whose
+target is absent as `skipped_pending`, prints nothing about it, and exits 0.
+That is correct for an artifact that genuinely does not exist yet (`bin/simple`
+before a build) and catastrophic for tracked source: the placeholder survives,
+the compiler reads it, and the failure surfaces hundreds of lines later as a
+syntax error in a file that has no syntax error. A green exit code from a tool
+that left the tree broken is worse than no tool.
+
+`--strict-missing` splits those two cases apart on a mechanical test, not a
+judgement call: if the target is **tracked by git** and missing from disk, the
+checkout is broken and that is a hard, named failure. If the target is
+**untracked** (an unbuilt binary, `tools/*-cli`, content inside an unpopulated
+submodule), it is still a legitimate pending skip.
+
+## Overview
+
+Measured on a fresh worktree of this repo (2026-09-02): a blanket strict mode
+failed on 16 links, every one of them an untracked submodule or tool target and
+none of them under `src/`. Scoping strictness to tracked targets keeps the flag
+usable on a real checkout while still refusing to leave a tracked placeholder
+behind.
+
+## Requirements
+
+**Requirements:** N/A
+
+- REQ-WIN-DANGLE-001: With `--strict-missing`, a placeholder whose target is
+  TRACKED and absent is a failure — non-zero exit, counted in `failed`, and the
+  offending path NAMED on stderr.
+- REQ-WIN-DANGLE-002: With `--strict-missing`, a placeholder whose target is
+  UNTRACKED and absent stays `skipped_pending` and exits 0.
+- REQ-WIN-DANGLE-003: Without the flag, both cases remain `skipped_pending` and
+  exit 0 — the default is byte-compatible with the pre-existing bootstrap
+  wiring, which must keep its run-before-and-after-the-build property.
+- REQ-WIN-DANGLE-004: A failed materialisation never leaves the caller believing
+  the tree is usable: the placeholder is still path text, and the guard that
+  consumes worktrees reports the non-zero status rather than swallowing it.
+
+## Plan
+
+**Plan:** doc/08_tracking/bug/windows_git_symlinks_materialize_as_path_text_2026-09-02.md
+
+1. Build a throwaway repo with two dangling symlinks: one to a tracked-then-
+   deleted file, one to a path git never tracked.
+2. Run the materialiser with `--strict-missing`; require exit 1, `failed=1`, and
+   the tracked offender NAMED, while the untracked one stays a pending skip.
+3. Run the same repo WITHOUT the flag; require exit 0 and both pending.
+4. Assert the consuming guard surfaces a non-zero materialisation status.
+
+## Design
+
+**Design:** doc/04_architecture/compiler/misc/file_class_structure.md
+
+The materialiser is POSIX `sh` invoked as an external process via
+`process_run`; this spec asserts on real exit codes and real stderr text.
+
+## Examples
+
+```sh
+bin/simple test test/03_system/check/windows_dangling_symlink_fails_loudly_spec.spl --clean
+```
+"""
+
+# @tag: system, check, windows, symlink, guard, fail-closed
+
+use std.spec.step
+
+use std.io_runtime.{file_read, process_run}
+use std.spec.*
+
+describe "materialize-symlinks-windows --strict-missing":
+    # @manual scenario evidence
+
+    it "fails and names a tracked dangling target, while sparing an untracked one":
+        # @req REQ-SSPEC-SYSTEM
+        # @req REQ-WIN-DANGLE-001
+        # @req REQ-WIN-DANGLE-002
+        # @req REQ-WIN-DANGLE-003
+        step("fails and names a tracked dangling target, while sparing an untracked one")
+        val root = "build/test-windows-dangling-symlink"
+        # `tracked_link` points at a file git tracks but that is absent from the
+        # working tree -- exactly the shape of a broken checkout.
+        # `untracked_link` points at a path git has never heard of -- the shape
+        # of an unbuilt artifact, which must remain a benign skip.
+        val command = "rm -rf " + root + " && mkdir -p " + root + "/pkg && cd " + root + " && " +
+            "git init -q && " +
+            "git config user.email t@example.com && " +
+            "git config user.name t && " +
+            "git config core.symlinks false && " +
+            "printf 'pub fn gone() -> i64:\\n    return 1\\n' > pkg/gone.spl && " +
+            "git add -A && git commit -q -m base && " +
+            "printf '../pkg/gone.spl' > pkg/tracked_link.spl && " +
+            "printf '../not/built/yet.bin' > pkg/untracked_link && " +
+            "git update-index --add --cacheinfo 120000,$(git hash-object -w pkg/tracked_link.spl),pkg/tracked_link.spl && " +
+            "git update-index --add --cacheinfo 120000,$(git hash-object -w pkg/untracked_link),pkg/untracked_link && " +
+            "git commit -q -m 'add dangling symlinks' && " +
+            "rm -f pkg/gone.spl && " +
+            "cd - >/dev/null && " +
+            "sh scripts/setup/materialize-symlinks-windows.shs --strict-missing " + root +
+            " > " + root + "/strict.txt 2>&1; echo \"EXIT=$?\" >> " + root + "/strict.txt; " +
+            "sh scripts/setup/materialize-symlinks-windows.shs " + root +
+            " > " + root + "/lenient.txt 2>&1; echo \"EXIT=$?\" >> " + root + "/lenient.txt"
+        val (_stdout, _stderr, code) = process_run("sh", ["-c", command])
+        expect(code).to_equal(0)
+
+        val strict = file_read(root + "/strict.txt")
+
+        step("Non-Windows hosts have real symlinks and the materialiser is a scoped no-op")
+        if strict.contains("Windows-only"):
+            expect(strict).to_contain("materialize-symlinks-windows: this script is Windows-only")
+        else:
+            step("STRICT: the tracked dangling target is a named, counted, non-zero failure")
+            expect(strict).to_contain("DANGLING symlink (target does not exist)")
+            expect(strict).to_contain("pkg/tracked_link.spl")
+            expect(strict).to_contain("failed=1")
+            expect(strict).to_contain("strict_missing=1")
+            expect(strict).to_contain("EXIT=1")
+
+            step("STRICT: the untracked target is NOT a failure -- it is a pending skip")
+            expect(strict).to_contain("skipped_pending(target missing)=1")
+
+            step("The failure is loud, not inferred: the offender is named on the way out")
+            val strict_names_only_the_tracked_one = strict.contains("untracked_link ->")
+            expect(strict_names_only_the_tracked_one).to_equal(false)
+
+            step("DEFAULT: without the flag both stay pending and the exit is clean")
+            val lenient = file_read(root + "/lenient.txt")
+            expect(lenient).to_contain("skipped_pending(target missing)=2")
+            expect(lenient).to_contain("failed=0")
+            expect(lenient).to_contain("EXIT=0")
+
+            step("A failed materialisation leaves the placeholder as path text -- provably unusable")
+            val still_text = file_read(root + "/pkg/tracked_link.spl")
+            expect(still_text).to_equal("../pkg/gone.spl")
+
+describe "the guard that consumes materialised worktrees":
+
+    it "surfaces a non-zero materialisation status instead of swallowing it":
+        # @req REQ-SSPEC-SYSTEM
+        # @req REQ-WIN-DANGLE-004
+        step("surfaces a non-zero materialisation status instead of swallowing it")
+        val guard = file_read("scripts/check/check-main-test-runnable-push.shs")
+
+        step("The status is captured on its own line, never through a pipe")
+        expect(guard).to_contain("_mw_rc=$?")
+        expect(guard).to_contain("symlink materialisation reported failures")
+
+        step("A missing materialiser is reported, not silently treated as success")
+        expect(guard).to_contain("worktree symlinks left unmaterialised")

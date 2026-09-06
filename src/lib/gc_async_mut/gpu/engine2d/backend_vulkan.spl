@@ -51,6 +51,8 @@ use std.nogc_sync_mut.gpu.engine2d.sffi_vulkan.{
     vulkan_sffi_alloc_buffer, vulkan_sffi_free_buffer,
     vulkan_sffi_copy_to_buffer, vulkan_sffi_copy_from_buffer,
     vulkan_sffi_read_buffer_bytes, vulkan_sffi_read_buffer_regions_bytes,
+    vulkan_sffi_readback_u32_into,
+    vulkan_sffi_copy_u32_into,
     vulkan_sffi_destroy_shader, vulkan_sffi_destroy_pipeline,
     vulkan_sffi_last_error,
     vulkan_sffi_recover_dependency_quarantine,
@@ -249,6 +251,7 @@ class VulkanBackend:
     present_damage_rects: [i64]  # Validated flat x,y,w,h tuples owned by this backend
     present_damage_valid: bool
     host_mirror_valid: bool
+    last_host_checksum: i64  # checksum of the last host_buf refresh (same algorithm as engine2d_readback_with_identity)
     present_readback_bytes: i64
     present_readback_rect_count: i64
     present_full_readback_count: i64
@@ -345,6 +348,7 @@ class VulkanBackend:
             present_damage_rects: [],
             present_damage_valid: false,
             host_mirror_valid: false,
+            last_host_checksum: 0,
             present_readback_bytes: 0,
             present_readback_rect_count: 0,
             present_full_readback_count: 0,
@@ -1310,12 +1314,22 @@ impl RenderBackend for VulkanBackend:
 
     me _refresh_host_full() -> bool:
         val fb_size = _i64(self.w) * _i64(self.h) * 4
-        val fb_bytes = vulkan_sffi_read_buffer_bytes(self.d_framebuffer, fb_size, 0)
-        val refreshed = _bytes_to_pixel_array(fb_bytes, self.w * self.h)
-        if refreshed.len() != self.w * self.h:
+        # One native call filling host_buf IN PLACE: download → [u32] tag-write
+        # → identity checksum. The destination is passed in rather than
+        # returned in a tuple, because a tuple return deep-copies the array
+        # (~12.1ms per 800x600 frame under JIT — larger than the download and
+        # native fill combined). Reusing host_buf also drops the per-frame
+        # 480,000-element allocation. See
+        # doc/02_requirements/nfr/engine2d_vulkan_2d_perf.md.
+        val px_count = self.w * self.h
+        if self.host_buf.len() != px_count:
+            self.host_buf = [0u32; px_count]
+        val checksum = vulkan_sffi_readback_u32_into(
+            self.host_buf, self.d_framebuffer, px_count, 0)
+        if checksum < 0:
             self._mark_readback_length_failed()
             return false
-        self.host_buf = refreshed
+        self.last_host_checksum = checksum
         self.host_mirror_valid = true
         self.present_readback_bytes = fb_size
         self.present_readback_rect_count = 1
@@ -1382,6 +1396,10 @@ impl RenderBackend for VulkanBackend:
         true
 
     me present():
+        val trace_present = (env_get("SIMPLE_VK_PRESENT_TRACE") ?? "") == "1"
+        var pt0: i64 = 0
+        if trace_present:
+            pt0 = time_now_unix_micros()
         self._begin_frame_receipt("host-cache", true, false)
         self.present_readback_bytes = 0
         self.present_readback_rect_count = 0
@@ -1389,6 +1407,8 @@ impl RenderBackend for VulkanBackend:
             self.frame_fallback_reason = "completion-unknown"
             return
         val pending_status = self._flush_pending_compute()
+        if trace_present:
+            vulkan_order_trace("present flush_us={time_now_unix_micros() - pt0}")
         if pending_status <= 0:
             if pending_status < 0:
                 self.completion_unknown = true
@@ -1400,6 +1420,9 @@ impl RenderBackend for VulkanBackend:
             self.frame_readback_requested = false
             self._clear_present_damage()
             return
+        var pt1: i64 = 0
+        if trace_present:
+            pt1 = time_now_unix_micros()
         if self.present_damage_valid and self.host_mirror_valid:
             if not self._refresh_host_damage():
                 self.frame_fallback_reason = "damaged-host-cache-refresh-failed"
@@ -1413,6 +1436,8 @@ impl RenderBackend for VulkanBackend:
             if not self._refresh_host_full():
                 self.frame_fallback_reason = "full-host-cache-refresh-failed"
                 return
+        if trace_present:
+            vulkan_order_trace("present refresh_us={time_now_unix_micros() - pt1}")
         self.dirty = false
         self.frame_readback_completed = true
         self.frame_host_cache_refresh_completed = true
@@ -1460,29 +1485,42 @@ impl RenderBackend for VulkanBackend:
         # fn contract forbids self mutation: dirty reads fetch straight from the
         # device; present() owns the host_buf cache refresh.
         if self.dirty:
-            val fb_size = _i64(self.w) * _i64(self.h) * 4
-            val fb_bytes = vulkan_sffi_read_buffer_bytes(self.d_framebuffer, fb_size, 0)
-            val pixels = _bytes_to_pixel_array(fb_bytes, self.w * self.h)
-            if pixels.len() != self.w * self.h:
+            # Fill a local buffer in place; see _refresh_host_full for why the
+            # destination is passed in rather than returned in a tuple.
+            var pixels: [u32] = [0u32; self.w * self.h]
+            val checksum = vulkan_sffi_readback_u32_into(
+                pixels, self.d_framebuffer, self.w * self.h, 0)
+            if checksum < 0:
                 return engine2d_readback([], "readback_failed")
             if self.cpu_fallback_used:
                 return engine2d_readback(pixels, "cpu_fallback")
-            return engine2d_readback_with_identity(
-                pixels, "device_readback", self.d_framebuffer, self.session.device
-            )
+            return Engine2DReadback(
+                pixels: pixels, source: "device_readback",
+                backend_handle: self.d_framebuffer,
+                device_identity: self.session.device,
+                pixel_count: pixels.len().to_i64(), checksum: checksum)
         var copy: [u32] = [0u32; self.w * self.h]
-        var i = 0
-        while i < self.w * self.h:
-            copy[i] = self.host_buf[i]
-            i = i + 1
+        # One native slot memcpy instead of an interpreted per-pixel loop. The
+        # loop was ~482 ms per 7680x4320 frame — more than half the frame, and
+        # ~100x the GPU transfer it accompanies. The facade falls back to the
+        # element loop itself when the native ABI is unavailable, so this stays
+        # correct on every lane; a failure here is a hard failure, never a
+        # partially-written destination.
+        if not vulkan_sffi_copy_u32_into(copy, self.host_buf, self.w * self.h):
+            return engine2d_readback([], "readback_failed")
         if self.cpu_fallback_used:
             engine2d_readback(copy, "cpu_fallback")
         else:
             # The cache was refreshed by a completed device-to-host copy. This
             # is not swapchain/device presentation; preserve that distinction.
-            engine2d_readback_with_identity(
-                copy, "host_cache_after_device_copy", self.d_framebuffer, self.session.device
-            )
+            # The checksum was computed during that refresh — reuse it instead
+            # of re-running the O(n) modulo loop over the copy.
+            Engine2DReadback(
+                pixels: copy, source: "host_cache_after_device_copy",
+                backend_handle: self.d_framebuffer,
+                device_identity: self.session.device,
+                pixel_count: copy.len().to_i64(),
+                checksum: self.last_host_checksum)
 
     me width() -> i32:
         self.w

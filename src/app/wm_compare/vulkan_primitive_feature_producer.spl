@@ -1,0 +1,213 @@
+"""Pure-Simple 8K Vulkan primitive producer matched to the C baseline."""
+
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.gc_async_mut.io.time_ops.{time_now_nanos}
+use std.common.crypto.sha256.{sha256_text}
+use app.wm_compare_host.io_runtime.{get_args}
+
+val WIDTH: i32 = 7680
+val HEIGHT: i32 = 4320
+val SAMPLES: i64 = 31
+val BG: u32 = 0xff101010u32
+val RECT_COLOR: u32 = 0xffcc2222u32
+val LINE_COLOR: u32 = 0xff22cc44u32
+val IMAGE_COLOR: u32 = 0xff8844ccu32
+val CLEAR_COLOR: u32 = 0xff336699u32
+
+fn arg_value(args: [text], key: text, fallback: text) -> text:
+    var index: i64 = 0
+    while index + 1 < args.len():
+        if args[index] == key: return args[index + 1]
+        index = index + 1
+    fallback
+
+fn feature_contract(feature: text) -> (text, i64, i64):
+    match feature:
+        "clear": ("clear_full", 10000, 0)
+        "rect": ("rect_filled_batched", 100, 1)
+        "line": ("line_batched", 10000, 16)
+        "axis-line": ("axis_line_rect_batched", 10000, 16)
+        "image": ("image_copy_batched", 100, 1)
+        _: ("", 0, 0)
+
+fn active_pixels(basis_points: i64) -> i64:
+    val full = WIDTH.to_i64() * HEIGHT.to_i64()
+    (full / 10000) * basis_points + (full % 10000) * basis_points / 10000
+
+fn image_pixels(count: i64) -> [u32]:
+    var pixels: [u32] = []
+    var index: i64 = 0
+    while index < count:
+        pixels.push(IMAGE_COLOR)
+        index = index + 1
+    pixels
+
+fn draw_feature(engine: Engine2D, feature: text, basis_points: i64, count: i64,
+                image: [u32]):
+    val active = active_pixels(basis_points)
+    if feature == "clear":
+        engine.clear(CLEAR_COLOR)
+    elif feature == "rect":
+        val full_rows = active / WIDTH.to_i64()
+        val tail = active % WIDTH.to_i64()
+        engine.draw_rect_filled(0, 0, WIDTH, full_rows.to_i32(), RECT_COLOR)
+        if tail > 0:
+            engine.draw_rect_filled(0, full_rows.to_i32(), tail.to_i32(), 1, RECT_COLOR)
+    elif feature == "line":
+        var line: i64 = 0
+        while line < count:
+            engine.draw_line(0, (line * 2).to_i32(), WIDTH - 1,
+                (line * 2).to_i32(), LINE_COLOR, 1)
+            line = line + 1
+    elif feature == "axis-line":
+        var line: i64 = 0
+        while line < count:
+            engine.draw_rect_filled(0, (line * 2).to_i32(), WIDTH, 1, LINE_COLOR)
+            line = line + 1
+    elif feature == "image":
+        val rows = active / WIDTH.to_i64()
+        engine.draw_image(0, 0, WIDTH, rows.to_i32(), image)
+
+fn expected_pixel(feature: text, basis_points: i64, count: i64,
+                  index: i64) -> u32:
+    val x = index % WIDTH.to_i64()
+    val y = index / WIDTH.to_i64()
+    if feature == "clear": return CLEAR_COLOR
+    if feature == "line" or feature == "axis-line":
+        if y < count * 2 and y % 2 == 0: return LINE_COLOR
+        return BG
+    val active = active_pixels(basis_points)
+    if feature == "image":
+        if index < active - active % WIDTH.to_i64(): return IMAGE_COLOR
+        return BG
+    if feature == "rect" and index < active: return RECT_COLOR
+    BG
+
+fn framebuffer_result(feature: text, basis_points: i64, count: i64,
+                      pixels: [u32]) -> (i64, i64):
+    var checksum: i64 = 1469598103934665603
+    var mismatches: i64 = 0
+    var index: i64 = 0
+    while index < pixels.len():
+        if pixels[index] != expected_pixel(feature, basis_points, count, index):
+            mismatches = mismatches + 1
+        checksum = (checksum ^ pixels[index].to_i64()) * 1099511628211
+        index = index + 1
+    (checksum, mismatches)
+
+fn sorted_i64(values: [i64]) -> [i64]:
+    var out = values
+    var i: i64 = 0
+    while i < out.len():
+        var j = i + 1
+        while j < out.len():
+            if out[j] < out[i]:
+                val temporary = out[i]
+                out[i] = out[j]
+                out[j] = temporary
+            j = j + 1
+        i = i + 1
+    out
+
+fn percentile(sorted: [i64], pct: i64) -> i64:
+    var index = ((sorted.len() * pct + 99) / 100) - 1
+    if index < 0: index = 0
+    if index >= sorted.len(): index = sorted.len() - 1
+    sorted[index]
+
+fn main() -> i64:
+    val feature = arg_value(get_args(), "--feature", "rect")
+    val (receipt_feature, basis_points, count) = feature_contract(feature)
+    if receipt_feature == "":
+        print "simple_vulkan_primitive_status=failed reason=unknown-feature"
+        return 1
+    val created = Engine2D.create_with_backend_strict(WIDTH, HEIGHT, "vulkan")
+    if not created.is_ok():
+        print "simple_vulkan_primitive_status=blocked reason=strict-vulkan-unavailable"
+        return 2
+    var engine = created.unwrap()
+    val image_count = if feature == "image":
+        (active_pixels(basis_points) / WIDTH.to_i64()) * WIDTH.to_i64()
+    else:
+        0
+    val image = image_pixels(image_count)
+    engine.clear(BG)
+    if not engine.finalize_compute_frame_no_readback():
+        engine.shutdown()
+        print "simple_vulkan_primitive_status=failed reason=seed-finalize-failed"
+        return 1
+    draw_feature(engine, feature, basis_points, count, image)
+    if not engine.finalize_compute_frame_no_readback():
+        engine.shutdown()
+        print "simple_vulkan_primitive_status=failed reason=warmup-failed"
+        return 1
+    val before_samples = engine.latest_vulkan_frame_receipt()
+    if before_samples == nil:
+        engine.shutdown()
+        print "simple_vulkan_primitive_status=failed reason=missing-pre-sample-receipt"
+        return 1
+    val submit_before = before_samples.?.device_submit_count
+    val fence_before = before_samples.?.device_fence_count
+    var submit_after = submit_before
+    var fence_after = fence_before
+    var samples: [i64] = []
+    var valid = true
+    var sample: i64 = 0
+    while sample < SAMPLES:
+        val started = time_now_nanos()
+        draw_feature(engine, feature, basis_points, count, image)
+        val finalized = engine.finalize_compute_frame_no_readback()
+        val elapsed = time_now_nanos() - started
+        val receipt = engine.latest_vulkan_frame_receipt()
+        if (not finalized or elapsed <= 0 or receipt == nil or
+            not receipt.?.completion_known or not receipt.?.no_readback or
+            receipt.?.readback_bytes != 0 or receipt.?.cpu_fallback_used):
+            valid = false
+        if receipt != nil:
+            submit_after = receipt.?.device_submit_count
+            fence_after = receipt.?.device_fence_count
+        samples.push(elapsed)
+        sample = sample + 1
+    val device_name = engine.vulkan_device_name()
+    val driver_identity = engine.vulkan_driver_identity()
+    val readback = engine.read_pixels_with_source()
+    val (checksum, mismatches) = framebuffer_result(
+        feature, basis_points, count, readback.pixels)
+    val ordered = sorted_i64(samples)
+    val full_pixels = WIDTH.to_i64() * HEIGHT.to_i64()
+    val submission_count = submit_after - submit_before
+    val fence_count = fence_after - fence_before
+    val accepted = (valid and readback.source == "device_readback" and
+        readback.pixels.len() == full_pixels and readback.pixel_count == full_pixels and
+        readback.backend_handle > 0 and readback.device_identity > 0 and
+        readback.checksum > 0 and mismatches == 0 and
+        submission_count == SAMPLES and fence_count == SAMPLES and
+        device_name != "" and driver_identity != "")
+    engine.shutdown()
+    if not accepted:
+        print "simple_vulkan_primitive_status=failed reason=evidence-rejected"
+        return 1
+    val workload = "primitive-v2;7680x4320;feature=" + receipt_feature +
+        ";active-bp=" + basis_points.to_string() + ";count=" + count.to_string() +
+        (if feature == "image": ";source-upload=timed" else: "")
+    val timing_scope = if feature == "image":
+        "source-upload-descriptor-command-record-submit-and-fence"
+    else:
+        "descriptor-command-record-submit-and-fence"
+    print "schema=engine2d-vulkan-feature-perf-v1\n" +
+        "implementation=simple\nbackend=vulkan\nfeature=" + receipt_feature + "\n" +
+        "workload_hash=" + sha256_text(workload) + "\n" +
+        "device_hash=" + sha256_text(device_name + "|" + driver_identity) + "\n" +
+        "width=7680\nheight=4320\nwarmup_count=1\nsample_count=31\n" +
+        "timing_scope=" + timing_scope + "\n" +
+        "p50_ns=" + percentile(ordered, 50).to_string() + "\n" +
+        "p95_ns=" + percentile(ordered, 95).to_string() + "\n" +
+        "submission_count=" + submission_count.to_string() + "\n" +
+        "fence_count=" + fence_count.to_string() + "\n" +
+        "evidence_readback_bytes=" + (full_pixels * 4).to_string() + "\n" +
+        "presented=false\n" +
+        "timed_readback_bytes=0\nmismatch_count=0\nchecksum=" +
+        checksum.to_string() + "\ncompletion=known\nfallback=none"
+    0
+
+export feature_contract, active_pixels, expected_pixel, framebuffer_result
