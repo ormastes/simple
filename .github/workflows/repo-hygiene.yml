@@ -764,6 +764,113 @@ jobs:
         run: |
           sh scripts/check/check-no-pid-keyed-build-artifacts.shs
 
+      # Baremetal tagged-bool decode parity.
+      #
+      # Pins riscv64_freestanding_bool_in_collection_always_true_2026-09-01:
+      # the riscv64 baremetal `rt_value_unbox_int` omitted the tagged-bool arm
+      # the canonical hosted runtime implements, so every bool read out of a
+      # collection decoded as its raw tag (always truthy). The in-guest parser
+      # then looped, exhausted the bump arena and re-entered spl_start 67 times.
+      # Blocking, not advisory: a pure static scan over the runtime definitions
+      # (no compiler, no QEMU, no firmware), measured green on this tree
+      # (PASS -- 3 definition(s) checked), runs in seconds, and its --selftest
+      # is fatal with a must-FAIL fixture.
+      - name: Baremetal tagged-bool decode parity
+        if: ${{ !cancelled() }}
+        run: |
+          sh scripts/check/check-baremetal-tagged-bool-decode.shs
+
+      # Inline .len() heap-tag coverage.
+      #
+      # Pins the `-1` half of
+      # riscv64_freestanding_len_eq_zero_guard_never_fires_2026-09-01: Cranelift
+      # inlines `.len()` as a load keyed on the heap type byte and answers a -1
+      # SENTINEL for any tag it does not recognise -- which fails OPEN in both
+      # directions at once (`x.len() == 0` is false AND `i < x.len()` iterates
+      # zero times). Blocking, not advisory: a pure static scan of the codegen
+      # tag table against the baremetal heap tags, ratcheted by
+      # inline_len_uncovered_heap_tag_baseline.txt, green on this tree
+      # (PASS -- 8 tag(s) checked, 4 known-uncovered) and needing only grep.
+      - name: Inline .len() covers baremetal heap tags
+        if: ${{ !cancelled() }}
+        run: |
+          sh scripts/check/check-inline-len-covers-baremetal-heap-tags.shs
+
+      # Bump-allocator exhaustion is reported, never silent.
+      #
+      # The 67 silent guest re-entries above were a full bump arena: rv_alloc()
+      # returned NULL, the caller stored through it, and the fault was
+      # unattributable -- the exhaustion report existed but lived only in
+      # malloc(), not rt_alloc/calloc/realloc. Two sessions read that as a
+      # firmware/reset problem. This guard requires every NULL-returning path to
+      # name itself on the console and every riscv64 boot TU to wire a printing
+      # reporter. Blocking, not advisory: pure static scan, green on this tree
+      # (PASS -- 6 definition(s) checked), no build artifact required.
+      - name: Bump-allocator exhaustion is reported
+        if: ${{ !cancelled() }}
+        run: |
+          sh scripts/check/check-bump-heap-exhaustion-reported.shs
+
+      # Declaration-index lookup must not hinge on an empty-text comparison.
+      #
+      # module_decl_at chose between its env mirror and its slot array with
+      # `if env_value != "":`. On riscv64 freestanding that is TRUE for a
+      # ZERO-LENGTH text (measured in-guest: len()==0 and the != arm taken
+      # anyway), so it returned ast_parse_i64("") == 0 for EVERY index and the
+      # top-level walk converted declaration 0 N times -- `main` silently
+      # ceased to exist, with zero errors from either lowering stage. Four
+      # boots and three prior sessions to find; a one-line edit to reintroduce.
+      # Blocking, not advisory: a static scan of that one decision site (it is
+      # deliberately NOT a tree-wide ban on `!= ""`), green on this tree, and
+      # verified RED against the fix's own parent commit.
+      - name: Declaration-index lookup is not an empty-text compare
+        if: ${{ !cancelled() }}
+        run: |
+          sh scripts/check/check-decl-index-lookup-not-empty-text-compare.shs
+
+      # Pins the fix for the riscv64 in-guest E-MIR-TYPE-ZeroKind abort, whose
+      # measured root cause is the if-val optional-extraction miscompile:
+      # match_result_mir_type bound a zeroed HirType from an ABSENT optional
+      # and dereferenced .kind, aborting the whole in-guest MIR lowering.
+      # Source mode is a ratchet on the one-line regression, not proof the
+      # target is healthy -- the boot in
+      # check-simpleos-riscv64-interpreter-in-guest-opensbi.shs is the
+      # acceptance test. Verified RED against the fix's own parent commit.
+      - name: match_result_mir_type guards its if-val extraction
+        if: ${{ !cancelled() }}
+        run: |
+          sh scripts/check/check-rv64-match-result-type-guarded.shs
+
+      # Pins the riscv64 baremetal rt_contains dict arm. .has/.contains/
+      # .contains_key on a Dict all lower to rt_contains, and that port
+      # answered FALSE for every dict in-guest, which made the interpreter's
+      # function-name index useless and the row report "function 'add' not
+      # found" on an index that provably held it. check-c-runtime-compiles-push
+      # scans src/runtime/ ONLY and cannot see this file -- measured: it
+      # returned rc=0 over this incident's own broken first fix attempt.
+      # Verified RED against that fix's own parent commit.
+      - name: riscv64 rt_contains answers dicts
+        if: ${{ !cancelled() }}
+        run: |
+          sh scripts/check/check-rv64-rt-contains-has-dict-arm.shs
+
+      # Pins the riscv64 baremetal rt_unwrap_or_trap. It checked only
+      # `value == NIL_VALUE` and returned everything else unchanged, so a boxed
+      # Some(x) came back as the WRAPPER and None/Err never trapped. In-guest
+      # that handed call_hir_function a Some-box instead of a HirFunction and
+      # the 248-byte by-value copy faulted off the end of a 32-byte object --
+      # the build-and-run row's blocker. The identical defect was already fixed
+      # on the x86_64 sibling in arch/common/boot/freestanding_value_registry_impl.h;
+      # riscv64's own duplicate shadows it, so a tree-wide grep finds the GOOD
+      # one and looks green. Unlike its neighbour above this guard is not a
+      # source-shape ratchet: it host-compiles the real function body and
+      # asserts a Some-box yields its PAYLOAD. Verified RED against the fix's
+      # own parent commit.
+      - name: riscv64 rt_unwrap_or_trap actually unwraps
+        if: ${{ !cancelled() }}
+        run: |
+          sh scripts/check/check-rv64-unwrap-or-trap-unwraps.shs
+
   # Advisory gates: honestly RED on the current tree.
   #
   # Separate job, exactly like the repo-hygiene job at the top of this file and
@@ -1227,6 +1334,49 @@ jobs:
 
       - name: riscv64 text primitive probe under OpenSBI (advisory diagnostic harness)
         run: sh scripts/check/run-riscv64-text-probe-opensbi.shs || true
+
+      # Phase-3 diagnostics transport reproduce gate. ADVISORY, and honestly so:
+      # it drives a real compile to prove the HIR error reaches the operator, so
+      # without a deployed seed (SIMPLE_SEED) it exits 2, "ERROR — nothing was
+      # checked". By this repo's own convention that is "could not determine",
+      # never a pass — so as a blocking gate on a runner that has no seed it
+      # fails every build for having nothing to say. Same reasoning that makes
+      # push-dual-run-shadow advisory in config/check/must_check_gates.sdn.
+      - name: Phase-3 diagnostics reported (needs a deployed seed)
+        if: ${{ !cancelled() }}
+        run: sh scripts/check/check-phase3-diagnostics-reported.shs
+
+      # riscv64 S-mode trap vector, MOVED HERE 2026-09-06 from code-idiom-gates.
+      #
+      # The guard itself is UNCHANGED and unweakened -- it is not opted out, it
+      # has no `|| true`, and its fail-closed contract stands: it COMPILES
+      # boot_entry.c for riscv64 and reads the emitted vector symbol address,
+      # and when no riscv64 cross toolchain exists it answers `ERROR — nothing
+      # was checked ... absence of a compiler is absence of evidence` (rc=2),
+      # exactly as the repo's guard convention requires.
+      #
+      # What was wrong was its WIRING, not the guard. `code-idiom-gates` is one
+      # of the two required checks on `main`, and the hosted runner image ships
+      # no riscv64-*-gcc / riscv64-*-nm, so that honest rc=2 turned the required
+      # check RED for every PR in the repository (run 33848725129), blocking
+      # work that has nothing to do with riscv64. A guard whose precondition the
+      # runner cannot meet does not belong on a required job.
+      #
+      # Its sibling `check-rv64-unwrap-or-trap-unwraps.shs` stays in
+      # code-idiom-gates and is untouched: it host-compiles, needs no cross
+      # toolchain, and was measured PASS (5 cases executed).
+      #
+      # The apt line is best-effort, in the same spirit as the ripgrep/lld line
+      # in the step above: if the cross toolchain installs, the guard genuinely
+      # compiles and enforces here; if it does not, the guard says so honestly
+      # inside a non-blocking job instead of blocking everyone. Promote back
+      # into code-idiom-gates once the toolchain is a guaranteed part of that
+      # job's environment.
+      - name: riscv64 boot installs an S-mode trap vector (advisory; needs a riscv64 cross toolchain)
+        if: ${{ !cancelled() }}
+        run: |
+          sudo apt-get install -y -qq gcc-riscv64-linux-gnu binutils-riscv64-linux-gnu >/dev/null 2>&1 || true
+          sh scripts/check/check-riscv64-boot-installs-trap-vector.shs
 
   # Stage-3 bootstrap migration guards. ADVISORY, and honestly so: each one
   # needs bootstrap stage artifacts or a deployed compiler that this runner does
