@@ -1162,7 +1162,7 @@ next session to chase:
   `rt_transient_heap_promote` calls and an `and` — likewise.
 - `rt_transient_heap_promote` itself allocates its plan/seen arrays with
   `calloc`/`realloc` and `free`s both before returning
-  (`src/runtime/runtime_native.c:2162-2163`), so it does not go through
+  (`src/runtime/runtime_native.c:2164-2165`), so it does not go through
   `rt_alloc` at all and cannot leak through the paused registry.
 
 So the paused window on Stage 3 probably allocates hundreds of blocks per
@@ -1206,3 +1206,12 @@ report, per source, (a) blocks/bytes registered while the scope was PAUSED,
 `rt_core_reclaim_transient_raw`; none requires a representation or behaviour
 change. Those three numbers plus RSS rank all four candidates in a single
 transaction.
+
+**§6's proposed fix is withdrawn as a fix.** Widening the per-source transient
+scope to the whole loop-body iteration remains a correct repair for the
+*measured* mechanism (§6's unscoped blocks, §7's paused-window blocks), and is
+still worth doing on its own terms. It cannot address the promotion-closure
+candidate: everything transitively reachable from `hir_module` is un-owned by
+`rt_transient_heap_promote` regardless of where the scope boundary is drawn, so
+if that closure is the owner, widening the scope reclaims nothing additional.
+Do not land it as this P0's fix on the strength of §6 alone.
