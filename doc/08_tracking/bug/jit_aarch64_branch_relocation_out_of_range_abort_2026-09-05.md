@@ -2,7 +2,9 @@
 
 **Filed:** 2026-09-05
 **Severity:** medium — non-deterministic abort of any JIT-executed tool invocation on aarch64
-**Status:** open, **now reproduced deterministically** (2026-09-06, see below)
+**Status:** **FIXED 2026-09-06** (see the final section). History below is kept:
+it records what was measured while the cause was still open, including two
+hypotheses that were tested and falsified.
 **Area:** Rust seed JIT (`codegen::jit`) over vendored `cranelift-jit`
 
 ## What happened
@@ -236,3 +238,102 @@ displacement problem survives.
 and CLAUDE.md scopes it out; this needs an explicit decision to patch vendor (or
 to carry the change upstream). Filed with the reproducer so that decision can be
 made on evidence.
+
+## FIXED 2026-09-06 — and the abort was only half of it
+
+Two defects, both in vendored `cranelift-jit` 0.116.1, both now patched
+(`src/compiler_rust/vendor/cranelift-jit/`).
+
+### Defect 1 — the range check is one bit too loose (silent miscompile)
+
+`compiled_blob.rs`'s `Reloc::Arm64Call` arm asserted
+
+```rust
+let diff = ((base as isize) - (at as isize)) >> 2;   // words
+assert!((diff >> 26 == -1) || (diff >> 26 == 0));    // admits +/-2^26 words
+```
+
+but `imm26` is a **signed 26-bit word** offset, so the encodable range is
+`[-2^25, 2^25)` words = +/-128 MiB — matching cranelift-codegen's own
+`LabelUse::Branch26 => (1 << 27) - 1` *bytes*
+(`vendor/cranelift-codegen/src/isa/aarch64/inst/mod.rs:2901`). The assert
+therefore admitted displacements up to +/-256 MiB; anything in the 128..256 MiB
+band **passed the assert and was then truncated into a branch to a completely
+wrong address**. That is why the primary reproducer here dies with SIGSEGV in
+JIT code (`pc` inside a JIT mapping, garbage `x30`) rather than with the
+documented SIGABRT: the abort is the *lucky* outcome, the SEGV is the same root
+cause landing one bit further out. The check is now `diff >> 25`.
+
+### Defect 2 — JIT code pages are handed out by the process allocator
+
+`memory.rs`'s `PtrLen::with_size` uses `std::alloc::alloc`, which mixes
+brk-heap and mmap'd blocks; on this host they land gigabytes apart, so two
+functions of the *same* JIT module could not reach each other with a `bl`.
+
+Fix: the *code* `Memory` of every `JITModule` (`Memory::new_code`, wired at
+`backend.rs:531`) is now backed by one contiguous `mmap` reservation of exactly
+`2^27` bytes — exactly the reach of a `bl` — so any two addresses inside it are
+in range **by construction**. The reservation is lazy and `MAP_NORESERVE`, so an
+unused module costs only address space; measured high-water mark for the vk2d
+bench is **7,284 KiB of 131,072 KiB** (`SIMPLE_JIT_ARENA_STATS=1`).
+
+Long-branch veneers (`ldr x16, #8 ; br x16 ; .quad target`, the standard
+BTI-safe PLT thunk shape) are carved downwards from the top of the same arena
+and cover a colocated target that lands outside it. `SIMPLE_JIT_FORCE_VENEERS=1`
+routes *every* `Arm64Call` through a veneer so the path is exercised rather than
+dead: the vk2d bench runs clean that way with 10,155 veneers installed.
+
+**Stated cap:** 128 MiB of JIT code per `JITModule`. Beyond it the allocator
+warns once and falls back to the old heap path, where the hazard returns — but
+now with a descriptive panic naming this document instead of a bare assert.
+
+### Before / after (same host, same build flags, aarch64)
+
+Reproducer: `SIMPLE_LIB=src VK2D_W=800 VK2D_H=600 VK2D_RECTS=64 VK2D_FRAMES=300
+simple run test/05_perf/bench/vulkan_2d_c/vk2d_bench.spl`, seed built with
+`--features vulkan`.
+
+| binary | runs | failures |
+|---|---|---|
+| unpatched | 8 | **2** — one `rc=139` SIGSEGV, one `rc=124` (spun at 99% CPU for the full 900 s timeout after `scene_source=table rects=64`, i.e. a corrupted branch target turned into an infinite loop) |
+| patched | 8 | **0** |
+| patched, `SIMPLE_JIT_FORCE_VENEERS=1` | 3 | **0** (10,155 veneers installed per run) |
+
+`.simple/logs/crash_*.log` count went 5 -> 5 across every patched run; all five
+existing reports are from unpatched runs and every one of them carries exactly
+`assertion failed: (diff >> 26 == -1) || (diff >> 26 == 0)` at
+`compiled_blob.rs:90`, i.e. the assert in this report. The SIGSEGV and the hang
+are the *same* defect landing in the band the assert failed to catch.
+
+Common-path regression check: `simple run` on `hello_native.spl` plus three
+mid-size examples produces **byte-identical output** on the unpatched and
+patched binaries, and `lint src/lib/nogc_async_mut/sosix/fs.spl` x5 adds no
+crash report (it still exits 1 on a pre-existing semantic error, unchanged).
+
+The failure is ASLR-dependent: under `gdb` with its default
+`disable-randomization on` the unpatched binary does **not** crash, which is why
+the original report could not reproduce on demand.
+
+### Still red, and NOT caused by this bug
+
+`scripts/check/check-vulkan-2d-c-compare.shs` still reports
+`compare_status=skipped compare_reason=c-leg-skipped:no-vulkan-headers`: this
+host has no `vulkan/vulkan.h`, so the C leg cannot build, and the script skips
+the Simple leg whenever the C leg skips. The bench itself now runs to completion
+but reports `status=blocked reason=backend-unavailable` —
+`VulkanInstance::get_or_init` fails with `ERROR_EXTENSION_NOT_PRESENT`. Measured
+cause: `vulkaninfo --summary` on this host lists 20 instance extensions and
+`VK_KHR_surface` is **not** among them (only `VK_KHR_display` /
+`VK_EXT_*_display` / DRM ones), so the surface extensions the backend asks for
+genuinely do not exist here; there is also no `DISPLAY`/`WAYLAND_DISPLAY`. The
+bench has no headless knob — `VK2D_BACKEND` only selects another backend, which
+is how it falls back to `cpu`. Both are environment gaps, unrelated to the
+relocation defect.
+
+### Upstream
+
+Both fixes belong upstream in `bytecodealliance/wasmtime`
+(`cranelift/jit/src/{compiled_blob,memory}.rs`): the range check is a plain bug,
+and the contiguous per-module code region is the same thing wasmtime already
+does for its own allocator. Carried here as a local vendored patch, commented at
+each edit site, until that lands.
