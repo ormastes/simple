@@ -434,14 +434,30 @@ difference is reclamation, not less work.
 **354x** and **113x** reductions, and the scoped build is also **2.3x faster** —
 reclaiming early keeps the working set in cache rather than costing time.
 
-### Metric correction: the `[heap]` brk figure is x86_64-specific
+### Metric note: the `[heap]` brk figure is ARENA-dependent, not arch-specific
 
-The 37,543,764 kB single `[heap]` brk mapping quoted for a Stage-3 worker does
-not reproduce on this aarch64 host: glibc here services these allocations via
-**mmap**, and the brk mapping stays at **132 kB** while RSS climbs into the GB.
-`smaps_rollup` has no `[heap]` line at all. Report `Rss`/`Anonymous` from
-`smaps_rollup` plus `/usr/bin/time -v` peak; a brk-only budget would read as
-flat on this arch while the process leaks.
+An earlier draft of this addendum claimed the 37 GB `[heap]` brk mapping was
+x86_64-specific because this lane's small fixtures showed only a 132 kB brk.
+**That was wrong, and a live process on this same aarch64 host disproves it.**
+Another lane's Stage-3 worker (PID 3108862, `stage2-admitted/simple` building
+`bootstrap_main.spl`) measured, read directly from `/proc/3108862/smaps`:
+
+```
+[heap]  Size:  37,313,356 kB
+        Rss:   37,171,428 kB
+VmRSS (whole process):  44,279,636 kB
+```
+
+That is the reported 37 GB brk mapping, reproduced on aarch64, and it independently
+re-confirms this row's headline symptom on a currently-running process.
+
+The difference is the glibc **arena**, not the architecture: a small
+single-threaded fixture is served from mmap'd arenas, while the long-lived
+multi-threaded worker grows its **main** arena via `brk`. Practical consequence
+for anyone writing a budget here: measure **both**. A brk-only budget reads as
+flat for small or thread-pool-served processes; an RSS-only budget hides which
+mapping is responsible. `smaps_rollup` has no `[heap]` line, so the per-mapping
+figure must come from `/proc/<pid>/smaps`, and peak from `/usr/bin/time -v`.
 
 ### Runnable gate
 

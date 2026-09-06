@@ -86,9 +86,8 @@ find_seed() {
         return 1
     fi
     for c in \
-        "$HOME/.cargo-target-gc/release/simple" \
-        "$REPO_ROOT/src/compiler_rust/target/release/simple" \
-        "$REPO_ROOT/bin/simple"
+        "$REPO_ROOT/bin/simple" \
+        "$REPO_ROOT/src/compiler_rust/target/release/simple"
     do
         [ -x "$c" ] && { echo "$c"; return 0; }
     done
@@ -164,15 +163,12 @@ run_fixture() {
 # apart here would pass a tree in which reclamation is dead.
 # ---------------------------------------------------------------------------
 selftest() {
-    st_dir="$WORK/selftest"
-    mkdir -p "$st_dir" || return 1
-    # Fixture 1: a scoped and an unscoped program must both build and run.
-    # Fixture 2: they must agree on the answer (same exit status) -- this is
-    #            what makes the memory difference a RECLAMATION result rather
-    #            than the scoped build doing less work.
-    # Fixture 3: the unscoped one must exceed MIN_RATIO x the scoped one.
-    # Fixture 4: a zero-measurement run must be reported as ERROR, not PASS
-    #            (checked by the caller's EV_MEASURED guard, asserted here).
+    # This guard's real negative control is not a separate fixture set: it is
+    # the unscoped fixture, measured in every run and asserted below to exceed
+    # the budget (see "negative control" in the scan). That makes the pre-fix
+    # shape a live control on every invocation rather than a one-off
+    # experiment, so the checks here are limited to the tunables, which are the
+    # only way this guard can be silently defanged.
     if [ "$MIN_RATIO" -lt 2 ]; then
         echo "selftest: MIN_RATIO must be >= 2 to discriminate (got $MIN_RATIO)"
         return 1
@@ -248,11 +244,32 @@ if [ "$EV_MEASURED" -eq 0 ]; then
     exit 2
 fi
 
-# Correctness gate first: identical work must give an identical answer. A
-# scoped build that freed something still live would corrupt or crash here,
-# and a scoped build that "won" by doing less work would differ too.
+# Correctness gate first: identical work must give an identical answer, and it
+# must be the RIGHT answer. Both fixtures sum 0..ITERS-1 and return it mod 251,
+# so the expected status is computable here. Checking against a computed value
+# (rather than only against each other) is what stops two equally-wrong runs --
+# notably two `timeout` kills, which would otherwise agree at 124 -- from
+# reading as a correctness pass. A scoped build that freed something still live
+# would corrupt or crash and miss this value.
+EXPECTED_EXIT=$(( (ITERS * (ITERS - 1) / 2) % 251 ))
+echo "expected exit status: $EXPECTED_EXIT"
 if [ "$SCOPED_EXIT" != "$UNSCOPED_EXIT" ]; then
     FAILURES="$FAILURES exit-status-mismatch(scoped=$SCOPED_EXIT,unscoped=$UNSCOPED_EXIT)"
+fi
+if [ "$SCOPED_EXIT" != "$EXPECTED_EXIT" ]; then
+    FAILURES="$FAILURES scoped-wrong-answer(got=$SCOPED_EXIT,want=$EXPECTED_EXIT)"
+fi
+if [ "$UNSCOPED_EXIT" != "$EXPECTED_EXIT" ]; then
+    FAILURES="$FAILURES unscoped-wrong-answer(got=$UNSCOPED_EXIT,want=$EXPECTED_EXIT)"
+fi
+
+# Negative control, evaluated every run: if the unscoped fixture -- the pre-fix
+# shape -- fits under the cap, then the cap cannot discriminate on this host and
+# a PASS would be vacuous. That is ERROR (nothing meaningful was checked), not a
+# pass, and not a FAIL either: the tree may be fine, the budget is not.
+if [ "$UNSCOPED_RSS" -le "$SCOPED_CAP_KB" ]; then
+    echo "ERROR -- nothing was checked (cap ${SCOPED_CAP_KB} kB does not discriminate: unscoped pre-fix shape measured ${UNSCOPED_RSS} kB, at or under the cap)"
+    exit 2
 fi
 
 if [ "$SCOPED_RSS" -gt "$SCOPED_CAP_KB" ]; then
