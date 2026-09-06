@@ -1,0 +1,374 @@
+#!/bin/sh
+# check-lifecycle-reachability.shs — fail-closed RATCHET on dormant lifecycle code.
+#
+# WHAT IT GATES
+# -------------
+# Delivered library code that nothing calls. An audit on 2026-09-05 found
+# src/lib/scv/lifecycle/** fully implemented, unstubbed, zero TODO markers —
+# and UNREACHABLE, because no production code called it. Every existing guard
+# in scripts/check/ was green throughout, because they all check trees, ranges,
+# symbols-that-exist, or source that compiles. Code that is well-formed,
+# non-conflicted, correctly sized, symbol-preserving and compilable can still
+# be dead on arrival. lifecycle_store_write's ONLY caller was a unit spec —
+# that is the incident shape, and a test-only caller is NOT reachability.
+#
+# MECHANISM
+#   * exported symbols are read from `export A, B, C` lines in
+#       src/lib/scv/lifecycle/**/*.spl
+#       src/app/sj/{operation,integrate_plan,gate_manifest}.spl
+#   * for each symbol, references OUTSIDE its own defining file are counted and
+#     split into production callers (src/**) and test-only callers (test/**)
+#   * dormant := zero PRODUCTION callers (test-only counts as dormant)
+#
+# RULES (mirrors scripts/check/check-unbacked-extern-ratchet.shs)
+#   * any dormant symbol NOT in the baseline              -> FAIL (new dormant code)
+#   * any baselined symbol that is no longer dormant      -> FAIL (stale baseline)
+#     ("no longer dormant" = it gained a production caller, or the symbol/file
+#      was removed; both mean the frozen file no longer describes the tree, and
+#      a stale baseline is how a ratchet silently stops ratcheting.)
+#   * 0 symbols scanned                                   -> ERROR, never a pass
+#
+# The tree certainly still carries dormant symbols today, so this is a RATCHET
+# against scripts/check/lifecycle_reachability_baseline.txt, not a hard
+# zero-bar — same shape as scripts/check/no_direct_rt_baseline.txt.
+#
+# --generate-baseline is for DELIBERATE, REVIEWED updates only. Using it to
+# "fix" a FAIL without reading the diff defeats the entire guard: a FAIL naming
+# new dormant symbols is real new dead-on-arrival code, and regenerating hides
+# it exactly the way the 2026-09-05 audit found it hidden.
+#
+# KNOWN LIMITS (stated, not solved — do not widen the spec to paper over them)
+#   * Matching is by NAME. Broad exported type names (Task, Feature, Approval)
+#     will match unrelated code elsewhere under src/ and can read as reachable
+#     when they are not. Function-shaped symbols like lifecycle_store_write are
+#     still caught, which is the incident this exists for.
+#   * "Outside its own defining file" means a sibling inside
+#     src/lib/scv/lifecycle/ counts as a production caller, so the library's
+#     internal wiring can look reachable while the library as a whole has no
+#     entry point. This guard catches per-symbol dormancy, not island dormancy.
+#   * `use ...` / `export ...` lines are NOT counted as callers — an import or
+#     a re-export is not a call. Comment tails (`#...`) are stripped.
+#   * -w name matching cannot tell a call from a type annotation; both count.
+#
+# Verdict is ALWAYS the last stdout line:
+#   PASS — <n> symbol(s) checked, 0 new, 0 stale                       exit 0
+#   FAIL — <n> symbol(s) checked, <k> newly dormant: <names>[; <m> stale: <names>]  exit 1
+#   ERROR — nothing was checked (<reason>)                             exit 2
+#
+# Usage:
+#   sh scripts/check/check-lifecycle-reachability.shs
+#   sh scripts/check/check-lifecycle-reachability.shs --root DIR
+#   sh scripts/check/check-lifecycle-reachability.shs --selftest-only
+#   sh scripts/check/check-lifecycle-reachability.shs --generate-baseline   # reviewed updates ONLY
+#
+# NOT wired into config/check/must_check_gates.sdn or any pre-push tier — this
+# repo has an explicit rule against prose claiming enforcement that is not
+# wired. Intended eventual tier: a `push` row with push_blocking:false (the
+# push-dual-run-shadow precedent), promoted to blocking once the sj wiring
+# lands and the baseline shrinks to a green, meaningful set.
+
+set -u
+
+ROOT="$(pwd)"
+SELFTEST_ONLY=0
+GENERATE_BASELINE=0
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --selftest-only|--selftest) SELFTEST_ONLY=1 ;;
+    --generate-baseline) GENERATE_BASELINE=1 ;;
+    --root) shift; ROOT="$1" ;;
+    *) echo "ERROR — nothing was checked (unknown argument: $1)"; exit 2 ;;
+  esac
+  shift
+done
+
+GREP=/usr/bin/grep
+[ -x "$GREP" ] || GREP=grep
+
+# ---- symbol collection -------------------------------------------------
+# collect_symbols <root>  -> stdout "relpath<TAB>symbol", sorted unique.
+# stdout "ERR" (only) on traversal failure.
+collect_symbols() {
+  cs_root="$1"
+  cs_tmp=$(mktemp) || { echo "ERR"; return; }
+  cs_list=$(mktemp) || { rm -f "$cs_tmp"; echo "ERR"; return; }
+  : > "$cs_list"
+  if [ -d "$cs_root/src/lib/scv/lifecycle" ]; then
+    if ! find "$cs_root/src/lib/scv/lifecycle" -name '*.spl' -type f ! -path '*/vendor/*' >> "$cs_list"; then
+      rm -f "$cs_tmp" "$cs_list"; echo "ERR"; return
+    fi
+  fi
+  for cs_f in src/app/sj/operation.spl src/app/sj/integrate_plan.spl src/app/sj/gate_manifest.spl; do
+    [ -f "$cs_root/$cs_f" ] && echo "$cs_root/$cs_f" >> "$cs_list"
+  done
+  while IFS= read -r cs_p; do
+    [ -n "$cs_p" ] || continue
+    [ -f "$cs_p" ] || continue
+    case "$cs_p" in
+      "$cs_root"/*) cs_rel=${cs_p#"$cs_root"/} ;;
+      *) cs_rel=$cs_p ;;
+    esac
+    awk -v rel="$cs_rel" '
+      /^[ \t]*export[ \t]/ {
+        line = $0
+        sub(/#.*/, "", line)
+        sub(/^[ \t]*export[ \t]+/, "", line)
+        gsub(/[^A-Za-z0-9_]/, " ", line)
+        n = split(line, t, " ")
+        for (i = 1; i <= n; i++) if (t[i] != "") print rel "\t" t[i]
+      }
+    ' "$cs_p" >> "$cs_tmp"
+  done < "$cs_list"
+  LC_ALL=C sort -u "$cs_tmp"
+  rm -f "$cs_tmp" "$cs_list"
+}
+
+# ---- reachability scan -------------------------------------------------
+# scan_refs <root> <symfile> -> stdout "relpath:symbol<TAB>prod<TAB>test"
+# stdout "ERR" (only) on scanner failure.
+scan_refs() {
+  sr_root="$1"; sr_syms="$2"
+  sr_names=$(mktemp) || { echo "ERR"; return; }
+  sr_hits=$(mktemp) || { rm -f "$sr_names"; echo "ERR"; return; }
+  cut -f2 "$sr_syms" | LC_ALL=C sort -u > "$sr_names"
+  # Only directories that exist are fed to grep — a missing test/ must not be a
+  # scanner error, but a missing src/ is handled by the caller before this runs.
+  set --
+  [ -d "$sr_root/src" ] && set -- "$@" "$sr_root/src"
+  [ -d "$sr_root/test" ] && set -- "$@" "$sr_root/test"
+  if [ $# -eq 0 ]; then rm -f "$sr_names" "$sr_hits"; echo "ERR"; return; fi
+  # Status is read DIRECTLY into a variable on the line after the command —
+  # never through a pipe. A pipeline's $? is the last stage's status and has
+  # produced false greens in this repo before.
+  "$GREP" -rwF -f "$sr_names" --include='*.spl' --exclude-dir=vendor "$@" > "$sr_hits" 2>/dev/null
+  sr_st=$?
+  # grep: 0 = matches, 1 = no matches (legitimate: everything dormant),
+  # >1 = real scanner error.
+  if [ $sr_st -gt 1 ]; then rm -f "$sr_names" "$sr_hits"; echo "ERR"; return; fi
+  awk -v ROOTP="$sr_root/" '
+    FNR == NR {
+      split($0, a, "\t")
+      if (a[1] == "" || a[2] == "") next
+      isdef[a[1] SUBSEP a[2]] = 1
+      issym[a[2]] = 1
+      keys[++nk] = $0
+      next
+    }
+    {
+      ci = index($0, ":")
+      if (ci == 0) next
+      rel = substr($0, 1, ci - 1)
+      body = substr($0, ci + 1)
+      if (index(rel, ROOTP) == 1) rel = substr(rel, length(ROOTP) + 1)
+      sub(/#.*/, "", body)
+      if (body ~ /^[ \t]*use[ \t]/) next
+      if (body ~ /^[ \t]*export[ \t]/) next
+      gsub(/[^A-Za-z0-9_]/, " ", body)
+      n = split(body, t, " ")
+      for (i = 1; i <= n; i++) {
+        s = t[i]
+        if (!(s in issym)) continue
+        if (rel ~ /^test\//) { tst[s]++; continue }
+        if (rel !~ /^src\//) continue
+        if ((rel SUBSEP s) in isdef) { selfh[rel SUBSEP s]++; totself[s]++ }
+        else prod[s]++
+      }
+    }
+    END {
+      for (i = 1; i <= nk; i++) {
+        split(keys[i], a, "\t")
+        rel = a[1]; s = a[2]
+        p = (prod[s] + 0) + ((totself[s] + 0) - (selfh[rel SUBSEP s] + 0))
+        printf "%s:%s\t%d\t%d\n", rel, s, p, tst[s] + 0
+      }
+    }
+  ' "$sr_syms" "$sr_hits"
+  sr_st=$?
+  rm -f "$sr_names" "$sr_hits"
+  [ $sr_st -eq 0 ] || echo "ERR"
+}
+
+# ---- one full evaluation ----------------------------------------------
+# Sets EV_VERDICT / EV_RC; prints the dormant detail block on stdout.
+evaluate() {
+  ev_root="$1"
+  ev_baseline="$ev_root/scripts/check/lifecycle_reachability_baseline.txt"
+  if [ ! -d "$ev_root/src" ]; then
+    EV_VERDICT="ERROR — nothing was checked (no src/ under $ev_root)"; EV_RC=2; return
+  fi
+  ev_w=$(mktemp -d) || { EV_VERDICT="ERROR — nothing was checked (mktemp failed)"; EV_RC=2; return; }
+  collect_symbols "$ev_root" > "$ev_w/syms.txt"
+  if [ "$(cat "$ev_w/syms.txt" 2>/dev/null)" = "ERR" ]; then
+    rm -rf "$ev_w"; EV_VERDICT="ERROR — nothing was checked (symbol collection failed)"; EV_RC=2; return
+  fi
+  ev_checked=$(wc -l < "$ev_w/syms.txt" | tr -d ' \t')
+  # Non-vacuity is absolute: a run that scanned 0 symbols is ERROR, never a
+  # pass. Checked BEFORE the baseline exists check so an empty tree reports the
+  # real reason.
+  if [ "${ev_checked:-0}" -eq 0 ]; then
+    rm -rf "$ev_w"
+    EV_VERDICT="ERROR — nothing was checked (0 exported symbols found in src/lib/scv/lifecycle/** and src/app/sj/{operation,integrate_plan,gate_manifest}.spl)"
+    EV_RC=2; return
+  fi
+  scan_refs "$ev_root" "$ev_w/syms.txt" > "$ev_w/refs.txt"
+  if [ "$(head -1 "$ev_w/refs.txt" 2>/dev/null)" = "ERR" ] || [ "$(tail -1 "$ev_w/refs.txt" 2>/dev/null)" = "ERR" ] || [ ! -s "$ev_w/refs.txt" ]; then
+    rm -rf "$ev_w"; EV_VERDICT="ERROR — nothing was checked (reference scan failed)"; EV_RC=2; return
+  fi
+  awk -F'\t' '$2 == 0 { print $1 }' "$ev_w/refs.txt" | LC_ALL=C sort -u > "$ev_w/dormant.txt"
+  ev_dormant=$(wc -l < "$ev_w/dormant.txt" | tr -d ' \t')
+
+  echo "lifecycle_reachability:"
+  echo "  scanner_ran: true"
+  echo "  root: $ev_root"
+  echo "  exported_symbols: $ev_checked"
+  echo "  dormant_symbols: $ev_dormant"
+  echo "  dormant detail (prod=production callers outside defining file, test=test-only callers):"
+  awk -F'\t' '$2 == 0 { printf "    %s prod=%s test=%s\n", $1, $2, $3 }' "$ev_w/refs.txt" | LC_ALL=C sort
+
+  if [ $GENERATE_BASELINE -eq 1 ]; then
+    mkdir -p "$ev_root/scripts/check" || { rm -rf "$ev_w"; EV_VERDICT="ERROR — nothing was checked (cannot create baseline dir)"; EV_RC=2; return; }
+    cp "$ev_w/dormant.txt" "$ev_baseline" || { rm -rf "$ev_w"; EV_VERDICT="ERROR — nothing was checked (baseline write failed)"; EV_RC=2; return; }
+    rm -rf "$ev_w"
+    EV_VERDICT="PASS — $ev_checked symbol(s) checked, 0 new, 0 stale (baseline recorded: $ev_dormant dormant symbol(s))"
+    EV_RC=0; return
+  fi
+  # A VERIFICATION run must NEVER write the tracked baseline.
+  if [ ! -f "$ev_baseline" ]; then
+    rm -rf "$ev_w"
+    EV_VERDICT="ERROR — nothing was checked (no baseline at $ev_baseline; run --generate-baseline to record one)"
+    EV_RC=2; return
+  fi
+  LC_ALL=C sort -u "$ev_baseline" | "$GREP" -v '^[ \t]*#' | "$GREP" -v '^[ \t]*$' > "$ev_w/base.txt"
+  LC_ALL=C comm -23 "$ev_w/dormant.txt" "$ev_w/base.txt" > "$ev_w/new.txt"
+  LC_ALL=C comm -13 "$ev_w/dormant.txt" "$ev_w/base.txt" > "$ev_w/stale.txt"
+  ev_new=$(wc -l < "$ev_w/new.txt" | tr -d ' \t')
+  ev_stale=$(wc -l < "$ev_w/stale.txt" | tr -d ' \t')
+  if [ "$ev_new" -gt 0 ] || [ "$ev_stale" -gt 0 ]; then
+    ev_msg="FAIL — $ev_checked symbol(s) checked, $ev_new newly dormant"
+    if [ "$ev_new" -gt 0 ]; then
+      ev_msg="$ev_msg: $(tr '\n' ' ' < "$ev_w/new.txt" | sed 's/ $//')"
+    fi
+    if [ "$ev_stale" -gt 0 ]; then
+      ev_msg="$ev_msg; $ev_stale stale: $(tr '\n' ' ' < "$ev_w/stale.txt" | sed 's/ $//')"
+    fi
+    rm -rf "$ev_w"
+    EV_VERDICT="$ev_msg"; EV_RC=1; return
+  fi
+  rm -rf "$ev_w"
+  EV_VERDICT="PASS — $ev_checked symbol(s) checked, 0 new, 0 stale"
+  EV_RC=0
+}
+
+# ---- selftest (runs first, always, fatal) ------------------------------
+st_run() {
+  # Runs the REAL script over a fixture tree. Status is read directly into a
+  # variable on the line AFTER the command, never through a pipe.
+  st_out=$(LIFECYCLE_REACH_SELFTEST_CHILD=1 sh "$0" --root "$1" ${2:-} 2>&1)
+  st_rc=$?
+  st_verdict=$(printf '%s\n' "$st_out" | tail -1)
+}
+
+selftest() {
+  st_dir=$(mktemp -d) || { echo "ERROR — nothing was checked (selftest mktemp failed)"; exit 2; }
+  st_fail=0
+
+  # fixture 1: clean tree — every exported symbol has a production caller -> PASS
+  mkdir -p "$st_dir/f1/src/lib/scv/lifecycle" "$st_dir/f1/src/app" "$st_dir/f1/scripts/check"
+  printf 'fn alpha_fn() -> bool:\n    return true\nexport alpha_fn\n' > "$st_dir/f1/src/lib/scv/lifecycle/store.spl"
+  printf 'use scv.lifecycle.store.{alpha_fn}\nfn go() -> bool:\n    return alpha_fn()\n' > "$st_dir/f1/src/app/wire.spl"
+  : > "$st_dir/f1/scripts/check/lifecycle_reachability_baseline.txt"
+  st_run "$st_dir/f1"
+  case "$st_verdict" in
+    "PASS — 1 symbol(s) checked, 0 new, 0 stale") : ;;
+    *) echo "selftest FIXTURE 1 (clean tree must PASS) failed: rc=$st_rc [$st_verdict]" >&2; st_fail=1 ;;
+  esac
+
+  # fixture 2: a NEW dormant symbol must FAIL and be named
+  cp -r "$st_dir/f1" "$st_dir/f2"
+  printf 'fn beta_fn() -> bool:\n    return true\nexport beta_fn\n' > "$st_dir/f2/src/lib/scv/lifecycle/orphan.spl"
+  st_run "$st_dir/f2"
+  case "$st_verdict" in
+    FAIL*"1 newly dormant"*"src/lib/scv/lifecycle/orphan.spl:beta_fn"*) : ;;
+    *) echo "selftest FIXTURE 2 (new dormant symbol must FAIL and be named) failed: rc=$st_rc [$st_verdict]" >&2; st_fail=1 ;;
+  esac
+  [ "$st_rc" = "1" ] || { echo "selftest FIXTURE 2 wrong exit code: rc=$st_rc" >&2; st_fail=1; }
+
+  # fixture 3: a baselined symbol that GAINED a production caller must FAIL stale
+  cp -r "$st_dir/f1" "$st_dir/f3"
+  printf 'src/lib/scv/lifecycle/store.spl:alpha_fn\n' > "$st_dir/f3/scripts/check/lifecycle_reachability_baseline.txt"
+  st_run "$st_dir/f3"
+  case "$st_verdict" in
+    FAIL*" stale: "*"src/lib/scv/lifecycle/store.spl:alpha_fn"*) : ;;
+    *) echo "selftest FIXTURE 3 (baselined symbol with a production caller must FAIL stale) failed: rc=$st_rc [$st_verdict]" >&2; st_fail=1 ;;
+  esac
+
+  # fixture 4: THE INCIDENT SHAPE — a symbol whose only caller is a test spec
+  # is DORMANT. lifecycle_store_write's only caller was a unit spec.
+  cp -r "$st_dir/f1" "$st_dir/f4"
+  mkdir -p "$st_dir/f4/test/01_unit"
+  printf 'fn gamma_fn() -> bool:\n    return true\nexport gamma_fn\n' > "$st_dir/f4/src/lib/scv/lifecycle/testonly.spl"
+  printf 'use scv.lifecycle.testonly.{gamma_fn}\nfn spec() -> bool:\n    return gamma_fn()\n' > "$st_dir/f4/test/01_unit/testonly_spec.spl"
+  st_out=$(LIFECYCLE_REACH_SELFTEST_CHILD=1 sh "$0" --root "$st_dir/f4" 2>&1)
+  st_rc=$?
+  st_verdict=$(printf '%s\n' "$st_out" | tail -1)
+  case "$st_verdict" in
+    FAIL*"src/lib/scv/lifecycle/testonly.spl:gamma_fn"*) : ;;
+    *) echo "selftest FIXTURE 4 (test-only caller must count as dormant) failed: rc=$st_rc [$st_verdict]" >&2; st_fail=1 ;;
+  esac
+  case "$st_out" in
+    *"src/lib/scv/lifecycle/testonly.spl:gamma_fn prod=0 test=1"*) : ;;
+    *) echo "selftest FIXTURE 4 detail split missing (expected prod=0 test=1)" >&2; st_fail=1 ;;
+  esac
+
+  # fixture 5: an empty tree must scan 0 symbols -> ERROR, never a pass.
+  # A baseline IS present, so the ERROR can only be the 0-symbol one.
+  mkdir -p "$st_dir/f5/src/lib" "$st_dir/f5/scripts/check"
+  : > "$st_dir/f5/scripts/check/lifecycle_reachability_baseline.txt"
+  st_run "$st_dir/f5"
+  case "$st_verdict" in
+    "ERROR — nothing was checked (0 exported symbols"*) : ;;
+    *) echo "selftest FIXTURE 5 (empty tree must ERROR on 0 symbols) failed: rc=$st_rc [$st_verdict]" >&2; st_fail=1 ;;
+  esac
+  [ "$st_rc" = "2" ] || { echo "selftest FIXTURE 5 wrong exit code: rc=$st_rc" >&2; st_fail=1; }
+
+  # fixture 6: a plain VERIFICATION run must not rewrite the tracked baseline
+  cp -r "$st_dir/f2" "$st_dir/f6"
+  printf 'src/lib/scv/lifecycle/sentinel.spl:sentinel_sym\n' > "$st_dir/f6/scripts/check/lifecycle_reachability_baseline.txt"
+  st_before=$(cat "$st_dir/f6/scripts/check/lifecycle_reachability_baseline.txt")
+  st_run "$st_dir/f6"
+  st_after=$(cat "$st_dir/f6/scripts/check/lifecycle_reachability_baseline.txt")
+  if [ "$st_before" != "$st_after" ]; then
+    echo "selftest FIXTURE 6 (verification run rewrote the baseline) failed" >&2; st_fail=1
+  fi
+
+  # fixture 7: a missing baseline on a verification run is ERROR, never a
+  # silent write-and-PASS; and --generate-baseline DOES record one.
+  cp -r "$st_dir/f1" "$st_dir/f7"
+  rm -f "$st_dir/f7/scripts/check/lifecycle_reachability_baseline.txt"
+  st_run "$st_dir/f7"
+  if [ "$st_rc" != "2" ] || [ -f "$st_dir/f7/scripts/check/lifecycle_reachability_baseline.txt" ]; then
+    echo "selftest FIXTURE 7a (missing baseline must fail closed) failed: rc=$st_rc [$st_verdict]" >&2; st_fail=1
+  fi
+  st_run "$st_dir/f7" --generate-baseline
+  if [ "$st_rc" != "0" ] || [ ! -f "$st_dir/f7/scripts/check/lifecycle_reachability_baseline.txt" ]; then
+    echo "selftest FIXTURE 7b (--generate-baseline must record) failed: rc=$st_rc [$st_verdict]" >&2; st_fail=1
+  fi
+
+  rm -rf "$st_dir"
+  if [ $st_fail -ne 0 ]; then
+    echo "ERROR — nothing was checked (selftest failed)"
+    exit 2
+  fi
+}
+
+if [ "${LIFECYCLE_REACH_SELFTEST_CHILD:-0}" = "0" ]; then selftest; fi
+if [ $SELFTEST_ONLY -eq 1 ]; then
+  echo "PASS — 8 selftest fixture(s) checked"
+  exit 0
+fi
+
+EV_VERDICT=""; EV_RC=2
+evaluate "$ROOT"
+echo "$EV_VERDICT"
+exit $EV_RC

@@ -1,27 +1,7 @@
 # `base64url_decode` silently accepts out-of-alphabet input (RFC 4648 §3.3) and diverges from the differential oracle
 
-- **Status:** RESOLVED (was OPEN)
+- **Status:** OPEN
 - **Date:** 2026-08-18
-
-## Re-verified 2026-09-02 (fix/bugdb-batch-g triage)
-
-The suggested fix's option 2 (strict sibling) has landed: `base64url_decode_strict`
-exists at `src/lib/common/base_encoding/base64.spl:325`, returning
-`Result<text, Base64UrlError>` and rejecting out-of-alphabet input per RFC 4648
-§3.3, exactly as this record's "Suggested fix" section describes. All named
-security-sensitive callers have migrated onto it:
-`src/lib/nogc_sync_mut/web_framework/auth_middleware.spl:44,162,231` and
-`src/lib/nogc_sync_mut/web_framework/password_reset.spl:41,149` both
-`use std.common.base_encoding.base64.{base64url_decode_strict, ...}` and cite
-this bug doc in a code comment at the call site. A dedicated regression spec
-already exists: `test/01_unit/lib/common/base_encoding/base64/base64url_decode_strict_spec.spl`.
-The original lenient `base64url_decode` is unchanged, as the record specifies
-("existing callers keep working"). Could not execute the spec on this host —
-the deployed self-hosted binary fails every spec run with
-`error: semantic: variable `always_inline` not found` (pre-existing
-stdlib/binary skew, unrelated to this record; see PR description). Source-level
-evidence (exact function existing, exact callers migrated, dedicated spec
-present) is the basis for RESOLVED here.
 - **Area:** `src/lib/common/base_encoding/base64.spl` (`base64url_decode`)
 - **Related migration:** C-MIG-0023 (base64url). This is a **correctness** gap;
   the separate perf gap is tracked in

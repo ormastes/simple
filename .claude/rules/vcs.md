@@ -5,29 +5,54 @@ alwaysApply: false
 ---
 # Version Control
 
-- Use **jj** (Jujutsu) as primary VCS, colocated with git
-- **NEVER create branches** - work directly on `main`
+- Use **jj** (Jujutsu) as primary VCS, colocated with git (plain `git` when jj is absent)
+- **Land via pull request — direct pushes to `main` are rejected server-side.**
+  Since 2026-09-05 the `spipe-vcs-v3-main` ruleset (`.github/rulesets/`) requires a
+  PR, two required status checks, and lists NO bypass actors: `git push origin
+  <sha>:main` fails with GH013 even for a one-commit fast-forward, and `gh pr merge
+  --admin` is refused. Auto-merge is disabled on the repo.
+- **Topic branches exist only to carry a PR.** No long-lived feature branches; the
+  branch is deleted at merge. Name it `<area>/<topic>-<date>`.
 - Commit: `jj commit -m "message"` (auto-tracks all changes, no staging needed)
-- Push: `sh scripts/check/land.shs` — gates the rules.sdl quick-group and integrity
-  checks against COMMITTED content, THEN runs `sj bookmark set main -r @- && sj
-  git push --bookmark main`. **Do not push via raw `sj`/`jj git push` directly** —
-  `jj git push` never invokes `.git/hooks/pre-push`, so the rules.sdl gates are
-  silently skipped on that path. See
-  `doc/08_tracking/bug/jj_push_bypasses_rules_sdl_gates_2026-08-11.md`.
-- Fetch: `sj raw jj git fetch && sj raw jj rebase -d main@origin`
+- Push/land (`land.shs` still gates the rules.sdl quick-group against COMMITTED
+  content; run it first, then):
+
+  ```bash
+  git push origin <sha>:refs/heads/<topic>          # only YOUR commits — see "Scope" below
+  gh pr create --base main --head <topic> --title "..." --body-file <file>
+  gh pr edit <n> --body-file <file>                 # REQUIRED once: fires the admission check (below)
+  gh pr merge <n> --merge                           # when mergeStateStatus is CLEAN or UNSTABLE
+  git push origin --delete <topic>
+  ```
+
+  **Required checks:** `Code Idiom & Structural Ratchet Gates` (runs on
+  `pull_request`) and `SPipe Self Review Admission` (`.github/workflows/review-admission.yml`).
+  The admission workflow's `pull_request_target` types are `[synchronize, edited,
+  closed, reopened]` — **not `opened`** — so a freshly opened PR sits `BLOCKED` with
+  no admission check-run at all. Any `edited`/`synchronize` event creates it; for
+  that event the job is skipped, and a *skipped* check-run satisfies the ruleset
+  (how PR #375 and #379 landed). `publish` is NOT required and fails on every PR
+  (runner has no `bin/simple`) — `UNSTABLE` is mergeable.
+  **Scope:** with many sessions sharing one clone, local `main` carries other
+  sessions' unpushed commits. Do not push the branch tip; rebuild only your commit
+  on `origin/main` (`git read-tree origin/main` into a temp `GIT_INDEX_FILE`, add
+  your blobs, `git write-tree`, `git commit-tree -p origin/main`) and push that sha.
+- Fetch: `sj raw jj git fetch && sj raw jj rebase -d main@origin` (git: `git fetch origin`)
 
 ## When `jj git push` fails ("External git program failed")
 
-Origin's HTTPS token is dead. Push the rebased tip directly over SSH, then re-sync tracking:
+Origin's HTTPS token is dead. Push the topic branch over SSH instead, then open the
+PR as above. **Do not push to `refs/heads/main` over SSH** — the ruleset rejects
+that path too (superseded 2026-09-05; the old direct-to-main recipe here no longer works).
 
 ```bash
 TIP=$(jj --ignore-working-copy log -r '@-' --no-graph -T 'commit_id')
 GIT_SSH_COMMAND="ssh -o BatchMode=yes -i ~/.ssh/id_ed25519_this_mac" \
-  git push git@github.com:ormastes/simple.git "$TIP":refs/heads/main
+  git push git@github.com:ormastes/simple.git "$TIP":refs/heads/<topic>
 GIT_SSH_COMMAND="ssh -o BatchMode=yes -i ~/.ssh/id_ed25519_this_mac" jj --ignore-working-copy git fetch
 ```
 
-Always verify with `git ls-remote` after — a clean-looking exit is not proof the content landed.
+Always verify with `git ls-remote` after a merge — a clean-looking exit is not proof the content landed.
 
 ## Rebase conflict loop (root-first)
 
@@ -41,46 +66,6 @@ jj --ignore-working-copy restore --from <chosen-side> --to <ROOT> <paths...>
 Side policy is per-path: paths whose latest truth is local restore from the pre-rebase local tip sha; paths already superseded upstream restore from `main@origin` (verify by symbol-grep on origin first). `--ignore-working-copy` is required — it skips the WC snapshot and dodges "Concurrent checkout" races.
 
 ## Pre-push guards
-
-**Wiring surface (corrected 2026-09-01 — read this before trusting any "wired into"
-claim below).** The pre-push chain is `.git/hooks/pre-push` -> `scripts/hooks/pre-push`
--> `scripts/check/pre-push-conflict-tree-guard.shs` -> `exec sh
-scripts/check/check-push-must-pass.shs --from-pre-push-hook`. Guards are NOT hardcoded
-in the dispatcher: the authoritative list is the rows with `tier=push` in
-**`config/check/must_check_gates.sdn`**, executed by `run_manifest_push_gates`
-(`check-push-must-pass.shs:282-352`). Each row's `id:mode:command` must byte-match a
-case arm there; the fail-closed `*)` arm at :348 blocks every push otherwise.
-`push_blocking=false` runs the guard and RECORDS its verdict on stderr without failing
-the push — that is the advisory tier, and an advisory verdict is never a pass. Prose
-below that says a guard is "wired into pre-push-conflict-tree-guard.shs" means
-"declared as a push-tier manifest row"; it does not mean the dispatcher calls it
-directly. **A guard sitting at `tier=bootstrap` executes on NO push** — that is where
-five of them were found on 2026-09-01, three of them green.
-
-**Caveat, measured 2026-09-01:** on unmodified `origin/main` the hook already ends
-`BLOCKING gate push-rules-quick failed (exit 2)` — `ERROR — nothing was checked
-(committed rules.sdl is not bound to the reviewed policy digest)`. Pushes are
-therefore routinely made with `--no-verify`, which nullifies every guard below.
-Fix that before trusting this list.
-
-Executed on every push as of 2026-09-01 (18 push-tier rows): conflict-tree, tree-size,
-conflict-markers, rules-quick, interpreter-module-owners, runtime-api-regression,
-interpreter-extern-registry-gap, sffi-v2-authority, type-walk-constructor-parity,
-main-test-runnable, rt-dual-implementation, runtime-source-list-parity,
-**c-runtime-compiles**, **no-direct-rt**, **guard-wiring** (all blocking); dual-run-shadow,
-**perf-regression-tests**, **process-wait-eintr-retry** (advisory, verdict recorded only).
-
-**Honestly NOT wired, and why (do not read the sections below as coverage):**
-`check-seed-builds-push.shs` (>10 min cold `cargo check` — too slow for an interactive
-gate); `check-test-tree-divergence.shs` (RED: 3085 new divergences vs baseline);
-`check-unbacked-extern-ratchet.shs` and `check-outline-parse-terminates.shs` (ERROR
-without a deployed `bin/simple`, which most push hosts lack);
-`check-use-target-resolves.shs` (RED: 3274 new); `check-stage-binaries-runnable.shs`
-and `check-no-unresolved-runtime-symbols.shs` (RED/ERROR on the tracked stage blobs —
-the first is what would have caught PR #232's Windows/macOS checkout damage, and is red
-for exactly that reason). Each stays advisory until its subject is repaired. Audit:
-`doc/08_tracking/bug/vcs_md_overstated_push_guard_wiring_2026-09-01.md`.
-
 
 ### What ACTUALLY runs on push (verified 2026-09-01 — read this before trusting any "Wired into" line below)
 

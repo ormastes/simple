@@ -1,6 +1,7 @@
 # Result-bearing wrapper for interpreter-mode specs.
 
 use std.nogc_sync_mut.io.file_ops.{file_delete, file_exists, file_read, file_write}
+use compiler.frontend.core.source_facts.{simple_code_lines, simple_string_continuation_lines}
 use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
 
 extern fn rt_file_create_excl(path: text, content: text) -> bool
@@ -411,7 +412,13 @@ fn _preprocess_spipe_file(file_path: text, native_result: bool) -> text:
     var import_parts: [text] = []
     var top_level_parts: [text] = []
     var body_parts: [text] = []
-    var in_docstring = false
+    # Element i pairs with lines[i]. Replaces a docstring flag that toggled on
+    # ANY line starting with `"""`, so a one-line docstring switched it on and
+    # nothing ever switched it off: every later import and top-level
+    # declaration was pushed verbatim into the main body (1,657 spec files
+    # carry a one-line docstring; measured 2026-09-06).
+    val string_continuation = simple_string_continuation_lines(content)
+    val code_lines = simple_code_lines(content)
     var in_top_fn = false
     var top_fn_indent = 0
     var in_import_block = false
@@ -420,7 +427,11 @@ fn _preprocess_spipe_file(file_path: text, native_result: bool) -> text:
     var top_decl_depth = 0
     var skipping_spec_import = false
 
-    for raw_line in lines:
+    var line_index = 0
+    while line_index < lines.len():
+        val raw_line = lines[line_index]
+        val fact_index = line_index
+        line_index = line_index + 1
         val infix_line = spipe_rewrite_infix_expect_line(raw_line)
         var line = spipe_rewrite_method_expect_line(infix_line)
         var trimmed = line.trim()
@@ -454,26 +465,11 @@ fn _preprocess_spipe_file(file_path: text, native_result: bool) -> text:
             continue
 
         # Track multi-line docstrings (""")
-        if trimmed.starts_with("\"\"\""):
-            # Toggle docstring state. A line with """ toggles in/out.
-            # If we see """ at start of line and we're NOT in a function body,
-            # treat docstrings at top level as body (they'll go into main).
-            if in_docstring:
-                in_docstring = false
-                if in_top_fn:
-                    top_level_parts.push(line)
-                else:
-                    body_parts.push("    " + line)
-                continue
-            else:
-                in_docstring = true
-                if in_top_fn:
-                    top_level_parts.push(line)
-                else:
-                    body_parts.push("    " + line)
-                continue
-
-        if in_docstring:
+         # Docstring lines pass through verbatim: a line inside a string opened
+        # earlier, or a line that is itself only a string (opener, closer, or a
+        # one-liner). Fixture-string interiors pass through too, instead of
+        # being classified as declarations.
+        if string_continuation[fact_index] or code_lines[fact_index].trim() == "\"\"":
             if in_top_fn:
                 top_level_parts.push(line)
             else:

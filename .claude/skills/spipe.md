@@ -258,6 +258,77 @@ sh scripts/setup/install-spipe-dev-command.shs --apply
 - [`doc/07_guide/infra/sspec_scenario_manual.md`](../../doc/07_guide/infra/sspec_scenario_manual.md) — SSpec scenario manual, capture, inline/previous scenario, and environmental-test guidance
 - [`doc/07_guide/platform/simpleos/qemu_system_tests.md`](../../doc/07_guide/platform/simpleos/qemu_system_tests.md) — **System tests over QEMU**: per-arch live-boot SSpec specs (`test/03_system/os/qemu/`), `qemu_systest_contract.spl` descriptors, pass/missing-media/boot-fail classification (fail-closed, never `skip()`), and `scripts/check/qemu-storage-audit.shs`
 
+## Landing a PR here (measured 2026-09-06 — read before you push)
+
+`main` is ruleset-protected (`spipe-vcs-v3-main`, `bypass_actors: []`). Direct
+push is rejected; `gh pr merge --admin` is refused for admins too. Two required
+checks: **`Code Idiom & Structural Ratchet Gates`** and **`SPipe Self Review
+Admission`**.
+
+**Push ONCE. Every force-push destroys an in-flight run.** `repo-hygiene.yml`
+(the idiom gate) declares `concurrency: group: ${{ github.workflow }}-${{
+github.ref }}` with `cancel-in-progress: true`, and the repo has **0
+self-hosted runners** with **53 runs queued/in-progress** measured on
+2026-09-06 across the parallel agent sessions. So a re-push does not "retry" —
+it cancels the running gate and re-queues you behind everything else. Get the
+commit message and the rebase right BEFORE the first push; amending a message
+afterwards costs a full queue cycle.
+
+**The admission check has two traps, and the fix for one causes the other.**
+1. `gh pr edit --body-file` with byte-identical content fires no `edited`
+   event, so no check-run is ever created and the PR sits `BLOCKED` forever.
+2. The admission workflow also cancels its own in-flight run on each new
+   event — so "fixing" trap 1 by editing repeatedly kills the very run that
+   would publish the check (3 cancelled runs before this was spotted).
+Fire ONE genuine body change, then wait. Diagnose with
+`gh api repos/<r>/actions/workflows/<id>/runs` and read `event` +
+`conclusion` — the check-runs list shows nothing while the workflow is in fact
+firing correctly, which reads as "never triggered" and is wrong.
+
+On a `pull_request` the admission job is **skipped** (its `if:` is
+`github.event_name == 'workflow_dispatch'`), and GitHub's rollup **accepts a
+skipped required check** — that is how PRs land normally. Dispatching it
+deliberately is the OWNER SELF-ATTESTATION path:
+
+```bash
+gh workflow run review-admission.yml --repo <r> \
+  -f pull_request_number=<n> -f session_id=<session> \
+  -f reviewer_model=<model> -f reviewer_effort=high -f self_attestation=PASS:0:0
+```
+
+`self_attestation` is a claim in the repo owner's name and the workflow's own
+config says it is **not** independent authentication. Never dispatch it without
+the user's explicit instruction, and only when the values are true.
+
+**Emergency bypass — user-authorized only, and always restored.** When a
+required check is stuck in the runner queue rather than failing:
+
+```bash
+gh api repos/<r>/rulesets/<id> > ruleset_ORIGINAL.json          # 1. save
+jq '{bypass_actors:[{actor_id:5,actor_type:"RepositoryRole",bypass_mode:"always"}]}' \
+   ruleset_ORIGINAL.json | gh api -X PUT repos/<r>/rulesets/<id> --input -
+gh pr merge <n> --merge --admin                                  # 2. merge
+jq '{bypass_actors:[]}' ruleset_ORIGINAL.json | gh api -X PUT repos/<r>/rulesets/<id> --input -
+gh api repos/<r>/rulesets/<id> --jq '.bypass_actors|length'      # 3. MUST print 0
+```
+
+This lowers protection for the whole repo, not one PR. Keep the window to a
+single command, verify `bypass_actors=0` afterwards, and record the bypass in
+the PR/commit. Do not use it for a check that is genuinely FAILING.
+
+**Lanes that are red for everyone — never attribute them to your change.**
+`Containerized Tests` (publishes `Unit Test Discovery (Podman)`, `Verify
+Resource Limits`, `render_2d Container Suite`): 12 failures and **zero**
+successes in its last 40 runs, on `main` and unrelated branches alike.
+`publish` and `aot-lane-fences`: both die with `no runnable bin/simple` on a
+fresh runner. None is ruleset-required. Diagnose by diffing your failing set
+against an unrelated open PR **and** checking whether the lane merely *queued*
+there — "fails only on mine" is usually "only ran on mine".
+
+You cannot approve your own PR (`Review Can not approve your own pull
+request`), and `required_approving_review_count` is 0, so approval never
+unblocks anything.
+
 ## Container test runs
 
 **Never `COPY . /opt/simple` (or any whole-repo COPY) into a test-isolation

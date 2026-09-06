@@ -1,0 +1,133 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-APP
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+
+"""DevHub lifecycle owns a real local producer: it persists a change record and reads it back."""
+# @req: REQ-SSPEC-APP
+# @ac: AC-7
+use std.spec.step
+
+use std.spec.{describe, it, expect, step}
+use app.devhub.cmd_lifecycle.{lifecycle_record_change_json, lifecycle_dry_run_json, lifecycle_inspect_root_json, lifecycle_capabilities_json, handle_lifecycle}
+use std.scv.lifecycle.store.{lifecycle_store_read}
+use std.scv.lifecycle.entity_codec.{change_from_record}
+use std.io_runtime.{file_exists, file_read, remove_file_if_exists}
+
+# Absolute oracles, computed OUTSIDE this codebase with coreutils sha256sum:
+#   printf 'change|seed-lane-b' | sha256sum
+#     -> 8f91f6b09d455229cffa99e6aee346c5e992c1e3464f0f2655d4d3cc8a443c1c
+#   printf 'intent-text'        | sha256sum
+#     -> 6e89ed5ae19a2c2292063dbebad46f5d1d03c750c63f8106724a16402407f53e
+# lifecycle_change_identity derives change_id as "chg_" + first 24 hex digits.
+#   printf 'change|seed-cli'    | sha256sum
+#     -> db712c67b4e69c03ffe6097f3fe50b47d16c4c5d19056351bf7e201efd1dd956
+val ORACLE_CHANGE_ID = "chg_8f91f6b09d455229cffa99e6"
+val ORACLE_CLI_CHANGE_ID = "chg_db712c67b4e69c03ffe6097f"
+val ORACLE_INTENT_DIGEST = "6e89ed5ae19a2c2292063dbebad46f5d1d03c750c63f8106724a16402407f53e"
+val STORE_ROOT = "build/test-artifacts/devhub-lifecycle-record"
+val STORE_PATH = STORE_ROOT + "/.scv/lifecycle/change/" + ORACLE_CHANGE_ID + ".scvl"
+
+describe "DevHub lifecycle local record producer":
+    # @manual scenario evidence
+    it "persists a change record to the lifecycle store and reads back exact fields":
+        # @req REQ-SSPEC-APP
+        step("persists a change record to the lifecycle store and reads back exact fields")
+        step("Start from no stored envelope so a stale file cannot fake the pass")
+        remove_file_if_exists(STORE_PATH)
+        expect(file_exists(STORE_PATH)).to_be(false)
+
+        step("Run the devhub lifecycle producer")
+        val (payload, code) = lifecycle_record_change_json(STORE_ROOT, "seed-lane-b", "Wire the lifecycle store", "lane-b", "intent-text")
+        expect(code).to_equal(0)
+        expect(payload).to_contain('"status":"recorded"')
+        expect(payload).to_contain('"entity_id":"' + ORACLE_CHANGE_ID + '"')
+
+        step("The envelope exists on disk with the exact canonical encoding")
+        expect(file_exists(STORE_PATH)).to_be(true)
+        expect(file_read(STORE_PATH)).to_start_with(
+            "scv-lifecycle/1|change|" + ORACLE_CHANGE_ID + "|3|title=Wire the lifecycle store|intent_digest=" + ORACLE_INTENT_DIGEST + "|owner=lane-b|")
+
+        step("Read back through the store and project the typed value object")
+        val decoded = lifecycle_store_read(STORE_ROOT, "change", ORACLE_CHANGE_ID)
+        expect(decoded.ok).to_be(true)
+        val change = change_from_record(decoded.record.?)
+        expect(change != nil).to_be(true)
+        expect(change.?.change_id).to_equal(ORACLE_CHANGE_ID)
+        expect(change.?.title).to_equal("Wire the lifecycle store")
+        expect(change.?.owner).to_equal("lane-b")
+        expect(change.?.intent_digest).to_equal(ORACLE_INTENT_DIGEST)
+
+    it "inspects the produced record as found rather than unbound":
+        # @req REQ-SSPEC-APP
+        step("inspects the produced record as found rather than unbound")
+        val (written, write_code) = lifecycle_record_change_json(STORE_ROOT, "seed-lane-b", "Wire the lifecycle store", "lane-b", "intent-text")
+        expect(write_code).to_equal(0)
+        val (payload, code) = lifecycle_inspect_root_json(STORE_ROOT, "change", ORACLE_CHANGE_ID, "idem-lane-b", false)
+        expect(code).to_equal(0)
+        expect(payload).to_contain('"status":"found"')
+        expect(payload).to_contain('"entity_id":"' + ORACLE_CHANGE_ID + '"')
+
+    it "plans a dry run from the persisted record instead of always rejecting":
+        # @req REQ-SSPEC-APP
+        step("plans a dry run from the persisted record instead of always rejecting")
+        val (written, write_code) = lifecycle_record_change_json(STORE_ROOT, "seed-lane-b", "Wire the lifecycle store", "lane-b", "intent-text")
+        expect(write_code).to_equal(0)
+        val (payload, code) = lifecycle_dry_run_json(STORE_ROOT, "change", ORACLE_CHANGE_ID)
+        expect(code).to_equal(0)
+        expect(payload).to_contain('"status":"planned"')
+        expect(payload).to_contain('"mutation":"none"')
+        expect(payload).to_contain('"field_count":3')
+
+    it "keeps the dry run fail-closed when input is genuinely absent":
+        # @req REQ-SSPEC-APP
+        step("keeps the dry run fail-closed when input is genuinely absent")
+        val (missing_id, missing_code) = lifecycle_dry_run_json(STORE_ROOT, "change", "")
+        expect(missing_code).to_equal(2)
+        expect(missing_id).to_contain('"code":"DRY_RUN_INPUT_REQUIRED"')
+
+        val (absent, absent_code) = lifecycle_dry_run_json(STORE_ROOT, "change", "chg_never_written_lane_b")
+        expect(absent_code).to_equal(2)
+        expect(absent).to_contain('"code":"DRY_RUN_RECORD_ABSENT"')
+
+        val (bad_domain, bad_code) = lifecycle_dry_run_json(STORE_ROOT, "not-a-domain", ORACLE_CHANGE_ID)
+        expect(bad_code).to_equal(2)
+        expect(bad_domain).to_contain('"code":"DOMAIN_UNSUPPORTED"')
+
+    it "refuses to persist delimiter-bearing fields":
+        # @req REQ-SSPEC-APP
+        step("refuses to persist delimiter-bearing fields")
+        val (payload, code) = lifecycle_record_change_json(STORE_ROOT, "seed-unsafe", "unsafe|title", "lane-b", "intent-text")
+        expect(code).to_equal(2)
+        expect(payload).to_contain('"code":"CHANGE_FIELD_UNSAFE"')
+
+        val (blank, blank_code) = lifecycle_record_change_json(STORE_ROOT, "", "title", "lane-b", "intent-text")
+        expect(blank_code).to_equal(2)
+        expect(blank).to_contain('"code":"CHANGE_INPUT_REQUIRED"')
+
+    it "produces and replans a record through the devhub CLI dispatch itself":
+        # @req REQ-SSPEC-APP
+        step("produces and replans a record through the devhub CLI dispatch itself")
+        val cli_path = STORE_ROOT + "/.scv/lifecycle/change/" + ORACLE_CLI_CHANGE_ID + ".scvl"
+        step("Start from no stored envelope so the dispatch must really write one")
+        remove_file_if_exists(cli_path)
+        expect(file_exists(cli_path)).to_be(false)
+
+        step("Drive the argv path exactly as `devhub lifecycle record-change` does")
+        expect(handle_lifecycle(["record-change", "--root", STORE_ROOT, "seed-cli", "CLI recorded change", "lane-b", "intent-text"])).to_equal(0)
+        expect(file_exists(cli_path)).to_be(true)
+        expect(file_read(cli_path)).to_start_with(
+            "scv-lifecycle/1|change|" + ORACLE_CLI_CHANGE_ID + "|3|title=CLI recorded change|intent_digest=" + ORACLE_INTENT_DIGEST + "|owner=lane-b|")
+
+        step("The same argv path plans a dry run over what it just wrote")
+        expect(handle_lifecycle(["dry-run", "--root", STORE_ROOT, "change", ORACLE_CLI_CHANGE_ID])).to_equal(0)
+        step("And stays fail-closed with no operands")
+        expect(handle_lifecycle(["dry-run"])).to_equal(2)
+        expect(handle_lifecycle(["record-change"])).to_equal(2)
+
+    it "advertises the local write path honestly while remote mutation stays disabled":
+        # @req REQ-SSPEC-APP
+        step("advertises the local write path honestly while remote mutation stays disabled")
+        val payload = lifecycle_capabilities_json()
+        expect(payload).to_contain('"record-change"')
+        expect(payload).to_contain('"remote_mutation":"disabled"')

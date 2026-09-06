@@ -130,13 +130,6 @@ bin/simple run src/app/wm_compare/backend_measurement_software_export.spl -- \
 
 ## Remaining Work
 
-- Live macOS browser-side Metal evidence is available for the 320x240
-  `css_boxes.html` fixture: Chrome and Electron both used ANGLE Metal on Apple
-  M4 and produced identical nonblank ARGB output (checksum
-  `329775811848360`, zero differing pixels). This is partial evidence only; the
-  Simple Metal row and three-way comparison still require an admitted
-  self-hosted compiler.
-
 1. **Compiled Simple 8K repeats**: CUDA and software backends now have measured
    smoke rows; repeat at 8K with multiple frames before making release claims.
 2. **CPU SIMD at 8K**: AVX2 backend exists but no 8K throughput evidence yet
@@ -165,19 +158,3 @@ src/os/compositor/
   perf_counters.spl         # Per-phase timing + report_contract()
   frame_pacer.spl           # Frame budget + vsync + report_contract()
 ```
-The CPU/SIMD scale contract emits comparable 4K and 8K cold/warm startup,
-frame p50/p95, and p95 input-to-paint fields for both `simple_web_cpu_simd`
-and `simple_web_software`. These values are admission evidence only when the
-same run also proves native SIMD execution, checksum parity, runtime freshness,
-and the applicable architecture-matrix receipt.
-
-Lifecycle fields must come from separate intervals: first render for cold
-start, a render after configured warmups for warm start, repeated ordinary
-renders for frame percentiles, and scroll-state-to-present samples for
-input-to-paint. Reusing frame percentiles under different field names is a
-failed measurement even when every value is positive.
-
-The scale benchmark labels this narrower interaction interval
-`scroll-state-to-present`. It does not prove host/screen event dispatch through
-WM and application callbacks; that end-to-end latency belongs to the production
-event-routing evidence gate.

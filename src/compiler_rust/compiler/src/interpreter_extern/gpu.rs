@@ -275,7 +275,8 @@ mod cuda_dlopen {
     type CuInit = unsafe extern "C" fn(u32) -> i32;
     type CuDeviceGet = unsafe extern "C" fn(*mut i32, i32) -> i32;
     type CuDeviceGetUuid = unsafe extern "C" fn(*mut CudaUuid, i32) -> i32;
-    type CuDeviceGetName = unsafe extern "C" fn(*mut i8, i32, i32) -> i32;
+    type CuDeviceGetName =
+        unsafe extern "C" fn(*mut std::os::raw::c_char, i32, i32) -> i32;
     type CuCtxCreate = unsafe extern "C" fn(*mut *mut c_void, u32, i32) -> i32;
     type CuCtxSetCurrent = unsafe extern "C" fn(*mut c_void) -> i32;
     type CuCtxGetCurrent = unsafe extern "C" fn(*mut *mut c_void) -> i32;
@@ -300,7 +301,8 @@ mod cuda_dlopen {
     type CuDeviceGetCount = unsafe extern "C" fn(*mut i32) -> i32;
     type CuModuleLoadData = unsafe extern "C" fn(*mut *mut c_void, *const c_void) -> i32;
     type CuModuleUnload = unsafe extern "C" fn(*mut c_void) -> i32;
-    type CuModuleGetFunction = unsafe extern "C" fn(*mut *mut c_void, *mut c_void, *const i8) -> i32;
+    type CuModuleGetFunction =
+        unsafe extern "C" fn(*mut *mut c_void, *mut c_void, *const std::os::raw::c_char) -> i32;
     type CuLaunchKernel = unsafe extern "C" fn(
         *mut c_void,
         u32,
@@ -540,8 +542,8 @@ use simple_runtime::metal_graphics_runtime::{
     rt_metal_draw_indexed, rt_metal_draw_primitives, rt_metal_end_compute_encoder, rt_metal_end_render_pass,
     rt_metal_free_buffer, rt_metal_free_texture, rt_metal_get_last_error, rt_metal_init, rt_metal_is_available,
     rt_metal_run_blit_frame, rt_metal_run_compute_frame, rt_metal_set_buffer, rt_metal_set_bytes, rt_metal_set_scissor,
-    rt_metal_set_viewport, rt_metal_present, rt_metal_wait_completed, rt_metal_buffer_upload_raw,
-    rt_metal_buffer_download_raw, rt_metal_set_bytes_raw,
+    rt_metal_set_viewport, rt_metal_present, rt_metal_wait_completed,
+    rt_metal_buffer_upload_raw, rt_metal_buffer_download_raw, rt_metal_set_bytes_raw,
 };
 
 pub(super) fn arg_i64(args: &[Value], index: usize, name: &str, expected: usize) -> Result<i64, CompileError> {
@@ -1364,7 +1366,7 @@ pub fn rt_cuda_device_name_fn(args: &[Value]) -> Result<Value, CompileError> {
     #[cfg(not(feature = "cuda"))]
     {
         if let Some(fns) = get_cuda_dl() {
-            let mut name_buf = [0i8; 256];
+            let mut name_buf = [0 as std::os::raw::c_char; 256];
             let r = unsafe { (fns.device_get_name)(name_buf.as_mut_ptr(), 256, device as i32) };
             if r == 0 {
                 let name = unsafe { std::ffi::CStr::from_ptr(name_buf.as_ptr() as *const std::os::raw::c_char) }
