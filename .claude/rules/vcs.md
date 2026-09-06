@@ -42,6 +42,16 @@ alwaysApply: false
   that event the job is skipped, and a *skipped* check-run satisfies the ruleset
   (how PR #375 and #379 landed). `publish` is NOT required and fails on every PR
   (runner has no `bin/simple`) — `UNSTABLE` is mergeable.
+  **Timing:** the recipe above is correct and still fails repeatedly, because
+  strict up-to-date races `main`'s own advance rate. Measured 2026-09-06 the
+  admission check did NOT arrive as a skipped run and had to be dispatched —
+  read `gh pr checks` rather than assuming either behaviour. Auto-merge is off
+  repo-wide and `--admin` does NOT bypass a *ruleset*. The update-branch -> dispatch -> poll-both -> merge-now ->
+  retry-on-"base advanced" loop, with measurements, is in
+  `doc/07_guide/infra/vcs/pr_landing_timing_race.md`.
+  **Reviewing someone else's PR:** a stale merge snapshot can DELETE landed work
+  with no merge conflict and no failing check. Detection recipe:
+  `doc/07_guide/infra/vcs/stale_merge_snapshot_rewind.md`.
   **Scope:** with many sessions sharing one clone, local `main` carries other
   sessions' unpushed commits. Do not push the branch tip; rebuild only your commit
   on `origin/main` (`git read-tree origin/main` into a temp `GIT_INDEX_FILE`, add

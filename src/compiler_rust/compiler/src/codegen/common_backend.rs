@@ -1013,8 +1013,19 @@ impl BackendSettings {
     /// `ObjectModule`, not `JITModule`, and never touches the PLT writer.
     pub fn jit() -> Self {
         // PLT entries needed by is_pic=true are only implemented for x86_64
-        // in cranelift-jit (vendor/cranelift-jit/src/backend.rs:297).
-        // On aarch64/riscv/etc., disable PIC so the assert never fires.
+        // in cranelift-jit (vendor/cranelift-jit/src/backend.rs:296,
+        // "PLT is currently only supported on x86_64").
+        //
+        // This does NOT make non-x86_64 safe — it picks which assert you get.
+        // With is_pic=false the aarch64 call path is a direct BL
+        // (Reloc::Aarch64Call), whose 26-bit signed word immediate reaches only
+        // +/-128 MB; when the JIT's allocations land further apart than that,
+        // vendor/cranelift-jit/src/compiled_blob.rs:90 asserts
+        // `(diff >> 26 == -1) || (diff >> 26 == 0)` and the process aborts.
+        // Reproduced deterministically 2026-09-06; see
+        // doc/08_tracking/bug/jit_aarch64_branch_relocation_out_of_range_abort_2026-09-05.md
+        // for the reproducer and the aarch64 PLT stub that would let is_pic be
+        // true here.
         let is_pic = cfg!(target_arch = "x86_64");
         Self {
             opt_level: "speed",
