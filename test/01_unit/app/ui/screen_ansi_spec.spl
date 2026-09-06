@@ -234,10 +234,78 @@ describe "Screen.put_text ANSI style splice":
             expect char_at_col(line, 2) to_equal("X")
             expect style_at_col(line, 2) to_equal("")
             # col 3: C should still be BOLD (suffix style restored)
-            expect char_at_col(line, 3) to_equal("C")
+            expect char_at_col(line, 3) to_equal("D")  # put_text overwrites: X replaced C at col 2, so col 3 is D
             expect style_at_col(line, 3) to_equal(BOLD)
             # col 4: D should still be BOLD
             expect style_at_col(line, 4) to_equal(BOLD)
+
+        it "overwrite inside a BOLD run is unstyled and the run resumes after it":
+            # Same scenario as the example above, with the overwritten column
+            # accounted for: put_text REPLACES col 2 ('C'), so col 3 is 'D'.
+            var s = Screen.new(10, 1)
+            s = s.put_styled(0, 0, "ABCDE", BOLD)
+            s = s.put_text(0, 2, "X")
+            val line = s.buffer[0]
+            expect style_at_col(line, 0) to_equal(BOLD)
+            expect char_at_col(line, 2) to_equal("X")
+            expect style_at_col(line, 2) to_equal("")
+            expect char_at_col(line, 3) to_equal("D")
+            expect style_at_col(line, 3) to_equal(BOLD)
+            expect char_at_col(line, 4) to_equal("E")
+            expect style_at_col(line, 4) to_equal(BOLD)
+            expect visible_width(line) to_equal(10)
+
+        it "three-block row survives an overwrite across two style boundaries":
+            # BOLD | CYAN | plain, overwritten from inside the BOLD block
+            # through the CYAN block and into the plain tail.
+            var s = Screen.new(12, 1)
+            s = s.put_styled(0, 0, "AAAA", BOLD)
+            s = s.put_styled(0, 4, "BBBB", CYAN)
+            s = s.put_text(0, 8, "cccc")
+            s = s.put_text(0, 2, "XXXXXX")
+            val line = s.buffer[0]
+            # cols 0..1: untouched BOLD prefix
+            expect char_at_col(line, 0) to_equal("A")
+            expect style_at_col(line, 0) to_equal(BOLD)
+            expect style_at_col(line, 1) to_equal(BOLD)
+            # cols 2..7: the overwrite, plain across both boundaries
+            expect char_at_col(line, 2) to_equal("X")
+            expect style_at_col(line, 2) to_equal("")
+            expect char_at_col(line, 5) to_equal("X")
+            expect style_at_col(line, 5) to_equal("")
+            expect char_at_col(line, 7) to_equal("X")
+            expect style_at_col(line, 7) to_equal("")
+            # col 8: the plain tail is still plain
+            expect char_at_col(line, 8) to_equal("c")
+            expect style_at_col(line, 8) to_equal("")
+            expect visible_width(line) to_equal(12)
+            expect ends_with_reset(line) to_equal(true)
+
+        it "three successive overwrites on one row keep every block's style":
+            var s = Screen.new(12, 1)
+            s = s.put_styled(0, 0, "AAAA", BOLD)
+            s = s.put_styled(0, 4, "BBBB", CYAN)
+            s = s.put_styled(0, 8, "CCCC", DIM)
+            s = s.put_text(0, 1, "X")
+            s = s.put_text(0, 5, "Y")
+            s = s.put_text(0, 9, "Z")
+            val line = s.buffer[0]
+            # BOLD block: hole at 1, style resumes at 2
+            expect char_at_col(line, 1) to_equal("X")
+            expect style_at_col(line, 1) to_equal("")
+            expect style_at_col(line, 0) to_equal(BOLD)
+            expect style_at_col(line, 2) to_equal(BOLD)
+            # CYAN block: hole at 5, style resumes at 6
+            expect char_at_col(line, 5) to_equal("Y")
+            expect style_at_col(line, 5) to_equal("")
+            expect style_at_col(line, 4).contains("\u{001b}[36m") to_equal(true)
+            expect style_at_col(line, 6).contains("\u{001b}[36m") to_equal(true)
+            # DIM block: hole at 9, style resumes at 10
+            expect char_at_col(line, 9) to_equal("Z")
+            expect style_at_col(line, 9) to_equal("")
+            expect style_at_col(line, 8) to_equal(DIM)
+            expect style_at_col(line, 10) to_equal(DIM)
+            expect visible_width(line) to_equal(12)
 
     describe "RESET not lost past styled block end":
 

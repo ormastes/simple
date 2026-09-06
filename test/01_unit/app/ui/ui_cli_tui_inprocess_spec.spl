@@ -1,0 +1,132 @@
+"""
+## Purpose and audience
+
+Pins the launch mode the `simple ui` dispatcher picks per backend, for the
+engineers working the slim TUI/GUI kernel-plugin lane. Until 2026-09-06 every
+backend — the interactive `tui` included — was launched by
+`run_ui_backend_dyn`, which spawns `backend_entry_<backend>.spl` through
+`std.nogc_sync_mut.io.process_ops.process_run`. That facade *pipes* the child's
+stdout and replays it only after the child exits, and no facade in `process_ops`
+can hand a child the parent's terminal (`rt_process_spawn_async` inherits
+stdout/stderr but nulls stdin). An interactive TUI therefore never received the
+harness pty and its alt-screen frame never reached the transcript — the residual
+defect recorded in
+`doc/08_tracking/bug/ui_backend_loader_calls_undefined_simple_binary_2026-09-06.md`
+§ Residual.
+
+The fix routes `tui` — and only `tui` — IN-PROCESS: the dispatcher calls
+`app.ui.tui.app.run_tui(file_path)` itself, so the TUI inherits the parent's
+stdin/tty. Every other backend (`tui_shared_wm`, `web`, `gui`, `electron`,
+`tauri`, `browser`, `tui_web`, `headless`, `cli`) keeps its spawn path
+unchanged.
+
+## Operator workflow
+
+Run this spec and confirm the Results line reports 0 failed. Scenario 1 reads
+the declarative seam `ui_backend_launch_mode`. Scenario 2 proves the seam is
+load-bearing by exercising the real dispatcher.
+
+## Compatibility and limitations
+
+The dispatcher cannot be driven to a running TUI here: the real route blocks on
+a synchronous watcher and the `SIMPLE_UI_TUI_STUB=1` route blocks on
+`input("")` under the runner (see `tui_cli_wiring_spec.spl`'s header), and no
+same-process stdout-capture facade exists to observe a banner with. Scenario 2
+uses a **spawn-poisoning** oracle instead, which discriminates without blocking:
+`SIMPLE_BINARY` is pointed at `/bin/echo` and the `.ui.sdn` path is one that
+does not exist.
+
+* In-process, `run_tui` rejects the missing file and returns **1**; `/bin/echo`
+  is never consulted, because no child is launched at all.
+* On the spawn path, `run_ui_backend_dyn` execs `/bin/echo` with the backend
+  entry arguments, which succeeds and returns **0** — the missing `.ui.sdn` is
+  never even looked at.
+
+The two codes are therefore mutually exclusive, and a regression that reverts
+`tui` to spawning flips example 4 from 1 to 0.
+
+## Verification guidance and troubleshooting
+
+A failure in scenario 1 means the routing policy changed. A failure of example 4
+(tui returned 0) means `tui` went back to spawning — that is the residual defect
+returning. A failure of examples 5/6 (a spawn backend returned 1) means a
+backend was wrongly pulled in-process; `tui_shared_wm` in particular must keep
+spawning, since it talks to a shared window manager, not this terminal.
+`SIMPLE_BINARY` is restored after every example.
+"""
+# Lifecycle: plan: doc/03_plan/ui/slim_kernel_plugin/plan.md ; bug: doc/08_tracking/bug/ui_backend_loader_calls_undefined_simple_binary_2026-09-06.md
+# @cover src/app/ui/cli_entry.spl
+# @manual_section: UI dispatcher launch mode
+
+use std.spec.step
+
+use std.spec.{describe, it, expect}
+use std.io_runtime.{env_get, env_set}
+
+use app.ui.cli_entry.{ui_backend_launch_mode, dispatch_ui_backend}
+
+val BIN_ENV = "SIMPLE_BINARY"
+val POISON_BIN = "/bin/echo"
+val MISSING_UI = "build/test/ui_cli_tui_inprocess/definitely_absent.ui.sdn"
+
+fn dispatch_with_poisoned_spawn(backend: text) -> i64:
+    """Run the dispatcher with a missing file and `/bin/echo` as the spawner.
+
+    Returns 1 only when the backend ran in-process (run_tui's file-not-found),
+    and 0 only when a child was actually spawned (echo succeeded).
+    """
+    val previous = env_get(BIN_ENV)
+    env_set(BIN_ENV, POISON_BIN)
+    val code = dispatch_ui_backend(backend, MISSING_UI, 3000, "")
+    env_set(BIN_ENV, previous)
+    return code
+
+# =========================================================================
+# Scenario 1 -- the declarative launch-mode seam
+# =========================================================================
+
+describe "ui backend launch mode":
+    # @manual scenario evidence
+
+    it "routes the interactive tui in-process":
+        # @req REQ-UI-SLIM-009
+        step("read the launch-mode seam for the tui backend")
+        # @capture(mode): ui_backend_launch_mode("tui")
+        expect(ui_backend_launch_mode("tui")).to_equal("in-process")
+
+    it "keeps tui_shared_wm on the spawn path":
+        # @req REQ-UI-SLIM-009
+        step("the shared-window-manager TUI is not this terminal's TUI")
+        # @capture(mode): ui_backend_launch_mode("tui_shared_wm")
+        expect(ui_backend_launch_mode("tui_shared_wm")).to_equal("spawn")
+
+    it "keeps web on the spawn path":
+        # @req REQ-UI-SLIM-009
+        step("every non-tui backend keeps the unchanged spawn path")
+        # @capture(mode): ui_backend_launch_mode("web")
+        expect(ui_backend_launch_mode("web")).to_equal("spawn")
+
+# =========================================================================
+# Scenario 2 -- the dispatcher honours the seam
+# =========================================================================
+
+describe "ui dispatcher launch routing":
+    # @manual scenario evidence
+
+    it "never spawns a child for tui":
+        # @req REQ-UI-SLIM-009
+        step("SIMPLE_BINARY=/bin/echo, missing .ui.sdn: in-process run_tui returns 1")
+        # @capture(routing): dispatch_ui_backend("tui", <missing>) exit code
+        expect(dispatch_with_poisoned_spawn("tui")).to_equal(1)
+
+    it "still spawns a child for tui_shared_wm":
+        # @req REQ-UI-SLIM-009
+        step("the poisoned spawner runs and returns 0, so a child really ran")
+        # @capture(routing): dispatch_ui_backend("tui_shared_wm", <missing>) exit code
+        expect(dispatch_with_poisoned_spawn("tui_shared_wm")).to_equal(0)
+
+    it "still spawns a child for web":
+        # @req REQ-UI-SLIM-009
+        step("a non-interactive backend is unaffected by the tui change")
+        # @capture(routing): dispatch_ui_backend("web", <missing>) exit code
+        expect(dispatch_with_poisoned_spawn("web")).to_equal(0)
