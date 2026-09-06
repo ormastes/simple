@@ -13,7 +13,7 @@
 
 use compiler.core.interpreter.eval.{eval_reset}
 use compiler.core.interpreter.env.{env_reset, env_define, env_lookup, env_scope_depth}
-use compiler.core.interpreter.env.{env_push_scope, env_pop_scope}
+use compiler.core.interpreter.env.{env_push_scope, env_pop_scope, env_assign}
 use compiler.core.interpreter.value.{val_reset, val_make_int, val_get_int}
 
 describe "Interpreter env scope-slot reuse":
@@ -83,6 +83,35 @@ describe "Interpreter env scope-slot reuse":
         env_define("deep", val_make_int(2))
         expect(val_get_int(env_lookup("deep"))).to_equal(2)
         env_pop_scope()
+        env_pop_scope()
+
+    # env_define is not the only reader of the bucket chain: env_lookup
+    # (env.spl:143) and env_assign (env.spl:113) walk the same
+    # `buckets[scope_bucket]` head into the same keys array, so both were
+    # exposed to the stale head as well.
+    it "env_assign on a recycled slot does not walk a stale chain":
+        fresh()
+        env_push_scope()
+        env_define("a", val_make_int(1))
+        env_pop_scope()
+
+        env_push_scope()
+        # `a` belongs to the slot's previous life, and there is no outer `a`,
+        # so the assignment must simply report "not found" rather than abort.
+        expect(env_assign("a", val_make_int(2))).to_equal(false)
+        env_pop_scope()
+
+    it "env_lookup on a recycled slot does not walk a stale chain":
+        fresh()
+        env_define("outer_only", val_make_int(8))
+        env_push_scope()
+        env_define("scoped", val_make_int(1))
+        env_pop_scope()
+
+        env_push_scope()
+        # Reads through the recycled slot must fall through to the outer scope.
+        expect(val_get_int(env_lookup("outer_only"))).to_equal(8)
+        expect(env_lookup("scoped") < 0).to_equal(true)
         env_pop_scope()
 
     it "keeps the scope stack balanced across recycles":
