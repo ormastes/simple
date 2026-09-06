@@ -24,6 +24,18 @@ val VMM_CORE_PATH = "src/os/kernel/memory/vmm_core.spl"
 val X86_32_INTERRUPT_PATH = "src/os/kernel/arch/x86_32/interrupt.spl"
 val X86_32_CPU_PATH = "src/os/kernel/arch/x86_32/cpu.spl"
 val RAW_SFFI_BASELINE_PATH = "scripts/check/raw_sffi_unsafe_baseline.tsv"
+val PORT_IO_OWNER_PATH = "src/os/kernel/arch/x86/port_io_owner.spl"
+val PORT_IO_ADAPT_PATH = "src/os/kernel/arch_adapt/x86_port_io.spl"
+val PORT_IO_CONSUMER_PATHS = [
+    "src/os/kernel/boot/cpu.spl",
+    "src/os/kernel/arch/x86/com1_common.spl",
+    "src/os/kernel/arch/x86_64/runtime_hal.spl",
+    "src/os/kernel/arch/x86_32/runtime_hal.spl",
+    "src/os/drivers/pci/pci.spl",
+    "src/os/drivers/rtc/rtc.spl",
+    "src/os/drivers/framebuffer/ramfb.spl",
+    "src/os/kernel/arch/reset.spl",
+]
 
 describe "x86 VMM D4 source and migrated interrupt-leaf dedup":
     it "pins x86_64 VMM D4 Step 6 source delegation through the test-aware core owner":
@@ -72,3 +84,20 @@ describe "x86 VMM D4 source and migrated interrupt-leaf dedup":
         expect(baseline.contains("src/os/kernel/arch/x86_64/paging.spl\trt_read_cr3\t")).to_be(false)
         expect(baseline.contains("src/os/kernel/arch/x86_64/paging.spl\trt_write_cr3\t")).to_be(false)
         expect(baseline.contains("src/os/kernel/arch/x86_32/interrupt.spl\trt_lidt\t")).to_be(false)
+
+    it "collapses every x86 port-I/O caller onto the single port_io_owner seam":
+        step("Read the port-I/O owner leaf and its compile-time re-export")
+        val owner = file_read_text(PORT_IO_OWNER_PATH)
+        val adapter = file_read_text(PORT_IO_ADAPT_PATH)
+
+        step("The owner is the only file that may declare the raw rt_port_* ABI")
+        expect(owner).to_contain("extern fn rt_port_inb(port: u16) -> u8")
+        expect(owner).to_contain("extern fn rt_port_outb(port: u16, value: u8)")
+        expect(adapter).to_contain("pub use os.kernel.arch.x86.port_io_owner.")
+
+        step("Every migrated caller imports the owner and declares no rt_port_* itself")
+        for path in PORT_IO_CONSUMER_PATHS:
+            val src = file_read_text(path)
+            expect(src.contains("port_io_owner") or src.contains("arch_adapt.x86_port_io")).to_be(true)
+            expect(src.contains("extern fn rt_port_")).to_be(false)
+            expect(src.contains("    rt_port_")).to_be(false)
