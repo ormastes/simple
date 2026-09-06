@@ -4076,19 +4076,32 @@ int64_t rt_string_to_upper(int64_t value) {
     return rt_string_ascii_case(value, 0);
 }
 
-/* rt_text_to_lower_ascii / rt_text_to_upper_ascii / rt_text_is_ascii are NOT
- * defined here.  They were added to this TU by 87b2aba58e3 to close NULL-GOT
- * slots at a time when runtime_simd_case.c was not an archive member; that TU
- * is now compiled unconditionally into every lane that compiles this one
- * (the seed core-C list in native_project/tools.rs, and the pure-Simple
- * backend list in 70.backend/backend/runtime_compiler.spl), so both copies
- * landed in the same archive.  That broke the Stage4 single-owner contract:
- * "Stage4 archive core defines `rt_text_is_ascii` 2 times".
- *
- * runtime_simd_case.c is the canonical owner -- it dispatches to the SIMD
- * kernels and caches the ASCII flag in the string's reserved field, whereas
- * these were plain scalar fallbacks.  Deleting the duplicates here removes no
- * ABI name from the tree; all three stay defined in runtime_simd_case.c. */
+/* Canonical RuntimeValue ASCII helpers used by std.sffi.system.  The Rust
+ * hosted runtime exposed these names while core-C only exposed the older
+ * rt_string_to_{lower,upper} spelling, leaving native tool closures with NULL
+ * GOT slots.  Keep both spellings on the same implementation. */
+int64_t rt_text_to_lower_ascii(int64_t value) {
+    return rt_string_ascii_case(value, 1);
+}
+
+int64_t rt_text_to_upper_ascii(int64_t value) {
+    return rt_string_ascii_case(value, 0);
+}
+
+int64_t rt_text_is_ascii(int64_t value) {
+    RtCoreString* s = rt_core_as_string(value);
+    if (!s) {
+        int64_t promoted;
+        if (rt_string_promote_raw_receiver(value, &promoted)) {
+            return rt_text_is_ascii(promoted);
+        }
+        return 0;
+    }
+    for (uint64_t i = 0; i < s->len; i++) {
+        if (((uint8_t)s->data[i]) > 0x7f) return 0;
+    }
+    return 1;
+}
 
 int64_t rt_string_to_float(int64_t value) {
     RtCoreString* s = rt_core_as_string(value);
@@ -11715,20 +11728,6 @@ double rt_pow(double a, double b) { return pow(a, b); }
 int64_t rt_ptr_read_i64(int64_t addr, int64_t offset) {
     if (addr <= 0 || offset < 0) abort();
     int64_t value;
-    memcpy(&value, (char*)(uintptr_t)addr + offset, sizeof(value));
-    return value;
-}
-
-/* Mirrors runtime_memory.c:582 byte-for-byte.  This TU carries the whole
- * rt_ptr_* fallback family for lanes built WITHOUT
- * -DSIMPLE_RUNTIME_MEMORY_OWNER=1 (runtime_memory.c is the owner when that
- * macro is set, and the two are mutually exclusive by construction, so this
- * is a fallback rather than a divergent second implementation).  read_i32 was
- * simply omitted, leaving it the one member of the family with no core-C
- * provider at all -- core_defined.get("rt_ptr_read_i32") was None, not 2. */
-int32_t rt_ptr_read_i32(int64_t addr, int64_t offset) {
-    if (addr <= 0 || offset < 0) abort();
-    int32_t value;
     memcpy(&value, (char*)(uintptr_t)addr + offset, sizeof(value));
     return value;
 }

@@ -8,7 +8,7 @@ use Test::More;
 
 my $package = "$Bin/../../..";
 my $coordinator = "$package/scripts/check/lib/bootstrap-stage23-coordinator.pl";
-my $fixture = "$package/test/fixtures/stage23-coordinator/fake-phase.shs";
+my $fixture = "$package/test/fixtures/stage23-coordinator/fake-phase.sh";
 my @roles = qw(perl dash env unit_supervisor unit_gate stage2_runner session
     planner_admission cache_policy jobs_policy provenance_facade
     provenance_authority provenance_command provenance_sanity

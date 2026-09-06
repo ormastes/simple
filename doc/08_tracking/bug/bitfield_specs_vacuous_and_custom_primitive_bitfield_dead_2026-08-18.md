@@ -1,43 +1,7 @@
 # Bitfield "coverage" is vacuous, and `custom_primitive_bitfield.spl` is unreachable code
 
-- **Status:** FIXED (was OPEN)
+- **Status:** OPEN
 - **Date:** 2026-08-18
-
-## Re-verified and re-fixed 2026-09-02 (fix/bugdb-batch-g triage)
-
-Finding 2 (dead module deletion) held: `src/compiler/50.mir/custom_primitive_bitfield.spl`
-is confirmed absent from the tree.
-
-**Finding 1 had regressed back to vacuous.** The body of this record below
-already claims "RESOLVED — 2026-08-18 (both findings)" with a before/after
-transcript, but the canonical `test/01_unit/compiler/mir/bitfield_mir_spec.spl`
-on this tree was NOT the described rewrite — it was still (in fact, worse: a
-garbled mix of old vacuous `it` blocks and a stray mid-file `use std.spec`
-line) asserting `check(code.contains("..."))` against local string literals,
-importing nothing. The real rewrite existed all along, but only in the
-**legacy duplicate path** `test/unit/compiler/mir/bitfield_mir_spec.spl` — the
-canonical `test/01_unit/` tree and the legacy `test/unit/` tree had diverged
-(the general duplicate-test-tree-divergence pattern `.claude/rules/vcs.md`
-tracks), and only the legacy copy carried the fix.
-Fixed by replacing `test/01_unit/compiler/mir/bitfield_mir_spec.spl` with the
-real, non-vacuous version (14 examples, imports
-`compiler.backend.bitfield.{BitLayout, bits_needed, would_straddle_word}`,
-positive-control example first, computed-value assertions throughout —
-content verified against the real `src/compiler/70.backend/bitfield.spl`
-symbols and signatures before use).
-
-**Verification caveat:** could not execute the spec on this host — the
-deployed self-hosted binary fails every spec run, including a one-line
-control, with `error: semantic: variable `always_inline` not found` (see PR
-description). Ran the same command against this exact file to confirm the
-failure is the pre-existing environment issue, not a defect in the rewrite:
-identical error, same as the trivial control. Verified by source-level
-reasoning instead: `BitLayout`/`bits_needed`/`would_straddle_word` exist at
-the cited lines in `src/compiler/70.backend/bitfield.spl` with the signatures
-the spec calls, and every expected constant in the spec is hand-computed from
-the real formulas (`mask() = (1 << bit_width) - 1`, `would_straddle_word`'s
-`field_width >= word_bits -> false` early-out, etc.), not copied without
-verification.
 - **Area:** `test/01_unit/compiler/mir/bitfield_mir_spec.spl`,
   `src/compiler/50.mir/custom_primitive_bitfield.spl`
 - **Severity:** Medium (reported coverage does not exist; 285 lines of dead source)
