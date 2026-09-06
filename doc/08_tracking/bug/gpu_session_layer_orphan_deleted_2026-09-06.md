@@ -1,7 +1,13 @@
 # `src/lib/gc_async_mut/gpu/session/` was deleted as an orphan layer — do not restore it
 
 Date: 2026-09-06
-Status: DECISION — PENDING the delete PR's actual diff (see the last section)
+Status: DONE — the deletion landed as PR #443 (30 files, -4790 lines).
+The "only FOUR baseline rows" section below was applied there verbatim and
+re-verified by an `extern fn <name>(` census on the post-deletion tree. #443
+additionally removed 64 path-keyed rows that this record did not cover, across
+`use_target_resolves` (45), `raw_sffi_unsafe` (15), `spec_vacuity_semantic` (3)
+and `directory_fanout` (1). This file is the record; #443 dropped its own copy
+so the two could not conflict on whichever merged second.
 Area: lib / gc_async_mut / gpu / session
 
 Census taken at `origin/main` `461e48379ff` (2026-09-06). **This record is
