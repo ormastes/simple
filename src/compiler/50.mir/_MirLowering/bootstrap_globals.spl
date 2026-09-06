@@ -151,6 +151,7 @@ fn bootstrap_register_fn_ret_types_module(module: HirModule):
 # (cross-module call sites need the callee module's declared types). The
 # native-build worker is one process per build, so no reset is needed at all.
 fn bootstrap_mir_functions_reset():
+    _bootstrap_llvm_name_index_epoch = _bootstrap_llvm_name_index_epoch + 1
     _bootstrap_mir_functions = []
     _bootstrap_mir_function_names = []
     _bootstrap_mir_function_modules = []
@@ -550,6 +551,195 @@ fn bootstrap_mir_function_param_count_at(index: i64) -> i64:
 
 fn bootstrap_mir_function_param_type_tag_at(function_index: i64, param_index: i64) -> i64:
     _bootstrap_mir_function_param_type_tags[_bootstrap_mir_function_param_starts[function_index] + param_index]
+
+# --- Flat signature-name index ------------------------------------------------
+# Perf owner for the bootstrap LLVM emitter's signature lookups
+# (doc/08_tracking/bug/bootstrap_llvm_signature_lookup_linear_scan_perf_2026-08-16.md).
+#
+# `MirToLlvm.bootstrap_llvm_function_index_for_name` used to scan the whole
+# function table (10,460 rows at Stage 3) for EVERY exact query, plus a second
+# full scan for a module-local basename. Return-type, parameter-type and
+# parameter-count queries all reach it, so emission was O(function_count x
+# signature_lookups).
+#
+# These tables are the replacement: immutable flat scalar arrays owned by this
+# module, NOT by the long-lived `MirToLlvm` receiver. A receiver-owned
+# whole-tree `Dict<text, ...>` is deliberately not used — the staged-receiver
+# corruption that motivated the linear-scan fallback is exactly the failure mode
+# a long-lived mutable whole-program receiver collection reintroduces. Ordering
+# is by a bounded integer key digest (never by `text` `<`, which native codegen
+# resolves as a raw POINTER compare), so a probe is a binary search plus a walk
+# of the equal-digest run, where exact `text` equality decides the match.
+var _bootstrap_llvm_name_index_epoch: i64 = 0
+var _bootstrap_llvm_name_index_built_epoch: i64 = -1
+var _bootstrap_llvm_name_index_built_count: i64 = -1
+var _bootstrap_llvm_exact_key_digests: [i64] = []
+var _bootstrap_llvm_exact_key_functions: [i64] = []
+var _bootstrap_llvm_exact_key_is_emitted_alias: [i64] = []
+var _bootstrap_llvm_base_key_digests: [i64] = []
+var _bootstrap_llvm_base_key_functions: [i64] = []
+
+fn bootstrap_llvm_name_digest(name: text) -> i64:
+    """Bounded polynomial digest of `name`. Never overflows i64 (the modulus
+    keeps the accumulator below 1.4e11 before the reduction) and never depends
+    on pointer identity, so the sort order is reproducible across runs."""
+    var digest = 0
+    var index = 0
+    val length = name.len()
+    while index < length:
+        digest = (digest * 131 + name.char_code_at(index)) % 1000000007
+        index = index + 1
+    digest
+
+fn bootstrap_llvm_name_basename(name: text) -> text:
+    val last_dot = name.last_index_of(".")
+    if last_dot >= 0: name.substring(last_dot + 1, name.len()) else: name
+
+fn bootstrap_llvm_name_index_sort_order(digests: [i64]) -> [i64]:
+    """Bottom-up merge sort returning a PERMUTATION of `digests`' positions.
+    Only the permutation is merged, so the parallel payload arrays are never
+    carried through the sort and no tuple of arrays crosses a call boundary."""
+    var order: [i64] = []
+    var seed_index = 0
+    while seed_index < digests.len():
+        order = order.push(seed_index)
+        seed_index = seed_index + 1
+    val total = order.len()
+    var width = 1
+    while width < total:
+        var merged: [i64] = []
+        var start = 0
+        while start < total:
+            val mid = if start + width < total: start + width else: total
+            val end = if start + width + width < total: start + width + width else: total
+            var left = start
+            var right = mid
+            while left < mid or right < end:
+                var take_left = false
+                if left < mid and right < end:
+                    take_left = digests[order[left]] <= digests[order[right]]
+                elif left < mid:
+                    take_left = true
+                if take_left:
+                    merged = merged.push(order[left])
+                    left = left + 1
+                else:
+                    merged = merged.push(order[right])
+                    right = right + 1
+            start = end
+        order = merged
+        width = width + width
+    order
+
+fn bootstrap_llvm_name_index_ensure():
+    """Build the sorted tables when the function accumulator has moved.
+
+    The accumulator only grows during lowering and is emptied by
+    `bootstrap_mir_functions_reset`, which bumps the epoch — so
+    (epoch, count) identifies the table contents and a rebuild after a reset
+    that happens to restore the same count is still forced."""
+    if _bootstrap_llvm_name_index_built_epoch == _bootstrap_llvm_name_index_epoch and
+       _bootstrap_llvm_name_index_built_count == _bootstrap_mir_function_names.len():
+        return
+    var exact_digests: [i64] = []
+    var exact_functions: [i64] = []
+    var exact_aliases: [i64] = []
+    var base_digests: [i64] = []
+    var base_functions: [i64] = []
+    var index = 0
+    while index < _bootstrap_mir_function_names.len():
+        val name = _bootstrap_mir_function_names[index]
+        exact_digests = exact_digests.push(bootstrap_llvm_name_digest(name))
+        exact_functions = exact_functions.push(index)
+        exact_aliases = exact_aliases.push(0)
+        # `main` is emitted as `__simple_main`; both spellings must resolve to
+        # the same row, and a second function literally named `__simple_main`
+        # must still make that spelling ambiguous.
+        if name == "main":
+            exact_digests = exact_digests.push(bootstrap_llvm_name_digest("__simple_main"))
+            exact_functions = exact_functions.push(index)
+            exact_aliases = exact_aliases.push(1)
+        base_digests = base_digests.push(bootstrap_llvm_name_digest(bootstrap_llvm_name_basename(name)))
+        base_functions = base_functions.push(index)
+        index = index + 1
+    val exact_order = bootstrap_llvm_name_index_sort_order(exact_digests)
+    var sorted_exact_digests: [i64] = []
+    var sorted_exact_functions: [i64] = []
+    var sorted_exact_aliases: [i64] = []
+    var exact_cursor = 0
+    while exact_cursor < exact_order.len():
+        val exact_slot = exact_order[exact_cursor]
+        sorted_exact_digests = sorted_exact_digests.push(exact_digests[exact_slot])
+        sorted_exact_functions = sorted_exact_functions.push(exact_functions[exact_slot])
+        sorted_exact_aliases = sorted_exact_aliases.push(exact_aliases[exact_slot])
+        exact_cursor = exact_cursor + 1
+    val base_order = bootstrap_llvm_name_index_sort_order(base_digests)
+    var sorted_base_digests: [i64] = []
+    var sorted_base_functions: [i64] = []
+    var base_cursor = 0
+    while base_cursor < base_order.len():
+        val base_slot = base_order[base_cursor]
+        sorted_base_digests = sorted_base_digests.push(base_digests[base_slot])
+        sorted_base_functions = sorted_base_functions.push(base_functions[base_slot])
+        base_cursor = base_cursor + 1
+    _bootstrap_llvm_exact_key_digests = sorted_exact_digests
+    _bootstrap_llvm_exact_key_functions = sorted_exact_functions
+    _bootstrap_llvm_exact_key_is_emitted_alias = sorted_exact_aliases
+    _bootstrap_llvm_base_key_digests = sorted_base_digests
+    _bootstrap_llvm_base_key_functions = sorted_base_functions
+    _bootstrap_llvm_name_index_built_epoch = _bootstrap_llvm_name_index_epoch
+    _bootstrap_llvm_name_index_built_count = _bootstrap_mir_function_names.len()
+
+fn bootstrap_llvm_name_index_lower_bound(digests: [i64], key: i64) -> i64:
+    var low = 0
+    var high = digests.len()
+    while low < high:
+        val mid = low + (high - low) / 2
+        if digests[mid] < key:
+            low = mid + 1
+        else:
+            high = mid
+    low
+
+fn bootstrap_llvm_exact_function_index(lookup_name: text) -> i64:
+    """Row whose canonical (or emitted-`main`) name is exactly `lookup_name`,
+    or -1 when there is none OR more than one — duplicate canonical providers
+    fail closed rather than silently lending the first provider's ABI."""
+    bootstrap_llvm_name_index_ensure()
+    val key = bootstrap_llvm_name_digest(lookup_name)
+    var found = -1
+    var cursor = bootstrap_llvm_name_index_lower_bound(_bootstrap_llvm_exact_key_digests, key)
+    while cursor < _bootstrap_llvm_exact_key_digests.len() and _bootstrap_llvm_exact_key_digests[cursor] == key:
+        val function_index = _bootstrap_llvm_exact_key_functions[cursor]
+        val entry_name = if _bootstrap_llvm_exact_key_is_emitted_alias[cursor] == 1:
+            "__simple_main"
+        else:
+            _bootstrap_mir_function_names[function_index]
+        if entry_name == lookup_name:
+            if found >= 0:
+                return -1
+            found = function_index
+        cursor = cursor + 1
+    found
+
+fn bootstrap_llvm_module_local_function_index(lookup_name: text, module_index: i64) -> i64:
+    """Row in flat module `module_index` whose basename is exactly
+    `lookup_name`, or -1 when there is none or more than one."""
+    if module_index < 0:
+        return -1
+    bootstrap_llvm_name_index_ensure()
+    val key = bootstrap_llvm_name_digest(lookup_name)
+    var found = -1
+    var cursor = bootstrap_llvm_name_index_lower_bound(_bootstrap_llvm_base_key_digests, key)
+    while cursor < _bootstrap_llvm_base_key_digests.len() and _bootstrap_llvm_base_key_digests[cursor] == key:
+        val function_index = _bootstrap_llvm_base_key_functions[cursor]
+        if _bootstrap_mir_function_modules[function_index] == module_index and
+           bootstrap_llvm_name_basename(_bootstrap_mir_function_names[function_index]) == lookup_name:
+            if found >= 0:
+                return -1
+            found = function_index
+        cursor = cursor + 1
+    found
 
 fn bootstrap_mir_static_count() -> i64:
     _bootstrap_mir_static_names.len()

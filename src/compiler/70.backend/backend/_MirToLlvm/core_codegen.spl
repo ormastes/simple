@@ -15,6 +15,7 @@ use compiler.mir.mir_lowering.{bootstrap_mir_function_count, bootstrap_mir_funct
     bootstrap_mir_function_module_at, bootstrap_mir_function_return_type_tag_at,
     bootstrap_mir_function_return_unsigned_at, bootstrap_mir_function_param_count_at,
     bootstrap_mir_function_param_type_tag_at,
+    bootstrap_llvm_exact_function_index, bootstrap_llvm_module_local_function_index,
     bootstrap_mir_static_count, bootstrap_mir_static_module_at, bootstrap_mir_static_symbol_id_at,
     bootstrap_mir_static_name_at, bootstrap_mir_static_type_tag_at,
     bootstrap_mir_static_init_kind_at, bootstrap_mir_static_init_payload_at,
@@ -1267,13 +1268,17 @@ impl MirTextCodegen for MirToLlvm:
         val direct = self.function_return_unsigned.get(func_name)
         if direct.?:
             return direct.unwrap()
-        if not func_name.starts_with("@"):
-            return false
-        val bare = func_name[1:]
-        # `.has()` + index, not `.get() ?? false` — under native codegen a
-        # Dict<_, bool> hit storing `true` collapses to false via `?? false`
-        # (dict_native_pitfalls.md), silently marking unsigned returns as signed.
-        if self.function_return_unsigned.has(bare): self.function_return_unsigned[bare] else: false
+        if func_name.starts_with("@"):
+            val bare = func_name[1:]
+            # `.has()` + index, not `.get() ?? false` — under native codegen a
+            # Dict<_, bool> hit storing `true` collapses to false via `?? false`
+            # (dict_native_pitfalls.md), silently marking unsigned returns as signed.
+            if self.function_return_unsigned.has(bare):
+                return self.function_return_unsigned[bare]
+        val bootstrap_index = self.bootstrap_llvm_function_index_for_name(func_name)
+        if bootstrap_index >= 0:
+            return bootstrap_mir_function_return_unsigned_at(bootstrap_index)
+        false
 
     me remember_function_param_types(name: text, param_tys: [text]):
         if name == "":
@@ -2390,15 +2395,17 @@ impl MirTextCodegen for MirToLlvm:
             if ty == nil or ty == "nil":
                 return ""
             return ty
-        if not func_name.starts_with("@"):
-            return ""
-        val bare = func_name[1:]
-        val bare_hit = self.function_return_types.get(bare)
-        if bare_hit.?:
-            val bare_ty = bare_hit.unwrap()
-            if bare_ty == nil or bare_ty == "nil":
-                return ""
-            return bare_ty
+        if func_name.starts_with("@"):
+            val bare = func_name[1:]
+            val bare_hit = self.function_return_types.get(bare)
+            if bare_hit.?:
+                val bare_ty = bare_hit.unwrap()
+                if bare_ty == nil or bare_ty == "nil":
+                    return ""
+                return bare_ty
+        val bootstrap_index = self.bootstrap_llvm_function_index_for_name(func_name)
+        if bootstrap_index >= 0:
+            return bootstrap_llvm_static_type_text(bootstrap_mir_function_return_type_tag_at(bootstrap_index), self.native_int_type)
         ""
 
     me lookup_function_param_type(func_name: text, index: i64) -> text:
@@ -2409,15 +2416,17 @@ impl MirTextCodegen for MirToLlvm:
             if index < param_tys.len():
                 return param_tys[index]
             return ""
-        if not func_name.starts_with("@"):
-            return ""
-        val bare = func_name[1:]
-        val bare_hit = self.function_param_types.get(bare)
-        if bare_hit.?:
-            val bare_param_tys = bare_hit.unwrap()
-            if index < bare_param_tys.len():
-                return bare_param_tys[index]
-            return ""
+        if func_name.starts_with("@"):
+            val bare = func_name[1:]
+            val bare_hit = self.function_param_types.get(bare)
+            if bare_hit.?:
+                val bare_param_tys = bare_hit.unwrap()
+                if index < bare_param_tys.len():
+                    return bare_param_tys[index]
+                return ""
+        val bootstrap_index = self.bootstrap_llvm_function_index_for_name(func_name)
+        if bootstrap_index >= 0 and index >= 0 and index < bootstrap_mir_function_param_count_at(bootstrap_index):
+            return bootstrap_llvm_static_type_text(bootstrap_mir_function_param_type_tag_at(bootstrap_index, index), self.native_int_type)
         ""
 
     me lookup_function_param_count(func_name: text) -> i64:
@@ -2428,12 +2437,14 @@ impl MirTextCodegen for MirToLlvm:
         val direct = self.function_param_types.get(func_name)
         if direct.?:
             return direct.unwrap().len()
-        if not func_name.starts_with("@"):
-            return -1
-        val bare = func_name[1:]
-        val bare_hit = self.function_param_types.get(bare)
-        if bare_hit.?:
-            return bare_hit.unwrap().len()
+        if func_name.starts_with("@"):
+            val bare = func_name[1:]
+            val bare_hit = self.function_param_types.get(bare)
+            if bare_hit.?:
+                return bare_hit.unwrap().len()
+        val bootstrap_index = self.bootstrap_llvm_function_index_for_name(func_name)
+        if bootstrap_index >= 0:
+            return bootstrap_mir_function_param_count_at(bootstrap_index)
         -1
 
     me mark_ptr_local(id: i64):
@@ -2717,6 +2728,32 @@ impl MirTextCodegen for MirToLlvm:
             self.builder.emit_store(g_ty, value_text, g_name)
         if bootstrap_debug:
             print "[mir-to-llvm] store-global:emit index={index} type={g_ty}"
+
+    me bootstrap_llvm_function_index_for_name(func_name: text) -> i64:
+        """Flat-bootstrap row backing `func_name`'s signature, or -1.
+
+        Authority lives in the immutable scalar tables owned by
+        `_MirLowering/bootstrap_globals.spl`, NOT on this receiver: the tables
+        are keyed by a bounded integer digest and probed by binary search, so a
+        query costs a walk of one equal-digest run instead of a scan of the
+        whole function table. Nothing beyond two i64 row indices crosses back —
+        no `MirType`, no per-function array, no receiver-owned dictionary. See
+        doc/08_tracking/bug/bootstrap_llvm_signature_lookup_linear_scan_perf_2026-08-16.md."""
+        val lookup_name = if func_name.starts_with("@"): func_name[1:] else: func_name
+        # Exact canonical names resolve first; the owner reports -1 for a
+        # duplicate provider so an ambiguous name fails closed rather than
+        # silently lending the first provider's ABI.
+        val exact_index = bootstrap_llvm_exact_function_index(lookup_name)
+        if exact_index >= 0:
+            return exact_index
+        # Runtime-owned names must never borrow a same-suffix pure-Simple ABI.
+        if mir_runtime_owned_call_name(lookup_name):
+            return -1
+        # An authored basename belongs only to the current flat module, and only
+        # when exactly one function in that module provides it.
+        if self.current_bootstrap_module >= 0 and not lookup_name.contains("."):
+            return bootstrap_llvm_module_local_function_index(lookup_name, self.current_bootstrap_module)
+        -1
 
 fn bootstrap_llvm_static_index(module_index: i64, symbol_id: i64) -> i64:
     if module_index < 0:
