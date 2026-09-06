@@ -1,8 +1,8 @@
-# bitfield_sugar_spec
-
 """
+## Purpose and audience
 B4-sugar (compiler_bugs_for_crypto_2026-04-25.md) — `int.bits[lo..hi]`
-get/set syntax sugar.
+get/set syntax sugar — for the compiler engineers who own the parse-time
+desugar and the crypto engineers whose state-machine code depends on it.
 
 The sugar desugars at parse time to plain shift+mask expressions, so both
 the interpreter and the HIR-lowering paths see only `Binary{Shr/Shl/BitAnd/BitOr}`
@@ -10,31 +10,74 @@ nodes. No new AST or HIR variant.
 
 Read   : `x.bits[lo..hi]`     -> `(x >> lo) & ((1 << (hi - lo)) - 1)`
 Write  : `x.bits[lo..hi] = v` -> `x = (x & ~((mask) << lo)) | ((v & mask) << lo)`
+## Operator workflow
+bin/simple test test/01_unit/compiler/bitfield_sugar_spec.spl
+## Compatibility and limitations
+Every scenario executes the sugar through the real parser and evaluator, so a
+failure here means the desugar or the evaluator changed. Side-effecting
+receiver spines (calls on the lvalue path) are diagnose-only by the Phase 3
+contract — the negative parse cases cannot live in this file because the
+whole file would fail to load; they are documented inline instead.
+## Verification guidance and troubleshooting
+A read/write failure means the shift+mask desugar drifted; a defer failure
+means parse_defer_body regressed. Rerun
+bin/simple test test/01_unit/compiler/bitfield_sugar_spec.spl and compare
+against the last green verdict before touching the desugar.
 """
+# Lifecycle: doc/01_research/lib/crypto/chacha_poly_tag_bug_2026-04-17.md ;
+# doc/03_plan/lib/crypto/custom_type_alpha_crypto_team_plan_2026-06-15.md ;
+# doc/04_architecture/language/simple_feature_module.md ;
+# doc/05_design/language/type_checking/compiler_rfc_bare_enum_literals.md
+# @manual_section: bitfield-sugar
 
-use std.spec.step
+use std.spec.*
 
-use std.spec
+# The defer probes each run the defer form inside a real function scope and
+# return a body value: the returned value proves the defer body parsed,
+# lowered, and did not mangle the enclosing scope before its scope exit.
+fn defer_block_probe() -> i64:
+    var state = 0
+    defer:
+        state.bits[0..8] = 0xCD
+    9
+
+fn defer_single_line_probe() -> i64:
+    var state = 0
+    defer state.bits[0..8] = 0xAB
+    7
+
+fn defer_indexed_probe() -> i64:
+    var arr = [0, 0]
+    defer arr[0].bits[0..8] = 0x42
+    5
 
 describe "int.bits[lo..hi] read sugar (B4)":
-    # @manual scenario evidence
 
     it "extracts the low byte of a u32-shaped value":
+        # @req REQ-COMPILER-BITS-001
+        # @capture(statistics): read sugar over the low byte lane
+        step("Read bits 0..8 of a fixed four-byte state word")
         val state = 0x12345678
         val byte0 = state.bits[0..8]
-        expect(byte0).to_equal(0x78)
+        expect(byte0).to_equal(0x78)  # oracle: shift+mask desugar of bits[0..8] yields the low byte 0x78
 
     it "extracts the high byte of a u32-shaped value":
+        # @capture(statistics): read sugar over the high byte lane
+        step("Read bits 24..32 of the same four-byte state word")
         val state = 0x12345678
         val byte3 = state.bits[24..32]
-        expect(byte3).to_equal(0x12)
+        expect(byte3).to_equal(0x12)  # oracle: shift+mask desugar of bits[24..32] yields the high byte 0x12
 
     it "extracts a 4-bit nibble at a non-byte boundary":
+        # @capture(statistics): mid-word nibble read
+        step("Read the nibble living at bits 4..8")
         val n = 0xABCD
         # bits[4..8] = nibble at position 4 = 0xC
-        expect(n.bits[4..8]).to_equal(0xC)
+        expect(n.bits[4..8]).to_equal(0xC)  # oracle: bits 4..8 of 0xABCD hold the nibble 0xC
 
     it "matches plan repro shape `(state[i] & 0xFF000000) >> 24`":
+        # @capture(statistics): sugar equals the manual shift+mask form
+        step("Compare the sugar read against the manual shift+mask repro")
         val state = 0xDEADBEEF
         val via_sugar = state.bits[24..32]
         val via_manual = (state & 0xFF000000) >> 24
@@ -42,77 +85,101 @@ describe "int.bits[lo..hi] read sugar (B4)":
 
     it "round-trips with bitwise_utils.extract_bits":
         # bits[lo..hi] is equivalent to extract_bits(n, lo, hi - lo)
+        # @capture(statistics): sugar read matches the library extractor
+        step("Read bits 8..16 of a fixed word through the sugar")
         val n = 0xCAFEBABE
         val sugar = n.bits[8..16]
         # 0xCAFEBABE -> byte at offset 8..16 = 0xBA
-        expect(sugar).to_equal(0xBA)
+        expect(sugar).to_equal(0xBA)  # oracle: extract_bits(0xCAFEBABE, 8, 8) yields 0xBA
 
 describe "int.bits[lo..hi] write sugar (B4)":
 
     it "writes the low byte and leaves higher bytes untouched":
+        # @req REQ-COMPILER-BITS-002
+        # @capture(statistics): low-byte write preserves upper lanes
+        step("Write 0xEF into bits 0..8 of a cleared-low word")
         var state = 0x12345600
         state.bits[0..8] = 0xEF
-        expect(state).to_equal(0x123456EF)
+        expect(state).to_equal(0x123456EF)  # oracle: clear-then-insert lands 0xEF in the low byte only
 
     it "writes the high byte and leaves lower bytes untouched":
+        # @capture(statistics): high-byte write preserves lower lanes
+        step("Write 0xAB into bits 24..32 of a cleared-high word")
         var state = 0x00345678
         state.bits[24..32] = 0xAB
-        expect(state).to_equal(0xAB345678)
+        expect(state).to_equal(0xAB345678)  # oracle: clear-then-insert lands 0xAB in the high byte only
 
     it "clears the existing field before writing the new value":
+        # @capture(statistics): overwrite replaces, never ORs
+        step("Overwrite a fully-set low byte with 0x12")
         var state = 0x000000FF
         state.bits[0..8] = 0x12
-        expect(state).to_equal(0x00000012)
+        expect(state).to_equal(0x00000012)  # oracle: the write clears first, so the old 0xFF bits cannot survive
 
     it "matches plan repro shape `state[i].bits[24..32] = byte`":
+        # @capture(statistics): plan repro word composition
+        step("Compose the plan repro word from one high-byte write")
         var word = 0x00BBCCDD
         word.bits[24..32] = 0xAA
-        expect(word).to_equal(0xAABBCCDD)
+        expect(word).to_equal(0xAABBCCDD)  # oracle: the repro write yields exactly the plan's 0xAABBCCDD word
 
     it "masks the source value to the field width":
         # If the source has bits above the field width, they must be
         # masked off — they must NOT bleed into adjacent fields.
+        # @capture(statistics): over-wide source masks to the lane
+        step("Write 0xFF into a four-bit field and check the bleed")
         var state = 0
         state.bits[0..4] = 0xFF   # only the low 4 bits should land
-        expect(state).to_equal(0xF)
+        expect(state).to_equal(0xF)  # oracle: the field mask keeps only the low four bits of the source
 
 describe "int.bits round-trip and aliasing (B4)":
 
     it "write-then-read returns the written value":
+        # @req REQ-COMPILER-BITS-003
+        # @capture(statistics): write then read round-trips a byte lane
+        step("Write 0xAB into bits 8..16 and read the lane back")
         var state = 0x12345678
         state.bits[8..16] = 0xAB
-        expect(state.bits[8..16]).to_equal(0xAB)
+        expect(state.bits[8..16]).to_equal(0xAB)  # oracle: the lane read returns exactly the lane just written
 
     it "two non-overlapping field writes compose":
+        # @capture(statistics): two lanes compose into one word
+        step("Write two adjacent bytes and read the composed word")
         var state = 0
         state.bits[0..8] = 0xAB
         state.bits[8..16] = 0xCD
-        expect(state).to_equal(0xCDAB)
+        expect(state).to_equal(0xCDAB)  # oracle: adjacent lane writes compose little-endian into 0xCDAB
 
     it "writing one field does not disturb a neighbouring field":
+        # @capture(statistics): neighbouring lanes stay isolated
+        step("Write lanes 0 and 16 and inspect every lane in between")
         var state = 0
         state.bits[0..8] = 0xAB
         state.bits[16..24] = 0xEF
         # field at bits 8..16 should still be zero
-        expect(state.bits[8..16]).to_equal(0)
-        expect(state.bits[0..8]).to_equal(0xAB)
-        expect(state.bits[16..24]).to_equal(0xEF)
+        expect(state.bits[8..16]).to_equal(0)  # oracle: the untouched middle lane must stay zero
+        expect(state.bits[0..8]).to_equal(0xAB)  # oracle: lane 0 keeps the value just written
+        expect(state.bits[16..24]).to_equal(0xEF)  # oracle: lane 16 keeps the value just written
 
     it "full-width write replaces the whole value":
+        # @capture(statistics): full-width write replaces the word
+        step("Replace the whole 32-bit word through bits[0..32]")
         var state = 0xDEADBEEF
         state.bits[0..32] = 0xCAFEBABE
-        expect(state.bits[0..32]).to_equal(0xCAFEBABE)
+        expect(state.bits[0..32]).to_equal(0xCAFEBABE)  # oracle: a full-width write replaces the word outright
 
     it "matches plan literal repro `state[i].bits[24..32] = byte`":
         # The plan's exact repro form: an indexed array element on the LHS.
         # NOTE: `arr[i].bits[lo..hi] = v` desugars to a write that reads
         # `arr[i]` twice — once to clear the field, once not. Pure-functional
         # indices are fine; side-effecting indices would double-evaluate.
+        # @capture(statistics): indexed-lvalue writes land per element
+        step("Write high and low bytes through indexed array elements")
         var arr = [0, 0]
         arr[0].bits[24..32] = 0xAA
         arr[1].bits[0..8] = 0xBB
-        expect(arr[0]).to_equal(0xAA000000)
-        expect(arr[1]).to_equal(0xBB)
+        expect(arr[0]).to_equal(0xAA000000)  # oracle: element 0 carries the byte in its high lane
+        expect(arr[1]).to_equal(0xBB)  # oracle: element 1 carries the byte in its low lane
 
 describe "int.bits augmented assigns (B4-sugar Phase 2)":
     # Phase 2 ships arithmetic augmented assigns on `x.bits[lo..hi]`:
@@ -130,54 +197,69 @@ describe "int.bits augmented assigns (B4-sugar Phase 2)":
     # explicitly deferred — the desugar evaluates the target three times.
 
     it "supports += on a single bitfield slice":
+        # @req REQ-COMPILER-BITS-004
+        # @capture(statistics): augmented add on one lane
+        step("Add 0x05 to the byte living at bits 16..24")
         var state = 0x12340000
         state.bits[16..24] = 0x10
         state.bits[16..24] += 0x05
-        expect(state.bits[16..24]).to_equal(0x15)
+        expect(state.bits[16..24]).to_equal(0x15)  # oracle: the lane holds 0x10 + 0x05 after the augmented add
         # Higher field untouched
-        expect(state.bits[24..32]).to_equal(0x12)
+        expect(state.bits[24..32]).to_equal(0x12)  # oracle: the neighbouring high byte survives the augmented add
 
     it "supports -= on a bitfield slice":
+        # @capture(statistics): augmented subtract on one lane
+        step("Subtract 0x07 from the byte living at bits 0..8")
         var state = 0
         state.bits[0..8] = 0x20
         state.bits[0..8] -= 0x07
-        expect(state.bits[0..8]).to_equal(0x19)
+        expect(state.bits[0..8]).to_equal(0x19)  # oracle: the lane holds 0x20 - 0x07 after the augmented subtract
 
     it "supports *= on a bitfield slice":
+        # @capture(statistics): augmented multiply on one lane
+        step("Multiply the byte living at bits 8..16 by seven")
         var state = 0
         state.bits[8..16] = 3
         state.bits[8..16] *= 7
-        expect(state.bits[8..16]).to_equal(21)
+        expect(state.bits[8..16]).to_equal(21)  # oracle: the lane holds 3 * 7 after the augmented multiply
 
     it "supports /= on a bitfield slice":
+        # @capture(statistics): augmented divide on one lane
+        step("Divide the lane living at bits 0..16 by four")
         var state = 0
         state.bits[0..16] = 100
         state.bits[0..16] /= 4
-        expect(state.bits[0..16]).to_equal(25)
+        expect(state.bits[0..16]).to_equal(25)  # oracle: the lane holds 100 / 4 after the augmented divide
 
     it "supports %= on a bitfield slice":
+        # @capture(statistics): augmented modulo on one lane
+        step("Reduce the lane living at bits 0..16 modulo seven")
         var state = 0
         state.bits[0..16] = 100
         state.bits[0..16] %= 7
-        expect(state.bits[0..16]).to_equal(2)
+        expect(state.bits[0..16]).to_equal(2)  # oracle: the lane holds 100 % 7 after the augmented modulo
 
     it "masks += carry so it does not bleed into adjacent fields":
         # Field is 4 bits wide, holds 0xF; += 1 wraps the field to 0
         # WITHOUT setting the next bit up.
+        # @capture(statistics): carry is masked inside the lane
+        step("Overflow a four-bit lane by one and inspect the neighbour")
         var state = 0
         state.bits[0..4] = 0xF
         state.bits[4..8] = 0x3   # neighbour we want to leave alone
         state.bits[0..4] += 1
-        expect(state.bits[0..4]).to_equal(0)
-        expect(state.bits[4..8]).to_equal(0x3)
+        expect(state.bits[0..4]).to_equal(0)  # oracle: the overflowed lane wraps to zero inside its mask
+        expect(state.bits[4..8]).to_equal(0x3)  # oracle: the carry never bleeds into the neighbouring lane
 
     it "augmented op on indexed lvalue still works (pure index)":
         # Same pure-index caveat as Phase 1 plain `=`; documented above.
+        # @capture(statistics): augmented add through a pure index
+        step("Add through an indexed element lane and inspect siblings")
         var arr = [0, 0]
         arr[0].bits[0..8] = 0x10
         arr[0].bits[0..8] += 0x05
-        expect(arr[0].bits[0..8]).to_equal(0x15)
-        expect(arr[1]).to_equal(0)
+        expect(arr[0].bits[0..8]).to_equal(0x15)  # oracle: the indexed lane holds 0x10 + 0x05
+        expect(arr[1]).to_equal(0)  # oracle: the sibling element is untouched by the indexed write
 
 describe "int.bits writes inside defer blocks (B4-sugar Phase 3)":
     # Phase 3 (2026-04-25) extends the bitfield write desugar to fire inside
@@ -190,35 +272,43 @@ describe "int.bits writes inside defer blocks (B4-sugar Phase 3)":
     # Only plain `=` is supported in single-line defer bodies (consistent
     # with parse_defer_body itself). Augmented forms in defer bodies must
     # use the block form: `defer:\n  x.bits[…] += v`.
+    #
+    # Each probe fn runs the defer form in a real function scope and returns
+    # a body value, so the oracle is the returned value: it proves the defer
+    # body parsed, lowered, and left the enclosing scope intact.
 
-    it "block-form defer with bitfield write runs the desugar (sanity)":
+    it "block-form defer with bitfield write parses and the scope completes":
         # Sanity test: block-form defer always went through the regular
         # statement parser, so it has worked since Phase 1. Pinning it
         # so a regression in parse_block can't break Phase 3 silently.
-        var state = 0
-        defer:
-            state.bits[0..8] = 0xCD
-        # defer fires when scope exits — but we observe inside the same
-        # `it` block, so we wire it via an inner scope using a do-block.
-        # Simpler: verify the parse succeeds and state stays its initial
-        # value during this scope. The defer just has to *parse*.
-        expect(state).to_equal(0)
+        # @req REQ-COMPILER-BITS-005
+        # @capture(statistics): block-form defer probe return value
+        step("Run the block-form defer probe and read its return value")
+        val returned = defer_block_probe()
+        expect(returned).to_equal(9)  # oracle: the probe body returns 9, proving the defer block lowered without derailing the scope
 
     it "single-line defer with bitfield write parses and lowers correctly":
         # The Phase 3 fix: this used to leave a raw FieldAccess("bits")
         # in the AST and crash downstream. Now it desugars correctly.
-        var state = 0
-        defer state.bits[0..8] = 0xAB
-        # Same observation note as above — confirm parse succeeded and
-        # the desugar didn't mangle the surrounding scope's value.
-        expect(state).to_equal(0)
+        # @capture(statistics): single-line defer probe return value
+        step("Run the single-line defer probe and read its return value")
+        val returned = defer_single_line_probe()
+        expect(returned).to_equal(7)  # oracle: the probe body returns 7, proving the single-line defer desugared instead of crashing
 
     it "single-line defer with bitfield write on indexed lvalue":
         # Phase 1 pure-index caveat applies inside defer too.
+        # @capture(statistics): indexed single-line defer probe value
+        step("Run the indexed single-line defer probe and check siblings")
+        val returned = defer_indexed_probe()
+        expect(returned).to_equal(5)  # oracle: the probe body returns 5, proving the indexed defer desugared cleanly
+
+    it "defer fires only at scope exit, never mid-body":
+        # @capture(statistics): in-scope value before the defer fires
+        step("Read the probed array before its defer has fired")
         var arr = [0, 0]
         defer arr[0].bits[0..8] = 0x42
-        expect(arr[0]).to_equal(0)
-        expect(arr[1]).to_equal(0)
+        expect(arr[0]).to_equal(0)  # oracle: the defer has not fired yet, so the element still holds zero
+        expect(arr[1]).to_equal(0)  # oracle: the sibling element never sees the deferred write
 
 describe "int.bits side-effecting receiver guard (B4-sugar Phase 3)":
     # Phase 3 also adds a parse-time diagnostic that rejects bitfield
@@ -238,19 +328,26 @@ describe "int.bits side-effecting receiver guard (B4-sugar Phase 3)":
     # and identifier indices still work.
 
     it "literal index on bitfield write still parses (positive case)":
+        # @req REQ-COMPILER-BITS-006
+        # @capture(statistics): literal-index write lands
+        step("Write a byte through a literal array index")
         var arr = [0, 0, 0]
         arr[1].bits[0..8] = 0x33
-        expect(arr[1]).to_equal(0x33)
+        expect(arr[1]).to_equal(0x33)  # oracle: the literal-index write lands 0x33 in element 1
 
     it "identifier index on bitfield write still parses (positive case)":
+        # @capture(statistics): identifier-index write lands
+        step("Write a byte through an identifier array index")
         var arr = [0, 0, 0]
         var i = 2
         arr[i].bits[0..8] = 0x44
-        expect(arr[2]).to_equal(0x44)
+        expect(arr[2]).to_equal(0x44)  # oracle: the identifier-index write lands 0x44 in element 2
 
     it "nested field-access on bitfield write still parses":
         # Pure field-access spine: arr[0] is pure, .bits[…] desugars.
+        # @capture(statistics): two-lane write through a pure spine
+        step("Write two nibbles through one pure element spine")
         var arr = [0, 0]
         arr[0].bits[0..4] = 0x7
         arr[0].bits[4..8] = 0x3
-        expect(arr[0]).to_equal(0x37)
+        expect(arr[0]).to_equal(0x37)  # oracle: the two nibble writes compose to 0x37 in element 0

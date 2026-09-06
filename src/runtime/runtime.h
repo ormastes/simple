@@ -1210,6 +1210,7 @@ int         rt_mem_snapshot_record(int64_t fd, int64_t seq,
                     int64_t hir_names, int64_t hir_symbols,
                     int64_t hir_functions, int64_t hir_constants,
                     int64_t hir_enums, int64_t hir_structs, int64_t hir_classes);
+int         rt_phase_profile_record(int64_t fd, int64_t seq, const char* message, int64_t message_len);
 int         rt_mem_snapshot_close(int64_t fd);
 int64_t     rt_process_rss_kib(void);
 int64_t     rt_process_hwm_kib(void);
