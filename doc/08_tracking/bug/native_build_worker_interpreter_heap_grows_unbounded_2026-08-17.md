@@ -616,3 +616,62 @@ fixtures: on the committed pre-fix content of the two files it reports
 `FAIL — 3 invariant(s) checked ...: driver-entry-closure-loop-not-scoped;
 driver-still-calls-unscoped-lower_module; wrapper-missing` (exit 1), and on the
 fixed tree `PASS — 9 invariant(s) checked` (exit 0).
+
+### Measurement — and the negative result that matters more than the scope
+
+Paired runs of the **same** 24-module generated closure (25 modules lowered;
+`[build] mir 25/25` reached in both), seed
+`/home/yoon/.cargo-target-mir/release/simple` built from this worktree,
+`--entry-closure --threads 1`, sampled every 2 s from `/proc/<pid>/status` and
+`/proc/<pid>/smaps`. Both runs end `rc=1` at `native_compile` on the SAME cause
+(`error: semantic: unknown extern function: rt_secure_temp_dir` — the seed's
+interpreter extern table, another lane's row), so the work performed is
+identical and the comparison is honest:
+
+| run | peak VmRSS | `[heap]` Rss | wall | mir mark | rc |
+|---|---:|---:|---:|---|---:|
+| pre  (no MIR scope) | **3,520,180 kB** | 8 kB | 168 s | mir 25/25 | 1 |
+| post (MIR scope)    | **3,521,688 kB** | 8 kB | 160 s | mir 25/25 | 1 |
+
+**0.04% apart — noise. The scope reclaims nothing in this lane, and the reason
+is structural, not a defect in the scope.** `rt_transient_array_scope_*` frees
+only what `track_transient_heap` recorded, and that hook sits in the Rust
+`simple_runtime` allocators (`rt_array_new`/`rt_string_new`/`rt_dict_new`/
+`RuntimeObject`...). In the **seed interpreter** the compiler's own values are
+interpreter-side values that never pass through those allocators, so the scope's
+object list is essentially empty and `end` frees essentially nothing. This is
+the same fact this row already states as the root mechanism — "**self-hosted**,
+`rt_array_new`/... resolve into the Rust `simple_runtime`" — read in the other
+direction, and it is why the existing 354x/113x numbers were measured on
+**natively compiled** fixtures.
+
+**Consequence for anyone continuing this: the interpreted lane cannot measure a
+compiler-side transient scope at all.** Do not repeat this measurement; it will
+always read as noise. The scope must be measured with a self-hosted (natively
+compiled) compiler.
+
+`[heap]` brk read 8 kB in both runs, confirming this row's own arena warning:
+this process is served from mmap'd arenas, so a brk-only budget is vacuous here.
+Peak RSS is dominated by the ~3 GB the seed spends loading and interpreting the
+whole compiler graph, which no per-module scope touches.
+
+### What still blocks the self-hosted measurement (not libunwind any more)
+
+All 834 modules compile (643 s cold, 23 s warm from the content-keyed object
+cache), then the **link** fails with the 167 unresolved runtime symbols listed
+above, with `--runtime-bundle core-c-bootstrap` AND `--runtime-path` AND
+`SIMPLE_RUNTIME_PATH` all pointing at `src/compiler_rust/target/bootstrap`
+(which does contain `libsimple_native_all.a`, 390 MB). Reading
+`native_project/config.rs:375-395`, `is_authorized_stage4_compiler_entry()` is
+checked BEFORE `bootstrap_hosted_native_all_runtime(...)` and returns the
+core-C archive alone, so on this entry the `native_all` archive is never
+consulted. That is runtime-archive/linker selection — a different lane's
+territory — so it was left alone rather than worked around;
+`SIMPLE_ALLOW_UNRESOLVED_RUNTIME=1` is explicitly NOT an answer, the driver
+itself states it yields a NULL GOT slot per name and a SEGV on first call.
+
+**Therefore, stated plainly: the MIR scope is landed and gated, but its memory
+effect is UNMEASURED.** The 354x/113x figures in the earlier addendum belong to
+the runtime mechanism, not to this boundary, and must not be re-quoted as if
+they did. The first thing to do on this row is a self-hosted build once the
+archive selection above is fixed, then re-run the paired closure with it.
