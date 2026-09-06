@@ -339,5 +339,16 @@ authorize+record pair of one `Evidence`/`Passive` `write-bundle`) and
 NOT done: no core/minidump/trace CAPTURE, no ELF-core parser, no capability above
 `Unverified` — a bundle proves identity and integrity, never replayability.
 
+**Writer hardened 2026-09-06 (PR #371 tip `bbf48c3f4f8`).** Receipts are stamped through
+`central_debug_service_v1_authorize_at` / `_record_at` with the SAME `now_ns` the manifest
+uses, and `receipts.sdn` emits `captured_at_ns` so it matches `DebugReceiptV1` (the
+round-trip example asserts the reader recovers a positive timestamp). Landmines: (1) a
+literal NUL byte inside a `contains("...")` string literal makes grep call the source
+"binary" — write `"\0"`; BSD awk cannot match `\x00`, find it with `tr -d` + `cmp`.
+(2) CLI acceptance (`simple debug write` then `inspect`) is verified BY HAND only — no
+system spec; `todo_db.sdn` row 0. (3) A THIRD spec, `evidence_bundle_writer_v1_spec.spl`,
+imports `std.common.debug.evidence_bundle_writer_v1`, which exists only in orphaned sweep
+ref `a8244005f9b` — RED, recorded in `debug_specs_import_removed_modules_2026-09-06.md`.
+
 ## Lane docs (2026-09-05)
 - design: `doc/05_design/app/debug/debug_capability_truth_wave0_design.md` · plan: `doc/03_plan/app/debug/dump_replay_wave_plan.md` · state: `.spipe/debug_capability_truth_wave0/state.md` · receipt contract: `doc/07_guide/app/debug/state_capability_receipt_contract.md`
