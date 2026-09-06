@@ -241,12 +241,12 @@ fn _splice_row(line: text, width: i32, col: i32, content: text) -> text:
         j = j + 1
 
     # Style management across the splice boundary.
-    # Scan the overwritten range to determine:
-    # 1) Did we lose a RESET? → emit RESET before content
-    # 2) What style was active at the suffix start? → re-emit it
-    #    before the suffix so tokens that inherited contextually
-    #    keep their style.
-    var lost_reset = false
+    # Scan the old line to determine:
+    # 1) prefix_active — the style still in effect at the end of the prefix.
+    #    Content that carries no escape of its own must NOT inherit it.
+    # 2) style_entering_suffix — the style the first suffix token inherited
+    #    contextually in the OLD line; it has to be re-established whenever
+    #    the emitted content leaves a different style in effect.
     var scan_style = ""
     # Scan prefix tokens to find active style at end of prefix
     var k = 0
@@ -259,24 +259,33 @@ fn _splice_row(line: text, width: i32, col: i32, content: text) -> text:
     k = col
     while k < after_col and k < line_tokens.len():
         val (new_s, had_r) = _scan_token_style(line_tokens[k], scan_style)
-        if had_r:
-            lost_reset = true
         scan_style = new_s
         k = k + 1
     val style_entering_suffix = scan_style
 
-    # Gap: only emit RESET if the prefix has an active style
-    # AND the overwritten range lost a RESET (or we're inserting
-    # into an active style run where content should be plain)
-    val gap = if prefix_active != "" and (lost_reset or prefix_active != style_entering_suffix): RESET else: ""
+    val content_tokens = _split_visible(clipped_text)
 
-    # Restore: re-emit suffix style if the first suffix token
-    # doesn't carry its own escape but had an inherited style
+    # Gap: the content is new text and must never inherit the style still
+    # active at the end of the prefix, whether or not the overwritten range
+    # happened to change that style. Emitted even when the content carries
+    # its own escape: an SGR such as 36 sets the colour but does not clear
+    # an inherited SGR 1, so only a RESET makes the write self-contained.
+    val gap = if clipped_text != "" and prefix_active != "": RESET else: ""
+
+    # Style actually left in effect once prefix + gap + content are emitted.
+    var after_style = if gap != "": "" else: prefix_active
+    for tok in content_tokens:
+        val (tok_style, tok_had_reset) = _scan_token_style(tok, after_style)
+        after_style = tok_style
+
+    # Restore: the first suffix token inherits whatever the content left
+    # behind, so re-establish its old style when the two differ. An empty
+    # old style needs an explicit RESET, not an empty string.
     var suffix_restore = ""
-    if style_entering_suffix != "" and after_col < line_tokens.len():
+    if after_style != style_entering_suffix and after_col < line_tokens.len():
         val first_suffix = line_tokens[after_col]
         if not first_suffix.contains("\u{001b}["):
-            suffix_restore = style_entering_suffix
+            suffix_restore = if style_entering_suffix == "": RESET else: style_entering_suffix
 
     return "{prefix}{gap}{clipped_text}{suffix_restore}{suffix}{RESET}"
 
