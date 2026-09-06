@@ -51,12 +51,18 @@
 #
 #   forbidden: "(none recorded" without a bracketed site tag
 #              ("[empty-at-record]" / "[lost-in-render]")
-#   required:  a pure-literal raising-site line -- one of
+#   required:  a pure-literal raising-site banner -- one of
 #              "error: AOT compile error -- unit, reason and lengths follow"
 #              "error: native capsule collection failed"
+#   AND:       a NON-EMPTY reason under that banner, with a non-zero
+#              "reason-len=" / "detail-len=".
 #
-# The pure-literal lines carry no interpolated operand, so nothing can silence
-# them; their presence is what proves the producer ran and spoke.
+# The banner alone is deliberately NOT enough. Both raising sites print the
+# banner unconditionally (it is a pure literal, so nothing can silence it) and
+# the reason separately -- so a binary that loses the reason still emits the
+# banner, which is this same silence one layer down. Requiring only the banner
+# would let exactly that regression pass as "attributed"; selftest fixtures F and
+# G pin it.
 #
 # Verdict is the LAST line on stdout:
 #   PASS  -- <n> invocation(s) executed, ...            exit 0
@@ -126,12 +132,46 @@ classify_run() {
     printf 'silent unattributed-none-recorded\n'
     return 0
   fi
-  if grep -qF "$LITERAL_AOT" "$_log" 2>/dev/null \
-     || grep -qF "$LITERAL_COLLECT" "$_log" 2>/dev/null; then
-    printf 'spoke raising-site-literal-present\n'
+  # A raising-site literal is necessary but NOT sufficient. Both raising sites
+  # print their pure-literal banner unconditionally and the REASON separately, so
+  # a binary that loses the reason still emits the banner -- which is the very
+  # silence this gate exists to catch, one layer further down. Require a non-empty
+  # reason to actually be present.
+  #
+  # Both sites also print an explicit length line (`reason-len=` / `detail-len=`).
+  # A zero there is a first-class "the producer had nothing to say" signal and is
+  # believed over the banner. When the length line itself is missing (it can be
+  # collapsed too), fall back to reading the bare reason line that follows the
+  # labelled marker.
+  _has_literal=0
+  grep -qF "$LITERAL_AOT" "$_log" 2>/dev/null && _has_literal=1
+  grep -qF "$LITERAL_COLLECT" "$_log" 2>/dev/null && _has_literal=1
+  if [ "$_has_literal" -eq 0 ]; then
+    printf 'silent no-raising-site-line-and-no-reason\n'
     return 0
   fi
-  printf 'silent no-raising-site-line-and-no-reason\n'
+  if grep -qE 'reason-len=0([^0-9]|$)|detail-len=0([^0-9]|$)' "$_log" 2>/dev/null; then
+    printf 'silent raising-site-banner-but-zero-length-reason\n'
+    return 0
+  fi
+  # Non-empty bare reason line after either labelled marker.
+  #   collect layout: <banner> / module / tag / detail   -> detail is line 3
+  #   aot layout:     ... "error:   reason (bare):" / detail -> detail is line 1
+  _reason_ok=$(awk '
+    collect > 0 {
+      collect++
+      if (collect == 4) { if (length($0) > 0) { print "yes"; exit } ; collect = 0 }
+      next
+    }
+    want == 1 { if (length($0) > 0) { print "yes"; exit } ; want = 0 ; next }
+    /^error: native capsule collection failed/ { collect = 1; next }
+    /error:   reason \(bare\):/ { want = 1; next }
+  ' "$_log" 2>/dev/null)
+  if [ "$_reason_ok" = "yes" ]; then
+    printf 'spoke raising-site-literal-and-non-empty-reason\n'
+    return 0
+  fi
+  printf 'silent raising-site-banner-but-empty-reason\n'
 }
 
 # Runs the candidate and sets RUN_RC in the CALLER's shell.
@@ -161,12 +201,16 @@ selftest() {
   _st_tmp=$(mktemp -d) || { echo "selftest: cannot mktemp"; return 1; }
   _fail=0
 
-  # Fixture A: a failing run that names its reason via the AOT literal -> spoke
+  # Fixture A: a failing run that names its reason via the AOT literal -> spoke.
+  # Layout mirrors `_aot_compile_failure` exactly.
   cat > "$_st_tmp/a.log" <<EOF
 [build] native_compile 0/1 step 5/6
 $LITERAL_AOT
+error:   unit (bare):
 scripts.check.cert.redeploy_gate.fixtures.hello_world
+error:   reason (bare):
 backend object-path status 1
+error:   name-len=52 reason-len=31
 EOF
   _r=$(classify_run 1 "$_st_tmp/a.log" | cut -d' ' -f1)
   [ "$_r" = "spoke" ] || { echo "selftest A: expected spoke, got $_r"; _fail=1; }
@@ -181,14 +225,46 @@ EOF
   _r=$(classify_run 1 "$_st_tmp/b.log" | cut -d' ' -f1)
   [ "$_r" = "silent" ] || { echo "selftest B: expected silent, got $_r"; _fail=1; }
 
-  # Fixture C: "(none recorded" that NAMES its site -> acceptable, and a raising
-  # line is present. The disambiguated fallback must not be treated as the defect.
+  # Fixture C: the collect site spoke in full -- banner / module / tag / detail --
+  # and the summary's fallback NAMES its site. Tolerated: the operator has the
+  # reason from the raising site even though the summary lost it.
   cat > "$_st_tmp/c.log" <<EOF
-$LITERAL_COLLECT
+$LITERAL_COLLECT -- module, tag and detail follow
+scripts.check.cert.redeploy_gate.fixtures.hello_world
+native-capsule-receipt-invalid
+receipt content mismatch at /t/o.o.capsule-receipt: expected-len=1278 actual-len=1278
+error:   tag-len=30 detail-len=77
       reason: (none recorded $SITE_TAG_LOST — the stored diagnostic is non-empty; diagnostics-len=41)
 EOF
   _r=$(classify_run 1 "$_st_tmp/c.log" | cut -d' ' -f1)
   [ "$_r" = "spoke" ] || { echo "selftest C: expected spoke, got $_r"; _fail=1; }
+
+  # Fixture F: the REGRESSION THIS GATE ALMOST MISSED. The banner prints (it is a
+  # pure literal, nothing can silence it) but every bare line is empty and the
+  # length line says zero -- silence one layer below the banner. Must be silent,
+  # or a rebuilt compiler that loses the reason passes as "attributed".
+  cat > "$_st_tmp/f.log" <<EOF
+$LITERAL_COLLECT -- module, tag and detail follow
+
+
+
+error:   tag-len=0 detail-len=0
+      reason: (none recorded $SITE_TAG_EMPTY — diagnostics-len=0 total=0 retained=0)
+EOF
+  _r=$(classify_run 1 "$_st_tmp/f.log" | cut -d' ' -f1)
+  [ "$_r" = "silent" ] || { echo "selftest F: expected silent, got $_r"; _fail=1; }
+
+  # Fixture G: banner present, bare lines empty, and NO length line either (the
+  # length line can itself be collapsed). Layout alone must still catch it.
+  cat > "$_st_tmp/g.log" <<EOF
+$LITERAL_AOT
+error:   unit (bare):
+scripts.check.cert.redeploy_gate.fixtures.hello_world
+error:   reason (bare):
+
+EOF
+  _r=$(classify_run 1 "$_st_tmp/g.log" | cut -d' ' -f1)
+  [ "$_r" = "silent" ] || { echo "selftest G: expected silent, got $_r"; _fail=1; }
 
   # Fixture D: a clean success -> ok, regardless of content
   echo "Native executable written" > "$_st_tmp/d.log"
@@ -223,7 +299,7 @@ if ! selftest; then
   exit 2
 fi
 if [ "$DO_SELFTEST" -eq 1 ]; then
-  echo "PASS — 5 selftest fixture(s) checked, classifier behaves"
+  echo "PASS — 7 selftest fixture(s) checked, classifier behaves"
   exit 0
 fi
 
