@@ -1,25 +1,35 @@
-# Purpose and audience: executable specification evidence for the owning engineering team.
-# @req REQ-SSPEC-COMPILER
-# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
-
-# Purpose and audience: executable specification evidence for the owning engineering team.
-# @req REQ-SSPEC-COMPILER
-# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
-
-# test/unit/compiler/backend/avx512_emit_spec.spl
-#
-# Byte-level golden tests for AVX-512 EVEX emit bodies.
-# Verifies evex_encode_3op_zmm and 3 emit helpers produce exact Intel SDM bytes.
-#
-# Reference: doc/04_architecture/simd_strict_emit_errata.md ERR-001a/b RESOLVED
-#            Intel SDM Vol 2A §2.6.1 Table 2-36
-#            simd_spec_verification_2026-05-02.md V-06
-#
-# Register IDs (inline literals from x86_64_avx512.spl scaffold):
-#   X86_ZMM0=48, X86_ZMM1=49, X86_ZMM2=50
-#   X86_K0=80 (unmasked), X86_K1=81
+"""
+## Purpose and audience
+Byte-level golden contract for the AVX-512 EVEX arithmetic emit bodies
+(`encode_avx512_add_f32x16`, `encode_avx512_mul_f32x16`,
+`encode_avx512_fma_f32x16` and `evex_encode_3op_zmm` in
+`compiler.backend.native.x86_64_avx512`), owned by the native-codegen backend
+team. Every scenario pins one instruction byte against the Intel SDM.
+## Operator workflow
+Run `simple run test/01_unit/compiler/backend/avx512_emit_spec.spl` after
+touching `src/compiler/**/x86_64_avx512.spl` EVEX encoding or the register-ID
+scaffold (X86_ZMM0=48, X86_ZMM1=49, X86_ZMM2=50, X86_K0=80 unmasked,
+X86_K1=81).
+## Compatibility and limitations
+The golden bytes cover the 512-bit f32 VADDPS/VMULPS (0F map, unmasked) and
+VFMADD213PS (0F38 map, k1-masked zeroing) forms only; compare-to-mask and
+other widths live in sibling backend specs. Sequences follow Intel SDM
+Vol 2A §2.6.1 Table 2-36 and the simd strict emit errata worked example
+(ERR-001a/b RESOLVED, V-06 in simd_spec_verification_2026-05-02).
+## Verification guidance and troubleshooting
+A failure names the drifting byte by position: byte 0 is the 0x62 escape,
+bytes 1-3 are the EVEX P0/P1/P2 prefix bytes, byte 4 the opcode, byte 5 the
+ModRM. Re-derive the failing byte from the per-scenario bit-layout comment
+before changing the encoder — a byte that matches llvm-mc but not the SDM
+comment means the comment is stale, not the encoder.
+"""
+# Lifecycle: doc/01_research/domain/sspec_documentization_maintenance.md ;
+# doc/03_plan/sspec_modernization_plan.md ;
+# doc/04_architecture/sspec_documentization_maintenance.md ;
+# doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
 
 use compiler.backend.native.x86_64_avx512.{encode_avx512_add_f32x16, encode_avx512_mul_f32x16, encode_avx512_fma_f32x16}
+use std.spec.{step}
 
 # ============================================================================
 # VADDPS zmm0, zmm0, zmm0 (no mask, no zeroing)
@@ -30,36 +40,55 @@ use compiler.backend.native.x86_64_avx512.{encode_avx512_add_f32x16, encode_avx5
 # ============================================================================
 
 describe "AVX-512 EVEX emit VADDPS f32 golden":
+    # @manual_section: avx512 evex arithmetic emit golden bytes
     it "VADDPS zmm0 zmm0 zmm0 emits 6 bytes":
+        # @req REQ-COMPILER-AVX512-EMIT-001
+        # @capture(protocol_binary): VADDPS zmm0 zmm0 zmm0 full encoding
+        step("Encode VADDPS zmm0, zmm0, zmm0 and check the encoded length")
         val result = encode_avx512_add_f32x16(48, 48, 48, 80, false)
-        expect(result.len()).to_equal(6)
+        expect(result.len()).to_equal(6)  # oracle: escape + P0 + P1 + P2 + opcode + ModRM = 6 bytes for one EVEX instruction
 
     it "VADDPS zmm0 zmm0 zmm0 escape byte is 0x62":
+        # @req REQ-COMPILER-AVX512-EMIT-002
+        # @capture(protocol_binary): VADDPS escape byte
+        step("Encode VADDPS and check the EVEX escape byte")
         val result = encode_avx512_add_f32x16(48, 48, 48, 80, false)
-        expect(result[0]).to_equal(98)
+        expect(result[0]).to_equal(98)  # oracle: 0x62 is the EVEX escape lead byte per Intel SDM Vol 2A §2.6.1
 
     it "VADDPS zmm0 zmm0 zmm0 P0 is 0xF1":
-        # P0: ~R=1 ~X=1 ~B=1 ~R'=1 0 m2=0 m1=0 m0=1 = 0xF1 (mm=001=0F map)
+        # @req REQ-COMPILER-AVX512-EMIT-003
+        # @capture(protocol_binary): VADDPS EVEX P0 byte
+        step("Encode VADDPS and check the P0 map byte")
         val result = encode_avx512_add_f32x16(48, 48, 48, 80, false)
-        expect(result[1]).to_equal(241)
+        expect(result[1]).to_equal(241)  # oracle: P0=0xF1 — ~R~X~B~R' all 1, mm=001 selects the legacy 0F map
 
     it "VADDPS zmm0 zmm0 zmm0 P1 is 0x7C":
-        # P1: W=0 ~vvvv=1111 must-1 pp=00 = 0x7C
+        # @req REQ-COMPILER-AVX512-EMIT-004
+        # @capture(protocol_binary): VADDPS EVEX P1 byte
+        step("Encode VADDPS and check the P1 prefix byte")
         val result = encode_avx512_add_f32x16(48, 48, 48, 80, false)
-        expect(result[2]).to_equal(124)
+        expect(result[2]).to_equal(124)  # oracle: P1=0x7C — W=0, ~vvvv=1111, must-1, pp=00 for the no-prefix 0F form
 
     it "VADDPS zmm0 zmm0 zmm0 P2 is 0x48":
-        # P2: z=0 L'=1 L=0 b=0 ~V'=1 aaa=000 = 0x48
+        # @req REQ-COMPILER-AVX512-EMIT-005
+        # @capture(protocol_binary): VADDPS EVEX P2 byte
+        step("Encode VADDPS and check the P2 prefix byte")
         val result = encode_avx512_add_f32x16(48, 48, 48, 80, false)
-        expect(result[3]).to_equal(72)
+        expect(result[3]).to_equal(72)  # oracle: P2=0x48 — L'=1 L=0 picks 512-bit, z=0 no zeroing, aaa=000 k0
 
     it "VADDPS zmm0 zmm0 zmm0 opcode is 0x58":
+        # @req REQ-COMPILER-AVX512-EMIT-006
+        # @capture(protocol_binary): VADDPS opcode byte
+        step("Encode VADDPS and check the opcode byte")
         val result = encode_avx512_add_f32x16(48, 48, 48, 80, false)
-        expect(result[4]).to_equal(88)
+        expect(result[4]).to_equal(88)  # oracle: 0x58 is ADDPS's opcode carried into EVEX.512.0F per Intel SDM Vol 2B VADDPS
 
     it "VADDPS zmm0 zmm0 zmm0 ModRM is 0xC0":
+        # @req REQ-COMPILER-AVX512-EMIT-007
+        # @capture(protocol_binary): VADDPS ModRM byte
+        step("Encode VADDPS and check the ModRM byte")
         val result = encode_avx512_add_f32x16(48, 48, 48, 80, false)
-        expect(result[5]).to_equal(192)
+        expect(result[5]).to_equal(192)  # oracle: ModRM=0xC0 — mod=11 register form, reg=zmm0, rm=zmm0
 
 # ============================================================================
 # VMULPS zmm0, zmm0, zmm0 (no mask, no zeroing)
@@ -70,72 +99,112 @@ describe "AVX-512 EVEX emit VADDPS f32 golden":
 # ============================================================================
 
 describe "AVX-512 EVEX emit VMULPS f32 golden":
+    # @manual_section: avx512 evex arithmetic emit golden bytes
     it "VMULPS zmm0 zmm0 zmm0 emits 6 bytes":
+        # @req REQ-COMPILER-AVX512-EMIT-008
+        # @capture(protocol_binary): VMULPS zmm0 zmm0 zmm0 full encoding
+        step("Encode VMULPS zmm0, zmm0, zmm0 and check the encoded length")
         val result = encode_avx512_mul_f32x16(48, 48, 48, 80, false)
-        expect(result.len()).to_equal(6)
+        expect(result.len()).to_equal(6)  # oracle: same 6-byte EVEX layout as every 2-op arithmetic form
 
     it "VMULPS zmm0 zmm0 zmm0 escape byte is 0x62":
+        # @req REQ-COMPILER-AVX512-EMIT-009
+        # @capture(protocol_binary): VMULPS escape byte
+        step("Encode VMULPS and check the EVEX escape byte")
         val result = encode_avx512_mul_f32x16(48, 48, 48, 80, false)
-        expect(result[0]).to_equal(98)
+        expect(result[0]).to_equal(98)  # oracle: 0x62 EVEX escape, shared with VADDPS
 
     it "VMULPS zmm0 zmm0 zmm0 P0 is 0xF1":
+        # @req REQ-COMPILER-AVX512-EMIT-010
+        # @capture(protocol_binary): VMULPS EVEX P0 byte
+        step("Encode VMULPS and check the P0 map byte")
         val result = encode_avx512_mul_f32x16(48, 48, 48, 80, false)
-        expect(result[1]).to_equal(241)
+        expect(result[1]).to_equal(241)  # oracle: P0=0xF1 — mm=001 (legacy 0F map), same as VADDPS
 
     it "VMULPS zmm0 zmm0 zmm0 P1 is 0x7C":
+        # @req REQ-COMPILER-AVX512-EMIT-011
+        # @capture(protocol_binary): VMULPS EVEX P1 byte
+        step("Encode VMULPS and check the P1 prefix byte")
         val result = encode_avx512_mul_f32x16(48, 48, 48, 80, false)
-        expect(result[2]).to_equal(124)
+        expect(result[2]).to_equal(124)  # oracle: P1=0x7C — W=0, ~vvvv=1111, pp=00, identical to VADDPS
 
     it "VMULPS zmm0 zmm0 zmm0 P2 is 0x48":
+        # @req REQ-COMPILER-AVX512-EMIT-012
+        # @capture(protocol_binary): VMULPS EVEX P2 byte
+        step("Encode VMULPS and check the P2 prefix byte")
         val result = encode_avx512_mul_f32x16(48, 48, 48, 80, false)
-        expect(result[3]).to_equal(72)
+        expect(result[3]).to_equal(72)  # oracle: P2=0x48 — 512-bit, no zeroing, aaa=000
 
     it "VMULPS zmm0 zmm0 zmm0 opcode is 0x59":
+        # @req REQ-COMPILER-AVX512-EMIT-013
+        # @capture(protocol_binary): VMULPS opcode byte
+        step("Encode VMULPS and check the opcode byte")
         val result = encode_avx512_mul_f32x16(48, 48, 48, 80, false)
-        expect(result[4]).to_equal(89)
+        expect(result[4]).to_equal(89)  # oracle: 0x59 is MULPS's opcode — 0x58 + 1, adjacent to VADDPS in the 0F map
 
     it "VMULPS zmm0 zmm0 zmm0 ModRM is 0xC0":
+        # @req REQ-COMPILER-AVX512-EMIT-014
+        # @capture(protocol_binary): VMULPS ModRM byte
+        step("Encode VMULPS and check the ModRM byte")
         val result = encode_avx512_mul_f32x16(48, 48, 48, 80, false)
-        expect(result[5]).to_equal(192)
+        expect(result[5]).to_equal(192)  # oracle: ModRM=0xC0 — mod=11, reg=zmm0, rm=zmm0, same operand triple as VADDPS
 
 # ============================================================================
 # VFMADD213PS zmm0 masked-k1 zeroing, zmm1, zmm2
 # EVEX.512.66.0F38.W0 A8 /r
 # dest=0(zmm0) src1=1(zmm1) src2=2(zmm2) k=k1 z=true
 # Expected: 62 F2 75 C9 A8 C2
-# Verified: simd_strict_emit_errata.md ERR-001 worked example + V-06
+# Verified: simd strict emit errata ERR-001 worked example + V-06
 # ============================================================================
 
 describe "AVX-512 EVEX emit VFMADD213PS f32 golden":
+    # @manual_section: avx512 evex arithmetic emit golden bytes
     it "VFMADD213PS zmm0-k1-z zmm1 zmm2 emits 6 bytes":
+        # @req REQ-COMPILER-AVX512-EMIT-015
+        # @capture(protocol_binary): VFMADD213PS masked-zeroing full encoding
+        step("Encode VFMADD213PS zmm0 masked-k1 zeroing, zmm1, zmm2 and check the length")
         # ZMM0=48, ZMM1=49, ZMM2=50, K1=81
         val result = encode_avx512_fma_f32x16(48, 49, 50, 81, true)
-        expect(result.len()).to_equal(6)
+        expect(result.len()).to_equal(6)  # oracle: masking and zeroing live in EVEX bits, not extra bytes — still 6 total
 
     it "VFMADD213PS zmm0-k1-z zmm1 zmm2 escape byte is 0x62":
+        # @req REQ-COMPILER-AVX512-EMIT-016
+        # @capture(protocol_binary): VFMADD213PS escape byte
+        step("Encode VFMADD213PS and check the EVEX escape byte")
         val result = encode_avx512_fma_f32x16(48, 49, 50, 81, true)
-        expect(result[0]).to_equal(98)
+        expect(result[0]).to_equal(98)  # oracle: 0x62 EVEX escape, shared across all three arithmetic forms
 
     it "VFMADD213PS zmm0-k1-z zmm1 zmm2 P0 is 0xF2":
-        # P0: ~R=1 ~X=1 ~B=1 ~R'=1 0 m2=0 m1=1 m0=0 = 0xF2 (MAP2=0F38)
+        # @req REQ-COMPILER-AVX512-EMIT-017
+        # @capture(protocol_binary): VFMADD213PS EVEX P0 byte
+        step("Encode VFMADD213PS and check the P0 map byte")
         val result = encode_avx512_fma_f32x16(48, 49, 50, 81, true)
-        expect(result[1]).to_equal(242)
+        expect(result[1]).to_equal(242)  # oracle: P0=0xF2 — mm=010 selects the 0F38 map required by FMA opcodes
 
     it "VFMADD213PS zmm0-k1-z zmm1 zmm2 P1 is 0x75":
-        # P1: W=0 ~vvvv=1110(zmm1) must-1 pp=01(0x66) = 0x75
+        # @req REQ-COMPILER-AVX512-EMIT-018
+        # @capture(protocol_binary): VFMADD213PS EVEX P1 byte
+        step("Encode VFMADD213PS and check the P1 prefix byte")
         val result = encode_avx512_fma_f32x16(48, 49, 50, 81, true)
-        expect(result[2]).to_equal(117)
+        expect(result[2]).to_equal(117)  # oracle: P1=0x75 — W=0, ~vvvv=1110 encodes src1 zmm1, must-1, pp=01 for 0x66
 
     it "VFMADD213PS zmm0-k1-z zmm1 zmm2 P2 is 0xC9":
-        # P2: z=1 L'=1 L=0 b=0 ~V'=1 aaa=001 = 0xC9
+        # @req REQ-COMPILER-AVX512-EMIT-019
+        # @capture(protocol_binary): VFMADD213PS EVEX P2 byte
+        step("Encode VFMADD213PS and check the P2 prefix byte")
         val result = encode_avx512_fma_f32x16(48, 49, 50, 81, true)
-        expect(result[3]).to_equal(201)
+        expect(result[3]).to_equal(201)  # oracle: P2=0xC9 — z=1 zeroing, L'=1 L=0 512-bit, ~V'=1, aaa=001 writes through k1
 
     it "VFMADD213PS zmm0-k1-z zmm1 zmm2 opcode is 0xA8":
+        # @req REQ-COMPILER-AVX512-EMIT-020
+        # @capture(protocol_binary): VFMADD213PS opcode byte
+        step("Encode VFMADD213PS and check the opcode byte")
         val result = encode_avx512_fma_f32x16(48, 49, 50, 81, true)
-        expect(result[4]).to_equal(168)
+        expect(result[4]).to_equal(168)  # oracle: 0xA8 is VFMADD213PS's opcode in the 0F38 map per Intel SDM Vol 2B
 
     it "VFMADD213PS zmm0-k1-z zmm1 zmm2 ModRM is 0xC2":
-        # ModRM: mod=11 reg=0(zmm0) rm=2(zmm2) = 0xC2
+        # @req REQ-COMPILER-AVX512-EMIT-021
+        # @capture(protocol_binary): VFMADD213PS ModRM byte
+        step("Encode VFMADD213PS and check the ModRM byte")
         val result = encode_avx512_fma_f32x16(48, 49, 50, 81, true)
-        expect(result[5]).to_equal(194)
+        expect(result[5]).to_equal(194)  # oracle: ModRM=0xC2 — mod=11 register form, reg=zmm0 dest, rm=zmm2

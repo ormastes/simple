@@ -2,6 +2,41 @@
 # @cover src/os/kernel/memory/vmm_device_mapping.spl 80%
 # @tag: integration, simpleos, kernel, vmm, device, mmio
 
+"""
+## Purpose and audience
+This spec pins the explicit device-VMA transaction contract of the SimpleOS
+kernel VMM: MMIO window mapping with exact USER/UC/NX PTE bits, provenance-
+checked unmap, stale-PTE collision rejection, all-or-nothing rollback on an
+injected mid-transaction failure, and per-address-space isolation. Audience:
+SimpleOS kernel memory maintainers and reviewers of changes to
+`src/os/kernel/memory/vmm*`.
+
+## Operator workflow
+Run the spec with the seed runner:
+`./src/compiler_rust/target/bootstrap/simple run test/02_integration/os/device_vma_transaction_spec.spl`
+Each scenario builds a fresh identity-mapped PMM + sparse VMM, performs one
+device-mapping transaction through `vmm_map_device_result`, and inspects the
+returned space and raw PTEs.
+
+## Compatibility and limitations
+The scenarios exercise the kernel VMM through its test seams
+(`vmm_init_sparse_for_test`, `vmm_set_map_failure_after_for_test`); they run
+wherever those seams link, and do not cover the boot-time firmware-provided
+memory map or swap-backed device windows.
+
+## Verification guidance and troubleshooting
+A `blocked:*` reason string failure means the transaction guard fired; the
+scenario name tells you which guard. A wrong PTE mask failure points at the
+flag wiring in `vmm_map_page_in`, and a rollback failure at the undo path
+around `vmm_set_map_failure_after_for_test`. Every scenario destroys its
+address space, so a leak reported by the PMM counter check is real.
+"""
+
+# Lifecycle: doc/01_research/os/memory/paging_swap_multiarch_research.md ;
+# doc/03_plan/os/simpleos/vmm_consolidation_plan.md ;
+# doc/04_architecture/os/kernel/x86_32_authenticated_mapping_owner_v1.md ;
+# doc/05_design/os/arm32_authenticated_user_page_table_owner_v1.md
+
 use std.spec.*
 use os.kernel.boot.mmio.{mmio_reset_for_test}
 use os.kernel.memory.pmm.{pmm_init_identity_range, pmm_get_manager, pmm_free_pages}
@@ -30,36 +65,44 @@ fn fresh_space() -> ProcessVmSpace:
 fn handle(space: ProcessVmSpace) -> AddressSpace:
     AddressSpace(phys_root: space.pml4, id: space.id)
 
+# @manual_section: device-vma-transactions
+
 describe "explicit device VMA transaction":
     it "maps an unaligned MMIO window with exact USER UC NX PTEs":
+        # @req REQ-001
         # @covers DVM_MAP_ROOT:true DVM_MAP_VMA:true
+        # @capture(bit_table): the mapped PTE bit pattern and page-granularity split retained as checked masks
+        step("Map an unaligned 0x1000-byte MMIO window at 0x90000001 through the device transaction")
         val original = fresh_space()
         val result = vmm_map_device_result(original, 0x90000001u64,
             0x1000u64, 0x70000000u64)
-        expect(result.code).to_equal(0)
-        expect(result.user_addr).to_equal(0x70000001u64)
-        expect(result.map_len).to_equal(0x2000u64)
-        expect(result.space.vma_count).to_equal(1u64)
+        expect(result.code).to_equal(0)  # oracle: an unaligned device window must be accepted — the transaction rounds it into page-granular leaves, not rejects it
+        expect(result.user_addr).to_equal(0x70000001u64)  # oracle: the returned user address preserves the caller's page offset so the device window lands byte-exact
+        expect(result.map_len).to_equal(0x2000u64)  # oracle: one page of cover on each side of the unaligned window is the minimum page-granular mapping
+        expect(result.space.vma_count).to_equal(1u64)  # oracle: the rounded leaves form exactly one device VMA, not one per page
         expect(result.space.areas[0].kind).to_equal(VMA_DEVICE)
-        expect(result.space.areas[0].backing).to_equal(0x90000000u64)
+        expect(result.space.areas[0].backing).to_equal(0x90000000u64)  # oracle: the VMA's backing records the page-aligned physical base, never the unaligned caller address
         val first = vmm_read_pte_in(handle(result.space), VirtAddr(addr: result.map_start))
         val second = vmm_read_pte_in(handle(result.space), VirtAddr(addr: result.map_start + 4096u64))
-        expect(first & PTE_ADDR_MASK).to_equal(0x90000000u64)
-        expect(second & PTE_ADDR_MASK).to_equal(0x90001000u64)
+        expect(first & PTE_ADDR_MASK).to_equal(0x90000000u64)  # oracle: first leaf frames the page containing the window start
+        expect(second & PTE_ADDR_MASK).to_equal(0x90001000u64)  # oracle: second leaf frames the next physical page — the split the 0x2000 length demanded
         expect(first & (PTE_PRESENT | PTE_WRITABLE | PTE_USER |
             PTE_CACHE_DISABLE | PTE_NO_EXECUTE)).to_equal(PTE_PRESENT |
-            PTE_WRITABLE | PTE_USER | PTE_CACHE_DISABLE | PTE_NO_EXECUTE)
-        expect(first & PTE_WRITE_THROUGH).to_equal(0u64)
+            PTE_WRITABLE | PTE_USER | PTE_CACHE_DISABLE | PTE_NO_EXECUTE)  # oracle: device MMIO needs USER+UC+NX exactly — cache-disable for MMIO semantics, NX because device memory is never code
+        expect(first & PTE_WRITE_THROUGH).to_equal(0u64)  # oracle: write-through must stay clear — UC alone defines device access, and a stray WT bit would change the memory type
         val unmapped = vmm_unmap_device_result(result.space, result.map_start,
             result.map_len, result.physical_page)
-        expect(unmapped.code).to_equal(0)
-    destroy_user_address_space(handle(unmapped.space))
+        expect(unmapped.code).to_equal(0)  # oracle: the same provenance that mapped must unmap cleanly, closing the transaction
+        destroy_user_address_space(handle(unmapped.space))  # oracle: teardown of the scenario's address space so the PMM leak check sees a clean slate
 
     it "rejects a replaced device leaf without mutating the VMA or PTE":
+        # @req REQ-003
+        # @capture(bit_table): the denied unmap result and untouched replacement PTE retained as checked values
+        step("Replace a device leaf's PTE by hand, then attempt a provenance-checked unmap")
         val original = fresh_space()
         val mapped = vmm_map_device_result(original, 0x91000000u64,
             4096u64, 0x70500000u64)
-        expect(mapped.code).to_equal(0)
+        expect(mapped.code).to_equal(0)  # oracle: the setup mapping must succeed so the denial below is attributable to provenance, not setup
         val as_handle = handle(mapped.space)
         val virt = VirtAddr(addr: mapped.map_start)
         val old_pte = vmm_read_pte_in(as_handle, virt)
@@ -69,18 +112,21 @@ describe "explicit device VMA transaction":
             replacement)).to_be(true)
         val denied = vmm_unmap_device_result(mapped.space, mapped.map_start,
             mapped.map_len, mapped.physical_page)
-        expect(denied.code).to_equal(-14)
+        expect(denied.code).to_equal(-14)  # oracle: -14 (EFAULT) — the recorded physical page no longer proves the leaf, so the unmap is refused as a fault
         expect(denied.reason).to_equal("blocked:device-pte-provenance-mismatch")
-        expect(denied.space.vma_count).to_equal(1u64)
-        expect(vmm_read_pte_in(as_handle, virt)).to_equal(replacement)
+        expect(denied.space.vma_count).to_equal(1u64)  # oracle: the denial must not roll back or tear down the VMA — the mapping survives untouched
+        expect(vmm_read_pte_in(as_handle, virt)).to_equal(replacement)  # oracle: the hand-swapped PTE must survive verbatim — the guard rejects, it never "fixes"
         expect(vmm_replace_pte_in(as_handle, virt, replacement,
             old_pte)).to_be(true)
         val unmapped = vmm_unmap_device_result(mapped.space, mapped.map_start,
             mapped.map_len, mapped.physical_page)
-        expect(unmapped.code).to_equal(0)
+        expect(unmapped.code).to_equal(0)  # oracle: restoring the original PTE re-establishes provenance, so the unmap then succeeds
         destroy_user_address_space(handle(unmapped.space))
 
     it "preserves a stale PTE collision without overwriting it":
+        # @req REQ-003
+        # @capture(bit_table): the collision result and the preserved pre-existing PTE retained as checked values
+        step("Pre-populate the target virtual page, then map a device window onto it")
         val original = fresh_space()
         val as_handle = handle(original)
         val flags = VmFlags(bits: VM_PRESENT | VM_WRITABLE | VM_USER | VM_NO_EXECUTE)
@@ -89,51 +135,60 @@ describe "explicit device VMA transaction":
         val before = vmm_read_pte_in(as_handle, VirtAddr(addr: 0x71000000u64))
         val result = vmm_map_device_result(original, 0xB0000000u64,
             4096u64, 0x71000000u64)
-        expect(result.code).to_equal(-17)
+        expect(result.code).to_equal(-17)  # oracle: -17 (EEXIST) — the virtual page is already occupied, and the device map must refuse, not clobber
         expect(result.reason).to_equal("blocked:pte-collision")
-        expect(result.space.vma_count).to_equal(0u64)
+        expect(result.space.vma_count).to_equal(0u64)  # oracle: a rejected transaction must not leave a half-registered VMA behind
         expect(vmm_read_pte_in(as_handle,
-            VirtAddr(addr: 0x71000000u64))).to_equal(before)
+            VirtAddr(addr: 0x71000000u64))).to_equal(before)  # oracle: the pre-existing RAM mapping must survive byte-identical — the collision guard exists to protect it
         expect(vmm_unmap_page_in(as_handle, VirtAddr(addr: 0x71000000u64))).to_be(true)
         destroy_user_address_space(as_handle)
 
     it "rolls mapped leaves and metadata back after an injected middle failure":
+        # @req REQ-010
+        # @capture(bit_table): the aborted transaction's errno, reason, and zeroed leaf PTEs retained as checked values
+        step("Inject a page-map failure after the first leaf, then map a two-leaf device window")
         val original = fresh_space()
         vmm_set_map_failure_after_for_test(1)
         val result = vmm_map_device_result(original, 0xC0000000u64,
             8192u64, 0x72000000u64)
         vmm_clear_map_failure_for_test()
-        expect(result.code).to_equal(-12)
+        expect(result.code).to_equal(-12)  # oracle: -12 (ENOMEM) — the injected second-leaf failure surfaces as the transaction's abort code
         expect(result.reason).to_equal("blocked:page-map-failed")
-        expect(result.space.vma_count).to_equal(0u64)
+        expect(result.space.vma_count).to_equal(0u64)  # oracle: all-or-nothing rollback — a failed multi-leaf map must leave zero VMAs, not the one leaf that succeeded
         expect(vmm_read_pte_in(handle(result.space),
-            VirtAddr(addr: 0x72000000u64))).to_equal(0u64)
+            VirtAddr(addr: 0x72000000u64))).to_equal(0u64)  # oracle: the first leaf DID map before the failure, so a nonzero PTE here would prove rollback leaked it
         expect(vmm_read_pte_in(handle(result.space),
-            VirtAddr(addr: 0x72001000u64))).to_equal(0u64)
+            VirtAddr(addr: 0x72001000u64))).to_equal(0u64)  # oracle: the second leaf failed to map and must remain absent
         destroy_user_address_space(handle(result.space))
 
     it "requires exact device provenance and never frees MMIO leaves":
+        # @req REQ-001 REQ-010
+        # @capture(bit_table): the wrong-provenance and partial-unmap errnos plus the untouched PMM counter retained as checked values
+        step("Attempt a wrong-page unmap and a partial-length unmap, then check the PMM free counter")
         val original = fresh_space()
         val mapped = vmm_map_device_result(original, 0xD0000000u64,
             8192u64, 0x73000000u64)
-        expect(mapped.code).to_equal(0)
+        expect(mapped.code).to_equal(0)  # oracle: the two-leaf device map must succeed so the refusals below are attributable to provenance enforcement
         val before_unmap = pmm_free_pages()
         val wrong_phys = vmm_unmap_device_result(mapped.space,
             mapped.map_start, mapped.map_len, mapped.physical_page + 4096u64)
         val partial = vmm_unmap_device_result(mapped.space,
             mapped.map_start, 4096u64, mapped.physical_page)
-        expect(wrong_phys.code).to_equal(-22)
-        expect(partial.code).to_equal(-22)
+        expect(wrong_phys.code).to_equal(-22)  # oracle: -22 (EINVAL) — a wrong physical page fails the provenance check outright
+        expect(partial.code).to_equal(-22)  # oracle: -22 (EINVAL) — a partial-length unmap of a multi-leaf window is refused; leaves are never split on release
         expect(vmm_read_pte_in(handle(mapped.space),
-            VirtAddr(addr: mapped.map_start)) & PTE_PRESENT).to_equal(PTE_PRESENT)
+            VirtAddr(addr: mapped.map_start)) & PTE_PRESENT).to_equal(PTE_PRESENT)  # oracle: both refused unmaps must leave the first leaf still present — refusal means zero mutation
         val unmapped = vmm_unmap_device_result(mapped.space,
             mapped.map_start, mapped.map_len, mapped.physical_page)
-        expect(unmapped.code).to_equal(0)
-        expect(unmapped.space.vma_count).to_equal(0u64)
-        expect(pmm_free_pages()).to_equal(before_unmap)
+        expect(unmapped.code).to_equal(0)  # oracle: only the exact original provenance releases the window
+        expect(unmapped.space.vma_count).to_equal(0u64)  # oracle: a complete unmap tears down every VMA the transaction created
+        expect(pmm_free_pages()).to_equal(before_unmap)  # oracle: MMIO leaves are frame-table-neutral — unmapping device windows must not return any pages to the PMM free list
         destroy_user_address_space(handle(unmapped.space))
 
     it "isolates identical virtual addresses in two process spaces":
+        # @req REQ-001
+        # @capture(bit_table): both spaces' mapping results and the second space's framing PTE retained as checked values
+        step("Map device windows into two independent address spaces and unmap only the first")
         val first_space = fresh_space()
         val first = vmm_map_device_result(first_space, 0xE0000000u64,
             4096u64, 0x74000000u64)
@@ -142,15 +197,15 @@ describe "explicit device VMA transaction":
             id: second_handle.id, vma_count: 0u64, areas: [])
         val second = vmm_map_device_result(second_space, 0xF0000000u64,
             4096u64, 0x74000000u64)
-        expect(first.code).to_equal(0)
-        expect(second.code).to_equal(0)
+        expect(first.code).to_equal(0)  # oracle: each space maps independently, so both transactions must succeed on disjoint roots
+        expect(second.code).to_equal(0)  # oracle: the second space's transaction must succeed equally — success is the baseline both spaces need before the isolation check below is meaningful
         val first_unmapped = vmm_unmap_device_result(first.space,
             first.map_start, first.map_len, first.physical_page)
-        expect(first_unmapped.code).to_equal(0)
+        expect(first_unmapped.code).to_equal(0)  # oracle: space one's provenance is intact, so its unmap must succeed, leaving space two untouched for the PTE check below
         expect(vmm_read_pte_in(handle(second.space),
-            VirtAddr(addr: second.map_start)) & PTE_ADDR_MASK).to_equal(0xF0000000u64)
+            VirtAddr(addr: second.map_start)) & PTE_ADDR_MASK).to_equal(0xF0000000u64)  # oracle: after tearing down space one, space two's PTE must still frame 0xF0000000 — unmapping one address space can never touch another's page tables
         val second_unmapped = vmm_unmap_device_result(second.space,
             second.map_start, second.map_len, second.physical_page)
-        expect(second_unmapped.code).to_equal(0)
+        expect(second_unmapped.code).to_equal(0)  # oracle: both spaces end the scenario cleanly torn down — a refusal here would leak the second space's device window
         destroy_user_address_space(handle(first_unmapped.space))
         destroy_user_address_space(handle(second_unmapped.space))
