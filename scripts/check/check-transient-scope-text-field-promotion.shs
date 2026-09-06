@@ -1,0 +1,110 @@
+#!/bin/sh
+# Guard: a text field assigned into an OLDER-scope carrier inside a transient
+# array scope must be promoted explicitly, or ending the scope free()s it.
+#
+# This is the shape that took Stage 3 down on 2026-09-06: `module_surfaces_freeze`
+# re-assigns ModuleSurface.logical_name/canonical_name/package_name/
+# preferred_registry_name inside the registry retention scope, the surface raw
+# belongs to an already-ended per-file scope so the graph walk in
+# rt_transient_heap_promote(registry) cannot reach them, and 771 freed strings
+# later surfaced as a nil HirStruct dereference in
+# phase3:hir:validate:value_struct_layouts. See
+# doc/08_tracking/bug/stage3_module_surface_freeze_names_freed_value_struct_layouts_segv_2026-09-06.md
+#
+# The fixture exercises BOTH shapes in one process: the unpromoted field must be
+# observed corrupt and the promoted field must be observed intact. A run where
+# both survive is a FAIL, not a pass — it means the fixture stopped reproducing
+# and the guard has quietly stopped guarding.
+#
+# NATIVE ONLY. The rt_transient_* externs are inert under an interpreter, so a
+# run without a native compiler is ERROR — never a pass.
+#
+# Verdict is the last line of stdout:
+#   PASS  — <n> case(s) executed, pre-fix shape corrupts, fix survives   exit 0
+#   FAIL  — ...                                                          exit 1
+#   ERROR — nothing was checked (<reason>)                               exit 2
+
+set -u
+
+repo_root=$(cd "$(dirname "$0")/../.." && pwd)
+fixture="test/fixture/transient_scope/text_field_promotion.spl"
+
+compiler=${SIMPLE_NATIVE_COMPILER:-}
+runtime_path=${SIMPLE_NATIVE_RUNTIME_PATH:-}
+target=${SIMPLE_NATIVE_TARGET:-aarch64-unknown-linux-gnu}
+workdir=${SIMPLE_TRANSIENT_CHECK_WORKDIR:-${TMPDIR:-/tmp}/transient-text-field-check.$$}
+
+if [ ! -f "$repo_root/$fixture" ]; then
+    echo "ERROR — nothing was checked (fixture missing: $fixture)"
+    exit 2
+fi
+
+if [ -z "$compiler" ] || [ ! -x "$compiler" ]; then
+    echo "ERROR — nothing was checked (set SIMPLE_NATIVE_COMPILER to a native Simple compiler that supports native-build; an interpreter cannot exercise the transient scope externs)"
+    exit 2
+fi
+
+if [ -z "$runtime_path" ] || [ ! -d "$runtime_path" ]; then
+    echo "ERROR — nothing was checked (set SIMPLE_NATIVE_RUNTIME_PATH to the runtime authority directory that pairs with \$SIMPLE_NATIVE_COMPILER)"
+    exit 2
+fi
+
+mkdir -p "$workdir" || {
+    echo "ERROR — nothing was checked (cannot create work directory $workdir)"
+    exit 2
+}
+binary="$workdir/text_field_promotion.bin"
+build_log="$workdir/build.log"
+run_log="$workdir/run.log"
+
+cd "$repo_root" || {
+    echo "ERROR — nothing was checked (cannot enter repo root $repo_root)"
+    exit 2
+}
+
+"$compiler" native-build "$fixture" \
+    --target "$target" \
+    --backend llvm \
+    --runtime-bundle core-c-bootstrap \
+    --threads 2 \
+    --cache-dir "$workdir/cache" \
+    --mode dynload \
+    --runtime-path "$runtime_path" \
+    -o "$binary" > "$build_log" 2>&1
+build_status=$?
+
+if [ "$build_status" -ne 0 ] || [ ! -x "$binary" ]; then
+    echo "ERROR — nothing was checked (native-build of the fixture failed, status $build_status; see $build_log)"
+    exit 2
+fi
+
+"$binary" > "$run_log" 2>&1
+run_status=$?
+
+if [ "$run_status" -ge 124 ]; then
+    echo "FAIL — 2 case(s) executed, the fixture itself crashed (status $run_status); see $run_log"
+    exit 1
+fi
+
+if grep -q 'RESULT: REPRODUCED and FIXED' "$run_log"; then
+    echo "PASS — 2 case(s) executed, pre-fix shape corrupts, fix survives"
+    exit 0
+fi
+
+if grep -q 'RESULT: NOT REPRODUCED' "$run_log"; then
+    echo "FAIL — 2 case(s) executed, the unpromoted field survived: the fixture no longer reproduces the defect and this guard is vacuous; see $run_log"
+    exit 1
+fi
+
+if grep -q 'RESULT: FIX INEFFECTIVE' "$run_log"; then
+    echo "FAIL — 2 case(s) executed, the explicitly promoted field was still freed; see $run_log"
+    exit 1
+fi
+
+if grep -q 'RESULT: INCONCLUSIVE' "$run_log"; then
+    echo "ERROR — nothing was checked (the transient scope API refused to open a scope on this runtime; see $run_log)"
+    exit 2
+fi
+
+echo "ERROR — nothing was checked (the fixture printed no RESULT line, status $run_status; see $run_log)"
+exit 2
