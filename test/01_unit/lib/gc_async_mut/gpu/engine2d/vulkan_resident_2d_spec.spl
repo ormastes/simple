@@ -1,0 +1,237 @@
+# @cover src/lib/gc_async_mut/gpu/engine2d/vulkan_resident_2d.spl 80%
+# @tag: unit, gpu, scheduler, resident, vulkan
+"""
+## Purpose and audience
+The fixed-arena resident-2D slice is how Engine2D submits a scene to Vulkan
+without rebuilding semantics or reading anything back per frame. This manual is
+for the engineer wiring that slice: it shows the counters that make the "no
+per-frame rebuild, no readback" claim checkable, what the arena refuses, and
+why device evidence assembled on a device-less host must not qualify.
+Feature IDs: gpu_scheduler_hardening. Category: Stdlib.
+## Operator workflow
+SIMPLE_LIB=src bin/simple test test/01_unit/lib/gc_async_mut/gpu/engine2d/vulkan_resident_2d_spec.spl
+## Compatibility and limitations
+Pure arena and evidence logic; runs on every host with no GPU present. It never
+creates a VulkanSession and therefore never proves device execution. The device
+half lives in test/03_system/app/ui.browser/feature/gpu_resident_vulkan_slice_spec.spl.
+## Verification guidance and troubleshooting
+A RED here means the fixed-arena contract moved: either a frame started
+rebuilding semantics, a readback appeared, a refusal path stopped refusing, or
+the evidence bar was lowered. Fix the module or the caller, never the spec.
+"""
+# Lifecycle: doc/01_research/local/gpu_scheduler_hardening_gpu_resident_rendering.md ; doc/03_plan/ui/gpu_scheduler_hardening_gpu_resident_rendering.md ;
+# doc/04_architecture/gpu_scheduler_hardening_gpu_resident_rendering.md ; doc/05_design/gpu_scheduler_hardening_gpu_resident_rendering.md
+# @manual_section: primary
+
+use std.spec.*
+use common.gpu.engine2d.gpu_epoch.{
+    ENGINE2D_GPU_PHASE_GPU_FINISHED,
+    ENGINE2D_GPU_PHASE_QUEUED,
+    ENGINE2D_GPU_PHASE_REJECTED,
+    ENGINE2D_GPU_PROFILE_SCENE_STATIC_POOL,
+    Engine2dGpuDeviceEvidence,
+    Engine2dGpuEpochRequest,
+    engine2d_gpu_device_evidence_qualifies,
+    engine2d_gpu_epoch_advance,
+    engine2d_gpu_truth_none
+}
+use std.gc_async_mut.gpu.engine2d.vulkan_resident_2d.{
+    Engine2dVulkanResidentArena,
+    Engine2dVulkanResidentSliceReport,
+    ENGINE2D_VULKAN_BINARY_IDENTITY_ENV,
+    ENGINE2D_VULKAN_CORE_CAPABILITIES,
+    engine2d_vulkan_binary_identity,
+    engine2d_vulkan_device_evidence,
+    engine2d_vulkan_resident_arena,
+    engine2d_vulkan_resident_frame,
+    engine2d_vulkan_resident_request,
+    engine2d_vulkan_resident_scene_identity
+}
+use std.nogc_sync_mut.io.env_ops.{env_set}
+
+fn resident_rows() -> [u64]:
+    [11u64, 22u64, 33u64, 44u64]
+
+fn resident_arena() -> Engine2dVulkanResidentArena:
+    engine2d_vulkan_resident_arena(7u64, 2u32, 8u32, 2u32)
+
+fn resident_request(arena_generation: u64) -> Engine2dGpuEpochRequest:
+    engine2d_vulkan_resident_request(ENGINE2D_GPU_PROFILE_SCENE_STATIC_POOL, arena_generation, 3u64, 4)
+
+describe "Fixed-arena Vulkan resident 2D":
+    it "admits repeated identical frames without a semantic rebuild or a readback":
+        # @req REQ-GPU-SCHED-RESIDENT-001
+        step("Create one bounded arena and submit the same scene rows four times")
+        var arena = resident_arena()
+        var admitted = 0
+        var i = 0
+        while i < 4:
+            val outcome = arena.frame(resident_rows(), resident_request(arena.arena_generation), true, ENGINE2D_VULKAN_CORE_CAPABILITIES)
+            if outcome.admitted:
+                admitted = admitted + 1
+            i = i + 1
+        step("Read the arena counters the slice publishes")
+        expect(admitted).to_equal(4)  # oracle: four submissions, four admissions
+        expect(arena.frames_submitted).to_equal(4)  # oracle: arena counted every admitted frame
+        expect(arena.semantic_rebuilds).to_equal(0)  # oracle: identical scene identity never rebuilds
+        expect(arena.readbacks).to_equal(0)  # oracle: the resident path copies nothing back
+        step("The exported core capability set satisfies the required resident profile")
+        val admitted_receipt = arena.frame(resident_rows(), resident_request(arena.arena_generation), true, ENGINE2D_VULKAN_CORE_CAPABILITIES).receipt
+        expect(admitted_receipt.phase).to_equal(ENGINE2D_GPU_PHASE_QUEUED)
+        expect(admitted_receipt.missing_capabilities).to_equal(0u32)  # oracle: compute+indirect is the whole requirement
+
+    it "counts a semantic rebuild only when the scene content actually changes":
+        # @req REQ-GPU-SCHED-RESIDENT-001
+        step("Submit one scene, then a different scene, through the same fixed arena")
+        var arena = resident_arena()
+        arena.frame(resident_rows(), resident_request(arena.arena_generation), true, ENGINE2D_VULKAN_CORE_CAPABILITIES)
+        arena.frame([99u64, 98u64], resident_request(arena.arena_generation), true, ENGINE2D_VULKAN_CORE_CAPABILITIES)
+        step("Check the rebuild counter and that both identities differ")
+        expect(arena.semantic_rebuilds).to_equal(1)  # oracle: one content change, one rebuild
+        expect(engine2d_vulkan_resident_scene_identity(resident_rows()) == engine2d_vulkan_resident_scene_identity([99u64, 98u64])).to_be(false)
+
+    it "reuses the same fixed slots rather than growing the arena":
+        # @req REQ-GPU-SCHED-RESIDENT-001
+        step("Run more frames than the arena has slots")
+        var arena = engine2d_vulkan_resident_arena(7u64, 1u32, 8u32, 1u32)
+        var i = 0
+        while i < 5:
+            arena.frame(resident_rows(), resident_request(arena.arena_generation), true, ENGINE2D_VULKAN_CORE_CAPABILITIES)
+            i = i + 1
+        step("A single-slot arena still admitted every frame, because each frame released its slot")
+        expect(arena.frames_submitted).to_equal(5)  # oracle: five frames over one reused slot
+        expect(arena.store.slot_count).to_equal(1u32)  # oracle: constructor slot_count, never grown
+
+    it "refuses a frame whose row count exceeds the fixed slot capacity":
+        # @req REQ-GPU-SCHED-RESIDENT-001
+        step("Submit five rows into an arena whose slots hold two")
+        var arena = engine2d_vulkan_resident_arena(7u64, 1u32, 2u32, 1u32)
+        val outcome = arena.frame([1u64, 2u64, 3u64, 4u64, 5u64], resident_request(arena.arena_generation), true, ENGINE2D_VULKAN_CORE_CAPABILITIES)
+        step("Read the refusal and confirm nothing was counted as a frame")
+        expect(outcome.admitted).to_be(false)
+        expect(outcome.receipt.phase).to_equal(ENGINE2D_GPU_PHASE_REJECTED)
+        expect(outcome.receipt.device_execution_proven).to_be(false)
+        expect(arena.frames_submitted).to_equal(0)  # oracle: a refused frame is not a submission
+
+    it "refuses a request carrying an arena generation the arena never issued":
+        # @req REQ-GPU-SCHED-RESIDENT-002
+        step("Submit a well-formed scene under a stale arena generation")
+        var arena = resident_arena()
+        val outcome = arena.frame(resident_rows(), resident_request(arena.arena_generation + 5u64), true, ENGINE2D_VULKAN_CORE_CAPABILITIES)
+        step("The receipt must be a terminal rejection naming the stale generation")
+        expect(outcome.admitted).to_be(false)
+        expect(outcome.receipt.terminal).to_be(true)
+        expect(outcome.receipt.diagnostic).to_contain("stale arena generation")
+        expect(outcome.receipt.routing_evidence_only).to_be(true)
+
+    it "routes a frame through the free-function wrapper into the same fixed arena":
+        # @req REQ-GPU-SCHED-RESIDENT-001
+        step("Submit two frames through engine2d_vulkan_resident_frame rather than the method")
+        var arena = resident_arena()
+        val first = engine2d_vulkan_resident_frame(arena, resident_rows(), resident_request(arena.arena_generation), true, ENGINE2D_VULKAN_CORE_CAPABILITIES)
+        val second = engine2d_vulkan_resident_frame(arena, resident_rows(), resident_request(arena.arena_generation), true, ENGINE2D_VULKAN_CORE_CAPABILITIES)
+        step("Both frames were admitted and the wrapper mutated the caller's arena in place")
+        expect(first.admitted).to_be(true)
+        expect(second.admitted).to_be(true)
+        expect(arena.frames_submitted).to_equal(2)  # oracle: the wrapper keeps the arena's counters
+        expect(first.scene_identity).to_equal(engine2d_vulkan_resident_scene_identity(resident_rows()))
+        step("The wrapper carries the arena's refusal contract too, so it is not an admit-everything path")
+        val stale = engine2d_vulkan_resident_frame(arena, resident_rows(), resident_request(arena.arena_generation + 9u64), true, ENGINE2D_VULKAN_CORE_CAPABILITIES)
+        expect(stale.admitted).to_be(false)
+        expect(stale.receipt.phase).to_equal(ENGINE2D_GPU_PHASE_REJECTED)
+        expect(arena.frames_submitted).to_equal(2)  # oracle: a refused frame is still not a submission
+
+describe "Vulkan resident device evidence":
+    it "reports no device timestamp and refuses to qualify without a binary identity":
+        # @req REQ-GPU-SCHED-PROOF-001
+        step("Build evidence the way the slice does on a host with no binary identity supplied")
+        val evidence = Engine2dGpuDeviceEvidence(binary_identity: "", device_name: "Some GPU", device_type: "discrete", driver_identity: "driver 1.0", host_submit_ns: 10, host_complete_ns: 20, device_timestamp_available: false, device_begin_ticks: 0, device_end_ticks: 0, transfer_bytes: 32, negative_control_passed: true)
+        step("Read the qualification verdict")
+        expect(evidence.device_timestamp_available).to_be(false)
+        expect(engine2d_gpu_device_evidence_qualifies(evidence)).to_be(false)
+
+    it "refuses to qualify evidence whose negative control did not pass":
+        # @req REQ-GPU-SCHED-PROOF-001
+        step("Assemble otherwise complete evidence with a failed negative control")
+        val evidence = Engine2dGpuDeviceEvidence(binary_identity: "sha256:deadbeef", device_name: "Some GPU", device_type: "discrete", driver_identity: "driver 1.0", host_submit_ns: 10, host_complete_ns: 20, device_timestamp_available: false, device_begin_ticks: 0, device_end_ticks: 0, transfer_bytes: 32, negative_control_passed: false)
+        expect(engine2d_gpu_device_evidence_qualifies(evidence)).to_be(false)
+
+    it "flips device execution only at gpu_finished and only on qualifying evidence":
+        # @req REQ-GPU-SCHED-PROOF-001
+        step("Admit a frame through the arena and read its routing-only receipt")
+        var arena = resident_arena()
+        val queued = arena.frame(resident_rows(), resident_request(arena.arena_generation), true, ENGINE2D_VULKAN_CORE_CAPABILITIES).receipt
+        expect(queued.device_execution_proven).to_be(false)
+        step("Advance the same receipt to gpu_finished with qualifying evidence")
+        val evidence = Engine2dGpuDeviceEvidence(binary_identity: "sha256:deadbeef", device_name: "Some GPU", device_type: "discrete", driver_identity: "driver 1.0", host_submit_ns: 10, host_complete_ns: 20, device_timestamp_available: true, device_begin_ticks: 100, device_end_ticks: 200, transfer_bytes: 32, negative_control_passed: true)
+        val finished = engine2d_gpu_epoch_advance(queued, ENGINE2D_GPU_PHASE_GPU_FINISHED, evidence, engine2d_gpu_truth_none())
+        expect(finished.phase).to_equal(ENGINE2D_GPU_PHASE_GPU_FINISHED)
+        expect(finished.device_execution_proven).to_be(true)
+        expect(finished.routing_evidence_only).to_be(false)
+
+    it "reads the binary identity from the host environment and leaves it empty when unset":
+        # @req REQ-GPU-SCHED-PROOF-001
+        step("Set the documented identity key and read it back through the slice accessor")
+        expect(env_set(ENGINE2D_VULKAN_BINARY_IDENTITY_ENV, "sha256:resident-spec")).to_be(true)
+        expect(engine2d_vulkan_binary_identity()).to_equal("sha256:resident-spec")
+        step("Clear the key again; an unsupplied identity must read empty, never a placeholder")
+        expect(env_set(ENGINE2D_VULKAN_BINARY_IDENTITY_ENV, "")).to_be(true)
+        expect(engine2d_vulkan_binary_identity()).to_equal("")
+        step("Evidence built with no identity therefore cannot qualify")
+        val anonymous = engine2d_vulkan_device_evidence("Apple M4", "integrated", "MoltenVK 1.2", 10, 20, 4096, true)
+        expect(anonymous.binary_identity).to_equal("")
+        expect(engine2d_gpu_device_evidence_qualifies(anonymous)).to_be(false)
+
+    it "refuses to qualify slice evidence even when every host-side fact is present":
+        # @req REQ-GPU-SCHED-PROOF-001
+        step("Supply an identity and build evidence from real session-shaped fields with real transfer bytes")
+        expect(env_set(ENGINE2D_VULKAN_BINARY_IDENTITY_ENV, "sha256:resident-spec")).to_be(true)
+        val evidence = engine2d_vulkan_device_evidence("Apple M4", "integrated", "MoltenVK 1.2", 100, 200, 4096, true)
+        step("Every host-side field is populated, so only the device half can be blocking")
+        expect(evidence.binary_identity).to_equal("sha256:resident-spec")
+        expect(evidence.device_name).to_equal("Apple M4")
+        expect(evidence.transfer_bytes).to_equal(4096)  # oracle: caller-supplied bytes are passed through, not zeroed
+        expect(evidence.negative_control_passed).to_be(true)
+        step("The slice reports no device timestamp, so the evidence still does not qualify")
+        expect(evidence.device_timestamp_available).to_be(false)
+        expect(evidence.device_begin_ticks).to_equal(0)
+        expect(evidence.device_end_ticks).to_equal(0)
+        expect(engine2d_gpu_device_evidence_qualifies(evidence)).to_be(false)
+        expect(env_set(ENGINE2D_VULKAN_BINARY_IDENTITY_ENV, "")).to_be(true)
+
+    it "reports a device-less resident run as routing evidence only in the slice report shape":
+        # @req REQ-GPU-SCHED-VERIFY-001
+        step("Admit a frame, then advance it to gpu_finished with the evidence the slice can honestly build")
+        var arena = resident_arena()
+        val queued = arena.frame(resident_rows(), resident_request(arena.arena_generation), true, ENGINE2D_VULKAN_CORE_CAPABILITIES).receipt
+        val evidence = engine2d_vulkan_device_evidence("Apple M4", "integrated", "MoltenVK 1.2", 100, 200, 0, true)
+        val finished = engine2d_gpu_epoch_advance(queued, ENGINE2D_GPU_PHASE_GPU_FINISHED, evidence, engine2d_gpu_truth_none())
+        expect(finished.phase).to_equal(ENGINE2D_GPU_PHASE_GPU_FINISHED)
+        expect(finished.device_execution_proven).to_be(false)
+        expect(finished.routing_evidence_only).to_be(true)
+        step("Fill the published report from those computed facts and read what it claims")
+        val report = Engine2dVulkanResidentSliceReport(
+            frames_requested: 1,
+            frames_submitted: arena.frames_submitted,
+            semantic_rebuilds: arena.semantic_rebuilds,
+            readbacks: arena.readbacks,
+            session_initialised: true,
+            init_error: "",
+            device_name: evidence.device_name,
+            device_type: evidence.device_type,
+            driver_identity: evidence.driver_identity,
+            negative_control_passed: evidence.negative_control_passed,
+            evidence_qualifies: engine2d_gpu_device_evidence_qualifies(evidence),
+            device_execution_proven: finished.device_execution_proven,
+            last_phase: finished.phase,
+            submit_failures: 0,
+            host_submit_ns: evidence.host_submit_ns,
+            host_complete_ns: evidence.host_complete_ns,
+            summary: "frames={arena.frames_submitted}/1;readbacks={arena.readbacks}"
+        )
+        expect(report.evidence_qualifies).to_be(false)
+        expect(report.device_execution_proven).to_be(false)
+        expect(report.frames_submitted).to_equal(1)  # oracle: one admitted frame in this run
+        expect(report.readbacks).to_equal(0)  # oracle: the resident path copies nothing back
+        expect(report.host_complete_ns > report.host_submit_ns).to_be(true)
+        expect(report.summary).to_contain("readbacks=0")

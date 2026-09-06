@@ -75,3 +75,18 @@ this stays visible rather than being silently baselined away.
 
 Verified against CURRENT SOURCE (content, not SHA ancestry) during the crit_01
 CORE-P1 sweep. Fix present in current source. `src/compiler_rust/compiler/src/codegen/cranelift_emitter.rs:730-739` `emit_box_int` no longer emits an inline `val << 3` (which overflows 64 bits for any value >= 2^61); it calls `rt_value_int`, under a comment naming "int61 truncation (DEFECT A, 2026-08-09)". The runtime half is implemented at `src/compiler_rust/runtime/src/value/core.rs:272`: `if Self::fits_inline_int(i) { Self((i as u64) << 3) } else { <heap box> }` -- bit-identical for what fits inline, heap-boxed for what does not. ROOT CAUSE COLLAPSE: this single unguarded 61-bit box is also the root of interp_me_method_first_param_times8_conditional_2026-06-29 (its "x8" IS this shift).
+
+## Re-probed 2026-09-06 — NOT REPRODUCIBLE
+
+Binary probed: `bin/release/aarch64-unknown-linux-gnu/simple` (Rust seed,
+aarch64). Both engines exercised: `SIMPLE_EXECUTION_MODE=interpret` (tree-walk)
+and `env -u SIMPLE_EXECUTION_MODE` (default Cranelift JIT). Probe sources are
+listed with each entry; they were run on both lanes and compared.
+
+p60, p62 and `i64::MAX` all materialize exactly, on both lanes:
+
+```
+P60=1152921504606846976  P62=4611686018427387904  MAXDEC=9223372036854775807
+```
+
+(identical on interpret and jit). Probe `_scratch/p_int.spl`.

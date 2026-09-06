@@ -9,9 +9,8 @@
 use app.ui.tui.screen.{Screen}
 use app.ui.render.ansi.{BOLD, CYAN, DIM, RESET}
 
-## Compatibility and limitations
-Executed on the interpreter test lane; asserts observable values only and makes no performance claims.
-"""
+# ## Compatibility and limitations
+# Executed on the interpreter test lane; asserts observable values only and makes no performance claims.
 
 # @req: REQ-APP-APP_TOOL-001 — stable requirement identity for this spec.
 # doc-path: doc/01_research/local/app_tool_behavior.md
@@ -23,6 +22,103 @@ Executed on the interpreter test lane; asserts observable values only and makes 
 use std.spec
 use std.io.{env_get, process_run}
 use std.spec.step
+
+# =========================================================================
+# Helpers — column-level style inspection
+# =========================================================================
+
+fn _to_chars(s: text) -> [text]:
+    if s == "":
+        return []
+    val parts = s.split("")
+    var result: [text] = []
+    for p in parts:
+        if p != "":
+            result = result + [p]
+    return result
+
+fn style_at_col(line: text, col: i32) -> text:
+    """Return the ANSI style escape active at visual column `col`.
+
+    Walks the line character-by-character, tracking escape state.
+    Returns the last style-setting escape seen before column `col`,
+    or "" if unstyled.  A RESET clears the tracked style.
+    """
+    val chars = _to_chars(line)
+    var style = ""
+    var vis = 0
+    var in_esc = false
+    var pending = ""
+    for ch in chars:
+        if ch == "\u{001b}":
+            in_esc = true
+            pending = "{pending}{ch}"
+        elif in_esc:
+            pending = "{pending}{ch}"
+            if "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz".contains(ch):
+                in_esc = false
+                if pending.contains("\u{001b}[0m") or pending.contains("\u{001b}[m"):
+                    style = ""
+                else:
+                    style = pending
+                pending = ""
+        else:
+            if vis == col:
+                return style
+            vis = vis + 1
+    return style
+
+fn char_at_col(line: text, col: i32) -> text:
+    """Return the visible character at visual column `col`."""
+    val chars = _to_chars(line)
+    var vis = 0
+    var in_esc = false
+    for ch in chars:
+        if ch == "\u{001b}":
+            in_esc = true
+        elif in_esc:
+            if "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz".contains(ch):
+                in_esc = false
+        else:
+            if vis == col:
+                return ch
+            vis = vis + 1
+    return ""
+
+fn visible_width(s: text) -> i32:
+    var w = 0
+    var in_esc = false
+    val parts = s.split("")
+    for ch in parts:
+        if ch == "":
+            pass_dn
+        elif ch == "\u{001b}":
+            in_esc = true
+        elif in_esc:
+            if "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz".contains(ch):
+                in_esc = false
+        else:
+            w = w + 1
+    w
+
+fn ends_with_reset(s: text) -> bool:
+    """Check that the line ends with a RESET escape (possibly with
+    trailing whitespace) so style does not leak to the next row."""
+    # Find the last ESC[0m — everything after it must be spaces or empty
+    val marker = "\u{001b}[0m"
+    if not s.contains(marker):
+        return false
+    val parts = s.split(marker)
+    val tail = parts[parts.len() - 1]
+    val tail_chars = _to_chars(tail)
+    for ch in tail_chars:
+        if ch != " " and ch != "":
+            return false
+    true
+
+# =========================================================================
+# Tests
+# =========================================================================
 
 describe "App tool execution behavior":
     it "a tool invocation passes arguments through to the child":

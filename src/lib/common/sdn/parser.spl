@@ -57,7 +57,7 @@ fn parse(source: text) -> Result<SdnValue, text>:
     # Block mapping: one or more "key: value" / "key = value" lines. Route on a
     # top-level separator so collection entries like `items = [1, 2, 3]` (which
     # contain no top-level `:`) are still parsed as a mapping, not a bare string.
-    if _sdn_top_sep(trimmed) >= 0:
+    if _sdn_top_sep(trimmed) >= 0 or _sdn_has_named_table(trimmed):
         return _sdn_parse_mapping(trimmed)
     # Integer
     if _looks_like_int(trimmed):
@@ -216,8 +216,26 @@ fn _sdn_parse_block(lines: [text], start: i64, indent: i64) -> Result<(SdnValue,
             else:
                 val t = line.trim()
                 val ci = _sdn_top_sep(t)
-                if ci < 0:
+                if t.starts_with("#"):
+                    # A `#` line is a comment. Without this it fell through to
+                    # the `key: value` branch below, so a commented line that
+                    # happened to carry a colon became a real dict key —
+                    # silent corruption rather than a parse error.
                     i = i + 1
+                elif ci < 0:
+                    # Named table: `name |h1, h2|` with rows indented deeper
+                    # than the header line. The anonymous top-level `|h1, h2|`
+                    # form was already supported; the NAMED form is what every
+                    # table SDN in this repo actually uses
+                    # (config/check/must_check_gates.sdn,
+                    # config/api/api_registry.sdn), and without it such a file
+                    # parses to a bare string with the table silently dropped.
+                    val tbl = _sdn_block_table(lines, i, ind, t)
+                    if tbl.2 == "":
+                        i = i + 1
+                    else:
+                        m[tbl.2] = tbl.0
+                        i = tbl.1
                 else:
                     val key = t.slice(0, ci).trim()
                     val valstr = t.slice(ci + 1, t.len()).trim()
@@ -520,6 +538,58 @@ fn _sdn_unescape(s: text) -> text:
     out
 
 # ---- table parsing ----
+
+# True when the document contains at least one `name |h1, h2|` header line.
+# A document made only of named tables carries no top-level `:` or `=`, so
+# without this it never reached the block parser and came back as one bare
+# string. Deliberately conservative: the name must be a single non-empty
+# token with no whitespace, so prose that merely contains a `|` is not
+# mistaken for a table.
+fn _sdn_has_named_table(source: text) -> bool:
+    for line in _sdn_split_lines(source):
+        val t = line.trim()
+        if t.len() >= 3 and not t.starts_with("#") and not t.starts_with("|"):
+            if t.slice(t.len() - 1, t.len()) == "|":
+                val bar = _sdn_index_of(t, "|")
+                if bar > 0:
+                    val name = t.slice(0, bar).trim()
+                    if name != "" and not name.contains(" "):
+                        return true
+    false
+
+# Recognise a NAMED table inside a block mapping: a line `name |h1, h2|`
+# whose rows are the following lines indented deeper than the header, ending
+# at the first blank line or the first line not indented deeper.
+#
+# Returns `(table, next_index, name)`. A `name` of "" means the line is not a
+# named-table header and the caller should fall through — the recogniser is
+# deliberately conservative, so a line that merely contains a `|` is left
+# alone.
+fn _sdn_block_table(lines: [text], start: i64, indent: i64, header: text) -> (SdnValue, i64, text):
+    val none_result = (SdnValue.Null, start, "")
+    val bar = _sdn_index_of(header, "|")
+    if bar <= 0:
+        return none_result
+    if header.slice(header.len() - 1, header.len()) != "|":
+        return none_result
+    val name = header.slice(0, bar).trim()
+    if name == "":
+        return none_result
+    var src = header.slice(bar, header.len())
+    var j = start + 1
+    var running = true
+    while running and j < lines.len():
+        if lines[j].trim() == "":
+            running = false
+        else:
+            if _sdn_indent(lines[j]) > indent:
+                src = src + "\n" + lines[j].trim()
+                j = j + 1
+            else:
+                running = false
+    match _sdn_parse_table(src):
+        case Ok(v): (v, j, name)
+        case Err(_): none_result
 
 # Parse a table: first line `|h1, h2|`, each following non-empty line is a
 # comma-separated row of scalar values.

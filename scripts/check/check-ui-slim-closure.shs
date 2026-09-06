@@ -1,0 +1,443 @@
+#!/bin/sh
+# check-ui-slim-closure.shs — fail-closed gate: an entry's import closure
+# must exclude a list of forbidden path prefixes.
+#
+# Context: doc/03_plan/ui/slim_kernel_plugin/plan.md (Wave 0, package A01) and
+# doc/02_requirements/nfr/ui_slim_kernel_plugin.md (NFR-UI-SLIM-002). The slim
+# TUI/GUI kernel/plugin work needs proof that a "slim" entry point (e.g. the
+# TUI route adapter) does not transitively pull in heavy or layering-violating
+# subsystems (compositor, kernel, drivers, skia, gpu) in ordinary mode. This
+# gate is the mechanical proof: it runs `deps fast` on the entry, extracts the
+# real file paths from its closure listing, and fails if any of them starts
+# with a forbidden prefix.
+#
+# Shape and verdict convention follow the two existing fail-closed gates:
+#   scripts/check/check-no-direct-rt.shs
+#   scripts/check/check-pure-simple-lint-runnable.shs
+# and .claude/rules/vcs.md "Pre-push guards" verdict table.
+#
+# Verdict is ALWAYS the LAST stdout line:
+#   PASS  — <n> file(s) in closure, 0 forbidden                      exit 0
+#   FAIL  — <n> file(s) in closure, <k> forbidden: <paths>           exit 1
+#   ERROR — nothing was checked (<reason>)                           exit 2
+#
+# Usage:
+#   sh scripts/check/check-ui-slim-closure.shs [--seed PATH] ENTRY.spl FORBIDDEN_PREFIX...
+#   sh scripts/check/check-ui-slim-closure.shs --selftest
+#
+# POSIX sh only. Must run on macOS BSD tools and Linux: no `awk -v`, no
+# `grep -P`, no `readlink -f`. Portable equivalents are used throughout.
+
+set -u
+
+SEED="${SIMPLE_SEED:-src/compiler_rust/target/bootstrap/simple}"
+SELFTEST=0
+ARGS=""
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --seed) SEED="$2"; shift 2 ;;
+        --selftest) SELFTEST=1; shift ;;
+        --) shift; break ;;
+        *) ARGS="$ARGS $1"; shift ;;
+    esac
+done
+# Any remaining args (after a literal --) are positional too.
+for a in "$@"; do
+    ARGS="$ARGS $a"
+done
+
+# Portable repo-root resolution (no readlink -f).
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)
+cd "$ROOT" || { echo "ERROR — nothing was checked (cannot cd to repo root)"; exit 2; }
+
+# ---- unresolved-import-edge detection ----
+# find_unresolved_imports BASE_ROOT ENTRY CLOSURE_PATHS
+# Parses ENTRY's own top-level `use A.B.C...` lines (ignoring lines inside a
+# """ docstring and anything after a `#` comment), strips `.{...}` / `.*` /
+# `as X` / `(...)` suffixes to get the dotted module path, computes the
+# on-disk candidate file(s) for it (mapping `std.X` -> src/lib/X, `lib.X` ->
+# src/lib/X, and any other bare-rooted path to both src/<path> and
+# src/lib/<path>, each as `.spl` or `/__init__.spl`), and reports (comma
+# separated) every module that has an on-disk candidate under BASE_ROOT but
+# does NOT appear anywhere in CLOSURE_PATHS. Honors $IMPORT_ENTRY_OVERRIDE
+# (selftest only) to read imports from a path other than ENTRY itself, since
+# selftest entries are fake closure-token labels, not real files.
+find_unresolved_imports() {
+    fu_base="$1"
+    fu_entry="$2"
+    fu_paths="$3"
+
+    if [ -n "${IMPORT_ENTRY_OVERRIDE:-}" ]; then
+        fu_entry_path="$IMPORT_ENTRY_OVERRIDE"
+    else
+        fu_entry_path="$fu_entry"
+    fi
+
+    [ -f "$fu_entry_path" ] || { printf '%s' ""; return; }
+
+    fu_modules=$(awk '
+        BEGIN { indoc = 0 }
+        {
+            raw = $0
+            cnt = gsub(/"""/, "\"\"\"", raw)
+            if (indoc) {
+                if (cnt % 2 == 1) indoc = 0
+                next
+            }
+            if (cnt % 2 == 1) { indoc = 1; next }
+            line = $0
+            hashpos = index(line, "#")
+            if (hashpos > 0) line = substr(line, 1, hashpos - 1)
+            gsub(/^[[:space:]]+/, "", line)
+            gsub(/[[:space:]]+$/, "", line)
+            if (substr(line, 1, 4) == "use ") print line
+        }
+    ' "$fu_entry_path" | sed \
+        -e 's/^use //' \
+        -e 's/\.{.*//' \
+        -e 's/\.\*.*//' \
+        -e 's/ as .*//' \
+        -e 's/ (.*//' \
+        -e 's/[[:space:]]*$//')
+
+    fu_unresolved=""
+    for mod in $fu_modules; do
+        [ -n "$mod" ] || continue
+        fu_slash=$(printf '%s' "$mod" | sed 's/\./\//g')
+        case "$mod" in
+            std.*|lib.*)
+                fu_rest=$(printf '%s' "$mod" | sed -e 's/^std\.//' -e 's/^lib\.//' -e 's/\./\//g')
+                fu_cands="src/lib/$fu_rest.spl src/lib/$fu_rest/__init__.spl"
+                ;;
+            *)
+                fu_cands="src/$fu_slash.spl src/$fu_slash/__init__.spl src/lib/$fu_slash.spl src/lib/$fu_slash/__init__.spl"
+                ;;
+        esac
+
+        fu_any_exists=0
+        fu_any_in_closure=0
+        for c in $fu_cands; do
+            if [ -e "$fu_base/$c" ]; then
+                fu_any_exists=1
+                for p in $fu_paths; do
+                    if [ "$p" = "$c" ]; then
+                        fu_any_in_closure=1
+                    fi
+                done
+            fi
+        done
+
+        if [ "$fu_any_exists" -eq 1 ] && [ "$fu_any_in_closure" -eq 0 ]; then
+            if [ -z "$fu_unresolved" ]; then
+                fu_unresolved="$mod"
+            else
+                fu_unresolved="$fu_unresolved, $mod"
+            fi
+        fi
+    done
+
+    printf '%s' "$fu_unresolved"
+}
+
+# ---- core scan logic, reusable by --selftest and the real run ----
+# run_closure_scan SEED_PATH ENTRY FORBIDDEN...
+# Prints the verdict line to stdout and returns 0 (PASS), 1 (FAIL), 2 (ERROR).
+run_closure_scan() {
+    scan_seed="$1"; shift
+    scan_entry="$1"; shift
+    # remaining "$@" are forbidden prefixes
+
+    if [ -z "$scan_seed" ] || [ ! -x "$scan_seed" ]; then
+        echo "ERROR — nothing was checked (no executable seed at '$scan_seed')"
+        return 2
+    fi
+    if [ -z "$scan_entry" ]; then
+        echo "ERROR — nothing was checked (no entry file given)"
+        return 2
+    fi
+
+    scan_out=$("$scan_seed" deps fast "$scan_entry" 2>/dev/null)
+    scan_rc=$?
+    if [ "$scan_rc" -ne 0 ]; then
+        echo "ERROR — nothing was checked (deps fast exited $scan_rc for '$scan_entry')"
+        return 2
+    fi
+
+    # Extract every whitespace-separated token that literally starts with
+    # "src/", from every line, deduped and sorted. This picks up direct
+    # imports, transitive files, the entry-file echoed in the header, and
+    # each hop of a cycle chain (a -> b -> c), without depending on leading
+    # indentation or trailing "(N transitive files)" suffixes.
+    scan_paths=$(printf '%s\n' "$scan_out" | awk '
+        {
+            for (i = 1; i <= NF; i++) {
+                if (substr($i, 1, 4) == "src/") print $i
+            }
+        }
+    ' | sort -u)
+
+    if [ -z "$scan_paths" ]; then
+        echo "ERROR — nothing was checked (0 src/ paths extracted from deps fast output)"
+        return 2
+    fi
+
+    scan_n=$(printf '%s\n' "$scan_paths" | grep -c .)
+
+    scan_entry_found=0
+    for p in $scan_paths; do
+        if [ "$p" = "$scan_entry" ]; then
+            scan_entry_found=1
+            break
+        fi
+    done
+    if [ "$scan_entry_found" -eq 0 ]; then
+        echo "ERROR — nothing was checked (entry '$scan_entry' does not appear in its own closure)"
+        return 2
+    fi
+
+    scan_import_base="${IMPORT_BASE_ROOT:-$ROOT}"
+    scan_unresolved=$(find_unresolved_imports "$scan_import_base" "$scan_entry" "$scan_paths")
+    if [ -n "$scan_unresolved" ]; then
+        echo "ERROR — nothing was checked (unresolved import edge(s) in $scan_entry: $scan_unresolved)"
+        return 2
+    fi
+
+    scan_forbidden_list=""
+    scan_k=0
+    for p in $scan_paths; do
+        for prefix in "$@"; do
+            case "$p" in
+                "$prefix"*)
+                    scan_k=$((scan_k + 1))
+                    if [ -z "$scan_forbidden_list" ]; then
+                        scan_forbidden_list="$p"
+                    else
+                        scan_forbidden_list="$scan_forbidden_list, $p"
+                    fi
+                    break
+                    ;;
+            esac
+        done
+    done
+
+    if [ "$scan_k" -gt 0 ]; then
+        echo "FAIL — $scan_n file(s) in closure, $scan_k forbidden: $scan_forbidden_list"
+        return 1
+    fi
+
+    echo "PASS — $scan_n file(s) in closure, 0 forbidden"
+    return 0
+}
+
+# ---- selftest ----
+if [ "$SELFTEST" -eq 1 ]; then
+    ST_DIR=$(mktemp -d "${TMPDIR:-/tmp}/ui-slim-closure-selftest.XXXXXX") || {
+        echo "ERROR — nothing was checked (mktemp failed)"
+        exit 2
+    }
+    trap 'rm -rf "$ST_DIR"' EXIT
+
+    st_pass=0
+    st_total=7
+
+    # Fixture 1: clean closure (entry present, no forbidden path) -> PASS
+    ST_SEED_CLEAN="$ST_DIR/seed_clean.sh"
+    cat > "$ST_SEED_CLEAN" <<'EOF'
+#!/bin/sh
+cat <<'OUT'
+=== deps fast: src/entry.spl ===
+Direct imports: 1
+
+  src/util.spl  (2 transitive files)
+    src/entry.spl
+    src/util.spl
+
+=== CYCLES ===
+  none
+OUT
+exit 0
+EOF
+    chmod +x "$ST_SEED_CLEAN"
+    st_out1=$(run_closure_scan "$ST_SEED_CLEAN" "src/entry.spl" "src/forbidden")
+    st_rc1=$?
+    case "$st_out1" in
+        "PASS — "*) [ "$st_rc1" -eq 0 ] && st_pass=$((st_pass + 1)) ;;
+    esac
+    [ "$st_rc1" -eq 0 ] || echo "selftest fixture 1 (clean -> PASS) FAILED: rc=$st_rc1 out=$st_out1"
+
+    # Fixture 2: one forbidden path -> FAIL naming it
+    ST_SEED_FORBIDDEN="$ST_DIR/seed_forbidden.sh"
+    cat > "$ST_SEED_FORBIDDEN" <<'EOF'
+#!/bin/sh
+cat <<'OUT'
+=== deps fast: src/entry.spl ===
+Direct imports: 2
+
+  src/util.spl  (1 transitive files)
+    src/util.spl
+  src/forbidden/bad.spl  (1 transitive files)
+    src/forbidden/bad.spl
+
+=== CYCLES ===
+  none
+OUT
+exit 0
+EOF
+    chmod +x "$ST_SEED_FORBIDDEN"
+    st_out2=$(run_closure_scan "$ST_SEED_FORBIDDEN" "src/entry.spl" "src/forbidden")
+    st_rc2=$?
+    case "$st_out2" in
+        "FAIL — "*"src/forbidden/bad.spl"*) [ "$st_rc2" -eq 1 ] && st_pass=$((st_pass + 1)) ;;
+    esac
+    [ "$st_rc2" -eq 1 ] || echo "selftest fixture 2 (forbidden -> FAIL) FAILED: rc=$st_rc2 out=$st_out2"
+
+    # Fixture 3: empty output -> ERROR
+    ST_SEED_EMPTY="$ST_DIR/seed_empty.sh"
+    cat > "$ST_SEED_EMPTY" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+    chmod +x "$ST_SEED_EMPTY"
+    st_out3=$(run_closure_scan "$ST_SEED_EMPTY" "src/entry.spl" "src/forbidden")
+    st_rc3=$?
+    case "$st_out3" in
+        "ERROR — "*) [ "$st_rc3" -eq 2 ] && st_pass=$((st_pass + 1)) ;;
+    esac
+    [ "$st_rc3" -eq 2 ] || echo "selftest fixture 3 (empty -> ERROR) FAILED: rc=$st_rc3 out=$st_out3"
+
+    # Fixture 4: fake seed exits 3 -> ERROR
+    ST_SEED_EXIT3="$ST_DIR/seed_exit3.sh"
+    cat > "$ST_SEED_EXIT3" <<'EOF'
+#!/bin/sh
+echo "some output"
+exit 3
+EOF
+    chmod +x "$ST_SEED_EXIT3"
+    st_out4=$(run_closure_scan "$ST_SEED_EXIT3" "src/entry.spl" "src/forbidden")
+    st_rc4=$?
+    case "$st_out4" in
+        "ERROR — "*) [ "$st_rc4" -eq 2 ] && st_pass=$((st_pass + 1)) ;;
+    esac
+    [ "$st_rc4" -eq 2 ] || echo "selftest fixture 4 (seed exit 3 -> ERROR) FAILED: rc=$st_rc4 out=$st_out4"
+
+    # Fixture 5: missing seed -> ERROR
+    ST_SEED_MISSING="$ST_DIR/does_not_exist.sh"
+    st_out5=$(run_closure_scan "$ST_SEED_MISSING" "src/entry.spl" "src/forbidden")
+    st_rc5=$?
+    case "$st_out5" in
+        "ERROR — "*) [ "$st_rc5" -eq 2 ] && st_pass=$((st_pass + 1)) ;;
+    esac
+    [ "$st_rc5" -eq 2 ] || echo "selftest fixture 5 (missing seed -> ERROR) FAILED: rc=$st_rc5 out=$st_out5"
+
+    # Fixture 6: entry's bare-rooted import has an on-disk candidate that the
+    # fake seed's closure omits entirely -> ERROR naming the module. This
+    # replays doc/08_tracking/bug/deps_fast_ignores_bare_tier_rooted_imports_2026-09-05.md.
+    ST_F6="$ST_DIR/f6"
+    mkdir -p "$ST_F6/src/lib/common/ui"
+    : > "$ST_F6/src/lib/common/ui/key_code.spl"
+    cat > "$ST_F6/entry.spl" <<'EOF'
+use common.ui.key_code.{KeyCode}
+
+fn main():
+    pass
+EOF
+    ST_SEED_BLIND="$ST_DIR/seed_blind.sh"
+    cat > "$ST_SEED_BLIND" <<'EOF'
+#!/bin/sh
+cat <<'OUT'
+=== deps fast: src/entry.spl ===
+Direct imports: 0
+
+  src/entry.spl
+
+=== CYCLES ===
+  none
+OUT
+exit 0
+EOF
+    chmod +x "$ST_SEED_BLIND"
+    IMPORT_BASE_ROOT="$ST_F6"
+    IMPORT_ENTRY_OVERRIDE="$ST_F6/entry.spl"
+    export IMPORT_BASE_ROOT IMPORT_ENTRY_OVERRIDE
+    st_out6=$(run_closure_scan "$ST_SEED_BLIND" "src/entry.spl" "src/forbidden")
+    st_rc6=$?
+    unset IMPORT_BASE_ROOT IMPORT_ENTRY_OVERRIDE
+    case "$st_out6" in
+        "ERROR — "*"unresolved import edge"*"common.ui.key_code"*) [ "$st_rc6" -eq 2 ] && st_pass=$((st_pass + 1)) ;;
+    esac
+    [ "$st_rc6" -eq 2 ] || echo "selftest fixture 6 (unresolved bare import -> ERROR) FAILED: rc=$st_rc6 out=$st_out6"
+
+    # Fixture 7: entry's bare-rooted import IS present in the fake closure ->
+    # PASS (proves the new check doesn't false-positive on a resolved edge).
+    ST_F7="$ST_DIR/f7"
+    mkdir -p "$ST_F7/src/lib/common/ui"
+    : > "$ST_F7/src/lib/common/ui/key_code.spl"
+    cat > "$ST_F7/entry.spl" <<'EOF'
+use common.ui.key_code.{KeyCode}
+
+fn main():
+    pass
+EOF
+    ST_SEED_COMPLETE="$ST_DIR/seed_complete.sh"
+    cat > "$ST_SEED_COMPLETE" <<'EOF'
+#!/bin/sh
+cat <<'OUT'
+=== deps fast: src/entry.spl ===
+Direct imports: 1
+
+  src/lib/common/ui/key_code.spl  (1 transitive files)
+    src/lib/common/ui/key_code.spl
+  src/entry.spl
+OUT
+exit 0
+EOF
+    chmod +x "$ST_SEED_COMPLETE"
+    IMPORT_BASE_ROOT="$ST_F7"
+    IMPORT_ENTRY_OVERRIDE="$ST_F7/entry.spl"
+    export IMPORT_BASE_ROOT IMPORT_ENTRY_OVERRIDE
+    st_out7=$(run_closure_scan "$ST_SEED_COMPLETE" "src/entry.spl" "src/forbidden")
+    st_rc7=$?
+    unset IMPORT_BASE_ROOT IMPORT_ENTRY_OVERRIDE
+    case "$st_out7" in
+        "PASS — "*) [ "$st_rc7" -eq 0 ] && st_pass=$((st_pass + 1)) ;;
+    esac
+    [ "$st_rc7" -eq 0 ] || echo "selftest fixture 7 (resolved bare import -> PASS) FAILED: rc=$st_rc7 out=$st_out7"
+
+    rm -rf "$ST_DIR"
+    trap - EXIT
+
+    if [ "$st_pass" -ne "$st_total" ]; then
+        echo "ERROR — nothing was checked (selftest: $st_pass/$st_total passed)"
+        exit 2
+    fi
+    echo "selftest: $st_pass/$st_total passed"
+fi
+
+# ---- real run ----
+# ARGS holds ENTRY followed by FORBIDDEN_PREFIX...; if --selftest was the
+# only thing given, there is nothing further to check.
+# shellcheck disable=SC2086
+set -- $ARGS
+if [ "$#" -eq 0 ]; then
+    if [ "$SELFTEST" -eq 1 ]; then
+        exit 0
+    fi
+    echo "ERROR — nothing was checked (no ENTRY.spl given)"
+    exit 2
+fi
+
+ENTRY="$1"; shift
+if [ "$#" -eq 0 ]; then
+    echo "ERROR — nothing was checked (no FORBIDDEN_PREFIX given)"
+    exit 2
+fi
+
+if [ ! -x "$SEED" ]; then
+    echo "ERROR — nothing was checked (no executable seed at '$SEED')"
+    exit 2
+fi
+
+run_closure_scan "$SEED" "$ENTRY" "$@"
+exit $?
