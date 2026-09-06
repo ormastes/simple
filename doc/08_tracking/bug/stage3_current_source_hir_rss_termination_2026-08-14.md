@@ -865,3 +865,93 @@ Parse phase, linear and shallow:
 | 313 | 4,076,252 | 702.7 | 2.25 |
 | 364 | 4,179,828 | 803.8 | 2.21 |
 
+
+### 6. AMENDMENT — the same measurement on `runtime_native.c` itself (the Stage-3 runtime), plus three corrections to §1-§5
+
+**Correction A (runtime identity).** §1 and §2 ran on `bin/simple`, which is the
+Rust seed and therefore links the **Rust twin** of the runtime
+(`rt_transient_array_scope_begin` is defined at
+`src/compiler_rust/runtime/src/value/collections.rs:1786`), not the
+`core-c-bootstrap` `runtime_native.c` that Stage 3 links. Every file:line in §3
+and §4 is `runtime_native.c`. That gap is now **closed by direct measurement**
+rather than by assuming the twins agree.
+
+A 33-line C fixture declares only the three symbols it uses
+(`rt_alloc`, `rt_transient_array_scope_begin`, `rt_transient_array_scope_end`),
+allocates `rt_alloc(32)` in batches of 4,000 and writes 4 words into each block,
+optionally bracketing each batch with begin/end. It is linked directly against
+`src/runtime/runtime_native.c` plus abort-on-call stubs for the 28 unrelated
+`spl_*` / `rt_process_*` / `rt_simd_*` symbols the translation unit references
+(none is on the allocation path; each aborts if reached):
+
+```bash
+~/dev/llvm/install/bin/clang -O2 -o probe main.c stubs.c \
+    src/runtime/runtime_native.c -lm -lpthread          # exit 0
+/usr/bin/time -v ./probe <N> <0|1>
+```
+
+| rt_alloc(32) calls | max RSS, no scope (KiB) | max RSS, scoped (KiB) |
+|---:|---:|---:|
+| 1,000,000 | 48,556 | **1,816** |
+| 4,000,000 | 189,016 | **1,816** |
+| 8,000,000 | 376,544 | **1,816** |
+| 16,000,000 | 751,416 | **1,816** |
+
+Unscoped marginal cost: `(751,416 - 48,556) KiB / 15,000,000 = ` **47.98
+B/alloc** — within 0.1% of the 48.03 B/alloc measured through the Simple/JIT
+lane in §1, so the two runtime twins agree. Scoped: **byte-identical 1,816 KiB
+at every N**, i.e. a slope of exactly zero over a 16x input range, and the
+reclaim is total rather than merely bounded.
+
+This is the Stage-3 runtime, measured, not inferred. §3's conclusion stands on
+`runtime_native.c` directly: no kind header, no `rt_object_new`, and no GEP
+shift are needed for an `rt_alloc` block to be reclaimed — the existing
+transient scope already reclaims 100% of them.
+
+**Correction B (§3 overstated "corrects").** §4 of 2026-08-17 already cited
+`rt_core_transient_raw_register`'s scope-gated behaviour. What this lane adds is
+not that the earlier reading missed registration, but a measurement showing the
+gate is the whole story: the fix is **narrowed** from object representation to
+**scope coverage**. Read §3 as narrowing §4, not as refuting it.
+
+**Correction C (§5 mis-described its own lane).** §5 called the seed-interpreted
+closure run a discriminator "without the no-GC native runtime underneath it".
+That is **false**. `grep -c 'falling back to interpreter'` over that run's log
+returns **1**, and the only module named is `src/app/cli/bootstrap_main.spl`
+itself — the entire compiler import closure, including `80.driver` and
+`20.hir`, is **JIT-compiled** and runs on the seed's runtime with `rt_alloc` and
+the transient-scope machinery live. So §5's parse-phase slope (2.2-2.7
+MiB/module over 775 sources) is not an interpreter control; it is a *near-repro*
+of Stage 3's execution model on a different runtime twin. Treat its slopes as
+indicative and its absolute RSS as not comparable to the Stage-3 figures.
+
+**What is still NOT located, stated plainly.** This lane measured the
+*mechanism* (an allocation outside a transient scope is unreclaimable, at 48
+B/block) and the *scope boundary* in the Stage-3 streaming driver
+(`lower_streaming_surface_source` only). It did **not** locate where the
+Restart-12 ~63 MiB/module actually lands. The candidates remain open and
+unranked: the promoted HIR graph itself, allocations made while the scope is
+*paused* (`rt_core_transient_raw_register` records those with the owned bit
+clear, so `rt_core_reclaim_transient_raw` skips them —
+`src/runtime/runtime_native.c:1512-1514`, `:1553`), the pre-HIR streaming
+**surface** phase, or the per-source loop body outside the scope. The loop-body
+allocations named in §4 are kilobytes per module by inspection and cannot by
+themselves be 63 MiB; §4 names them as *unreclaimable by construction*, not as
+the measured owner. This record has a history of confident owner claims that
+turned out to be small terms — this is not another one.
+
+**Smallest correct fix (proposed, NOT implemented, NOT measured).** Widen the
+per-source transient scope in
+`CompilerDriver.lower_and_check_streaming_surfaces_impl` from
+`lower_streaming_surface_source` alone
+(`src/compiler/80.driver/driver_hir_pipeline_lowering.spl:65-100`) to the whole
+loop-body iteration, promoting the small set of values that must outlive it
+(the `HirModule` is already promoted; the `CompileContext` diagnostics and
+poison markers are not). That is a `80.driver`-owned change, not a
+runtime-or-backend one, and is materially cheaper than §4's scoped fix. It must
+not be landed on this evidence alone: the correct next step is an instrumented
+canonical Stage-3 transaction that reports, per module, promoted bytes vs.
+reclaimed bytes vs. RSS delta — which is what would actually rank the four
+candidates above. That transaction cannot run in this worktree (no Stage 2, no
+Stage 3, and the sanctioned bootstrap was explicitly out of scope for this
+lane), so the row stays **OPEN**.
