@@ -33,6 +33,22 @@ on:
   push:
     branches: [main, integration/main, 'release/**']
 
+# Scheduled runs previously accumulated without bound. The only concurrency
+# control was job-level, keyed on `inputs.pull_request_number` -- which is EMPTY
+# for `schedule` events, so every scheduled run collided in one group with
+# `cancel-in-progress: false` and queued behind its predecessors. At */5 that is
+# 288 runs/day against a hosted-runner cap with zero self-hosted runners
+# registered, and this broker produces a REQUIRED check, so the workflow that
+# must run for any PR to merge was starving itself. Measured 2026-09-02: 19 of
+# the ~89 queued runs repo-wide were this one workflow.
+#
+# Collapse scheduled runs (only the newest is useful -- it re-evaluates current
+# state anyway) while leaving dispatch/PR runs strictly alone: those are
+# per-PR-keyed and must not cancel each other.
+concurrency:
+  group: review-admission-${{ github.event_name }}-${{ github.event.inputs.pull_request_number || github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'schedule' }}
+
 # Repository Actions defaults remain read-only. Only the protected environment
 # jobs below request checks:write. The generic Actions App is explicitly a
 # user-authorized trust boundary, not an independent security identity.
