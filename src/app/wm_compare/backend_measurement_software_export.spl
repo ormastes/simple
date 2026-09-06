@@ -5,7 +5,6 @@
 # not pay GPU probe/import costs before the render loop starts.
 
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{simple_web_layout_render_html_software_pixels, simple_web_layout_render_html_software_pixels_traced}
-use std.gc_async_mut.gpu.browser_engine.simple_web_html_engine2d_presenter.{simple_web_layout_render_html_pixels_at_scroll}
 use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_cpu.{simple_web_render_html_to_pixels_with_cpu_draw_ir_backend}
 use std.nogc_sync_mut.gpu.engine2d.simd_provider.{reset_simd_hits, simd_hit_counts}
 use std.nogc_sync_mut.gpu.engine2d.simd_native_rows.{engine2d_simd_native_hits, engine2d_simd_native_reset}
@@ -95,11 +94,6 @@ fn _sample_html(fixture_id: text) -> text:
         return "<html><body style='margin:0;background:#102030'></body></html>"
     "<html><head><title>GUI Perf</title><style>body{background:#102030;color:#f8fafc} .panel{padding:12px;border:1px solid #38bdf8}</style></head><body><main class='panel'><h1>Simple GUI Perf</h1><p>" + fixture_id + "</p><button>Render</button><section><h2>Text lane</h2><p>abcdefghijklmnopqrstuvwxyz 0123456789</p></section></main></body></html>"
 
-fn _input_sample_html(html: text) -> text:
-    # Keep the ordinary frame fixture byte-identical while making the input
-    # sample genuinely scrollable even at the 8K checkpoint.
-    html.replace("</body>", "<div style='height:20000px'></div></body>")
-
 fn _is_supported_software_backend(backend: text) -> bool:
     if backend == "software": return true
     if backend == "cpu": return true
@@ -158,9 +152,7 @@ fn _native_simd_executed_text(native_simd_hits: i64) -> text:
     _bool_text(native_simd_hits > 0)
 
 fn _software_sample_sdn(fixture_id: text, backend: text, supported_backend: bool, args: [text],
-                        warmup_count: i32, sample_count: i32, cold_start_us: i64,
-                        warm_start_us: i64, p50: i64, p95: i64,
-                        p95_input_to_paint_us: i64,
+                        warmup_count: i32, sample_count: i32, p50: i64, p95: i64,
                         checksum_value: i64, proof_count: i64, simd_provider_hits: i64,
                         native_simd_hits: i64) -> text:
     _software_sample_sdn_values(fixture_id, backend, supported_backend,
@@ -172,17 +164,14 @@ fn _software_sample_sdn(fixture_id: text, backend: text, supported_backend: bool
         _positive_or_one(_arg_i64(args, "--binary-size-bytes", 0)),
         _positive_or_one(_arg_i64(args, "--baseline-binary-size-bytes", 0)),
         _positive_or_one(_arg_i64(args, "--package-size-bytes", 0)),
-        warmup_count, sample_count, cold_start_us, warm_start_us, p50, p95,
-        p95_input_to_paint_us, checksum_value, proof_count, simd_provider_hits, native_simd_hits)
+        warmup_count, sample_count, p50, p95, checksum_value, proof_count, simd_provider_hits, native_simd_hits)
 
 fn _software_sample_sdn_values(fixture_id: text, backend: text, supported_backend: bool,
                                shell: text, command: text, host: text,
                                operation_family: text,
                                max_rss_kb: i64, binary_size_bytes: i64,
                                baseline_binary_size_bytes: i64, package_size_bytes: i64,
-                               warmup_count: i32, sample_count: i32, cold_start_us: i64,
-                               warm_start_us: i64, p50: i64, p95: i64,
-                               p95_input_to_paint_us: i64,
+                               warmup_count: i32, sample_count: i32, p50: i64, p95: i64,
                                checksum_value: i64, proof_count: i64, simd_provider_hits: i64,
                                native_simd_hits: i64) -> text:
     val backend_family = _backend_family(backend)
@@ -216,12 +205,11 @@ fn _software_sample_sdn_values(fixture_id: text, backend: text, supported_backen
         "host: \"" + _sdn_escape(host) + "\" " +
         "warmup_count: " + warmup_count.to_string() + " " +
         "sample_count: " + sample_count.to_string() + " " +
-        "cold_start_us: " + cold_start_us.to_string() + " " +
-        "warm_start_us: " + warm_start_us.to_string() + " " +
+        "cold_start_us: " + p50.to_string() + " " +
+        "warm_start_us: " + p50.to_string() + " " +
         "p50_frame_us: " + p50.to_string() + " " +
         "p95_frame_us: " + p95.to_string() + " " +
-        "p95_input_to_paint_us: " + p95_input_to_paint_us.to_string() + " " +
-        "input_to_paint_scope: \"scroll-state-to-present\" " +
+        "p95_input_to_paint_us: " + p95.to_string() + " " +
         "max_rss_kb: " + max_rss_kb.to_string() + " " +
         "binary_size_bytes: " + binary_size_bytes.to_string() + " " +
         "baseline_binary_size_bytes: " + baseline_binary_size_bytes.to_string() + " " +
@@ -272,7 +260,6 @@ pub fn software_only_render_loop_export_sdn(args: [text], clock: FrameClock? = n
     val backend = _arg_value(args, "--software-render-backend", "software")
     val fixture_id = _arg_value(args, "--fixture", "software-render-loop")
     val html = _sample_html(fixture_id)
-    val input_html = _input_sample_html(html)
     if _arg_enabled(args, "--trace-layout-stages"):
         val trace_start_us = ck.now_micros()
         val trace_pixels = simple_web_layout_render_html_software_pixels_traced(html, width, height)
@@ -290,23 +277,13 @@ pub fn software_only_render_loop_export_sdn(args: [text], clock: FrameClock? = n
             "gui_perf_benchmark_physical_pixels=" + width.to_string() + "x" + height.to_string() + "\n" +
             "gui_perf_benchmark_screen_size_reduced=false"
     val supported_backend = _is_supported_software_backend(backend)
-    var pixels: [u32] = []
-    var cold_start_us: i64 = 0
-    if supported_backend:
-        val cold_start = ck.now_micros()
-        pixels = _render_software_pixels(html, width, height, backend)
-        cold_start_us = _positive_elapsed_us(cold_start, ck)
     var warmup = 0
     if supported_backend:
         while warmup < warmup_count:
             _render_software_pixels(html, width, height, backend)
             warmup = warmup + 1
-    var warm_start_us: i64 = 0
-    if supported_backend:
-        val warm_start = ck.now_micros()
-        pixels = _render_software_pixels(html, width, height, backend)
-        warm_start_us = _positive_elapsed_us(warm_start, ck)
     var samples: [i64] = []
+    var pixels: [u32] = []
     var i = 0
     reset_simd_hits()
     engine2d_simd_native_reset()
@@ -322,22 +299,10 @@ pub fn software_only_render_loop_export_sdn(args: [text], clock: FrameClock? = n
     val sorted = _sort_i64(samples)
     val p50 = _percentile_nearest_rank(sorted, 50)
     val p95 = _percentile_nearest_rank(sorted, 95)
-    val frame_pixels = pixels
-    var input_samples: [i64] = []
-    var input_index = 0
-    if supported_backend:
-        while input_index < sample_count:
-            val input_start = ck.now_micros()
-            val scroll_y = if input_index % 2 == 0: 1 else: 0
-            pixels = simple_web_layout_render_html_pixels_at_scroll(input_html, width, height, backend, scroll_y)
-            input_samples.push(_positive_elapsed_us(input_start, ck))
-            input_index = input_index + 1
-    val p95_input_to_paint_us = _percentile_nearest_rank(_sort_i64(input_samples), 95)
-    val checksum_value = _checksum_u32_pixels(frame_pixels)
-    val proof_count = _nonzero_pixels(frame_pixels)
+    val checksum_value = _checksum_u32_pixels(pixels)
+    val proof_count = _nonzero_pixels(pixels)
     val samples_sdn = _software_sample_sdn(fixture_id, backend, supported_backend, args,
-        warmup_count, sample_count, cold_start_us, warm_start_us, p50, p95,
-        p95_input_to_paint_us, checksum_value, proof_count, simd_provider_hits, native_simd_hits)
+        warmup_count, sample_count, p50, p95, checksum_value, proof_count, simd_provider_hits, native_simd_hits)
     samples_sdn + "\n" +
         "gui_perf_benchmark_dpi=" + dpi.to_string() + "\n" +
         "gui_perf_benchmark_dpi_default=300\n" +
@@ -363,25 +328,14 @@ pub fn software_only_render_loop_export_values(backend: text, width: i32, height
     if dpi <= 0:
         dpi = 300
     val html = _sample_html(fixture_id)
-    val input_html = _input_sample_html(html)
     val supported_backend = _is_supported_software_backend(backend)
-    var pixels: [u32] = []
-    var cold_start_us: i64 = 0
-    if supported_backend:
-        val cold_start = ck.now_micros()
-        pixels = _render_software_pixels(html, width, height, backend)
-        cold_start_us = _positive_elapsed_us(cold_start, ck)
     var warmup = 0
     if supported_backend:
         while warmup < warmup_count:
             _render_software_pixels(html, width, height, backend)
             warmup = warmup + 1
-    var warm_start_us: i64 = 0
-    if supported_backend:
-        val warm_start = ck.now_micros()
-        pixels = _render_software_pixels(html, width, height, backend)
-        warm_start_us = _positive_elapsed_us(warm_start, ck)
     var samples: [i64] = []
+    var pixels: [u32] = []
     var i = 0
     reset_simd_hits()
     engine2d_simd_native_reset()
@@ -397,24 +351,12 @@ pub fn software_only_render_loop_export_values(backend: text, width: i32, height
     val sorted = _sort_i64(samples)
     val p50 = _percentile_nearest_rank(sorted, 50)
     val p95 = _percentile_nearest_rank(sorted, 95)
-    val frame_pixels = pixels
-    var input_samples: [i64] = []
-    var input_index = 0
-    if supported_backend:
-        while input_index < sample_count:
-            val input_start = ck.now_micros()
-            val scroll_y = if input_index % 2 == 0: 1 else: 0
-            pixels = simple_web_layout_render_html_pixels_at_scroll(input_html, width, height, backend, scroll_y)
-            input_samples.push(_positive_elapsed_us(input_start, ck))
-            input_index = input_index + 1
-    val p95_input_to_paint_us = _percentile_nearest_rank(_sort_i64(input_samples), 95)
-    val checksum_value = _checksum_u32_pixels(frame_pixels)
-    val proof_count = _nonzero_pixels(frame_pixels)
+    val checksum_value = _checksum_u32_pixels(pixels)
+    val proof_count = _nonzero_pixels(pixels)
     val samples_sdn = _software_sample_sdn_values(fixture_id, backend, supported_backend,
         shell, command, host, "text_blit", 1, _positive_or_one(binary_size_bytes),
         _positive_or_one(baseline_binary_size_bytes), _positive_or_one(package_size_bytes),
-        warmup_count, sample_count, cold_start_us, warm_start_us, p50, p95,
-        p95_input_to_paint_us, checksum_value, proof_count, simd_provider_hits, native_simd_hits)
+        warmup_count, sample_count, p50, p95, checksum_value, proof_count, simd_provider_hits, native_simd_hits)
     samples_sdn + "\n" +
         "gui_perf_benchmark_dpi=" + dpi.to_string() + "\n" +
         "gui_perf_benchmark_dpi_default=300\n" +

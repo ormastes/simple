@@ -3,17 +3,7 @@
 - **Filed:** 2026-08-17
 - **Severity:** P1 — a green guard will turn RED for a *good* reason, and will
   read as a regression to whoever sees it first
-- **Status:** RESOLVED 2026-09-02 — the owning lane re-based the control on
-  option 2 (a synthetic, defect-free control). Verified by reading
-  `test/01_unit/engine_divergence/check-engine-divergence-probes.shs` at
-  `origin/main` @ `1b76db1d6c3`: its header now documents
-  `mode_switch_control_probe` as the CONTROL — "references an unresolvable
-  external symbol. Only the Cranelift path emits `[jit-fallback]` for that, so
-  the two engines are distinguishable by construction and the control cannot
-  'expire' by someone fixing a bug" — and explicitly cites this record as the
-  reason. The old `boxed_int_61bit_probe` is still covered but is demoted in
-  the same header to "LEGACY CONTROL ... now advisory only". That is exactly
-  the fix this record asked for.
+- **Status:** OPEN — needs the owning lane (W5) to re-base its control
 
 ## The collision
 

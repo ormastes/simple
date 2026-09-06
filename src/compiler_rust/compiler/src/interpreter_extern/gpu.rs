@@ -542,8 +542,8 @@ use simple_runtime::metal_graphics_runtime::{
     rt_metal_draw_indexed, rt_metal_draw_primitives, rt_metal_end_compute_encoder, rt_metal_end_render_pass,
     rt_metal_free_buffer, rt_metal_free_texture, rt_metal_get_last_error, rt_metal_init, rt_metal_is_available,
     rt_metal_run_blit_frame, rt_metal_run_compute_frame, rt_metal_set_buffer, rt_metal_set_bytes, rt_metal_set_scissor,
-    rt_metal_set_viewport, rt_metal_present, rt_metal_wait_completed, rt_metal_buffer_upload_raw,
-    rt_metal_buffer_download_raw, rt_metal_set_bytes_raw,
+    rt_metal_set_viewport, rt_metal_present, rt_metal_wait_completed,
+    rt_metal_buffer_upload_raw, rt_metal_buffer_download_raw, rt_metal_set_bytes_raw,
 };
 
 pub(super) fn arg_i64(args: &[Value], index: usize, name: &str, expected: usize) -> Result<i64, CompileError> {
