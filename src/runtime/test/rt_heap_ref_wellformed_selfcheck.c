@@ -49,7 +49,7 @@ int main(void) {
 
     int64_t untagged = (int64_t)(uintptr_t)&anchor;
     check(rt_heap_ref_wellformed(untagged) == 1,
-        "raw untagged class reference is wellformed");
+        "raw untagged pointer (native-lane class reference) is wellformed");
 
     if (failures != 0) {
         printf("rt_heap_ref_wellformed_selfcheck: %d failure(s)\n", failures);
