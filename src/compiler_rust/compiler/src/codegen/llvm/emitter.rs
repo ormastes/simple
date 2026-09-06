@@ -1500,6 +1500,45 @@ impl CodegenEmitter for LlvmEmitter<'_> {
                 "to_u32" | "to_i32" => self.backend.context_ref().i32_type(),
                 _ => self.backend.context_ref().i64_type(),
             };
+            // `to_i64`/`to_int` on a value that is ALREADY i64-wide is a no-op
+            // coercion -- and in this ABI a `text` handle IS an i64, so the
+            // identity silently yielded the handle's own word instead of the
+            // parsed number. Measured 2026-09-07 on the aarch64 Stage 2
+            // candidate: `native_build_shard_threads` (src/app/cli/
+            // native_build_main.spl) compiled all three `args[i].to_i64() ?? 0`
+            // sites to NOTHING -- no int-parse call appears in its
+            // disassembly -- so `--threads 1` became the argv string's own
+            // pointer (163343233 / 219057025 across runs, tracking the heap),
+            // the memory clamp turned that into 79 shard workers for a
+            // single-unit build, and 78 of them lost the object publish race
+            // with `AOT object destination already exists`.
+            //
+            // The redirect table below (`builtin_method_redirect`) already maps
+            // `to_int`/`to_i64` -> `rt_string_to_int`, but this cast block
+            // matches FIRST and preempts it. Routing unconditionally to
+            // `rt_string_to_int` is NOT the fix either: it returns 0 for a
+            // non-string, which would silently zero every erased NUMERIC
+            // `.to_i64()`. Dispatch on the receiver at runtime instead --
+            // `rt_to_int_dynamic` parses a registry-validated heap string and
+            // is the IDENTITY for everything else, so the genuinely-i64 case
+            // is bit-for-bit unchanged. This mirrors the pure-Simple lowering
+            // fixed by PR #335 (src/compiler/50.mir/_MirLoweringExpr/
+            // method_calls_literals.spl, "dynamic to_i64 arm"); only the seed's
+            // LLVM arm was left behind, and the seed is what emits Stage 2.
+            // Narrower targets (to_u8/to_i8/.../to_u32/to_i32) genuinely change
+            // width and keep the coercion.
+            // doc/08_tracking/bug/windows_msvc_stage2_rejected_struct_receiver_route_threads_2026-09-01.md
+            if matches!(method, "to_i64" | "to_int") {
+                if let BasicValueEnum::IntValue(v) = recv {
+                    if v.get_type() == int_type {
+                        let dynamic = self.call_runtime("rt_to_int_dynamic", &[recv])?;
+                        if let Some(d) = dest {
+                            self.set(*d, dynamic);
+                        }
+                        return Ok(());
+                    }
+                }
+            }
             let value = match recv {
                 BasicValueEnum::IntValue(v) => {
                     if v.get_type() == int_type {

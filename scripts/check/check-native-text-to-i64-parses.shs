@@ -1,0 +1,222 @@
+#!/bin/sh
+# check-native-text-to-i64-parses.shs
+#
+# A natively compiled `simple` must PARSE a `text` when it evaluates
+# `.to_i64()`, not hand back the text handle's own machine word.
+#
+# INCIDENT (measured 2026-09-07, aarch64 Stage 2 candidate). The seed's LLVM
+# codegen matched `to_i64`/`to_int` inside an unconditional integer-cast block
+# (codegen/llvm/{emitter.rs,functions.rs}) and emitted a coercion to i64. In
+# this ABI a `text` handle IS an i64, so that coercion is the IDENTITY, and the
+# call evaluated to the receiver's pointer. `native_build_shard_threads`
+# (src/app/cli/native_build_main.spl) compiled all three of its
+# `args[i].to_i64() ?? 0` sites to NOTHING -- its disassembly contains no
+# int-parse call at all -- so `--threads 1` became a heap address
+# (163343233 / 219057025 / 1172458513 across runs, each tracking the process
+# heap). `shard_threads_mem_cap` then clamped that to 79 shard workers for a
+# ONE-unit build; the first worker published the object and the other 78 lost
+# the publish race with `AOT object destination already exists`, which the
+# driver reports as a failed unit. The whole bootstrap stopped there.
+#
+# WHY NO EXISTING GUARD CAUGHT IT. Every pre-push guard checks trees, ranges,
+# source text or symbol sets; `check-c-runtime-compiles-push.shs` runs a
+# compiler but over SOURCE, and `check-stage-binaries-runnable.shs` executes a
+# stage binary but only asserts it does not crash. A binary that runs to
+# completion and quietly reads one integer wrong passes all of them.
+#
+# WHAT THIS PROBE DOES. It reads a number the binary must have parsed from an
+# argument and from the environment, and requires both to come back EXACTLY.
+# `shard_mem_clamp.spl` prints
+#     [shard] threads=<cap> (requested <N>, capped by MemAvailable=<A> kB / worker budget <B> kB)
+# where <N> is `--threads` parsed by `args[i+1].to_i64() ?? 0` and <B> is
+# `SIMPLE_PARSE_SHARD_WORKER_KB` parsed by `raw.to_i64() ?? 0`. Two independent
+# `text.to_i64()` results on one line, both under our control.
+#
+# The probe passes `--threads 4` with an absurd per-worker budget so the clamp
+# is forced BELOW the request and the line is therefore printed at all (the
+# clamp prints only when `cap < requested`). That makes the probe non-vacuous:
+# a run that produced no `[shard]` line is ERROR, never a pass, because absence
+# of the line is absence of evidence -- it does not distinguish a fixed binary
+# from one that died before reaching the clamp.
+#
+# Pre-fix, measured on build/bootstrap/stage2 candidate `simple.rejected`:
+#   [shard] threads=1 (requested 1172458513, capped by MemAvailable=1172641633 kB / worker budget 1172592001 kB)
+# Both parsed numbers are garbage, and the three values sit within ~190 kB of
+# each other -- consecutive heap allocations, which is what identifies them as
+# pointers rather than as any plausible integer.
+#
+# The build itself is expected to be killed by the timeout: the clamp line is
+# printed before any real work, so the probe never waits for a compile.
+#
+# Verdict is the last line of stdout:
+#   PASS  — <n> value(s) checked, ...            exit 0
+#   FAIL  — ...                                  exit 1
+#   ERROR — nothing was checked (<reason>)       exit 2
+
+set -u
+
+REPO_ROOT=$(cd "$(dirname "$0")/../.." 2>/dev/null && pwd) || REPO_ROOT=""
+FIXTURE_REL="scripts/check/cert/redeploy_gate/fixtures/hello_world.spl"
+PROBE_THREADS=4
+PROBE_BUDGET_KB=100000000000
+PROBE_TIMEOUT=${PROBE_TIMEOUT:-90}
+
+binary=""
+selftest_only=0
+
+usage() {
+    echo "usage: $0 [--binary <path>] [--selftest]" >&2
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --binary) binary=${2:-}; shift 2 ;;
+        --binary=*) binary=${1#--binary=}; shift ;;
+        --selftest) selftest_only=1; shift ;;
+        -h|--help) usage; exit 0 ;;
+        *) echo "unknown argument: $1" >&2; usage; exit 2 ;;
+    esac
+done
+
+# ---------------------------------------------------------------------------
+# Verdict logic, factored out so --selftest can drive it from fixture logs
+# instead of from a real compiler. Echoes "OK", "BAD <detail>" or "NONE".
+# ---------------------------------------------------------------------------
+classify_log() {
+    _log=$1
+    _want_threads=$2
+    _want_budget=$3
+    _line=$(grep -m1 '^\[shard\] threads=' "$_log" 2>/dev/null)
+    if [ -z "$_line" ]; then
+        echo "NONE"
+        return
+    fi
+    _req=$(printf '%s\n' "$_line" | sed -n 's/.*(requested \([0-9-]*\),.*/\1/p')
+    _bud=$(printf '%s\n' "$_line" | sed -n 's/.*worker budget \([0-9-]*\) kB.*/\1/p')
+    if [ -z "$_req" ] || [ -z "$_bud" ]; then
+        echo "BAD unparseable clamp line: $_line"
+        return
+    fi
+    if [ "$_req" != "$_want_threads" ]; then
+        echo "BAD --threads $_want_threads parsed as $_req (text.to_i64() returned the handle, not the number): $_line"
+        return
+    fi
+    if [ "$_bud" != "$_want_budget" ]; then
+        echo "BAD SIMPLE_PARSE_SHARD_WORKER_KB=$_want_budget parsed as $_bud (text.to_i64() returned the handle, not the number): $_line"
+        return
+    fi
+    echo "OK"
+}
+
+# ---------------------------------------------------------------------------
+# Selftest — fatal, runs before any real scan.
+# ---------------------------------------------------------------------------
+run_selftest() {
+    _dir=$(mktemp -d) || { echo "ERROR — nothing was checked (mktemp failed)"; exit 2; }
+    _failures=0
+
+    # 1. A healthy line must classify OK.
+    printf '[shard] threads=1 (requested 4, capped by MemAvailable=219237329 kB / worker budget 100000000000 kB)\n' \
+        > "$_dir/good.log"
+    _v=$(classify_log "$_dir/good.log" 4 100000000000)
+    [ "$_v" = "OK" ] || { echo "selftest: healthy line misclassified: $_v" >&2; _failures=$((_failures + 1)); }
+
+    # 2. The real incident line must FAIL, and must name the bad request.
+    printf '[shard] threads=1 (requested 1172458513, capped by MemAvailable=1172641633 kB / worker budget 1172592001 kB)\n' \
+        > "$_dir/incident.log"
+    _v=$(classify_log "$_dir/incident.log" 4 100000000000)
+    case "$_v" in
+        "BAD "*1172458513*) : ;;
+        *) echo "selftest: incident line not caught: $_v" >&2; _failures=$((_failures + 1)) ;;
+    esac
+
+    # 3. A correct --threads but garbage env budget must still FAIL: one good
+    #    parse must not launder the other.
+    printf '[shard] threads=1 (requested 4, capped by MemAvailable=219237329 kB / worker budget 1172592001 kB)\n' \
+        > "$_dir/halfbad.log"
+    _v=$(classify_log "$_dir/halfbad.log" 4 100000000000)
+    case "$_v" in
+        "BAD "*WORKER_KB*) : ;;
+        *) echo "selftest: garbage env budget not caught: $_v" >&2; _failures=$((_failures + 1)) ;;
+    esac
+
+    # 4. No clamp line at all must be NONE, so the caller is forced to ERROR
+    #    rather than reporting a vacuous pass.
+    : > "$_dir/empty.log"
+    _v=$(classify_log "$_dir/empty.log" 4 100000000000)
+    [ "$_v" = "NONE" ] || { echo "selftest: empty log not treated as vacuous: $_v" >&2; _failures=$((_failures + 1)); }
+
+    # 5. A malformed clamp line must FAIL, not be silently skipped.
+    printf '[shard] threads=1 (requested , capped by MemAvailable=x kB / worker budget y kB)\n' \
+        > "$_dir/mangled.log"
+    _v=$(classify_log "$_dir/mangled.log" 4 100000000000)
+    case "$_v" in
+        "BAD "*) : ;;
+        *) echo "selftest: malformed line not caught: $_v" >&2; _failures=$((_failures + 1)) ;;
+    esac
+
+    rm -rf "$_dir"
+    if [ "$_failures" -ne 0 ]; then
+        echo "ERROR — nothing was checked (selftest failed: $_failures fixture(s))"
+        exit 2
+    fi
+}
+
+run_selftest
+if [ "$selftest_only" -eq 1 ]; then
+    echo "PASS — 5 selftest fixture(s) checked, 0 failures"
+    exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Real probe
+# ---------------------------------------------------------------------------
+if [ -z "$REPO_ROOT" ] || [ ! -f "$REPO_ROOT/$FIXTURE_REL" ]; then
+    echo "ERROR — nothing was checked (repo root or $FIXTURE_REL not found; run from a real clone)"
+    exit 2
+fi
+
+if [ -z "$binary" ]; then
+    for _cand in \
+        "$REPO_ROOT/bin/simple" \
+        "$REPO_ROOT/build/bootstrap/stage2/$(uname -m)-unknown-linux-gnu/simple"
+    do
+        if [ -x "$_cand" ]; then binary=$_cand; break; fi
+    done
+fi
+
+if [ -z "$binary" ] || [ ! -x "$binary" ]; then
+    echo "ERROR — nothing was checked (no executable simple binary; pass --binary <path>)"
+    exit 2
+fi
+
+work=$(mktemp -d) || { echo "ERROR — nothing was checked (mktemp failed)"; exit 2; }
+trap 'rm -rf "$work"' EXIT INT TERM
+
+(
+    cd "$REPO_ROOT" || exit 1
+    SIMPLE_PARSE_SHARD_WORKER_KB=$PROBE_BUDGET_KB \
+    timeout "$PROBE_TIMEOUT" "$binary" native-build \
+        --backend llvm --runtime-bundle core-c-bootstrap \
+        --entry-closure --mode one-binary \
+        --threads "$PROBE_THREADS" --cache-dir "$work/cache" \
+        "$FIXTURE_REL" --output "$work/probe.bin"
+) > "$work/probe.log" 2>&1
+# The build is expected to be cut short by the timeout; only the clamp line
+# matters, so the exit status is deliberately NOT read as the verdict.
+
+verdict=$(classify_log "$work/probe.log" "$PROBE_THREADS" "$PROBE_BUDGET_KB")
+case "$verdict" in
+    OK)
+        echo "PASS — 2 parsed value(s) checked in $binary, --threads $PROBE_THREADS and SIMPLE_PARSE_SHARD_WORKER_KB=$PROBE_BUDGET_KB both round-trip exactly"
+        exit 0
+        ;;
+    NONE)
+        echo "ERROR — nothing was checked (no '[shard] threads=' line from $binary within ${PROBE_TIMEOUT}s; the clamp never ran, so nothing was parsed)"
+        exit 2
+        ;;
+    *)
+        echo "FAIL — 2 parsed value(s) checked in $binary: ${verdict#BAD }"
+        exit 1
+        ;;
+esac
