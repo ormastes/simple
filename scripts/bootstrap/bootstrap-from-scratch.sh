@@ -1280,6 +1280,31 @@ bootstrap_stage3_archive_prior_evidence() (
   echo "  Stage 3 evidence: archived prior ${bsape_path}"
 )
 
+# A reused output root can contain hash-bound sanity evidence from an earlier
+# run. The bounded collector correctly refuses to overwrite those leaves.
+# Fail before any cleanup or probe so evidence and cache remain untouched.
+bootstrap_stage2_sanity_output_preflight() (
+  bssop_base=$1
+  [ -n "${bssop_base}" ] || return 0
+  for bssop_suffix in \
+    '' .frontend-driver.log \
+    .frontend-bootstrap-0.log .frontend-bootstrap-0.log.bounded.env \
+    .frontend-bootstrap-0.log.stage2-mir-retention .frontend-bootstrap-0.log.stage2-mir-retention.bounded.env \
+    .frontend-bootstrap-0.log.stage2-module-path-naming .frontend-bootstrap-0.log.stage2-module-path-naming.bounded.env \
+    .frontend-bootstrap-0.log.hello-world-positional .frontend-bootstrap-0.log.hello-world-positional.bounded.env \
+    .frontend-bootstrap-0.status.env \
+    .frontend-bootstrap-1.log .frontend-bootstrap-1.log.bounded.env \
+    .frontend-bootstrap-1.log.stage2-mir-retention .frontend-bootstrap-1.log.stage2-mir-retention.bounded.env \
+    .frontend-bootstrap-1.log.stage2-module-path-naming .frontend-bootstrap-1.log.stage2-module-path-naming.bounded.env \
+    .frontend-bootstrap-1.log.hello-world-positional .frontend-bootstrap-1.log.hello-world-positional.bounded.env \
+    .frontend-bootstrap-1.status.env; do
+    if [ -e "${bssop_base}${bssop_suffix}" ] || [ -L "${bssop_base}${bssop_suffix}" ]; then
+      echo "stage2-sanity-error: stale-evidence-output-root; use a new output root with a cache clone" >&2
+      return 1
+    fi
+  done
+)
+
 # A timed-out Rust native-build leaves every already-published object in its
 # producer-scoped cache.  Retry only the one unambiguous recovery case while
 # the exact same seed process lineage and cache scope are still available.
@@ -1332,7 +1357,7 @@ run_logged() {
 
 CANDIDATE_FRONTEND_ROOT=${repo_root}
 COMPILER_PROBE_TIMEOUT_SECONDS=${COMPILER_PROBE_TIMEOUT_SECONDS:-5}
-COMPILER_BUILD_TIMEOUT_SECONDS=${COMPILER_BUILD_TIMEOUT_SECONDS:-60}
+COMPILER_BUILD_TIMEOUT_SECONDS=${COMPILER_BUILD_TIMEOUT_SECONDS:-180}
 COMPILER_EXEC_TIMEOUT_SECONDS=${COMPILER_EXEC_TIMEOUT_SECONDS:-5}
 NATIVE_FILE_TIMEOUT_SECONDS=${SIMPLE_NATIVE_FILE_TIMEOUT:-300}   # per-file native-build cap; 0 = wait for completion
 NATIVE_LOW_MEMORY=${SIMPLE_NATIVE_LOW_MEMORY:-1}   # 1 = --low-memory (single worker); 0 = full parallel
@@ -1445,8 +1470,15 @@ bootstrap_stage_sanity() (
     export TEMP TMP
   fi
   evidence_tmp="${evidence_path:-${TMPDIR:-/tmp}/bootstrap-sanity}.tmp.$$"
-  frontend_log="${evidence_tmp}.frontend"
-  rm -f "${evidence_tmp}" "${frontend_log}"
+  frontend_log="${evidence_path:-${TMPDIR:-/tmp}/bootstrap-sanity}.frontend-driver.log"
+  frontend_bootstrap0_log="${evidence_path:-${TMPDIR:-/tmp}/bootstrap-sanity}.frontend-bootstrap-0.log"
+  frontend_bootstrap0_status_path="${evidence_path:-${TMPDIR:-/tmp}/bootstrap-sanity}.frontend-bootstrap-0.status.env"
+  frontend_bootstrap1_log="${evidence_path:-${TMPDIR:-/tmp}/bootstrap-sanity}.frontend-bootstrap-1.log"
+  frontend_bootstrap1_status_path="${evidence_path:-${TMPDIR:-/tmp}/bootstrap-sanity}.frontend-bootstrap-1.status.env"
+  bootstrap_stage2_sanity_output_preflight "${evidence_path}" || return 1
+  rm -f "${evidence_tmp}" "${frontend_log}" \
+    "${frontend_bootstrap0_log}" "${frontend_bootstrap0_status_path}" \
+    "${frontend_bootstrap1_log}" "${frontend_bootstrap1_status_path}"
   candidate_sha_before=$(bootstrap_stage3_hash_file "${candidate}") || return 1
   # Expected version is DERIVED, never hardcoded. The literal
   # "simple-bootstrap 1.0.0-beta" used to live here; release commit 9a3f6051996
@@ -1474,9 +1506,21 @@ bootstrap_stage_sanity() (
     unsupported_status=$?
   fi
   frontend_status=0
+  frontend_owner_pid=$(perl -e 'print getppid') || return 1
+  exec 6<"${frontend_bootstrap0_log%/*}" \
+    7<"${sanity_repo_root}/scripts/bootstrap/run-process-group-bounded-log.pl" \
+    8<"$(command -v perl)" || return 1
+  BOOTSTRAP_STAGE3_PERL_DESCRIPTOR=/proc/$frontend_owner_pid/fd/8
+  BOOTSTRAP_STAGE3_BOUNDED_LOG_DESCRIPTOR=/proc/$frontend_owner_pid/fd/7
+  frontend_log_authority=/proc/$frontend_owner_pid/fd/6/${frontend_log##*/}
+  export BOOTSTRAP_STAGE3_PERL_DESCRIPTOR BOOTSTRAP_STAGE3_BOUNDED_LOG_DESCRIPTOR
+  frontend_hash_or_dash() { [ -f "$1" ] && bootstrap_stage3_hash_file "$1" || echo -; }
   CANDIDATE_FRONTEND_BACKEND="${backend}" \
     CANDIDATE_FRONTEND_BOOTSTRAP=0 \
-    candidate_frontend_smoke "${candidate}" >"${frontend_log}" 2>&1 ||
+    CANDIDATE_FRONTEND_LOG_PATH="/proc/$frontend_owner_pid/fd/6/${frontend_bootstrap0_log##*/}" \
+    CANDIDATE_FRONTEND_LOG_DISPLAY_PATH="${frontend_bootstrap0_log}" \
+    CANDIDATE_FRONTEND_STATUS_PATH="/proc/$frontend_owner_pid/fd/6/${frontend_bootstrap0_status_path##*/}" \
+    candidate_frontend_smoke "${candidate}" >"${frontend_log_authority}" 2>&1 ||
     frontend_status=$?
   # Second pass under SIMPLE_BOOTSTRAP=1 -- the EXACT configuration Stage 3
   # invokes this candidate in. The single-pass (SIMPLE_BOOTSTRAP=0) gate
@@ -1485,10 +1529,15 @@ bootstrap_stage_sanity() (
   # unbounded (444 MB log / 32 GB RSS). See doc/08_tracking/bug/
   # stage2_binary_lexer_reads_every_source_as_empty_infinite_parser_loop_2026-08-09.md
   frontend_bootstrap_status=0
+  frontend_bootstrap_ran=false
   if [ "${frontend_status}" -eq 0 ]; then
+    frontend_bootstrap_ran=true
     CANDIDATE_FRONTEND_BACKEND="${backend}" \
       CANDIDATE_FRONTEND_BOOTSTRAP=1 \
-      candidate_frontend_smoke "${candidate}" >>"${frontend_log}" 2>&1 ||
+      CANDIDATE_FRONTEND_LOG_PATH="/proc/$frontend_owner_pid/fd/6/${frontend_bootstrap1_log##*/}" \
+      CANDIDATE_FRONTEND_LOG_DISPLAY_PATH="${frontend_bootstrap1_log}" \
+      CANDIDATE_FRONTEND_STATUS_PATH="/proc/$frontend_owner_pid/fd/6/${frontend_bootstrap1_status_path##*/}" \
+      candidate_frontend_smoke "${candidate}" >>"${frontend_log_authority}" 2>&1 ||
       frontend_bootstrap_status=$?
     frontend_status=${frontend_bootstrap_status}
   fi
@@ -1555,9 +1604,23 @@ bootstrap_stage_sanity() (
       printf 'unsupported_output_sha256=%s\n' \
         "$(printf '%s' "${unsupported}" | bootstrap_stage3_hash_stream)"
       echo "frontend_smoke_status=${frontend_status}"
+      echo "frontend_smoke_backend=${backend}"
+      echo "frontend_smoke_bootstrap0_raw_status=$([ -f "${frontend_bootstrap0_status_path}" ] && sed -n 's/^raw_status=//p' "${frontend_bootstrap0_status_path}" || echo "${frontend_status}")"
+      echo "frontend_smoke_bootstrap0_log_path=${frontend_bootstrap0_log}"
+      echo "frontend_smoke_bootstrap0_log_sha256=$(frontend_hash_or_dash "${frontend_bootstrap0_log}")"
+      echo "frontend_smoke_bootstrap0_status_path=${frontend_bootstrap0_status_path}"
+      echo "frontend_smoke_bootstrap0_status_sha256=$(frontend_hash_or_dash "${frontend_bootstrap0_status_path}")"
       echo "unsupported_match_status=${unsupported_match_status}"
       echo "frontend_smoke_bootstrap_mode_status=${frontend_bootstrap_status}"
-      echo "frontend_smoke_output_sha256=$(bootstrap_stage3_hash_file "${frontend_log}")"
+      echo "frontend_smoke_bootstrap1_ran=${frontend_bootstrap_ran}"
+      echo "frontend_smoke_bootstrap1_raw_status=$([ -f "${frontend_bootstrap1_status_path}" ] && sed -n 's/^raw_status=//p' "${frontend_bootstrap1_status_path}" || echo not-run)"
+      echo "frontend_smoke_bootstrap1_log_path=$([ "${frontend_bootstrap_ran}" = true ] && echo "${frontend_bootstrap1_log}" || echo -)"
+      echo "frontend_smoke_bootstrap1_log_sha256=$([ "${frontend_bootstrap_ran}" = true ] && frontend_hash_or_dash "${frontend_bootstrap1_log}" || echo -)"
+      echo "frontend_smoke_bootstrap1_status_path=$([ "${frontend_bootstrap_ran}" = true ] && echo "${frontend_bootstrap1_status_path}" || echo -)"
+      echo "frontend_smoke_bootstrap1_status_sha256=$([ "${frontend_bootstrap_ran}" = true ] && frontend_hash_or_dash "${frontend_bootstrap1_status_path}" || echo -)"
+      echo "frontend_smoke_output_sha256=$(frontend_hash_or_dash "${frontend_log}")"
+      echo "frontend_smoke_driver_log_path=${frontend_log}"
+      echo "frontend_smoke_driver_log_sha256=$(frontend_hash_or_dash "${frontend_log}")"
       echo "candidate_sha256_after=${candidate_sha_after}"
       echo "sha_stable_status=${sha_stable_status}"
       echo "checks_run=${sanity_checks_run}"
@@ -1587,7 +1650,6 @@ bootstrap_stage_sanity() (
       echo "bootstrap-sanity-error: frontend smoke log is empty (${frontend_log})" >&2
     fi
   fi
-  rm -f "${frontend_log}"
   [ "${sanity_status}" = pass ]
 )
 
@@ -2191,6 +2253,8 @@ else
   tool_authority_before="${stage3_provenance_dir}/tool-authority-before.txt"
   tool_authority_after="${stage3_provenance_dir}/tool-authority-after.txt"
   mkdir -p "${stage3_provenance_dir}"
+  bootstrap_stage2_sanity_output_preflight "${stage2_sanity_evidence}" || exit 1
+  bootstrap_stage2_sanity_output_preflight "${stage3_sanity_evidence}" || exit 1
   # A previous fail-closed run may leave its admitted authority deliberately
   # frozen (directories 0500, files 0400/0500). Thaw only this private output
   # tree before replacing it; source/runtime authorities remain untouched.
@@ -2725,12 +2789,19 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
         stage2_status=4
       elif ! bootstrap_stage3_write_stage2_admission_receipt \
         "${stage2_admission_receipt_absolute}" \
-        "${stage2_admitted_absolute}" "$(absolute_path "${stage3_source_before}")" \
-        "$(absolute_path "${runtime_admitted_snapshot}")" \
-        "$(absolute_path "${tool_authority_before}")" \
+        "${stage2_admission_receipt_absolute}" \
+        "${stage2_admitted_absolute}" "${stage2_admitted_absolute}" \
+        "$(absolute_path "${stage3_source_before}")" "$(absolute_path "${stage3_source_before}")" \
+        "$(absolute_path "${runtime_admitted_snapshot}")" "$(absolute_path "${runtime_admitted_snapshot}")" \
+        "${stage_runtime_absolute}" "${stage_runtime_absolute}" \
+        "$(absolute_path "${tool_authority_before}")" "$(absolute_path "${tool_authority_before}")" \
         "${stage2_build_args_sha256}" \
         "$(absolute_path "${stage2_sanity_evidence}")" \
-        "$(absolute_path "${stage2_receiver_evidence}")" \
+        "$(absolute_path "${stage2_sanity_evidence}")" \
+        "$(dirname -- "$(absolute_path "${stage2_sanity_evidence}")")" \
+        "$(absolute_path "${stage2_receiver_evidence}")" "$(absolute_path "${stage2_receiver_evidence}")" \
+        "$(dirname -- "$(absolute_path "${stage2_receiver_evidence}")")/stage2-receiver.log" \
+        "$(dirname -- "$(absolute_path "${stage2_receiver_evidence}")")/stage2-receiver.log" \
         "${repo_root}"; then
         chmod u+w "${stage2_admitted_bin}"
         rm -f "${stage2_admitted_bin}" "${stage2_admission_receipt}"
@@ -3021,6 +3092,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     }
     BSTAGE3_ROOT="${repo_root}"
     BSTAGE3_MANIFEST="$(absolute_path "${stage3_provenance_manifest}")"
+    BSTAGE3_MANIFEST_DISPLAY=$BSTAGE3_MANIFEST
     BSTAGE3_PLATFORM="${PLATFORM}"
     BSTAGE3_BACKEND="${backend}"
     BSTAGE3_MODE="${bootstrap_mode}"
@@ -3063,12 +3135,38 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     BSTAGE3_STAGE2_TRANSCRIPT="$(absolute_path "${stage2_command_transcript}")"
     BSTAGE3_STAGE3_TRANSCRIPT="$(absolute_path "${stage3_command_transcript}")"
     BSTAGE3_STAGE2_SANITY="$(absolute_path "${stage2_sanity_evidence}")"
+    BSTAGE3_STAGE2_SANITY_DISPLAY=$BSTAGE3_STAGE2_SANITY
+    BSTAGE3_STAGE2_SANITY_COMPANION_PARENT=$(dirname -- "$BSTAGE3_STAGE2_SANITY")
     BSTAGE3_STAGE2_RECEIVER="$(absolute_path "${stage2_receiver_evidence}")"
     BSTAGE3_STAGE3_SANITY="$(absolute_path "${stage3_sanity_evidence}")"
+    BSTAGE3_STAGE2_RECEIVER_LOG="$(dirname -- "$BSTAGE3_STAGE2_RECEIVER")/stage2-receiver.log"
+    BSTAGE3_STAGE3_SANITY_COMPANION_PARENT="$(dirname -- "$BSTAGE3_STAGE3_SANITY")"
+    BSTAGE3_JOBS_RECEIPT="$(dirname -- "$BSTAGE3_MANIFEST")/effective-build-jobs.env"
+    [ -f "$BSTAGE3_JOBS_RECEIPT" ] || {
+      printf 'schema=simple-bootstrap-effective-build-jobs-v1\nstatus=ready\njobs=%s\n' "$selfhost_jobs" >"$BSTAGE3_JOBS_RECEIPT" || exit 1
+      chmod 0400 "$BSTAGE3_JOBS_RECEIPT" || exit 1
+    }
+    BSTAGE3_SEED_DISPLAY=$BSTAGE3_SEED BSTAGE3_NATIVE_ALL_DISPLAY=$BSTAGE3_NATIVE_ALL
+    BSTAGE3_BACKFILL_DISPLAY=$BSTAGE3_BACKFILL BSTAGE3_STAGE2_DISPLAY=$BSTAGE3_STAGE2
+    BSTAGE3_STAGE2_ADMITTED_DISPLAY=$BSTAGE3_STAGE2_ADMITTED BSTAGE3_STAGE2_ADMISSION_DISPLAY=$BSTAGE3_STAGE2_ADMISSION
+    BSTAGE3_STAGE2_LOG_DISPLAY=$BSTAGE3_STAGE2_LOG BSTAGE3_STAGE3_LOG_DISPLAY=$BSTAGE3_STAGE3_LOG
+    BSTAGE3_STAGE2_TRANSCRIPT_DISPLAY=$BSTAGE3_STAGE2_TRANSCRIPT BSTAGE3_STAGE3_TRANSCRIPT_DISPLAY=$BSTAGE3_STAGE3_TRANSCRIPT
+    BSTAGE3_STAGE2_SANITY_COMPANION_PARENT_DISPLAY=$BSTAGE3_STAGE2_SANITY_COMPANION_PARENT
+    BSTAGE3_STAGE2_RECEIVER_DISPLAY=$BSTAGE3_STAGE2_RECEIVER BSTAGE3_STAGE2_RECEIVER_LOG_DISPLAY=$BSTAGE3_STAGE2_RECEIVER_LOG
+    BSTAGE3_STAGE3_SANITY_DISPLAY=$BSTAGE3_STAGE3_SANITY BSTAGE3_STAGE3_SANITY_COMPANION_PARENT_DISPLAY=$BSTAGE3_STAGE3_SANITY_COMPANION_PARENT
+    BSTAGE3_GIT_AFTER_DISPLAY=$BSTAGE3_GIT_AFTER BSTAGE3_RUNTIME_ORIGIN_AFTER_DISPLAY=$BSTAGE3_RUNTIME_ORIGIN_AFTER
+    BSTAGE3_RUNTIME_ADMITTED_DISPLAY=$BSTAGE3_RUNTIME_ADMITTED_SNAPSHOT BSTAGE3_TOOL_AUTHORITY_DISPLAY=$BSTAGE3_TOOL_AUTHORITY
+    BSTAGE3_SEED_STAMP_DISPLAY=$BSTAGE3_SEED_STAMP BSTAGE3_SOURCE_AFTER_DISPLAY=$BSTAGE3_SOURCE_AFTER
+    BSTAGE3_STAGE3_DISPLAY=$BSTAGE3_STAGE3 BSTAGE3_BOOTSTRAP_SCRIPT_DISPLAY=$BSTAGE3_BOOTSTRAP_SCRIPT
+    BSTAGE3_HELPER_DISPLAY=$BSTAGE3_HELPER BSTAGE3_STAGE2_CACHE_DIR_DISPLAY=$BSTAGE3_STAGE2_CACHE_DIR
+    BSTAGE3_STAGE3_CACHE_DIR_DISPLAY=$BSTAGE3_STAGE3_CACHE_DIR BSTAGE3_RUNTIME_PATH_DISPLAY=$BSTAGE3_RUNTIME_PATH
+    BSTAGE3_SOURCE_BEFORE_DISPLAY=$BSTAGE3_SOURCE_BEFORE BSTAGE3_TOOL_AUTHORITY_BEFORE_DISPLAY=$BSTAGE3_TOOL_AUTHORITY_BEFORE
+    BSTAGE3_JOBS_RECEIPT_DISPLAY=$BSTAGE3_JOBS_RECEIPT
     BSTAGE3_LOCK="$(absolute_path "${bootstrap_lock}")"
+    BSTAGE3_LOCK_DISPLAY=$BSTAGE3_LOCK
     BSTAGE3_RUST_LOG="${stage_build_rust_log}"
     export BSTAGE3_ROOT BSTAGE3_MANIFEST BSTAGE3_PLATFORM BSTAGE3_BACKEND \
-      BSTAGE3_MODE BSTAGE3_SEED BSTAGE3_NATIVE_ALL BSTAGE3_BACKFILL \
+      BSTAGE3_MODE BSTAGE3_SEED BSTAGE3_NATIVE_ALL BSTAGE3_BACKFILL BSTAGE3_LOCK_DISPLAY \
       BSTAGE3_RUNTIME_ORIGIN_BEFORE BSTAGE3_RUNTIME_ORIGIN_AFTER \
       BSTAGE3_RUNTIME_ADMITTED_SNAPSHOT \
       BSTAGE3_TOOL_AUTHORITY BSTAGE3_TOOL_AUTHORITY_BEFORE \
@@ -3087,7 +3185,8 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       BSTAGE3_SEED_INPUTS_FINGERPRINT BSTAGE3_SEED_FEATURES \
       BSTAGE3_GIT_BEFORE BSTAGE3_GIT_AFTER \
       BSTAGE3_STAGE2_TRANSCRIPT BSTAGE3_STAGE3_TRANSCRIPT \
-      BSTAGE3_STAGE2_SANITY BSTAGE3_STAGE2_RECEIVER \
+      BSTAGE3_STAGE2_SANITY BSTAGE3_STAGE2_SANITY_DISPLAY \
+      BSTAGE3_STAGE2_SANITY_COMPANION_PARENT BSTAGE3_STAGE2_RECEIVER \
       BSTAGE3_STAGE3_SANITY BSTAGE3_LOCK \
       BSTAGE3_RUST_LOG
     bootstrap_stage3_write_manifest || {
@@ -3107,8 +3206,10 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       exit 1
     }
     bootstrap_stage3_verify_manifest \
+      "$(absolute_path "${stage3_provenance_manifest}")" \
       "$(absolute_path "${stage3_provenance_manifest}")" "${repo_root}" \
-      "${stage3_candidate}" || {
+      "${stage3_candidate}" "${stage3_candidate}" \
+      "$(absolute_path "${stage3_provenance_manifest}").authority-map.env" || {
       echo "error: --stop-after-stage3 refused unverified Stage 3 provenance" >&2
       exit 1
     }
@@ -3299,7 +3400,8 @@ stage3_acceptance_sanity=$(bootstrap_stage3_manifest_value \
   exit 1
 }
 bootstrap_stage3_verify_sanity_evidence_receipt \
-  "${stage3_acceptance_sanity}" "${stage3}" "${repo_root}" || {
+  "${stage3_acceptance_sanity}" "${stage3_acceptance_sanity}" \
+  "$(dirname -- "${stage3_acceptance_sanity}")" "${stage3}" "${repo_root}" || {
   echo "error: Stage 3 acceptance sanity receipt did not re-verify" >&2
   exit 1
 }

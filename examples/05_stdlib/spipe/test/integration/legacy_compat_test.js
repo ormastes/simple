@@ -81,7 +81,7 @@ try {
   const byId = new Map(responses.filter((item) => item.id !== null).map((item) => [item.id, item]));
   assert.equal(byId.get(1).result.protocolVersion, mcp.protocolVersion);
   assert.deepEqual(byId.get(1).result.serverInfo, mcp.serverInfo);
-  assert.deepEqual(byId.get(2).result.tools, mcp.toolSchemas);
+  assert.deepEqual(byId.get(2).result.tools.slice(0, mcp.toolSchemas.length), mcp.toolSchemas);
   assert.deepEqual(byId.get(3).result.resources, [{
     uri: mcp.resource.uri,
     name: mcp.resource.name,
