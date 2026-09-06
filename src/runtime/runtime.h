@@ -1595,6 +1595,22 @@ int64_t  rt_sdl2_get_display_usable_h(int64_t index);
 
 /* ===== Panic / Abort ===== */
 
+/* SPL_WEAK: portable spelling of `__attribute__((weak))`.
+ *
+ * cl.exe (MSVC proper) has no `__attribute__` syntax at all -- it is a hard
+ * parse error (C2143/C2059), which is what blocked the embedded runtime-compile
+ * path on the Windows MSVC lane. MSVC has no weak-symbol concept either, so the
+ * only portable expansion there is nothing: the definition becomes strong.
+ *
+ * CROSS-PLATFORM: gated on `_MSC_VER && !__clang__`, so clang-cl (which DOES
+ * accept the attribute, and whose weak-external lowering the SPL_CLI_ARGS_WEAK
+ * note below depends on) is byte-identical, as are Linux, macOS and FreeBSD. */
+#if defined(_MSC_VER) && !defined(__clang__)
+#  define SPL_WEAK
+#else
+#  define SPL_WEAK __attribute__((weak))
+#endif
+
 #ifdef _MSC_VER
 __declspec(noreturn) void spl_panic(const char* msg);
 #else

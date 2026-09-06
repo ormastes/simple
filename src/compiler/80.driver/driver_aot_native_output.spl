@@ -137,6 +137,18 @@ fn driver_native_shadow_sort(lines: [text]) -> [text]:
         sorted = next
     sorted
 
+# `file_write_text` / `file_read_text` are NOT usable here. `std.file_system`
+# exports argument-validating STUBS (`file_ops.spl:60` returns `true` without
+# writing a byte), and the name additionally collides across the loaded set --
+# the JIT reports `file_write_text` with 3 co-compiled definitions over 2
+# signatures ((text,text)->() vs (text,text)->bool) and resolves the ambiguity
+# by falling back to the LAST definition. On Windows that landed on the stub, so
+# the capsule receipt was never written while the write reported success, and
+# every native-build died at `native-capsule-receipt-invalid` (see
+# doc/08_tracking/bug/windows_native_capsule_receipt_invalid_blocks_every_native_build_2026-09-03.md).
+# `file_write_exact` / `file_read_nullable` are single-definition names backed by
+# one direct `rt_file_write_text` / `rt_file_read_text` call, so they are both
+# real and unambiguous.
 @always_inline
 fn _sffi_file_write_text(path: text, content: text) -> bool:
     unsafe(capabilities: [ffi]):
@@ -403,22 +415,38 @@ fn driver_native_disk_source_identity(source_path: text) -> text:
         case Ok(source): sha256_text(source.content)
         case Err(_): ""
 
-pub fn driver_native_capsule_result_valid_v1(capsule: FrozenNativeModuleCapsuleV1) -> bool:
-    if not capsule.identity_valid() or not _sffi_file_exists(capsule.object_path):
-        return false
-    if capsule.cache_source != "" and (
-        capsule.source_identity == ""
-        or driver_native_disk_source_identity(capsule.cache_source)
-            != capsule.source_identity):
-        return false
+pub fn driver_native_capsule_result_reason_v1(
+    capsule: FrozenNativeModuleCapsuleV1
+) -> text:
+    """"" when the capsule receipt is valid, else the ONE invariant that failed.
+
+    Every branch here is the same fail-closed condition
+    `driver_native_capsule_result_valid_v1` enforces; this function only names
+    which one fired, so the verdict string is diagnosable. Nothing is relaxed.
+    """
+    if not capsule.identity_valid(): return "identity-invalid"
+    if not _sffi_file_exists(capsule.object_path):
+        return "object-missing:{capsule.object_path}"
+    if capsule.cache_source != "":
+        if capsule.source_identity == "": return "source-identity-empty"
+        if driver_native_disk_source_identity(capsule.cache_source)
+                != capsule.source_identity:
+            return "source-identity-mismatch:{capsule.cache_source}"
     val receipt_path = capsule.object_path + ".capsule-receipt"
-    if not _sffi_file_exists(receipt_path): return false
+    if not _sffi_file_exists(receipt_path):
+        return "receipt-missing:{receipt_path}"
     val object_fp = FileFingerprint.from_file(capsule.object_path)
-    if not object_fp.?: return false
+    if not object_fp.?: return "object-fingerprint-failed:{capsule.object_path}"
     var expected = ""
     if val fp = object_fp:
         expected = "native-capsule-result-v1\n{capsule.capsule_identity}\n{capsule.object_path}\n{fp.size}\n{fp.content_hash}\n"
-    (_sffi_file_read_text(receipt_path) ?? "") == expected
+    val actual = _sffi_file_read_text(receipt_path) ?? ""
+    if actual != expected:
+        return "receipt-content-mismatch:expected-bytes={expected.len()}:actual-bytes={actual.len()}"
+    ""
+
+pub fn driver_native_capsule_result_valid_v1(capsule: FrozenNativeModuleCapsuleV1) -> bool:
+    driver_native_capsule_result_reason_v1(capsule) == ""
 
 pub fn driver_native_collect_capsule_result_v1(
     batch: FrozenNativeModuleCapsuleBatchV1, build_cache: BuildCache,
@@ -433,8 +461,9 @@ pub fn driver_native_collect_capsule_result_v1(
         or driver_native_disk_source_identity(capsule.cache_source)
             != capsule.source_identity):
         return "native-capsule-source-mutated:{module_name}"
-    if not driver_native_capsule_result_valid_v1(capsule):
-        return "native-capsule-receipt-invalid:{module_name}"
+    val receipt_reason = driver_native_capsule_result_reason_v1(capsule)
+    if receipt_reason != "":
+        return "native-capsule-receipt-invalid:{module_name}:{receipt_reason}"
     if capsule.cache_source == "": return ""
     val source_fp = FileFingerprint.from_file(capsule.cache_source)
     if val source_fp_val = source_fp:

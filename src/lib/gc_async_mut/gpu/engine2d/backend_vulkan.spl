@@ -22,6 +22,10 @@ use std.gc_async_mut.gpu.engine2d.backend.{RenderBackend, Engine2DExtended, Engi
 use std.gpu.engine2d.color.{rgba, rgb, color_r, color_g, color_b, color_a}
 use std.gpu.engine2d.glyph.{glyph_height, glyph_advance, render_text_to_buffer}
 use std.gpu.engine2d.helpers_text.{text_blit_buffer}
+# The bitmap-font atlas lane lives in backend_vulkan_font.spl, which imports this
+# module back — the same mutual pair backend_vulkan_helpers.spl already forms.
+# Importing the provenance constant keeps that dependency explicit and loaded.
+use std.gc_async_mut.gpu.engine2d.backend_vulkan_font.{VULKAN_TEXT_PATH_CPU_RASTER, VULKAN_TEXT_PATH_NOT_DRAWN}
 use std.gc_async_mut.gpu.engine2d.backend_vulkan_helpers.{
     _pack_clear_pc, _pack_rect_pc, _pack_circle_pc,
     _pack_triangle_pc, _pack_gradient_pc, _pack_image_composite_pc,
@@ -296,6 +300,19 @@ class VulkanBackend:
     session: VulkanSession       # Shared session (null-like when not session-owned)
     owns_session: bool           # True when this backend must release the session
     last_error: text             # Most recent init/runtime failure for strict probes
+    # Text-lane provenance. A SEPARATE axis from the readback provenance
+    # (`readback_source`: completion_unknown / readback_failed / cpu_fallback /
+    # device_readback / host_cache_after_device_copy) — this says which lane the
+    # last text draw took, not where its pixels were read back from. Values:
+    # "font-atlas-batch" (the GPU atlas composited it), "cpu-raster-blit" (the
+    # CPU rasteriser + image upload did), "font-atlas-batch-abandoned" (the atlas
+    # attempt failed after work may already have been recorded, so nothing was
+    # redrawn). Empty until the first text draw.
+    last_text_path: text
+    # Why the atlas lane was not used, or the composite evidence reason when it
+    # was attempted and did not complete. Empty exactly when last_text_path is
+    # "font-atlas-batch".
+    last_text_fallback_reason: text
 
     static fn create() -> VulkanBackend:
         """Create an uninitialized Vulkan backend. Call init() before drawing."""
@@ -392,7 +409,9 @@ class VulkanBackend:
             completion_unknown: false,
             session: VulkanSession.create(),
             owns_session: false,
-            last_error: ""
+            last_error: "",
+            last_text_path: "",
+            last_text_fallback_reason: ""
         )
 
 fn vulkan_backend_retain_session(mut backend: VulkanBackend, session: VulkanSession):
@@ -944,18 +963,22 @@ impl RenderBackend for VulkanBackend:
         val pc = _pack_gradient_pc(x, y, w, h, top_color, bottom_color, self.w, self.h, self.clip_x, self.clip_y, self.clip_w, self.clip_h, self.clip_enabled)
         self._dispatch_framebuffer_checked(self.pipe_gradient, pc, gx, gy, 1)
 
-    # TODO: [gpu][P2] draw_text / draw_text_bg NEVER reach the Vulkan font-atlas
-    # pipeline. Both CPU-rasterise via text_blit_buffer() and upload the result
-    # through draw_image_blend(). The GPU atlas exists but is a SEPARATE entry
-    # point, composite_font_batch, wired only at engine.spl:1698 — nothing in
-    # this method can reach it. Evidence to close: either route draw_text
-    # through composite_font_batch (and prove it with a device-free batch-shape
-    # spec plus a device spec), or record a decision that Vulkan text stays CPU
-    # raster and delete the implication that these are GPU text paths.
+    # Bitmap text goes through the font-atlas pipeline whenever that pipeline can
+    # reproduce the CPU raster exactly (`_bitmap_text_atlas_path`,
+    # backend_vulkan_font.spl); otherwise the original CPU raster + image blit
+    # runs unchanged. `last_text_path` / `last_text_fallback_reason` always say
+    # which of the two actually happened.
     me draw_text(x: i32, y: i32, text_val: text, color: u32, font_size: i32):
-        if self.completion_unknown: return
+        if self.completion_unknown:
+            self.last_text_path = VULKAN_TEXT_PATH_NOT_DRAWN
+            self.last_text_fallback_reason = "completion-unknown"
+            return
         if not self.initialized:
             self.dirty = true
+            self.last_text_path = VULKAN_TEXT_PATH_CPU_RASTER
+            self.last_text_fallback_reason = "backend-uninitialized"
+            return
+        if not self._bitmap_text_atlas_path(x, y, text_val, color, font_size):
             return
         val text_buf = text_blit_buffer(text_val, color, 0x00000000u32, font_size)
         if text_buf.is_empty():
@@ -1749,9 +1772,16 @@ impl Engine2DExtended for VulkanBackend:
     # analogous to preparing a texture; it does not make the final framebuffer
     # a CPU mirror when the device composite succeeds.
     me draw_text_bg(x: i32, y: i32, text_val: text, fg: u32, bg: u32, font_size: i32):
-        if self.completion_unknown: return
+        if self.completion_unknown:
+            self.last_text_path = VULKAN_TEXT_PATH_NOT_DRAWN
+            self.last_text_fallback_reason = "completion-unknown"
+            return
         if not self.initialized:
             self.dirty = true
+            self.last_text_path = VULKAN_TEXT_PATH_CPU_RASTER
+            self.last_text_fallback_reason = "backend-uninitialized"
+            return
+        if not self._bitmap_text_bg_atlas_path(x, y, text_val, fg, bg, font_size):
             return
         val text_buf = text_blit_buffer(text_val, fg, bg, font_size)
         if text_buf.is_empty():
