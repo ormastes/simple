@@ -1,9 +1,8 @@
-<!-- llm-process-gen: managed source=claude_release_command source_sha256=8101a3f942cf7248127ec5931807a5fd55425fb7bfb11ea1aedfaa70a7a6551b content_sha256=861814efcb71cb4d3344e56009aaefefe93af4452886d06d8ca671c9faff85da -->
-# Release Skill
+# Protected Software Release
 
 Release contract: isolated-session; reviewed-beta-backport; immutable-candidate; promote-without-rebuild; protected-ref-guard; non-destructive-release-identity.
 
-## Usage
+This is the semantic source for Simple/Spipe stable, alpha, beta, RC, patch, and hotfix release projections.
 
 ## Invariants
 
@@ -30,42 +29,35 @@ session start at exact release/X.Y
   -> create a new beta candidate attempt
 ```
 
-## Procedure
+Do not automatically discover or cherry-pick “all fixes.” Do not accept feature commits, commit ranges, moving branch names, stale reviews, missing adaptation reasons, or evidence from the pre-backport revision.
 
-Given argument: `$ARGUMENTS`
+## Release commands
 
-Prerequisite: `/verify` must show `STATUS: PASS`. SPipe/manual evidence,
-lower-model sidecar review, and workflow/tooling/evidence/spec/verification
-contract docs must already be complete from verify. Release must not create or
-update SPipe specs, repair generated-manual quality, accept sidecar-review gaps,
-or repair stale `doc/07_guide`, `doc/06_spec`, `.codex/skills`,
-`.agents/skills`, `.claude/skills`, `.claude/agents/spipe`, or
-`.gemini/commands` instructions. Before proceeding, confirm
-`find doc/06_spec -name '*_spec.spl' | wc -l` returns `0`.
+Use `simple release version-check`, `beta-prepare`, `backport-check`, `candidate-check`, `promote-check`, and `withdraw-check` to validate each boundary before provider mutation. Use `spipe release-guide` and `spipe release-capabilities` to inspect this plugin’s policy surface.
 
 ## Scoped self-review status and remediation
 
-1. Read current version from `simple.sdn` (field `project.version`, line 6)
-2. Parse argument:
-   - Empty, `patch`, or `third` → increment patch (Z+1)
-   - `minor` or `second` → increment minor (Y+1), reset patch to 0
-   - `major` or `first` → increment major (X+1), reset minor and patch to 0
-   - Pattern `X.Y.Z` (digits.digits.digits) → use as-is
-   - Anything else → error, show usage
-3. Print: `Version bump: {old} → {new}`
+GitHub forbids a PR author from submitting an `APPROVED` review on their own
+PR. `SPipe Self Review Admission` is the required status-check alternative; it
+does not claim provider or independent approval. Ordinary code/text is eligible
+by default only when authenticated external policy has no matching deny or
+constrain record. Scope kinds are `code`, `text`, exact `file`, immediate
+`directory_files`, and recursive `directory_recursive`.
 
-### Step 2 — Update all version locations
+Read the exact rejection/invalidation reason. Push, retarget, base/diff/ruleset
+or policy drift, and expiry require a fresh exact-head high-effort review with
+zero P0/P1 and a new dispatch. A deny requires external policy-owner action or
+an eligible independent-review route; uncovered scope requires a smaller diff
+or new exact constraint; unsafe/secret material must be removed and exposed
+credentials rotated. Never attempt author `APPROVED`, reuse a stale status, or
+weaken protected integration, candidate, release, signing, or publication
+authority.
 
-Update these 4 files with the new version:
+## External authority
 
-| File | What to change |
-|------|---------------|
-| `simple.sdn` | `version: X.Y.Z` (line 6) |
-| `VERSION` | Entire file content: `X.Y.Z\n` |
-| `src/app/cli/main.spl` | Hardcoded fallback string `"X.Y.Z"` in `get_version()` |
-| `src/app/cli/bootstrap_main.spl` | Hardcoded string `"X.Y.Z"` in `bootstrap_version()` |
+Live ruleset changes, signing, protected pushes, GitHub publication, and registry publication require explicit authority. A local plan PASS is not a live release PASS.
 
-### Step 3 — Update CHANGELOG
+## Normalized contract clauses
 
 - One isolated release session owns one work branch and one non-main worktree.
 - `release/version.sdn` is the sole version authority and all other version locations are checked projections.

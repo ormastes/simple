@@ -1,14 +1,13 @@
 ---
 name: release
-description: "Codex release skill. Version bump (major/minor/patch/exact), CHANGELOG update, commit, tag, push (ask before push). Prerequisite: verify PASS."
+description: Prepare and promote stable or prerelease Simple releases from isolated sessions and immutable admitted candidates.
 ---
 
-# Release — Codex Version Bump and Tag
+# Protected Simple Release
 
-**Cooperative Phase:** Release (after verification passes)
-**Self-sufficient.** Can be run by any LLM independently.
+Use [the software-release guide](../../../doc/07_guide/infra/software_release.md) and `release/version.sdn` as the canonical product-version authority.
 
-## Tools
+## Procedure
 
 1. Require a prior verification `STATUS: PASS`, including one `bin/simple test test --whole --mode=interpreter` result and current SPipe/manual evidence.
 2. Start an isolated release session: one `work/release/...` branch, one worktree, exact protected target SHA, and private outputs. Never author in the main worktree.
@@ -23,15 +22,18 @@ description: "Codex release skill. Version bump (major/minor/patch/exact), CHANG
 11. Ask before any push or publication. Draft, attach exact assets, verify, then publish immutably.
 12. Rollback redeploys an earlier admitted release. Withdrawal preserves tag/assets/history. Corrections receive a new version.
 
-## Usage
+Use `simple release version-check|beta-prepare|backport-check|candidate-check|promote-check|withdraw-check` for the pure validation boundaries.
 
 For protected PR integration, explicitly self-attest high-capability/high-effort PASS with zero P0/P1, then dispatch `SPipe Self Review Admission`. GitHub forbids PR authors from submitting an `APPROVED` review on their own PR; this is a required status check, not provider or independent approval. Ordinary code/text is default allow absent an external operator deny/constrain, using `code`, `text`, exact `file`, immediate `directory_files`, and descendant `directory_recursive` scopes. The trusted default-branch workflow resolves/re-resolves protected target/ruleset, head, base, merge-base, and diff before a ten-minute result. If rejected or invalidated, follow the reason: state drift/expiry needs a fresh exact-head review and dispatch; deny needs policy-owner action or an eligible independent route; uncovered scope needs a smaller diff or new constraint; unsafe/secret material must be removed and any credential rotated. Never use author `APPROVED`, a stale check, or weaker candidate/release/publication authority as remediation. The generic Actions App is not an independent security boundary. Candidate admission accepts only `spipe-review-admission/1`; keep release-environment approval separate.
 
-Run `verify` skill first — must show **STATUS: PASS**.
+For `self approve`, `approve PR`, or `author cannot approve`, run `spipe self-review-guide`; this is the canonical exact-head status workflow, not provider `APPROVED`.
 
-Run `bin/simple test test --whole --mode=interpreter` after bootstrap and
-before changing versions or tags. This release-blocking command includes the
-full spec/long-test surface, `.spl` comment doctests, and executable Markdown
-code fences; any failure stops release.
+For the repository mutation boundary, use
+`scripts/release/converge-reviewed-fix.shs` with one exact commit and its bound
+`spipe-review-receipt/1`. It fetches both remote heads before creating the
+private branch/worktree, emits `spipe-reviewed-fix-preparation/1`, and stops
+before push or protected integration.
+
+Never move `main` or `release/*` directly, broadly push every local tag, create unsigned/lightweight release tags, delete or move published tags, rebuild during promotion, or substitute seed/old/source-only artifacts.
 
 Live rulesets, signing, protected pushes, and publication require explicit authority. Do not confuse a local plan PASS with a live release PASS.

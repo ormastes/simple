@@ -1,0 +1,76 @@
+#!/bin/sh
+# The scalar checked i64 WFFI transport must allocate nothing, and must agree
+# with the legacy [status, value] transport on every documented status.
+#
+# Builds test/harness/wffi_i64_alloc_count_c_harness.c as a single translation
+# unit (runtime_native.c is #included) and links it with --wrap on the three
+# allocator entry points, so every allocation the runtime performs on the call
+# path is counted. The legacy transport MUST report a non-zero per-call figure:
+# that is the control which proves the counter discriminates, so the scalar
+# transport's zero is never a vacuous "nothing was counted" result.
+#
+# Verdict is the last line of stdout:
+#   PASS  — <n> case(s) checked, ...   exit 0
+#   FAIL  — ...                        exit 1
+#   ERROR — nothing was checked (...)  exit 2
+set -u
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+HARNESS="$ROOT/test/harness/wffi_i64_alloc_count_c_harness.c"
+STUBS="$ROOT/test/harness/rt_clear_harness_stubs.c"
+WORK=${TMPDIR:-/tmp}/wffi-try-call-i64-out.$$
+
+cleanup() { rm -rf "$WORK"; }
+trap cleanup EXIT INT TERM
+
+if [ ! -f "$HARNESS" ]; then
+    printf 'ERROR — nothing was checked (harness %s is missing)\n' "$HARNESS"
+    exit 2
+fi
+
+CC=
+for candidate in clang cc gcc; do
+    if command -v "$candidate" >/dev/null 2>&1; then CC=$candidate; break; fi
+done
+if [ -z "$CC" ]; then
+    printf 'ERROR — nothing was checked (no C compiler)\n'
+    exit 2
+fi
+
+mkdir -p "$WORK"
+"$CC" -O2 -std=gnu11 -D_GNU_SOURCE -w -o "$WORK/harness" \
+    "$HARNESS" "$STUBS" \
+    -Wl,--wrap=malloc,--wrap=calloc,--wrap=realloc \
+    -lm -lpthread -ldl >"$WORK/build.log" 2>&1
+build_rc=$?
+if [ "$build_rc" -ne 0 ]; then
+    printf 'ERROR — nothing was checked (harness build failed, rc=%s)\n' "$build_rc"
+    cat "$WORK/build.log"
+    exit 2
+fi
+
+"$WORK/harness" >"$WORK/output" 2>&1
+rc=$?
+cat "$WORK/output"
+
+cases=$(grep -c -E '^\[( ok |FAIL)\]' "$WORK/output" 2>/dev/null || true)
+[ -n "$cases" ] || cases=0
+if [ "$cases" -eq 0 ]; then
+    printf 'ERROR — nothing was checked (harness reported zero cases)\n'
+    exit 2
+fi
+
+array_line=$(grep '^array_transport_allocs=' "$WORK/output" 2>/dev/null || true)
+out_line=$(grep '^out_transport_allocs=' "$WORK/output" 2>/dev/null || true)
+if [ -z "$array_line" ] || [ -z "$out_line" ]; then
+    printf 'ERROR — nothing was checked (harness printed no allocation census)\n'
+    exit 2
+fi
+
+if [ "$rc" -ne 0 ]; then
+    printf 'FAIL — %s case(s) checked, harness rc=%s (%s; %s)\n' \
+        "$cases" "$rc" "$array_line" "$out_line"
+    exit 1
+fi
+
+printf 'PASS — %s case(s) checked, %s, %s\n' "$cases" "$array_line" "$out_line"

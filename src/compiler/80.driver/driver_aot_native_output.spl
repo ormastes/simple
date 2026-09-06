@@ -12,7 +12,27 @@ use std.nogc_sync_mut.io.file_ops.{file_is_regular_no_follow,
     file_read_regular_no_follow_bounded, secure_temp_dir_raw}
 use std.nogc_sync_mut.io.dir_ops.{dir_remove}
 use std.nogc_sync_mut.path.{dirname}
-use std.file_system.{file_write_text, file_read_text}
+# `std.file_system.{file_write_text, file_read_text}` USED to be imported here.
+# Do not restore that import: `std.file_system` resolves into the
+# `nogc_async_mut.file_system.file_ops` module, whose file I/O is a set of MOCKS
+# ("Mock implementations for pure Simple demonstration", file_ops.spl:5).
+# `file_write_text` there performs NO I/O and unconditionally returns `true`
+# (file_ops.spl:58-68), so every write below silently vanished while reporting
+# success -- the object's `.capsule-receipt` was never created and
+# `driver_native_capsule_result_valid_v1` then rejected a perfectly good object
+# with `native-capsule-receipt-invalid`, which is how `native-build` could not
+# build a three-line hello world. `file_read_text` there is a matching mock
+# (returns `Some("mock file content: " + path)`), but measured 2026-09-06 the
+# REAL definition happened to win for reads -- the compiler warns that
+# `file_read_text` has 4 co-compiled definitions with 2 differing signatures and
+# resolves ambiguous call sites by "falling back to the last definition", so the
+# read side is fragile-by-luck rather than observed-broken. It is moved off
+# `std.file_system` here for the same reason, not because a break was seen.
+# This is the second instance of the hazard already recorded in that file's own
+# header at :34-40 for `file_read_bytes`: the flat function registry is keyed on
+# NAME ALONE, so a mock in any module of the import closure hijacks the call
+# site. See doc/08_tracking/bug/std_file_system_write_mocks_return_true_without_writing_2026-09-06.md
+use std.io_runtime.{file_write_exact, file_read_nullable}
 use compiler.backend.backend.backend_helpers.{compile_module_with_backend,
     compile_module_with_backend_target_cpu_storage_bindings, get_effective_backend_name}
 use compiler.backend.backend.backend_types.{CompiledModule, CompileError}
@@ -132,13 +152,19 @@ fn driver_native_shadow_sort(lines: [text]) -> [text]:
 
 @always_inline
 fn _sffi_file_write_text(path: text, content: text) -> bool:
+    # `file_write_exact` is the one-call runtime status (io_runtime.spl:250):
+    # every caller below writes into `cache_scope_root`, which
+    # `_sffi_dir_create(cache_scope_root, true)` has already created, so the
+    # create-parent-and-retry policy of `file_write` would only mask a genuinely
+    # missing directory. Callers here treat `false` as a hard build error and
+    # need the honest status.
     unsafe(capabilities: [ffi]):
-        file_write_text(path, content)
+        file_write_exact(path, content)
 
 @always_inline
 fn _sffi_file_read_text(path: text) -> text?:
     unsafe(capabilities: [ffi]):
-        file_read_text(path)
+        file_read_nullable(path)
 
 @always_inline
 fn _sffi_file_exists(path: text) -> bool:

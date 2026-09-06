@@ -1442,6 +1442,22 @@ pub extern "C" fn rt_bytes_to_text(bytes: RuntimeValue) -> RuntimeValue {
         return RuntimeValue::NIL;
     }
 
+    // PERF (2026-09-06): a `[u8]` built by ordinary Simple code is stored in
+    // the PACKED byte representation, whose elements are `u8` by construction
+    // — neither rejection below can fire for it. Reading its bytes as one
+    // slice therefore returns exactly what the loop would have built, while
+    // skipping a boxed `rt_array_get` call per byte. That per-element round
+    // trip cost ~46 ns/BYTE on the codegen (Cranelift JIT) lane, which made
+    // every bulk bytes->text conversion in the stdlib (base64 decode output,
+    // utf8 validation, file reads) an order of magnitude slower than the
+    // pure-Simple loop that produced the bytes (~2 ns/byte). Boxed-element
+    // arrays keep the checked loop verbatim, so out-of-range or non-int
+    // elements still yield NIL exactly as before.
+    // See doc/08_tracking/bug/codegen_lane_still_slow_base64url_utf8_time_utils_2026-08-18.md
+    if let Some(packed) = crate::value::collections::packed_byte_array_bytes(bytes) {
+        return unsafe { rt_string_new(packed.as_ptr(), packed.len() as u64) };
+    }
+
     let mut out = Vec::with_capacity(len as usize);
     for i in 0..len {
         let value = crate::value::collections::rt_array_get(bytes, i);

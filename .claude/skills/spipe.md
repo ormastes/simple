@@ -9,6 +9,14 @@ SPipe is the process layer. SSpec is the executable `.spl` scenario authoring
 surface. New manuals should be written as step-based SSpec scenarios and run or
 mirrored through SPipe.
 
+> **Modern SSpec** = a spec written *manual-first* so docgen produces a
+> professional scenario manual, not a test log: user-voice `"""..."""`
+> docstrings, outcome-named `it` blocks, imperative `step("...")` calls,
+> capture evidence, `@manual_section` grouping, and `@req` traceability. A terse
+> spec still generates a correct skeleton (screens + steps) but no explanations —
+> the generator assembles, it never invents prose. Do NOT ship the anti-patterns
+> in `doc/07_guide/infra/sspec_antipatterns.md`.
+
 > **Run specs on the pure-Simple self-hosted binary, not the Rust seed.** The
 > SPipe runner, docgen, and every `bin/simple test`/`run` invocation default to
 > the self-hosted `bin/release/<triple>/simple` (built via bootstrap), not
@@ -64,14 +72,38 @@ stale PASS artifact.
 
 > **Test runner operational caveats.** Section/directory test runs must be SEQUENTIAL (parallel database access corrupts state); only the final `Results:` summary line is authoritative (intermediate diagnostics mislead); single-file targets use the Rust-embedded runner (reliable), directory targets use the Pure-Simple daemon (known fresh-seed hang). See `doc/07_guide/infra/testing.md` § "Runner Operational Caveats" for F1–F4 facts and remedies.
 
+> **DB evidence: know which of the three Simple DBs you tested.** Simple has a
+> **textual DB** (SDN-file store: `database/core.spl` `SdnDatabase`, WAL,
+> tracking DBs), an **embedded DB** (in-process SQL: `database/pure_sql`,
+> C SQLite via SFFI; interpreter `rt_sqlite` emulation — non-ACID, no ORDER BY
+> semantics, constraints unenforced), and the **DB server**
+> (`std.database.server` = `src/lib/nogc_sync_mut/database/server/` —
+> sessions, capabilities, transactions, commit-before-ack durability;
+> `postgres_mimic` is only its PostgreSQL compatibility surface). Canonical
+> map: `doc/07_guide/lib/database/db_implementations_map.md`. Specs run under
+> `bin/simple test`/`run` exercise the embedded DB's emulation; any
+> durability, ordering, constraint, or transaction claim about the **server**
+> tier needs evidence against the DB server (or real SQLite on a native
+> build), and the spec/receipt must say which backend produced it.
+
 > **Verify which binary produced your evidence.** `bin/simple` resolves through
 > `bin/release/<triple>/simple`, which can be a stale seed rather than the
 > self-hosted binary. Before trusting or attributing test/run evidence: run
 > `<binary> --version` and check for the seed warning banner, and `readlink -f`
 > the path. A seed banner + old mtime means findings apply to the SEED, not the
-> self-hosted compiler — attribute accordingly. Known failure mode: universal
-> single-file `simple test` hang on a stale seed (see
-> `doc/08_tracking/bug/deployed_seed_test_runner_init_hang_2026-07-17.md`).
+> self-hosted compiler — attribute accordingly. Known failure modes, both of
+> which present as a HANG with no output (not a test failure):
+> 1. universal single-file `simple test` hang on a stale seed (see
+>    `doc/08_tracking/bug/deployed_seed_test_runner_init_hang_2026-07-17.md`);
+> 2. **self-delegation loop** on binaries built between 2026-07-24 and
+>    `0531ca8ce266` — the CLI resolved its own identity by shelling out to
+>    `readlink -f /proc/self/exe`, which returns the HELPER (`/usr/bin/readlink`),
+>    so it delegated to `bin/simple` = itself forever. Tell it apart from a real
+>    hang by letting stderr through instead of piping to `tail`: the loop floods
+>    `seed sibling not found, skipping delegation: /usr/bin/simple_seed`. A bare
+>    `timeout ... | tail -N` hides it and it reads as a silent hang. Drive
+>    `bin/release/<triple>/simple_seed` until redeploy. See
+>    `doc/08_tracking/bug/cli_symlink_argv0_seed_sibling_lookup_2026-07-24.md`.
 
 > **A stale DEPLOYED binary fails healthy specs, and it looks like your code.**
 > When a spec dies with `semantic: unknown extern function: <rt_*>` or with a
@@ -116,10 +148,27 @@ convergence. Canonical guide and plan:
 `doc/03_plan/sys_test/mcdc_rt_hal_hardening.md`; concise expert map:
 `doc/00_llm_process/feature_expert/mcdc_rt_hal/skill.md`.
 
+### Protected PR self-review handoff
+
+GitHub forbids PR authors from submitting an `APPROVED` review on their own PR.
+`SPipe Self Review Admission` is instead a ten-minute required status check; it
+never claims provider or independent approval. Ordinary code/text is eligible
+by default absent an external operator deny/constrain. Scopes are `code`,
+`text`, exact `file`, immediate `directory_files`, and recursive
+`directory_recursive`.
+
+Preserve the reported reason in the SPipe log. Drift or expiry needs a fresh
+exact-head high-effort review with zero P0/P1 and a new dispatch; deny needs
+external policy-owner action or an eligible independent route; uncovered scope
+needs a smaller diff or new constraint; unsafe/secret material must be removed
+and exposed credentials rotated. Never attempt author `APPROVED`, reuse a stale
+check, or weaken merge, candidate, release, signing, or publication authority.
+
 For broad SPipe lanes, split independent checks across lower-model sidecars
-when available (Codex Spark, Claude Haiku, or Claude Sonnet), then require a
-normal/highest-capability review before accepting done marks, broad exclusions,
-or release-blocking verification. The first architecture pass defines shared
+when available (Codex Spark, Claude Haiku, Claude Sonnet, or **GLM** via z.ai —
+setup: [doc/07_guide/infra/model_providers/glm.md](../../doc/07_guide/infra/model_providers/glm.md)),
+then require a normal/highest-capability review before accepting done marks,
+broad exclusions, or release-blocking verification. The first architecture pass defines shared
 interface names, manual `step("...")` flow helper names, and setup/checker
 helper names; placeholder helpers must fail explicitly (`assert(false)` or
 `fail(...)`).
@@ -132,6 +181,12 @@ cannot cover a capability executable on the current host. Preserve the affected
 acceptance-criterion IDs: a postponed row stays out of exclusions, keeps its
 TODO open, and blocks any phase, verify report, or goal whose acceptance depends
 on it until resumed and proved.
+
+For Cosmos+ NVMe physical evidence, accept BT-001..BT-006 only after
+`scripts/check/check-nvme-firmware-remaining-gates.shs --board-evidence DIR`
+passes. A result summary alone is invalid: each BT row binds a retained raw log
+by SHA-256, names the independent campaign reviewer, and matches the verified
+v3 package source, board, boot mode, and artifact identities.
 
 For cross-host or native-only matrices, keep every unavailable row visible in
 executable and generated-manual evidence as `unsupported` or `blocked`; never
@@ -213,6 +268,16 @@ before accepting regeneration-safe PASS. For RISC-V evidence that spans
 generated RTL sidecars plus Lean/BYL, cite
 `sh scripts/check/check-riscv-formal-dual-track.shs` so SPipe evidence covers
 the sidecar self-test, normal sidecar contract, and manual proof gate together.
+RISC-V RTL artifact evidence must additionally cite
+`sh scripts/check/check-riscv-rtl-truth.shs`: it fails closed on fake-CPU
+evidence (empty architecture, `smoke_handoff` step-counter core, decode-free
+core, wrapper instantiating an undefined entity) and classifies each lane as
+`reference-handwritten`/`fixture`/`generated-contract`/`generated-real`. A
+declared `generated-real` or FPGA/Linux RISC-V lane whose SPipe evidence does
+not name this checker is not release evidence; a VIOLATION is a finding to file,
+never a rule to relax. Also treat advertised profiles as capability claims:
+`GC` march or hard-float `*d` ABI strings require implemented+tested F/D
+hardware — soft-float lanes must advertise `imac_zicsr_zifencei`/`ilp32`/`lp64`.
 BYL is a backend/interchange surface, not the proof result. It is helpful when
 SPipe needs cheap regenerated facts, but added proof intent belongs in the
 manual Lean theorem or constraint file and the generated contract must name any
@@ -229,12 +294,50 @@ non-empty `simple`/`spl`/`sdoctest` Markdown fences and closed, non-empty
 `#`/`##`/`///`, fenced-docstring, or docstring `sdoctest:` source examples. Use `text` for illustrative
 non-runnable snippets, run changed doctest files explicitly, and force
 `--refresh-manifest` after bulk moves; ordinary refresh is TTL plus size/mtime.
+Mandatory-check ledger v3 rows must name an owner and actionable unblock
+condition for TODO/blocked work; PASS rows use `unblock_condition=none`.
 If the hardening matrix reports `reason=stale-static-reports`, refresh the
 named reports until `simpleos_hardening_stale_reports=none` before accepting
 the lane.
+SimpleOS compiler-in-filesystem lanes must prove install-image deployment and
+in-guest execution. The target-native Simple payload must be embedded in the
+SimpleOS filesystem under `/usr/bin/simple(.smf)`, `/bin/simple(.smf)`,
+`/sys/apps/simple(.smf)`, `/sys/apps/simple_compiler(.smf)`,
+`/sys/apps/simple_interpreter(.smf)`, `/sys/apps/simple_loader(.smf)`, and
+`/SYS/SIMPLETOOL.SDN`. Host `bin/simple`, placeholder marker apps, host-side
+compile/run evidence, or QEMU fixed-command SSH responses are not PASS evidence.
+Require a QEMU or physical-board transcript that runs `/usr/bin/simple
+--version` and compiles/runs a small `hello world` from the mounted SimpleOS
+filesystem. For physical-board claims, also record board identity,
+download/boot path, and serial or SSH transcript; otherwise classify the lane as
+QEMU-only or source-present.
+Ground truth (2026-07-14): cross-build + boot + FS-exec *staging* of the
+target-native Simple compiler is proven on all three simpleos arches
+(`bin/release/<arch>-unknown-simpleos/simple`, 4 MB static EXEC, fail-closed
+`readelf` gate). In-guest *interpreter execution* is now PROVEN on x86_64 under
+real OVMF (`fe9fbd8c2285`): `ssh root@guest /usr/bin/simple /hello.spl` prints
+"hello from simple on simpleos" — gate `scripts/os/ssh_simple_hello_uefi.shs`
+rung L4b PASS, rc=0, an ARBITRARY program (not a fixed-command fixture). Root of
+the last blocker: the guest lexer's `src[start:pos].join("")` (native value-type
+array-slice + join) returns `""` in the guest, so every identifier token came out
+empty and nothing resolved — fixed with a char-index loop. **Lesson: native array
+`[s:e]` slice + `.join()` is unreliable in guest-run code; use index loops.** The
+interpreter goal was reached via the focused `simpleos_tool` payload built with
+`src/compiler_rust/target/bootstrap/simple` — the deployed *full CLI* still has
+separate blockers (stale two-argument `rt_env_set` artifact ABI
+(`doc/08_tracking/bug/deployed_selfhost_env_set_miscompile_segv_2026-07-14.md`)
+and the #99 seed-cranelift enum miscompile). So: build the payload with
+`src/compiler_rust/target/bootstrap/simple` (the deployed `bin/simple` SEGVs on
+every `native-build`), and classify a compiler-in-filesystem lane as
+staging-proven (not in-guest-run) until the self-hosted redeploy lands. Do NOT
+mark such a lane PASS on staging alone.
 Starvation, fairness, race-condition, scheduler, channel, lock, or
 resource-lifecycle claims require a concurrency/resource model gate or an
 explicit blocker; a single interleaving test is not formal evidence.
+For flight-level or mission-critical robust-software lanes, use
+`doc/07_guide/app/spipe/mission_critical_robust_sw.md` as the operator-facing
+contract before claiming Simple compiler, SimpleOS baremetal, NVMe firmware, or
+thread/process/coroutine hardening evidence.
 
 Check or install that wiring with:
 
@@ -257,6 +360,7 @@ sh scripts/setup/install-spipe-dev-command.shs --apply
 - [`doc/07_guide/app/spipe/mission_critical_robust_sw.md`](../../doc/07_guide/app/spipe/mission_critical_robust_sw.md) — flight-level / mission-critical robust-software gate contract
 - [`doc/07_guide/infra/sspec_scenario_manual.md`](../../doc/07_guide/infra/sspec_scenario_manual.md) — SSpec scenario manual, capture, inline/previous scenario, and environmental-test guidance
 - [`doc/07_guide/platform/simpleos/qemu_system_tests.md`](../../doc/07_guide/platform/simpleos/qemu_system_tests.md) — **System tests over QEMU**: per-arch live-boot SSpec specs (`test/03_system/os/qemu/`), `qemu_systest_contract.spl` descriptors, pass/missing-media/boot-fail classification (fail-closed, never `skip()`), and `scripts/check/qemu-storage-audit.shs`
+- [`doc/07_guide/platform/simpleos/simpleos_baremetal_board_support.md`](../../doc/07_guide/platform/simpleos/simpleos_baremetal_board_support.md) — SimpleOS board support and the Simple compiler install-image/filesystem contract
 
 ## Landing a PR here (measured 2026-09-06 — read before you push)
 
@@ -853,6 +957,16 @@ recorded `rejected_shortcuts` first; do not retry a rejected `rt_*`, fixture
 bypass, backend-poke, or generated-code workaround unless new evidence changes
 the decision.
 
+> **An unimplemented dispatch arm returns an error; it never aborts the
+> process.** Five `_ => unreachable!(...)` fallbacks in the interpreter's winit
+> SFFI turned any unimplemented extern into a whole-process abort with a
+> panic-inside-panic, destroying the diagnostics of the very run that found it
+> (`dispatch_window called with unexpected name:
+> rt_winit_window_staging_ptr` killed a demo launch instead of failing one
+> call). They are now `Err(unknown_function(name))`. Any name-dispatch table you
+> add — extern router, capture-kind registry, backend selector — must make its
+> default arm a catchable error so the run still reports what was missing.
+
 Before handoff, run `sh scripts/audit/direct-env-runtime-guard.shs --working`
 for runtime-adjacent lanes and treat any new raw env/process/runtime access
 outside owner modules as a fix-before-done issue.
@@ -866,12 +980,129 @@ For GUI render-location assertions, use
 the stable id, role/kind, geometry, hit rect, parent, and computed style inside
 the SSpec case.
 
+## UI-lane specs & diagnostics
+
+`std.diag` (`src/lib/nogc_sync_mut/diag.spl`, guide
+`doc/07_guide/infra/debugging/easy_debug_infra.md`) is the shared debug
+primitive set (P0 of `doc/03_plan/ui/testing/ui_test_infra_plan.md`) that
+UI-lane specs should instrument with rather than ad-hoc `print`:
+
+```simple
+use std.diag.{dbg_stage, dbg_deadline, dbg_deadline_clear, dbg_time_begin,
+              dbg_time_end, dbg_summary, dbg_provenance, dbg_event_hop,
+              dbg_force_facet, dbg_diag_reset}
+```
+
+- `dbg_stage(component, stage)` — stage tracer, ring cap 256; `dbg_deadline(label,
+  budget_ms)` / `dbg_deadline_clear` — cooperative (thread-free) watchdog,
+  breach dumps stage history once; `dbg_time_begin/end(label)` + `dbg_summary()`
+  — aggregating timers, the quadratic-path finder; `dbg_event_hop(chain_id, hop,
+  detail)` — one line per event hop; `dbg_provenance(claimed, actual, context)`
+  — ALWAYS-ON anti-fakery assert (never gated).
+- Gate with `SIMPLE_DIAG=all|stage,watchdog,timers,events` (read once, cached).
+  Since specs run in the same process as module load, use the two test-only
+  hooks instead of env: `dbg_force_facet(facet)` to force a facet on mid-spec,
+  `dbg_diag_reset()` to clear all module state between `it` blocks.
+
+**Two interpreter landmines proved during the P0 spec work** (both documented
+in `diag.spl`'s header and `diag_spec.spl`'s header comment):
+1. `if val Some(x) = dict.get(k):` **silently never matches** — `Dict.get()`
+   returns the raw value or `nil`, NOT a `Some(..)`-tagged Option. Use
+   `dict.get(k) ?? default` or `!= nil` instead.
+2. Module globals mutated inside functions are **stale when read directly from
+   a spec `it` block** — the interpreter snapshot the `it` block sees does not
+   reflect writes made by module functions. Always assert through the module's
+   own accessor functions (e.g. `dbg_last_emit()`, `dbg_timer_stats(label)`),
+   never by reading a module-level `var` directly from the spec.
+
+**Two more spec-authoring landmines proved by the 2026-07-20 web/GUI/WM/GPU/
+DrawIR/3D hardening campaign** (found independently by four separate lanes —
+treat both as default assumptions when writing a spec or probe):
+3. **A top-level `fn` mutating a top-level module `var` does not persist** —
+   not just when read from an `it` block (landmine 2 above) but between the
+   function's own calls. A probe that increments a shared `pass_count`/
+   `fail_count` inside a `check()` helper prints every PASS/FAIL line
+   correctly and then reports `0/0` in its summary — a silent false green
+   in the exact place you look for the verdict. Thread an immutable tally
+   struct (or a small class mutated via `me`) through the case functions and
+   return it; never accumulate through module scope. Always prove the
+   failure path is real with a deliberate-red run (expect nonzero rc) before
+   trusting a probe's `fail=0`.
+4. **The `simple test` daemon evaluator and `simple run` diverge on
+   optional-returning lookups compared with `== nil` / `!=`** — a helper
+   returning `text?` and compared that way passed under `run` and in 10 of 11
+   daemon examples, then mis-evaluated equal values as changed only in the
+   larger (~20+ element) daemon case. Avoid optionals in comparison paths in
+   spec-support helpers; use a membership check or `.has()` + `[]`. Tracked:
+   `doc/08_tracking/bug/bug_sspec_daemon_optional_lookup_equality_divergence_2026-07-20.md`.
+   Corollary: a spec that is green under ONE runner is not proven — the
+   campaign's convention of shipping a `bin/simple run` probe mirror
+   alongside each spec exists precisely to surface this class.
+
+**UI interaction (Playwright-like `UiTest`/`locator`) is designed, not yet
+implemented.** See `doc/05_design/ui/testing/ui_test_infra_design.md` (the
+`UiSession`/`Locator`/`Lane` API) and `doc/03_plan/ui/testing/ui_test_infra_plan.md`
+(phases P1-P6). Specs that need to click/type/snapshot a live UI should follow
+that plan rather than hand-rolling a driver against `ui.test_api`/SGTTI directly.
+
 ## Rendering Checks (`expect_draw` style)
 
 For GUI, Web, 2D, Draw IR, and WASM rendering specs, use `expect_draw`-style
 helper functions inside normal SSpec `it` blocks. The helper may wrap repeated
 setup/readback, but it must contain real assertions and must not replace
 `expect`, `describe`, `it`, or the canonical matchers.
+
+For GUI/web font work, reuse the canonical `FontRenderer` and assert semantic
+`DrawIrComposition` text/style before backend/readback evidence. `WebIR` remains
+the existing semantic/layout model; transient `FontRenderBatch` atlas/device
+material belongs only to Engine2D, never WebIR or Draw IR. The canonical
+Web producer uses the HTML/WebIR-to-DrawIR owner; the canonical GUI producer
+uses `widget_tree_to_draw_ir`, never a private widget command collector. The
+submitted payload must be that exact composition before dispatch can pass; a
+separate frame event leaves dispatch `not_requested`. Preserve the executor's
+exact readback source instead of replacing it with generic provenance. The
+canonical WM frame route is `SharedWmScene -> DrawIrComposition -> Engine2D`;
+`shared_wm_scene_render_*_to_backend` and `_to_pixel_buffer` are compatibility
+renderers, not selected-font completion. Reject evidence built on an app-private
+font draw path or on Engine3D HUD/world as a GUI/web/2D shortcut. A synthetic
+composition is supporting evidence only: production acceptance must exercise
+the real hosted frame owner, canonical SimpleOS entry wiring, and the retained
+QEMU framebuffer crop, with platform backends limited to final-pixel
+presentation.
+
+Shared-font SSpec manuals freeze these exact steps: `Load the pinned multilingual
+font manifest`; `Accept exact-face-bound simple-script shaping`; `Prepare one
+shared font batch for 2D and 3D`; `Emit the selected font composite program and
+plan compilation`; `Prove native submission and device readback`. Engine3D
+HUD/world stays a separate consumer lane. Full rules live in `$sp_dev` under
+“Shared multilingual font work.”
+The final irreversible registered-only SimpleOS shaping scenario uses exact
+validated Arabic/Devanagari registered bytes, no host font ABI or filesystem
+access after the mode switch, handle-free Draw IR, and the existing
+selected-byte `FontRenderer`; it never implies a QEMU framebuffer PASS.
+AC-13 review rejects raw `rt_mutex_*` ownership in font modules, mutable
+module-global engine pools, and hosted unsynchronized generation counters;
+freestanding initialization constraints must be repaired through the existing
+facades rather than by adding parallel runtime owners.
+NFR-008 promotion must flow from `VulkanFontCompositeEvidence` and
+`vulkan_font_stage_evidence_ready` into durable `FontPerfBudgetEvidence`, then
+through `read_font_perf_evidence` and `expect_font_perf_budget`. `queue_device`
+is one fused submit-through-device-completion interval; the later `sync` field
+is fence observation, not disjoint device time. Offscreen rendering records
+`not-applicable-offscreen` presentation and still requires device readback.
+Vulkan promotion also requires the exact pinned precompiled-SPIR-V hash;
+magic-valid alternative modules and runtime GLSL remain unpromoted. The checker
+requires extracted optimization/font source bytes to match their emitter-declared
+hashes and rejects missing or malformed hashes before compilation. A well-formed stale
+Vulkan source may compile and retain `.comp`/`.spv` candidates for review, but
+evidence remains invalid until both source and artifact pins match.
+Portable font admission aggregates only `PORTABLE_COMPUTE_TARGETS` and first
+requires emitted semantics to match `PORTABLE_COMPUTE_EXPECTED_SEMANTICS`,
+`candidate_compiled=true`, and `artifact_validated=true`. Evidence records the
+compiler and validator path/version/SHA-256; Vulkan additionally requires a
+passing `spirv-val` row. Stale pins remain `pinned_verified=false`. Independent
+review may then update tracked source/artifact pins, after which a reproducing
+run must set `pinned_verified=true`; never repin merely to green the first run.
 
 For RenderDoc evidence, use the shared helper interface instead of spelling
 `renderdoccmd` directly in each spec or check script:
@@ -895,16 +1126,19 @@ renderer parity wrapper now consumes
 `scripts/check/check-wm-browser-event-routing-evidence.shs`; a green production
 claim must expose `production_gui_web_renderer_parity_event_routing_*` with
 focus, move, maximize, title-command, text-input, pointer-down, pointer-up, and
-`blur_or_tolerance=false`.
+browser timing/animation proof: `performance_now_available=true` with a positive
+`performance_now_delta_ms`, at least two animation frames,
+`css_animation_probe=true`, and `blur_or_tolerance=false`.
 
 For GUI/web/2D Vulkan comparison, use
 `scripts/setup/setup-gui-web-2d-vulkan-env.shs --check` for readiness,
 `--browser-backing` for focused direct Electron Chromium backing proof, `--run`
 for direct Electron/Chrome/Simple launch probes, and
 `--renderdoc-simple` for the Simple in-application RenderDoc debug path on a
-prepared Linux or macOS RenderDoc host. Leave `RDOC_SIMPLE_BIN` unset for normal
-runs so the helper builds `src/compiler_rust/target/release/simple` with current
-`rt_renderdoc_*` externs. Use all-lane `--renderdoc` only for cross-surface
+prepared Linux or macOS RenderDoc host. Normal runs use the repo-managed
+self-hosted `bin/simple` selected by the wrapper. If it is unavailable or lacks
+the current RenderDoc externs, report the bootstrap/runtime gap; never substitute
+the Rust seed. Use all-lane `--renderdoc` only for cross-surface
 evidence collection. For Windows setup, read
 `doc/07_guide/app/ui/gui_web_2d_vulkan_setup.md`: `vulkaninfo --summary`,
 DirectX availability, Chrome installation, and Electron installation are host
@@ -1127,12 +1361,92 @@ observe a pass:
   `production-gpu-dispatch-not-wired`); with a matching payload → GPU stats
   (`gpu_returned_glyphs == 1`, `cpu_fallback_hits == 0`). Add a corrupt-checksum
   case that must be REJECTED (falls back). If the impl reports GPU-offloaded
-  regardless of payload, it is a cover-up and the spec must fail it. See
+  regardless of payload, it is a cover-up and the compatibility spec must fail
+  it. See
   `test/01_unit/lib/common/text_layout/bitmap_font_gpu_offload_spec.spl`.
-- **Effect oracles are absolute, not "non-zero".** Transparency/blend specs assert
-  the exact composited value: full coverage replaces (channel == fg), half
-  coverage hits the midpoint (`(fg*128 + bg*127)/255`), zero coverage leaves bg
-  untouched. See `font_glyph_transparency_spec.spl`.
+- **Shared font batch native proof.** Direct 2D/3D font composition must begin
+  with the same batch generation plus quad/atlas payload hash (do not infer
+  face/glyph identity from fields the current compatibility batch lacks), then
+  separately prove compiled
+  versioned entry, nonzero device/program/texture/sampler/pipeline handles,
+  true atlas/destination allocation counts with guarded indices, atlas upload
+  and bind, submit/draw, completed fence, and device-origin
+  readback against an absolute CPU oracle. Emitted source, environment payload,
+  upload alone, software backend names, simulation, or equal checksums are not
+  native proof. Record unavailable hardware as `unavailable`; never promote it.
+  Before native promotion, the exact Pure Simple shaping/corpus gate must accept
+  the face for the language/script; a codepoint raster/layout witness alone is
+  diagnostic and leaves the matrix cell `unavailable`.
+  Run shared multilingual font acceptance SSpecs with
+  `SIMPLE_NO_STUB_FALLBACK=1 bin/simple test <spec> --mode=native`; interpreter runs are diagnostics and cannot
+  promote a manifest cell, backend, or performance row.
+  The pure test runner and canonical `src/app/test/font_evidence_runner.spl`
+  must share `build_interpreter_result_wrapper`, which appends `print_summary`,
+  `get_executed_test_count`, and `get_exit_code` checks to the interpreted source.
+  `CompileResult.Success` alone is false green: matcher failures only update
+  spec state. Require exit 1 plus `test-runner: spec failed` for deliberate-red
+  and exit 1 plus `test-runner: no examples executed` for zero-executed before
+  using that runner as diagnostic evidence; reject 2/124/139. Use
+  `scripts/check/fixtures/font_evidence_runner_fail_spec.spl` and
+  `scripts/check/fixtures/font_evidence_runner_empty_spec.spl`. It must use the
+  existing file facade, map every non-success `CompileResult` nonzero, and
+  delete its temporary wrapper. Retain exact commands, runner binary SHA-256,
+  and both logs under the canonical `$system_test` artifact path.
+  Resolve matrix policy by exact language and category. Unknown axes fail
+  closed, and `witness_family` must not be treated as a loadable asset unless
+  the resolved status is `native` or `fallback`.
+  Supplementary-plane/emoji claims must exercise a real format-12 cmap witness
+  (currently `U+1F600`) and prove the selected run face owns the returned glyph
+  ID; parser-only lookup is not fallback acceptance.
+  Shaped-run rendering must fail closed unless the `OtFont` is explicitly bound
+  to the same live runtime face generation, blob/runtime cmap glyph IDs agree
+  for every codepoint, and cache/atlas identity includes face + generation +
+  glyph index + size. A codepoint used as a fabricated glyph index or a stale
+  freed handle is a hard failure. Engines consume the neutral text-layout run
+  and `FontRenderBatch`, never the Skia shaper type directly.
+  Preserve absolute source index and cluster identity inside each shaped glyph
+  before any reversal/reorder; language/script/direction and current advance/
+  offset metadata must stay aligned with glyph order. Cmap parity is direct
+  material evidence only: complex scripts and multi-codepoint emoji sequences
+  remain invalid while substitution/positioning completeness is false.
+  Engine3D neutral HUD/world acceptance is CPU compatibility evidence only:
+  world text projects one anchor into a screen-space billboard. It does not
+  prove native texture upload, depth/occlusion, pipeline draw, fence, or
+  device-origin readback.
+  Distinguish GPU atlas composition from CPU glyph rasterization and from direct
+  GPU outline rasterization.
+  The OpenCL adapter must additionally prove the versioned shared source,
+  generation-keyed atlas upload with load/unload invalidation, checked dirty-row
+  offsets after the initial full upload, full upload on reset/gap/invalid dirty
+  metadata, exact 0..14
+  argument binding, submit/synchronize, and `device_readback`; conditional unit
+  execution is not a release PASS when the device is unavailable.
+  The CUDA adapter must prove the separately source-tracked Simple-generated
+  PTX companion passes runtime PTX-hash, entry, and program-version checks,
+  while checker/SPipe exact equality binds its pinned source and emitter-version
+  hashes to the current Simple emission and
+  the default 2D module provides no font entry; all 15 value/pointer slots are ordered exactly,
+  atlas generation is invalidated on font replacement, each accepted prefix is synchronized before
+  CPU-mirror parity is updated, and final pixels come from `device_readback`.
+  Production loading additionally requires packaged or tracked Simple-generated
+  PTX bound to an immutable trusted hash and program version; ignored `build/`
+  output and caller-provided adjacent hashes are not trust anchors.
+  The Metal adapter must prove compiler/runtime source equality, the optional
+  native pipeline, exact 13-word/52-byte ABI, native-only typed routing (never
+  `metal-on-vulkan`), completed prefix dispatch, and device-origin readback.
+- **CLDR ranking replay.** A release top-language claim requires pinned
+  `common/supplemental/{supplementalData,supplementalMetadata,likelySubtags}.xml`
+  from the selected CLDR object, verified source hashes, two byte-identical
+  `cldr_rank_languages` generations, and exact top-10 plus rank-11 comparison.
+  Compare every language total and script subtotal with the checked-in derived
+  ledger. The synthetic unit fixture proves scanner/arithmetic behavior only.
+- **Effect oracles are absolute, not "non-zero".** Transparency/blend specs use
+  effective alpha `sa=(coverage*fg_a+127)/255`; when `sa==0`, output is the
+  unchanged background. Otherwise assert
+  `dst_weight=bg_a*(255-sa)/255`, `out_a=sa+dst_weight`, and
+  `out_rgb=(fg_rgb*sa+bg_rgb*dst_weight)/out_a`.
+  Full coverage replaces the foreground only when `fg_a==255`. See
+  `font_glyph_transparency_spec.spl`.
 - **Config/env backend selection.** When one API selects its lane (SIMD CPU vs
   GPU) by environment (`SIMPLE_2D_BACKEND`), assert the override is honored when
   the backend initializes AND ignored (auto-probe, value changes) when it cannot —
@@ -1164,11 +1478,61 @@ observe a pass:
   the CPU reference (`ran_on_cpu=true`, no masquerade); the value must equal the CPU
   oracle in both branches. Avoid generic `!=`/2-arg `==` on `[T]` in comparators
   (interp bug; use `less` + derive equality).
-- **Per-backend kernel EMISSION (no GPU needed).** "cuda/metal/vulkan backed" is
-  verified at emission level like `gpu_portable_compute_spec`: assert backend markers
-  on the emitted source — CUDA `__global__ void`, OpenCL `__kernel void`, Metal
-  `kernel void` + `[[thread_position_in_grid]]`, WebGPU `@compute @workgroup_size`.
-  See `gpu_compute_algorithm_kernels_spec.spl`.
+- **Per-backend kernel EMISSION (no GPU needed).** Verify only targets the
+  emitter actually supports: CUDA `__global__ void`, OpenCL `__kernel void`,
+  Metal `kernel void` + `[[thread_position_in_grid]]`, and WebGPU
+  `@compute @workgroup_size`. Vulkan requires validated SPIR-V evidence, not a
+  fabricated text marker. See `gpu_compute_algorithm_kernels_spec.spl`.
+  When font composition accompanies a generated optimization module, require a
+  separate font artifact/compile plan, a distinct `_font_atlas` path, and the
+  versioned font entry in exported-symbol evidence. Never concatenate WGSL
+  modules whose storage/uniform bindings overlap.
+
+### GPU / drawing / event honest backend baseline (2026-07-06)
+
+Before writing GPU-processing, 2D-drawing, or event specs, read the intensive
+test plan `doc/03_plan/ui/testing/gpu_draw_event_intensive_tests.md` (+ `_tldr`)
+and the coverage guide `doc/07_guide/testing/gpu_rendering_tests_gap_analysis.md`.
+The plan is: **shared portable bodies (Linux CI) + system-specific device
+checkpoints** across processing {vulkan, metal, cuda, hip} × drawing {metal,
+vulkan, directx}, with `read_pixels()`→PPM as the absolute oracle. Honest state a
+spec must not paper over:
+- GPU compute (`std.compute`/ExecTarget) is a **payload-gated simulation** — it
+  reports GPU provenance but runs a CPU reference; real device execution is proven
+  only on Metal. Assert value == CPU oracle in BOTH branches + the provenance flag.
+- **Vulkan** `line`/`circle_outline`/`rounded_rect` dispatch a validated EMPTY
+  shader (zero pixels); **Metal** `clip` is a no-op; **cpu_simd** is an honest
+  alias of `cpu` (no live SIMD). A drawing spec must catch these, not match a
+  same-code-path tautology.
+- The GPU job/event scheduler (`host_gpu_event_queue.spl`,
+  `draw_ir_runtime_queue.spl`) is real (EMPTY→QUEUED→SUBMITTED→COMPLETED); the
+  debug-log feature instruments it with `std.diag` (`dbg_event_hop`/`dbg_stage`/
+  `dbg_provenance`, `SIMPLE_DIAG=events,stage`) — never re-introduce a fabricated
+  `estimated_ms` speedup.
+- HTML/CSS Draw-IR boxes now render borders/gradients/radius/shadow (not flat
+  fill); `<img>` remains blocked (`engine2d_draw_ir_image_path_no_resolver_2026-07-06`).
+
+### Backend isolation in UI specs (2026-07-06)
+
+Specs for **app-level** UI behavior must drive a **facade**, never a backend or
+`rt_*` extern directly — the spec exercises the same isolated path the app ships:
+
+- 2D: `Engine2D.create_requested_backend(w,h,name)`; HTML→pixels:
+  `web_render_backend(name,w,h).render_html_to_pixels(html)` (`name` =
+  `pure_simple`|`chromium`); windows/sessions: `GuiRenderer` once it lands
+  (P3 Gap A). Never construct `MetalBackend`/`SoftwareBackend`… or call
+  `simple_web_engine2d_render_html_pixels`/`simple_web_layout_render_html_*`
+  from a spec that stands in for app code.
+- Parity/readback specs assert **provenance**, not just pixels — check the
+  `ReadbackSource`/backend name the facade reports (e.g. metal vs software) so a
+  silent software fallback (MEMORY 06-10) fails the spec instead of green-washing.
+  Equality-to-CPU-oracle alone is a same-path tautology; see § "Equality is not
+  correctness".
+- Backend-engine or `rt_*` calls belong only in `src/lib/**/gpu/**` and the
+  designated `io`/`ffi` facades. A spec that must touch those directly is a
+  backend/library spec, not an app spec — place it accordingly.
+- Full rules, allowlist, per-lane call patterns, and the source-contract gate:
+  [`doc/07_guide/ui/rendering/backend_isolation_guide.md`](../../doc/07_guide/ui/rendering/backend_isolation_guide.md).
 
 ## Startup-Sensitive Specs
 
@@ -1201,8 +1565,6 @@ duplicate-check outcomes plus the aggregate pass marker. Raw source, a deployed
 wrapper, Rust seed, or stale binary is not evidence. This sanity does not
 replace release `--whole` or repository-wide policy checks, and it must not be
 copied into compiler Stages 2 or 3.
-The bootstrap completion recorder must override ambient `SIMPLE_BINARY`/`SIMPLE_BIN` and
-bind all automated gates to the exact validated Stage 4 candidate.
 
 An explicitly admitted Stage 2 or Stage 3 Simple binary may run focused
 pure-Simple compiler/interpreter/loader work under
@@ -1312,30 +1674,6 @@ was a 4-line probe spec that CALLS the extern: a capable driver validates the
 argument types, an incapable one reports `unknown extern function`.
 
 ## Shared working tree: blob-first landing (2026-08-07)
-
-Linked Git worktrees share one hooks directory. Must-check setup installs the
-stable `scripts/hooks/pre-push-worktree-launcher`, which resolves the active
-worktree before entering its tracked dispatcher. Do not replace it with an
-absolute symlink to one checkout; that makes every sibling fail hook-wiring
-verification. Do not preserve a legacy dispatcher as `pre-push.local`, which
-would recurse.
-
-Check before installing or repairing the shared hook. On Unix-like hosts:
-
-```sh
-sh scripts/setup/install-must-check-hooks.shs --check ||
-  sh scripts/setup/install-must-check-hooks.shs --install
-```
-
-On Windows PowerShell:
-
-```powershell
-& scripts/setup/install-must-check-hooks.ps1 -Check
-if ($LASTEXITCODE -ne 0) { & scripts/setup/install-must-check-hooks.ps1 -Install }
-```
-
-The canonical tier and hook contract is
-`doc/07_guide/tooling/must_check_tiering.md`.
 
 On this repo's shared working tree, a concurrent session's checkout/reconcile
 can silently WIPE an in-progress file — no `git status` trace, not even
@@ -1676,6 +2014,69 @@ fixture and compare it to what you wrote.
   final verdict line (pattern: `test/.../probe_interaction_core.spl`,
   `test/02_integration/ui/probe_event_loop_smoke.spl`).
 
+## Silent defaults (`??` on a non-Optional) — the evidence is empty, the reason lies
+
+`expr ?? default` fires **only on `nil`**. Applied to a non-Optional it is dead
+code: the default is unreachable and the expression silently yields the empty/zero
+value. Nothing warns.
+
+The trap in this codebase is `env_get`, which exists with **two return types**:
+
+| definition | returns | `?? default` |
+|---|---|---|
+| `src/lib/nogc_sync_mut/io_runtime.spl:174` (`std.io_runtime`) | `text` | **DEAD** |
+| `src/lib/nogc_sync_mut/env/variables.spl:11` | `text` | **DEAD** |
+| `src/lib/nogc_sync_mut/src/config.spl:764` | `text?` | works |
+
+So `env_get("SOME_PATH") ?? path_join(root, "f.ppm")` yields `""` when the
+variable is unset — and whether your code is correct depends on which import is
+in scope. ~680 occurrences of the pattern in-tree; **occurrences, not bugs** —
+check each against its own import before touching it.
+
+**How it wastes a session.** An empty path produced `status=fail
+reason=ppm-write-failed` in a showcase evidence lane. Permissions, directory
+existence, 1.6 MB payload size, filename collision and `path_join` were all
+tested and all fine — because the failing *value* was never printed. Two added
+prints found it immediately.
+
+**Rules for evidence lanes:**
+- A failure branch must print the **value it failed on**, not just a reason slug.
+  `reason=ppm-write-failed` with no path is unactionable; `failed_ppm_path=` +
+  `failed_ppm_bytes=` is a diagnosis.
+- **Never discard a status return.** `dir_create_all(x)` with the result ignored
+  turns a directory-layer failure into a mystery write failure two phases later.
+  One reason slug covering two distinct causes is what stalls root-causing.
+- A reason slug is a **hypothesis**, not a finding. Confirm the named cause is
+  the real one before acting on it (here it was not).
+- `grep 'Results:'` / assert on artifact existence — never conclude from a
+  `tail`, and never from a pipeline's exit code (`cmd | tail` reported `EXIT=0`
+  while the build SIGSEGV'd).
+
+Detail: `doc/08_tracking/bug/env_get_nil_coalesce_dead_fallback_2026-07-25.md`.
+Glossary: *Dead Nil-Coalesce Fallback*, *Same-Name Divergence*.
+
+## Watchdogs and isolation wrappers can eat your evidence
+
+Before concluding "the lane produced nothing", rule out the harness itself. Three
+independent kills sat in front of one host-WM showcase cell, each hiding the next:
+
+1. **`examples/**` isolation buffers child output** and prints it only after
+   `child.wait()` — a timeout kill discards everything, including `main()`'s
+   first line. Symptom: **zero output AND exit 0**, which reads as success to any
+   check that inspects only the return code.
+2. **A 10s in-process watchdog** (`SIMPLE_TIMEOUT_SECONDS` default) against a
+   capture lane whose bridge+frame waits budget ~8 minutes. It also *misreports*
+   its own limit: the watchdog prints `(10s)` while the surfaced error says
+   `exceeded 0 second limit`.
+3. Only then the real defect (the silent default above).
+
+Setting `SIMPLE_TIMEOUT_SECONDS=<n>` raises the watchdog **and** disables the
+isolation re-exec (`examples_safety.rs:38,42` key off that one variable).
+
+Corollary: "no verdict" is never self-explanatory — read the cause out of the log
+every time. Detail:
+`doc/08_tracking/bug/examples_isolation_buffers_output_lost_on_timeout_2026-07-25.md`.
+
 ## Fixtures that lie (mock stdlib on a real-IO path)
 
 `std.nogc_sync_mut.file_system.file_ops` is a **mock**: `file_read_text` returns
@@ -1863,6 +2264,14 @@ fail with the exact symptom in the bug report**, then fix the code and re-run.
 Report both observations (`3 failed → 21/0`, with the failing values quoted);
 "added a spec, suite green" is not evidence the spec covers the defect.
 
+A reproduction alone is still under-verified: the defect's shape usually
+repeats in sibling paths (other match arms, the same API family's other
+members, neighboring config axes, boundary values). Add similar-case examples
+for the nearest siblings in the same spec, and close with a sabotage probe
+(re-break the fix → specs red → restore → green, all three observed and
+reported). See `.claude/agents/test.md` § "Every fix ships a reproduction
+spec AND similar-case specs".
+
 ## GUI sanity tests (pure-Simple lane)
 
 After any GUI / engine2d / web-render change, sanity-check the **three main GUI
@@ -1880,48 +2289,6 @@ oracle; region screen-capture is flaky). Full launch/capture/parity-gate details
 **[`lib/spipe_ui.md`](lib/spipe_ui.md)** (the UI skill). Reference:
 `doc/04_architecture/ui/simple_gui_stack.md` → "GUI Sanity Apps". The web-layout
 lane is interpreter-bound (~1.5 ms/px) — keep web sanity surfaces ≤ ~900×760.
-
-## `@tag:in-development` — the ONE legitimate way to ship an expected-to-fail spec
-
-Canonical guide: [`doc/07_guide/infra/testing.md`](../../doc/07_guide/infra/testing.md)
-§ "Tags and Filtering" → `@tag:in-development`. Read it before using the tag.
-
-When you write a spec ahead of the implementation it describes, mark it:
-
-```simple
-# @tag:in-development
-# Tracks: <TODO id / bug record / plan row>   <- MANDATORY, no exceptions
-```
-
-Contract: expected to FAIL, SKIPPED in whole-suite runs, **COUNTED** in the
-runner summary, selectable via `simple test --tag in-development`.
-
-**Enforcement status (checked against `origin/main` @ `3ccf808f6f2`, 2026-08-23).**
-`--tag <name>` filtering exists in the seed driver
-(`src/compiler_rust/driver/src/cli/test_runner/args.rs:24`, forwarded at
-`execution.rs:923-925`), and `@tag:qemu` is scanned there for the timeout budget
-(`execution.rs:95`). The pure-Simple runner parses exactly **two** header
-directives — `# @di_test` and `# @exec_limit <N>`
-(`src/app/test_runner_new/test_runner_single.spl:193,209`) — and no `@tag:` at
-all. The skip/count semantics are landing in sibling lanes. Until they land,
-**the tag documents intent and changes nothing at runtime: the spec still runs
-and still fails.** Never report it as skipped without re-verifying at origin.
-
-**Do NOT use it for:**
-
-- a **regression** (used to pass, now fails) — fix or revert; tagging it buries
-  a loud, actionable failure in a debt counter;
-- a failure you have not diagnosed — that is an unfiled bug;
-- **environmental** unavailability (no GPU/board/network) — that is
-  `skip(name, reason)` / `pending(name)`
-  (`src/lib/gc_async_mut/spec/__init__.spl:40-43`) or the host-aware
-  `skip:`/`blocked:` wording;
-- getting a red suite green before a landing;
-- keeping a spec for behaviour nobody intends to build — delete it.
-
-**Promotion:** the moment it passes, delete the tag line and the Tracks line in
-the same commit as the fix, and close the tracked row. A passing spec that is
-still tagged is a stale ratchet: the count stops being a debt figure.
 
 ## Template
 
@@ -1950,15 +2317,18 @@ SPipe verify and implementation phases enforce these quality gates:
 
 ### Strictness Tiers (lint-tier axis)
 
-Code-strictness is a `moderate | lib | reliable` tier, **orthogonal** to the
-stdlib memory tiers (`nogc_sync_mut`, ...) — never conflate the two. `reliable`
-is the strict-lint + (planned) primitive-use + proof-coverage ladder that
-supersedes the rejected "High-robustness mode". Select via `simple.sdn [lints]
-profile=`, `simple lint --profile=<tier>`, or a `@lint_profile(<tier>)` file
-header (most-local-wins; distinct from the R9 `@profile(critical)` must-use
-annotation). Unset = legacy defaults. Every lint code is configurable via
-`[lints]` / `@allow`/`@warn`/`@deny`. Guide: `doc/07_guide/language/strictness_tiers.md`
-(tldr alongside); plan: `doc/03_plan/compiler/reliable_mode/reliable_mode_plan.md`.
+Code strictness uses the `moderate | strict | robust | critical` tier axis,
+**orthogonal** to the stdlib memory tiers (`nogc_sync_mut`, ...) — never
+conflate the two. `robust` is the strict-lint + planned primitive-use and proof-
+coverage ladder that supersedes the rejected "High-robustness mode";
+`critical` adds the mission-critical release rules. `lib`, `reliable`, and
+`mission-critical` are deprecated compatibility aliases for `strict`, `robust`,
+and `critical`. Select via `simple.sdn [lints] profile=`, `simple lint
+--profile=<tier>`, or a `@lint_profile(<tier>)` file header (most-local-wins;
+distinct from the R9 `@profile(critical)` must-use annotation). Unset = legacy
+defaults. Every lint code is configurable via `[lints]` / `@allow`/`@warn`/
+`@deny`. Guide: `doc/07_guide/language/strictness_tiers.md` (tldr alongside);
+plan: `doc/03_plan/compiler/reliable_mode/reliable_mode_plan.md`.
 
 ## Feature Module Packaging (`.sfm`)
 
@@ -1990,17 +2360,20 @@ done
 ```
 
 For concurrency perf work, do not collapse the Simple APIs into one "thread"
-bucket. `thread_spawn` is the OS-thread primitive, `green_spawn` in
-`std.concurrent.green_thread` is the implemented cooperative green-thread queue
-on the current OS thread, and `task_spawn` is the pool-backed native task path
-when `rt_pool_*` links. Keep `doc/07_guide/lib/misc/stdlib.md`,
-`doc/07_guide/compiler/check_perf.md`, and `.codex/skills/coding/SKILL.md`
-updated when those surfaces change.
+bucket. `thread_spawn` is the OS-thread primitive,
+`cooperative_green_spawn` / `cooperative_green_spawn_value` in
+`std.concurrent.cooperative_green` are cooperative queue APIs on the current OS
+thread, `multicore_green_spawn` is the Pure Simple bounded-worker facade that
+must prove `used_runtime_pool()` for M:N claims, and `task_spawn` is the
+lower-level task facade over `multicore_green_spawn`. Keep
+`doc/07_guide/lib/misc/stdlib.md`, `doc/07_guide/compiler/check_perf.md`, and
+`.codex/skills/coding/SKILL.md` updated when those surfaces change.
 
 Concurrency API misuse is enforced by `simple check` as the E-PAR rule family
 (E-PAR-001..005: facade/alias/surface/call-shape/rt_pool rules; E-PAR-006:
-green-spawn closures are share-nothing — no module-level mutable `var` reads,
-no captured `var` writes; `thread_spawn` exempt). Both compilers implement the
+cooperative/multicore green closures are share-nothing — no module-level
+mutable `var` reads, no captured `var` writes; `thread_spawn` exempt). Both
+compilers implement the
 rules: the Rust seed in `driver/src/cli/check.rs`, the pure-Simple lints in
 `src/compiler/35.semantics/lint/concurrency_{api_misuse,share_nothing}.spl`
 wired into `src/app/cli/check.spl`. The self-hosted E-PAR-006 lane is fully
@@ -2030,11 +2403,11 @@ Exception: safety-critical guards in process/signal paths (e.g. `pid <= 0` check
 before `kill()`/`waitpid()`) belong in the seed runtime too — a failed spawn's
 `-1` reaching `kill(-1)` SIGTERMs every user process (tmux + all SSH sessions +
 `systemd --user`). Such seed changes only take effect after a seed rebuild
-(`cargo build`) + `scripts/bootstrap/bootstrap-from-scratch.sh --deploy`.
-Caveat: `--deploy` ships the stage4 CLI with no smoke gate (verified broken
-2026-06-11 — lint coredumps, silent test no-op); always smoke-test `bin/simple`
-afterwards and, if broken, atomically restore the fresh seed from
-`src/compiler_rust/target/release/simple` (see `.claude/rules/bootstrap.md`).
+through `scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --deploy`.
+Normal bootstrap reuses the Rust seed and never runs cargo. The wrapper's
+`-c 'print(1+1)'` probe is only compiler sanity; the Stage 4 essential-tools
+gate above must pass before claiming the pure-Simple toolchain is healthy (see
+`.claude/rules/bootstrap.md`).
 See `doc/07_guide/runtime/process_kill_safety.md`.
 
 ### Bootstrap gate uses the deployed `bin/release`, not the Rust seed
@@ -2087,6 +2460,14 @@ links or mmaps user memory: the OVMF kernel `.bss` band is
 PASS: a durable serial transcript with the full ladder — never a verbal claim
 (the 2e "FULL COMPLETE" mislabel was caught exactly this way). Physical-board
 phases: `doc/03_plan/os/simpleos/hw_qemu/clang_board_bringup_x86_64_uefi.md`.
+
+Reading that transcript: **anchor every marker with its brackets/prefix** —
+grepping a serial log for `fault` also matches `[rfm] at=default-font`, so search
+`\[fault\]`. Then symbolize a bare `[fault] rip=0x...` line directly with
+`llvm-symbolizer --obj=<kernel.elf> 0x<rip>`; it works on the SimpleOS kernel ELF
+and names the faulting Simple function immediately (2026-08-04:
+`lib__common__encoding__sfnt__parse_fvar_axes`). `llvm-nm | sort | awk`
+address-range hunting is unnecessary.
 
 For SimpleOS QEMU host-GPU external-host evidence, use the postponement and
 resume contract in `doc/07_guide/platform/simpleos/qemu_system_tests.md` and
@@ -2336,8 +2717,56 @@ probes. When a spec or task touches RISC-V/SoC hardware, the sanity anchors are
   `doc/08_tracking/bug/seed_jit_boxed_int_61bit_drops_high_bits_2026-07-22.md`).
 - **RV32 FPGA load path** — `sh scripts/fpga/check_linux_loading_rv32.shs` →
   `CHECK_LINUX_LOADING_RV32: PASS` (core-vs-host checksum over a 64 KB payload).
+- **RV32/64 4 GiB address space** — `bin/simple run
+  test/01_unit/lib/hardware/soc_rtl/addr4g_probe.spl` → `ADDR4G_PROBE: ALL PASS`
+  (rv32 sparse page-backed RAM addresses the full 32-bit space — 3 GiB / top-of-4
+  GiB round-trips, no signed-i32 truncation or RAM_END-cap aliasing; rv64 dispatch
+  ≥ 2^31). `src/lib/hardware/soc_rtl/ram_sparse.spl`.
+- **RISC-V HW gate bundle** — `sh scripts/check/check-riscv-hardware-gates.shs`
+  runs the JTAG debug testbenches + soc/core/mux/FPU probes together.
 - Guide + full-Linux-boot reproduction: `doc/07_guide/os/rv64_soc_linux_boot.md`
   § "Sanity tests".
+
+**Architecture map — DO NOT read one legacy `.vhd` and conclude "nothing exists"
+(that mistake was made 2026-07-23).** The real layout:
+- **Shared XLEN-parameterized logic** lives in `src/lib/hardware/riscv_common/`
+  (`xlen.spl` `XlenConfig.rv32()/.rv64()` — mask/sign_bit/bytes_per_reg; plus
+  shared `alu`/`decode`/`csr_defs`/`registers`/`memory`/`rtl_decode`). BOTH cores
+  import it. Full single-core XLEN migration is planned/in-progress (research doc
+  `doc/01_research/hardware/riscv/riscv32_riscv64_unification_realrtl_aop_jtag_2026-07-21.md`)
+  — the generic-monomorphization path is deliberately NOT used yet (fail-closed
+  hardware templates first). Do not build a second common layer.
+- **rv32 core** = `src/lib/hardware/rv32i_rtl/` (**HAS `mmu_sv32.spl` + S-mode
+  `csr_s.spl` + 4 GiB via ram_sparse**). The 64 KB / no-MMU thing is ONLY the
+  legacy hand-written synthesizable `examples/.../rv32_exec_core.vhd` reference
+  core — not the current `.spl` model.
+- **rv64 core** = `src/lib/hardware/rv64gc_rtl/` (Sv39, S-mode, M/A/C + the F/D
+  **FPU landed 2026-07-23** — `fpu.spl`, DI-toggle, wired into `core.spl`; so the
+  old "GC profile is FALSE, no F/D hardware" note is now partially resolved for
+  the model — verify the profile string against actual F/D wiring before claiming
+  `gc`/`d`-ABI).
+- **JTAG** = explicit RTL (`src/lib/hardware/debug/` jtag_tap/riscv_dtm/dmi_bus,
+  Stages 1–3 of 5 landed) + **AOP hart hooks** (`src/lib/hardware/debug_hooks/
+  hart_debug.spl`, the repo `on pc{…} use … before` weave via
+  `driver_pipeline.weave_aop`/`mir_aop_injection`). AOP is ONLY the hart
+  integration hooks; TAP/DTM/DMI/DM stay explicit RTL.
+
+**What's missing to actually BOOT Linux (honest, 2026-07-23):**
+- *rv64 on the `.spl` model:* Linux→/init is proven on QEMU's OWN cpu with
+  Simple's `soc_virt.dtb` (`build/os/rv64_soc/transcripts/qemu_ourdtb_wired.log`).
+  On the **Simple core**, `SOC64 PROBE: ALL PASS` proves the privileged sequence,
+  and real OpenSBI executes reloc→bss→fw_platform_init→C-init but **stalls
+  spinning ~0x800005F4 before the banner** (open: early SBI/timer or console
+  bind). Full boot also needs the **JIT boxed-int defect fixed** (interp ≈540
+  inst/s → billions of insns is infeasible; JIT mis-executes the core today).
+- *rv32 on the `.spl` model:* MMU(Sv32)+S-mode+4 GiB exist, but there is **no
+  bootable rv32 SoC-top** wired for OpenSBI/kernel handoff (only `soc_top_64.spl`
+  boots) and no rv32 Linux kernel build — both are the gap, not the core.
+- *Either on a real FPGA:* **no synthesizable rv64 core** (the `.spl` model is a
+  simulator; the bundle generator emits `GENERATED_RTL_NOT_IMPLEMENTED`; no
+  `.spl`→Verilog backend), and the synthesizable rv32 `.vhd` lacks the MMU/4 GiB.
+  A board IS present (Xilinx ML Carrier Card, JTAG+UART via FT4232H, Vivado
+  2025.2) — the blocker is the missing synthesizable core, not hardware access.
 
 **Working-copy caveat:** these gates compile the hardware sources directly, so
 leaked jj conflict markers / half-finished parallel-session edits fail them at

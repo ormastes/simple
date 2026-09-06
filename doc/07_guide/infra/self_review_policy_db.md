@@ -5,6 +5,21 @@ Review Admission`. It governs protected PR integration only. It does not grant
 release-environment approval, candidate admission, signing, publication, or a
 GitHub provider Approve review.
 
+## What the GitHub status means
+
+GitHub forbids a pull-request author from submitting an `APPROVED` review on
+their own PR. SPipe does not bypass or imitate that provider rule. After an
+eligible exact-head self-review, the trusted workflow creates the required
+`SPipe Self Review Admission` **check status** instead. A green check therefore
+means the scoped SPipe policy admitted the bound head/base/diff for ten minutes;
+it never means the author, GitHub, or an independent reviewer approved the PR.
+
+For ordinary code and text, eligibility is default allow when the authenticated
+external database is valid and no matching `deny` or `constrain` record narrows
+the request. This default does not broaden any authority: branch rules, other
+required checks, candidate admission, release environments, signing, merging,
+and publication remain separate gates.
+
 ## Storage and default
 
 Store UTF-8 JSONL outside the repository and provide its exact bytes through
