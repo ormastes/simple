@@ -321,7 +321,22 @@ jobs:
               reason="identity bound as $id_kind, tree differs: $changed path(s) changed by the merge, gates with intersecting or unbounded inputs re-run (of $covered row(s))"
           }
 
-          decide
+          # `shell: sh` is `sh -e`, and decide() reads `$?` after commands it
+          # expects to be able to fail (`git fetch` ... `fetch_rc=$?`). Under
+          # errexit that read is never reached: the fetch aborts the whole step
+          # with exit 1, before any `mode=`/`skip_ids=`/`range=` output is
+          # written. Measured 2026-09-07 on PR #457 and reproduced by re-running
+          # the job: 2.6s, no stdout at all, `##[error]Process completed with
+          # exit code 1`. The damage is not the failed step -- it is that
+          # `Install ripgrep` below carries no `!cancelled()`, so it is skipped
+          # once a prior step fails, while every gate step DOES carry it and
+          # runs anyway. The job then fails as `rg: not found` in three
+          # unrelated gates, which names nothing about the real cause.
+          # Invoking through `||` suspends errexit for the call, which is the
+          # non-errexit semantics decide() was written against. Every failure
+          # path inside it already returns 0 with `mode` still `full`, the
+          # strictest mode, so this can only widen what gets checked.
+          decide || true
           printf 'mode=%s\n' "$mode" >> "$GITHUB_OUTPUT"
           printf 'skip_ids=%s\n' "$skip_ids" >> "$GITHUB_OUTPUT"
           printf 'range=%s\n' "$range" >> "$GITHUB_OUTPUT"
@@ -367,7 +382,7 @@ jobs:
       # Skipped in `sanity`: apt-get alone costs more than the whole 60s budget.
       # An empty/missing output is never 'sanity', so this installs by default.
       - name: Install ripgrep
-        if: ${{ steps.receipt.outputs.mode != 'sanity' }}
+        if: ${{ !cancelled() && steps.receipt.outputs.mode != 'sanity' }}
         run: |
           command -v rg >/dev/null 2>&1 || (sudo apt-get update && sudo apt-get install -y ripgrep)
 
