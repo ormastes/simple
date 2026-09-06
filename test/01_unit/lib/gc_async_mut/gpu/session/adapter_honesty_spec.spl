@@ -81,6 +81,16 @@ fn readback_still_ends_in_bare_success_sentinel(path: text) -> bool:
     val cmd = '/usr/bin/grep -A8 -E "me readback\\(" ' + path + ' | /usr/bin/grep -c -E "^\\s*\"\"\\s*$"'
     shell_output(cmd).trim().to_i64() > 0
 
+# Same anchored shape, parameterized by method name, so init_device /
+# submit_commands / present are covered by exactly the check readback already
+# had rather than three hand-copied predicates. `[[:space:]]` is used instead
+# of `\s` because this runs through BSD grep on macOS, where `\s` inside -E is
+# not portable and would silently match nothing — which would make every
+# "must be false" assertion vacuously true.
+fn method_still_ends_in_bare_success_sentinel(path: text, method: text) -> bool:
+    val cmd = '/usr/bin/grep -A8 -E "me ' + method + '\\(" ' + path + ' | /usr/bin/grep -c -E "^[[:space:]]*\"\"[[:space:]]*$" | /usr/bin/head -1'
+    shell_output(cmd).trim().to_i64() > 0
+
 describe "GPU backend / session adapter honesty (A3, sites 11-20)":
     # @manual scenario evidence
 
@@ -111,7 +121,7 @@ describe "GPU backend / session adapter honesty (A3, sites 11-20)":
 
         it "probe_backend(\"webgpu\") does not report Initialized on a host with no adapter":
             # @req REQ-SSPEC-LIB
-            step("probe_backend(\")
+            step("probe_backend(webgpu) does not report Initialized on a host with no adapter")
             val probe = Engine2D.probe_backend(4, 4, "webgpu")
             expect(backend_status_text(probe.status)).to_not_equal("Initialized")
 
@@ -204,6 +214,64 @@ describe "GPU backend / session adapter honesty (A3, sites 11-20)":
             a.init_device()
             val r = a.readback(0, 0, 4, 4)
             expect(r.len() > 0).to_equal(true)
+
+    context "vulkan adapter init_device/submit/present never report false success":
+        """`readback()` was the only vulkan entry point that refused honestly.
+        `init_device()`, `submit_commands()` and `present()` still called
+        `rt_vk_create_device` / `rt_vk_submit` / `rt_vk_present`, which have
+        zero runtime backing in any `.rs` or `.c` and are frozen as unbacked at
+        `scripts/check/unbacked_extern_baseline.txt:1101,1115,1119`. An
+        unbacked extern silently returns nil, so `init_device()` could inherit
+        that nil through its `h <= 0` guard and return "" — the success
+        sentinel — having created no device. Each now refuses with its own
+        distinguishable reason naming the missing extern, so a caller can tell
+        "not initialized" apart from "there is no runtime behind this"."""
+
+        it "init_device() refuses and names the missing extern":
+            # @req REQ-SSPEC-LIB
+            step("init_device() refuses and names the missing extern")
+            var a = BackendVulkanAdapter.create("test")
+            val r = a.init_device()
+            expect(r).to_not_equal("")  # oracle: "" is this adapter family's success sentinel and no device was created
+            expect(r).to_contain("rt_vk_create_device")
+            expect(a.initialized).to_equal(false)  # oracle: a refused init must not latch the adapter as initialized
+            expect(a.handle).to_equal(0)  # oracle: a refused init must not fabricate a device handle
+
+        it "submit_commands() refuses and names the missing extern":
+            # @req REQ-SSPEC-LIB
+            step("submit_commands() refuses and names the missing extern")
+            var a = BackendVulkanAdapter.create("test")
+            # Un-initialized, the not-initialized guard answers first — that is
+            # the honest layered answer and is checked here so the two refusals
+            # stay distinguishable from one another.
+            expect(a.submit_commands(1)).to_equal("vulkan: device not initialized")
+            # Stage past that guard to reach the backing refusal itself.
+            a.initialized = true
+            val r = a.submit_commands(1)
+            expect(r).to_not_equal("")  # oracle: no queue exists to submit to, so success may not be reported
+            expect(r).to_contain("rt_vk_submit")
+
+        it "present() refuses and names the missing extern":
+            # @req REQ-SSPEC-LIB
+            step("present() refuses and names the missing extern")
+            var a = BackendVulkanAdapter.create("test")
+            expect(a.present()).to_equal("vulkan: device not initialized")
+            a.initialized = true
+            val r = a.present()
+            expect(r).to_not_equal("")  # oracle: no swapchain exists to present to, so success may not be reported
+            expect(r).to_contain("rt_vk_present")
+
+        it "no vulkan adapter entry point still ends in the bare success sentinel":
+            # @req REQ-SSPEC-LIB
+            step("no vulkan adapter entry point still ends in the bare success sentinel")
+            # Static half, same technique as the readback scenarios above:
+            # `cleanup()` legitimately ends in "" (it really does release), so
+            # the check is scoped to the four device-facing entry points.
+            val path = "src/lib/gc_async_mut/gpu/session/backend_vulkan_adapter.spl"
+            expect(readback_still_ends_in_bare_success_sentinel(path)).to_equal(false)
+            expect(method_still_ends_in_bare_success_sentinel(path, "init_device")).to_equal(false)
+            expect(method_still_ends_in_bare_success_sentinel(path, "submit_commands")).to_equal(false)
+            expect(method_still_ends_in_bare_success_sentinel(path, "present")).to_equal(false)
 
     context "site 20 — metal adapter supports_*() is platform- and device-gated":
         """supports_compute/graphics/present were hardcoded `true` on any
