@@ -1,0 +1,64 @@
+# Native-only lifetime acceptance command:
+#   bin/simple test test/01_unit/compiler/backend/compile_error_message_ownership_spec.spl --mode=native --no-cache
+# Interpreter execution does not prove compiled flat-aggregate ownership.
+
+use std.spec.{describe, it, expect}
+use std.spec.step
+use compiler.backend.backend.backend_types.{
+    BackendKind, CodegenTarget, CompileError, compileerror_backend_error,
+    compileerror_target_unsupported, compileerror_to_text
+}
+
+fn error_from_dynamic_result_payload(sequence: i64) -> CompileError:
+    val fragments = [
+        "llc failed during bootstrap", "preserved LLVM IR", "sentinel-{sequence}"
+    ]
+    val dynamic_message = fragments.join("; ")
+    val result: Result<i64, text> = Err(dynamic_message)
+    match result:
+        case Err(message):
+            compileerror_backend_error(BackendKind.Llvm, message)
+        case Ok(_):
+            compileerror_backend_error(BackendKind.Llvm, "unexpected success")
+
+fn churn_diagnostic_allocations(rounds: i64) -> text:
+    var retained = ""
+    var idx = 0
+    while idx < rounds:
+        retained = "diagnostic-allocation-{idx}-{retained.len()}"
+        idx = idx + 1
+    retained
+
+describe "backend CompileError message ownership":
+    it "retains a dynamic Result payload after its producer frame ends":
+        step("construct an LLVM error from dynamically composed text")
+        val error = error_from_dynamic_result_payload(417)
+
+        step("churn text allocations after the source payload leaves scope")
+        val churn = churn_diagnostic_allocations(256)
+        expect(churn).to_contain("diagnostic-allocation-255")
+
+        step("read the exact compiler-owned diagnostic")
+        expect(error.phase).to_equal("backend (llvm)")
+        val rendered = compileerror_to_text(error)
+        expect(rendered).to_equal(
+            "Compile error in backend (llvm): llc failed during bootstrap; " +
+            "preserved LLVM IR; sentinel-417"
+        )
+        expect(rendered).not.to_contain("<invalid-heap:")
+
+    it "retains the dynamically formatted unsupported-target diagnostic":
+        step("construct an unsupported-target error before allocation churn")
+        val error = compileerror_target_unsupported(
+            BackendKind.Llvm, CodegenTarget.Wasm64)
+        val churn = churn_diagnostic_allocations(256)
+        expect(churn).to_contain("diagnostic-allocation-255")
+
+        step("read the owned target message and phase")
+        expect(error.phase).to_equal("target selection")
+        val rendered = compileerror_to_text(error)
+        expect(rendered).to_equal(
+            "Compile error in target selection: Backend llvm does not support " +
+            "target wasm64"
+        )
+        expect(rendered).not.to_contain("<invalid-heap:")

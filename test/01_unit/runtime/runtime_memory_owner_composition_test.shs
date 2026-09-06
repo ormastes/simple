@@ -7,6 +7,7 @@ trap 'rm -rf "$tmp"' EXIT HUP INT TERM
 fail() { echo "FAIL: $1" >&2; exit 1; }
 
 overlaps='copy_mem rt_alloc rt_free rt_memcpy rt_memset rt_ptr_read_i64 rt_ptr_read_u8 rt_ptr_write_bytes_raw rt_ptr_write_i16 rt_ptr_write_i32 rt_ptr_write_i64 rt_ptr_write_u8 rt_realloc rt_struct_alloc rt_struct_receiver_valid'
+transient_owner_bridge='rt_transient_raw_owner_register rt_transient_raw_owner_register_state rt_transient_raw_owner_query rt_transient_raw_owner_unregister rt_transient_raw_owner_thread_allows'
 
 build_set() {
   name=$1; shift
@@ -22,6 +23,15 @@ build_set() {
     nm -g --defined-only "$tmp/$name-runtime_memory.o" | awk -v wanted="$symbol" '$NF == wanted { found=1 } END { exit !found }' ||
       fail "$name composition does not assign $symbol to runtime_memory.o"
   done
+  for symbol in $transient_owner_bridge; do
+    nm -g --defined-only "$tmp/$name-runtime_native.o" |
+      awk -v wanted="$symbol" '$NF == wanted { found=1 } END { exit !found }' ||
+      fail "$name runtime_native does not own $symbol"
+    if nm -g --defined-only "$tmp/$name-runtime_memory.o" |
+        awk -v wanted="$symbol" '$NF == wanted { found=1 } END { exit !found }'; then
+      fail "$name runtime_memory duplicates $symbol"
+    fi
+  done
 }
 
 # native-all/non-dynload retains hosted providers but still delegates memory.
@@ -34,5 +44,12 @@ build_set standalone -DSIMPLE_CORE_C_STANDALONE=1
 if nm -g --defined-only "$tmp/standalone-runtime_thread.o" | grep -Eq '[[:space:]]spl_thread_cpu_count$'; then
   fail 'standalone composition retained duplicate hosted thread provider'
 fi
+
+# Pure-Simple uses an explicitly conservative array-root scope contract and
+# does not claim raw-root graph promotion parity with the hosted C runtime.
+grep -q 'if array_is_valid(value) < 1:' "$root/src/runtime/simple_core/core_array.spl" ||
+  fail 'pure-Simple transient promotion no longer proves its array-root boundary'
+grep -q 'retain the whole bounded scope' "$root/src/runtime/simple_core/core_array.spl" ||
+  fail 'pure-Simple conservative transient contract is undocumented'
 
 echo 'PASS: memory ABI has one runtime_memory owner in standalone and native-all compositions'
