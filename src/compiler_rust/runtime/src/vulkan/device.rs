@@ -239,7 +239,22 @@ pub struct VulkanDevice {
 
     direct_compute_gate: Mutex<()>,
     direct_compute_quarantine: Mutex<RecoveryQueue<DirectComputeSubmission>>,
+
+    // Signalled fences kept for reuse across submissions. `vkCreateFence` +
+    // `vkDestroyFence` measured ~700us EACH on NVIDIA GB10, so a per-submit
+    // fence lifecycle cost ~1.4ms of the ~1.5ms an EMPTY compute submit took —
+    // more than the submit and the GPU work combined, and paid twice per
+    // Engine2D frame (one compute batch + one readback transfer). The C
+    // reference creates its fence once and resets it per frame; this pool is
+    // the same thing behind the existing handle API, so no caller changes.
+    // See doc/02_requirements/nfr/engine2d_vulkan_2d_perf.md.
+    fence_pool: Mutex<Vec<Fence>>,
 }
+
+/// Upper bound on retained fences. Two submissions are in flight per frame at
+/// most (compute batch, readback transfer); a small slack absorbs the font and
+/// present lanes without letting a pathological caller retain unboundedly.
+const FENCE_POOL_CAPACITY: usize = 4;
 
 struct DirectComputeSubmission {
     pipeline: Arc<ComputePipeline>,
@@ -617,6 +632,7 @@ impl VulkanDevice {
             swapchain_loader,
             direct_compute_gate: Mutex::new(()),
             direct_compute_quarantine: Mutex::new(RecoveryQueue::default()),
+            fence_pool: Mutex::new(Vec::new()),
         }))
     }
 
@@ -898,7 +914,7 @@ impl VulkanDevice {
             return Err(VulkanError::CommandBufferError(format!("End: {:?}", e)));
         }
 
-        let fence = match Fence::new(Arc::clone(self), false) {
+        let fence = match self.acquire_fence() {
             Ok(fence) => fence,
             Err(error) => {
                 unsafe { self.handle().free_command_buffers(*self.transfer_pool.lock(), &[cmd]) };
@@ -944,7 +960,48 @@ impl VulkanDevice {
             return Err(FencedSubmitError::CompletionUnknown(error));
         }
         unsafe { self.handle().free_command_buffers(*self.transfer_pool.lock(), &[cmd]) };
+        // The wait above succeeded, so this fence is signalled and the device
+        // is done with it: retain it instead of paying `vkDestroyFence` here
+        // and `vkCreateFence` on the next download.
+        self.release_fence(fence);
         Ok(())
+    }
+
+    /// Take a fence that is guaranteed unsignalled and ready to submit with.
+    ///
+    /// Reuses a retained fence when one is available, resetting it first — a
+    /// signalled fence handed to `vkQueueSubmit` is invalid usage. A reset
+    /// failure is not recoverable for that fence, so it is dropped and a fresh
+    /// one is created rather than returning a fence in an unknown state.
+    pub fn acquire_fence(self: &Arc<Self>) -> VulkanResult<Fence> {
+        let pooled = {
+            let mut pool = self.fence_pool.lock();
+            pool.pop()
+        };
+        if let Some(fence) = pooled {
+            if fence.reset().is_ok() {
+                return Ok(fence);
+            }
+            drop(fence);
+        }
+        Fence::new(Arc::clone(self), false)
+    }
+
+    /// Retain a fence for reuse, or destroy it.
+    ///
+    /// Only a fence the device has finished with may be retained: an
+    /// unsignalled fence may still be referenced by a submission in flight, so
+    /// it is dropped (destroyed) exactly as before rather than handed to the
+    /// next submit. `get_fence_status` is a non-blocking query, so this never
+    /// stalls the caller.
+    pub fn release_fence(&self, fence: Fence) {
+        if !matches!(fence.is_signaled(), Ok(true)) {
+            return;
+        }
+        let mut pool = self.fence_pool.lock();
+        if pool.len() < FENCE_POOL_CAPACITY {
+            pool.push(fence);
+        }
     }
 
     pub fn transfer_completion_unknown(&self) -> bool {
