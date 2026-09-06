@@ -1,3 +1,36 @@
+"""
+## Purpose and audience
+Source-contract suite for the hosted browser renderer entry path, written for
+maintainers of src/os/hosted/hosted_entry.spl and the
+hosted_browser_renderer_* modules: every scenario pins an ordering or
+ownership property of the shipped production source — theme-gated registry
+init, hidden-worker dispatch before host UI init, sandboxed per-window
+renderer routing, bounded writes, HSTS persistence order, and fail-closed
+reaping — so a regression that reorders or reroutes these lines fails here
+before it ships.
+## Operator workflow
+Run the spec with the seed runner
+(`src/compiler_rust/target/bootstrap/simple run <this-file>`); each scenario
+reads the production module source, slices the relevant function bodies, and
+asserts ordering and containment properties over them.
+## Compatibility and limitations
+These are source contracts over shipped source with no runtime API, so they
+execute everywhere the runner can read the source files, but they say nothing
+about pixel output — rendering behavior itself is covered by the WM/render
+lanes. Several scenarios are legitimately RED while the product source is
+mid-migration; see the per-scenario failures for which contract drifted.
+## Verification guidance and troubleshooting
+A failure names the ordering or ownership property that drifted; re-read the
+sliced region named by the scenario rather than loosening the expectation.
+If the source files move, update the read paths in the scenarios, never the
+assertions.
+"""
+# Lifecycle: doc/01_research/domain/web_renderer_vulkan_4k_showcase_hardening.md ;
+# doc/03_plan/agent_tasks/web_renderer_vulkan_4k_showcase_hardening.md ;
+# doc/04_architecture/web_renderer_vulkan_4k_showcase_hardening.md ;
+# doc/05_design/web_renderer_vulkan_4k_showcase_hardening.md
+# @manual_section: hosted-browser-renderer-entry
+
 use std.spec.*
 
 
@@ -13,6 +46,7 @@ fn executable_source_lines(source: text) -> text:
 describe "hosted browser renderer entry isolation":
     it "gates the production registry on exact theme readiness":
         # @req REQ-SSPEC-OS
+        # @capture(protocol_binary): the theme-gated registry call ordering retained for review
         step("gates the production registry on exact theme readiness")
         step("Inspect the hosted theme-before-init production route")
         val entry = executable_source_lines(
@@ -78,6 +112,7 @@ describe "hosted browser renderer entry isolation":
         )
 
     it "keeps secondary hosted navigation public and response-bounded":
+        # @capture(protocol_binary): the public-limited navigation entry and its byte budget retained
         step("Inspect the secondary navigation source limits")
         val source = rt_file_read_text(
             "src/os/hosted/hosted_web_content_session.spl"
@@ -86,9 +121,11 @@ describe "hosted browser renderer entry isolation":
             "rt_browser_http_job_start_public_limited"
         )
         expect(source).to_contain("5000, 589824")
-        expect(source.contains("rt_browser_http_job_start(")).to_be(false)
+        val legacy_unbounded_call_absent = source.contains("rt_browser_http_job_start(")
+        expect(legacy_unbounded_call_absent).to_be(false)
 
     it "dispatches the hidden worker before host UI initialization":
+        # @capture(protocol_binary): the worker-dispatch-before-UI ordering retained
         step("Inspect the worker startup ordering")
         val entry = executable_source_lines(
             rt_file_read_text("src/os/hosted/hosted_entry.spl") ?? ""
@@ -113,6 +150,7 @@ describe "hosted browser renderer entry isolation":
         expect(winit_pos).to_be_greater_than(worker_pos)
 
     it "keeps one ready-gated renderer with bounded writes and validated frames":
+        # @capture(protocol_binary): the broker ready-gate, bounded-write and frame-decode guard lines retained
         step("Inspect renderer readiness and frame bounds")
         val broker = rt_file_read_text(
             "src/os/hosted/hosted_browser_renderer_process.spl"
@@ -250,6 +288,7 @@ describe "hosted browser renderer entry isolation":
         expect(broker.contains("fn _renderer_fetch_mode")).to_be(false)
 
     it "builds bounded diagnostics without joining retained warnings":
+        # @capture(protocol_binary): the bounded-diagnostics builder contract lines retained
         step("Inspect bounded renderer diagnostics")
         val worker = rt_file_read_text(
             "src/os/hosted/hosted_browser_renderer_worker.spl"
@@ -267,6 +306,7 @@ describe "hosted browser renderer entry isolation":
         expect(body).to_contain("warning.slice(0, remaining)")
 
     it "routes the production browser through the external worker frame gate":
+        # @capture(protocol_binary): the external worker frame routing lines retained
         step("Inspect external worker frame routing")
         val entry = executable_source_lines(
             rt_file_read_text("src/os/hosted/hosted_entry.spl") ?? ""
@@ -373,6 +413,7 @@ describe "hosted browser renderer entry isolation":
         )).to_be(false)
 
     it "converges parent-owned bookmarks across idle and busy renderers":
+        # @capture(protocol_binary): the bookmark revision convergence ordering retained
         step("Inspect bookmark convergence across renderer states")
         val entry = executable_source_lines(
             rt_file_read_text("src/os/hosted/hosted_entry.spl") ?? ""
@@ -417,6 +458,7 @@ describe "hosted browser renderer entry isolation":
         expect(hidden).to_be_greater_than(applied)
 
     it "keeps startup HTML out of the address draft and Escape fallback":
+        # @capture(protocol_binary): the address-draft guard and Escape fallback ordering retained
         step("Inspect startup address draft and Escape behavior")
         val registry = executable_source_lines(
             rt_file_read_text(
@@ -448,6 +490,7 @@ describe "hosted browser renderer entry isolation":
         expect(init_payload).to_be_greater_than(init)
 
     it "keeps primary startup HTML as payload but exposes about blank":
+        # @capture(protocol_binary): the startup-payload ordering and public about:blank fallback retained
         step("Inspect primary startup payload and public address")
         val entry = executable_source_lines(
             rt_file_read_text("src/os/hosted/hosted_entry.spl") ?? ""
@@ -472,6 +515,7 @@ describe "hosted browser renderer entry isolation":
         expect(fallback).to_be_greater_than(escape)
 
     it "keeps title commands and page input on their production owner routes":
+        # @capture(protocol_binary): the pointer/key/text owner-route slices retained
         step("Inspect title and page-input owner routing")
         val entry = executable_source_lines(
             rt_file_read_text("src/os/hosted/hosted_entry.spl") ?? ""
@@ -684,8 +728,9 @@ describe "hosted browser renderer entry isolation":
         expect(advance_call).to_be_greater_than(active_animation)
         expect(advance_failure).to_be_greater_than(advance_call)
 
-    # @req REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-009
     it "routes each secondary browser window through its own sandbox renderer":
+        # @req REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-009
+        # @capture(protocol_binary): the per-window sandbox dispatch route lines retained
         step("Inspect per-window sandbox renderer isolation")
         val entry = executable_source_lines(
             rt_file_read_text("src/os/hosted/hosted_entry.spl") ?? ""
@@ -872,6 +917,7 @@ describe "hosted browser renderer entry isolation":
         expect(browser_text_route.contains("web_sessions.")).to_be(false)
 
     it "fails closed and reaps hidden or destroyed browser renderers":
+        # @capture(protocol_binary): the reap and close-retry ordering retained
         step("Inspect renderer reap and fail-closed paths")
         val compositor = rt_file_read_text(
             "src/os/compositor/host_compositor_core.spl"
@@ -940,6 +986,7 @@ describe "hosted browser renderer entry isolation":
         )).to_be(false)
 
     it "keeps transient close failures recoverable":
+        # @capture(protocol_binary): the close-failure drop helper contract retained
         step("Check close retry clears only close-failed markers on success")
         val registry = rt_file_read_text(
             "src/os/hosted/hosted_browser_renderer_registry.spl"
@@ -976,8 +1023,9 @@ describe "hosted browser renderer entry isolation":
         expect(advance_success).to_be_greater_than(-1)
         expect(advance_clear).to_be_greater_than(advance_success)
 
-    # @req REQ-WEB-BROWSER-011 REQ-WEB-BROWSER-017
     it "persists learned HSTS before processing the completed frame":
+        # @req REQ-WEB-BROWSER-011 REQ-WEB-BROWSER-017
+        # @capture(protocol_binary): the HSTS save-before-frame ordering retained
         step("Inspect HSTS persistence ordering")
         val entry = executable_source_lines(
             rt_file_read_text("src/os/hosted/hosted_entry.spl") ?? ""
@@ -1040,8 +1088,9 @@ describe "hosted browser renderer entry isolation":
         expect(close_body).to_contain("renderer: renderer_close.renderer")
         expect(close_body).to_contain("raster: renderer_close.raster")
 
-    # @req REQ-WEB-BROWSER-011 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-018
     it "reconciles titlebar keyboard and evidence browser closes":
+        # @req REQ-WEB-BROWSER-011 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-018
+        # @capture(protocol_binary): the close reconciliation ordering across mouse, key and evidence commands retained
         step("Inspect browser close reconciliation")
         val entry = executable_source_lines(
             rt_file_read_text("src/os/hosted/hosted_entry.spl") ?? ""

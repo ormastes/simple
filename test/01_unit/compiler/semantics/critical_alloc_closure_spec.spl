@@ -1,3 +1,31 @@
+"""
+## Purpose and audience
+Executable spec of the REQ-011 semantic allocation entry-closure check for
+the mission-critical runtime maintainers who own
+`src/compiler/semantics/critical_alloc_closure`. Scope: transitive allocation
+rejection from steady-state roots, init-boundary non-promotion, fail-closed
+unknown-callee and graph-overflow handling, and cycle termination.
+## Operator workflow
+Run: ./src/compiler_rust/target/bootstrap/simple run
+test/01_unit/compiler/semantics/critical_alloc_closure_spec.spl — the
+closure_node helper builds small call graphs and each scenario asserts on the
+finding list returned by critical_alloc_closure_check_v1.
+## Compatibility and limitations
+Graphs are hand-built node lists, so the spec pins the checker's closure
+contract, not source discovery. Bounds are exercised via the explicit
+max-functions/max-edges parameters, not the shipped constants.
+## Verification guidance and troubleshooting
+A failure means the checker missed a transitive allocation, promoted an init
+function into a steady-state root, mis-classified an unknown callee or an
+overflow, or double-reported on a cycle. Each scenario name names which
+contract broke.
+"""
+# Lifecycle: doc/01_research/local/simple_compiler_linter_performance_memory_bug_detection.md ;
+# doc/03_plan/app/tools/scv_mission_critical_alloc.md ;
+# doc/04_architecture/mission_critical_infra_hardening_v2.md ;
+# doc/05_design/mission_critical_infra_hardening_v2.md
+# @manual_section: critical-alloc-closure
+
 use std.spec.*
 use compiler.semantics.critical_alloc_closure.{
     CriticalAllocNodeV1, critical_alloc_closure_check_v1,
@@ -9,8 +37,11 @@ fn closure_node(name: text, callees: [text], root: bool, init: bool, detail: tex
         is_steady_root: root, is_init_boundary: init,
         direct_alloc_detail: detail, line: 7)
 
-describe "REQ-011 semantic allocation entry closure":
+describe "semantic allocation entry closure":
     it "rejects a transitive allocation on a failure or shutdown helper":
+        # @req REQ-011
+        # @capture(statistics): root/offender pair of the single finding
+        step("Check a three-node graph where the failure helper allocates")
         val nodes = [
             closure_node("hal_run", ["finish"], true, false, ""),
             closure_node("finish", ["failure_log"], false, false, ""),
@@ -18,18 +49,24 @@ describe "REQ-011 semantic allocation entry closure":
         ]
         val findings = critical_alloc_closure_check_v1(
             nodes, CRITICAL_ALLOC_MAX_FUNCTIONS, CRITICAL_ALLOC_MAX_EDGES)
-        expect(findings.len()).to_equal(1)
+        expect(findings.len()).to_equal(1)  # oracle: the allocation sits only on failure_log, so exactly one violation exists
         expect(findings[0].root).to_equal("hal_run")
         expect(findings[0].offender).to_equal("failure_log")
 
     it "does not promote an initialization function into a steady-state root":
+        # @req REQ-011
+        # @capture(statistics): finding count for the init-boundary node
+        step("Check a lone init-boundary function that allocates an array literal")
         val nodes = [closure_node("hal_init", [], true, true, "array literal")]
-        expect(critical_alloc_closure_check_v1(nodes, 8, 8).len()).to_equal(0)
+        expect(critical_alloc_closure_check_v1(nodes, 8, 8).len()).to_equal(0)  # oracle: init boundaries may allocate during startup, so zero findings is the contract
 
     it "fails closed for an unresolved callee and a bounded graph overflow":
+        # @req REQ-011
+        # @capture(statistics): finding counts and details for unknown callee and overflow
+        step("Check an unknown callee, then a graph that exceeds its bounds")
         val unknown = [closure_node("hal_run", ["foreign_alloc"], true, false, "")]
         val unknown_findings = critical_alloc_closure_check_v1(unknown, 8, 8)
-        expect(unknown_findings.len()).to_equal(1)
+        expect(unknown_findings.len()).to_equal(1)  # oracle: an unresolvable callee must surface one finding, never pass silently
         expect(unknown_findings[0].detail).to_contain("unknown")
 
         val oversized = [
@@ -37,15 +74,18 @@ describe "REQ-011 semantic allocation entry closure":
             closure_node("two", [], false, false, ""),
         ]
         val oversized_findings = critical_alloc_closure_check_v1(oversized, 1, 8)
-        expect(oversized_findings.len()).to_equal(1)
+        expect(oversized_findings.len()).to_equal(1)  # oracle: two nodes against a max of one must produce the single overflow finding, not a crash
         expect(oversized_findings[0].detail).to_contain("limit exceeded")
 
     it "terminates once per node on cycles without duplicating a violation":
+        # @req REQ-011
+        # @capture(statistics): offender name of the single cycle finding
+        step("Check a two-node cycle reachable from a steady-state root")
         val nodes = [
             closure_node("hal_run", ["a"], true, false, ""),
             closure_node("a", ["b"], false, false, ""),
             closure_node("b", ["a"], false, false, "dictionary literal"),
         ]
         val findings = critical_alloc_closure_check_v1(nodes, 8, 8)
-        expect(findings.len()).to_equal(1)
+        expect(findings.len()).to_equal(1)  # oracle: the cycle revisits b once, so the allocation on b is reported exactly once
         expect(findings[0].offender).to_equal("b")

@@ -1,38 +1,71 @@
+"""
+## Purpose and audience
+For SimpleOS image-build maintainers verifying that `scripts/os/make_os_disk.c`
+still emits a structurally valid FAT32 image (correct geometry constants,
+redundant boot-sector/FSInfo copies, independent directory and file cluster
+chains) and that the paired integrity checker still exercises the FAT chain,
+manifest, and raw-chain evidence a reviewer needs before trusting a built image.
+## Operator workflow
+Run `bin/simple run test/02_integration/os/port/make_os_disk_fat32_integrity_spec.spl`
+after touching `scripts/os/make_os_disk.c` or
+`scripts/check/check-make-os-disk-fat32-integrity.shs`.
+## Compatibility and limitations
+These scenarios are source-contract checks against the C image generator and
+its shell-script checker, not a built-image runtime check — no disk image is
+mounted here. See `doc/03_plan/sys_test/fat32_capsule_mount_owner_v1.md` for the
+scope boundary between source-contract and mounted-image verification.
+## Verification guidance and troubleshooting
+A failing `expect` names the exact literal string the generator or checker no
+longer contains; grep the cited literal in the named file to locate the drift
+before editing the spec.
+"""
+# Lifecycle: doc/01_research/os/fs/storage_fat32_handle_metadata.md ;
+# doc/03_plan/os/storage/storage_fat32_handle_metadata.md ;
+# doc/04_architecture/os/fat32_atomic_replace_recovery.md ;
+# doc/05_design/os/storage/storage_fat32_handle_metadata.md
+# @manual_section: fat32_image_integrity
+
 use std.spec
 use std.io_runtime.{file_read}
 
 describe "SimpleOS direct FAT32 image integrity":
     it "uses valid FAT32 geometry and redundant metadata":
+        # @req REQ-FAT32-IMG-001
+        # @capture(protocol_json): literal geometry and metadata-writer tokens found in make_os_disk.c
         step("Inspect dynamic FAT32 geometry and metadata writers")
-        val source = file_read("scripts/os/make_os_disk.c")
-        expect(source).to_contain("FAT32_MIN_DATA_CLUSTERS = 65525")
-        expect(source).to_contain("geometry_for_cluster_size")
-        expect(source).to_contain("write_fat32_fsinfo")
-        expect(source).to_contain("memcpy(g_image + (size_t)6 * SECTOR_SIZE, g_image, SECTOR_SIZE)")
-        expect(source).to_contain("write_fat32_fsinfo((size_t)7 * SECTOR_SIZE)")
-        expect(source).to_contain("memcpy(g_image + 71, \"SIMPLEOS   \", 11)")
-        expect(source).to_contain("memcpy(g_image + 82, \"FAT32   \", 8)")
+        val disk_image_generator_source = file_read("scripts/os/make_os_disk.c")
+        expect(disk_image_generator_source).to_contain("FAT32_MIN_DATA_CLUSTERS = 65525")
+        expect(disk_image_generator_source).to_contain("geometry_for_cluster_size")
+        expect(disk_image_generator_source).to_contain("write_fat32_fsinfo")
+        expect(disk_image_generator_source).to_contain("memcpy(g_image + (size_t)6 * SECTOR_SIZE, g_image, SECTOR_SIZE)")
+        expect(disk_image_generator_source).to_contain("write_fat32_fsinfo((size_t)7 * SECTOR_SIZE)")
+        expect(disk_image_generator_source).to_contain("memcpy(g_image + 71, \"SIMPLEOS   \", 11)")
+        expect(disk_image_generator_source).to_contain("memcpy(g_image + 82, \"FAT32   \", 8)")
 
     it "owns directory chains and duplicate file chains independently":
+        # @req REQ-FAT32-IMG-002
+        # @capture(protocol_json): literal directory-allocation and file-copy tokens found in make_os_disk.c
         step("Inspect directory allocation, dot entries, and file copies")
-        val source = file_read("scripts/os/make_os_disk.c")
-        expect(source).to_contain("int efi_cluster = alloc_directory()")
-        expect(source).to_contain("reserve_root_directory()")
-        expect(source).to_contain("put_dot_entries(usr_bin, &usr_bin_n, usr_bin_cluster, usr_cluster)")
-        expect(source).to_contain("write_directory(tmp_cluster, tmp, tmp_n)")
-        expect(source).to_contain("int hello_c_cluster = alloc_clusters(clang_c.data, clang_c.len)")
-        expect(source).to_contain("int simple_root_cluster = simple_payload.len ? alloc_clusters")
-        expect(source.contains("steam_manifest_cluster")).to_equal(false)
-        expect(source.contains("steam_marker_cluster")).to_equal(false)
+        val disk_image_generator_source = file_read("scripts/os/make_os_disk.c")
+        expect(disk_image_generator_source).to_contain("int efi_cluster = alloc_directory()")
+        expect(disk_image_generator_source).to_contain("reserve_root_directory()")
+        expect(disk_image_generator_source).to_contain("put_dot_entries(usr_bin, &usr_bin_n, usr_bin_cluster, usr_cluster)")
+        expect(disk_image_generator_source).to_contain("write_directory(tmp_cluster, tmp, tmp_n)")
+        expect(disk_image_generator_source).to_contain("int hello_c_cluster = alloc_clusters(clang_c.data, clang_c.len)")
+        expect(disk_image_generator_source).to_contain("int simple_root_cluster = simple_payload.len ? alloc_clusters")
+        expect(disk_image_generator_source.contains("steam_manifest_cluster")).to_equal(false)
+        expect(disk_image_generator_source.contains("steam_marker_cluster")).to_equal(false)
 
     it "provides reproducible fsck, mtools, manifest, and raw-chain evidence":
+        # @req REQ-FAT32-IMG-003
+        # @capture(protocol_json): literal fsck/mtools/manifest tokens found in the integrity checker
         step("Inspect the focused integrity checker")
-        val checker = file_read("scripts/check/check-make-os-disk-fat32-integrity.shs")
-        expect(checker).to_contain("x86_64 fs-exec")
-        expect(checker).to_contain("x86_64 desktop-fonts")
-        expect(checker).to_contain("fsck.fat -vn")
-        expect(checker).to_contain("mdir -i")
-        expect(checker).to_contain("mtype -i")
-        expect(checker).to_contain("mshowfat -i")
-        expect(checker).to_contain("NotoEmoji[wght].ttf")
-        expect(checker).to_contain("duplicate files unexpectedly share a FAT chain")
+        val integrity_checker_source = file_read("scripts/check/check-make-os-disk-fat32-integrity.shs")
+        expect(integrity_checker_source).to_contain("x86_64 fs-exec")
+        expect(integrity_checker_source).to_contain("x86_64 desktop-fonts")
+        expect(integrity_checker_source).to_contain("fsck.fat -vn")
+        expect(integrity_checker_source).to_contain("mdir -i")
+        expect(integrity_checker_source).to_contain("mtype -i")
+        expect(integrity_checker_source).to_contain("mshowfat -i")
+        expect(integrity_checker_source).to_contain("NotoEmoji[wght].ttf")
+        expect(integrity_checker_source).to_contain("duplicate files unexpectedly share a FAT chain")

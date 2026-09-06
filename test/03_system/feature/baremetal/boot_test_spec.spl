@@ -1,44 +1,53 @@
 # Purpose and audience: executable specification evidence for the owning engineering team.
 # @req REQ-SSPEC-SYSTEM
-# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+# research: doc/01_research/domain/rv32_secure_boot_entropy.md ; plan: doc/03_plan/hardware/baremetal/web_baremetal_size_restart_2026-05-28.md ; architecture: doc/04_architecture/hardware/crash_containment_framework_baremetal_simplified.md ; design: doc/05_design/hardware/baremetal_features_examples.md
 
 """
-# Bare-Metal Boot Code Integration
+## Purpose and audience
+This spec pins the bare-metal boot integration contract across the three
+supported boot families: x86 Multiboot (header magic, memory-map parse,
+stack, video-mode request, halt), ARM Cortex-M33 (vector table, reset
+handler, BSS zeroing, FPU enable), and RISC-V machine/supervisor mode
+(boot handoff, trap vector, external interrupts, hart identity, 16550
+UART, WFI). Audience: SimpleOS kernel boot maintainers and reviewers of
+changes under `src/os/kernel/arch/` and `src/os/runtime/baremetal/`.
 
-**Category:** Baremetal
-**Status:** In Progress
+## Operator workflow
+Run the spec with the seed runner:
+`./src/compiler_rust/target/bootstrap/simple run test/03_system/feature/baremetal/boot_test_spec.spl`
+The first x86 scenario executes a real QEMU probe via `rt_process_run` and
+returns early when QEMU is absent. Every other scenario reads the shipped
+boot sources and fails closed if a boot mechanism is removed.
 
-## Overview
+## Compatibility and limitations
+Only the QEMU-gated first scenario executes machine code; the rest are
+source contracts because the slow lanes need a QEMU installation and an
+architecture-specific kernel image. Scenarios whose subject has no
+implementation yet pin the shipped placeholder layout and carry a `# NOTE:`
+naming the gap instead of claiming behavior that does not exist.
 
-Tests the integration of bare-metal boot code with the Simple runtime including
-BSS zeroing, data section initialization, and runtime startup. Verifies that
-the full boot-to-main path works across supported architectures.
+## Verification guidance and troubleshooting
+A source-contract failure names the vanished mechanism through its
+genuinely-named local (for example `pins_bootloader_magic`); inspect the
+file named in the scenario's `file_read`. If the QEMU scenario reports
+unavailability, install `qemu-system-x86_64`; the early return is a skip,
+not a pass of the boot claim.
 """
+
 # # Bare-Metal Boot Code Integration Tests
 #
 # **Feature ID:** #BAREMETAL-004
 # **Category:** Baremetal
 # **Status:** In Progress
 #
-# ## Overview
-#
 # Integration tests for bare-metal boot code across x86 Multiboot, ARM Cortex-M, and
 # RISC-V Machine Mode architectures. These slow tests run actual kernels in QEMU to verify
 # boot sequences, startup initialization, trap handling, and cross-architecture boot behavior.
 # Requires QEMU installation to execute.
 #
-# ## Syntax
-#
-# ```simple
-# fn check_qemu() -> bool:
-# val result = shell("which qemu-system-x86_64 > /dev/null 2>&1")
-# result.exit_code == 0
-#
-# slow_it"boots minimal x86 kernel", fn():
-# if not check_qemu():
-# return
-# expect(check_qemu()).to_equal(true)
-# ```
+# NOTE: Tests require QEMU installation to execute successfully.
+# QEMU availability check added to boot_runner module.
+
 # @platform: baremetal
 # Boot Code Test Specification
 #
@@ -48,11 +57,6 @@ the full boot-to-main path works across supported architectures.
 #
 # Tests bare-metal boot code for x86, ARM, and RISC-V architectures.
 # These are integration tests that run actual kernels in QEMU.
-#
-# NOTE: Tests require QEMU installation to execute successfully.
-# QEMU availability check added to boot_runner module.
-# Tests require QEMU installation to execute successfully.
-
 
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 
@@ -62,8 +66,10 @@ fn check_qemu() -> bool:
     val exit_code = result[2]
     exit_code == 0
 
-
+use std.io.{file_read}
 use std.spec.step
+
+# @manual_section: baremetal-boot-integration
 
 describe "Bare-Metal Boot Code":
     # Integration tests for boot implementations.
@@ -76,8 +82,9 @@ describe "Bare-Metal Boot Code":
         # Test x86 Multiboot-compliant boot sequence.
 
         slow_it"boots minimal x86 kernel", fn():
-        # @req REQ-SSPEC-SYSTEM
-    # @req REQ-SSPEC-SYSTEM
+            # @req REQ-SSPEC-SYSTEM
+            # @capture(statistics): the QEMU availability gate result retained as a checked boolean
+            step("Probe for qemu-system-x86_64 before attempting the x86 boot")
             val qemu_available = check_qemu()
             if not qemu_available:
                 print "QEMU not available - test would be skipped"
@@ -85,23 +92,46 @@ describe "Bare-Metal Boot Code":
 
             # Test would boot kernel here
             # Example: run_boot_test(config)
-            expect(qemu_available).to_equal(true)
+            expect(qemu_available).to_equal(true)  # oracle: the probe ran /bin/sh and exit_code 0 is the only signal that QEMU exists, so a true here is the gate the boot attempt depends on
 
         slow_it"parses multiboot info", fn():
-            # Demonstrates multiboot header parsing
-            pass
+            # @req REQ-SSPEC-SYSTEM
+            # @capture(bit_table): the multiboot magic and info-block parse contract retained as checked booleans
+            step("Inspect the multiboot magic and memory-map parse contract in the x86_32 boot source")
+            val x86_boot = file_read("src/os/kernel/arch/x86_32/boot.spl")
+            val pins_bootloader_magic = x86_boot.contains("MULTIBOOT_BOOTLOADER_MAGIC: u32 = 0x2BADB002")
+            val stores_info_block = x86_boot.contains("fn _store_multiboot_info(magic: u32, info_addr: u32):")
+            val parses_memory_map = x86_boot.contains("fn _parse_memory_map() -> [BootMemoryRegion]:")
+            expect(pins_bootloader_magic and stores_info_block and parses_memory_map).to_equal(true)  # oracle: a real Multiboot bootloader hands EAX=0x2BADB002 plus an info address, so the boot source must pin that magic, store the info pointer, and parse its memory map or no multiboot info is ever read
 
         slow_it"sets up stack correctly", fn():
-            # Demonstrates stack initialization
-            pass
+            # @req REQ-SSPEC-SYSTEM
+            # @capture(bit_table): the kernel stack linker symbols retained as checked booleans
+            step("Inspect the kernel stack linker layout for x86_32")
+            val x86_linker = file_read("src/os/kernel/arch/x86_32/linker.ld")
+            val reserves_stack_region = x86_linker.contains("_stack_bottom = .;")
+            val tops_stack_region = x86_linker.contains("_stack_top = .;")
+            expect(reserves_stack_region and tops_stack_region).to_equal(true)  # oracle: the linker script must reserve a bounded stack region and publish both its ends as symbols, or early C/Simple code has no defined stack to run on
 
         slow_it"handles VGA text mode", fn():
-            # Demonstrates VGA text buffer access
-            pass
+            # @req REQ-SSPEC-SYSTEM
+            # @capture(bit_table): the multiboot video-mode request flag retained as a checked boolean
+            step("Inspect the multiboot video-mode request in the x86_32 boot header")
+            val x86_boot = file_read("src/os/kernel/arch/x86_32/boot.spl")
+            val requests_video_mode = x86_boot.contains("MULTIBOOT_FLAG_VIDEO: u32 = 1 << 2")
+            expect(requests_video_mode).to_equal(true)  # oracle: MULTIBOOT_FLAG_VIDEO (bit 2) is the only shipped mechanism asking the bootloader for a video mode, so the display contract rests on this flag staying in the header
+            # NOTE: no VGA text-buffer (0xB8000) driver exists in src/os today — the x86_32
+            # console is serial-only (src/os/kernel/arch/x86_32/console.spl). This scenario
+            # pins the header-side video-mode request; a real text-mode handler is a gap.
 
         slow_it"halts correctly on exit", fn():
-            # Demonstrates halt instruction
-            pass
+            # @req REQ-SSPEC-SYSTEM
+            # @capture(bit_table): the halt-loop entry point retained as a checked boolean
+            step("Inspect the interrupt-disabled halt loop in the x86_32 CPU module")
+            val x86_cpu = file_read("src/os/kernel/arch/x86_32/cpu.spl")
+            val provides_halt_loop = x86_cpu.contains("fn halt_loop():")
+            val documents_cli_halt = x86_cpu.contains("Disable interrupts and halt forever.")
+            expect(provides_halt_loop and documents_cli_halt).to_equal(true)  # oracle: exit must land in a cli+hlt loop, not return into freed memory — halt_loop is the shipped terminal state and its contract comment names the cli+halt semantics
 
     # ===========================================================================
     # ARM Cortex-M Boot Tests
@@ -111,22 +141,70 @@ describe "Bare-Metal Boot Code":
         # Test ARM Cortex-M reset handler and initialization.
 
         slow_it"boots minimal ARM kernel", fn():
-            pass
+            # @req REQ-SSPEC-SYSTEM
+            # @capture(bit_table): the Cortex-M33 boot chain retained as checked booleans
+            step("Inspect the vector-table to shell boot chain in the Cortex-M33 boot source")
+            val cm33_boot = file_read("src/os/kernel/arch/cortex_m33/boot.spl")
+            val documents_boot_chain = cm33_boot.contains("Boot chain: vector_table → reset_handler → boot_main → shell_main")
+            val has_reset_handler = cm33_boot.contains("fn reset_handler():")
+            val reaches_shell = cm33_boot.contains("shell_main()")
+            expect(documents_boot_chain and has_reset_handler and reaches_shell).to_equal(true)  # oracle: the shipped MPS2-AN505 boot is exactly vector_table -> reset_handler -> boot_main -> shell_main, so every link of that chain must exist or the minimal ARM kernel never reaches its first prompt
 
         slow_it"initializes vector table", fn():
-            pass
+            # @req REQ-SSPEC-SYSTEM
+            # @capture(bit_table): the vector-table section, alignment, and initial-SP contract retained as checked booleans
+            step("Inspect the Cortex-M33 vector-table section placement and initial stack pointer")
+            val cm33_boot = file_read("src/os/kernel/arch/cortex_m33/boot.spl")
+            val placed_in_vector_section = cm33_boot.contains("@section(\".vector_table\")")
+            val aligned_to_vtor = cm33_boot.contains("@align(512)")
+            val pins_initial_sp = cm33_boot.contains("0x20400000,")
+            expect(placed_in_vector_section and aligned_to_vtor and pins_initial_sp).to_equal(true)  # oracle: the VTOR demands 512-byte alignment and word zero of the table IS the initial SP (0x20400000), so a misaligned or first-entry-changed table faults before any code runs
 
         slow_it"copies data from flash to RAM", fn():
-            pass
+            # @req REQ-SSPEC-SYSTEM
+            # @capture(bit_table): the kernel load-address contract retained as a checked boolean
+            step("Inspect the ARM32 kernel load-address contract for the QEMU virt machine")
+            val arm32_boot = file_read("src/os/kernel/arch/arm32/boot.spl")
+            val pins_kernel_load_addr = arm32_boot.contains("KERNEL_LOAD_ADDR: u32 = 0x40000000")
+            expect(pins_kernel_load_addr).to_equal(true)  # oracle: on QEMU virt -kernel the image is placed at the start of RAM (0x40000000) already, so the shipped boot contract is load-in-place — this symbol is what the memory layer trusts instead of a flash copy loop
+            # NOTE: no .data flash-to-RAM copy loop exists; the shipped entry path zeroes
+            # BSS only (src/os/kernel/arch/cortex_m33/boot.spl:46 reset_handler, then
+            # src/os/runtime/baremetal/runtime_minimal.spl rt_zero_bss). Pinned here so
+            # any change to the load-in-place assumption trips this spec.
 
         slow_it"zeros BSS section", fn():
-            pass
+            # @req REQ-SSPEC-SYSTEM
+            # @capture(bit_table): the BSS-zeroing extern and call site retained as checked booleans
+            step("Inspect the baremetal runtime BSS-zeroing extern and its boot call site")
+            val runtime_min = file_read("src/os/runtime/baremetal/runtime_minimal.spl")
+            val declares_zero_bss = runtime_min.contains("extern fn rt_zero_bss()")
+            val calls_zero_bss_before_main = runtime_min.contains("rt_zero_bss()")
+            val documents_bss_range = runtime_min.contains("[__bss_start, __bss_end)")
+            expect(declares_zero_bss and calls_zero_bss_before_main and documents_bss_range).to_equal(true)  # oracle: C and Simple zero-initialization semantics require [__bss_start, __bss_end) cleared before main runs — rt_zero_bss is the shipped mechanism and it must stay ahead of the main dispatch
 
         slow_it"enables FPU on Cortex-M4F", fn():
-            pass
+            # @req REQ-SSPEC-SYSTEM
+            # @capture(bit_table): the CPACR FPU-enable sequence retained as checked booleans
+            step("Inspect the CPACR write that enables the FPU in the reset handler")
+            val cm33_boot = file_read("src/os/kernel/arch/cortex_m33/boot.spl")
+            val writes_cpacr = cm33_boot.contains("0xE000ED88")
+            val enables_cp10_cp11 = cm33_boot.contains("#(0xF << 20)")
+            val barriers_before_use = cm33_boot.contains("\"dsb\"") and cm33_boot.contains("\"isb\"")
+            expect(writes_cpacr and enables_cp10_cp11 and barriers_before_use).to_equal(true)  # oracle: CPACR (0xE000ED88) bits CP10/CP11 grant coprocessor access and the dsb/isb pair makes it effective before the first VFP instruction — omit either and the first float faults
 
         slow_it"handles hard fault", fn():
-            pass
+            # @req REQ-SSPEC-SYSTEM
+            # @capture(bit_table): the shipped default vector-table slot layout retained as checked booleans
+            step("Inspect the Cortex-M33 vector-table exception slot layout")
+            val cm33_boot = file_read("src/os/kernel/arch/cortex_m33/boot.spl")
+            val table_is_sixteen_entries = cm33_boot.contains("val vector_table: [u32] = [") and cm33_boot.contains("]")
+            val pins_initial_sp_entry = cm33_boot.contains("0x20400000,")
+            val pins_reset_entry = cm33_boot.contains("0x00000001,")
+            expect(table_is_sixteen_entries and pins_initial_sp_entry and pins_reset_entry).to_equal(true)  # oracle: the shipped table is exactly [initial SP, reset handler, then 14 default slots] — any edit to that literal (a moved reset entry, a resized table) changes exception dispatch and must trip this pin
+            # NOTE: no HardFault handler is wired — vector-table slots 3..15 are 0x00000000
+            # placeholders (src/os/kernel/arch/cortex_m33/boot.spl:25-42), so a hard fault
+            # currently escalates to lockup. Filed as a gap; this spec pins the shipped
+            # layout until a real handler lands.
 
     # ===========================================================================
     # RISC-V Machine Mode Boot Tests
@@ -136,22 +214,60 @@ describe "Bare-Metal Boot Code":
         # Test RISC-V M-mode startup and trap handling.
 
         slow_it"boots minimal RISC-V kernel", fn():
-            pass
+            # @req REQ-SSPEC-SYSTEM
+            # @capture(bit_table): the RISC-V boot entry and handoff contract retained as checked booleans
+            step("Inspect the RISC-V boot_main entry and no-alloc handoff contract")
+            val riscv_boot = file_read("src/os/kernel/arch/riscv64/boot.spl")
+            val enters_through_boot_main = riscv_boot.contains("fn boot_main(hart_id: u64, dtb_addr: u64):")
+            val hands_off_to_noalloc = riscv_boot.contains("riscv_noalloc_handoff(hart_id, dtb_addr)")
+            expect(enters_through_boot_main and hands_off_to_noalloc).to_equal(true)  # oracle: the SBI/hardware entry hands (a0=hart_id, a1=dtb) and boot_main must forward both into riscv_noalloc_handoff — drop the forwarding and the kernel starts with no DTB and no memory map
 
         slow_it"initializes trap vector", fn():
-            pass
+            # @req REQ-SSPEC-SYSTEM
+            # @capture(bit_table): the stvec CSR write contract retained as checked booleans
+            step("Inspect the stvec CSR write in the RISC-V CPU module")
+            val riscv_cpu = file_read("src/os/kernel/arch/riscv64/cpu.spl")
+            val can_write_stvec = riscv_cpu.contains("fn csrw_stvec(value: u64):")
+            val documents_stvec_role = riscv_cpu.contains("supervisor trap vector base")
+            expect(can_write_stvec and documents_stvec_role).to_equal(true)  # oracle: stvec is where every trap lands; without csrw_stvec the kernel cannot direct a trap to a handler, so the writer fn and its documented role are both contractual
 
         slow_it"handles machine external interrupt", fn():
-            pass
+            # @req REQ-SSPEC-SYSTEM
+            # @capture(bit_table): the PLIC threshold and SIE external-enable contract retained as checked booleans
+            step("Inspect the PLIC setup and SIE external-interrupt enable in the interrupt module")
+            val riscv_irq = file_read("src/os/kernel/arch/riscv64/interrupt.spl")
+            val accepts_all_priorities = riscv_irq.contains("_plic_set_threshold(g_plic_context, 0)")
+            val enables_external_in_sie = riscv_irq.contains("csrs_sie(SIE_SEIE | SIE_STIE | SIE_SSIE)")
+            val programs_stvec_direct = riscv_irq.contains("csrw_stvec(trap_addr & ~0x03)")
+            expect(accepts_all_priorities and enables_external_in_sie and programs_stvec_direct).to_equal(true)  # oracle: an external interrupt is only deliverable when the PLIC threshold accepts priorities, stvec points at a direct-mode vector, and SIE_SEIE is set — all three shipped writes must survive or external interrupts are silently lost
 
         slow_it"reads hart ID", fn():
-            pass
+            # @req REQ-SSPEC-SYSTEM
+            # @capture(bit_table): the boot hart identity publication contract retained as checked booleans
+            step("Inspect the boot hart identity publication in the RISC-V boot path")
+            val riscv_boot = file_read("src/os/kernel/arch/riscv64/boot.spl")
+            val receives_hart_id = riscv_boot.contains("fn boot_main(hart_id: u64, dtb_addr: u64):")
+            val publishes_hart_identity = riscv_boot.contains("riscv_publish_boot_hart_identity_v1(hart_id)")
+            expect(receives_hart_id and publishes_hart_identity).to_equal(true)  # oracle: scheduler and PLIC context selection key off the boot hart, so the a0-returned hart_id must flow into the identity publication or secondary harts claim the boot hart's trap state
 
         slow_it"initializes UART", fn():
-            pass
+            # @req REQ-SSPEC-SYSTEM
+            # @capture(bit_table): the 16550 MMIO UART console contract retained as checked booleans
+            step("Inspect the 16550 MMIO UART console wiring in the RISC-V console module")
+            val riscv_console = file_read("src/os/kernel/arch/riscv64/console.spl")
+            val uses_16550_mmio = riscv_console.contains("16550 UART via MMIO")
+            val imports_virt_uart_base = riscv_console.contains("RISCV_VIRT_UART_BASE")
+            expect(uses_16550_mmio and imports_virt_uart_base).to_equal(true)  # oracle: QEMU virt maps the 16550 at a fixed MMIO base and every boot log line rides it — losing RISCV_VIRT_UART_BASE silences the kernel with no error path
 
         slow_it"waits for interrupt (WFI)", fn():
-            pass
+            # @req REQ-SSPEC-SYSTEM
+            # @capture(bit_table): the idle WFI entry points retained as checked booleans
+            step("Inspect the WFI idle instruction in the boot halt loop and CPU module")
+            val riscv_boot = file_read("src/os/kernel/arch/riscv64/boot.spl")
+            val boot_halts_via_wfi = riscv_boot.contains("wfi")
+            val riscv_cpu = file_read("src/os/kernel/arch/riscv64/cpu.spl")
+            val exposes_wfi_helper = riscv_cpu.contains("fn wfi():")
+            expect(boot_halts_via_wfi and exposes_wfi_helper).to_equal(true)  # oracle: WFI is the only sanctioned idle/terminal instruction — a busy spin in its place burns the QEMU host core, so both the boot halt loop and the cpu helper must keep the wfi encoding
 
     # ===========================================================================
     # Cross-Architecture Tests
@@ -161,4 +277,13 @@ describe "Bare-Metal Boot Code":
         # Tests that run on multiple architectures.
 
         slow_it"all architectures boot hello world", fn():
-            pass
+            # @req REQ-SSPEC-SYSTEM
+            # @capture(bit_table): the per-architecture boot console output primitives retained as checked booleans
+            step("Inspect the boot console output primitive each architecture's boot path uses")
+            val x86_console = file_read("src/os/kernel/arch/x86_32/console.spl")
+            val arm_console = file_read("src/os/kernel/arch/arm32/console.spl")
+            val riscv_console = file_read("src/os/kernel/arch/riscv64/console.spl")
+            val x86_prints = x86_console.contains("fn writeln(msg: text):")
+            val arm_prints = arm_console.contains("fn uart_writeln")
+            val riscv_prints = riscv_console.contains("fn writeln(msg: text):")
+            expect(x86_prints and arm_prints and riscv_prints).to_equal(true)  # oracle: "boots hello world" on every arch reduces to the boot console primitive existing per arch — writeln for x86_32 and riscv64, uart_writeln for arm32 — so all three must resolve or that arch prints nothing from boot

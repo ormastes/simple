@@ -1,10 +1,45 @@
-# Purpose and audience: executable specification evidence for the owning engineering team.
-# @req REQ-SSPEC-COMPILER
-# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+"""
+## Purpose and audience
 
+Executable source-contract evidence for the hosted timestamp providers that
+the bootstrap runtime owns: the Windows progress epoch in
+`src/runtime/runtime_timestamp.c`, the floor-based calendar field
+decomposition, and the bootstrap SFFI generator's timestamp template.
+Written for the runtime and SFFI-lane engineers who must not let a
+truncating or clock-reading shortcut back into these owners.
 
+## Operator workflow
 
+Run this spec and confirm the Results line reports 0 failed once the two
+floor-contract defects below (see Compatibility) are fixed. Scenario one
+reads the real C source and pins the thread-local progress-epoch contract;
+scenario two drives the real `rt_timestamp_get_*` externs at negative and
+zero micros; scenario three reads the generator templates and pins the
+floor-division day decomposition.
 
+## Compatibility and limitations
+
+Scenario one pins the current thread-local progress contract
+(`rt_progress_tls_store_start_nanos` / `rt_progress_tls_clear`); scenario
+two is a live extern call and needs no source. Scenario three is currently
+RED on two legitimate defects: `src/app/sffi_gen.templates/bootstrap_sffi.txt:99`
+decomposes the day with truncating `/` and `%` instead of
+`div_euclid`/`rem_euclid`, and `src/app/ffi_gen.specs/time_mod.spl` emits
+`chrono::DateTime::from_timestamp` bodies instead of the floor-based
+arithmetic. Those two stay RED on purpose until the generators are fixed.
+
+## Verification guidance and troubleshooting
+
+If scenario one fails, someone edited the progress-epoch mechanism in
+`runtime_timestamp.c` -- update the pins to the new mechanism only if the
+store-once/subtract contract still holds, and record the change. If
+scenario three fails on `chrono::`, a generator regressed to library
+datetime calls; if it fails on `div_euclid` counts, the compiler-side twin
+and the app-side spec have drifted apart and must be re-counted.
+"""
+# Lifecycle: research: doc/01_research/local/sffi_v2_hardening.md ; plan: doc/03_plan/agent_tasks/sffi_v2_hardening.md ; architecture: doc/04_architecture/platform/sffi_v2_hardening.md ; design: doc/05_design/language/resource/resource_sffi_binding_design_2026-08-06.md
+# @cover src/runtime/runtime_timestamp.c
+# @manual_section: hosted timestamp provider ownership
 
 use std.spec.step
 
@@ -17,48 +52,61 @@ extern fn rt_timestamp_get_second(micros: i64) -> i32
 extern fn rt_timestamp_get_microsecond(micros: i64) -> i32
 
 describe "hosted timestamp provider ownership":
-    # @manual scenario evidence
     it "records and subtracts the Windows progress reset epoch":
         # @req REQ-SSPEC-COMPILER
-        step("records and subtracts the Windows progress reset epoch")
+        # @capture(protocol_json): thread-local progress-epoch pins over the C source
+        step("read the timestamp owner source and pin the thread-local progress epoch")
         val source = rt_file_read_text("src/runtime/runtime_timestamp.c") ?? ""
-        expect(source).to_contain("static int64_t g_progress_start_nanos = 0;")
-        expect(source.split("g_progress_start_nanos = rt_time_now_nanos();").len() - 1).to_equal(2)
-        expect(source).to_contain("int64_t elapsed_nanos = rt_time_now_nanos() - g_progress_start_nanos;")
-        expect(source).to_contain("if (elapsed_nanos <= 0) return 0.0;")
-        expect(source).to_contain("return (double)elapsed_nanos / 1000000000.0;")
-        expect(source.contains("return (double)rt_time_now_nanos() / 1000000000.0;")).to_be(false)
+        expect(source).to_contain("static RT_TIME_THREAD_LOCAL int64_t g_progress_start_nanos = 0;")
+        expect(source).to_contain("g_progress_start_nanos = start_nanos;")
+        expect(source).to_contain("g_progress_start_nanos = 0;")
+        expect(source).to_contain("int64_t elapsed = now - rt_progress_tls_start_nanos();")
+        expect(source).to_contain("return elapsed < 0 ? -1.0 : (double)elapsed / 1000000000.0;")
+        val has_direct_clock_read = source.contains(
+            "return (double)rt_time_now_nanos() / 1000000000.0;")
+        expect(has_direct_clock_read).to_equal(false)  # oracle: elapsed seconds must subtract the stored epoch, never read the clock bare
 
     it "uses a floor-day remainder for negative sub-second timestamps":
         # @req REQ-SSPEC-COMPILER
-        step("uses a floor-day remainder for negative sub-second timestamps")
-        expect(rt_timestamp_get_hour(-1)).to_equal(23)
-        expect(rt_timestamp_get_minute(-1)).to_equal(59)
-        expect(rt_timestamp_get_second(-1)).to_equal(59)
-        expect(rt_timestamp_get_microsecond(-1)).to_equal(999999)
-        expect(rt_timestamp_get_hour(0)).to_equal(0)
-        expect(rt_timestamp_get_microsecond(1)).to_equal(1)
+        # @capture(bit_table): calendar fields for -1, 0 and +1 microseconds
+        step("call the timestamp externs at negative, zero and unit micros")
+        expect(rt_timestamp_get_hour(-1)).to_equal(23)  # oracle: floor semantics send -1 micros to the last hour of the previous day
+        expect(rt_timestamp_get_minute(-1)).to_equal(59)  # oracle: same floor puts -1 micros in the last minute
+        expect(rt_timestamp_get_second(-1)).to_equal(59)  # oracle: same floor puts -1 micros in the last second
+        expect(rt_timestamp_get_microsecond(-1)).to_equal(999999)  # oracle: the sub-second remainder floors to the final microsecond slot
+        expect(rt_timestamp_get_hour(0)).to_equal(0)  # oracle: the epoch itself decomposes to hour zero
+        expect(rt_timestamp_get_microsecond(1)).to_equal(1)  # oracle: one micros after the epoch is microsecond slot 1
 
     it "keeps the bootstrap SFFI timestamp owner floor-based":
         # @req REQ-SSPEC-COMPILER
-        step("keeps the bootstrap SFFI timestamp owner floor-based")
+        # @capture(protocol_json): floor-division pins over the generator templates
+        step("read the generator templates and require the floor-based day decomposition")
+        # NOTE: legitimate RED (two defects, both verified 2026-09-05):
+        # 1. src/app/sffi_gen.templates/bootstrap_sffi.txt:99 decomposes the
+        #    day with truncating `micros / 1_000_000` / `% 86400`, which is
+        #    wrong for negative timestamps -- it must use div_euclid/rem_euclid.
+        # 2. src/app/ffi_gen.specs/time_mod.spl:25,72-95 emits
+        #    chrono::DateTime::from_timestamp bodies instead of floor-based
+        #    arithmetic. Fix the generators; do not weaken these assertions.
         val source = rt_file_read_text("src/app/sffi_gen.templates/bootstrap_sffi.txt") ?? ""
         expect(source).to_contain("micros.div_euclid(86_400_000_000)")
         expect(source).to_contain("micros.rem_euclid(86_400_000_000)")
         expect(source).to_not_contain("let secs = micros / 1_000_000")
         val compiler_gen = rt_file_read_text("src/compiler/90.tools/sffi_gen/specs/time_mod.spl") ?? ""
         val app_gen = rt_file_read_text("src/app/ffi_gen.specs/time_mod.spl") ?? ""
-        expect(compiler_gen.split("micros.div_euclid(86_400_000_000)").len() - 1).to_equal(3)  # oracle: 3 — named expected value from the requirement
-        expect(compiler_gen.split("micros.rem_euclid(86_400_000_000)").len() - 1).to_equal(3)  # oracle: 3 — named expected value from the requirement
-        expect(app_gen.split("micros.div_euclid(86_400_000_000)").len() - 1).to_equal(3)  # oracle: 3 — named expected value from the requirement
-        expect(app_gen.split("micros.rem_euclid(86_400_000_000)").len() - 1).to_equal(3)  # oracle: 3 — named expected value from the requirement
-        expect(compiler_gen.contains("chrono::")).to_be(false)
-        expect(app_gen.contains("chrono::")).to_be(false)
+        expect(compiler_gen.split("micros.div_euclid(86_400_000_000)").len() - 1).to_equal(3)  # oracle: the compiler-side twin emits the floor division at all three day/month boundaries
+        expect(compiler_gen.split("micros.rem_euclid(86_400_000_000)").len() - 1).to_equal(3)  # oracle: the compiler-side twin emits the floor remainder at all three boundaries
+        expect(app_gen.split("micros.div_euclid(86_400_000_000)").len() - 1).to_equal(3)  # oracle: the app-side spec must match the twin's three floor divisions
+        expect(app_gen.split("micros.rem_euclid(86_400_000_000)").len() - 1).to_equal(3)  # oracle: the app-side spec must match the twin's three floor remainders
+        val compiler_uses_chrono = compiler_gen.contains("chrono::")
+        val app_uses_chrono = app_gen.contains("chrono::")
+        expect(compiler_uses_chrono).to_equal(false)  # oracle: generated Rust must stay on integer euclidean arithmetic, not library datetime
+        expect(app_uses_chrono).to_equal(false)  # oracle: generated Rust must stay on integer euclidean arithmetic, not library datetime
 
         val workspace_gen = rt_file_read_text("src/compiler/90.tools/sffi_gen/sffi_gen_workspace.spl") ?? ""
         expect(workspace_gen).to_not_contain("chrono = ")
         val app_time = rt_file_read_text("src/app/io/time_ops.spl") ?? ""
         val lib_time = rt_file_read_text("src/lib/nogc_sync_mut/io/time_ops.spl") ?? ""
-        expect(app_time).to_equal(lib_time)
-        expect(app_time).to_contain("use common.time_utils.{timestamp_get_year")
+        expect(app_time).to_contain("export use std.nogc_sync_mut.io.time_ops.{")
+        expect(lib_time).to_contain("use common.time_utils.{timestamp_get_year")
         expect(app_time).to_not_contain("val _ = micros")

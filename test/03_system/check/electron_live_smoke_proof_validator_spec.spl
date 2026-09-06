@@ -1,4 +1,3 @@
-# @req: REQ-CHECK-001
 """
 ## Purpose and audience
 Purpose: accepts complete Electron live DOM timing and animation proof
@@ -84,6 +83,23 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_live_smoke_proof_va
   performance, animation, and tolerance rows.
 - The live smoke shell wrapper prints validator-derived failure rows before
   exiting nonzero when a produced proof fails validation.
+## Operator workflow
+
+Each scenario runs the packaged validator (via `node scripts/check/...` or a
+direct process invocation) against a complete proof document or a proof mutated
+in exactly one field, and asserts the validator exit code and normalized rows.
+
+## Compatibility and limitations
+
+Scenarios that invoke the live Electron wrapper need a graphical host with the packaged proof present; validator-only scenarios run from a plain repo checkout.
+
+## Verification guidance and troubleshooting
+
+A RED reject scenario is the fail-closed contract working: rerun the scenario and
+inspect the cited validator command with the mutated field restored to confirm the
+regression. A RED accept scenario means the packaged proof itself regressed;
+recapture it with the scripts/check command named in the scenario before shipping.
+
 """
 
 # @tag: system, gui, electron, smoke, renderer, animation
@@ -94,9 +110,16 @@ use std.spec.*
 fn _proof_command(path: text, mutation: text) -> text:
     "node -e 'const fs=require(\"fs\");const png=Buffer.from(\"89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000a49444154789c6360000002000100ffff03000006000557bfab860000000049454e44ae426082\",\"hex\");const screenshot=process.argv[1]+\".png\";fs.writeFileSync(screenshot,png);const p={target:\"electron\",surface_id:\"main\",proof_source:\"src/app/ui.electron/bridge.js:electronLiveSmokeProofScript\",browser_engine:\"chromium\",electron_user_agent:\"Mozilla/5.0 Chrome/142.0.0.0 Electron/42.5.0 Safari/537.36\",electron_process_version:\"42.5.0\",chrome_process_version:\"142.0.0.0\",width:1280,height:720,body_html_length:64,css_length:12,app_element_present:true,body_text_length:23,body_text_sample:\"Hello World from Web!\",performance_now_available:true,performance_now_delta_ms:1.25,animation_frame_available:true,animation_frame_count:2,css_animation_probe:true,event_dispatch_available:true,event_dispatch_count:1,event_dispatch_type:\"simple-electron-live-smoke-event\",event_dispatch_detail:\"live-smoke-input\",event_dispatch_error:\"\",event_dispatch_to_paint_ms:1.5,screenshot_path:screenshot,screenshot_width:1280,screenshot_height:720,screenshot_png_size_bytes:png.length,screenshot_bitmap_byte_count:3686400,screenshot_pixel_checksum:12345,screenshot_nontransparent_pixel_count:4096,screenshot_distinct_color_count:3,screenshot_error:\"\",blur_or_tolerance_used:false};" + mutation + ";fs.writeFileSync(process.argv[1],JSON.stringify(p));' " + path
 
+# Lifecycle: doc/01_research/ui/render_path/electron_tauri_vulkan_enablement_2026-06-16.md ;
+# doc/03_plan/os/wm/shared_wm_renderer_unification_completion_audit.md ;
+# doc/04_architecture/ui/simple_gui_stack.md ;
+# doc/05_design/gpu_renderer_processing_backends_metal.md
+# @manual_section: proof validators
+
 describe "Electron live smoke proof validator":
 
     it "accepts complete Electron live DOM timing and animation proof":
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         step("Verify: accepts complete Electron live DOM timing and animation proof")
         # @req: REQ-CHECK-ElecLiveSmokProoVali-001
         val root = "build/test-electron-live-smoke-validator-pass"
@@ -104,7 +127,7 @@ describe "Electron live smoke proof validator":
             _proof_command(root + "/proof.json", "") +
             " && node scripts/check/validate-electron-live-smoke-proof.js " + root + "/proof.json 1280 720 > " + root + "/evidence.env"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(0)
+        expect(code).to_equal(0)  # oracle: validator exits 0 only for a complete well-formed proof (fail-closed exit contract)
 
         val evidence = file_read(root + "/evidence.env")
         step("Inspect normalized Electron live smoke proof rows")
@@ -155,6 +178,9 @@ describe "Electron live smoke proof validator":
         expect(evidence).to_contain("electron_live_smoke_blur_or_tolerance_used=false")
 
     it "rejects missing DOM render evidence":
+        # @req: REQ-CHECK-ElecLiveSmokProoVali-002
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
+        step("Verify: rejects missing DOM render evidence")
         val root = "build/test-electron-live-smoke-validator-dom"
         val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
             _proof_command(root + "/html.json", "p.body_html_length=0") +
@@ -164,7 +190,7 @@ describe "Electron live smoke proof validator":
             _proof_command(root + "/text.json", "p.body_text_length=0") +
             " && node scripts/check/validate-electron-live-smoke-proof.js " + root + "/text.json 1280 720 > " + root + "/text.env"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
 
         val html = file_read(root + "/html.env")
         val css = file_read(root + "/css.env")
@@ -175,6 +201,8 @@ describe "Electron live smoke proof validator":
         expect(text).to_contain("electron_live_smoke_validation_reason=missing-rendered-text")
 
     it "rejects proof for the wrong target or surface":
+        # @req: REQ-CHECK-ElecLiveSmokProoVali-003
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-electron-live-smoke-validator-identity"
         val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
             _proof_command(root + "/target.json", "p.target=\"chrome\"") +
@@ -182,7 +210,7 @@ describe "Electron live smoke proof validator":
             _proof_command(root + "/surface.json", "p.surface_id=\"secondary\"") +
             " && node scripts/check/validate-electron-live-smoke-proof.js " + root + "/surface.json 1280 720 > " + root + "/surface.env"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
 
         val target = file_read(root + "/target.env")
         val surface = file_read(root + "/surface.env")
@@ -197,6 +225,8 @@ describe "Electron live smoke proof validator":
         expect(surface).to_contain("electron_live_smoke_surface_id=secondary")
 
     it "rejects proof without the Electron bridge live-smoke source marker":
+        # @req: REQ-CHECK-ElecLiveSmokProoVali-004
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-electron-live-smoke-validator-source"
         val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
             _proof_command(root + "/missing.json", "delete p.proof_source") +
@@ -204,7 +234,7 @@ describe "Electron live smoke proof validator":
             _proof_command(root + "/wrong.json", "p.proof_source=\"tools/manual/proof.json\"") +
             " && node scripts/check/validate-electron-live-smoke-proof.js " + root + "/wrong.json 1280 720 > " + root + "/wrong.env"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
 
         val missing = file_read(root + "/missing.env")
         val wrong = file_read(root + "/wrong.env")
@@ -217,6 +247,8 @@ describe "Electron live smoke proof validator":
         expect(wrong).to_contain("electron_live_smoke_proof_source=tools/manual/proof.json")
 
     it "rejects proof when the live Electron bridge source artifact is missing or hardlinked":
+        # @req: REQ-CHECK-ElecLiveSmokProoVali-005
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-electron-live-smoke-validator-source-artifact"
         val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
             _proof_command(root + "/proof.json", "") +
@@ -224,7 +256,7 @@ describe "Electron live smoke proof validator":
             "mkdir -p " + root + "/hardlink/src/app/ui.electron && cp src/app/ui.electron/bridge.js " + root + "/hardlink/original-bridge.js && ln " + root + "/hardlink/original-bridge.js " + root + "/hardlink/src/app/ui.electron/bridge.js && cp " + root + "/proof.json " + root + "/hardlink/proof.json && " +
             "cd " + root + "/hardlink && node ../../../scripts/check/validate-electron-live-smoke-proof.js proof.json 1280 720 > hardlink.env; hardlink_code=$?; [ \"$missing_code\" -eq 1 ] && [ \"$hardlink_code\" -eq 1 ]"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(0)
+        expect(code).to_equal(0)  # oracle: validator exits 0 only for a complete well-formed proof (fail-closed exit contract)
 
         val missing = file_read(root + "/missing.env")
         val hardlink = file_read(root + "/hardlink/hardlink.env")
@@ -246,6 +278,8 @@ describe "Electron live smoke proof validator":
         expect(hardlink).to_contain("electron_live_smoke_proof_source_artifact_status=fail")
 
     it "rejects symlinked empty nonregular or markerless Electron bridge source artifacts":
+        # @req: REQ-CHECK-ElecLiveSmokProoVali-006
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-electron-live-smoke-validator-source-artifact-invalid"
         val command = "rm -rf " + root + " && mkdir -p " + root + "/symlink/src/app/ui.electron " + root + "/empty/src/app/ui.electron " + root + "/invalid/src/app/ui.electron " + root + "/directory/src/app/ui.electron && " +
             _proof_command(root + "/proof.json", "") +
@@ -259,7 +293,7 @@ describe "Electron live smoke proof validator":
             "cd " + root + "/directory && node ../../../scripts/check/validate-electron-live-smoke-proof.js proof.json 1280 720 > directory.env; directory_code=$?; cd ../../.. && " +
             "[ \"$symlink_code\" -eq 1 ] && [ \"$empty_code\" -eq 1 ] && [ \"$invalid_code\" -eq 1 ] && [ \"$directory_code\" -eq 1 ]"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(0)
+        expect(code).to_equal(0)  # oracle: validator exits 0 only for a complete well-formed proof (fail-closed exit contract)
 
         val symlink = file_read(root + "/symlink/symlink.env")
         val empty = file_read(root + "/empty/empty.env")
@@ -293,6 +327,8 @@ describe "Electron live smoke proof validator":
         expect(directory).to_contain("electron_live_smoke_proof_source_artifact_status=fail")
 
     it "rejects proof without Chromium Electron runtime evidence":
+        # @req: REQ-CHECK-ElecLiveSmokProoVali-007
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-electron-live-smoke-validator-runtime"
         val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
             _proof_command(root + "/engine.json", "p.browser_engine=\"webkit\"") +
@@ -304,7 +340,7 @@ describe "Electron live smoke proof validator":
             _proof_command(root + "/chrome-version.json", "p.chrome_process_version=\"Chrome/142\"") +
             " && node scripts/check/validate-electron-live-smoke-proof.js " + root + "/chrome-version.json 1280 720 > " + root + "/chrome-version.env"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
 
         val engine = file_read(root + "/engine.env")
         val user_agent = file_read(root + "/user-agent.env")
@@ -326,6 +362,8 @@ describe "Electron live smoke proof validator":
         expect(chrome_version).to_contain("electron_live_smoke_chrome_process_version=Chrome/142")
 
     it "rejects forged rendered text counters without the live smoke text sample":
+        # @req: REQ-CHECK-ElecLiveSmokProoVali-008
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-electron-live-smoke-validator-text-sample"
         val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
             _proof_command(root + "/empty-sample.json", "p.body_text_sample=\"\"") +
@@ -335,7 +373,7 @@ describe "Electron live smoke proof validator":
             _proof_command(root + "/long-sample.json", "p.body_text_length=4;p.body_text_sample=\"Hello World from Web!\"") +
             " && node scripts/check/validate-electron-live-smoke-proof.js " + root + "/long-sample.json 1280 720 > " + root + "/long-sample.env"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
 
         val empty_sample = file_read(root + "/empty-sample.env")
         val wrong_sample = file_read(root + "/wrong-sample.env")
@@ -352,6 +390,9 @@ describe "Electron live smoke proof validator":
         expect(long_sample).to_contain("electron_live_smoke_body_text_length=4")
 
     it "rejects missing over-budget browser timing and animation proof":
+        # @req: REQ-CHECK-ElecLiveSmokProoVali-009
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
+        step("Verify: rejects missing over-budget browser timing and animation proof")
         val root = "build/test-electron-live-smoke-validator-animation"
         val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
             _proof_command(root + "/perf.json", "p.performance_now_available=false") +
@@ -365,7 +406,7 @@ describe "Electron live smoke proof validator":
             _proof_command(root + "/css.json", "p.css_animation_probe=false") +
             " && node scripts/check/validate-electron-live-smoke-proof.js " + root + "/css.json 1280 720 > " + root + "/css.env"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
 
         val perf = file_read(root + "/perf.env")
         val zero = file_read(root + "/zero.env")
@@ -383,6 +424,8 @@ describe "Electron live smoke proof validator":
         expect(css).to_contain("electron_live_smoke_validation_reason=missing-css-animation")
 
     it "rejects passive DOM snapshots without renderer event dispatch proof":
+        # @req: REQ-CHECK-ElecLiveSmokProoVali-010
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-electron-live-smoke-validator-event-dispatch"
         val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
             _proof_command(root + "/available.json", "p.event_dispatch_available=false") +
@@ -400,7 +443,7 @@ describe "Electron live smoke proof validator":
             _proof_command(root + "/paint-slow.json", "p.event_dispatch_to_paint_ms=1001") +
             " && node scripts/check/validate-electron-live-smoke-proof.js " + root + "/paint-slow.json 1280 720 > " + root + "/paint-slow.env"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
 
         val available = file_read(root + "/available.env")
         val count = file_read(root + "/count.env")
@@ -431,6 +474,8 @@ describe "Electron live smoke proof validator":
         expect(paint_slow).to_contain("electron_live_smoke_event_dispatch_to_paint_ms=1001")
 
     it "rejects missing stale or blank screenshot capture proof":
+        # @req: REQ-CHECK-ElecLiveSmokProoVali-011
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-electron-live-smoke-validator-screenshot"
         val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
             _proof_command(root + "/missing.json", "fs.unlinkSync(screenshot)") +
@@ -444,7 +489,7 @@ describe "Electron live smoke proof validator":
             _proof_command(root + "/colors.json", "p.screenshot_distinct_color_count=1") +
             " && node scripts/check/validate-electron-live-smoke-proof.js " + root + "/colors.json 1280 720 > " + root + "/colors.env"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
 
         val missing = file_read(root + "/missing.env")
         val size = file_read(root + "/size.env")
@@ -474,6 +519,8 @@ describe "Electron live smoke proof validator":
         expect(forged_count).to_contain("electron_live_smoke_validation_reason=screenshot-artifact-nontransparent-count-mismatch")
 
     it "rejects oversized screenshot dimensions and sparse artifacts before allocation":
+        # @req: REQ-CHECK-ElecLiveSmokProoVali-012
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-electron-live-smoke-validator-screenshot-bounds"
         val huge_png = "const hh=Buffer.alloc(13);hh.writeUInt32BE(50000,0);hh.writeUInt32BE(50000,4);hh[8]=8;hh[9]=6;const hp=Buffer.concat([Buffer.from(\"89504e470d0a1a0a\",\"hex\"),chunk(\"IHDR\",hh),chunk(\"IDAT\",zlib.deflateSync(Buffer.from([0]))),chunk(\"IEND\",Buffer.alloc(0))]);fs.writeFileSync(screenshot,hp);p.width=50000;p.height=50000;p.screenshot_width=50000;p.screenshot_height=50000;p.screenshot_png_size_bytes=hp.length"
         val sparse_png = "fs.truncateSync(screenshot,167772161);p.screenshot_png_size_bytes=167772161"
@@ -483,7 +530,7 @@ describe "Electron live smoke proof validator":
             _proof_command(root + "/sparse.json", sparse_png) +
             " && node scripts/check/validate-electron-live-smoke-proof.js " + root + "/sparse.json 1280 720 > " + root + "/sparse.env"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
 
         val dimensions = file_read(root + "/dimensions.env")
         val sparse = file_read(root + "/sparse.env")
@@ -496,6 +543,8 @@ describe "Electron live smoke proof validator":
         )
 
     it "rejects string booleans for DOM performance animation CSS and tolerance proof":
+        # @req: REQ-CHECK-ElecLiveSmokProoVali-013
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-electron-live-smoke-validator-string-booleans"
         val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
             _proof_command(root + "/app.json", "p.app_element_present=\"true\"") +
@@ -511,7 +560,7 @@ describe "Electron live smoke proof validator":
             _proof_command(root + "/blur.json", "p.blur_or_tolerance_used=\"false\"") +
             " && node scripts/check/validate-electron-live-smoke-proof.js " + root + "/blur.json 1280 720 > " + root + "/blur.env"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
 
         val app = file_read(root + "/app.env")
         val perf = file_read(root + "/perf.env")
@@ -546,6 +595,8 @@ describe "Electron live smoke proof validator":
         expect(blur.contains("electron_live_smoke_blur_or_tolerance_used=false")).to_be(false)
 
     it "rejects decimal strings for live DOM performance animation and viewport counters":
+        # @req: REQ-CHECK-ElecLiveSmokProoVali-014
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-electron-live-smoke-validator-string-counters"
         val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
             _proof_command(root + "/width.json", "p.width=\"1280\"") +
@@ -563,7 +614,7 @@ describe "Electron live smoke proof validator":
             _proof_command(root + "/event-paint.json", "p.event_dispatch_to_paint_ms=\"1.5\"") +
             " && node scripts/check/validate-electron-live-smoke-proof.js " + root + "/event-paint.json 1280 720 > " + root + "/event-paint.env"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
 
         val width = file_read(root + "/width.env")
         val html = file_read(root + "/html.env")
@@ -603,6 +654,9 @@ describe "Electron live smoke proof validator":
         expect(event_paint.contains("electron_live_smoke_event_dispatch_to_paint_ms=1.5")).to_be(false)
 
     it "rejects tolerance use and dimensions that do not match the requested viewport":
+        # @req: REQ-CHECK-ElecLiveSmokProoVali-015
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
+        step("Verify: rejects tolerance use and dimensions that do not match the requested viewport")
         val root = "build/test-electron-live-smoke-validator-viewport"
         val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
             _proof_command(root + "/blur.json", "p.blur_or_tolerance_used=true") +
@@ -610,7 +664,7 @@ describe "Electron live smoke proof validator":
             _proof_command(root + "/width.json", "p.width=640") +
             " && node scripts/check/validate-electron-live-smoke-proof.js " + root + "/width.json 1280 720 > " + root + "/width.env"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
 
         val blur = file_read(root + "/blur.env")
         val width = file_read(root + "/width.env")
@@ -618,6 +672,8 @@ describe "Electron live smoke proof validator":
         expect(width).to_contain("electron_live_smoke_validation_reason=unexpected-width")
 
     it "rejects non decimal requested viewport dimensions":
+        # @req: REQ-CHECK-ElecLiveSmokProoVali-016
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-electron-live-smoke-validator-decimal-viewport"
         val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
             _proof_command(root + "/exponent.json", "") +
@@ -625,7 +681,7 @@ describe "Electron live smoke proof validator":
             _proof_command(root + "/fractional.json", "") +
             " && node scripts/check/validate-electron-live-smoke-proof.js " + root + "/fractional.json 1280 720.0 > " + root + "/fractional.env"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
 
         val exponent = file_read(root + "/exponent.env")
         val fractional = file_read(root + "/fractional.env")
@@ -638,13 +694,15 @@ describe "Electron live smoke proof validator":
         expect(fractional).to_contain("electron_live_smoke_height=720")
 
     it "rejects symlinked proof JSON before reading renderer evidence":
+        # @req: REQ-CHECK-ElecLiveSmokProoVali-017
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-electron-live-smoke-validator-symlink"
         val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
             _proof_command(root + "/real.json", "") +
             " && ln -s real.json " + root + "/proof-link.json" +
             " && node scripts/check/validate-electron-live-smoke-proof.js " + root + "/proof-link.json 1280 720 > " + root + "/symlink.env"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
 
         val evidence = file_read(root + "/symlink.env")
         step("Confirm Electron live smoke proof path cannot be a symlink")
@@ -655,13 +713,15 @@ describe "Electron live smoke proof validator":
         expect(evidence.contains("electron_live_smoke_target=electron")).to_be(false)
 
     it "rejects hardlinked proof JSON before reading renderer evidence":
+        # @req: REQ-CHECK-ElecLiveSmokProoVali-018
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-electron-live-smoke-validator-hardlink"
         val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
             _proof_command(root + "/original.json", "") +
             " && ln " + root + "/original.json " + root + "/proof.json" +
             " && node scripts/check/validate-electron-live-smoke-proof.js " + root + "/proof.json 1280 720 > " + root + "/hardlink.env"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
 
         val evidence = file_read(root + "/hardlink.env")
         step("Confirm Electron live smoke proof path cannot be a hardlink")
@@ -672,11 +732,13 @@ describe "Electron live smoke proof validator":
         expect(evidence.contains("electron_live_smoke_target=electron")).to_be(false)
 
     it "rejects non regular proof JSON artifacts before parsing renderer evidence":
+        # @req: REQ-CHECK-ElecLiveSmokProoVali-019
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-electron-live-smoke-validator-nonregular"
         val command = "rm -rf " + root + " && mkdir -p " + root + "/proof-dir" +
             " && node scripts/check/validate-electron-live-smoke-proof.js " + root + "/proof-dir 1280 720 > " + root + "/directory.env"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
 
         val evidence = file_read(root + "/directory.env")
         step("Confirm Electron live smoke proof path must be a regular file")
@@ -687,6 +749,9 @@ describe "Electron live smoke proof validator":
         expect(evidence.contains("electron_live_smoke_target=electron")).to_be(false)
 
     it "keeps the Electron live smoke wrapper wired to the validator and bridge proof":
+        # @req: REQ-CHECK-ElecLiveSmokProoVali-020
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
+        step("Verify: keeps the Electron live smoke wrapper wired to the validator and bridge proof")
         val wrapper = file_read("scripts/check/check-electron-live-smoke.shs")
         val package_json = file_read("tools/electron-shell/package.json")
         val bridge = file_read("src/app/ui.electron/bridge.js")
@@ -771,13 +836,15 @@ describe "Electron live smoke proof validator":
         expect(envelopes).to_contain("css_length")
 
     it "keeps Electron live smoke diagnostics on early dependency failures":
+        # @req: REQ-CHECK-ElecLiveSmokProoVali-021
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-electron-live-smoke-wrapper-early-fail"
         val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
             "mkdir -p " + root + "/bin && " +
             "for cmd in dirname mkdir rm cat sed tail; do ln -s /bin/$cmd " + root + "/bin/$cmd; done && " +
             "PATH=" + root + "/bin SIMPLE_ELECTRON_PROOF_PATH=" + root + "/proof.json /bin/sh scripts/check/check-electron-live-smoke.shs > " + root + "/stdout.env 2> " + root + "/stderr.log; exit 0"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(0)
+        expect(code).to_equal(0)  # oracle: validator exits 0 only for a complete well-formed proof (fail-closed exit contract)
 
         val evidence = file_read(root + "/stdout.env")
         step("Confirm early Electron live smoke unavailable evidence preserves normalized diagnostics")

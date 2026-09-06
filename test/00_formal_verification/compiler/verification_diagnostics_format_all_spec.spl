@@ -1,57 +1,96 @@
-# Defect-class spec for the `format_all` collection-iteration defect.
-#
-# Root cause (compiler, Rust seed): a `for` loop binding does NOT shadow a
-# same-named module-namespace alias, so `for diag in ...: diag.format()` inside
-# verification_diagnostics.spl resolved `diag` to the module dict of the very
-# module the spec imports as `diag`, yielding
-#   semantic: method `format` not found on type `dict`
-# Tracked in doc/08_tracking/bug/for_loop_var_shadowed_by_module_alias_2026-08-18.md
-#
-# The alias below is deliberately named `diag` so this spec keeps exercising the
-# exact collision shape, and it covers every list-iterating / list-length method
-# on the collector, not just the one that happened to fail.
-use verification.lean.verification_diagnostics as diag
+"""
+## Purpose and audience
+Executable contract for the VerificationDiagnostics collector's
+list-iterating and list-length methods (format_all, has_errors, error_count,
+is_empty) plus a single-diagnostic positive control. This is the defect-class
+spec for the collection-iteration regression where a `for` loop binding failed
+to shadow the module alias; the alias below is deliberately named `diag` to
+keep exercising that exact collision shape. Owned by the compiler verification
+team.
 
+## Operator workflow
+Run this spec after touching the diagnostics collector or anything that
+iterates over collected diagnostics:
+`bin/simple test test/00_formal_verification/compiler/verification_diagnostics_format_all_spec.spl`.
+A failure names the collector invariant that broke.
+
+## Compatibility and limitations
+Root cause of the original defect (compiler, Rust seed): a `for` loop binding
+does NOT shadow a same-named module-namespace alias, so `for diag in ...:
+diag.format()` inside verification_diagnostics.spl resolved `diag` to the
+module dict, yielding `semantic: method 'format' not found on type 'dict'`.
+Tracked in doc/08_tracking/bug/for_loop_var_shadowed_by_module_alias_2026-08-18.md.
+All scenarios run in memory; no Lean toolchain is required.
+
+## Verification guidance and troubleshooting
+Rerun with the single command above. A `method format not found on type dict`
+failure means the alias-shadowing defect regressed; a code mismatch in
+format_all output means the error-code table changed.
+"""
+# Lifecycle: doc/01_research/domain/simple_formal_verification_2_0.md
+# doc/03_plan/agent_tasks/simple_formal_verification_2_0.md
+# doc/04_architecture/simple_formal_verification_2_0.md
+# doc/05_design/simple_formal_verification_2_0.md
+
+use verification.lean.verification_diagnostics as diag
+use std.spec.step
+
+# @manual_section: verification-diagnostics-collection
 describe "VerificationDiagnostics collection methods":
     context "format_all":
         it "returns an empty list for an empty collector":
+            # @req REQ-VDIAG-FMT-001
+            # @capture(statistics): format_all length for a collector with zero diagnostics
+            step("Format an empty diagnostic collector")
             val collector = diag.VerificationDiagnostics.new()
-            expect(collector.format_all().len()).to_equal(0)
+            expect(collector.format_all().len()).to_equal(0)  # oracle: no diagnostics means no formatted lines
 
         it "formats a single diagnostic":
+            # @req REQ-VDIAG-FMT-002
+            # @capture(protocol_json): format_all output for one IoInVerified diagnostic
+            step("Format a collector holding one diagnostic")
             val span = diag.Span.new(0, 10, 1, 1)
             var collector = diag.VerificationDiagnostics.new()
             collector.push(diag.VerificationDiagnostic.new(diag.VerificationErrorCode.IoInVerified, span))
             val all = collector.format_all()
-            expect(all.len()).to_equal(1)
+            expect(all.len()).to_equal(1)  # oracle: exactly one diagnostic was pushed
             expect(all[0]).to_contain("V-EFFECT-001")
 
         it "formats several diagnostics in push order":
+            # @req REQ-VDIAG-FMT-003
+            # @capture(protocol_json): format_all output preserving push order across three codes
+            step("Format three diagnostics pushed in a fixed order")
             val span = diag.Span.new(0, 10, 1, 1)
             var collector = diag.VerificationDiagnostics.new()
             collector.push(diag.VerificationDiagnostic.new(diag.VerificationErrorCode.IoInVerified, span))
             collector.push(diag.VerificationDiagnostic.new(diag.VerificationErrorCode.FfiInVerified, span))
             collector.push(diag.VerificationDiagnostic.new(diag.VerificationErrorCode.MissingTermination, span))
             val all = collector.format_all()
-            expect(all.len()).to_equal(3)
+            expect(all.len()).to_equal(3)  # oracle: three diagnostics were pushed
             expect(all[0]).to_contain("V-EFFECT-001")
             expect(all[1]).to_contain("V-UNSAFE-003")
             expect(all[2]).to_contain("V-TERM-001")
 
     context "sibling collection accessors":
         it "reports has_errors, error_count and is_empty consistently":
+            # @req REQ-VDIAG-FMT-004
+            # @capture(statistics): accessor triplet before and after the first push
+            step("Check the accessor triplet around a single push")
             val span = diag.Span.new(0, 10, 1, 1)
             var collector = diag.VerificationDiagnostics.new()
             expect(collector.has_errors()).to_equal(false)
-            expect(collector.error_count()).to_equal(0)
+            expect(collector.error_count()).to_equal(0)  # oracle: no diagnostic has been pushed yet
             expect(collector.is_empty()).to_equal(true)
             collector.push(diag.VerificationDiagnostic.new(diag.VerificationErrorCode.GhostAccessesNonGhost, span))
             expect(collector.has_errors()).to_equal(true)
-            expect(collector.error_count()).to_equal(1)
+            expect(collector.error_count()).to_equal(1)  # oracle: exactly one diagnostic was pushed
             expect(collector.is_empty()).to_equal(false)
 
     context "positive control":
         it "single-diagnostic format() still works (never regressed)":
+            # @req REQ-VDIAG-FMT-005
+            # @capture(protocol_json): single-diagnostic format() carrying item, code, and file
+            step("Format a single diagnostic directly")
             val span = diag.Span.new(0, 10, 1, 1)
             var d = diag.VerificationDiagnostic.new(diag.VerificationErrorCode.FfiInVerified, span)
             d = d.with_item("call_c").with_file("a.spl")

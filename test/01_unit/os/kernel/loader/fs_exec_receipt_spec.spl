@@ -1,4 +1,31 @@
+"""
+## Purpose and audience
+Pins the filesystem execution receipt contract for the kernel loader:
+which constructor records an exited process, how process registration is
+expressed, how a failed launch stays distinct from an exited process, and
+why a synchronous handoff never fabricates a pid. Audience: kernel loader
+and scheduler engineers.
+## Operator workflow
+Run this spec from the repo root with the Simple runner; every scenario
+constructs receipts through the production constructors exported from
+os.kernel.loader.fs_exec_receipt and asserts the recorded fields.
+## Compatibility and limitations
+Covers the value-returning receipt records only. Live process launch,
+scheduler registration side effects, and pid allocation are out of scope;
+the receipt is a passive record, so no scheduler ownership is invented.
+## Verification guidance and troubleshooting
+A red scenario means a receipt field no longer preserves the value the
+constructor recorded. Compare the failing expect against the constructor
+in src/os/kernel/loader/fs_exec_receipt.spl before editing the oracle.
+"""
+# Lifecycle: doc/01_research/domain/simpleos_32bit_bootstrap.md ;
+# doc/03_plan/os/simpleos/host_os_completeness_plan.md ;
+# doc/04_architecture/os/loader/simpleos_boot_service_authority_v1.md ;
+# doc/05_design/rt_hal_typed_exit_protocol.md
+# @manual_section: exec-receipt-contract
+
 use std.spec
+use std.spec.step
 use os.kernel.loader.fs_exec_receipt.{
     fs_exec_receipt_failed, fs_exec_receipt_exited,
     fs_exec_receipt_exited_registered
@@ -7,32 +34,44 @@ use os.kernel.loader.fs_exec_receipt.{
 describe "filesystem execution receipt":
     describe "REQ-001: preserve process identity and exit status":
         it "records completed execution without inventing scheduler ownership":
+            # @req REQ-001
+            # @capture(statistics): six receipt fields recorded by the exited constructor
+            step("Record an exited process through the production constructor")
             val receipt = fs_exec_receipt_exited("/SYS/APPS/WEBSRV.SMF", 41, 0)
             expect(receipt.path).to_equal("/SYS/APPS/WEBSRV.SMF")
-            expect(receipt.pid).to_equal(41)
-            expect(receipt.exit_code).to_equal(0)
+            expect(receipt.pid).to_equal(41)  # oracle: 41 is the fixture pid that must be carried verbatim
+            expect(receipt.exit_code).to_equal(0)  # oracle: exit code 0 proves the completed run is preserved untouched
             expect(receipt.started).to_be(true)
             expect(receipt.exited).to_be(true)
             expect(receipt.process_registered).to_be(false)
 
         it "marks process identity only through the registered constructor":
+            # @req REQ-001
+            # @capture(statistics): registered-constructor receipt fields
+            step("Record the same exit through the registered constructor")
             val receipt = fs_exec_receipt_exited_registered(
                 "/SYS/APPS/WEBSRV.SMF", 41, 0)
             expect(receipt.process_registered).to_be(true)
-            expect(receipt.pid).to_equal(41)
+            expect(receipt.pid).to_equal(41)  # oracle: the registered constructor still carries the fixture pid 41
 
         it "keeps a launch failure distinct from an exited process":
+            # @req REQ-001
+            # @capture(statistics): failed-launch receipt fields versus exited fields
+            step("Record a failed launch through the failure constructor")
             val receipt = fs_exec_receipt_failed("/SYS/APPS/DBSRV.SMF", -2)
-            expect(receipt.pid).to_equal(-2)
-            expect(receipt.exit_code).to_equal(-2)
+            expect(receipt.pid).to_equal(-2)  # oracle: -2 is the fixture's sentinel pid for a failed launch
+            expect(receipt.exit_code).to_equal(-2)  # oracle: the failure sentinel doubles as the exit code slot
             expect(receipt.started).to_be(false)
             expect(receipt.exited).to_be(false)
             expect(receipt.process_registered).to_be(false)
 
         it "does not require a fabricated PID for a synchronous handoff":
+            # @req REQ-001
+            # @capture(statistics): synchronous-handoff receipt fields
+            step("Record a synchronous handoff without a scheduler pid")
             val receipt = fs_exec_receipt_exited("/SYS/APPS/STREAM.ELF", 0, 7)
-            expect(receipt.pid).to_equal(0)
-            expect(receipt.exit_code).to_equal(7)
+            expect(receipt.pid).to_equal(0)  # oracle: 0 marks that no pid was fabricated for the synchronous handoff
+            expect(receipt.exit_code).to_equal(7)  # oracle: the handoff reports the fixture's exit code 7 unchanged
             expect(receipt.started).to_be(true)
             expect(receipt.exited).to_be(true)
             expect(receipt.process_registered).to_be(false)

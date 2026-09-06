@@ -1,7 +1,43 @@
-# Specification for src/lib/common/hpack/huffman_h2.spl
-#
-# Covers RFC 7541 §5.2 Huffman coding with Appendix B static table.
-# Reference vectors from RFC 7541 Appendix C.4.
+"""
+## Purpose and audience
+
+HPACK Huffman codec conformance for `src/lib/common/hpack/huffman_h2.spl`:
+RFC 7541 section 5.2 Huffman coding over the Appendix B static table, pinned
+against the RFC 7541 Appendix C.4 reference vectors, plus decoder rejection
+of explicit EOS, over-long padding, non-EOS trailing bits, and out-of-range
+windows. Written for the h2/HPACK owner and anyone tightening the codec's
+error paths.
+
+## Operator workflow
+
+Run one spec: `./src/compiler_rust/target/bootstrap/simple run
+test/01_unit/lib/common/hpack/huffman_h2_spec.spl`. Encoder scenarios pin
+exact byte output against the RFC vectors; decoder scenarios round-trip
+through the real `hpack_huffman_encode` / `hpack_huffman_decode` pair; the
+256-byte indexed payload exercises every symbol 0x00-0xff in one pass.
+
+## Compatibility and limitations
+
+Reference vectors are byte-frozen from RFC 7541 Appendix C.4 — changing the
+code table or padding rule is a spec-visible break by design. The
+round-trip scenarios prove encode/decode agreement, not byte-level RFC
+equality (those are pinned by the C.4 scenarios above them). Decoder bounds
+follow the RFC's strict rule that at most 7 bits of EOS padding may trail.
+
+## Verification guidance and troubleshooting
+
+An encoder failure on a C.4 vector means the static table or the padding
+rule drifted; diff the emitted bytes against the pinned vector to find the
+first divergent octet. A decoder rejection failure means an error path
+became lenient — check the EOS-in-stream and 7-bit padding guards first.
+A round-trip failure with matching lengths usually indicates a bit-order
+bug inside one direction only; the 256-byte indexed payload localizes it to
+a specific symbol class.
+"""
+# Lifecycle: doc/01_research/lib/compress/compression_codec_catalog_2026-06-15.md ;
+# doc/03_plan/lib/compress/custom_type_alpha_compression_team_plan_2026-06-15.md ;
+# doc/04_architecture/lib/common_compression_framework.md ;
+# doc/05_design/lib/networking/net_packet_io_boundary.md
 
 use std.spipe.*
 use std.common.hpack.huffman_h2.{hpack_huffman_encode, hpack_huffman_decode}
@@ -107,166 +143,223 @@ fn _bytes_eq(a: [u8], b: [u8]) -> bool:
         i = i + 1
     ok
 
-# ---------------------------------------------------------------------------
-# Encoder tests
-# ---------------------------------------------------------------------------
-
+# @manual_section: hpack-huffman-rfc-vectors
 describe "HPACK Huffman encoder — RFC 7541 §C.4 reference vectors":
 
     it "encodes 'www.example.com' (§C.4.1) correctly":
+        # @req REQ-HPACK-HUFF-C4
+        # @capture(protocol_binary): encoded bytes for the C.4.1 reference string
+        step("Encode the C.4.1 reference string with the shipped encoder")
         val encoded = hpack_huffman_encode(_www_example_com())
         val expected = _www_example_com_encoded()
-        expect(encoded.len()).to_equal(12)
-        expect(_bytes_eq(encoded, expected)).to_equal(true)
+        expect(encoded.len()).to_equal(12)  # oracle: the C.4.1 vector is 92 code bits, which pad to exactly 12 octets under the EOS rule
+        expect(_bytes_eq(encoded, expected)).to_equal(true)  # oracle: the C.4.1 byte vector is byte-frozen from the RFC, so any divergence is a table or padding bug
 
     it "encodes 'no-cache' (§C.4.2) correctly":
+        # @req REQ-HPACK-HUFF-C4
+        # @capture(protocol_binary): encoded bytes for the C.4.2 reference string
+        step("Encode the C.4.2 reference string with the shipped encoder")
         val encoded = hpack_huffman_encode(_no_cache())
         val expected = _no_cache_encoded()
-        expect(encoded.len()).to_equal(6)
-        expect(_bytes_eq(encoded, expected)).to_equal(true)
+        expect(encoded.len()).to_equal(6)  # oracle: the C.4.2 vector is 43 code bits, which pad to exactly 6 octets under the EOS rule
+        expect(_bytes_eq(encoded, expected)).to_equal(true)  # oracle: the C.4.2 byte vector is byte-frozen from the RFC, so any divergence is a table or padding bug
 
     it "encodes 'custom-key' (§C.4.3) correctly":
+        # @req REQ-HPACK-HUFF-C4
+        # @capture(protocol_binary): encoded bytes for the C.4.3 custom-key string
+        step("Encode the C.4.3 custom-key string with the shipped encoder")
         val encoded = hpack_huffman_encode(_custom_key())
         val expected = _custom_key_encoded()
-        expect(encoded.len()).to_equal(8)
-        expect(_bytes_eq(encoded, expected)).to_equal(true)
+        expect(encoded.len()).to_equal(8)  # oracle: the C.4.3 custom-key vector is 55 code bits, which pad to exactly 8 octets under the EOS rule
+        expect(_bytes_eq(encoded, expected)).to_equal(true)  # oracle: the C.4.3 custom-key bytes are byte-frozen from the RFC, so any divergence is a table or padding bug
 
     it "encodes 'custom-value' (§C.4.3) correctly":
+        # @req REQ-HPACK-HUFF-C4
+        # @capture(protocol_binary): encoded bytes for the C.4.3 custom-value string
+        step("Encode the C.4.3 custom-value string with the shipped encoder")
         val encoded = hpack_huffman_encode(_custom_value())
         val expected = _custom_value_encoded()
-        expect(encoded.len()).to_equal(9)
-        expect(_bytes_eq(encoded, expected)).to_equal(true)
+        expect(encoded.len()).to_equal(9)  # oracle: the C.4.3 custom-value vector is 67 code bits, which pad to exactly 9 octets under the EOS rule
+        expect(_bytes_eq(encoded, expected)).to_equal(true)  # oracle: the C.4.3 custom-value bytes are byte-frozen from the RFC, so any divergence is a table or padding bug
 
+# @manual_section: hpack-huffman-encoder-basics
 describe "HPACK Huffman encoder — basic cases":
 
     it "encodes empty payload to empty output":
+        # @req REQ-HPACK-HUFF-BASIC
+        # @capture(statistics): output length for an empty payload encode
+        step("Encode an empty payload with the shipped encoder")
         val out = hpack_huffman_encode([])
-        expect(out.len()).to_equal(0)
+        expect(out.len()).to_equal(0)  # oracle: zero input bytes carry zero code bits, so even EOS padding must not fabricate an output octet
 
     it "encodes a single byte (0x61 = 'a') with EOS padding":
+        # @req REQ-HPACK-HUFF-BASIC
+        # @capture(protocol_binary): single-symbol encode with EOS padding bits
         # 'a' = 00011 (5 bits); padded to 8 bits with 3 high EOS bits → 000 11111
         # = 0x1f
+        step("Encode the single symbol 'a' and read back the padded octet")
         val out = hpack_huffman_encode([0x61u8])
-        expect(out.len()).to_equal(1)
-        expect(out[0]).to_equal(0x1fu8)
+        expect(out.len()).to_equal(1)  # oracle: one 5-bit code plus 3 EOS pad bits lands exactly on one octet
+        expect(out[0]).to_equal(0x1fu8)  # oracle: 00011 followed by 111 padding reads back as 0x1f, pinning bit order and pad placement
 
     it "encodes '200' correctly":
+        # @req REQ-HPACK-HUFF-BASIC
+        # @capture(statistics): output produced for the status-string encode
+        step("Encode the three-digit status string with the shipped encoder")
         val out = hpack_huffman_encode(_status_200())
         # Just verify it produces some output and round-trips.
-        expect(out.len()).to_be_greater_than(0)
+        expect(out.len()).to_be_greater_than(0)  # oracle: a three-digit status string always emits at least one octet, so zero output would mean a dead encoder
 
-# ---------------------------------------------------------------------------
-# Decoder tests
-# ---------------------------------------------------------------------------
-
+# @manual_section: hpack-huffman-rfc-decode
 describe "HPACK Huffman decoder — RFC 7541 §C.4 reference vectors":
 
     it "decodes 'www.example.com' (§C.4.1) correctly":
+        # @req REQ-HPACK-HUFF-C4
+        # @capture(protocol_binary): decoded text for the C.4.1 reference bytes
+        step("Decode the byte-frozen C.4.1 vector with the shipped decoder")
         val enc = _www_example_com_encoded()
         val res = hpack_huffman_decode(enc, 0, enc.len())
-        expect(res.is_ok()).to_equal(true)
+        expect(res.is_ok()).to_equal(true)  # oracle: the byte-frozen RFC vector must decode cleanly — a rejection means the table or pad rule rejects valid input
         val decoded = res.unwrap()
-        expect(_bytes_eq(decoded, _www_example_com())).to_equal(true)
+        expect(_bytes_eq(decoded, _www_example_com())).to_equal(true)  # oracle: decoding the RFC vector must reproduce the exact C.4.1 plaintext, closing the vector both ways
 
     it "decodes 'no-cache' (§C.4.2) correctly":
+        # @req REQ-HPACK-HUFF-C4
+        # @capture(protocol_binary): decoded text for the C.4.2 reference bytes
+        step("Decode the byte-frozen C.4.2 vector with the shipped decoder")
         val enc = _no_cache_encoded()
         val res = hpack_huffman_decode(enc, 0, enc.len())
-        expect(res.is_ok()).to_equal(true)
+        expect(res.is_ok()).to_equal(true)  # oracle: the byte-frozen RFC vector must decode cleanly — a rejection means the table or pad rule rejects valid input
         val decoded = res.unwrap()
-        expect(_bytes_eq(decoded, _no_cache())).to_equal(true)
+        expect(_bytes_eq(decoded, _no_cache())).to_equal(true)  # oracle: decoding the RFC vector must reproduce the exact C.4.2 plaintext, closing the vector both ways
 
     it "decodes 'custom-key' (§C.4.3) correctly":
+        # @req REQ-HPACK-HUFF-C4
+        # @capture(protocol_binary): decoded text for the C.4.3 custom-key bytes
+        step("Decode the byte-frozen C.4.3 custom-key vector with the shipped decoder")
         val enc = _custom_key_encoded()
         val res = hpack_huffman_decode(enc, 0, enc.len())
-        expect(res.is_ok()).to_equal(true)
+        expect(res.is_ok()).to_equal(true)  # oracle: the byte-frozen RFC vector must decode cleanly — a rejection means the table or pad rule rejects valid input
         val decoded = res.unwrap()
-        expect(_bytes_eq(decoded, _custom_key())).to_equal(true)
+        expect(_bytes_eq(decoded, _custom_key())).to_equal(true)  # oracle: decoding the RFC vector must reproduce the exact C.4.3 custom-key plaintext
 
     it "decodes 'custom-value' (§C.4.3) correctly":
+        # @req REQ-HPACK-HUFF-C4
+        # @capture(protocol_binary): decoded text for the C.4.3 custom-value bytes
+        step("Decode the byte-frozen C.4.3 custom-value vector with the shipped decoder")
         val enc = _custom_value_encoded()
         val res = hpack_huffman_decode(enc, 0, enc.len())
-        expect(res.is_ok()).to_equal(true)
+        expect(res.is_ok()).to_equal(true)  # oracle: the byte-frozen RFC vector must decode cleanly — a rejection means the table or pad rule rejects valid input
         val decoded = res.unwrap()
-        expect(_bytes_eq(decoded, _custom_value())).to_equal(true)
+        expect(_bytes_eq(decoded, _custom_value())).to_equal(true)  # oracle: decoding the RFC vector must reproduce the exact C.4.3 custom-value plaintext
 
+# @manual_section: hpack-huffman-decoder-errors
 describe "HPACK Huffman decoder — error cases":
 
     it "rejects a stream containing an explicit EOS symbol":
+        # @req REQ-HPACK-HUFF-ERR
+        # @capture(statistics): decoder verdict for the embedded-EOS stream
+        step("Decode a stream that embeds a 30-bit all-ones EOS mid-stream")
         val stream = _eos_embedded_stream()
         val res = hpack_huffman_decode(stream, 0, stream.len())
-        expect(res.is_err()).to_equal(true)
+        expect(res.is_err()).to_equal(true)  # oracle: EOS may only appear as trailing padding, so a mid-stream 30-bit all-ones symbol must fail the decode
 
     it "rejects padding longer than 7 bits":
+        # @req REQ-HPACK-HUFF-ERR
+        # @capture(statistics): decoder verdict for the over-padded stream
+        step("Decode a stream trailing eleven one-bits after the symbol")
         val stream = _over_padded_stream()
         val res = hpack_huffman_decode(stream, 0, stream.len())
-        expect(res.is_err()).to_equal(true)
+        expect(res.is_err()).to_equal(true)  # oracle: the RFC caps trailing pad at 7 bits, so 11 trailing one-bits must fail rather than silently decode
 
     it "rejects trailing bits that are not an EOS prefix":
-        step("Verify: rejects trailing bits that are not an EOS prefix")
+        # @req REQ-HPACK-HUFF-ERR
+        # @capture(statistics): decoder verdict for non-EOS trailing bits
+        step("Decode one zero byte whose trailing 000 bits are not all ones")
         # '0' is 00000; the remaining 000 bits are not all-one EOS padding.
         val res = hpack_huffman_decode([0x00u8], 0, 1)
-        expect(res.is_err()).to_equal(true)
+        expect(res.is_err()).to_equal(true)  # oracle: trailing pad bits must be the high bits of EOS (all ones), so zero trailing bits cannot terminate a valid stream
 
     it "keeps the shortest-code expansion within the RFC-derived bound":
-        step("Verify: keeps the shortest-code expansion within the RFC-derived bound")
+        # @req REQ-HPACK-HUFF-ERR
+        # @capture(statistics): expansion size for five octets of shortest codes
+        step("Decode five octets of the 5-bit shortest code and check the yield")
         # Eight five-bit '0' codes consume exactly five encoded octets.
         val res = hpack_huffman_decode([0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8], 0, 5)
-        expect(res.is_ok()).to_equal(true)
-        expect(res.unwrap().len()).to_equal(8)  # oracle: floor(5 * 8 / 5)
+        expect(res.is_ok()).to_equal(true)  # oracle: five octets of the shortest code with exact bit alignment is valid input, not padding, so it must decode
+        expect(res.unwrap().len()).to_equal(8)  # oracle: floor(5 * 8 / 5) — 40 bits over the 5-bit shortest code yields exactly eight symbols
 
     it "rejects negative offset":
+        # @req REQ-HPACK-HUFF-ERR
+        # @capture(statistics): decoder verdict for a negative window offset
+        step("Decode the C.4.2 vector from start offset -1")
         val enc = _no_cache_encoded()
         val res = hpack_huffman_decode(enc, -1, enc.len())
-        expect(res.is_err()).to_equal(true)
+        expect(res.is_err()).to_equal(true)  # oracle: a negative start offset reads out of bounds by construction, so the window check must fail closed
 
     it "rejects length that exceeds buffer":
+        # @req REQ-HPACK-HUFF-ERR
+        # @capture(statistics): decoder verdict for an over-long window length
+        step("Decode the C.4.2 vector with a window one byte past its end")
         val enc = _no_cache_encoded()
         val res = hpack_huffman_decode(enc, 0, enc.len() + 1)
-        expect(res.is_err()).to_equal(true)
+        expect(res.is_err()).to_equal(true)  # oracle: a window past the buffer end reads out of bounds by construction, so the length check must fail closed
 
-# ---------------------------------------------------------------------------
-# Round-trip tests
-# ---------------------------------------------------------------------------
-
+# @manual_section: hpack-huffman-round-trip
 describe "HPACK Huffman codec — round-trip":
 
     it "round-trips empty input":
+        # @req REQ-HPACK-HUFF-RT
+        # @capture(statistics): round-trip sizes for the empty payload
+        step("Round-trip the empty payload through encode then decode")
         val encoded = hpack_huffman_encode([])
         val res = hpack_huffman_decode(encoded, 0, encoded.len())
-        expect(res.is_ok()).to_equal(true)
-        expect(res.unwrap().len()).to_equal(0)
+        expect(res.is_ok()).to_equal(true)  # oracle: the encoder's own empty output is a valid decoder window by construction, so rejecting it breaks the codec contract
+        expect(res.unwrap().len()).to_equal(0)  # oracle: an empty round-trip must return zero symbols — any padding fabrication would leak a phantom byte
 
     it "round-trips single byte 'a'":
+        # @req REQ-HPACK-HUFF-RT
+        # @capture(protocol_binary): round-trip bytes for the single symbol 'a'
+        step("Round-trip the single symbol 'a' through encode then decode")
         val payload: [u8] = [0x61u8]
         val encoded = hpack_huffman_encode(payload)
         val res = hpack_huffman_decode(encoded, 0, encoded.len())
-        expect(res.is_ok()).to_equal(true)
+        expect(res.is_ok()).to_equal(true)  # oracle: the encoder's own output over the shortest-code symbol is the tightest valid window the decoder must accept
         val decoded = res.unwrap()
-        expect(decoded.len()).to_equal(1)
-        expect(decoded[0]).to_equal(0x61u8)
+        expect(decoded.len()).to_equal(1)  # oracle: one input symbol must survive the round trip as exactly one symbol
+        expect(decoded[0]).to_equal(0x61u8)  # oracle: the round-tripped byte must be the literal input 0x61 — any change means a bit-order bug
 
     it "round-trips '200'":
+        # @req REQ-HPACK-HUFF-RT
+        # @capture(protocol_binary): round-trip bytes for the '200' status string
+        step("Round-trip the status string through encode then decode")
         val payload = _status_200()
         val encoded = hpack_huffman_encode(payload)
         val res = hpack_huffman_decode(encoded, 0, encoded.len())
-        expect(res.is_ok()).to_equal(true)
+        expect(res.is_ok()).to_equal(true)  # oracle: encoder output is always a valid decoder window, so a failure means the padding rule disagrees between directions
         val decoded = res.unwrap()
-        expect(_bytes_eq(decoded, payload)).to_equal(true)
+        expect(_bytes_eq(decoded, payload)).to_equal(true)  # oracle: the round trip must reproduce the exact three status digits
 
     it "round-trips 256-byte indexed payload (covers every symbol 0x00-0xff)":
+        # @req REQ-HPACK-HUFF-RT
+        # @capture(statistics): round-trip sizes over all 256 symbol values
+        step("Round-trip the full symbol alphabet 0x00-0xff in one payload")
         val payload = _make_indexed(256)
         val encoded = hpack_huffman_encode(payload)
         val res = hpack_huffman_decode(encoded, 0, encoded.len())
-        expect(res.is_ok()).to_equal(true)
+        expect(res.is_ok()).to_equal(true)  # oracle: a payload enumerating every byte value exercises the entire table at once, and the full-table window must decode cleanly
         val decoded = res.unwrap()
-        expect(decoded.len()).to_equal(256)
-        expect(_bytes_eq(decoded, payload)).to_equal(true)
+        expect(decoded.len()).to_equal(256)  # oracle: 256 input symbols must survive as exactly 256 symbols regardless of per-symbol code widths
+        expect(_bytes_eq(decoded, payload)).to_equal(true)  # oracle: byte-exact survival over all 256 values proves every table row in one assertion
 
     it "round-trips 100-byte repeating payload":
+        # @req REQ-HPACK-HUFF-RT
+        # @capture(statistics): round-trip sizes for the 100-byte repeat payload
+        step("Round-trip one hundred repeats of the same symbol")
         val payload = _make_repeating(0x41u8, 100)
         val encoded = hpack_huffman_encode(payload)
         val res = hpack_huffman_decode(encoded, 0, encoded.len())
-        expect(res.is_ok()).to_equal(true)
+        expect(res.is_ok()).to_equal(true)  # oracle: one hundred repeats of a single 5-bit-style code stresses the accumulation loop, and its output must decode cleanly
         val decoded = res.unwrap()
-        expect(decoded.len()).to_equal(100)
-        expect(_bytes_eq(decoded, payload)).to_equal(true)
+        expect(decoded.len()).to_equal(100)  # oracle: 100 input symbols must survive as exactly 100 symbols through the repeating-code path
+        expect(_bytes_eq(decoded, payload)).to_equal(true)  # oracle: every repeated byte must come back as the literal 0x41, catching off-by-one symbol emission

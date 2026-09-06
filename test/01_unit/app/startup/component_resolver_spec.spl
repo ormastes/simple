@@ -1,7 +1,39 @@
-# @cover src/app/startup/component_resolver.spl 90%
-"""Pure startup graph DFS with cycle and implementation-policy gating."""
+"""
+## Purpose and audience
+Drives the pure startup component graph resolver end to end: dependency-first
+resolution across static candidates and dynamic locators, shared-dependency
+deduplication, DFS cycle rejection, capability/target/profile denial, and the
+missing-policy fail-closed path. Audience: app startup and DynSMF wiring
+maintainers.
 
-use std.spec.{describe, it, assert_eq}
+## Operator workflow
+Run `./src/compiler_rust/target/bootstrap/simple run
+test/01_unit/app/startup/component_resolver_spec.spl` from the repo root; each
+scenario builds an in-memory catalog and asserts the rendered resolution plan.
+
+## Compatibility and limitations
+The catalog is constructed in memory, so no component artifacts are loaded
+from disk and no SMF bundle is executed. NOTE: the spec currently executes
+zero scenarios because its catalog import is broken —
+`src/app/startup/component_resolver.spl:12` (and
+`src/os/smf/component_admission.spl:6`) import
+`std.common.structural.component.resolver`, a module that does not exist on
+disk under `src/lib/common/structural/component/` (only `descriptor.spl`
+lives there), so module load fails with "does not export 'resolver'".
+
+## Verification guidance and troubleshooting
+A red scenario prints the rendered plan string; compare it against the
+expected `ok:resolved|...` / `err:...` rendering cited in the assertion. If
+execution reports 0 executed scenarios, the module-load defect noted above is
+the cause, not the assertions.
+"""
+# Lifecycle: doc/01_research/domain/aspect_component_admission.md ;
+# doc/03_plan/agent_tasks/startup_perf_parallel_plan_2026-08-17.md ;
+# doc/04_architecture/startup/simple_app_startup.md ;
+# doc/05_design/mcp_startup_entry_closure_split_blocker.md
+# @manual_section: startup-component-graph-resolution
+
+use std.spec.{describe, it, expect}
 use std.common.structural.component.descriptor.{
     ComponentDescriptor,
     ComponentDescriptorV1,
@@ -48,16 +80,25 @@ fn graph_request() -> StartupComponentGraphRequest:
 
 describe "startup component graph resolver":
     it "emits dependencies first and preserves static/dynamic resolution":
+        # @req REQ-APP-STARTUP-001
+        # @capture(protocol_json): rendered resolution plan with static and dynamic component rows retained for review
+        step("Resolve the optimizer root over a two-component catalog")
         val plan = resolve_startup_component_graph(graph_request(), graph_descriptors(), graph_implementations())
-        assert_eq(startup_component_graph_render(plan), "ok:resolved|compiler.frontend:frontend.parse:static:frontend.static|optimizer.basic:optimizer.run:dynamic:optimizer.smf")
+        expect(startup_component_graph_render(plan)).to_equal("ok:resolved|compiler.frontend:frontend.parse:static:frontend.static|optimizer.basic:optimizer.run:dynamic:optimizer.smf")
 
     it "deduplicates a shared dependency across roots":
+        # @req REQ-APP-STARTUP-002
+        # @capture(protocol_json): rendered plan for two roots sharing one dependency retained for review
+        step("Resolve two roots that both depend on the frontend component")
         var req = graph_request()
         req.roots = ["compiler.frontend", "optimizer.basic"]
         val plan = resolve_startup_component_graph(req, graph_descriptors(), graph_implementations())
-        assert_eq(startup_component_graph_render(plan), "ok:resolved|compiler.frontend:frontend.parse:static:frontend.static|optimizer.basic:optimizer.run:dynamic:optimizer.smf")
+        expect(startup_component_graph_render(plan)).to_equal("ok:resolved|compiler.frontend:frontend.parse:static:frontend.static|optimizer.basic:optimizer.run:dynamic:optimizer.smf")
 
     it "fails closed on a DFS back edge":
+        # @req REQ-APP-STARTUP-003
+        # @capture(protocol_json): rendered cycle-rejection plan retained for review
+        step("Resolve a two-component catalog whose dependencies form a cycle")
         var descriptors: [ComponentDescriptorV1] = []
         descriptors.push(graph_descriptor("a", ["b"]))
         descriptors.push(graph_descriptor("b", ["a"]))
@@ -66,22 +107,28 @@ describe "startup component graph resolver":
         req.component_ids = ["a", "b"]
         req.interface_names = ["run", "run"]
         req.required_capability_bits = [0, 0]
-        assert_eq(startup_component_graph_render(resolve_startup_component_graph(req, descriptors, component_resolver_catalog_default())), "err:dependency_cycle:a")
+        expect(startup_component_graph_render(resolve_startup_component_graph(req, descriptors, component_resolver_catalog_default()))).to_equal("err:dependency_cycle:a")
 
     it "propagates capability, target, and profile denial without I/O fallback":
+        # @req REQ-APP-STARTUP-004
+        # @capture(protocol_json): rendered denial plans for capability, target, and profile gates retained for review
+        step("Deny each component through capability, target, then profile gating")
         var req = graph_request()
         req.required_capability_bits = [1, 4]
-        assert_eq(startup_component_graph_render(resolve_startup_component_graph(req, graph_descriptors(), graph_implementations())), "err:capability_denied:optimizer.basic")
+        expect(startup_component_graph_render(resolve_startup_component_graph(req, graph_descriptors(), graph_implementations()))).to_equal("err:capability_denied:optimizer.basic")
         req = graph_request()
         req.target = "macos-arm64"
-        assert_eq(startup_component_graph_render(resolve_startup_component_graph(req, graph_descriptors(), graph_implementations())), "err:target_denied:compiler.frontend")
+        expect(startup_component_graph_render(resolve_startup_component_graph(req, graph_descriptors(), graph_implementations()))).to_equal("err:target_denied:compiler.frontend")
         req = graph_request()
         req.profile = "debug"
-        assert_eq(startup_component_graph_render(resolve_startup_component_graph(req, graph_descriptors(), graph_implementations())), "err:profile_denied:compiler.frontend")
+        expect(startup_component_graph_render(resolve_startup_component_graph(req, graph_descriptors(), graph_implementations()))).to_equal("err:profile_denied:compiler.frontend")
 
     it "requires explicit policy for every dependency":
+        # @req REQ-APP-STARTUP-005
+        # @capture(protocol_json): rendered missing-policy rejection plan retained for review
+        step("Drop the frontend policy entry while the optimizer still depends on it")
         var req = graph_request()
         req.component_ids = ["optimizer.basic"]
         req.interface_names = ["optimizer.run"]
         req.required_capability_bits = [2]
-        assert_eq(startup_component_graph_render(resolve_startup_component_graph(req, graph_descriptors(), graph_implementations())), "err:missing_component_policy:compiler.frontend")
+        expect(startup_component_graph_render(resolve_startup_component_graph(req, graph_descriptors(), graph_implementations()))).to_equal("err:missing_component_policy:compiler.frontend")

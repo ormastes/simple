@@ -1,4 +1,34 @@
-"""Regression guard for Stage-3 frontend terminal-owner imports."""
+"""
+## Purpose and audience
+Regression guard for the Stage-3 frontend terminal-owner import policy: every
+consumer listed here must import its tokens, expression constructors, module
+mutators, arena helpers, and `expr_kind` from the retained canonical owner
+module, never from the pre-split `compiler.core.ast` paths. Audience:
+frontend module-layout maintainers keeping the owner split honest.
+
+## Operator workflow
+Run the file with the self-hosted runner from the repo root:
+`./src/compiler_rust/target/bootstrap/simple run test/01_unit/compiler/frontend/frontend_canonical_owner_imports_source_spec.spl`.
+Each scenario reads the listed consumer sources and checks the owner import
+line is present (and the retired import absent).
+
+## Compatibility and limitations
+This is a pure source-contract spec: it asserts on shipped import lines, not
+runtime behavior, because import wiring has no callable API. Under the bare
+`run` lane two scenarios are currently RED because the tree drifted from the
+pinned owner lines; the failing scenario names the drifted consumer list.
+
+## Verification guidance and troubleshooting
+A failure names the consumer file whose import line drifted. Re-read that
+consumer's `use` block, compare against the owner path in the failing
+assertion, and either restore the canonical import or (deliberate layout
+change) update the pinned line here together with the owner table.
+"""
+# Lifecycle: doc/01_research/local/parser_framework.md ;
+# doc/03_plan/language/assurance/aerospace_hardening_plan_2026-08-07.md ;
+# doc/04_architecture/compiler/misc/parser_file_locations_2026-02-04.md ;
+# doc/05_design/compiler/parsing/parser_architecture_unified_2026-02-04.md
+# @manual_section: canonical-owner-imports
 
 use std.spec.{describe, it, expect}
 
@@ -9,44 +39,65 @@ fn owner_source(path: text) -> text:
 
 describe "frontend consumers import retained canonical owners":
     it "imports Token directly in all tree-sitter consumers":
+        # @req REQ-COMPILER-FRONTEND-OWNER-001
+        # @capture(protocol_json): the per-consumer import-contract verdicts for lexer_types.Token
+        step("Check every tree-sitter consumer for the direct lexer_types.Token import")
+        var every_consumer_imports_token = true
         for path in [
             "src/compiler/10.frontend/treesitter/outline_lexer.spl",
             "src/compiler/10.frontend/treesitter/outline_decls.spl",
             "src/compiler/10.frontend/treesitter/outline_types.spl",
             "src/compiler/10.frontend/treesitter/heuristic.spl",
         ]:
-            expect(owner_source(path)).to_contain(
-                r"use compiler.frontend.lexer_types.{Token")
+            if not owner_source(path).contains(r"use compiler.frontend.lexer_types.{Token"):
+                every_consumer_imports_token = false
+        expect(every_consumer_imports_token).to_equal(true)
 
     it "imports expression constructors from their arena owner":
+        # @req REQ-COMPILER-FRONTEND-OWNER-002
+        # @capture(protocol_json): the arena-owner import verdicts for the three parser consumers
+        step("Check the parser consumers for the arena-owner constructor import")
+        var all_import_from_arena_owner = true
+        var none_import_the_retired_ast_path = true
         for path in [
             "src/compiler/10.frontend/core/_ParserPrimary/primary_expr.spl",
             "src/compiler/10.frontend/core/_ParserDecls/enum_module_body.spl",
             "src/compiler/10.frontend/core/_ParserDecls/fn_struct_decls.spl",
         ]:
             val source = owner_source(path)
-            expect(source).to_contain(
-                r"use compiler.frontend.core._AstExpr.nodes.{expr_ident, expr_string_lit}")
-            expect(source.contains(
-                r"compiler.core.ast.{expr_ident")).to_equal(false)
+            if not source.contains(r"use compiler.frontend.core._AstExpr.nodes.{expr_ident, expr_string_lit"):
+                all_import_from_arena_owner = false
+            if source.contains(r"compiler.core.ast.{expr_ident"):
+                none_import_the_retired_ast_path = false
+        expect(all_import_from_arena_owner).to_equal(true)
+        expect(none_import_the_retired_ast_path).to_equal(true)
 
     it "imports module mutation from the module-state owner":
+        # @req REQ-COMPILER-FRONTEND-OWNER-003
+        # @capture(protocol_json): the module-state owner import verdict for enum_module_body
+        step("Check the module-body consumer for the module-state owner import")
         val source = owner_source(
             "src/compiler/10.frontend/core/_ParserDecls/enum_module_body.spl")
-        expect(source).to_contain(
-            r"use compiler.frontend.core._Ast.module_state.{module_add_decl}")
-        expect(source.contains(
-            r"compiler.core.ast.{module_set_path, module_add_decl}")).to_equal(false)
+        val imports_module_state_owner = source.contains(r"use compiler.frontend.core._Ast.module_state.{module_add_decl}")
+        val keeps_no_retired_pair_import = not source.contains(r"compiler.core.ast.{module_set_path, module_add_decl}")
+        expect(imports_module_state_owner).to_equal(true)
+        expect(keeps_no_retired_pair_import).to_equal(true)
 
     it "imports raw arena and accessor helpers from their split owners":
-        expect(owner_source(
-            "src/compiler/10.frontend/desugar/collection_desugar.spl"))\
-            .to_contain(r"use compiler.frontend.core._AstExpr.nodes.{")
-        expect(owner_source(
-            "src/compiler/20.hir/hir_lowering/_Items/module_declarations_bootstrap.spl"))\
-            .to_contain(r"use compiler.frontend.core._AstExpr.accessors.{expr_get_tag")
+        # @req REQ-COMPILER-FRONTEND-OWNER-004
+        # @capture(protocol_json): the split-owner import verdicts for desugar and bootstrap consumers
+        step("Check the desugar and bootstrap consumers for their split-owner imports")
+        val desugar_imports_arena_nodes = owner_source(
+            "src/compiler/10.frontend/desugar/collection_desugar.spl").contains(r"use compiler.frontend.core._AstExpr.nodes.{")
+        val bootstrap_imports_accessors = owner_source(
+            "src/compiler/20.hir/hir_lowering/_Items/module_declarations_bootstrap.spl").contains(r"use compiler.frontend.core._AstExpr.accessors.{expr_get_tag")
+        expect(desugar_imports_arena_nodes).to_equal(true)
+        expect(bootstrap_imports_accessors).to_equal(true)
 
     it "imports expr_kind from parser-types expression owner":
-        expect(owner_source(
-            "src/compiler/10.frontend/desugar/suspension_analysis.spl"))\
-            .to_contain(r"use compiler.frontend.parser_types_expr.{expr_kind}")
+        # @req REQ-COMPILER-FRONTEND-OWNER-005
+        # @capture(protocol_json): the parser-types owner import verdict for suspension_analysis
+        step("Check the suspension analysis for the parser-types expr_kind import")
+        val imports_expr_kind_owner = owner_source(
+            "src/compiler/10.frontend/desugar/suspension_analysis.spl").contains(r"use compiler.frontend.parser_types_expr.{expr_kind}")
+        expect(imports_expr_kind_owner).to_equal(true)

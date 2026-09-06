@@ -219,6 +219,67 @@ fn _is_numeric_literal(value: text) -> bool:
             return false
     digit_count > 0
 
+fn _digits_to_index(value: text) -> i64:
+    # Digits only: `to_i64` would also accept a leading sign, and a negative
+    # index can never name an array element.
+    val candidate = value.trim()
+    if candidate == "": return -1
+    for ch in candidate:
+        if ch < "0" or ch > "9": return -1
+    candidate.to_i64() ?? -1
+
+fn _resolved_binding_value(bindings: Dict<text, text>, name: text) -> text:
+    # Resolve ONE hop of indirection through a locally built array, so that
+    #     val fields = ["board_id", "jtag_interface"]
+    #     val field = fields[0]
+    #     expect(field).to_equal("board_id")
+    # is still recognised as the tautology it is. Without this hop, moving the
+    # copied literal into an array literal changes the binding's SOURCE TEXT
+    # (`fields[0]` instead of `"board_id"`) and silently evades ORA-002 while
+    # proving exactly as little about the product. Observed 2026-09-06 in a
+    # modernization wave that "fixed" ORA-002 this way.
+    #
+    # Every bail-out below returns the unresolved right-hand side, which is
+    # what the caller compared before this function existed — so an unparsed
+    # shape can only fail to REPORT a tautology, never invent one.
+    if not bindings.has(name): return ""
+    val rhs = bindings[name].trim()
+    if not rhs.ends_with("]"): return rhs
+    val open_at = rhs.index_of("[")
+    if open_at <= 0: return rhs
+    val base = rhs.substring(0, open_at).trim()
+    val index_text = rhs.substring(open_at + 1, rhs.len() - 1).trim()
+    val index = _digits_to_index(index_text)
+    if index < 0: return rhs
+    if not bindings.has(base): return rhs
+    val array_text = bindings[base].trim()
+    if not array_text.starts_with("[") or not array_text.ends_with("]"): return rhs
+    val inner = array_text.substring(1, array_text.len() - 1)
+    # A nested array or call argument list would make a comma split wrong, and
+    # a wrong split could invent a finding — so decline to guess.
+    if inner.contains("[") or inner.contains("("): return rhs
+    val parts = inner.split(",")
+    if index >= parts.len(): return rhs
+    parts[index].trim()
+
+fn _is_self_comparison(bindings: Dict<text, text>, reassigned: [text],
+        actual: text, expected: text) -> bool:
+    # `expect(x == "lit").to_equal(true)` is the SAME tautology as
+    # `expect(x).to_equal("lit")` with the comparison moved inside the call —
+    # it proves a local literal equals itself either way. Moving it was
+    # reported by a modernization wave as a fix, on the stated grounds that it
+    # "breaks the scorer's literal-vs-self-binding match"; that is evasion,
+    # not evidence, so the detector follows the comparison inside.
+    if expected != "true": return false
+    if not actual.contains("=="): return false
+    val sides = actual.split("==")
+    if sides.len() != 2: return false
+    val bound_name = sides[0].trim()
+    val compared_to = sides[1].trim()
+    if not bindings.has(bound_name): return false
+    if reassigned.contains(bound_name): return false
+    _resolved_binding_value(bindings, bound_name) == compared_to
+
 fn _assignment(line: text) -> (text, text):
     val trimmed = line.trim()
     # Both `val` and `var` bindings feed the tautology heuristic. `var` used
@@ -483,7 +544,9 @@ fn extract_sspec_source_facts(path: text, source: text) -> SspecSourceFacts:
             if current_line > 0: scenario_assertions = scenario_assertions + 1
             val (actual, expected) = _assertion_parts(line)
             val local_arithmetic = actual != "" and (_is_numeric_literal(actual) or
-                (scenario_bindings.has(actual) and scenario_bindings[actual] == expected and
+                _is_self_comparison(scenario_bindings, scenario_reassigned, actual, expected) or
+                (scenario_bindings.has(actual) and
+                    _resolved_binding_value(scenario_bindings, actual) == expected and
                     not scenario_reassigned.contains(actual)))
             if local_arithmetic: scenario_local_arithmetic = true
             if expected != "" and _is_numeric_literal(expected) and

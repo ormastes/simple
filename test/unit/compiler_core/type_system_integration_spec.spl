@@ -1,104 +1,193 @@
-# Type System Integration Tests
-#
-# Tests for advanced type system integration (type_checker, type_erasure, type_inference)
+"""
+## Purpose and audience
+Executable evidence that the compiler's type system end-to-end path —
+literal inference, function-signature checking, monomorphization, and
+composite types — accepts well-typed programs and evaluates them to the
+values an operator expects. Audience: engineers changing type_checker,
+type_erasure, or type_inference layers.
+## Operator workflow
+Run `simple run test/unit/compiler_core/type_system_integration_spec.spl`
+from the repo root; every scenario compiles and executes a small typed
+program inline and asserts the produced value.
+## Compatibility and limitations
+Covers the accepting path only: no scenario feeds an ill-typed program,
+since Simple has no try/catch to observe a type error at runtime. Float
+equality is exercised on exactly representable values (4.0 squared).
+## Verification guidance and troubleshooting
+A failed scenario means the inferred or checked type flowed a wrong value
+through execution; re-run the single file to reproduce. The failing
+assertion names the expression whose evaluation diverged from the declared
+types.
+"""
+# Lifecycle: doc/01_research/domain/sspec_documentization_maintenance.md ;
+# doc/03_plan/sspec_modernization_plan.md ;
+# doc/04_architecture/sspec_documentization_maintenance.md ;
+# doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
 
+use std.spec.step
 
+# @manual_section: type inference
 describe "Type Inference in Variable Declarations":
-    # @manual scenario evidence
+
     it "infers i64 from integer literal":
+        # @req REQ-COMPILER-TYPES-001
+        # @capture(bit_table): inferred-type to value pair retained
+        step("pass an integer literal through an i64-typed identity function")
+        fn echo_i64(v: i64) -> i64:
+            v
         val x = 42
-        expect(x).to_equal(42)  # oracle: expected value 42 is the behavior asserted by this regression spec
+        expect(echo_i64(x)).to_equal(42)  # oracle: the i64-typed round trip must preserve the literal
 
     it "infers f64 from float literal":
+        # @req REQ-COMPILER-TYPES-001
+        # @capture(bit_table): inferred-type to value pair retained
+        step("pass a float literal through an f64-typed identity function")
+        fn echo_f64(v: f64) -> f64:
+            v
         val pi = 3.14
-        expect(pi).to_equal(3.14)
+        expect(echo_f64(pi)).to_equal(3.14)  # oracle: the f64-typed round trip must preserve the literal
 
     it "infers text from string literal":
+        # @req REQ-COMPILER-TYPES-001
+        # @capture(bit_table): inferred-type to value pair retained
+        step("pass a string literal through a text-typed identity function")
+        fn echo_text(v: text) -> text:
+            v
         val greeting = "Hello"
-        expect(greeting).to_equal("Hello")
+        expect(echo_text(greeting)).to_equal("Hello")
 
     it "infers bool from boolean literal":
+        # @req REQ-COMPILER-TYPES-001
+        # @capture(bit_table): inferred-type to value pair retained
+        step("pass a boolean literal through a bool-typed identity function")
+        fn echo_bool(v: bool) -> bool:
+            v
         val flag = true
-        expect(flag).to_equal(true)
+        expect(echo_bool(flag)).to_equal(true)
 
     it "infers type from binary operation":
+        # @req REQ-COMPILER-TYPES-001
+        # @capture(statistics): evaluated sum retained
+        step("evaluate an integer sum and check its value")
         val sum = 10 + 20
-        expect(sum).to_equal(30)  # oracle: expected value 30 is the behavior asserted by this regression spec
+        expect(sum).to_equal(30)  # oracle: i64 operands must sum to 30 under i64 inference
 
     it "infers bool from comparison":
+        # @req REQ-COMPILER-TYPES-001
+        # @capture(bit_table): comparison result retained
+        step("evaluate a comparison expression and check its boolean value")
         val is_greater = 5 > 3
         expect(is_greater).to_equal(true)
 
     it "infers bool from logical operation":
+        # @req REQ-COMPILER-TYPES-001
+        # @capture(bit_table): logical result retained
+        step("evaluate a logical conjunction and check its boolean value")
         val both_true = true and true
         expect(both_true).to_equal(true)
 
+# @manual_section: type checking
 describe "Type Checking in Function Calls":
+
     it "validates correct parameter types":
+        # @req REQ-COMPILER-TYPES-002
+        # @capture(statistics): call result retained
+        step("call an i64-by-i64 function with well-typed arguments")
         fn multiply(a: i64, b: i64) -> i64:
             a * b
         val result = multiply(6, 7)
-        expect(result).to_equal(42)  # oracle: expected value 42 is the behavior asserted by this regression spec
+        expect(result).to_equal(42)  # oracle: the checked call must evaluate 6 * 7 to 42
 
     it "works with mixed parameter types":
+        # @req REQ-COMPILER-TYPES-002
+        # @capture(bit_table): mixed-type call result retained
+        step("call a function taking i64 and text parameters")
         fn format_number(num: i64, suffix: text) -> text:
             str(num) + suffix
         val result = format_number(100, " units")
         expect(result).to_equal("100 units")
 
     it "handles bool parameters":
+        # @req REQ-COMPILER-TYPES-002
+        # @capture(bit_table): bool-parameter call result retained
+        step("call a bool-parameter function and check the negation")
         fn negate(x: bool) -> bool:
             not x
         val result = negate(false)
         expect(result).to_equal(true)
 
     it "handles f64 parameters":
+        # @req REQ-COMPILER-TYPES-002
+        # @capture(statistics): f64-parameter call result retained
+        step("call an f64-parameter function and check the square")
         fn square(x: f64) -> f64:
             x * x
         val result = square(4.0)
-        expect(result).to_equal(16.0)
+        expect(result).to_equal(16.0)  # oracle: the checked call must square 4.0 to exactly 16.0
 
+# @manual_section: monomorphization
 describe "Monomorphization Cache":
+
     it "caches function calls with same types":
+        # @req REQ-COMPILER-TYPES-003
+        # @capture(statistics): both monomorphic call results retained
+        step("call one generic function twice at the same instantiation")
         fn identity(x):
             x
         val result1 = identity(10)
         val result2 = identity(20)
-        expect(result1).to_equal(10)  # oracle: expected value 10 is the behavior asserted by this regression spec
-        expect(result2).to_equal(20)  # oracle: expected value 20 is the behavior asserted by this regression spec
+        expect(result1).to_equal(10)  # oracle: the cached instantiation must still evaluate its own argument
+        expect(result2).to_equal(20)  # oracle: the second call must not reuse the first call's cached value
 
     it "handles different type instantiations":
+        # @req REQ-COMPILER-TYPES-003
+        # @capture(bit_table): both instantiations' results retained
+        step("call one generic function at two distinct instantiations")
         fn first(a, b):
             a
         val int_result = first(42, 100)
         val text_result = first("hello", "world")
-        expect(int_result).to_equal(42)  # oracle: expected value 42 is the behavior asserted by this regression spec
+        expect(int_result).to_equal(42)  # oracle: the i64 instantiation must return its own first argument
         expect(text_result).to_equal("hello")
 
+# @manual_section: composite types
 describe "Complex Type System Features":
+
     it "combines type inference with type checking":
+        # @req REQ-COMPILER-TYPES-004
+        # @capture(statistics): combined-path result retained
+        step("feed an inferred binding through a checked function")
         fn process(value: i64) -> i64:
             value * 2
         val input = 21
         val output = process(input)
-        expect(output).to_equal(42)  # oracle: expected value 42 is the behavior asserted by this regression spec
+        expect(output).to_equal(42)  # oracle: the combined path must double 21 to 42
 
     it "works with nested function calls":
+        # @req REQ-COMPILER-TYPES-004
+        # @capture(statistics): nested-call result retained
+        step("nest two checked calls and evaluate the composition")
         fn add_ten(x: i64) -> i64:
             x + 10
         fn double_it(y: i64) -> i64:
             y * 2
         val result = double_it(add_ten(5))
-        expect(result).to_equal(30)  # oracle: expected value 30 is the behavior asserted by this regression spec
+        expect(result).to_equal(30)  # oracle: double(add_ten(5)) must evaluate to 30
 
     it "handles array types":
+        # @req REQ-COMPILER-TYPES-004
+        # @capture(statistics): folded array sum retained
+        step("fold an integer array and check the total")
         val numbers = [1, 2, 3, 4, 5]
         var sum: i64 = 0
         for n in numbers:
             sum = sum + n
-        expect(sum).to_equal(15)  # oracle: expected value 15 is the behavior asserted by this regression spec
+        expect(sum).to_equal(15)  # oracle: 1+2+3+4+5 must fold to 15
 
     it "infers types in control flow":
+        # @req REQ-COMPILER-TYPES-004
+        # @capture(bit_table): branch-selected value retained
+        step("select a branch on an inferred boolean condition")
         val condition = 10 > 5
         val message = if condition: "yes" else: "no"
         expect(message).to_equal("yes")
