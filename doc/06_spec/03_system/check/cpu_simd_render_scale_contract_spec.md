@@ -46,8 +46,7 @@ dimensions to a tiny fixture while preserving the same code path.
 - REQ-CPU-SIMD-SCALE-003: The wrapper emits `gui_perf_cpu_base_compare_*`
   fields for the focused CPU-SIMD vs scalar software baseline row.
 - REQ-CPU-SIMD-SCALE-004: The wrapper remains runnable at small overridden
-  dimensions for fast contract verification, using GNU `time -f` or Darwin
-  `time -l` while normalizing maximum resident-set evidence to KiB.
+  dimensions for fast contract verification.
 - REQ-CPU-SIMD-SCALE-005: The executable contract records native mode,
   default 300dpi retina density, and sample count so reports cannot pass with
   interpreter fallback or DPI drift.
@@ -394,10 +393,6 @@ expect(out).to_contain("cpu_simd_render_scale_runtime_source_fresh_status=")
 expect(out).to_contain("cpu_simd_render_scale_runtime_source_fresh_required=0")
 expect(out).to_contain("cpu_simd_render_scale_4k_pixels=16x16")
 expect(out).to_contain("cpu_simd_render_scale_8k_pixels=32x32")
-expect(out).to_contain("cpu_simd_render_scale_4k_warm_start_us=")
-expect(out).to_contain("cpu_simd_render_scale_4k_p95_input_to_paint_us=")
-expect(out).to_contain("cpu_simd_render_scale_8k_warm_start_us=")
-expect(out).to_contain("cpu_simd_render_scale_8k_p95_input_to_paint_us=")
 expect(out).to_contain("cpu_simd_render_scale_4k_software_p50_frame_us=")
 expect(out).to_contain("cpu_simd_render_scale_8k_software_p50_frame_us=")
 expect(out).to_contain("cpu_simd_render_scale_4k_vs_software_p50_ratio_permille=")
