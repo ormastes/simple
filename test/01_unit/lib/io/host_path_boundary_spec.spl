@@ -1,0 +1,147 @@
+"""
+## Purpose and audience
+Acceptance oracles for the host-path boundary that every `file_ops` call
+crosses. Audience: the reviewer of any change to
+`src/lib/nogc_sync_mut/fs/host_path.spl` or
+`src/lib/nogc_sync_mut/io/file_ops.spl`, who needs one spec that turns red
+when the boundary stops converting on Windows, starts converting off Windows,
+or loses its wiring at a call site.
+
+## Operator workflow
+src/compiler_rust/target/bootstrap/simple run test/01_unit/lib/io/host_path_boundary_spec.spl
+
+## Evidence class of each scenario
+The first three scenarios are BEHAVIOURAL: they call the explicit-platform
+seam `host_path_native_for` / `host_path_canonical_for` and assert the value
+it returned, so they run identically on a Linux, macOS or Windows host. The
+last two scenarios are SOURCE-INVARIANT wiring checks, not behavioural ones:
+they read the `file_ops` module and count boundary-crossing call sites. They
+prove the wiring is present, never that the runtime honoured it.
+
+## Compatibility and limitations
+The identity contract off Windows was a real data-corruption defect, recorded
+in doc/08_tracking/bug/pr255_host_path_native_corrupts_posix_paths_and_costs_unix_2026-09-02.md
+Off Windows a backslash is a legal filename byte, so a rewrite silently
+addresses a different file at the same string length. Length assertions cannot
+see that, which is why these scenarios compare full byte values.
+
+## Verification guidance and troubleshooting
+A red wiring scenario names the offending source line. A red identity
+scenario means the platform guard is no longer the first statement of the
+entry point.
+"""
+# doc-path: doc/08_tracking/bug/pr255_host_path_native_corrupts_posix_paths_and_costs_unix_2026-09-02.md
+# @manual_section: host-path-boundary
+
+use std.spec.*
+use std.nogc_sync_mut.fs.host_path.{host_path_native_for, host_path_canonical_for}
+use std.nogc_sync_mut.io.file_ops.{file_read}
+
+val file_ops_source_path = "src/lib/nogc_sync_mut/io/file_ops.spl"
+
+fn is_boundary_call_line(line: text) -> bool:
+    # A live call site: not a comment, not the extern declaration block.
+    if line.starts_with("#"): return false
+    if line.starts_with("extern fn"): return false
+    line.contains("rt_file_")
+
+fn unwrapped_call_lines(source: text) -> [text]:
+    # Every `rt_file_*` call line that does NOT route its path argument through
+    # `host_path_native`. `rt_file_unlock` takes an already-open handle, not a
+    # path, so it is correctly bare and is excluded here.
+    var offenders: [text] = []
+    for raw in source.split("\n"):
+        val line = raw.trim()
+        if not is_boundary_call_line(line): continue
+        if line.contains("rt_file_unlock("): continue
+        if line.contains("host_path_native("): continue
+        offenders = offenders.push(line)
+    offenders
+
+fn wrapped_call_count(source: text) -> i64:
+    var seen = 0
+    for raw in source.split("\n"):
+        val line = raw.trim()
+        if not is_boundary_call_line(line): continue
+        if not line.contains("host_path_native("): continue
+        seen = seen + 1
+    seen
+
+fn bare_unlock_count(source: text) -> i64:
+    var seen = 0
+    for raw in source.split("\n"):
+        val line = raw.trim()
+        if not is_boundary_call_line(line): continue
+        if not line.contains("rt_file_unlock("): continue
+        if line.contains("host_path_native("): continue
+        seen = seen + 1
+    seen
+
+describe "host path boundary — conversion happens on Windows and nowhere else":
+
+    it "converts a canonical path to native Windows form on a Windows host":
+        # @req REQ-HOSTPATH-NATIVE-001
+        step("Convert a MinGW-style drive path for an explicit Windows host")
+        # @capture(protocol_json): the converted path is retained in the step narrative
+        val native = host_path_native_for("/d/foo/bar", "windows")
+        step("Verify the drive letter moved and the separators became backslashes")
+        expect(native).to_equal("d:\\foo\\bar")
+
+        step("Convert a native Windows path back to canonical forward-slash form")
+        val canonical = host_path_canonical_for("C:\\tmp\\a.txt", "windows")
+        step("Verify only the separators changed")
+        expect(canonical).to_equal("C:/tmp/a.txt")
+
+    it "leaves a POSIX path containing a backslash byte-identical off Windows":
+        # @req REQ-HOSTPATH-NATIVE-002
+        step("Take a POSIX path whose filename legitimately contains a backslash")
+        val posix = "/home/a\\b.txt"
+        step("Convert it for an explicit Linux host")
+        # @capture(protocol_json): input and output paths are retained for comparison
+        val converted = host_path_native_for(posix, "linux")
+        step("Verify the backslash survived — a rewrite here addresses a different file")
+        expect(converted).to_equal("/home/a\\b.txt")
+
+        step("Convert the same path for an explicit macOS host")
+        val on_macos = host_path_native_for(posix, "macos")
+        step("Verify macOS is the identity too")
+        expect(on_macos).to_equal("/home/a\\b.txt")
+
+    it "rejects a bare relative segment as a drive letter even on Windows":
+        # @req REQ-HOSTPATH-NATIVE-003
+        step("Convert a relative path whose first segment is a single letter")
+        # @capture(protocol_json): the rejected drive-letter candidate is retained
+        val relative = host_path_native_for("c/foo", "windows")
+        step("Verify it did not become a drive root, which would be a data-loss shape")
+        expect(relative).to_equal("c\\foo")
+
+        step("Convert a path already carrying a drive letter")
+        val idempotent = host_path_native_for("C:/tmp/a.txt", "windows")
+        step("Verify the existing drive letter kept its case")
+        expect(idempotent).to_equal("C:\\tmp\\a.txt")
+
+describe "host path boundary — file_ops wiring (source-invariant, not behavioural)":
+
+    it "routes every path-taking rt_file_ call through the host-path boundary":
+        # @req REQ-HOSTPATH-WIRING-001
+        step("Read the file_ops module that owns every rt_file_ call site")
+        val source = file_read(file_ops_source_path)
+        step("Collect the call lines that do not cross the boundary")
+        # @capture(statistics): offender lines and wrapped-call counts are retained
+        val offenders = unwrapped_call_lines(source)
+        step("Verify no path-taking call site bypasses host_path_native")
+        expect(offenders).to_equal([])
+
+        step("Verify the wiring was not silently rewound to zero call sites")
+        val wrapped = wrapped_call_count(source)
+        expect(wrapped).to_be_greater_than(17)  # oracle: 18 wrapped call sites measured at origin/main 4699194f81e
+
+    it "keeps rt_file_unlock bare because it takes a handle and not a path":
+        # @req REQ-HOSTPATH-WIRING-002
+        step("Read the file_ops module")
+        val source = file_read(file_ops_source_path)
+        step("Count rt_file_unlock call sites that correctly pass no converted path")
+        # @capture(statistics): the bare-unlock call count is retained
+        val bare = bare_unlock_count(source)
+        step("Verify the single unlock call site is present and unwrapped")
+        expect(bare).to_equal(1)  # oracle: rt_file_unlock(handle: i64) at file_ops.spl:19 takes a handle, so wrapping it would be a type error

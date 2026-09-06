@@ -8,10 +8,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use cranelift_jit::{JITBuilder, JITModule};
+use cranelift_module::Module;
 
-use crate::mir::MirModule;
+use crate::mir::{MirInst, MirModule};
 
-use super::common_backend::{create_isa_and_flags, BackendError, BackendResult, BackendSettings, CodegenBackend};
+use super::common_backend::{
+    create_isa_and_flags, referenced_call_names, BackendError, BackendResult, BackendSettings, CodegenBackend,
+};
 
 // Re-export error types for backwards compatibility
 pub use super::common_backend::BackendError as JitError;
@@ -32,6 +35,9 @@ pub struct JitCompiler {
     provider: Arc<dyn RuntimeSymbolProvider>,
     /// Heap-backed global initialization runs once before the first JIT entry call.
     module_init_ran: AtomicBool,
+    /// Number of globals in the most recently compiled module, retained only
+    /// for the opt-in module-initializer stage trace.
+    module_global_count: usize,
 }
 
 // Safety: The compiled function pointers are only valid while JitCompiler is alive
@@ -71,6 +77,7 @@ impl JitCompiler {
             compiled_funcs: HashMap::new(),
             provider,
             module_init_ran: AtomicBool::new(false),
+            module_global_count: 0,
         })
     }
 
@@ -83,7 +90,9 @@ impl JitCompiler {
 
     /// Compile a MIR module and return function pointers.
     pub fn compile_module(&mut self, mir: &MirModule) -> JitResult<()> {
-        let stage_trace = std::env::var_os("SIMPLE_JIT_STAGE_TRACE").is_some_and(|value| value != "0");
+        let stage_trace = std::env::var_os("SIMPLE_JIT_STAGE_TRACE")
+            .is_some_and(|value| value != "0");
+        self.module_global_count = mir.globals.len();
         // Pre-compile guard against the broken JIT lambda/closure ABI.
         //
         // `compile_closure_create` builds a closure as a bare `rt_alloc` block
@@ -183,7 +192,8 @@ impl JitCompiler {
             // Opt-in hard failure for lanes that must never silently de-JIT.
             // Off by default so legitimate fallbacks (cross-module Simple
             // method symbols) keep working.
-            if std::env::var_os("SIMPLE_JIT_STRICT").is_some_and(|v| v != "0") {
+            if jit_fallback_is_strict() {
+                self.emit_unresolved_symbol_trace(mir, &name);
                 return Err(BackendError::ModuleError(format!(
                     "SIMPLE_JIT_STRICT: unresolved external symbol '{name}' would NULL-jump in JIT; \
                      refusing to fall back to the interpreter"
@@ -472,6 +482,68 @@ impl JitCompiler {
         None
     }
 
+    /// Emit bounded ownership evidence for a strict unresolved JIT import.
+    ///
+    /// This is intentionally diagnostic-only: it runs only after codegen has
+    /// already found an unresolved `Linkage::Import`, only when both strict
+    /// failure and `SIMPLE_JIT_SYMBOL_TRACE=1` are enabled, and never changes
+    /// symbol lookup, declaration, or fallback policy.
+    fn emit_unresolved_symbol_trace(&self, mir: &MirModule, requested: &str) {
+        if !jit_symbol_trace_enabled() {
+            return;
+        }
+
+        let raw_calls: Vec<String> = mir
+            .functions
+            .iter()
+            .flat_map(|function| {
+                function.blocks.iter().flat_map(move |block| {
+                    block.instructions.iter().filter_map(move |instruction| match instruction {
+                        MirInst::Call { target, .. }
+                            if jit_symbol_trace_matches(requested, target.name()) =>
+                        {
+                            Some(format!("{} -> {}", function.name, target.name()))
+                        }
+                        _ => None,
+                    })
+                })
+            })
+            .collect();
+        let referenced: Vec<String> = referenced_call_names(&mir.functions)
+            .into_iter()
+            .filter(|name| jit_symbol_trace_matches(requested, name))
+            .collect();
+        let mir_functions: Vec<String> = mir
+            .functions
+            .iter()
+            .filter(|function| jit_symbol_trace_matches(requested, &function.name))
+            .map(|function| format!("{} body={}", function.name, !function.blocks.is_empty()))
+            .collect();
+        let mir_externs: Vec<String> = mir
+            .extern_fn_names
+            .iter()
+            .filter(|name| jit_symbol_trace_matches(requested, name))
+            .cloned()
+            .collect();
+        let declarations: Vec<String> = self
+            .backend
+            .module
+            .declarations()
+            .get_functions()
+            .filter_map(|(_, declaration)| {
+                let name = declaration.name.as_deref()?;
+                jit_symbol_trace_matches(requested, name)
+                    .then(|| format!("{} linkage={:?}", name, declaration.linkage))
+            })
+            .collect();
+
+        eprintln!(
+            "[jit-symbol] unresolved requested={requested} raw_calls={raw_calls:?} \
+             mir_references={referenced:?} mir_functions={mir_functions:?} \
+             mir_externs={mir_externs:?} declared_near={declarations:?}"
+        );
+    }
+
     /// Get the native function pointer for a compiled function.
     ///
     /// # Safety
@@ -493,8 +565,22 @@ impl JitCompiler {
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
             .is_ok()
         {
+            let stage_trace = std::env::var_os("SIMPLE_JIT_STAGE_TRACE")
+                .is_some_and(|value| value != "0");
+            if stage_trace {
+                eprintln!(
+                    "[jit-stage] module_init:start globals={}",
+                    self.module_global_count
+                );
+            }
             let init: fn() = std::mem::transmute(ptr);
             init();
+            if stage_trace {
+                eprintln!(
+                    "[jit-stage] module_init:done globals={}",
+                    self.module_global_count
+                );
+            }
         }
         Ok(())
     }
@@ -511,8 +597,17 @@ impl JitCompiler {
             .get_function_ptr(name)
             .ok_or_else(|| BackendError::UnknownFunction(name.to_string()))?;
 
+        let stage_trace = std::env::var_os("SIMPLE_JIT_STAGE_TRACE")
+            .is_some_and(|value| value != "0");
+        if stage_trace {
+            eprintln!("[jit-stage] entry_call:start name={name}");
+        }
         let func: fn() -> i64 = std::mem::transmute(ptr);
-        Ok(func())
+        let result = func();
+        if stage_trace {
+            eprintln!("[jit-stage] entry_call:done name={name} result={result}");
+        }
+        Ok(result)
     }
 
     /// Call a compiled function that takes one i64 argument and returns i64.
@@ -542,6 +637,25 @@ impl JitCompiler {
         let func: fn(i64, i64) -> i64 = std::mem::transmute(ptr);
         Ok(func(arg1, arg2))
     }
+}
+
+fn jit_symbol_trace_enabled() -> bool {
+    std::env::var_os("SIMPLE_JIT_SYMBOL_TRACE").is_some_and(|value| value != "0")
+}
+
+/// Match an exact symbol, its ABI-leading-underscore variant, or a normal
+/// `prefix__name` declaration.  This is presentation-only trace grouping;
+/// actual JIT resolution always uses the exact requested declaration name.
+fn jit_symbol_trace_matches(requested: &str, candidate: &str) -> bool {
+    fn bare(name: &str) -> &str {
+        name.rsplit_once("__")
+            .map(|(_, suffix)| suffix)
+            .unwrap_or(name)
+    }
+
+    let requested = bare(requested).trim_start_matches('_');
+    let candidate = bare(candidate).trim_start_matches('_');
+    requested == candidate
 }
 
 impl Default for JitCompiler {
@@ -581,6 +695,20 @@ fn jit_import_resolves(provider: &dyn RuntimeSymbolProvider, name: &str) -> bool
         return true;
     }
     dlsym_resolves(name)
+}
+
+/// Whether a JIT fallback must fail the current process. `STRICT_ALL` is the
+/// diagnostic superset used by contained bootstrap workers; it must apply at
+/// this lower boundary too, before the driver has a chance to interpret.
+fn jit_fallback_is_strict() -> bool {
+    jit_fallback_is_strict_for(
+        std::env::var_os("SIMPLE_JIT_STRICT").is_some_and(|value| value != "0"),
+        std::env::var_os("SIMPLE_JIT_STRICT_ALL").is_some_and(|value| value != "0"),
+    )
+}
+
+fn jit_fallback_is_strict_for(strict: bool, strict_all: bool) -> bool {
+    strict || strict_all
 }
 
 #[cfg(not(windows))]

@@ -16,7 +16,11 @@ use std.nogc_sync_mut.shell.file (rename)
 # Pure Simple compiler driver (use desugared static methods for interpreter compatibility)
 use compiler.driver.driver (compiler_driver_create, compiler_driver_run_compile, aot_file, aot_c_file, aot_cuda_file, aot_opencl_file, aot_vhdl_file, compile_to_smf)
 use app.io._CliCompile.native_build_closure.{_native_build_entry_closure}
-use compiler.driver.driver_source_loading.{driver_entry_scan_cache_reset}
+use compiler.driver.driver_source_loading.{
+    driver_entry_scan_cache_reset, driver_entry_scan_cache_release,
+    driver_entry_scan_cache_read_count, driver_entry_scan_cache_scan_count,
+    driver_entry_scan_cache_hit_count
+}
 use app.io._CliCompile.compile_llvm_ir_facade.{
     cli_compile_source_llvm_artifacts
 }
@@ -977,6 +981,14 @@ fn cli_native_build(args: [text]) -> i64:
                 native_inputs = native_inputs.push(entry_point)
                 options = cli_native_build_add_bootstrap_input(options, entry_point)
             options.input_files = native_inputs
+            if effective_entry_closure:
+                if verbose:
+                    _cli_eprint("[native-build] closure scan cache release reads={driver_entry_scan_cache_read_count()} scans={driver_entry_scan_cache_scan_count()} hits={driver_entry_scan_cache_hit_count()}")
+                # The immutable closure paths are now owned by native_inputs.
+                # Source payloads used to discover them are not needed by the
+                # parser and can otherwise retain the whole graph concurrently
+                # with AST/HIR allocation.
+                driver_entry_scan_cache_release()
             if verbose and effective_entry_closure:
                 _cli_eprint("[native-build] Entry closure files: {native_inputs.len()}")
             options.mode = CompileMode.Aot
@@ -1011,6 +1023,10 @@ fn cli_native_build(args: [text]) -> i64:
                 native_inputs = native_inputs.push(entry_point)
                 options = cli_native_build_add_bootstrap_input(options, entry_point)
             options.input_files = native_inputs
+            if effective_entry_closure:
+                if verbose:
+                    _cli_eprint("[native-build] closure scan cache release reads={driver_entry_scan_cache_read_count()} scans={driver_entry_scan_cache_scan_count()} hits={driver_entry_scan_cache_hit_count()}")
+                driver_entry_scan_cache_release()
             if verbose and effective_entry_closure:
                 _cli_eprint("[native-build] Entry closure files: {native_inputs.len()}")
             options.mode = CompileMode.Aot

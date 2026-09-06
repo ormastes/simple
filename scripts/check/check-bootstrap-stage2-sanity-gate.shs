@@ -53,8 +53,43 @@ bootstrap_stage3_hash_stream() { sha256sum | cut -d' ' -f1; }
 # candidate_frontend_smoke: real one compiles a fixture. Stub delegates to the
 # candidate so a broken candidate genuinely fails the smoke, as in production.
 candidate_frontend_smoke() {
-  "$1" __frontend_smoke__ 2>&1 || return $?
-  return 0
+  [ -z "${CANDIDATE_FRONTEND_LOG_PATH:-}" ] ||
+    printf 'probe=synthetic build=begin\n' >"$CANDIDATE_FRONTEND_LOG_PATH"
+  smoke_status=0
+  "$1" __frontend_smoke__ 2>&1 || smoke_status=$?
+  if [ -n "${CANDIDATE_FRONTEND_STATUS_PATH:-}" ]; then
+    for smoke_probe in p2_add stage2_mir_retention stage2_module_path_naming hello_world_positional; do
+      case "$smoke_probe" in p2_add) smoke_log=$CANDIDATE_FRONTEND_LOG_PATH ;; *) smoke_log=$CANDIDATE_FRONTEND_LOG_PATH.$(printf '%s' "$smoke_probe" | tr _ -) ;; esac
+      printf 'probe=%s\n' "$smoke_probe" >"$smoke_log"
+      smoke_sha=$(bootstrap_stage3_hash_file "$smoke_log")
+      {
+        echo schema=simple-bounded-process-log-v1; echo status=complete
+        echo reason=child-exit; echo raw_status="$smoke_status"; echo max_bytes=4194304
+        echo bytes_captured="$(wc -c <"$smoke_log")"; echo timeout_seconds="${COMPILER_BUILD_TIMEOUT_SECONDS:-180}"
+        echo term_grace_seconds=1; echo combined_stream=stdout-stderr
+        echo process_group=setsid; echo artifact_limit=none
+        echo log_leaf="${smoke_log##*/}"; echo log_sha256="$smoke_sha"
+      } >"$smoke_log.bounded.env"
+    done
+    {
+      echo schema=simple-candidate-frontend-status-v2
+      [ "$smoke_status" -eq 0 ] && echo result=pass || echo result=fail
+      echo probe=synthetic
+      echo raw_status="$smoke_status"
+      echo bootstrap_mode="${CANDIDATE_FRONTEND_BOOTSTRAP:-0}"
+      echo backend="${CANDIDATE_FRONTEND_BACKEND:-cranelift}"
+      echo log_path="$CANDIDATE_FRONTEND_LOG_PATH"
+      for smoke_probe in p2_add stage2_mir_retention stage2_module_path_naming hello_world_positional; do
+        case "$smoke_probe" in p2_add) smoke_log=$CANDIDATE_FRONTEND_LOG_PATH ;; *) smoke_log=$CANDIDATE_FRONTEND_LOG_PATH.$(printf '%s' "$smoke_probe" | tr _ -) ;; esac
+        echo "${smoke_probe}_log_path=$smoke_log"
+        echo "${smoke_probe}_log_sha256=$(bootstrap_stage3_hash_file "$smoke_log")"
+        echo "${smoke_probe}_collector_receipt_path=$smoke_log.bounded.env"
+        echo "${smoke_probe}_collector_receipt_sha256=$(bootstrap_stage3_hash_file "$smoke_log.bounded.env")"
+        echo "${smoke_probe}_raw_status=$smoke_status"
+      done
+    } >"$CANDIDATE_FRONTEND_STATUS_PATH"
+  fi
+  return "$smoke_status"
 }
 backend=llvm
 EOF
@@ -176,6 +211,19 @@ REPO_ROOT_OVERRIDE="${repo_root}"
 
 # --- non-vacuity + evidence completeness -----------------------------------
 for f in version_expect_status version_match_status unsupported_match_status \
+         frontend_smoke_backend \
+         frontend_smoke_bootstrap0_raw_status \
+         frontend_smoke_bootstrap0_log_path \
+         frontend_smoke_bootstrap0_log_sha256 \
+         frontend_smoke_bootstrap0_status_path \
+         frontend_smoke_bootstrap0_status_sha256 \
+         frontend_smoke_bootstrap1_ran \
+         frontend_smoke_bootstrap1_raw_status \
+         frontend_smoke_bootstrap1_log_path \
+         frontend_smoke_bootstrap1_log_sha256 \
+         frontend_smoke_bootstrap1_status_path \
+         frontend_smoke_bootstrap1_status_sha256 \
+         frontend_smoke_driver_log_path frontend_smoke_driver_log_sha256 \
          sha_stable_status checks_run; do
   CASES_RUN=$((CASES_RUN + 1))
   if grep -q "^${f}=" "${work}/reproducer_current_version.env" 2>/dev/null; then
@@ -186,6 +234,16 @@ for f in version_expect_status version_match_status unsupported_match_status \
     note "  version mismatch stayed invisible)"
   fi
 done
+
+CASES_RUN=$((CASES_RUN + 1))
+if [ -s "${work}/reject_frontend_smoke_broken.env.frontend-bootstrap-0.log" ] &&
+   [ -s "${work}/reject_frontend_smoke_broken.env.frontend-bootstrap-0.status.env" ] &&
+   [ -f "${work}/reject_frontend_smoke_broken.env.frontend-driver.log" ]; then
+  note "failed_frontend_logs_retained: PASS"
+else
+  FAILURES="${FAILURES} failed_frontend_logs_retained(absent)"
+  note "failed_frontend_logs_retained: FAIL"
+fi
 
 if [ "${CASES_RUN}" -eq 0 ]; then
   echo "ERROR — nothing was checked"

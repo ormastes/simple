@@ -72,17 +72,21 @@ fn _link_native_mingw(object_files: [text], output: text, config: NativeLinkConf
 
     # Auto-detect runtime library
     var runtime_dir = config.runtime_path
+    var support_inputs = object_files
     if runtime_dir == "":
         runtime_dir = find_runtime_lib_dir()
     if runtime_dir != "" and runtime_dir != "none":
-        args = args.push("-L{runtime_dir}")
-        args = args.push("-lsimple_compiler")
+        val runtime_archives = native_runtime_archive_inputs(runtime_dir, config.runtime_bundle)
+        for arg in native_runtime_archive_link_args(
+                runtime_dir, config.runtime_bundle, runtime_archives, true, true, false):
+            args = args.push(arg)
+            support_inputs.push(arg)
 
     # Windows system libraries (MinGW names)
     val mingw_libs = ["kernel32", "ws2_32", "bcrypt", "userenv", "ntdll", "ole32", "synchronization", "d3d11", "dxgi", "SDL2"]
     for lib in mingw_libs:
         args = args.push("-l{lib}")
-    for flag in native_all_gnu_support_args(object_files, "windows-mingw", ""):
+    for flag in native_all_gnu_support_args(support_inputs, "windows-mingw", ""):
         args = args.push(flag)
 
     # Libraries from config
@@ -140,6 +144,15 @@ fn link_to_shared(object_files: [text], output: text, config: NativeLinkConfig) 
 
     val os = host_os()
 
+    # Shared/DLL links obey the same named runtime authority as executables.
+    # Validate before platform dispatch so MSVC, MinGW, and Unix cannot silently
+    # omit or replace an explicit provider bundle.
+    val msvc_runtime = os == "windows" and not _is_mingw_env()
+    val provider_error = native_runtime_provider_selection_error_for_config_platform(
+        config, msvc_runtime)
+    if provider_error != "":
+        return Err(provider_error)
+
     if os == "windows":
         return _link_shared_windows(object_files, output, config)
 
@@ -176,11 +189,17 @@ fn _link_shared_unix(object_files: [text], output: text, config: NativeLinkConfi
 
     # Auto-detect runtime library
     var runtime_dir = config.runtime_path
+    var support_inputs = object_files
     if runtime_dir == "":
         runtime_dir = find_runtime_lib_dir()
     if runtime_dir != "" and runtime_dir != "none":
-        sb.push(" -L{runtime_dir} -lsimple_compiler")
-        sb.push(" -Wl,-rpath,{runtime_dir}")
+        val runtime_archives = native_runtime_archive_inputs(
+            runtime_dir, config.runtime_bundle)
+        for arg in native_runtime_archive_link_args(
+                runtime_dir, config.runtime_bundle, runtime_archives, true, true, true):
+            sb.push(" ")
+            sb.push(arg)
+            support_inputs.push(arg)
 
     # Standard libraries
     if os == "linux":
@@ -190,7 +209,7 @@ fn _link_shared_unix(object_files: [text], output: text, config: NativeLinkConfi
     elif os == "freebsd":
         sb.push(" -lc -lpthread -lm")
     val brew_prefix = macos_homebrew_prefix(env_get("HOMEBREW_PREFIX") ?? "", host_arch())
-    for flag in native_all_gnu_support_args(object_files, os, brew_prefix):
+    for flag in native_all_gnu_support_args(support_inputs, os, brew_prefix):
         sb.push(" ")
         sb.push(flag)
 
@@ -249,12 +268,9 @@ fn _link_shared_msvc(object_files: [text], output: text, config: NativeLinkConfi
     for lp in config.library_paths:
         msvc_config.lib_paths.push(lp)
 
-    # User libraries
-    for lib in config.libraries:
-        if lib.ends_with(".lib"):
-            msvc_config.libs.push(lib)
-        else:
-            msvc_config.libs.push("{lib}.lib")
+    # User libraries share native-link suffix normalization and basename dedup.
+    msvc_config.libs = native_msvc_configured_libraries(
+        msvc_config.libs, config.libraries)
 
     # Windows system libraries
     val win_libs = ["kernel32.lib", "ws2_32.lib", "bcrypt.lib", "userenv.lib", "ntdll.lib", "advapi32.lib"]
@@ -270,8 +286,16 @@ fn _link_shared_msvc(object_files: [text], output: text, config: NativeLinkConfi
     if runtime_dir == "":
         runtime_dir = find_runtime_lib_dir()
     if runtime_dir != "" and runtime_dir != "none":
+        val runtime_archives = native_runtime_archive_inputs_for_platform(
+            runtime_dir, config.runtime_bundle, true)
         msvc_config.lib_paths.push(runtime_dir)
-        msvc_config.libs.push("simple_compiler.lib")
+        val selected_runtime_libs = native_msvc_runtime_selection(
+            config.runtime_bundle, runtime_archives)
+        msvc_config.libs = native_msvc_runtime_libraries(
+            msvc_config.libs, selected_runtime_libs)
+        for wlib in native_all_msvc_support_libraries(msvc_config.libs):
+            if not msvc_config.libs.contains(wlib):
+                msvc_config.libs.push(wlib)
 
     # Extra flags
     for flag in config.extra_flags:
@@ -308,16 +332,23 @@ fn _link_shared_mingw(object_files: [text], output: text, config: NativeLinkConf
 
     # Runtime library
     var runtime_dir = config.runtime_path
+    var support_inputs = object_files
     if runtime_dir == "":
         runtime_dir = find_runtime_lib_dir()
     if runtime_dir != "" and runtime_dir != "none":
-        sb.push(" -L{runtime_dir} -lsimple_compiler")
+        val runtime_archives = native_runtime_archive_inputs(
+            runtime_dir, config.runtime_bundle)
+        for arg in native_runtime_archive_link_args(
+                runtime_dir, config.runtime_bundle, runtime_archives, true, true, false):
+            sb.push(" ")
+            sb.push(arg)
+            support_inputs.push(arg)
 
     # Windows system libraries
     val mingw_libs = ["kernel32", "ws2_32", "bcrypt", "userenv", "ntdll"]
     for lib in mingw_libs:
         sb.push(" -l{lib}")
-    for flag in native_all_gnu_support_args(object_files, "windows-mingw", ""):
+    for flag in native_all_gnu_support_args(support_inputs, "windows-mingw", ""):
         sb.push(" ")
         sb.push(flag)
 

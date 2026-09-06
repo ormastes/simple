@@ -14,7 +14,7 @@
 use .contracts_v1.{
     DebugSessionId, DebugPolicyV1, DebugReceiptV1, DebugCapabilityV1,
     DebugVerificationV1, DebugPerturbationV1, DebugRootOperationV1,
-    DebugTargetNodeV1,
+    DebugTargetNodeV1, DebugProbeKindV1, DebugProbeV1,
 }
 
 class _DebugSessionRecordV1:
@@ -27,6 +27,25 @@ class _DebugSessionRecordV1:
 
 var _DEBUG_SESSIONS_V1: [_DebugSessionRecordV1] = []
 var _DEBUG_NEXT_ID_V1: i64 = 1
+var _DEBUG_NEXT_RECEIPT_V1: i64 = 1
+var _DEBUG_NEXT_PROBE_V1: i64 = 1
+
+fn _next_receipt_id(session_id: DebugSessionId) -> text:
+    """Session-bound receipt identifier. The session value is embedded so a
+    receipt read back out of a bundle can be tied to the session that issued
+    it without a side table."""
+    val n = _DEBUG_NEXT_RECEIPT_V1
+    _DEBUG_NEXT_RECEIPT_V1 = _DEBUG_NEXT_RECEIPT_V1 + 1
+    "receipt-" + session_id.value + "-" + str(n)
+
+pub fn central_debug_service_v1_session_count() -> i64:
+    """Number of sessions that are currently OPEN. A closed session is retained
+    for its receipt trail but is not counted, so open+close is observably
+    balanced."""
+    var n = 0
+    for s in _DEBUG_SESSIONS_V1:
+        if not s.closed: n = n + 1
+    n
 
 pub fn debug_policy_development_v1() -> DebugPolicyV1:
     """Permissive development-mode policy: Control and Domain operations are
@@ -73,13 +92,22 @@ pub fn central_debug_service_v1_add_target(session_id: DebugSessionId, target: D
         return Err("central debug service v1: unknown or closed session " + session_id.value)
     Ok(nil)
 
-pub fn central_debug_service_v1_authorize(session_id: DebugSessionId, operation: DebugRootOperationV1, perturbation: DebugPerturbationV1, action: text) -> DebugReceiptV1:
+pub fn central_debug_service_v1_authorize_at(session_id: DebugSessionId, operation: DebugRootOperationV1, perturbation: DebugPerturbationV1, action: text, now_ns: i64) -> DebugReceiptV1:
+    """Policy decision for one operation, stamped with the CALLER's clock. The
+    service owns no clock, so `now_ns` is recorded verbatim on the receipt.
+
+    Probe is gated by `allow_control`: applying or removing a probe modifies the
+    debuggee, so a policy that denies Control denies Probe as well. No prior
+    requirement chose this -- it is stated here and in
+    `doc/08_tracking/bug/debug_service_v1_probe_and_adapter_call_undefined_symbols_2026-09-05.md`."""
     match _find_session(session_id):
         case None:
             return DebugReceiptV1(
+                receipt_id: _next_receipt_id(session_id),
                 session_id: session_id.value, operation: operation, perturbation: perturbation,
                 action: action, allowed: false, succeeded: false, execution_changed: false,
                 reason: "central debug service v1: unknown or closed session",
+                captured_at_ns: now_ns,
             )
         case Some(s):
             var allowed = true
@@ -87,21 +115,98 @@ pub fn central_debug_service_v1_authorize(session_id: DebugSessionId, operation:
             if operation == DebugRootOperationV1.Control and not s.policy.allow_control:
                 allowed = false
                 reason = "policy '" + s.policy.name + "' denies Control operations"
+            elif operation == DebugRootOperationV1.Probe and not s.policy.allow_control:
+                allowed = false
+                reason = "policy '" + s.policy.name + "' denies Probe operations"
             elif operation == DebugRootOperationV1.Domain and not s.policy.allow_domain:
                 allowed = false
                 reason = "policy '" + s.policy.name + "' denies Domain operations"
             DebugReceiptV1(
+                receipt_id: _next_receipt_id(session_id),
                 session_id: session_id.value, operation: operation, perturbation: perturbation,
                 action: action, allowed: allowed, succeeded: false, execution_changed: false,
-                reason: reason,
+                reason: reason, captured_at_ns: now_ns,
             )
 
-pub fn central_debug_service_v1_record(session_id: DebugSessionId, operation: DebugRootOperationV1, perturbation: DebugPerturbationV1, action: text, succeeded: bool, execution_changed: bool, reason: text) -> DebugReceiptV1:
+pub fn central_debug_service_v1_authorize(session_id: DebugSessionId, operation: DebugRootOperationV1, perturbation: DebugPerturbationV1, action: text) -> DebugReceiptV1:
+    """Clockless authorization for callers that carry no clock. The receipt's
+    `captured_at_ns` is -1 ("caller supplied no time"), never a made-up one."""
+    central_debug_service_v1_authorize_at(session_id, operation, perturbation, action, -1)
+
+pub fn central_debug_service_v1_record_at(session_id: DebugSessionId, operation: DebugRootOperationV1, perturbation: DebugPerturbationV1, action: text, succeeded: bool, execution_changed: bool, reason: text, now_ns: i64) -> DebugReceiptV1:
+    """Records an already-authorized operation, stamped with the CALLER's clock."""
     DebugReceiptV1(
+        receipt_id: _next_receipt_id(session_id),
         session_id: session_id.value, operation: operation, perturbation: perturbation,
         action: action, allowed: true, succeeded: succeeded, execution_changed: execution_changed,
-        reason: reason,
+        reason: reason, captured_at_ns: now_ns,
     )
+
+pub fn central_debug_service_v1_record(session_id: DebugSessionId, operation: DebugRootOperationV1, perturbation: DebugPerturbationV1, action: text, succeeded: bool, execution_changed: bool, reason: text) -> DebugReceiptV1:
+    """Clockless record; `captured_at_ns` is -1. See `_authorize`."""
+    central_debug_service_v1_record_at(session_id, operation, perturbation, action, succeeded, execution_changed, reason, -1)
+
+pub fn central_debug_service_v1_update_target_capability(session_id: DebugSessionId, capability: DebugCapabilityV1) -> Result<(), text>:
+    """Replaces the recorded capability of an ALREADY-registered target, so a
+    target that was only fixture-verified at registration can be raised to
+    live-verified once it has actually run. Fails closed on an unknown session
+    or an unregistered target -- it never registers a target as a side effect."""
+    var found_session = false
+    var found_target = false
+    var new_sessions: [_DebugSessionRecordV1] = []
+    for s in _DEBUG_SESSIONS_V1:
+        if s.id == session_id.value and not s.closed:
+            found_session = true
+            var updated = s
+            var caps: [DebugCapabilityV1] = []
+            for c in updated.capabilities:
+                if c.target_id == capability.target_id:
+                    found_target = true
+                    caps.push(capability)
+                else:
+                    caps.push(c)
+            updated.capabilities = caps
+            new_sessions.push(updated)
+        else:
+            new_sessions.push(s)
+    if not found_session:
+        return Err("central debug service v1: unknown or closed session " + session_id.value)
+    if not found_target:
+        return Err("central debug service v1: unregistered target " + capability.target_id)
+    _DEBUG_SESSIONS_V1 = new_sessions
+    Ok(nil)
+
+pub fn central_debug_service_v1_apply_probe(session_id: DebugSessionId, kind: DebugProbeKindV1, target_id: text, source_anchor: text, perturbation: DebugPerturbationV1, expires_at_ns: i64) -> Result<DebugProbeV1, text>:
+    """Registers a probe the CALLER has already applied through its own
+    transport, and mints the session-bound identity for it. This module never
+    talks to a target (see the header), so it validates that the session is open
+    and the target is registered, then returns the probe identity the caller
+    persists. It does not claim the probe is live -- that is the transport's
+    receipt, recorded separately."""
+    if source_anchor.trim() == "":
+        return Err("central debug service v1: probe requires a source anchor")
+    match _find_session(session_id):
+        case None: Err("central debug service v1: unknown or closed session " + session_id.value)
+        case Some(s):
+            var known = false
+            for t in s.targets:
+                if t.target_id == target_id: known = true
+            if not known:
+                return Err("central debug service v1: unregistered probe target " + target_id)
+            val n = _DEBUG_NEXT_PROBE_V1
+            _DEBUG_NEXT_PROBE_V1 = _DEBUG_NEXT_PROBE_V1 + 1
+            Ok(DebugProbeV1(
+                probe_id: "probe-" + session_id.value + "-" + str(n),
+                session_id: session_id.value, kind: kind, target_id: target_id,
+                source_anchor: source_anchor, perturbation: perturbation,
+                expires_at_ns: expires_at_ns,
+            ))
+
+pub fn central_debug_service_v1_record_outcome(session_id: DebugSessionId, operation: DebugRootOperationV1, perturbation: DebugPerturbationV1, action: text, succeeded: bool, execution_changed: bool, reason: text) -> DebugReceiptV1:
+    """Records the OUTCOME half of an authorize/record pair. Same shape as
+    `central_debug_service_v1_record`; the separate name exists because the
+    call sites record an outcome after an already-authorized operation."""
+    central_debug_service_v1_record(session_id, operation, perturbation, action, succeeded, execution_changed, reason)
 
 pub fn central_debug_service_v1_close(session_id: DebugSessionId) -> Result<(), text>:
     var found = false
