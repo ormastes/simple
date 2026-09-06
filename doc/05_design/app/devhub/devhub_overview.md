@@ -319,9 +319,31 @@ Three constraints shaped the implementation, each verified before it was written
    cached compiled artifacts, not raw source") — satisfied here by not executing
    raw source on the hot path at all.
 3. **The duplication must not drift.** The sh and Simple chains read the same
-   sources in the same order. `gh_shim_backend_routing_spec.spl` runs the real
-   shim as a subprocess and asserts both halves agree, including the
-   PATH-shadowed configuration where the recursion hazard is live.
+   sources in the same order, **both anchored on the caller's working
+   directory** — `bin/gh` walks up from `$PWD` for `.spipe/config.sdn` and
+   sniffs `git remote` without `-C`, mirroring `find_repo_root()` in
+   `backend_resolve.spl`. That anchoring is the whole feature and was the first
+   version's worst bug: the shim originally read *its own* repository, so a
+   developer with Simple's `bin/` on `PATH` working in a Bitbucket-hosted
+   checkout got Simple's committed `git_backend: github` and was sent to the
+   real `gh` — breaking precisely the case the shim exists for, while every
+   test passed because they all ran from the Simple root.
+   `gh_shim_backend_routing_spec.spl` runs the real shim as a subprocess and
+   asserts both halves agree, including the PATH-shadowed configuration where
+   the recursion hazard is live and a scratch repository whose config differs
+   from Simple's.
+
+A fourth constraint emerged from the same review and is worth stating
+separately, because it generalises: **the refusal policy must be an allowlist.**
+The named refuse-lists (`--draft`, `--web`, `--admin`, …) are a *blocklist*, and
+a blocklist only catches what someone thought of. `gh pr create --body-file` —
+the exact form `.claude/rules/vcs.md` prescribes for opening a pull request —
+matched no rename and no refusal, reached the Bitbucket command layer, was never
+read, and would have opened a PR with an empty body and exit 0. Each verb now
+declares the flags it can actually translate and refuses everything else by
+name, so the policy holds by construction rather than by a list staying
+complete. `--body-file` itself is resolved to an inline `--body` in
+`cmd_git.spl` (reading a file is I/O; `gh_compat.spl` stays pure).
 
 The shim hands its resolved backend to devhub as the **environment** rung, not
 as an injected `--backend` flag. The flag form was the first implementation and

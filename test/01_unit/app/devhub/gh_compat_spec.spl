@@ -21,6 +21,7 @@ use app.devhub.gh_compat.{
     gh_repo_to_bb_argv,
     bb_pr_to_gh_json,
     first_unsupported_flag,
+    first_unknown_flag,
     json_escape
 }
 
@@ -181,6 +182,59 @@ describe "devhub gh compatibility translation":
         it "returns the offending flag, or empty when all are fine":
             expect(first_unsupported_flag(["--a", "--b"], ["--b"])).to_equal("--b")
             expect(first_unsupported_flag(["--a"], ["--b"])).to_equal("")
+
+    describe "allowlist enforcement (the half that actually holds the policy)":
+        # The named refuse-lists are a BLOCKLIST: anything nobody thought of
+        # sails through to the Bitbucket command layer, which never reads it.
+        # That is not hypothetical — `gh pr create --body-file <f>`, the exact
+        # form .claude/rules/vcs.md prescribes for opening a PR, did precisely
+        # that: the body vanished and the command exited 0.
+        it "refuses an unlisted flag by name rather than passing it through":
+            val (ok, argv, err) = gh_pr_to_bb_argv("create", ["--title", "T", "--head", "x", "--assignee", "bob"])
+            expect(ok).to_equal(false)
+            expect(err).to_contain("--assignee")
+            expect(err).to_contain("not translatable")
+
+        it "refuses --body-file at this layer, since honouring it needs I/O":
+            # cmd_git.spl rewrites --body-file to --body BEFORE calling here
+            # (gh_compat is pure). Reaching this function with one still set
+            # therefore means the rewrite was skipped — a real bug that must
+            # fail loudly rather than drop the body.
+            val (ok, argv, err) = gh_pr_to_bb_argv("create", ["--title", "T", "--head", "x", "--body-file", "b.md"])
+            expect(ok).to_equal(false)
+            expect(err).to_contain("--body-file")
+
+        it "still accepts every flag it can genuinely translate":
+            val (ok, argv, err) = gh_pr_to_bb_argv("create", ["--title", "T", "--head", "x", "--base", "main", "--body", "B", "--reviewer", "u", "--json", "number"])
+            expect(ok).to_equal(true)
+            expect(err).to_equal("")
+
+        it "applies to list, merge and comment too":
+            expect(gh_pr_to_bb_argv("list", ["--author", "me"]).0).to_equal(false)
+            expect(gh_pr_to_bb_argv("merge", ["7", "--body", "note"]).0).to_equal(false)
+            expect(gh_pr_to_bb_argv("comment", ["7", "--editor"]).0).to_equal(false)
+
+        it "handles the --flag=value spelling":
+            expect(gh_pr_to_bb_argv("create", ["--assignee=bob"]).0).to_equal(false)
+            expect(gh_pr_to_bb_argv("list", ["--state=open"]).0).to_equal(true)
+
+        it "does not mistake a positional argument for a flag":
+            expect(gh_pr_to_bb_argv("view", ["42", "--json", "number"]).0).to_equal(true)
+
+    describe "first_unknown_flag":
+        it "returns the first long flag not in the allowlist":
+            expect(first_unknown_flag(["--a", "--b"], ["--a"])).to_equal("--b")
+            expect(first_unknown_flag(["--a", "--b"], ["--a", "--b"])).to_equal("")
+
+        it "compares the name only for --flag=value":
+            expect(first_unknown_flag(["--a=1"], ["--a"])).to_equal("")
+            expect(first_unknown_flag(["--z=1"], ["--a"])).to_equal("--z")
+
+        it "ignores positionals and short flags":
+            # Short forms are consumed by the rename tables; a bare -x is
+            # ambiguous with a negative-number value, so it is not policed here.
+            expect(first_unknown_flag(["42", "value"], ["--a"])).to_equal("")
+            expect(first_unknown_flag(["-x"], ["--a"])).to_equal("")
 
     describe "Bitbucket JSON -> gh JSON":
         it "renames every field an LLM reads back":

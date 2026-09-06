@@ -68,8 +68,26 @@ resolve_backend() {
     # 2. committed repo config: `git_backend:` inside the `devhub:` section.
     #    Section-scoped on purpose -- a bare grep for the key would also match
     #    a same-named key under some other section.
-    _cfg="${REPO_ROOT}/.spipe/config.sdn"
-    if [ -f "$_cfg" ]; then
+    #
+    #    Anchored on the CALLER'S working directory, not on this script's own
+    #    repository. That distinction is the whole feature: the shim lives in
+    #    the Simple checkout, but it is meant to be used from any repository
+    #    whose bin/ is on PATH. Reading Simple's own .spipe/config.sdn would
+    #    answer `github` for a Bitbucket-hosted repo -- breaking the exact
+    #    case the shim exists for. Mirrors find_repo_root() in
+    #    backend_resolve.spl, which walks up from cwd for the same file.
+    #    REPO_ROOT survives only to locate bin/devhub.
+    _cfg=""
+    _d=$PWD
+    while [ -n "$_d" ]; do
+        if [ -f "$_d/.spipe/config.sdn" ]; then
+            _cfg="$_d/.spipe/config.sdn"
+            break
+        fi
+        [ "$_d" = "/" ] && break
+        _d=$(dirname -- "$_d")
+    done
+    if [ -n "$_cfg" ] && [ -f "$_cfg" ]; then
         _v=$(awk '
             /^[a-zA-Z_]+:[[:space:]]*$/ { in_devhub = ($0 ~ /^devhub:/); next }
             in_devhub && /^[[:space:]]+git_backend:/ {
@@ -84,8 +102,9 @@ resolve_backend() {
         fi
     fi
 
-    # 3. sniff the origin remote's host
-    _url=$(git -C "$REPO_ROOT" remote get-url origin 2>/dev/null || true)
+    # 3. sniff the origin remote's host -- again of the CALLER'S repository
+    #    (no -C), for the same reason as the config lookup above.
+    _url=$(git remote get-url origin 2>/dev/null || true)
     case "$_url" in
         *bitbucket.org*) printf 'bitbucket'; return 0 ;;
         *github.com*)    printf 'github';    return 0 ;;

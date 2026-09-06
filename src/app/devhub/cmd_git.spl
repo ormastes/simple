@@ -42,6 +42,7 @@ use app.devhub.adapter_bitbucket.{BbClient, bb_get_pr, bb_list_prs, bb_create_pr
 use app.devhub.gh_compat.{gh_pr_to_bb_argv, gh_repo_to_bb_argv, bb_pr_to_gh_json, gh_state_to_bb}
 use app.devhub.flags.{_extract_flag, _has_flag, _remove_flags, _positional_args}
 use app.devhub.output.{print_error, format_json_output, wants_json}
+use app.io.mod.{file_read, file_exists}
 
 
 fn handle_git(args: [text]) -> i64:
@@ -81,8 +82,61 @@ fn handle_git(args: [text]) -> i64:
             1
 
 
-fn _git_bitbucket(args: [text], source: text) -> i64:
+fn _resolve_body_file(args: [text]) -> (bool, [text], text):
+    """Rewrite `--body-file F` / `-F F` into `--body <contents of F>`.
+
+    gh accepts a PR body either inline or from a file, and `--body-file` is the
+    form `.claude/rules/vcs.md` prescribes for opening a pull request here — so
+    it is the spelling most likely to arrive, not an exotic one. It cannot live
+    in gh_compat.spl, which is pure by design; reading a file is I/O.
+
+    Before this existed the flag matched no rename and no refusal, passed
+    straight through to the Bitbucket command layer, and was never read: the
+    pull request was created with an EMPTY body and exit 0. That is precisely
+    the silent drop the translation policy forbids, which is why the allowlist
+    in gh_compat.spl now refuses anything unrecognised by construction rather
+    than relying on a blocklist staying complete.
+
+    A missing file is a hard failure, never an empty body.
+
+    Deliberately reads through `app.io.mod` and NOT
+    `std.nogc_sync_mut.file_system.file_ops`. The latter's `file_read_text` is
+    a **mock**: `file_exists_mock` accepts any non-empty string and the reader
+    returns the literal `Some("mock file content: " + path)`
+    (`file_ops.spl:32`). Measured here on 2026-09-06:
+    `file_exists("/nonexistent")` -> **true**, and the read yields
+    `Option::Some(mock file content: /nonexistent)`. Wiring `--body-file`
+    through it would have opened pull requests whose body was the string
+    "mock file content: /path". `app.io.mod` was verified honest against the
+    same inputs: false / real content / an empty file distinguishable from a
+    missing one. See the bug record filed alongside this change.
+    """
+    var out: [text] = []
+    var i: i64 = 0
+    while i < args.len():
+        if (args[i] == "--body-file" or args[i] == "-F") and i + 1 < args.len():
+            val path = args[i + 1]
+            if not file_exists(path):
+                return (false, [], "cannot read --body-file `{path}`: no such file.\n  refusing rather than opening a pull request with an empty body.")
+            out = out + ["--body", file_read(path)]
+            i = i + 2
+        else if args[i] == "--body-file" or args[i] == "-F":
+            return (false, [], "--body-file requires a path argument.")
+        else:
+            out = out + [args[i]]
+            i = i + 1
+    (true, out, "")
+
+
+fn _git_bitbucket(raw_args: [text], source: text) -> i64:
     """Run a gh-shaped command against the Bitbucket backend."""
+    # Done before anything else so both the JSON path and the delegated path
+    # see a plain `--body`.
+    val (body_ok, args, body_err) = _resolve_body_file(raw_args)
+    if not body_ok:
+        print_error(body_err)
+        return 1
+
     val noun = args[0]
     val rest = if args.len() > 1: args[1:] else: []
 

@@ -68,6 +68,9 @@ CLI's own version banner, which is only reachable through that fast path.
 | `DEVHUB_GIT_BACKEND=bitbucket bin/gh pr list` | 1 | error naming the config keys to set |
 | `PATH=bin:$PATH gh --version` | 0 | real `gh` banner, terminates (non-recursion) |
 | `bin/gh --backend github pr diff` | 1 | GitHub handler answered, not Bitbucket |
+| `cd <other repo> && <abs>/bin/gh pr diff 1` | 1 | that repo's config decided, not Simple's |
+| `bin/gh pr create --body-file /missing` | 1 | refusal naming the file; never "mock file content" |
+| `bin/gh pr create --assignee bob` | 1 | allowlist refusal naming `--assignee` |
 | `bin/devhub gh --help` | 0 | facade help, no backend required |
 
 ## Exclusions
@@ -81,7 +84,7 @@ those cannot: that a real process, invoked as `gh`, lands in the right place.
 
 ## Pass criteria
 
-The runner must discover one spec with eight examples, all passing. Exits must
+The runner must discover one spec with eleven examples, all passing. Exits must
 match the matrix. A scenario that passes because a command was not found, or
 because `--version` answered while the routed commands did not, is not
 acceptance — scenario 1 asserts the GitHub CLI's own banner text, and the
@@ -205,6 +208,52 @@ describe "REQ-DEVHUB-GHSHIM-001: `gh` routes to the configured backend":
         # exactly where the documented precedence puts it.
         expect(exit_code).to_equal(1)  # oracle: pinned constant asserted by this scenario
         expect(stdout).to_contain("unknown github pr command")
+
+    it "should read the CALLER's repository config, not the shim's own":
+        # @req REQ-SSPEC-SYSTEM
+        step("should read the caller's repository config, not the shim's own")
+        step("Create a scratch repository whose devhub config selects bitbucket")
+        # This is the deployment the feature exists for: the shim lives in the
+        # Simple checkout and is used from OTHER repositories. Anchoring config
+        # and remote lookup on the shim's own repo made it answer `github` for
+        # a Bitbucket-hosted checkout — breaking the one case it was built for,
+        # while every other scenario here (all run from the Simple root) passed.
+        val setup = run_sh("rm -rf build/test-artifacts/gh_shim_cwd && mkdir -p build/test-artifacts/gh_shim_cwd/.spipe && printf 'devhub:\\n  git_backend: bitbucket\\n' > build/test-artifacts/gh_shim_cwd/.spipe/config.sdn && echo ok")
+        expect(setup.0).to_contain("ok")
+
+        step("Invoke the shim by absolute path from inside that repository")
+        val (stdout, stderr, exit_code) = run_sh("cd build/test-artifacts/gh_shim_cwd && \"$OLDPWD/bin/gh\" pr diff 1 2>&1")
+
+        step("Check the scratch repo's bitbucket setting decided, not Simple's github")
+        expect(exit_code).to_equal(1)  # oracle: pinned constant asserted by this scenario
+        expect(stdout).to_contain("not supported on the bitbucket backend")
+
+    it "should refuse an unreadable --body-file rather than send an empty body":
+        # @req REQ-SSPEC-SYSTEM
+        step("should refuse an unreadable --body-file rather than send an empty body")
+        step("Create a pull request whose body file does not exist")
+        # `--body-file` is the form .claude/rules/vcs.md prescribes, and it used
+        # to match no rename and no refusal: it reached the Bitbucket layer,
+        # was never read, and would have opened a PR with an empty body, exit 0.
+        val (stdout, stderr, exit_code) = run_sh("DEVHUB_GIT_BACKEND=bitbucket BB_WORKSPACE=acme BB_REPO=widgets ./bin/gh pr create --title T --head work/x --body-file /definitely/not/here.md 2>&1")
+
+        step("Check the command refused and named the missing file")
+        expect(exit_code).to_equal(1)  # oracle: pinned constant asserted by this scenario
+        expect(stdout).to_contain("cannot read --body-file")
+        # Never the mock filesystem's fabricated content (file_ops.spl:32).
+        expect(stdout).to_not_contain("mock file content")
+
+    it "should refuse a gh flag it cannot translate even when nobody listed it":
+        # @req REQ-SSPEC-SYSTEM
+        step("should refuse a gh flag it cannot translate even when nobody listed it")
+        step("Pass a real gh flag that has no Bitbucket meaning and no explicit refusal")
+        val (stdout, stderr, exit_code) = run_sh("DEVHUB_GIT_BACKEND=bitbucket ./bin/gh pr create --title T --head work/x --assignee bob 2>&1")
+
+        step("Check the allowlist caught it by name")
+        # The named refuse-lists are a blocklist; this proves the allowlist
+        # behind them, which is what makes the policy hold by construction.
+        expect(exit_code).to_equal(1)  # oracle: pinned constant asserted by this scenario
+        expect(stdout).to_contain("--assignee")
 
     it "should answer for the facade help without requiring any backend":
         # @req REQ-SSPEC-SYSTEM

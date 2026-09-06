@@ -189,10 +189,29 @@ top-level `merge`/`approve`/`comment post`. `--json` output is re-keyed to gh's
 names (`number`, `headRefName`, `baseRefName`, `author.login`, `url`, `body`,
 `isDraft`).
 
-**A gh flag with no backend equivalent is refused by name, never dropped**
-(`--draft`, `--fill`, `--web`, `--template`, `--admin`, `--auto`, `--search`).
-A silently-dropped `--base` would open a PR against the wrong branch and still
-exit 0; a refusal is strictly safer than an approximation.
+`--body-file F` / `-F F` is read and turned into an inline `--body`; a missing
+file is a **hard error**, never a silently empty PR description.
+
+**Every flag a verb cannot translate is refused by name, never dropped.** This
+is an allowlist, not a blocklist: each verb declares what it can translate and
+refuses everything else, including flags nobody anticipated. A silently-dropped
+`--base` would open a PR against the wrong branch and still exit 0; a refusal is
+strictly safer than an approximation.
+
+```
+$ gh pr create --title T --head work/x --assignee bob     # backend: bitbucket
+error: `gh pr create --assignee` is not translatable to the bitbucket backend.
+```
+
+Flags with a specific known reason (`--draft`, `--fill`, `--web`, `--template`,
+`--admin`, `--auto`, `--search`) get a message explaining it.
+
+### Which repository does `bin/gh` look at?
+
+**The one you are standing in**, not the Simple checkout the shim lives in. It
+walks up from `$PWD` for `.spipe/config.sdn` and reads `git remote` in the
+current directory. So Simple's `bin/` can be on your `PATH` permanently while
+each repository you `cd` into decides its own backend.
 
 ### `github` (alias `gh` when routed — see above)
 

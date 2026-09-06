@@ -196,6 +196,20 @@ fn bb_pr_to_gh_json(raw: text) -> text:
 # Inbound: gh argv -> devhub bb argv
 # ============================================================================
 
+# Flags each verb can actually translate. Anything else is refused by name —
+# see first_unknown_flag for why an allowlist and not a blocklist. `--backend`
+# appears because a direct caller (not going through cmd_git.spl, which strips
+# it) may legitimately still carry it. Output flags (`--json`, `--jq`,
+# `--no-pager`) and Bitbucket coordinates are accepted everywhere.
+val _COMMON_KNOWN = ["--json", "--jq", "--no-pager", "--workspace", "--repo", "--backend"]
+
+val PR_CREATE_KNOWN = _COMMON_KNOWN + ["--title", "--head", "--base", "--body", "--reviewer"]
+val PR_LIST_KNOWN = _COMMON_KNOWN + ["--state", "--limit"]
+val PR_READ_KNOWN = _COMMON_KNOWN + ["--approve", "--unapprove"]
+val PR_MERGE_KNOWN = _COMMON_KNOWN + ["--squash", "--rebase", "--merge", "--strategy", "--keep-source"]
+val PR_COMMENT_KNOWN = _COMMON_KNOWN + ["--body", "--content", "--inline-path", "--inline-from", "--inline-to"]
+
+
 fn _rename_flags(args: [text], renames: [(text, text)]) -> [text]:
     """Rename flag tokens, leaving values and positionals untouched."""
     var out: [text] = []
@@ -219,6 +233,46 @@ fn first_unsupported_flag(args: [text], unsupported: [text]) -> text:
             if arg == flag:
                 return flag
     ""
+
+
+fn first_unknown_flag(args: [text], known: [text]) -> text:
+    """First long flag NOT in `known`; "" when every flag is recognised.
+
+    This is the ALLOWLIST half of the translation policy, and it is the half
+    that actually enforces it. The explicit refuse-lists below give better
+    messages for flags we know about and know we cannot honour, but they are
+    a blocklist: anything nobody thought of passes straight through to the
+    Bitbucket command layer, where an unrecognised flag is simply never read.
+
+    That is not hypothetical. `gh pr create --body-file <f>` — the form
+    `.claude/rules/vcs.md` itself prescribes for opening a PR — sailed through
+    the blocklist and the PR body vanished, exit 0. Exactly the silent drop
+    the policy was written to prevent.
+
+    Known limit, stated rather than papered over: only `--long` forms are
+    checked (plus `--long=value`), because a bare `-x` is ambiguous with a
+    negative-number value. Short forms are covered by listing them in the
+    rename tables, which is where they are actually consumed.
+    """
+    for arg in args:
+        if arg.starts_with("--"):
+            val eq = arg.find("=")
+            val name = if eq > 0: arg[0:eq] else: arg
+            var found = false
+            for k in known:
+                if k == name:
+                    found = true
+            if not found:
+                return name
+    ""
+
+
+fn unknown_flag_message(flag: text, verb: text, backend: text) -> text:
+    "`gh {verb} {flag}` is not translatable to the {backend} backend.\n" +
+    "  devhub refuses every flag it cannot map, rather than passing it to a\n" +
+    "  backend that will ignore it — an ignored flag changes what the command\n" +
+    "  does while still exiting 0.\n" +
+    "  drop {flag}, or use --backend github if this repo has a GitHub remote."
 
 
 fn unsupported_flag_message(flag: text, verb: text, backend: text) -> text:
@@ -265,16 +319,29 @@ fn gh_pr_to_bb_argv(verb: text, args: [text]) -> (bool, [text], text):
             val bad = first_unsupported_flag(args, ["--draft", "-d", "--fill", "--fill-first", "--web", "-w", "--template", "--no-maintainer-edit", "--project", "--milestone"])
             if bad != "":
                 return (false, [], unsupported_flag_message(bad, "pr create", "bitbucket"))
+            # --body-file is deliberately NOT accepted here: gh_compat is pure,
+            # and honouring it means reading a file. cmd_git.spl rewrites it to
+            # --body before calling this, so reaching here with one still set
+            # is a real bug and must fail loudly.
+            val unknown = first_unknown_flag(args, PR_CREATE_KNOWN)
+            if unknown != "":
+                return (false, [], unknown_flag_message(unknown, "pr create", "bitbucket"))
             (true, ["pr", "create"] + _rename_flags(args, [("--head", "--source"), ("-H", "--source"), ("--base", "--dest"), ("-B", "--dest"), ("-t", "--title"), ("-b", "--body"), ("-r", "--reviewer")]), "")
         "view":
             val bad_view = first_unsupported_flag(args, ["--web", "-w", "--comments"])
             if bad_view != "":
                 return (false, [], unsupported_flag_message(bad_view, "pr view", "bitbucket"))
+            val unknown_view = first_unknown_flag(args, PR_READ_KNOWN)
+            if unknown_view != "":
+                return (false, [], unknown_flag_message(unknown_view, "pr view", "bitbucket"))
             (true, ["pr", "view"] + args, "")
         "list":
             val bad_list = first_unsupported_flag(args, ["--web", "-w", "--search", "-S", "--label", "-l", "--draft"])
             if bad_list != "":
                 return (false, [], unsupported_flag_message(bad_list, "pr list", "bitbucket"))
+            val unknown_list = first_unknown_flag(args, PR_LIST_KNOWN)
+            if unknown_list != "":
+                return (false, [], unknown_flag_message(unknown_list, "pr list", "bitbucket"))
             val (ok, mapped, err) = _map_state_flag(args)
             if not ok:
                 return (false, [], err)
@@ -283,6 +350,9 @@ fn gh_pr_to_bb_argv(verb: text, args: [text]) -> (bool, [text], text):
             val bad_merge = first_unsupported_flag(args, ["--auto", "--admin", "--delete-branch", "-d", "--match-head-commit"])
             if bad_merge != "":
                 return (false, [], unsupported_flag_message(bad_merge, "pr merge", "bitbucket"))
+            val unknown_merge = first_unknown_flag(args, PR_MERGE_KNOWN)
+            if unknown_merge != "":
+                return (false, [], unknown_flag_message(unknown_merge, "pr merge", "bitbucket"))
             # gh spells the strategy as three boolean flags; Bitbucket takes
             # one --strategy value. gh's default (when none is given) is a
             # merge commit, so that is the default carried across — NOT
@@ -313,8 +383,14 @@ fn gh_pr_to_bb_argv(verb: text, args: [text]) -> (bool, [text], text):
             for arg in args:
                 if arg != "--approve" and arg != "-a":
                     review_rest = review_rest + [arg]
+            val unknown_review = first_unknown_flag(review_rest, PR_READ_KNOWN)
+            if unknown_review != "":
+                return (false, [], unknown_flag_message(unknown_review, "pr review", "bitbucket"))
             (true, ["approve"] + review_rest, "")
         "comment":
+            val unknown_comment = first_unknown_flag(args, PR_COMMENT_KNOWN)
+            if unknown_comment != "":
+                return (false, [], unknown_flag_message(unknown_comment, "pr comment", "bitbucket"))
             (true, ["comment", "post"] + _rename_flags(args, [("--body", "--content"), ("-b", "--content")]), "")
         "status":
             (true, ["status"] + args, "")
