@@ -369,13 +369,9 @@ mod unix {
             unsafe { assert_eq!(libc::pipe2(signal.as_mut_ptr(), libc::O_CLOEXEC), 0) };
             let child_fd = fd;
             let start = Instant::now();
-            let join = std::thread::spawn(move || {
-                serve(child_fd, signal[1], IDLE_MIN_MS, IDLE_MAX_MS)
-            });
+            let join = std::thread::spawn(move || serve(child_fd, signal[1], IDLE_MIN_MS, IDLE_MAX_MS));
             let mut ready = 0u8;
-            unsafe {
-                assert_eq!(libc::read(signal[0], (&mut ready as *mut u8).cast(), 1), 1)
-            };
+            unsafe { assert_eq!(libc::read(signal[0], (&mut ready as *mut u8).cast(), 1), 1) };
             assert!(try_connect(fd));
             assert_eq!(join.join().unwrap(), 0);
             let elapsed = start.elapsed();
