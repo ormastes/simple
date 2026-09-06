@@ -67,46 +67,6 @@ Side policy is per-path: paths whose latest truth is local restore from the pre-
 
 ## Pre-push guards
 
-**Wiring surface (corrected 2026-09-01 — read this before trusting any "wired into"
-claim below).** The pre-push chain is `.git/hooks/pre-push` -> `scripts/hooks/pre-push`
--> `scripts/check/pre-push-conflict-tree-guard.shs` -> `exec sh
-scripts/check/check-push-must-pass.shs --from-pre-push-hook`. Guards are NOT hardcoded
-in the dispatcher: the authoritative list is the rows with `tier=push` in
-**`config/check/must_check_gates.sdn`**, executed by `run_manifest_push_gates`
-(`check-push-must-pass.shs:282-352`). Each row's `id:mode:command` must byte-match a
-case arm there; the fail-closed `*)` arm at :348 blocks every push otherwise.
-`push_blocking=false` runs the guard and RECORDS its verdict on stderr without failing
-the push — that is the advisory tier, and an advisory verdict is never a pass. Prose
-below that says a guard is "wired into pre-push-conflict-tree-guard.shs" means
-"declared as a push-tier manifest row"; it does not mean the dispatcher calls it
-directly. **A guard sitting at `tier=bootstrap` executes on NO push** — that is where
-five of them were found on 2026-09-01, three of them green.
-
-**Caveat, measured 2026-09-01:** on unmodified `origin/main` the hook already ends
-`BLOCKING gate push-rules-quick failed (exit 2)` — `ERROR — nothing was checked
-(committed rules.sdl is not bound to the reviewed policy digest)`. Pushes are
-therefore routinely made with `--no-verify`, which nullifies every guard below.
-Fix that before trusting this list.
-
-Executed on every push as of 2026-09-01 (18 push-tier rows): conflict-tree, tree-size,
-conflict-markers, rules-quick, interpreter-module-owners, runtime-api-regression,
-interpreter-extern-registry-gap, sffi-v2-authority, type-walk-constructor-parity,
-main-test-runnable, rt-dual-implementation, runtime-source-list-parity,
-**c-runtime-compiles**, **no-direct-rt**, **guard-wiring** (all blocking); dual-run-shadow,
-**perf-regression-tests**, **process-wait-eintr-retry** (advisory, verdict recorded only).
-
-**Honestly NOT wired, and why (do not read the sections below as coverage):**
-`check-seed-builds-push.shs` (>10 min cold `cargo check` — too slow for an interactive
-gate); `check-test-tree-divergence.shs` (RED: 3085 new divergences vs baseline);
-`check-unbacked-extern-ratchet.shs` and `check-outline-parse-terminates.shs` (ERROR
-without a deployed `bin/simple`, which most push hosts lack);
-`check-use-target-resolves.shs` (RED: 3274 new); `check-stage-binaries-runnable.shs`
-and `check-no-unresolved-runtime-symbols.shs` (RED/ERROR on the tracked stage blobs —
-the first is what would have caught PR #232's Windows/macOS checkout damage, and is red
-for exactly that reason). Each stays advisory until its subject is repaired. Audit:
-`doc/08_tracking/bug/vcs_md_overstated_push_guard_wiring_2026-09-01.md`.
-
-
 ### What ACTUALLY runs on push (verified 2026-09-01 — read this before trusting any "Wired into" line below)
 
 The installed hook is `scripts/check/pre-push-conflict-tree-guard.shs`. It runs

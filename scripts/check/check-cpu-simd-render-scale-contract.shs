@@ -22,20 +22,6 @@ REQUIRE_ARCH_MATRIX="${CPU_SIMD_RENDER_SCALE_REQUIRE_ARCH_MATRIX:-0}"
 ARCH_MATRIX_ENV="${CPU_SIMD_RENDER_SCALE_ARCH_MATRIX_ENV:-}"
 ARCH_MATRIX_ONLY="${CPU_SIMD_RENDER_SCALE_ARCH_MATRIX_ONLY:-0}"
 
-if command -v gtime >/dev/null 2>&1; then
-    TIME_BIN="$(command -v gtime)"
-    TIME_STYLE="gnu"
-elif [ -x /usr/bin/time ] && [ "$(uname -s)" = "Darwin" ]; then
-    TIME_BIN="/usr/bin/time"
-    TIME_STYLE="darwin"
-elif [ -x /usr/bin/time ]; then
-    TIME_BIN="/usr/bin/time"
-    TIME_STYLE="gnu"
-else
-    TIME_BIN=""
-    TIME_STYLE="unavailable"
-fi
-
 mkdir -p "$OUT_DIR"
 
 run_with_timeout() {
@@ -43,25 +29,6 @@ run_with_timeout() {
         timeout "$TIMEOUT_SECS" "$@"
     else
         "$@"
-    fi
-}
-
-run_with_rss_time() {
-    time_file="$1"
-    shift
-    if [ "$TIME_STYLE" = "gnu" ]; then
-        "$TIME_BIN" -f 'max_rss_kb=%M' -o "$time_file" "$@"
-    else
-        "$TIME_BIN" -l -o "$time_file" "$@"
-    fi
-}
-
-rss_kb_from_time_file() {
-    time_file="$1"
-    if [ "$TIME_STYLE" = "gnu" ]; then
-        sed -n 's/^max_rss_kb=//p' "$time_file"
-    else
-        awk '/maximum resident set size/ { print int($1 / 1024); exit }' "$time_file"
     fi
 }
 
@@ -85,19 +52,19 @@ fn main() -> i64:
     print(software_only_render_loop_export_values("$backend", $width, $height, $DPI, "$dpi_source", 1, $SAMPLE_COUNT, "cpu-simd-${fixture_label}", "simple-web", "scale-${fixture_label}", "local", 1, 1, 1))
     0
 EOF
-    [ "$TIME_STYLE" != "unavailable" ] || return 96
+    [ -x /usr/bin/time ] || return 96
     run_rc=0
     if command -v timeout >/dev/null 2>&1; then
-        SIMPLE_LIB="$ROOT/src" run_with_rss_time "$time_file" \
+        SIMPLE_LIB="$ROOT/src" /usr/bin/time -f 'max_rss_kb=%M' -o "$time_file" \
             timeout "$TIMEOUT_SECS" "$SIMPLE_BIN" run "$entry" --mode="$EXEC_MODE" \
             >"$OUT_DIR/$label.sdn" 2>"$OUT_DIR/$label.err" || run_rc=$?
     else
-        SIMPLE_LIB="$ROOT/src" run_with_rss_time "$time_file" \
+        SIMPLE_LIB="$ROOT/src" /usr/bin/time -f 'max_rss_kb=%M' -o "$time_file" \
             "$SIMPLE_BIN" run "$entry" --mode="$EXEC_MODE" \
             >"$OUT_DIR/$label.sdn" 2>"$OUT_DIR/$label.err" || run_rc=$?
     fi
     [ "$run_rc" -eq 0 ] || return "$run_rc"
-    measured_rss="$(rss_kb_from_time_file "$time_file")"
+    measured_rss="$(sed -n 's/^max_rss_kb=//p' "$time_file")"
     case "$measured_rss" in
         ''|*[!0-9]*|0) return 95 ;;
     esac
@@ -474,31 +441,19 @@ echo "cpu_simd_render_scale_contract_dpi_source=$(field_value gui_perf_benchmark
 echo "cpu_simd_render_scale_contract_sample_count=$SAMPLE_COUNT"
 echo "cpu_simd_render_scale_contract_run_order=$RUN_ORDER"
 echo "cpu_simd_render_scale_4k_pixels=${WIDTH_4K}x${HEIGHT_4K}"
-echo "cpu_simd_render_scale_4k_cold_start_us=$(sdn_i64_value cold_start_us "$OUT_DIR/4k.sdn")"
-echo "cpu_simd_render_scale_4k_warm_start_us=$(sdn_i64_value warm_start_us "$OUT_DIR/4k.sdn")"
 echo "cpu_simd_render_scale_4k_p50_frame_us=$(sdn_i64_value p50_frame_us "$OUT_DIR/4k.sdn")"
 echo "cpu_simd_render_scale_4k_p95_frame_us=$(sdn_i64_value p95_frame_us "$OUT_DIR/4k.sdn")"
-echo "cpu_simd_render_scale_4k_p95_input_to_paint_us=$(sdn_i64_value p95_input_to_paint_us "$OUT_DIR/4k.sdn")"
-echo "cpu_simd_render_scale_4k_software_cold_start_us=$(sdn_i64_value cold_start_us "$OUT_DIR/4k_software.sdn")"
-echo "cpu_simd_render_scale_4k_software_warm_start_us=$(sdn_i64_value warm_start_us "$OUT_DIR/4k_software.sdn")"
 echo "cpu_simd_render_scale_4k_software_p50_frame_us=$(sdn_i64_value p50_frame_us "$OUT_DIR/4k_software.sdn")"
 echo "cpu_simd_render_scale_4k_software_p95_frame_us=$(sdn_i64_value p95_frame_us "$OUT_DIR/4k_software.sdn")"
-echo "cpu_simd_render_scale_4k_software_p95_input_to_paint_us=$(sdn_i64_value p95_input_to_paint_us "$OUT_DIR/4k_software.sdn")"
 echo "cpu_simd_render_scale_4k_vs_software_p50_ratio_permille=$(ratio_permille "$(sdn_i64_value p50_frame_us "$OUT_DIR/4k_software.sdn")" "$(sdn_i64_value p50_frame_us "$OUT_DIR/4k.sdn")")"
 echo "cpu_simd_render_scale_4k_checksum=$(sdn_text_value checksum "$OUT_DIR/4k.sdn")"
 echo "cpu_simd_render_scale_4k_software_checksum=$(sdn_text_value checksum "$OUT_DIR/4k_software.sdn")"
 echo "cpu_simd_render_scale_4k_software_checksum_parity=true"
 echo "cpu_simd_render_scale_8k_pixels=${WIDTH_8K}x${HEIGHT_8K}"
-echo "cpu_simd_render_scale_8k_cold_start_us=$(sdn_i64_value cold_start_us "$OUT_DIR/8k.sdn")"
-echo "cpu_simd_render_scale_8k_warm_start_us=$(sdn_i64_value warm_start_us "$OUT_DIR/8k.sdn")"
 echo "cpu_simd_render_scale_8k_p50_frame_us=$(sdn_i64_value p50_frame_us "$OUT_DIR/8k.sdn")"
 echo "cpu_simd_render_scale_8k_p95_frame_us=$(sdn_i64_value p95_frame_us "$OUT_DIR/8k.sdn")"
-echo "cpu_simd_render_scale_8k_p95_input_to_paint_us=$(sdn_i64_value p95_input_to_paint_us "$OUT_DIR/8k.sdn")"
-echo "cpu_simd_render_scale_8k_software_cold_start_us=$(sdn_i64_value cold_start_us "$OUT_DIR/8k_software.sdn")"
-echo "cpu_simd_render_scale_8k_software_warm_start_us=$(sdn_i64_value warm_start_us "$OUT_DIR/8k_software.sdn")"
 echo "cpu_simd_render_scale_8k_software_p50_frame_us=$(sdn_i64_value p50_frame_us "$OUT_DIR/8k_software.sdn")"
 echo "cpu_simd_render_scale_8k_software_p95_frame_us=$(sdn_i64_value p95_frame_us "$OUT_DIR/8k_software.sdn")"
-echo "cpu_simd_render_scale_8k_software_p95_input_to_paint_us=$(sdn_i64_value p95_input_to_paint_us "$OUT_DIR/8k_software.sdn")"
 echo "cpu_simd_render_scale_8k_vs_software_p50_ratio_permille=$(ratio_permille "$(sdn_i64_value p50_frame_us "$OUT_DIR/8k_software.sdn")" "$(sdn_i64_value p50_frame_us "$OUT_DIR/8k.sdn")")"
 echo "cpu_simd_render_scale_8k_checksum=$(sdn_text_value checksum "$OUT_DIR/8k.sdn")"
 echo "cpu_simd_render_scale_8k_software_checksum=$(sdn_text_value checksum "$OUT_DIR/8k_software.sdn")"

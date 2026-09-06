@@ -119,30 +119,3 @@ bin/simple src/lib/nogc_sync_mut/lsp/lsp_query.spl definition src/lib/common/bas
 bin/simple native-build --runtime-bundle core-c-bootstrap --entry doc/08_tracking/bug/repro/native_text_ordering_to_int_repro.spl --output /tmp/r && /tmp/r
 bin/simple run doc/08_tracking/bug/repro/native_text_ordering_to_int_repro.spl
 ```
-
----
-
-## Re-triage 2026-09-02 (aarch64-apple-darwin) — 2 of the 3 named codegen bugs are gone; the third changed shape
-
-Lane: `native-build` via `src/compiler_rust/target/release/simple` (Rust seed,
-37,291,896 B, 2026-09-01 09:24), compared against the same program run
-interpreted. Measured with a single program carrying all three shapes and no
-LSP code involved, exactly as the PM update prescribes:
-
-| named defect | interpreted | native | verdict |
-|---|---|---|---|
-| 2. text `>=` miscompiles (`"5" >= "0"` -> false) | `true` | `true` | **gone** |
-| 3. `str(negative i64)` | `-7` | `-7` | **gone** |
-| 1. `text.to_int()` returns tagged garbage | `1` / `136` | build FAILS | **changed shape, still blocking** |
-
-`to_int` no longer miscompiles to `<value:0x1>` / `17`; the native lane now
-refuses the program outright with `error: MIR lowering error: unresolved method
-call: to_int` (reported at a misattributed source location — `:2:5`, which is
-not the call site). A hard build failure is strictly better than a silent wrong
-integer, but it is a different defect from the one filed and it still blocks
-`line_raw.to_int()` on this path.
-
-Stays OPEN, re-scoped: the remaining work is `to_int` resolution on the
-native-build MIR lowering path, not the three-way primitive miscompilation this
-record was written about. Defects C and D (bootstrap stage4 / portability) were
-not exercised by this lane and are untouched.

@@ -67,8 +67,8 @@ fn every_freestanding_boot_path_calls_simple_call_module_inits() {
 
     for (label, rel) in FREESTANDING_BOOT_PATHS {
         let path = root.join(rel);
-        let source =
-            std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{label}: cannot read {}: {e}", path.display()));
+        let source = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("{label}: cannot read {}: {e}", path.display()));
 
         // Count only lines that CALL it, not the declaration and not prose.
         // C: `__simple_call_module_inits();`  asm: `call __simple_call_module_inits`

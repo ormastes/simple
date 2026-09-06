@@ -3,15 +3,7 @@
 - **ID:** interp_simpleos_lane_contract_crash
 - **Date:** 2026-06-13
 - **Severity:** P1 (blocks interpreter-mode testing of all catalog-lane QEMU scenarios)
-- **Status:** workarounds landed 2026-06-13 (interpreter root cause open) —
-  **re-probed 2026-09-02 and the probe CANNOT decide it.** The repro at the top
-  of this record now runs clean (`rc=0`, `targets: 8`, `target found`,
-  `lane name: riscv64-smoke`) on BOTH the deployed 2026-07-25 seed and a seed
-  built from `origin/main` `1b76db1d6c3`. Identical on both is the tell: the
-  workarounds are in the SOURCE, so this repro exercises the worked-around
-  path on every binary and can never show the Option-poison root cause. Do not
-  read the green as evidence the root cause is fixed — closing this row needs
-  a probe written against the pre-workaround shape, not this one.
+- **Status:** workarounds landed 2026-06-13 (interpreter root cause open)
 
 ## Two distinct Option-poison sites (both worked around, root cause shared & open)
 1. **Platform catalog** (`simpleos_platform_qemu_smoke_lane` etc.) — `Option<SimpleOsPlatformBuildTarget>` unwrap mis-binds. Fixed by index-based accessors (`_simpleos_platform_target_index`, `*_or_smoke`, `*_direct`) so no Option crosses a boundary.

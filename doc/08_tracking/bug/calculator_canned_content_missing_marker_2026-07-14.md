@@ -1,24 +1,9 @@
 # Calculator canned WM content missing `[canned]` marker
 
-- **Status:** RESOLVED (re-verified 2026-09-02, bugdb batch triage)
+- **Status:** Open
 - **Filed:** 2026-07-14
 - **Area:** gui / wm-compositor / anti-fake-evidence
 - **Severity:** minor (honesty-invariant violation, not a crash)
-
-## Resolution (2026-09-02)
-`shared_wm_scene_render_app_content` in
-`src/lib/common/ui/window_scene_draw_ir.spl:1529-1534` now emits five content
-lines for the `Calculator` branch, the fifth being
-`_shared_wm_scene_content_line(backend, cx, cy, cw, 4, "[canned demo — no live
-content]", muted, bg)` — the same marker every other canned branch (Terminal,
-Editor, File Manager, Browser) already carries. No code change was needed; the
-fix predates this triage pass. Regression coverage:
-`test/01_unit/lib/common/ui/wm_canned_content_provenance_marker_spec.spl`,
-which pins the Calculator branch specifically and also walks every canned
-title generically so a future unmarked branch fails loudly. The spec DSL
-could not be executed in this session (see PR body for the environment
-blocker); verification here is direct source inspection matching the spec's
-own assertions.
 
 ## Symptom
 

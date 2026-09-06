@@ -521,8 +521,7 @@ impl<'a> MirLowerer<'a> {
                 {
                     return Err(MirLowerError::Unsupported(format!(
                         "unknown variant or method '{}' on enum {}{}",
-                        variant_name,
-                        enum_name,
+                        variant_name, enum_name,
                         self.declared_variants_hint(enum_name)
                     )));
                 }

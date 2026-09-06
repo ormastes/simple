@@ -9,7 +9,7 @@ use Test::More;
 
 my $package = $ENV{STAGE2_RUNNER_PACKAGE} or die "STAGE2_RUNNER_PACKAGE required\n";
 my $runner = "$package/scripts/check/lib/bootstrap-stage2-runner.pl";
-my $bootstrap = "$package/test/00_unit/scripts/fake-stage2-bootstrap.shs";
+my $bootstrap = "$package/test/00_unit/scripts/fake-stage2-bootstrap.sh";
 my $helper_fixture = "$package/test/00_unit/scripts/fake-stage2-helper-capsule.shs";
 my @helper_names = qw(session planner_admission cache_policy jobs_policy
     provenance_facade provenance_authority provenance_command provenance_sanity
