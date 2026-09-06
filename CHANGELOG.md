@@ -146,6 +146,41 @@ All notable changes to Simple Language will be documented in this file.
   spec inputs and register interpreter byte-array pointers for runtime font
   loading; a full self-hosted rebuild remains unverified.
 
+## [1.0.1-beta.1] - 2026-09-07
+
+Version-only beta cut of the 1.0 line. It ships **no self-hosted binary**: Stage 2
+admission does not pass on any host tried, so the bootstrap could not be
+completed and `bin/simple` remains the Rust seed. See Known issues.
+
+### Changed
+- **Product version is now `1.0.1-beta.1`** (`release/version.sdn`, `channel: beta`),
+  projected into all 17 declared consumers. `check_repository_version` reports
+  `PASS semver=1.0.1-beta.1 channel=beta projections=17`.
+
+### Fixed
+- **Registry projections were stale at `0.9.9`** while the product read
+  `1.0.0-rc.1` — `tools/mcp-registry/{package,server}.json` and
+  `tools/lsp-mcp-registry/{package,server}.json` are declared projections, so the
+  version authority was returning `valid: false` on unmodified `main`. All four
+  now carry the product version.
+
+### Known issues
+- `simple release <subcommand>` dispatches to 21 `run_*` wrappers that exist
+  nowhere in the tree, so every documented release validation command fails with
+  `E1002`. The underlying authority modules are intact; only the CLI adapter
+  layer is missing. See
+  `doc/08_tracking/bug/release_cli_dispatch_functions_missing_2026-09-07.md`.
+- **No `native-build` completes without `SIMPLE_BOOTSTRAP=1`.** The scalar
+  object-path AOT route is builtin-LLVM-only, and the Stage-2 binary carries no
+  such provider even when built with `--backend=llvm`, so it cannot pass its own
+  admission gate. The diagnostic that says so is destroyed between the driver
+  and the build summary, which is why it reported an empty reason for months.
+  See `doc/08_tracking/bug/native_build_blocked_missing_sdl2_and_bootstrap_env_aarch64_2026-09-07.md`.
+- **Linux hosts need SDL2 installed to link anything.**
+  `native_linking.spl:351` pushes `-lSDL2` unconditionally, so a host without
+  the SDL2 development package fails every native-build — a hello world with no
+  UI code included. Windows already dlopens SDL instead; Linux has no such path.
+
 ## [1.0.0-beta] - 2026-05-20
 
 ### Added
