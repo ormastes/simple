@@ -1660,11 +1660,16 @@ fn validate_stage4_macos_system_ownership(archives: &[PathBuf], cc: &str, build_
             .arg("-Wl,-undefined,error")
             .arg(format!("-Wl,-force_load,{}", archive.display()));
         if matches!(spec.undefined, Stage4CliCUndefinedPolicy::Sqlite) {
-            // These two ABI names are deliberately owned by the adjacent
+            // These three ABI names are deliberately owned by the adjacent
             // core-C capsule; every remaining undefined must resolve through
             // the macOS SDK's SQLite/System libraries in this strict probe.
+            // The set must stay in step with STAGE4_C_SQLITE_UNDEFINED and with
+            // validate_stage4_system_library_ownership, which both already list
+            // all three. `_rt_string_len` was missing here, so `_borrow_string`
+            // in runtime_sqlite.o failed this probe on every macOS Stage-4 link.
             command
                 .arg("-Wl,-U,_rt_string_data")
+                .arg("-Wl,-U,_rt_string_len")
                 .arg("-Wl,-U,_rt_string_new")
                 .arg("-lsqlite3");
         }
