@@ -218,10 +218,8 @@ scan() {
             if (!(sym in reg) || reg[sym] == "") { unreg[++nunreg] = sym; next }
             # B. `misc` is the residual bucket, not a group: a symbol there is
             #    ungrouped, and only the frozen baseline admits it.
-            if (reg[sym] == "misc") {
-                miscnow[sym] = 1
-                if (genmode != "1" && !(sym in bung)) ungrouped[++nungrouped] = sym
-            }
+            if (reg[sym] == "misc" && genmode != "1" && !(sym in bung))
+                ungrouped[++nungrouped] = sym
         }
         END {
             if (nreg == 0 || ngrow == 0) { print "ERR:registry has no rt rows"; exit }
@@ -241,9 +239,17 @@ scan() {
                 }
                 # C. stale baseline: a baselined `misc` symbol that is now
                 #    grouped, or gone from the tree.
+                #    The "now grouped" half reads the REGISTRY and is always
+                #    decidable. The "gone" half needs the same --census the
+                #    stale-ROW check needs, and for the same reason: a cheap
+                #    run cannot distinguish a symbol that left the tree from
+                #    one that only nm can see.
                 for (s in bung) {
-                    if (!(s in seen)) { stalebase[++nstalebase] = s "(gone)"; continue }
-                    if (!(s in miscnow)) stalebase[++nstalebase] = s "(now " reg[s] ")"
+                    if (!(s in reg)) {
+                        if (stale_mode && !(s in seen)) stalebase[++nstalebase] = s "(gone)"
+                        continue
+                    }
+                    if (reg[s] != "misc") stalebase[++nstalebase] = s "(now " reg[s] ")"
                 }
             }
             if (stale_mode) {
@@ -269,8 +275,14 @@ scan() {
                 printf "#                         allowlist as check-no-direct-rt.shs.\n" > baseout
                 printf "#\n" > baseout
                 printf "# Do NOT regenerate to clear a FAIL without reading the diff.\n" > baseout
+                # Freeze EVERY registry row in `misc`, not just the ones the
+                # cheap universe can see. The registry is the authority on
+                # membership; ~9 misc symbols here are nm-only and invisible
+                # to a text scan, and freezing only the visible ones made a
+                # --census run report them as newly ungrouped on a tree
+                # nobody had touched.
                 nu = 0
-                for (s in miscnow) { uarr[++nu] = s }
+                for (s in reg) if (reg[s] == "misc") uarr[++nu] = s
                 isort(uarr, nu)
                 for (i = 1; i <= nu; i++) printf "ungrouped\t%s\n", uarr[i] > baseout
                 nb = 0
@@ -421,15 +433,24 @@ budget	demo	1
     set -- ${r%%|*}
     [ "${7:-x}" = "1" ] || st_fail "stale baseline entry (now grouped) not caught (got '$r')"
 
-    # fixture 7: a baselined symbol that has LEFT the tree is also stale.
+    # fixture 7: a baselined symbol that has LEFT the tree is also stale —
+    # but, like the stale-ROW check, only under --census: a cheap run cannot
+    # tell "gone" from "nm-only". Both halves are asserted.
     mkfixture "$st_root/g" "$REG_DEMO" 'ungrouped	rt_vanished_sym
 budget	demo	1
 '
+    printf '# c_lane_mode=nm\nsymbol\tc_lane\trust_lane\tsimple_twin\tdual_pair\tclass\nrt_demo_one\tyes\tno\tno\tno\tc-only\n' \
+        > "$st_root/g/census.tsv"
     r=$(scan "$st_root/g" "$st_root/g/config/api/api_registry.sdn" \
              "$st_root/g/scripts/check/rt_api_group_baseline.txt")
     st_n=$((st_n + 1))
     set -- ${r%%|*}
-    [ "${7:-x}" = "1" ] || st_fail "stale baseline entry (gone) not caught (got '$r')"
+    [ "${7:-x}" = "0" ] || st_fail "gone-symbol staleness claimed without --census (got '$r')"
+    r=$(scan "$st_root/g" "$st_root/g/config/api/api_registry.sdn" \
+             "$st_root/g/scripts/check/rt_api_group_baseline.txt" "$st_root/g/census.tsv")
+    st_n=$((st_n + 1))
+    set -- ${r%%|*}
+    [ "${7:-x}" = "1" ] || st_fail "stale baseline entry (gone) not caught with --census (got '$r')"
 
     # fixture 8: a registry row for a symbol that no longer exists is a STALE
     # ROW — but only with --census, since the cheap universe cannot tell

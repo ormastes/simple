@@ -40,7 +40,7 @@ rejected are in the census, §3):
 - Everything smaller falls into the residual group **`misc`** — *not* `core`,
   which is a real family (`rt_core_*`).
 
-`misc` is not an API group. It is 408 symbols and 828 call sites of work
+`misc` is not an API group. It is 417 symbols and 828 call sites of work
 queue, kept visible precisely so it can be split. A family that grows past 5
 symbols becomes its own group at the next regeneration, automatically.
 
@@ -49,7 +49,7 @@ regenerate. What *is* a design act is naming its provider.
 
 **A symbol in `misc` is UNGROUPED, and the gate errors on a new one**
 (added 2026-09-06 — see §7 for why the first cut could not). The frozen
-`scripts/check/rt_api_group_baseline.txt` lists the 408 admitted today; any
+`scripts/check/rt_api_group_baseline.txt` lists the 417 admitted today; any
 symbol that lands in `misc` and is not on that list FAILs. The remedy is
 **not** a wider baseline: it is a row in `config/api/api_group_overrides.sdn`
 assigning the symbol to a group that already exists. That file is the only
@@ -161,7 +161,7 @@ large fraction of the debt. `file` (808/82) and `array` (268/79) are the volume
 targets. Each landed batch lowers the group's registry count, and the ratchet
 holds the new floor.
 
-**Stage 3 — split `misc`.** 408 symbols, 828 sites. As sub-families reach 5
+**Stage 3 — split `misc`.** 417 symbols, 828 sites. As sub-families reach 5
 symbols they become groups automatically at regeneration; smaller ones move by
 an `api_group_overrides.sdn` row. Progress is one number: `ungrouped` lines in
 `scripts/check/rt_api_group_baseline.txt`, which only ever goes down —
@@ -230,7 +230,7 @@ Reader: `src/lib/common/api_registry.spl` (`api_registry_parse`,
 sh scripts/check/check-rt-api-groups.shs                     # default ratchet
 sh scripts/check/check-rt-api-groups.shs --census F          # + stale-row check
 sh scripts/check/check-rt-api-groups.shs --critical          # unowned groups fail
-sh scripts/check/check-rt-api-groups.shs --selftest          # 14 fixtures, fatal
+sh scripts/check/check-rt-api-groups.shs --selftest          # 15 fixtures, fatal
 sh scripts/check/check-rt-api-groups.shs --generate-baseline # reviewed re-freeze ONLY
 ```
 
@@ -238,9 +238,17 @@ Verdict is always the last stdout line; a run that checked 0 things is
 `ERROR`, never a pass. Measured 2026-09-06 at `c26107f3306`, ~1s:
 
 ```
-PASS — 14 selftest fixture(s) checked
+PASS — 15 selftest fixture(s) checked
 PASS — 4064 rt_* symbol(s) checked, 0 unregistered, 0 newly ungrouped, 0 group(s) over budget, 0 stale baseline entries, stale-row check OFF (no --census), 43 group(s) still unowned
 FAIL — critical mode: 4064 rt_* symbol(s) checked, all registered and grouped, but 43 group(s) have no allowlisted provider (access=unowned)
+```
+
+With the full census (`rt-dual-implementation-census.shs --out F`, 2,680 rows,
+~2 min) the universe is the whole registry rather than the text-visible slice,
+and the stale-ROW check turns on:
+
+```
+PASS — 4163 rt_* symbol(s) checked, 0 unregistered, 0 newly ungrouped, 0 group(s) over budget, 0 stale baseline entries, stale-row=0, 43 group(s) still unowned
 ```
 
 Each failing condition, demonstrated against the real tree rather than only a
@@ -321,3 +329,32 @@ with no `bin/simple`, so blocking is technically possible — but
 that would block every push from a host without it. Promote to blocking once
 the `rg` dependency is either satisfied everywhere or made a documented SKIP,
 and once the new ungrouped/frozen-budget semantics have soaked.
+
+**Two limits found while proving the above, recorded rather than papered over.**
+
+*The baseline is frozen from the REGISTRY, not from the cheap scan.* The first
+cut froze the 408 `misc` symbols a text scan can see, but the registry holds
+417 — nine (`rt_fb_blit32`, `rt_fstring_format`, `rt_lapack_dge{sv,trf,trs}`,
+`rt_pointer_{new,ref,deref}`, `rt_vtable_lookup`) are nm-only, invisible to a
+grep. A `--census` run, which adds every census symbol to the visible set,
+therefore reported those nine as newly ungrouped on a tree nobody had touched.
+Fixed: `--generate-baseline` freezes every registry row in `misc`. For the
+same reason the "baselined symbol has LEFT the tree" half of the stale-baseline
+check runs only under `--census`; the "baselined symbol is now grouped" half
+reads the registry and is always decidable.
+
+*A symbol called only from its provider is invisible to this gate.* The
+universe is "defined in C/Rust text, or **forbidden**-called from Simple".
+Naming the five providers above moved 8 `lane=none` symbols — externs declared
+and called nowhere but inside those files — out of the universe entirely
+(4171 → 4163, unbacked 908 → 900). That is a pre-existing property of the
+generator, newly visible. It is not load-bearing here (`--census` still sees
+the whole registry) but it means the cheap universe shrinks as ownership
+improves, and a genuinely new provider-only extern would not be caught by a
+cheap run. `extern-backing-census.shs` remains the authority on that question.
+
+*An override cannot invent a group, and this is now enforced* rather than only
+claimed: `gen-api-registry.shs` exits 2 naming any override row whose group was
+not formed by the family heuristic
+(`ERROR — nothing was generated (override names a group that does not exist:
+rt_typo_sym->notagroup)`).
