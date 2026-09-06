@@ -1,13 +1,30 @@
-# Purpose and audience: executable specification evidence for the owning engineering team.
-# @req REQ-SSPEC-COMPILER
-# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+"""
+## Purpose and audience
+Byte-level golden encoding evidence for the compiler's native AArch64 backend
+CRC32/CRC32C emit functions (CRC32B/H/W/X and CRC32CB/CH/CW/CX). Audience:
+the ARM64 backend engineer who must verify each emitted instruction matches
+the ARMv8 ARM opcode layout bit-for-bit before trusting the codegen path.
 
-# Purpose and audience: executable specification evidence for the owning engineering team.
-# @req REQ-SSPEC-COMPILER
-# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+## Operator workflow
+bin/simple test test/01_unit/compiler/backend/neon_crc32_spec.spl
 
-# test/unit/compiler/backend/neon_crc32_spec.spl
-#
+## Compatibility and limitations
+Interpreter-mode note (per .claude/rules/testing.md): the test runner in
+interpreter mode only verifies file loading and describe/it block
+reachability; assertions inside it-blocks execute under compiled mode.
+Unsupported: CRC32 variants outside the 8 listed here (not implemented by
+the backend).
+
+## Verification guidance and troubleshooting
+Each scenario captures the emitted little-endian byte layout of one
+CRC32/CRC32C instruction as a bit_table. A mismatch names the offending byte;
+cross-reference ARMv8 ARM §C7.2.36 (CRC32) / §C7.2.37 (CRC32C) and the
+per-scenario derivation comment (`base + Rm*65536 + Rn*32 + Rd`) to locate
+which register field produced the wrong byte.
+"""
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+# @manual_section: neon-crc32-encoding
+
 # Feature ID: #COMPILER-BACKEND-NATIVE-NEON-CRC32
 # Category:   Compiler | Backend | Native | AArch64 CRC32 Encoding
 #
@@ -19,11 +36,6 @@
 # Encoding: base + Rm*65536 + Rn*32 + Rd
 #
 # ARMv8 ARM §C7.2.36 (CRC32) and §C7.2.37 (CRC32C)
-#
-# Interpreter-mode note (per .claude/rules/testing.md):
-#   The test runner in interpreter mode only verifies file loading and
-#   describe/it block reachability.  Assertions inside it-blocks are not
-#   executed.  Compiled-mode execution will exercise them.
 
 use compiler.backend.native.arm_neon.{emit_neon_crc32b, emit_neon_crc32h, emit_neon_crc32w, emit_neon_crc32x, emit_neon_crc32cb, emit_neon_crc32ch, emit_neon_crc32cw, emit_neon_crc32cx}
 
@@ -34,22 +46,29 @@ use compiler.backend.native.arm_neon.{emit_neon_crc32b, emit_neon_crc32h, emit_n
 
 describe "emit_neon_crc32b — CRC-32 byte accumulate":
     it "CRC32B W0, W0, W0 encodes to base opcode bytes":
+        # @req REQ-NEON-CRC32-001
+        step("Encode CRC32B W0, W0, W0 (Rd=Rn=Rm=0)")
         var b = emit_neon_crc32b(0, 0, 0)
-        expect(b.len()).to_equal(4)
-        expect(b[0]).to_equal(0x00)
-        expect(b[1]).to_equal(0x40)
-        expect(b[2]).to_equal(0xC0)
-        expect(b[3]).to_equal(0x1A)
+        # @capture(bit_table): little-endian 4-byte CRC32B base opcode layout
+        step("Verify the emitted bytes equal the ARMv8 base opcode 0x1AC04000")
+        expect(b.len()).to_equal(4)  # oracle: CRC32B is a fixed 4-byte AArch64 instruction
+        expect(b[0]).to_equal(0x00)  # oracle: byte0 = Rd field, Rd=0 contributes nothing
+        expect(b[1]).to_equal(0x40)  # oracle: byte1 = base opcode bits with Rn=0 (no Rn*32 offset)
+        expect(b[2]).to_equal(0xC0)  # oracle: byte2 = base opcode bits with Rm=0 (no Rm*65536 offset)
+        expect(b[3]).to_equal(0x1A)  # oracle: byte3 = top opcode byte identifying the CRC32B family
 
     it "CRC32B W1, W2, W3 encodes register fields correctly":
+        # @req REQ-NEON-CRC32-002
+        step("Encode CRC32B W1, W2, W3 (Rd=1, Rn=2, Rm=3)")
         # word = 0x1AC04000 + 3*65536 + 2*32 + 1 = 0x1AC34041
-        # LE bytes: 0x41, 0x40, 0xC3, 0x1A
         var b = emit_neon_crc32b(1, 2, 3)
-        expect(b.len()).to_equal(4)
-        expect(b[0]).to_equal(0x41)
-        expect(b[1]).to_equal(0x40)
-        expect(b[2]).to_equal(0xC3)
-        expect(b[3]).to_equal(0x1A)
+        # @capture(bit_table): little-endian 4-byte CRC32B register-field layout
+        step("Verify Rd/Rn/Rm are folded into the base opcode word 0x1AC34041")
+        expect(b.len()).to_equal(4)  # oracle: CRC32B is a fixed 4-byte AArch64 instruction
+        expect(b[0]).to_equal(0x41)  # oracle: byte0 = base+Rd(1)+Rn*32(64) folded into the low byte
+        expect(b[1]).to_equal(0x40)  # oracle: byte1 unaffected — Rn*32 stayed within byte0's carry
+        expect(b[2]).to_equal(0xC3)  # oracle: byte2 = base byte + Rm(3) from the Rm*65536 term
+        expect(b[3]).to_equal(0x1A)  # oracle: byte3 = top opcode byte, unaffected by register fields
 
 # ============================================================================
 # CRC32H W0, W0, W0 => base 0x1AC04400
@@ -58,12 +77,16 @@ describe "emit_neon_crc32b — CRC-32 byte accumulate":
 
 describe "emit_neon_crc32h — CRC-32 halfword accumulate":
     it "CRC32H W0, W0, W0 encodes to base opcode bytes":
+        # @req REQ-NEON-CRC32-003
+        step("Encode CRC32H W0, W0, W0 (Rd=Rn=Rm=0)")
         var b = emit_neon_crc32h(0, 0, 0)
-        expect(b.len()).to_equal(4)
-        expect(b[0]).to_equal(0x00)
-        expect(b[1]).to_equal(0x44)
-        expect(b[2]).to_equal(0xC0)
-        expect(b[3]).to_equal(0x1A)
+        # @capture(bit_table): little-endian 4-byte CRC32H base opcode layout
+        step("Verify the emitted bytes equal the ARMv8 base opcode 0x1AC04400")
+        expect(b.len()).to_equal(4)  # oracle: CRC32H is a fixed 4-byte AArch64 instruction
+        expect(b[0]).to_equal(0x00)  # oracle: byte0 = Rd field, Rd=0 contributes nothing
+        expect(b[1]).to_equal(0x44)  # oracle: byte1 = base opcode "size=01" bits for the halfword variant
+        expect(b[2]).to_equal(0xC0)  # oracle: byte2 = base opcode bits with Rm=0
+        expect(b[3]).to_equal(0x1A)  # oracle: byte3 = top opcode byte identifying the CRC32 family
 
 # ============================================================================
 # CRC32W W0, W0, W0 => base 0x1AC04800
@@ -74,20 +97,28 @@ describe "emit_neon_crc32h — CRC-32 halfword accumulate":
 
 describe "emit_neon_crc32w — CRC-32 word accumulate":
     it "CRC32W W0, W0, W0 encodes to base opcode bytes":
+        # @req REQ-NEON-CRC32-004
+        step("Encode CRC32W W0, W0, W0 (Rd=Rn=Rm=0)")
         var b = emit_neon_crc32w(0, 0, 0)
-        expect(b.len()).to_equal(4)
-        expect(b[0]).to_equal(0x00)
-        expect(b[1]).to_equal(0x48)
-        expect(b[2]).to_equal(0xC0)
-        expect(b[3]).to_equal(0x1A)
+        # @capture(bit_table): little-endian 4-byte CRC32W base opcode layout
+        step("Verify the emitted bytes equal the ARMv8 base opcode 0x1AC04800")
+        expect(b.len()).to_equal(4)  # oracle: CRC32W is a fixed 4-byte AArch64 instruction
+        expect(b[0]).to_equal(0x00)  # oracle: byte0 = Rd field, Rd=0 contributes nothing
+        expect(b[1]).to_equal(0x48)  # oracle: byte1 = base opcode "size=10" bits for the word variant
+        expect(b[2]).to_equal(0xC0)  # oracle: byte2 = base opcode bits with Rm=0
+        expect(b[3]).to_equal(0x1A)  # oracle: byte3 = top opcode byte identifying the CRC32 family
 
     it "CRC32W W0, W0, W1 encodes Rm=1 correctly":
+        # @req REQ-NEON-CRC32-005
+        step("Encode CRC32W W0, W0, W1 (Rm=1)")
         var b = emit_neon_crc32w(0, 0, 1)
-        expect(b.len()).to_equal(4)
-        expect(b[0]).to_equal(0x00)
-        expect(b[1]).to_equal(0x48)
-        expect(b[2]).to_equal(0xC1)
-        expect(b[3]).to_equal(0x1A)
+        # @capture(bit_table): little-endian 4-byte CRC32W Rm=1 layout
+        step("Verify Rm=1 raises byte2 via the Rm*65536 term")
+        expect(b.len()).to_equal(4)  # oracle: CRC32W is a fixed 4-byte AArch64 instruction
+        expect(b[0]).to_equal(0x00)  # oracle: byte0 = Rd field, Rd=0 contributes nothing
+        expect(b[1]).to_equal(0x48)  # oracle: byte1 = base opcode "size=10" bits, unaffected by Rm
+        expect(b[2]).to_equal(0xC1)  # oracle: byte2 = base 0xC0 + Rm(1) from the Rm*65536 term
+        expect(b[3]).to_equal(0x1A)  # oracle: byte3 = top opcode byte, unaffected by register fields
 
 # ============================================================================
 # CRC32X W0, W0, X0 => base 0x9AC04C00
@@ -98,12 +129,16 @@ describe "emit_neon_crc32w — CRC-32 word accumulate":
 
 describe "emit_neon_crc32x — CRC-32 doubleword accumulate":
     it "CRC32X W0, W0, X0 encodes to base opcode bytes":
+        # @req REQ-NEON-CRC32-006
+        step("Encode CRC32X W0, W0, X0 (Rd=Rn=Rm=0)")
         var b = emit_neon_crc32x(0, 0, 0)
-        expect(b.len()).to_equal(4)
-        expect(b[0]).to_equal(0x00)
-        expect(b[1]).to_equal(0x4C)
-        expect(b[2]).to_equal(0xC0)
-        expect(b[3]).to_equal(0x9A)
+        # @capture(bit_table): little-endian 4-byte CRC32X base opcode layout
+        step("Verify the emitted bytes equal the ARMv8 base opcode 0x9AC04C00")
+        expect(b.len()).to_equal(4)  # oracle: CRC32X is a fixed 4-byte AArch64 instruction
+        expect(b[0]).to_equal(0x00)  # oracle: byte0 = Rd field, Rd=0 contributes nothing
+        expect(b[1]).to_equal(0x4C)  # oracle: byte1 = base opcode "size=11" bits for the doubleword variant
+        expect(b[2]).to_equal(0xC0)  # oracle: byte2 = base opcode bits with Rm=0
+        expect(b[3]).to_equal(0x9A)  # oracle: byte3 = top opcode byte, sf=1 selects the 64-bit Rm form
 
 # ============================================================================
 # CRC32CB W0, W0, W0 => base 0x1AC05000
@@ -112,12 +147,16 @@ describe "emit_neon_crc32x — CRC-32 doubleword accumulate":
 
 describe "emit_neon_crc32cb — CRC-32C byte accumulate":
     it "CRC32CB W0, W0, W0 encodes to base opcode bytes":
+        # @req REQ-NEON-CRC32-007
+        step("Encode CRC32CB W0, W0, W0 (Rd=Rn=Rm=0)")
         var b = emit_neon_crc32cb(0, 0, 0)
-        expect(b.len()).to_equal(4)
-        expect(b[0]).to_equal(0x00)
-        expect(b[1]).to_equal(0x50)
-        expect(b[2]).to_equal(0xC0)
-        expect(b[3]).to_equal(0x1A)
+        # @capture(bit_table): little-endian 4-byte CRC32CB base opcode layout
+        step("Verify the emitted bytes equal the ARMv8 base opcode 0x1AC05000")
+        expect(b.len()).to_equal(4)  # oracle: CRC32CB is a fixed 4-byte AArch64 instruction
+        expect(b[0]).to_equal(0x00)  # oracle: byte0 = Rd field, Rd=0 contributes nothing
+        expect(b[1]).to_equal(0x50)  # oracle: byte1 = base opcode C=1 (Castagnoli) byte variant bits
+        expect(b[2]).to_equal(0xC0)  # oracle: byte2 = base opcode bits with Rm=0
+        expect(b[3]).to_equal(0x1A)  # oracle: byte3 = top opcode byte identifying the CRC32 family
 
 # ============================================================================
 # CRC32CH W0, W0, W0 => base 0x1AC05400
@@ -126,12 +165,16 @@ describe "emit_neon_crc32cb — CRC-32C byte accumulate":
 
 describe "emit_neon_crc32ch — CRC-32C halfword accumulate":
     it "CRC32CH W0, W0, W0 encodes to base opcode bytes":
+        # @req REQ-NEON-CRC32-008
+        step("Encode CRC32CH W0, W0, W0 (Rd=Rn=Rm=0)")
         var b = emit_neon_crc32ch(0, 0, 0)
-        expect(b.len()).to_equal(4)
-        expect(b[0]).to_equal(0x00)
-        expect(b[1]).to_equal(0x54)
-        expect(b[2]).to_equal(0xC0)
-        expect(b[3]).to_equal(0x1A)
+        # @capture(bit_table): little-endian 4-byte CRC32CH base opcode layout
+        step("Verify the emitted bytes equal the ARMv8 base opcode 0x1AC05400")
+        expect(b.len()).to_equal(4)  # oracle: CRC32CH is a fixed 4-byte AArch64 instruction
+        expect(b[0]).to_equal(0x00)  # oracle: byte0 = Rd field, Rd=0 contributes nothing
+        expect(b[1]).to_equal(0x54)  # oracle: byte1 = base opcode Castagnoli halfword variant bits
+        expect(b[2]).to_equal(0xC0)  # oracle: byte2 = base opcode bits with Rm=0
+        expect(b[3]).to_equal(0x1A)  # oracle: byte3 = top opcode byte identifying the CRC32 family
 
 # ============================================================================
 # CRC32CW W0, W0, W0 => base 0x1AC05800
@@ -140,12 +183,16 @@ describe "emit_neon_crc32ch — CRC-32C halfword accumulate":
 
 describe "emit_neon_crc32cw — CRC-32C word accumulate":
     it "CRC32CW W0, W0, W0 encodes to base opcode bytes":
+        # @req REQ-NEON-CRC32-009
+        step("Encode CRC32CW W0, W0, W0 (Rd=Rn=Rm=0)")
         var b = emit_neon_crc32cw(0, 0, 0)
-        expect(b.len()).to_equal(4)
-        expect(b[0]).to_equal(0x00)
-        expect(b[1]).to_equal(0x58)
-        expect(b[2]).to_equal(0xC0)
-        expect(b[3]).to_equal(0x1A)
+        # @capture(bit_table): little-endian 4-byte CRC32CW base opcode layout
+        step("Verify the emitted bytes equal the ARMv8 base opcode 0x1AC05800")
+        expect(b.len()).to_equal(4)  # oracle: CRC32CW is a fixed 4-byte AArch64 instruction
+        expect(b[0]).to_equal(0x00)  # oracle: byte0 = Rd field, Rd=0 contributes nothing
+        expect(b[1]).to_equal(0x58)  # oracle: byte1 = base opcode Castagnoli word variant bits
+        expect(b[2]).to_equal(0xC0)  # oracle: byte2 = base opcode bits with Rm=0
+        expect(b[3]).to_equal(0x1A)  # oracle: byte3 = top opcode byte identifying the CRC32 family
 
 # ============================================================================
 # CRC32CX W0, W0, X0 => base 0x9AC05C00
@@ -156,19 +203,26 @@ describe "emit_neon_crc32cw — CRC-32C word accumulate":
 
 describe "emit_neon_crc32cx — CRC-32C doubleword accumulate":
     it "CRC32CX W0, W0, X0 encodes to base opcode bytes":
+        # @req REQ-NEON-CRC32-010
+        step("Encode CRC32CX W0, W0, X0 (Rd=Rn=Rm=0)")
         var b = emit_neon_crc32cx(0, 0, 0)
-        expect(b.len()).to_equal(4)
-        expect(b[0]).to_equal(0x00)
-        expect(b[1]).to_equal(0x5C)
-        expect(b[2]).to_equal(0xC0)
-        expect(b[3]).to_equal(0x9A)
+        # @capture(bit_table): little-endian 4-byte CRC32CX base opcode layout
+        step("Verify the emitted bytes equal the ARMv8 base opcode 0x9AC05C00")
+        expect(b.len()).to_equal(4)  # oracle: CRC32CX is a fixed 4-byte AArch64 instruction
+        expect(b[0]).to_equal(0x00)  # oracle: byte0 = Rd field, Rd=0 contributes nothing
+        expect(b[1]).to_equal(0x5C)  # oracle: byte1 = base opcode Castagnoli doubleword variant bits
+        expect(b[2]).to_equal(0xC0)  # oracle: byte2 = base opcode bits with Rm=0
+        expect(b[3]).to_equal(0x9A)  # oracle: byte3 = top opcode byte, sf=1 selects the 64-bit Rm form
 
     it "CRC32CX W5, W6, X7 encodes register fields correctly":
+        # @req REQ-NEON-CRC32-011
+        step("Encode CRC32CX W5, W6, X7 (Rd=5, Rn=6, Rm=7)")
         # word = 0x9AC05C00 + 7*65536 + 6*32 + 5 = 0x9AC75CC5
-        # LE bytes: 0xC5, 0x5C, 0xC7, 0x9A
         var b = emit_neon_crc32cx(5, 6, 7)
-        expect(b.len()).to_equal(4)
-        expect(b[0]).to_equal(0xC5)
-        expect(b[1]).to_equal(0x5C)
-        expect(b[2]).to_equal(0xC7)
-        expect(b[3]).to_equal(0x9A)
+        # @capture(bit_table): little-endian 4-byte CRC32CX register-field layout
+        step("Verify Rd/Rn/Rm are folded into the base opcode word 0x9AC75CC5")
+        expect(b.len()).to_equal(4)  # oracle: CRC32CX is a fixed 4-byte AArch64 instruction
+        expect(b[0]).to_equal(0xC5)  # oracle: byte0 = base 0x00 + Rd(5) + Rn*32(192) folded low byte
+        expect(b[1]).to_equal(0x5C)  # oracle: byte1 unchanged — Rn*32 carry stayed within byte0
+        expect(b[2]).to_equal(0xC7)  # oracle: byte2 = base 0xC0 + Rm(7) from the Rm*65536 term
+        expect(b[3]).to_equal(0x9A)  # oracle: byte3 = top opcode byte, unaffected by register fields

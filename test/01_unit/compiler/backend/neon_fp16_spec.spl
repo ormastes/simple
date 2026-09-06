@@ -1,13 +1,31 @@
-# Purpose and audience: executable specification evidence for the owning engineering team.
-# @req REQ-SSPEC-COMPILER
-# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+"""
+## Purpose and audience
+Byte-level golden encoding evidence for the compiler's native AArch64 backend
+FP16 conversion emit functions (FCVTN/FCVTN2/FCVTL/FCVTL2/FCVTZS/FCVTZU).
+Audience: the ARM64 backend engineer verifying each emitted instruction
+matches the ARMv8 ARM opcode layout bit-for-bit before trusting the codegen
+path.
 
-# Purpose and audience: executable specification evidence for the owning engineering team.
-# @req REQ-SSPEC-COMPILER
-# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+## Operator workflow
+bin/simple test test/01_unit/compiler/backend/neon_fp16_spec.spl
 
-# test/unit/compiler/backend/neon_fp16_spec.spl
-#
+## Compatibility and limitations
+Interpreter-mode note (per .claude/rules/testing.md): the test runner in
+interpreter mode only verifies file loading and describe/it block
+reachability; assertions inside it-blocks execute under compiled mode.
+Unsupported: FP16 conversion forms outside the 6 listed here (not
+implemented by the backend).
+
+## Verification guidance and troubleshooting
+Each scenario captures the emitted little-endian byte layout of one FP16
+conversion instruction as a bit_table. A mismatch names the offending byte;
+cross-reference ARMv8 ARM §C7.2.66-69 and the per-scenario derivation
+comment (`base + Rn*32 + Rd`) to locate which register field produced the
+wrong byte.
+"""
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+# @manual_section: neon-fp16-conversion-encoding
+
 # Feature ID: #COMPILER-BACKEND-NATIVE-NEON-FP16
 # Category:   Compiler | Backend | Native | AArch64 FP16 Conversion Encoding
 #
@@ -21,11 +39,6 @@
 #
 # All instructions are 4-byte fixed-width, little-endian per ARMv8 ABI.
 # 2-register encoding: base + Rn*32 + Rd
-#
-# Interpreter-mode note (per .claude/rules/testing.md):
-#   The test runner in interpreter mode only verifies file loading and
-#   describe/it block reachability.  Assertions inside it-blocks are not
-#   executed.  Compiled-mode execution will exercise them.
 
 use compiler.backend.native.arm_neon.{emit_fcvtn_4h, emit_fcvtn2_8h, emit_fcvtl_4s, emit_fcvtl2_4s, emit_fcvtzs_4s, emit_fcvtzu_4s}
 
@@ -36,34 +49,43 @@ use compiler.backend.native.arm_neon.{emit_fcvtn_4h, emit_fcvtn2_8h, emit_fcvtl_
 
 describe "emit_fcvtn_4h — narrow fp32 to fp16 into lower half":
     it "FCVTN V0.4H, V0.4S encodes to base opcode bytes":
+        # @req REQ-NEON-FP16-001
+        step("Encode FCVTN V0.4H, V0.4S (Rd=Rn=0)")
         # word = 0x0E216800 + 0*32 + 0 = 0x0E216800
-        # LE: [0x00, 0x68, 0x21, 0x0E]
         var b = emit_fcvtn_4h(0, 0)
-        expect(b.len()).to_equal(4)
-        expect(b[0]).to_equal(0x00)
-        expect(b[1]).to_equal(0x68)
-        expect(b[2]).to_equal(0x21)
-        expect(b[3]).to_equal(0x0E)
+        # @capture(bit_table): little-endian 4-byte FCVTN base opcode layout
+        step("Verify the emitted bytes equal the ARMv8 base opcode 0x0E216800")
+        expect(b.len()).to_equal(4)  # oracle: FCVTN is a fixed 4-byte AArch64 instruction
+        expect(b[0]).to_equal(0x00)  # oracle: byte0 = Rd field, Rd=0 contributes nothing
+        expect(b[1]).to_equal(0x68)  # oracle: byte1 = base opcode bits identifying FCVTN's narrow form
+        expect(b[2]).to_equal(0x21)  # oracle: byte2 = base opcode bits with Rn=0 (no Rn*32 offset)
+        expect(b[3]).to_equal(0x0E)  # oracle: byte3 = top opcode byte, Q=0 selects the lower-half form
 
     it "FCVTN V0.4H, V1.4S encodes rn=1 into bits[9:5]":
+        # @req REQ-NEON-FP16-002
+        step("Encode FCVTN V0.4H, V1.4S (Rn=1)")
         # word = 0x0E216800 + 1*32 + 0 = 0x0E216820
-        # LE: [0x20, 0x68, 0x21, 0x0E]
         var b = emit_fcvtn_4h(0, 1)
-        expect(b.len()).to_equal(4)
-        expect(b[0]).to_equal(0x20)
-        expect(b[1]).to_equal(0x68)
-        expect(b[2]).to_equal(0x21)
-        expect(b[3]).to_equal(0x0E)
+        # @capture(bit_table): little-endian 4-byte FCVTN Rn=1 layout
+        step("Verify Rn=1 raises byte0 via the Rn*32 term")
+        expect(b.len()).to_equal(4)  # oracle: FCVTN is a fixed 4-byte AArch64 instruction
+        expect(b[0]).to_equal(0x20)  # oracle: byte0 = base 0x00 + Rn(1)*32 = 0x20
+        expect(b[1]).to_equal(0x68)  # oracle: byte1 unaffected by Rn — no carry into it
+        expect(b[2]).to_equal(0x21)  # oracle: byte2 = base opcode bits, unaffected by Rn
+        expect(b[3]).to_equal(0x0E)  # oracle: byte3 = top opcode byte, unaffected by register fields
 
     it "FCVTN V1.4H, V2.4S encodes rd=1 rn=2 correctly":
+        # @req REQ-NEON-FP16-003
+        step("Encode FCVTN V1.4H, V2.4S (Rd=1, Rn=2)")
         # word = 0x0E216800 + 2*32 + 1 = 0x0E216841
-        # LE: [0x41, 0x68, 0x21, 0x0E]
         var b = emit_fcvtn_4h(1, 2)
-        expect(b.len()).to_equal(4)
-        expect(b[0]).to_equal(0x41)
-        expect(b[1]).to_equal(0x68)
-        expect(b[2]).to_equal(0x21)
-        expect(b[3]).to_equal(0x0E)
+        # @capture(bit_table): little-endian 4-byte FCVTN register-field layout
+        step("Verify Rd/Rn are folded into the base opcode word 0x0E216841")
+        expect(b.len()).to_equal(4)  # oracle: FCVTN is a fixed 4-byte AArch64 instruction
+        expect(b[0]).to_equal(0x41)  # oracle: byte0 = base 0x00 + Rn(2)*32(64) + Rd(1) = 0x41
+        expect(b[1]).to_equal(0x68)  # oracle: byte1 unaffected by Rd/Rn
+        expect(b[2]).to_equal(0x21)  # oracle: byte2 = base opcode bits, unaffected by Rd/Rn
+        expect(b[3]).to_equal(0x0E)  # oracle: byte3 = top opcode byte, unaffected by register fields
 
 # ============================================================================
 # FCVTN2 Vd.8H, Vn.4S — base 0x4E216800
@@ -72,34 +94,43 @@ describe "emit_fcvtn_4h — narrow fp32 to fp16 into lower half":
 
 describe "emit_fcvtn2_8h — narrow fp32 to fp16 into upper half":
     it "FCVTN2 V0.8H, V0.4S encodes to base opcode bytes":
+        # @req REQ-NEON-FP16-004
+        step("Encode FCVTN2 V0.8H, V0.4S (Rd=Rn=0)")
         # word = 0x4E216800 + 0*32 + 0 = 0x4E216800
-        # LE: [0x00, 0x68, 0x21, 0x4E]
         var b = emit_fcvtn2_8h(0, 0)
-        expect(b.len()).to_equal(4)
-        expect(b[0]).to_equal(0x00)
-        expect(b[1]).to_equal(0x68)
-        expect(b[2]).to_equal(0x21)
-        expect(b[3]).to_equal(0x4E)
+        # @capture(bit_table): little-endian 4-byte FCVTN2 base opcode layout
+        step("Verify the emitted bytes equal the ARMv8 base opcode 0x4E216800")
+        expect(b.len()).to_equal(4)  # oracle: FCVTN2 is a fixed 4-byte AArch64 instruction
+        expect(b[0]).to_equal(0x00)  # oracle: byte0 = Rd field, Rd=0 contributes nothing
+        expect(b[1]).to_equal(0x68)  # oracle: byte1 = base opcode bits identifying FCVTN's narrow form
+        expect(b[2]).to_equal(0x21)  # oracle: byte2 = base opcode bits with Rn=0
+        expect(b[3]).to_equal(0x4E)  # oracle: byte3 = top opcode byte, Q=1 selects the upper-half form
 
     it "FCVTN2 V0.8H, V1.4S encodes rn=1":
+        # @req REQ-NEON-FP16-005
+        step("Encode FCVTN2 V0.8H, V1.4S (Rn=1)")
         # word = 0x4E216800 + 1*32 + 0 = 0x4E216820
-        # LE: [0x20, 0x68, 0x21, 0x4E]
         var b = emit_fcvtn2_8h(0, 1)
-        expect(b.len()).to_equal(4)
-        expect(b[0]).to_equal(0x20)
-        expect(b[1]).to_equal(0x68)
-        expect(b[2]).to_equal(0x21)
-        expect(b[3]).to_equal(0x4E)
+        # @capture(bit_table): little-endian 4-byte FCVTN2 Rn=1 layout
+        step("Verify Rn=1 raises byte0 via the Rn*32 term")
+        expect(b.len()).to_equal(4)  # oracle: FCVTN2 is a fixed 4-byte AArch64 instruction
+        expect(b[0]).to_equal(0x20)  # oracle: byte0 = base 0x00 + Rn(1)*32 = 0x20
+        expect(b[1]).to_equal(0x68)  # oracle: byte1 unaffected by Rn
+        expect(b[2]).to_equal(0x21)  # oracle: byte2 = base opcode bits, unaffected by Rn
+        expect(b[3]).to_equal(0x4E)  # oracle: byte3 = top opcode byte, unaffected by register fields
 
     it "FCVTN2 V3.8H, V4.4S encodes rd=3 rn=4 correctly":
+        # @req REQ-NEON-FP16-006
+        step("Encode FCVTN2 V3.8H, V4.4S (Rd=3, Rn=4)")
         # word = 0x4E216800 + 4*32 + 3 = 0x4E216883
-        # LE: [0x83, 0x68, 0x21, 0x4E]
         var b = emit_fcvtn2_8h(3, 4)
-        expect(b.len()).to_equal(4)
-        expect(b[0]).to_equal(0x83)
-        expect(b[1]).to_equal(0x68)
-        expect(b[2]).to_equal(0x21)
-        expect(b[3]).to_equal(0x4E)
+        # @capture(bit_table): little-endian 4-byte FCVTN2 register-field layout
+        step("Verify Rd/Rn are folded into the base opcode word 0x4E216883")
+        expect(b.len()).to_equal(4)  # oracle: FCVTN2 is a fixed 4-byte AArch64 instruction
+        expect(b[0]).to_equal(0x83)  # oracle: byte0 = base 0x00 + Rn(4)*32(128) + Rd(3) = 0x83
+        expect(b[1]).to_equal(0x68)  # oracle: byte1 unaffected by Rd/Rn
+        expect(b[2]).to_equal(0x21)  # oracle: byte2 = base opcode bits, unaffected by Rd/Rn
+        expect(b[3]).to_equal(0x4E)  # oracle: byte3 = top opcode byte, unaffected by register fields
 
 # ============================================================================
 # FCVTL Vd.4S, Vn.4H — base 0x0E217800
@@ -108,34 +139,43 @@ describe "emit_fcvtn2_8h — narrow fp32 to fp16 into upper half":
 
 describe "emit_fcvtl_4s — widen fp16 to fp32 from lower half":
     it "FCVTL V0.4S, V0.4H encodes to base opcode bytes":
+        # @req REQ-NEON-FP16-007
+        step("Encode FCVTL V0.4S, V0.4H (Rd=Rn=0)")
         # word = 0x0E217800 + 0*32 + 0 = 0x0E217800
-        # LE: [0x00, 0x78, 0x21, 0x0E]
         var b = emit_fcvtl_4s(0, 0)
-        expect(b.len()).to_equal(4)
-        expect(b[0]).to_equal(0x00)
-        expect(b[1]).to_equal(0x78)
-        expect(b[2]).to_equal(0x21)
-        expect(b[3]).to_equal(0x0E)
+        # @capture(bit_table): little-endian 4-byte FCVTL base opcode layout
+        step("Verify the emitted bytes equal the ARMv8 base opcode 0x0E217800")
+        expect(b.len()).to_equal(4)  # oracle: FCVTL is a fixed 4-byte AArch64 instruction
+        expect(b[0]).to_equal(0x00)  # oracle: byte0 = Rd field, Rd=0 contributes nothing
+        expect(b[1]).to_equal(0x78)  # oracle: byte1 = base opcode bits identifying FCVTL's widen form
+        expect(b[2]).to_equal(0x21)  # oracle: byte2 = base opcode bits with Rn=0
+        expect(b[3]).to_equal(0x0E)  # oracle: byte3 = top opcode byte, Q=0 selects the lower-half form
 
     it "FCVTL V0.4S, V1.4H encodes rn=1":
+        # @req REQ-NEON-FP16-008
+        step("Encode FCVTL V0.4S, V1.4H (Rn=1)")
         # word = 0x0E217800 + 1*32 + 0 = 0x0E217820
-        # LE: [0x20, 0x78, 0x21, 0x0E]
         var b = emit_fcvtl_4s(0, 1)
-        expect(b.len()).to_equal(4)
-        expect(b[0]).to_equal(0x20)
-        expect(b[1]).to_equal(0x78)
-        expect(b[2]).to_equal(0x21)
-        expect(b[3]).to_equal(0x0E)
+        # @capture(bit_table): little-endian 4-byte FCVTL Rn=1 layout
+        step("Verify Rn=1 raises byte0 via the Rn*32 term")
+        expect(b.len()).to_equal(4)  # oracle: FCVTL is a fixed 4-byte AArch64 instruction
+        expect(b[0]).to_equal(0x20)  # oracle: byte0 = base 0x00 + Rn(1)*32 = 0x20
+        expect(b[1]).to_equal(0x78)  # oracle: byte1 unaffected by Rn
+        expect(b[2]).to_equal(0x21)  # oracle: byte2 = base opcode bits, unaffected by Rn
+        expect(b[3]).to_equal(0x0E)  # oracle: byte3 = top opcode byte, unaffected by register fields
 
     it "FCVTL V2.4S, V3.4H encodes rd=2 rn=3 correctly":
+        # @req REQ-NEON-FP16-009
+        step("Encode FCVTL V2.4S, V3.4H (Rd=2, Rn=3)")
         # word = 0x0E217800 + 3*32 + 2 = 0x0E217862
-        # LE: [0x62, 0x78, 0x21, 0x0E]
         var b = emit_fcvtl_4s(2, 3)
-        expect(b.len()).to_equal(4)
-        expect(b[0]).to_equal(0x62)
-        expect(b[1]).to_equal(0x78)
-        expect(b[2]).to_equal(0x21)
-        expect(b[3]).to_equal(0x0E)
+        # @capture(bit_table): little-endian 4-byte FCVTL register-field layout
+        step("Verify Rd/Rn are folded into the base opcode word 0x0E217862")
+        expect(b.len()).to_equal(4)  # oracle: FCVTL is a fixed 4-byte AArch64 instruction
+        expect(b[0]).to_equal(0x62)  # oracle: byte0 = base 0x00 + Rn(3)*32(96) + Rd(2) = 0x62
+        expect(b[1]).to_equal(0x78)  # oracle: byte1 unaffected by Rd/Rn
+        expect(b[2]).to_equal(0x21)  # oracle: byte2 = base opcode bits, unaffected by Rd/Rn
+        expect(b[3]).to_equal(0x0E)  # oracle: byte3 = top opcode byte, unaffected by register fields
 
 # ============================================================================
 # FCVTL2 Vd.4S, Vn.8H — base 0x4E217800
@@ -144,34 +184,43 @@ describe "emit_fcvtl_4s — widen fp16 to fp32 from lower half":
 
 describe "emit_fcvtl2_4s — widen fp16 to fp32 from upper half":
     it "FCVTL2 V0.4S, V0.8H encodes to base opcode bytes":
+        # @req REQ-NEON-FP16-010
+        step("Encode FCVTL2 V0.4S, V0.8H (Rd=Rn=0)")
         # word = 0x4E217800 + 0*32 + 0 = 0x4E217800
-        # LE: [0x00, 0x78, 0x21, 0x4E]
         var b = emit_fcvtl2_4s(0, 0)
-        expect(b.len()).to_equal(4)
-        expect(b[0]).to_equal(0x00)
-        expect(b[1]).to_equal(0x78)
-        expect(b[2]).to_equal(0x21)
-        expect(b[3]).to_equal(0x4E)
+        # @capture(bit_table): little-endian 4-byte FCVTL2 base opcode layout
+        step("Verify the emitted bytes equal the ARMv8 base opcode 0x4E217800")
+        expect(b.len()).to_equal(4)  # oracle: FCVTL2 is a fixed 4-byte AArch64 instruction
+        expect(b[0]).to_equal(0x00)  # oracle: byte0 = Rd field, Rd=0 contributes nothing
+        expect(b[1]).to_equal(0x78)  # oracle: byte1 = base opcode bits identifying FCVTL's widen form
+        expect(b[2]).to_equal(0x21)  # oracle: byte2 = base opcode bits with Rn=0
+        expect(b[3]).to_equal(0x4E)  # oracle: byte3 = top opcode byte, Q=1 selects the upper-half form
 
     it "FCVTL2 V0.4S, V1.8H encodes rn=1":
+        # @req REQ-NEON-FP16-011
+        step("Encode FCVTL2 V0.4S, V1.8H (Rn=1)")
         # word = 0x4E217800 + 1*32 + 0 = 0x4E217820
-        # LE: [0x20, 0x78, 0x21, 0x4E]
         var b = emit_fcvtl2_4s(0, 1)
-        expect(b.len()).to_equal(4)
-        expect(b[0]).to_equal(0x20)
-        expect(b[1]).to_equal(0x78)
-        expect(b[2]).to_equal(0x21)
-        expect(b[3]).to_equal(0x4E)
+        # @capture(bit_table): little-endian 4-byte FCVTL2 Rn=1 layout
+        step("Verify Rn=1 raises byte0 via the Rn*32 term")
+        expect(b.len()).to_equal(4)  # oracle: FCVTL2 is a fixed 4-byte AArch64 instruction
+        expect(b[0]).to_equal(0x20)  # oracle: byte0 = base 0x00 + Rn(1)*32 = 0x20
+        expect(b[1]).to_equal(0x78)  # oracle: byte1 unaffected by Rn
+        expect(b[2]).to_equal(0x21)  # oracle: byte2 = base opcode bits, unaffected by Rn
+        expect(b[3]).to_equal(0x4E)  # oracle: byte3 = top opcode byte, unaffected by register fields
 
     it "FCVTL2 V2.4S, V3.8H encodes rd=2 rn=3 correctly":
+        # @req REQ-NEON-FP16-012
+        step("Encode FCVTL2 V2.4S, V3.8H (Rd=2, Rn=3)")
         # word = 0x4E217800 + 3*32 + 2 = 0x4E217862
-        # LE: [0x62, 0x78, 0x21, 0x4E]
         var b = emit_fcvtl2_4s(2, 3)
-        expect(b.len()).to_equal(4)
-        expect(b[0]).to_equal(0x62)
-        expect(b[1]).to_equal(0x78)
-        expect(b[2]).to_equal(0x21)
-        expect(b[3]).to_equal(0x4E)
+        # @capture(bit_table): little-endian 4-byte FCVTL2 register-field layout
+        step("Verify Rd/Rn are folded into the base opcode word 0x4E217862")
+        expect(b.len()).to_equal(4)  # oracle: FCVTL2 is a fixed 4-byte AArch64 instruction
+        expect(b[0]).to_equal(0x62)  # oracle: byte0 = base 0x00 + Rn(3)*32(96) + Rd(2) = 0x62
+        expect(b[1]).to_equal(0x78)  # oracle: byte1 unaffected by Rd/Rn
+        expect(b[2]).to_equal(0x21)  # oracle: byte2 = base opcode bits, unaffected by Rd/Rn
+        expect(b[3]).to_equal(0x4E)  # oracle: byte3 = top opcode byte, unaffected by register fields
 
 # ============================================================================
 # FCVTZS Vd.4S, Vn.4S — base 0x4EA1B800
@@ -180,34 +229,43 @@ describe "emit_fcvtl2_4s — widen fp16 to fp32 from upper half":
 
 describe "emit_fcvtzs_4s — fp32 to signed int32 truncate 4 lanes":
     it "FCVTZS V0.4S, V0.4S encodes to base opcode bytes":
+        # @req REQ-NEON-FP16-013
+        step("Encode FCVTZS V0.4S, V0.4S (Rd=Rn=0)")
         # word = 0x4EA1B800 + 0*32 + 0 = 0x4EA1B800
-        # LE: [0x00, 0xB8, 0xA1, 0x4E]
         var b = emit_fcvtzs_4s(0, 0)
-        expect(b.len()).to_equal(4)
-        expect(b[0]).to_equal(0x00)
-        expect(b[1]).to_equal(0xB8)
-        expect(b[2]).to_equal(0xA1)
-        expect(b[3]).to_equal(0x4E)
+        # @capture(bit_table): little-endian 4-byte FCVTZS base opcode layout
+        step("Verify the emitted bytes equal the ARMv8 base opcode 0x4EA1B800")
+        expect(b.len()).to_equal(4)  # oracle: FCVTZS is a fixed 4-byte AArch64 instruction
+        expect(b[0]).to_equal(0x00)  # oracle: byte0 = Rd field, Rd=0 contributes nothing
+        expect(b[1]).to_equal(0xB8)  # oracle: byte1 = base opcode bits identifying the truncate form
+        expect(b[2]).to_equal(0xA1)  # oracle: byte2 = base opcode bits with Rn=0
+        expect(b[3]).to_equal(0x4E)  # oracle: byte3 = top opcode byte, U=0 selects the signed variant
 
     it "FCVTZS V0.4S, V1.4S encodes rn=1":
+        # @req REQ-NEON-FP16-014
+        step("Encode FCVTZS V0.4S, V1.4S (Rn=1)")
         # word = 0x4EA1B800 + 1*32 + 0 = 0x4EA1B820
-        # LE: [0x20, 0xB8, 0xA1, 0x4E]
         var b = emit_fcvtzs_4s(0, 1)
-        expect(b.len()).to_equal(4)
-        expect(b[0]).to_equal(0x20)
-        expect(b[1]).to_equal(0xB8)
-        expect(b[2]).to_equal(0xA1)
-        expect(b[3]).to_equal(0x4E)
+        # @capture(bit_table): little-endian 4-byte FCVTZS Rn=1 layout
+        step("Verify Rn=1 raises byte0 via the Rn*32 term")
+        expect(b.len()).to_equal(4)  # oracle: FCVTZS is a fixed 4-byte AArch64 instruction
+        expect(b[0]).to_equal(0x20)  # oracle: byte0 = base 0x00 + Rn(1)*32 = 0x20
+        expect(b[1]).to_equal(0xB8)  # oracle: byte1 unaffected by Rn
+        expect(b[2]).to_equal(0xA1)  # oracle: byte2 = base opcode bits, unaffected by Rn
+        expect(b[3]).to_equal(0x4E)  # oracle: byte3 = top opcode byte, unaffected by register fields
 
     it "FCVTZS V3.4S, V4.4S encodes rd=3 rn=4 correctly":
+        # @req REQ-NEON-FP16-015
+        step("Encode FCVTZS V3.4S, V4.4S (Rd=3, Rn=4)")
         # word = 0x4EA1B800 + 4*32 + 3 = 0x4EA1B883
-        # LE: [0x83, 0xB8, 0xA1, 0x4E]
         var b = emit_fcvtzs_4s(3, 4)
-        expect(b.len()).to_equal(4)
-        expect(b[0]).to_equal(0x83)
-        expect(b[1]).to_equal(0xB8)
-        expect(b[2]).to_equal(0xA1)
-        expect(b[3]).to_equal(0x4E)
+        # @capture(bit_table): little-endian 4-byte FCVTZS register-field layout
+        step("Verify Rd/Rn are folded into the base opcode word 0x4EA1B883")
+        expect(b.len()).to_equal(4)  # oracle: FCVTZS is a fixed 4-byte AArch64 instruction
+        expect(b[0]).to_equal(0x83)  # oracle: byte0 = base 0x00 + Rn(4)*32(128) + Rd(3) = 0x83
+        expect(b[1]).to_equal(0xB8)  # oracle: byte1 unaffected by Rd/Rn
+        expect(b[2]).to_equal(0xA1)  # oracle: byte2 = base opcode bits, unaffected by Rd/Rn
+        expect(b[3]).to_equal(0x4E)  # oracle: byte3 = top opcode byte, unaffected by register fields
 
 # ============================================================================
 # FCVTZU Vd.4S, Vn.4S — base 0x6EA1B800
@@ -216,63 +274,96 @@ describe "emit_fcvtzs_4s — fp32 to signed int32 truncate 4 lanes":
 
 describe "emit_fcvtzu_4s — fp32 to unsigned int32 truncate 4 lanes":
     it "FCVTZU V0.4S, V0.4S encodes to base opcode bytes":
+        # @req REQ-NEON-FP16-016
+        step("Encode FCVTZU V0.4S, V0.4S (Rd=Rn=0)")
         # word = 0x6EA1B800 + 0*32 + 0 = 0x6EA1B800
-        # LE: [0x00, 0xB8, 0xA1, 0x6E]
         var b = emit_fcvtzu_4s(0, 0)
-        expect(b.len()).to_equal(4)
-        expect(b[0]).to_equal(0x00)
-        expect(b[1]).to_equal(0xB8)
-        expect(b[2]).to_equal(0xA1)
-        expect(b[3]).to_equal(0x6E)
+        # @capture(bit_table): little-endian 4-byte FCVTZU base opcode layout
+        step("Verify the emitted bytes equal the ARMv8 base opcode 0x6EA1B800")
+        expect(b.len()).to_equal(4)  # oracle: FCVTZU is a fixed 4-byte AArch64 instruction
+        expect(b[0]).to_equal(0x00)  # oracle: byte0 = Rd field, Rd=0 contributes nothing
+        expect(b[1]).to_equal(0xB8)  # oracle: byte1 = base opcode bits identifying the truncate form
+        expect(b[2]).to_equal(0xA1)  # oracle: byte2 = base opcode bits with Rn=0
+        expect(b[3]).to_equal(0x6E)  # oracle: byte3 = top opcode byte, U=1 selects the unsigned variant
 
     it "FCVTZU V0.4S, V1.4S encodes rn=1":
+        # @req REQ-NEON-FP16-017
+        step("Encode FCVTZU V0.4S, V1.4S (Rn=1)")
         # word = 0x6EA1B800 + 1*32 + 0 = 0x6EA1B820
-        # LE: [0x20, 0xB8, 0xA1, 0x6E]
         var b = emit_fcvtzu_4s(0, 1)
-        expect(b.len()).to_equal(4)
-        expect(b[0]).to_equal(0x20)
-        expect(b[1]).to_equal(0xB8)
-        expect(b[2]).to_equal(0xA1)
-        expect(b[3]).to_equal(0x6E)
+        # @capture(bit_table): little-endian 4-byte FCVTZU Rn=1 layout
+        step("Verify Rn=1 raises byte0 via the Rn*32 term")
+        expect(b.len()).to_equal(4)  # oracle: FCVTZU is a fixed 4-byte AArch64 instruction
+        expect(b[0]).to_equal(0x20)  # oracle: byte0 = base 0x00 + Rn(1)*32 = 0x20
+        expect(b[1]).to_equal(0xB8)  # oracle: byte1 unaffected by Rn
+        expect(b[2]).to_equal(0xA1)  # oracle: byte2 = base opcode bits, unaffected by Rn
+        expect(b[3]).to_equal(0x6E)  # oracle: byte3 = top opcode byte, unaffected by register fields
 
     it "FCVTZU V3.4S, V4.4S encodes rd=3 rn=4 correctly":
+        # @req REQ-NEON-FP16-018
+        step("Encode FCVTZU V3.4S, V4.4S (Rd=3, Rn=4)")
         # word = 0x6EA1B800 + 4*32 + 3 = 0x6EA1B883
-        # LE: [0x83, 0xB8, 0xA1, 0x6E]
         var b = emit_fcvtzu_4s(3, 4)
-        expect(b.len()).to_equal(4)
-        expect(b[0]).to_equal(0x83)
-        expect(b[1]).to_equal(0xB8)
-        expect(b[2]).to_equal(0xA1)
-        expect(b[3]).to_equal(0x6E)
+        # @capture(bit_table): little-endian 4-byte FCVTZU register-field layout
+        step("Verify Rd/Rn are folded into the base opcode word 0x6EA1B883")
+        expect(b.len()).to_equal(4)  # oracle: FCVTZU is a fixed 4-byte AArch64 instruction
+        expect(b[0]).to_equal(0x83)  # oracle: byte0 = base 0x00 + Rn(4)*32(128) + Rd(3) = 0x83
+        expect(b[1]).to_equal(0xB8)  # oracle: byte1 unaffected by Rd/Rn
+        expect(b[2]).to_equal(0xA1)  # oracle: byte2 = base opcode bits, unaffected by Rd/Rn
+        expect(b[3]).to_equal(0x6E)  # oracle: byte3 = top opcode byte, unaffected by register fields
 
 # ============================================================================
 # Property: all variants always return exactly 4 bytes
 # ============================================================================
 
 describe "FP16 conversion emit output length":
-    it "emit_fcvtn_4h always returns 4 bytes":
+    it "emit_fcvtn_4h always returns 4 bytes regardless of register operands":
+        # @req REQ-NEON-FP16-019
+        step("Encode FCVTN V2.4H, V1.4S with non-zero registers")
         var b = emit_fcvtn_4h(1, 2)
-        expect(b.len()).to_equal(4)
+        # @capture(bit_table): FCVTN output length invariant
+        step("Verify the fixed-width AArch64 instruction is exactly 4 bytes")
+        expect(b.len()).to_equal(4)  # oracle: every AArch64 instruction word is 4 bytes wide
 
-    it "emit_fcvtn2_8h always returns 4 bytes":
+    it "emit_fcvtn2_8h always returns 4 bytes regardless of register operands":
+        # @req REQ-NEON-FP16-020
+        step("Encode FCVTN2 V2.8H, V1.4S with non-zero registers")
         var b = emit_fcvtn2_8h(1, 2)
-        expect(b.len()).to_equal(4)
+        # @capture(bit_table): FCVTN2 output length invariant
+        step("Verify the fixed-width AArch64 instruction is exactly 4 bytes")
+        expect(b.len()).to_equal(4)  # oracle: every AArch64 instruction word is 4 bytes wide
 
-    it "emit_fcvtl_4s always returns 4 bytes":
+    it "emit_fcvtl_4s always returns 4 bytes regardless of register operands":
+        # @req REQ-NEON-FP16-021
+        step("Encode FCVTL V2.4S, V1.4H with non-zero registers")
         var b = emit_fcvtl_4s(1, 2)
-        expect(b.len()).to_equal(4)
+        # @capture(bit_table): FCVTL output length invariant
+        step("Verify the fixed-width AArch64 instruction is exactly 4 bytes")
+        expect(b.len()).to_equal(4)  # oracle: every AArch64 instruction word is 4 bytes wide
 
-    it "emit_fcvtl2_4s always returns 4 bytes":
+    it "emit_fcvtl2_4s always returns 4 bytes regardless of register operands":
+        # @req REQ-NEON-FP16-022
+        step("Encode FCVTL2 V2.4S, V1.8H with non-zero registers")
         var b = emit_fcvtl2_4s(1, 2)
-        expect(b.len()).to_equal(4)
+        # @capture(bit_table): FCVTL2 output length invariant
+        step("Verify the fixed-width AArch64 instruction is exactly 4 bytes")
+        expect(b.len()).to_equal(4)  # oracle: every AArch64 instruction word is 4 bytes wide
 
-    it "emit_fcvtzs_4s always returns 4 bytes":
+    it "emit_fcvtzs_4s always returns 4 bytes regardless of register operands":
+        # @req REQ-NEON-FP16-023
+        step("Encode FCVTZS V2.4S, V1.4S with non-zero registers")
         var b = emit_fcvtzs_4s(1, 2)
-        expect(b.len()).to_equal(4)
+        # @capture(bit_table): FCVTZS output length invariant
+        step("Verify the fixed-width AArch64 instruction is exactly 4 bytes")
+        expect(b.len()).to_equal(4)  # oracle: every AArch64 instruction word is 4 bytes wide
 
-    it "emit_fcvtzu_4s always returns 4 bytes":
+    it "emit_fcvtzu_4s always returns 4 bytes regardless of register operands":
+        # @req REQ-NEON-FP16-024
+        step("Encode FCVTZU V2.4S, V1.4S with non-zero registers")
         var b = emit_fcvtzu_4s(1, 2)
-        expect(b.len()).to_equal(4)
+        # @capture(bit_table): FCVTZU output length invariant
+        step("Verify the fixed-width AArch64 instruction is exactly 4 bytes")
+        expect(b.len()).to_equal(4)  # oracle: every AArch64 instruction word is 4 bytes wide
 
 # ============================================================================
 # Property: FCVTN/FCVTN2 differ only in byte[3] (Q bit = bit30)
@@ -280,13 +371,17 @@ describe "FP16 conversion emit output length":
 
 describe "FCVTN vs FCVTN2 Q-bit distinction":
     it "FCVTN and FCVTN2 with same registers match bytes 0-2 and differ at byte[3]":
+        # @req REQ-NEON-FP16-025
+        step("Encode FCVTN and FCVTN2 with identical registers V0.4H/V0.8H, V1.4S")
         var n  = emit_fcvtn_4h(0, 1)
         var n2 = emit_fcvtn2_8h(0, 1)
+        # @capture(bit_table): FCVTN vs FCVTN2 byte-by-byte Q-bit distinction
+        step("Verify the register-field bytes match and only the Q-bit byte differs")
         expect(n[0]).to_equal(n2[0])
         expect(n[1]).to_equal(n2[1])
         expect(n[2]).to_equal(n2[2])
         # FCVTN2 has Q=1 (bit 30), raising byte[3] by 0x40
-        expect(n2[3] - n[3]).to_equal(0x40)
+        expect(n2[3] - n[3]).to_equal(0x40)  # oracle: bit30 (Q=1 selects upper half) adds 0x40 to the top byte
 
 # ============================================================================
 # Property: FCVTZS vs FCVTZU differ only in byte[3] (U bit = bit29)
@@ -294,10 +389,14 @@ describe "FCVTN vs FCVTN2 Q-bit distinction":
 
 describe "FCVTZS vs FCVTZU U-bit distinction":
     it "FCVTZS and FCVTZU with same registers match bytes 0-2 and differ at byte[3]":
+        # @req REQ-NEON-FP16-026
+        step("Encode FCVTZS and FCVTZU with identical registers V0.4S, V1.4S")
         var s = emit_fcvtzs_4s(0, 1)
         var u = emit_fcvtzu_4s(0, 1)
+        # @capture(bit_table): FCVTZS vs FCVTZU byte-by-byte U-bit distinction
+        step("Verify the register-field bytes match and only the U-bit byte differs")
         expect(s[0]).to_equal(u[0])
         expect(s[1]).to_equal(u[1])
         expect(s[2]).to_equal(u[2])
         # FCVTZU has U=1 (bit 29), raising byte[3] by 0x20
-        expect(u[3] - s[3]).to_equal(0x20)
+        expect(u[3] - s[3]).to_equal(0x20)  # oracle: bit29 (U=1 selects unsigned) adds 0x20 to the top byte
