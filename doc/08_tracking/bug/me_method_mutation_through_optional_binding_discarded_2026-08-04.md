@@ -408,3 +408,80 @@ does **not** compile — unrelated `translate_call` trait break, see
 origin tip was not possible and is **not** claimed. All probe and spec runs used
 the pure-Simple self-hosted `bin/simple` in this working copy, interpreter mode
 for the language probes and the default runner for the spec.
+
+---
+
+## Addendum 2026-09-07 — the OPTIONAL-TYPED FIELD variant, and why the documented workaround does not rescue it
+
+Two independent investigations of unrelated WM failures converged on this same
+defect, from different symptoms. Both are broader than what is recorded above,
+in two specific ways.
+
+### 1. The source can be an optional-typed FIELD, not just a local binding
+
+The shape is `class C: backend: SomeTrait?`, then reading that field to call a
+mutating method on the payload. Every advance the method makes is discarded when
+the field is next read, because the read yields a copy.
+
+Isolated with a 30-line reproducer containing no compositor code at all (a
+`Holder` class over a `ScriptedInput`): three pumps of a ONE-event script report
+`seen=3`, not `seen=1`.
+
+### 2. Optionality is the discriminator — not trait-vs-concrete, and not the read form
+
+Measured, one row per variant, all else identical (want 1):
+
+| field type | read form | result |
+|---|---|---|
+| `InputBackend` (trait, plain) | direct | 1 — correct |
+| `ScriptedInput` (concrete, plain) | direct | 1 — correct |
+| `InputBackend?` | `val inp = self.input` | 3 — WRONG |
+| `InputBackend?` | `if val inp = ...` | 3 — WRONG |
+| `InputBackend?` | `if val Some(inp) = ...` | 3 — WRONG |
+| `ScriptedInput?` (concrete, optional) | direct | 3 — WRONG |
+
+This matters for anyone relying on this document: **the `if val Some(x) = opt`
+destructuring recorded above as THE workaround does not fix the field variant.**
+It is row 5 and it is still wrong. A plain concrete optional (row 6) is wrong
+too, so this is not about trait objects or dynamic dispatch.
+
+A free-standing local of the same type, polled twice, advances correctly — so
+the defect is specifically *reading a mutable payload out of an optional-typed
+field*.
+
+Reproduces identically under the default lane and under
+`SIMPLE_EXECUTION_MODE=interpreter`, so it is not JIT-lowering-specific.
+
+### The workaround that DOES work, and the production bug it fixes
+
+Store the mutated payload back into the field explicitly.
+
+This was not academic. `Compositor._drain_input_source`
+(`src/os/compositor/compositor.spl`) read `input: InputBackend?` into a local,
+drained it, and never wrote it back. Within one call the local kept its advance,
+so the queue got exactly one event and looked right; across frames the field
+reset, so **the WM re-delivered every input event on every frame**. A single
+wheel notch scrolled 40, then 80, then 120. This is a real desktop-facing defect,
+not only a test artifact — it was found through a red spec but it affects the
+running compositor.
+
+Fixed by adding `self.input = inp` after the drain loop (and turning the loop's
+early `return` into a `break` so the write-back is not skipped on the common
+path). Pinned by `delivers each scripted event once no matter how many frames
+run` in `test/01_unit/os/compositor/compositor_input_unification_spec.spl`,
+sabotage-verified: removing the write-back flips that example RED.
+
+### Why this stayed hidden
+
+Sibling examples in the same spec are idempotent under replay, or clamp far
+above the doubled value (a wheel test using 1000 x 7 against a 4000 clamp cannot
+see double delivery at all). Only an example whose expected value is small and
+exact exposes it.
+
+### Still open
+
+The underlying language/runtime defect is unchanged and still OPEN. Lint rule
+`OPTME001` flags the local-binding shape; it does **not** flag the field shape
+documented here, which is the more dangerous one because the payload outlives
+the expression. Extending `OPTME001` to optional-typed fields whose payload has
+`me` methods is the natural next step.
