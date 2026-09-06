@@ -329,6 +329,28 @@ You cannot approve your own PR (`Review Can not approve your own pull
 request`), and `required_approving_review_count` is 0, so approval never
 unblocks anything.
 
+**A clean merge can still be a silent rewind — check before you push.** Four
+PRs on 2026-09-06 carried stale merge snapshots that DELETED landed work while
+merging cleanly: `git merge-tree` reported no conflict, CI was green, and the
+deletions sat in shared append-only meta files the author never opened
+(registries and gate ledgers such as
+`doc/00_llm_process/knowledge_registry.sdn`,
+`doc/00_llm_process/llm_process_manifest.sdn`,
+`config/check/must_check_gates.sdn` — every lane appends a row, and a snapshot
+taken before three other lanes appended theirs removes all three).
+
+```sh
+git diff origin/main..HEAD -- <shared meta file> | grep -c '^-[^-]'   # must be 0
+```
+
+`^-[^-]` skips the `---` header so the count is real removed lines. Non-zero on
+an append-only file means rebase onto `origin/main` and re-apply your row — never
+force the snapshot through. Only valid for genuinely append-only files; where
+lines legitimately change, read the diff instead of counting it. Same family:
+`doc/08_tracking/bug/aspect_dynload_facet_implementation_deleted_by_merge_restore_2026-09-05.md`,
+`.../sffi_authority_group2_stale_snapshot_clobber_2026-09-02.md`. Protocol:
+`.claude/rules/vcs.md` § "Sync must never clobber".
+
 ## Container test runs
 
 **Never `COPY . /opt/simple` (or any whole-repo COPY) into a test-isolation
@@ -561,6 +583,16 @@ measured **100**.
 - The gate's cache (`.simple/cache/sspec-score-gate/`) keys on path + source
   hash only; after touching `src/app/sspec_maintain/`, delete it or old scores
   are reported.
+
+**Before you file a scorer defect, re-read the two rules above.** The first two
+traps in this list — `# oracle:` that must TRAIL the `expect(` on the SAME line
+(ORA-003), and a `REQ-` id declared outside any `it` body clamping the effective
+score to 49 (TRC-003) — account for most spec failures here, and both were
+reported as scorer bugs by workers on 2026-09-05 and again on 2026-09-06. Both
+reports were FALSE: the scorer was implementing the documented rule, and the
+specs were wrong. Reproduce against `scripts/check/sspec-train.shs` (per-rule
+histogram, so you can see WHICH rule deducted) before writing a bug record; a
+"the scorer is broken" claim from an agent is not evidence.
 
 ### Measuring on this host (no full CLI deployed)
 

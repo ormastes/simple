@@ -25,3 +25,12 @@ Maintain process knowledge for the `lib` layer: owned source, architecture links
 When project work changes this layer's public contract, source ownership, tests, architecture, or verification requirements, update this skill with current links and handoff notes.
 
 Template: [layer_skill.md](../../template/layer_skill.md)
+
+## Session update 2026-09-06 — silent-rewind merges
+
+`src/lib` shares append-only registry/manifest files with several parallel
+lanes, so it is exposed to the stale-snapshot merge class that deleted landed
+work in four PRs on 2026-09-06 without producing a single conflict. The
+detection recipe (`git diff origin/main..HEAD -- <shared meta file> |
+grep -c '^-[^-]'` must be `0`) and the caveats are on the
+[app layer expert](../app/skill.md) § Session update 2026-09-06.
