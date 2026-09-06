@@ -1,12 +1,28 @@
 """
-Aspect dynload lifecycle ownership contract.
-
-The behavioral example makes the CAS gate bite: a second owner cannot enter
-until the first publishes release.  The source contract pins the product
-bridge, typed bounded-wait outcomes, bounded retention, and the absence of
-retry sleeps.  Native OS-thread contention is covered by the adjacent
-`aspect_lifecycle_gate_native.spl` executable probe.
+## Purpose and audience
+Aspect dynload lifecycle ownership contract. The behavioral example makes
+the CAS gate bite: a second owner cannot enter until the first publishes
+release. The source contract pins the product bridge, typed bounded-wait
+outcomes, bounded retention, and the absence of retry sleeps. For loader
+engineers and aspect-pack authors.
+## Operator workflow
+./src/compiler_rust/target/bootstrap/simple run test/01_unit/compiler/loader/aspect_lifecycle_gate_spec.spl
+A healthy run reports 6 executed, 0 failed, exit 0.
+## Compatibility and limitations
+Native OS-thread contention is covered by the adjacent
+`aspect_lifecycle_gate_native.spl` executable probe, not here; the source
+scenarios read shipped source as a contract surface and assert runtime CAS
+behavior only in the first scenario.
+## Verification guidance and troubleshooting
+Rerun with the command above. A refusal-path failure means the compare-
+exchange loop or the owner-sequence wrap guard drifted; a source-contract
+failure means the loader bridge lost its bounded-wait or bounded-retention
+wiring. Never soften the sleeps-free contract to make a failure green.
 """
+# Lifecycle: doc/01_research/domain/aspect_dynload.md ;
+# doc/03_plan/compiler/aspect_dynload/aspect_dynload_lane_plan_2026-08-19.md ;
+# doc/04_architecture/compiler/aspect_dynload/aspect_final_unpin_registry_v2_2026-08-26.md ;
+# doc/05_design/language/aop/aspect_facet_dynload_smf_pack_design_2026-08-04.md
 
 use std.spec.{describe, it, expect, step}
 use compiler.loader.aspect_lifecycle_gate.{
@@ -31,8 +47,11 @@ fn native_probe_source() -> text:
     rt_file_read_text(
         "test/01_unit/compiler/loader/aspect_lifecycle_gate_native.spl")
 
+# @manual_section: aspect lifecycle CAS ownership
 describe "aspect lifecycle CAS ownership":
     it "admits one owner and refuses a concurrent nonblocking claimant":
+        # @req REQ-LOADER-ASPECT-CAS-001
+        # @capture(bit_table): CAS owner, refusal, and exit transition table for the gate
         step("Acquire the process-wide owner with one CAS")
         val first = aspect_lifecycle_gate_try_enter_v1("spec/first-owner")
         expect(first.acquired).to_equal(true)
@@ -52,21 +71,32 @@ describe "aspect lifecycle CAS ownership":
         expect(aspect_lifecycle_gate_locked_v1()).to_equal(false)
 
     it "keeps waiting bounded and sleep-free in source":
+        # @req REQ-LOADER-ASPECT-CAS-002
+        # @capture(bit_table): bounded-wait source-contract token table
+        step("Pin the bounded wait budget and the sleep-free CAS loop in shipped source")
         val source = gate_source()
-        expect(ASPECT_LIFECYCLE_WAIT_BUDGET_V1).to_equal(65536)
+        expect(ASPECT_LIFECYCLE_WAIT_BUDGET_V1).to_equal(65536)  # oracle: the frozen wait budget v1 — 2^16 bounded yields
         expect(source).to_contain("while yields < ASPECT_LIFECYCLE_WAIT_BUDGET_V1")
         expect(source).to_contain("thread_yield()")
         expect(source).to_contain("compare_exchange(")
         expect(source).to_contain("owner_sequence << 16")
         expect(source).to_contain(
             "current >= ASPECT_LIFECYCLE_MAX_OWNER_SEQUENCE_V1")
-        expect(source.contains("current == 9223372036854775807")).to_equal(false)
-        expect(source.contains(".store(")).to_equal(false)
-        expect(source.contains("fetch_add")).to_equal(false)
-        expect(source.contains("thread_sleep")).to_equal(false)
-        expect(source.contains("while true")).to_equal(false)
+        val wraps_owner_sequence_not_i64_max = source.contains("current == 9223372036854775807")
+        expect(wraps_owner_sequence_not_i64_max).to_equal(false)
+        val avoids_strong_store = source.contains(".store(")
+        expect(avoids_strong_store).to_equal(false)
+        val avoids_fetch_add = source.contains("fetch_add")
+        expect(avoids_fetch_add).to_equal(false)
+        val stays_sleep_free = source.contains("thread_sleep")
+        expect(stays_sleep_free).to_equal(false)
+        val avoids_unbounded_loop = source.contains("while true")
+        expect(avoids_unbounded_loop).to_equal(false)
 
     it "routes product publication pins and unload through the owner bridge":
+        # @req REQ-LOADER-ASPECT-CAS-003
+        # @capture(bit_table): owner-bridge wiring token table from the loader source
+        step("Pin the loader bridge's publication, unload, and retention wiring")
         val source = loader_source()
         expect(source).to_contain("aspect_lifecycle_gate_enter_v1(")
         expect(source).to_contain("admission.waited_same_operation")
@@ -81,14 +111,21 @@ describe "aspect lifecycle CAS ownership":
         expect(source).to_contain("MODULE_ASPECT_MAX_RETAINED_SNAPSHOTS_V1")
 
     it "uses a deterministic native contention handshake":
+        # @req REQ-LOADER-ASPECT-CAS-004
+        # @capture(bit_table): native probe handshake token table
+        step("Pin the native probe's deterministic contention handshake")
         val source = native_probe_source()
         expect(source).to_contain("refused_claims")
         expect(source).to_contain(
             "bounded_wait_for(refused_claims, CONTENDERS)")
         expect(source).to_contain("aspect_lifecycle_gate_try_enter_v1(")
-        expect(source.contains("while holds < 64")).to_equal(false)
+        val hardcodes_hold_count = source.contains("while holds < 64")
+        expect(hardcodes_hold_count).to_equal(false)
 
     it "keeps startup rollback and unload history explicitly bounded":
+        # @req REQ-LOADER-ASPECT-CAS-005
+        # @capture(bit_table): rollback and tombstone-retention token table
+        step("Pin startup rollback restoration and bounded unload tombstones")
         val source = aspect_source()
         expect(source).to_contain("val generation_before = _ld_generation[ld]")
         expect(source).to_contain("while rollback > 0")
@@ -97,10 +134,13 @@ describe "aspect lifecycle CAS ownership":
         expect(source).to_contain("_fc_unloaded = _fc_unloaded.remove(evicted)")
 
     it "does not fabricate executable reclamation without a mapping receipt":
+        # @req REQ-LOADER-ASPECT-CAS-006
+        # @capture(bit_table): mapping-receipt guard token table
+        step("Pin the executable-reclamation mapping-receipt guard")
         val source = loader_source()
         expect(source).to_contain("It does NOT claim executable unmap")
         expect(source).to_contain("no executable mapping receipt")
         expect(source).to_contain("after final unpin")
         expect(source).to_contain(
             "calling native_free_exec_memory here without that receipt is forbidden")
-        expect(source.split("native_free_exec_memory").len()).to_equal(2)
+        expect(source.split("native_free_exec_memory").len()).to_equal(2)  # oracle: exactly one call site, so one split separator — split yields 2 parts

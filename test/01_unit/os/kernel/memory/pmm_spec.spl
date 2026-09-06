@@ -1,59 +1,62 @@
-# Purpose and audience: executable specification evidence for the owning engineering team.
-# @req REQ-SSPEC-OS
-# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+use std.spec.{describe, it, expect}
+use std.spec.step
+use os.kernel.types.memory_types.{PhysAddr, PageFrame}
+use os.kernel.memory.pmm.{PhysMemManager, pmm_is_live_contiguous_allocation, MAX_PHYS_PAGES, BITMAP_SIZE_BYTES}
 
-# Purpose and audience: executable specification evidence for the owning engineering team.
-# @req REQ-SSPEC-OS
-# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
-
+# @req: REQ-SSPEC-OS — behavior under test holds under execution.
 """
 ## Purpose and audience
 
-Purpose: the behavior asserted in this spec  Audience: engineers reading this spec to confirm the behavior still holds.
+Executable specification for the bitmap-based physical page frame
+allocator (PhysMemManager) and its PageFrame/PhysAddr type-level
+conversions. Audience: kernel memory engineers confirming allocation
+bookkeeping still holds before a change lands.
 
 ## Operator workflow
 
 1. Run `bin/simple test test/01_unit/os/kernel/memory/pmm_spec.spl`.
-2. Every scenario must pass; a failure is a regression in the behavior under test.
+2. Every scenario must pass; a failure is a regression in PMM behavior.
 
 ## Compatibility and limitations
 
-Covers the behavior asserted here; platform-specific behavior is out of scope.
-"""
+The allocator's bitmap access uses mmio_read8/mmio_write8, which requires
+real memory-mapped hardware, so bitmap I/O itself is out of scope; these
+scenarios cover the state-tracking fields, PageFrame conversions, the
+contiguous-allocation registry, and the module constants.
 
-# doc-path: doc/01_research/local/pmm_spec.md
-# doc-path: doc/03_plan/sys_test/pmm_spec.md
-# doc-path: doc/04_architecture/pmm_spec.md
-# doc-path: doc/05_design/pmm_spec_oracles.md
+## Verification guidance and troubleshooting
+
+Re-run the single file to reproduce; a failing scenario names the PMM
+operation and the expected value. Registry scenarios exercise only the
+fixed registry arrays — no mmio — so a failure there is a pure bookkeeping
+regression, not a hardware issue.
+"""
+# Lifecycle:
+# doc/01_research/domain/sspec_documentization_maintenance.md
+# doc/03_plan/sspec_modernization_plan.md
+# doc/04_architecture/sspec_documentization_maintenance.md
+# doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+# @manual_section: pmm-bookkeeping
 # @manual: primary
 
-"""
-# Physical Memory Manager Specification
 
-**Feature IDs:** #OS-004
-**Category:** Runtime
-**Difficulty:** 3/5
-**Status:** Implemented
-**Requirements:** N/A
-**Plan:** N/A
-**Design:** N/A
-**Research:** N/A
+# ============================================================================
+# Helper: PhysMemManager constructor
+# ============================================================================
+#
+# Constructs the REAL os.kernel.memory.pmm.PhysMemManager struct. Its
+# total_memory()/free_memory()/used_pages() methods are pure arithmetic over
+# the struct's own fields (bitmap_addr, total_pages, free_pages,
+# last_alloc_index) — only the separate _bitmap_* helpers in pmm.spl touch
+# mmio, and those are out of scope here (see docstring above).
 
-## Overview
-
-Tests for the bitmap-based physical page frame allocator (PhysMemManager).
-Tests allocate/free logic using the PhysMemManager struct directly.
-
-Note: The actual PMM uses mmio_read/write for bitmap access, which requires
-real memory-mapped hardware. These tests validate the data structure logic
-and type-level operations (PageFrame, PhysAddr conversions) rather than
-the bitmap I/O operations that require bare-metal execution.
-"""
-
-use std.spec.{describe, it, expect}
-use std.spec.step
-use os.kernel.types.memory_types.{PhysAddr, PageFrame}
-use os.kernel.memory.pmm.{PhysMemManager, pmm_is_live_contiguous_allocation}
+fn _make_pmm(bitmap_addr: u64, total_pages: u64, free_pages: u64) -> PhysMemManager:
+    PhysMemManager(
+        bitmap_addr: bitmap_addr,
+        total_pages: total_pages,
+        free_pages: free_pages,
+        last_alloc_index: 0
+    )
 
 
 # ============================================================================
@@ -70,42 +73,69 @@ describe "PhysMemManager":
 
     describe "construction":
         it "initializes with zero pages":
+            # @req REQ-SSPEC-OS
+            # @capture(statistics): total_pages and free_pages after a zero-page construct
+            step("Construct a manager over an empty physical range")
             val pmm = _make_pmm(0, 0, 0)
-            expect(pmm.total_pages).to_equal(0)
-            expect(pmm.free_pages).to_equal(0)
+            expect(pmm.total_pages).to_equal(0)  # oracle: no pages were handed to the constructor
+            expect(pmm.free_pages).to_equal(0)  # oracle: an empty range has nothing free
 
         it "tracks total pages":
+            # @req REQ-SSPEC-OS
+            # @capture(statistics): total_pages for a 1024-page range
+            step("Construct a manager over a 1024-page range at 1 MiB")
             val pmm = _make_pmm(0x100000, 1024, 1024)
-            expect(pmm.total_pages).to_equal(1024)
+            expect(pmm.total_pages).to_equal(1024)  # oracle: constructor stores the range size verbatim
 
         it "tracks free pages":
+            # @req REQ-SSPEC-OS
+            # @capture(statistics): free_pages when half of 1024 pages start free
+            step("Construct a manager whose free count is half its total")
             val pmm = _make_pmm(0x100000, 1024, 512)
-            expect(pmm.free_pages).to_equal(512)
+            expect(pmm.free_pages).to_equal(512)  # oracle: constructor stores the free count verbatim
 
         it "stores bitmap address":
+            # @req REQ-SSPEC-OS
+            # @capture(statistics): bitmap_addr round-trip of 0xDEAD0000
+            step("Construct a manager with a bitmap at 0xDEAD0000")
             val pmm = _make_pmm(0xDEAD0000, 256, 256)
-            expect(pmm.bitmap_addr).to_equal(0xDEAD0000)
+            expect(pmm.bitmap_addr).to_equal(0xDEAD0000)  # oracle: constructor stores the bitmap base verbatim
 
         it "initializes last_alloc_index to zero":
+            # @req REQ-SSPEC-OS
+            # @capture(statistics): last_alloc_index hint at construction time
+            step("Construct a fresh manager and read the next-fit hint")
             val pmm = _make_pmm(0x100000, 1024, 1024)
-            expect(pmm.last_alloc_index).to_equal(0)
+            expect(pmm.last_alloc_index).to_equal(0)  # oracle: a fresh allocator starts its search at frame 0
 
     describe "memory queries":
         it "total_memory returns total_pages * 4096":
+            # @req REQ-SSPEC-OS
+            # @capture(statistics): total_memory for 256 managed pages
+            step("Query total memory for a 256-page manager")
             val pmm = _make_pmm(0x100000, 256, 256)
-            expect(pmm.total_memory()).to_equal(256 * 4096)
+            expect(pmm.total_memory()).to_equal(256 * 4096)  # oracle: product multiplies total_pages by PAGE_SIZE (4096)
 
         it "free_memory returns free_pages * 4096":
+            # @req REQ-SSPEC-OS
+            # @capture(statistics): free_memory for 128 free pages
+            step("Query free memory when 128 of 256 pages are free")
             val pmm = _make_pmm(0x100000, 256, 128)
-            expect(pmm.free_memory()).to_equal(128 * 4096)
+            expect(pmm.free_memory()).to_equal(128 * 4096)  # oracle: product multiplies free_pages by PAGE_SIZE (4096)
 
         it "used_pages returns total - free":
+            # @req REQ-SSPEC-OS
+            # @capture(statistics): used_pages as total minus free
+            step("Query used pages for a partially allocated range")
             val pmm = _make_pmm(0x100000, 1000, 600)
-            expect(pmm.used_pages()).to_equal(400)
+            expect(pmm.used_pages()).to_equal(400)  # oracle: 1000 total minus 600 free leaves 400 used
 
         it "total_memory for zero pages is zero":
+            # @req REQ-SSPEC-OS
+            # @capture(statistics): total_memory for an empty manager
+            step("Query total memory for an empty manager")
             val pmm = _make_pmm(0, 0, 0)
-            expect(pmm.total_memory()).to_equal(0)
+            expect(pmm.total_memory()).to_equal(0)  # oracle: zero pages times PAGE_SIZE is zero bytes
 
 
 # ============================================================================
@@ -115,71 +145,101 @@ describe "PhysMemManager":
 describe "PageFrame allocation types":
     describe "PageFrame construction":
         it "creates a frame with valid pfn":
+            # @req REQ-SSPEC-OS
+            # @capture(statistics): pfn field round-trip for frame 0
+            step("Construct a page frame numbered 0")
             val frame = PageFrame(pfn: 0)
-            expect(frame.pfn).to_equal(0)
+            expect(frame.pfn).to_equal(0)  # oracle: constructor stores the frame number verbatim
 
         it "pfn maps to correct physical address":
+            # @req REQ-SSPEC-OS
+            # @capture(statistics): pfn 10 converted to a physical address
+            step("Convert frame 10 to its physical address")
             val frame = PageFrame(pfn: 10)
             val addr = frame.to_phys_addr()
-            expect(addr.addr).to_equal(10 * 4096)
+            expect(addr.addr).to_equal(10 * 4096)  # oracle: product shifts the pfn by PAGE_SIZE (4096)
 
     describe "PageFrame round-trip":
         it "alloc index 0 maps to pfn 0":
+            # @req REQ-SSPEC-OS
+            # @capture(statistics): pfn 0 address round-trip back to pfn
+            step("Round-trip frame 0 through address conversion and back")
             val frame = PageFrame(pfn: 0)
             val addr = frame.to_phys_addr()
-            expect(addr.addr).to_equal(0)
+            expect(addr.addr).to_equal(0)  # oracle: frame 0 sits at physical byte 0
             val back = PageFrame.from_phys_addr(addr)
-            expect(back.pfn).to_equal(0)
+            expect(back.pfn).to_equal(0)  # oracle: converting back recovers the original frame number
 
         it "alloc index 1023 maps to address 4190208":
+            # @req REQ-SSPEC-OS
+            # @capture(statistics): pfn 1023 converted to a physical address
+            step("Convert frame 1023 to its physical address")
             val frame = PageFrame(pfn: 1023)
             val addr = frame.to_phys_addr()
-            expect(addr.addr).to_equal(1023 * 4096)
+            expect(addr.addr).to_equal(1023 * 4096)  # oracle: product shifts the pfn by PAGE_SIZE (4096)
 
     describe "simulated alloc/free state tracking":
         it "decrementing free_pages simulates allocation":
+            # @req REQ-SSPEC-OS
+            # @capture(statistics): free and used counts after one simulated allocation
+            step("Allocate one page against a fully free 100-page manager")
             var pmm = _make_pmm(0x100000, 100, 100)
             # Simulate allocating a page
             pmm.free_pages = pmm.free_pages - 1
-            expect(pmm.free_pages).to_equal(99)
-            expect(pmm.used_pages()).to_equal(1)
+            expect(pmm.free_pages).to_equal(99)  # oracle: one allocation leaves 99 free
+            expect(pmm.used_pages()).to_equal(1)  # oracle: 100 total minus 99 free is 1 used
 
         it "incrementing free_pages simulates freeing":
+            # @req REQ-SSPEC-OS
+            # @capture(statistics): free and used counts after one simulated free
+            step("Free one page against a half-allocated manager")
             var pmm = _make_pmm(0x100000, 100, 50)
             # Simulate freeing a page
             pmm.free_pages = pmm.free_pages + 1
-            expect(pmm.free_pages).to_equal(51)
-            expect(pmm.used_pages()).to_equal(49)
+            expect(pmm.free_pages).to_equal(51)  # oracle: freeing one page raises the count to 51
+            expect(pmm.used_pages()).to_equal(49)  # oracle: 100 total minus 51 free is 49 used
 
         it "cannot allocate when free_pages is zero":
+            # @req REQ-SSPEC-OS
+            # @capture(statistics): allocation verdict against an exhausted manager
+            step("Attempt an allocation from an exhausted manager")
             val pmm = _make_pmm(0x100000, 100, 0)
             val can_alloc = pmm.free_pages > 0
-            expect(can_alloc).to_equal(false)
+            expect(can_alloc).to_equal(false)  # oracle: zero free pages must deny the allocation
 
         it "free then re-alloc restores count":
+            # @req REQ-SSPEC-OS
+            # @capture(statistics): free count after a free followed by a re-allocation
+            step("Free one page then allocate it again")
             var pmm = _make_pmm(0x100000, 100, 99)
             # Free one page
             pmm.free_pages = pmm.free_pages + 1
-            expect(pmm.free_pages).to_equal(100)
+            expect(pmm.free_pages).to_equal(100)  # oracle: the free raises the count back to the total
             # Allocate again
             pmm.free_pages = pmm.free_pages - 1
-            expect(pmm.free_pages).to_equal(99)
+            expect(pmm.free_pages).to_equal(99)  # oracle: the re-allocation restores the prior count
 
         it "next-fit hint advances on allocation":
+            # @req REQ-SSPEC-OS
+            # @capture(statistics): next-fit hint position across two allocations
+            step("Advance the next-fit hint across two simulated allocations")
             var pmm = _make_pmm(0x100000, 100, 100)
             # Simulate allocation at index 0, hint moves to 1
             pmm.last_alloc_index = 1
-            expect(pmm.last_alloc_index).to_equal(1)
+            expect(pmm.last_alloc_index).to_equal(1)  # oracle: after frame 0 the hint points at frame 1
             # Simulate allocation at index 1, hint moves to 2
             pmm.last_alloc_index = 2
-            expect(pmm.last_alloc_index).to_equal(2)
+            expect(pmm.last_alloc_index).to_equal(2)  # oracle: after frame 1 the hint points at frame 2
 
         it "next-fit hint wraps around":
+            # @req REQ-SSPEC-OS
+            # @capture(statistics): next-fit hint wrapping past the last frame
+            step("Wrap the next-fit hint past the final frame")
             var pmm = _make_pmm(0x100000, 100, 100)
             pmm.last_alloc_index = 99
             # Next alloc wraps to 0
             pmm.last_alloc_index = (pmm.last_alloc_index + 1) % pmm.total_pages
-            expect(pmm.last_alloc_index).to_equal(0)
+            expect(pmm.last_alloc_index).to_equal(0)  # oracle: the hint wraps modulo the page count back to frame 0
 
 
 # ============================================================================
@@ -188,33 +248,23 @@ describe "PageFrame allocation types":
 
 describe "PMM constants":
     it "PAGE_SIZE is 4096":
-        expect(4096).to_equal(4096)
+        # @req REQ-SSPEC-OS
+        # @capture(statistics): one-page total memory reported by the product
+        step("Ask the product allocator for the byte size of one page")
+        val pmm = _make_pmm(0, 1, 1)
+        expect(pmm.total_memory()).to_equal(4096)  # oracle: product computes total_pages * PAGE_SIZE with total_pages 1
 
     it "MAX_PHYS_PAGES covers 4GB":
-        # 4GB / 4KB = 1,048,576 pages
-        expect(1048576).to_equal(1048576)
+        # @req REQ-SSPEC-OS
+        # @capture(statistics): product maximum physical page count
+        step("Read the maximum physical page count from the product module")
+        expect(MAX_PHYS_PAGES).to_equal(1048576)  # oracle: 4GB of addressable memory divided into 4KB pages
 
     it "BITMAP_SIZE_BYTES is MAX_PHYS_PAGES / 8":
-        expect(131072).to_equal(1048576 / 8)
-
-
-# ============================================================================
-# Helper: PhysMemManager constructor
-# ============================================================================
-#
-# Constructs the REAL os.kernel.memory.pmm.PhysMemManager struct. Its
-# total_memory()/free_memory()/used_pages() methods are pure arithmetic over
-# the struct's own fields (bitmap_addr, total_pages, free_pages,
-# last_alloc_index) — only the separate _bitmap_* helpers in pmm.spl touch
-# mmio, and those are out of scope here (see file docstring above).
-
-fn _make_pmm(bitmap_addr: u64, total_pages: u64, free_pages: u64) -> PhysMemManager:
-    PhysMemManager(
-        bitmap_addr: bitmap_addr,
-        total_pages: total_pages,
-        free_pages: free_pages,
-        last_alloc_index: 0
-    )
+        # @req REQ-SSPEC-OS
+        # @capture(statistics): product bitmap byte size against one bit per page
+        step("Compare the product bitmap size against one bit per page")
+        expect(BITMAP_SIZE_BYTES).to_equal(MAX_PHYS_PAGES / 8)  # oracle: one bitmap bit per page, eight bits per byte
 
 
 # ============================================================================
@@ -230,10 +280,19 @@ fn _make_pmm(bitmap_addr: u64, total_pages: u64, free_pages: u64) -> PhysMemMana
 
 describe "PMM contiguous-allocation registry":
     it "reports no live allocation for an unrecorded base":
-        expect(pmm_is_live_contiguous_allocation(0x200000, 4)).to_equal(false)
+        # @req REQ-SSPEC-OS
+        # @capture(statistics): registry verdict for an unrecorded base address
+        step("Query the registry for a base it never recorded")
+        expect(pmm_is_live_contiguous_allocation(0x200000, 4)).to_equal(false)  # oracle: nothing was registered at 0x200000
 
     it "rejects a zero page count":
-        expect(pmm_is_live_contiguous_allocation(0x200000, 0)).to_equal(false)
+        # @req REQ-SSPEC-OS
+        # @capture(statistics): registry verdict for a zero-length range
+        step("Query the registry with a zero-length range")
+        expect(pmm_is_live_contiguous_allocation(0x200000, 0)).to_equal(false)  # oracle: an empty range can never be live
 
     it "rejects a base that is not page aligned":
-        expect(pmm_is_live_contiguous_allocation(0x200001, 4)).to_equal(false)
+        # @req REQ-SSPEC-OS
+        # @capture(statistics): registry verdict for an unaligned base address
+        step("Query the registry with an unaligned base address")
+        expect(pmm_is_live_contiguous_allocation(0x200001, 4)).to_equal(false)  # oracle: 0x200001 is not page aligned so the registry must deny it

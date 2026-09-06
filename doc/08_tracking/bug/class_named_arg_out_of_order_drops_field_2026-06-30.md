@@ -67,3 +67,35 @@ In the interpreter's class-literal evaluation, bind each named argument to its
 field **by name** (match the declared field set), not positionally. Likely in
 the semantic/eval path for struct/class literal construction. Out of scope for
 the PrivilegeStore task (pure-Simple lib work, no compiler rebuild).
+
+## Re-reproduction attempt 2026-09-06 — NOT REPRODUCIBLE on the current seed
+
+Host: `bin/release/aarch64-unknown-linux-gnu/simple`, 50093192 bytes,
+mtime 2026-09-06 09:59 (aarch64 Linux), `SIMPLE_EXECUTION_MODE=interpret`.
+
+Fixture (`build/wi/r_namedarg.spl`) — named args supplied in an order that does
+not match the declaration order, with a third field so a simple two-way swap
+cannot accidentally look correct:
+
+```simple
+class Point:
+    var x: i64 = 0
+    var y: i64 = 0
+    var z: i64 = 0
+
+fn main() -> void:
+    val p = Point(z: 3, x: 1, y: 2)
+    print("out-of-order named args -> x={p.x} y={p.y} z={p.z} (expected 1 2 3)")
+```
+
+Observed:
+
+```
+out-of-order named args -> x=1 y=2 z=3 (expected 1 2 3)
+```
+
+Every field lands on its declared name. No field is dropped.
+
+Scope: the **Rust seed's** interpreter lane. The pure-Simple interpreter
+(`test_interp.spl`, the file the work package attributed this row to) was not
+separately measured.

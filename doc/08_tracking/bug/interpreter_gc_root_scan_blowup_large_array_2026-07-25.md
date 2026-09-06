@@ -86,3 +86,28 @@ loop with and without that instance in scope.
   the same function, 120s+ and still not done.
 - `probe_engine_loadfont_separate_fn.spl` — same load moved to a separate function,
   caller still holds `Engine2D`; same blowup.
+
+## Re-verification 2026-09-06 (bug-db closeout pass) — STILL OPEN; a cheap synthetic repro does NOT reproduce it
+
+`bug_db.sdn` carries this row as `fix-implemented-verification-pending`, which
+contradicts this doc's own explicit status ("root-caused, NOT fixed") — no
+"Fix" section exists anywhere in this doc. No fix has landed.
+
+Attempted the doc's own suggested cheap synthetic repro (allocate one large
+class instance holding a `[i64]`, keep it alive, then time an unrelated
+large-array build loop): building a `BigThing` with a 200,000-element array,
+then running a 200,000-push loop with it alive vs. not, completed in 0.39s
+total under `SIMPLE_EXECUTION_MODE=interpreter` on this host's deployed seed
+— no measurable slowdown. This does **not** demonstrate the bug is fixed: the
+doc is explicit that the trigger is specific to font/TTF loading with a live
+`Engine2D` (many small field writes / array touches during
+`FontRasterizer` construction), not merely "any large object alive during any
+array build" — the synthetic repro attempted here does not reproduce the
+triggering shape, so it neither confirms nor refutes the defect. Reproducing
+the real defect would require the original `graphics_2d_showcase.spl` /
+`FontRenderer.try_load_runtime_ttf` + `Engine2D.create_offscreen` combination,
+which is expensive (the doc reports 2+ minutes and rising, killed at a 120s
+bound) and was not re-run here.
+
+**Conclusion: STILL BROKEN** (per this doc's own unambiguous status; not
+independently re-confirmed against the expensive real trigger in this pass).
