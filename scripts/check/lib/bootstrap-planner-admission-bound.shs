@@ -172,7 +172,7 @@ bootstrap_planner_v2_verify_structure() {
 # the directory to measured content stops a forger reusing an admission
 # directory after changing the runtime or source-closure it claims.
 bootstrap_planner_v2_admission_dir() {
-    printf '%s\n' "$1/build/bootstrap/admission/$2"
+    printf '%s\n' "$1/admission/$2"
 }
 
 # The exact argv the producer must exec the planner with, one element per line.
@@ -262,25 +262,41 @@ bootstrap_planner_v2_verify_bound() {
     bootstrap_planner_v2_root=$(bootstrap_planner_v2_canonical_dir "$2") || return 1
 
     bootstrap_planner_v2_scope=$(bootstrap_planner_v2_field cache_scope_key "$bootstrap_planner_v2_receipt") || return 1
-    bootstrap_planner_v2_adm=$(bootstrap_planner_v2_admission_dir "$bootstrap_planner_v2_root" "$bootstrap_planner_v2_scope")
 
     # Parent-authority artifacts must share one real stage2 directory beneath
-    # the repository's configurable build output.  Do not hardcode the default
-    # build/bootstrap name: bootstrap-from-scratch exposes --output.
+    # either the repository build tree or the explicitly allowlisted external
+    # bootstrap output. Do not infer trust from an arbitrary absolute path.
     bootstrap_planner_v2_parent=$(bootstrap_planner_v2_field parent_compiler_path "$bootstrap_planner_v2_receipt") || return 1
     bootstrap_planner_v2_sanity=$(bootstrap_planner_v2_field parent_stage2_sanity_path "$bootstrap_planner_v2_receipt") || return 1
     bootstrap_planner_v2_provenance=$(bootstrap_planner_v2_field parent_stage2_provenance_path "$bootstrap_planner_v2_receipt") || return 1
     for bootstrap_planner_v2_got in "$bootstrap_planner_v2_parent" \
         "$bootstrap_planner_v2_sanity" "$bootstrap_planner_v2_provenance"; do
-        case "$bootstrap_planner_v2_got" in
-            "$bootstrap_planner_v2_root"/build/*/stage2/*) ;;
-            *) return 1 ;;
-        esac
         case "$bootstrap_planner_v2_got" in *..*) return 1 ;; esac
     done
     bootstrap_planner_v2_parent_dir=$(dirname -- "$bootstrap_planner_v2_parent") || return 1
     [ "$(dirname -- "$bootstrap_planner_v2_sanity")" = "$bootstrap_planner_v2_parent_dir" ] || return 1
     [ "$(dirname -- "$bootstrap_planner_v2_provenance")" = "$bootstrap_planner_v2_parent_dir" ] || return 1
+    bootstrap_planner_v2_stage2_dir=$(dirname -- "$bootstrap_planner_v2_parent_dir") || return 1
+    [ "$(basename -- "$bootstrap_planner_v2_stage2_dir")" = stage2 ] || return 1
+    bootstrap_planner_v2_output=$(dirname -- "$bootstrap_planner_v2_stage2_dir") || return 1
+    bootstrap_planner_v2_output=$(bootstrap_planner_v2_canonical_dir \
+        "$bootstrap_planner_v2_output") || return 1
+    case "$bootstrap_planner_v2_output" in
+        "$bootstrap_planner_v2_root"/build/*) ;;
+        *)
+            bootstrap_planner_v2_external=${SIMPLE_BOOTSTRAP_EXTERNAL_OUTPUT_ROOT:-}
+            [ -n "$bootstrap_planner_v2_external" ] || return 1
+            bootstrap_planner_v2_external=$(bootstrap_planner_v2_canonical_dir \
+                "$bootstrap_planner_v2_external") || return 1
+            [ "$bootstrap_planner_v2_external" != / ] || return 1
+            case "$bootstrap_planner_v2_output" in
+                "$bootstrap_planner_v2_external"|"$bootstrap_planner_v2_external"/*) ;;
+                *) return 1 ;;
+            esac
+            ;;
+    esac
+    bootstrap_planner_v2_adm=$(bootstrap_planner_v2_admission_dir \
+        "$bootstrap_planner_v2_output" "$bootstrap_planner_v2_scope")
 
     # Producer-derived artifacts are pinned by exact name in the admission dir.
     for bootstrap_planner_v2_pair in \

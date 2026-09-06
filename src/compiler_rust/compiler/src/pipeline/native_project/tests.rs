@@ -374,6 +374,123 @@ fn pure_simple_lambda_inline_helper_has_both_callers() {
 }
 
 #[test]
+fn folded_global_scalar_type_calls_keep_mir_lowering_receiver_ownership() {
+    let dispatch = include_str!("../../../../../compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl");
+    assert!(dispatch.contains("fn folded_global_scalar_type(constant: MirConstant) -> MirType:"));
+    assert!(dispatch.contains("self.folded_global_scalar_type(constant)"));
+    assert!(dispatch.contains("self.folded_global_scalar_type(mir_const)"));
+    assert!(!dispatch.contains("= folded_global_scalar_type(constant)"));
+    assert!(!dispatch.contains("= folded_global_scalar_type(mir_const)"));
+}
+
+#[test]
+fn flattened_decl_env_helper_keeps_a_matching_mir_definition_and_call_target() {
+    use crate::codegen::JitCompiler;
+    use crate::mir::{lower_to_mir, MirInst};
+
+    let root = repo_root_for_native_project_tests();
+    let path = root.join("src/compiler/10.frontend/core/_Ast/decl_nodes.spl");
+    let source = std::fs::read_to_string(&path).expect("read declaration owner");
+    let mut declaration_parser = simple_parser::Parser::new(&source);
+    let declaration_ast = declaration_parser.parse().expect("parse declaration owner");
+    assert!(
+        declaration_ast.items.iter().any(|item| matches!(item,
+            simple_parser::ast::Node::Function(function)
+                if function.name == "_sffi_env_get_i64" && !function.body.statements.is_empty()
+        )),
+        "the source declaration owner must retain its private helper spelling"
+    );
+
+    // Use the same lenient, project-aware lowering route as `run_file_jit`.
+    // Plain `hir::lower` is intentionally stricter and rejects an unrelated
+    // list-comprehension in this large owner graph before it reaches the
+    // declaration map we are attributing here.
+    let mut visited = std::collections::HashSet::new();
+    let flattened_ast = crate::pipeline::module_loader::load_module_with_imports(&path, &mut visited)
+        .expect("load flattened declaration owner");
+    let project_hint = crate::pipeline::native_single_file_project_hint(&path);
+    let flattened_hir = crate::hir::lower_with_context_lenient_and_project_hint(
+        &flattened_ast,
+        &path,
+        project_hint.as_deref(),
+    )
+    .expect("JIT-compatible HIR lower flattened declaration owner");
+    let flattened_mir = lower_to_mir(&flattened_hir)
+        .expect("JIT-compatible MIR lower flattened declaration owner");
+    assert!(
+        flattened_mir.functions.iter().any(|function| {
+            function.name == "_sffi_env_get_i64" && !function.blocks.is_empty()
+        }),
+        "flattened JIT MIR must retain the private helper body under its exact spelling"
+    );
+    let flattened_caller = flattened_mir
+        .functions
+        .iter()
+        .find(|function| function.name == "ast_decl_arena_default")
+        .expect("flattened arena-default caller");
+    assert!(
+        flattened_caller
+            .blocks
+            .iter()
+            .flat_map(|block| &block.instructions)
+            .any(|instruction| {
+                matches!(instruction, MirInst::Call { target, .. } if target.name() == "_sffi_env_get_i64")
+            }),
+        "flattened caller must target the retained helper by its exact MIR definition name"
+    );
+
+    // Pair the actual flattened-map inspection with a small executable fixture
+    // that compares the private free helper with an ordinary free helper and
+    // proves that its real `rt_env_get_i64` provider resolves in the JIT.
+    let source = r#"
+@unsafe(reason: "test runtime ABI", capabilities: [ffi])
+extern fn rt_env_get_i64(key: text, default_value: i64) -> i64
+
+fn _sffi_env_get_i64(key: text, default_value: i64) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_env_get_i64(key, default_value)
+
+fn known_good_free_helper(value: i64) -> i64:
+    value + 1
+
+fn probe_private_env_helper() -> i64:
+    _sffi_env_get_i64("SIMPLE_JIT_PRIVATE_HELPER_TEST_ABSENT", 41) + known_good_free_helper(0)
+"#;
+    let mut parser = simple_parser::Parser::new(source);
+    let ast = parser.parse().expect("parse helper resolution fixture");
+    let hir = crate::hir::lower(&ast).expect("HIR lower helper resolution fixture");
+    let mir = lower_to_mir(&hir).expect("MIR lower flattened declaration module");
+
+    assert!(
+        mir.functions.iter().any(|function| function.name == "_sffi_env_get_i64" && !function.blocks.is_empty()),
+        "MIR must retain the private helper body under its exact spelling"
+    );
+    let caller = mir.functions.iter().find(|function| function.name == "probe_private_env_helper")
+        .expect("private helper caller");
+    assert!(
+        caller.blocks.iter().flat_map(|block| &block.instructions).any(|instruction| {
+            matches!(instruction, MirInst::Call { target, .. } if target.name() == "_sffi_env_get_i64")
+        }),
+        "the caller must target the retained helper by its exact MIR definition name"
+    );
+    assert!(
+        mir.extern_fn_names.iter().any(|name| name == "rt_env_get_i64"),
+        "the helper's real runtime provider must remain the registered rt_env_get_i64 extern"
+    );
+    assert!(
+        !mir.extern_fn_names.iter().any(|name| name == "sffi_env_get_i64"),
+        "the helper itself must not become a bare external import"
+    );
+
+    let mut jit = JitCompiler::new_static().expect("create static JIT");
+    jit.compile_module(&mir)
+        .expect("private helper must resolve locally while rt_env_get_i64 resolves through runtime provider");
+    let result = unsafe { jit.call_i64_void("probe_private_env_helper") }
+        .expect("call private helper fixture");
+    assert_eq!(result, 42, "private helper and known-good helper must both execute");
+}
+
+#[test]
 fn enum_runtime_identity_qualification_preserves_builtins_and_custom_shadows() {
     use crate::hir::{HirType, TypeId};
     use crate::mir::{BlockId, MirFunction, MirInst, MirModule, MirPattern};
@@ -3566,6 +3683,69 @@ __attribute__((constructor)) static void discarded_ctor(void) { retained_helper(
     assert_eq!(archive_members(&output).unwrap(), ["stage4_runtime_capsule_local.o"]);
 }
 
+/// The Stage4 entry stub writes argv through core-C.  Keep every public argv
+/// reader in the same capsule: if one is localized, the Rust staticlib can
+/// provide a different strong reader and commands silently see an empty argv.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+#[test]
+fn test_stage4_core_c_argv_capsule_exports_one_initialized_provider_family() {
+    let temp = tempfile::tempdir().unwrap();
+    let core = build_core_c_runtime_library(&temp.path().join("core")).unwrap();
+    let providers = build_stage4_cli_c_provider_archives(&temp.path().join("providers")).unwrap();
+    let requested = super::linker::STAGE4_CORE_C_ARGV_PROVIDER_SYMBOLS
+        .iter()
+        .map(|symbol| (*symbol).to_string())
+        .collect::<Vec<_>>();
+    let capsule = build_stage4_runtime_capsule_archive(
+        &core,
+        &providers,
+        &requested,
+        &temp.path().join("capsule"),
+    )
+    .unwrap();
+
+    let (defined, undefined) = super::tools::archive_global_symbols(&capsule).unwrap();
+    assert_eq!(
+        defined,
+        requested
+            .iter()
+            .map(|symbol| (symbol.clone(), 1))
+            .collect::<std::collections::BTreeMap<_, _>>()
+    );
+    assert!(!undefined
+        .iter()
+        .any(|symbol| symbol.starts_with("rt_") || symbol.starts_with("spl_")));
+
+    run_stage4_c_probe(
+        temp.path(),
+        "stage4_core_c_argv_provider_probe",
+        r#"
+#include <string.h>
+#include <stdint.h>
+
+extern void rt_set_args(int, char **);
+extern int64_t spl_arg_count(void);
+extern const char *spl_get_arg(int64_t);
+extern int64_t rt_cli_arg_count(void);
+
+int main(void) {
+    char first[] = "simple";
+    char second[] = "native-build";
+    char third[] = "--help";
+    char *argv[] = { first, second, third };
+    rt_set_args(3, argv);
+    if (spl_arg_count() != 3 || rt_cli_arg_count() != 3) return 1;
+    if (strcmp(spl_get_arg(1), "native-build") != 0) return 2;
+    if (strcmp(spl_get_arg(2), "--help") != 0) return 3;
+    return 0;
+}
+"#,
+        &[&capsule],
+        &["-lm", "-lpthread", "-ldl"],
+        &[],
+    );
+}
+
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
 #[test]
 fn test_stage4_linux_exact_core_projects_fail_closed_platform_abi() {
@@ -4257,6 +4437,12 @@ fn test_bootstrap_mutex_capsule_exports_only_canonical_bootstrap_abi() {
     .into_iter()
     .map(str::to_string)
     .collect::<std::collections::BTreeSet<_>>();
+    let secure_staging = ["rt_secure_temp_dir", "rt_file_publish_noreplace"]
+        .into_iter()
+        .map(str::to_string)
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(defined.intersection(&secure_staging).count(), 0,
+        "bootstrap supplement must not duplicate the full Rust runtime's secure-staging provider");
     // rt_heap_live_bytes / rt_heap_peak_bytes are OWNED by the outer (Rust)
     // runtime. runtime_memtrack.c ships them as WEAK fallbacks (93e0b028ffb), so
     // the capsule may carry them only as weak globals the owner overrides --

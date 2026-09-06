@@ -1,0 +1,120 @@
+"""
+## Purpose and audience
+Pins `StateCapabilityReceiptV1` as a pure-data contract: the default
+constructor's "Unverified by default" rule and the validator's "no
+Supported without a runnable acceptance receipt" gate, both from
+`doc/01_research/infra/dump_replay/simple_dump_replay_fw_spipe_devhub_design_plan_2026-09-05.md`
+section 5. Audience: engineers building Wave 0+ dump/replay producers who
+must construct a receipt without accidentally overclaiming capability.
+## Operator workflow
+src/compiler_rust/target/bootstrap/simple run test/01_unit/lib/common/debug/state_capability_receipt_v1_spec.spl
+## Compatibility and limitations
+Exercises only the pure-data contract in
+`src/lib/common/debug/state/capability_receipt_v1.spl` -- there is no
+producer/writer in this repo yet, matching the sibling
+`debug_evidence_bundle_contract_v1_spec.spl`.
+## Verification guidance and troubleshooting
+A RED here after a contract change means the field list or status vocabulary
+drifted from the design doc's section 5 -- reconcile the doc citation above
+together with the code change.
+"""
+# Lifecycle: doc/01_research/infra/dump_replay/simple_dump_replay_fw_spipe_devhub_design_plan_2026-09-05.md ;
+# doc/03_plan/app/debug/dump_replay_wave_plan.md ;
+# doc/04_architecture/simple_unified_debugging_evidence.md ;
+# doc/05_design/app/debug/debug_capability_truth_wave0_design.md ;
+# doc/07_guide/app/debug/state_capability_receipt_contract.md
+# @manual_section: primary
+
+use std.spec.*
+use std.common.debug.state.capability_receipt_v1.{
+    CapabilityStatus, StateCapabilityReceiptV1,
+    state_capability_receipt_unverified_v1, state_capability_receipt_validate_v1,
+}
+
+val GOOD_DIGEST = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+fn well_formed_receipt() -> StateCapabilityReceiptV1:
+    var r = state_capability_receipt_unverified_v1("artifact-1", "operator-claim")
+    r.normalized_capsule_digest = GOOD_DIGEST
+    r.analyze = CapabilityStatus.Supported
+    r.proof_receipts = ["acceptance-receipt-1"]
+    r
+
+describe "StateCapabilityReceiptV1 pure-data contract":
+
+    it "defaults every capability to Unverified with the claim source":
+        # @req REQ-STATE-CAP-001
+        # @capture(receipt=state_capability_receipt_unverified_v1("artifact-1", "operator-claim"))
+        step("Build a fresh receipt via the Wave 0 constructor")
+        val receipt = state_capability_receipt_unverified_v1("artifact-1", "operator-claim")
+        # @capture(evidence_manifest): the constructed receipt's six capability fields and proof_receipts length
+        step("Verify all six capability fields are Unverified, not Supported by default")
+        match receipt.analyze:
+            case CapabilityStatus.Unverified(source): expect(source).to_equal("operator-claim")
+            case _: expect("not unverified").to_equal("unverified")
+        match receipt.resume_forward:
+            case CapabilityStatus.Unverified(_): expect(true).to_equal(true)
+            case _: expect("not unverified").to_equal("unverified")
+        match receipt.exact_replay:
+            case CapabilityStatus.Unverified(_): expect(true).to_equal(true)
+            case _: expect("not unverified").to_equal("unverified")
+        match receipt.reverse_execution:
+            case CapabilityStatus.Unverified(_): expect(true).to_equal(true)
+            case _: expect("not unverified").to_equal("unverified")
+        match receipt.counterfactual_fork:
+            case CapabilityStatus.Unverified(_): expect(true).to_equal(true)
+            case _: expect("not unverified").to_equal("unverified")
+        match receipt.profile_correlation:
+            case CapabilityStatus.Unverified(_): expect(true).to_equal(true)
+            case _: expect("not unverified").to_equal("unverified")
+        expect(receipt.proof_receipts.len()).to_equal(0)  # oracle: the Wave 0 constructor starts every receipt with zero proof receipts
+
+    it "accepts a well-formed receipt with Supported backed by a proof receipt":
+        # @req REQ-STATE-CAP-002
+        # @capture(evidence_manifest): the well-formed receipt fixture and the validator's Ok/Err outcome
+        step("Validate a receipt that claims Supported and carries a proof receipt")
+        val outcome = state_capability_receipt_validate_v1(well_formed_receipt())
+        # @capture(evidence_manifest): the validator's Ok(_) branch, proving Supported-with-proof is accepted
+        step("Verify the validator accepts it")
+        match outcome:
+            case Ok(_): expect(true).to_equal(true)
+            case Err(reason): expect(reason).to_equal("")
+
+    it "rejects Supported with no proof_receipts":
+        # @req REQ-STATE-CAP-003
+        # @capture(evidence_manifest): the mutated receipt with proof_receipts cleared to empty
+        step("Validate a receipt that claims Supported but has no proof receipts")
+        var r = well_formed_receipt()
+        r.proof_receipts = []
+        val outcome = state_capability_receipt_validate_v1(r)
+        # @capture(evidence_manifest): the validator's Err(reason) text naming proof_receipts
+        step("Verify rejection names the missing proof")
+        match outcome:
+            case Ok(_): expect("accepted").to_equal("rejected")
+            case Err(reason): expect(reason).to_contain("proof_receipts")
+
+    it "rejects a malformed normalized_capsule_digest":
+        # @req REQ-STATE-CAP-004
+        # @capture(evidence_manifest): the mutated receipt carrying the malformed digest string
+        step("Validate a receipt whose digest is not sha256:<64 lowercase hex>")
+        var r = well_formed_receipt()
+        r.normalized_capsule_digest = "not-a-digest"
+        val outcome = state_capability_receipt_validate_v1(r)
+        # @capture(evidence_manifest): the validator's Err(reason) text naming the digest
+        step("Verify rejection names the malformed digest")
+        match outcome:
+            case Ok(_): expect("accepted").to_equal("rejected")
+            case Err(reason): expect(reason).to_contain("digest")
+
+    it "rejects the wrong receipt_version":
+        # @req REQ-STATE-CAP-005
+        # @capture(evidence_manifest): the mutated receipt carrying the tampered receipt_version
+        step("Validate a receipt whose receipt_version was tampered with")
+        var r = well_formed_receipt()
+        r.receipt_version = "state-capability-receipt/v2"
+        val outcome = state_capability_receipt_validate_v1(r)
+        # @capture(evidence_manifest): the validator's Err(reason) text naming receipt_version, proving no crash
+        step("Verify rejection names the version mismatch, not a crash")
+        match outcome:
+            case Ok(_): expect("accepted").to_equal("rejected")
+            case Err(reason): expect(reason).to_contain("receipt_version")

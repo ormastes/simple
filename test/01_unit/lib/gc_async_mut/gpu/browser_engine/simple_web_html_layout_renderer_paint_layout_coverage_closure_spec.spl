@@ -537,3 +537,71 @@ describe "paint_tiled: widget_mode early-return branch":
         # same entry point (not the argb(245,245,245) canvas base, since the
         # unstyled div covers the whole 32x24 frame here).
         assert_equal(tiled[0], 0xFF0066CCu32)
+
+# --- content_paint_hidden_by_ancestor: the two ancestor walks it used to make
+# (a content_hidden_by_ancestor call for display:none / content-visibility /
+# iframe, then a separate opacity_pct <= 0 walk) were fused into ONE walk over
+# the same chain. The predicate is private, so the verdicts are pinned through
+# pixels: each hiding condition on an ANCESTOR must still suppress the
+# descendant's paint, and the same document with no hiding condition must still
+# paint it. Counting the marker colour rather than reading pixel 0 keeps these
+# independent of UA default body margins.
+
+fn _pl_marker_pixels(pixels: [u32]) -> i32:
+    var found = 0
+    var idx = 0
+    while idx < pixels.len():
+        if pixels[idx] == 0xFF0000FFu32:
+            found = found + 1
+        idx = idx + 1
+    found
+
+fn _pl_hidden_doc(ancestor_style: text) -> text:
+    "<html><body><div style='" + ancestor_style +
+        "'><div style='width:16px;height:12px;background:#0000ff'></div>" +
+        "</div></body></html>"
+
+describe "content_paint_hidden_by_ancestor: one fused ancestor walk, same verdicts":
+
+    it "still paints the descendant when no ancestor hides it":
+        # @req REQ-SSPEC-UNIT
+        step("still paints the descendant when no ancestor hides it")
+        val px = simple_web_layout_render_html_software_pixels(
+            _pl_hidden_doc("width:32px;height:24px"), 32, 24)
+        assert_equal(px.len(), 768)
+        assert_true(_pl_marker_pixels(px) > 0)
+
+    it "suppresses the descendant under an ancestor with opacity:0":
+        # @req REQ-SSPEC-UNIT
+        step("suppresses the descendant under an ancestor with opacity:0")
+        val px = simple_web_layout_render_html_software_pixels(
+            _pl_hidden_doc("width:32px;height:24px;opacity:0"), 32, 24)
+        assert_equal(px.len(), 768)
+        assert_equal(_pl_marker_pixels(px), 0)
+
+    it "suppresses the descendant under an ancestor with display:none":
+        # @req REQ-SSPEC-UNIT
+        step("suppresses the descendant under an ancestor with display:none")
+        val px = simple_web_layout_render_html_software_pixels(
+            _pl_hidden_doc("display:none"), 32, 24)
+        assert_equal(px.len(), 768)
+        assert_equal(_pl_marker_pixels(px), 0)
+
+    it "suppresses the descendant under an ancestor with content-visibility:hidden":
+        # @req REQ-SSPEC-UNIT
+        step("suppresses the descendant under an ancestor with content-visibility:hidden")
+        val px = simple_web_layout_render_html_software_pixels(
+            _pl_hidden_doc("width:32px;height:24px;content-visibility:hidden"),
+            32, 24)
+        assert_equal(px.len(), 768)
+        assert_equal(_pl_marker_pixels(px), 0)
+
+    it "suppresses a node that carries opacity:0 itself":
+        # @req REQ-SSPEC-UNIT
+        step("suppresses a node that carries opacity:0 itself")
+        val html = "<html><body>" +
+            "<div style='width:16px;height:12px;background:#0000ff;opacity:0'>" +
+            "</div></body></html>"
+        val px = simple_web_layout_render_html_software_pixels(html, 32, 24)
+        assert_equal(px.len(), 768)
+        assert_equal(_pl_marker_pixels(px), 0)
