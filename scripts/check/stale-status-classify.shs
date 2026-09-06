@@ -18,8 +18,35 @@ set -u
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 RES="$ROOT/build/sweep/res"
 PLAN="$ROOT/build/sweep/plan.txt"
+SRCMAP="$ROOT/build/sweep/srcmap.txt"   # id<TAB>owning source file, from the input list
+
+# MEASURED 2026-09-06, not inferred: a probe spec run under `bin/simple test`
+# printed `LANE_PROBE exec_mode=interpret runtime_mode=interpreter`, and
+# test/01_unit/compiler/class_reference_semantics_spec.spl's own header states
+# the same divergence ("under `bin/simple test` every field/array store
+# VALUE-COPIES ... under the default JIT (`bin/simple run`) all cases alias").
+# So EVERY spec body runs interpreted. A codegen/JIT/native-class row therefore
+# cannot be certified fixed by a green spec here, whether or not it shells out.
+codegen_class() {
+    case "$1" in
+        *jit*|*native*|*codegen*|*_mir_*|*llvm*|*aot*|*cranelift*|*machine_code*)
+            return 0 ;;
+    esac
+    case "${2:-}" in
+        *50.mir*|*60.*|*70.*|*backend*|*compiler_rust*|*codegen*)
+            return 0 ;;
+    esac
+    return 1
+}
 
 while IFS='|' read -r sev id bucket repro runner lane; do
+    # 13 MANUAL-NONE rows were superseded by an appended RUN-DERIVED-SHS row
+    # for the same id. Emit the superseding row only, so the counts stay 1:1
+    # with the 272 input rows.
+    if [ "$bucket" = "MANUAL-NONE" ]; then
+        grep -qF "|$id|RUN-DERIVED-SHS|" "$PLAN" && continue
+    fi
+
     conf="declared"
     case "$bucket" in
         RUN-DERIVED|RUN-DERIVED-SHS) conf="record-derived" ;;
@@ -61,8 +88,30 @@ while IFS='|' read -r sev id bucket repro runner lane; do
         esac
     fi
 
+    # Inversion-pinning specs: some specs deliberately assert the WRONG
+    # (currently-observed) result so the defect stays executable and loud. For
+    # those, a GREEN run means the bug is still present — the exact inverse of
+    # the usual reading. Detected mechanically so it cannot be missed by eye.
+    pin=""
+    if [ -f "$ROOT/$repro" ]; then
+        if grep -qiE 'PINS CURRENT BEHAVIOR|divergence pinned|asserts the WRONG|pin the (current|broken)|pins the (current|broken)|re-pin' "$ROOT/$repro" 2>/dev/null; then
+            pin="pin-inverted"
+        fi
+    fi
+
+    srcfile=$(awk -F'\t' -v k="$id" '$1==k{print $2; exit}' "$SRCMAP" 2>/dev/null)
+    if [ "$lane" = "-" ] || [ -z "$lane" ]; then
+        if [ "$runner" = "simple-test" ] && codegen_class "$id" "${srcfile:-}"; then
+            lane="codegen-interpret-lane"
+        fi
+    fi
+
     if [ "$cls" = "PASSED" ] || [ "$cls" = "PASSED-NOVERDICT" ]; then
-        if [ "$lane" != "-" ] && [ -n "$lane" ]; then
+        if [ -n "$pin" ]; then
+            # Green on an inversion-pinning spec == the defect is still live.
+            cls="STILL-BROKEN"
+            lane="pin-inverted-green"
+        elif [ "$lane" != "-" ] && [ -n "$lane" ]; then
             cls="LANE-SUSPECT"
         elif [ "$cls" = "PASSED-NOVERDICT" ]; then
             cls="NO-EVIDENCE"
