@@ -6,4 +6,4 @@ import { createRouter } from "./protocol/router.js";
 import { runStdioTransport } from "./transport/stdio.js";
 
 const moduleRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-runStdioTransport(createRouter({ moduleRoot, serverVersion: "0.1.0" }));
+runStdioTransport(createRouter({ moduleRoot }));

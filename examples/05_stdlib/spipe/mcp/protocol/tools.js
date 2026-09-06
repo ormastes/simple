@@ -83,7 +83,8 @@ export function readDoc(moduleRoot, path) {
     "doc/00_llm_process/project_expert/",
     "doc/00_llm_process/domain_expert/",
     "doc/00_llm_process/tool_expert/",
-    "doc/00_llm_process/template/"
+    "doc/00_llm_process/template/",
+    "doc/00_llm_process/skill_command/"
   ];
   if (!allowed.some((prefix) => path === prefix || path.startsWith(prefix))) {
     throw new Error("path is outside the SPipe documentation allowlist");

@@ -6389,6 +6389,46 @@ fn test_gcc_cpu_dispatch_symbols_are_not_stub_candidates() {
 }
 
 #[test]
+/// A fabricated stub returns the tagged-nil sentinel 3, so a stubbed `bcmp`
+/// answers "different" for every comparison. aarch64 clang lowers
+/// equality-only memcmp to `bcmp`, which made `text == text` and
+/// `starts_with` silently false in every native-built binary on this host and
+/// left the Stage-3 admission planner rejecting its own valid
+/// `--bootstrap-reason`. These names must never be stub candidates.
+#[test]
+fn test_libc_names_are_not_stub_candidates() {
+    for symbol in [
+        "bcmp",
+        "strncasecmp",
+        "strpbrk",
+        "strtok_r",
+        "atoi",
+        "isatty",
+        "fsync",
+        "openat",
+        "pread",
+        "pwrite",
+        "localtime_r",
+        "sched_yield",
+        "pthread_once",
+        "pthread_mutex_trylock",
+        "__assert_fail",
+        "__clear_cache",
+        "__sigsetjmp",
+        // glibc >= 2.38 emits these C23 spellings; a host newer than the list
+        // anticipated used to stub them.
+        "__ctype_b_loc",
+        "__isoc23_strtol",
+        "__isoc23_sscanf",
+        "__isoc99_sscanf",
+    ] {
+        assert!(
+            super::tools::is_system_symbol(symbol),
+            "{symbol} must resolve from libc, never be weak-stubbed"
+        );
+    }
+}
+
 fn test_cxx_abi_symbols_are_not_stub_candidates() {
     assert!(super::tools::is_system_symbol("__Znwm"));
     assert!(super::tools::is_system_symbol("_Znwm"));

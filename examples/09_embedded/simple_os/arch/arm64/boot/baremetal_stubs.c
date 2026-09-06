@@ -96,7 +96,7 @@ typedef struct {
  * i64 load at offset 8. See arch/common/baremetal_runtime.h. */
 typedef struct {
     HeapHeader hdr;
-    uint32_t   len;
+    uint64_t   len;
     char       data[];
 } RuntimeString;
 _Static_assert(offsetof(RuntimeString, len) == 8, "RuntimeString.len must sit at offset 8");
@@ -328,7 +328,7 @@ RuntimeValue rt_string_new(RuntimeValue data, RuntimeValue len_val)
     if (!s) return NIL_VALUE;
     s->hdr.type = HEAP_STRING;
     s->hdr.size = (uint32_t)(sizeof(RuntimeString) + (size_t)len + 1);
-    s->len = (uint32_t)len;
+    s->len = (uint64_t)len;
     const char *src = (const char *)(uintptr_t)data;
     if (src && len > 0) __builtin_memcpy(s->data, src, (size_t)len);
     s->data[len] = '\0';
@@ -343,7 +343,7 @@ RuntimeValue rt_string_from_cstr(const char *cstr)
     if (!s) return NIL_VALUE;
     s->hdr.type = HEAP_STRING;
     s->hdr.size = (uint32_t)(sizeof(RuntimeString) + len + 1);
-    s->len = (uint32_t)len;
+    s->len = (uint64_t)len;
     __builtin_memcpy(s->data, cstr, len);
     s->data[len] = '\0';
     return ENCODE_PTR(s);
