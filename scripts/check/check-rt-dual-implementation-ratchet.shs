@@ -54,9 +54,12 @@
 
 set -u
 
+SELF="$0"
+
 REV=""
 ROOT=""
 BASELINE=""
+BASELINE_EXPLICIT=0
 GENERATE=0
 SELFTEST_ONLY=0
 
@@ -64,7 +67,7 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --rev) REV="$2"; shift 2 ;;
         --root) ROOT="$2"; shift 2 ;;
-        --baseline) BASELINE="$2"; shift 2 ;;
+        --baseline) BASELINE="$2"; BASELINE_EXPLICIT=1; shift 2 ;;
         --generate-baseline) GENERATE=1; shift ;;
         --selftest) SELFTEST_ONLY=1; shift ;;
         *) echo "unknown argument: $1" >&2; echo "ERROR — nothing was checked"; exit 2 ;;
@@ -217,20 +220,72 @@ selftest() {
     fi
     st_n=$((st_n + 1))
 
+    # Fixture 7: --rev must read the COMMITTED tree and the COMMITTED baseline,
+    # never the working checkout. This replays the 2026-09-06 incident directly:
+    # a chain-merge was pushed with --no-verify because the hook reported a
+    # failure about the shared working copy while the pushed content carried a
+    # different, real regression. The fixture commits a clean tree + matching
+    # baseline, then dirties the working copy with a NEW rust-only symbol and a
+    # baseline row that would excuse it. A working-tree scan sees a clean pair
+    # and PASSes; only a committed-content scan is correct, and it must also
+    # ignore the working copy's doctored baseline.
+    if ! command -v git >/dev/null 2>&1; then
+        echo "selftest: FAILED — git unavailable, cannot verify the --rev committed-content path"
+        rm -rf "$st_dir"; return 1
+    fi
+    mkfixture f7
+    ( cd "$st_dir/f7" \
+      && git init -q . \
+      && git config user.email selftest@example.com \
+      && git config user.name selftest ) >/dev/null 2>&1
+    mkdir -p "$st_dir/f7/scripts/check"
+    printf 'rt_conly\tc-only\nrt_ronly\trust-only\n' \
+        > "$st_dir/f7/scripts/check/rt_dual_implementation_baseline.txt"
+    ( cd "$st_dir/f7" && git add -A && git commit -q -m committed ) >/dev/null 2>&1
+    # Working copy only: a new rust-only symbol plus a baseline row excusing it.
+    printf 'pub fn rt_working_copy_only() -> i64 { 9 }\n' \
+        >> "$st_dir/f7/src/compiler_rust/runtime/src/lib.rs"
+    printf 'rt_working_copy_only\trust-only\n' \
+        >> "$st_dir/f7/scripts/check/rt_dual_implementation_baseline.txt"
+    st_out=$(RT_DUAL_RATCHET_SELFTEST_CHILD=1 sh "$SELF" \
+        --root "$st_dir/f7" --rev HEAD 2>&1 | tail -1)
+    case "$st_out" in
+        "PASS — 2 symbol(s) checked against 2 baselined, 0 new, 0 stale") ;;
+        *) echo "selftest: FAILED — --rev did not read committed content, got [$st_out]"
+           rm -rf "$st_dir"; return 1 ;;
+    esac
+    # And the same tree scanned as a WORKING TREE must see the extra symbol, so
+    # the fixture proves the two paths genuinely differ rather than both being
+    # blind to the edit.
+    st_out=$(RT_DUAL_RATCHET_SELFTEST_CHILD=1 sh "$SELF" --root "$st_dir/f7" 2>&1 | tail -1)
+    case "$st_out" in
+        "PASS — 3 symbol(s) checked against 3 baselined, 0 new, 0 stale") ;;
+        *) echo "selftest: FAILED — working-tree scan did not see the dirty edit, got [$st_out]"
+           rm -rf "$st_dir"; return 1 ;;
+    esac
+    st_n=$((st_n + 1))
+
     rm -rf "$st_dir"
     echo "selftest: $st_n fixture(s) passed"
     return 0
 }
 
-selftest
-RC=$?
+if [ "${RT_DUAL_RATCHET_SELFTEST_CHILD:-0}" = 1 ]; then
+    # Fixture 7 invokes this script recursively; re-running the selftest there
+    # would recurse without end. The child is exercising the real scan path,
+    # which is the point of the fixture.
+    RC=0
+else
+    selftest
+    RC=$?
+fi
 if [ $RC -ne 0 ]; then
     echo "ERROR — nothing was checked (selftest failed)"
     exit 2
 fi
 
 if [ "$SELFTEST_ONLY" -eq 1 ]; then
-    echo "PASS — 6 fixture(s) checked, selftest only, no real tree scanned"
+    echo "PASS — 7 fixture(s) checked, selftest only, no real tree scanned"
     exit 0
 fi
 
@@ -244,10 +299,6 @@ if [ -z "$ROOT" ]; then
         echo "ERROR — nothing was checked (not inside a git repository and no --root)"
         exit 2
     fi
-fi
-
-if [ -z "$BASELINE" ]; then
-    BASELINE="$ROOT/scripts/check/rt_dual_implementation_baseline.txt"
 fi
 
 WORK=$(mktemp -d)
@@ -264,7 +315,13 @@ if [ -n "$REV" ]; then
     # commit may never have been checked out, and under concurrent agent load
     # the working copy disagrees with what is actually being pushed.
     mkdir -p "$WORK/rev"
-    ( cd "$ROOT" && git archive "$REV" -- src/runtime src/compiler_rust/runtime ) 2>/dev/null \
+    # The BASELINE is archived alongside the sources on purpose. Scanning the
+    # committed tree while comparing it against the WORKING COPY's baseline is
+    # still a wrong-tree verdict: a local edit to the baseline (or a stale
+    # checkout that predates a baseline update) would silently decide the
+    # result for content it does not describe.
+    ( cd "$ROOT" && git archive "$REV" -- src/runtime src/compiler_rust/runtime \
+        scripts/check/rt_dual_implementation_baseline.txt ) 2>/dev/null \
         | tar -x -C "$WORK/rev" 2>/dev/null
     RC=$?
     if [ $RC -ne 0 ] || [ ! -d "$WORK/rev/src" ]; then
@@ -274,12 +331,35 @@ if [ -n "$REV" ]; then
     SCAN_ROOT="$WORK/rev"
 fi
 
+if [ -z "$BASELINE" ]; then
+    BASELINE="$ROOT/scripts/check/rt_dual_implementation_baseline.txt"
+    if [ -n "$REV" ]; then
+        if [ -f "$WORK/rev/scripts/check/rt_dual_implementation_baseline.txt" ]; then
+            BASELINE="$WORK/rev/scripts/check/rt_dual_implementation_baseline.txt"
+        else
+            echo "ERROR — nothing was checked (baseline absent from $REV)"
+            exit 2
+        fi
+    fi
+fi
+if [ "$BASELINE_EXPLICIT" -eq 1 ] && [ -n "$REV" ]; then
+    echo "note: --baseline overrides the baseline committed at $REV" >&2
+fi
+
 extract_lanes "$SCAN_ROOT" "$WORK"
 single_lane "$WORK" > "$WORK/current.txt"
 
 CUR_N=$(wc -l < "$WORK/current.txt" | tr -d ' ')
 if [ "$CUR_N" -eq 0 ]; then
     echo "ERROR — nothing was checked (0 single-lane rt_* symbols extracted from $SCAN_ROOT)"
+    exit 2
+fi
+
+if [ "$GENERATE" -eq 1 ] && [ -n "$REV" ] && [ "$BASELINE_EXPLICIT" -eq 0 ]; then
+    # Without this the regenerated baseline would be written into the throwaway
+    # $WORK/rev checkout and vanish with the trap — a silent no-op that looks
+    # like a successful regeneration.
+    echo "ERROR — nothing was checked (--generate-baseline with --rev needs an explicit --baseline path)"
     exit 2
 fi
 
