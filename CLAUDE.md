@@ -52,7 +52,7 @@ bin/simple run src/app/test/freebsd_qemu_setup.spl --download --quick
 
 ## Owned-Code Scope
 - For code counts, reviews, verification scans, and summaries, ignore vendored or third-party runtime source unless the user explicitly asks to inspect it.
-- External paths: `src/compiler_rust/vendor/**`, `src/runtime/vendor/**`, `src/runtime/miniaudio.h`, `src/runtime/stb_image.h`, `src/runtime/stb_truetype.h`.
+- External paths: `src/compiler_rust/vendor/**`, `src/runtime/vendor/**`, `src/runtime/miniaudio.h`, `src/runtime/stb_image.h`, `src/runtime/stb_truetype.h`, `test/05_perf/ui_slim/ref/vendor/**` (pinned C reference libraries for the slim-UI benchmarks).
 
 ## Detailed Rules & Reference
 - **Rules:** `.claude/rules/` — `language.md`, `testing.md`, `bootstrap.md`, `commands.md`, `structure.md`, `code-style.md`, `vcs.md`

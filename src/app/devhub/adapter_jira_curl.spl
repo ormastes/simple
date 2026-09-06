@@ -213,7 +213,10 @@ fn _parse_jira_issue(obj: any) -> JiraIssue:
     val source = if fields != nil: fields else: obj
 
     val summary = _jstr(source, "summary")
-    val description = _jstr(source, "description")
+    # ADF -> plain text. `_adf_doc` below wraps outbound text into an
+    # Atlassian Document; this is the inverse, and without it a description
+    # came back as the raw `{"type":"doc",...}` JSON blob (see adf_to_plain).
+    val description = adf_to_plain(json_object_get(source, "description"))
     val priority_obj = json_object_get(source, "priority")
     val priority = if priority_obj != nil: _jstr(priority_obj, "name") else: ""
     val status_obj = json_object_get(source, "status")
@@ -246,6 +249,75 @@ fn _json_escape(s: text) -> text:
     so callers/specs in this module don't need a second import for the same
     escaping rules used by _adf_doc."""
     escape_json(s)
+
+
+fn adf_to_plain(node: any) -> text:
+    """Flatten an Atlassian Document Format value to plain text.
+
+    The inverse of `_adf_doc`, and the half that was missing: devhub targets
+    Jira REST **v3** (`auth.spl` -> `rest/api/3`), where rich-text fields are
+    ADF *objects*, not strings. `_jstr` JSON-serialises a value and strips
+    surrounding quotes — for an object the result does not start with `"`, so
+    the whole `{"type":"doc","version":1,...}` blob was returned verbatim and
+    printed as the issue description.
+
+    v3 and v2 are not interchangeable here: v3 does not accept plain text and
+    v2 does not accept ADF, so "just use v2" would break the write path that
+    `_adf_doc` already gets right.
+
+    Walks the node tree concatenating `text` leaves. `hardBreak` and
+    `paragraph` boundaries become newlines so multi-paragraph descriptions stay
+    readable. Unknown node types are traversed rather than dropped, so a
+    description containing a panel, list or table still yields its words
+    instead of nothing.
+
+    Accepts a plain JSON string too, so a v2 response (or a Server/DC
+    deployment) still reads correctly through the same call site.
+    """
+    if node == nil:
+        return ""
+    val raw = json_serialize(node)
+    # A v2/plain string field: already text, just unquote it.
+    if raw.starts_with("\""):
+        return _jstr_of(node)
+    if raw == "null":
+        return ""
+    _adf_walk(node).trim()
+
+
+fn _jstr_of(node: any) -> text:
+    """Unquote a JSON string value."""
+    val s = json_serialize(node)
+    if s.starts_with("\"") and s.ends_with("\""):
+        return s[1:s.len() - 1]
+    s
+
+
+fn _adf_walk(node: any) -> text:
+    """Recursive ADF flattener. Separated from adf_to_plain so the entry point
+    can handle the non-ADF cases once, rather than on every node."""
+    if node == nil:
+        return ""
+    val node_type = _jstr(node, "type")
+    if node_type == "text":
+        return _jstr(node, "text")
+    if node_type == "hardBreak":
+        return "\n"
+    val content = json_object_get(node, "content")
+    if content == nil:
+        return ""
+    var out = ""
+    var i: i64 = 0
+    val n = json_array_length(content)
+    while i < n:
+        val child = json_array_get(content, i)
+        if child != nil:
+            out = out + _adf_walk(child)
+        i = i + 1
+    # Block-level nodes end with a newline so paragraphs do not run together.
+    if node_type == "paragraph" or node_type == "heading" or node_type == "listItem" or node_type == "codeBlock":
+        return out + "\n"
+    out
 
 
 fn _adf_doc(plain: text) -> text:
