@@ -86,3 +86,15 @@ exact-wake, and cancellation evidence.
 Update this page whenever a layer owner, public facade, invariant, focused test,
 or migration gate changes. Do not promote proposal text to current-state
 evidence without an executable owner and test.
+
+## SOSIX contract capsule (added 2026-09-05)
+
+`src/lib/common/contracts/sosix/` is a sibling of `contracts/execution`: pure
+SOSIX values (operation lifecycle, completions, wait protocol, positioned
+descriptors, frozen service IDs, typed errors). It imports only
+`contracts/execution`, never `os.*` or `rt_*`. `src/lib/nogc_async_mut/sosix/`
+is the hosted composition over `async_ring` (`fs`, `sync`, `time`);
+`src/os/sosix/**` consumes the common capsule through `os.sosix.core.*` shims
+and must not import the hosted capsule. Enforced by
+`scripts/check/check-sosix-capsule-boundaries.shs`. Feature wiki:
+`doc/00_llm_process/feature_expert/sosix_runtime_unification/skill.md`.

@@ -1,0 +1,142 @@
+"""Typed terminal results for canonical SOSIX asynchronous operations."""
+
+use std.common.contracts.sosix.operation_v1.{SosixOperationId, SosixOperationSlot, sosix_operation_is_terminal}
+
+pub struct SosixCompletion:
+    operation: SosixOperationId
+    api_id: u32
+    status: i32
+    transferred: u64
+    partial_progress: bool
+    terminal_state: u8
+
+pub struct SosixCompletionCreateResult:
+    accepted: bool
+    reason: text
+    completion: SosixCompletion
+
+pub struct SosixTypedCompletionResult:
+    accepted: bool
+    reason: text
+    completion: SosixCompletion
+
+export SosixCompletion, SosixCompletionCreateResult, SosixTypedCompletionResult
+
+fn _empty_completion(operation: SosixOperationId, api_id: u32) -> SosixCompletion:
+    SosixCompletion(
+        operation: operation,
+        api_id: api_id,
+        status: 0,
+        transferred: 0,
+        partial_progress: false,
+        terminal_state: 0
+    )
+
+pub fn sosix_completion_from_slot(
+    operation: SosixOperationId, api_id: u32, slot: SosixOperationSlot
+) -> SosixCompletionCreateResult:
+    if slot.generation != operation.generation:
+        return SosixCompletionCreateResult(
+            accepted: false,
+            reason: "stale-generation",
+            completion: _empty_completion(operation, api_id)
+        )
+    if not sosix_operation_is_terminal(slot):
+        return SosixCompletionCreateResult(
+            accepted: false,
+            reason: "operation-not-terminal",
+            completion: _empty_completion(operation, api_id)
+        )
+    SosixCompletionCreateResult(
+        accepted: true,
+        reason: "accepted",
+        completion: SosixCompletion(
+            operation: operation,
+            api_id: api_id,
+            status: slot.status,
+            transferred: slot.transferred,
+            partial_progress: slot.partial_progress,
+            terminal_state: slot.state
+        )
+    )
+
+pub fn sosix_completion_expect_api(
+    completion: SosixCompletion, expected_api_id: u32
+) -> SosixTypedCompletionResult:
+    if completion.api_id != expected_api_id:
+        return SosixTypedCompletionResult(
+            accepted: false,
+            reason: "completion-api-mismatch",
+            completion: completion
+        )
+    SosixTypedCompletionResult(accepted: true, reason: "accepted", completion: completion)
+
+export sosix_completion_from_slot, sosix_completion_expect_api
+
+
+
+# --- completion queue (formerly os.sosix.core.completion_queue): bounded FIFO of typed completions.
+# Publication is nonblocking; a full queue rejects the newest completion and records overflow,
+# which the transport owner must treat as a fault.
+pub val SOSIX_COMPLETION_QUEUE_MAX_CAPACITY: i64 = 1024
+
+class SosixCompletionQueue:
+    slots: [SosixCompletion]
+    head: i64
+    tail: i64
+    count: i64
+    limit: i64
+    rejected: u64
+
+impl SosixCompletionQueue:
+    static fn create(requested_capacity: i64) -> SosixCompletionQueue:
+        var bounded = requested_capacity
+        if bounded < 1:
+            bounded = 1
+        if bounded > SOSIX_COMPLETION_QUEUE_MAX_CAPACITY:
+            bounded = SOSIX_COMPLETION_QUEUE_MAX_CAPACITY
+        val placeholder = SosixCompletion(
+            operation: SosixOperationId(slot: 0, generation: 0),
+            api_id: 0,
+            status: 0,
+            transferred: 0,
+            partial_progress: false,
+            terminal_state: 0
+        )
+        var slots: [SosixCompletion] = []
+        var i: i64 = 0
+        # cpu-lane-loop-ok: one-time bounded queue allocation
+        while i < bounded:
+            slots = slots.push(placeholder)
+            i = i + 1
+        SosixCompletionQueue(
+            slots: slots, head: 0, tail: 0, count: 0, limit: bounded, rejected: 0
+        )
+
+    me publish(completion: SosixCompletion) -> bool:
+        if self.count >= self.limit:
+            self.rejected = self.rejected + 1
+            return false
+        self.slots[self.tail] = completion
+        self.tail = (self.tail + 1) % self.limit
+        self.count = self.count + 1
+        true
+
+    me take() -> SosixCompletion?:
+        if self.count <= 0:
+            return nil
+        val completion = self.slots[self.head]
+        self.head = (self.head + 1) % self.limit
+        self.count = self.count - 1
+        completion
+
+    fn len() -> i64:
+        self.count
+
+    fn capacity() -> i64:
+        self.limit
+
+    fn rejected_count() -> u64:
+        self.rejected
+
+export SOSIX_COMPLETION_QUEUE_MAX_CAPACITY, SosixCompletionQueue
