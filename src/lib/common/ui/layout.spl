@@ -120,31 +120,29 @@ fn layout_vbox(children: [WidgetNode], x: i32, y: i32, w: i32, h: i32) -> [Widge
         return rects
 
     # Calculate sizes: fixed-height items first, then distribute remaining
-    # TODO: [ui][P2] vbox does not honour the `flex` prop at all — it counts children
-    # without a fixed height and divides equally, so with_flex(n, 3) is
-    # silently dropped here and with_flex(n, 0) still gets an equal share
-    # instead of zero. layout_hbox weights by get_flex(); the two axes agree
-    # only on the remainder invariant (awarded once, to the last space-taking
-    # child), not on weighting. Making this weight-aware changes existing vbox
-    # geometry for any node carrying a flex prop, so it is deliberately not
-    # bundled with the hbox remainder fix.
+    # free height in proportion to each child's `flex` weight — the same
+    # policy layout_hbox applies on the other axis, so the two agree on both
+    # weighting and the remainder invariant (awarded once, to the last
+    # space-taking child). get_flex() defaults to 1, so children carrying no
+    # flex prop still split the box equally, exactly as before.
     var total_fixed: i32 = 0
-    var flex_count: i32 = 0
+    var total_flex: i32 = 0
 
     for child in children:
         val fixed_h = get_fixed_height(child)
         if fixed_h > 0:
             total_fixed = total_fixed + fixed_h
         else:
-            flex_count = flex_count + 1
+            val flex = get_flex(child)
+            total_flex = total_flex + flex
 
     # Clamp remaining flex space at 0: when fixed children already overflow the
     # box, flex children get 0 height, never a negative size.
     var remaining = h - total_fixed
     if remaining < 0:
         remaining = 0
-    val flex_h = if flex_count > 0: remaining / flex_count else: 0
-    val flex_remainder = if flex_count > 0: remaining - flex_h * flex_count else: 0
+    val flex_unit = if total_flex > 0: remaining / total_flex else: 0
+    val flex_remainder = if total_flex > 0: remaining - flex_unit * total_flex else: 0
 
     var cur_y = y
     var flex_idx: i32 = 0
@@ -154,11 +152,17 @@ fn layout_vbox(children: [WidgetNode], x: i32, y: i32, w: i32, h: i32) -> [Widge
         if child_h > 0:
             actual_h = child_h
         else:
-            flex_idx = flex_idx + 1
-            if flex_idx == flex_count:
-                actual_h = flex_h + flex_remainder
+            val flex = get_flex(child)
+            flex_idx = flex_idx + flex
+            # Remainder guard, identical in form to layout_hbox's — see the
+            # long comment there for why get_flex()'s clamp at 0 makes
+            # flex_idx monotone, and why the `flex > 0` half is load-bearing
+            # for TRAILING flex="0" children (without it they re-arm
+            # `flex_idx >= total_flex` and collect a second copy).
+            if flex > 0 and flex_idx >= total_flex:
+                actual_h = flex * flex_unit + flex_remainder
             else:
-                actual_h = flex_h
+                actual_h = flex * flex_unit
 
         actual_h = clamp_dim(actual_h, get_min_height(child), get_max_height(child))
         if actual_h > 0:
@@ -223,9 +227,9 @@ fn layout_hbox(children: [WidgetNode], x: i32, y: i32, w: i32, h: i32) -> [Widge
             # `flex_idx >= total_flex` and collected a second copy of the
             # remainder — w=10 with children flex=3 and flex=0 assigned 10+1
             # = 11px into a 10px box. A child that asked for zero width gets
-            # zero width. This matches layout_vbox's `flex_idx == flex_count`
-            # invariant: remainder awarded exactly once, to the last
-            # space-taking child.
+            # zero width. layout_vbox applies the identical guard on the
+            # other axis, so both agree on the invariant: remainder awarded
+            # exactly once, to the last space-taking child.
             if flex > 0 and flex_idx >= total_flex:
                 actual_w = flex * flex_unit + flex_remainder
             else:
