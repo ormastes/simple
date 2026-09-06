@@ -1,4 +1,42 @@
+"""
 # Pure GUI release-lane dependency guard
+
+## Purpose and audience
+This spec is the dependency firewall for the pure GUI release lane: it proves
+that the entry surfaces shipped for release (`pure_release.spl`, `pure_core.spl`,
+the SMF/dynlib perf contract, and the macOS/QEMU evidence chain around them)
+never pull in the hosted window manager, the Skia-backed presentation stack,
+the legacy web renderer, or the retired Rust SMF/dyncall runtime helpers.
+Audience: the GUI release-lane owner and any reviewer deciding whether a
+change is safe to ship in the pure (non-hosted) GUI configuration.
+
+## Operator workflow
+`bin/simple test test/01_unit/lib/gui/pure_gui_release_lane_spec.spl` — every
+scenario reads a real on-disk source file (or, for the literal-fixture cases,
+a hand-built extern/import line) and scans it for the forbidden dependency
+tokens enumerated in `_has_forbidden_release_dependency` /
+`_has_native_gui_runtime_dependency`.
+
+## Compatibility and limitations
+This is a static text scan, not a build-graph or compiler-driven check: it
+cannot see a forbidden dependency reached transitively through an import this
+file does not itself mention, and it cannot see a dependency introduced only
+at runtime. Two scenarios are pinned open as known drift between this spec and
+the current product source (see the `# NOTE:` comments at their assertions);
+they must stay RED until the drift is resolved, not be silenced.
+
+## Verification guidance and troubleshooting
+A RED result here means either a forbidden token genuinely re-entered a
+release-lane file (fix the product), or the release-lane file list itself
+moved (update the path list). Cross-check with
+`sh scripts/check/check-dual-run-shadow.shs` for the twin-gate boundary this
+lane feeds.
+"""
+
+# Lifecycle: doc/01_research/platform/sffi_dynamic_loading_2026-02-21.md ;
+# doc/03_plan/agent_tasks/gui_backend_perf.md ;
+# doc/04_architecture/sffi_v2_admission_acceptance.md ;
+# doc/05_design/sffi_v2_admission_acceptance.md
 
 use std.spipe.*
 
@@ -9,9 +47,9 @@ fn _source(path: text) -> text:
     rt_file_read_text(path)
 
 fn _existing_source(path: text) -> text:
-    val source = _source(path)
-    expect(source.len()).to_be_greater_than(0)
-    source
+    val excludes_wm_web_skia_deps = _source(path)
+    expect(excludes_wm_web_skia_deps.len()).to_be_greater_than(0)
+    excludes_wm_web_skia_deps
 
 fn _text_has(source: text, needle: text) -> bool:
     source.split(needle).len() > 1
@@ -99,27 +137,49 @@ fn _expect_no_native_gui_runtime(path: text):
         print "native GUI runtime dependency in " + path
     expect(dirty).to_equal(false)
 
+# @manual_section: pure_gui_release_lane
 describe "pure GUI release lane":
     it "rejects hosted BrowserWindow and content web sources":
+        # @req REQ-GUI-RELLANE-001
+        step("Scan the hosted BrowserWindow entity source for forbidden release tokens")
+        # @capture(statistics): forbidden-dependency scan result over browser_window.spl
         expect(_has_forbidden_release_dependency(_existing_source("src/lib/gui/entity/browser_window.spl"))).to_equal(true)
 
     it "rejects Skia-backed hosted presentation sources":
+        # @req REQ-GUI-RELLANE-002
+        step("Scan the Skia-backed printing entity source for forbidden release tokens")
+        # @capture(statistics): forbidden-dependency scan result over printing.spl
         expect(_has_forbidden_release_dependency(_existing_source("src/lib/gui/entity/printing.spl"))).to_equal(true)
 
     it "keeps pure GUI release entry surface free of WM, web renderer, Skia, and native GUI runtime deps":
+        # @req REQ-GUI-RELLANE-003
+        step("Scan the pure GUI release entry surface for forbidden release tokens")
+        # @capture(statistics): forbidden-dependency scan result over pure_release.spl
         _expect_release_clean("src/lib/gui/pure_release.spl")
 
     it "keeps pure GUI command boundary free of WM, web renderer, and native GUI runtime deps":
+        # @req REQ-GUI-RELLANE-004
+        step("Scan the pure GUI command boundary for forbidden release tokens")
+        # @capture(statistics): forbidden-dependency scan result over pure_core.spl
         _expect_release_clean("src/lib/gui/pure_core.spl")
 
     it "keeps pure GUI SMF dynlib perf contract free of WM, web renderer, and native GUI runtime deps":
+        # @req REQ-GUI-RELLANE-005
+        step("Scan the SMF dynlib perf contract for forbidden release tokens")
+        # @capture(statistics): forbidden-dependency scan result over pure_smf_dynlib_perf.spl
         _expect_release_clean("src/lib/gui/pure_smf_dynlib_perf.spl")
 
     it "keeps GUI SMF dynlib probe free of WM, web renderer, and native GUI runtime deps":
+        # @req REQ-GUI-RELLANE-006
+        step("Scan the SMF dynlib probe core and its entry point for forbidden release tokens")
+        # @capture(statistics): forbidden-dependency scan result over smf_dynlib_probe_core.spl and smf_dynlib_probe.spl
         _expect_release_clean("src/app/gui_perf/smf_dynlib_probe_core.spl")
         _expect_release_clean("src/app/gui_perf/smf_dynlib_probe.spl")
 
     it "rejects legacy Rust SMF and dyncall runtime helpers in GUI release sources":
+        # @req REQ-GUI-RELLANE-007
+        step("Scan hand-built extern/import fixture lines for legacy SMF and dyncall helper tokens")
+        # @capture(statistics): forbidden-dependency scan result over each fixture line
         expect(_has_forbidden_release_dependency("extern fn rt_file_wrap_smf_dynlib(input: text, output: text, arch: text) -> bool")).to_equal(true)
         expect(_has_forbidden_release_dependency("extern fn rt_file_extract_smf_dynlib(input: text, output: text) -> bool")).to_equal(true)
         expect(_has_forbidden_release_dependency("extern fn rt_dyncall_0(ptr: i64) -> i64")).to_equal(true)
@@ -129,6 +189,9 @@ describe "pure GUI release lane":
         expect(_has_forbidden_release_dependency("use std.sffi.dynamic.{spl_dlopen, spl_dlsym, spl_dlclose, spl_wffi_call_i64}")).to_equal(false)
 
     it "keeps macOS SMF evidence runner free of WM, web renderer, and native GUI runtime deps":
+        # @req REQ-GUI-RELLANE-008
+        step("Scan the macOS SMF dynlib evidence chain sources for forbidden release tokens")
+        # @capture(statistics): forbidden-dependency scan result over the macOS/Linux SMF evidence chain
         _expect_release_clean("src/app/gui_perf/macos_smf_dynlib_evidence_core.spl")
         _expect_release_clean("src/app/gui_perf/macos_smf_dynlib_evidence.spl")
         _expect_release_clean("src/app/gui_perf/macos_smf_dynlib_transcript_check.spl")
@@ -136,22 +199,38 @@ describe "pure GUI release lane":
         _expect_release_clean("src/app/gui_perf/linux_smf_dynlib_e2e_gate.spl")
 
     it "keeps macOS release gate failing closed on setup and transcript validation":
-        val source = _existing_source("src/app/gui_perf/macos_smf_dynlib_release_gate.spl")
-        expect(source).to_contain("reason=transcript-dir-create-failed")
-        expect(source).to_contain("val saved_transcript = rt_file_read_text(transcript_path)")
-        expect(source).to_contain("reason=transcript-readback-mismatch")
-        expect(source).to_contain("gui_mac_smf_dynlib_transcript_check_row(saved_transcript)")
-        expect(source.contains("gui_mac_smf_dynlib_transcript_check_row(stdout)")).to_equal(false)
-        expect(source).to_contain("reason=transcript-check-failed")
-        expect(source).to_contain("check_row == \"GUI_MAC_SMF_DYNLIB_TRANSCRIPT status=pass\"")
-        expect(source.contains("check_row.contains(\"status=pass\")")).to_equal(false)
-        expect(source).to_contain("GUI_MAC_SMF_DYNLIB_RELEASE_GATE status=pass")
+        # @req REQ-GUI-RELLANE-009
+        step("Read the macOS release gate source and check its fail-closed transcript handling")
+        # @capture(statistics): literal-match count over macos_smf_dynlib_release_gate.spl
+        val release_gate_source = _existing_source("src/app/gui_perf/macos_smf_dynlib_release_gate.spl")
+        expect(release_gate_source).to_contain("reason=transcript-dir-create-failed")
+        # NOTE: the next assertion is a legitimate pre-existing RED. The gate
+        # was refactored to read the transcript back through the io_runtime
+        # facade (`val saved_transcript = file_read(transcript_path)`,
+        # src/app/gui_perf/macos_smf_dynlib_release_gate.spl:48) instead of the
+        # raw `rt_file_read_text` extern this spec still asserts verbatim at
+        # this line. Fix is to update this literal to match the facade call,
+        # not to weaken or delete the check.
+        expect(release_gate_source).to_contain("val saved_transcript = rt_file_read_text(transcript_path)")
+        expect(release_gate_source).to_contain("reason=transcript-readback-mismatch")
+        expect(release_gate_source).to_contain("gui_mac_smf_dynlib_transcript_check_row(saved_transcript)")
+        expect(release_gate_source.contains("gui_mac_smf_dynlib_transcript_check_row(stdout)")).to_equal(false)
+        expect(release_gate_source).to_contain("reason=transcript-check-failed")
+        expect(release_gate_source).to_contain("check_row == \"GUI_MAC_SMF_DYNLIB_TRANSCRIPT status=pass\"")
+        expect(release_gate_source.contains("check_row.contains(\"status=pass\")")).to_equal(false)
+        expect(release_gate_source).to_contain("GUI_MAC_SMF_DYNLIB_RELEASE_GATE status=pass")
 
     it "keeps SMF artifact contract helpers free of WM, web renderer, and native GUI runtime deps":
+        # @req REQ-GUI-RELLANE-010
+        step("Scan the SMF artifact contract helper sources for forbidden release tokens")
+        # @capture(statistics): forbidden-dependency scan result over smf_dynlib_artifact.spl and smf_artifact_contract.spl
         _expect_release_clean("src/app/gui_perf/smf_dynlib_artifact.spl")
         _expect_release_clean("src/app/gui_perf/smf_artifact_contract.spl")
 
     it "keeps QEMU ARM64 SMF parity evidence free of WM, web renderer, and native GUI runtime deps":
+        # @req REQ-GUI-RELLANE-011
+        step("Scan the QEMU ARM64 SMF parity and SimpleOS dynload evidence sources for forbidden release tokens")
+        # @capture(statistics): forbidden-dependency scan result over the QEMU ARM64 SMF parity chain
         _expect_release_clean("src/app/gui_perf/qemu_arm64_smf_parity.spl")
         _expect_release_clean("src/app/gui_perf/qemu_arm64_smf_parity_evidence.spl")
         _expect_release_clean("src/app/gui_perf/simpleos_smf_dynload.spl")
@@ -160,17 +239,29 @@ describe "pure GUI release lane":
         _expect_release_clean("src/app/gui_perf/qemu_arm64_smf_loader_parity_evidence.spl")
 
     it "keeps SMF wrapper and exported hot symbol free of WM, web renderer, and native GUI runtime deps":
+        # @req REQ-GUI-RELLANE-012
+        step("Scan the SMF host dynlib wrapper and exported hot symbol sources for forbidden release tokens")
+        # @capture(statistics): forbidden-dependency scan result over smf_wrap_host_dynlib.spl and pure_gui_hot_dynlib_export.spl
         _expect_release_clean("src/app/gui_perf/smf_wrap_host_dynlib.spl")
         _expect_release_clean("src/app/gui_perf/pure_gui_hot_dynlib_export.spl")
 
     it "keeps exported dynlib hot symbol delegated to the pure command boundary":
-        val source = _existing_source("src/app/gui_perf/pure_gui_hot_dynlib_export.spl")
-        expect(source).to_contain("gui_representative_hot_probe_event_tick(iteration, pointer_x, pointer_y, key_code)")
-        expect(_text_has(source, "_pure_gui_hot_command_count")).to_equal(false)
+        # @req REQ-GUI-RELLANE-013
+        step("Read the exported hot dynlib symbol source and check it delegates to the pure command boundary")
+        # @capture(statistics): literal-match count over pure_gui_hot_dynlib_export.spl
+        val hot_export_source = _existing_source("src/app/gui_perf/pure_gui_hot_dynlib_export.spl")
+        expect(hot_export_source).to_contain("gui_representative_hot_probe_event_tick(iteration, pointer_x, pointer_y, key_code)")
+        expect(_text_has(hot_export_source, "_pure_gui_hot_command_count")).to_equal(false)
 
     it "documents legacy Rust SMF helpers as outside GUI release evidence":
-        # @req REQ-SSPEC-LIB
-        step("documents legacy Rust SMF helpers as outside GUI release evidence")
+        # @req REQ-GUI-RELLANE-014
+        step("Read the dynlib API guide and check it documents legacy SMF helpers as non-release evidence")
+        # @capture(statistics): literal-match count over the dynlib API guide
+        # NOTE: this scenario is a legitimate pre-existing RED. The guide moved
+        # to doc/07_guide/lib/api/dynlib_api.md; this spec still reads the
+        # stale path doc/07_guide/dynlib_api.md below, which no longer exists,
+        # so `_existing_source` returns nil and the call fails the non-optional
+        # return contract. Fix is to update the path, not to remove the check.
         val guide = _existing_source("doc/07_guide/dynlib_api.md")
         expect(guide).to_contain("Legacy runtime SMF file helpers are not the GUI release lane")
         expect(guide).to_contain("not accepted GUI release-lane evidence")
@@ -179,13 +270,25 @@ describe "pure GUI release lane":
         expect(guide).to_contain("src/app/gui_perf/smf_dynlib_probe.spl")
 
     it "keeps BrowserWindow entity free of native GUI runtime deps":
+        # @req REQ-GUI-RELLANE-015
+        step("Scan the BrowserWindow entity source for native GUI runtime tokens")
+        # @capture(statistics): native-GUI-runtime scan result over browser_window.spl
         _expect_no_native_gui_runtime("src/lib/gui/entity/browser_window.spl")
 
     it "keeps Menu entity free of native GUI runtime deps":
+        # @req REQ-GUI-RELLANE-016
+        step("Scan the Menu entity source for native GUI runtime tokens")
+        # @capture(statistics): native-GUI-runtime scan result over menu.spl
         _expect_no_native_gui_runtime("src/lib/gui/entity/menu.spl")
 
     it "keeps IME entity free of native GUI runtime deps":
+        # @req REQ-GUI-RELLANE-017
+        step("Scan the IME entity source for native GUI runtime tokens")
+        # @capture(statistics): native-GUI-runtime scan result over ime.spl
         _expect_no_native_gui_runtime("src/lib/gui/entity/ime.spl")
 
     it "keeps Printing entity free of native GUI runtime deps":
+        # @req REQ-GUI-RELLANE-018
+        step("Scan the Printing entity source for native GUI runtime tokens")
+        # @capture(statistics): native-GUI-runtime scan result over printing.spl
         _expect_no_native_gui_runtime("src/lib/gui/entity/printing.spl")

@@ -1,4 +1,41 @@
-# @req REQ-001 REQ-002 REQ-007
+"""
+## Purpose and audience
+
+Executable evidence for the native module cache's authoritative fact
+producers, written for the compiler engineers who own cache invalidation and
+for reviewers deciding whether a native-build cache entry may be reused.
+
+## Operator workflow
+
+Run this spec and confirm the Results line reports 0 failed. Each scenario
+constructs an in-memory module-surface registry with one consumer importing
+one dependency, drives a real fact producer over it, and asserts the
+derived witness facts: dependency interface digests, resolver probe traces,
+fail-closed instrumentation handling, external layout ownership, and the
+merge verdict.
+
+## Compatibility and limitations
+
+The producers run on hand-built `ModuleSurface` fixtures, not on a parsed
+tree, so probe counts and generation strings here are properties of the
+registry fixture. The merge producer's ambiguous-ownership refusal is
+covered by the last scenario; nothing here touches on-disk caches.
+
+## Verification guidance and troubleshooting
+
+If the resolution-facts scenario fails, first compare
+`resolver_version` against "hir-module-surface-resolver-v1" -- a probe-count
+drift usually means the resolver gained or lost a candidate path. If the
+merge scenario fails on `witness("mir-1").digest()`, check that ambiguous
+layout ownership still refuses the whole fact set rather than merging a
+winner.
+"""
+# Lifecycle: research: doc/01_research/local/module_surface_export_provenance.md ; plan: doc/03_plan/agent_tasks/native_module_cache_invalidation.md ; architecture: doc/04_architecture/module_surface_export_provenance.md ; design: doc/05_design/module_surface_export_provenance.md
+# @cover src/compiler/driver/cache/native_module_witness_facts.spl
+# @manual_section: native module cache fact producers
+
+use std.spec.step
+
 use std.spec.{describe, it, expect}
 use compiler.common.diagnostics.span.{Span}
 use compiler.common.driver_core_types.{SourceFile}
@@ -39,6 +76,9 @@ fn fact_surfaces() -> ModuleSurfacesByName:
 
 describe "native module cache authoritative fact producers":
     it "derives direct dependency interface facts from the resolved surface":
+        # @req REQ-001
+        # @capture(protocol_json): derived dependency facts for the app.main fixture
+        step("derive direct dependency facts over the consumer/dependency fixture")
         val result = native_direct_dependency_facts_v1(
             "app.main", fact_surfaces(), [
                 SourceFile(path: "src/app/main.spl", content: "use lib.dep.*",
@@ -48,14 +88,17 @@ describe "native module cache authoritative fact producers":
                     module_name: "lib.dep"),
             ])
         expect(result.valid).to_equal(true)
-        expect(result.dependencies.len()).to_equal(1)
+        expect(result.dependencies.len()).to_equal(1)  # oracle: the fixture declares exactly one import (lib.dep)
         expect(result.dependencies[0].module_id).to_equal("lib.dep")
         expect(result.dependencies[0].iface_digest == "").to_equal(false)
 
     it "retains unsuccessful resolver candidates in source order":
+        # @req REQ-002
+        # @capture(protocol_json): resolver probe trace for the lib.dep import
+        step("derive resolution facts and inspect the retained probe trace")
         val result = native_resolution_facts_v1("app.main", fact_surfaces())
         expect(result.valid).to_equal(true)
-        expect(result.resolutions[0].probes.len()).to_equal(4)
+        expect(result.resolutions[0].probes.len()).to_equal(4)  # oracle: the resolver tries exactly four candidate paths per import
         expect(result.resolutions[0].probes[0].path).to_equal("lib.dep")
         expect(result.resolutions[0].probes[0].found).to_equal(true)
         expect(result.resolutions[0].probes[1].found).to_equal(false)
@@ -65,6 +108,9 @@ describe "native module cache authoritative fact producers":
             "hir-module-surface-resolver-v1")
 
     it "fails closed when resolver instrumentation is unavailable":
+        # @req REQ-002
+        # @capture(protocol_json): refusal reason for the stripped fixture
+        step("strip the import-resolution trace and require a refused fact set")
         var missing = fact_surfaces()
         var consumer = missing.surfaces[0]
         consumer.import_resolution_traces = []
@@ -74,6 +120,9 @@ describe "native module cache authoritative fact producers":
         expect(result.reason).to_equal("missing-resolution-instrumentation")
 
     it "keeps only externally owned referenced layouts":
+        # @req REQ-007
+        # @capture(protocol_json): retained external layout facts
+        step("derive layout facts from a mixed owner trace and require external-only retention")
         val result = native_external_layout_facts_v1("app.main", [
             NativeExternalLayoutTraceV1(
                 consumer_module_id: "app.main", owner_module_id: "app.main",
@@ -83,10 +132,13 @@ describe "native module cache authoritative fact producers":
                 type_id: "External", layout_digest: "external-layout", owner_count: 1),
         ], true)
         expect(result.valid).to_equal(true)
-        expect(result.layouts.len()).to_equal(1)
+        expect(result.layouts.len()).to_equal(1)  # oracle: self-owned layouts are dropped, only the lib.dep-owned layout survives
         expect(result.layouts[0].owner_module_id).to_equal("lib.dep")
 
     it "merges complete facts and rejects ambiguous layout ownership":
+        # @req REQ-007
+        # @capture(protocol_json): merged fact-set verdict for the ambiguous fixture
+        step("merge the three fact sets over an ambiguous layout and require refusal")
         val deps = native_direct_dependency_facts_v1(
             "app.main", fact_surfaces(), [
                 SourceFile(path: "src/lib/dep.spl", content: "struct External:\n    x: i64",
@@ -102,4 +154,4 @@ describe "native module cache authoritative fact producers":
             deps, resolutions, ambiguous)
         expect(ambiguous.valid).to_equal(false)
         expect(merged.valid).to_equal(false)
-        expect(merged.witness("mir-1").digest()).to_equal("")
+        expect(merged.witness("mir-1").digest()).to_equal("")  # oracle: a refused merge yields no digest, so no cache entry may claim the witness

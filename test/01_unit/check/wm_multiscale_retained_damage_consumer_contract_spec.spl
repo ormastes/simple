@@ -1,3 +1,33 @@
+"""
+## Purpose and audience
+Source-contract evidence for the engineers who own the WM multiscale
+retained-damage path (`src/lib/common/ui/render_opt/wm_retained_damage_consumer.spl`,
+`src/os/compositor/compositor_engine2d.spl`,
+`src/os/compositor/host_compositor_core.spl`). It pins the three-scale damage
+pyramid, the backend-neutral consumer surface, the admitted-schedule routing to
+Engine2D, and the owner-issued full-seed calibration order. Operators auditing
+a damage-routing regression rerun this spec before touching the compositor.
+## Operator workflow
+Run
+`./src/compiler_rust/target/bootstrap/simple run test/01_unit/check/wm_multiscale_retained_damage_consumer_contract_spec.spl`
+from the repo root; every scenario reads the named production sources and
+asserts the wiring tokens in execution order.
+## Compatibility and limitations
+This is a source-contract spec: it proves the shipped call chain and its
+ordering, not runtime frame output, throughput, or an 8K performance claim.
+Those require presented-frame receipts from a native host lane.
+## Verification guidance and troubleshooting
+A failure names the contract local that went false; grep the cited source file
+for the matching token to see whether a rename or a reordering broke the chain.
+Ordering failures (`to_be_less_than` on two offsets) mean the seed-commit or
+present-before-commit sequencing regressed.
+"""
+# Lifecycle: doc/01_research/domain/engine2d_four_backend_capture.md ;
+# doc/03_plan/ui/draw_ir/draw_ir_backend_native_refactor_plan.md ;
+# doc/04_architecture/gpu_scheduler_hardening_gpu_resident_rendering.md ;
+# doc/05_design/wm_full_stack_demo.md
+# @manual_section: wm-retained-damage
+
 # @tag: unit, contract, wm, render_perf, retained, damage
 
 use std.spec
@@ -5,62 +35,112 @@ use std.io_runtime.{file_read}
 
 describe "WM multiscale retained damage consumer contract":
     it "keeps the three-scale pyramid backend neutral":
+        # @req REQ-WM-DAMAGE-001
+        # @capture(bit_table): the three-scale damage budget ladder and the backend-neutral consumer surface it pins
+        step("Inspect the retained damage consumer source for the pinned pyramid and its backend neutrality")
         val source = file_read(
             "src/lib/common/ui/render_opt/wm_retained_damage_consumer.spl")
-        expect(source).to_contain("[256u32, 64u32, 32u32]")
-        expect(source).to_contain("WM_DAMAGE_LEVEL_CPU")
-        expect(source).to_contain("WM_DAMAGE_LEVEL_PRESENTER")
-        expect(source).to_contain("retained_damage_plan(")
-        expect(source).to_contain("retained_frame_schedule(")
-        expect(source.contains("Vulkan")).to_equal(false)
-        expect(source.contains("WebIR")).to_equal(false)
-        expect(source.contains("GuiIR")).to_equal(false)
+        val pins_three_scale_ladder = source.contains("[256u32, 64u32, 32u32]")
+        val names_cpu_damage_level = source.contains("WM_DAMAGE_LEVEL_CPU")
+        val names_presenter_damage_level = source.contains("WM_DAMAGE_LEVEL_PRESENTER")
+        val exposes_retained_damage_plan = source.contains("retained_damage_plan(")
+        val exposes_retained_frame_schedule = source.contains("retained_frame_schedule(")
+        val backend_neutral_has_no_vulkan = source.contains("Vulkan")
+        val backend_neutral_has_no_webir = source.contains("WebIR")
+        val backend_neutral_has_no_guiir = source.contains("GuiIR")
+        expect(pins_three_scale_ladder).to_equal(true)  # oracle: 256/64/32 are the pinned CPU/presenter/full budgets of the pyramid
+        expect(names_cpu_damage_level).to_equal(true)  # oracle: the ladder constants must stay named for the CPU tier
+        expect(names_presenter_damage_level).to_equal(true)  # oracle: the ladder constants must stay named for the presenter tier
+        expect(exposes_retained_damage_plan).to_equal(true)  # oracle: the plan builder is the consumer's public entry point
+        expect(exposes_retained_frame_schedule).to_equal(true)  # oracle: the schedule builder is what the compositor admits
+        expect(backend_neutral_has_no_vulkan).to_equal(false)  # oracle: a backend name here would couple the neutral pyramid to one backend
+        expect(backend_neutral_has_no_webir).to_equal(false)  # oracle: a backend name here would couple the neutral pyramid to one backend
+        expect(backend_neutral_has_no_guiir).to_equal(false)  # oracle: a backend name here would couple the neutral pyramid to one backend
 
     it "routes only an admitted schedule to Engine2D and falls back full":
+        # @req REQ-WM-DAMAGE-002
+        # @capture(bit_table): the Engine2D DrawIR route and its full-frame fallback wiring offsets
+        step("Inspect the compositor engine for the DrawIR route and the full-frame fallback")
         val source = file_read("src/os/compositor/compositor_engine2d.spl")
-        expect(source).to_contain("WmRetainedDamageConsumer")
-        expect(source).to_contain("engine2d_draw_ir_adv_composition_damage_with_images(")
-        expect(source).to_contain("self.engine.present()")
-        val consumer = source.index_of("engine2d_draw_ir_adv_composition_damage_with_images(")
-        val fallback = source.index_of("self.engine.present()")
-        expect(consumer >= 0).to_equal(true)
-        expect(fallback >= 0).to_equal(true)
+        val consumer_wired_into_engine = source.contains("WmRetainedDamageConsumer")
+        val routes_to_drawir_composition = source.contains("engine2d_draw_ir_adv_composition_damage_with_images(")
+        val keeps_full_frame_fallback = source.contains("self.engine.present()")
+        val consumer_offset = source.index_of("engine2d_draw_ir_adv_composition_damage_with_images(")
+        val fallback_offset = source.index_of("self.engine.present()")
+        val drawir_route_present = consumer_offset >= 0
+        val fallback_present = fallback_offset >= 0
+        expect(consumer_wired_into_engine).to_equal(true)  # oracle: without the consumer type the engine cannot consume retained schedules
+        expect(routes_to_drawir_composition).to_equal(true)  # oracle: the DrawIR composition call is the admitted-schedule executor
+        expect(keeps_full_frame_fallback).to_equal(true)  # oracle: present() is the full-frame fallback when no schedule is admitted
+        expect(drawir_route_present).to_equal(true)  # oracle: index_of found the DrawIR route, so the offset is a real hit
+        expect(fallback_present).to_equal(true)  # oracle: index_of found the fallback present, so the offset is a real hit
 
     it "uses an owner-issued full seed before canonical DrawIR retained execution":
+        # @req REQ-WM-DAMAGE-003
+        # @capture(bit_table): the calibration receipt gate, its owner tokens, and the schedule-before-execute offsets
+        step("Inspect the compositor engine for the calibration gate and its schedule-before-execute order")
         val source = file_read("src/os/compositor/compositor_engine2d.spl")
-        expect(source).to_contain("Engine2dRetainedDamageCalibrationReceipt")
-        expect(source).to_contain("seed_retained_damage_calibration(")
-        expect(source).to_contain("record_retained_damage_full_sample(")
-        expect(source).to_contain("_ENGINE2D_RETAINED_DAMAGE_MIN_FULL_SAMPLES")
-        expect(source).to_contain("complete_retained_damage_full_present(")
-        expect(source).to_contain("time_now_nanos()")
-        expect(source).to_contain("retained_damage_replay_manifest(")
-        expect(source).to_contain("retained_damage_resource_manifest(")
-        expect(source).to_contain("admitted_retained_damage_schedule(")
-        expect(source).to_contain("retained_schedule.unwrap().plan")
-        expect(source).to_contain("if self.retained_damage_calibration != nil:")
-        expect(source).to_contain("owner-token-retained-replay")
-        expect(source).to_contain("presenter-full-seed-unpresented")
-        expect(source).to_contain("immediate-mode-no-replay-receipt")
-        expect(source.contains("configure_retained_damage_calibration(")).to_equal(false)
-        expect(source.contains("retained_device_frame")).to_equal(false)
-        expect(source.contains("build_damage_frame_plan(pyramid, 0, 64, 60)")).to_equal(false)
-        val schedule = source.index_of("retained_schedule = self.admitted_retained_damage_schedule(")
-        val executor = source.index_of("retained_schedule.unwrap().plan")
-        val fallback = source.index_of("engine2d_draw_ir_adv_composition_submit_with_images(")
-        expect(schedule >= 0).to_equal(true)
-        expect(executor >= 0).to_equal(true)
-        expect(fallback >= 0).to_equal(true)
-        expect(schedule).to_be_less_than(executor)
+        val names_calibration_receipt = source.contains("Engine2dRetainedDamageCalibrationReceipt")
+        val seeds_calibration = source.contains("seed_retained_damage_calibration(")
+        val records_full_samples = source.contains("record_retained_damage_full_sample(")
+        val pins_minimum_samples = source.contains("_ENGINE2D_RETAINED_DAMAGE_MIN_FULL_SAMPLES")
+        val completes_full_present = source.contains("complete_retained_damage_full_present(")
+        val stamps_wall_clock = source.contains("time_now_nanos()")
+        val emits_replay_manifest = source.contains("retained_damage_replay_manifest(")
+        val emits_resource_manifest = source.contains("retained_damage_resource_manifest(")
+        val admits_schedule = source.contains("admitted_retained_damage_schedule(")
+        val executes_admitted_plan = source.contains("retained_schedule.unwrap().plan")
+        val gates_on_calibration = source.contains("if self.retained_damage_calibration != nil:")
+        val owner_token_present = source.contains("owner-token-retained-replay")
+        val unpresented_seed_token = source.contains("presenter-full-seed-unpresented")
+        val immediate_mode_token = source.contains("immediate-mode-no-replay-receipt")
+        val no_external_calibration_config = source.contains("configure_retained_damage_calibration(")
+        val no_device_frame_leak = source.contains("retained_device_frame")
+        val no_legacy_plan_call = source.contains("build_damage_frame_plan(pyramid, 0, 64, 60)")
+        val schedule_offset = source.index_of("retained_schedule = self.admitted_retained_damage_schedule(")
+        val executor_offset = source.index_of("retained_schedule.unwrap().plan")
+        val fallback_offset = source.index_of("engine2d_draw_ir_adv_composition_submit_with_images(")
+        val schedule_admission_present = schedule_offset >= 0
+        val plan_execution_present = executor_offset >= 0
+        val submit_fallback_present = fallback_offset >= 0
+        expect(names_calibration_receipt).to_equal(true)  # oracle: the receipt type is the owner-issued gate
+        expect(seeds_calibration).to_equal(true)  # oracle: seeding must precede any admitted schedule
+        expect(records_full_samples).to_equal(true)  # oracle: full samples are the evidence the receipt certifies
+        expect(pins_minimum_samples).to_equal(true)  # oracle: the minimum-sample constant makes the gate non-trivial
+        expect(completes_full_present).to_equal(true)  # oracle: the seed ends in a real presented frame
+        expect(stamps_wall_clock).to_equal(true)  # oracle: timestamps bind the seed to a present window
+        expect(emits_replay_manifest).to_equal(true)  # oracle: the replay manifest is the auditable seed record
+        expect(emits_resource_manifest).to_equal(true)  # oracle: the resource manifest is the auditable seed record
+        expect(admits_schedule).to_equal(true)  # oracle: only the admitted schedule may drive retained execution
+        expect(executes_admitted_plan).to_equal(true)  # oracle: execution consumes the admitted plan, not a locally built one
+        expect(gates_on_calibration).to_equal(true)  # oracle: the nil check is the fail-closed gate on the receipt
+        expect(owner_token_present).to_equal(true)  # oracle: the owner token string is the receipt's identity
+        expect(unpresented_seed_token).to_equal(true)  # oracle: the unpresented-seed rejection string is the guard's verdict
+        expect(immediate_mode_token).to_equal(true)  # oracle: the immediate-mode verdict string documents the no-receipt path
+        expect(no_external_calibration_config).to_equal(false)  # oracle: calibration must be owner-issued, not externally configurable
+        expect(no_device_frame_leak).to_equal(false)  # oracle: retained_device_frame was retired; its return would resurrect the old path
+        expect(no_legacy_plan_call).to_equal(false)  # oracle: the legacy hard-coded plan call bypasses admission and must stay gone
+        expect(schedule_admission_present).to_equal(true)  # oracle: index_of found the admission site
+        expect(plan_execution_present).to_equal(true)  # oracle: index_of found the plan execution site
+        expect(submit_fallback_present).to_equal(true)  # oracle: index_of found the submit fallback site
+        expect(schedule_offset).to_be_less_than(executor_offset)  # oracle: admission must textually precede execution or the gate orders nothing
 
     it "commits CPU calibration only after the host has presented its full seed":
+        # @req REQ-WM-DAMAGE-004
+        # @capture(bit_table): the host present-before-commit offsets for the CPU calibration seed
+        step("Inspect host compositor core for present-before-commit ordering of the calibration seed")
         val backend = file_read("src/os/compositor/compositor_engine2d.spl")
         val host = file_read("src/os/compositor/host_compositor_core.spl")
-        expect(backend).to_contain("full-seed-warmup")
-        expect(host).to_contain("val retained_full_started_ns = time_now_nanos()")
-        expect(host).to_contain("executor.complete_retained_damage_full_present(")
-        val present = host.index_of("self.pixel_backend.present()")
-        val commit = host.index_of("executor.complete_retained_damage_full_present(")
-        expect(present >= 0).to_equal(true)
-        expect(commit >= 0).to_equal(true)
-        expect(present).to_be_less_than(commit)
+        val backend_names_seed_warmup = backend.contains("full-seed-warmup")
+        val host_stamps_seed_start = host.contains("val retained_full_started_ns = time_now_nanos()")
+        val host_completes_seed = host.contains("executor.complete_retained_damage_full_present(")
+        val present_offset = host.index_of("self.pixel_backend.present()")
+        val commit_offset = host.index_of("executor.complete_retained_damage_full_present(")
+        val present_site_present = present_offset >= 0
+        val commit_site_present = commit_offset >= 0
+        expect(backend_names_seed_warmup).to_equal(true)  # oracle: the backend must declare the warmup phase the host drives
+        expect(host_stamps_seed_start).to_equal(true)  # oracle: the host timestamps the seed window it is responsible for
+        expect(host_completes_seed).to_equal(true)  # oracle: only the host completes the full present
+        expect(present_site_present).to_equal(true)  # oracle: index_of found the host present site
+        expect(commit_site_present).to_equal(true)  # oracle: index_of found the host commit site
+        expect(present_offset).to_be_less_than(commit_offset)  # oracle: present must precede commit or calibration certifies an unpresented seed

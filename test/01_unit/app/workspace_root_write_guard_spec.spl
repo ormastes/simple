@@ -1,12 +1,48 @@
-# Purpose and audience: executable specification evidence for the owning engineering team.
+"""
+## Purpose and audience
+Executable specification for the workspace root write guard
+(scripts/check-workspace-root-guard.shs) and its wiring into the lint and
+repo-hygiene lanes. Written for the workspace-hygiene owners who need proof
+that misplaced root entries are flagged fail-closed, the guard never deletes
+by default, and every lint entrypoint actually runs the staged audit.
+
+## Operator workflow
+Run one file: `bin/simple test test/01_unit/app/workspace_root_write_guard_spec.spl`.
+The behaviour scenarios execute the real guard script via rt_process_run in
+audit / self-test / bogus-mode forms against prepared path files under /tmp;
+the wiring scenarios are source contracts read from the shipped guard and
+lint sources via genuinely-named locals.
+
+## Compatibility and limitations
+The guard is a shell script, so behavioural coverage runs it as a subprocess
+and needs the repo checkout present; wiring coverage is a source contract
+because there is no runtime seam to observe which call path lint took. The
+lint delegation is a two-hop chain (lint_entry wrapper -> run_lint_command in
+cli_lint_commands -> _cli_run_workspace_root_guard in cli_ops); the wrapper
+itself never names the guard.
+
+## Verification guidance and troubleshooting
+An audit-mode failure with a WRG001 diagnostic means FILE.md allowlisting or
+root-entry classification changed — run the guard's own --self-test first. A
+wiring-contract failure means a lint entrypoint stopped running the staged
+audit; re-check the chain in cli_lint_commands.spl and cli_ops.spl before
+editing either side.
+"""
+
+# Lifecycle: doc/01_research/infra/sspec/modern_sspec_typed_evidence_research_2026-08-08.md
+# doc/03_plan/infra/misc/workspace_root_write_guard.md
+# doc/04_architecture/infra/workspace/workspace_root_write_guard.md
+# doc/05_design/infra/workspace_root_write_guard.md
+# @manual_section: workspace root write guard
+
 # @req REQ-SSPEC-APP
-# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+# @feature workspace_root_write_guard
+# tag: unit
 
-# Workspace root write guard implementation — executes the real guard script.
-
+use std.spec
 use std.spec.step
-
-use std.io_runtime.{file_exists, write_file}
+use std.spec.{describe, it, expect}
+use std.io_runtime.{file_exists, write_file, read_file}
 
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 
@@ -17,96 +53,110 @@ fn run_guard(mode_and_opts: [text]) -> (text, i64):
 fn run_guard_all(mode_and_opts: [text]) -> (text, text, i64):
     rt_process_run("sh", ["scripts/check-workspace-root-guard.shs"] + mode_and_opts)
 
-use std.spec.{describe, it, expect}
-use std.io_runtime.{read_file, file_exists}
 describe "Workspace root write guard implementation":
     # @manual scenario evidence
     it "ships the root guard script":
         # @req REQ-SSPEC-APP
-        step("ships the root guard script")
+        # @capture(bit_table): guard-script presence check
+        step("Check the guard script exists at its tracked path")
         expect(file_exists("scripts/check-workspace-root-guard.shs")).to_equal(true)
 
     it "flags misplaced root entries and passes clean trees in audit mode":
         # @req REQ-SSPEC-APP
-        step("flags misplaced root entries and passes clean trees in audit mode")
+        # @capture(statistics): audit exit codes for bad and clean path files
+        step("Audit a stray root entry and a clean tree through the real guard")
         write_file("/tmp/wrg_bad_paths.txt", "stray_root_file.txt\n")
         write_file("/tmp/wrg_good_paths.txt", "src/lib/foo.spl\n")
-        # oracle: a root entry not allowed by FILE.md is a WRG001 violation (exit 1)
         val (bad_out, bad_rc) = run_guard(["audit", "--path-file", "/tmp/wrg_bad_paths.txt"])
-        expect(bad_rc).to_equal(1)
+        expect(bad_rc).to_equal(1)  # oracle: exit 1 is the guard's violation code — a misplaced root entry must fail the audit, not just warn
         expect(bad_out.contains("WRG001")).to_equal(true)
-        # oracle: an allowed tree path audits clean (exit 0)
         val (good_out, good_rc) = run_guard(["audit", "--path-file", "/tmp/wrg_good_paths.txt"])
-        expect(good_rc).to_equal(0)
+        expect(good_rc).to_equal(0)  # oracle: an allowlisted tree path must audit clean so legitimate layouts never block the lane
         expect(good_out.contains("OK")).to_equal(true)
 
     it "runs its own parser and path-classification self-tests":
         # @req REQ-SSPEC-APP
-        step("runs its own parser and path-classification self-tests")
-        # oracle: the built-in self-test suite must pass
+        # @capture(statistics): self-test exit code from the real guard
+        step("Run the guard's built-in self-test suite")
         val (out, rc) = run_guard(["--self-test"])
-        expect(rc).to_equal(0)
+        expect(rc).to_equal(0)  # oracle: the guard's own fixtures prove the parser and classifier work; any non-zero exit means the guard cannot be trusted this run
         expect(out.contains("self-test OK")).to_equal(true)
 
     it "rejects unknown arguments instead of guessing a mode":
         # @req REQ-SSPEC-APP
-        step("rejects unknown arguments instead of guessing a mode")
-        # oracle: a bogus mode fails closed with exit 2 and a diagnostic
+        # @capture(statistics): bogus-mode exit code and diagnostic
+        step("Feed the guard a bogus mode and observe the fail-closed exit")
         val (out, err, rc) = run_guard_all(["bogus"])
-        expect(rc).to_equal(2)
+        expect(rc).to_equal(2)  # oracle: exit 2 is the could-not-determine code — guessing a mode would let a typo'd invocation audit nothing and still pass
         expect((out + err).contains("unknown argument")).to_equal(true)
+
     it "supports audit fix lock unlock modes":
         # @req: REQ-GEN-APP-001
-        step("Verify: supports audit fix lock unlock modes")
-        val source = read_file("scripts/check-workspace-root-guard.shs")
-        expect(source.contains("audit|fix|lock|unlock")).to_equal(true)
-        expect(source.contains("--apply")).to_equal(true)
-        expect(source.contains("run_audit")).to_equal(true)
-        expect(source.contains("run_fix")).to_equal(true)
-        expect(source.contains("run_lock_preview")).to_equal(true)
-        expect(source.contains("run_lock_apply")).to_equal(true)
-        expect(source.contains("run_unlock_apply")).to_equal(true)
-        expect(source.contains("load_builtin_allowed_root")).to_equal(true)
-        expect(source.contains("FILE.md not found at repository root")).to_equal(false)
+        # @capture(source_contract): guard mode-dispatch lines retained
+        step("Read the shipped guard source and observe its mode dispatch")
+        val guard_script = read_file("scripts/check-workspace-root-guard.shs")
+        expect(guard_script.contains("audit|fix|lock|unlock")).to_equal(true)
+        expect(guard_script.contains("--apply")).to_equal(true)
+        expect(guard_script.contains("run_audit")).to_equal(true)
+        expect(guard_script.contains("run_fix")).to_equal(true)
+        expect(guard_script.contains("run_lock_preview")).to_equal(true)
+        expect(guard_script.contains("run_lock_apply")).to_equal(true)
+        expect(guard_script.contains("run_unlock_apply")).to_equal(true)
+        expect(guard_script.contains("load_builtin_allowed_root")).to_equal(true)
+        expect(guard_script.contains("FILE.md not found at repository root")).to_equal(false)
 
     it "does not delete by default":
         # @req: REQ-GEN-APP-001
-        step("Verify: does not delete by default")
-        val source = read_file("scripts/check-workspace-root-guard.shs")
-        expect(source.contains("does not delete files")).to_equal(true)
-        expect(source.contains("rm -rf \"$TMP_DIR\"")).to_equal(true)
-        expect(source.contains("rm -rf \"$rel\"")).to_equal(false)
+        # @capture(source_contract): guard deletion-safety lines retained
+        step("Read the shipped guard source and observe its deletion policy")
+        val guard_script = read_file("scripts/check-workspace-root-guard.shs")
+        expect(guard_script.contains("does not delete files")).to_equal(true)
+        # oracle: cleanup must be scoped to the guard's own temp dir; any
+        # rm -rf of a working-tree relative path would destroy user files
+        expect(guard_script.contains("rm -rf \"$TMP_DIR\"")).to_equal(true)
+        expect(guard_script.contains("rm -rf \"$rel\"")).to_equal(false)
 
     it "documents Windows ACL locking":
         # @req: REQ-GEN-APP-001
-        step("Verify: documents Windows ACL locking")
-        val source = read_file("scripts/check-workspace-root-guard.shs")
-        expect(source.contains("icacls")).to_equal(true)
-        expect(source.contains("Administrator")).to_equal(true)
-        expect(source.contains("protected_lock_dirs")).to_equal(true)
-        expect(source.contains("MUTABLE_ROOT_DIRS")).to_equal(true)
+        # @capture(source_contract): Windows ACL documentation lines retained
+        step("Read the shipped guard source and observe the Windows ACL notes")
+        val guard_script = read_file("scripts/check-workspace-root-guard.shs")
+        expect(guard_script.contains("icacls")).to_equal(true)
+        expect(guard_script.contains("Administrator")).to_equal(true)
+        expect(guard_script.contains("protected_lock_dirs")).to_equal(true)
+        expect(guard_script.contains("MUTABLE_ROOT_DIRS")).to_equal(true)
 
     it "wires lint entrypoints to the staged audit helper":
         # @req: REQ-GEN-APP-001
-        step("Verify: wires lint entrypoints to the staged audit helper")
-        val lint = read_file("src/app/io/cli_lint_commands.spl")
-        val lint_entry = read_file("src/app/cli/lint_entry.spl")
-        expect(lint.contains("_cli_run_workspace_root_guard()")).to_equal(true)
-        expect(lint_entry.contains("_cli_run_workspace_root_guard()")).to_equal(true)
+        # @capture(source_contract): lint delegation-chain lines retained
+        step("Read the lint sources and observe the two-hop guard delegation")
+        # NOTE: the wrapper lint_entry.spl never names the guard directly; it
+        # delegates to run_lint_command in cli_lint_commands.spl, which is
+        # where the guard call lives (cli_lint_commands.spl:104).
+        val lint_commands_source = read_file("src/app/io/cli_lint_commands.spl")
+        val lint_entry_source = read_file("src/app/cli/lint_entry.spl")
+        expect(lint_commands_source.contains("_cli_run_workspace_root_guard()")).to_equal(true)
+        # oracle: the wrapper must still route lint through the shared
+        # command implementation, or the guard would be bypassed entirely
+        expect(lint_entry_source.contains("run_lint_command")).to_equal(true)
 
     it "wires tracked CLI lint to staged audit":
         # @req: REQ-GEN-APP-001
-        step("Verify: wires tracked CLI lint to staged audit")
-        val ops = read_file("src/app/io/cli_ops.spl")
-        val lint = read_file("src/app/io/cli_lint_commands.spl")
-        val lint_entry = read_file("src/app/cli/lint_entry.spl")
-        expect(ops.contains("_cli_run_workspace_root_guard")).to_equal(true)
-        expect(ops.contains("check-workspace-root-guard.shs")).to_equal(true)
-        expect(lint.contains("_cli_run_workspace_root_guard()")).to_equal(true)
-        expect(lint_entry.contains("_cli_run_workspace_root_guard()")).to_equal(true)
+        # @capture(source_contract): staged-audit wiring lines retained
+        step("Read the ops and lint sources and observe the staged audit call")
+        val ops_source = read_file("src/app/io/cli_ops.spl")
+        val lint_commands_source = read_file("src/app/io/cli_lint_commands.spl")
+        val lint_entry_source = read_file("src/app/cli/lint_entry.spl")
+        expect(ops_source.contains("_cli_run_workspace_root_guard")).to_equal(true)
+        # oracle: the guard must run in audit --staged mode from the lint
+        # path, so only committed-intent files are classified
+        expect(ops_source.contains("check-workspace-root-guard.shs")).to_equal(true)
+        expect(lint_commands_source.contains("_cli_run_workspace_root_guard()")).to_equal(true)
+        expect(lint_entry_source.contains("run_lint_command")).to_equal(true)
 
     it "wires tracked repo hygiene to staged audit":
         # @req: REQ-GEN-APP-001
-        step("Verify: wires tracked repo hygiene to staged audit")
-        val source = read_file("scripts/check/check-repo-hygiene.shs")
-        expect(source.contains("check-workspace-root-guard.shs audit --staged")).to_equal(true)
+        # @capture(source_contract): repo-hygiene wiring line retained
+        step("Read the hygiene script and observe its guard invocation")
+        val hygiene_script = read_file("scripts/check/check-repo-hygiene.shs")
+        expect(hygiene_script.contains("check-workspace-root-guard.shs audit --staged")).to_equal(true)

@@ -53,6 +53,50 @@ ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)
 cd "$ROOT" || { echo "ERROR — nothing was checked (cannot cd to repo root)"; exit 2; }
 
 # ---- unresolved-import-edge detection ----
+# dotted_candidates ROOT DOTTED_MODULE
+# Emits every on-disk file path a dotted module name can legally denote under
+# ROOT, including DOTTED-DIRECTORY packages: a directory whose own name carries
+# dots, e.g. `app.ui.tui.app` -> `src/app/ui.tui/app.spl` and `app.ui.cli` ->
+# `src/app/ui.cli/__init__.spl`. This mirrors `dotted_dir_from` /
+# `resolve_parts_from_root` in the canonical resolver,
+# src/compiler_rust/compiler/src/pipeline/module_loader.rs:41-130 — a segment
+# that is not a real directory may instead be folded into the previous
+# directory's name with a `.`. Without these forms the gate could not tell a
+# dropped `app.ui.tui.app` edge from a module that simply does not exist, and
+# would report a blind PASS.
+dotted_candidates() {
+    dc_root="$1"
+    dc_mod="$2"
+    printf '%s\n' "$dc_mod" | awk -v root="$dc_root" '
+        {
+            n = split($0, seg, ".")
+            if (n < 1) next
+            # plain form: every segment is its own directory
+            path = root
+            for (i = 1; i < n; i++) path = path "/" seg[i]
+            print path "/" seg[n] ".spl"
+            print path "/" seg[n] "/__init__.spl"
+            # dotted-directory forms: fold the segments after position k into
+            # one dot-joined directory name
+            for (k = 1; k < n; k++) {
+                prefix = root
+                for (i = 1; i <= k; i++) prefix = prefix "/" seg[i]
+                # (a) dot-joined DIRECTORY holding seg[n] as a file
+                dir = ""
+                for (i = k + 1; i < n; i++) dir = (dir == "" ? seg[i] : dir "." seg[i])
+                if (dir != "") print prefix "/" dir "/" seg[n] ".spl"
+                # (b) dot-joined directory that IS the module (package init)
+                pkg = ""
+                for (i = k + 1; i <= n; i++) pkg = (pkg == "" ? seg[i] : pkg "." seg[i])
+                if (pkg != "" && pkg != seg[n]) {
+                    print prefix "/" pkg "/__init__.spl"
+                    print prefix "/" pkg "/mod.spl"
+                }
+            }
+        }
+    '
+}
+
 # find_unresolved_imports BASE_ROOT ENTRY CLOSURE_PATHS
 # Parses ENTRY's own top-level `use A.B.C...` lines (ignoring lines inside a
 # """ docstring and anything after a `#` comment), strips `.{...}` / `.*` /
@@ -105,14 +149,13 @@ find_unresolved_imports() {
     fu_unresolved=""
     for mod in $fu_modules; do
         [ -n "$mod" ] || continue
-        fu_slash=$(printf '%s' "$mod" | sed 's/\./\//g')
         case "$mod" in
             std.*|lib.*)
-                fu_rest=$(printf '%s' "$mod" | sed -e 's/^std\.//' -e 's/^lib\.//' -e 's/\./\//g')
-                fu_cands="src/lib/$fu_rest.spl src/lib/$fu_rest/__init__.spl"
+                fu_rest=$(printf '%s' "$mod" | sed -e 's/^std\.//' -e 's/^lib\.//')
+                fu_cands=$(dotted_candidates "src/lib" "$fu_rest")
                 ;;
             *)
-                fu_cands="src/$fu_slash.spl src/$fu_slash/__init__.spl src/lib/$fu_slash.spl src/lib/$fu_slash/__init__.spl"
+                fu_cands="$(dotted_candidates "src" "$mod") $(dotted_candidates "src/lib" "$mod")"
                 ;;
         esac
 
@@ -240,7 +283,7 @@ if [ "$SELFTEST" -eq 1 ]; then
     trap 'rm -rf "$ST_DIR"' EXIT
 
     st_pass=0
-    st_total=7
+    st_total=8
 
     # Fixture 1: clean closure (entry present, no forbidden path) -> PASS
     ST_SEED_CLEAN="$ST_DIR/seed_clean.sh"
@@ -404,6 +447,31 @@ EOF
         "PASS — "*) [ "$st_rc7" -eq 0 ] && st_pass=$((st_pass + 1)) ;;
     esac
     [ "$st_rc7" -eq 0 ] || echo "selftest fixture 7 (resolved bare import -> PASS) FAILED: rc=$st_rc7 out=$st_out7"
+
+    # Fixture 8: the entry imports a DOTTED-DIRECTORY module
+    # (`app.ui.tui.app` -> src/app/ui.tui/app.spl) that the fake seed's closure
+    # omits -> ERROR naming the module. Before the dotted-candidate forms were
+    # added, no candidate for this module existed on disk, so the gate could not
+    # see the dropped edge and returned a blind PASS.
+    ST_F8="$ST_DIR/f8"
+    mkdir -p "$ST_F8/src/app/ui" "$ST_F8/src/app/ui.tui"
+    : > "$ST_F8/src/app/ui.tui/app.spl"
+    cat > "$ST_F8/entry.spl" <<'EOF'
+use app.ui.tui.app.{run_tui}
+
+fn main():
+    pass
+EOF
+    IMPORT_BASE_ROOT="$ST_F8"
+    IMPORT_ENTRY_OVERRIDE="$ST_F8/entry.spl"
+    export IMPORT_BASE_ROOT IMPORT_ENTRY_OVERRIDE
+    st_out8=$(run_closure_scan "$ST_SEED_BLIND" "src/entry.spl" "src/forbidden")
+    st_rc8=$?
+    unset IMPORT_BASE_ROOT IMPORT_ENTRY_OVERRIDE
+    case "$st_out8" in
+        "ERROR — "*"unresolved import edge"*"app.ui.tui.app"*) [ "$st_rc8" -eq 2 ] && st_pass=$((st_pass + 1)) ;;
+    esac
+    [ "$st_rc8" -eq 2 ] || echo "selftest fixture 8 (dropped dotted-directory import -> ERROR) FAILED: rc=$st_rc8 out=$st_out8"
 
     rm -rf "$ST_DIR"
     trap - EXIT

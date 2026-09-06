@@ -1,0 +1,656 @@
+#!/bin/sh
+# check-ui-slim-startup.shs — fail-closed launch-timing harness for the slim
+# TUI/GUI kernel/plugin lanes H0 / T0 / T1.
+#
+# Context: doc/03_plan/ui/slim_kernel_plugin/plan.md (Wave 0, package A01),
+# doc/02_requirements/nfr/ui_slim_kernel_plugin.md (NFR-UI-SLIM-001) and the
+# external design section 8 (workloads 8.1, timestamps 8.3, memory 8.4,
+# sampling 8.5, result template 8.7):
+#   doc/01_research/ui/slim_kernel_plugin/simple_slim_tui_gui_kernel_plugin_design_parallel_plan_2026-09-05.md
+#
+# Shape and verdict convention follow scripts/check/check-ui-slim-closure.shs
+# and .claude/rules/vcs.md "Pre-push guards".
+#
+# Verdict is ALWAYS the LAST stdout line:
+#   PASS  — <n> sample(s), <lane>, median <ms> ms, p95 <ms> ms, label=<lbl>   exit 0
+#   FAIL  — <n> sample(s) attempted, <lane>, <reason>                          exit 1
+#   ERROR — nothing was checked (<reason>)                                     exit 2
+#
+# Usage:
+#   sh scripts/check/check-ui-slim-startup.shs --binary PATH --lane H0|T0|T1 \
+#        [--samples N] [--warmup N] [--out DIR] [--timeout SECS]
+#   sh scripts/check/check-ui-slim-startup.shs --selftest
+#
+# Non-vacuity is absolute: a run that produced 0 validated samples is never a
+# PASS. A sample whose transcript lacks the lane's marker is a FAIL, not a
+# discarded sample -- a harness that silently drops bad runs certifies noise.
+#
+# POSIX sh only. Runs on macOS BSD tools and Linux: no `readlink -f`, no
+# `grep -P`, no GNU-only `stat`/`date` assumptions, no `timeout(1)`, and
+# deliberately NO perl/python for timestamps (external monotonic-ish clock is
+# `gdate +%s%N` / `date +%s%N`, else a `/usr/bin/time -p` wall-clock fallback;
+# the clock actually used is recorded in the output and the verdict trailer).
+
+set -u
+
+# ---- defaults ----
+BINARY=""
+LANE=""
+SAMPLES=20
+WARMUP=5
+OUT_DIR=""
+TIMEOUT_S="${SIMPLE_UI_SLIM_TIMEOUT:-300}"
+SELFTEST=0
+CERT_MIN_SAMPLES=100
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --binary)  BINARY="${2:-}"; shift 2 ;;
+        --lane)    LANE="${2:-}"; shift 2 ;;
+        --samples) SAMPLES="${2:-}"; shift 2 ;;
+        --warmup)  WARMUP="${2:-}"; shift 2 ;;
+        --out)     OUT_DIR="${2:-}"; shift 2 ;;
+        --timeout) TIMEOUT_S="${2:-}"; shift 2 ;;
+        --selftest) SELFTEST=1; shift ;;
+        --) shift; break ;;
+        *) echo "ERROR — nothing was checked (unknown argument '$1')"; exit 2 ;;
+    esac
+done
+
+# T1 must measure the real parser-backed TUI, never the size-audit banner stub
+# (src/app/ui.tui/app.spl). Enforce it here rather than trusting the caller.
+unset SIMPLE_UI_TUI_STUB
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)
+cd "$ROOT" || { echo "ERROR — nothing was checked (cannot cd to repo root)"; exit 2; }
+
+# ---- platform probes -------------------------------------------------------
+PLATFORM=$(uname -s 2>/dev/null || echo unknown)
+
+# Clock. `date +%s%N` is GNU; BSD date echoes a literal N. Probe, never assume.
+detect_clock() {
+    if command -v gdate >/dev/null 2>&1; then
+        dc_v=$(gdate +%s%N 2>/dev/null || echo N)
+        case "$dc_v" in *N*) : ;; *) echo gdate_ns; return 0 ;; esac
+    fi
+    dc_v=$(date +%s%N 2>/dev/null || echo N)
+    case "$dc_v" in *N*) : ;; *) echo date_ns; return 0 ;; esac
+    if [ -x /usr/bin/time ]; then echo time_wall; return 0; fi
+    echo none
+}
+CLOCK=$(detect_clock)
+
+now_us() {
+    case "$CLOCK" in
+        gdate_ns) nu=$(gdate +%s%N); echo $((nu / 1000)) ;;
+        date_ns)  nu=$(date +%s%N);  echo $((nu / 1000)) ;;
+        *)        echo 0 ;;
+    esac
+}
+
+# Max-RSS metric name differs per platform and the UNITS differ too; never
+# conflate them (design section 8.4: "label metrics rather than treating unlike
+# definitions as identical").
+case "$PLATFORM" in
+    Darwin) RSS_METRIC="max_rss_bytes";  RSS_FLAG="-l" ;;
+    Linux)  RSS_METRIC="max_rss_kbytes"; RSS_FLAG="-v" ;;
+    *)      RSS_METRIC="max_rss_unsupported"; RSS_FLAG="" ;;
+esac
+
+sha256_of() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" 2>/dev/null | cut -d' ' -f1
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" 2>/dev/null | cut -d' ' -f1
+    else
+        echo "unavailable"
+    fi
+}
+
+mtime_of() {
+    # GNU `stat -f FILE` is FILESYSTEM stat and SUCCEEDS (printing the mount
+    # point for %m), so it must never be tried first: probe the GNU form first,
+    # since BSD stat rejects -c outright.
+    mo=$(stat -c '%Y' "$1" 2>/dev/null) || mo=""
+    case "$mo" in ''|*[!0-9]*) mo="" ;; esac
+    if [ -z "$mo" ]; then
+        mo=$(stat -f '%m' "$1" 2>/dev/null) || mo=""
+        case "$mo" in ''|*[!0-9]*) mo="" ;; esac
+    fi
+    [ -n "$mo" ] || mo="unavailable"
+    echo "$mo"
+}
+
+# ---- bounded execution (no timeout(1) on macOS) ----------------------------
+# Returns 0 on normal exit (rc propagated), 124 when the watchdog killed it.
+BOUNDED_RC=0
+BOUNDED_TIMED_OUT=0
+run_bounded() {
+    rb_secs="$1"; rb_outfile="$2"; shift 2
+    BOUNDED_TIMED_OUT=0
+    rb_flag="$rb_outfile.timedout"
+    rm -f "$rb_flag"
+    "$@" > "$rb_outfile" 2>&1 &
+    rb_pid=$!
+    (
+        rb_i=0
+        rb_max=$((rb_secs * 5))
+        while [ "$rb_i" -lt "$rb_max" ]; do
+            sleep 0.2
+            kill -0 "$rb_pid" 2>/dev/null || exit 0
+            rb_i=$((rb_i + 1))
+        done
+        # Record the verdict BEFORE the kill: the parent's `wait` returns the
+        # instant SIGKILL lands, so testing whether the watchdog is still alive
+        # is a race that silently relabels a timeout as "exited rc=137".
+        : > "$rb_flag"
+        kill -9 "$rb_pid" 2>/dev/null
+        exit 1
+    ) &
+    rb_wd=$!
+    wait "$rb_pid" 2>/dev/null
+    BOUNDED_RC=$?
+    if [ -f "$rb_flag" ]; then
+        BOUNDED_TIMED_OUT=1
+        rm -f "$rb_flag"
+    fi
+    kill "$rb_wd" 2>/dev/null
+    wait "$rb_wd" 2>/dev/null
+    return 0
+}
+
+# ---- lane definitions ------------------------------------------------------
+# marker: the literal text the transcript MUST contain for the run to count.
+lane_marker() {
+    case "$1" in
+        H0) echo "ui-slim-h0-hello" ;;
+        T0) echo "ui-slim-t0-altscreen" ;;
+        T1) echo "ui-slim-t1-greeting" ;;
+    esac
+}
+lane_fixture() {
+    case "$1" in
+        H0) echo "${SIMPLE_UI_SLIM_H0:-test/05_perf/ui_slim/h0_hello.spl}" ;;
+        T0) echo "${SIMPLE_UI_SLIM_T0:-test/05_perf/ui_slim/t0_altscreen.spl}" ;;
+        T1) echo "${SIMPLE_UI_SLIM_T1:-test/05_perf/ui_slim/t1_greeting.ui.sdn}" ;;
+    esac
+}
+# What the recorded number actually measures, per lane. Design section 8.3
+# forbids calling an unlike interval "startup"; label it instead.
+lane_metric() {
+    case "$1" in
+        H0|T0) echo "launch_to_process_exit" ;;
+        T1)    echo "launch_to_marker_and_exit" ;;
+    esac
+}
+
+# ---- pty driver for T1 -----------------------------------------------------
+PTY_TOOL="none"
+detect_pty_tool() {
+    # SIMPLE_UI_SLIM_PTY_TOOL forces a driver so the `script(1)` fallback can be
+    # exercised on a host that also has expect.
+    case "${SIMPLE_UI_SLIM_PTY_TOOL:-}" in
+        expect) command -v expect >/dev/null 2>&1 && { echo expect; return 0; } ;;
+        script) command -v script >/dev/null 2>&1 && { echo script; return 0; } ;;
+    esac
+    if command -v expect >/dev/null 2>&1; then echo expect; return 0; fi
+    if command -v script  >/dev/null 2>&1; then echo script; return 0; fi
+    echo none
+}
+
+# Writes a throwaway expect driver: wait for the marker on a REAL pty, then
+# send the deterministic quit key `q` (src/app/ui.tui/input.spl:29 maps "q" to
+# UIEvent.Quit). No sleep-based guessing: the quit is caused by the marker.
+write_expect_driver() {
+    wd_path="$1"; wd_bin="$2"; wd_fixture="$3"; wd_marker="$4"; wd_timeout="$5"
+    cat > "$wd_path" <<EOF
+set timeout $wd_timeout
+log_user 1
+spawn $wd_bin ui tui $wd_fixture
+expect {
+    "$wd_marker" { send "q" }
+    timeout { puts "\nUI_SLIM_HARNESS_TIMEOUT"; exit 124 }
+    eof { puts "\nUI_SLIM_HARNESS_EOF_BEFORE_MARKER"; exit 3 }
+}
+expect {
+    eof { }
+    timeout { puts "\nUI_SLIM_HARNESS_TIMEOUT"; exit 124 }
+}
+exit 0
+EOF
+}
+
+# script(1) fallback: a fifo feeds the child's pty stdin; a bounded poller
+# watches the transcript and writes `q` only once the marker has appeared.
+write_script_driver() {
+    sd_path="$1"; sd_bin="$2"; sd_fixture="$3"; sd_marker="$4"; sd_timeout="$5"
+    cat > "$sd_path" <<EOF
+#!/bin/sh
+set -u
+sd_dir=\$(mktemp -d 2>/dev/null) || exit 2
+trap 'rm -rf "\$sd_dir"' EXIT
+mkfifo "\$sd_dir/in" || exit 2
+: > "\$sd_dir/typescript"
+( sleep $sd_timeout > "\$sd_dir/in" ) &
+holder=\$!
+if script -q /dev/null true >/dev/null 2>&1; then
+    script -q "\$sd_dir/typescript" $sd_bin ui tui $sd_fixture < "\$sd_dir/in" &
+else
+    script -q -c "$sd_bin ui tui $sd_fixture" "\$sd_dir/typescript" < "\$sd_dir/in" &
+fi
+child=\$!
+i=0
+sent=0
+while [ \$i -lt $((sd_timeout * 5)) ]; do
+    if [ \$sent -eq 0 ] && grep -q "$sd_marker" "\$sd_dir/typescript" 2>/dev/null; then
+        printf 'q' > "\$sd_dir/in"
+        sent=1
+    fi
+    kill -0 \$child 2>/dev/null || break
+    sleep 0.2
+    i=\$((i + 1))
+done
+if kill -0 \$child 2>/dev/null; then
+    kill -9 \$child 2>/dev/null
+    { kill \$holder; wait \$holder; } >/dev/null 2>&1
+    cat "\$sd_dir/typescript"
+    echo "UI_SLIM_HARNESS_TIMEOUT"
+    exit 124
+fi
+wait \$child
+rc=\$?
+# Reap the fifo holder QUIETLY: the shell's "Terminated: 15" job notice would
+# otherwise become the transcript's last line and mask the child's real error.
+{ kill \$holder; wait \$holder; } >/dev/null 2>&1
+cat "\$sd_dir/typescript"
+exit \$rc
+EOF
+    chmod +x "$sd_path"
+}
+
+# ---- statistics (POSIX awk) ------------------------------------------------
+# Input: one integer microsecond sample per line on stdin.
+# Output: "min median p95 max spread" in MILLISECONDS with 3 decimals.
+stats_ms() {
+    sort -n | awk '
+        { v[n++] = $1 }
+        END {
+            if (n == 0) { print "0.000 0.000 0.000 0.000 0.000"; exit }
+            med_i = int((n - 1) / 2)
+            if (n % 2 == 0) { med = (v[med_i] + v[med_i + 1]) / 2 } else { med = v[med_i] }
+            p = int(0.95 * n + 0.999999)
+            if (p < 1) p = 1
+            if (p > n) p = n
+            printf "%.3f %.3f %.3f %.3f %.3f\n", \
+                v[0]/1000, med/1000, v[p-1]/1000, v[n-1]/1000, (v[n-1] - v[0])/1000
+        }'
+}
+
+# ---- concurrent-build guard ------------------------------------------------
+# Timing under a concurrent build is not evidence (design section 8.5: the
+# benchmark owner holds an exclusive runner lock). Fail closed.
+# NOTE: the seed's own path contains "bootstrap", so a PEER session running the
+# same seed matches this pattern -- deliberately. That peer is real load and its
+# presence really does invalidate the samples, so it is NOT filtered out by
+# binary path. Only this harness's own processes are excluded, and the guard
+# runs BEFORE the first child is launched, so it cannot see its own children.
+# SKIP_BUSY_GUARD=1 is set only by --selftest, whose fake binaries measure
+# verdict logic rather than real timing.
+SKIP_BUSY_GUARD=0
+concurrent_builders() {
+    [ "$SKIP_BUSY_GUARD" -eq 1 ] && return 0
+    cb_self=$$
+    cb_ppid=$PPID
+    pgrep -f 'cargo|native-build|bootstrap' 2>/dev/null | while read -r cb_pid; do
+        [ -n "$cb_pid" ] || continue
+        [ "$cb_pid" = "$cb_self" ] && continue
+        [ "$cb_pid" = "$cb_ppid" ] && continue
+        cb_cmd=$(ps -p "$cb_pid" -o command= 2>/dev/null) || continue
+        [ -n "$cb_cmd" ] || continue
+        case "$cb_cmd" in
+            *check-ui-slim-startup*) continue ;;
+            *pgrep*) continue ;;
+        esac
+        echo "$cb_pid"
+    done
+}
+
+# ---- the scan --------------------------------------------------------------
+run_startup_scan() {
+    s_bin="$1"; s_lane="$2"; s_samples="$3"; s_warmup="$4"; s_out="$5"; s_to="$6"
+
+    case "$s_lane" in
+        H0|T0|T1) : ;;
+        *) echo "ERROR — nothing was checked (unknown lane '$s_lane', want H0|T0|T1)"; return 2 ;;
+    esac
+    if [ -z "$s_bin" ]; then
+        echo "ERROR — nothing was checked (no --binary given)"; return 2
+    fi
+    if [ ! -x "$s_bin" ]; then
+        echo "ERROR — nothing was checked (no executable binary at '$s_bin')"; return 2
+    fi
+    case "$s_samples" in ''|*[!0-9]*) echo "ERROR — nothing was checked (--samples must be a non-negative integer)"; return 2 ;; esac
+    case "$s_warmup"  in ''|*[!0-9]*) echo "ERROR — nothing was checked (--warmup must be a non-negative integer)"; return 2 ;; esac
+    case "$s_to"      in ''|*[!0-9]*) echo "ERROR — nothing was checked (--timeout must be a positive integer)"; return 2 ;; esac
+    [ "$s_to" -gt 0 ] || { echo "ERROR — nothing was checked (--timeout must be > 0)"; return 2; }
+    if [ "$s_samples" -eq 0 ]; then
+        echo "ERROR — nothing was checked (--samples 0 produces no evidence)"; return 2
+    fi
+    if [ "$CLOCK" = "none" ]; then
+        echo "ERROR — nothing was checked (no usable clock: neither gdate/date +%s%N nor /usr/bin/time)"; return 2
+    fi
+
+    s_fixture=$(lane_fixture "$s_lane")
+    s_marker=$(lane_marker "$s_lane")
+    s_metric=$(lane_metric "$s_lane")
+    if [ ! -f "$s_fixture" ]; then
+        echo "ERROR — nothing was checked (lane $s_lane fixture missing: $s_fixture)"; return 2
+    fi
+
+    s_busy=$(concurrent_builders | tr '\n' ' ' | sed 's/ *$//')
+    if [ -n "$s_busy" ]; then
+        echo "ERROR — nothing was checked (concurrent build/bootstrap processes running: pid(s) $s_busy; timing under load is not evidence)"
+        return 2
+    fi
+
+    s_driver=""
+    if [ "$s_lane" = "T1" ]; then
+        PTY_TOOL=$(detect_pty_tool)
+        if [ "$PTY_TOOL" = "none" ]; then
+            echo "ERROR — nothing was checked (no pty tool)"; return 2
+        fi
+    fi
+
+    s_tmp=$(mktemp -d 2>/dev/null) || { echo "ERROR — nothing was checked (cannot create temp dir)"; return 2; }
+    s_run_out="$s_tmp/run.out"
+    if [ "$s_lane" = "T1" ]; then
+        if [ "$PTY_TOOL" = "expect" ]; then
+            s_driver="$s_tmp/drive.exp"
+            write_expect_driver "$s_driver" "$s_bin" "$s_fixture" "$s_marker" "$s_to"
+        else
+            s_driver="$s_tmp/drive.sh"
+            write_script_driver "$s_driver" "$s_bin" "$s_fixture" "$s_marker" "$s_to"
+        fi
+    fi
+
+    # one_run: executes the lane once into $s_run_out. Sets ONE_RC.
+    ONE_RC=0
+    one_run() {
+        case "$s_lane" in
+            H0|T0) run_bounded "$s_to" "$s_run_out" "$s_bin" run "$s_fixture" ;;
+            T1)
+                if [ "$PTY_TOOL" = "expect" ]; then
+                    run_bounded "$s_to" "$s_run_out" expect -f "$s_driver"
+                else
+                    run_bounded "$s_to" "$s_run_out" sh "$s_driver"
+                fi
+                ;;
+        esac
+        ONE_RC=$BOUNDED_RC
+        [ "$BOUNDED_TIMED_OUT" -eq 1 ] && ONE_RC=124
+        return 0
+    }
+
+    # ---- warmups (untimed, but still validated: a warmup that cannot produce
+    # the marker means the timed samples would all be fabrications).
+    s_i=0
+    s_seed_banner=0
+    while [ "$s_i" -lt "$s_warmup" ]; do
+        one_run
+        if grep -q 'bootstrap seed only' "$s_run_out" 2>/dev/null; then s_seed_banner=1; fi
+        if [ "$ONE_RC" -eq 124 ]; then
+            # Bail immediately: otherwise a wedged binary burns
+            # (warmup + samples) x timeout before saying anything.
+            rm -rf "$s_tmp"
+            echo "FAIL — 0 sample(s) attempted, $s_lane, warmup run $((s_i + 1)) timed out after ${s_to}s"
+            return 1
+        fi
+        s_i=$((s_i + 1))
+    done
+
+    # ---- timed samples
+    s_file="$s_tmp/samples.txt"
+    : > "$s_file"
+    s_ok=0
+    s_bad=0
+    s_bad_reason=""
+    s_fail_txt=""
+    s_attempt=0
+    while [ "$s_attempt" -lt "$s_samples" ]; do
+        s_attempt=$((s_attempt + 1))
+        s_t0=$(now_us)
+        one_run
+        s_t1=$(now_us)
+        if grep -q 'bootstrap seed only' "$s_run_out" 2>/dev/null; then s_seed_banner=1; fi
+        if [ "$ONE_RC" -eq 124 ]; then
+            s_bad=$((s_bad + 1))
+            [ -n "$s_bad_reason" ] || s_bad_reason="run $s_attempt timed out after ${s_to}s"
+            continue
+        fi
+        if ! grep -q "$s_marker" "$s_run_out" 2>/dev/null; then
+            s_bad=$((s_bad + 1))
+            # Skip the harness's own EOF/TIMEOUT tag: the useful evidence is
+            # the child's last real output line (e.g. an E1002 from the seed).
+            s_clean="$s_tmp/clean.txt"
+            tr -d '\r' < "$s_run_out" | grep -v '^[[:space:]]*$' | grep -v 'UI_SLIM_HARNESS_' > "$s_clean" 2>/dev/null
+            s_last=$(grep -i 'error' "$s_clean" 2>/dev/null | tail -1 | cut -c1-160)
+            [ -n "$s_last" ] || s_last=$(tail -1 "$s_clean" 2>/dev/null | cut -c1-160)
+            [ -n "$s_last" ] || s_last=$(tr -d '\r' < "$s_run_out" | grep -v '^[[:space:]]*$' | tail -1 | cut -c1-160)
+            # Keep the whole transcript: 160 chars is a pointer, not evidence.
+            if [ -z "$s_fail_txt" ]; then
+                s_fail_dir="$s_out"
+                [ -n "$s_fail_dir" ] || s_fail_dir="build/ui_slim/startup"
+                if mkdir -p "$s_fail_dir" 2>/dev/null; then
+                    s_fail_txt="$s_fail_dir/${s_lane}_$(date -u '+%Y%m%dT%H%M%SZ')_fail.txt"
+                    cp "$s_run_out" "$s_fail_txt" 2>/dev/null || s_fail_txt=""
+                fi
+            fi
+            [ -n "$s_bad_reason" ] || s_bad_reason="run $s_attempt produced no '$s_marker' in its transcript (rc=$ONE_RC, last line: $s_last)"
+            continue
+        fi
+        if [ "$ONE_RC" -ne 0 ]; then
+            s_bad=$((s_bad + 1))
+            [ -n "$s_bad_reason" ] || s_bad_reason="run $s_attempt exited rc=$ONE_RC"
+            continue
+        fi
+        s_dt=$((s_t1 - s_t0))
+        if [ "$s_dt" -le 0 ]; then
+            s_bad=$((s_bad + 1))
+            [ -n "$s_bad_reason" ] || s_bad_reason="run $s_attempt produced a non-positive interval ($s_dt us) on clock $CLOCK"
+            continue
+        fi
+        echo "$s_dt" >> "$s_file"
+        s_ok=$((s_ok + 1))
+    done
+
+    if [ "$s_bad" -gt 0 ]; then
+        rm -rf "$s_tmp"
+        [ -n "$s_fail_txt" ] && echo "transcript: $s_fail_txt"
+        echo "FAIL — $s_attempt sample(s) attempted, $s_lane, $s_bad invalid: $s_bad_reason"
+        return 1
+    fi
+    if [ "$s_ok" -eq 0 ]; then
+        rm -rf "$s_tmp"
+        echo "ERROR — nothing was checked (0 validated samples for lane $s_lane)"
+        return 2
+    fi
+
+    # ---- memory, in a SEPARATE run (design 8.5: keep instrumentation out of
+    # the timing runs). Never conflated with the timing numbers.
+    s_rss="NOT_MEASURED"
+    if [ -n "$RSS_FLAG" ] && [ -x /usr/bin/time ]; then
+        s_memout="$s_tmp/mem.out"
+        case "$s_lane" in
+            H0|T0) run_bounded "$s_to" "$s_memout" /usr/bin/time "$RSS_FLAG" "$s_bin" run "$s_fixture" ;;
+            T1)
+                if [ "$PTY_TOOL" = "expect" ]; then
+                    run_bounded "$s_to" "$s_memout" /usr/bin/time "$RSS_FLAG" expect -f "$s_driver"
+                else
+                    run_bounded "$s_to" "$s_memout" /usr/bin/time "$RSS_FLAG" sh "$s_driver"
+                fi
+                ;;
+        esac
+        s_rss=$(tr -d '\r' < "$s_memout" 2>/dev/null \
+            | grep -i 'maximum resident set size' \
+            | tail -1 \
+            | tr -cd '0-9')
+        [ -n "$s_rss" ] || s_rss="NOT_MEASURED"
+    fi
+
+    set -- $(stats_ms < "$s_file")
+    s_min="$1"; s_med="$2"; s_p95="$3"; s_max="$4"; s_spread="$5"
+
+    s_label="certified"
+    s_label_why=""
+    if [ "$s_ok" -lt "$CERT_MIN_SAMPLES" ]; then
+        s_label="diagnostic"; s_label_why="samples $s_ok < $CERT_MIN_SAMPLES"
+    fi
+    if [ "$s_seed_banner" -eq 1 ]; then
+        s_label="diagnostic"
+        if [ -n "$s_label_why" ]; then s_label_why="$s_label_why; bootstrap seed banner"
+        else s_label_why="bootstrap seed banner"; fi
+    fi
+
+    # ---- raw sample record
+    s_stamp=$(date -u '+%Y%m%dT%H%M%SZ')
+    [ -n "$s_out" ] || s_out="build/ui_slim/startup"
+    mkdir -p "$s_out" 2>/dev/null || { rm -rf "$s_tmp"; echo "ERROR — nothing was checked (cannot create out dir '$s_out')"; return 2; }
+    s_sdn="$s_out/${s_lane}_${s_stamp}.sdn"
+    {
+        echo "run:"
+        echo "    lane: $s_lane"
+        echo "    metric: $s_metric"
+        echo "    label: $s_label"
+        [ -n "$s_label_why" ] && echo "    label_reason: \"$s_label_why\""
+        echo "    timestamp_utc: $s_stamp"
+        echo "    platform: $PLATFORM"
+        echo "    clock: $CLOCK"
+        echo "    pty_tool: $PTY_TOOL"
+        echo "    fixture: $s_fixture"
+        echo "    marker: \"$s_marker\""
+        echo "    warmup: $s_warmup"
+        echo "    samples: $s_ok"
+        echo "    invalid: $s_bad"
+        echo "    timeout_s: $s_to"
+        echo "binary:"
+        echo "    path: $s_bin"
+        echo "    sha256: $(sha256_of "$s_bin")"
+        echo "    mtime_unix: $(mtime_of "$s_bin")"
+        echo "summary_ms:"
+        echo "    min: $s_min"
+        echo "    median: $s_med"
+        echo "    p95: $s_p95"
+        echo "    max: $s_max"
+        echo "    spread: $s_spread"
+        echo "memory:"
+        echo "    metric: $RSS_METRIC"
+        echo "    value: $s_rss"
+        if [ "$s_lane" = "T1" ]; then
+            echo "    note: \"separate instrumented run, not one of the timed samples; /usr/bin/time wraps the pty driver, so this is the rusage max over the driver+child tree, not the UI process alone\""
+        else
+            echo "    note: \"separate instrumented run, not one of the timed samples\""
+        fi
+        echo "samples_us:"
+        s_n=0
+        while read -r s_v; do
+            echo "    $s_n: $s_v"
+            s_n=$((s_n + 1))
+        done < "$s_file"
+    } > "$s_sdn"
+
+    rm -rf "$s_tmp"
+    echo "raw: $s_sdn"
+    echo "metric=$s_metric clock=$CLOCK $RSS_METRIC=$s_rss min=${s_min}ms max=${s_max}ms spread=${s_spread}ms"
+    echo "PASS — $s_ok sample(s), $s_lane, median $s_med ms, p95 $s_p95 ms, label=$s_label"
+    return 0
+}
+
+# ---- selftest --------------------------------------------------------------
+if [ "$SELFTEST" -eq 1 ]; then
+    st_total=5
+    st_pass=0
+    SKIP_BUSY_GUARD=1
+    ST_DIR=$(mktemp -d 2>/dev/null) || { echo "ERROR — nothing was checked (selftest: cannot create temp dir)"; exit 2; }
+    trap 'rm -rf "$ST_DIR"' EXIT
+    ST_OUT="$ST_DIR/out"
+
+    # Fake H0 binary that behaves: prints the H0 marker on `run FIXTURE`, exits 0.
+    cat > "$ST_DIR/good" <<'EOF'
+#!/bin/sh
+echo "ui-slim-h0-hello"
+exit 0
+EOF
+    # Fake binary that exits 0 with NO marker -- the "looks green, proves
+    # nothing" shape this harness exists to reject.
+    cat > "$ST_DIR/silent" <<'EOF'
+#!/bin/sh
+echo "started"
+exit 0
+EOF
+    # Fake binary that hangs forever -- must be bounded and FAIL, not wedge.
+    cat > "$ST_DIR/hang" <<'EOF'
+#!/bin/sh
+while true; do sleep 5; done
+EOF
+    chmod +x "$ST_DIR/good" "$ST_DIR/silent" "$ST_DIR/hang"
+
+    # Fixture 1: well-behaved fake -> PASS.
+    st_out1=$(run_startup_scan "$ST_DIR/good" H0 3 1 "$ST_OUT" 10 2>&1)
+    st_rc1=$?
+    case "$(echo "$st_out1" | tail -1)" in
+        "PASS — 3 sample(s), H0, median "*"label=diagnostic") [ "$st_rc1" -eq 0 ] && st_pass=$((st_pass + 1)) ;;
+    esac
+    [ "$st_rc1" -eq 0 ] || echo "selftest fixture 1 (good fake -> PASS) FAILED: rc=$st_rc1 out=$(echo "$st_out1" | tail -1)"
+
+    # Fixture 2: exits 0 but never prints the marker -> FAIL.
+    st_out2=$(run_startup_scan "$ST_DIR/silent" H0 2 0 "$ST_OUT" 10 2>&1)
+    st_rc2=$?
+    case "$(echo "$st_out2" | tail -1)" in
+        "FAIL — "*"no 'ui-slim-h0-hello' in its transcript"*) [ "$st_rc2" -eq 1 ] && st_pass=$((st_pass + 1)) ;;
+    esac
+    [ "$st_rc2" -eq 1 ] || echo "selftest fixture 2 (no marker -> FAIL) FAILED: rc=$st_rc2 out=$(echo "$st_out2" | tail -1)"
+
+    # Fixture 3: hangs past the timeout -> FAIL (bounded, named as a timeout).
+    st_out3=$(run_startup_scan "$ST_DIR/hang" H0 1 0 "$ST_OUT" 2 2>&1)
+    st_rc3=$?
+    case "$(echo "$st_out3" | tail -1)" in
+        "FAIL — "*"timed out after 2s"*) [ "$st_rc3" -eq 1 ] && st_pass=$((st_pass + 1)) ;;
+    esac
+    [ "$st_rc3" -eq 1 ] || echo "selftest fixture 3 (hang -> FAIL) FAILED: rc=$st_rc3 out=$(echo "$st_out3" | tail -1)"
+
+    # Fixture 4: samples=0 -> ERROR (a zero-sample run is never a pass).
+    st_out4=$(run_startup_scan "$ST_DIR/good" H0 0 0 "$ST_OUT" 10 2>&1)
+    st_rc4=$?
+    case "$(echo "$st_out4" | tail -1)" in
+        "ERROR — nothing was checked ("*"--samples 0"*) [ "$st_rc4" -eq 2 ] && st_pass=$((st_pass + 1)) ;;
+    esac
+    [ "$st_rc4" -eq 2 ] || echo "selftest fixture 4 (samples=0 -> ERROR) FAILED: rc=$st_rc4 out=$(echo "$st_out4" | tail -1)"
+
+    # Fixture 5: missing binary -> ERROR.
+    st_out5=$(run_startup_scan "$ST_DIR/does_not_exist" H0 3 0 "$ST_OUT" 10 2>&1)
+    st_rc5=$?
+    case "$(echo "$st_out5" | tail -1)" in
+        "ERROR — nothing was checked (no executable binary at "*) [ "$st_rc5" -eq 2 ] && st_pass=$((st_pass + 1)) ;;
+    esac
+    [ "$st_rc5" -eq 2 ] || echo "selftest fixture 5 (missing binary -> ERROR) FAILED: rc=$st_rc5 out=$(echo "$st_out5" | tail -1)"
+
+    rm -rf "$ST_DIR"
+    trap - EXIT
+
+    if [ "$st_pass" -ne "$st_total" ]; then
+        echo "ERROR — nothing was checked (selftest: $st_pass/$st_total passed)"
+        exit 2
+    fi
+    echo "selftest: $st_pass/$st_total passed"
+fi
+
+# ---- real run --------------------------------------------------------------
+if [ -z "$BINARY" ] && [ -z "$LANE" ]; then
+    if [ "$SELFTEST" -eq 1 ]; then exit 0; fi
+    echo "ERROR — nothing was checked (no --binary/--lane given)"
+    exit 2
+fi
+
+run_startup_scan "$BINARY" "$LANE" "$SAMPLES" "$WARMUP" "$OUT_DIR" "$TIMEOUT_S"
+exit $?

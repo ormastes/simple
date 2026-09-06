@@ -1,44 +1,36 @@
 # @cover src/lib/common/ui/clipboard_service.spl 80%
 """
-# Clipboard Service Spec
-
-## Overview
-
-`ClipboardService` is the framework-level clipboard: a current entry plus a
-bounded HISTORY ring (kill-ring / clipboard-manager semantics), an
-injectable host-OS bridge seam, and capability-gated entry points. This spec
-proves the ring bounds correctly, `paste_from_history` promotes an older
-entry to current (moving it to the front) rather than duplicating it, the
-host bridge seam round-trips through installed function pointers instead of
-any real OS call, and the capability gates deny when the caller lacks
-ClipboardRead/ClipboardWrite.
-
-## Requirements
-
-**Requirements:** N/A
-
-## Plan
-
-**Plan:** N/A
-
-## Design
-
-**Design:** doc/04_architecture/ui/simple_gui_stack.md
-
-## Research
-
-**Research:** N/A
-
-## Examples
-
-Three copies fill history most-recent-first; a 4th copy against a
-capacity-3 service evicts the oldest. `paste_from_history(1)` promotes that
-entry to `history[0]` and to `paste()`'s answer, without growing the ring.
-A fake host bridge (two top-level fns over a module var) proves `copy()`
-calls the write side and `sync_from_host()` calls the read side — no real
-SDL2/OS clipboard is touched. `copy_gated`/`paste_gated` deny with
-`NotSupported` when the capability list omits ClipboardWrite/ClipboardRead.
+## Purpose and audience
+Proves the framework-level clipboard service: a current entry plus a bounded
+HISTORY ring (kill-ring / clipboard-manager semantics), an injectable
+host-OS bridge seam, and capability-gated entry points. Specifically: the
+ring bounds correctly, paste_from_history promotes an older entry to current
+(moving it to the front) rather than duplicating it, the host bridge seam
+round-trips through installed function pointers instead of any real OS call,
+and the capability gates deny when the caller lacks ClipboardRead or
+ClipboardWrite. Written for UI framework and clipboard owners.
+## Operator workflow
+Run from the repo root with the seed runner:
+`./src/compiler_rust/target/bootstrap/simple run test/01_unit/lib/common/ui/clipboard_service_spec.spl`
+and read the SPEC FILE VERDICT line; scenarios construct ClipboardService
+instances directly — no real SDL2/OS clipboard is touched.
+## Compatibility and limitations
+Pure in-memory scenarios over the fake host bridge (two top-level fns over a
+module var). The ring capacity, promotion order, and capability denial
+values pinned here freeze the current service semantics; a deliberate
+service change must update this file alongside the source.
+## Verification guidance and troubleshooting
+A failure names the clipboard operation whose observable (history order,
+ring length, promoted entry, bridge call count, capability verdict)
+diverged. Bridge call-count failures indicate the service stopped routing
+through install_host_bridge; ring-length failures indicate an eviction or
+promotion regression.
 """
+# Lifecycle: doc/01_research/ui/execir_style_command_ir_for_gui_2026-08-18.md ;
+# doc/03_plan/ui/unified_packed_ui_scene_agent_lanes.md ;
+# doc/04_architecture/ui/gpu_web_scene_ports.md ;
+# doc/05_design/ui/unified_packed_ui_scene.md
+# @manual_section: clipboard-service
 
 use std.spec.*
 use common.ui.clipboard_service.{ClipboardService, ClipboardEntry}
@@ -65,6 +57,8 @@ fn _fake_host_write(content: text) -> bool:
 describe "ClipboardService — history ring":
 
     it "copy() pushes most-recent-first and paste() returns the current entry":
+        # @req REQ-UI-CLIPBOARD-001
+        # @capture(statistics): the three-row history ring after copies a, b, c
         step("Copy three items in order a, b, c")
         var svc = ClipboardService.new()
         svc.copy("text/plain", "a")
@@ -73,7 +67,7 @@ describe "ClipboardService — history ring":
 
         step("history()[0] is the most recent copy; paste() matches it")
         val hist = svc.history_entries()
-        expect(hist.len()).to_equal(3)
+        expect(hist.len()).to_equal(3)  # oracle: three copies fill the default-capacity ring most-recent-first
         expect(hist[0].data).to_equal("c")
         expect(hist[1].data).to_equal("b")
         expect(hist[2].data).to_equal("a")
@@ -83,6 +77,8 @@ describe "ClipboardService — history ring":
             expect(current.data).to_equal("c")
 
     it "a bounded ring evicts the oldest entry once capacity is exceeded":
+        # @req REQ-UI-CLIPBOARD-002
+        # @capture(statistics): the ring pinned at capacity 3 after a 4th copy evicts the oldest
         step("Fill a capacity-3 service with 4 copies")
         var svc = ClipboardService.with_capacity(3)
         svc.copy("text/plain", "1")
@@ -91,13 +87,15 @@ describe "ClipboardService — history ring":
         svc.copy("text/plain", "4")
 
         step("Oldest entry (1) is evicted; ring stays at capacity")
-        expect(svc.history_len()).to_equal(3)
+        expect(svc.history_len()).to_equal(3)  # oracle: the ring holds exactly its capacity of three
         val hist = svc.history_entries()
         expect(hist[0].data).to_equal("4")
         expect(hist[1].data).to_equal("3")
         expect(hist[2].data).to_equal("2")
 
     it "paste_from_history(idx) promotes that entry to current without duplicating it":
+        # @req REQ-UI-CLIPBOARD-003
+        # @capture(statistics): the ring before and after promoting history[1] to the front
         step("Copy three items, then paste from history index 1 (the middle one)")
         var svc = ClipboardService.new()
         svc.copy("text/plain", "first")
@@ -110,7 +108,7 @@ describe "ClipboardService — history ring":
             expect(promoted.data).to_equal("second")
 
         step("The promoted entry is now current and at the front; ring size unchanged")
-        expect(svc.history_len()).to_equal(3)
+        expect(svc.history_len()).to_equal(3)  # oracle: promotion moves the entry instead of growing the ring
         val hist = svc.history_entries()
         expect(hist[0].data).to_equal("second")
         val current = svc.paste()
@@ -119,6 +117,8 @@ describe "ClipboardService — history ring":
             expect(current.data).to_equal("second")
 
     it "paste_from_history rejects an out-of-range index":
+        # @req REQ-UI-CLIPBOARD-004
+        # @capture(statistics): the nil result for an out-of-range history index
         step("A one-entry service has no index 5")
         var svc = ClipboardService.new()
         svc.copy("text/plain", "only")
@@ -126,6 +126,8 @@ describe "ClipboardService — history ring":
         assert_true(missing == nil)
 
     it "cut() records the same way copy() does":
+        # @req REQ-UI-CLIPBOARD-005
+        # @capture(statistics): the current entry produced by cut()
         step("cut() is clipboard-mechanics-identical to copy()")
         var svc = ClipboardService.new()
         svc.cut("text/plain", "cut-payload")
@@ -135,21 +137,28 @@ describe "ClipboardService — history ring":
             expect(current.data).to_equal("cut-payload")
 
     it "clear() empties the ring":
+        # @req REQ-UI-CLIPBOARD-006
+        # @capture(statistics): the zero-length ring after clear()
         step("Populate then clear")
         var svc = ClipboardService.new()
         svc.copy("text/plain", "x")
         svc.copy("text/plain", "y")
         svc.clear()
-        expect(svc.history_len()).to_equal(0)
+        expect(svc.history_len()).to_equal(0)  # oracle: clear() empties the ring entirely
         assert_true(svc.paste() == nil)
 
     it "paste() on an empty service returns nil":
+        # @req REQ-UI-CLIPBOARD-007
+        # @capture(statistics): the nil paste result on a fresh service
+        step("Paste from a fresh, never-populated service")
         var svc = ClipboardService.new()
         assert_true(svc.paste() == nil)
 
 describe "ClipboardService — injectable host bridge seam":
 
     it "copy() calls the installed write function, not a real OS clipboard":
+        # @req REQ-UI-CLIPBOARD-008
+        # @capture(protocol_json): the fake-bridge write call count and the payload it received
         step("Install the fake bridge (top-level fns backed by a module var)")
         _fake_host_slot = ""
         _fake_host_write_calls = 0
@@ -158,10 +167,12 @@ describe "ClipboardService — injectable host bridge seam":
 
         step("copy() must reach the fake write function")
         svc.copy("text/plain", "bridged")
-        expect(_fake_host_write_calls).to_equal(1)
+        expect(_fake_host_write_calls).to_equal(1)  # oracle: exactly one host write call serves one copy()
         expect(_fake_host_slot).to_equal("bridged")
 
     it "sync_from_host() pulls a live host value into history when it changed":
+        # @req REQ-UI-CLIPBOARD-009
+        # @capture(statistics): the current entry adopted from the external host value
         step("Fake bridge pre-seeded with an external value never copied locally")
         _fake_host_slot = "external-value"
         _fake_host_write_calls = 0
@@ -176,33 +187,46 @@ describe "ClipboardService — injectable host bridge seam":
             expect(current.data).to_equal("external-value")
 
     it "sync_from_host() is a no-op when no bridge is installed (the SimpleOS case)":
+        # @req REQ-UI-CLIPBOARD-010
+        # @capture(statistics): the unchanged zero-length history after an unbridged sync
         step("No bridge installed -- the service is its own clipboard")
         var svc = ClipboardService.new()
         svc.sync_from_host()
-        expect(svc.history_len()).to_equal(0)
+        expect(svc.history_len()).to_equal(0)  # oracle: without a bridge, sync must not invent a history entry
 
 describe "ClipboardService — capability gating":
 
     it "copy_gated denies without ClipboardWrite":
+        # @req REQ-UI-CLIPBOARD-011
+        # @capture(bit_table): the denied-copy verdict row and the untouched ring length
         step("Empty capability list has neither Read nor Write")
         var svc = ClipboardService.new()
         val result = svc.copy_gated([], "text/plain", "should-not-land")
         assert_true(result.is_err())
-        expect(svc.history_len()).to_equal(0)
+        expect(svc.history_len()).to_equal(0)  # oracle: a denied copy must not land in the ring
 
     it "copy_gated succeeds with ClipboardWrite granted":
+        # @req REQ-UI-CLIPBOARD-012
+        # @capture(bit_table): the granted-copy verdict row and the ring holding the granted payload
+        step("Copy with ClipboardWrite granted")
         var svc = ClipboardService.new()
         val result = svc.copy_gated([Capability.ClipboardWrite], "text/plain", "granted")
         assert_true(result.is_ok())
-        expect(svc.history_len()).to_equal(1)
+        expect(svc.history_len()).to_equal(1)  # oracle: the granted copy occupies exactly one history slot
 
     it "paste_gated denies without ClipboardRead":
+        # @req REQ-UI-CLIPBOARD-013
+        # @capture(bit_table): the denied-paste verdict row despite a populated ring
+        step("Paste with an empty capability list against a populated ring")
         var svc = ClipboardService.new()
         svc.copy("text/plain", "present")
         val result = svc.paste_gated([])
         assert_true(result.is_err())
 
     it "paste_gated succeeds with ClipboardRead granted":
+        # @req REQ-UI-CLIPBOARD-014
+        # @capture(bit_table): the granted-paste verdict row with ClipboardRead held
+        step("Paste with ClipboardRead granted")
         var svc = ClipboardService.new()
         svc.copy("text/plain", "present")
         val result = svc.paste_gated([Capability.ClipboardRead])

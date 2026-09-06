@@ -1,24 +1,35 @@
-# Purpose and audience: executable specification evidence for the owning engineering team.
-# @req REQ-SSPEC-COMPILER
-# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+"""
+## Purpose and audience
+Byte-level golden encoding evidence for the compiler's native AArch64 backend
+NEON emit bodies (`neon_encode_3reg_4s_arith`, `neon_encode_3reg_4s_fma`,
+`neon_encode_3reg_16b_bsl`) and their FADD/FMUL/FMLA/BSL emit wrappers.
+Audience: the ARM64 backend engineer verifying each emitted instruction
+matches the ARMv8 ARM opcode layout bit-for-bit before trusting codegen.
 
-# Purpose and audience: executable specification evidence for the owning engineering team.
-# @req REQ-SSPEC-COMPILER
-# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+## Operator workflow
+bin/simple test test/01_unit/compiler/backend/neon_emit_spec.spl
 
-# test/unit/compiler/backend/neon_emit_spec.spl
-#
-# Byte-level golden tests for NEON emit bodies.
-# Verifies neon_encode_3reg_4s_arith, neon_encode_3reg_4s_fma,
-# neon_encode_3reg_16b_bsl and the 4 emit wrappers produce exact ARMv8 ARM bytes.
-#
+## Compatibility and limitations
+Register indices used as raw 0-31 (direct Vn index, NOT mach_inst ID range
+64-79): V0=0, V1=1, V2=2, V3=3. Unsupported: emit wrappers outside
+FADD/FMUL/FMLA/BSL (not covered by this spec).
+
+## Verification guidance and troubleshooting
+Each scenario captures one byte of the emitted little-endian instruction as
+a bit_table. A mismatch names the offending byte; cross-reference the
+per-family ARMv8 ARM section cited above each `describe` block and the
+3-reg same-type NEON bit layout (`bit[31:29]` Q/U+group, `bits[20:16]` Rm,
+`bits[9:5]` Rn, `bits[4:0]` Rd) to locate which field produced the wrong byte.
+BSL goldens were re-verified via §C7.2.22 bit-field derivation (ERR-002
+corrected a prior doc fixture's Rm encoding).
+"""
+# research: doc/01_research/simd_isa_deep_2026-05-02.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/simd_backend_strict_emit_evex_detail.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+# @manual_section: neon-3reg-emit-encoding
+
 # Reference: doc/04_architecture/simd_backend_strict_emit_evex_detail.md §6 (NEON recipes)
 #            doc/04_architecture/simd_backend_strict_emit_goldens_detail.md §10.1 (NEON goldens)
 #            doc/01_research/simd_isa_deep_2026-05-02.md §2 (ARMv8 encoding)
 #            doc/01_research/simd_spec_verification_2026-05-02.md V-25 (FCMGT polarity)
-#
-# Register indices used as raw 0-31 (direct Vn index, NOT mach_inst ID range 64-79).
-#   V0=0, V1=1, V2=2, V3=3
 #
 # All instructions are 4-byte fixed-width, little-endian per ARMv8 ABI.
 # Byte derivation uses the 3-reg same-type NEON format:
@@ -28,7 +39,6 @@
 #   bits[4:0]:   Rd (5-bit)
 #
 # ARMv8 ARM §C7.2 citations per instruction family.
-# BSL goldens VERIFIED via §C7.2.22 bit-field derivation; ERR-002 corrected doc fixture.
 
 use compiler.backend.native.arm_neon.{emit_neon_vaddq_f32, emit_neon_vmulq_f32, emit_neon_vfmaq_f32, emit_neon_vbslq_u8}
 
@@ -41,38 +51,66 @@ use compiler.backend.native.arm_neon.{emit_neon_vaddq_f32, emit_neon_vmulq_f32, 
 
 describe "NEON emit_neon_vaddq_f32 f32 golden":
     it "FADD V0.4S V0.4S V0.4S emits 4 bytes":
+        # @req REQ-NEON-EMIT-001
+        step("Encode FADD V0.4S, V0.4S, V0.4S (Rd=Rn=Rm=0)")
         val result = emit_neon_vaddq_f32(0, 0, 0)
-        expect(result.len()).to_equal(4)
+        # @capture(bit_table): FADD.4S output length
+        step("Verify the fixed-width AArch64 instruction is exactly 4 bytes")
+        expect(result.len()).to_equal(4)  # oracle: every AArch64 instruction word is 4 bytes wide
 
     it "FADD V0.4S V0.4S V0.4S byte0 is 0x00":
+        # @req REQ-NEON-EMIT-002
+        step("Encode FADD V0.4S, V0.4S, V0.4S and read byte0")
         # bits[7:0]: Rd=0, Rn[2:0]=0
         val result = emit_neon_vaddq_f32(0, 0, 0)
-        expect(result[0]).to_equal(0)
+        # @capture(bit_table): FADD.4S byte0 layout
+        step("Verify byte0 holds Rd (0) with no Rn low-bit contribution")
+        expect(result[0]).to_equal(0)  # oracle: byte0 = Rd(0) | Rn[2:0]<<5(0)
 
     it "FADD V0.4S V0.4S V0.4S byte1 is 0xD4":
+        # @req REQ-NEON-EMIT-003
+        step("Encode FADD V0.4S, V0.4S, V0.4S and read byte1")
         # bits[15:8]: opcode=11010 → 0xD4
         val result = emit_neon_vaddq_f32(0, 0, 0)
-        expect(result[1]).to_equal(212)
+        # @capture(bit_table): FADD.4S byte1 layout
+        step("Verify byte1 holds the FADD opcode field 11010b")
+        expect(result[1]).to_equal(212)  # oracle: bits[15:8] opcode=11010b = 0xD4
 
     it "FADD V0.4S V0.4S V0.4S byte2 is 0x20":
+        # @req REQ-NEON-EMIT-004
+        step("Encode FADD V0.4S, V0.4S, V0.4S and read byte2")
         # bits[23:16]: bit21=1, Rm=0 → 0x20
         val result = emit_neon_vaddq_f32(0, 0, 0)
-        expect(result[2]).to_equal(32)
+        # @capture(bit_table): FADD.4S byte2 layout
+        step("Verify byte2 holds the fixed bit21=1 with Rm=0")
+        expect(result[2]).to_equal(32)  # oracle: bits[23:16] fixed bit21=1, Rm(0) = 0x20
 
     it "FADD V0.4S V0.4S V0.4S byte3 is 0x4E":
+        # @req REQ-NEON-EMIT-005
+        step("Encode FADD V0.4S, V0.4S, V0.4S and read byte3")
         # bits[31:24]: 0=0, Q=1, U=0, 01110 → 0x4E
         val result = emit_neon_vaddq_f32(0, 0, 0)
-        expect(result[3]).to_equal(78)
+        # @capture(bit_table): FADD.4S byte3 layout
+        step("Verify byte3 holds Q=1 U=0 and the 01110 group opcode")
+        expect(result[3]).to_equal(78)  # oracle: bits[31:24] Q=1,U=0,group=01110b = 0x4E
 
     it "FADD V1.4S V2.4S V3.4S byte0 encodes Rd and Rn low":
+        # @req REQ-NEON-EMIT-006
+        step("Encode FADD V1.4S, V2.4S, V3.4S and read byte0")
         # Rd=1 → bits[4:0]=1; Rn=2 → bits[9:5]=2 → byte0 = 1 + (2*32)%256 = 0x41
         val result = emit_neon_vaddq_f32(1, 2, 3)
-        expect(result[0]).to_equal(65)
+        # @capture(bit_table): FADD.4S register-field byte0
+        step("Verify byte0 folds Rd=1 and the low bits of Rn=2")
+        expect(result[0]).to_equal(65)  # oracle: byte0 = Rd(1) + Rn(2)*32 low bits = 0x41
 
     it "FADD V1.4S V2.4S V3.4S byte2 encodes Rm":
+        # @req REQ-NEON-EMIT-007
+        step("Encode FADD V1.4S, V2.4S, V3.4S and read byte2")
         # Rm=3 → bits[20:16]=3 → byte2 = 0x20 + 3 = 0x23
         val result = emit_neon_vaddq_f32(1, 2, 3)
-        expect(result[2]).to_equal(35)
+        # @capture(bit_table): FADD.4S register-field byte2
+        step("Verify byte2 folds Rm=3 into the fixed bit21=1 base")
+        expect(result[2]).to_equal(35)  # oracle: byte2 = fixed base 0x20 + Rm(3) = 0x23
 
 # ============================================================================
 # FMUL V0.4S, V0.4S, V0.4S
@@ -83,35 +121,63 @@ describe "NEON emit_neon_vaddq_f32 f32 golden":
 
 describe "NEON emit_neon_vmulq_f32 f32 golden":
     it "FMUL V0.4S V0.4S V0.4S emits 4 bytes":
+        # @req REQ-NEON-EMIT-008
+        step("Encode FMUL V0.4S, V0.4S, V0.4S (Rd=Rn=Rm=0)")
         val result = emit_neon_vmulq_f32(0, 0, 0)
-        expect(result.len()).to_equal(4)
+        # @capture(bit_table): FMUL.4S output length
+        step("Verify the fixed-width AArch64 instruction is exactly 4 bytes")
+        expect(result.len()).to_equal(4)  # oracle: every AArch64 instruction word is 4 bytes wide
 
     it "FMUL V0.4S V0.4S V0.4S byte0 is 0x00":
+        # @req REQ-NEON-EMIT-009
+        step("Encode FMUL V0.4S, V0.4S, V0.4S and read byte0")
         val result = emit_neon_vmulq_f32(0, 0, 0)
-        expect(result[0]).to_equal(0)
+        # @capture(bit_table): FMUL.4S byte0 layout
+        step("Verify byte0 holds Rd (0) with no Rn low-bit contribution")
+        expect(result[0]).to_equal(0)  # oracle: byte0 = Rd(0) | Rn[2:0]<<5(0)
 
     it "FMUL V0.4S V0.4S V0.4S byte1 is 0xDC":
+        # @req REQ-NEON-EMIT-010
+        step("Encode FMUL V0.4S, V0.4S, V0.4S and read byte1")
         # bits[15:8]: opcode=11011 → 0xDC
         val result = emit_neon_vmulq_f32(0, 0, 0)
-        expect(result[1]).to_equal(220)
+        # @capture(bit_table): FMUL.4S byte1 layout
+        step("Verify byte1 holds the FMUL opcode field 11011b")
+        expect(result[1]).to_equal(220)  # oracle: bits[15:8] opcode=11011b = 0xDC
 
     it "FMUL V0.4S V0.4S V0.4S byte2 is 0x20":
+        # @req REQ-NEON-EMIT-011
+        step("Encode FMUL V0.4S, V0.4S, V0.4S and read byte2")
         val result = emit_neon_vmulq_f32(0, 0, 0)
-        expect(result[2]).to_equal(32)
+        # @capture(bit_table): FMUL.4S byte2 layout
+        step("Verify byte2 holds the fixed bit21=1 with Rm=0")
+        expect(result[2]).to_equal(32)  # oracle: bits[23:16] fixed bit21=1, Rm(0) = 0x20
 
     it "FMUL V0.4S V0.4S V0.4S byte3 is 0x6E":
+        # @req REQ-NEON-EMIT-012
+        step("Encode FMUL V0.4S, V0.4S, V0.4S and read byte3")
         # bits[31:24]: 0=0, Q=1, U=1, 01110 → 0x6E
         val result = emit_neon_vmulq_f32(0, 0, 0)
-        expect(result[3]).to_equal(110)
+        # @capture(bit_table): FMUL.4S byte3 layout
+        step("Verify byte3 holds Q=1 U=1 and the 01110 group opcode")
+        expect(result[3]).to_equal(110)  # oracle: bits[31:24] Q=1,U=1,group=01110b = 0x6E
 
     it "FMUL V2.4S V1.4S V0.4S byte0 encodes Rd":
+        # @req REQ-NEON-EMIT-013
+        step("Encode FMUL V2.4S, V1.4S, V0.4S and read byte0")
         # Rd=2, Rn=1 → byte0 = 2 + (1*32)%256 = 0x22
         val result = emit_neon_vmulq_f32(2, 1, 0)
-        expect(result[0]).to_equal(34)
+        # @capture(bit_table): FMUL.4S register-field byte0
+        step("Verify byte0 folds Rd=2 and the low bits of Rn=1")
+        expect(result[0]).to_equal(34)  # oracle: byte0 = Rd(2) + Rn(1)*32 low bits = 0x22
 
     it "FMUL V2.4S V1.4S V0.4S byte3 unchanged":
+        # @req REQ-NEON-EMIT-014
+        step("Encode FMUL V2.4S, V1.4S, V0.4S and read byte3")
         val result = emit_neon_vmulq_f32(2, 1, 0)
-        expect(result[3]).to_equal(110)
+        # @capture(bit_table): FMUL.4S byte3 register-independence
+        step("Verify byte3 stays at the fixed opcode value regardless of registers")
+        expect(result[3]).to_equal(110)  # oracle: byte3 carries no register bits, stays 0x6E
 
 # ============================================================================
 # FMLA V0.4S, V0.4S, V0.4S
@@ -123,35 +189,63 @@ describe "NEON emit_neon_vmulq_f32 f32 golden":
 
 describe "NEON emit_neon_vfmaq_f32 f32 golden":
     it "FMLA V0.4S V0.4S V0.4S emits 4 bytes":
+        # @req REQ-NEON-EMIT-015
+        step("Encode FMLA V0.4S, V0.4S, V0.4S (Rd=Rn=Rm=0)")
         val result = emit_neon_vfmaq_f32(0, 0, 0)
-        expect(result.len()).to_equal(4)
+        # @capture(bit_table): FMLA.4S output length
+        step("Verify the fixed-width AArch64 instruction is exactly 4 bytes")
+        expect(result.len()).to_equal(4)  # oracle: every AArch64 instruction word is 4 bytes wide
 
     it "FMLA V0.4S V0.4S V0.4S byte0 is 0x00":
+        # @req REQ-NEON-EMIT-016
+        step("Encode FMLA V0.4S, V0.4S, V0.4S and read byte0")
         val result = emit_neon_vfmaq_f32(0, 0, 0)
-        expect(result[0]).to_equal(0)
+        # @capture(bit_table): FMLA.4S byte0 layout
+        step("Verify byte0 holds Rd (0) with no Rn low-bit contribution")
+        expect(result[0]).to_equal(0)  # oracle: byte0 = Rd(0) | Rn[2:0]<<5(0)
 
     it "FMLA V0.4S V0.4S V0.4S byte1 is 0xCC":
+        # @req REQ-NEON-EMIT-017
+        step("Encode FMLA V0.4S, V0.4S, V0.4S and read byte1")
         # bits[15:8]: opcode=11001 → 0xCC
         val result = emit_neon_vfmaq_f32(0, 0, 0)
-        expect(result[1]).to_equal(204)
+        # @capture(bit_table): FMLA.4S byte1 layout
+        step("Verify byte1 holds the FMLA opcode field 11001b")
+        expect(result[1]).to_equal(204)  # oracle: bits[15:8] opcode=11001b = 0xCC
 
     it "FMLA V0.4S V0.4S V0.4S byte2 is 0x20":
+        # @req REQ-NEON-EMIT-018
+        step("Encode FMLA V0.4S, V0.4S, V0.4S and read byte2")
         val result = emit_neon_vfmaq_f32(0, 0, 0)
-        expect(result[2]).to_equal(32)
+        # @capture(bit_table): FMLA.4S byte2 layout
+        step("Verify byte2 holds the fixed bit21=1 with Rm=0")
+        expect(result[2]).to_equal(32)  # oracle: bits[23:16] fixed bit21=1, Rm(0) = 0x20
 
     it "FMLA V0.4S V0.4S V0.4S byte3 is 0x4E":
+        # @req REQ-NEON-EMIT-019
+        step("Encode FMLA V0.4S, V0.4S, V0.4S and read byte3")
         val result = emit_neon_vfmaq_f32(0, 0, 0)
-        expect(result[3]).to_equal(78)
+        # @capture(bit_table): FMLA.4S byte3 layout
+        step("Verify byte3 holds Q=1 U=0 and the 01110 group opcode")
+        expect(result[3]).to_equal(78)  # oracle: bits[31:24] Q=1,U=0,group=01110b = 0x4E
 
     it "FMLA V3.4S V1.4S V2.4S byte0 encodes Rd and Rn":
+        # @req REQ-NEON-EMIT-020
+        step("Encode FMLA V3.4S, V1.4S, V2.4S and read byte0")
         # Rd=3, Rn=1 → byte0 = 3 + (1*32)%256 = 0x23
         val result = emit_neon_vfmaq_f32(3, 1, 2)
-        expect(result[0]).to_equal(35)
+        # @capture(bit_table): FMLA.4S register-field byte0
+        step("Verify byte0 folds Rd=3 and the low bits of Rn=1")
+        expect(result[0]).to_equal(35)  # oracle: byte0 = Rd(3) + Rn(1)*32 low bits = 0x23
 
     it "FMLA V3.4S V1.4S V2.4S byte2 encodes Rm":
+        # @req REQ-NEON-EMIT-021
+        step("Encode FMLA V3.4S, V1.4S, V2.4S and read byte2")
         # Rm=2 → bits[20:16]=2 → byte2 = 0x20 + 2 = 0x22
         val result = emit_neon_vfmaq_f32(3, 1, 2)
-        expect(result[2]).to_equal(34)
+        # @capture(bit_table): FMLA.4S register-field byte2
+        step("Verify byte2 folds Rm=2 into the fixed bit21=1 base")
+        expect(result[2]).to_equal(34)  # oracle: byte2 = fixed base 0x20 + Rm(2) = 0x22
 
 # ============================================================================
 # BSL V0.16B, V0.16B, V0.16B
@@ -166,34 +260,62 @@ describe "NEON emit_neon_vfmaq_f32 f32 golden":
 
 describe "NEON emit_neon_vbslq_u8 16B golden":
     it "BSL V0.16B V0.16B V0.16B emits 4 bytes":
+        # @req REQ-NEON-EMIT-022
+        step("Encode BSL V0.16B, V0.16B, V0.16B (Rd=Rn=Rm=0)")
         val result = emit_neon_vbslq_u8(0, 0, 0)
-        expect(result.len()).to_equal(4)
+        # @capture(bit_table): BSL.16B output length
+        step("Verify the fixed-width AArch64 instruction is exactly 4 bytes")
+        expect(result.len()).to_equal(4)  # oracle: every AArch64 instruction word is 4 bytes wide
 
     it "BSL V0.16B V0.16B V0.16B byte0 is 0x00":
+        # @req REQ-NEON-EMIT-023
+        step("Encode BSL V0.16B, V0.16B, V0.16B and read byte0")
         val result = emit_neon_vbslq_u8(0, 0, 0)
-        expect(result[0]).to_equal(0)
+        # @capture(bit_table): BSL.16B byte0 layout
+        step("Verify byte0 holds Rd (0) with no Rn low-bit contribution")
+        expect(result[0]).to_equal(0)  # oracle: byte0 = Rd(0) | Rn[2:0]<<5(0)
 
     it "BSL V0.16B V0.16B V0.16B byte1 is 0x1C":
+        # @req REQ-NEON-EMIT-024
+        step("Encode BSL V0.16B, V0.16B, V0.16B and read byte1")
         # bits[15:8]: opcode=000111 lower → 0x1C
         val result = emit_neon_vbslq_u8(0, 0, 0)
-        expect(result[1]).to_equal(28)
+        # @capture(bit_table): BSL.16B byte1 layout
+        step("Verify byte1 holds the BSL opcode field 000111b (low bits)")
+        expect(result[1]).to_equal(28)  # oracle: bits[15:8] opcode=000111b (low) = 0x1C
 
     it "BSL V0.16B V0.16B V0.16B byte2 is 0x60":
+        # @req REQ-NEON-EMIT-025
+        step("Encode BSL V0.16B, V0.16B, V0.16B and read byte2")
         # bits[23:16]: size=11 (bits[22:21]=11), Rm=0 → 0x60
         val result = emit_neon_vbslq_u8(0, 0, 0)
-        expect(result[2]).to_equal(96)
+        # @capture(bit_table): BSL.16B byte2 layout
+        step("Verify byte2 holds size=11 with Rm=0")
+        expect(result[2]).to_equal(96)  # oracle: bits[23:16] size=11b, Rm(0) = 0x60
 
     it "BSL V0.16B V0.16B V0.16B byte3 is 0x6E":
+        # @req REQ-NEON-EMIT-026
+        step("Encode BSL V0.16B, V0.16B, V0.16B and read byte3")
         # bits[31:24]: 0=0, Q=1, U=1, 01110 → 0x6E
         val result = emit_neon_vbslq_u8(0, 0, 0)
-        expect(result[3]).to_equal(110)
+        # @capture(bit_table): BSL.16B byte3 layout
+        step("Verify byte3 holds Q=1 U=1 and the 01110 group opcode")
+        expect(result[3]).to_equal(110)  # oracle: bits[31:24] Q=1,U=1,group=01110b = 0x6E
 
     it "BSL V3.16B V1.16B V2.16B byte0 encodes Rd and Rn":
+        # @req REQ-NEON-EMIT-027
+        step("Encode BSL V3.16B, V1.16B, V2.16B and read byte0")
         # Rd=3, Rn=1 → byte0 = 3 + (1*32)%256 = 0x23
         val result = emit_neon_vbslq_u8(3, 1, 2)
-        expect(result[0]).to_equal(35)
+        # @capture(bit_table): BSL.16B register-field byte0
+        step("Verify byte0 folds Rd=3 and the low bits of Rn=1")
+        expect(result[0]).to_equal(35)  # oracle: byte0 = Rd(3) + Rn(1)*32 low bits = 0x23
 
     it "BSL V3.16B V1.16B V2.16B byte2 encodes Rm":
+        # @req REQ-NEON-EMIT-028
+        step("Encode BSL V3.16B, V1.16B, V2.16B and read byte2")
         # Rm=2 → bits[20:16]=2, size=11 → byte2 = 0x60 + 2 = 0x62
         val result = emit_neon_vbslq_u8(3, 1, 2)
-        expect(result[2]).to_equal(98)
+        # @capture(bit_table): BSL.16B register-field byte2
+        step("Verify byte2 folds Rm=2 into the size=11 base")
+        expect(result[2]).to_equal(98)  # oracle: byte2 = size=11 base 0x60 + Rm(2) = 0x62

@@ -1,12 +1,44 @@
+"""
+## Purpose and audience
+For operators and reviewers auditing the direct core-C bootstrap runtime
+capsule producer (`scripts/check/build-core-c-bootstrap-runtime-capsule.shs`).
+This is a source-contract spec: it pins the producer script's shipped shell
+source against the exact file graph, build invocation, fail-closed gates, and
+attestation schema the capsule promises, so a silent edit to the script cannot
+drop a runtime source file, weaken a fail-closed check, or loosen the
+attestation record without a scenario going red.
+## Operator workflow
+Run `./src/compiler_rust/target/bootstrap/simple run
+test/03_system/check/core_c_bootstrap_runtime_capsule_contract_spec.spl` after
+touching the producer script or the runtime files it lists.
+## Compatibility and limitations
+This spec never invokes the producer script (no bootstrap/build is started by
+running it) — it inspects the script's own source text as a source contract.
+It cannot catch a defect the script's TEXT does not expose (e.g. a shell
+logic bug that still contains all the required substrings); it only proves
+the required strings are present or absent.
+## Verification guidance and troubleshooting
+A failure names the missing/unexpected substring and the file it was expected
+in. Re-run after editing the producer script or `src/runtime/runtime_native.c`
+/ `src/runtime/runtime_contracts.c` / `src/runtime/runtime.h`.
+"""
+# Lifecycle: doc/01_research/local/pure_simple_full_cli_bootstrap_recovery.md ;
+# doc/03_plan/design/bootstrap_sdk_capsule.md ;
+# doc/04_architecture/compiler/bootstrap_build_modes_tldr.md ;
+# doc/05_design/compiler/bootstrap_compiler_backend_stage_split.md
+# @manual_section: core_c_bootstrap_runtime_capsule
+
 use std.io.{file_read}
-use std.spec.{describe, it, expect}
+use std.spec.{describe, it, expect, step}
 
 val PRODUCER = "scripts/check/build-core-c-bootstrap-runtime-capsule.shs"
 
 describe "direct core-C bootstrap runtime capsule producer":
-    # @manual scenario evidence
     it "uses the canonical ordered core-C source graph":
-        val source = file_read(PRODUCER)
+        # @req REQ-CCBRC-001
+        # @capture(bit_table): the ordered runtime/hosted/platform file list the producer compiles
+        step("Read the core-C bootstrap producer script source")
+        val producer_script_source = file_read(PRODUCER)
         for input in [
             "runtime_native.c",
             "runtime_framebuffer.c",
@@ -21,59 +53,83 @@ describe "direct core-C bootstrap runtime capsule producer":
             "runtime_simd_utf8.c",
             "runtime_simd_dispatch.c"
         ]:
-            expect(source).to_contain(input)
-        expect(source).to_contain("hosted_cocoa.c")
-        expect(source).to_contain("hosted_win32.c")
-        expect(source).to_contain("platform/platform_macos.h")
-        expect(source).to_contain("platform/unix_common.h")
-        expect(source).to_contain("stb_truetype.h")
-        expect(source.contains("runtime_https_openssl_core.c")).to_equal(false)
+            # NOTE: "runtime_pool.c" is a genuine pre-existing failure — the
+            # producer script does not mention it (grep confirmed 2026-09-06,
+            # scripts/check/build-core-c-bootstrap-runtime-capsule.shs has no
+            # occurrence). Left RED per testing rules; do not weaken.
+            expect(producer_script_source).to_contain(input)
+        expect(producer_script_source).to_contain("hosted_cocoa.c")
+        expect(producer_script_source).to_contain("hosted_win32.c")
+        expect(producer_script_source).to_contain("platform/platform_macos.h")
+        expect(producer_script_source).to_contain("platform/unix_common.h")
+        expect(producer_script_source).to_contain("stb_truetype.h")
+        expect(producer_script_source.contains("runtime_https_openssl_core.c")).to_equal(false)
 
     it "builds a deterministic archive without a language compiler lane":
-        val source = file_read(PRODUCER)
-        expect(source).to_contain("\"$CC_PATH\" $COMMON_FLAGS $TARGET_FLAGS")
-        expect(source).to_contain("\"$AR_PATH\" rcsD \"$ARCHIVE\"")
-        expect(source).to_contain("ZERO_AR_DATE=1 \"$AR_PATH\" rcs \"$ARCHIVE\"")
-        expect(source).to_contain("-MMD -MF \"$depfile\"")
-        expect(source).to_contain("for declared_input in $SOURCE_FILES $HEADER_FILES")
-        expect(source).to_contain("repeat-compile-failed")
-        expect(source).to_contain("repeat-build-archive-mismatch")
-        expect(source).to_contain("-DSIMPLE_CORE_C_STANDALONE=1")
-        expect(source).to_contain("-mno-outline-atomics")
-        expect(source.contains("bin/" + "simple")).to_equal(false)
-        expect(source.contains("native-" + "build")).to_equal(false)
-        expect(source.contains("car" + "go")).to_equal(false)
-        expect(source.contains("SIMPLE_ALLOW_" + "FREESTANDING_STUBS")).to_equal(false)
+        # @req REQ-CCBRC-002
+        # @capture(bit_table): the exact CC/AR invocation and the excluded compiler-lane substrings
+        step("Verify the producer compiles and archives with reproducible flags and no compiler-lane dependency")
+        val producer_script_source = file_read(PRODUCER)
+        expect(producer_script_source).to_contain("\"$CC_PATH\" $COMMON_FLAGS $TARGET_FLAGS")
+        expect(producer_script_source).to_contain("\"$AR_PATH\" rcsD \"$ARCHIVE\"")
+        expect(producer_script_source).to_contain("ZERO_AR_DATE=1 \"$AR_PATH\" rcs \"$ARCHIVE\"")
+        expect(producer_script_source).to_contain("-MMD -MF \"$depfile\"")
+        expect(producer_script_source).to_contain("for declared_input in $SOURCE_FILES $HEADER_FILES")
+        expect(producer_script_source).to_contain("repeat-compile-failed")
+        expect(producer_script_source).to_contain("repeat-build-archive-mismatch")
+        expect(producer_script_source).to_contain("-DSIMPLE_CORE_C_STANDALONE=1")
+        expect(producer_script_source).to_contain("-mno-outline-atomics")
+        expect(producer_script_source.contains("bin/" + "simple")).to_equal(false)
+        expect(producer_script_source.contains("native-" + "build")).to_equal(false)
+        expect(producer_script_source.contains("car" + "go")).to_equal(false)
+        expect(producer_script_source.contains("SIMPLE_ALLOW_" + "FREESTANDING_STUBS")).to_equal(false)
 
     it "fails closed on dirty input and existing output":
-        val source = file_read(PRODUCER)
-        expect(source).to_contain("git status --porcelain --untracked-files=all")
-        expect(source).to_contain("runtime-source-dirty")
-        expect(source).to_contain("output-already-exists")
-        expect(source).to_contain("missing-runtime-input")
-        expect(source).to_contain("archive-empty")
+        # @req REQ-CCBRC-003
+        # @capture(bit_table): the fail-closed gate identifiers the producer emits on each adverse input
+        step("Verify the producer refuses dirty git state, missing inputs, and existing output")
+        val producer_script_source = file_read(PRODUCER)
+        # NOTE: genuine pre-existing failure — the producer script does not
+        # invoke "git status --porcelain --untracked-files=all" anywhere
+        # (grep confirmed 2026-09-06, same script as above). It may use a
+        # different dirty-check mechanism, but the documented contract string
+        # is absent. Left RED per testing rules; do not weaken.
+        expect(producer_script_source).to_contain("git status --porcelain --untracked-files=all")
+        expect(producer_script_source).to_contain("runtime-source-dirty")
+        expect(producer_script_source).to_contain("output-already-exists")
+        expect(producer_script_source).to_contain("missing-runtime-input")
+        expect(producer_script_source).to_contain("archive-empty")
 
     it "requires the contract ABI from the dedicated runtime-contracts provider":
-        val producer = file_read(PRODUCER)
-        val contracts = file_read("src/runtime/runtime_contracts.c")
-        val native = file_read("src/runtime/runtime_native.c")
-        val header = file_read("src/runtime/runtime.h")
+        # @req REQ-CCBRC-004
+        # @capture(bit_table): the single-definition provider binding for each contract-check symbol
+        step("Verify the contract-check symbols are defined once, in runtime_contracts.c, and pinned by the producer")
+        val producer_script_source = file_read(PRODUCER)
+        val runtime_contracts_source = file_read("src/runtime/runtime_contracts.c")
+        val runtime_native_source = file_read("src/runtime/runtime_native.c")
+        val runtime_header_source = file_read("src/runtime/runtime.h")
         for symbol in ["simple_contract_check", "simple_contract_check_msg"]:
-            expect(contracts).to_contain("void {symbol}(")
+            expect(runtime_contracts_source).to_contain("void {symbol}(")
             # Exactly one definition: runtime_native.c must not redefine it.
-            expect(native.contains("void {symbol}(")).to_equal(false)
-            expect(header).to_contain("void     {symbol}(")
-            expect(producer).to_contain("{symbol}_archive_symbol=T")
-            expect(producer).to_contain("{symbol}_provider=runtime_contracts.o")
+            expect(runtime_native_source.contains("void {symbol}(")).to_equal(false)
+            expect(runtime_header_source).to_contain("void     {symbol}(")
+            expect(producer_script_source).to_contain("{symbol}_archive_symbol=T")
+            expect(producer_script_source).to_contain("{symbol}_provider=runtime_contracts.o")
 
     it "reports how many checks it actually executed":
-        val source = file_read(PRODUCER)
-        expect(source).to_contain("core_c_runtime_capsule_checks_executed=")
-        expect(source).to_contain("checks_executed=$CHECKS_RUN")
-        expect(source).to_contain("checks-executed-below-floor")
+        # @req REQ-CCBRC-005
+        # @capture(bit_table): the executed-check counter fields and their below-floor gate name
+        step("Verify the producer reports and gates on the number of checks it actually ran")
+        val producer_script_source = file_read(PRODUCER)
+        expect(producer_script_source).to_contain("core_c_runtime_capsule_checks_executed=")
+        expect(producer_script_source).to_contain("checks_executed=$CHECKS_RUN")
+        expect(producer_script_source).to_contain("checks-executed-below-floor")
 
     it "attests immutable inputs tools archive provider and self-check":
-        val source = file_read(PRODUCER)
+        # @req REQ-CCBRC-006
+        # @capture(bit_table): every attestation field name recorded in the receipt schema
+        step("Verify the producer records a full attestation schema with tool identity, archive digests, and a passing self-check")
+        val producer_script_source = file_read(PRODUCER)
         for field in [
             "schema=core-c-bootstrap-runtime-capsule-v1",
             "head_revision=",
@@ -99,10 +155,10 @@ describe "direct core-C bootstrap runtime capsule producer":
             "archive_members_sha256=",
             "producer_script_sha256="
         ]:
-            expect(source).to_contain(field)
-        expect(source).to_contain("rt_string_free_archive_symbol=T")
-        expect(source).to_contain("rt_string_free_provider=runtime_native.o")
-        expect(source).to_contain("NF >= 3")
-        expect(source).to_contain("rt_string_free_selfcheck=pass")
-        expect(source).to_contain("rt_string_free_selfcheck.c")
-        expect(source).to_contain("SELFCHECK PASSED (0 failures)")
+            expect(producer_script_source).to_contain(field)
+        expect(producer_script_source).to_contain("rt_string_free_archive_symbol=T")
+        expect(producer_script_source).to_contain("rt_string_free_provider=runtime_native.o")
+        expect(producer_script_source).to_contain("NF >= 3")
+        expect(producer_script_source).to_contain("rt_string_free_selfcheck=pass")
+        expect(producer_script_source).to_contain("rt_string_free_selfcheck.c")
+        expect(producer_script_source).to_contain("SELFCHECK PASSED (0 failures)")

@@ -1,4 +1,34 @@
-use std.spec
+"""
+## Purpose and audience
+
+Executable specification for the cache validator's import surface — which
+module owns `ShbReader`, hashing, and byte-read helpers used by
+`src/compiler/80.driver/cache/cache_validator.spl` — for compiler owners who
+move a dependency's terminal owner or add a new module-scope `use`.
+
+## Operator workflow
+
+Run this spec with the repo test runner and confirm zero failed scenarios.
+Each scenario reads the validator source once and asserts a specific import
+or wiring contract against a genuinely named local.
+
+## Compatibility and limitations
+
+These are source-contract scenarios: they pin which module a dependency is
+imported from, not the validator's runtime STALE/OK decision (covered by
+other cache specs). A failure means the import surface moved without this
+spec being updated, or a real regression reintroduced a nested `use`.
+
+## Verification guidance and troubleshooting
+
+Re-run after any change to `cache_validator.spl`'s `use` list. A failing
+scenario names the exact substring it expected; grep the validator source for
+that substring to see what changed.
+"""
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+# @manual_section: cache validator import surface
+
+use std.spec.step
 use std.nogc_sync_mut.io.file_ops.{file_read}
 use compiler.driver.cache.cache_validator.{validate_shb}
 
@@ -6,21 +36,41 @@ val VALIDATOR_SOURCE = "src/compiler/80.driver/cache/cache_validator.spl"
 
 describe "cache validator SHB reader ownership":
     it "binds ShbReader at module scope for Stage4 lowering":
+        # @req REQ-CACHE-VALIDATOR-001
+        # @capture(statistics): presence of the module-scope ShbReader import and its call sites
+        step("Read the validator source and pin the module-scope ShbReader import")
         val source = file_read(VALIDATOR_SOURCE)
-        expect(source).to_contain("use compiler.shb.shb_reader.{ShbReader}")
-        expect(source.contains("\n    use compiler.shb.shb_reader")).to_be(false)
+        val open_brace = "{"
+        val close_brace = "}"
+        val imports_shb_reader_at_module_scope =
+            source.contains("use compiler.shb.shb_reader." + open_brace + "ShbReader" + close_brace)
+        val nests_shb_reader_import_inside_a_function =
+            source.contains("\n    use compiler.shb.shb_reader")
+        expect(imports_shb_reader_at_module_scope).to_be(true)
+        expect(nests_shb_reader_import_inside_a_function).to_be(false)
         expect(source).to_contain("val reader = ShbReader.open(shb_path)")
         expect(source).to_contain("reader.source_hash()")
         expect(source).to_contain("reader.source_mtime()")
 
     it "keeps every compiler dependency in the validator at module scope":
+        # @req REQ-CACHE-VALIDATOR-002
+        # @capture(statistics): count of nested compiler.* imports found inside a function body
+        step("Read the validator source and confirm no compiler.* import is nested in a function")
         val source = file_read(VALIDATOR_SOURCE)
-        expect(source.contains("\n    use compiler.")).to_be(false)
+        val has_nested_compiler_import = source.contains("\n    use compiler.")
+        expect(has_nested_compiler_import).to_be(false)
 
     it "binds hashing and byte reads from their terminal runtime owner":
+        # @req REQ-CACHE-VALIDATOR-003
+        # @capture(statistics): terminal-owner import string present, superseded aliases absent
+        step("Read the validator source and pin the terminal owner of hashing and byte-read helpers")
         val source = file_read(VALIDATOR_SOURCE)
         expect(source).to_contain(
             "file_exists, file_read_nullable, file_read_bytes, hash_text")
-        expect(source.contains("use std.io_runtime.{hash_text}")).to_be(false)
-        expect(source.contains(
-            "io.file_ops.{file_modified_time, file_read_bytes}")).to_be(false)
+        val still_imports_hash_text_from_io_runtime =
+            source.contains("use std.io_runtime.{hash_text}")
+        val still_imports_byte_reads_from_file_ops_alias =
+            source.contains(
+                "io.file_ops.{file_modified_time, file_read_bytes}")
+        expect(still_imports_hash_text_from_io_runtime).to_be(false)
+        expect(still_imports_byte_reads_from_file_ops_alias).to_be(false)

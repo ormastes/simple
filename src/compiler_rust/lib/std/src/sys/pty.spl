@@ -1,71 +1,46 @@
-# PTY (Pseudo-Terminal) System Library
-#
-# Provides low-level PTY operations for terminal I/O testing and multiplexing.
-
-# Runtime externs — implemented in src/compiler_rust/runtime/src/value/pty.rs (compiled mode,
-# #[no_mangle] exports) and src/compiler_rust/compiler/src/interpreter_extern/pty.rs (interpreter mode).
-# Note: src/runtime/runtime_pty.c is no longer compiled by any build path; the Rust implementation
-# in value/pty.rs supersedes it.
-#
-# rt_pty_open(rows, cols) -> i32
-#   Opens a POSIX PTY pair.  Returns the master fd on success, or -1 on error.
-#   The slave fd is tracked internally and released by rt_pty_spawn.
-#
-# rt_pty_spawn(master_fd, shell) -> i64
-#   Forks a shell process on the slave side of the PTY.
-#   Returns the child PID on success, or -1 on error.
+# PTY (pseudo-terminal) capability.
+# Raw runtime operations are private to this module. Applications use the
+# typed functions below so POSIX PTYs and Windows ConPTY remain provider details.
 extern fn rt_pty_open(rows: i32, cols: i32) -> i32
-extern fn rt_pty_spawn(master_fd: i32, shell: text) -> i64
+extern fn rt_pty_spawn(handle: i32, program: text) -> i64
+extern fn rt_pty_write(handle: i64, data: text) -> bool
+extern fn rt_pty_read(handle: i64, timeout_ms: i64) -> text
+extern fn rt_pty_close(handle: i64) -> bool
+extern fn rt_pty_is_running(handle: i64) -> bool
+extern fn rt_platform_name() -> text?
 
-# Legacy SFFI declarations (interpreter testing helpers)
-extern fn native_pty_openpty()
-extern fn native_pty_write(fd: i32, data: text) -> bool
-extern fn native_pty_read(fd: i32, timeout_ms: i32) -> text
-extern fn native_pty_close(fd: i32) -> bool
+pub fn open(rows: i32, cols: i32) -> i32:
+    if rows <= 0 or cols <= 0:
+        return -1
+    rt_pty_open(rows, cols)
 
-def openpty():
-    """
-    Open a new pseudo-terminal pair.
+pub fn spawn(handle: i32, program: text) -> i64:
+    if handle < 0 or program == "":
+        return -1
+    rt_pty_spawn(handle, program)
 
-    Returns:
-        (master_fd, slave_fd) - File descriptors for master and slave ends
-    """
-    return native_pty_openpty()
+pub fn write(handle: i32, data: text) -> bool:
+    if handle < 0:
+        return false
+    rt_pty_write(handle as i64, data)
 
-def write(fd: i32, data: text) -> bool:
-    """
-    Write data to a PTY file descriptor.
+pub fn read(handle: i32, timeout_ms: i32) -> text:
+    if handle < 0 or timeout_ms < 0:
+        return ""
+    rt_pty_read(handle as i64, timeout_ms as i64)
 
-    Args:
-        fd: File descriptor
-        data: Data to write
+pub fn close(handle: i32) -> bool:
+    if handle < 0:
+        return false
+    rt_pty_close(handle as i64)
 
-    Returns:
-        True on success, False on failure
-    """
-    return native_pty_write(fd, data)
+pub fn is_running(handle: i32) -> bool:
+    if handle < 0:
+        return false
+    rt_pty_is_running(handle as i64)
 
-def read(fd: i32, timeout_ms: i32) -> text:
-    """
-    Read data from a PTY file descriptor with timeout.
-
-    Args:
-        fd: File descriptor
-        timeout_ms: Timeout in milliseconds (default: 1000)
-
-    Returns:
-        text of data read, or empty string on timeout
-    """
-    return native_pty_read(fd, timeout_ms)
-
-def close(fd: i32) -> bool:
-    """
-    Close a PTY file descriptor.
-
-    Args:
-        fd: File descriptor to close
-
-    Returns:
-        True on success, False on failure
-    """
-    return native_pty_close(fd)
+pub fn platform_default_shell() -> text:
+    val platform = rt_platform_name() ?? "unknown"
+    if platform.lower().contains("windows"):
+        return "cmd.exe"
+    "/bin/sh"

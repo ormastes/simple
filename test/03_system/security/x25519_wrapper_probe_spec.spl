@@ -2,27 +2,94 @@
 #
 # Portable x25519 wrapper probe.
 #
-# Bigint wrapper diagnostics can exceed the default watchdog. Focused crypto
-# tests cover arithmetic; this smoke records wrapper vector dimensions.
+# Runs the real RFC 7748 section 6.1 vectors through the pure-Simple
+# Montgomery ladder so the wrapper output is observed from product calls, not
+# restated constants. Bigint wrapper diagnostics can exceed the default
+# watchdog on constrained hosts, which is why this probe stays a portable
+# smoke.
+
+# @manual_section: x25519 wrapper portable probe
+"""
+## Purpose and audience
+
+Executable evidence that the x25519 implementation behind the bigint wrapper
+derives the exact public key and shared secret RFC 7748 section 6.1
+publishes. For cryptography and release engineers confirming the crypto lane
+before a build ships.
+
+## Operator workflow
+
+Run `./src/compiler_rust/target/bootstrap/simple run
+test/system/x25519_wrapper_probe_spec.spl` (or the 03_system twin) and
+confirm 3 examples pass with 0 failures.
+
+## Compatibility and limitations
+
+Pure-Simple arithmetic only: no runtime extern, no network, and no hardware.
+Live TLS transport coverage lives in the focused crypto and TLS specs.
+
+## Verification guidance and troubleshooting
+
+A hex mismatch means the field arithmetic or the ladder is broken — never
+adjust the RFC constants, which are the standard. Probe the field layer
+first, then the ladder's starting state.
+"""
+# research: doc/01_research/domain/x25519mlkem768_acceleration.md ; plan: doc/03_plan/sys_test/x25519mlkem768_acceleration.md ; architecture: doc/04_architecture/x25519mlkem768_acceleration.md ; design: doc/05_design/lib/x25519mlkem768_remaining_detail_design.md
 
 use std.spec.step
 
 use std.spec.*
 
+use src.lib.nogc_async_mut_noalloc.tls.x25519.{x25519, x25519_pubkey}
+
 val X25519_A_HEX = "77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a"
 val X25519_A_PUBLIC_HEX = "8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a"
 val X25519_SHARED_HEX = "4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742"
 
-use std.spec.step
+fn _hex(b: [u8]) -> text:
+    val digits = "0123456789abcdef"
+    var out = ""
+    var i = 0
+    while i < b.length():
+        val v = b[i].to_i64()
+        out = out + digits.substring(v / 16, v / 16 + 1) + digits.substring(v % 16, v % 16 + 1)
+        i = i + 1
+    out
+
+fn _alice_private() -> [u8]:
+    # 77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a (RFC 7748 6.1)
+    [
+        0x77u8, 0x07u8, 0x6du8, 0x0au8, 0x73u8, 0x18u8, 0xa5u8, 0x7du8,
+        0x3cu8, 0x16u8, 0xc1u8, 0x72u8, 0x51u8, 0xb2u8, 0x66u8, 0x45u8,
+        0xdfu8, 0x4cu8, 0x2fu8, 0x87u8, 0xebu8, 0xc0u8, 0x99u8, 0x2au8,
+        0xb1u8, 0x77u8, 0xfbu8, 0xa5u8, 0x1du8, 0xb9u8, 0x2cu8, 0x2au8
+    ]
+
+fn _bob_private() -> [u8]:
+    # 5dab087e624a8a4b79e17f8b83800ee66f3bb1292618b6fd1c2f8b27ff88e0eb (RFC 7748 6.1)
+    [
+        0x5du8, 0xabu8, 0x08u8, 0x7eu8, 0x62u8, 0x4au8, 0x8au8, 0x4bu8,
+        0x79u8, 0xe1u8, 0x7fu8, 0x8bu8, 0x83u8, 0x80u8, 0x0eu8, 0xe6u8,
+        0x6fu8, 0x3bu8, 0xb1u8, 0x29u8, 0x26u8, 0x18u8, 0xb6u8, 0xfdu8,
+        0x1cu8, 0x2fu8, 0x8bu8, 0x27u8, 0xffu8, 0x88u8, 0xe0u8, 0xebu8
+    ]
 
 describe "x25519 wrapper portable probe":
     # @manual scenario evidence
-    it "records base vector widths":
-        expect(X25519_A_HEX.len()).to_equal(64)
-        expect(X25519_A_PUBLIC_HEX.len()).to_equal(64)
+    it "derives alice's published public key":
+        # @req REQ-CRYPTO-X25519-001
+        # @capture(protocol_binary): derived 32-byte public key hex retained for review
+        step("Multiply alice's private scalar by the curve base point")
+        expect(_hex(x25519_pubkey(_alice_private()))).to_equal(X25519_A_PUBLIC_HEX)  # oracle: RFC 7748 section 6.1 publishes exactly this public key
 
-    it "records shared vector width":
-        expect(X25519_SHARED_HEX.len()).to_equal(64)
+    it "derives the published shared secret":
+        # @req REQ-CRYPTO-X25519-001
+        # @capture(protocol_binary): derived 32-byte shared secret hex retained for review
+        step("Combine alice's private scalar with bob's derived public key")
+        expect(_hex(x25519(_alice_private(), x25519_pubkey(_bob_private())))).to_equal(X25519_SHARED_HEX)  # oracle: RFC 7748 section 6.1 publishes exactly this shared secret
 
-    it "records bigint wrapper probe width":
-        expect(32).to_equal(32)
+    it "returns a full width shared secret":
+        # @req REQ-CRYPTO-X25519-001
+        # @capture(statistics): derived secret byte width retained for review
+        step("Measure the agreed secret's byte width")
+        expect(x25519(_alice_private(), x25519_pubkey(_bob_private())).length()).to_equal(32)  # oracle: an x25519 output is always exactly 32 bytes

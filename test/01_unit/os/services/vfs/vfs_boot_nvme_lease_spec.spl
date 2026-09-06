@@ -1,3 +1,31 @@
+"""
+## Purpose and audience
+Boot-time NVMe lease contract for the OS VFS lane, written for the
+storage/vfs owners. It pins how `os.services.vfs.vfs_boot_init` leases the
+system FAT32 volume over NVMe, accepts production transfers from reversible
+probes, assigns user-namespace leases to driver instances, and releases queue
+owners on teardown.
+## Operator workflow
+Run `./src/compiler_rust/target/bootstrap/simple run test/01_unit/os/services/vfs/vfs_boot_nvme_lease_spec.spl`
+from the repository root; scenarios build in-memory block devices and call the
+boot init surface directly, so no NVMe hardware is required.
+## Compatibility and limitations
+The production-readiness, transfer-evidence, DBFS/NVFS, and standalone-q35
+measurement scenarios assert shipped behavior that is currently RED (11 of 27
+fail); they are kept RED deliberately to document the gap. Hardware-gated
+coverage beyond the in-memory device model is out of scope here.
+## Verification guidance and troubleshooting
+A red scenario means the boot-init surface diverged from the lease contract;
+grep `src/os/.../vfs_boot_init` for the failing pinned token and re-read the
+storage requirement before renaming either side. A load failure means the
+`os.services.vfs` import root moved, not that the lease logic broke.
+"""
+# Lifecycle: doc/01_research/domain/sspec_documentization_maintenance.md ;
+# doc/03_plan/sspec_modernization_plan.md ;
+# doc/04_architecture/sspec_documentization_maintenance.md ;
+# doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+# @manual_section: vfs boot nvme lease
+
 use std.spec.{describe, it, expect}
 use std.io_runtime.{read_file}
 use std.fs_driver.mem_block_device.{MemBlockDevice}
@@ -108,6 +136,9 @@ fn _valid_shared_dma_4k() -> SharedDmaBuffer:
 
 describe "VFS boot NVMe lease contract":
     it "builds a filesystem-ready system FAT32 lease for pure Simple boot":
+        # @req REQ-SSPEC-OS
+        # @capture(bit_table): builds a filesystem-ready system FAT32 lease for pure Simple boot verdict row retained for review
+        step("builds a filesystem-ready system FAT32 lease for pure Simple boot")
         val lease = vfs_boot_nvme_system_fat32_lease(512u32, 65536u64, _tokenized_boot_grant())
         expect(lease.provider).to_equal("simple-driver")
         expect(lease.shared_block_interface).to_equal(true)
@@ -117,10 +148,16 @@ describe "VFS boot NVMe lease contract":
         expect(nvme_filesystem_lease_reason(lease, NvmeFilesystemConsumer.Fat32)).to_equal("ready")
 
     it "keeps invalid namespace geometry rejected before FAT32 can mount":
+        # @req REQ-SSPEC-OS
+        # @capture(bit_table): keeps invalid namespace geometry rejected before FAT32 can mount verdict row retained for review
+        step("keeps invalid namespace geometry rejected before FAT32 can mount")
         val lease = vfs_boot_nvme_system_fat32_lease(0u32, 65536u64, _tokenized_boot_grant())
         expect(nvme_filesystem_lease_reason(lease, NvmeFilesystemConsumer.Fat32)).to_equal("nvme-fs-namespace-invalid-lba-size")
 
     it "builds production boot FAT32 leases only from ready transfer evidence":
+        # @req REQ-SSPEC-OS
+        # @capture(bit_table): builds production boot FAT32 leases only from ready transfer evidence verdict row retained for review
+        step("builds production boot FAT32 leases only from ready transfer evidence")
         val ready = nvme_transfer_evidence(
             "simple-driver",
             true,
@@ -164,19 +201,34 @@ describe "VFS boot NVMe lease contract":
 
     it "uses hardware transfer evidence before mounting the pure Simple boot FAT32 lease":
         # @req REQ-SSPEC-OS
+        # @capture(bit_table): uses hardware transfer evidence before mounting the pure Simple boot FAT32 lease verdict row retained for review
+        step("uses hardware transfer evidence before mounting the pure Simple boot FAT32 lease")
+        # @req REQ-SSPEC-OS
         step("uses hardware transfer evidence before mounting the pure Simple boot FAT32 lease")
         val source = (read_file("src/os/services/vfs/vfs_boot_init.spl") + read_file("src/os/services/vfs/vfs_boot_core.spl") + read_file("src/os/services/vfs/vfs_boot_state.spl") + read_file("src/os/services/vfs/vfs_ambient_context.spl") + read_file("src/os/services/vfs/nvme_boot_runtime_owner.spl") + read_file("src/os/services/vfs/nvme_filesystem_direct_io.spl") + read_file("src/os/services/vfs/nvme_q35_lease_perf.spl") + read_file("src/os/services/vfs/direct_fat32_boot_reader.spl"))
-        expect(source.contains("val transfer_evidence_result = g_nvme.transfer_evidence_from_reversible_probe(")).to_equal(true)
-        expect(source.contains("\"system-driver\"")).to_equal(true)
-        expect(source.contains("\"kernel-owned-resource\"")).to_equal(true)
-        expect(source.contains("\"system-kernel-namespace\"")).to_equal(true)
-        expect(source.contains("vfs_boot_nvme_system_fat32_lease_from_transfer_evidence(")).to_equal(true)
-        expect(source.contains("g_vfs_nvme_active_leases = [lease]")).to_equal(true)
-        expect(source.contains("g_vfs_nvme_direct_adapter_leases = [lease]")).to_equal(true)
-        expect(source.contains("pure-Simple NVMe evidence lease policy degraded")).to_equal(true)
-        expect(source.contains("NvmeBlockAdapter.for_identified_namespace_unchecked(")).to_equal(true)
+        val pins_val_transfer_evidence_result_g_nvme_tran = source.contains("val transfer_evidence_result = g_nvme.transfer_evidence_from_reversible_probe(")
+        expect(pins_val_transfer_evidence_result_g_nvme_tran).to_equal(true)
+        val pins_system_driver = source.contains("\"system-driver\"")
+        expect(pins_system_driver).to_equal(true)
+        val pins_kernel_owned_resource = source.contains("\"kernel-owned-resource\"")
+        expect(pins_kernel_owned_resource).to_equal(true)
+        val pins_system_kernel_namespace = source.contains("\"system-kernel-namespace\"")
+        expect(pins_system_kernel_namespace).to_equal(true)
+        val pins_vfs_boot_nvme_system_fat32_lease_from_tr = source.contains("vfs_boot_nvme_system_fat32_lease_from_transfer_evidence(")
+        expect(pins_vfs_boot_nvme_system_fat32_lease_from_tr).to_equal(true)
+        val pins_g_vfs_nvme_active_leases_lease = source.contains("g_vfs_nvme_active_leases = [lease]")
+        expect(pins_g_vfs_nvme_active_leases_lease).to_equal(true)
+        val pins_g_vfs_nvme_direct_adapter_leases_lease = source.contains("g_vfs_nvme_direct_adapter_leases = [lease]")
+        expect(pins_g_vfs_nvme_direct_adapter_leases_lease).to_equal(true)
+        val pins_pure_simple_nvme_evidence_lease_policy_d = source.contains("pure-Simple NVMe evidence lease policy degraded")
+        expect(pins_pure_simple_nvme_evidence_lease_policy_d).to_equal(true)
+        val pins_nvmeblockadapter_for_identified_namespac = source.contains("NvmeBlockAdapter.for_identified_namespace_unchecked(")
+        expect(pins_nvmeblockadapter_for_identified_namespac).to_equal(true)
 
     it "records boot NVMe leases and rejects later user assignment of the same namespace":
+        # @req REQ-SSPEC-OS
+        # @capture(bit_table): records boot NVMe leases and rejects later user assignment of the same namespace verdict row retained for review
+        step("records boot NVMe leases and rejects later user assignment of the same namespace")
         vfs_boot_nvme_reset_active_leases_for_test()
         val system_lease = vfs_boot_nvme_system_fat32_lease(512u32, 65536u64, _tokenized_boot_grant())
         val conflicting_user = _user_lease_for_boot_nsid(1u32)
@@ -189,6 +241,9 @@ describe "VFS boot NVMe lease contract":
         vfs_boot_nvme_reset_active_leases_for_test()
 
     it "assigns user namespaces through the active VFS lease registry":
+        # @req REQ-SSPEC-OS
+        # @capture(bit_table): assigns user namespaces through the active VFS lease registry verdict row retained for review
+        step("assigns user namespaces through the active VFS lease registry")
         vfs_boot_nvme_reset_active_leases_for_test()
         val boot_lease = vfs_boot_nvme_system_fat32_lease(512u32, 65536u64, _tokenized_boot_grant())
         val grant = _tokenized_grant_for_owner(42u64)
@@ -204,6 +259,9 @@ describe "VFS boot NVMe lease contract":
         vfs_boot_nvme_reset_active_leases_for_test()
 
     it "creates user namespace driver instances only after active-lease admission":
+        # @req REQ-SSPEC-OS
+        # @capture(bit_table): creates user namespace driver instances only after active-lease admission verdict row retained for review
+        step("creates user namespace driver instances only after active-lease admission")
         vfs_boot_nvme_reset_active_leases_for_test()
         val boot_lease = vfs_boot_nvme_system_fat32_lease(512u32, 65536u64, _tokenized_boot_grant())
         val grant = _tokenized_grant_for_owner(42u64)
@@ -221,6 +279,9 @@ describe "VFS boot NVMe lease contract":
 
     it "keeps generic user namespace driver instances off the NVMe DirectIo adapter registry":
         # @req REQ-SSPEC-OS
+        # @capture(bit_table): keeps generic user namespace driver instances off the NVMe DirectIo adapter registry verdict row retained for review
+        step("keeps generic user namespace driver instances off the NVMe DirectIo adapter registry")
+        # @req REQ-SSPEC-OS
         step("keeps generic user namespace driver instances off the NVMe DirectIo adapter registry")
         val source = (read_file("src/os/services/vfs/vfs_boot_init.spl") + read_file("src/os/services/vfs/vfs_boot_core.spl") + read_file("src/os/services/vfs/vfs_boot_state.spl") + read_file("src/os/services/vfs/vfs_ambient_context.spl") + read_file("src/os/services/vfs/nvme_boot_runtime_owner.spl") + read_file("src/os/services/vfs/nvme_filesystem_direct_io.spl") + read_file("src/os/services/vfs/nvme_q35_lease_perf.spl") + read_file("src/os/services/vfs/direct_fat32_boot_reader.spl"))
         val generic_pos = source.index_of("fn vfs_boot_nvme_assign_user_namespace_driver_instance(")
@@ -232,6 +293,9 @@ describe "VFS boot NVMe lease contract":
         expect(generic_body.contains("g_vfs_nvme_direct_adapters = g_vfs_nvme_direct_adapters.push")).to_equal(false)
 
     it "rejects a second user driver instance for the same namespace with a different grant":
+        # @req REQ-SSPEC-OS
+        # @capture(bit_table): rejects a second user driver instance for the same namespace with a different grant verdict row retained for review
+        step("rejects a second user driver instance for the same namespace with a different grant")
         vfs_boot_nvme_reset_active_leases_for_test()
         val grant = _tokenized_grant_for_owner(42u64)
         val other_grant = _tokenized_grant_for_owner(43u64)
@@ -248,52 +312,92 @@ describe "VFS boot NVMe lease contract":
 
     it "routes production user namespace mounts through the pure Simple NVMe block adapter":
         # @req REQ-SSPEC-OS
+        # @capture(bit_table): routes production user namespace mounts through the pure Simple NVMe block adapter verdict row retained for review
+        step("routes production user namespace mounts through the pure Simple NVMe block adapter")
+        # @req REQ-SSPEC-OS
         step("routes production user namespace mounts through the pure Simple NVMe block adapter")
         val source = (read_file("src/os/services/vfs/vfs_boot_init.spl") + read_file("src/os/services/vfs/vfs_boot_core.spl") + read_file("src/os/services/vfs/vfs_boot_state.spl") + read_file("src/os/services/vfs/vfs_ambient_context.spl") + read_file("src/os/services/vfs/nvme_boot_runtime_owner.spl") + read_file("src/os/services/vfs/nvme_filesystem_direct_io.spl") + read_file("src/os/services/vfs/nvme_q35_lease_perf.spl") + read_file("src/os/services/vfs/direct_fat32_boot_reader.spl"))
         val lease_check_pos = source.index_of("val lease_result = nvme_user_assigned_filesystem_lease_from_grant_checked(")
         val identify_pos = source.index_of("val identify = g_nvme.identify_namespace_id(lease.namespace_identity.nsid)")
         val queue_pos = source.index_of("val queue_ready = g_nvme.ensure_user_data_queue_for_assignment(")
         val adapter_pos = source.index_of("val adapter_result = NvmeBlockAdapter.for_filesystem_lease(g_nvme, lease, consumer)")
-        expect(source.contains("fn vfs_boot_nvme_assign_user_namespace_hardware_driver_instance(")).to_equal(true)
-        expect(source.contains("fn vfs_boot_nvme_assign_discovered_user_namespace_hardware_driver_instance(")).to_equal(true)
-        expect(source.contains("fn vfs_boot_nvme_system_namespace_nsid_for_user_assignment() -> u32:")).to_equal(true)
-        expect(source.contains("if lease.mode == NvmeNamespaceMode.System:")).to_equal(true)
-        expect(source.contains("val system_nsid = vfs_boot_nvme_system_namespace_nsid_for_user_assignment()")).to_equal(true)
-        expect(source.contains("val user_namespace = g_nvme.identify_first_assignable_user_namespace(system_nsid)")).to_equal(true)
-        expect(source.contains("\"nvme-user-assign-namespace-discovery-failed:\"")).to_equal(true)
-        expect(source.contains("facts.formatted_lba_size")).to_equal(true)
-        expect(source.contains("facts.lba_count")).to_equal(true)
-        expect(source.contains("val interface_probe = vfs_boot_nvme_assign_user_namespace_lease(")).to_equal(true)
-        expect(source.contains("val shared_interface = vfs_boot_nvme_shared_consumer_interface_reason(probe_lease)")).to_equal(true)
-        expect(source.contains("val release_probe = vfs_boot_nvme_release_active_lease(probe_lease)")).to_equal(true)
-        expect(source.contains("\"nvme-user-assign-shared-interface-not-ready:\"")).to_equal(true)
-        expect(source.contains("\"nvme-user-assign-probe-release-failed\"")).to_equal(true)
-        expect(source.contains("val driver_ready = vfs_boot_nvme_shared_driver_ready_for_user_assignment()")).to_equal(true)
-        expect(source.contains("return Err(driver_ready)")).to_equal(true)
-        expect(source.contains("val previous_nsid = g_nvme.get_namespace_id()")).to_equal(true)
-        expect(source.contains("val identify = g_nvme.identify_namespace_id(lease.namespace_identity.nsid)")).to_equal(true)
-        expect(source.contains("\"nvme-user-assign-namespace-identify-failed:\"")).to_equal(true)
-        expect(source.contains("val queue_ready = g_nvme.ensure_user_data_queue_for_assignment(")).to_equal(true)
-        expect(source.contains("lease.namespace_identity.controller_id")).to_equal(true)
-        expect(source.contains("lease.namespace_identity.nsid")).to_equal(true)
-        expect(source.contains("lease.queue.owner_task")).to_equal(true)
-        expect(source.contains("\"nvme-user-assign-queue-create-failed:\"")).to_equal(true)
-        expect(source.contains("val restore_identify = g_nvme.identify_namespace_id(previous_nsid)")).to_equal(true)
-        expect(source.contains("val restore_after_queue = g_nvme.identify_namespace_id(previous_nsid)")).to_equal(true)
-        expect(source.contains("val restore_after_adapter = g_nvme.identify_namespace_id(previous_nsid)")).to_equal(true)
-        expect(source.contains("\"nvme-user-assign-namespace-restore-failed:\"")).to_equal(true)
-        expect(source.contains("NvmeBlockAdapter.for_filesystem_lease(g_nvme, lease, consumer)")).to_equal(true)
-        expect(source.contains("val bounce = adapter.init_bounce_buffer()")).to_equal(true)
-        expect(source.contains("vfs_nvme_driver_instance_for_lease(name, adapter, lease, consumer)")).to_equal(true)
-        expect(source.contains("g_vfs_nvme_active_leases = g_vfs_nvme_active_leases.push(lease)")).to_equal(true)
-        expect(source.contains("g_vfs_nvme_direct_adapter_leases = g_vfs_nvme_direct_adapter_leases.push(lease)")).to_equal(true)
-        expect(source.contains("g_vfs_nvme_direct_adapters = g_vfs_nvme_direct_adapters.push(adapter)")).to_equal(true)
+        val pins_fn_vfs_boot_nvme_assign_user_namespace_h = source.contains("fn vfs_boot_nvme_assign_user_namespace_hardware_driver_instance(")
+        expect(pins_fn_vfs_boot_nvme_assign_user_namespace_h).to_equal(true)
+        val pins_fn_vfs_boot_nvme_assign_discovered_user = source.contains("fn vfs_boot_nvme_assign_discovered_user_namespace_hardware_driver_instance(")
+        expect(pins_fn_vfs_boot_nvme_assign_discovered_user).to_equal(true)
+        val pins_fn_vfs_boot_nvme_system_namespace_nsid_f = source.contains("fn vfs_boot_nvme_system_namespace_nsid_for_user_assignment() -> u32:")
+        expect(pins_fn_vfs_boot_nvme_system_namespace_nsid_f).to_equal(true)
+        val pins_if_lease_mode_nvmenamespacemode_system = source.contains("if lease.mode == NvmeNamespaceMode.System:")
+        expect(pins_if_lease_mode_nvmenamespacemode_system).to_equal(true)
+        val pins_val_system_nsid_vfs_boot_nvme_system_nam = source.contains("val system_nsid = vfs_boot_nvme_system_namespace_nsid_for_user_assignment()")
+        expect(pins_val_system_nsid_vfs_boot_nvme_system_nam).to_equal(true)
+        val pins_val_user_namespace_g_nvme_identify_first = source.contains("val user_namespace = g_nvme.identify_first_assignable_user_namespace(system_nsid)")
+        expect(pins_val_user_namespace_g_nvme_identify_first).to_equal(true)
+        val pins_nvme_user_assign_namespace_discovery_fai = source.contains("\"nvme-user-assign-namespace-discovery-failed:\"")
+        expect(pins_nvme_user_assign_namespace_discovery_fai).to_equal(true)
+        val pins_facts_formatted_lba_size = source.contains("facts.formatted_lba_size")
+        expect(pins_facts_formatted_lba_size).to_equal(true)
+        val pins_facts_lba_count = source.contains("facts.lba_count")
+        expect(pins_facts_lba_count).to_equal(true)
+        val pins_val_interface_probe_vfs_boot_nvme_assign = source.contains("val interface_probe = vfs_boot_nvme_assign_user_namespace_lease(")
+        expect(pins_val_interface_probe_vfs_boot_nvme_assign).to_equal(true)
+        val pins_val_shared_interface_vfs_boot_nvme_share = source.contains("val shared_interface = vfs_boot_nvme_shared_consumer_interface_reason(probe_lease)")
+        expect(pins_val_shared_interface_vfs_boot_nvme_share).to_equal(true)
+        val pins_val_release_probe_vfs_boot_nvme_release = source.contains("val release_probe = vfs_boot_nvme_release_active_lease(probe_lease)")
+        expect(pins_val_release_probe_vfs_boot_nvme_release).to_equal(true)
+        val pins_nvme_user_assign_shared_interface_not_re = source.contains("\"nvme-user-assign-shared-interface-not-ready:\"")
+        expect(pins_nvme_user_assign_shared_interface_not_re).to_equal(true)
+        val pins_nvme_user_assign_probe_release_failed = source.contains("\"nvme-user-assign-probe-release-failed\"")
+        expect(pins_nvme_user_assign_probe_release_failed).to_equal(true)
+        val pins_val_driver_ready_vfs_boot_nvme_shared_dr = source.contains("val driver_ready = vfs_boot_nvme_shared_driver_ready_for_user_assignment()")
+        expect(pins_val_driver_ready_vfs_boot_nvme_shared_dr).to_equal(true)
+        val pins_return_err_driver_ready = source.contains("return Err(driver_ready)")
+        expect(pins_return_err_driver_ready).to_equal(true)
+        val pins_val_previous_nsid_g_nvme_get_namespace_i = source.contains("val previous_nsid = g_nvme.get_namespace_id()")
+        expect(pins_val_previous_nsid_g_nvme_get_namespace_i).to_equal(true)
+        val pins_val_identify_g_nvme_identify_namespace_i = source.contains("val identify = g_nvme.identify_namespace_id(lease.namespace_identity.nsid)")
+        expect(pins_val_identify_g_nvme_identify_namespace_i).to_equal(true)
+        val pins_nvme_user_assign_namespace_identify_fail = source.contains("\"nvme-user-assign-namespace-identify-failed:\"")
+        expect(pins_nvme_user_assign_namespace_identify_fail).to_equal(true)
+        val pins_val_queue_ready_g_nvme_ensure_user_data = source.contains("val queue_ready = g_nvme.ensure_user_data_queue_for_assignment(")
+        expect(pins_val_queue_ready_g_nvme_ensure_user_data).to_equal(true)
+        val pins_lease_namespace_identity_controller_id = source.contains("lease.namespace_identity.controller_id")
+        expect(pins_lease_namespace_identity_controller_id).to_equal(true)
+        val pins_lease_namespace_identity_nsid = source.contains("lease.namespace_identity.nsid")
+        expect(pins_lease_namespace_identity_nsid).to_equal(true)
+        val pins_lease_queue_owner_task = source.contains("lease.queue.owner_task")
+        expect(pins_lease_queue_owner_task).to_equal(true)
+        val pins_nvme_user_assign_queue_create_failed = source.contains("\"nvme-user-assign-queue-create-failed:\"")
+        expect(pins_nvme_user_assign_queue_create_failed).to_equal(true)
+        val pins_val_restore_identify_g_nvme_identify_nam = source.contains("val restore_identify = g_nvme.identify_namespace_id(previous_nsid)")
+        expect(pins_val_restore_identify_g_nvme_identify_nam).to_equal(true)
+        val pins_val_restore_after_queue_g_nvme_identify = source.contains("val restore_after_queue = g_nvme.identify_namespace_id(previous_nsid)")
+        expect(pins_val_restore_after_queue_g_nvme_identify).to_equal(true)
+        val pins_val_restore_after_adapter_g_nvme_identif = source.contains("val restore_after_adapter = g_nvme.identify_namespace_id(previous_nsid)")
+        expect(pins_val_restore_after_adapter_g_nvme_identif).to_equal(true)
+        val pins_nvme_user_assign_namespace_restore_faile = source.contains("\"nvme-user-assign-namespace-restore-failed:\"")
+        expect(pins_nvme_user_assign_namespace_restore_faile).to_equal(true)
+        val pins_nvmeblockadapter_for_filesystem_lease_g = source.contains("NvmeBlockAdapter.for_filesystem_lease(g_nvme, lease, consumer)")
+        expect(pins_nvmeblockadapter_for_filesystem_lease_g).to_equal(true)
+        val pins_val_bounce_adapter_init_bounce_buffer = source.contains("val bounce = adapter.init_bounce_buffer()")
+        expect(pins_val_bounce_adapter_init_bounce_buffer).to_equal(true)
+        val pins_vfs_nvme_driver_instance_for_lease_name = source.contains("vfs_nvme_driver_instance_for_lease(name, adapter, lease, consumer)")
+        expect(pins_vfs_nvme_driver_instance_for_lease_name).to_equal(true)
+        val pins_g_vfs_nvme_active_leases_g_vfs_nvme_acti = source.contains("g_vfs_nvme_active_leases = g_vfs_nvme_active_leases.push(lease)")
+        expect(pins_g_vfs_nvme_active_leases_g_vfs_nvme_acti).to_equal(true)
+        val pins_g_vfs_nvme_direct_adapter_leases_g_vfs_n = source.contains("g_vfs_nvme_direct_adapter_leases = g_vfs_nvme_direct_adapter_leases.push(lease)")
+        expect(pins_g_vfs_nvme_direct_adapter_leases_g_vfs_n).to_equal(true)
+        val pins_g_vfs_nvme_direct_adapters_g_vfs_nvme_di = source.contains("g_vfs_nvme_direct_adapters = g_vfs_nvme_direct_adapters.push(adapter)")
+        expect(pins_g_vfs_nvme_direct_adapters_g_vfs_nvme_di).to_equal(true)
         expect(lease_check_pos >= 0).to_equal(true)
         expect(identify_pos > lease_check_pos).to_equal(true)
         expect(queue_pos > lease_check_pos).to_equal(true)
         expect(adapter_pos > lease_check_pos).to_equal(true)
 
     it "keeps direct IO adapter ownership mapped by lease instead of active lease index":
+        # @req REQ-SSPEC-OS
+        # @capture(bit_table): keeps direct IO adapter ownership mapped by lease instead of active lease index verdict row retained for review
+        step("keeps direct IO adapter ownership mapped by lease instead of active lease index")
         vfs_boot_nvme_reset_active_leases_for_test()
         val grant = _tokenized_grant_for_owner(42u64)
         val evidence = _user_evidence(grant)
@@ -304,23 +408,40 @@ describe "VFS boot NVMe lease contract":
         expect(vfs_boot_nvme_active_lease_count_for_test()).to_equal(1u64)
         expect(vfs_boot_nvme_direct_adapter_count_for_test()).to_equal(0u64)
 
-        expect(source.contains("var g_vfs_nvme_direct_adapter_leases: [NvmeFilesystemLease] = []")).to_equal(true)
-        expect(source.contains("for adapter_lease in g_vfs_nvme_direct_adapter_leases:")).to_equal(true)
-        expect(source.contains("nvme_filesystem_lease_same_identity(active, lease)")).to_equal(true)
-        expect(source.contains("nvme_filesystem_lease_same_identity(adapter_lease, lease)")).to_equal(true)
-        expect(source.contains("var removed_direct_adapter = false")).to_equal(true)
-        expect(source.contains("removed_direct_adapter = true")).to_equal(true)
-        expect(source.contains("remaining_adapter_leases = remaining_adapter_leases.push(adapter_lease)")).to_equal(true)
-        expect(source.contains("g_vfs_nvme_direct_adapter_leases = remaining_adapter_leases")).to_equal(true)
-        expect(source.contains("g_nvme.release_user_data_queue_owner(")).to_equal(true)
-        expect(source.contains("if lease.mode == NvmeNamespaceMode.UserAssigned and removed_direct_adapter:")).to_equal(true)
-        expect(source.contains("\"nvme-fs-user-queue-owner-release-failed\"")).to_equal(true)
-        expect(source.contains("lease.queue.queue_id")).to_equal(true)
-        expect(source.contains("lease.queue.owner_task")).to_equal(true)
-        expect(source.contains("for active in g_vfs_nvme_active_leases:\n        if nvme_filesystem_lease_same_assignment(active, lease):\n            if idx >= g_vfs_nvme_direct_adapters.len():")).to_equal(false)
+        val pins_var_g_vfs_nvme_direct_adapter_leases_nvm = source.contains("var g_vfs_nvme_direct_adapter_leases: [NvmeFilesystemLease] = []")
+        expect(pins_var_g_vfs_nvme_direct_adapter_leases_nvm).to_equal(true)
+        val pins_for_adapter_lease_in_g_vfs_nvme_direct_a = source.contains("for adapter_lease in g_vfs_nvme_direct_adapter_leases:")
+        expect(pins_for_adapter_lease_in_g_vfs_nvme_direct_a).to_equal(true)
+        val pins_nvme_filesystem_lease_same_identity_acti = source.contains("nvme_filesystem_lease_same_identity(active, lease)")
+        expect(pins_nvme_filesystem_lease_same_identity_acti).to_equal(true)
+        val pins_nvme_filesystem_lease_same_identity_adap = source.contains("nvme_filesystem_lease_same_identity(adapter_lease, lease)")
+        expect(pins_nvme_filesystem_lease_same_identity_adap).to_equal(true)
+        val pins_var_removed_direct_adapter_false = source.contains("var removed_direct_adapter = false")
+        expect(pins_var_removed_direct_adapter_false).to_equal(true)
+        val pins_removed_direct_adapter_true = source.contains("removed_direct_adapter = true")
+        expect(pins_removed_direct_adapter_true).to_equal(true)
+        val pins_remaining_adapter_leases_remaining_adapt = source.contains("remaining_adapter_leases = remaining_adapter_leases.push(adapter_lease)")
+        expect(pins_remaining_adapter_leases_remaining_adapt).to_equal(true)
+        val pins_g_vfs_nvme_direct_adapter_leases_remaini = source.contains("g_vfs_nvme_direct_adapter_leases = remaining_adapter_leases")
+        expect(pins_g_vfs_nvme_direct_adapter_leases_remaini).to_equal(true)
+        val pins_g_nvme_release_user_data_queue_owner = source.contains("g_nvme.release_user_data_queue_owner(")
+        expect(pins_g_nvme_release_user_data_queue_owner).to_equal(true)
+        val pins_if_lease_mode_nvmenamespacemode_userassi = source.contains("if lease.mode == NvmeNamespaceMode.UserAssigned and removed_direct_adapter:")
+        expect(pins_if_lease_mode_nvmenamespacemode_userassi).to_equal(true)
+        val pins_nvme_fs_user_queue_owner_release_failed = source.contains("\"nvme-fs-user-queue-owner-release-failed\"")
+        expect(pins_nvme_fs_user_queue_owner_release_failed).to_equal(true)
+        val pins_lease_queue_queue_id = source.contains("lease.queue.queue_id")
+        expect(pins_lease_queue_queue_id).to_equal(true)
+        val pins_lease_queue_owner_task_0 = source.contains("lease.queue.owner_task")
+        expect(pins_lease_queue_owner_task_0).to_equal(true)
+        val pins_for_active_in_g_vfs_nvme_active_leases_n = source.contains("for active in g_vfs_nvme_active_leases:\n        if nvme_filesystem_lease_same_assignment(active, lease):\n            if idx >= g_vfs_nvme_direct_adapters.len():")
+        expect(pins_for_active_in_g_vfs_nvme_active_leases_n).to_equal(false)
         vfs_boot_nvme_reset_active_leases_for_test()
 
     it "requires filesystem DirectIo probe before submitting through lease adapters":
+        # @req REQ-SSPEC-OS
+        # @capture(bit_table): requires filesystem DirectIo probe before submitting through lease adapters verdict row retained for review
+        step("requires filesystem DirectIo probe before submitting through lease adapters")
         vfs_boot_nvme_reset_active_leases_for_test()
         val lease = _user_lease_for_boot_nsid(18u32)
         val unsupported = DriverInstance.DbFs(DbFsDriver.new_hosted())
@@ -345,21 +466,37 @@ describe "VFS boot NVMe lease contract":
 
     it "resolves filesystem DirectIo through file extents before lease adapter submission":
         # @req REQ-SSPEC-OS
+        # @capture(bit_table): resolves filesystem DirectIo through file extents before lease adapter submission verdict row retained for review
+        step("resolves filesystem DirectIo through file extents before lease adapter submission")
+        # @req REQ-SSPEC-OS
         step("resolves filesystem DirectIo through file extents before lease adapter submission")
         val source = (read_file("src/os/services/vfs/vfs_boot_init.spl") + read_file("src/os/services/vfs/vfs_boot_core.spl") + read_file("src/os/services/vfs/vfs_boot_state.spl") + read_file("src/os/services/vfs/vfs_ambient_context.spl") + read_file("src/os/services/vfs/nvme_boot_runtime_owner.spl") + read_file("src/os/services/vfs/nvme_filesystem_direct_io.spl") + read_file("src/os/services/vfs/nvme_q35_lease_perf.spl") + read_file("src/os/services/vfs/direct_fat32_boot_reader.spl"))
 
-        expect(source.contains("fn vfs_boot_nvme_map_filesystem_direct_4k_request(driver: DriverInstance, req: DirectIoRequest) -> Result<DirectIoRequest, FsError>:")).to_equal(true)
-        expect(source.contains("fn vfs_boot_nvme_map_filesystem_direct_4k_batch(driver: DriverInstance, req: DirectIoBatchRequest) -> Result<DirectIoBatchRequest, FsError>:")).to_equal(true)
-        expect(source.contains("driver.direct_io_extent_for_handle(FileHandle(id: req.handle_id), req.file_offset, 4096u64)")).to_equal(true)
-        expect(source.contains("val storage_offset = (mapped.storage_lba * mapped.sector_size.to_u64()) as i64")).to_equal(true)
-        expect(source.contains("file_offset: storage_offset")).to_equal(true)
-        expect(source.contains("for offset in req.file_offsets:\n        val extent = driver.direct_io_extent_for_handle(FileHandle(id: req.handle_id), offset, 4096u64)")).to_equal(true)
-        expect(source.contains("storage_offsets.push((mapped.storage_lba * mapped.sector_size.to_u64()) as i64)")).to_equal(true)
-        expect(source.contains("file_offsets: storage_offsets")).to_equal(true)
-        expect(source.contains("vfs_boot_nvme_direct_io_extent_matches_request(direct, mapped, req.file_offset, 4096u64)")).to_equal(true)
-        expect(source.contains("vfs_boot_nvme_direct_io_extent_matches_request(direct, mapped, offset, 4096u64)")).to_equal(true)
+        val pins_fn_vfs_boot_nvme_map_filesystem_direct_4 = source.contains("fn vfs_boot_nvme_map_filesystem_direct_4k_request(driver: DriverInstance, req: DirectIoRequest) -> Result<DirectIoRequest, FsError>:")
+        expect(pins_fn_vfs_boot_nvme_map_filesystem_direct_4).to_equal(true)
+        val pins_fn_vfs_boot_nvme_map_filesystem_direct_4_1 = source.contains("fn vfs_boot_nvme_map_filesystem_direct_4k_batch(driver: DriverInstance, req: DirectIoBatchRequest) -> Result<DirectIoBatchRequest, FsError>:")
+        expect(pins_fn_vfs_boot_nvme_map_filesystem_direct_4_1).to_equal(true)
+        val pins_driver_direct_io_extent_for_handle_fileh = source.contains("driver.direct_io_extent_for_handle(FileHandle(id: req.handle_id), req.file_offset, 4096u64)")
+        expect(pins_driver_direct_io_extent_for_handle_fileh).to_equal(true)
+        val pins_val_storage_offset_mapped_storage_lba_ma = source.contains("val storage_offset = (mapped.storage_lba * mapped.sector_size.to_u64()) as i64")
+        expect(pins_val_storage_offset_mapped_storage_lba_ma).to_equal(true)
+        val pins_file_offset_storage_offset = source.contains("file_offset: storage_offset")
+        expect(pins_file_offset_storage_offset).to_equal(true)
+        val pins_for_offset_in_req_file_offsets_n_val_ext = source.contains("for offset in req.file_offsets:\n        val extent = driver.direct_io_extent_for_handle(FileHandle(id: req.handle_id), offset, 4096u64)")
+        expect(pins_for_offset_in_req_file_offsets_n_val_ext).to_equal(true)
+        val pins_storage_offsets_push_mapped_storage_lba = source.contains("storage_offsets.push((mapped.storage_lba * mapped.sector_size.to_u64()) as i64)")
+        expect(pins_storage_offsets_push_mapped_storage_lba).to_equal(true)
+        val pins_file_offsets_storage_offsets = source.contains("file_offsets: storage_offsets")
+        expect(pins_file_offsets_storage_offsets).to_equal(true)
+        val pins_vfs_boot_nvme_direct_io_extent_matches_r = source.contains("vfs_boot_nvme_direct_io_extent_matches_request(direct, mapped, req.file_offset, 4096u64)")
+        expect(pins_vfs_boot_nvme_direct_io_extent_matches_r).to_equal(true)
+        val pins_vfs_boot_nvme_direct_io_extent_matches_r_2 = source.contains("vfs_boot_nvme_direct_io_extent_matches_request(direct, mapped, offset, 4096u64)")
+        expect(pins_vfs_boot_nvme_direct_io_extent_matches_r_2).to_equal(true)
 
     it "rejects DirectIo extents that do not match the probed request":
+        # @req REQ-SSPEC-OS
+        # @capture(bit_table): rejects DirectIo extents that do not match the probed request verdict row retained for review
+        step("rejects DirectIo extents that do not match the probed request")
         val dbfs = direct_io_nvme_filesystem_extension("dbfs", 512u32)
         val matching = DirectIoExtent(
             consumer: "dbfs",
@@ -404,14 +541,24 @@ describe "VFS boot NVMe lease contract":
         expect(vfs_boot_nvme_direct_io_extent_matches_request(dbfs, wrong_len, 0i64, 4096u64)).to_equal(false)
 
     it "exposes boot FAT DirectIo extents on the pure SimpleOS shared FAT driver":
+        # @req REQ-SSPEC-OS
+        # @capture(bit_table): exposes boot FAT DirectIo extents on the pure SimpleOS shared FAT driver verdict row retained for review
+        step("exposes boot FAT DirectIo extents on the pure SimpleOS shared FAT driver")
         val source = read_file("src/os/services/fat32/shared_fat32_driver.spl")
 
-        expect(source.contains("use std.fs_driver.direct_io.{DirectIoExtent}")).to_equal(true)
-        expect(source.contains("me fn direct_io_extent_for_handle(handle: u64, file_offset: i64, byte_len: u64) -> Result<DirectIoExtent, text>:")).to_equal(true)
-        expect(source.contains("return Result.Err(\"invalid file handle\")")).to_equal(true)
-        expect(source.contains("self.inner.direct_io_extent_for_handle(shared_opt.unwrap(), file_offset, byte_len)")).to_equal(true)
+        val pins_use_std_fs_driver_direct_io_directioexte = source.contains("use std.fs_driver.direct_io.{DirectIoExtent}")
+        expect(pins_use_std_fs_driver_direct_io_directioexte).to_equal(true)
+        val pins_me_fn_direct_io_extent_for_handle_handle = source.contains("me fn direct_io_extent_for_handle(handle: u64, file_offset: i64, byte_len: u64) -> Result<DirectIoExtent, text>:")
+        expect(pins_me_fn_direct_io_extent_for_handle_handle).to_equal(true)
+        val pins_return_result_err_invalid_file_handle = source.contains("return Result.Err(\"invalid file handle\")")
+        expect(pins_return_result_err_invalid_file_handle).to_equal(true)
+        val pins_self_inner_direct_io_extent_for_handle_s = source.contains("self.inner.direct_io_extent_for_handle(shared_opt.unwrap(), file_offset, byte_len)")
+        expect(pins_self_inner_direct_io_extent_for_handle_s).to_equal(true)
 
     it "rejects uncommitted DBFS filesystem DirectIo batches before adapter lookup":
+        # @req REQ-SSPEC-OS
+        # @capture(bit_table): rejects uncommitted DBFS filesystem DirectIo batches before adapter lookup verdict row retained for review
+        step("rejects uncommitted DBFS filesystem DirectIo batches before adapter lookup")
         val lease = _user_lease_for_boot_nsid(19u32)
         val mounted = vfs_nvme_driver_instance_for_lease("user-dbfs", MemBlockDevice.new(1024u64, 512u32), lease, NvmeFilesystemConsumer.Dbfs).unwrap()
         val handle = mounted.open_path(Path(raw: "/hot.db"), OpenFlags.read_write().with_create())
@@ -429,6 +576,9 @@ describe "VFS boot NVMe lease contract":
         expect(mapped.unwrap_err()).to_equal(FsError.Unsupported)
 
     it "rejects uncommitted NVFS filesystem DirectIo before adapter lookup":
+        # @req REQ-SSPEC-OS
+        # @capture(bit_table): rejects uncommitted NVFS filesystem DirectIo before adapter lookup verdict row retained for review
+        step("rejects uncommitted NVFS filesystem DirectIo before adapter lookup")
         val lease = _user_lease_for_boot_nsid(20u32)
         val mounted = vfs_nvme_driver_instance_for_lease("user-nvfs", MemBlockDevice.new(1024u64, 512u32), lease, NvmeFilesystemConsumer.Nvfs).unwrap()
         val handle = mounted.open_path(Path(raw: "/hot.nvfs"), OpenFlags.read_write().with_create())
@@ -439,26 +589,45 @@ describe "VFS boot NVMe lease contract":
 
     it "wires q35 pure Simple perf evidence to real shared-DMA direct I/O":
         # @req REQ-SSPEC-OS
+        # @capture(bit_table): wires q35 pure Simple perf evidence to real shared-DMA direct I/O verdict row retained for review
+        step("wires q35 pure Simple perf evidence to real shared-DMA direct I/O")
+        # @req REQ-SSPEC-OS
         step("wires q35 pure Simple perf evidence to real shared-DMA direct I/O")
         val source = (read_file("src/os/services/vfs/vfs_boot_init.spl") + read_file("src/os/services/vfs/vfs_boot_core.spl") + read_file("src/os/services/vfs/vfs_boot_state.spl") + read_file("src/os/services/vfs/vfs_ambient_context.spl") + read_file("src/os/services/vfs/nvme_boot_runtime_owner.spl") + read_file("src/os/services/vfs/nvme_filesystem_direct_io.spl") + read_file("src/os/services/vfs/nvme_q35_lease_perf.spl") + read_file("src/os/services/vfs/direct_fat32_boot_reader.spl"))
         val entry = read_file("examples/09_embedded/simple_os/arch/x86_64/q35_pure_nvme_perf_entry.spl")
 
-        expect(source.contains("fn vfs_boot_nvme_q35_pure_simple_perf_probe_serial_lines() -> [text]:")).to_equal(true)
-        expect(source.contains("val batch_4k_ops: u32 = 32u32")).to_equal(true)
-        expect(source.contains("dma_alloc(batch_bytes as i64, DmaDir.Bidirectional)")).to_equal(true)
-        expect(source.contains("vfs_boot_nvme_submit_active_lease_direct_4k_batch(")).to_equal(true)
-        expect(source.contains("direct_io_read_batch_request(1u64, offsets, shared, 100000u32)")).to_equal(true)
-        expect(source.contains("direct_io_write_batch_request(1u64, offsets, shared, 100000u32)")).to_equal(true)
-        expect(source.contains("vfs_boot_nvme_submit_active_lease_direct_4k_batch_write_through(")).to_equal(true)
-        expect(source.contains("fn _vfs_boot_q35_ready_fs_consumers(lease: NvmeFilesystemLease) -> Result<text, text>:")).to_equal(true)
-        expect(source.contains("vfs_boot_nvme_shared_consumer_interface_reason(lease)")).to_equal(true)
-        expect(source.contains("nvme_filesystem_lease_reason(lease, NvmeFilesystemConsumer.Fat32)")).to_equal(true)
-        expect(source.contains("nvme_filesystem_lease_reason(lease, NvmeFilesystemConsumer.Nvfs)")).to_equal(true)
-        expect(source.contains("nvme_filesystem_lease_reason(lease, NvmeFilesystemConsumer.Dbfs)")).to_equal(true)
-        expect(source.contains("fs-consumer-lease-not-ready")).to_equal(true)
-        expect(source.contains("/SYS/PERF/CFAT4K.TXT")).to_equal(true)
-        expect(source.contains("real_device_q35_pure_simple_perf_marker_from_measurements(")).to_equal(true)
-        expect(source.contains("reason=c-baseline-missing-iops")).to_equal(true)
+        val pins_fn_vfs_boot_nvme_q35_pure_simple_perf_pr = source.contains("fn vfs_boot_nvme_q35_pure_simple_perf_probe_serial_lines() -> [text]:")
+        expect(pins_fn_vfs_boot_nvme_q35_pure_simple_perf_pr).to_equal(true)
+        val pins_val_batch_4k_ops_u32_32u32 = source.contains("val batch_4k_ops: u32 = 32u32")
+        expect(pins_val_batch_4k_ops_u32_32u32).to_equal(true)
+        val pins_dma_alloc_batch_bytes_as_i64_dmadir_bidi = source.contains("dma_alloc(batch_bytes as i64, DmaDir.Bidirectional)")
+        expect(pins_dma_alloc_batch_bytes_as_i64_dmadir_bidi).to_equal(true)
+        val pins_vfs_boot_nvme_submit_active_lease_direct = source.contains("vfs_boot_nvme_submit_active_lease_direct_4k_batch(")
+        expect(pins_vfs_boot_nvme_submit_active_lease_direct).to_equal(true)
+        val pins_direct_io_read_batch_request_1u64_offset = source.contains("direct_io_read_batch_request(1u64, offsets, shared, 100000u32)")
+        expect(pins_direct_io_read_batch_request_1u64_offset).to_equal(true)
+        val pins_direct_io_write_batch_request_1u64_offse = source.contains("direct_io_write_batch_request(1u64, offsets, shared, 100000u32)")
+        expect(pins_direct_io_write_batch_request_1u64_offse).to_equal(true)
+        val pins_vfs_boot_nvme_submit_active_lease_direct_3 = source.contains("vfs_boot_nvme_submit_active_lease_direct_4k_batch_write_through(")
+        expect(pins_vfs_boot_nvme_submit_active_lease_direct_3).to_equal(true)
+        val pins_fn_vfs_boot_q35_ready_fs_consumers_lease = source.contains("fn _vfs_boot_q35_ready_fs_consumers(lease: NvmeFilesystemLease) -> Result<text, text>:")
+        expect(pins_fn_vfs_boot_q35_ready_fs_consumers_lease).to_equal(true)
+        val pins_vfs_boot_nvme_shared_consumer_interface = source.contains("vfs_boot_nvme_shared_consumer_interface_reason(lease)")
+        expect(pins_vfs_boot_nvme_shared_consumer_interface).to_equal(true)
+        val pins_nvme_filesystem_lease_reason_lease_nvmef = source.contains("nvme_filesystem_lease_reason(lease, NvmeFilesystemConsumer.Fat32)")
+        expect(pins_nvme_filesystem_lease_reason_lease_nvmef).to_equal(true)
+        val pins_nvme_filesystem_lease_reason_lease_nvmef_4 = source.contains("nvme_filesystem_lease_reason(lease, NvmeFilesystemConsumer.Nvfs)")
+        expect(pins_nvme_filesystem_lease_reason_lease_nvmef_4).to_equal(true)
+        val pins_nvme_filesystem_lease_reason_lease_nvmef_5 = source.contains("nvme_filesystem_lease_reason(lease, NvmeFilesystemConsumer.Dbfs)")
+        expect(pins_nvme_filesystem_lease_reason_lease_nvmef_5).to_equal(true)
+        val pins_fs_consumer_lease_not_ready = source.contains("fs-consumer-lease-not-ready")
+        expect(pins_fs_consumer_lease_not_ready).to_equal(true)
+        val pins_sys_perf_cfat4k_txt = source.contains("/SYS/PERF/CFAT4K.TXT")
+        expect(pins_sys_perf_cfat4k_txt).to_equal(true)
+        val pins_real_device_q35_pure_simple_perf_marker = source.contains("real_device_q35_pure_simple_perf_marker_from_measurements(")
+        expect(pins_real_device_q35_pure_simple_perf_marker).to_equal(true)
+        val pins_reason_c_baseline_missing_iops = source.contains("reason=c-baseline-missing-iops")
+        expect(pins_reason_c_baseline_missing_iops).to_equal(true)
         expect(entry.contains("q35_pure_nvme_perf_serial_lines")).to_equal(true)
         expect(entry.contains("serial_println(line)")).to_equal(true)
         val pcimgr = read_file("src/os/services/pcimgr/pcimgr.spl")
@@ -467,32 +636,58 @@ describe "VFS boot NVMe lease contract":
         expect(pcimgr.contains("pcimgr_enable_mmio_bus_master(bus_u8, dev_u8, func_u8)")).to_equal(true)
 
     it "measures the standalone q35 C baseline inside the guest on the same device":
+        # @req REQ-SSPEC-OS
+        # @capture(bit_table): measures the standalone q35 C baseline inside the guest on the same device verdict row retained for review
+        step("measures the standalone q35 C baseline inside the guest on the same device")
         val source = read_file("src/os/services/vfs/q35_pure_nvme_perf_boot.spl")
 
-        expect(source.contains("extern fn simpleos_nvme_init() -> i64")).to_equal(true)
-        expect(source.contains("extern fn simpleos_nvme_read_sector(device_idx: u64, lba: u64, buf_addr: u64) -> i64")).to_equal(true)
-        expect(source.contains("extern fn simpleos_nvme_write_sector(device_idx: u64, lba: u64, buf_addr: u64) -> i64")).to_equal(true)
-        expect(source.contains("fn _measure_c_bridge_4k_baseline(lbas: [u64], sector_size: u32, buf_addr: u64) -> Result<Q35NvmePerfCounters, text>:")).to_equal(true)
-        expect(source.contains("val init = simpleos_nvme_init()")).to_equal(true)
-        expect(source.contains("simpleos_nvme_read_sector(0u64, lba + sector.to_u64(), buf_addr")).to_equal(true)
-        expect(source.contains("simpleos_nvme_write_sector(0u64, lba + sector.to_u64(), buf_addr")).to_equal(true)
-        expect(source.contains("all_lbas.push(lba)")).to_equal(true)
-        expect(source.contains("val c_baseline = _measure_c_bridge_4k_baseline(all_lbas, sector_size, shared.cpu_virt_addr)")).to_equal(true)
-        expect(source.contains("c_read_iops = c.read_iops")).to_equal(true)
-        expect(source.contains("c_write_iops = c.write_iops")).to_equal(true)
-        expect(source.contains("if read_p99_us >= c_read_p99_us:")).to_equal(true)
-        expect(source.contains("simple-read-p99-not-faster-than-c")).to_equal(true)
-        expect(source.contains("if write_p99_us >= c_write_p99_us:")).to_equal(true)
-        expect(source.contains("simple-write-p99-not-faster-than-c")).to_equal(true)
+        val pins_extern_fn_simpleos_nvme_init_i64 = source.contains("extern fn simpleos_nvme_init() -> i64")
+        expect(pins_extern_fn_simpleos_nvme_init_i64).to_equal(true)
+        val pins_extern_fn_simpleos_nvme_read_sector_devi = source.contains("extern fn simpleos_nvme_read_sector(device_idx: u64, lba: u64, buf_addr: u64) -> i64")
+        expect(pins_extern_fn_simpleos_nvme_read_sector_devi).to_equal(true)
+        val pins_extern_fn_simpleos_nvme_write_sector_dev = source.contains("extern fn simpleos_nvme_write_sector(device_idx: u64, lba: u64, buf_addr: u64) -> i64")
+        expect(pins_extern_fn_simpleos_nvme_write_sector_dev).to_equal(true)
+        val pins_fn_measure_c_bridge_4k_baseline_lbas_u64 = source.contains("fn _measure_c_bridge_4k_baseline(lbas: [u64], sector_size: u32, buf_addr: u64) -> Result<Q35NvmePerfCounters, text>:")
+        expect(pins_fn_measure_c_bridge_4k_baseline_lbas_u64).to_equal(true)
+        val pins_val_init_simpleos_nvme_init = source.contains("val init = simpleos_nvme_init()")
+        expect(pins_val_init_simpleos_nvme_init).to_equal(true)
+        val pins_simpleos_nvme_read_sector_0u64_lba_secto = source.contains("simpleos_nvme_read_sector(0u64, lba + sector.to_u64(), buf_addr")
+        expect(pins_simpleos_nvme_read_sector_0u64_lba_secto).to_equal(true)
+        val pins_simpleos_nvme_write_sector_0u64_lba_sect = source.contains("simpleos_nvme_write_sector(0u64, lba + sector.to_u64(), buf_addr")
+        expect(pins_simpleos_nvme_write_sector_0u64_lba_sect).to_equal(true)
+        val pins_all_lbas_push_lba = source.contains("all_lbas.push(lba)")
+        expect(pins_all_lbas_push_lba).to_equal(true)
+        val pins_val_c_baseline_measure_c_bridge_4k_basel = source.contains("val c_baseline = _measure_c_bridge_4k_baseline(all_lbas, sector_size, shared.cpu_virt_addr)")
+        expect(pins_val_c_baseline_measure_c_bridge_4k_basel).to_equal(true)
+        val pins_c_read_iops_c_read_iops = source.contains("c_read_iops = c.read_iops")
+        expect(pins_c_read_iops_c_read_iops).to_equal(true)
+        val pins_c_write_iops_c_write_iops = source.contains("c_write_iops = c.write_iops")
+        expect(pins_c_write_iops_c_write_iops).to_equal(true)
+        val pins_if_read_p99_us_c_read_p99_us = source.contains("if read_p99_us >= c_read_p99_us:")
+        expect(pins_if_read_p99_us_c_read_p99_us).to_equal(true)
+        val pins_simple_read_p99_not_faster_than_c = source.contains("simple-read-p99-not-faster-than-c")
+        expect(pins_simple_read_p99_not_faster_than_c).to_equal(true)
+        val pins_if_write_p99_us_c_write_p99_us = source.contains("if write_p99_us >= c_write_p99_us:")
+        expect(pins_if_write_p99_us_c_write_p99_us).to_equal(true)
+        val pins_simple_write_p99_not_faster_than_c = source.contains("simple-write-p99-not-faster-than-c")
+        expect(pins_simple_write_p99_not_faster_than_c).to_equal(true)
 
     it "measures standalone q35 Simple I/O through the lease-backed adapter DirectIo surface":
+        # @req REQ-SSPEC-OS
+        # @capture(bit_table): measures standalone q35 Simple I/O through the lease-backed adapter DirectIo surface verdict row retained for review
+        step("measures standalone q35 Simple I/O through the lease-backed adapter DirectIo surface")
         val source = read_file("src/os/services/vfs/q35_pure_nvme_perf_boot.spl")
 
-        expect(source.contains("use os.services.vfs.vfs_block_adapters.{NvmeBlockAdapter}")).to_equal(true)
-        expect(source.contains("nvme_transfer_readiness_reason(evidence)")).to_equal(true)
-        expect(source.contains("NvmeBlockAdapter.submit_direct_4k_shared_dma_batch_for_lease_window(nvme, 1u32, SIMPLEOS_NVME_SYSTEM_QUEUE_ID, consumer, 0u64, sector_count, sector_size, read_req)")).to_equal(true)
-        expect(source.contains("NvmeBlockAdapter.submit_direct_4k_shared_dma_batch_write_through_for_lease_window(nvme, 1u32, SIMPLEOS_NVME_SYSTEM_QUEUE_ID, consumer, 0u64, sector_count, sector_size, write_req)")).to_equal(true)
-        expect(source.contains("NvmeBlockAdapter.submit_direct_4k_shared_dma_batch_for_identified_namespace")).to_equal(false)
+        val pins_use_os_services_vfs_vfs_block_adapters_n = source.contains("use os.services.vfs.vfs_block_adapters.{NvmeBlockAdapter}")
+        expect(pins_use_os_services_vfs_vfs_block_adapters_n).to_equal(true)
+        val pins_nvme_transfer_readiness_reason_evidence = source.contains("nvme_transfer_readiness_reason(evidence)")
+        expect(pins_nvme_transfer_readiness_reason_evidence).to_equal(true)
+        val pins_nvmeblockadapter_submit_direct_4k_shared = source.contains("NvmeBlockAdapter.submit_direct_4k_shared_dma_batch_for_lease_window(nvme, 1u32, SIMPLEOS_NVME_SYSTEM_QUEUE_ID, consumer, 0u64, sector_count, sector_size, read_req)")
+        expect(pins_nvmeblockadapter_submit_direct_4k_shared).to_equal(true)
+        val pins_nvmeblockadapter_submit_direct_4k_shared_6 = source.contains("NvmeBlockAdapter.submit_direct_4k_shared_dma_batch_write_through_for_lease_window(nvme, 1u32, SIMPLEOS_NVME_SYSTEM_QUEUE_ID, consumer, 0u64, sector_count, sector_size, write_req)")
+        expect(pins_nvmeblockadapter_submit_direct_4k_shared_6).to_equal(true)
+        val pins_nvmeblockadapter_submit_direct_4k_shared_7 = source.contains("NvmeBlockAdapter.submit_direct_4k_shared_dma_batch_for_identified_namespace")
+        expect(pins_nvmeblockadapter_submit_direct_4k_shared_7).to_equal(false)
         val adapter = read_file("src/os/services/vfs/vfs_block_adapters.spl")
         expect(adapter.contains("static fn submit_direct_4k_shared_dma_batch_for_lease(")).to_equal(true)
         expect(adapter.contains("static fn submit_direct_4k_shared_dma_batch_for_lease_window(")).to_equal(true)
@@ -507,44 +702,83 @@ describe "VFS boot NVMe lease contract":
         expect(adapter.contains("nvme_filesystem_lease_absolute_lba(lease, relative_lba)")).to_equal(true)
         expect(adapter.contains("if relative_lba >= lba_count:")).to_equal(true)
         expect(adapter.contains("direct_io_validate_batch(ext, req, 4096u64)")).to_equal(true)
-        expect(source.contains("fn _fat32_fixture_direct_offsets(nvme: NvmeDriver, sector_size: u32, buf: SharedDmaBuffer) -> Result<[i64], text>:")).to_equal(true)
-        expect(source.contains("\"FAT4K   BIN\"")).to_equal(true)
-        expect(source.contains("fat32_extent_source=freestanding-fat32-extents")).to_equal(true)
-        expect(source.contains("fn _dbfs_arena_direct_offsets(sector_size: u32, sector_count: u64, arena_base_lba: u64) -> Result<[i64], text>:")).to_equal(true)
-        expect(source.contains("nvfs_extent_source=freestanding-dbfs-arena")).to_equal(true)
-        expect(source.contains("dbfs_extent_source=freestanding-dbfs-arena")).to_equal(true)
-        expect(source.contains("fat32_direct_io=read-write-through")).to_equal(true)
-        expect(source.contains("nvfs_direct_io=read-write-through")).to_equal(true)
-        expect(source.contains("dbfs_direct_io=read-write-through")).to_equal(true)
-        expect(source.contains("fn _consumer_for_measurement(run: u32, op: u32) -> NvmeFilesystemConsumer:")).to_equal(true)
-        expect(source.contains("saw_fat32 = true")).to_equal(true)
-        expect(source.contains("saw_nvfs = true")).to_equal(true)
-        expect(source.contains("saw_dbfs = true")).to_equal(true)
-        expect(source.contains("fs-consumer-direct-io-incomplete")).to_equal(true)
-        expect(source.contains("fs_consumers=\" + fs_consumers")).to_equal(true)
-        expect(source.contains("direct_io_read_batch_request(1u64, offsets, shared, 200000u32)")).to_equal(true)
-        expect(source.contains("direct_io_write_batch_request(1u64, offsets, shared, 200000u32)")).to_equal(true)
-        expect(source.contains("fn _q35_user_namespace_assignment_marker(")).to_equal(true)
-        expect(source.contains("active_leases: [NvmeFilesystemLease]")).to_equal(true)
-        expect(source.contains("val active_system_lease = _q35_system_namespace_lease(sector_size, sector_count)")).to_equal(true)
-        expect(source.contains("val system_nsid = 1u32")).to_equal(true)
-        expect(source.contains("val user_namespace = nvme.identify_first_assignable_user_namespace(system_nsid)")).to_equal(true)
-        expect(source.contains("val user_nsid = user_facts.nsid")).to_equal(true)
-        expect(source.contains("nvme_user_assigned_filesystem_lease_from_grant_checked(\n        evidence,\n        grant,\n        0u32,\n        1u32,")).to_equal(false)
-        expect(source.contains("nvme_user_assigned_filesystem_lease_from_grant_checked(\n        evidence,\n        grant,\n        0u32,\n        user_nsid,")).to_equal(true)
-        expect(source.contains("_q35_user_namespace_assignment_marker(nvme, grant, shared, [active_system_lease])")).to_equal(true)
-        expect(source.contains("NvmeFilesystemConsumer.Fat32,\n        []")).to_equal(false)
-        expect(source.contains("user_namespace_assignment=hardware-data-queue")).to_equal(true)
-        expect(source.contains("user_namespace_nsid=\" + lease.namespace_identity.nsid.to_u64().to_text()")).to_equal(true)
-        expect(source.contains("user_namespace_active_lease_count=\" + active_leases.len().to_u64().to_text()")).to_equal(true)
-        expect(source.contains("user_namespace_direct_io=read-write-through")).to_equal(true)
-        expect(source.contains("nvme_shared_filesystem_interface(lease)")).to_equal(true)
-        expect(source.contains("user_namespace_shared_interface=\" + nvme_shared_filesystem_interface_consumers()")).to_equal(true)
-        expect(source.contains("NvmeBlockAdapter.submit_direct_4k_shared_dma_batch_write_through_for_lease(")).to_equal(true)
-        expect(source.contains("nvme.read_4k_shared_dma_batch_in_namespace_on_queue(")).to_equal(false)
-        expect(source.contains("nvme.write_4k_shared_dma_batch_in_namespace_on_queue(")).to_equal(false)
+        val pins_fn_fat32_fixture_direct_offsets_nvme_nvm = source.contains("fn _fat32_fixture_direct_offsets(nvme: NvmeDriver, sector_size: u32, buf: SharedDmaBuffer) -> Result<[i64], text>:")
+        expect(pins_fn_fat32_fixture_direct_offsets_nvme_nvm).to_equal(true)
+        val pins_fat4k_bin = source.contains("\"FAT4K   BIN\"")
+        expect(pins_fat4k_bin).to_equal(true)
+        val pins_fat32_extent_source_freestanding_fat32_e = source.contains("fat32_extent_source=freestanding-fat32-extents")
+        expect(pins_fat32_extent_source_freestanding_fat32_e).to_equal(true)
+        val pins_fn_dbfs_arena_direct_offsets_sector_size = source.contains("fn _dbfs_arena_direct_offsets(sector_size: u32, sector_count: u64, arena_base_lba: u64) -> Result<[i64], text>:")
+        expect(pins_fn_dbfs_arena_direct_offsets_sector_size).to_equal(true)
+        val pins_nvfs_extent_source_freestanding_dbfs_are = source.contains("nvfs_extent_source=freestanding-dbfs-arena")
+        expect(pins_nvfs_extent_source_freestanding_dbfs_are).to_equal(true)
+        val pins_dbfs_extent_source_freestanding_dbfs_are = source.contains("dbfs_extent_source=freestanding-dbfs-arena")
+        expect(pins_dbfs_extent_source_freestanding_dbfs_are).to_equal(true)
+        val pins_fat32_direct_io_read_write_through = source.contains("fat32_direct_io=read-write-through")
+        expect(pins_fat32_direct_io_read_write_through).to_equal(true)
+        val pins_nvfs_direct_io_read_write_through = source.contains("nvfs_direct_io=read-write-through")
+        expect(pins_nvfs_direct_io_read_write_through).to_equal(true)
+        val pins_dbfs_direct_io_read_write_through = source.contains("dbfs_direct_io=read-write-through")
+        expect(pins_dbfs_direct_io_read_write_through).to_equal(true)
+        val pins_fn_consumer_for_measurement_run_u32_op_u = source.contains("fn _consumer_for_measurement(run: u32, op: u32) -> NvmeFilesystemConsumer:")
+        expect(pins_fn_consumer_for_measurement_run_u32_op_u).to_equal(true)
+        val pins_saw_fat32_true = source.contains("saw_fat32 = true")
+        expect(pins_saw_fat32_true).to_equal(true)
+        val pins_saw_nvfs_true = source.contains("saw_nvfs = true")
+        expect(pins_saw_nvfs_true).to_equal(true)
+        val pins_saw_dbfs_true = source.contains("saw_dbfs = true")
+        expect(pins_saw_dbfs_true).to_equal(true)
+        val pins_fs_consumer_direct_io_incomplete = source.contains("fs-consumer-direct-io-incomplete")
+        expect(pins_fs_consumer_direct_io_incomplete).to_equal(true)
+        val pins_fs_consumers_fs_consumers = source.contains("fs_consumers=\" + fs_consumers")
+        expect(pins_fs_consumers_fs_consumers).to_equal(true)
+        val pins_direct_io_read_batch_request_1u64_offset_8 = source.contains("direct_io_read_batch_request(1u64, offsets, shared, 200000u32)")
+        expect(pins_direct_io_read_batch_request_1u64_offset_8).to_equal(true)
+        val pins_direct_io_write_batch_request_1u64_offse_9 = source.contains("direct_io_write_batch_request(1u64, offsets, shared, 200000u32)")
+        expect(pins_direct_io_write_batch_request_1u64_offse_9).to_equal(true)
+        val pins_fn_q35_user_namespace_assignment_marker = source.contains("fn _q35_user_namespace_assignment_marker(")
+        expect(pins_fn_q35_user_namespace_assignment_marker).to_equal(true)
+        val pins_active_leases_nvmefilesystemlease = source.contains("active_leases: [NvmeFilesystemLease]")
+        expect(pins_active_leases_nvmefilesystemlease).to_equal(true)
+        val pins_val_active_system_lease_q35_system_names = source.contains("val active_system_lease = _q35_system_namespace_lease(sector_size, sector_count)")
+        expect(pins_val_active_system_lease_q35_system_names).to_equal(true)
+        val pins_val_system_nsid_1u32 = source.contains("val system_nsid = 1u32")
+        expect(pins_val_system_nsid_1u32).to_equal(true)
+        val pins_val_user_namespace_nvme_identify_first_a = source.contains("val user_namespace = nvme.identify_first_assignable_user_namespace(system_nsid)")
+        expect(pins_val_user_namespace_nvme_identify_first_a).to_equal(true)
+        val pins_val_user_nsid_user_facts_nsid = source.contains("val user_nsid = user_facts.nsid")
+        expect(pins_val_user_nsid_user_facts_nsid).to_equal(true)
+        val pins_nvme_user_assigned_filesystem_lease_from = source.contains("nvme_user_assigned_filesystem_lease_from_grant_checked(\n        evidence,\n        grant,\n        0u32,\n        1u32,")
+        expect(pins_nvme_user_assigned_filesystem_lease_from).to_equal(false)
+        val pins_nvme_user_assigned_filesystem_lease_from_10 = source.contains("nvme_user_assigned_filesystem_lease_from_grant_checked(\n        evidence,\n        grant,\n        0u32,\n        user_nsid,")
+        expect(pins_nvme_user_assigned_filesystem_lease_from_10).to_equal(true)
+        val pins_q35_user_namespace_assignment_marker_nvm = source.contains("_q35_user_namespace_assignment_marker(nvme, grant, shared, [active_system_lease])")
+        expect(pins_q35_user_namespace_assignment_marker_nvm).to_equal(true)
+        val pins_nvmefilesystemconsumer_fat32_n = source.contains("NvmeFilesystemConsumer.Fat32,\n        []")
+        expect(pins_nvmefilesystemconsumer_fat32_n).to_equal(false)
+        val pins_user_namespace_assignment_hardware_data = source.contains("user_namespace_assignment=hardware-data-queue")
+        expect(pins_user_namespace_assignment_hardware_data).to_equal(true)
+        val pins_user_namespace_nsid_lease_namespace_iden = source.contains("user_namespace_nsid=\" + lease.namespace_identity.nsid.to_u64().to_text()")
+        expect(pins_user_namespace_nsid_lease_namespace_iden).to_equal(true)
+        val pins_user_namespace_active_lease_count_active = source.contains("user_namespace_active_lease_count=\" + active_leases.len().to_u64().to_text()")
+        expect(pins_user_namespace_active_lease_count_active).to_equal(true)
+        val pins_user_namespace_direct_io_read_write_thro = source.contains("user_namespace_direct_io=read-write-through")
+        expect(pins_user_namespace_direct_io_read_write_thro).to_equal(true)
+        val pins_nvme_shared_filesystem_interface_lease = source.contains("nvme_shared_filesystem_interface(lease)")
+        expect(pins_nvme_shared_filesystem_interface_lease).to_equal(true)
+        val pins_user_namespace_shared_interface_nvme_sha = source.contains("user_namespace_shared_interface=\" + nvme_shared_filesystem_interface_consumers()")
+        expect(pins_user_namespace_shared_interface_nvme_sha).to_equal(true)
+        val pins_nvmeblockadapter_submit_direct_4k_shared_11 = source.contains("NvmeBlockAdapter.submit_direct_4k_shared_dma_batch_write_through_for_lease(")
+        expect(pins_nvmeblockadapter_submit_direct_4k_shared_11).to_equal(true)
+        val pins_nvme_read_4k_shared_dma_batch_in_namespa = source.contains("nvme.read_4k_shared_dma_batch_in_namespace_on_queue(")
+        expect(pins_nvme_read_4k_shared_dma_batch_in_namespa).to_equal(false)
+        val pins_nvme_write_4k_shared_dma_batch_in_namesp = source.contains("nvme.write_4k_shared_dma_batch_in_namespace_on_queue(")
+        expect(pins_nvme_write_4k_shared_dma_batch_in_namesp).to_equal(false)
 
     it "packages the C FAT baseline artifact into the q35 FAT image contract":
+        # @req REQ-SSPEC-OS
+        # @capture(bit_table): packages the C FAT baseline artifact into the q35 FAT image contract verdict row retained for review
+        step("packages the C FAT baseline artifact into the q35 FAT image contract")
         val script = read_file("scripts/os/make_os_disk.shs")
         expect(script.contains("SIMPLEOS_CFAT4K_BASELINE")).to_equal(true)
         expect(script.contains("build\", \"os\", \"perf\", \"CFAT4K.TXT")).to_equal(true)
@@ -555,6 +789,9 @@ describe "VFS boot NVMe lease contract":
         expect(script.contains("spc = 8")).to_equal(true)
 
     it "checks shared driver readiness before constructing hardware user namespace adapters":
+        # @req REQ-SSPEC-OS
+        # @capture(bit_table): checks shared driver readiness before constructing hardware user namespace adapters verdict row retained for review
+        step("checks shared driver readiness before constructing hardware user namespace adapters")
         vfs_boot_nvme_reset_active_leases_for_test()
         val source = read_file("src/os/services/vfs/vfs_boot_init.spl")
         val guard_pos = source.index_of("val driver_ready = vfs_boot_nvme_shared_driver_ready_for_user_assignment()")
@@ -566,6 +803,9 @@ describe "VFS boot NVMe lease contract":
         expect(vfs_boot_nvme_active_lease_count_for_test()).to_equal(0u64)
 
     it "releases user data queue owners on post-queue hardware assignment failures":
+        # @req REQ-SSPEC-OS
+        # @capture(bit_table): releases user data queue owners on post-queue hardware assignment failures verdict row retained for review
+        step("releases user data queue owners on post-queue hardware assignment failures")
         # @req REQ-SSPEC-OS
         step("releases user data queue owners on post-queue hardware assignment failures")
         val source = (read_file("src/os/services/vfs/vfs_boot_init.spl") + read_file("src/os/services/vfs/vfs_boot_core.spl") + read_file("src/os/services/vfs/vfs_boot_state.spl") + read_file("src/os/services/vfs/vfs_ambient_context.spl") + read_file("src/os/services/vfs/nvme_boot_runtime_owner.spl") + read_file("src/os/services/vfs/nvme_filesystem_direct_io.spl") + read_file("src/os/services/vfs/nvme_q35_lease_perf.spl") + read_file("src/os/services/vfs/direct_fat32_boot_reader.spl"))
@@ -585,7 +825,8 @@ describe "VFS boot NVMe lease contract":
         expect(helper_pos >= 0).to_equal(true)
         expect(fn_start >= 0).to_equal(true)
         expect(fn_end > fn_start).to_equal(true)
-        expect(source.contains("g_nvme.release_user_data_queue_owner(\n        lease.queue.queue_id,\n        lease.namespace_identity.controller_id,\n        lease.namespace_identity.nsid,\n        lease.queue.owner_task\n    )")).to_equal(true)
+        val pins_g_nvme_release_user_data_queue_owner_n_l = source.contains("g_nvme.release_user_data_queue_owner(\n        lease.queue.queue_id,\n        lease.namespace_identity.controller_id,\n        lease.namespace_identity.nsid,\n        lease.queue.owner_task\n    )")
+        expect(pins_g_nvme_release_user_data_queue_owner_n_l).to_equal(true)
         expect(adapter_fail_pos > queue_pos).to_equal(true)
         expect(bounce_fail_pos > queue_pos).to_equal(true)
         expect(driver_fail_pos > queue_pos).to_equal(true)
@@ -598,6 +839,9 @@ describe "VFS boot NVMe lease contract":
         expect(driver_fail_body.contains("vfs_boot_nvme_release_user_queue_owner_for_failed_assignment(lease)")).to_equal(true)
 
     it "releases active user namespace leases so reassignment can proceed":
+        # @req REQ-SSPEC-OS
+        # @capture(bit_table): releases active user namespace leases so reassignment can proceed verdict row retained for review
+        step("releases active user namespace leases so reassignment can proceed")
         vfs_boot_nvme_reset_active_leases_for_test()
         val grant = _tokenized_grant_for_owner(42u64)
         val evidence = _user_evidence(grant)
@@ -615,6 +859,9 @@ describe "VFS boot NVMe lease contract":
         vfs_boot_nvme_reset_active_leases_for_test()
 
     it "accepts only pure Simple NVMe boot storage as production-ready":
+        # @req REQ-SSPEC-OS
+        # @capture(bit_table): accepts only pure Simple NVMe boot storage as production-ready verdict row retained for review
+        step("accepts only pure Simple NVMe boot storage as production-ready")
         expect(vfs_boot_storage_acceptance_reason(false, "not-mounted", false)).to_equal("not-mounted")
         expect(vfs_boot_storage_acceptance_reason(true, "c-boot-bridge", false)).to_equal("vfs-boot-storage-not-pure-simple:c-boot-bridge")
         expect(vfs_boot_storage_acceptance_reason(true, "virtio-blk", true)).to_equal("vfs-boot-storage-not-nvme-simple-driver:virtio-blk")
@@ -624,6 +871,9 @@ describe "VFS boot NVMe lease contract":
         expect(vfs_boot_storage_production_ready(true, "simple-driver", true)).to_equal(true)
 
     it "keeps production VFS boot out of C bridge and virtio fallback branches":
+        # @req REQ-SSPEC-OS
+        # @capture(bit_table): keeps production VFS boot out of C bridge and virtio fallback branches verdict row retained for review
+        step("keeps production VFS boot out of C bridge and virtio fallback branches")
         # @req REQ-SSPEC-OS
         step("keeps production VFS boot out of C bridge and virtio fallback branches")
         val source = (read_file("src/os/services/vfs/vfs_boot_init.spl") + read_file("src/os/services/vfs/vfs_boot_core.spl") + read_file("src/os/services/vfs/vfs_boot_state.spl") + read_file("src/os/services/vfs/vfs_ambient_context.spl") + read_file("src/os/services/vfs/nvme_boot_runtime_owner.spl") + read_file("src/os/services/vfs/nvme_filesystem_direct_io.spl") + read_file("src/os/services/vfs/nvme_q35_lease_perf.spl") + read_file("src/os/services/vfs/direct_fat32_boot_reader.spl"))
@@ -642,4 +892,7 @@ describe "VFS boot NVMe lease contract":
         expect(production_body.contains("_vfs_boot_init_pure_nvme_fat32(nvme_idx.to_u64())")).to_equal(true)
 
     it "exports fail-closed production readiness through the VFS public surface":
+        # @req REQ-SSPEC-OS
+        # @capture(bit_table): exports fail-closed production readiness through the VFS public surface verdict row retained for review
+        step("exports fail-closed production readiness through the VFS public surface")
         expect(vfs_boot_storage_acceptance_ready()).to_equal(false)

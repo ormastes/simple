@@ -2476,3 +2476,55 @@ int64_t rt_process_wait(int64_t pid, int64_t timeout_ms) {
     }
 }
 #endif
+
+/* C lane of rt_pty_is_running.
+ *
+ * HONEST SCOPE, stated rather than implied. The rest of the rt_pty_* family
+ * (open/spawn/read/write/close) is Rust-only and frozen as such in
+ * scripts/check/rt_dual_implementation_baseline.txt, so this is NOT a mirror
+ * of an existing C pty implementation -- there is none to mirror. It is a
+ * state-free liveness probe, and being state-free is exactly what lets it be
+ * correct without the child table the Rust lane keeps.
+ *
+ * POSIX: `handle` is the pty MASTER fd, the same value the Rust unix lane in
+ * src/compiler_rust/runtime/src/value/pty.rs takes. When the last descriptor
+ * on the SLAVE side is closed -- which is what happens when the spawned child
+ * exits, the parent having already closed its own slave copy in pty_process
+ * ::spawn -- poll() on the master reports POLLHUP. "Does anyone still hold the
+ * slave end" therefore answers "is the session still running" with no pid
+ * table at all. Two divergences from the Rust unix lane, neither hidden:
+ *   - this does NOT reap the child. The Rust lane's waitpid(WNOHANG) doubles
+ *     as an eviction from CHILD_TABLE; with no table of ours to evict from,
+ *     reaping a pid this lane never spawned is not ours to do.
+ *   - a grandchild that inherited the slave keeps the session "running" after
+ *     the direct child exits. That is the honest reading of the pty's state.
+ * poll() on a pty master is a known soft spot outside Linux and was NOT
+ * exercised on macOS or FreeBSD here.
+ *
+ * Windows: the Rust lane resolves `handle` through its own SESSIONS map to a
+ * process HANDLE and calls WaitForSingleObject. The C lane owns no such map,
+ * cannot resolve the handle, and therefore cannot answer. It reports false --
+ * the same value pty.rs itself uses as this family's "not supported here"
+ * answer in its #[cfg(not(any(unix, windows)))] arms -- rather than inventing
+ * a liveness claim it has no basis for. A bool cannot carry "unknown", so the
+ * distinction lives in this comment and in the ConPTY follow-up, not in a
+ * fabricated sentinel that would assert a specific failure instead.
+ */
+#ifdef _WIN32
+bool rt_pty_is_running(int64_t handle) {
+    (void)handle;
+    return false;
+}
+#else
+bool rt_pty_is_running(int64_t handle) {
+    if (handle < 0) return false;
+    struct pollfd probe;
+    probe.fd = (int)handle;
+    probe.events = 0;
+    probe.revents = 0;
+    int ready = poll(&probe, 1, 0);
+    if (ready < 0) return false;
+    if (probe.revents & (POLLHUP | POLLERR | POLLNVAL)) return false;
+    return true;
+}
+#endif

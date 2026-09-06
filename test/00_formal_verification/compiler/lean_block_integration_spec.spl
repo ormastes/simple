@@ -1,28 +1,33 @@
 # @cover src/compiler_rust/lib/std/src/verification/lean/lean_block.spl 80%
 # @cover src/compiler_rust/lib/std/src/verification/lean/codegen.spl 60%
 """
-# Lean Block Integration Specification
+## Purpose and audience
+Executable contract for embedded lean{} blocks: theorem-name and import
+extraction, placement-aware block construction, namespacing, merging into
+generated Lean output with import deduplication, and collision detection
+between structured theorems and block content. Owned by the compiler
+verification team; anyone embedding raw Lean in Simple source reads this.
 
-**Feature IDs:** #LEAN-BLOCK
-**Category:** Verification
-**Difficulty:** 3/5
-**Status:** In Progress
-**Requirements:** N/A
-**Plan:** doc/03_plan/lean_verification_contract.md
+## Operator workflow
+Run this spec after changing the lean{} block parser or the Lean codegen
+emitter:
+`bin/simple test test/00_formal_verification/compiler/lean_block_integration_spec.spl`.
+A failure names the extraction, merge, or collision invariant that broke.
 
-## Overview
+## Compatibility and limitations
+Block bodies are literal fixtures; nothing invokes the Lean toolchain, so no
+`lean`/`lake` install is needed. The dedup scenario pins the current default
+import list — adding a default import intentionally requires updating it.
 
-Verifies that embedded lean{} blocks are correctly parsed, merged into
-generated Lean output, and that namespace collisions are detected.
-
-## Key Concepts
-
-| Concept | Description |
-|---------|-------------|
-| lean{} block | Raw Lean 4 code embedded in Simple source |
-| Collision | Same theorem name in both generated and handwritten code |
-| Import dedup | Imports from lean{} blocks merged without duplicates |
+## Verification guidance and troubleshooting
+Rerun with the single command above. A missing-theorem failure means
+extract_theorem_names stopped recognising the body shape; a duplicated-import
+failure means deduplicated_lean_block_imports lost its default-import filter.
 """
+# Lifecycle: doc/01_research/domain/simple_formal_verification_2_0.md
+# doc/03_plan/agent_tasks/simple_formal_verification_2_0.md
+# doc/04_architecture/simple_formal_verification_2_0.md
+# doc/05_design/simple_formal_verification_2_0.md
 
 use std.spipe.*
 use verification.lean.lean_block.{LeanBlock, LeanBlockPlacement}
@@ -33,38 +38,54 @@ use verification.lean.{LeanCodegenOptions, LeanCodegen, LeanTheorem}
 # Test Group 1: LeanBlock Model
 # ============================================================================
 
+# @manual_section: lean-block-integration
 describe "LeanBlock Model":
     it "extracts theorem names from body":
+        # @req REQ-LEAN-BLOCK-001
+        # @capture(protocol_json): theorem names parsed out of a two-theorem lean{} body
+        step("Parse theorem names from a two-theorem body")
         val body = "theorem my_theorem (n : Nat) : n + 0 = n := by\n  simp\n\ntheorem another_thm : True := trivial"
         val names = LeanBlock.extract_theorem_names(body)
-        expect(names.len()).to_equal(2)
+        expect(names.len()).to_equal(2)  # oracle: the body declares exactly two theorems
         expect(names[0]).to_equal("my_theorem")
         expect(names[1]).to_equal("another_thm")
 
     it "extracts imports from body":
+        # @req REQ-LEAN-BLOCK-002
+        # @capture(protocol_json): import lines parsed out of a two-import lean{} body
+        step("Parse imports from a two-import body")
         val body = "import Mathlib.Data.Nat.Basic\nimport Std.Data.List\n\ntheorem foo : True := trivial"
         val imps = LeanBlock.extract_imports(body)
-        expect(imps.len()).to_equal(2)
+        expect(imps.len()).to_equal(2)  # oracle: the body carries exactly two import lines
         expect(imps[0]).to_equal("Mathlib.Data.Nat.Basic")
         expect(imps[1]).to_equal("Std.Data.List")
 
     it "creates with placement and auto-extracts":
+        # @req REQ-LEAN-BLOCK-003
+        # @capture(protocol_json): LeanBlock record with placement, origin line, and auto-extracted content
+        step("Construct a ModuleLevel block and auto-extract its content")
         val body = "import Mathlib.Tactic\ntheorem helper_lemma : 1 + 1 = 2 := by norm_num"
         val block = LeanBlock.create("test.spl", 42, LeanBlockPlacement.ModuleLevel, body)
         expect(block.source_file).to_equal("test.spl")
-        expect(block.source_line).to_equal(42)
-        expect(block.theorem_names.len()).to_equal(1)
+        expect(block.source_line).to_equal(42)  # oracle: the block was declared at line 42
+        expect(block.theorem_names.len()).to_equal(1)  # oracle: the body declares one theorem
         expect(block.theorem_names[0]).to_equal("helper_lemma")
-        expect(block.imports.len()).to_equal(1)
+        expect(block.imports.len()).to_equal(1)  # oracle: the body carries one import
         expect(block.imports[0]).to_equal("Mathlib.Tactic")
 
     it "handles body with no theorems or imports":
+        # @req REQ-LEAN-BLOCK-004
+        # @capture(protocol_json): empty extraction result for a comment-only lean{} body
+        step("Parse a body that holds neither theorems nor imports")
         val body = "-- just a comment\ndef helper := 42"
         val block = LeanBlock.create("empty.spl", 1, LeanBlockPlacement.FunctionLevel, body)
-        expect(block.theorem_names.len()).to_equal(0)
-        expect(block.imports.len()).to_equal(0)
+        expect(block.theorem_names.len()).to_equal(0)  # oracle: a comment-only body declares no theorems
+        expect(block.imports.len()).to_equal(0)  # oracle: a comment-only body carries no imports
 
     it "sets explicit namespace":
+        # @req REQ-LEAN-BLOCK-005
+        # @capture(protocol_json): namespaced LeanBlock record
+        step("Attach an explicit namespace to a block")
         val body = "theorem ns_thm : True := trivial"
         var block = lean_block.LeanBlock.create("ns.spl", 10, lean_block.LeanBlockPlacement.TypeLevel, body)
         block = block.with_namespace("MyModule.Proofs")
@@ -77,6 +98,9 @@ describe "LeanBlock Model":
 
 describe "Lean Block Codegen Integration":
     it "includes lean{} block content in generated output":
+        # @req REQ-LEAN-BLOCK-006
+        # @capture(protocol_json): emitted Lean containing the block theorem and its origin marker
+        step("Emit a module whose lean{} block content is included")
         var opts = LeanCodegenOptions.new()
         opts = opts.with_module_name("BlockTest")
         var cgen = LeanCodegen.new(opts)
@@ -95,6 +119,9 @@ describe "Lean Block Codegen Integration":
         expect(output).to_contain("From example.spl:15")
 
     it "deduplicates imports from lean{} blocks":
+        # @req REQ-LEAN-BLOCK-007
+        # @capture(protocol_json): non-default import list after deduplication
+        step("Deduplicate a block import that the defaults already carry")
         var opts = LeanCodegenOptions.new()
         opts = opts.with_module_name("ImportTest")
         var cgen = LeanCodegen.new(opts)
@@ -109,10 +136,13 @@ describe "Lean Block Codegen Integration":
 
         val extra = cgen.deduplicated_lean_block_imports()
         # Mathlib.Data.Nat.Basic is already in default imports, should not duplicate
-        expect(extra.len()).to_equal(1)
+        expect(extra.len()).to_equal(1)  # oracle: only the non-default Std import survives dedup
         expect(extra[0]).to_equal("Std.Data.List")
 
     it "strips import lines from lean{} block body in output":
+        # @req REQ-LEAN-BLOCK-008
+        # @capture(protocol_json): emitted Lean with block imports hoisted to the top-level section
+        step("Emit a block whose import line is hoisted out of the body")
         var opts = LeanCodegenOptions.new()
         opts = opts.with_module_name("StripTest")
         var cgen = LeanCodegen.new(opts)
@@ -140,6 +170,9 @@ describe "Lean Block Codegen Integration":
 
 describe "Lean Block Collision Detection":
     it "detects duplicate theorem names between generated and lean{} blocks":
+        # @req REQ-LEAN-BLOCK-009
+        # @capture(protocol_json): collision record naming the duplicated theorem
+        step("Detect a theorem name shared by codegen and a lean{} block")
         var opts = LeanCodegenOptions.new()
         opts = opts.with_module_name("CollisionTest")
         var cgen = LeanCodegen.new(opts)
@@ -157,12 +190,15 @@ describe "Lean Block Collision Detection":
         cgen = cgen.add_lean_block(block)
 
         val collisions = cgen.check_lean_block_collisions()
-        expect(collisions.len()).to_equal(1)
+        expect(collisions.len()).to_equal(1)  # oracle: shared_name is the single duplicated theorem
         expect(collisions[0].theorem_name).to_equal("shared_name")
         expect(collisions[0].message).to_contain("Collision")
         expect(collisions[0].message).to_contain("shared_name")
 
     it "reports no collisions when names are distinct":
+        # @req REQ-LEAN-BLOCK-010
+        # @capture(protocol_json): empty collision list for disjoint theorem names
+        step("Emit codegen and block theorems with disjoint names")
         var opts = LeanCodegenOptions.new()
         opts = opts.with_module_name("NoCollisionTest")
         var cgen = LeanCodegen.new(opts)
@@ -178,4 +214,4 @@ describe "Lean Block Collision Detection":
         cgen = cgen.add_lean_block(block)
 
         val collisions = cgen.check_lean_block_collisions()
-        expect(collisions.len()).to_equal(0)
+        expect(collisions.len()).to_equal(0)  # oracle: disjoint names must yield zero collisions

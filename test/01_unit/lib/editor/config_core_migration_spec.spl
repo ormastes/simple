@@ -4,6 +4,35 @@
 # keybindings}.spl through src/lib/common/config_core/. This spec pins the
 # editor-level behaviour that must be IDENTICAL after the swap, plus the new
 # capability the swap buys (full layer precedence + mandatory ceiling).
+"""
+## Purpose and audience
+Pins editor-level behaviour during the CFG2 migration of the editor config,
+platform config, and keybindings onto std.common.config_core: SDN parsing
+preserves previous field values, unknown-key detection, full layer
+precedence up to a mandatory ceiling, constraint guards, get/set round
+trips, and serialisation. Written for editor and stdlib config owners
+reviewing the swap.
+## Operator workflow
+Run from the repo root with the seed runner:
+`./src/compiler_rust/target/bootstrap/simple run test/01_unit/lib/editor/config_core_migration_spec.spl`
+and read the SPEC FILE VERDICT line; scenarios drive the migrated
+editor_config_* / platform_config_* / keybinding_config_load APIs directly.
+## Compatibility and limitations
+Keybinding scenarios write fixtures under /tmp and need a writable temp
+root; every other scenario is pure. Values asserted here are the frozen
+pre-migration editor defaults and must change only with a deliberate
+schema change.
+## Verification guidance and troubleshooting
+A failure names the migrated API and field whose value diverged from the
+pinned pre-migration value; compare against the fixture document built in
+user_sdn() at the top of this file. Layer-precedence failures indicate the
+config_core rank ordering, not the editor defaults.
+"""
+# Lifecycle: doc/01_research/app/editor/sspec_traceability_reorg.md ;
+# doc/03_plan/app/editor/editor_markdown_editing_subsystem.md ;
+# doc/04_architecture/app/ui/vscode_rich_editor.md ;
+# doc/05_design/app/editor/vscode_rich_editor.md
+# @manual_section: editor-config-core-migration
 
 use std.spec.{step}
 use std.io_runtime.{file_write}
@@ -41,115 +70,178 @@ describe "editor config on std.config core":
 
     describe "SDN parsing preserves the previous field values":
         it "reads the pinned theme / font_size / tab_size triple":
+            # @req REQ-EDITOR-CFGCORE-001
+            # @capture(statistics): the parsed theme, font_size, and tab_size values from the fixture
             step("parse the user document through config_core")
             val config = editor_config_from_entries(user_entries())
             expect(config.theme).to_equal("light")
-            expect(config.font_size).to_equal(18)
-            expect(config.tab_size).to_equal(8)
+            expect(config.font_size).to_equal(18)  # oracle: the fixture document pins font_size: 18
+            expect(config.tab_size).to_equal(8)  # oracle: the fixture document pins tab_size: 8
 
         it "keeps the previous bool semantics for a false value":
+            # @req REQ-EDITOR-CFGCORE-002
+            # @capture(statistics): the insert_spaces row proving "false" parses as a bool, not text
+            step("parse the fixture and read the insert_spaces field the old loader would have bool-coerced")
             val config = editor_config_from_entries(user_entries())
             expect(config.insert_spaces).to_equal(false)
 
         it "accepts zero for hover_delay_ms whose minimum is zero":
+            # @req REQ-EDITOR-CFGCORE-003
+            # @capture(statistics): the hover_delay_ms row at its declared minimum of zero
+            step("parse the fixture and read the boundary hover_delay_ms value")
             val config = editor_config_from_entries(user_entries())
-            expect(config.hover_delay_ms).to_equal(0)
+            expect(config.hover_delay_ms).to_equal(0)  # oracle: the fixture pins hover_delay_ms: 0 and the schema minimum is zero
 
         it "leaves unmentioned fields at their compiled defaults":
+            # @req REQ-EDITOR-CFGCORE-004
+            # @capture(statistics): the compiled-default rows for word_wrap, line_numbers, auto_save_delay_ms
+            step("parse the fixture and read three fields the document never mentions")
             val config = editor_config_from_entries(user_entries())
             expect(config.word_wrap).to_equal(false)
             expect(config.line_numbers).to_equal(true)
-            expect(config.auto_save_delay_ms).to_equal(30000)
+            expect(config.auto_save_delay_ms).to_equal(30000)  # oracle: the compiled editor default for auto_save_delay_ms
 
         it "skips comment and blank lines":
+            # @req REQ-EDITOR-CFGCORE-005
+            # @capture(statistics): the parsed entry count against the fixture's six physical lines
             step("the fixture opens with a comment and contains a blank line")
-            expect(user_entries().len()).to_equal(5)
+            expect(user_entries().len()).to_equal(5)  # oracle: six fixture lines minus the comment and the blank line
 
     describe "unknown key detection":
         it "reports a key the editor schema does not declare":
+            # @req REQ-EDITOR-CFGCORE-006
+            # @capture(bit_table): the unknown-key report row for the injected nonexistent_key
+            step("inject an unknown key into the entry list and run the schema unknown-key report")
             val entries = entries_plus(user_entries(), "nonexistent_key", "1", "user")
             val unknown = config_unknown_entry_keys(editor_config_schema(), entries)
-            expect(unknown.len()).to_equal(1)
+            expect(unknown.len()).to_equal(1)  # oracle: exactly the one injected key is unknown
             expect(unknown).to_contain("nonexistent_key")
 
         it "ignores the unknown key when building the config":
+            # @req REQ-EDITOR-CFGCORE-007
+            # @capture(statistics): the font_size row proving unknown keys never reach the config
+            step("build the config from entries carrying an unknown key and read a known field")
             val entries = entries_plus(user_entries(), "nonexistent_key", "1", "user")
             val config = editor_config_from_entries(entries)
-            expect(config.font_size).to_equal(18)
+            expect(config.font_size).to_equal(18)  # oracle: unknown keys are dropped, so the fixture's 18 survives
 
     describe "layer precedence":
         it "lets a user value override the compiled default":
+            # @req REQ-EDITOR-CFGCORE-008
+            # @capture(statistics): the compiled-default 14 versus the user-layer 18 for font_size
             step("compiled default font_size is 14")
-            expect(editor_config_default().font_size).to_equal(14)
+            expect(editor_config_default().font_size).to_equal(14)  # oracle: the compiled editor default
             val config = editor_config_from_entries(user_entries())
-            expect(config.font_size).to_equal(18)
+            expect(config.font_size).to_equal(18)  # oracle: the user layer outranks the compiled default
 
         it "lets a workspace value override the user value":
+            # @req REQ-EDITOR-CFGCORE-009
+            # @capture(statistics): the tab_size row with workspace 2 beating user 8
+            step("add a workspace tab_size entry above the user entries and resolve it")
             val entries = entries_plus(user_entries(), "tab_size", "2", "workspace")
-            expect(editor_config_from_entries(entries).tab_size).to_equal(2)
+            expect(editor_config_from_entries(entries).tab_size).to_equal(2)  # oracle: workspace outranks the user layer
 
         it "lets a mandatory policy value beat a user value":
+            # @req REQ-EDITOR-CFGCORE-010
+            # @capture(statistics): the font_size row with mandatory 12 beating user 18
+            step("add a mandatory font_size entry above the user entries and resolve it")
             val entries = entries_plus(user_entries(), "font_size", "12", "mandatory")
-            expect(editor_config_from_entries(entries).font_size).to_equal(12)
+            expect(editor_config_from_entries(entries).font_size).to_equal(12)  # oracle: the mandatory policy value wins over any lower layer
 
         it "keeps the mandatory value even when a session entry follows it":
+            # @req REQ-EDITOR-CFGCORE-011
+            # @capture(statistics): the font_size row with mandatory 12 surviving a later session 40
+            step("append a session font_size entry after the mandatory one and resolve again")
             var entries = entries_plus(user_entries(), "font_size", "12", "mandatory")
             entries = entries_plus(entries, "font_size", "40", "session")
-            expect(editor_config_from_entries(entries).font_size).to_equal(12)
+            expect(editor_config_from_entries(entries).font_size).to_equal(12)  # oracle: mandatory is a ceiling, so the later session 40 cannot displace it
 
         it "marks a mandatory-pinned key as locked":
+            # @req REQ-EDITOR-CFGCORE-012
+            # @capture(bit_table): the locked row for font_size under a mandatory entry
+            step("resolve a mandatory-pinned key and query the lock state")
             val entries = entries_plus(user_entries(), "font_size", "12", "mandatory")
             expect(config_is_locked(editor_config_schema(), entries, "font_size")).to_equal(true)
 
         it "reports an unpinned key as unlocked":
+            # @req REQ-EDITOR-CFGCORE-013
+            # @capture(bit_table): the unlocked row for font_size with no mandatory entry
+            step("query the lock state for a key no mandatory entry pins")
             expect(config_is_locked(editor_config_schema(), user_entries(), "font_size")).to_equal(false)
 
         it "loads nothing when every source path is missing":
+            # @req REQ-EDITOR-CFGCORE-014
+            # @capture(statistics): the compiled-default rows returned for two absent source files
+            step("load two absent source paths and read the compiled defaults that survive")
             val config = editor_config_load_layers([
                 EditorConfigSource(path: "/tmp/cfg2_absent_user.sdn", layer: "user"),
                 EditorConfigSource(path: "/tmp/cfg2_absent_ws.sdn", layer: "workspace")
             ])
-            expect(config.font_size).to_equal(14)
+            expect(config.font_size).to_equal(14)  # oracle: absent files leave the compiled default of 14
             expect(config.theme).to_equal("dark")
 
     describe "constraint guards behave as the old open-coded guards did":
         it "ignores a zero font_size and keeps the lower layer":
+            # @req REQ-EDITOR-CFGCORE-015
+            # @capture(statistics): the font_size row where a zero workspace entry was rejected
+            step("add a workspace font_size of zero and resolve through the declared minimum guard")
             val entries = entries_plus(user_entries(), "font_size", "0", "workspace")
-            expect(editor_config_from_entries(entries).font_size).to_equal(18)
+            expect(editor_config_from_entries(entries).font_size).to_equal(18)  # oracle: zero fails the n > 0 guard, so the user's 18 stands
 
         it "ignores a non-numeric tab_size and keeps the lower layer":
+            # @req REQ-EDITOR-CFGCORE-016
+            # @capture(statistics): the tab_size row where a text workspace entry was rejected
+            step("add a workspace tab_size of non-numeric text and resolve it")
             val entries = entries_plus(user_entries(), "tab_size", "wide", "workspace")
-            expect(editor_config_from_entries(entries).tab_size).to_equal(8)
+            expect(editor_config_from_entries(entries).tab_size).to_equal(8)  # oracle: the non-numeric entry is dropped, so the user's 8 stands
 
     describe "get / set by key round trip":
         it "sets and reads back hover_delay_ms":
+            # @req REQ-EDITOR-CFGCORE-017
+            # @capture(statistics): the set/get round-trip row for hover_delay_ms
+            step("set hover_delay_ms by key on the default config and read it back")
             val config = editor_config_set_by_key(editor_config_default(), "hover_delay_ms", "125")
             expect(editor_config_get_by_key(config, "hover_delay_ms")).to_equal("125")
 
         it "sets a bool field":
+            # @req REQ-EDITOR-CFGCORE-018
+            # @capture(statistics): the set/get round-trip row storing word_wrap as text "true"
+            step("set word_wrap by key on the default config and read it back")
             val config = editor_config_set_by_key(editor_config_default(), "word_wrap", "true")
             expect(editor_config_get_by_key(config, "word_wrap")).to_equal("true")
 
         it "leaves the config unchanged for an unknown key":
+            # @req REQ-EDITOR-CFGCORE-019
+            # @capture(statistics): the unchanged default rows after a rejected unknown-key set
+            step("set an unknown key on the default config and read two known fields")
             val config = editor_config_set_by_key(editor_config_default(), "no_such_key", "9")
-            expect(config.font_size).to_equal(14)
+            expect(config.font_size).to_equal(14)  # oracle: the unknown-key set is a no-op, so the default 14 stands
             expect(config.theme).to_equal("dark")
 
         it "returns empty text for an unknown key":
+            # @req REQ-EDITOR-CFGCORE-020
+            # @capture(statistics): the empty-text read row for a key the schema never declared
+            step("read an unknown key from the default config")
             expect(editor_config_get_by_key(editor_config_default(), "no_such_key")).to_equal("")
 
     describe "serialisation round trip":
         it "reloads an identical config from its own SDN output":
+            # @req REQ-EDITOR-CFGCORE-021
+            # @capture(protocol_json): the emitted SDN text and the reloaded field values it round-trips
+            step("serialise the fixture config and reload it from its own SDN output")
             val original = editor_config_from_entries(user_entries())
             val text_out = config_entries_to_sdn(editor_config_to_entries(original, "user"))
             val reloaded = editor_config_from_entries(config_parse_layer(content: text_out, layer: "user"))
             expect(reloaded.theme).to_equal("light")
-            expect(reloaded.font_size).to_equal(18)
-            expect(reloaded.tab_size).to_equal(8)
-            expect(reloaded.hover_delay_ms).to_equal(0)
+            expect(reloaded.font_size).to_equal(18)  # oracle: the round trip preserves the fixture's 18
+            expect(reloaded.tab_size).to_equal(8)  # oracle: the round trip preserves the fixture's 8
+            expect(reloaded.hover_delay_ms).to_equal(0)  # oracle: the round trip preserves the fixture's boundary zero
             expect(reloaded.insert_spaces).to_equal(false)
 
         it "emits one line per declared field":
+            # @req REQ-EDITOR-CFGCORE-022
+            # @capture(protocol_json): the serialised default-config lines for theme and auto_save_delay_ms
+            step("serialise the compiled default config and inspect the emitted lines")
             val text_out = config_entries_to_sdn(editor_config_to_entries(editor_config_default(), "user"))
             expect(text_out.contains("theme: dark")).to_equal(true)
             expect(text_out.contains("auto_save_delay_ms: 30000")).to_equal(true)
@@ -157,32 +249,52 @@ describe "editor config on std.config core":
 describe "platform config on std.config core":
 
     it "sets and reads back an int key":
+        # @req REQ-EDITOR-CFGCORE-023
+        # @capture(statistics): the platform set/get round-trip row for max_open_files
+        step("set max_open_files by key on the desktop platform config and read it back")
         val config = platform_config_set_by_key(platform_default_config(EditorPlatform.Desktop), "max_open_files", "512")
         expect(platform_config_get_by_key(config, "max_open_files")).to_equal("512")
 
     it "keeps the current value for a non-numeric int":
+        # @req REQ-EDITOR-CFGCORE-024
+        # @capture(statistics): the max_undo_depth row where text input was rejected
+        step("set max_undo_depth to non-numeric text and read the surviving value")
         val config = platform_config_set_by_key(platform_default_config(EditorPlatform.Desktop), "max_undo_depth", "lots")
         expect(platform_config_get_by_key(config, "max_undo_depth")).to_equal("128")
 
     it "sets a bool key":
+        # @req REQ-EDITOR-CFGCORE-025
+        # @capture(statistics): the platform set/get round-trip row for file_watcher_enabled
+        step("set file_watcher_enabled by key on the desktop platform config and read it back")
         val config = platform_config_set_by_key(platform_default_config(EditorPlatform.Desktop), "file_watcher_enabled", "false")
         expect(platform_config_get_by_key(config, "file_watcher_enabled")).to_equal("false")
 
     it "switches the platform by name":
+        # @req REQ-EDITOR-CFGCORE-026
+        # @capture(statistics): the platform row after a recognised name switch to simpleos
+        step("switch the platform by its recognised name and read it back")
         val config = platform_config_set_by_key(platform_default_config(EditorPlatform.Desktop), "platform", "simpleos")
         expect(platform_config_get_by_key(config, "platform")).to_equal("simpleos")
 
     it "keeps the current platform for an unrecognised name":
+        # @req REQ-EDITOR-CFGCORE-027
+        # @capture(statistics): the platform row where an unknown name was rejected
+        step("attempt an unrecognised platform name and read the surviving value")
         val config = platform_config_set_by_key(platform_default_config(EditorPlatform.Desktop), "platform", "amiga")
         expect(platform_config_get_by_key(config, "platform")).to_equal("desktop")
 
     it "leaves the config unchanged for an unknown key":
+        # @req REQ-EDITOR-CFGCORE-028
+        # @capture(statistics): the unchanged max_open_files default after a rejected unknown-key set
+        step("set an unknown key on the platform config and read a known field")
         val config = platform_config_set_by_key(platform_default_config(EditorPlatform.Desktop), "no_such_key", "9")
         expect(platform_config_get_by_key(config, "max_open_files")).to_equal("256")
 
 describe "keybinding load on std.config core":
 
     it "parses a keybinding document through the shared line parser":
+        # @req REQ-EDITOR-CFGCORE-029
+        # @capture(protocol_json): the fixture keybinding document and the two resolved bindings
         step("write a fixture keybinding document")
         val path = "/tmp/cfg2_keybindings_fixture.sdn"
         val content = "# user keybindings\n" +
@@ -192,10 +304,13 @@ describe "keybinding load on std.config core":
         expect(file_write(path, content)).to_equal(true)
         step("load it")
         val config = keybinding_config_load(path)
-        expect(keybinding_count(config)).to_equal(2)
+        expect(keybinding_count(config)).to_equal(2)  # oracle: the fixture declares exactly two bindings
         expect(resolve_key(config, "z", "normal")).to_equal("undo")
         expect(resolve_key(config, "Z", "normal")).to_equal("redo")
 
     it "returns an empty config for a missing file":
+        # @req REQ-EDITOR-CFGCORE-030
+        # @capture(statistics): the zero-binding row returned for an absent keybinding file
+        step("load an absent keybinding path and count the bindings")
         val config = keybinding_config_load("/tmp/cfg2_absent_keybindings.sdn")
-        expect(keybinding_count(config)).to_equal(0)
+        expect(keybinding_count(config)).to_equal(0)  # oracle: a missing file yields an empty binding set

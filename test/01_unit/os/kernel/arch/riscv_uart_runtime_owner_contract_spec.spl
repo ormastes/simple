@@ -1,13 +1,49 @@
 """
-Pins the canonical RISC-V UART runtime owner and the migrated consumers.
+## Purpose and audience
+Pins the canonical RISC-V UART runtime owner and the migrated consumers:
+one typed inline byte owner holds the raw u64 ABI, every architecture and
+noalloc consumer routes through it, and the raw-SFFI baseline moves with
+the migration. Audience: RISC-V platform bring-up and SFFI migration
+engineers.
 
 This is source-contract evidence only. It proves ownership and typed byte
 routing, not live UART behavior on RISC-V hardware or QEMU.
+## Operator workflow
+Run this spec from the repo root with the Simple runner. Scenarios read
+the owner source, grep the kernel tree for stray raw declarations,
+inspect the 14 migrated consumers, and audit the raw-SFFI and unbacked
+baseline files.
+## Compatibility and limitations
+Source-contract evidence only; no UART device is opened. Known RED on the
+current tree: the consumer migration has not landed (11 of the 14 listed
+consumers still declare `extern fn rt_riscv_uart_put`, e.g.
+src/os/kernel/boot/riscv_noalloc_log.spl), consumer rows are still
+present in scripts/check/raw_sffi_unsafe_baseline.tsv from line 5981, and
+scripts/check/unbacked_extern_baseline.txt has no rt_riscv_uart_put row.
+## Verification guidance and troubleshooting
+A red scenario names the migration step that has not landed. If the raw
+extern census finds new files, add them to CONSUMER_PATHS; do not weaken
+the expects — the contract stays red until every consumer routes through
+the typed owner and the baseline rows move.
 """
+# Lifecycle: doc/01_research/domain/riscv_gen2_hwir_foundation.md ;
+# doc/03_plan/os/riscv/riscv64_fpga_simpleos_launch.md ;
+# doc/04_architecture/os/kernel/riscv64_boot_dtb_capability_v1.md ;
+# doc/05_design/rt_hal_typed_exit_protocol.md
 # @manual: primary
+# @manual_section: riscv-uart-owner-contract
 
 use std.spec
+use std.spec.step
 use app.io.mod.{file_read_text, process_run}
+
+# NOTE: defect — the migration this contract pins has not landed. 11
+# consumer files still declare `extern fn rt_riscv_uart_put` (rg census
+# 2026-09-06; includes src/os/kernel/boot/riscv_noalloc_log.spl), the
+# consumer rows still sit in raw_sffi_unsafe_baseline.tsv (line 5981 and
+# the riscv block through 6218), and unbacked_extern_baseline.txt carries
+# no rt_riscv_uart_put provider row. Scenarios 1-3 are legitimately RED
+# until those land; the expects must not be weakened.
 
 val OWNER_PATH = "src/os/kernel/arch/riscv/uart_runtime_owner.spl"
 val BASELINE_PATH = "scripts/check/raw_sffi_unsafe_baseline.tsv"
@@ -31,6 +67,8 @@ val CONSUMER_PATHS = [
 
 describe "RISC-V UART runtime ownership":
     it "keeps the raw u64 ABI behind one typed inline byte owner":
+        # @req REQ-OS-KERNEL-RISCV-UART-001
+        # @capture(statistics): raw-extern census over the kernel tree plus owner-source contract
         step("Read and inspect the typed RISC-V UART runtime owner")
         val owner = file_read_text(OWNER_PATH)
         expect(owner).to_contain("extern fn rt_riscv_uart_put(byte: u64)")
@@ -41,21 +79,26 @@ describe "RISC-V UART runtime ownership":
         val raw_declarations = process_run("rg", [
             "-l", "^extern fn rt_riscv_uart_put", "src/os/kernel", "--glob", "*.spl"
         ])
-        expect(raw_declarations.2).to_equal(0)
+        expect(raw_declarations.2).to_equal(0)  # oracle: rg exits 0 when the anchored search compiles and runs
         expect(raw_declarations.0).to_equal(
             "src/os/kernel/arch/riscv/uart_runtime_owner.spl\n"
         )
 
     it "routes every migrated architecture and noalloc consumer through the owner":
+        # @req REQ-OS-KERNEL-RISCV-UART-001
+        # @capture(statistics): per-consumer routing census across the 14 consumer files
         step("Inspect all 14 migrated architecture and noalloc consumers")
         for path in CONSUMER_PATHS:
-            val source = file_read_text(path)
-            expect(source).to_contain("use os.kernel.arch.riscv.uart_runtime_owner.{riscv_uart_put}")
-            expect(source).to_contain("riscv_uart_put(")
-            expect(source.contains("extern fn rt_riscv_uart_put")).to_be(false)
-            expect(source.contains("rt_riscv_uart_put(")).to_be(false)
+            val consumer_source = file_read_text(path)
+            expect(consumer_source).to_contain(
+                "use os.kernel.arch.riscv.uart_runtime_owner." + "{" + "riscv_uart_put}")
+            expect(consumer_source).to_contain("riscv_uart_put(")
+            expect(consumer_source.contains("extern fn rt_riscv_uart_put")).to_be(false)
+            expect(consumer_source.contains("rt_riscv_uart_put(")).to_be(false)
 
     it "moves the unsafe baseline row while retaining the provider obligation":
+        # @req REQ-OS-KERNEL-RISCV-UART-001
+        # @capture(statistics): baseline-row audit across raw-SFFI and unbacked baselines
         step("Read the raw-SFFI and unbacked-provider baselines")
         val baseline = file_read_text(BASELINE_PATH)
         val unbacked = file_read_text(UNBACKED_PATH)

@@ -1,5 +1,31 @@
-"""Repository version authority checks real projections and plans compatible bumps without writing."""
-# @req: REQ-001, REQ-002, REQ-003, REQ-012
+"""
+## Purpose and audience
+Verifies the repository version authority for release engineers: the canonical
+`release/version.sdn` manifest and its declared projections, deterministic
+prerelease render plans, monotonic channel/identity rejection, compatibility
+dimension bump policy, and projection path safety in `app.release.version_authority`.
+## Operator workflow
+Run `./src/compiler_rust/target/bootstrap/simple run test/01_unit/app/release/version_authority_spec.spl`
+from the repo root; scenarios read the live repository version, so run them in a
+clean checkout at the version under audit.
+## Compatibility and limitations
+Prerelease/patch helpers derive targets from the live manifest, so the exact
+bump counts asserted (per-file edit multiplicity, Cargo.lock occurrence count)
+are pinned to the current projection set and change only with a reviewed
+manifest schema change. These scenarios never mutate files — plans are rendered,
+not applied.
+## Verification guidance and troubleshooting
+A `valid=false` failure usually means local manifest drift — run the version
+check tooling before suspecting the authority. A monotonicity or bump-policy
+failure indicates the policy tables in `app.release.policy` changed; compare the
+`reason` text against the asserted substring.
+"""
+# Lifecycle: doc/01_research/local/release_process_hardening.md ;
+# doc/03_plan/agent_tasks/release_process_hardening.md ;
+# doc/04_architecture/release_process_hardening.md ;
+# doc/05_design/release_process_hardening.md
+# @manual_section: version-authority
+
 use std.spec.{describe, it, expect, step}
 use app.release.version_authority.{CompatibilitySnapshot, compatibility_snapshot, load_repository_version, check_repository_version, plan_repository_version_render, plan_repository_version_bump, version_projection_path_valid}
 use app.release.policy.{parse_release_version}
@@ -19,12 +45,14 @@ fn next_patch() -> text:
 
 describe "Repository-backed release version authority":
     it "loads the canonical manifest and checks every declared projection":
+        # @req REQ-RELVER-001
+        # @capture(statistics): manifest schema ids and projection drift report
         step("Load release/version.sdn from the repository")
         val manifest = load_repository_version(".")
         expect(manifest.valid).to_be(true)
         expect(manifest.semver).to_equal(parse_release_version(manifest.semver).canonical)
-        expect(manifest.release_manifest_schema).to_equal(1)
-        expect(manifest.bootstrap_receipt_schema).to_equal(1)
+        expect(manifest.release_manifest_schema).to_equal(1)  # oracle: the only release manifest schema revision shipped so far
+        expect(manifest.bootstrap_receipt_schema).to_equal(1)  # oracle: the only bootstrap receipt schema revision shipped so far
 
         step("Read and compare every declared projection")
         val report = check_repository_version(".")
@@ -33,6 +61,9 @@ describe "Repository-backed release version authority":
         expect(report.drift).to_equal([])
 
     it "renders a deterministic next prerelease plan without mutating files":
+        # @req REQ-RELVER-002
+        # @capture(statistics): per-projection edit counts for the render plan
+        step("Render a next-prerelease plan against the live manifest")
         val target = next_prerelease()
         val plan = plan_repository_version_render(".", target, load_repository_version(".").channel)
         expect(plan.valid).to_be(true)
@@ -48,29 +79,35 @@ describe "Repository-backed release version authority":
         for edit in plan.projection_edits:
             if edit.path.ends_with("/package.json"):
                 package_json_edits = package_json_edits + 1
-                expect(edit.rendered_content.split(target).len() - 1).to_equal(1)
+                expect(edit.rendered_content.split(target).len() - 1).to_equal(1)  # oracle: each package.json carries exactly one version field
             elif edit.path.ends_with("/server.json"):
                 server_json_edits = server_json_edits + 1
-                expect(edit.rendered_content.split(target).len() - 1).to_equal(2)
+                expect(edit.rendered_content.split(target).len() - 1).to_equal(2)  # oracle: server.json pins the version in two fields
             elif edit.path == "src/compiler_rust/Cargo.toml":
                 cargo_toml_edits = cargo_toml_edits + 1
                 expect(edit.rendered_content).to_contain("[workspace.package]")
                 expect(edit.rendered_content).to_contain("version = \"" + target + "\"")
             elif edit.path == "src/compiler_rust/Cargo.lock":
                 cargo_lock_edits = cargo_lock_edits + 1
-                expect(edit.rendered_content.split("version = \"" + target + "\"").len() - 1).to_equal(11)
-        expect(package_json_edits).to_equal(2)
-        expect(server_json_edits).to_equal(2)
-        expect(cargo_toml_edits).to_equal(1)
-        expect(cargo_lock_edits).to_equal(1)
+                expect(edit.rendered_content.split("version = \"" + target + "\"").len() - 1).to_equal(11)  # oracle: eleven lockfile packages carry the workspace version
+        expect(package_json_edits).to_equal(2)  # oracle: the manifest declares exactly two package.json projections
+        expect(server_json_edits).to_equal(2)  # oracle: the manifest declares exactly two server.json projections
+        expect(cargo_toml_edits).to_equal(1)  # oracle: one workspace Cargo.toml projection
+        expect(cargo_lock_edits).to_equal(1)  # oracle: one Cargo.lock projection
 
     it "rejects channel mismatch and non-monotonic release identities":
+        # @req REQ-RELVER-003
+        # @capture(protocol_json): rejection reasons for mismatched identities
+        step("Render plans with a wrong channel and a non-monotonic identity")
         val manifest = load_repository_version(".")
         expect(plan_repository_version_render(".", next_prerelease(), "beta").valid).to_be(false)
         val core = manifest.semver.split("-")[0]
         expect(plan_repository_version_render(".", core + "-alpha.1", "alpha").reason).to_contain("advance monotonically")
 
     it "requires a major SemVer bump when a compatibility dimension changes":
+        # @req REQ-RELVER-004
+        # @capture(protocol_json): bump verdicts for compatibility-dimension drift
+        step("Bump one compatibility dimension and request a patch-level bump")
         val current = unchanged_compatibility()
         val changed = CompatibilitySnapshot(
             public_api_major: current.public_api_major,
@@ -89,6 +126,7 @@ describe "Repository-backed release version authority":
         expect(too_small.minimum_bump).to_equal("major")
         expect(too_small.reason).to_contain("smaller")
 
+        step("Request a matching major bump and confirm it is accepted")
         val next_major = current.public_api_major + 1
         val changed_major = CompatibilitySnapshot(
             public_api_major: next_major,
@@ -107,6 +145,9 @@ describe "Repository-backed release version authority":
         expect(major.requested_bump).to_equal("major")
 
     it "uses an explicit minor policy for the Spipe skill compatibility dimension":
+        # @req REQ-RELVER-005
+        # @capture(protocol_json): minor-bump verdict for the skill dimension
+        step("Bump only the Spipe skill dimension and request a minor bump")
         val current = unchanged_compatibility()
         val changed = CompatibilitySnapshot(
             public_api_major: current.public_api_major,
@@ -128,6 +169,9 @@ describe "Repository-backed release version authority":
         expect(plan.minimum_bump).to_equal("minor")
 
     it "rejects projection path traversal absolute paths duplicates and control bytes":
+        # @req REQ-RELVER-006
+        # @capture(bit_table): accepted and rejected projection paths
+        step("Offer benign and malicious projection paths to the path validator")
         expect(version_projection_path_valid("src/app/simple.sdn")).to_be(true)
         expect(version_projection_path_valid("../VERSION")).to_be(false)
         expect(version_projection_path_valid("/tmp/VERSION")).to_be(false)
@@ -136,6 +180,9 @@ describe "Repository-backed release version authority":
         expect(version_projection_path_valid("src/\nVERSION")).to_be(false)
 
     it "rejects compatibility counter rollback and public API major drift":
+        # @req REQ-RELVER-007
+        # @capture(protocol_json): rejection reasons for rollback and major drift
+        step("Roll a compatibility counter back and request a stable bump")
         val current = unchanged_compatibility()
         val rollback = CompatibilitySnapshot(
             public_api_major: current.public_api_major,
@@ -152,6 +199,7 @@ describe "Repository-backed release version authority":
         val next_major = current.public_api_major + 1
         expect(plan_repository_version_bump(".", next_major.to_text() + ".0.0", "stable", rollback).reason).to_contain("cannot decrease")
 
+        step("Mismatch the public API major and request the same bump")
         val mismatched = CompatibilitySnapshot(
             public_api_major: 1,
             compiler_abi: current.compiler_abi,

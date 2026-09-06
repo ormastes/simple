@@ -1,23 +1,52 @@
-# @tag: rendering, engine2d, metal, msl, pipeline
-# @cover src/lib/gc_async_mut/gpu/engine2d/backend_metal_msl.spl 60%
-# @cover src/lib/gc_async_mut/gpu/engine2d/backend_metal.spl 30%
-#
-# Guards the Metal MSL compile + GPU dispatch path. Before the MSL fix, the
-# embedded shader failed to compile (Simple `#` comments are invalid C-pp
-# directives; `int half` collided with MSL's reserved `half` type), so init()
-# returned false and every "metal" test silently passed via the software-mirror
-# fallback. These tests assert real pipeline creation and GPU dispatch.
-#
-# macOS-only: on Linux the asserts are skipped (Metal unavailable by design).
+"""
+## Purpose and audience
+Guards the Metal MSL compile + GPU dispatch path. Before the MSL fix, the
+embedded shader failed to compile (Simple `#` comments are invalid C-pp
+directives; `int half` collided with MSL's reserved `half` type), so init()
+returned false and every "metal" test silently passed via the software-mirror
+fallback. These tests assert real pipeline creation and GPU dispatch.
+Audience: Engine2D Metal backend engineers touching the MSL shader library
+or the session pipeline registry.
+
+## Operator workflow
+Run the single file with the seed runner (`simple run
+test/02_integration/rendering/metal_msl_pipeline_spec.spl`). The two
+source-contract scenarios read the shipped MSL/session sources directly;
+the dispatch scenarios drive a real MetalBackend.
+
+## Compatibility and limitations
+macOS-only for the hardware half: on Linux the asserts fall to the OS-gate
+branch (Metal unavailable by design) instead of passing vacuously. The
+source-contract scenarios are text assertions on shipped sources and are
+host-neutral.
+
+## Verification guidance and troubleshooting
+A failure in `keeps mandatory session pipelines mapped to one MSL entry
+point` names the kernel whose binding or MSL signature drifted; a failure
+in the dispatch scenarios usually means init() compiled no pipelines
+(check `pipe_*` handles) or a glass receipt leaked into the CPU mirror.
+@tag: rendering, engine2d, metal, msl, pipeline
+@cover src/lib/gc_async_mut/gpu/engine2d/backend_metal_msl.spl 60%
+@cover src/lib/gc_async_mut/gpu/engine2d/backend_metal.spl 30%
+"""
+
+# Lifecycle: research doc/01_research/domain/gpu_renderer_processing_backends_metal.md ;
+# plan doc/03_plan/agent_tasks/gpu_renderer_processing_backends_metal.md ;
+# architecture doc/04_architecture/gpu_renderer_processing_backends_metal.md ;
+# design doc/05_design/gpu_renderer_processing_backends_metal.md
 
 use std.spec.{describe, context, it, expect}
 use std.gc_async_mut.gpu.engine2d.backend_metal.{MetalBackend}
 use std.gc_async_mut.gpu.engine2d.color.{rgb}
 use std.nogc_sync_mut.env.platform.{is_macos}
 
+# @manual_section: metal msl pipeline
 describe "Metal MSL compile + GPU dispatch":
 
     it "keeps mandatory session pipelines mapped to one MSL entry point":
+        # @req REQ-METALMSL-001
+        # @capture(bit_table): per-kernel binding and signature flags retained
+        step("Read the shipped MSL and session sources and cross-check every kernel binding")
         val msl = file_read(
             "src/lib/gc_async_mut/gpu/engine2d/backend_metal_msl.spl"
         )
@@ -40,8 +69,8 @@ describe "Metal MSL compile + GPU dispatch":
         ]
         for name in mandatory:
             val binding = "metal_sffi_create_compute_pipeline(self.device, self.shader_lib, \"" + name + "\")"
-            expect(session.split(binding).len()).to_equal(2)
-            expect(msl.split("kernel void " + name + "(").len()).to_equal(2)
+            expect(session.split(binding).len()).to_equal(2)  # oracle: exactly one binding site per mandatory kernel
+            expect(msl.split("kernel void " + name + "(").len()).to_equal(2)  # oracle: exactly one MSL definition per mandatory kernel
             val kernel = msl.substring(msl.index_of("kernel void " + name + "("), msl.len())
             val signature = kernel.substring(0, kernel.index_of(") {"))
             expect(signature).to_contain("[[buffer(0)]]")
@@ -59,8 +88,8 @@ describe "Metal MSL compile + GPU dispatch":
             "kernel_glyph_atlas_blit"
         ]
         for name in optional:
-            expect(msl.split("kernel void " + name + "(").len()).to_equal(2)
-            expect(session.split("\"" + name + "\"").len()).to_equal(2)
+            expect(msl.split("kernel void " + name + "(").len()).to_equal(2)  # oracle: exactly one MSL definition per optional kernel
+            expect(session.split("\"" + name + "\"").len()).to_equal(2)  # oracle: exactly one session reference per optional kernel
             val kernel = msl.substring(msl.index_of("kernel void " + name + "("), msl.len())
             val signature = kernel.substring(0, kernel.index_of(") {"))
             expect(signature).to_contain("[[buffer(0)]]")
@@ -78,6 +107,9 @@ describe "Metal MSL compile + GPU dispatch":
         expect(gate.contains("pipe_font_atlas_composite")).to_equal(false)
 
     it "keeps a successful device-glass receipt separate from CPU mirror execution":
+        # @req REQ-METALMSL-002
+        # @capture(bit_table): glass receipt separation flags retained
+        step("Read the shipped Metal backend source and check the glass receipt contract")
         # This is deliberately host-neutral: the receipt may only describe the
         # completed Metal snapshot/material dispatch. CPU mirror rasterization
         # is a distinct fallback lane, not hidden work behind that receipt.
@@ -103,25 +135,31 @@ describe "Metal MSL compile + GPU dispatch":
     context "on macOS":
 
         it "MSL compiles: all compute pipelines created":
+            # @req REQ-METALMSL-003
+            # @capture(statistics): created pipeline handle counts retained
+            step("Init a MetalBackend on macOS and check every session pipeline handle")
             if is_macos():
                 var b = MetalBackend.create()
                 val ok = b.init(16, 16)
                 expect(ok).to_equal(true)
-                expect(b.session.pipe_clear).to_be_greater_than(0)
-                expect(b.session.pipe_rect_filled).to_be_greater_than(0)
-                expect(b.session.pipe_line).to_be_greater_than(0)
-                expect(b.session.pipe_circle).to_be_greater_than(0)
-                expect(b.session.pipe_triangle).to_be_greater_than(0)
-                expect(b.session.pipe_gradient).to_be_greater_than(0)
-                expect(b.session.pipe_blit).to_be_greater_than(0)
-                expect(b.session.pipe_image_composite).to_be_greater_than(0)
-                expect(b.pending_composite_command).to_equal(0)
-                expect(b.pending_composite_encoder).to_equal(0)
+                expect(b.session.pipe_clear).to_be_greater_than(0)  # oracle: a compiled MSL pipeline gets a non-zero handle
+                expect(b.session.pipe_rect_filled).to_be_greater_than(0)  # oracle: a compiled MSL pipeline gets a non-zero handle
+                expect(b.session.pipe_line).to_be_greater_than(0)  # oracle: a compiled MSL pipeline gets a non-zero handle
+                expect(b.session.pipe_circle).to_be_greater_than(0)  # oracle: a compiled MSL pipeline gets a non-zero handle
+                expect(b.session.pipe_triangle).to_be_greater_than(0)  # oracle: a compiled MSL pipeline gets a non-zero handle
+                expect(b.session.pipe_gradient).to_be_greater_than(0)  # oracle: a compiled MSL pipeline gets a non-zero handle
+                expect(b.session.pipe_blit).to_be_greater_than(0)  # oracle: a compiled MSL pipeline gets a non-zero handle
+                expect(b.session.pipe_image_composite).to_be_greater_than(0)  # oracle: a compiled MSL pipeline gets a non-zero handle
+                expect(b.pending_composite_command).to_equal(0)  # oracle: init must leave no composite work in flight
+                expect(b.pending_composite_encoder).to_equal(0)  # oracle: init must leave no composite work in flight
                 b.shutdown()
             else:
                 expect(is_macos()).to_equal(false)
 
         it "device glass dispatch owns an independent completed operation":
+            # @req REQ-METALMSL-004
+            # @capture(gui_image): device glass dispatch readback retained
+            step("Dispatch a device glass material and diff the readback against the CPU oracle")
             if is_macos():
                 var b = MetalBackend.create()
                 expect(b.init(16, 16)).to_equal(true)
@@ -149,23 +187,26 @@ describe "Metal MSL compile + GPU dispatch":
                     [seed; 16 * 16],
                     config
                 )
-                expect(oracle.len()).to_equal(8 * 8)
+                expect(oracle.len()).to_equal(8 * 8)  # oracle: the CPU oracle covers exactly the 8x8 glass region
                 val applied = b.draw_ir_apply_glass_material_device(config)
                 val readback = b.read_pixels_with_source()
                 expect(applied).to_equal(true)
                 expect(readback.source).to_equal("device_readback")
-                expect(readback.backend_handle).to_be_greater_than(0)
-                expect(readback.pixels.len()).to_equal(16 * 16)
+                expect(readback.backend_handle).to_be_greater_than(0)  # oracle: a device readback carries a live backend handle
+                expect(readback.pixels.len()).to_equal(16 * 16)  # oracle: the framebuffer readback is the full 16x16 surface
                 expect(readback.pixels[0]).to_equal(seed)
                 expect(readback.pixels[4 * 16 + 4]).to_equal(oracle[0])
                 expect(readback.pixels[8 * 16 + 8]).to_equal(oracle[4 * 8 + 4])
-                expect(b.pending_composite_command).to_equal(0)
-                expect(b.pending_composite_encoder).to_equal(0)
+                expect(b.pending_composite_command).to_equal(0)  # oracle: an independent dispatch completes with nothing left pending
+                expect(b.pending_composite_encoder).to_equal(0)  # oracle: an independent dispatch completes with nothing left pending
                 b.shutdown()
             else:
                 expect(is_macos()).to_equal(false)
 
         it "normal mirror mode rejects a device-only glass receipt":
+            # @req REQ-METALMSL-005
+            # @capture(statistics): mirror-mode rejection error retained
+            step("Attempt a device glass dispatch in mirror mode and require the typed rejection")
             if is_macos():
                 var b = MetalBackend.create()
                 expect(b.init(16, 16)).to_equal(true)
@@ -200,6 +241,9 @@ describe "Metal MSL compile + GPU dispatch":
                 expect(is_macos()).to_equal(false)
 
         it "GPU clear dispatch runs (1d) and marks dirty":
+            # @req REQ-METALMSL-006
+            # @capture(bit_table): clear dispatch dirty flag retained
+            step("Clear a MetalBackend on macOS and check the dirty flag")
             if is_macos():
                 var b = MetalBackend.create()
                 b.init(16, 16)
@@ -210,6 +254,9 @@ describe "Metal MSL compile + GPU dispatch":
                 expect(is_macos()).to_equal(false)
 
         it "GPU rect_filled dispatch runs (2d) and marks dirty":
+            # @req REQ-METALMSL-007
+            # @capture(bit_table): rect dispatch dirty flag retained
+            step("Fill a rect on a MetalBackend on macOS and check the dirty flag")
             if is_macos():
                 var b = MetalBackend.create()
                 b.init(16, 16)

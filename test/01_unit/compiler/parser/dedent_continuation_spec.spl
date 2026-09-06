@@ -1,3 +1,44 @@
+"""
+## Purpose and audience
+
+Executable evidence for the "G27" trailing-binary-operator line-continuation
+lexer rule (`src/compiler/10.frontend/core/lexer_struct.spl`,
+`handle_indentation()`, ~line 777): a line ending in a binary operator (`+`,
+`|`, `>`, `and`, `=`, `+=`, `:=`, generic-close, ...) suppresses spurious
+Indent/Dedent/Newline emission so the continuation's closing token can sit
+above, at, or below the continuation indent without a parse error. Written
+for compiler-frontend engineers who touch the self-hosted lexer/parser and
+for reviewers of call sites (e.g. `src/lib/common/ui/access_cli_grammar.spl`)
+that rely on this contract.
+
+## Operator workflow
+
+Run this spec with the test runner and read the per-scenario verdict lines.
+14 scenarios are declared; 13 pin currently-correct behavior and must stay
+green. One scenario (walrus-assignment RHS continuation) is a documented,
+currently-open defect and is expected to stay RED — see Compatibility.
+
+## Compatibility and limitations
+
+Covers only the dedent/continuation contract for binary-operator-terminated
+lines, generic-close dedents, and ordinary block indentation; it does not
+cover every lexer indentation rule. One scenario is a known-failing canary:
+`scalar +=` continuation IS covered by G27, but the walrus form
+`(captured := \n    scalar)` is NOT — the parser rejects it with "expected ),
+got :" — because the G27 continuation-suppression rule does not list `:=`
+among its RHS-requiring trailing operators. That scenario stays RED on
+purpose; do not soften it.
+
+## Verification guidance and troubleshooting
+
+A red scenario here (other than the documented walrus canary) means the G27
+suppression rule regressed — check `handle_indentation()` in
+`lexer_struct.spl` and the parser's expression-continuation handling before
+assuming the spec itself is wrong.
+"""
+# Lifecycle: research: doc/01_research/compiler/parser/lazy_parsing_prior_art.md ; plan: doc/03_plan/compiler/self_hosted_frontend/parser_completion.md ; architecture: doc/04_architecture/compiler/misc/parser_file_locations_2026-02-04.md ; design: doc/05_design/compiler/parsing/parser_architecture_unified_2026-02-04.md
+# @manual_section: dedent continuation
+
 # Regression spec for the trailing-binary-operator line-continuation lexer
 # rule (aka "G27" in src/compiler/10.frontend/core/lexer_struct.spl).
 #
@@ -36,6 +77,9 @@ fn parses_ok(name: text, src: text) -> bool:
 
 describe "inline lambda continuation inside calls":
     it "suppresses the newline after an inline lambda used as the final argument":
+        # @req REQ-PARSER-DEDENT-001
+        step("Parse a call whose final argument is an inline lambda spanning a line break")
+        # @capture(statistics): parse-outcome boolean recorded for the inline-lambda-as-final-argument case
         val src = "fn invoke(callback: fn() -> i64) -> i64:\n" +
             "    callback()\n\n" +
             "fn answer() -> i64:\n" +
@@ -48,6 +92,9 @@ describe "inline lambda continuation inside calls":
 
 describe "trailing-operator continuation across indentation changes":
     it "parses a closing token dedented BELOW the continuation indent (the reported bug repro)":
+        # @req REQ-PARSER-DEDENT-001
+        step("Parse a trailing-plus continuation whose closing brace is dedented below the continuation indent")
+        # @capture(statistics): parse-outcome boolean recorded for the dedented-close repro case
         val src = "fn make_page(a: text, b: text) -> text:\n" +
             "    val page = \"{\" +\n" +
             "        a + \",\" +\n" +
@@ -57,6 +104,9 @@ describe "trailing-operator continuation across indentation changes":
         expect(parses_ok("dedented_close", src)).to_equal(true)
 
     it "parses a closing token indented DEEPER than the continuation indent":
+        # @req REQ-PARSER-DEDENT-001
+        step("Parse a trailing-plus continuation whose closing brace is indented deeper than the continuation indent")
+        # @capture(statistics): parse-outcome boolean recorded for the extra-indented-close case
         val src = "fn make_page(a: text, b: text) -> text:\n" +
             "    val page = \"{\" +\n" +
             "        a +\n" +
@@ -66,6 +116,9 @@ describe "trailing-operator continuation across indentation changes":
         expect(parses_ok("extra_indented_close", src)).to_equal(true)
 
     it "still parses the closing token left at the continuation indent (previously-normalized style)":
+        # @req REQ-PARSER-DEDENT-001
+        step("Parse a trailing-plus continuation whose closing brace stays at the continuation indent")
+        # @capture(statistics): parse-outcome boolean recorded for the continuation-indent-close case
         val src = "fn make_page(a: text, b: text) -> text:\n" +
             "    val page = \"{\" +\n" +
             "        a + \",\" +\n" +
@@ -75,6 +128,9 @@ describe "trailing-operator continuation across indentation changes":
         expect(parses_ok("continuation_indent_close", src)).to_equal(true)
 
     it "parses nested trailing-op continuations (mirrors access_cli_grammar.spl access_render_json)":
+        # @req REQ-PARSER-DEDENT-001
+        step("Parse nested trailing-plus continuations mirroring the access_render_json call site")
+        # @capture(statistics): parse-outcome boolean recorded for the nested-dedented-close case
         val src = "fn render(a: text, b: text) -> text:\n" +
             "    val page = \"{\" +\n" +
             "        a + \",\" +\n" +
@@ -86,12 +142,18 @@ describe "trailing-operator continuation across indentation changes":
         expect(parses_ok("nested_dedented_close", src)).to_equal(true)
 
     it "parses same-indent RHS after trailing bitwise OR":
+        # @req REQ-PARSER-DEDENT-001
+        step("Parse a trailing bitwise-OR continuation whose RHS stays at the same indent")
+        # @capture(statistics): parse-outcome boolean recorded for the same-indent bitwise-or case
         val src = "fn read_word(bytes: [u8]) -> i64:\n" +
             "    (bytes[0] as i64) |\n" +
             "    ((bytes[1] as i64) << 8)\n"
         expect(parses_ok("same_indent_bitwise_or", src)).to_equal(true)
 
     it "keeps greater-than as a trailing expression operator":
+        # @req REQ-PARSER-DEDENT-001
+        step("Parse a trailing greater-than continuation and confirm it is not misread as a generic close")
+        # @capture(statistics): parse-outcome boolean recorded for the greater-than-continuation case
         val src = "fn greater(a: i64, b: i64) -> bool:\n" +
             "    a >\n" +
             "    b\n"
@@ -99,7 +161,9 @@ describe "trailing-operator continuation across indentation changes":
 
 describe "leading logical operator condition continuation parity":
     it "accepts the exact Stage 2 leading-and rejection and its grouped control":
+        # @req REQ-PARSER-DEDENT-001
         step("Verify: accepts the exact Stage 2 leading-and rejection and its grouped control")
+        # @capture(statistics): parse-outcome booleans recorded for both the leading-and and grouped forms
         val leading = "fn f(first: bool, second: bool) -> bool:\n" +
             "    if first\n" +
             "        and second:\n" +
@@ -115,7 +179,9 @@ describe "leading logical operator condition continuation parity":
 
 describe "assignment RHS continuation":
     it "parses bare and field reassignments with the RHS on the next line":
+        # @req REQ-PARSER-DEDENT-001
         step("Parse assignment forms used by BrowserSession and JsRuntime")
+        # @capture(statistics): parse-outcome boolean recorded for the assignment-rhs case
         val src = "class Box:\n" +
             "    value: i64\n\n" +
             "fn update(box: Box) -> i64:\n" +
@@ -128,7 +194,16 @@ describe "assignment RHS continuation":
         expect(parses_ok("assignment_rhs", src)).to_equal(true)
 
     it "parses compound and walrus assignments across the same boundary":
+        # @req REQ-PARSER-DEDENT-001
         step("Parse every assignment token classified as RHS-requiring")
+        # @capture(statistics): parse-outcome boolean recorded for the compound/walrus RHS case
+        # NOTE: legitimately RED. The walrus form `(captured :=\n    scalar)` is
+        # rejected ("expected ), got :" then "unexpected token in expression: )")
+        # because src/compiler/10.frontend/core/lexer_struct.spl's G27
+        # continuation-suppression rule (handle_indentation(), ~line 777) does
+        # not include `:=` among the trailing binary operators that suppress
+        # Dedent emission, even though `+=` on the line above it is covered.
+        # Do not silence this scenario — it pins the open defect.
         val src = "fn update() -> i64:\n" +
             "    var scalar = 1\n" +
             "    scalar +=\n" +
@@ -140,6 +215,9 @@ describe "assignment RHS continuation":
 
 describe "generic close indentation":
     it "dedents after a generic class field type":
+        # @req REQ-PARSER-DEDENT-001
+        step("Parse a class body dedent immediately after a generic field type")
+        # @capture(statistics): parsed declaration count and second-declaration name recorded
         val src = "class Holder:\n" +
             "    values: Dict<text, i32>\n\n" +
             "fn read() -> i64:\n" +
@@ -147,21 +225,27 @@ describe "generic close indentation":
             "    x\n"
         expect(parses_ok("generic_class_field", src)).to_equal(true)
         val decls = module_get_decls()
-        expect(decls.len()).to_equal(2)
+        expect(decls.len()).to_equal(2)  # oracle: source has exactly 2 top-level decls -- the class and the fn
         expect(decl_get_name(decls[1])).to_equal("read")
 
     it "dedents after compact nested generic closes":
+        # @req REQ-PARSER-DEDENT-001
+        step("Parse a class body dedent immediately after a compact nested generic close")
+        # @capture(statistics): parsed declaration count and second-declaration name recorded
         val src = "class Holder:\n" +
             "    values: Dict<text, Option<i32>>\n\n" +
             "fn read() -> i64:\n" +
             "    1\n"
         expect(parses_ok("nested_generic_class_field", src)).to_equal(true)
         val decls = module_get_decls()
-        expect(decls.len()).to_equal(2)
+        expect(decls.len()).to_equal(2)  # oracle: source has exactly 2 top-level decls -- the class and the fn
         expect(decl_get_name(decls[1])).to_equal("read")
 
 describe "non-continuation indentation is unaffected":
     it "still requires a real INDENT/DEDENT pair for an ordinary nested block":
+        # @req REQ-PARSER-DEDENT-001
+        step("Parse an ordinary nested if-block using a real Indent/Dedent pair")
+        # @capture(statistics): parse-outcome boolean recorded for the ordinary-block control case
         val src = "fn f() -> i64:\n" +
             "    if true:\n" +
             "        return 1\n" +
@@ -169,6 +253,9 @@ describe "non-continuation indentation is unaffected":
         expect(parses_ok("ordinary_block", src)).to_equal(true)
 
     it "still rejects a body statement that is under-indented relative to its block":
+        # @req REQ-PARSER-DEDENT-001
+        step("Parse an under-indented body statement and confirm the parser still rejects it")
+        # @capture(statistics): parse-outcome boolean recorded for the bad-indent negative control
         # No trailing binary operator precedes this line, so the dedent
         # suppression rule must NOT apply — a real indentation error here
         # should still be caught by the parser.

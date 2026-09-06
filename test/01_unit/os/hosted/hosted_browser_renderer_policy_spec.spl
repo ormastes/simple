@@ -1,28 +1,37 @@
 """
-# Hosted browser renderer policy
-
-**Requirements:** doc/02_requirements/feature/simple_web_browser_engine_production_hardening.md
-**Plan:** doc/03_plan/sys_test/simple_web_browser_engine_production_hardening.md
-**Design:** doc/05_design/simple_web_browser_engine_production_hardening.md
-**Research:** doc/01_research/local/simple_web_browser_engine_production_hardening.md
-
-## Overview
-
+## Purpose and audience
 Treats decoded renderer protocol messages as untrusted input at the hosted
-browser broker. The scenarios cover navigation permits, origin and CSP
-admission, cookie ownership, HSTS, redirects, resource limits, lifecycle, and
-site-swap state without granting the renderer direct network authority.
-
-## Examples
-
-The primary adversarial flow decodes SBRQ4 requests through the production
-dispatcher and proves rejected cookie or navigation side effects occur before
-trusted broker state changes. Explicit controls retain the parent-authorized
-initial document load and route top-level HTTPS-to-HTTP navigation through the
-navigation policy rather than subresource mixed-content policy.
+browser broker. The scenarios cover transport-host normalization,
+navigation permits, origin and CSP admission, cookie ownership, HSTS,
+redirects, resource limits, lifecycle, and site-swap state without
+granting the renderer direct network authority. Audience: hosted browser
+engine and renderer-policy engineers.
+## Operator workflow
+Run this spec from the repo root with the Simple runner. The primary
+adversarial flow decodes SBRQ4 requests through the production dispatcher
+and proves rejected cookie or navigation side effects occur before
+trusted broker state changes; mock fetch registries drive the network
+paths deterministically.
+## Compatibility and limitations
+Explicit controls retain the parent-authorized initial document load and
+route top-level HTTPS-to-HTTP navigation through the navigation policy
+rather than subresource mixed-content policy. Evidence is policy- and
+session-level; no real GPU surface or live network is exercised. The
+scenario near the top of the second transport-host describe block
+duplicates the first by name and exercises the private
+`_browser_transport_host` alias — kept verbatim.
+## Verification guidance and troubleshooting
+A red scenario names the policy invariant that regressed (permit
+admission, CSP gating, HSTS upgrade, publication-once, or generation
+binding). Compare the failing expect against
+src/os/hosted/hosted_browser_renderer_policy.spl and
+hosted_browser_renderer_process.spl before editing oracles.
 """
+# Lifecycle: doc/01_research/local/simple_web_browser_engine_production_hardening.md ;
+# doc/03_plan/sys_test/simple_web_browser_engine_production_hardening.md ;
+# doc/04_architecture/infra/misc/export_star_self_hosted.md ;
+# doc/05_design/simple_web_browser_engine_production_hardening.md
 # @manual: primary
-# @req: REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-010 REQ-WEB-BROWSER-012 REQ-WEB-BROWSER-013 REQ-WEB-BROWSER-014 REQ-WEB-BROWSER-011 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-002
 # doc-path: doc/01_research/os/simpleos/simpleos_rv64_hosted_qemu.md
 # doc-path: doc/03_plan/compiler/self_hosted_frontend/full_cli_redeploy_and_browser_startup_plan.md
 # doc-path: doc/04_architecture/infra/misc/export_star_self_hosted.md
@@ -92,7 +101,8 @@ extern fn rt_file_read_text(path: text) -> text
 
 describe "hosted browser renderer transport host":
     it "unwraps only a canonical IPv6 address for socket and TLS":
-        # @req REQ-SSPEC-OS
+        # @req REQ-SSPEC-OS REQ-WEB-BROWSER-002 REQ-WEB-BROWSER-011
+        # @capture(statistics): transport-host normalization over IPv6, IPv4, and malformed brackets
         step("unwraps only a canonical IPv6 address for socket and TLS")
         expect(hosted_browser_transport_host(
             "[2606:4700:4700::1111]"
@@ -113,6 +123,7 @@ describe "hosted browser renderer transport host":
 
     it "normalizes every hosted browser transport boundary":
         # @req REQ-SSPEC-OS
+        # @capture(statistics): transport-host call sites across renderer process and content session sources
         step("normalizes every hosted browser transport boundary")
         val renderer = rt_file_read_text(
             "src/os/hosted/hosted_browser_renderer_process.spl"
@@ -130,6 +141,7 @@ describe "hosted browser renderer transport host":
 describe "hosted browser attachment disposition":
     it "rejects an attachment token in any Content-Disposition value":
         # @req REQ-SSPEC-OS
+        # @capture(statistics): attachment-disposition header probes across case and whitespace variants
         step("rejects an attachment token in any Content-Disposition value")
         expect(browser_header_has_attachment_disposition(
             "Content-Disposition: inline\r\n" +
@@ -144,6 +156,7 @@ describe "hosted browser attachment disposition":
 
     it "stages only a body-free SBR2 rejection response":
         # @req REQ-SSPEC-OS
+        # @capture(statistics): body-free SBR2 rejection staging across retained and probe URLs
         step("stages only a body-free SBR2 rejection response")
         val safe_url = "https://safe.test/retained"
         val attachment_url = "https://safe.test/probe.html"
@@ -213,7 +226,7 @@ describe "hosted browser attachment disposition":
             browser_renderer_capability_payload_message(decoded.message)
         )
         expect(response.ok).to_be(true)
-        expect(response.status).to_equal(0)
+        expect(response.status).to_equal(0)  # oracle: 0 is the broker's local-reply status when no network exchange ran
         expect(response.body).to_equal("")
         expect(response.error).to_equal(
             "document-attachment-unsupported"
@@ -352,6 +365,9 @@ fn _render_background_image_pixels(session: BrowserSession) -> [u32]:
 
 describe "hosted browser renderer transport host":
     it "unwraps only a canonical IPv6 address for socket and TLS":
+        # @req REQ-SSPEC-OS
+        # @capture(statistics): private-alias transport-host normalization probes
+        step("unwraps only a canonical IPv6 address for socket and TLS")
         expect(_browser_transport_host(
             "[2606:4700:4700::1111]"
         )).to_equal("2606:4700:4700::1111")
@@ -425,7 +441,8 @@ describe "hosted browser renderer broker policy":
 
     # @req REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-018
     it "keeps Favorite bound to the committed page during navigation":
-        # @req REQ-SSPEC-OS
+        # @req REQ-SSPEC-OS REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-008
+        # @capture(statistics): favorite callback and bookmark persistence across busy, pending, and committed states
         step("keeps Favorite bound to the committed page during navigation")
         """
         The parent-owned Favorite control must not bookmark the previous
@@ -475,12 +492,12 @@ describe "hosted browser renderer broker policy":
         val command_busy = registry.dispatch_chrome_pointer(
             6, 91, "favorite", false
         )
-        expect(command_busy.callback_count).to_equal(0)
+        expect(command_busy.callback_count).to_equal(0)  # oracle: a busy renderer must not record the Favorite callback
         expect(command_busy.reason).to_equal("renderer-busy")
         if command_busy.reason == "favorite-parent":
             val url = registry.document_url(91)
             val _ = profile.toggle_bookmark(url, url)?
-        expect(profile.load_bookmarks()?.entries.len()).to_equal(0)
+        expect(profile.load_bookmarks()?.entries.len()).to_equal(0)  # oracle: the busy-rejected Favorite must not persist a bookmark entry
 
         step("Reject Favorite while the navigation transport is pending")
         entry = registry.entries[0]
@@ -494,9 +511,9 @@ describe "hosted browser renderer broker policy":
         val network_busy = registry.dispatch_chrome_pointer(
             8, 91, "favorite", false
         )
-        expect(network_busy.callback_count).to_equal(0)
+        expect(network_busy.callback_count).to_equal(0)  # oracle: the transport-pending Favorite records no callback either
         expect(network_busy.reason).to_equal("renderer-busy")
-        expect(profile.load_bookmarks()?.entries.len()).to_equal(0)
+        expect(profile.load_bookmarks()?.entries.len()).to_equal(0)  # oracle: and persists no bookmark entry while the network job is in flight
 
         step("Commit the target page before admitting Favorite")
         entry = registry.entries[0]
@@ -518,14 +535,15 @@ describe "hosted browser renderer broker policy":
 
         step("Persist only the newly committed URL")
         val saved = profile.load_bookmarks()?
-        expect(saved.entries.len()).to_equal(1)
+        expect(saved.entries.len()).to_equal(1)  # oracle: only the one committed post-navigation Favorite is persisted
         expect(saved.entries[0].first).to_equal("https://new.test/")
         profile.close()?
         expect(registry.close()).to_equal(true)
 
     # @req REQ-WEB-BROWSER-010 REQ-WEB-BROWSER-012 REQ-WEB-BROWSER-013
     it "admits decoded renderer side effects only through trusted CSP state":
-        # @req REQ-SSPEC-OS
+        # @req REQ-SSPEC-OS REQ-WEB-BROWSER-010 REQ-WEB-BROWSER-012 REQ-WEB-BROWSER-013
+        # @capture(statistics): decoded SBRQ4 side effects gated on committed CSP state
         step("admits decoded renderer side effects only through trusted CSP state")
         """
         Renderer SBRQ4 messages are attacker-controlled input. The broker must
@@ -673,7 +691,8 @@ describe "hosted browser renderer broker policy":
 
     # @req REQ-WEB-BROWSER-012 REQ-WEB-BROWSER-014
     it "blocks forged renderer requests with committed CSP before transport":
-        # @req REQ-SSPEC-OS
+        # @req REQ-SSPEC-OS REQ-WEB-BROWSER-014
+        # @capture(statistics): forged-frame rejection before any transport mutation
         step("blocks forged renderer requests with committed CSP before transport")
         var mocks = MockResponseRegistry.create()
         for url in [
@@ -827,7 +846,7 @@ describe "hosted browser renderer broker policy":
         expect(observed_mock_request(
             "https://app.test/private"
         )).to_be_nil()
-        expect(broker.network_job_handle).to_equal(0)
+        expect(broker.network_job_handle).to_equal(0)  # oracle: 0 is the broker's no-in-flight-network-job sentinel
         expect(broker.pending_wire != "").to_be(true)
         broker.pending_wire = ""
         broker.pending_wire_offset = 0
@@ -860,7 +879,7 @@ describe "hosted browser renderer broker policy":
         expect(observed_mock_request(
             "https://images.test/beacon"
         )).to_be_nil()
-        expect(broker.network_job_handle).to_equal(0)
+        expect(broker.network_job_handle).to_equal(0)  # oracle: the CSP-blocked fetch leaves no job handle behind
         expect(broker.pending_wire != "").to_be(true)
         broker.pending_wire = ""
         broker.pending_wire_offset = 0
@@ -878,7 +897,7 @@ describe "hosted browser renderer broker policy":
         )
         expect(missing.ok).to_be(false)
         expect(missing.reason).to_equal("csp-policy-unavailable")
-        expect(broker.network_job_handle).to_equal(0)
+        expect(broker.network_job_handle).to_equal(0)  # oracle: 0 again proves the failed-close released the job slot
 
         step("Fail closed when committed policy state is invalid")
         broker.document_csp_ready = true
@@ -943,7 +962,7 @@ describe "hosted browser renderer broker policy":
         expect(observed_mock_request(
             "https://images.test/pixel.png"
         ).?).to_be(true)
-        expect(broker.network_job_handle).to_equal(0)
+        expect(broker.network_job_handle).to_equal(0)  # oracle: the idle/cleaned-up broker must hold no network job handle
 
         step("Stage target history CSP and URL before resource dispatch")
         val original_history_csp = broker.history_csp_policies[0]
@@ -999,6 +1018,7 @@ describe "hosted browser renderer broker policy":
 
     it "issues only bounded canonical http navigation permits":
         # @req REQ-SSPEC-OS
+        # @capture(statistics): navigation permit admission over scheme and host variants
         step("issues only bounded canonical http navigation permits")
         var broker = HostedBrowserRendererProcess.create(1, 640, 480)
         expect(broker.poll()).to_be_nil()
@@ -1014,6 +1034,7 @@ describe "hosted browser renderer broker policy":
 
     it "loads persisted HSTS into the trusted navigation permit":
         # @req REQ-SSPEC-OS
+        # @capture(statistics): persisted HSTS snapshot entries loaded into the permit
         step("loads persisted HSTS into the trusted navigation permit")
         val now_ms = rt_time_now_unix_micros() / 1000
         var entries: [BrowserHstsSnapshotEntry] = []
@@ -1037,6 +1058,7 @@ describe "hosted browser renderer broker policy":
     it "rewrites one trusted redirect location after HSTS upgrade":
         # @req REQ-SSPEC-OS
         step("rewrites one trusted redirect location after HSTS upgrade")
+        # @capture(statistics): rewrites-one-trusted-redirect-location-after-hsts-upgrade
         val headers = hosted_browser_replace_response_header(
             "Location: http://secure.test/a\nX-Test: yes\n" +
             "location: http://evil.test/",
@@ -1051,6 +1073,7 @@ describe "hosted browser renderer broker policy":
     it "rejects a malformed HTTPS redirect before creating a navigation permit":
         # @req REQ-SSPEC-OS
         step("rejects a malformed HTTPS redirect before creating a navigation permit")
+        # @capture(statistics): rejects-a-malformed-https-redirect-before-creating-a-navigation-permit
         step("Receive a hostile redirect location from the authenticated transport")
         val url = "https://safe.test/start"
         var broker = HostedBrowserRendererProcess.create(1, 640, 480)
@@ -1086,6 +1109,7 @@ describe "hosted browser renderer broker policy":
     it "never learns HSTS from generic response finalization":
         # @req REQ-SSPEC-OS
         step("never learns HSTS from generic response finalization")
+        # @capture(statistics): never-learns-hsts-from-generic-response-finalization
         var broker = HostedBrowserRendererProcess.create(1, 640, 480)
         broker.network.set_requester_origin("https://origin.test")
         val denied = broker._finalize_network(
@@ -1109,7 +1133,7 @@ describe "hosted browser renderer broker policy":
             ),
             sts_response(404)
         )
-        expect(not_found.status).to_equal(404)
+        expect(not_found.status).to_equal(404)  # oracle: the fixture STS probe answers 404 without an STS header
         expect(broker.hsts_dirty).to_be(false)
         expect(broker.authorize_navigation(
             "http://status.test/after-404", "GET", "", "", ""
@@ -1123,7 +1147,7 @@ describe "hosted browser renderer broker policy":
             fetch_request("http://plaintext.test/", RequestMode.Navigate),
             sts_response(200)
         )
-        expect(plaintext.status).to_equal(200)
+        expect(plaintext.status).to_equal(200)  # oracle: plain-HTTP 200 without STS must not upgrade the origin
         expect(broker.authorize_navigation(
             "http://plaintext.test/next", "GET", "", "", ""
         )).to_be(true)
@@ -1136,7 +1160,7 @@ describe "hosted browser renderer broker policy":
             fetch_request("https://untrusted.test/", RequestMode.Navigate),
             sts_response(200)
         )
-        expect(untrusted.status).to_equal(200)
+        expect(untrusted.status).to_equal(200)  # oracle: 200 over TLS from an uninstalled origin leaves HSTS untouched
         expect(broker.hsts_dirty).to_be(false)
         expect(broker.authorize_navigation(
             "http://untrusted.test/next", "GET", "", "", ""
@@ -1146,7 +1170,8 @@ describe "hosted browser renderer broker policy":
         )
 
     it "caps wasm before hex encoding can double the IPC body":
-        # @req REQ-SSPEC-OS
+        # @req REQ-SSPEC-OS REQ-WEB-BROWSER-017
+        # @capture(statistics): wasm body hex-encoding size cap boundary
         step("caps wasm before hex encoding can double the IPC body")
         var broker = HostedBrowserRendererProcess.create(1, 640, 480)
         val encoded = broker._finalize_network(
@@ -1174,6 +1199,7 @@ describe "hosted browser renderer broker policy":
     it "does not start asynchronous navigation before renderer readiness":
         # @req REQ-SSPEC-OS
         step("does not start asynchronous navigation before renderer readiness")
+        # @capture(statistics): does-not-start-asynchronous-navigation-before-renderer-readiness
         var broker = HostedBrowserRendererProcess.create(1, 640, 480)
         match broker.begin_navigate(
             "https://example.test/", "GET", "", "", "", 1000
@@ -1182,18 +1208,19 @@ describe "hosted browser renderer broker policy":
                 expect(reason).to_equal("invalid-renderer-state")
             Ok(_):
                 expect(false).to_be(true)
-        expect(broker.command_deadline_ms).to_equal(0)
+        expect(broker.command_deadline_ms).to_equal(0)  # oracle: a rejected navigation arms no command deadline, so 0 ms
         expect(broker.pending_operation).to_equal("")
         expect(broker.pending_document_commit_url).to_equal("")
         expect(broker.provisional_document_origin).to_equal("")
-        expect(broker.network_job_handle).to_equal(0)
+        expect(broker.network_job_handle).to_equal(0)  # oracle: the refused navigation leaves no network job running
         expect(broker.pending_wire).to_equal("")
-        expect(broker.next_request_id).to_equal(2)
+        expect(broker.next_request_id).to_equal(2)  # oracle: request ids burn one slot per attempt, so the counter sits at 2
         expect(broker.navigation_permit.active).to_be(false)
 
     it "treats repeated asynchronous Stop as idempotent":
         # @req REQ-SSPEC-OS
         step("treats repeated asynchronous Stop as idempotent")
+        # @capture(statistics): treats-repeated-asynchronous-stop-as-idempotent
         var broker = HostedBrowserRendererProcess.create(1, 640, 480)
         broker.state = "active"
         broker.command_deadline_ms = 100
@@ -1207,6 +1234,7 @@ describe "hosted browser renderer broker policy":
     it "replaces a fully sent slow navigation before stale completion":
         # @req REQ-SSPEC-OS
         step("replaces a fully sent slow navigation before stale completion")
+        # @capture(statistics): replaces-a-fully-sent-slow-navigation-before-stale-completion
         var broker = HostedBrowserRendererProcess.create(1, 640, 480)
         broker.state = "active"
         broker.document_url = "https://example.test/current"
@@ -1226,7 +1254,7 @@ describe "hosted browser renderer broker policy":
         expect(broker.begin_pointer(
             7, 4, 5, true, 1000
         ).is_ok()).to_be(true)
-        expect(broker.deferred_commands.len()).to_equal(1)
+        expect(broker.deferred_commands.len()).to_equal(1)  # oracle: the deferred pointer command is retained, exactly one entry
         broker.pending_operation = "navigation"
         broker.network_job_handle = 424242
         broker.network_job_fetch = Some(request(
@@ -1261,13 +1289,13 @@ describe "hosted browser renderer broker policy":
         )
 
         expect(replaced.is_ok()).to_be(true)
-        expect(broker.network_job_handle).to_equal(0)
+        expect(broker.network_job_handle).to_equal(0)  # oracle: the redirected navigation finished, so its job slot is free
         expect(broker.network_job_fetch).to_be_nil()
         expect(broker.network_job_policy).to_be_nil()
         expect(broker.network_job_request).to_be_nil()
-        expect(broker.network_job_redirect_count).to_equal(0)
-        expect(broker.deferred_commands.len()).to_equal(0)
-        expect(broker.next_animation_ms).to_equal(-1)
+        expect(broker.network_job_redirect_count).to_equal(0)  # oracle: a direct commit performs no redirect hops
+        expect(broker.deferred_commands.len()).to_equal(0)  # oracle: nothing stays deferred after the navigation completes
+        expect(broker.next_animation_ms).to_equal(-1)  # oracle: minus one encodes no animation frame being scheduled
         expect(broker.stop_after_write).to_be(false)
         expect(broker.pending_document_commit_url).to_equal("")
         expect(broker.provisional_document_origin).to_equal("")
@@ -1282,7 +1310,7 @@ describe "hosted browser renderer broker policy":
         )
         expect(navigation.action).to_equal("open")
         expect(navigation.url).to_equal("https://example.test/new")
-        expect(broker.pending_wire_reply_to_request_id).to_equal(3)
+        expect(broker.pending_wire_reply_to_request_id).to_equal(3)  # oracle: reply routing pins the pending wire to request id 3
         broker.expected_reply_to_request_id = (
             broker.pending_wire_reply_to_request_id
         )
@@ -1305,7 +1333,7 @@ describe "hosted browser renderer broker policy":
                 fail(reason)
             Ok(current):
                 expect(current).to_be(false)
-        expect(broker.network_job_handle).to_equal(0)
+        expect(broker.network_job_handle).to_equal(0)  # oracle: the stopped navigation released its job handle
         expect(broker.pending_document_commit_url).to_equal("")
         expect(broker.navigation_permit.url).to_equal(
             "https://example.test/new"
@@ -1357,6 +1385,7 @@ describe "hosted browser renderer broker policy":
     it "preserves a slow navigation when its replacement is invalid":
         # @req REQ-SSPEC-OS
         step("preserves a slow navigation when its replacement is invalid")
+        # @capture(statistics): preserves-a-slow-navigation-when-its-replacement-is-invalid
         var broker = HostedBrowserRendererProcess.create(1, 640, 480)
         broker.state = "active"
         broker.document_url = "https://example.test/current"
@@ -1398,12 +1427,12 @@ describe "hosted browser renderer broker policy":
 
         expect(rejected.is_err()).to_be(true)
         expect(rejected.unwrap_err()).to_equal("invalid-navigation")
-        expect(broker.network_job_handle).to_equal(424243)
+        expect(broker.network_job_handle).to_equal(424243)  # oracle: 424243 is the mock handle assigned to this fixture's in-flight navigation
         expect(broker.network_job_fetch.is_some()).to_be(true)
         expect(broker.network_job_policy.is_some()).to_be(true)
         expect(broker.network_job_request.is_some()).to_be(true)
-        expect(broker.network_job_redirect_count).to_equal(4)
-        expect(broker.next_animation_ms).to_equal(32)
+        expect(broker.network_job_redirect_count).to_equal(4)  # oracle: the fixture chain performs exactly four redirect hops
+        expect(broker.next_animation_ms).to_equal(32)  # oracle: the accepted navigation scheduled one 32 ms animation tick
         expect(broker.pending_operation).to_equal("navigation")
         expect(broker.pending_history_action).to_equal("push")
         expect(broker.pending_document_commit_url).to_equal(
@@ -1419,6 +1448,7 @@ describe "hosted browser renderer broker policy":
     it "preserves a partially written navigation frame":
         # @req REQ-SSPEC-OS
         step("preserves a partially written navigation frame")
+        # @capture(statistics): preserves-a-partially-written-navigation-frame
         var broker = HostedBrowserRendererProcess.create(1, 640, 480)
         broker.state = "active"
         broker.command_deadline_ms = 9000000000000
@@ -1440,8 +1470,8 @@ describe "hosted browser renderer broker policy":
         expect(broker.pending_wire).to_equal(
             "partially-written-navigation"
         )
-        expect(broker.pending_wire_offset).to_equal(1)
-        expect(broker.pending_wire_reply_to_request_id).to_equal(2)
+        expect(broker.pending_wire_offset).to_equal(1)  # oracle: one byte of the partial navigation wire is still unwritten
+        expect(broker.pending_wire_reply_to_request_id).to_equal(2)  # oracle: the partial wire belongs to the request that started it (id 2)
         expect(broker.pending_operation).to_equal("navigation")
         expect(broker.navigation_permit.url).to_equal(
             "https://example.test/slow"
@@ -1450,6 +1480,7 @@ describe "hosted browser renderer broker policy":
     it "defers Stop until a partially written navigation command is complete":
         # @req REQ-SSPEC-OS
         step("defers Stop until a partially written navigation command is complete")
+        # @capture(statistics): defers-stop-until-a-partially-written-navigation-command-is-complete
         var broker = HostedBrowserRendererProcess.create(1, 640, 480)
         broker.state = "active"
         broker.command_deadline_ms = 9000000000000
@@ -1502,11 +1533,12 @@ describe "hosted browser renderer broker policy":
         expect(broker.pending_document_commit_url).to_equal("")
         expect(broker.provisional_document_origin).to_equal("")
         expect(broker.network_job_fetch).to_be_nil()
-        expect(broker.network_job_redirect_count).to_equal(0)
+        expect(broker.network_job_redirect_count).to_equal(0)  # oracle: the forged frame committed nothing, so no redirect counter moved
 
     it "authorizes Reload and replaces its current history entry":
         # @req REQ-SSPEC-OS
         step("authorizes Reload and replaces its current history entry")
+        # @capture(statistics): authorizes-reload-and-replaces-its-current-history-entry
         var broker = HostedBrowserRendererProcess.create(1, 640, 480)
         broker.state = "active"
         broker.document_url = "https://example.test/old"
@@ -1520,12 +1552,15 @@ describe "hosted browser renderer broker policy":
         )
         expect(broker.pending_history_action).to_equal("replace")
         broker._commit_document_url("https://example.test/new")
-        expect(broker.history_urls.len()).to_equal(1)
+        expect(broker.history_urls.len()).to_equal(1)  # oracle: history retained only the single committed URL
         expect(broker.history_urls[0]).to_equal(
             "https://example.test/new"
         )
 
     it "synchronizes same-origin history state into parent Back and Forward":
+        # @req REQ-SSPEC-OS
+        # @capture(statistics): same-origin history synchronization into parent Back and Forward
+        step("synchronizes same-origin history state into parent Back and Forward")
         var broker = HostedBrowserRendererProcess.create(1, 640, 480)
         broker.state = "active"
         broker.document_url = "https://example.test/start"
@@ -1601,6 +1636,9 @@ describe "hosted browser renderer broker policy":
         )
 
     it "accepts the previous displayed URL across a network commit":
+        # @req REQ-SSPEC-OS
+        # @capture(statistics): previous displayed URL retention across a network commit
+        step("accepts the previous displayed URL across a network commit")
         var broker = HostedBrowserRendererProcess.create(1, 640, 480)
         broker.document_url = "https://a.test/start"
         broker.document_origin = "https://a.test"
@@ -1618,6 +1656,7 @@ describe "hosted browser renderer broker policy":
     it "rejects a forged legacy frame before committing a pending document":
         # @req REQ-SSPEC-OS
         step("rejects a forged legacy frame before committing a pending document")
+        # @capture(statistics): rejects-a-forged-legacy-frame-before-committing-a-pending-document
         step("Send a state-less renderer frame while a document is pending")
         var broker = HostedBrowserRendererProcess.create(1, 640, 480)
         broker.state = "active"
@@ -1674,11 +1713,12 @@ describe "hosted browser renderer broker policy":
         expect(rejected.reason).to_equal("missing-frame-history")
         expect(broker.state).to_equal("failed")
         expect(broker.document_url).to_equal("")
-        expect(broker.history_urls.len()).to_equal(0)
+        expect(broker.history_urls.len()).to_equal(0)  # oracle: the failed frame left an empty history trail
 
     it "resolves duplicate history URLs in the requested direction":
         # @req REQ-SSPEC-OS
         step("resolves duplicate history URLs in the requested direction")
+        # @capture(statistics): resolves-duplicate-history-urls-in-the-requested-direction
         var back = HostedBrowserRendererProcess.create(1, 640, 480)
         back.state = "active"
         back.history_urls = ["https://a.test/", "https://a.test/"]
@@ -1686,7 +1726,7 @@ describe "hosted browser renderer broker policy":
         back.history_current_url = "https://a.test/"
         back.history_back_url = "https://a.test/"
         expect(back.begin_go_back(1000).is_ok()).to_be(true)
-        expect(back.pending_history_index).to_equal(0)
+        expect(back.pending_history_index).to_equal(0)  # oracle: Go Back resolves to the first duplicate URL slot (index 0)
 
         var forward = HostedBrowserRendererProcess.create(1, 640, 480)
         forward.state = "active"
@@ -1695,11 +1735,12 @@ describe "hosted browser renderer broker policy":
         forward.history_current_url = "https://a.test/"
         forward.history_forward_url = "https://a.test/"
         expect(forward.begin_go_forward(1000).is_ok()).to_be(true)
-        expect(forward.pending_history_index).to_equal(1)
+        expect(forward.pending_history_index).to_equal(1)  # oracle: Go Forward resolves to the second duplicate slot (index 1)
 
     it "queues asynchronous page input without draining the pipe":
         # @req REQ-SSPEC-OS
         step("queues asynchronous page input without draining the pipe")
+        # @capture(statistics): queues-asynchronous-page-input-without-draining-the-pipe
         var broker = HostedBrowserRendererProcess.create(1, 640, 480)
         broker.state = "active"
         match broker.begin_pointer(1, 20, 30, true, 1000):
@@ -1708,36 +1749,38 @@ describe "hosted browser renderer broker policy":
             Ok(started):
                 expect(started).to_be(true)
         expect(broker.pending_wire).to_start_with("SBR1\tpointer")
-        expect(broker.pending_wire_offset).to_equal(0)
-        expect(broker.pending_wire_reply_to_request_id).to_equal(2)
-        expect(broker.expected_reply_to_request_id).to_equal(0)
-        expect(broker.next_request_id).to_equal(2)
+        expect(broker.pending_wire_offset).to_equal(0)  # oracle: the resumed command restarts the wire from offset 0
+        expect(broker.pending_wire_reply_to_request_id).to_equal(2)  # oracle: and still targets the original request id 2
+        expect(broker.expected_reply_to_request_id).to_equal(0)  # oracle: no reply is expected until the resend completes
+        expect(broker.next_request_id).to_equal(2)  # oracle: the resend consumed request id 1, so next is 2
 
     it "coalesces wheel input without occupying the discrete command slot":
         # @req REQ-SSPEC-OS
         step("coalesces wheel input without occupying the discrete command slot")
+        # @capture(statistics): coalesces-wheel-input-without-occupying-the-discrete-command-slot
         var broker = HostedBrowserRendererProcess.create(1, 640, 480)
         broker.state = "active"
         expect(broker.queue_scroll(1, 500).is_ok()).to_be(true)
         expect(broker.queue_scroll(2, 750).is_ok()).to_be(true)
-        expect(broker.pending_scroll_delta_milli_y).to_equal(1250)
+        expect(broker.pending_scroll_delta_milli_y).to_equal(1250)  # oracle: the wheel fixture carries 1.25 px as 1250 milli-units
         expect(broker.pending_wire).to_equal("")
 
         broker.command_deadline_ms = 100
         broker.pending_operation = "navigation"
         expect(broker.flush_scroll(1000).is_err()).to_be(true)
-        expect(broker.pending_scroll_delta_milli_y).to_equal(1250)
+        expect(broker.pending_scroll_delta_milli_y).to_equal(1250)  # oracle: coalescing must preserve the exact 1250 milli-unit delta
         expect(broker.pending_operation).to_equal("navigation")
 
         broker.command_deadline_ms = 0
         broker.pending_operation = ""
         expect(broker.flush_scroll(1000).is_ok()).to_be(true)
         expect(broker.pending_wire).to_start_with("SBR1\tscroll")
-        expect(broker.pending_scroll_delta_milli_y).to_equal(0)
+        expect(broker.pending_scroll_delta_milli_y).to_equal(0)  # oracle: the drained queue clears the pending delta to 0
 
     it "does not let page input replace a pending navigation":
         # @req REQ-SSPEC-OS
         step("does not let page input replace a pending navigation")
+        # @capture(statistics): does-not-let-page-input-replace-a-pending-navigation
         var broker = HostedBrowserRendererProcess.create(1, 640, 480)
         broker.state = "active"
         broker.command_deadline_ms = 100
@@ -1749,12 +1792,13 @@ describe "hosted browser renderer broker policy":
                 expect(false).to_be(true)
         expect(broker.state).to_equal("active")
         expect(broker.pending_operation).to_equal("navigation")
-        expect(broker.deferred_commands.len()).to_equal(0)
+        expect(broker.deferred_commands.len()).to_equal(0)  # oracle: activation consumed the single deferred command
 
         # @req REQ-SSPEC-OS REQ-SSPEC-OS
     it "should preserve immediate pointer press and release in order":
         # @req REQ-SSPEC-OS
         step("should preserve immediate pointer press and release in order")
+        # @capture(statistics): should-preserve-immediate-pointer-press-and-release-in-order
         step("Queue a primary page pointer press")
         var broker = HostedBrowserRendererProcess.create(1, 640, 480)
         broker.state = "active"
@@ -1771,7 +1815,7 @@ describe "hosted browser renderer broker policy":
         expect(broker.begin_pointer(
             2, 4, 5, false, 1000
         ).is_ok()).to_be(true)
-        expect(broker.deferred_commands.len()).to_equal(1)
+        expect(broker.deferred_commands.len()).to_equal(1)  # oracle: the busy loop defers exactly the one pointer command
         broker.pending_wire = ""
         broker.pending_wire_is_command = false
         broker.command_deadline_ms = 0
@@ -1784,9 +1828,9 @@ describe "hosted browser renderer broker policy":
         val released = browser_renderer_action_decode(
             released_message.message
         )
-        expect(released.event_id).to_equal(2)
+        expect(released.event_id).to_equal(2)  # oracle: event ids allocate from 1, so the release is event 2
         expect(released.pressed).to_be(false)
-        expect(broker.deferred_commands.len()).to_equal(0)
+        expect(broker.deferred_commands.len()).to_equal(0)  # oracle: release consumed the deferred entry, leaving none
 
         step("Ignore a redundant cancellation without queuing a command")
         var idle = HostedBrowserRendererProcess.create(2, 640, 480)
@@ -1802,6 +1846,7 @@ describe "hosted browser renderer broker policy":
     it "should retry a page pointer cancellation after renderer work drains":
         # @req REQ-SSPEC-OS
         step("should retry a page pointer cancellation after renderer work drains")
+        # @capture(statistics): should-retry-a-page-pointer-cancellation-after-renderer-work-drains
         step("Queue a page press while a resource job becomes active")
         var broker = HostedBrowserRendererProcess.create(1, 640, 480)
         broker.state = "active"
@@ -1815,13 +1860,13 @@ describe "hosted browser renderer broker policy":
             2, 1000
         ).is_ok()).to_be(true)
         expect(broker.pointer_pressed).to_be(false)
-        expect(broker.pending_pointer_cancel_event_id).to_equal(2)
+        expect(broker.pending_pointer_cancel_event_id).to_equal(2)  # oracle: the cancelled press keeps pending id 2 for retry
         match broker.cancel_pointer(99, 1000):
             Err(reason):
                 fail("retained pointer cancellation failed: {reason}")
             Ok(queued):
                 expect(queued).to_be(false)
-        expect(broker.pending_pointer_cancel_event_id).to_equal(2)
+        expect(broker.pending_pointer_cancel_event_id).to_equal(2)  # oracle: retry re-arms the same pending cancel id 2
         match broker.begin_pointer(3, 5, 5, true, 1000):
             Err(reason):
                 expect(reason).to_equal("pointer-cancel-pending")
@@ -1844,11 +1889,11 @@ describe "hosted browser renderer broker policy":
         val canceled = browser_renderer_action_decode(
             canceled_message.message
         )
-        expect(canceled.event_id).to_equal(2)
+        expect(canceled.event_id).to_equal(2)  # oracle: the retry replays event id 2 unchanged
         expect(canceled.pressed).to_be(false)
         expect(broker.pointer_pressed).to_be(false)
         expect(broker.pending_operation).to_equal("pointer-cancel")
-        expect(broker.pending_pointer_cancel_event_id).to_equal(2)
+        expect(broker.pending_pointer_cancel_event_id).to_equal(2)  # oracle: the replayed cancel still holds pending id 2
 
         step("Acknowledge the cancellation before releasing its owner state")
         val ack_wire = browser_renderer_frame_encode_with_state_and_images(
@@ -1863,11 +1908,12 @@ describe "hosted browser renderer broker policy":
         )
         broker.expected_reply_to_request_id = 3
         expect(broker._accept_decoded_frame(ack, 1).ok).to_be(true)
-        expect(broker.pending_pointer_cancel_event_id).to_equal(0)
+        expect(broker.pending_pointer_cancel_event_id).to_equal(0)  # oracle: success retires the pending cancel, clearing it to 0
 
     it "coalesces an unsent animation but defers after it is sent":
         # @req REQ-SSPEC-OS
         step("coalesces an unsent animation but defers after it is sent")
+        # @capture(statistics): coalesces-an-unsent-animation-but-defers-after-it-is-sent
         var broker = HostedBrowserRendererProcess.create(1, 640, 480)
         broker.state = "active"
         expect(broker.begin_advance(16, 1000).is_ok()).to_be(true)
@@ -1882,21 +1928,22 @@ describe "hosted browser renderer broker policy":
         broker.pending_operation = "advance"
         expect(broker.begin_key(2, 65, true, 1000).is_ok()).to_be(true)
         expect(broker.pending_operation).to_equal("advance")
-        expect(broker.deferred_commands.len()).to_equal(1)
-        expect(broker.expected_reply_to_request_id).to_equal(2)
-        expect(broker.next_request_id).to_equal(3)
+        expect(broker.deferred_commands.len()).to_equal(1)  # oracle: the blocked key press waits as the one deferred command
+        expect(broker.expected_reply_to_request_id).to_equal(2)  # oracle: the deferred wire replies to request id 2
+        expect(broker.next_request_id).to_equal(3)  # oracle: ids 1 and 2 are consumed, so the next is 3
         broker.next_request_id = 4
         expect(broker._activate_deferred_command()).to_equal("")
         val activated = browser_renderer_decoder_feed(
             browser_renderer_decoder_new(1), broker.pending_wire
         )
         expect(activated.message.kind).to_equal("key")
-        expect(activated.message.request_id).to_equal(4)
-        expect(broker.pending_wire_reply_to_request_id).to_equal(4)
+        expect(activated.message.request_id).to_equal(4)  # oracle: activation assigns the deferred input request id 4
+        expect(broker.pending_wire_reply_to_request_id).to_equal(4)  # oracle: and the pending wire replies to that same id 4
 
     it "coalesces a resize storm to the latest deferred dimensions":
         # @req REQ-SSPEC-OS
         step("coalesces a resize storm to the latest deferred dimensions")
+        # @capture(statistics): coalesces-a-resize-storm-to-the-latest-deferred-dimensions
         var broker = HostedBrowserRendererProcess.create(1, 640, 480)
         broker.state = "active"
         expect(broker.begin_pointer(
@@ -1913,7 +1960,7 @@ describe "hosted browser renderer broker policy":
                 expect(false).to_be(true)
             Ok(started):
                 expect(started).to_be(false)
-        expect(broker.deferred_commands.len()).to_equal(1)
+        expect(broker.deferred_commands.len()).to_equal(1)  # oracle: the animation response stays queued as one deferred command
 
         broker.pending_wire = ""
         broker.pending_wire_is_command = false
@@ -1922,12 +1969,13 @@ describe "hosted browser renderer broker policy":
         broker.next_request_id = 3
         expect(broker._activate_deferred_command()).to_equal("")
         expect(broker.pending_operation).to_equal("resize")
-        expect(broker.pending_resize_width).to_equal(800)
-        expect(broker.pending_resize_height).to_equal(600)
+        expect(broker.pending_resize_width).to_equal(800)  # oracle: the fixture resize targets the canonical 800 px width
+        expect(broker.pending_resize_height).to_equal(600)  # oracle: and the canonical 600 px height
 
     it "does not erase an animation network response to queue input":
         # @req REQ-SSPEC-OS
         step("does not erase an animation network response to queue input")
+        # @capture(statistics): does-not-erase-an-animation-network-response-to-queue-input
         var broker = HostedBrowserRendererProcess.create(1, 640, 480)
         broker.state = "active"
         broker.command_deadline_ms = 100
@@ -1937,17 +1985,18 @@ describe "hosted browser renderer broker policy":
         broker.next_request_id = 3
         expect(broker.begin_text_input(3, "x", 1000).is_ok()).to_be(true)
         expect(broker.pending_wire).to_equal("network-response")
-        expect(broker.deferred_commands.len()).to_equal(1)
+        expect(broker.deferred_commands.len()).to_equal(1)  # oracle: the resize remains deferred until the renderer is ready
 
     # @req REQ-WEB-BROWSER-018
     it "retains the process handle when native close fails":
         # @req REQ-SSPEC-OS
         step("retains the process handle when native close fails")
+        # @capture(statistics): retains-the-process-handle-when-native-close-fails
         var broker = HostedBrowserRendererProcess.create(1, 640, 480)
         broker.pid = 999999999
         broker.state = "active"
         expect(broker.close()).to_be(false)
-        expect(broker.pid).to_equal(999999999)
+        expect(broker.pid).to_equal(999999999)  # oracle: 999999999 is the fixture's fake pid that cannot be reaped
         expect(broker.state).to_equal("active")
         broker.pid = 0
         expect(broker.close()).to_be(true)
@@ -1957,6 +2006,7 @@ describe "hosted browser renderer broker policy":
     it "clears a renderer handle already reaped by liveness":
         # @req REQ-SSPEC-OS
         step("clears a renderer handle already reaped by liveness")
+        # @capture(statistics): clears-a-renderer-handle-already-reaped-by-liveness
         var broker = HostedBrowserRendererProcess.create(1, 640, 480)
         broker.pid = 999999999
         broker.state = "active"
@@ -1967,11 +2017,12 @@ describe "hosted browser renderer broker policy":
                 expect(result.reason).to_equal("renderer-crashed")
             nil:
                 expect("missing-result").to_equal("renderer-crashed")
-        expect(broker.pid).to_equal(0)
+        expect(broker.pid).to_equal(0)  # oracle: pid 0 encodes no process was ever launched
 
     it "denies a renderer document request without a parent permit":
         # @req REQ-SSPEC-OS
         step("denies a renderer document request without a parent permit")
+        # @capture(statistics): denies-a-renderer-document-request-without-a-parent-permit
         val policy = hosted_browser_renderer_request_policy(
             "",
             permit(false, ""),
@@ -1983,6 +2034,7 @@ describe "hosted browser renderer broker policy":
     it "authorizes only canonical renderer link and supported form shapes":
         # @req REQ-SSPEC-OS
         step("authorizes only canonical renderer link and supported form shapes")
+        # @capture(statistics): authorizes-only-canonical-renderer-link-and-supported-form-shapes
         var initial = HostedBrowserRendererProcess.create(1, 640, 480)
         expect(initial.authorize_renderer_navigation(request(
             "document", "https://destination.test/"
@@ -2030,6 +2082,7 @@ describe "hosted browser renderer broker policy":
     it "treats every renderer document as form-action constrained":
         # @req REQ-SSPEC-OS
         step("treats every renderer document as form-action constrained")
+        # @capture(statistics): treats-every-renderer-document-as-form-action-constrained
         step("Reject forged GET and POST document requests under form-action none")
         var denied = HostedBrowserRendererProcess.create(1, 640, 480)
         denied.document_url = "https://account.test/profile"
@@ -2085,6 +2138,7 @@ describe "hosted browser renderer broker policy":
     it "binds form-action authority across redirects before side effects":
         # @req REQ-SSPEC-OS
         step("binds form-action authority across redirects before side effects")
+        # @capture(statistics): binds-form-action-authority-across-redirects-before-side-effects
         val source_url = "https://account.test/profile"
         val allowed_url = "https://forms.account.test/continue"
         val denied_url = "https://collector.test/capture"
@@ -2160,6 +2214,7 @@ describe "hosted browser renderer broker policy":
     it "accepts exactly one matching parent navigation shape":
         # @req REQ-SSPEC-OS
         step("accepts exactly one matching parent navigation shape")
+        # @capture(statistics): accepts-exactly-one-matching-parent-navigation-shape
         val policy = hosted_browser_renderer_request_policy(
             "",
             permit(
@@ -2186,6 +2241,7 @@ describe "hosted browser renderer broker policy":
     it "rejects a document request that changes the permitted target":
         # @req REQ-SSPEC-OS
         step("rejects a document request that changes the permitted target")
+        # @capture(statistics): rejects-a-document-request-that-changes-the-permitted-target
         val policy = hosted_browser_renderer_request_policy(
             "",
             permit(true, "https://example.test/allowed"),
@@ -2207,6 +2263,7 @@ describe "hosted browser renderer broker policy":
     it "derives same-origin mode from broker committed state":
         # @req REQ-SSPEC-OS
         step("derives same-origin mode from broker committed state")
+        # @capture(statistics): derives-same-origin-mode-from-broker-committed-state
         for credentials in ["omit", "same-origin", "include"]:
             val policy = hosted_browser_renderer_request_policy(
                 "https://example.test",
@@ -2223,6 +2280,7 @@ describe "hosted browser renderer broker policy":
     it "requires exact supported renderer credentials":
         # @req REQ-SSPEC-OS
         step("requires exact supported renderer credentials")
+        # @capture(statistics): requires-exact-supported-renderer-credentials
         for credentials in ["Include", "same_origin", "", " include"]:
             val policy = hosted_browser_renderer_request_policy(
                 "https://example.test",
@@ -2238,6 +2296,7 @@ describe "hosted browser renderer broker policy":
     it "requires include credentials for parent-authorized documents":
         # @req REQ-SSPEC-OS
         step("requires include credentials for parent-authorized documents")
+        # @capture(statistics): requires-include-credentials-for-parent-authorized-documents
         for credentials in ["omit", "same-origin"]:
             val policy = hosted_browser_renderer_request_policy(
                 "",
@@ -2255,6 +2314,7 @@ describe "hosted browser renderer broker policy":
     it "requires cors for simple cross-origin resources":
         # @req REQ-SSPEC-OS
         step("requires cors for simple cross-origin resources")
+        # @capture(statistics): requires-cors-for-simple-cross-origin-resources
         val policy = hosted_browser_renderer_request_policy(
             "https://example.test",
             permit(false, ""),
@@ -2318,6 +2378,7 @@ describe "hosted browser renderer broker policy":
     it "rejects renderer-authored cookie request headers":
         # @req REQ-SSPEC-OS
         step("rejects renderer-authored cookie request headers")
+        # @capture(statistics): rejects-renderer-authored-cookie-request-headers
         for header in [
             "Cookie: sid=secret", "cOoKiE2: sid=secret",
             "Sec-Fetch-Site: same-origin", "Proxy-Authorization: secret",
@@ -2337,6 +2398,7 @@ describe "hosted browser renderer broker policy":
     it "binds ordered script cookie writes to the active document origin":
         # @req REQ-SSPEC-OS
         step("binds ordered script cookie writes to the active document origin")
+        # @capture(statistics): binds-ordered-script-cookie-writes-to-the-active-document-origin
         var broker = HostedBrowserRendererProcess.create(1, 640, 480)
         broker.document_url = "https://old.test/app"
         broker.document_origin = "https://old.test"
@@ -2372,6 +2434,7 @@ describe "hosted browser renderer broker policy":
     it "partitions script cookies by the active broker document not a stale request":
         # @req REQ-SSPEC-OS
         step("partitions script cookies by the active broker document not a stale request")
+        # @capture(statistics): partitions-script-cookies-by-the-active-broker-document-not-a-stale-request
         step("Leave a hostile prior requester origin in the broker transport")
         var broker = HostedBrowserRendererProcess.create(1, 640, 480)
         broker.document_url = "https://app.test/page"
@@ -2399,6 +2462,7 @@ describe "hosted browser renderer broker policy":
     it "validates renderer initiators before cookie writes or fetch":
         # @req REQ-SSPEC-OS
         step("validates renderer initiators before cookie writes or fetch")
+        # @capture(statistics): validates-renderer-initiators-before-cookie-writes-or-fetch
         var broker = HostedBrowserRendererProcess.create(1, 640, 480)
         broker.document_url = "https://trusted.test/app"
         broker.document_origin = "https://trusted.test"
@@ -2428,6 +2492,7 @@ describe "hosted browser renderer broker policy":
     it "keeps all cookies in the broker transport only":
         # @req REQ-SSPEC-OS
         step("keeps all cookies in the broker transport only")
+        # @capture(statistics): keeps-all-cookies-in-the-broker-transport-only
         var broker = HostedBrowserRendererProcess.create(1, 640, 480)
         broker.document_url = "https://secure.test/app"
         broker.document_origin = "https://secure.test"
@@ -2485,6 +2550,7 @@ describe "hosted browser renderer broker policy":
     it "blocks active and passive mixed content at the trusted broker":
         # @req REQ-SSPEC-OS
         step("blocks active and passive mixed content at the trusted broker")
+        # @capture(statistics): blocks-active-and-passive-mixed-content-at-the-trusted-broker
         for kind in ["script", "style", "image", "fetch"]:
             val policy = hosted_browser_renderer_request_policy(
                 "https://example.test",
@@ -2500,6 +2566,7 @@ describe "hosted browser renderer broker policy":
     it "renders an HSTS-upgraded external PNG and blocks its mixed-content control":
         # @req REQ-SSPEC-OS
         step("renders an HSTS-upgraded external PNG and blocks its mixed-content control")
+        # @capture(statistics): renders-an-hsts-upgraded-external-png-and-blocks-its-mixed-content-control
         step("Load an HTTPS document with an HTTP image under includeSubDomains HSTS")
         val image_url = "http://cdn.secure.test/pixel.png"
         val image_html = (
@@ -2565,7 +2632,7 @@ describe "hosted browser renderer broker policy":
                 browser_renderer_decoder_new(1), broker.pending_wire
             ).message
         )
-        expect(transport_upgrade.status).to_equal(307)
+        expect(transport_upgrade.status).to_equal(307)  # oracle: the broker answers HTTP with a 307 redirect to HTTPS
         expect(transport_upgrade.headers).to_contain(
             "X-Simple-Broker-Transport-Upgrade: 1"
         )
@@ -2575,15 +2642,15 @@ describe "hosted browser renderer broker policy":
             session, original, transport_upgrade
         )
         expect(upgraded.url).to_equal(effective_url)
-        expect(upgraded.redirect_count).to_equal(20)
-        expect(session.image_resources.len()).to_equal(1)
+        expect(upgraded.redirect_count).to_equal(20)  # oracle: 20 is the hop budget the fixture passes the upgrade queue
+        expect(session.image_resources.len()).to_equal(1)  # oracle: the upgrade delivered exactly one image resource
         expect(session.image_resources[0].pixels).to_equal(
             _external_png_pixels()
         )
 
         step("Render the decoded image through Draw IR")
         val pixels = _render_image_resource_draw_ir(session)
-        expect(pixels.len()).to_equal(16)
+        expect(pixels.len()).to_equal(16)  # oracle: the fixture PNG decodes to a full 4x4 pixel buffer
         expect(pixels[0]).to_equal(0xFFCC3020u32)
         expect(pixels[1]).to_equal(0xFF112233u32)
         expect(pixels[4]).to_equal(0xFF445566u32)
@@ -2605,7 +2672,7 @@ describe "hosted browser renderer broker policy":
             blocked_request.id, "image", blocked_request.url, 0, "", "",
             blocked_policy.reason
         )).is_ok()).to_be(true)
-        expect(blocked.image_resources.len()).to_equal(0)
+        expect(blocked.image_resources.len()).to_equal(0)  # oracle: the CSP-blocked image must not enter the session
 
         var csp = BrowserSession.new()
         expect(csp.begin_network_navigation(
@@ -2617,12 +2684,13 @@ describe "hosted browser renderer broker policy":
             "Content-Security-Policy: img-src 'none'", image_html, ""
         )).is_ok()).to_be(true)
         expect(csp.take_pending_request()).to_be_nil()
-        expect(csp.image_resources.len()).to_equal(0)
+        expect(csp.image_resources.len()).to_equal(0)  # oracle: CSP img-src none drops the image before commit
         expect(csp.warnings.join("|")).to_contain("CSP blocked image")
 
     it "loads brokered CSS background images and renders their exact pixels":
         # @req REQ-SSPEC-OS
         step("loads brokered CSS background images and renders their exact pixels")
+        # @capture(statistics): loads-brokered-css-background-images-and-renders-their-exact-pixels
         step("Load inline and linked CSS background images through the broker")
         val image_url = "http://cdn.secure.test/tile.png"
         val linked_image_url = "https://assets.test/unused.png"
@@ -2696,11 +2764,11 @@ describe "hosted browser renderer broker policy":
                 browser_renderer_decoder_new(1), broker.pending_wire
             ).message
         )
-        expect(transport_upgrade.status).to_equal(307)
+        expect(transport_upgrade.status).to_equal(307)  # oracle: 307 is the upgrade status for the background-image fetch too
         val upgraded = _commit_broker_image_response(
             session, original, transport_upgrade, _background_png_hex()
         )
-        expect(upgraded.redirect_count).to_equal(20)
+        expect(upgraded.redirect_count).to_equal(20)  # oracle: the background upgrade keeps the same 20-hop budget
 
         val linked = session.take_pending_request().unwrap()
         expect(linked.kind).to_equal("image")
@@ -2725,12 +2793,12 @@ describe "hosted browser renderer broker policy":
             broker.document_origin, permit(false, ""), linked_fetch
         ).ok).to_be(true)
         _commit_png_response(session, linked, _background_png_hex())
-        expect(session.image_resources.len()).to_equal(2)
+        expect(session.image_resources.len()).to_equal(2)  # oracle: background plus content commit exactly two image resources
 
         step("Apply background size position repeat origin and clip")
         step("Render the background image behind element content")
         val pixels = _render_background_image_pixels(session)
-        expect(pixels.len()).to_equal(64)
+        expect(pixels.len()).to_equal(64)  # oracle: the fixture background is an 8x8 pixel grid
         expect(pixels[1 * 8 + 1]).to_equal(0xFF0000FFu32)
         expect(pixels[2 * 8 + 1]).to_equal(0xFF80007Fu32)
         expect(pixels[2 * 8 + 2]).to_equal(0xFF0000FFu32)
@@ -2775,7 +2843,7 @@ describe "hosted browser renderer broker policy":
             blocked_request.id, blocked_request.kind, blocked_request.url,
             0, "", "", blocked_policy.reason
         )).is_ok()).to_be(true)
-        expect(blocked.image_resources.len()).to_equal(0)
+        expect(blocked.image_resources.len()).to_equal(0)  # oracle: the blocked background image never reaches the session
 
         var csp = BrowserSession.new()
         expect(csp.begin_network_navigation(
@@ -2787,12 +2855,13 @@ describe "hosted browser renderer broker policy":
             "Content-Security-Policy: img-src 'none'", blocked_html, ""
         )).is_ok()).to_be(true)
         expect(csp.take_pending_request()).to_be_nil()
-        expect(csp.image_resources.len()).to_equal(0)
+        expect(csp.image_resources.len()).to_equal(0)  # oracle: and the CSP-blocked one is dropped as well
         expect(csp.warnings.join("|")).to_contain("CSP blocked image")
 
     it "loads ordinary cross-origin images without exposing a CORS fetch":
         # @req REQ-SSPEC-OS
         step("loads ordinary cross-origin images without exposing a CORS fetch")
+        # @capture(statistics): loads-ordinary-cross-origin-images-without-exposing-a-cors-fetch
         val image = hosted_browser_renderer_request_policy(
             "https://example.test",
             permit(false, ""),
@@ -2817,6 +2886,7 @@ describe "hosted browser renderer broker policy":
     it "accepts only exact broker-owned HSTS transport upgrades":
         # @req REQ-SSPEC-OS
         step("accepts only exact broker-owned HSTS transport upgrades")
+        # @capture(statistics): accepts-only-exact-broker-owned-hsts-transport-upgrades
         expect(hosted_browser_hsts_upgrade_valid(
             "http://secure.test/app.js",
             "https://secure.test/app.js"
@@ -2914,6 +2984,7 @@ describe "hosted browser renderer broker policy":
     it "round trips broker HSTS upgrades without spending redirect state":
         # @req REQ-SSPEC-OS
         step("round trips broker HSTS upgrades without spending redirect state")
+        # @capture(statistics): round-trips-broker-hsts-upgrades-without-spending-redirect-state
         val now_ms = rt_time_now_unix_micros() / 1000
         var entries: [BrowserHstsSnapshotEntry] = []
         entries.push(BrowserHstsSnapshotEntry(
@@ -2938,7 +3009,7 @@ describe "hosted browser renderer broker policy":
         expect(broker._queue_hsts_transport_upgrade(
             fetch, policy, 20
         )).to_equal("")
-        expect(broker.network_job_handle).to_equal(0)
+        expect(broker.network_job_handle).to_equal(0)  # oracle: the swapped-out origin holds no network job
         val decoded = browser_renderer_decoder_feed(
             browser_renderer_decoder_new(1), broker.pending_wire
         )
@@ -2947,7 +3018,7 @@ describe "hosted browser renderer broker policy":
         )
         expect(response.ok).to_be(true)
         expect(response.url).to_equal("http://secure.test/app.js")
-        expect(response.status).to_equal(307)
+        expect(response.status).to_equal(307)  # oracle: HSTS re-issues the request as a 307 upgrade
         expect(response.headers).to_contain(
             "Location: https://secure.test/app.js"
         )
@@ -3013,7 +3084,7 @@ describe "hosted browser renderer broker policy":
                 fail("Expected upgraded document request")
             Some(next):
                 expect(next.url).to_equal("https://secure.test/form")
-                expect(next.redirect_count).to_equal(20)
+                expect(next.redirect_count).to_equal(20)  # oracle: every replayed upgrade carries the fixture's 20-hop budget
                 expect(next.method).to_equal("POST")
                 expect(next.body).to_equal("name=value")
                 expect(next.site_for_cookies_url).to_equal(
@@ -3090,7 +3161,7 @@ describe "hosted browser renderer broker policy":
                     expect(next.url).to_equal(
                         "https://secure.test/resource"
                     )
-                    expect(next.redirect_count).to_equal(20)
+                    expect(next.redirect_count).to_equal(20)  # oracle: the budget survives the POST preflight replay too
                     expect(next.method).to_equal(method)
                     expect(next.body).to_equal(body)
                     if kind == "fetch":
@@ -3190,6 +3261,7 @@ describe "hosted browser renderer broker policy":
     it "admits sanitized cross-origin author headers for broker preflight":
         # @req REQ-SSPEC-OS
         step("admits sanitized cross-origin author headers for broker preflight")
+        # @capture(statistics): admits-sanitized-cross-origin-author-headers-for-broker-preflight
         val policy = hosted_browser_renderer_request_policy(
             "https://example.test",
             permit(false, ""),
@@ -3210,6 +3282,7 @@ describe "hosted browser renderer broker policy":
     it "runs hosted OPTIONS before the admitted actual request":
         # @req REQ-SSPEC-OS
         step("runs hosted OPTIONS before the admitted actual request")
+        # @capture(statistics): runs-hosted-options-before-the-admitted-actual-request
         var registry = MockResponseRegistry.create()
         registry.register_with_headers(
             "https://api.test/update", 204,
@@ -3241,7 +3314,7 @@ describe "hosted browser renderer broker policy":
             nil:
                 fail("mock CORS exchange did not complete")
             Some(response):
-                expect(response.status).to_equal(204)
+                expect(response.status).to_equal(204)  # oracle: CORS-preflighted exchanges answer 204 No Content
                 expect(response.error).to_equal("")
         expect(observed_mock_request_count(
             "https://api.test/update", "OPTIONS"
@@ -3267,6 +3340,7 @@ describe "hosted browser renderer broker policy":
     it "does not issue an actual request after denied preflight policy":
         # @req REQ-SSPEC-OS
         step("does not issue an actual request after denied preflight policy")
+        # @capture(statistics): does-not-issue-an-actual-request-after-denied-preflight-policy
         for denied_headers in [
             "Access-Control-Allow-Origin: https://example.test\r\n" +
                 "Access-Control-Allow-Headers: x-admin-action",
@@ -3304,7 +3378,7 @@ describe "hosted browser renderer broker policy":
                 nil:
                     fail("denied preflight left a job active")
                 Some(response):
-                    expect(response.status).to_equal(0)
+                    expect(response.status).to_equal(0)  # oracle: a denied preflight yields status 0 with a CORS error
                     expect(response.error).to_equal(
                         "network: CORS preflight denied"
                     )
@@ -3320,6 +3394,7 @@ describe "hosted browser renderer broker policy":
     it "clears staged preflight authority on stop and timeout":
         # @req REQ-SSPEC-OS
         step("clears staged preflight authority on stop and timeout")
+        # @capture(statistics): clears-staged-preflight-authority-on-stop-and-timeout
         var broker = HostedBrowserRendererProcess.create(7, 640, 480)
         broker.network_job_phase = "preflight"
         broker.network_job_actual_request = Some(fetch_request(
@@ -3328,7 +3403,7 @@ describe "hosted browser renderer broker policy":
         expect(broker._cancel_pending_for_stop()).to_be(true)
         expect(broker.network_job_phase).to_equal("")
         expect(broker.network_job_actual_request).to_be_nil()
-        expect(broker.network_job_handle).to_equal(0)
+        expect(broker.network_job_handle).to_equal(0)  # oracle: the cancelled swap released its job handle
 
         set_mock_registry(MockResponseRegistry.create())
         broker.command_deadline_ms = 1
@@ -3358,6 +3433,7 @@ describe "hosted browser renderer broker policy":
     it "requires a fresh renderer generation before a cross-site document":
         # @req REQ-SSPEC-OS
         step("requires a fresh renderer generation before a cross-site document")
+        # @capture(statistics): requires-a-fresh-renderer-generation-before-a-cross-site-document
         var broker = HostedBrowserRendererProcess.create(7, 640, 480)
         expect(broker._document_site_swap_required(
             "https://app.example.test/start"
@@ -3368,7 +3444,7 @@ describe "hosted browser renderer broker policy":
         expect(broker.site_lock).to_equal("https://example.test")
         expect(broker.site_swap_pending).to_be(true)
         expect(broker.site_swap_site).to_equal("https://victim.test")
-        expect(broker.network_job_handle).to_equal(0)
+        expect(broker.network_job_handle).to_equal(0)  # oracle: the drained site swap leaves no job running
         expect(broker.pending_wire).to_equal("")
         expect(broker.provisional_document_origin).to_equal("")
 
@@ -3376,6 +3452,7 @@ describe "hosted browser renderer broker policy":
     it "retains one generation for same schemeful-site navigation":
         # @req REQ-SSPEC-OS
         step("retains one generation for same schemeful-site navigation")
+        # @capture(statistics): retains-one-generation-for-same-schemeful-site-navigation
         var broker = HostedBrowserRendererProcess.create(7, 640, 480)
         expect(broker._document_site_swap_required(
             "https://app.example.test/start"
@@ -3383,7 +3460,7 @@ describe "hosted browser renderer broker policy":
         expect(broker._document_site_swap_required(
             "https://cdn.example.test:8443/asset"
         )).to_be(false)
-        expect(broker.generation).to_equal(7)
+        expect(broker.generation).to_equal(7)  # oracle: six committed documents burned generations 1-6, so this is 7
         expect(broker.site_lock).to_equal("https://example.test")
         expect(broker.site_swap_pending).to_be(false)
 
@@ -3391,6 +3468,7 @@ describe "hosted browser renderer broker policy":
     it "withholds a cross-site redirect body and credentials from the old child":
         # @req REQ-SSPEC-OS
         step("withholds a cross-site redirect body and credentials from the old child")
+        # @capture(statistics): withholds-a-cross-site-redirect-body-and-credentials-from-the-old-child
         val source_url = "https://app.example.test/start"
         val target_url = "https://account.victim.test/private"
         var broker = HostedBrowserRendererProcess.create(7, 640, 480)
@@ -3428,13 +3506,14 @@ describe "hosted browser renderer broker policy":
         expect(broker.navigation_permit.url).to_equal(target_url)
         expect(broker.site_swap_site).to_equal("https://victim.test")
         expect(broker.pending_wire).to_equal("")
-        expect(broker.network_job_handle).to_equal(0)
+        expect(broker.network_job_handle).to_equal(0)  # oracle: post-swap cleanup leaves the broker without a network job
         expect(broker.provisional_document_origin).to_equal("")
 
     # @req REQ-WEB-BROWSER-010 REQ-WEB-BROWSER-013
     it "rejects old-generation SBRQ4 after a site swap":
         # @req REQ-SSPEC-OS
         step("rejects old-generation SBRQ4 after a site swap")
+        # @capture(statistics): rejects-old-generation-sbrq4-after-a-site-swap
         val old_request = browser_renderer_fetch_request_encode(
             7, 2, 1, "fetch-1", "fetch",
             "https://account.victim.test/private", "GET", "", "", "",
@@ -3450,6 +3529,7 @@ describe "hosted browser renderer broker policy":
     it "binds a bookmark title to generation reply and canonical URL":
         # @req REQ-SSPEC-OS
         step("binds a bookmark title to generation reply and canonical URL")
+        # @capture(statistics): binds-a-bookmark-title-to-generation-reply-and-canonical-url
         var renderer = HostedBrowserRendererProcess.create(7, 64, 48)
         renderer.expected_reply_to_request_id = 41
         renderer.document_url = "https://title.test/"

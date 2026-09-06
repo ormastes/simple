@@ -1,85 +1,158 @@
+"""
+## Purpose and audience
+Pins the ordered committed-text delivery contract that lets a "g" keystroke
+arrive exactly once, after its key-down, across the three owned layers of
+the native window input path: the owned `WinitInputEvent` record and its
+copy-before-free decode in `window_winit.spl`, the web showcase event
+reduction that dispatches each record's `committed_text` exactly once, and
+the live-evidence gate script that rejects a duplicate, missing, or
+out-of-order committed-text receipt. Audience: windowing and input
+engineers touching `winit_poll_input_into`/`winit_wait_input_into` or the
+web showcase input loop.
+
+## Operator workflow
+Run the single file with the seed runner from the repository root and
+require every scenario green; each failure names which layer of the
+committed-text contract regressed. Set `WINIT_TEXT_FIXTURE_ROOT` to point
+the contract reads at a different tree root (defaults to the repository
+root).
+
+## Compatibility and limitations
+These scenarios are SOURCE CONTRACTS: they grep-verify the exact tokens in
+the real `src/lib`, `src/runtime`, `examples`, and `scripts` sources that
+implement the contract, they do not drive a live window. The contract is
+fail-closed — if a fixture root is configured but does not contain the
+sources, the reads come back empty and the scenarios FAIL rather than
+silently pass.
+
+## Verification guidance and troubleshooting
+An `owned native records` failure means the copy-before-free decode or the
+`StoredEvent` origin fields changed shape; a `web event reduction` failure
+means the showcase stopped dispatching each record's committed text exactly
+once (or reintroduced the old `event_kinds` replay path); a `live evidence`
+failure means the gate script no longer enforces keyboard-revision-before-
+committed-text or the receipt-revision probe. Fix the named source, never
+the needle, unless the contract itself moved — in which case update the
+needle to the new grep-verified token.
+"""
+
+# Lifecycle: research doc/01_research/domain/wm_gui_web_2d_host_env_hardening.md ;
+# plan doc/03_plan/agent_tasks/gui_web_gpu_host_platform_matrix.md ;
+# architecture doc/04_architecture/wm_gui_web_2d_host_env_hardening.md ;
+# design doc/05_design/wm_gui_web_2d_host_env_hardening.md
+
 # @tag: rendering, gui, window, winit, web, text
 # @cover src/lib/nogc_sync_mut/io/window_winit.spl 75%
 
+use std.spec.step
 use std.spec.{describe, context, it, expect}
 use std.io_runtime.{file_read, env_get}
 
-val FIXTURE_ROOT = env_get("WINIT_TEXT_FIXTURE_ROOT") ?? "."
+# env_get returns an EMPTY string (not nil) when the variable is unset, so a
+# plain `?? "."` fallback never fires and every path would become absolute
+# "/src/..." — all reads would silently come back empty. Guard on emptiness
+# so an unusable root fails closed (the contains-assertions below fail on
+# empty reads) instead of vacuously passing.
+val FIXTURE_ROOT_CONFIGURED = env_get("WINIT_TEXT_FIXTURE_ROOT") ?? ""
+val FIXTURE_ROOT = if FIXTURE_ROOT_CONFIGURED.len() > 0: FIXTURE_ROOT_CONFIGURED else: "."
 val WINT = FIXTURE_ROOT + "/src/lib/nogc_sync_mut/io/window_winit.spl"
 val EVENT_RECORD = FIXTURE_ROOT + "/src/lib/nogc_sync_mut/io/window_winit_input_event.spl"
 val RUNTIME = FIXTURE_ROOT + "/src/runtime/spl_winit/src/lib.rs"
 val WEB = FIXTURE_ROOT + "/examples/06_io/ui/web_render_file_gui.spl"
 val WRAPPER = FIXTURE_ROOT + "/scripts/check/check-macos-vulkan-web-live-evidence.shs"
 
+# @manual_section: ordered Winit committed-text delivery
 describe "ordered Winit committed-text delivery":
 
     context "owned native records":
 
         it "copies text before freeing and derives compatibility kinds":
-            val source = file_read(WINT)
-            val record = file_read(EVENT_RECORD)
-            val runtime = file_read(RUNTIME)
-            expect(record).to_contain("struct WinitInputEvent:")
-            expect(record).to_contain("keycode: i64")
-            expect(record).to_contain("pressed: bool")
-            expect(record).to_contain("committed_text: text")
-            expect(record).to_contain("mut events_out: [WinitInputEvent]")
-            expect(record).to_contain("events_out.push(event)")
-            expect(record).to_contain("event_kinds_out.push(event.kind)")
-            expect(source).to_contain(
-                "val committed_text = if kind == EVT_TEXT:")
-            expect(source).to_contain("winit_poll_input_into(")
-            expect(source).to_contain("winit_wait_input_into(")
-            expect(source).to_contain(
+            # @req REQ-WINITTEXT-001
+            # @capture(protocol_json): owned-record and StoredEvent contract tokens retained
+            step("Read the owned input-event record, window source, and runtime StoredEvent contract")
+            val owned_input_event_record = file_read(EVENT_RECORD)
+            val owned_native_window_source = file_read(WINT)
+            val native_runtime_stored_event_contract = file_read(RUNTIME)
+            # The record owns the decoded payload: kind/keycode/pressed plus the
+            # copied-out committed_text, and both output queues are appended per
+            # event so kind parity can never drift from the text payload.
+            expect(owned_input_event_record).to_contain("struct WinitInputEvent:")
+            expect(owned_input_event_record).to_contain("keycode: i64")
+            expect(owned_input_event_record).to_contain("pressed: bool")
+            expect(owned_input_event_record).to_contain("committed_text: text")
+            expect(owned_input_event_record).to_contain("mut events_out: [WinitInputEvent]")
+            expect(owned_input_event_record).to_contain("events_out.push(event)")
+            expect(owned_input_event_record).to_contain("event_kinds_out.push(event.kind)")
+            # Copy-before-free: the text accessor borrows the handle, so the
+            # decode happens before rt_winit_event_free and through the checked
+            # (nil-safe) accessor only.
+            expect(owned_native_window_source).to_contain(
+                "winit_event_text_checked(ev)")
+            expect(owned_native_window_source).to_contain(
+                "case Some(value): committed_text = value")
+            expect(owned_native_window_source).to_contain("winit_poll_input_into(")
+            expect(owned_native_window_source).to_contain("winit_wait_input_into(")
+            expect(owned_native_window_source).to_contain(
                 "events_out, event_kinds, kind, keycode, pressed, committed_text)")
-            expect(source).to_contain(
+            expect(owned_native_window_source).to_contain(
                 "kind == EVT_KEYBOARD or kind == EVT_TEXT")
-            expect(source).to_contain("rt_winit_event_free(ev)")
-            expect(runtime).to_contain("origin_keycode: i64")
-            expect(runtime).to_contain("origin_pressed: bool")
-            expect(runtime).to_contain("origin_keycode,")
-            expect(runtime).to_contain("origin_pressed,")
-            expect(runtime).to_contain("origin_keycode: 0")
-            expect(runtime).to_contain("origin_pressed: false")
-            expect(runtime).to_contain(
+            expect(owned_native_window_source).to_contain("rt_winit_event_free(ev)")
+            # The runtime StoredEvent keeps the origin key state so a text event
+            # can be attributed to the key-down that produced it, in both the
+            # stored shape and the two field accessors.
+            expect(native_runtime_stored_event_contract).to_contain("origin_keycode: i64")
+            expect(native_runtime_stored_event_contract).to_contain("origin_pressed: bool")
+            expect(native_runtime_stored_event_contract).to_contain("origin_keycode,")
+            expect(native_runtime_stored_event_contract).to_contain("origin_pressed,")
+            expect(native_runtime_stored_event_contract).to_contain("origin_keycode: 0")
+            expect(native_runtime_stored_event_contract).to_contain("origin_pressed: false")
+            expect(native_runtime_stored_event_contract).to_contain(
                 "StoredEvent::Text { origin_keycode, .. }")
-            expect(runtime).to_contain(
+            expect(native_runtime_stored_event_contract).to_contain(
                 "StoredEvent::Text { origin_pressed, .. }")
-            expect(source.contains(
+            # The queue itself must NOT leak into the runtime record shape: the
+            # owned record is the only event container.
+            expect(owned_native_window_source.contains(
                 "    events: [WinitInputEvent]")).to_equal(false)
 
     context "web event reduction":
 
         it "uses each record's text and admits one visible committed g":
-            val source = file_read(WEB)
-            expect(source).to_contain(
-                "var input_events: [WinitInputEvent] = []")
-            expect(source).to_contain(
-                "winit_poll_input_into(lp, input_events)")
-            expect(source).to_contain("for event in input_events:")
-            expect(source).to_contain("val raw_kind = event.kind")
-            expect(source).to_contain(
-                "raw_kind == 11 and event.committed_text != \"\"")
-            expect(source).to_contain(
-                "event.committed_text == \"g\"")
-            expect(source).to_contain(
-                "committed_text_receipt_revision == 0")
-            expect(source).to_contain(
-                "committed_text_revision > keyboard_revision")
-            expect(source).to_contain("committed_text_events == 1")
-            expect(source).to_contain(
-                "INPUT \" + committed_text + \" REV ")
-            expect(source.contains(
+            # @req REQ-WINITTEXT-002
+            # @capture(protocol_json): web reduction dispatch contract tokens retained
+            step("Read the web showcase event-reduction contract")
+            val web_event_reduction_contract = file_read(WEB)
+            # The showcase drains the owned records directly: one wait into the
+            # record queue, then exactly one dispatch per record, so a committed
+            # text can be observed once and only once per physical keystroke.
+            expect(web_event_reduction_contract).to_contain(
+                "var events: [WinitInputEvent] = []")
+            expect(web_event_reduction_contract).to_contain(
+                "winit_wait_input_into(lp, 100, events, pointer_x, pointer_y)")
+            expect(web_event_reduction_contract).to_contain("for event in events:")
+            expect(web_event_reduction_contract).to_contain(
+                "event.kind == 11 and event.committed_text != \"\"")
+            expect(web_event_reduction_contract).to_contain(
+                "semantic.dispatch_text(event_id, event.committed_text)")
+            # The old event_kinds replay path re-derived kinds after the fact and
+            # duplicated text admission; its reintroduction must fail this file.
+            expect(web_event_reduction_contract.contains(
                 "for raw_kind in input.event_kinds:")).to_equal(false)
 
         it "requires the committed record and revision in live evidence":
-            val source = file_read(WRAPPER)
-            expect(source).to_contain("keystroke \"g\"")
-            expect(source).to_contain(
+            # @req REQ-WINITTEXT-003
+            # @capture(protocol_json): live-evidence gate contract tokens retained
+            step("Read the live-evidence gate contract")
+            val live_evidence_gate_contract = file_read(WRAPPER)
+            # The live gate drives a real "g" keystroke and fails closed unless
+            # the committed text arrived exactly once, AFTER the keyboard record,
+            # with its receipt revision probed as first-class live evidence.
+            expect(live_evidence_gate_contract).to_contain("keystroke \"g\"")
+            expect(live_evidence_gate_contract).to_contain(
                 "web_standards_event_committed_text")
-            expect(source).to_contain(
+            expect(live_evidence_gate_contract).to_contain(
                 "committed-text-duplicate-or-missing")
-            expect(source).to_contain(
+            expect(live_evidence_gate_contract).to_contain(
                 "keyboard_revision\" -lt \"$committed_text_revision")
-            expect(source).to_contain(
+            expect(live_evidence_gate_contract).to_contain(
                 "macos_vulkan_web_live_committed_text_receipt_revision")

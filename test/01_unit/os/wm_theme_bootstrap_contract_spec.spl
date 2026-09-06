@@ -1,3 +1,46 @@
+"""
+## Purpose and audience
+For SimpleOS WM/compositor maintainers. Pins ownership of theme-snapshot
+installation across every entry point that boots a compositor: the hosted
+desktop entry, the generated per-architecture (x86_64/arm64/riscv64)
+embedded GUI entries, and the shared host/SimpleOS theme-bootstrap owner
+modules. The contract is: exactly one designated call installs the theme
+before backend/compositor creation, and no other module reaches around it
+to read the snapshot Option ABI directly.
+## Operator workflow
+Run after touching any `*_wm_theme_bootstrap.spl`, `wm_chrome_theme.spl`,
+`hosted_entry.spl`, `gui_entry_desktop.spl` (any arch), or a WM/web/taskbar
+consumer named in the last scenario: `bin/simple test
+test/01_unit/os/wm_theme_bootstrap_contract_spec.spl`. Each scenario reads
+one or more shipped module sources and checks ordering/presence of the
+theme-install call relative to backend/compositor/VFS creation.
+## Compatibility and limitations
+This is a source-contract check, not a runtime behavior check: there is no
+build that boots all four architectures' embedded GUI entries in one test
+run, so the only observable evidence is shipped source text and the
+relative byte-offset ordering of named calls within it.
+## Verification guidance and troubleshooting
+NOTE: measured 2026-09-06, this file is heavily RED against current source
+and unchanged before/after this modernization pass (baseline via `git show
+HEAD:test/01_unit/os/wm_theme_bootstrap_contract_spec.spl`: 1 of 12
+scenarios pass, identically before and after). Several product modules this
+file expects (`install_host_wm_theme`, `apply_host_wm_css_theme_override`,
+`active_host_wm_theme_snapshot`) do not exist anywhere under `src/`
+(verified via repo-wide grep), and several expected import/ordering strings
+no longer appear in the current `hosted_entry.spl` /
+`host_wm_theme_bootstrap.spl` / per-arch `gui_entry_desktop.spl` sources --
+this is upstream product drift, out of scope for a test-file-only batch.
+Do not weaken any assertion to make these pass; each scenario carries a
+`# NOTE:` at its failure site with the specific missing symbol or string.
+Fixing this file for real requires reconciling it against the current
+`os.compositor.*_wm_theme_bootstrap` and per-arch GUI entry modules.
+"""
+# Lifecycle: doc/01_research/ui/wm/simple_wm_modernization.md ;
+# doc/03_plan/os/wm/browser_theme_capture_progress_2026-07-25.md ;
+# doc/04_architecture/ui/drawing_stack.md ;
+# doc/05_design/ui/rendering/draw_ir_multibackend_design.md
+# @manual_section: wm_theme_bootstrap_ownership
+
 use std.io_runtime.{file_read}
 use std.spec.*
 
@@ -5,6 +48,12 @@ use std.spec.*
 describe "WM theme bootstrap ownership":
 
     it "installs the resolved host package before backend and compositor creation":
+        # @req REQ-WMTHEME-001
+        # @capture(statistics): byte-offset ordering of the install call vs backend/compositor creation
+        # NOTE: legitimate RED, verified 2026-09-06. src/os/hosted/hosted_entry.spl no longer
+        # contains the expected "use os.compositor.host_wm_theme_bootstrap.{install_default_host_wm_theme}"
+        # import string -- upstream product drift, out of scope for this test-file-only batch.
+        step("Read the hosted entry module and locate the theme-install, backend, and compositor calls")
         val source = file_read("src/os/hosted/hosted_entry.spl")
         val install = source.index_of("install_default_host_wm_theme()")
         val backend = source.index_of("HostedWinitBufferBackend.create(")
@@ -17,6 +66,12 @@ describe "WM theme bootstrap ownership":
         expect(install).to_be_less_than(compositor)
 
     it "prefers active state then the package-owned snapshot projection":
+        # @req REQ-WMTHEME-002
+        # @capture(statistics): byte-offset ordering and presence checks across the host theme bootstrap owner
+        # NOTE: legitimate RED, verified 2026-09-06. src/os/compositor/host_wm_theme_bootstrap.spl no
+        # longer contains "aetheric_dark_theme_render_snapshot()" -- upstream product drift, out of
+        # scope for this test-file-only batch.
+        step("Read the host theme bootstrap owner and locate the active/package/generated snapshot calls")
         val source = file_read("src/os/compositor/host_wm_theme_bootstrap.spl")
         val active = source.index_of("active_wm_theme_render_snapshot()")
         val package_load = source.index_of("load_theme_package(default_theme_id()).snapshot")
@@ -26,14 +81,23 @@ describe "WM theme bootstrap ownership":
         expect(package_load).to_be_less_than(generated)
         expect(source).to_contain("aetheric_dark_theme_render_snapshot()")
         expect(source).to_contain("apply_theme_render_snapshot_to_wm_chrome")
-        expect(source.contains("load_theme_package(")).to_be(false)
-        expect(source.contains("aetheric_dark_theme_render_snapshot()")).to_be(false)
-        expect(source.contains("active_wm_theme_render_snapshot()")).to_be(false)
+        val still_calls_load_theme_package = source.contains("load_theme_package(")
+        val still_calls_generated_snapshot_directly = source.contains("aetheric_dark_theme_render_snapshot()")
+        val still_calls_active_snapshot_directly = source.contains("active_wm_theme_render_snapshot()")
+        expect(still_calls_load_theme_package).to_be(false)
+        expect(still_calls_generated_snapshot_directly).to_be(false)
+        expect(still_calls_active_snapshot_directly).to_be(false)
         expect(source).to_contain("fn apply_host_wm_css_theme_override(css_text: text) -> bool:")
         expect(source).to_contain("apply_wm_css_theme_text(css_text)")
         expect(source).to_contain("fn active_host_wm_theme_snapshot() -> ThemeRenderSnapshot:")
 
     it "installs an explicit host package through the canonical snapshot projection":
+        # @req REQ-WMTHEME-003
+        # @capture(statistics): installed snapshot identity and hash fields
+        # NOTE: legitimate RED, verified 2026-09-06. `install_host_wm_theme` does not exist anywhere
+        # under src/ (verified: `grep -rln "fn install_host_wm_theme" src/` returns nothing) --
+        # upstream product drift/removal, out of scope for this test-file-only batch.
+        step("Install the glass_dark host package and inspect the resulting snapshot")
         val snapshot = install_host_wm_theme("glass_dark")
         expect(snapshot.id).to_equal("aetheric_dark")
         expect(snapshot.source_manifest_sha256.len()).to_be_greater_than(0)
@@ -41,20 +105,32 @@ describe "WM theme bootstrap ownership":
         expect(active_wm_theme_id()).to_equal(snapshot.id)
 
     it "reprojects a valid host CSS override into the active snapshot identity":
+        # @req REQ-WMTHEME-004
+        # @capture(statistics): overridden snapshot's packed RGBA fields and hash-change check
+        # NOTE: legitimate RED, verified 2026-09-06 -- same missing `install_host_wm_theme` as the
+        # previous scenario.
+        step("Install the glass_dark host package, then apply an explicit CSS override")
         val package_snapshot = install_host_wm_theme("glass_dark")
         val installed = apply_host_wm_css_theme_override(
             "--wm-bg: #112233; --wm-fg: #445566; --wm-accent: #778899; --wm-surface: #aabbcc; --wm-surface-hover: #ddeeff; --wm-error: #ff0000;"
         )
         expect(installed).to_be(true)
         val effective_snapshot = active_host_wm_theme_snapshot()
-        expect(effective_snapshot.background_rgba).to_equal(0xFF112233u32)
-        expect(effective_snapshot.foreground_rgba).to_equal(0xFF445566u32)
-        expect(effective_snapshot.accent_rgba).to_equal(0xFF778899u32)
-        expect(effective_snapshot.material.window_fill_rgba).to_equal(0xFFAABBCCu32)
-        expect(effective_snapshot.material.inactive_title_fill_rgba).to_equal(0xFFDDEEFFu32)
+        expect(effective_snapshot.background_rgba).to_equal(0xFF112233u32)  # oracle: alpha FF + the override's --wm-bg #112233
+        expect(effective_snapshot.foreground_rgba).to_equal(0xFF445566u32)  # oracle: alpha FF + the override's --wm-fg #445566
+        expect(effective_snapshot.accent_rgba).to_equal(0xFF778899u32)  # oracle: alpha FF + the override's --wm-accent #778899
+        expect(effective_snapshot.material.window_fill_rgba).to_equal(0xFFAABBCCu32)  # oracle: alpha FF + the override's --wm-surface #aabbcc
+        expect(effective_snapshot.material.inactive_title_fill_rgba).to_equal(0xFFDDEEFFu32)  # oracle: alpha FF + the override's --wm-surface-hover #ddeeff
         expect(effective_snapshot.material_sha256).to_not_equal(package_snapshot.material_sha256)
 
     it "installs the generated Aetheric snapshot through one x86_64 owner":
+        # @req REQ-WMTHEME-005
+        # @capture(statistics): byte-offset ordering of the install call vs engine creation
+        # NOTE: legitimate RED, verified 2026-09-06. examples/09_embedded/simple_os/arch/x86_64/
+        # gui_entry_desktop.spl no longer contains the expected
+        # "use os.compositor.simpleos_wm_theme_bootstrap.{install_generated_simpleos_wm_theme}" import
+        # string in this exact form -- upstream product drift, out of scope for this test-file-only batch.
+        step("Read the x86_64 embedded GUI entry and locate the theme-install and engine-creation calls")
         val source = file_read("examples/09_embedded/simple_os/arch/x86_64/gui_entry_desktop.spl")
         val install = source.index_of("install_generated_simpleos_wm_theme()")
         val engine = source.index_of("var engine = create_fb_engine_sized(")
@@ -63,13 +139,29 @@ describe "WM theme bootstrap ownership":
         expect(source).to_contain(expected_import)
         expect(install).to_be_greater_than(0)
         expect(install).to_be_less_than(engine)
-        expect(source.contains("use common.ui.generated.aetheric_dark_theme_snapshot")).to_be(false)
-        expect(source.contains("apply_theme_render_snapshot_to_wm_chrome(")).to_be(false)
+        val still_imports_generated_snapshot_directly = source.contains("use common.ui.generated.aetheric_dark_theme_snapshot")
+        val still_applies_snapshot_to_chrome_directly = source.contains("apply_theme_render_snapshot_to_wm_chrome(")
+        expect(still_imports_generated_snapshot_directly).to_be(false)
+        expect(still_applies_snapshot_to_chrome_directly).to_be(false)
 
     it "installs the same generated Aetheric snapshot before ARM64 compositor creation":
+        # @req REQ-WMTHEME-006
+        # @capture(statistics): byte-offset ordering of install/mount/theme-css/override/engine calls
+        # NOTE: legitimate RED, verified 2026-09-06 (real product bug, filed). This scenario used
+        # to crash with "semantic: variable `mount` not found" -- three `val` bindings (mount,
+        # theme_css, override) were missing entirely, a copy-paste gap against the sibling
+        # x86_64/riscv64 scenarios; fixed below so the scenario actually executes. With that fixed,
+        # it now fails for real: examples/09_embedded/simple_os/arch/arm64/gui_entry_desktop.spl:40
+        # imports install_generated_simpleos_wm_theme but never calls it anywhere in the file
+        # (x86_64's gui_entry_desktop.spl:324 does). See
+        # doc/08_tracking/bug/simpleos_arm64_riscv64_embedded_gui_missing_theme_install_call_2026-09-06.md.
+        step("Read the arm64 embedded GUI entry and locate the theme-install, VFS-mount, and engine-creation calls")
         val source = file_read("examples/09_embedded/simple_os/arch/arm64/gui_entry_desktop.spl")
         val install = source.index_of("install_generated_simpleos_wm_theme()")
         val framebuffer = source.index_of("val framebuffer_address = raw_alloc(")
+        val mount = source.index_of("val vfs_mounted = vfs_boot_init_virtio_fat32()")
+        val theme_css = source.index_of("val theme_css = if vfs_mounted:")
+        val override = source.index_of("val theme_override_applied = if vfs_mounted:")
         val engine = source.index_of("var engine = create_fb_engine_sized(")
         val expected_import = "use os.compositor.simpleos_wm_theme_bootstrap." +
             "{" + "install_generated_simpleos_wm_theme" + "}"
@@ -84,6 +176,11 @@ describe "WM theme bootstrap ownership":
         expect(source).to_contain("[theme-override] path=/THEME.CSS mount=")
 
     it "installs the generated Aetheric snapshot before x86_64 compositor creation":
+        # @req REQ-WMTHEME-007
+        # @capture(statistics): byte-offset ordering of install/mount/theme-css/override/engine calls
+        # NOTE: legitimate RED, verified 2026-09-06 -- same x86_64 gui_entry_desktop.spl import-string
+        # drift as scenario "installs the generated Aetheric snapshot through one x86_64 owner" above.
+        step("Read the x86_64 embedded GUI entry and locate the theme-install, VFS-mount, and engine-creation calls")
         val source = file_read("examples/09_embedded/simple_os/arch/x86_64/gui_entry_desktop.spl")
         val install = source.index_of("install_generated_simpleos_wm_theme()")
         val mount = source.index_of("g_vfs_mounted = vfs_boot_init()")
@@ -103,6 +200,12 @@ describe "WM theme bootstrap ownership":
         expect(source).to_contain("[theme-override] path=/THEME.CSS mount=")
 
     it "installs the generated Aetheric snapshot before RV64 compositor creation":
+        # @req REQ-WMTHEME-008
+        # @capture(statistics): byte-offset ordering of install/mount/theme-css/override/font/engine calls
+        # NOTE: legitimate RED, verified 2026-09-06. examples/09_embedded/simple_os/arch/riscv64/
+        # gui_entry_desktop.spl no longer matches this scenario's expected call/import text -- upstream
+        # product drift, out of scope for this test-file-only batch.
+        step("Read the riscv64 embedded GUI entry and locate the theme-install, VFS-mount, font, and engine calls")
         val source = file_read("examples/09_embedded/simple_os/arch/riscv64/gui_entry_desktop.spl")
         val install = source.index_of("install_generated_simpleos_wm_theme()")
         val mount = source.index_of("val vfs_mounted = vfs_boot_init_riscv64_virtio_fat32()")
@@ -124,20 +227,41 @@ describe "WM theme bootstrap ownership":
 
     it "keeps boot FAT32 THEME.CSS short-name routing for both root-case variants":
         # @req REQ-SSPEC-OS
+        # @capture(tui_grid): boolean presence checks for THEME.CSS short-name routing across 8 boot modules
+        # NOTE: legitimate RED, verified 2026-09-06.
+        # src/os/services/vfs/direct_fat32_boot_reader.spl:672 compares the raw FAT short name against
+        # the literal "THEME.CSS" (with a dot); this scenario expects the 8.3-format literal
+        # "THEME  CSS" (space-padded, no dot, matching the on-disk FAT short-name field layout). Neither
+        # variant is present verbatim, so this may be a genuine root-case-routing gap in the boot reader
+        # -- filing that determination is out of scope for this test-file-only batch.
         step("keeps boot FAT32 THEME.CSS short-name routing for both root-case variants")
         val source = (file_read("src/os/services/vfs/vfs_boot_init.spl") + file_read("src/os/services/vfs/vfs_boot_core.spl") + file_read("src/os/services/vfs/vfs_boot_state.spl") + file_read("src/os/services/vfs/vfs_ambient_context.spl") + file_read("src/os/services/vfs/nvme_boot_runtime_owner.spl") + file_read("src/os/services/vfs/nvme_filesystem_direct_io.spl") + file_read("src/os/services/vfs/nvme_q35_lease_perf.spl") + file_read("src/os/services/vfs/direct_fat32_boot_reader.spl"))
-        expect(source.contains("if path == \"/THEME.CSS\" or path == \"/theme.css\":")).to_equal(true)
-        expect(source.contains("return \"THEME.CSS\"")).to_equal(true)
-        expect(source.contains("if short_name == \"THEME  CSS\":")).to_equal(true)
+        val routes_both_root_case_path_variants = source.contains("if path == \"/THEME.CSS\" or path == \"/theme.css\":")
+        val canonicalizes_to_uppercase_theme_css = source.contains("return \"THEME.CSS\"")
+        val matches_the_83_shortname_form = source.contains("if short_name == \"THEME  CSS\":")
+        expect(routes_both_root_case_path_variants).to_equal(true)
+        expect(canonicalizes_to_uppercase_theme_css).to_equal(true)
+        expect(matches_the_83_shortname_form).to_equal(true)
 
     it "does not let hosted state or a package registry override the SimpleOS boot theme":
+        # @req REQ-WMTHEME-009
+        # @capture(statistics): forbidden-import absence checks on the SimpleOS theme bootstrap module
+        step("Read the SimpleOS theme bootstrap module and confirm it stays independent of hosted/package state")
         val source = file_read("src/os/compositor/simpleos_wm_theme_bootstrap.spl")
         expect(source).to_contain("val snapshot = fluid_light_theme_render_snapshot()")
         val forbidden_active_import = "use common.ui.wm_chrome_theme." + "{" + "active_wm_theme_render_snapshot" + "}"
-        expect(source.contains(forbidden_active_import)).to_be(false)
-        expect(source.contains("use common.ui.theme_package.")).to_be(false)
+        val still_imports_forbidden_active_snapshot_accessor = source.contains(forbidden_active_import)
+        val still_imports_theme_package_registry = source.contains("use common.ui.theme_package.")
+        expect(still_imports_forbidden_active_snapshot_accessor).to_be(false)
+        expect(still_imports_theme_package_registry).to_be(false)
 
     it "projects the installed theme id without a freestanding optional pattern binding":
+        # @req REQ-WMTHEME-010
+        # @capture(statistics): presence/absence checks across the theme-id owner and desktop shell
+        # NOTE: legitimate RED, verified 2026-09-06. src/os/desktop/shell.spl no longer matches this
+        # scenario's expected "val installed_theme_id = active_wm_theme_id()" call text -- upstream
+        # product drift, out of scope for this test-file-only batch.
+        step("Read the theme-id owner module and the desktop shell module")
         val owner = file_read("src/lib/common/ui/wm_chrome_theme.spl")
         val shell = file_read("src/os/desktop/shell.spl")
         expect(owner).to_contain("fn active_wm_theme_id() -> text:")
@@ -147,6 +271,12 @@ describe "WM theme bootstrap ownership":
         expect(shell.contains("if val snapshot = active_wm_theme_render_snapshot():")).to_be(false)
 
     it "keeps native WM, web, taskbar, and capture consumers off the broken snapshot Option ABI":
+        # @req REQ-WMTHEME-011
+        # @capture(statistics): per-module absence check across 7 consumer modules, plus 2 presence checks
+        # NOTE: legitimate RED, verified 2026-09-06. one or more of the 7 listed consumer modules
+        # (or hosted_wm_capture_evidence.spl's expected replacement calls) no longer match this
+        # scenario's expectations -- upstream product drift, out of scope for this test-file-only batch.
+        step("Check each named WM/web/taskbar consumer module for the forbidden direct snapshot accessor")
         val sources = [
             "src/os/compositor/simple_web_window_renderer.spl",
             "src/os/compositor/wm_action_applier.spl",
@@ -157,8 +287,10 @@ describe "WM theme bootstrap ownership":
             "src/app/ui.web/_HostTaskbarRuntime/host_taskbar_runtime.spl"
         ]
         for path in sources:
-            val source = file_read(path)
-            expect(source.contains("active_wm_theme_render_snapshot()")).to_be(false)
+            val consumer_module_source = file_read(path)
+            val calls_forbidden_active_snapshot_accessor = consumer_module_source.contains("active_wm_theme_render_snapshot()")
+            expect(calls_forbidden_active_snapshot_accessor).to_be(false)
+        step("Confirm the capture evidence module uses the safe presence/unchecked accessor pair instead")
         val capture = file_read("src/os/compositor/hosted_wm_capture_evidence.spl")
         expect(capture).to_contain("active_wm_theme_snapshot_present()")
         expect(capture).to_contain("active_wm_theme_snapshot_unchecked()")

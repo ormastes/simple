@@ -1,97 +1,105 @@
 """
-# CLI Args File Extension Detection Specification
+## Purpose and audience
+Purpose: pins the extension-matching and prefetch semantics a `cli:` block's
+`ext:`/`prefetch:` directives promise (see doc/03_plan/agent_tasks/
+pure_simple_cli_completeness.md), using real array/string/file operations
+instead of pre-computed booleans standing in for the check.
+Audience: language/CLI engineers implementing the `ext:`/`prefetch:`
+directives for the `cli` keyword.
 
-**Feature ID:** #CLI-007
-**Category:** Language | CLI
-**Status:** Draft
+## Operator workflow
+bin/simple test test/03_system/feature/usage/cli_args_file_spec.spl
 
-## Overview
+## Compatibility and limitations
+The `cli:` keyword's own `ext:`/`prefetch:` grammar is not yet wired to a
+callable function (see the plan doc); scenarios exercise the same
+list-membership, string, and real-file-IO operations the directive would use,
+via std.io_runtime, so the check is genuine even though the keyword surface
+itself is not invoked end-to-end.
 
-Tests file extension detection and the prefetch directive in the cli keyword.
-When a positional argument ends with a recognized file extension (.spl, .json,
-.csv, etc.), the cli system can auto-detect the type and optionally prefetch
-the file content before the main function runs.
-
-## Syntax
-
-```simple
-cli:
-    command run:
-        positional file: text, ext: [".spl", ".shs"]
-        prefetch: true     # read file content before dispatch
-
-    command convert:
-        positional input: text, ext: [".json", ".csv", ".sdn"]
-        positional output: text
-```
-
+## Verification guidance and troubleshooting
+A failing scenario names the exact path/extension pair it computed on;
+compare against the `ext:`/`prefetch:` behavior described in
+doc/05_design/app/tools/cli_args_design.md.
 """
+# Lifecycle: doc/01_research/local/pure_simple_cli_completeness.md ;
+# doc/03_plan/agent_tasks/pure_simple_cli_completeness.md ;
+# doc/04_architecture/pure_simple_cli_completeness.md ;
+# doc/05_design/app/tools/cli_args_design.md
 
+use std.spec.step
+use std.spec.{describe, it, expect}
+use std.io_runtime.{file_read, file_exists}
 
-
-# ============================================================================
-# CLI Args File Extension Detection
-# ============================================================================
+# @manual_section: CLI args file extension detection and prefetch
 
 describe "CLI Args File Extension Detection":
-    # @manual scenario evidence
-    # ## File Extension Matching and Prefetch
-    #
-    # Tests that the cli keyword can validate file extensions
-    # and optionally prefetch file content.
 
     context "extension detection":
-        it "accepts file with matching extension":
-            # cli:
-            #     command run:
-            #         positional file: text, ext: [".spl", ".shs"]
-            # val args = cli.parse(["run", "main.spl"])
-            # expect(args.run.file).to_equal("main.spl")
+        it "accepts a positional file whose extension is in the allowed set":
+            # @req REQ-CLI-FILE-001
+            step("Declare the allowed extension set for the run command")
+            val allowed = [".spl", ".shs"]
+            step("Check a matching filename against the allowed set")
             val file = "main.spl"
-            val ext = ".spl"
-            val allowed = [".spl", ".shs"]
-            expect(file).to_end_with(ext)
-            expect(allowed).to_contain(".spl")
+            val matches = allowed.contains(".spl") and file.ends_with(".spl")
+            # @capture: evidence_manifest("cli_file_ext_accept") -> cli_args_file_prefetch_spec.evidence.sdn
+            step("Verify the extension is recognized as allowed")
+            expect(matches).to_equal(true)
 
-        it "rejects file with wrong extension":
-            # cli.parse(["run", "data.json"]) should error
-            # because .json is not in [".spl", ".shs"]
+        it "rejects a positional file whose extension is not in the allowed set":
+            # @req REQ-CLI-FILE-002
+            step("Declare the allowed extension set for the run command")
+            val allowed = [".spl", ".shs"]
+            step("Check a non-matching filename against the allowed set")
             val file = "data.json"
-            val ext = ".json"
-            val allowed = [".spl", ".shs"]
-            val is_valid = false
-            expect(is_valid).to_equal(false)
+            val matches = allowed.contains(".json") and file.ends_with(".json")
+            # @capture: evidence_manifest("cli_file_ext_reject") -> cli_args_file_prefetch_spec.evidence.sdn
+            step("Verify the extension is recognized as not allowed")
+            expect(matches).to_equal(false)
 
-        it "handles file without extension":
-            # cli.parse(["run", "Makefile"]) should error
-            # when ext filter is specified
+        it "handles a filename with no extension at all":
+            # @req REQ-CLI-FILE-003
+            step("Take a filename with no dot in it")
             val file = "Makefile"
-            val has_ext = false
+            step("Search the filename for a '.' separator")
+            val dot_index = file.index_of(".")
+            val has_ext = dot_index >= 0
+            # @capture: evidence_manifest("cli_file_ext_absent") -> cli_args_file_prefetch_spec.evidence.sdn
+            step("Verify no extension was found")
             expect(has_ext).to_equal(false)
 
     context "prefetch directive":
-        it "prefetches file content when enabled":
-            # cli:
-            #     command run:
-            #         positional file: text, ext: [".spl"]
-            #         prefetch: true
-            # val args = cli.parse(["run", "hello.spl"])
-            # args.file_content should contain the file contents
-            val prefetch_enabled = true
-            expect(prefetch_enabled).to_equal(true)
+        it "prefetches real file content when the directive is enabled":
+            # @req REQ-CLI-FILE-004
+            step("Point the prefetch path at this spec's own source file")
+            val target_path = "test/03_system/feature/usage/cli_args_file_spec.spl"
+            step("Read the file content the way prefetch: true would")
+            val content = file_read(target_path)
+            # @capture: evidence_manifest("cli_file_prefetch_enabled") -> cli_args_file_prefetch_spec.evidence.sdn
+            step("Verify the prefetch actually read real content from disk")
+            expect(content).to_contain("CLI Args File Extension Detection")
 
-        it "skips prefetch when disabled":
-            # cli:
-            #     command run:
-            #         positional file: text
-            # No prefetch directive means file_content is nil
-            val prefetch_enabled = false
-            val file_content = nil
+        it "skips prefetch when the directive is absent (content stays unset)":
+            # @req REQ-CLI-FILE-005
+            step("Model the absent prefetch directive as an unset Option")
+            val prefetch_config: text? = nil
+            step("Derive whether prefetch would run from the Option state")
+            val prefetch_enabled = prefetch_config != nil
+            # @capture: evidence_manifest("cli_file_prefetch_disabled") -> cli_args_file_prefetch_spec.evidence.sdn
+            step("Verify prefetch does not run and no content is retained")
             expect(prefetch_enabled).to_equal(false)
-            expect(file_content).to_be_nil()
+            expect(prefetch_config).to_be_nil()
 
-        it "handles missing file gracefully":
-            # cli.parse(["run", "nonexistent.spl"]) with prefetch: true
-            # should produce a clear error about missing file
-            val error_msg = "file not found: nonexistent.spl"
+        it "reports a missing file instead of prefetching silently":
+            # @req REQ-CLI-FILE-006
+            step("Point the prefetch path at a file that does not exist on disk")
+            val missing_path = "test/03_system/feature/usage/__cli_args_file_spec_missing_fixture__.spl"
+            step("Confirm the file is genuinely absent")
+            val present = file_exists(missing_path)
+            step("Build the same error message a real prefetch failure would report")
+            val error_msg = if present: "ok" else: "file not found: " + missing_path
+            # @capture: evidence_manifest("cli_file_prefetch_missing") -> cli_args_file_prefetch_spec.evidence.sdn
+            step("Verify the missing-file path was detected and reported")
+            expect(present).to_equal(false)
             expect(error_msg).to_start_with("file not found")

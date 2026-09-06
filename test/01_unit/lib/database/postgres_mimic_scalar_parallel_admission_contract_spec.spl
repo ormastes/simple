@@ -1,46 +1,89 @@
 """Source-level admission contract for scalar pgwire socket workers.
 
-These assertions cover ordering and boundary shape only.  A native vertical
-fixture remains the evidence gate for actual thread/socket execution.
+## Purpose and audience
+Freezes the admission ordering of the scalar parallel Linux server for
+database-layer maintainers: configuration admission and size ceilings run
+before ports bind, cancel outranks deadline, socket workers stay on scalar
+records, and reuseport construction stays behind the TcpListener facade.
+## Operator workflow
+Run `./src/compiler_rust/target/bootstrap/simple run
+test/01_unit/lib/database/postgres_mimic_scalar_parallel_admission_contract_spec.spl`
+and read the SPEC FILE VERDICT line.
+## Compatibility and limitations
+These assertions cover ordering and boundary shape only. A native vertical
+fixture remains the evidence gate for actual thread/socket execution. The
+contract reads shipped product source and asserts via named contract
+locals; it does not open sockets.
+## Verification guidance and troubleshooting
+A failure names which contract local or ordering index went wrong; grep
+the cited token in the cited source file to see what moved. RED here
+documents a real admission-ordering defect.
 """
+# Lifecycle: doc/01_research/local/postgres_mimic_server.md ;
+# doc/03_plan/agent_tasks/mcdc_rt_hal_hardening.md ;
+# doc/04_architecture/runtime/postgres_mimic_worker_scalar_abi.md ;
+# doc/05_design/postgres_mimic_scalar_dispatch_v1.md
+# @manual_section: scalar parallel admission contract
 
 use std.spec
 use std.io_runtime.{file_read}
 
 describe "Postgres mimic scalar parallel admission":
     it "rejects TLS-required and oversized worker configuration before ports bind":
+        # @req REQ-PG-SCALAR-ADMIT-001
+        # @capture(bit_table): admission token presence and bind-ordering indexes
+        step("Read parallel_linux_server.spl and verify admission guards precede the reuseport bind")
         val source = file_read(
             "src/lib/nogc_async_mut/database/postgres_mimic/parallel_linux_server.spl")
         val entry = source.index_of("me serve_scalar_parallel_bounded(max_connections: i64)")
         val admission = source.index_of("pg_scalar_config_admissible(self.ssl_policy,")
         val listener = source.index_of("TcpListener.bind_reuseport(self.address)")
-        expect(source).to_contain("const PG_SCALAR_CONFIG_MAX_TEXT: i64 = 256")
-        expect(source).to_contain("if policy == PgWireSslPolicy.Required: return false")
-        expect(source).to_contain("user_length > 0 and user_length <= PG_SCALAR_CONFIG_MAX_TEXT")
-        expect(source).to_contain("database_length > 0 and database_length <= PG_SCALAR_CONFIG_MAX_TEXT")
+        val pins_config_text_ceiling = source.contains("const PG_SCALAR_CONFIG_MAX_TEXT: i64 = 256")
+        val rejects_tls_required_policy = source.contains("if policy == PgWireSslPolicy.Required: return false")
+        val bounds_user_field_length = source.contains("user_length > 0 and user_length <= PG_SCALAR_CONFIG_MAX_TEXT")
+        val bounds_database_field_length = source.contains("database_length > 0 and database_length <= PG_SCALAR_CONFIG_MAX_TEXT")
+        expect(pins_config_text_ceiling).to_equal(true)  # oracle: the admission contract pins a 256-char config field ceiling
+        expect(rejects_tls_required_policy).to_equal(true)  # oracle: a Required TLS policy must fail admission outright
+        expect(bounds_user_field_length).to_equal(true)  # oracle: the user field must be non-empty and within the ceiling
+        expect(bounds_database_field_length).to_equal(true)  # oracle: the database field must be non-empty and within the ceiling
         expect(entry).to_be_greater_than(0)
         expect(admission).to_be_greater_than(entry)
         expect(listener).to_be_greater_than(admission)
 
     it "cancels a claimed connection before evaluating its request deadline":
+        # @req REQ-PG-SCALAR-ADMIT-002
+        # @capture(bit_table): cancel-vs-deadline ordering indexes
+        step("Read parallel_linux_server.spl and verify cancel handling precedes the deadline check")
         val source = file_read(
             "src/lib/nogc_async_mut/database/postgres_mimic/parallel_linux_server.spl")
         val cancel = source.index_of("if operation == 2:")
         val deadline = source.index_of("if timeout_ms <= 0 or max_response <= 0 or deadline <= now_ms:")
+        val routes_cancel_to_owner = source.contains("current_owner.dispatch.cancel_connection(connection)")
         expect(cancel).to_be_greater_than(0)
         expect(deadline).to_be_greater_than(cancel)
-        expect(source).to_contain("current_owner.dispatch.cancel_connection(connection)")
+        expect(routes_cancel_to_owner).to_equal(true)  # oracle: cancel must be dispatched through the owning connection
 
     it "uses only scalar runtime descriptor and config records for socket workers":
+        # @req REQ-PG-SCALAR-ADMIT-003
+        # @capture(bit_table): scalar-record presence and registry-forbidden verdicts
+        step("Read parallel_linux_server.spl and verify socket workers use scalar records with no registry types")
         val source = file_read(
             "src/lib/nogc_async_mut/database/postgres_mimic/parallel_linux_server.spl")
-        expect(source).to_contain("rt_pg_wire_server_config_scalar_new")
-        expect(source).to_contain("rt_pg_worker_descriptor_new(worker_id, listener_fd,")
-        expect(source.contains("rt_pg_dispatch_gate_registry")).to_equal(false)
-        expect(source.contains("rt_pg_wire_server_config_registry")).to_equal(false)
-        expect(source.contains("PgWireServerConfig")).to_equal(false)
+        val uses_scalar_config_record = source.contains("rt_pg_wire_server_config_scalar_new")
+        val uses_scalar_worker_descriptor = source.contains("rt_pg_worker_descriptor_new(worker_id, listener_fd,")
+        val references_dispatch_gate_registry = source.contains("rt_pg_dispatch_gate_registry")
+        val references_wire_config_registry = source.contains("rt_pg_wire_server_config_registry")
+        val references_struct_config_type = source.contains("PgWireServerConfig")
+        expect(uses_scalar_config_record).to_equal(true)  # oracle: socket workers take the scalar config record constructor
+        expect(uses_scalar_worker_descriptor).to_equal(true)  # oracle: socket workers take the scalar runtime descriptor
+        expect(references_dispatch_gate_registry).to_equal(false)  # oracle: the registry gate ABI is retired for socket workers
+        expect(references_wire_config_registry).to_equal(false)  # oracle: the config registry ABI is retired for socket workers
+        expect(references_struct_config_type).to_equal(false)  # oracle: the struct config type must not reach socket workers
 
     it "constructs reuseport listeners behind the TcpListener owner facade":
+        # @req REQ-PG-SCALAR-ADMIT-003
+        # @capture(bit_table): facade-vs-backend ordering indexes
+        step("Read tcp.spl and verify bind_reuseport delegates to the platform backend behind the facade")
         val source = file_read("src/lib/nogc_sync_mut/io/tcp.spl")
         val constructor = source.index_of("static fn bind_reuseport(addr: text)")
         val backend = source.index_of("tcp_backend_bind_with_reuseport(addr)")

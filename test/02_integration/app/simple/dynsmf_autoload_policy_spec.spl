@@ -84,9 +84,15 @@ fn ordinary_registry_trust_source(fixture) -> text:
 
 describe "dynSMF startup autoload policy":
     # @manual scenario evidence
+    # NOTE (2026-09-05): RED before modernization and kept RED — the queued
+    # evidence count/reasons drifted from the pinned admission contract
+    # (evidence rows for file_io/gui_renderer no longer match the expected
+    # compile_background/queued/failed sequence). Product defect; assertions
+    # kept at full strength.
     it "queues background compile evidence before checked autoload for missing artifacts":
         # @req REQ-SSPEC-INTEGRATION
         # @req REQ-010
+        # @capture(statistics): background-compile evidence rows queued per missing startup artifact
         step("queues background compile evidence before checked autoload for missing artifacts")
         val manifest = [
             DynSmfManifestEntry(id: "file_io", path: "build/dynsmf/startup_missing_file_io.smf", source_module: "std.io", artifact_kind: "precompiled_smf", abi_version: "1", default_autoload: true, exports: ["open"]),
@@ -111,52 +117,61 @@ describe "dynSMF startup autoload policy":
     it "demand-load policy: default startup loads nothing and queues nothing":
         # @req REQ-005
         # @req REQ-SSPEC-INTEGRATION
+        # @capture(statistics): loaded and evidence counts for a plain demand-only startup
         step("demand-load policy: default startup loads nothing and queues nothing")
         # Perf program 2026-08-10: the seven stdlib-like entries are
         # demand-loaded, so a plain startup session performs zero loads,
         # zero background-compile queueing, and zero spawns.
         val session = dynsmf_startup_session_from_values([], "", "", "integration-default")
-        expect(session.loaded.len()).to_equal(0)
-        expect(session.evidence.len()).to_equal(0)
+        expect(session.loaded.len()).to_equal(0)  # oracle: demand-only startup loads no artifact without an OS-owned request
+        expect(session.evidence.len()).to_equal(0)  # oracle: a plain startup queues no background compiles and spawns nothing
 
         # @req REQ-009
     it "skip-all startup policy still yields an empty demand-load startup session":
         # @req REQ-SSPEC-INTEGRATION
+        # @capture(statistics): loaded and evidence counts under --no-dynsmf and SIMPLE_DYNSMF=0
         step("skip-all startup policy still yields an empty demand-load startup session")
         val by_arg = dynsmf_startup_session_from_values(["--no-dynsmf"], "", "", "integration-no-arg")
-        expect(by_arg.loaded.len()).to_equal(0)
+        expect(by_arg.loaded.len()).to_equal(0)  # oracle: --no-dynsmf must load nothing at startup
         expect(by_arg.policy.source).to_equal("arg:--no-dynsmf")
-        expect(by_arg.evidence.len()).to_equal(0)
+        expect(by_arg.evidence.len()).to_equal(0)  # oracle: the skip-all policy queues no evidence either
 
         val by_env = dynsmf_startup_session_from_values([], "0", "", "integration-no-env")
-        expect(by_env.loaded.len()).to_equal(0)
+        expect(by_env.loaded.len()).to_equal(0)  # oracle: SIMPLE_DYNSMF=0 must load nothing at startup
         expect(by_env.policy.source).to_equal("env:SIMPLE_DYNSMF")
-        expect(by_env.evidence.len()).to_equal(0)
+        expect(by_env.evidence.len()).to_equal(0)  # oracle: the environment opt-out also queues nothing
 
     it "honors per-id disable policy on an explicit autoload manifest":
         # @req REQ-SSPEC-INTEGRATION
+        # @capture(statistics): skip evidence rows under --disable-dynsmf=tui_renderer
         step("honors per-id disable policy on an explicit autoload manifest")
         val manifest = [
             DynSmfManifestEntry(id: "tui_renderer", path: "build/dynsmf/policy_tui_renderer.smf", source_module: "app.ui.render.tui_widgets", artifact_kind: "precompiled_smf", abi_version: "1", default_autoload: true, exports: ["render_tui_tree"])
         ]
         val session = dynsmf_startup_session_for_manifest_from_values(["--disable-dynsmf=tui_renderer"], "", "", "integration-disable", manifest)
-        expect(session.loaded.len()).to_equal(0)
+        expect(session.loaded.len()).to_equal(0)  # oracle: a disabled id must never load at startup
         var saw_skip = false
         for row in session.evidence:
             if row.library_id == "tui_renderer" and row.action == "skip":
                 saw_skip = true
         expect(saw_skip).to_equal(true)
 
+    # NOTE (2026-09-05): RED before modernization and kept RED — the app-root
+    # --dynsmf-status render no longer carries the pinned
+    # "dynsmf admission=unconfigured status=fail_closed" line (observed output
+    # reports policy=default with no admission line). Product/status-render
+    # defect; assertions kept at full strength.
     it "exposes app root dynSMF status evidence without noisy plain startup":
         # @req REQ-SSPEC-INTEGRATION
         # @req REQ-006
+        # @capture(tui_grid): app-root --dynsmf-status stdout pinned as status evidence
         step("exposes app root dynSMF status evidence without noisy plain startup")
         val (plain_out, plain_err, plain_code) = run_app_root_dynsmf([])
-        expect(plain_code).to_equal(0)
+        expect(plain_code).to_equal(0)  # oracle: plain startup exits successfully
         expect(plain_out).to_equal("")
 
         val (out, err, code) = run_app_root_dynsmf(["--dynsmf-status"])
-        expect(code).to_equal(0)
+        expect(code).to_equal(0)  # oracle: the status command exits successfully
         expect(out).to_contain("dynsmf session=app-root")
         expect(out).to_contain("loaded=0")
         expect(out).to_contain("dynsmf admission=unconfigured status=fail_closed")
@@ -164,13 +179,22 @@ describe "dynSMF startup autoload policy":
     it "exposes app root dynSMF opt-out evidence":
         # @req REQ-SSPEC-INTEGRATION
         # @req REQ-007
+        # @capture(tui_grid): app-root opt-out status stdout pinned as evidence
         step("exposes app root dynSMF opt-out evidence")
         val (out, err, code) = run_app_root_dynsmf(["--no-dynsmf", "--dynsmf-status"])
-        expect(code).to_equal(0)
+        expect(code).to_equal(0)  # oracle: the opt-out status command exits successfully
         expect(out).to_contain("policy=arg:--no-dynsmf")
         expect(out).to_contain("loaded=0")
 
+    # NOTE (2026-09-05): RED before modernization and kept RED — the app-root
+    # status run against a work-dir simple_dynload.sdn no longer matches the
+    # pinned file_io:load evidence lines (observed output reports
+    # policy=default with artifact_missing_file evidence instead). Product
+    # defect in the status-path admission render; assertions kept.
     it "consumes simple_dynload.sdn only on the explicit status path":
+        # @req REQ-SSPEC-INTEGRATION
+        # @capture(tui_grid): work-dir config status stdout pinned as evidence
+        step("consume simple_dynload.sdn only on the explicit status path")
         val work_dir = "/tmp/simple_dynload_status_cutover_" + rt_getpid().to_text()
         val (_, _, mkdir_code) = rt_process_run("mkdir", ["-p", work_dir])
         val config_path = work_dir + "/simple_dynload.sdn"
@@ -180,14 +204,21 @@ describe "dynSMF startup autoload policy":
         # Source-run logging may create a nested .simple/logs tree in the
         # isolated working directory. Remove only this PID-scoped fixture.
         val (_, _, cleanup_code) = rt_process_run("rm", ["-rf", work_dir])
-        expect(mkdir_code).to_equal(0)
-        expect(cleanup_code).to_equal(0)
-        expect(code).to_equal(0)
+        expect(mkdir_code).to_equal(0)  # oracle: the PID-scoped fixture directory must be creatable
+        expect(cleanup_code).to_equal(0)  # oracle: the PID-scoped fixture must be removable
+        expect(code).to_equal(0)  # oracle: the status command exits successfully even with a config present
         expect(out).to_contain("file_io:load")
         expect(out).to_contain("trusted_admission_missing")
         expect(out.contains("spawned_pid:")).to_equal(false)
 
+    # NOTE (2026-09-05): RED before modernization and kept RED — the
+    # meta-command guard ordering/behavior drifted from the pinned policy
+    # fields (observed --help/--version sessions no longer match the expected
+    # empty evidence sets). Product defect; assertions kept at full strength.
     it "keeps direct root meta commands ahead of config and registry startup owners":
+        # @req REQ-SSPEC-INTEGRATION
+        # @capture(statistics): meta-command session policy and evidence counts
+        step("keep direct root meta commands ahead of config and registry startup owners")
         val manifest = [
             DynSmfManifestEntry(id: "file_io", path: "build/dynsmf/meta_guard_missing_file_io.smf", source_module: "std.io", artifact_kind: "precompiled_smf", abi_version: "1", default_autoload: true, exports: ["open"])
         ]
@@ -199,15 +230,15 @@ describe "dynSMF startup autoload policy":
             ["--version", "--no-dynsmf"], "meta-version", manifest, missing_config, invalid_registry)
         expect(help.session_id).to_equal("meta-help")
         expect(help.policy.source).to_equal("arg:--disable-dynsmf")
-        expect(help.policy.disabled_ids.len()).to_equal(1)
+        expect(help.policy.disabled_ids.len()).to_equal(1)  # oracle: only file_io is disabled by the --disable-dynsmf flag
         expect(help.policy.disabled_ids[0]).to_equal("file_io")
-        expect(help.loaded.len()).to_equal(0)
-        expect(help.evidence.len()).to_equal(0)
+        expect(help.loaded.len()).to_equal(0)  # oracle: the --help meta command loads no startup artifact
+        expect(help.evidence.len()).to_equal(0)  # oracle: the --help meta command queues no evidence
         expect(version.session_id).to_equal("meta-version")
         expect(version.policy.source).to_equal("arg:--no-dynsmf")
         expect(version.policy.disabled_all).to_equal(true)
-        expect(version.loaded.len()).to_equal(0)
-        expect(version.evidence.len()).to_equal(0)
+        expect(version.loaded.len()).to_equal(0)  # oracle: the --version meta command loads no startup artifact
+        expect(version.evidence.len()).to_equal(0)  # oracle: the --version meta command queues no evidence
 
         # The hard terminator makes the following token a program argument.
         # It must not trigger the root meta-command short circuit.
@@ -216,7 +247,15 @@ describe "dynSMF startup autoload policy":
         expect(after_boundary.session_id).to_equal("meta-boundary")
         expect(after_boundary.evidence.len()).to_be_greater_than(0)
 
+    # NOTE (2026-09-05): RED before modernization and kept RED — the pinned
+    # source-order tokens in dynsmf_autoload.spl / component_dynsmf_wiring.spl
+    # / component_admission.spl no longer match the shipped sources at the
+    # pinned positions. Source-contract drift; assertions kept at full
+    # strength.
     it "orders the meta guard before trace environment file config and registry owners":
+        # @req REQ-SSPEC-INTEGRATION
+        # @capture(bit_table): meta-guard ordering pins across startup, wiring, and admission sources
+        step("order the meta guard before trace environment file config and registry owners")
         val source = file_read_text("src/app/startup/dynsmf_autoload.spl")
         val entry_start = source.index_of("pub fn dynsmf_startup_session_with_registry_dynload_config(")
         val entry = source.substring(entry_start, source.len())
@@ -259,7 +298,14 @@ describe "dynSMF startup autoload policy":
         expect(admission_body.contains("file_read_text(")).to_equal(false)
         expect(admission_body.contains("rt_file_")).to_equal(false)
 
+    # NOTE (2026-09-05): RED before modernization and kept RED — one or more
+    # pinned admission tokens below are absent from the shipped
+    # dynsmf_autoload.spl (source-contract drift). Assertions kept at full
+    # strength.
     it "uses one retained digest-verified byte image for admitted autoload":
+        # @req REQ-SSPEC-INTEGRATION
+        # @capture(bit_table): retained-byte-image admission pins from the startup source
+        step("use one retained digest-verified byte image for admitted autoload")
         val source = file_read_text("src/app/startup/dynsmf_autoload.spl")
         expect(source).to_contain("val exact_bytes = file_read_bytes(request.artifact.path)")
         expect(source).to_contain("sha256_u8_hex(exact_bytes) != request.artifact.content_hash")
@@ -267,6 +313,9 @@ describe "dynSMF startup autoload policy":
         expect(source).to_contain("dynsmf_session_load_admitted(session, id, request, exact_bytes)")
         expect(source).to_contain("dynsmf_session_load_admitted(session, id, admitted!.request, admitted!.artifact_bytes)")
         expect(source).to_contain("_dynsmf_startup_queue_missing_without_artifact_read")
-        expect(source.contains("dynsmf_session_queue_missing_background_compiles(")).to_equal(false)
-        expect(source.contains("dynsmf_session_load_checked(")).to_equal(false)
-        expect(source.contains("dynsmf_session_autoload_checked(")).to_equal(false)
+        val queue_missing_background_compiles_retired = source.contains("dynsmf_session_queue_missing_background_compiles(")
+        val load_checked_retired = source.contains("dynsmf_session_load_checked(")
+        val autoload_checked_retired = source.contains("dynsmf_session_autoload_checked(")
+        expect(queue_missing_background_compiles_retired).to_equal(false)  # oracle: background-compile queueing moved behind the no-artifact-read helper
+        expect(load_checked_retired).to_equal(false)  # oracle: checked autoload loading is retired from the startup path
+        expect(autoload_checked_retired).to_equal(false)  # oracle: autoload-checked loading is retired from the startup path

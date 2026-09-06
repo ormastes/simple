@@ -1,10 +1,33 @@
-# Purpose and audience: executable specification evidence for the owning engineering team.
-# @req REQ-SSPEC-COMPILER
-# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+"""
+# research: doc/01_research/compiler/backend/backend_completeness_summary.md ; plan: doc/03_plan/compiler/backend/arm32_x86_32_native_backend_plan.md ; architecture: doc/04_architecture/compiler/backend/unified_backend_architecture.md ; design: doc/05_design/compiler/backend/backend_architecture.md
+## Purpose and audience
+Executable golden-byte evidence for the x86_64 native crypto instruction
+encoders (AES-NI, SHA-NI, CRC32, PCLMULQDQ) in
+`compiler.backend.native.encode_x86_64_crypto`. Audience: compiler backend
+engineers verifying or extending x86_64 crypto-extension code generation.
+REQ-SSPEC-COMPILER, REQ-COMPILER-BACKEND-ENCODE-X86-CRYPTO.
 
-# Purpose and audience: executable specification evidence for the owning engineering team.
-# @req REQ-SSPEC-COMPILER
-# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+## Operator workflow
+Run this file with `bin/simple run test/01_unit/compiler/backend/encode_x86_64_crypto_spec.spl`.
+Interpreter mode only verifies file loading and describe/it reachability;
+compiled-mode execution exercises the byte-level assertions. Each scenario
+calls one emit_* encoder with fixed register operands and checks the returned
+byte sequence against a hand-derived Intel SDM opcode encoding.
+
+## Compatibility and limitations
+Goldens cover only the listed AES-NI, SHA-NI, CRC32 and PCLMULQDQ
+instructions with a small, fixed set of register operands (including one
+REX.R prefix case for a destination register number >= 8); other prefix
+combinations (REX.W, REX.B, REX.X) and register-number combinations are not
+covered here.
+
+## Verification guidance and troubleshooting
+On a failing scenario, recompute the expected byte sequence from the Intel
+SDM Vol 2 opcode table entry for that instruction (prefix bytes, opcode
+map/escape bytes, opcode byte, ModRM byte, and any immediate byte) and
+compare against the oracle comment on the failing assertion, which names
+what that byte encodes.
+"""
 
 # x86_64 Crypto Encoder — Golden Byte Tests
 #
@@ -19,6 +42,7 @@
 #   describe/it block reachability.  The assertions inside it-blocks are not
 #   executed.  Compiled-mode execution will exercise them.
 
+use std.spec.step
 use compiler.backend.native.encode_x86_64_crypto.{
     emit_aesenc,
     emit_aesenclast,
@@ -39,146 +63,192 @@ use compiler.backend.native.encode_x86_64_crypto.{
 # AES-NI Instructions (66 0F 38 xx /r)
 # ============================================================================
 
+# @manual_section: x86_64 AES-NI encoders
 describe "x86 AES-NI encoder — golden bytes":
     it "emit_aesenc(0,0) → [0x66, 0x0F, 0x38, 0xDC, 0xC0]":
+        step("Encode AESENC for dst=0, src=0 and inspect the emitted bytes")
+        # @req REQ-COMPILER-BACKEND-ENCODE-X86-CRYPTO
+        # @capture(bit_table): 5-byte AESENC instruction encoding
         val bytes = emit_aesenc(0, 0)
-        expect(bytes.len()).to_equal(5)
-        expect(bytes[0]).to_equal(0x66)
-        expect(bytes[1]).to_equal(0x0F)
-        expect(bytes[2]).to_equal(0x38)
-        expect(bytes[3]).to_equal(0xDC)
-        expect(bytes[4]).to_equal(0xC0)
+        expect(bytes.len()).to_equal(5)  # oracle: 66 0F 38 DC /r has no REX or immediate, so 5 bytes total
+        expect(bytes[0]).to_equal(0x66)  # oracle: mandatory operand-size-override prefix for AES-NI
+        expect(bytes[1]).to_equal(0x0F)  # oracle: two-byte opcode escape
+        expect(bytes[2]).to_equal(0x38)  # oracle: 0F 38 opcode map selector for AESENC
+        expect(bytes[3]).to_equal(0xDC)  # oracle: AESENC opcode byte per Intel SDM Vol 2
+        expect(bytes[4]).to_equal(0xC0)  # oracle: ModRM = 11 000 000, reg=dst(0), rm=src(0), mod=register-direct
 
     it "emit_aesenc(8,0) → [0x66, 0x44, 0x0F, 0x38, 0xDC, 0xC0] (REX.R for dst>=8)":
+        step("Encode AESENC for dst=8, src=0 and confirm the REX.R prefix appears")
+        # @req REQ-COMPILER-BACKEND-ENCODE-X86-CRYPTO
+        # @capture(bit_table): 6-byte AESENC instruction encoding with REX.R prefix
         val bytes = emit_aesenc(8, 0)
-        expect(bytes.len()).to_equal(6)
-        expect(bytes[0]).to_equal(0x66)
-        expect(bytes[1]).to_equal(0x44)
-        expect(bytes[2]).to_equal(0x0F)
-        expect(bytes[3]).to_equal(0x38)
-        expect(bytes[4]).to_equal(0xDC)
-        expect(bytes[5]).to_equal(0xC0)
+        expect(bytes.len()).to_equal(6)  # oracle: dst register number >= 8 requires a REX.R prefix byte, so 6 bytes total
+        expect(bytes[0]).to_equal(0x66)  # oracle: mandatory operand-size-override prefix for AES-NI
+        expect(bytes[1]).to_equal(0x44)  # oracle: REX prefix 0100 R00B with R=1 to extend ModRM.reg (dst=8) into bit 3
+        expect(bytes[2]).to_equal(0x0F)  # oracle: two-byte opcode escape
+        expect(bytes[3]).to_equal(0x38)  # oracle: 0F 38 opcode map selector for AESENC
+        expect(bytes[4]).to_equal(0xDC)  # oracle: AESENC opcode byte per Intel SDM Vol 2
+        expect(bytes[5]).to_equal(0xC0)  # oracle: ModRM = 11 000 000, reg=dst(8 low 3 bits=0), rm=src(0)
 
     it "emit_aesenclast(0,0) → [0x66, 0x0F, 0x38, 0xDD, 0xC0]":
+        step("Encode AESENCLAST for dst=0, src=0 and inspect the emitted bytes")
+        # @req REQ-COMPILER-BACKEND-ENCODE-X86-CRYPTO
+        # @capture(bit_table): 5-byte AESENCLAST instruction encoding
         val bytes = emit_aesenclast(0, 0)
-        expect(bytes.len()).to_equal(5)
-        expect(bytes[0]).to_equal(0x66)
-        expect(bytes[1]).to_equal(0x0F)
-        expect(bytes[2]).to_equal(0x38)
-        expect(bytes[3]).to_equal(0xDD)
-        expect(bytes[4]).to_equal(0xC0)
+        expect(bytes.len()).to_equal(5)  # oracle: 66 0F 38 DD /r has no REX or immediate, so 5 bytes total
+        expect(bytes[0]).to_equal(0x66)  # oracle: mandatory operand-size-override prefix for AES-NI
+        expect(bytes[1]).to_equal(0x0F)  # oracle: two-byte opcode escape
+        expect(bytes[2]).to_equal(0x38)  # oracle: 0F 38 opcode map selector for AESENCLAST
+        expect(bytes[3]).to_equal(0xDD)  # oracle: AESENCLAST opcode byte per Intel SDM Vol 2
+        expect(bytes[4]).to_equal(0xC0)  # oracle: ModRM = 11 000 000, reg=dst(0), rm=src(0), mod=register-direct
 
     it "emit_aesdec(0,0) → [0x66, 0x0F, 0x38, 0xDE, 0xC0]":
+        step("Encode AESDEC for dst=0, src=0 and inspect the emitted bytes")
+        # @req REQ-COMPILER-BACKEND-ENCODE-X86-CRYPTO
+        # @capture(bit_table): 5-byte AESDEC instruction encoding
         val bytes = emit_aesdec(0, 0)
-        expect(bytes.len()).to_equal(5)
-        expect(bytes[0]).to_equal(0x66)
-        expect(bytes[1]).to_equal(0x0F)
-        expect(bytes[2]).to_equal(0x38)
-        expect(bytes[3]).to_equal(0xDE)
-        expect(bytes[4]).to_equal(0xC0)
+        expect(bytes.len()).to_equal(5)  # oracle: 66 0F 38 DE /r has no REX or immediate, so 5 bytes total
+        expect(bytes[0]).to_equal(0x66)  # oracle: mandatory operand-size-override prefix for AES-NI
+        expect(bytes[1]).to_equal(0x0F)  # oracle: two-byte opcode escape
+        expect(bytes[2]).to_equal(0x38)  # oracle: 0F 38 opcode map selector for AESDEC
+        expect(bytes[3]).to_equal(0xDE)  # oracle: AESDEC opcode byte per Intel SDM Vol 2
+        expect(bytes[4]).to_equal(0xC0)  # oracle: ModRM = 11 000 000, reg=dst(0), rm=src(0), mod=register-direct
 
     it "emit_aesdeclast(0,0) → [0x66, 0x0F, 0x38, 0xDF, 0xC0]":
+        step("Encode AESDECLAST for dst=0, src=0 and inspect the emitted bytes")
+        # @req REQ-COMPILER-BACKEND-ENCODE-X86-CRYPTO
+        # @capture(bit_table): 5-byte AESDECLAST instruction encoding
         val bytes = emit_aesdeclast(0, 0)
-        expect(bytes.len()).to_equal(5)
-        expect(bytes[0]).to_equal(0x66)
-        expect(bytes[1]).to_equal(0x0F)
-        expect(bytes[2]).to_equal(0x38)
-        expect(bytes[3]).to_equal(0xDF)
-        expect(bytes[4]).to_equal(0xC0)
+        expect(bytes.len()).to_equal(5)  # oracle: 66 0F 38 DF /r has no REX or immediate, so 5 bytes total
+        expect(bytes[0]).to_equal(0x66)  # oracle: mandatory operand-size-override prefix for AES-NI
+        expect(bytes[1]).to_equal(0x0F)  # oracle: two-byte opcode escape
+        expect(bytes[2]).to_equal(0x38)  # oracle: 0F 38 opcode map selector for AESDECLAST
+        expect(bytes[3]).to_equal(0xDF)  # oracle: AESDECLAST opcode byte per Intel SDM Vol 2
+        expect(bytes[4]).to_equal(0xC0)  # oracle: ModRM = 11 000 000, reg=dst(0), rm=src(0), mod=register-direct
 
     it "emit_aesimc(0,0) → [0x66, 0x0F, 0x38, 0xDB, 0xC0]":
+        step("Encode AESIMC for dst=0, src=0 and inspect the emitted bytes")
+        # @req REQ-COMPILER-BACKEND-ENCODE-X86-CRYPTO
+        # @capture(bit_table): 5-byte AESIMC instruction encoding
         val bytes = emit_aesimc(0, 0)
-        expect(bytes.len()).to_equal(5)
-        expect(bytes[0]).to_equal(0x66)
-        expect(bytes[1]).to_equal(0x0F)
-        expect(bytes[2]).to_equal(0x38)
-        expect(bytes[3]).to_equal(0xDB)
-        expect(bytes[4]).to_equal(0xC0)
+        expect(bytes.len()).to_equal(5)  # oracle: 66 0F 38 DB /r has no REX or immediate, so 5 bytes total
+        expect(bytes[0]).to_equal(0x66)  # oracle: mandatory operand-size-override prefix for AES-NI
+        expect(bytes[1]).to_equal(0x0F)  # oracle: two-byte opcode escape
+        expect(bytes[2]).to_equal(0x38)  # oracle: 0F 38 opcode map selector for AESIMC
+        expect(bytes[3]).to_equal(0xDB)  # oracle: AESIMC opcode byte per Intel SDM Vol 2
+        expect(bytes[4]).to_equal(0xC0)  # oracle: ModRM = 11 000 000, reg=dst(0), rm=src(0), mod=register-direct
 
     it "emit_aeskeygenassist(0,0,0x10) → [0x66, 0x0F, 0x3A, 0xDF, 0xC0, 0x10]":
+        step("Encode AESKEYGENASSIST for dst=0, src=0, rcon=0x10 and inspect the emitted bytes")
+        # @req REQ-COMPILER-BACKEND-ENCODE-X86-CRYPTO
+        # @capture(bit_table): 6-byte AESKEYGENASSIST instruction encoding with immediate
         val bytes = emit_aeskeygenassist(0, 0, 0x10)
-        expect(bytes.len()).to_equal(6)
-        expect(bytes[0]).to_equal(0x66)
-        expect(bytes[1]).to_equal(0x0F)
-        expect(bytes[2]).to_equal(0x3A)
-        expect(bytes[3]).to_equal(0xDF)
-        expect(bytes[4]).to_equal(0xC0)
-        expect(bytes[5]).to_equal(0x10)
+        expect(bytes.len()).to_equal(6)  # oracle: 66 0F 3A DF /r ib carries a trailing immediate byte, so 6 bytes total
+        expect(bytes[0]).to_equal(0x66)  # oracle: mandatory operand-size-override prefix for AES-NI
+        expect(bytes[1]).to_equal(0x0F)  # oracle: two-byte opcode escape
+        expect(bytes[2]).to_equal(0x3A)  # oracle: 0F 3A opcode map selector for AESKEYGENASSIST
+        expect(bytes[3]).to_equal(0xDF)  # oracle: AESKEYGENASSIST opcode byte per Intel SDM Vol 2
+        expect(bytes[4]).to_equal(0xC0)  # oracle: ModRM = 11 000 000, reg=dst(0), rm=src(0), mod=register-direct
+        expect(bytes[5]).to_equal(0x10)  # oracle: trailing immediate byte, the round-constant operand echoed verbatim
 
 # ============================================================================
 # SHA-NI Instructions (0F 38 xx /r)
 # ============================================================================
 
+# @manual_section: x86_64 SHA-NI encoders
 describe "x86 SHA-NI encoder — golden bytes":
     it "emit_sha256rnds2(0,0) → [0x0F, 0x38, 0xCB, 0xC0]":
+        step("Encode SHA256RNDS2 for dst=0, src=0 and inspect the emitted bytes")
+        # @req REQ-COMPILER-BACKEND-ENCODE-X86-CRYPTO
+        # @capture(bit_table): 4-byte SHA256RNDS2 instruction encoding
         val bytes = emit_sha256rnds2(0, 0)
-        expect(bytes.len()).to_equal(4)
-        expect(bytes[0]).to_equal(0x0F)
-        expect(bytes[1]).to_equal(0x38)
-        expect(bytes[2]).to_equal(0xCB)
-        expect(bytes[3]).to_equal(0xC0)
+        expect(bytes.len()).to_equal(4)  # oracle: 0F 38 CB /r has no mandatory prefix, REX or immediate, so 4 bytes total
+        expect(bytes[0]).to_equal(0x0F)  # oracle: two-byte opcode escape
+        expect(bytes[1]).to_equal(0x38)  # oracle: 0F 38 opcode map selector for SHA256RNDS2
+        expect(bytes[2]).to_equal(0xCB)  # oracle: SHA256RNDS2 opcode byte per Intel SDM Vol 2
+        expect(bytes[3]).to_equal(0xC0)  # oracle: ModRM = 11 000 000, reg=dst(0), rm=src(0), mod=register-direct
 
     it "emit_sha256msg1(0,0) → [0x0F, 0x38, 0xCC, 0xC0]":
+        step("Encode SHA256MSG1 for dst=0, src=0 and inspect the emitted bytes")
+        # @req REQ-COMPILER-BACKEND-ENCODE-X86-CRYPTO
+        # @capture(bit_table): 4-byte SHA256MSG1 instruction encoding
         val bytes = emit_sha256msg1(0, 0)
-        expect(bytes.len()).to_equal(4)
-        expect(bytes[0]).to_equal(0x0F)
-        expect(bytes[1]).to_equal(0x38)
-        expect(bytes[2]).to_equal(0xCC)
-        expect(bytes[3]).to_equal(0xC0)
+        expect(bytes.len()).to_equal(4)  # oracle: 0F 38 CC /r has no mandatory prefix, REX or immediate, so 4 bytes total
+        expect(bytes[0]).to_equal(0x0F)  # oracle: two-byte opcode escape
+        expect(bytes[1]).to_equal(0x38)  # oracle: 0F 38 opcode map selector for SHA256MSG1
+        expect(bytes[2]).to_equal(0xCC)  # oracle: SHA256MSG1 opcode byte per Intel SDM Vol 2
+        expect(bytes[3]).to_equal(0xC0)  # oracle: ModRM = 11 000 000, reg=dst(0), rm=src(0), mod=register-direct
 
     it "emit_sha256msg2(0,0) → [0x0F, 0x38, 0xCD, 0xC0]":
+        step("Encode SHA256MSG2 for dst=0, src=0 and inspect the emitted bytes")
+        # @req REQ-COMPILER-BACKEND-ENCODE-X86-CRYPTO
+        # @capture(bit_table): 4-byte SHA256MSG2 instruction encoding
         val bytes = emit_sha256msg2(0, 0)
-        expect(bytes.len()).to_equal(4)
-        expect(bytes[0]).to_equal(0x0F)
-        expect(bytes[1]).to_equal(0x38)
-        expect(bytes[2]).to_equal(0xCD)
-        expect(bytes[3]).to_equal(0xC0)
+        expect(bytes.len()).to_equal(4)  # oracle: 0F 38 CD /r has no mandatory prefix, REX or immediate, so 4 bytes total
+        expect(bytes[0]).to_equal(0x0F)  # oracle: two-byte opcode escape
+        expect(bytes[1]).to_equal(0x38)  # oracle: 0F 38 opcode map selector for SHA256MSG2
+        expect(bytes[2]).to_equal(0xCD)  # oracle: SHA256MSG2 opcode byte per Intel SDM Vol 2
+        expect(bytes[3]).to_equal(0xC0)  # oracle: ModRM = 11 000 000, reg=dst(0), rm=src(0), mod=register-direct
 
 # ============================================================================
 # CRC32 Instructions (F2 0F 38 Fx /r)
 # ============================================================================
 
+# @manual_section: x86_64 CRC32 encoders
 describe "x86 CRC32 encoder — golden bytes":
     it "emit_crc32_r32_r32(0,0) → [0xF2, 0x0F, 0x38, 0xF1, 0xC0]":
+        step("Encode CRC32 r32,r32 for dst=0, src=0 and inspect the emitted bytes")
+        # @req REQ-COMPILER-BACKEND-ENCODE-X86-CRYPTO
+        # @capture(bit_table): 5-byte CRC32 r32,r32 instruction encoding
         val bytes = emit_crc32_r32_r32(0, 0)
-        expect(bytes.len()).to_equal(5)
-        expect(bytes[0]).to_equal(0xF2)
-        expect(bytes[1]).to_equal(0x0F)
-        expect(bytes[2]).to_equal(0x38)
-        expect(bytes[3]).to_equal(0xF1)
-        expect(bytes[4]).to_equal(0xC0)
+        expect(bytes.len()).to_equal(5)  # oracle: F2 0F 38 F1 /r has no REX or immediate, so 5 bytes total
+        expect(bytes[0]).to_equal(0xF2)  # oracle: mandatory REPNE prefix that selects the CRC32 opcode form
+        expect(bytes[1]).to_equal(0x0F)  # oracle: two-byte opcode escape
+        expect(bytes[2]).to_equal(0x38)  # oracle: 0F 38 opcode map selector for CRC32
+        expect(bytes[3]).to_equal(0xF1)  # oracle: CRC32 r32,r32 opcode byte (32-bit source form) per Intel SDM Vol 2
+        expect(bytes[4]).to_equal(0xC0)  # oracle: ModRM = 11 000 000, reg=dst(0), rm=src(0), mod=register-direct
 
     it "emit_crc32_r64_r64(0,0) → [0xF2, 0x48, 0x0F, 0x38, 0xF1, 0xC0]":
+        step("Encode CRC32 r64,r64 for dst=0, src=0 and confirm the REX.W prefix appears")
+        # @req REQ-COMPILER-BACKEND-ENCODE-X86-CRYPTO
+        # @capture(bit_table): 6-byte CRC32 r64,r64 instruction encoding with REX.W prefix
         val bytes = emit_crc32_r64_r64(0, 0)
-        expect(bytes.len()).to_equal(6)
-        expect(bytes[0]).to_equal(0xF2)
-        expect(bytes[1]).to_equal(0x48)
-        expect(bytes[2]).to_equal(0x0F)
-        expect(bytes[3]).to_equal(0x38)
-        expect(bytes[4]).to_equal(0xF1)
-        expect(bytes[5]).to_equal(0xC0)
+        expect(bytes.len()).to_equal(6)  # oracle: 64-bit operand size requires a REX.W prefix byte, so 6 bytes total
+        expect(bytes[0]).to_equal(0xF2)  # oracle: mandatory REPNE prefix that selects the CRC32 opcode form
+        expect(bytes[1]).to_equal(0x48)  # oracle: REX prefix 0100 W000 with W=1 selecting 64-bit operand size
+        expect(bytes[2]).to_equal(0x0F)  # oracle: two-byte opcode escape
+        expect(bytes[3]).to_equal(0x38)  # oracle: 0F 38 opcode map selector for CRC32
+        expect(bytes[4]).to_equal(0xF1)  # oracle: CRC32 r64,r64 opcode byte (64-bit source form) per Intel SDM Vol 2
+        expect(bytes[5]).to_equal(0xC0)  # oracle: ModRM = 11 000 000, reg=dst(0), rm=src(0), mod=register-direct
 
 # ============================================================================
 # PCLMULQDQ (66 0F 3A 44 /r ib)
 # ============================================================================
 
+# @manual_section: x86_64 PCLMULQDQ encoder
 describe "x86 PCLMULQDQ encoder":
     it "emit_pclmulqdq(0,0,0x00) → [0x66, 0x0F, 0x3A, 0x44, 0xC0, 0x00]":
+        step("Encode PCLMULQDQ for dst=0, src=0, imm=0x00 and inspect the emitted bytes")
+        # @req REQ-COMPILER-BACKEND-ENCODE-X86-CRYPTO
+        # @capture(bit_table): 6-byte PCLMULQDQ instruction encoding, low/low quadword selector
         val bytes = emit_pclmulqdq(0, 0, 0x00)
-        expect(bytes.len()).to_equal(6)
-        expect(bytes[0]).to_equal(0x66)
-        expect(bytes[1]).to_equal(0x0F)
-        expect(bytes[2]).to_equal(0x3A)
-        expect(bytes[3]).to_equal(0x44)
-        expect(bytes[4]).to_equal(0xC0)
-        expect(bytes[5]).to_equal(0x00)
+        expect(bytes.len()).to_equal(6)  # oracle: 66 0F 3A 44 /r ib carries a trailing immediate byte, so 6 bytes total
+        expect(bytes[0]).to_equal(0x66)  # oracle: mandatory operand-size-override prefix for PCLMULQDQ
+        expect(bytes[1]).to_equal(0x0F)  # oracle: two-byte opcode escape
+        expect(bytes[2]).to_equal(0x3A)  # oracle: 0F 3A opcode map selector for PCLMULQDQ
+        expect(bytes[3]).to_equal(0x44)  # oracle: PCLMULQDQ opcode byte per Intel SDM Vol 2
+        expect(bytes[4]).to_equal(0xC0)  # oracle: ModRM = 11 000 000, reg=dst(0), rm=src(0), mod=register-direct
+        expect(bytes[5]).to_equal(0x00)  # oracle: immediate 0x00 selects the low quadword of both source operands
 
     it "emit_pclmulqdq(0,0,0x11) → [0x66, 0x0F, 0x3A, 0x44, 0xC0, 0x11]":
+        step("Encode PCLMULQDQ for dst=0, src=0, imm=0x11 and inspect the emitted bytes")
+        # @req REQ-COMPILER-BACKEND-ENCODE-X86-CRYPTO
+        # @capture(bit_table): 6-byte PCLMULQDQ instruction encoding, high/high quadword selector
         val bytes = emit_pclmulqdq(0, 0, 0x11)
-        expect(bytes.len()).to_equal(6)
-        expect(bytes[0]).to_equal(0x66)
-        expect(bytes[1]).to_equal(0x0F)
-        expect(bytes[2]).to_equal(0x3A)
-        expect(bytes[3]).to_equal(0x44)
-        expect(bytes[4]).to_equal(0xC0)
-        expect(bytes[5]).to_equal(0x11)
+        expect(bytes.len()).to_equal(6)  # oracle: 66 0F 3A 44 /r ib carries a trailing immediate byte, so 6 bytes total
+        expect(bytes[0]).to_equal(0x66)  # oracle: mandatory operand-size-override prefix for PCLMULQDQ
+        expect(bytes[1]).to_equal(0x0F)  # oracle: two-byte opcode escape
+        expect(bytes[2]).to_equal(0x3A)  # oracle: 0F 3A opcode map selector for PCLMULQDQ
+        expect(bytes[3]).to_equal(0x44)  # oracle: PCLMULQDQ opcode byte per Intel SDM Vol 2
+        expect(bytes[4]).to_equal(0xC0)  # oracle: ModRM = 11 000 000, reg=dst(0), rm=src(0), mod=register-direct
+        expect(bytes[5]).to_equal(0x11)  # oracle: immediate 0x11 selects the high quadword of both source operands

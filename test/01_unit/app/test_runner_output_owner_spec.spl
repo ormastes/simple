@@ -1,15 +1,52 @@
+"""
+## Purpose and audience
+Pins the Stage4 test-runner document-output path on its concrete owners for
+test-runner and release-engineering maintainers: `result_doc_name` must stay
+the single basename authority, its caller must bind through the shipped
+module, and every import must come from the typed `std.nogc_sync_mut.io`
+owner modules instead of the legacy `std.io` facade.
+## Operator workflow
+Run `simple run test/01_unit/app/test_runner_output_owner_spec.spl` after
+touching `src/lib/nogc_sync_mut/test_runner/test_runner_output.spl` or any
+`std.io` facade surface it could regress onto.
+## Compatibility and limitations
+The owner-contract scenario reads the owning module as shipped source; it
+asserts the import/binding contract, not runtime rendering. The two basename
+scenarios are pure product calls and run identically on every host OS.
+## Verification guidance and troubleshooting
+An owner-contract failure means a `std.io` facade import or an inline
+basename implementation crept back into the module. A basename failure means
+`result_doc_name` stopped normalizing separators. Rerun this single spec to
+reproduce, then inspect the named module at the cited path.
+"""
+# Lifecycle: doc/01_research/domain/sspec_documentization_maintenance.md ;
+# doc/03_plan/sys_test/test_runner_debug_tui_sgtti.md ;
+# doc/04_architecture/test/test_runner_daemon_resource_governor.md ;
+# doc/05_design/release_process_hardening.md
+# @manual_section: test-runner doc output owners
+
 use std.test_runner.test_runner_output.{result_doc_name}
 use std.nogc_sync_mut.io.file_ops.{file_read}
+use std.spec.{step}
 
 describe "test runner doc output path owner":
     it "keeps Stage4 doc output on the concrete basename owner":
-        val source = file_read("src/lib/nogc_sync_mut/test_runner/test_runner_output.spl")
-        expect(source).to_contain("use std.nogc_sync_mut.io.sysinfo_ops.{path_basename}")
-        expect(source.contains("use std.io.{path_basename}")).to_equal(false)
-        expect(source).to_contain("val name = result_doc_name(result.path)")
+        # @req REQ-TESTRUNNER-DOCOUT-001
+        # @capture(bit_table): owner-import contract hits over the shipped module source
+        step("Read the shipped test_runner_output module and check its import owners")
+        val stage4_doc_output_owner_source = file_read("src/lib/nogc_sync_mut/test_runner/test_runner_output.spl")
+        expect(stage4_doc_output_owner_source).to_contain("use std.nogc_sync_mut.io.sysinfo_ops.{path_basename}")
+        expect(stage4_doc_output_owner_source.contains("use std.io.{path_basename}")).to_equal(false)
+        expect(stage4_doc_output_owner_source).to_contain("val name = result_doc_name(result.path)")
 
     it "formats a POSIX result path as its basename":
+        # @req REQ-TESTRUNNER-DOCOUT-002
+        # @capture(protocol_json): the formatted doc filename for a nested POSIX result path
+        step("Format a nested POSIX result path through the product basename owner")
         expect(result_doc_name("nested/path/example_spec.spl")).to_equal("example_spec.spl")
 
     it "prevents platform path separators from leaking into doc output":
+        # @req REQ-TESTRUNNER-DOCOUT-003
+        # @capture(protocol_json): the formatted doc filename for a Windows-style result path
+        step("Format a Windows-style result path and require POSIX-safe doc output")
         expect(result_doc_name("C:\\repo\\test\\nested\\example_test.spl")).to_equal("example_test.spl")

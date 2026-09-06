@@ -1,12 +1,34 @@
+"""
+## Purpose and audience
+Headless contract for the interactive widget app's pure interaction model,
+for the engineers who own `src/lib/common/ui/widget_interact_model.spl` and
+`examples/06_io/ui/widget_interact_metal_gui.spl` (whose testable core this
+is). Synthetic event sequences are driven through the reducers — no GPU, no
+winit — and the resulting state is asserted directly.
+## Operator workflow
+Run: ./src/compiler_rust/target/bootstrap/simple run test/02_integration/ui/widget_interact_model_spec.spl
+Each scenario applies reducer events (click, key, wheel, tick) to an
+interact_state_new() state and pins the counter, text, caret, scroll, or
+animation result.
+## Compatibility and limitations
+Pure model only: no rendering, no event loop, no device; the expect-in-loop
+shape is avoided because the test runner mishandles expect() inside a loop
+body in interpret mode (facts are accumulated and asserted once after).
+## Verification guidance and troubleshooting
+A failure names the reducer whose state transition drifted (counter, text,
+caret, scroll clamp, or animation bounce). Diff against widget_interact_model
+reducers before editing an assertion — the pinned values are the app's
+documented interaction behavior.
+"""
+# Lifecycle: doc/01_research/domain/sspec_documentization_maintenance.md ;
+# doc/03_plan/sspec_modernization_plan.md ;
+# doc/04_architecture/sspec_documentization_maintenance.md ;
+# doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+# @manual_section: widget-interaction-model
 # @tag: ui, interaction, reducers, ci
 # @cover src/lib/common/ui/widget_interact_model.spl 90%
-#
-# Headless spec for the interactive widget app's pure interaction model.
-# Drives synthetic event sequences through the reducers (no GPU, no winit) and
-# asserts the resulting state. This is the testable core of
-# examples/06_io/ui/widget_interact_metal_gui.spl.
 
-use std.spec.{describe, context, it, expect}
+use std.spec.{describe, context, it, expect, step}
 use common.ui.widget_interact_model.{
     InteractState, interact_state_new,
     on_click, on_key, on_wheel, on_tick,
@@ -16,28 +38,40 @@ use common.ui.widget_interact_model.{
 describe "widget interaction model":
 
     it "starts at the documented initial state":
+        # @req REQ-UI-INTERACT-001
+        # @capture(statistics): fresh-state field table
+        step("Create a fresh interaction state and read every field")
         val s = interact_state_new()
-        expect(s.counter).to_equal(0)
+        expect(s.counter).to_equal(0)  # oracle: a fresh state has seen no clicks
         expect(s.text).to_equal("")
-        expect(s.caret).to_equal(0)
-        expect(s.scroll_offset).to_equal(0)
+        expect(s.caret).to_equal(0)  # oracle: no typed input means the caret sits at the origin
+        expect(s.scroll_offset).to_equal(0)  # oracle: a fresh state starts unscrolled
         expect(s.anim_x).to_equal(ANIM_MIN)
 
     it "increments the counter on a click inside the button":
+        # @req REQ-UI-INTERACT-001
+        # @capture(statistics): counter after two in-bounds clicks
+        step("Click inside the button bounds twice")
         val s0 = interact_state_new()
         val s1 = on_click(s0, BTN_X + 5, BTN_Y + 5)
-        expect(s1.counter).to_equal(1)
+        expect(s1.counter).to_equal(1)  # oracle: exactly one in-bounds click has landed
         val s2 = on_click(s1, BTN_X + 5, BTN_Y + 5)
-        expect(s2.counter).to_equal(2)
+        expect(s2.counter).to_equal(2)  # oracle: the second in-bounds click increments again
 
     it "ignores a click outside the button":
+        # @req REQ-UI-INTERACT-002
+        # @capture(statistics): counter after two out-of-bounds clicks
+        step("Click below the button, then to its right, both out of bounds")
         val s0 = interact_state_new()
         val s1 = on_click(s0, BTN_X + 5, BTN_Y + 500)
-        expect(s1.counter).to_equal(0)
+        expect(s1.counter).to_equal(0)  # oracle: a click outside the vertical bounds must not count
         val s2 = on_click(s1, BTN_X + 5000, BTN_Y + 5)
-        expect(s2.counter).to_equal(0)
+        expect(s2.counter).to_equal(0)  # oracle: a click outside the horizontal bounds must not count either
 
     it "maps keycodes to lowercase ascii chars":
+        # @req REQ-UI-INTERACT-003
+        # @capture(bit_table): keycode-to-char mapping rows
+        step("Map letter, digit, space, and control keycodes through the table")
         expect(keycode_to_char(72)).to_equal("h")
         expect(keycode_to_char(73)).to_equal("i")
         expect(keycode_to_char(55)).to_equal("7")
@@ -45,33 +79,42 @@ describe "widget interaction model":
         expect(keycode_to_char(8)).to_equal("")
 
     it "appends typed printable keys to the text input":
+        # @req REQ-UI-INTERACT-003
+        # @capture(statistics): text buffer and caret after four keypresses
+        step("Type H, I, space, and 7 through the key reducer")
         var s = interact_state_new()
         s = on_key(s, 72)   # H -> h
         s = on_key(s, 73)   # I -> i
         s = on_key(s, 32)   # space
         s = on_key(s, 55)   # 7
         expect(s.text).to_equal("hi 7")
-        expect(s.caret).to_equal(4)
+        expect(s.caret).to_equal(4)  # oracle: one caret step per appended char, and four chars were appended
 
     it "deletes the last char on backspace and stops at empty":
+        # @req REQ-UI-INTERACT-004
+        # @capture(statistics): text and caret through three backspaces
+        step("Type two chars, then press backspace three times")
         var s = interact_state_new()
         s = on_key(s, 65)   # 'a'
         s = on_key(s, 66)   # 'b'
         expect(s.text).to_equal("ab")
         s = on_key(s, KEY_BACKSPACE)
         expect(s.text).to_equal("a")
-        expect(s.caret).to_equal(1)
+        expect(s.caret).to_equal(1)  # oracle: deleting 'b' leaves one char, so the caret retracts one step
         s = on_key(s, KEY_BACKSPACE)
         expect(s.text).to_equal("")
         s = on_key(s, KEY_BACKSPACE)
         expect(s.text).to_equal("")
-        expect(s.caret).to_equal(0)
+        expect(s.caret).to_equal(0)  # oracle: backspace on an empty buffer must stop at the origin instead of underflowing
 
     it "scrolls the list down and clamps at the bottom":
+        # @req REQ-UI-INTERACT-005
+        # @capture(statistics): scroll offset through overshooting wheel-down spins
+        step("Wheel down once, then fifty more times past the bottom")
         var s = interact_state_new()
-        expect(s.scroll_offset).to_equal(0)
+        expect(s.scroll_offset).to_equal(0)  # oracle: unscrolled baseline before the wheel events
         s = on_wheel(s, -1)
-        expect(s.scroll_offset).to_equal(1)
+        expect(s.scroll_offset).to_equal(1)  # oracle: one wheel-down step advances the offset by one
         var i = 0
         while i < 50:
             s = on_wheel(s, -1)
@@ -79,23 +122,32 @@ describe "widget interaction model":
         expect(s.scroll_offset).to_equal(scroll_max())
 
     it "scrolls the list up and clamps at the top":
+        # @req REQ-UI-INTERACT-005
+        # @capture(statistics): scroll offset through overshooting wheel-up spins
+        step("Wheel up three times, then fifty more times past the top")
         var s = interact_state_new()
         s = on_wheel(s, -3)
-        expect(s.scroll_offset).to_equal(3)
+        expect(s.scroll_offset).to_equal(3)  # oracle: three wheel-down steps advance the offset by three
         var i = 0
         while i < 50:
             s = on_wheel(s, 1)
             i = i + 1
-        expect(s.scroll_offset).to_equal(0)
+        expect(s.scroll_offset).to_equal(0)  # oracle: wheel-up past the top must clamp at the origin, not go negative
 
     it "scrolls via up/down arrow keys":
+        # @req REQ-UI-INTERACT-006
+        # @capture(statistics): scroll offset after arrow-key scrolling
+        step("Press the down arrow, then the up arrow")
         var s = interact_state_new()
         s = on_key(s, KEY_ARROW_DOWN)
-        expect(s.scroll_offset).to_equal(1)
+        expect(s.scroll_offset).to_equal(1)  # oracle: one arrow-down press advances the offset by one
         s = on_key(s, KEY_ARROW_UP)
-        expect(s.scroll_offset).to_equal(0)
+        expect(s.scroll_offset).to_equal(0)  # oracle: arrow-up reverses the same step back to the origin
 
     it "bounces the animation off both walls and stays in bounds":
+        # @req REQ-UI-INTERACT-007
+        # @capture(statistics): bound and sign-flip tallies over 400 ticks
+        step("Tick the animation 400 times and accumulate bound and flip facts")
         var s = interact_state_new()
         var i = 0
         var sign_flips = 0
@@ -116,6 +168,9 @@ describe "widget interaction model":
         expect(sign_flips).to_be_greater_than(1)
 
     it "bounces the animation off the left wall":
+        # @req REQ-UI-INTERACT-007
+        # @capture(statistics): single-tick left-wall bounce position and direction
+        step("Seed the state two pixels above the left wall moving left, then tick once")
         var s = InteractState(counter: 0, text: "", caret: 0, scroll_offset: 0, anim_x: ANIM_MIN + 2, anim_dx: -3)
         s = on_tick(s)
         expect(s.anim_x).to_equal(ANIM_MIN)

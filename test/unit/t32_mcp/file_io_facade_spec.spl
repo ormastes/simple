@@ -1,11 +1,32 @@
 """
-T32 MCP file-I/O facade regression coverage.
-
-The Stage4 bootstrap frontier exposed an unresolved `rt_file_read_text` in
-`gap_tools.spl`.  T32 MCP is an app leaf, so file reads must route through the
-existing `std.io_runtime` facade (via `t32_file_read`), not module-local raw
-intrinsics.
+## Purpose and audience
+T32 MCP file-I/O facade regression coverage. The Stage4 bootstrap frontier
+exposed an unresolved `rt_file_read_text` in `gap_tools.spl`; T32 MCP is an app
+leaf, so file reads must route through the existing `std.io_runtime` facade
+(via `t32_file_read`), not module-local raw intrinsics. Written for engineers
+touching app.mcp_t32 file access or adding new MCP tool handlers.
+## Operator workflow
+Run this spec with:
+`./src/compiler_rust/target/bootstrap/simple run test/unit/t32_mcp/file_io_facade_spec.spl`
+and read the trailing SPEC FILE VERDICT line.
+## Compatibility and limitations
+The reproducer scenario writes a temporary CMM file under /tmp keyed by pid and
+microsecond timestamp. The callsite-scan scenarios are source contracts over
+examples/10_tooling/trace32_tools/t32_mcp and require that directory plus
+config/t32/catalogs to be present relative to the repo root.
+## Verification guidance and troubleshooting
+A facade regression surfaces as a BLOCK-containing result from
+handle_t32_cmm_validate or an empty read of the windows catalog; the scenario
+name identifies which read path broke. A callsite-scan failure prints nothing
+by design — re-run with the scanner scenario name to find the offending file
+and move its read onto t32_file_read.
 """
+
+# Lifecycle: doc/01_research/hardware/t32/t32_mcp_hw_integration_tests.md ;
+# doc/03_plan/agent_tasks/bootstrap_phase4_conflict_resolution_manifest_2026-08-16.md ;
+# doc/04_architecture/hardware/t32_terminal_power_remote.md ;
+# doc/05_design/app/misc/t32_mcp_cli_improvements.md
+# @manual_section: t32-mcp-file-io-facade
 
 use std.io_runtime.{file_read, file_write, file_delete, dir_walk, getpid, time_now_unix_micros}
 use app.mcp_t32.json_helpers.{t32_file_read}
@@ -15,6 +36,9 @@ describe "T32 MCP file-I/O facade":
 
     context "exact gap_tools reproducer":
         it "loads a real CMM path through handle_t32_cmm_validate":
+            # @req REQ-T32MCP-IO-001
+            # @capture(protocol_json): handle_t32_cmm_validate response for a real CMM path retained for review
+            step("Write a CMM script to a temp path and validate it through the gap_tools handler")
             val path = "/tmp/t32_mcp_gap_tools_reproducer_{getpid()}_{time_now_unix_micros()}.cmm"
             val wrote = file_write(path, "DIALOG.OK \"Flash done\"\n")
             expect(wrote).to_equal(true)
@@ -25,25 +49,40 @@ describe "T32 MCP file-I/O facade":
             expect(file_delete(path)).to_equal(true)
 
         it "reads an existing CMM/catalog source through the shared facade":
+            # @req REQ-T32MCP-IO-002
+            # @capture(protocol_json): facade read of the windows catalog retained for review
+            step("Read the shipped windows catalog through t32_file_read")
             val source = t32_file_read("config/t32/catalogs/windows.sdn")
             expect(source.len() > 0).to_equal(true)
 
         it "returns empty text for a missing source path":
+            # @req REQ-T32MCP-IO-003
+            # @capture(protocol_json): facade read of a missing path retained for review
+            step("Read a path that does not exist through t32_file_read")
             val source = t32_file_read("build/test-artifacts/t32-mcp-missing-source.sdn")
             expect(source).to_equal("")
 
     context "adjacent raw-intrinsic prevention":
         it "keeps every T32 MCP file-read callsite on the facade":
+            # @req REQ-T32MCP-IO-004
+            # @capture(statistics): per-file raw-intrinsic absence scan over t32_mcp sources retained for review
+            step("Scan every t32_mcp .spl source for raw rt_file_read_text intrinsic calls")
             val files = dir_walk("examples/10_tooling/trace32_tools/t32_mcp")
             var scanned = 0
             for path in files:
                 if path.ends_with(".spl"):
                     val source = file_read(path)
-                    expect(source.contains("rt_file_read_text(")).to_equal(false)
+                    val raw_intrinsic_absent = not source.contains("rt_file_read_text(")
+                    expect(raw_intrinsic_absent).to_equal(true)
                     scanned = scanned + 1
             expect(scanned > 0).to_equal(true)
 
         it "keeps the shared helper implemented by file_read":
+            # @req REQ-T32MCP-IO-005
+            # @capture(statistics): json_helpers import and delegation source contract retained for review
+            step("Read json_helpers.spl and verify it imports and delegates to the facade file_read")
             val source = file_read("examples/10_tooling/trace32_tools/t32_mcp/json_helpers.spl")
-            expect(source.contains("use std.io_runtime.{file_read, file_write, process_run}")).to_equal(true)
-            expect(source.contains("    file_read(path)")).to_equal(true)
+            val imports_io_runtime_facade = source.contains("use std.io_runtime.{file_read, file_write, process_run}")
+            expect(imports_io_runtime_facade).to_equal(true)
+            val delegates_to_facade_read = source.contains("    file_read(path)")
+            expect(delegates_to_facade_read).to_equal(true)
