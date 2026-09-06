@@ -1,0 +1,90 @@
+#!/bin/sh
+# check-stage4-dynamic-runtime-lane.shs
+#
+# The Stage4 self-hosted compiler entry must be able to link the SHARED runtime
+# (`libsimple_runtime.so`) instead of the static core-C archive.
+#
+# WHY THIS GATE EXISTS. `selected_runtime_library`
+# (src/compiler_rust/compiler/src/pipeline/native_project/config.rs) used to
+# short-circuit every authorized Stage4 compiler entry onto the core-C archive
+# built by `build_core_c_runtime_library`, returning BEFORE the code that would
+# consult the richer runtime, and hard-erroring
+#   "Stage4 compiler entry requires the core-c-bootstrap runtime lane"
+# for any other lane. The core-C archive carries only the bootstrap C ABI
+# subset, so the Stage4 link died with 167 unresolved `rt_*` symbols no
+# `--runtime-path` / `SIMPLE_RUNTIME_PATH` setting could satisfy, and chasing
+# them led into an LLVM libunwind ABI question that should not exist at all --
+# Simple does not unwind.
+#
+# The lane guard's own intent (6c97e5709ad) was anti-silent-substitution: a
+# Stage4 entry asking for a lane it will not get must be TOLD, never re-routed
+# behind its back. `dynamic-runtime` honours that intent -- it is an explicit,
+# named request answered with exactly the runtime it named.
+#
+# WHAT IS CHECKED. The `native_project` unit test
+#   test_stage4_compiler_entry_dynamic_runtime_lane_selects_the_shared_library
+# which pins three things: (1) an authorized Stage4 entry on the
+# `dynamic-runtime` lane resolves to the `.so` -- pre-fix this was the forced-lane
+# Err; (2) the lane is REFUSED for any entry that is not the Stage4 compiler, so
+# the freestanding / core-C lanes are untouched; (3) the lane is never inferred,
+# only selected by an explicit `--runtime-bundle dynamic-runtime`.
+#
+# Verdict is the LAST line of stdout, per this repo's guard convention:
+#   PASS  -- <n> assertion group(s) checked, ...        exit 0
+#   FAIL  -- ...                                        exit 1
+#   ERROR -- nothing was checked (<reason>)             exit 2
+# A run that executed 0 tests is ERROR, never a pass: absence of a test run is
+# absence of evidence. A missing cargo is likewise ERROR.
+
+set -u
+
+TEST_NAME=test_stage4_compiler_entry_dynamic_runtime_lane_selects_the_shared_library
+repo_root=$(cd "$(dirname "$0")/../.." && pwd)
+manifest="$repo_root/src/compiler_rust/Cargo.toml"
+
+if [ ! -f "$manifest" ]; then
+  echo "ERROR — nothing was checked (no Cargo manifest at $manifest)"
+  exit 2
+fi
+
+if ! command -v cargo >/dev/null 2>&1; then
+  echo "ERROR — nothing was checked (no cargo on PATH; absence of a test runner is absence of evidence)"
+  exit 2
+fi
+
+# Never write into the shared bootstrap target dir: a concurrent bootstrap owns
+# it. An explicit CARGO_TARGET_DIR from the caller wins so a warm lane can reuse
+# its own objects.
+: "${CARGO_TARGET_DIR:=${TMPDIR:-/tmp}/simple-dynrt-lane-check-target}"
+export CARGO_TARGET_DIR
+
+log=$(mktemp) || { echo "ERROR — nothing was checked (mktemp failed)"; exit 2; }
+
+cargo test --offline --manifest-path "$manifest" -p simple-compiler \
+  --lib "$TEST_NAME" -- --exact --nocapture > "$log" 2>&1
+rc=$?
+
+# Read the runner's own accounting rather than trusting rc alone: cargo returns
+# 0 for a filter that matched nothing, which would be a vacuous pass.
+ran=$(grep -c "^test .*${TEST_NAME} \.\.\. ok$" "$log")
+failed=$(grep -c "^test .*${TEST_NAME} \.\.\. FAILED$" "$log")
+
+if [ "$ran" -eq 0 ] && [ "$failed" -eq 0 ]; then
+  echo "--- cargo output ---"
+  tail -40 "$log"
+  rm -f "$log"
+  echo "ERROR — nothing was checked (the filter matched no test named $TEST_NAME)"
+  exit 2
+fi
+
+if [ "$failed" -gt 0 ] || [ "$rc" -ne 0 ]; then
+  echo "--- cargo output ---"
+  sed -n '/^failures:/,$p' "$log" | head -40
+  rm -f "$log"
+  echo "FAIL — $TEST_NAME failed: the Stage4 compiler entry cannot reach the dynamic runtime lane"
+  exit 1
+fi
+
+rm -f "$log"
+echo "PASS — 3 assertion group(s) checked (dynamic lane selected, non-Stage4 entry refused, lane never inferred)"
+exit 0

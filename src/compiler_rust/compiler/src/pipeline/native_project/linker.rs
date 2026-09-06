@@ -1256,8 +1256,20 @@ int main(int argc, char** argv) {
             }
             other => other,
         };
+        // The dynamic lane bypasses the whole exact-provider profile below.
+        // That profile exists to make a set of STATIC archives link without
+        // duplicate or missing definitions: it projects the Rust runtime into a
+        // capsule, localizes everything outside the requested ABI, and audits
+        // disjointness between the core-C, compiler-backfill and provider
+        // archives. A shared object needs none of it -- the dynamic linker
+        // resolves at load time, and a definition in the executable simply
+        // takes precedence over the library's, so there is no collision class
+        // to project away.
+        let dynamic_runtime_lane = selected_runtime
+            .as_ref()
+            .is_some_and(|(path, _)| super::config::is_shared_runtime_library(path));
         #[cfg(any(target_os = "linux", target_os = "macos"))]
-        let stage4_c_providers = if self.is_authorized_stage4_compiler_entry() {
+        let stage4_c_providers = if self.is_authorized_stage4_compiler_entry() && !dynamic_runtime_lane {
             build_stage4_cli_c_provider_archives(&temp_dir.join("stage4_c_providers"))?
         } else {
             Vec::new()
@@ -1286,8 +1298,19 @@ int main(int argc, char** argv) {
         if let Some(rust_runtime) = stage4_rust_runtime.as_ref() {
             backfill_providers.push(rust_runtime.clone());
         }
-        let compiler_backfill =
-            self.prepare_stage4_compiler_backfill_archive(selected_runtime.as_ref(), &backfill_providers, temp_dir)?;
+        let compiler_backfill = if dynamic_runtime_lane {
+            // Take the backfill archive as it is. Projecting it against a
+            // shared object would be meaningless: an archive member and a
+            // dynamic definition never collide (the executable's own
+            // definition wins), so there is nothing to localize, and the
+            // projection helpers read archive members, not ELF dynamic tables.
+            // Measured on this host, the backfill's 76 `rt_*` definitions
+            // (all `rt_cranelift_*`) are disjoint from the shared runtime's
+            // 1,646 exported `rt_*` -- the two compose rather than overlap.
+            self.selected_stage4_compiler_backfill_archive()?
+        } else {
+            self.prepare_stage4_compiler_backfill_archive(selected_runtime.as_ref(), &backfill_providers, temp_dir)?
+        };
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         let stage4_profile = if exact_stage4 {
             let (core, is_native_all) = selected_runtime
@@ -1632,7 +1655,58 @@ int main(int argc, char** argv) {
 
         if !exact_stage4 {
             if let Some((runtime_lib, is_native_all)) = selected_runtime.as_ref() {
-                if *is_native_all {
+                if super::config::is_shared_runtime_library(runtime_lib) {
+                    // Dynamic runtime lane. Simple does not unwind, so nothing
+                    // here needs an unwinder: the shared runtime's own NEEDED
+                    // list is libm/libgcc_s/libc, and no LLVM libunwind is
+                    // involved on either side of the link.
+                    //
+                    // `-L<dir> -l<stem>` rather than the bare path: the shared
+                    // object carries no SONAME, and with a path argument the
+                    // linker records that PATH verbatim as DT_NEEDED, which
+                    // bakes a build directory into the produced compiler.
+                    // Passing it via -l records the plain file name instead,
+                    // which is what RUNPATH is then able to resolve.
+                    let dir = runtime_lib
+                        .parent()
+                        .ok_or_else(|| format!("shared runtime `{}` has no parent dir", runtime_lib.display()))?;
+                    let stem = runtime_lib
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .and_then(|s| s.strip_prefix("lib"))
+                        .ok_or_else(|| {
+                            format!("shared runtime `{}` is not a lib<name>.so", runtime_lib.display())
+                        })?;
+                    cmd.arg(format!("-L{}", dir.display()));
+                    // --no-as-needed keeps the DT_NEEDED entry even for a link
+                    // where --gc-sections later drops the referencing section;
+                    // the runtime is loaded for its initializers too, not only
+                    // for symbols the linker can see being used.
+                    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+                    cmd.arg("-Wl,--no-as-needed");
+                    cmd.arg(format!("-l{stem}"));
+                    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+                    cmd.arg("-Wl,--as-needed");
+                    // RUNPATH, not LD_LIBRARY_PATH. `$ORIGIN` first so the
+                    // binary keeps working when it is moved together with the
+                    // copy of the runtime placed beside it below; the build
+                    // directory second, so it also runs in place.
+                    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+                    {
+                        cmd.arg("-Wl,-rpath,$ORIGIN");
+                        cmd.arg("-Wl,-rpath,$ORIGIN/../lib");
+                        cmd.arg(format!("-Wl,-rpath,{}", dir.display()));
+                        // Without --disable-new-dtags a modern ld emits RUNPATH,
+                        // which is NOT inherited by the runtime's own
+                        // dependencies. Keep the default (RUNPATH) but record
+                        // both origins so a relocated binary still resolves.
+                    }
+                    #[cfg(target_os = "macos")]
+                    {
+                        cmd.arg("-Wl,-rpath,@loader_path");
+                        cmd.arg(format!("-Wl,-rpath,{}", dir.display()));
+                    }
+                } else if *is_native_all {
                     #[cfg(target_os = "macos")]
                     {
                         cmd.arg("-Wl,-force_load").arg(runtime_lib);
@@ -2020,6 +2094,32 @@ int main(int argc, char** argv) {
         let output_result = cmd.output().map_err(|e| format!("link ({cc}): {e}"))?;
 
         if output_result.status.success() {
+            // Dynamic lane: place the runtime beside the binary so the
+            // `$ORIGIN` RUNPATH resolves without LD_LIBRARY_PATH. A compiler
+            // that only runs with the right env var set is a trap the bootstrap
+            // would fall into, so this is part of producing the artifact, not
+            // an optional convenience.
+            if let Some((runtime_lib, _)) = selected_runtime.as_ref() {
+                if super::config::is_shared_runtime_library(runtime_lib) {
+                    if let (Some(out_dir), Some(name)) = (self.output.parent(), runtime_lib.file_name()) {
+                        let beside = out_dir.join(name);
+                        if beside != *runtime_lib {
+                            // Write to a temp name and rename: a direct copy
+                            // over a shared object another process has mapped
+                            // fails with ETXTBSY.
+                            let staged = out_dir.join(format!(".{}.new", name.to_string_lossy()));
+                            std::fs::copy(runtime_lib, &staged)
+                                .and_then(|_| std::fs::rename(&staged, &beside))
+                                .map_err(|e| {
+                                    format!(
+                                        "failed to place the shared runtime beside {}: {e}",
+                                        self.output.display()
+                                    )
+                                })?;
+                        }
+                    }
+                }
+            }
             #[cfg(any(target_os = "linux", target_os = "freebsd"))]
             if self.config.strip {
                 if let Some(objcopy) = find_objcopy_tool() {
