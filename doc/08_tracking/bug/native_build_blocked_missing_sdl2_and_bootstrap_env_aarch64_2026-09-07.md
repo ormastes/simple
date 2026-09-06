@@ -80,3 +80,34 @@ text produced by `_compile_selected_module`
 `build_result.errors`, so `unit_err[1]` is empty. `build/build_diagnostics.log`
 is never created. Until a real message reaches the summary, every instance of
 this class costs a bisect. Fix this first — it is what makes cause 2 tractable.
+
+## Where the message is destroyed (added after the first filing)
+
+`_finish_selected_module_compile` (`driver_aot_native_output.spl:1665-1672`):
+
+```
+match compiled:
+    case Err(err):
+        Err("AOT compile error in {name}: {err.to_text()}")
+```
+
+`err` is a `CompileError`. That interpolation is the whole diagnostic, and it
+does not survive native codegen:
+
+- the Stage-2 binary built 2026-09-05 renders it
+  `AOT compile error in ...: <invalid-heap:0x9d48501>` — the exact fingerprint
+  documented in
+  `native_struct_interpolation_renders_invalid_heap_2026-09-02.md`;
+- the Stage-2 binary built today from `origin/main` renders it as nothing at
+  all, which is how the unit reaches the summary with an empty reason.
+
+Both binaries fail the identical fixture at `SIMPLE_BOOTSTRAP=0` with SDL2
+installed, so this is long-standing, not a regression in the window between
+them. The `case Ok(module)` arm is ruled out: it would produce
+`Backend produced no object code for {name}`, plain text that would have
+printed.
+
+Fix order: make this one call site carry a real message (read the field, do not
+interpolate the struct), rebuild Stage 2, and only then chase why the backend
+returns `Err` at `SIMPLE_BOOTSTRAP=0`. Until then every instance of this class
+costs a bisect, which is what both the Windows records and this one paid.
