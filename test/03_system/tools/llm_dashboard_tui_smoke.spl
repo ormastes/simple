@@ -1,61 +1,66 @@
 # LLM Dashboard TUI Smoke Test (runs in interpreter mode)
 #
-# Tests that the TUI dashboard starts, handles keys, and exits cleanly.
-# Run: bin/simple run test/system/llm_dashboard_tui_smoke.spl
+# Runs the REAL TUI entry (src/app/llm_dashboard/tui_main.spl) once against a
+# fixture JSONL directory with stdin at EOF, so the app draws one frame and exits
+# through its own "Dashboard closed." path. Asserts on the exit status (read
+# directly from the process, never from a pipeline) and on frame content that
+# only the real TUI emits (alt-screen switch, box-drawing panels, status bar).
+#
+# Binary: SIMPLE_BINARY env override, else the bootstrap seed (the only binary
+# on a bare checkout that has `run`). stderr is captured, never discarded.
+#
+# Run: <binary> run test/03_system/tools/llm_dashboard_tui_smoke.spl
 
-extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+use std.io_runtime.{env_get, process_run, dir_create_all, file_write}
 
-fn dash_cmd(keys: text, delay: i64) -> text:
-    """Build command that sends keys to dashboard after delay."""
-    val tout = delay + 8
-    return "(sleep {delay} && printf '{keys}') | timeout {tout} bin/simple run src/app/llm_dashboard/main.spl 2>/dev/null | cat"
+val DEFAULT_BINARY: text = "src/compiler_rust/target/bootstrap/simple"
+val FIXTURE_DIR: text = "build/test-artifacts/03_system/tools/llm_dashboard_tui_smoke/projects"
 
-fn main():
-    var passed = 0
-    var failed = 0
+fn configured_binary() -> text:
+    val configured = env_get("SIMPLE_BINARY")
+    if configured != "": return configured
+    DEFAULT_BINARY
 
-    print "=== LLM Dashboard TUI Smoke Tests ==="
+fn write_fixture() -> bool:
+    if not dir_create_all("{FIXTURE_DIR}/proj"): return false
+    val line = "{\"type\":\"assistant\",\"message\":{\"model\":\"claude-opus\",\"content\":[]}}\n"
+    file_write("{FIXTURE_DIR}/proj/s1.jsonl", line)
 
-    # Test 1: Quit on 'q'
-    print "[1] quit on q"
-    val (out1, _, c1) = rt_process_run("/bin/bash", ["-c", dash_cmd("q", 1)])
-    if c1 == 0:
-        print "  ok: exit 0"
-        passed = passed + 1
-    else:
-        print "  FAIL: exit {c1}"
-        failed = failed + 1
+fn check(name: text, ok: bool, detail: text, failed: i64) -> i64:
+    if ok:
+        print "  ok: {name}"
+        return failed
+    print "  FAIL: {name} -- {detail}"
+    failed + 1
 
-    # Test 2: Tab switch then quit
-    print "[2] tab + quit"
-    val (_, _, c2) = rt_process_run("/bin/bash", ["-c", dash_cmd("2q", 1)])
-    if c2 == 0:
-        print "  ok: exit 0"
-        passed = passed + 1
-    else:
-        print "  FAIL: exit {c2}"
-        failed = failed + 1
+fn main() -> i64:
+    print "=== LLM Dashboard TUI Smoke Test ==="
+    val binary = configured_binary()
+    if not write_fixture():
+        print "  FAIL: could not create fixture under {FIXTURE_DIR}"
+        return 1
 
-    # Test 3: Many rapid keys then quit
-    print "[3] rapid keys"
-    val (_, _, c3) = rt_process_run("/bin/bash", ["-c", dash_cmd("123456jjkkrcq", 1)])
-    if c3 == 0:
-        print "  ok: exit 0"
-        passed = passed + 1
-    else:
-        print "  FAIL: exit {c3}"
-        failed = failed + 1
+    # No pipe: the status below is the dashboard process's own (timeout passes
+    # it through; 124 = hung). stdin is /dev/null so the TUI draws one frame
+    # and exits on EOF.
+    val cmd = "COLUMNS=120 LINES=40 exec timeout 150 {binary} run src/app/llm_dashboard/tui_main.spl --dir {FIXTURE_DIR} </dev/null"
+    print "[run] {cmd}"
+    val (out, err, code) = process_run("/bin/sh", ["-c", cmd])
+    val status = code
 
-    # Test 4: Produces output (screen rendering)
-    print "[4] produces output"
-    if out1.len() > 0:
-        print "  ok: {out1.len()} bytes rendered"
-        passed = passed + 1
-    else:
-        print "  FAIL: no output"
-        failed = failed + 1
+    var failed: i64 = 0
+    failed = check("exit status 0", status == 0, "exit {status}; stderr tail: {err.slice(err.len() - 400 if err.len() > 400 else 0, err.len())}", failed)
+    failed = check("no runtime error on stderr", not err.contains("Runtime error") and not err.contains("PANIC") and not err.contains("error: semantic"), "stderr: {err.slice(0, 400 if err.len() > 400 else err.len())}", failed)
+    failed = check("alt-screen switch emitted", out.contains("\x1b[?1049h"), "{out.len()} bytes, no ESC[?1049h", failed)
+    failed = check("box-drawing panels rendered", out.contains("┌") and out.contains("└"), "{out.len()} bytes, no box glyphs", failed)
+    failed = check("dashboard panels present", out.contains("Agent Tree") and out.contains("Activity Feed"), "panel titles missing", failed)
+    failed = check("status bar present", out.contains("Next refresh:"), "status bar segment missing", failed)
+    failed = check("clean shutdown", out.contains("Dashboard closed."), "no shutdown line", failed)
+    failed = check("frame is a real frame, not the static stub", out.len() > 2000, "only {out.len()} bytes", failed)
 
     print ""
-    print "=== Results: {passed}/{passed + failed} passed ==="
     if failed == 0:
-        print "ALL TESTS PASSED"
+        print "=== PASS: 8/8 checks, {out.len()} bytes rendered by {binary} ==="
+        return 0
+    print "=== FAIL: {failed}/8 checks failed ==="
+    return 1
