@@ -139,7 +139,7 @@ A fixture that only catches a CRASH is worthless — the regression being guarde
 against is silent, not loud. Inject the rot in its real shape: leave
 materialisation succeeding and point the scan paths back at the working
 checkout, then confirm the selftest fails with the fixture's own message.
-Measured for the two gates converted so far:
+Measured for the three gates converted so far:
 
 ```
 === type-walk fixture 7 ===                  (rot: MAT/PROJ/ALLOW resolved against $ROOT)
@@ -152,6 +152,12 @@ restored rc=0
 clean rc=0
 rotted rc=1
   selftest FAIL: --rev did not read committed content, got [FAIL — 2 import site(s) checked, 1 new]
+restored rc=0
+
+=== runtime-source-list-parity fixture 8 ===  (rot: ROOT="$GIT_ROOT" after a successful archive)
+clean selftest rc=0
+rotted selftest rc=2
+  selftest FAIL: --rev did not read committed content (exit 1): FAIL — 3 file(s) checked, 1 offender(s) (1 changed, 0 new, 0 stale-baseline, 0 stale-roster): b.c
 restored rc=0
 ```
 
@@ -184,7 +190,7 @@ past everyone on 2026-09-06, and it is what the fixtures now catch.
 | 17 | `push-ui-slim-closure` | `check-ui-slim-closure.shs` | no | see 2 | TODO |
 | 18 | `push-parser-source-global-ratchet` | `check-parser-source-global-ratchet.shs` | no | `--rev`; small (136 lines), accepts `--root` | TODO |
 | 19 | `push-rt-api-groups` | `check-rt-api-groups.shs` | no | `--rev` plus `config/api/api_registry.sdn` and `rt_api_group_baseline.txt` from the rev; needs `rg` | TODO |
-| 20 | `push-runtime-source-list-parity` | `check-runtime-source-list-parity.shs` | **yes** | `--rev` over `src/runtime` plus the three roster files; accepts `--root` | TODO |
+| 20 | `push-runtime-source-list-parity` | `check-runtime-source-list-parity.shs` | **yes** | `--rev` over `src/runtime` plus the three roster files AND the baseline | **DONE** |
 | 21 | `push-no-mock-file-system-io` | `check-no-mock-file-system-io.shs` | **yes** | `--rev` | **DONE** |
 | 22 | `push-lifecycle-reachability` | `check-lifecycle-reachability.shs` | no | `--rev`; accepts `--root` | TODO |
 | 23 | `push-plan-acceptance-swept` | `check-plan-acceptance-swept.shs` | no | needs a runnable Simple binary — blocked, like 16, not tree-scoped by nature | TODO (blocked) |

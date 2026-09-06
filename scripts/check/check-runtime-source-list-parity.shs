@@ -66,14 +66,18 @@ GENERATE=0
 SELFTEST_ONLY=0
 INTERNAL=0
 
+REV=""
+BASELINE_EXPLICIT=0
+
 usage() {
-    echo "usage: $0 [--root DIR] [--baseline FILE] [--generate-baseline] [--selftest]"
+    echo "usage: $0 [--root DIR] [--rev REV] [--baseline FILE] [--generate-baseline] [--selftest]"
 }
 
 while [ $# -gt 0 ]; do
     case "$1" in
         --root) ROOT="$2"; shift 2 ;;
-        --baseline) BASELINE="$2"; shift 2 ;;
+        --rev) REV="$2"; shift 2 ;;
+        --baseline) BASELINE="$2"; BASELINE_EXPLICIT=1; shift 2 ;;
         --generate-baseline) GENERATE=1; shift ;;
         --selftest) SELFTEST_ONLY=1; shift ;;
         --internal-scan) INTERNAL=1; shift ;;
@@ -89,16 +93,56 @@ if [ -z "$ROOT" ]; then
 fi
 [ -n "$ROOT" ] || { echo "ERROR — nothing was checked (repo root not resolvable)"; exit 2; }
 
-DEFAULT_BASELINE="$ROOT/scripts/check/runtime_source_list_parity_baseline.txt"
+WORK="$(mktemp -d)" || { echo "ERROR — nothing was checked (mktemp failed)"; exit 2; }
+trap 'rm -rf "$WORK"' EXIT INT TERM
+
+# --rev <REV> reads the COMMITTED tree at REV instead of the working checkout.
+#
+# Why it exists (2026-09-06): as a `tree`-mode push row this BLOCKING gate
+# scanned the shared WORKING CHECKOUT, not the commit being pushed. `_ref` in
+# run_manifest_push_gates is the sha off pre-push stdin, so under concurrent
+# agent load a tree-mode row reports on content that is not being pushed. See
+# doc/08_tracking/bug/push_gates_evaluate_working_checkout_not_pushed_commit_2026-09-06.md
+#
+# GIT_ROOT stays the real repository (git archive must run there); ROOT becomes
+# the materialised tree, so every path below is derived from the pushed commit.
+# The BASELINE is archived from the same revision on purpose: scanning committed
+# sources against the working copy's baseline is still a wrong-tree verdict.
+BASELINE_REL=scripts/check/runtime_source_list_parity_baseline.txt
+if [ -n "$REV" ]; then
+    GIT_ROOT="$ROOT"
+    mkdir -p "$WORK/rev"
+    ( cd "$GIT_ROOT" && git archive "$REV" -- \
+        src/runtime \
+        src/compiler_rust/compiler/src/pipeline/native_project/tools.rs \
+        src/compiler/70.backend/backend/runtime_compiler.spl \
+        src/compiler_rust/runtime/build.rs \
+        "$BASELINE_REL" ) 2>/dev/null | tar -x -C "$WORK/rev" 2>/dev/null
+    if [ ! -d "$WORK/rev/src/runtime" ]; then
+        echo "ERROR — nothing was checked (could not materialise $REV)"
+        exit 2
+    fi
+    if [ "$BASELINE_EXPLICIT" -eq 0 ] && [ ! -f "$WORK/rev/$BASELINE_REL" ]; then
+        echo "ERROR — nothing was checked (baseline absent from $REV)"
+        exit 2
+    fi
+    if [ "$GENERATE" -eq 1 ] && [ "$BASELINE_EXPLICIT" -eq 0 ]; then
+        # Writing into the materialised tree would vanish with the trap — a
+        # silent no-op that looks like success.
+        echo "ERROR — nothing was checked (--generate-baseline with --rev needs an explicit --baseline path)"
+        exit 2
+    fi
+    [ "$BASELINE_EXPLICIT" -eq 0 ] || echo "note: --baseline overrides the baseline committed at $REV" >&2
+    ROOT="$WORK/rev"
+fi
+
+DEFAULT_BASELINE="$ROOT/$BASELINE_REL"
 [ -n "$BASELINE" ] || BASELINE="$DEFAULT_BASELINE"
 
 SEED_LIST="$ROOT/src/compiler_rust/compiler/src/pipeline/native_project/tools.rs"
 SIMPLE_LIST="$ROOT/src/compiler/70.backend/backend/runtime_compiler.spl"
 RUST_LIST="$ROOT/src/compiler_rust/runtime/build.rs"
 RT="$ROOT/src/runtime"
-
-WORK="$(mktemp -d)" || { echo "ERROR — nothing was checked (mktemp failed)"; exit 2; }
-trap 'rm -rf "$WORK"' EXIT INT TERM
 
 # ---------------------------------------------------------------- extractors
 # Each extractor prints one path per line, relative to src/runtime/, with the
@@ -331,11 +375,49 @@ selftest() {
         echo "  selftest ok: unity include expanded into coverage"
     fi
 
+    # fixture 8: --rev must read the COMMITTED tree, and the two paths must
+    # genuinely DISAGREE. This is what keeps the 2026-09-06 wrong-tree fix from
+    # rotting: a --rev that silently fell back to the working checkout fails
+    # here. See the header note on --rev.
+    if ! command -v git >/dev/null 2>&1; then
+        echo "  selftest FAIL: git unavailable, cannot verify the --rev committed-content path"
+        fails=$((fails + 1))
+    else
+        f8="$tdir/rev"; cp -r "$f1" "$f8"
+        # The gate's real baseline path, so --rev can archive it by name.
+        mkdir -p "$f8/scripts/check"
+        cp "$f8/scripts/check/bl.txt" "$f8/$BASELINE_REL"
+        ( cd "$f8" \
+          && git init -q . \
+          && git config user.email selftest@example.com \
+          && git config user.name selftest \
+          && git add -A && git commit -q -m committed ) >/dev/null 2>&1
+        # Working copy ONLY: drop a list entry while the .c stays -- fixture 2's
+        # exact shape. A working-tree scan must FAIL; a committed-content scan
+        # must still PASS.
+        _t="$f8/src/compiler_rust/compiler/src/pipeline/native_project/tools.rs"
+        sed '/"b\.c",/d' "$_t" > "$_t.tmp" && mv "$_t.tmp" "$_t"
+        out=$(sh "$SELF" --internal-scan --root "$f8" --rev HEAD 2>&1); rc=$?
+        if [ "$rc" != 0 ]; then
+            echo "  selftest FAIL: --rev did not read committed content (exit $rc): $(echo "$out" | tail -1)"
+            fails=$((fails + 1))
+        else
+            echo "  selftest ok: --rev reads the committed tree (exit 0)"
+        fi
+        out=$(sh "$SELF" --internal-scan --root "$f8" --baseline "$f8/scripts/check/bl.txt" 2>&1); rc=$?
+        if [ "$rc" != 1 ]; then
+            echo "  selftest FAIL: working-tree scan did not see the dirty edit (exit $rc)"
+            fails=$((fails + 1))
+        else
+            echo "  selftest ok: working-tree scan sees the dirty edit (exit 1) -- paths disagree"
+        fi
+    fi
+
     if [ "$fails" -ne 0 ]; then
         echo "SELFTEST FAILED ($fails case(s))"
         return 1
     fi
-    echo "selftest: 7 fixture(s) passed"
+    echo "selftest: 8 fixture(s) passed"
     return 0
 }
 
@@ -350,7 +432,7 @@ if [ "$INTERNAL" -eq 0 ]; then
 fi
 
 if [ "$SELFTEST_ONLY" -eq 1 ]; then
-    echo "PASS — selftest only, 7 fixture(s) passed, 0 tree file(s) checked"
+    echo "PASS — selftest only, 8 fixture(s) passed, 0 tree file(s) checked"
     exit 0
 fi
 
