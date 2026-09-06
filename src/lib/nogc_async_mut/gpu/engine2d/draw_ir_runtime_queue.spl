@@ -119,20 +119,33 @@ fn _engine2d_draw_ir_empty_drain(status: text, diagnostic: text) -> Engine2dHost
 fn _engine2d_draw_ir_empty_dispatch(status: text, diagnostic: text) -> Engine2dHostGpuRuntimeDispatchResult:
     Engine2dHostGpuRuntimeDispatchResult(dispatched: false, status: status, backend_name: "", queue_handle: 0, backend_handle: 0, payload_hash: 0, payload_size: 0, payload_text: "", diagnostic: diagnostic)
 
+fn _engine2d_draw_ir_text_fold(seed: i64, value: text, weight: i64) -> i64:
+    """Fold a text field's actual characters, not merely its length.
+
+    Length alone collides on every same-length swap, so two different scenes
+    would share a content hash and be treated as the same payload.
+    """
+    var acc = (seed + value.len().to_i64() * weight) % 2147483647
+    var j = 0
+    while j < value.len():
+        acc = (acc * 31 + value.char_code_at(j).to_i64() + weight) % 2147483647
+        j = j + 1
+    acc
+
 fn engine2d_draw_ir_payload_checksum(batch: DrawIrBatch) -> i64:
     var checksum: i64 = 0
     var i = 0
     while i < batch.commands.len():
         val command = batch.commands[i]
         checksum = (checksum + (i.to_i64() + 1) * 17) % 2147483647
-        checksum = (checksum + command.kind.len().to_i64() * 31) % 2147483647
-        checksum = (checksum + command.component_id.len().to_i64() * 37) % 2147483647
+        checksum = _engine2d_draw_ir_text_fold(checksum, command.kind, 31)
+        checksum = _engine2d_draw_ir_text_fold(checksum, command.component_id, 37)
         checksum = (checksum + command.x.to_i64() * 41) % 2147483647
         checksum = (checksum + command.y.to_i64() * 43) % 2147483647
         checksum = (checksum + command.width.to_i64() * 47) % 2147483647
         checksum = (checksum + command.height.to_i64() * 53) % 2147483647
         checksum = (checksum + command.color.to_i64() * 59) % 2147483647
-        checksum = (checksum + command.text_value.len().to_i64() * 61) % 2147483647
+        checksum = _engine2d_draw_ir_text_fold(checksum, command.text_value, 61)
         i = i + 1
     checksum
 
@@ -309,7 +322,10 @@ fn engine2d_draw_ir_runtime_queue_submit_packed(request: Engine2dGpuEpochRequest
     val preflight_token = RingToken(ring_id: queue.queue_handle as u64, slot: 0u64, generation: RingGeneration(value: request.queue_generation))
     val preflight = engine2d_gpu_epoch_admit(request, preflight_token, device_available, available_capabilities)
     if preflight.phase != ENGINE2D_GPU_PHASE_QUEUED:
-        return preflight
+        # A refused epoch owns no queue slot, so it must not carry a token that
+        # names one. Slot 0 is not a packet id (ids start at 1) and a caller that
+        # trusted it would be reading a slot this request never held.
+        return engine2d_gpu_epoch_admit(request, nil, device_available, available_capabilities)
     if queue.queue_handle <= 0:
         return _engine2d_packed_refuse(request, device_available, available_capabilities, "runtime queue handle is not registered")
     if queue.backend_handle <= 0:

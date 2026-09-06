@@ -24,10 +24,12 @@ never the spec. Each scenario resets the process-global queue first.
 
 use std.spec.*
 use common.ui.draw_ir.{
+    DRAW_IR_BACKEND_CPU,
     DRAW_IR_BACKEND_GPU,
     draw_ir_batch,
     draw_ir_embedding_config,
-    draw_ir_rect
+    draw_ir_rect,
+    draw_ir_text
 }
 use common.gpu.engine2d.gpu_epoch.{
     ENGINE2D_GPU_PHASE_QUEUED,
@@ -41,7 +43,9 @@ use common.ui.draw_ir_v3_execution_route.{DRAW_IR_V3_REASON_NO_DEVICE}
 use common.ui.draw_ir_v3_ports.{DRAW_IR_V3_CAP_COMPUTE_PASSES}
 use std.nogc_async_mut.gpu.engine2d.draw_ir_runtime_queue.{
     engine2d_draw_ir_epoch_request_from_batch,
+    engine2d_draw_ir_payload_checksum,
     engine2d_draw_ir_payload_summary_sdn_compat,
+    engine2d_draw_ir_runtime_queue_dispatch,
     engine2d_draw_ir_runtime_queue_dispatch_only,
     engine2d_draw_ir_runtime_queue_submit_deferred,
     engine2d_draw_ir_runtime_queue_submit_packed
@@ -63,6 +67,11 @@ extern fn rt_host_gpu_queue_reset()
 fn deferred_batch(batch_id: text):
     draw_ir_batch(batch_id, DRAW_IR_BACKEND_GPU, draw_ir_embedding_config("surf1", "win1", 0, 0, 20, 16, 10, 1000, false), [
         draw_ir_rect("body", 2, 3, 6, 5, GREEN)
+    ])
+
+fn queue_text_batch(body: text):
+    draw_ir_batch("checksum-probe", DRAW_IR_BACKEND_GPU, draw_ir_embedding_config("surf1", "win1", 0, 0, 20, 16, 10, 1000, false), [
+        draw_ir_text("label", 2, 3, body, GREEN)
     ])
 
 describe "no-GC Engine2D Draw IR runtime queue dispatch":
@@ -250,3 +259,136 @@ describe "no-GC Engine2D Draw IR runtime queue dispatch":
         expect(summary.payload_sdn_bytes).to_be_greater_than(0)
         expect(summary.command_count).to_equal(1)
         expect(summary.summary).to_contain("sdn_bytes={summary.payload_sdn_bytes}")
+
+    it "routes an explicit CPU-selected backend to the host path without emitting a queue packet":
+        # @req REQ-GPU-SCHED-ASYNC-001
+        step("Reset the bounded runtime queue and build an explicit dispatch payload")
+        engine2d_host_gpu_runtime_reset()
+        val cpu_batch = draw_ir_batch("explicit-cpu", DRAW_IR_BACKEND_CPU, draw_ir_embedding_config("surf1", "win1", 0, 0, 20, 16, 10, 1000, false), [
+            draw_ir_rect("body", 2, 3, 6, 5, GREEN)
+        ])
+        val queue = engine2d_host_gpu_runtime_queue_with_backend_handle("vulkan", 1, 7, true, 4096)
+        val payload = engine2d_draw_ir_payload_summary_sdn_compat(cpu_batch, 128)
+
+        step("Dispatch it with the backend selection supplied by the caller")
+        val host_result = engine2d_draw_ir_runtime_queue_dispatch(cpu_batch, DRAW_IR_BACKEND_CPU, 1, 128, payload, queue)
+
+        step("Expect the host lane: nothing submitted, nothing drained, nothing dispatched")
+        expect(host_result.queued_for_gpu).to_be(false)
+        expect(host_result.runtime_submit.submitted).to_be(false)
+        expect(host_result.runtime_submit.status).to_equal("host")
+        expect(host_result.runtime_submit.packet_id).to_equal(0)  # oracle: _engine2d_draw_ir_empty_submit emits packet_id 0
+        expect(host_result.runtime_drain.drained).to_equal(0)  # oracle: the host lane never drains the bounded queue
+        expect(host_result.runtime_drain.status).to_equal("empty")
+        expect(host_result.runtime_dispatch.dispatched).to_be(false)
+        expect(host_result.runtime_dispatch.status).to_equal("host")
+        expect(host_result.runtime_dispatch.backend_name).to_equal("")
+
+        step("The returned result reflects the caller-supplied payload, not a fabricated one")
+        expect(host_result.payload.batch_id).to_equal("explicit-cpu")
+        expect(host_result.payload.packet_bytes).to_equal(128)  # oracle: the packet_bytes argument passed to sdn_compat
+        expect(host_result.payload.command_checksum).to_equal(engine2d_draw_ir_payload_checksum(cpu_batch))
+
+        step("Adverse: prove the bounded queue holds no orphan packet from the host route")
+        val nothing_pending = engine2d_host_gpu_runtime_submit_pending(queue, 1)
+        expect(nothing_pending.count).to_equal(0)  # oracle: a CPU route emits no packet at all
+
+        step("Contrast: the same explicit call with a GPU backend does queue and dispatch")
+        val gpu_batch = deferred_batch("explicit-gpu")
+        val gpu_payload = engine2d_draw_ir_payload_summary_sdn_compat(gpu_batch, 64)
+        val gpu_result = engine2d_draw_ir_runtime_queue_dispatch(gpu_batch, DRAW_IR_BACKEND_GPU, 1, 64, gpu_payload, queue)
+        expect(gpu_result.queued_for_gpu).to_be(true)
+        expect(gpu_result.runtime_submit.submitted).to_be(true)
+        expect(gpu_result.runtime_dispatch.dispatched).to_be(true)
+        expect(gpu_result.runtime_dispatch.payload_hash).to_equal(gpu_payload.command_checksum)
+        engine2d_host_gpu_runtime_reset()
+
+    it "derives the SDN compatibility summary from the batch so its byte count tracks the batch size":
+        # @req REQ-GPU-SCHED-PAYLOAD-002
+        step("Render the compatibility summary for a one-command batch")
+        engine2d_host_gpu_runtime_reset()
+        val one = engine2d_draw_ir_payload_summary_sdn_compat(deferred_batch("sdn-one"), 64)
+
+        step("Render it again for a three-command batch of the same shape")
+        val three_batch = draw_ir_batch("sdn-three", DRAW_IR_BACKEND_GPU, draw_ir_embedding_config("surf1", "win1", 0, 0, 20, 16, 10, 1000, false), [
+            draw_ir_rect("body", 2, 3, 6, 5, GREEN),
+            draw_ir_rect("body", 9, 3, 6, 5, GREEN),
+            draw_ir_rect("body", 2, 9, 6, 5, GREEN)
+        ])
+        val three = engine2d_draw_ir_payload_summary_sdn_compat(three_batch, 192)
+
+        step("The SDN text is real text whose recorded byte count is derived from it")
+        expect(one.payload_sdn.len() > 0).to_be(true)
+        expect(one.payload_sdn_bytes).to_equal(one.payload_sdn.len().to_i64())
+        expect(three.payload_sdn_bytes).to_equal(three.payload_sdn.len().to_i64())
+
+        step("A larger batch produces strictly more SDN bytes and a different checksum")
+        expect(three.payload_sdn_bytes).to_be_greater_than(one.payload_sdn_bytes)
+        expect(three.command_count).to_equal(3)  # oracle: three draw_ir_rect commands in the batch
+        expect(one.command_count).to_equal(1)  # oracle: one draw_ir_rect command in the batch
+        expect(three.command_checksum).to_not_equal(one.command_checksum)
+        expect(three.summary).to_contain("commands=3")
+        expect(three.summary).to_contain("bytes=192")
+
+        step("Adverse: an empty batch still yields SDN text but no commands and a zero checksum")
+        val empty = engine2d_draw_ir_payload_summary_sdn_compat(draw_ir_batch("sdn-empty", DRAW_IR_BACKEND_GPU, draw_ir_embedding_config("surf1", "win1", 0, 0, 20, 16, 10, 1000, false), []), 0)
+        expect(empty.command_count).to_equal(0)  # oracle: the batch carries no commands
+        expect(empty.command_checksum).to_equal(0)  # oracle: the checksum accumulator never advances over an empty command list
+        expect(empty.payload_sdn.len() > 0).to_be(true)
+        expect(empty.payload_sdn_bytes).to_be_less_than(one.payload_sdn_bytes)
+
+    it "defaults a deferred DrawIR receipt to routing evidence with no device claim on either lane":
+        # @req REQ-GPU-SCHED-LIFE-001
+        step("Take the host lane by handing the seam a CPU-target batch")
+        engine2d_host_gpu_runtime_reset()
+        val queue = engine2d_host_gpu_runtime_queue_with_backend_handle("vulkan", 1, 7, true, 4096)
+        val cpu_batch = draw_ir_batch("deferred-host", DRAW_IR_BACKEND_CPU, draw_ir_embedding_config("surf1", "win1", 0, 0, 20, 16, 10, 1000, false), [
+            draw_ir_rect("body", 2, 3, 6, 5, GREEN)
+        ])
+        val host_receipt = engine2d_draw_ir_runtime_queue_submit_deferred(cpu_batch, true, queue)
+
+        step("The host lane is terminal, unqueued, and carries no packet")
+        expect(host_receipt.status).to_equal("host")
+        expect(host_receipt.accepted).to_be(false)
+        expect(host_receipt.queued).to_be(false)
+        expect(host_receipt.terminal).to_be(true)
+        expect(host_receipt.packet_id).to_equal(0)  # oracle: no packet is emitted on the CPU path
+        expect(host_receipt.queue_handle).to_equal(1)  # oracle: queue handle 1 from the queue under test
+        expect(host_receipt.backend_handle).to_equal(7)  # oracle: backend handle 7 from the queue under test
+        expect(host_receipt.command_checksum).to_equal(engine2d_draw_ir_payload_checksum(cpu_batch))
+
+        step("Adverse: a refused route must never leave an orphan packet behind")
+        val nothing_pending = engine2d_host_gpu_runtime_submit_pending(queue, 1)
+        expect(nothing_pending.count).to_equal(0)  # oracle: the CPU path emits no packet
+
+        step("Both the refused host lane and the accepted GPU lane refuse to claim device execution")
+        val gpu_receipt = engine2d_draw_ir_runtime_queue_submit_deferred(deferred_batch("deferred-gpu"), true, queue)
+        expect(gpu_receipt.queued).to_be(true)
+        expect(host_receipt.routing_evidence_only).to_be(true)
+        expect(host_receipt.device_execution_proven).to_be(false)
+        expect(gpu_receipt.routing_evidence_only).to_be(true)
+        expect(gpu_receipt.device_execution_proven).to_be(false)
+        engine2d_host_gpu_runtime_reset()
+
+describe "Packed seam refusal and checksum sensitivity":
+    it "distinguishes two batches whose text differs but has the same length":
+        # @req REQ-GPU-SCHED-PAYLOAD-002
+        step("Checksum two batches that differ only in text content of equal length")
+        val left = engine2d_draw_ir_payload_checksum(queue_text_batch("abc"))
+        val right = engine2d_draw_ir_payload_checksum(queue_text_batch("xyz"))
+        val again = engine2d_draw_ir_payload_checksum(queue_text_batch("abc"))
+        step("Equal-length text must not collide, and the checksum stays deterministic")
+        expect(left == right).to_be(false)
+        expect(left).to_equal(again)
+
+    it "hands back no ring token when the packed seam refuses the epoch":
+        # @req REQ-GPU-SCHED-LIFE-001
+        step("Submit a required-profile packed epoch with no device present")
+        engine2d_host_gpu_runtime_reset()
+        val queue = engine2d_host_gpu_runtime_queue_with_backend_handle("vulkan", 1, 7, true, 4096)
+        val request = engine2d_draw_ir_epoch_request_from_batch(queue_text_batch("abc"), ENGINE2D_GPU_PROFILE_SCENE_REQUIRED, queue, 4096u64, 1u64, 2u64, 3u64, 4u64, 5u64)
+        val refused = engine2d_draw_ir_runtime_queue_submit_packed(request, queue, false, 0u32)
+        step("A refused epoch owns no slot, so it must carry no token")
+        expect(refused.phase).to_equal(ENGINE2D_GPU_PHASE_REJECTED)
+        expect(refused.token).to_be_nil()
+        engine2d_host_gpu_runtime_reset()

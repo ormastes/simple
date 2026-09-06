@@ -31,12 +31,17 @@ use common.gpu.engine2d.gpu_provider_conformance.{
     ENGINE2D_GPU_GRADE_FULL,
     ENGINE2D_GPU_GRADE_ROUTING_ONLY,
     ENGINE2D_GPU_GRADE_UNAVAILABLE,
+    ENGINE2D_GPU_API_LEVEL_DIRECTX,
+    ENGINE2D_GPU_API_LEVEL_METAL,
+    ENGINE2D_GPU_API_LEVEL_VULKAN,
     ENGINE2D_GPU_PROVIDER_DIRECTX,
     ENGINE2D_GPU_PROVIDER_METAL,
     ENGINE2D_GPU_PROVIDER_VULKAN,
     Engine2dGpuProviderReport,
+    engine2d_gpu_provider_api_level,
     engine2d_gpu_provider_conformance,
     engine2d_gpu_provider_conformance_summary,
+    engine2d_gpu_provider_missing_for_full,
     engine2d_gpu_provider_report_unavailable
 }
 use common.gpu.engine2d.gpu_epoch.{
@@ -169,3 +174,50 @@ describe "Engine2D GPU provider conformance":
         expect(summary).to_contain("provider=metal")
         expect(summary).to_contain("grade=routing_only")
         expect(summary).to_contain("autonomous=false")
+
+    it "gives every provider its canonical api level and keeps DirectX on D3D11/DXVK":
+        # @req REQ-GPU-SCHED-PROVIDER-001
+        step("Ask for the canonical api level of each of the three providers")
+        expect(engine2d_gpu_provider_api_level(ENGINE2D_GPU_PROVIDER_VULKAN)).to_equal(ENGINE2D_GPU_API_LEVEL_VULKAN)
+        expect(engine2d_gpu_provider_api_level(ENGINE2D_GPU_PROVIDER_VULKAN)).to_equal("vulkan-1.x")
+        expect(engine2d_gpu_provider_api_level(ENGINE2D_GPU_PROVIDER_METAL)).to_equal(ENGINE2D_GPU_API_LEVEL_METAL)
+        expect(engine2d_gpu_provider_api_level(ENGINE2D_GPU_PROVIDER_METAL)).to_equal("metal")
+        step("The DirectX lane is D3D11 via DXVK; this tree ships no D3D12 provider")
+        val directx_level = engine2d_gpu_provider_api_level(ENGINE2D_GPU_PROVIDER_DIRECTX)
+        expect(directx_level).to_equal(ENGINE2D_GPU_API_LEVEL_DIRECTX)
+        expect(directx_level).to_equal("d3d11-dxvk")
+        expect(directx_level.contains("d3d12")).to_be(false)
+        expect(ENGINE2D_GPU_API_LEVEL_DIRECTX.contains("d3d12")).to_be(false)
+        step("Adverse case: a provider name nobody implements has no api level to give")
+        expect(engine2d_gpu_provider_api_level("d3d12")).to_equal("unknown")
+        expect(engine2d_gpu_provider_api_level("")).to_equal("unknown")
+
+    it "names each missing prerequisite individually and stays empty for a fully conformant report":
+        # @req REQ-GPU-SCHED-PROVIDER-001
+        step("A report that closes every gap has nothing left to name")
+        expect(engine2d_gpu_provider_missing_for_full(fully_capable_report(ENGINE2D_GPU_PROVIDER_VULKAN, DRAW_IR_V3_CAP_COMPUTE_PASSES))).to_equal("")
+        step("An absent provider is reported as unavailable, not as a list of gaps")
+        expect(engine2d_gpu_provider_missing_for_full(engine2d_gpu_provider_report_unavailable(ENGINE2D_GPU_PROVIDER_VULKAN, "loader missing"))).to_equal("unavailable")
+        step("Withhold only the fence token: the fence gap is named and the phase gap is not")
+        val no_fence = Engine2dGpuProviderReport(provider: ENGINE2D_GPU_PROVIDER_VULKAN, api_level: ENGINE2D_GPU_API_LEVEL_VULKAN, available: true, device_name: "Reference Device", device_type: "discrete_gpu", driver_identity: "reference-driver-1.0", capabilities: DRAW_IR_V3_CAP_COMPUTE_PASSES, distinct_phases: true, fence_token_available: false, device_timestamps_available: true, probe_error: "")
+        val no_fence_missing = engine2d_gpu_provider_missing_for_full(no_fence)
+        expect(no_fence_missing).to_equal("fence token not exposed")
+        expect(no_fence_missing.contains("phases")).to_be(false)
+        step("Withhold only the phase separation: the phase gap is named and the fence gap is not")
+        val no_phases = Engine2dGpuProviderReport(provider: ENGINE2D_GPU_PROVIDER_METAL, api_level: ENGINE2D_GPU_API_LEVEL_METAL, available: true, device_name: "Reference Device", device_type: "discrete_gpu", driver_identity: "reference-driver-1.0", capabilities: DRAW_IR_V3_CAP_COMPUTE_PASSES, distinct_phases: false, fence_token_available: true, device_timestamps_available: true, probe_error: "")
+        val no_phases_missing = engine2d_gpu_provider_missing_for_full(no_phases)
+        expect(no_phases_missing).to_contain("phases not distinguished")
+        expect(no_phases_missing.contains("fence")).to_be(false)
+        step("Withhold the identities: the device name and the driver identity are named separately")
+        val no_identity = Engine2dGpuProviderReport(provider: ENGINE2D_GPU_PROVIDER_VULKAN, api_level: ENGINE2D_GPU_API_LEVEL_VULKAN, available: true, device_name: "", device_type: "discrete_gpu", driver_identity: "", capabilities: DRAW_IR_V3_CAP_COMPUTE_PASSES, distinct_phases: true, fence_token_available: true, device_timestamps_available: true, probe_error: "")
+        val no_identity_missing = engine2d_gpu_provider_missing_for_full(no_identity)
+        expect(no_identity_missing).to_contain("device name not reported")
+        expect(no_identity_missing).to_contain("driver identity not reported")
+        step("Withhold the device clock: a provider that cannot timestamp can never prove execution")
+        val no_clock = Engine2dGpuProviderReport(provider: ENGINE2D_GPU_PROVIDER_VULKAN, api_level: ENGINE2D_GPU_API_LEVEL_VULKAN, available: true, device_name: "Reference Device", device_type: "discrete_gpu", driver_identity: "reference-driver-1.0", capabilities: DRAW_IR_V3_CAP_COMPUTE_PASSES, distinct_phases: true, fence_token_available: true, device_timestamps_available: false, probe_error: "")
+        val no_clock_missing = engine2d_gpu_provider_missing_for_full(no_clock)
+        expect(no_clock_missing).to_equal("device timestamps not available")
+        expect(engine2d_gpu_provider_conformance(no_clock, ENGINE2D_GPU_PROFILE_SCENE_REQUIRED).grade).to_equal(ENGINE2D_GPU_GRADE_ROUTING_ONLY)
+        step("A named gap of any kind keeps the provider off a full grade")
+        expect(engine2d_gpu_provider_conformance(no_fence, ENGINE2D_GPU_PROFILE_SCENE_REQUIRED).grade).to_equal(ENGINE2D_GPU_GRADE_ROUTING_ONLY)
+        expect(engine2d_gpu_provider_conformance(no_identity, ENGINE2D_GPU_PROFILE_DEVICE_INITIATED).autonomous_submission_allowed).to_equal(false)
