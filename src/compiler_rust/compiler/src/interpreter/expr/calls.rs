@@ -1210,6 +1210,14 @@ pub(super) fn eval_call_expr(
                     if crate::interpreter::field_access_debug_enabled() {
                         let receiver_expr = format!("{receiver:?}");
                         let receiver_value = recv_val.to_debug_string();
+                        // `Expr::FieldAccess` carries no span, so the failing
+                        // frame cannot be named by file:line. The local
+                        // environment's key set names it instead: parameter
+                        // names are unique per method in practice.
+                        let mut local_keys: Vec<&str> = env.overlay_entries().map(|(k, _)| k.as_str()).collect();
+                        local_keys.sort_unstable();
+                        let mut all_keys: Vec<&str> = env.keys().map(|k| k.as_str()).collect();
+                        all_keys.sort_unstable();
                         let stack = crate::interpreter::debug_call_stack_snapshot();
                         let stack_tail = stack
                             .iter()
@@ -1220,11 +1228,13 @@ pub(super) fn eval_call_expr(
                             .collect::<Vec<_>>()
                             .join(" -> ");
                         eprintln!(
-                            "[field-access-error] field={field} recv_type={} recv={} expr={} stack={} hint=set SIMPLE_BOOTSTRAP_DIAG=1 or SIMPLE_DEBUG_FIELD_ACCESS=1 before process start",
+                            "[field-access-error] field={field} recv_type={} recv={} expr={} stack={} locals={} env_keys={} hint=set SIMPLE_BOOTSTRAP_DIAG=1 or SIMPLE_DEBUG_FIELD_ACCESS=1 before process start",
                             recv_val.type_name(),
                             receiver_value.chars().take(500).collect::<String>(),
                             receiver_expr.chars().take(500).collect::<String>(),
-                            stack_tail
+                            stack_tail,
+                            local_keys.join(","),
+                            all_keys.join(",").chars().take(2000).collect::<String>()
                         );
                     }
                     let ctx = ErrorContext::new()

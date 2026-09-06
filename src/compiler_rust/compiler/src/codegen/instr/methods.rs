@@ -86,7 +86,7 @@ fn call_len_method<M: Module>(
         return inline_runtime_array_len_value(builder, receiver);
     }
     if func_name == "rt_len" {
-        return inline_runtime_len_value(builder, receiver);
+        return inline_runtime_len_value(builder, receiver, ctx.baremetal);
     }
     if let Some(&len_id) = ctx.runtime_funcs.get(func_name) {
         let len_ref = ctx.module.declare_func_in_func(len_id, builder.func);

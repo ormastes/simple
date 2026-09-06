@@ -1,0 +1,142 @@
+# @cover src/lib/gc_async_mut/gpu/engine2d/gpu_provider_probes.spl 80%
+# @tag: unit, gpu, scheduler, provider, probe
+"""
+## Purpose and audience
+The provider probes are how Engine2D asks a host what its GPU backends really
+offer before any scene is routed to one. This manual is for the engineer adding
+or grading a provider: it shows the report every probe must produce on any host,
+the seams no probe may claim without a backing extern, and why a probe run on a
+machine with no GPU is still a meaningful answer rather than an error.
+Feature IDs: gpu_scheduler_hardening. Category: Stdlib.
+## Operator workflow
+SIMPLE_LIB=src bin/simple run test/01_unit/lib/gc_async_mut/gpu/engine2d/gpu_provider_probes_spec.spl
+## Compatibility and limitations
+Device-free: it runs on a host with no GPU and asserts nothing about whether any
+provider is available, only about the shape and honesty of what is reported. It
+therefore never proves device execution; the device half lives in the
+GPU-gated system specs.
+## Verification guidance and troubleshooting
+A RED here means a probe started claiming a seam the tree cannot back — a fence
+token, a device timestamp, a D3D12 lane — or a probe stopped explaining why a
+provider is unavailable. Fix the probe, never the spec.
+"""
+# Lifecycle: doc/01_research/local/gpu_scheduler_hardening_gpu_resident_rendering.md ; doc/03_plan/ui/gpu_scheduler_hardening_gpu_resident_rendering.md ;
+# doc/04_architecture/gpu_scheduler_hardening_gpu_resident_rendering.md ; doc/05_design/gpu_scheduler_hardening_gpu_resident_rendering.md
+# @manual_section: primary
+
+use std.spec.*
+use common.gpu.engine2d.gpu_epoch.{ENGINE2D_GPU_PROFILE_SCENE_STATIC_POOL}
+use common.gpu.engine2d.gpu_provider_conformance.{
+    ENGINE2D_GPU_API_LEVEL_DIRECTX,
+    ENGINE2D_GPU_GRADE_FULL,
+    ENGINE2D_GPU_PROVIDER_DIRECTX,
+    ENGINE2D_GPU_PROVIDER_METAL,
+    ENGINE2D_GPU_PROVIDER_VULKAN,
+    engine2d_gpu_provider_conformance
+}
+use std.gc_async_mut.gpu.engine2d.gpu_provider_probes.{
+    engine2d_gpu_probe_all,
+    engine2d_gpu_probe_directx,
+    engine2d_gpu_probe_metal,
+    engine2d_gpu_probe_vulkan
+}
+
+describe "Engine2D GPU provider probes":
+    it "reports exactly one entry per provider in canonical order on any host":
+        # @req REQ-GPU-SCHED-PROVIDER-001
+        step("Probe every provider this host can answer for")
+        val reports = engine2d_gpu_probe_all()
+        step("Read the provider names off the three reports")
+        expect(reports.len()).to_equal(3)  # oracle: vulkan, metal, directx — one report each
+        val vulkan_name = reports[0].provider
+        val metal_name = reports[1].provider
+        val directx_name = reports[2].provider
+        expect(vulkan_name).to_equal(ENGINE2D_GPU_PROVIDER_VULKAN)
+        expect(metal_name).to_equal(ENGINE2D_GPU_PROVIDER_METAL)
+        expect(directx_name).to_equal(ENGINE2D_GPU_PROVIDER_DIRECTX)
+        step("The three names are distinct, so no provider is reported twice under another label")
+        expect(vulkan_name == metal_name).to_be(false)
+        expect(metal_name == directx_name).to_be(false)
+        expect(vulkan_name == directx_name).to_be(false)
+
+    it "never claims a fence token or device timestamps, because no extern backs them":
+        # @req REQ-GPU-SCHED-PROOF-001
+        step("Probe every provider and inspect the two seams that would license a device claim")
+        val reports = engine2d_gpu_probe_all()
+        var fence_claims = 0
+        var timestamp_claims = 0
+        var i = 0
+        while i < reports.len():
+            val report = reports[i]
+            if report.fence_token_available:
+                fence_claims = fence_claims + 1
+            if report.device_timestamps_available:
+                timestamp_claims = timestamp_claims + 1
+            i = i + 1
+        step("Both seams must be absent on every provider, available or not")
+        expect(fence_claims).to_equal(0)  # oracle: no rt_*_create_fence extern exists in this tree
+        expect(timestamp_claims).to_equal(0)  # oracle: no query-pool / counter-sample extern exists in this tree
+
+    it "grades no provider as full conformance while those seams are missing":
+        # @req REQ-GPU-SCHED-PROVIDER-001
+        step("Grade each probe report against the static-pool profile")
+        val reports = engine2d_gpu_probe_all()
+        var full_grades = 0
+        var missing_reasons = 0
+        var i = 0
+        while i < reports.len():
+            val conformance = engine2d_gpu_provider_conformance(reports[i], ENGINE2D_GPU_PROFILE_SCENE_STATIC_POOL)
+            if conformance.grade == ENGINE2D_GPU_GRADE_FULL:
+                full_grades = full_grades + 1
+            if conformance.missing_for_full != "":
+                missing_reasons = missing_reasons + 1
+            if conformance.autonomous_submission_allowed:
+                full_grades = full_grades + 1
+            i = i + 1
+        step("Every provider is short of full, and every one says what it is short of")
+        expect(full_grades).to_equal(0)  # oracle: a routing_only provider never grades full nor gains autonomy
+        expect(missing_reasons).to_equal(3)  # oracle: all three reports name at least one gap
+
+    it "explains every unavailable provider instead of reporting a silent absence":
+        # @req REQ-GPU-SCHED-VERIFY-001
+        step("Probe every provider and pair each availability verdict with its explanation")
+        val reports = engine2d_gpu_probe_all()
+        var mismatches = 0
+        var i = 0
+        while i < reports.len():
+            val report = reports[i]
+            if not report.available and report.probe_error == "":
+                mismatches = mismatches + 1
+            if report.available and report.probe_error != "":
+                mismatches = mismatches + 1
+            i = i + 1
+        step("An unavailable report always carries a non-empty probe_error; an available one carries none")
+        expect(mismatches).to_equal(0)  # oracle: availability and explanation agree on all three reports
+        expect(reports.len()).to_equal(3)  # oracle: the loop above examined every provider
+
+    it "keeps directx pinned to the D3D11/DXVK lane this tree actually has":
+        # @req REQ-GPU-SCHED-PROVIDER-001
+        step("Probe DirectX directly on this host")
+        val report = engine2d_gpu_probe_directx()
+        step("The api level is the DXVK constant and mentions no D3D12 lane")
+        expect(report.provider).to_equal(ENGINE2D_GPU_PROVIDER_DIRECTX)
+        expect(report.api_level).to_equal(ENGINE2D_GPU_API_LEVEL_DIRECTX)
+        expect(report.api_level.contains("d3d12")).to_be(false)
+        expect(report.api_level.contains("d3d11")).to_be(true)
+        expect(report.fence_token_available).to_be(false)
+
+    it "answers for vulkan and metal without crashing on a host that lacks them":
+        # @req REQ-GPU-SCHED-VERIFY-001
+        step("Call each single-provider probe on its own; a missing backend must be a report, not a fault")
+        val vulkan = engine2d_gpu_probe_vulkan()
+        val metal = engine2d_gpu_probe_metal()
+        step("Each returned a report labelled with its own provider and no fabricated device seam")
+        expect(vulkan.provider).to_equal(ENGINE2D_GPU_PROVIDER_VULKAN)
+        expect(metal.provider).to_equal(ENGINE2D_GPU_PROVIDER_METAL)
+        expect(vulkan.device_timestamps_available).to_be(false)
+        expect(metal.device_timestamps_available).to_be(false)
+        step("An unavailable provider reports empty identities rather than a placeholder name")
+        val vulkan_named = vulkan.available or vulkan.device_name == ""
+        val metal_named = metal.available or metal.device_name == ""
+        expect(vulkan_named).to_be(true)
+        expect(metal_named).to_be(true)
