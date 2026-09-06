@@ -258,8 +258,16 @@ fn driver_native_classify_module_failure_v1(detail: text) -> BuildOutcomeKind:
 #
 # This is deliberately NOT a substitute for the payload fix: an empty detail
 # here is itself evidence of the crossing defect, and says so.
+# `detail != ""` alone is NOT a sufficient emptiness test on this path. The
+# payload that reaches here can be a corrupt tagged word (the `<invalid-heap:0x…>`
+# shape in the bug record), which compares unequal to `""` and yet renders as
+# nothing downstream -- so a value that passed this guard still arrived at
+# `reason_block_for` as empty, which is precisely how a "non-empty" detail became
+# "(none recorded)". Test the LENGTH as well: it is a different lowering path
+# from text comparison, so the two together catch both the empty and the corrupt
+# case. Anything non-positive is treated as lost.
 fn driver_native_nonempty_failure_detail(detail: text) -> text:
-    if detail != "":
+    if detail != "" and detail.len() > 0:
         return detail
     "diagnostic lost crossing the AOT Result boundary (see the 'error: AOT "
         + "compile error' line above for the real reason); tracked in "
@@ -1278,8 +1286,13 @@ impl CompilerDriver:
                             capsules, build_cache, name, obj_path)
                         if collect_error != "":
                             module_unit_id = module_unit_id + 1
+                            # Wrapped like the two Err sites below: `collect_error
+                            # != ""` admitted it, but that test does not survive a
+                            # corrupt payload, so an unwrapped detail could still
+                            # reach the summary as "(none recorded)".
                             driver_native_record_module_failure(module_outcomes,
-                                module_unit_id, name, collect_error)
+                                module_unit_id, name,
+                                driver_native_nonempty_failure_detail(collect_error))
                         cache_miss_count = cache_miss_count + 1
                     case Err(e):
                         module_unit_id = module_unit_id + 1
@@ -1579,8 +1592,39 @@ impl CompilerDriver:
 # -- it is tracked separately in
 # doc/08_tracking/bug/stage2_aot_error_message_lost_invalid_heap_2026-09-06.md --
 # it removes that defect's ability to blind every failure on this path.
+# Measured 2026-09-06 on the rejected stage-2 (`simple.rejected`): this function
+# WAS called 222 times and printed 222 EMPTY lines. The log carries exactly one
+# blank line per failure, immediately before each of the 222 build-outcome
+# summaries, and not one `error: AOT compile error in ...` line -- so the
+# interpolated `print` collapsed the WHOLE string, its literal prefix included,
+# when one interpolated operand was the corrupt payload the bug record calls
+# `<invalid-heap:0x…>`. That is why four investigations read this path as "never
+# reached": a single bad operand silences the literal text around it.
+#
+# So the diagnostic must not depend on interpolation succeeding. Three
+# independent statements, ordered most-robust first, so a collapse localises the
+# corruption instead of erasing the message:
+#   1. a pure-literal line -- no operands, so nothing can silence it. Its
+#      presence alone proves this function ran, which is the fact that was
+#      unobtainable before.
+#   2. `print name` / `print detail` BARE -- a bare print of a text value does
+#      not build an interpolated temporary, so it survives crossings that
+#      collapse `"{...}"`. This is the line that carries the real reason.
+#   3. the lengths, via i64 interpolation -- a different lowering path from text
+#      interpolation, so a zero/garbage length distinguishes "the payload is
+#      empty" from "the payload is corrupt" without guessing.
+# A blank line from (2) with a non-zero length from (3) is positive evidence of
+# the text-crossing defect, not an absence of evidence.
 fn _aot_compile_failure(name: text, detail: text) -> Result<text, text>:
-    print "error: AOT compile error in {name}: {detail}"
+    print "error: AOT compile error -- unit, reason and lengths follow on the next lines"
+    _sffi_stdout_flush()
+    print "error:   unit (bare):"
+    print name
+    _sffi_stdout_flush()
+    print "error:   reason (bare):"
+    print detail
+    _sffi_stdout_flush()
+    print "error:   name-len={name.len()} reason-len={detail.len()}"
     _sffi_stdout_flush()
     Err("AOT compile error in {name}: {detail}")
 
