@@ -12,5 +12,5 @@
 
 <!-- sdn-diagram:frontend-offload-switch-tldr -->
 ```sdn
-{cli, env, simple.sdn, default off} -> resolve_frontend_offload -> frontend_offload_decision -> {receipt, parse mode}
+{cli, env, simple.sdn (Wave 1 GFO-005), default off} -> resolve_frontend_offload -> frontend_offload_decision -> {receipt, parse mode}
 ```

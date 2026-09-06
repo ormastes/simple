@@ -54,10 +54,11 @@ use compiler.driver.driver_phase_gates.{
 use compiler.semantics.layer_call_wiring.{check_project_layer_calls}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 use std.io.{file_lock, file_unlock, file_exists, file_write}
-use compiler.common.structural_contracts.offload_profile.{OffloadDecision}
+use compiler.common.structural_contracts.offload_profile.{OffloadDecision, validate_offload_profile}
 use compiler.common.structural_contracts.frontend_offload_switch.{
     FrontendOffloadInputs, FrontendOffloadSwitch, resolve_frontend_offload,
-    frontend_offload_decision, FRONTEND_OFFLOAD_GPU_PARSE_AVAILABLE, frontend_offload_receipt_line
+    frontend_offload_decision, frontend_offload_profile,
+    FRONTEND_OFFLOAD_GPU_PARSE_AVAILABLE, frontend_offload_receipt_line
 }
 
 @unsafe(reason: "raw stdout flush ABI", capabilities: [ffi])
@@ -310,6 +311,12 @@ pub fn driver_frontend_offload_decision() -> Result<OffloadDecision, text>:
     if switch_result.is_err():
         return Err(switch_result.unwrap_err())
     val switch = switch_result.unwrap()
+    # Build and validate the per-stage profile the switch resolves into. Wave 0
+    # selects no stage from it, but an invalid profile must fail the compile here
+    # rather than surface later as a wrong stage mode.
+    match validate_offload_profile(frontend_offload_profile(switch)):
+        Ok(()) -> ()
+        Err(message) -> return Err("frontend_offload_invalid_profile: " + message)
     val decision_result = _driver_frontend_offload_decide(switch)
     if decision_result.is_err():
         return Err(decision_result.unwrap_err())

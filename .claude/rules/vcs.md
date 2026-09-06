@@ -12,7 +12,16 @@ alwaysApply: false
   <sha>:main` fails with GH013 even for a one-commit fast-forward, and `gh pr merge
   --admin` is refused. Auto-merge is disabled on the repo.
 - **Topic branches exist only to carry a PR.** No long-lived feature branches; the
-  branch is deleted at merge. Name it `<area>/<topic>-<date>`.
+  branch is deleted at merge. **`.spipe/policy/vcs.sdn` is the canonical source
+  for this** — read it, not this prose, when the two disagree. Its
+  `authoring.ordinary_change` block requires `branch_pattern: work/*`
+  (so name the branch `work/<topic>`, NOT `<area>/<topic>`),
+  `unique_branch: required`, `unique_workspace: required`, and
+  `main_worktree: read_only` — ordinary changes are authored in their own
+  workspace, not by committing in the shared main worktree.
+  `direct_protected_ref_update: deny` is the same rule the server enforces.
+  The `server_profiles.standard` block names the two required checks and
+  `approving_reviews: 0`, matching the ruleset.
 - Commit: `jj commit -m "message"` (auto-tracks all changes, no staging needed)
 - Push/land (`land.shs` still gates the rules.sdl quick-group against COMMITTED
   content; run it first, then):
