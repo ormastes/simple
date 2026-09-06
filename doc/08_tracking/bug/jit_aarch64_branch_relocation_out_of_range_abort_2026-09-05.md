@@ -129,6 +129,37 @@ sets `is_pic = cfg!(target_arch = "x86_64")` and explains it as:
 Disabling PIC does not avoid an assert; it *chooses* this one. The comment
 should say so, otherwise the next reader concludes aarch64 is already safe.
 
+## Workaround: `SIMPLE_EXECUTION_MODE=interpret` (2026-09-06)
+
+The line above saying "`--mode=interpreter` does not avoid it" is **wrong, and
+the experiment behind it did not test what it claimed**. `--mode=interpreter`
+is not a flag `run` accepts; it is consumed as a FILE PATH:
+
+```
+$ simple run --mode=interpreter <file>
+[INFO] JIT compilation failed, falling back to interpreter: module load error:
+       io: Cannot read "--mode=interpreter": No such file or directory
+error: compile failed: io: Cannot read "--mode=interpreter"
+```
+
+So that run never selected the interpreter — it passed an unrecognised argument
+and then JIT-compiled the real file as usual, which is why it still aborted.
+
+The switch that works is the environment variable read at
+`driver/src/exec_core.rs:223`, whose accepted values are `jit` |
+`interpret` | `interpreter` | `interpret-optimized`:
+
+```
+SIMPLE_EXECUTION_MODE=interpret simple run <file>
+```
+
+Positive control: a hello-world runs identically under the default and under
+`interpret`. With it set, the vk2d_bench reproducer above runs for >10 minutes
+without aborting and produces **no crash log**, where the JIT lane dumps core in
+seconds. It is slow — it is an interpreter — but it is a real escape hatch for
+anyone blocked by this on aarch64, and it was previously recorded as not
+working.
+
 ## Three states measured 2026-09-06 (the cheap fixes are ruled OUT)
 
 Each row was built and run against the deterministic reproducer above. This
