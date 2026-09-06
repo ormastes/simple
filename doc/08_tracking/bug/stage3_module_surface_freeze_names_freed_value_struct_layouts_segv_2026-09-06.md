@@ -160,3 +160,38 @@ the same machinery. Candidates to check with a phase-instrumented binary:
 `begin` and `pause` on the success path) and the phase-2 registry retention
 scope (`driver_source_pipeline_parsing.spl:538`), whose `end` return value is
 ignored on several paths.
+
+## Why promotion is exactly the right lever (read, not inferred)
+
+`rt_core_reclaim_transient_immortal` (`runtime_native.c:1752`) frees a string iff
+`RT_CORE_STRING_FLAG_TRANSIENT` is set and `RT_CORE_STRING_FLAG_SHARED` is not —
+and `rt_transient_heap_promote`'s commit loop clears exactly that TRANSIENT flag
+(`runtime_native.c:2201`). Note that strings are reclaimed by FLAG, not by scope
+id: any string still flagged transient dies at the next `scope_end`, whichever
+scope that is. Arrays/dicts/enums/closures are reclaimed by scope id instead,
+which is why the enumerated array promotions in `module_surfaces_promote` were
+enough for them and nothing covered the texts.
+
+## Verification status — stated plainly
+
+- **Ran, and discriminates:** `scripts/check/check-transient-scope-text-field-promotion.shs`
+  tier 1. `PASS — 4 freeze-scope text field(s) checked, all promoted` on the fixed
+  tree; `FAIL — ... not promoted by module_surfaces_promote: logical_name
+  canonical_name package_name preferred_registry_name` with the four promotions
+  deleted.
+- **Ran:** `test/01_unit/compiler/semantics/value_struct_layout_spec.spl`, 15/15
+  with the hardening in place, including
+  `validate_value_struct_layouts rejects genuine direct by-value cycles` — the
+  validator still rejects a bad layout.
+- **NOT run:** the native fixture (tier 2). Both native lanes available on this
+  host fail before codegen for filed, unrelated reasons — the admitted Stage-2
+  binary reports `AOT compile error ...: <invalid-heap:0x3adf9d91>` on a
+  three-line hello world (`phase2_native_build_hello_world_invalid_heap_and_scorer_segv_2026-09-05.md`),
+  and the Rust seed's native-build worker stops at
+  `error: semantic: unknown extern function: rt_secure_temp_dir`. The fixture is
+  written and wired; it has not executed.
+- **NOT run:** a full Stage-3 self-host. The fix is therefore not verified
+  end-to-end.
+- Evidence trail kept at `/home/yoon/segv-lane/unpack/wt1/{ProcMaps,ProcStatus}`;
+  the 39 GB `CoreDump` was deleted after analysis and is re-derivable with
+  `apport-unpack` from the original `.crash` in `/var/crash`.
