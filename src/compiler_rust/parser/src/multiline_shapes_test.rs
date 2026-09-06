@@ -144,7 +144,9 @@ mod multiline_shapes {
             "deref assignment after a multi-line call must parse"
         );
         assert!(
-            parses("fn f(p: rawptr<i64>, q: rawptr<i64>, v: i64):\n    val s = g(\n        1)\n    *p = v\n    *q = v\n"),
+            parses(
+                "fn f(p: rawptr<i64>, q: rawptr<i64>, v: i64):\n    val s = g(\n        1)\n    *p = v\n    *q = v\n"
+            ),
             "two consecutive deref assignments after a multi-line call must parse"
         );
         assert!(

@@ -28,18 +28,12 @@ fn strict_all_marks_jit_fallbacks_as_hard_failures() {
 
 #[test]
 fn symbol_trace_groups_private_helper_and_module_qualified_near_match() {
-    assert!(super::jit_symbol_trace_matches(
-        "sffi_env_get_i64",
-        "_sffi_env_get_i64"
-    ));
+    assert!(super::jit_symbol_trace_matches("sffi_env_get_i64", "_sffi_env_get_i64"));
     assert!(super::jit_symbol_trace_matches(
         "sffi_env_get_i64",
         "compiler__frontend___sffi_env_get_i64"
     ));
-    assert!(!super::jit_symbol_trace_matches(
-        "sffi_env_get_i64",
-        "rt_env_get_i64"
-    ));
+    assert!(!super::jit_symbol_trace_matches("sffi_env_get_i64", "rt_env_get_i64"));
 }
 
 #[test]
@@ -219,8 +213,7 @@ fn rule_count() -> i64:
     let mut jit = JitCompiler::new_static().expect("create static JIT");
     jit.compile_module(&mir_module)
         .expect("compile module-init struct fixture without fallback");
-    let count = unsafe { jit.call_i64_void("rule_count") }
-        .expect("module init must construct the global registry");
+    let count = unsafe { jit.call_i64_void("rule_count") }.expect("module init must construct the global registry");
     assert_eq!(count, 0);
 }
 

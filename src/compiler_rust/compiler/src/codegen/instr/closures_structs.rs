@@ -2140,10 +2140,7 @@ fn try_compile_builtin_method_call<M: Module>(
                 let mut sig = Signature::new(platform_call_conv());
                 sig.params.push(AbiParam::new(types::I64));
                 sig.returns.push(AbiParam::new(types::I64));
-                match ctx
-                    .module
-                    .declare_function("rt_char_from_code", Linkage::Import, &sig)
-                {
+                match ctx.module.declare_function("rt_char_from_code", Linkage::Import, &sig) {
                     Ok(id) => {
                         ctx.func_ids.insert("rt_char_from_code".to_string(), id);
                         id

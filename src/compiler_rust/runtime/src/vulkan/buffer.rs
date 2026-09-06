@@ -404,12 +404,7 @@ impl VulkanBuffer {
     /// The closure runs while the staging buffer is alive and the transfer has
     /// already been fenced, so the slice is complete and stable for its
     /// duration. It must not escape the borrow.
-    pub fn download_range_with<R>(
-        &self,
-        offset: u64,
-        size: u64,
-        consume: impl FnOnce(&[u8]) -> R,
-    ) -> VulkanResult<R> {
+    pub fn download_range_with<R>(&self, offset: u64, size: u64, consume: impl FnOnce(&[u8]) -> R) -> VulkanResult<R> {
         checked_download_end(self.size, offset, size)?;
         if size == 0 {
             return Ok(consume(&[]));

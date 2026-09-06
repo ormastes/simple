@@ -343,16 +343,22 @@ mod linux {
         if !ok || next > i64::MAX as u64 {
             return INVALID;
         }
-        let updated = receipts().lock().ok().map(|mut guard| {
-            match guard.get_mut(&lock) {
+        let updated = receipts()
+            .lock()
+            .ok()
+            .map(|mut guard| match guard.get_mut(&lock) {
                 Some(Receipt::Lock(value)) => {
                     value.issued_epoch = next;
                     true
                 }
                 _ => false,
-            }
-        }).unwrap_or(false);
-        if updated { next as i64 } else { INVALID }
+            })
+            .unwrap_or(false);
+        if updated {
+            next as i64
+        } else {
+            INVALID
+        }
     }
     #[no_mangle]
     pub unsafe extern "C" fn rt_cache_host_publish_readiness_v1(
