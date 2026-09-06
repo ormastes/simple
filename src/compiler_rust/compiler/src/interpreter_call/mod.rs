@@ -202,9 +202,7 @@ fn function_module_owner(func: &Arc<FunctionDef>) -> Option<Arc<str>> {
 /// Every registered definition of `name`: the overload set plus the flat-map
 /// entry (which is not always in the overload set).
 fn all_candidates(name: &str, functions: &HashMap<String, Arc<FunctionDef>>) -> Vec<Arc<FunctionDef>> {
-    let mut out = FUNCTION_OVERLOADS
-        .with(|cell| cell.borrow().get(name).cloned())
-        .unwrap_or_default();
+    let mut out = FUNCTION_OVERLOADS.with(|cell| cell.borrow().get(name).cloned()).unwrap_or_default();
     if let Some(flat) = functions.get(name) {
         if !out.iter().any(|c| Arc::ptr_eq(c, flat)) {
             out.push(Arc::clone(flat));
@@ -261,14 +259,11 @@ fn import_bound_candidate(
     }
     if debug_dupdispatch() {
         let b = crate::interpreter::owner_bindings(&current);
-        eprintln!(
-            "[dupdispatch] probe name={name} current={current} has_table={} entry={:?}",
-            b.is_some(),
-            b.as_ref().and_then(|t| t.get(name).cloned())
-        );
+        eprintln!("[dupdispatch] probe name={name} current={current} has_table={} entry={:?}",
+            b.is_some(), b.as_ref().and_then(|t| t.get(name).cloned()));
     }
-    let (mut source_owner, mut source_name) =
-        crate::interpreter::owner_bindings(&current).and_then(|bindings| bindings.get(name).cloned())?;
+    let (mut source_owner, mut source_name) = crate::interpreter::owner_bindings(&current)
+        .and_then(|bindings| bindings.get(name).cloned())?;
     // Walk re-export facades to the module that actually DECLARES the
     // function, mirroring the bounded chain walk HIR lowering performs in
     // `collect_flattened_import_aliases`. At each hop, a candidate declared
@@ -281,25 +276,23 @@ fn import_bound_candidate(
     let mut target: Option<Arc<FunctionDef>> = None;
     for _ in 0..16 {
         target = functions
-            .get(&crate::interpreter::flatten_owner_mangled_name(
-                &source_owner,
-                &source_name,
-            ))
+            .get(&crate::interpreter::flatten_owner_mangled_name(&source_owner, &source_name))
             .cloned()
             .or_else(|| candidate_declared_by(&source_owner, &source_name, functions));
         if target.is_some() {
             break;
         }
         let hop = crate::interpreter::owner_bindings(&source_owner).and_then(|bindings| {
-            bindings
-                .get(&source_name)
-                .cloned()
-                .filter(|next| *next.0 != *source_owner || next.1 != source_name)
-                .or_else(|| bindings.get("*").map(|glob| (Arc::clone(&glob.0), source_name.clone())))
+            bindings.get(&source_name).cloned().filter(|next| {
+                *next.0 != *source_owner || next.1 != source_name
+            }).or_else(|| {
+                bindings.get("*").map(|glob| (Arc::clone(&glob.0), source_name.clone()))
+            })
         });
         match hop {
             Some((next_owner, next_name))
-                if *next_owner != *current && (*next_owner != *source_owner || next_name != source_name) =>
+                if *next_owner != *current
+                    && (*next_owner != *source_owner || next_name != source_name) =>
             {
                 source_owner = next_owner;
                 source_name = next_name;
@@ -726,13 +719,7 @@ pub(crate) fn evaluate_call(
                     );
                 }
                 if let Some(func) = select_overload(&overloads, &evaluated_args) {
-                    if debug_dupdispatch() {
-                        eprintln!(
-                            "[dupdispatch] P4-overload name={name} owner={:?} current={:?}",
-                            function_module_owner(&func),
-                            CURRENT_EXEC_MODULE.with(|c| c.borrow().clone())
-                        );
-                    }
+                    if debug_dupdispatch() { eprintln!("[dupdispatch] P4-overload name={name} owner={:?} current={:?}", function_module_owner(&func), CURRENT_EXEC_MODULE.with(|c| c.borrow().clone())); }
                     return core::exec_function_with_values_and_writeback(
                         &func,
                         &evaluated_args,
@@ -763,13 +750,7 @@ pub(crate) fn evaluate_call(
 
         // Priority 5: Check regular functions (user-defined) — most common case
         if let Some(func) = functions.get(name).cloned() {
-            if debug_dupdispatch() {
-                eprintln!(
-                    "[dupdispatch] P5-flat name={name} owner={:?} current={:?}",
-                    function_module_owner(&func),
-                    CURRENT_EXEC_MODULE.with(|c| c.borrow().clone())
-                );
-            }
+            if debug_dupdispatch() { eprintln!("[dupdispatch] P5-flat name={name} owner={:?} current={:?}", function_module_owner(&func), CURRENT_EXEC_MODULE.with(|c| c.borrow().clone())); }
             // AOP join point. `has_advice()` is a thread-local emptiness check,
             // so a program with no `on pc{...}` declaration pays nothing.
             if core::aop_runtime::has_advice() {
@@ -789,12 +770,7 @@ pub(crate) fn evaluate_call(
         // Priority 6: Check env for decorated functions and closures (decorators store
         // the decorated version in env while the original remains in functions)
         if let Some(val) = env.get(name).cloned() {
-            if debug_dupdispatch() {
-                eprintln!(
-                    "[dupdispatch] P6-env name={name} current={:?}",
-                    CURRENT_EXEC_MODULE.with(|c| c.borrow().clone())
-                );
-            }
+            if debug_dupdispatch() { eprintln!("[dupdispatch] P6-env name={name} current={:?}", CURRENT_EXEC_MODULE.with(|c| c.borrow().clone())); }
             if let Some(result) = call_value_as_callable(val, args, env, functions, classes, enums, impl_methods)? {
                 return Ok(result);
             }

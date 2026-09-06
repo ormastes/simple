@@ -500,12 +500,3 @@ bug — it is this defect, and the repairs above cannot reach it.
 | `src/lib/nogc_sync_mut/spec.spl` | every spec run | sound — post-edit run still enumerates all 20 fd_table examples |
 | `src/lib/nogc_sync_mut/db/dbfs_engine/superblock.spl` | **no covering spec exists** | repaired by inspection only |
 | `src/os/gui/render.spl` | **no covering spec exists** | repaired by inspection only |
-
-## macOS release admission follow-up (2026-09-02)
-
-`bin/release/macos-arm64/simple` was tested against
-`bootstrap_nonentry_module_global`: a provider module initializes a global to
-42 and the entry module returns it. The release lacks the LLVM feature, so the
-canonical LLVM admission produced no artifact. Its Cranelift backend returned
-build success but the generated program exited 3 instead of 42. The artifact is
-therefore rejected as evidence for module-global identity.
