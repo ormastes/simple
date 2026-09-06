@@ -348,7 +348,22 @@ fn link_native_unix(object_files: [text], output: text, config: NativeLinkConfig
         args.push("-ldl")
         args.push("--as-needed")
         args.push("-lm")
-        args.push("-lSDL2")
+        # -lSDL2 is deliberately ABSENT, for the same reason SDL2.lib is absent
+        # from the Windows list below (:838-848). src/runtime/runtime_sdl2.c
+        # binds every SDL entry point through dlopen/dlsym at first use
+        # (runtime_sdl2.c:11,173,263 SDL2_BIND_REQUIRED), so the archive carries
+        # ZERO undefined SDL_* symbols (measured with `nm -u` on
+        # libsimple_runtime.a: 0) and nothing needs SDL2 at link time.
+        # `--as-needed` does NOT rescue this: it only gates whether DT_NEEDED is
+        # recorded, so ld.lld must still FIND libSDL2.so and hard-fails with
+        # "unable to find library -lSDL2" on any host without it -- which is
+        # every host that has not installed the SDL2 dev package, including this
+        # aarch64 box. src/compiler/70.backend/backend/runtime_compiler.spl:483-485
+        # already states the contract this restores: runtime_sdl2 "needs no SDL2
+        # headers to compile and no -lSDL2 to link, so hosts without SDL2 still
+        # build". A program that genuinely wants SDL2 linked statically still
+        # gets it via config.libraries.
+        # See doc/08_tracking/bug/linux_native_link_unconditional_lsdl2_2026-09-06.md
         args.push("--no-as-needed")
     elif os == "macos":
         # sdl2-compat installs into the Homebrew lib dir, which is not on the
@@ -904,8 +919,14 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
             args.push(flag)
         args.push("-Wl,--as-needed")
         args.push("-lm")
-        if not hosted_cross:
-            args.push("-lSDL2")
+        # -lSDL2 removed here for the same reason as the direct-lld Linux arm
+        # above: runtime_sdl2.c dlopens SDL at first use, the runtime archive has
+        # no undefined SDL_* symbols, and -Wl,--as-needed only gates DT_NEEDED --
+        # the linker still has to FIND libSDL2.so, so this was an unconditional
+        # link failure on any host without the SDL2 dev package. The
+        # `not hosted_cross` guard was not enough: the failure is on the NATIVE
+        # host lane. See
+        # doc/08_tracking/bug/linux_native_link_unconditional_lsdl2_2026-09-06.md
         args.push("-Wl,--no-as-needed")
         if config.allow_duplicate_definitions:
             args.push("-Wl,--allow-multiple-definition")
