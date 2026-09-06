@@ -151,6 +151,66 @@ paths — guard arms, `as` bindings, multi-statement and nested-declaration bloc
 bodies, the empty-body sabotage with its `:` parity twin, and the `=>`, `:`,
 `case` and return-type-continuation regressions.
 
+## Proven on a REBUILT Stage 2, not only on the seed
+
+`--full-bootstrap --stop-after-stage2 --mode=dynload` in an isolated worktree
+(`SIMPLE_CACHE_SCOPE=arrow-arm-lane`, `--output=build/bootstrap-arrow`, never
+deployed, `bin/simple` untouched). The host has no SDL2 and no sudo; the
+`-lSDL2` blocker was sidestepped with a symbol-less `libSDL2.so` on
+`LIBRARY_PATH` — a workaround, not a fix, and
+`bootstrap_stage2_selfhost_link_requires_sdl2_2026-09-06.md` stands.
+
+BEFORE — Stage 2 built from the UNFIXED source, sha256
+`88cf297f2846d8b6635d797d96103b1cb05dd1c5da711e0bcddf424eeddbbb1f`,
+152,381,584 bytes, `compile --format=smf` on the 7-line repro, **rc=1**:
+
+```
+[parser_error] path scratch_boot/repro/repro.spl line 3:11: expected :, got -> '->'
+[parser_error] line 3:11: unexpected token in expression: -> '->'
+[parser_error] path scratch_boot/repro/repro.spl line 3:20: expected :, got Newline ''
+[parser_error] line 4:11: unexpected token in expression: -> '->'
+[parser_error] path scratch_boot/repro/repro.spl line 4:14: expected :, got StringLit 'other'
+[ERROR]   parse error in scratch_boot/repro/repro.spl
+```
+
+AFTER — Stage 2 built from THIS source, sha256
+`4d0c20ba36add1d5bb3407852480ad83143084bbf8c4ed42e8a36d5ad9feab7c`,
+152,654,248 bytes, same command, **rc=0, zero `[parser_error]` lines**:
+
+```
+[cranelift-direct] compile main
+[cranelift-direct] compile probe
+[build] smf_package unknown/unknown step 1/1 +1234ms dt=33ms scratch_boot/repro/repro.smf
+```
+
+And on the file that actually blocked Stage 3 —
+`compile --format=smf src/compiler/80.driver/driver_source_pipeline_parsing.spl`,
+which pulls the whole compiler closure: **zero `[parser_error]` lines**, the run
+proceeds past parse into HIR lowering. The parse blocker is gone.
+
+## Next blocker after this one (Stage 2 sanity, NOT parse, NOT SDL2)
+
+The stage-2-only bootstrap built Stage 2 successfully and then failed its
+**Stage-2 bootstrap-compiler sanity** gate, so the binary was preserved as
+`stage2/<triple>/simple.rejected`:
+
+```
+error: sanity FAIL - frontend smoke exited 1 (bootstrap-mode pass: 0)
+  ERROR: scripts.check.cert.redeploy_gate.fixtures.hello_world
+      reason: native-capsule-source-mutated:scripts.check.cert.redeploy_gate.fixtures.hello_world
+error: Stage 2 bootstrap compiler sanity failed
+```
+
+The smoke's own trace shows `parse`, `hir`, `monomorphize`, `mir`, `aop_weave`
+and `native_cache` all **complete**; the failure is the native-capsule
+source-mutation check at `native_compile`. That is a different defect from both
+this record and the SDL2 one and is not investigated here.
+
+Note the wrapper's final line is `UNDIAGNOSABLE: the stage failed with no error
+message of any kind.` — it is wrong, and it points at the wrong log. The real
+error is in `stage3/<triple>/stage2-sanity.env.frontend-failure.log`, not
+`logs/<triple>/stage2-native-build.log`.
+
 ## Pre-existing reds stepped over when landing (recorded per .claude/rules/vcs.md)
 
 Range `0dc18e8edfc..ec029f32a08`, measured 2026-09-06:
