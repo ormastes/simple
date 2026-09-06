@@ -675,3 +675,20 @@ effect is UNMEASURED.** The 354x/113x figures in the earlier addendum belong to
 the runtime mechanism, not to this boundary, and must not be re-quoted as if
 they did. The first thing to do on this row is a self-hosted build once the
 archive selection above is fixed, then re-run the paired closure with it.
+
+**And the same fact bounds the CORRECTNESS evidence, not just the memory
+evidence.** Because the interpreter's values never enter the scope's object
+list, the paired runs above exercised `begin`/`pause`/`promote`/`end` as calls
+but never exercised the FREE path — nothing was reclaimed, so nothing could
+dangle. What they do establish is that the change is behaviour-neutral through
+parse/HIR/MIR/native_cache: the modified compiler lowers all 25 modules
+(`[build] mir 25/25`), emits no scope-failure diagnostic, and stops at the same
+place with the same rc as the unmodified one. Producing a runnable binary from
+the modified pipeline was attempted on this host and is not possible right now:
+`--backend cranelift` needs `rt_secure_temp_dir` (missing from the seed's
+interpreter extern table), `--backend llvm-lib` fails `spl_dlopen ... LLVM-C.dll`,
+and `--backend c` / `--backend native` are refused outright ("not available in
+the pure Simple command path"). So the escape analysis above is argued from an
+enumerated write set and NOT yet corroborated by a run that actually frees. Do
+not treat this scope as proven safe until a self-hosted compiler has been built
+with it and has produced a correct binary.
