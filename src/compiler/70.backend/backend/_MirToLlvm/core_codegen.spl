@@ -708,6 +708,15 @@ impl MirTextCodegen for MirToLlvm:
             self.translate_block_at(body.blocks, block_i, effective_ret_ty, is_start, return_slot_id, module_index, ir_handle)
             block_i = block_i + 1
 
+        # Validate against the complete MIR body after every block has been
+        # translated. This preserves legal cross-block forward references,
+        # while rejecting a Call destination whose definition was silently
+        # lost by staged payload dispatch before external LLVM assembly sees
+        # malformed `%lN` text.
+        val missing_call_destination = self.first_unemitted_call_destination(body)
+        if missing_call_destination >= 0:
+            panic("compile error: LLVM Call destination %l{missing_call_destination} was not emitted")
+
         if ir_handle >= 0:
             val closing = "\n}\n"
             _sffi_string_builder_push(ir_handle, closing)
@@ -715,6 +724,27 @@ impl MirTextCodegen for MirToLlvm:
             self.builder.end_function()
         if bootstrap_debug:
             print "[mir-to-llvm] function:done {name}"
+
+    me first_unemitted_call_destination(body: MirBody) -> i64:
+        """Return the first MIR Call destination without an emitted LLVM SSA
+        definition, or -1 when every value-producing Call was emitted."""
+        val call_disc = _sffi_enum_discriminant(MirInstKind.Call(nil, mir_operand_const_int(0), []))
+        var block_i = 0
+        while block_i < body.blocks.len():
+            val instructions = body.blocks[block_i].instructions
+            var instruction_i = 0
+            while instruction_i < instructions.len():
+                val inst = instructions[instruction_i]
+                if _sffi_enum_discriminant(inst.kind) == call_disc:
+                    # Typed accessor, not raw payload/tuple decoding -- see
+                    # MirInst.bootstrap_call_dest_local_id. -1 covers both a
+                    # void Call and a non-Call, so nothing to account for.
+                    val dest_id = inst.bootstrap_call_dest_local_id()
+                    if dest_id >= 0 and not self.defined_locals.contains_key(dest_id):
+                        return dest_id
+                instruction_i = instruction_i + 1
+            block_i = block_i + 1
+        -1
 
     me translate_block_at(blocks: [MirBlock], block_index: i64, return_type_text: text, is_start: bool, return_slot_id: i64, module_index: i64, ir_handle: i64):
         """Translate a MIR basic block."""
@@ -878,6 +908,30 @@ impl MirTextCodegen for MirToLlvm:
             self.translate_global_addr_ids(
                 addr_dest_id, addr_symbol_id, module_index, ir_handle)
             self.mark_instruction_dest_defined_at(instructions, index)
+            return
+
+        # Dispatch Call by DISCRIMINANT, before the structural match below, for
+        # the same reason LoadGlobal/GlobalAddr/StoreGlobal are dispatched that
+        # way above: a Call that falls into the structural match and fails to
+        # bind its payload silently selects a wildcard arm, so no
+        # `%lN = call ...` definition is emitted even though a later terminator
+        # still references that destination -- malformed `%lN` text handed
+        # straight to LLVM. `translate_call_at`'s own decode still ends in
+        # `case _: return`, so the check below is what makes that silent exit
+        # loud.
+        # Returning HERE also keeps the tail `mark_instruction_dest_defined_at`
+        # off Call: that method marks a Call destination optimistically from the
+        # MIR inventory, which would defeat the emission receipt in
+        # `translate_call_at` and make both this panic and
+        # `first_unemitted_call_destination` vacuous.
+        val call_disc = _sffi_enum_discriminant(MirInstKind.Call(nil, mir_operand_const_int(0), []))
+        if _sffi_enum_discriminant(inst_kind) == call_disc:
+            if bootstrap_debug:
+                print "[mir-to-llvm] instruction:call-discriminant index={index}"
+            self.translate_call_at(instructions, index, ir_handle)
+            val call_dest_id = inst.bootstrap_call_dest_local_id()
+            if call_dest_id >= 0 and not self.defined_locals.contains_key(call_dest_id):
+                panic("compile error: LLVM Call destination %l{call_dest_id} was not emitted")
             return
 
         match inst_kind:
@@ -1357,6 +1411,12 @@ impl MirTextCodegen for MirToLlvm:
                         val ret_src_unsigned = if self.unsigned_locals.contains_key(return_local_id): self.unsigned_locals[return_local_id] else: false
                         if bootstrap_debug:
                             print "[mir-to-llvm] terminator:ret-threaded-abi index={block_index} type={ret_ty} value={val_str} src={ret_src_ty}"
+                        # Keep impossible return conversions fail-closed, but
+                        # attribute them to the exact MIR terminator. This is
+                        # diagnostic context only: a floating value is never a
+                        # legal text/pointer return and no cast is synthesized.
+                        if is_float_type(self.valid_llvm_type(ret_src_ty)) and ret_ty == "ptr":
+                            panic("compile error: LLVM return type mismatch function={self.current_function_name} terminator=Ret block={block_index} local={return_local_id} value={val_str} source={ret_src_ty} target={ret_ty}")
                         val ret_val = self.value_as_type_signed(val_str, ret_src_ty, ret_ty, ret_src_unsigned)
                         self.builder.emit_ret(ret_ty, ret_val)
                         if bootstrap_debug:
@@ -2187,6 +2247,16 @@ impl MirTextCodegen for MirToLlvm:
                 _sffi_string_builder_push(ir_handle, emitted_call)
             else:
                 self.builder.emit(call_line)
+        # Mark only after the call line has actually reached its output sink.
+        # This keeps defined_locals an emission receipt instead of an optimistic
+        # MIR-destination inventory and makes the discriminant-dispatch check in
+        # translate_instruction_at fail immediately rather than handing
+        # malformed `%lN` text to LLVM. Every `has_dest` path above emits a
+        # `%name = call ...` line before reaching here (the only early exit is
+        # the `case _: return` in the decode, which emits nothing), so the tail
+        # is the single correct receipt site.
+        if has_dest:
+            self.defined_locals[dest_id] = true
         if bootstrap_debug:
             print "[mir-to-llvm] call:emit index={index} present={has_dest}"
 
