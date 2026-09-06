@@ -15,6 +15,14 @@ on:
         description: Exact convergence receipt artifact name
         required: true
         type: string
+      convergence_artifact_id:
+        description: Exact protected-integration artifact ID
+        required: true
+        type: string
+      convergence_artifact_digest:
+        description: Exact GitHub artifact digest (sha256:...)
+        required: true
+        type: string
       convergence_receipt_sha256:
         description: Expected SHA-256 of convergence-receipt.json
         required: true
@@ -88,44 +96,47 @@ jobs:
           echo "attempt=$((10#$attempt))" >> "$GITHUB_OUTPUT"
           echo "attempt_name=$attempt_name" >> "$GITHUB_OUTPUT"
 
-      - name: Enforce create-once candidate artifact identity
-        id: create_once
+      - name: Build receipt-free admitted Stage 2 trust root
         env:
-          GH_TOKEN: ${{ github.token }}
-          ARTIFACT_NAME: candidate-${{ steps.freeze.outputs.version }}-${{ steps.freeze.outputs.attempt_name }}-${{ steps.freeze.outputs.commit }}
-          COMMIT: ${{ steps.freeze.outputs.commit }}
-          STATUS_CONTEXT: simple-release/candidate/${{ steps.freeze.outputs.version }}/${{ steps.freeze.outputs.attempt_name }}
-          RUN_ATTEMPT: ${{ github.run_attempt }}
+          SIMPLE_NO_STUB_FALLBACK: '1'
         run: |
           set -euo pipefail
-          # A rerun must allocate a new candidate attempt/ref; it may not
-          # replace the identity reserved by an earlier execution. Commit
-          # status history is durable beyond artifact retention and failures;
-          # the candidate-ref concurrency group serializes this check/create.
-          test "$RUN_ATTEMPT" = 1
-          reservations=$(gh api --paginate \
-            "repos/${GITHUB_REPOSITORY}/commits/${COMMIT}/statuses?per_page=100" |
-            jq -s --arg context "$STATUS_CONTEXT" \
-              '[.[][] | select(.context == $context)] | length')
-          test "$reservations" = 0 || {
-            echo "candidate attempt was already reserved; allocate a new candidate attempt" >&2
-            exit 1
-          }
-          existing=$(gh api --paginate \
-            "repos/${GITHUB_REPOSITORY}/actions/artifacts?name=${ARTIFACT_NAME}&per_page=100" |
-            jq -s --arg name "$ARTIFACT_NAME" \
-              '[.[].artifacts[] | select(.name == $name)] | length')
-          test "$existing" = 0 || {
-            echo "candidate artifact identity already exists; allocate a new candidate attempt" >&2
-            exit 1
-          }
-          gh api -X POST "repos/${GITHUB_REPOSITORY}/statuses/${COMMIT}" \
-            -f state=pending \
-            -f context="$STATUS_CONTEXT" \
-            -f description='Candidate attempt reserved; rebuilds require a new attempt' \
-            -f target_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
-            >/dev/null
-          echo "reserved=true" >> "$GITHUB_OUTPUT"
+          sh scripts/bootstrap/bootstrap-from-scratch.sh \
+            --backend=llvm --mode=dynload --full-bootstrap \
+            --stop-after-stage2 --no-mcp --jobs=2
+
+      - name: Resume admitted Stage 3 with planner receipt
+        run: |
+          set -euo pipefail
+          stage2=$(find build/bootstrap/stage2 -type f -name simple -print -quit)
+          test -n "$stage2"
+          receipt="$PWD/build/bootstrap/candidate-stage3-planner-admission-v2.env"
+          sh scripts/bootstrap/produce-bootstrap-planner-admission-v2.shs \
+            --target=//bootstrap:stage3 \
+            --reason=verify-landed-compiler-fix \
+            --parent-compiler="$stage2" \
+            --out="$receipt"
+          sh scripts/bootstrap/bootstrap-from-scratch.sh \
+            --bootstrap-receipt="$receipt" \
+            --resume-stage3-from-admitted=build/bootstrap
+
+      - name: Resume release-bound Stage 4 with planner receipt
+        env:
+          SIMPLE_NO_STUB_FALLBACK: '1'
+        run: |
+          set -euo pipefail
+          stage2=$(find build/bootstrap/stage2 -type f -name simple -print -quit)
+          test -n "$stage2"
+          receipt="$PWD/build/bootstrap/candidate-stage4-planner-admission-v2.env"
+          sh scripts/bootstrap/produce-bootstrap-planner-admission-v2.shs \
+            --target=//bootstrap:stage4 \
+            --reason=release-trust-verification \
+            --parent-compiler="$stage2" \
+            --out="$receipt"
+          sh scripts/bootstrap/bootstrap-from-scratch.sh \
+            --bootstrap-receipt="$receipt" \
+            --resume-stage4-from-admitted=build/bootstrap \
+            --release --strategy=full
 
       - name: Validate canonical version and required support policy
         env:
@@ -180,7 +191,7 @@ jobs:
       - name: Download exact protected-integration convergence receipt
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: ${{ inputs.convergence_artifact }}
+          artifact-ids: ${{ inputs.convergence_artifact_id }}
           path: build/convergence-receipt
           run-id: ${{ inputs.convergence_run_id }}
           github-token: ${{ github.token }}
@@ -191,12 +202,13 @@ jobs:
           COMMIT: ${{ steps.freeze.outputs.commit }}
           RECEIPT_RUN_ID: ${{ inputs.convergence_run_id }}
           EXPECTED_RECEIPT_SHA256: ${{ inputs.convergence_receipt_sha256 }}
+          RECEIPT_ARTIFACT: ${{ inputs.convergence_artifact }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           receipt=build/convergence-receipt/convergence-receipt.json
           test -f "$receipt"
-          test "${{ inputs.convergence_artifact }}" = "convergence-receipt-${COMMIT}"
+          test "$RECEIPT_ARTIFACT" = "convergence-receipt-${COMMIT}"
           [[ "$RECEIPT_RUN_ID" =~ ^[1-9][0-9]*$ ]]
           [[ "$EXPECTED_RECEIPT_SHA256" =~ ^[0-9a-f]{64}$ ]]
           printf '%s  %s\n' "$EXPECTED_RECEIPT_SHA256" "$receipt" | sha256sum --check --strict
@@ -211,8 +223,31 @@ jobs:
             build/convergence-receipt/integration-evidence.json \
             build/convergence-receipt/review-admission-receipt.json \
             build/convergence-receipt/review-evidence.json \
+            build/convergence-receipt/verifier-unavailability-proof.json \
             build/convergence-receipt/reviewed-convergence-manifest.json; do
-            gh attestation verify "$subject" --repo "$GITHUB_REPOSITORY" >/dev/null
+            authority_class=$(jq -er '.authority_class' "$receipt")
+            if test "$authority_class" = owner_attested_actions; then
+              run_head=$(jq -er '.workflow.run_head_sha' build/convergence-receipt/review-evidence.json)
+              cert_identity="https://github.com/ormastes/simple/.github/workflows/pr-admission.yml@refs/heads/main"
+              gh attestation verify "$subject" --repo "$GITHUB_REPOSITORY" \
+                --signer-workflow ormastes/simple/.github/workflows/pr-admission.yml \
+                --signer-digest "$run_head" --source-ref refs/heads/main \
+                --deny-self-hosted-runners \
+                --format json > build/convergence-receipt/attestation-verification.json
+              jq -e --arg identity "$cert_identity" --arg digest "$run_head" \
+                'length > 0 and all(.[];
+                  .verificationResult.signature.certificate as $certificate |
+                  $certificate.subjectAlternativeName == $identity and
+                  $certificate.buildSignerURI == $identity and
+                  $certificate.buildSignerDigest == $digest and
+                  $certificate.runnerEnvironment == "github-hosted" and
+                  $certificate.sourceRepositoryURI == "https://github.com/ormastes/simple" and
+                  $certificate.sourceRepositoryRef == "refs/heads/main")' \
+                build/convergence-receipt/attestation-verification.json >/dev/null
+            else
+              test "$authority_class" = external_broker
+              gh attestation verify "$subject" --repo "$GITHUB_REPOSITORY" >/dev/null
+            fi
           done
 
           test "$(sha256sum build/convergence-receipt/integration-evidence.json | awk '{print $1}')" = \
@@ -231,9 +266,23 @@ jobs:
 
           run_json=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${RECEIPT_RUN_ID}")
           test "$(jq -r '.conclusion' <<<"$run_json")" = success
-          test "$(jq -r '.head_sha' <<<"$run_json")" = "$COMMIT"
           test "$(jq -r '.event' <<<"$run_json")" = workflow_dispatch
           test "$(jq -r '.path' <<<"$run_json")" = .github/workflows/pr-admission.yml
+          authority_class=$(jq -er '.authority_class' "$receipt")
+          if test "$authority_class" = owner_attested_actions; then
+            run_head=$(jq -er '.workflow.run_head_sha' build/convergence-receipt/review-evidence.json)
+            test "$(jq -r '.head_sha' <<<"$run_json")" = "$run_head"
+            test "$(jq -r '.head_branch' <<<"$run_json")" = main
+            test "$(jq -r '.actor.id' <<<"$run_json")" = 2378857
+            test "$(jq -r '.triggering_actor.id' <<<"$run_json")" = 2378857
+            live_main=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq .object.sha)
+            test "$run_head" = "$live_main"
+            workflow_blob_sha=$(gh api "repos/${GITHUB_REPOSITORY}/contents/.github/workflows/pr-admission.yml?ref=${run_head}" --jq .sha)
+            test "$workflow_blob_sha" = "$(jq -er '.workflow.workflow_blob_sha' build/convergence-receipt/review-evidence.json)"
+          else
+            test "$authority_class" = external_broker
+            test "$(jq -r '.head_sha' <<<"$run_json")" = "$COMMIT"
+          fi
 
           release_line=$(printf '%s\n' "$VERSION" | awk -F. '{print $1 "." $2}')
           release_ref="release/$release_line"
@@ -259,19 +308,25 @@ jobs:
           integration_head_sha=$(jq -r '.provider.integration_head_sha' "$receipt")
           inventory_head=$(jq -r '.provider.release_inventory_head_sha' "$receipt")
           jq -e --arg release_ref "$release_ref" --arg commit "$COMMIT" \
-            --arg base "$integration_base_sha" --arg head "$integration_head_sha" '
+            --arg base "$integration_base_sha" --arg head "$integration_head_sha" \
+            --arg authority "$authority_class" '
               .state == "closed" and .merged == true and .merged_at != null and
               .base.ref == $release_ref and .base.sha == $base and
               .head.sha == $head and .merge_commit_sha == $commit and
-              .user.login != .merged_by.login' <<<"$provider_pr" >/dev/null
+              (if $authority == "owner_attested_actions" then
+                 .user.id == 2378857 and .merged_by.id == 2378857
+               else .user.login != .merged_by.login end)' <<<"$provider_pr" >/dev/null
           jq -e --arg pr_number "$integration_pr_number" \
             --arg release_ref "$release_ref" --arg commit "$COMMIT" \
-            --arg base "$integration_base_sha" --arg head "$integration_head_sha" '
+            --arg base "$integration_base_sha" --arg head "$integration_head_sha" \
+            --arg authority "$authority_class" '
               .schema == "simple-release-provider-integration/1" and
               .pr.number == ($pr_number | tonumber) and .pr.merged == true and
               .pr.base_ref == $release_ref and .pr.base_sha == $base and
               .pr.head_sha == $head and .pr.merge_commit_sha == $commit and
-              .pr.author.login != .pr.merged_by.login' \
+              (if $authority == "owner_attested_actions" then
+                 .pr.author.id == 2378857 and .pr.merged_by.id == 2378857
+               else .pr.author.login != .pr.merged_by.login end)' \
             build/convergence-receipt/integration-evidence.json >/dev/null
           parents=$(git show -s --format='%P' "$COMMIT")
           test "$parents" = "$integration_base_sha $integration_head_sha"
@@ -446,6 +501,12 @@ jobs:
             '.schema == "simple-release-convergence/3" and
              .producer == "protected_integration" and
              .inventory_origin == "protected_integration" and
+             (.authority_class == "external_broker" or
+              .authority_class == "owner_attested_actions") and
+             (if .authority_class == "owner_attested_actions" then
+                .verification_performed == false and .github_pr_approval_claimed == false
+              else .verification_performed == true and .github_pr_approval_claimed == false end) and
+             (.verifier_unavailability_proof_sha256 | test("^[0-9a-f]{64}$")) and
              .candidate_commit_sha == $commit and .release_ref == $release_ref and
              .main_head_sha == $main and .release_head_sha == $release and
              .provider.integration_merge_sha == $commit and
@@ -604,6 +665,28 @@ jobs:
           done < <(jq -cS '.[]' build/convergence-receipt/forward-port-evidence.json)
 
           csv() { jq -r "$1 | join(\",\")" "$receipt"; }
+
+          # The fallback proof may wait behind the full Stage 2/3/4 build, but
+          # it cannot survive protected-state drift. Re-resolve every mutable
+          # authority immediately before the pure admission decision.
+          live_main=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq .object.sha)
+          live_release=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/${release_ref}" --jq .object.sha)
+          live_candidate=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/${CANDIDATE_REF}" --jq .object.sha)
+          test "$live_main" = "$main_sha"
+          test "$live_release" = "$release_sha"
+          test "$live_candidate" = "$COMMIT"
+          scripts/release/github-policy.shs verify-live "$GITHUB_REPOSITORY"
+          authority_class=$(jq -er '.authority_class' "$receipt")
+          if test "$authority_class" = owner_attested_actions; then
+            proof=build/convergence-receipt/verifier-unavailability-proof.json
+            jq -e '((.expires_at|fromdateiso8601)-(.issued_at|fromdateiso8601)) <= 28800 and
+              (.expires_at|fromdateiso8601) > now' "$proof" >/dev/null
+            run_head=$(jq -er '.workflow.run_head_sha' build/convergence-receipt/review-evidence.json)
+            test "$run_head" = "$live_main"
+          else
+            test "$authority_class" = external_broker
+          fi
+
           runtime=bin/release/x86_64-unknown-linux-gnu/simple
           SIMPLE_LIB="$PWD/src" "$runtime" run src/app/release/main.spl \
             convergence-admission --json --graph-independent \
@@ -635,6 +718,44 @@ jobs:
             .main_remains_independent == true' build/release-contract/convergence-admission.json >/dev/null
           mkdir -p candidate
           cp "$receipt" candidate/convergence-receipt.json
+
+      - name: Reserve create-once candidate artifact after qualification
+        id: create_once
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_NAME: candidate-${{ steps.freeze.outputs.version }}-${{ steps.freeze.outputs.attempt_name }}-${{ steps.freeze.outputs.commit }}
+          COMMIT: ${{ steps.freeze.outputs.commit }}
+          STATUS_CONTEXT: simple-release/candidate/${{ steps.freeze.outputs.version }}/${{ steps.freeze.outputs.attempt_name }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          # Qualification above is receipt-bound and read-only with respect to
+          # the immutable attempt. Only a run that reached this point may burn
+          # the create-once identity; reruns still require a new attempt.
+          test "$RUN_ATTEMPT" = 1
+          reservations=$(gh api --paginate \
+            "repos/${GITHUB_REPOSITORY}/commits/${COMMIT}/statuses?per_page=100" |
+            jq -s --arg context "$STATUS_CONTEXT" \
+              '[.[][] | select(.context == $context)] | length')
+          test "$reservations" = 0 || {
+            echo "candidate attempt was already reserved; allocate a new candidate attempt" >&2
+            exit 1
+          }
+          existing=$(gh api --paginate \
+            "repos/${GITHUB_REPOSITORY}/actions/artifacts?name=${ARTIFACT_NAME}&per_page=100" |
+            jq -s --arg name "$ARTIFACT_NAME" \
+              '[.[].artifacts[] | select(.name == $name)] | length')
+          test "$existing" = 0 || {
+            echo "candidate artifact identity already exists; allocate a new candidate attempt" >&2
+            exit 1
+          }
+          gh api -X POST "repos/${GITHUB_REPOSITORY}/statuses/${COMMIT}" \
+            -f state=pending \
+            -f context="$STATUS_CONTEXT" \
+            -f description='Qualified candidate attempt reserved; rebuilds require a new attempt' \
+            -f target_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            >/dev/null
+          echo "reserved=true" >> "$GITHUB_OUTPUT"
 
       - name: Assemble admitted candidate without fallback
         env:

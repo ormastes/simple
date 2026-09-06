@@ -44,6 +44,26 @@ Apply the commit only on the private work branch, rerun affected tests, and subm
 
 During a long beta or bootstrap qualification run, schedule a bounded read-only fetch-and-compare checkpoint before every candidate attempt, after a bootstrap failure is repaired, and before release admission. `inspect_release_main_convergence` fetches exact remote heads with bounded refspecs, compares at most 256 source-only commits, and verifies that every selected SHA is review-bound, reachable from the source, and not already represented in the target. It must not choose, cherry-pick, merge, or push a fix. Avoid tight polling and do not give the bootstrap worker protected-ref credentials.
 
+The default-branch workflow `release-convergence-checkpoint.yml` invokes a
+source-hosted observation every six hours and by operator dispatch. Scheduled runs derive
+`release/X.Y` from `release/version.sdn` and report not-applicable when that
+line does not exist; an operator dispatch requires the line to exist and may
+name it explicitly. It fetches only the two exact remote-tracking refs, bounds
+each source-only inventory to 256 commits, and emits
+`simple-release-source-convergence-observation/1` JSON. It invokes no compiler
+at all: `deployed_runtime_used=false` and `release_admission_eligible=false`
+make the fresh-runner boundary explicit instead of pretending that source-hosted
+Git comparison is a deployed pure-Simple payload.
+The equivalent local observation is:
+
+```sh
+scripts/release/convergence-checkpoint.shs --release-ref=release/X.Y --require-release-line
+```
+
+A checkpoint is an operator hint only: it cannot
+select a fix or satisfy review, backport/forward-port, integration, candidate,
+or promotion admission.
+
 For each operator-selected exact commit:
 
 1. From `main` to `release/X.Y`, create a private backport branch/worktree, verify the source review, apply only that commit, renew focused evidence, and submit to the release-line integration authority.
@@ -67,14 +87,35 @@ Ratchet Gates` and `SPipe Self Review Admission` from the GitHub Actions App
 identity. The latter is an exact-head check, not an Approve review and not a
 claim that GitHub accepted self-approval.
 
+GitHub forbids a PR author from submitting an `APPROVED` review on their own
+PR. The required SPipe status is the deliberate provider-compatible mechanism:
+it records a scoped, short-lived admission without fabricating provider or
+independent approval. Ordinary code/text is eligible by default only when the
+authenticated external policy is valid and no matching deny/constrain narrows
+it. Exact scopes are `code`, `text`, `file`, `directory_files` (immediate files),
+and `directory_recursive` (descendants).
+
 After self-review with a high-capability model at `high` effort or above, Spipe
-dispatches PR number, session, model/effort, and literal `PASS:0:0`. This is
+dispatches PR number, the reviewed `expected_head_sha`, session, model/effort,
+and literal `PASS:0:0`. This is
 explicit `self_attested` evidence, not an authenticated higher-model receipt or
-independent review. The workflow accepts no caller SHA/base/diff/ruleset. From
-its trusted default-branch definition it resolves protected target/ref/ruleset,
-author, head, base, merge-base, and changed paths, then re-resolves them before
+independent review. The expected head is only a review binding: the workflow
+independently resolves the live provider head and rejects any mismatch. It
+accepts no caller base/diff/ruleset. From its trusted default-branch definition
+it resolves protected target/ref/ruleset, author, base, merge-base, and changed paths, then re-resolves them before
 publishing a ten-minute `spipe-self-review-decision/1` check. Push, retarget,
 ruleset change, diff drift, or expiry requires a new dispatch.
+
+On rejection or invalidation, read the reported reason before retrying. State
+drift or expiry requires a fresh exact-head high-effort review with zero P0/P1
+and a new dispatch. A matching deny requires external policy-owner action or an
+eligible independent-review route. An uncovered constraint requires reducing
+the diff or a new external constraint. Secret/credential, traversal, alias,
+symlink, submodule, unsupported-type, or encoding rejection requires removing
+the unsafe material (and rotating any exposed credential) before creating and
+reviewing a new head. Missing/malformed policy or evidence must be restored at
+its external authority. Never remediate by attempting author `APPROVED`,
+reusing a stale check, or weakening candidate/release/publication controls.
 
 The checked-in `.spipe/policy/self-review-policy.sdn` is projection only and
 cannot grant or deny a session. Operator policy is external UTF-8 JSONL from
@@ -155,19 +196,43 @@ SHA, exact required check identities, PASS verdict, review/audit digests, issue
 time, and an expiry no more than 24 hours later. A later push changes the current
 head and invalidates the receipt and status.
 
-Only when that verifier mechanism is unavailable may the repository owner use
-`mode=owner_attested_fallback`. It has the same exact bindings and additionally
-requires the literal reason `no eligible independent reviewer`, the provider
-owner identity, and a digest of the retained verifier-unavailability receipt.
-It is not an admin bypass, self-review, or permission to omit checks.
+Only when that verifier mechanism is unavailable may the repository owner
+explicitly dispatch `authority_class=owner_attested_actions` from trusted
+`main`, with `NO-VERIFY:OWNER-PROOF`. The dedicated
+`owner-convergence-admission` environment requires owner ID `2378857` and has
+`prevent_self_review=false`; protected-integration, release, and npm-release
+remain unchanged. The eight-hour receipt is sized for queueing plus the full
+Stage 2/3/4 candidate qualification, says `verification_performed=false` and
+`github_pr_approval_claimed=false`, retains the verifier-unavailability proof,
+and binds the exact run, workflow source commit/blob, live policy, rulesets,
+environment, PR/parents, candidate, manifest, forward ports, and required
+checks. Candidate admission fetches the exact run/artifact/digest and verifies
+its GitHub attestation with `--signer-workflow`, signer digest, source ref, and
+self-hosted runners denied; it separately inspects the authenticated certificate
+identity fields because `--signer-workflow` and `--cert-identity` are mutually
+exclusive GitHub CLI selectors. Immediately before the pure admission decision,
+the candidate re-resolves live main, release, and candidate refs, revalidates
+the environment/ruleset/config projection and trusted workflow, and rechecks
+expiry. The longer queue allowance therefore does not survive any protected
+state drift. Candidate content is fetched as data and never executed. Same
+author/merger is accepted only in this fallback; normal external broker
+admission retains the inequality. This is not an admin bypass, self-review, or
+permission to omit checks.
+
+Forward-port receipt replay branches on the convergence authority before any
+broker lookup. External mode retains the exact broker App admission check.
+Owner mode accepts both empty and non-empty forward-port sets only when every
+row carries `authority_class=owner_attested_actions`, false verification and
+GitHub-approval claims, null broker identity, and the exact configured required
+checks for the recorded PR head.
 
 This candidate/release receipt is distinct from PR `SPipe Self Review
 Admission`. GitHub rulesets cannot natively express conditional model review
 versus owner attestation, and environment required reviewers cannot represent
 that alternative. Therefore the `SPipe Review Admission` App/custom-environment
-portion of `.github/review-admission-broker.json` remains fail-closed until its
-external signed protocol and dedicated App are configured. Existing
-protected-integration, release, and npm-release reviewers remain enabled.
+portion of `.github/review-admission-broker.json` remains the preferred route
+when its external signed protocol and dedicated App are configured. The owner
+fallback must prove that route unavailable and fails closed otherwise.
 
 Prepare one selected fix with `scripts/release/converge-reviewed-fix.shs`. The
 command requires a create-once `spipe-review-receipt/1` file bound to the exact
@@ -248,19 +313,25 @@ Use `simple release withdraw-check`. Redeployment may select a prior valid relea
 
 ## Current verification boundary
 
-The live GitHub configuration baseline passes
-`scripts/release/github-policy.shs verify-live ormastes/simple`: all seven
-declared rulesets match their projections, the protected-integration, release,
-and npm-release environments exist with the declared policy, and immutable
-releases are enabled. This is configuration evidence, not release admission.
+The prior live GitHub configuration baseline covered all seven declared
+rulesets, the protected-integration, release, and npm-release environments, and
+immutable releases. The complete privileged self-review projection additionally
+requires read-only repository Actions defaults and the declared
+`self-review-admission` environment; `verify-live` now checks those surfaces and
+prints a normalized projection SHA-256 only after every comparison passes. This
+is configuration evidence, not release admission.
 The declared environment reviewer is also the sole repository owner, so GitHub
 `prevent_self_review` still makes the release-environment path circular. The
 candidate/release `SPipe Review Admission` App projection is not configured and
-`github-policy.shs apply-live` consequently remains fail-closed. The separate
-PR `SPipe Self Review Admission` source projection now exists, but it is not
-live evidence until the one-time bootstrap plan is executed, the external
-policy DB secret is configured, the workflow is present on the default branch,
-both protected rulesets are CAS-applied, and live parity is reverified.
+its future `broker_signed` lane remains fail-closed. `github-policy.shs
+apply-live --yes` supports only the separately configured, explicitly
+user-accepted `self_attested` generic-Actions lane: it sets read-only workflow
+defaults, declares the `self-review-admission` environment, applies the `main`
+and `release/*` rulesets with zero provider approvals and exact `SPipe Self
+Review Admission`, then runs live parity verification and emits its digest. The
+source projection is not live evidence until the repository policy owner runs
+that command after configuring the external policy DB secret and retains its
+post-apply receipt.
 
 The exact release lineage still lacks admitted Stage 3 and Stage 4 receipts and
 one clean release-grade `bin/simple test test --whole --mode=interpreter` PASS.
