@@ -19,9 +19,18 @@ The alarming estimate corrects **downward by about 6.5x**.
 | ... restricted to product paths (`src/ scripts/ config/`) | 1,928 |
 | ... + require the line to be absent at the merge result too | 1,928 |
 | ... + require it absent from the **entire tip tree**, not just the same file | 1,555 |
-| ... after this audit's repair (`0dc18e8edfc`) | **949** |
-| ... of which hand-adjudicated **SUPERSEDED**, i.e. never a loss | 35 |
-| **genuine, unrepaired product exposure** | **~914 lines / ~95 files** |
+| **genuine + unadjudicated product exposure after this audit's repair (`0dc18e8edfc`)** | **949 lines / ~96 files** |
+
+`949 = 894 (a7fd32f9475) + 50 (provenance verifier, counted once) + 4
+(df31df530e7) + 1 (cb986e09bdb)`. The 35 lines hand-adjudicated **SUPERSEDED**
+(31 in `d150a169f26`, 4 in `dfb069ade84`) are **already excluded** from that
+949 — do not subtract them again.
+
+Units caveat: the `1,555` row is *raw-minus-relocated*; the tree-scoped
+pre-repair figure was never measured, because the tip line index was built
+after `0dc18e8edfc` had landed. The load-bearing claim is that **949 is a
+post-repair residual**, not that `1,555 - 606 = 949` — the 606 raw lines this
+audit restored are in the raw unit, not the tree-scoped one.
 
 Two facts do most of the correction, and neither is a quibble:
 
@@ -104,7 +113,7 @@ against `origin/main` at `0dc18e8edfc`.
 | merge | date | prior est. | raw (file-scoped) | **tree-scoped** | verdict |
 |---|---|---|---|---|---|
 | `a7fd32f9475` | 09-02 | 2178 / 114f | 1830 / 115f | **894 / 92f** | **GENUINE.** Residual after this audit repaired 606 raw lines. Wholesale revert of ~19 PRs. |
-| `0547effe615` | 08-27 | 3900 / 1f | 2 / 1f | **0** | **NOT PRODUCT.** ~14k lines, all `test/**` + generated `doc/06_spec/**`. |
+| `0547effe615` | 08-27 | 3900 / 1f | 2 / 1f | **0 so far** | **NOT PRODUCT.** ~14k lines, `test/**` + generated `doc/06_spec/**`. Scan was still enumerating (product 0 across 329 of 978 files at report time); the raw file-scoped product figure is **2 lines / 1 file**, so a completed tree-scoped scan cannot exceed 2. |
 | `198737a06e9` | 09-06 | 57 / 2f | 52 / 2f | **50 / 2f** | GENUINE, **same loss as the row below** (`.shs`→`.sh`); count once. |
 | `66e58d62da8` | 09-02 | 57 / 2f | 52 / 2f | **50 / 2f** | Duplicate of the above — one 51-line loss in `bootstrap-stage3-provenance-verifier`, propagated. |
 | `d150a169f26` | 08-31 | 35 / 1f | 35 / 1f | 31 / 1f | **SUPERSEDED** — macro-generated at tip. Not a loss. |
