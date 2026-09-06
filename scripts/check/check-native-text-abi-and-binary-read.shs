@@ -1,0 +1,232 @@
+#!/bin/sh
+# check-native-text-abi-and-binary-read.shs
+#
+# Two producer contracts of the native C runtime, both BEHAVIOURAL (the runtime
+# is compiled and RUN, not grepped), measured 2026-09-07 while chasing the
+# stage-2 positional native-build failure:
+#
+#   1. text-literal extern ABI. The compiler lowers a `text` extern argument to
+#      the pair (rt_string_data(v), rt_string_len(v)) -- see
+#      src/compiler/50.mir/text_extern_abi.spl and the disassembly of any
+#      natively compiled call site. A `text` LITERAL is a bare pointer into
+#      .rodata, not a heap RtCoreString. rt_string_len already carried a
+#      `>= 0x10000 ? strlen(...)` fallback for that; rt_string_data did NOT and
+#      returned NULL, and rt_text_arg_to_path rejects (NULL, len != 0). So every
+#      text-ABI extern called with a string literal failed in a natively
+#      compiled binary. Measured on a stage-2-compiled probe:
+#      rt_file_size("/etc/hostname") = -1 while rt_file_size("/etc/" +
+#      "hostname") -- same bytes, heap string -- = 11.
+#
+#   2. binary file read length. rt_file_read_text strlen()'d the buffer returned
+#      by spl_file_read, so content stopped at the first NUL byte. An ELF
+#      object's e_ident has one at offset 7, so a 1080-byte aarch64 `.o` came
+#      back as a NON-nil 7-byte text. FileFingerprint.from_file
+#      (src/compiler/80.driver/driver_build/incremental.spl) documents "text
+#      read is nil for a missing OR non-UTF-8 file" and only then falls back to
+#      rt_file_hash_sha256; a non-nil short read made that fallback DEAD, so the
+#      native capsule receipt recorded rt_hash_text of 7 bytes of ELF magic --
+#      -8673224916767039355 for EVERY aarch64 object ever emitted. An
+#      authenticated cache checkpoint keyed on a constant authenticates nothing.
+#
+# Neither contract is visible to any existing gate: check-c-runtime-compiles-push
+# only runs `-fsyntax-only`, and both defects compile cleanly.
+#
+# Verdict is the LAST line of stdout:
+#   PASS — <n> contract(s) checked, 0 failed        exit 0
+#   FAIL — <n> contract(s) checked, <k> failed      exit 1
+#   ERROR — nothing was checked (<reason>)          exit 2
+# A run that evaluated 0 contracts is ERROR, never a pass, and a machine with no
+# C compiler is ERROR: absence of a compiler is absence of evidence.
+#
+# --selftest rebuilds the runtime with BOTH defects reintroduced and requires
+# the probe to FAIL naming them; it runs before every scan and is fatal.
+
+set -u
+
+repo_root=$(cd "$(dirname "$0")/../.." && pwd)
+probe_src="$repo_root/scripts/check/native_text_abi_probe.c"
+runtime_dir="$repo_root/src/runtime"
+work_root="${TMPDIR:-/tmp}/native-text-abi-gate.$$"
+selftest_only=0
+run_selftest=1
+
+for arg in "$@"; do
+    case "$arg" in
+        --selftest) selftest_only=1 ;;
+        --no-selftest) run_selftest=0 ;;
+        *) printf 'unknown argument: %s\n' "$arg" >&2
+           printf 'ERROR — nothing was checked (unknown argument %s)\n' "$arg"
+           exit 2 ;;
+    esac
+done
+
+cleanup() { rm -rf "$work_root"; }
+trap cleanup EXIT INT TERM
+
+find_cc() {
+    for candidate in "${CC:-}" clang cc gcc; do
+        [ -n "$candidate" ] || continue
+        if command -v "$candidate" >/dev/null 2>&1; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
+RUNTIME_MEMBERS="runtime_native runtime_framebuffer runtime_directx_core
+runtime_legacy_core runtime_core_io_exports runtime_core_host_services
+runtime_fork runtime_memtrack runtime_process runtime_memory
+runtime_process_owned runtime_coverage_core runtime_contracts runtime_font
+runtime_thread runtime_simd_utf8 runtime_simd_case runtime_simd_dispatch
+runtime_packed_span runtime_terminal runtime_core_exports"
+
+CC_BIN=$(find_cc) || {
+    printf 'ERROR — nothing was checked (no clang/cc/gcc on this machine)\n'
+    exit 2
+}
+
+if [ ! -f "$probe_src" ]; then
+    printf 'ERROR — nothing was checked (probe source missing: %s)\n' "$probe_src"
+    exit 2
+fi
+
+# Build the runtime from $1 (a directory holding the runtime sources) plus the
+# probe, into $2. Echoes nothing on success; prints the compiler's first error
+# on failure and returns non-zero.
+build_probe() {
+    src_dir=$1
+    out_bin=$2
+    obj_dir="$out_bin.objs"
+    rm -rf "$obj_dir"
+    mkdir -p "$obj_dir" || return 1
+    objs=""
+    count=0
+    # Exactly the members of the `core-c-bootstrap` runtime archive (minus the
+    # macOS/Windows hosted shims, which do not build here). Compiling every
+    # src/runtime/*.c instead pulls in parallel shim translation units that
+    # duplicate symbols at link time.
+    for base in $RUNTIME_MEMBERS; do
+        c="$src_dir/$base.c"
+        [ -f "$c" ] || continue
+        obj="$obj_dir/$base.o"
+        if "$CC_BIN" -O1 -w -DSIMPLE_RUNTIME_MEMORY_OWNER -I"$src_dir" \
+             -c -o "$obj" "$c" >"$obj_dir/$base.log" 2>&1; then
+            objs="$objs $obj"
+            count=$((count + 1))
+        fi
+    done
+    if [ "$count" -eq 0 ]; then
+        printf 'no runtime translation unit compiled\n'
+        return 1
+    fi
+    # Archive, then link against the archive: the linker pulls only the members
+    # that resolve a needed symbol, which is how the real `core-c-bootstrap`
+    # bundle avoids the duplicate definitions these translation units carry
+    # between them. Linking the loose objects directly does not.
+    # shellcheck disable=SC2086
+    ar rcs "$obj_dir/libprobe_runtime.a" $objs >"$obj_dir/ar.log" 2>&1 || {
+        head -3 "$obj_dir/ar.log"
+        return 1
+    }
+    "$CC_BIN" -O1 -w -o "$out_bin" "$probe_src" "$obj_dir/libprobe_runtime.a" \
+        -lm -lpthread -ldl >"$obj_dir/link.log" 2>&1 || {
+        head -3 "$obj_dir/link.log"
+        return 1
+    }
+    return 0
+}
+
+# --- selftest: both defects reintroduced must FAIL ---------------------------
+if [ "$run_selftest" -eq 1 ] || [ "$selftest_only" -eq 1 ]; then
+    broken_dir="$work_root/broken/runtime"
+    mkdir -p "$broken_dir" || {
+        printf 'ERROR — nothing was checked (cannot create %s)\n' "$broken_dir"
+        exit 2
+    }
+    cp -R "$runtime_dir"/. "$broken_dir"/ 2>/dev/null
+
+    # Defect 1: drop rt_string_data's raw-literal fallback.
+    awk '
+        /^const uint8_t\* rt_string_data\(int64_t string\) \{$/ { print; state = 1; next }
+        state == 1 && /^    RtCoreString\* s = rt_core_as_string\(string\);$/ {
+            print
+            print "    return s ? (const uint8_t*)s->data : NULL;"
+            state = 2; next
+        }
+        state == 2 {
+            if ($0 == "}") { print; state = 0 }
+            next
+        }
+        { print }
+    ' "$runtime_dir/runtime_native.c" > "$broken_dir/runtime_native.c.tmp" \
+        && mv "$broken_dir/runtime_native.c.tmp" "$broken_dir/runtime_native.c"
+
+    # Defect 2: re-truncate the read at the first NUL byte.
+    awk '
+        /^int64_t rt_file_read_text\(const uint8_t\* path_ptr, uint64_t path_len\) \{$/ {
+            print
+            print "    char path[RT_TEXT_PATH_MAX];"
+            print "    const int64_t rt_nil = 3;"
+            print "    if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return rt_nil;"
+            print "    { FILE* probe = fopen(path, \"rb\"); if (!probe) return rt_nil; fclose(probe); }"
+            print "    char* content = spl_file_read(path);"
+            print "    if (!content) return rt_nil;"
+            print "    int64_t result = rt_string_new((const uint8_t*)content, (uint64_t)strlen(content));"
+            print "    free(content);"
+            print "    return result;"
+            print "}"
+            state = 1; next
+        }
+        state == 1 {
+            if ($0 == "}") { state = 0 }
+            next
+        }
+        { print }
+    ' "$broken_dir/runtime_native.c" > "$broken_dir/runtime_native.c.tmp" \
+        && mv "$broken_dir/runtime_native.c.tmp" "$broken_dir/runtime_native.c"
+
+    broken_bin="$work_root/broken/probe"
+    if ! build_err=$(build_probe "$broken_dir" "$broken_bin"); then
+        printf 'selftest could not build the defective runtime: %s\n' "$build_err" >&2
+        printf 'ERROR — nothing was checked (selftest build failed)\n'
+        exit 2
+    fi
+    broken_out=$("$broken_bin" "$work_root/broken/scratch.bin" 2>&1)
+    broken_rc=$?
+    if [ "$broken_rc" -ne 1 ]; then
+        printf '%s\n' "$broken_out" >&2
+        printf 'ERROR — nothing was checked (selftest: defective runtime did not FAIL, rc=%s)\n' "$broken_rc"
+        exit 2
+    fi
+    case "$broken_out" in
+        *text-literal-decodes*) ;;
+        *) printf 'ERROR — nothing was checked (selftest: literal defect not detected)\n'; exit 2 ;;
+    esac
+    case "$broken_out" in
+        *binary-read-length*) ;;
+        *) printf 'ERROR — nothing was checked (selftest: read-length defect not detected)\n'; exit 2 ;;
+    esac
+    if [ "$selftest_only" -eq 1 ]; then
+        printf 'selftest: the defective runtime FAILS on both contracts, as required\n'
+        printf 'PASS — 2 selftest fixture(s) checked, 0 failed\n'
+        exit 0
+    fi
+fi
+
+# --- real scan ---------------------------------------------------------------
+real_bin="$work_root/real/probe"
+mkdir -p "$work_root/real" || {
+    printf 'ERROR — nothing was checked (cannot create %s)\n' "$work_root/real"
+    exit 2
+}
+if ! build_err=$(build_probe "$runtime_dir" "$real_bin"); then
+    printf '%s\n' "$build_err" >&2
+    printf 'ERROR — nothing was checked (runtime probe did not build)\n'
+    exit 2
+fi
+
+out=$("$real_bin" "$work_root/real/scratch.bin" 2>&1)
+rc=$?
+printf '%s\n' "$out"
+exit "$rc"
