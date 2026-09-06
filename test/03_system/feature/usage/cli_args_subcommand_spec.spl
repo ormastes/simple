@@ -1,140 +1,199 @@
 """
-# CLI Args Subcommand Specification
+## Purpose and audience
+Documents subcommand dispatch and pass-through argument handling using the
+real, callable argument-parsing library the tree already ships
+(`std.cli.simple_parser_api.simple_parser` and
+`std.nogc_sync_mut.composition.cli_option_route.classify_cli_tokens_v1`), for
+language maintainers and app authors defining multi-command CLIs. The
+proposed `cli` keyword syntax itself (`doc/05_design/app/tools/cli_args_design.md`,
+Status: Proposal) is not implemented; these scenarios exercise the real
+library the design doc identifies as the parsing engine underneath it.
 
-**Feature ID:** #CLI-005
-**Category:** Language | CLI
-**Status:** Draft
+## Operator workflow
+`bin/simple test test/03_system/feature/usage/cli_args_subcommand_spec.spl`
+runs every scenario; each builds a real `SimpleParser` (or calls the real
+`classify_cli_tokens_v1` token classifier) and asserts the `ParsedResult` /
+token classification it actually returns.
 
-## Overview
+## Compatibility and limitations
+`SimpleParser.parse()` routes every argument after a recognized subcommand
+token into `subcommand_args` unparsed — a subcommand's own options/positionals
+are asserted by feeding `subcommand_args` into a second, subcommand-scoped
+parser, matching how `src/lib/nogc_sync_mut/cli/simple_parser_api.spl` is
+meant to be composed. The literal `cli:`/`sub build:` declaration syntax from
+the design doc is not implemented.
 
-Tests subcommand dispatch with the `cli` keyword. Subcommands allow
-grouping related functionality under named commands, each with their
-own options and positional arguments.
-
-## Syntax
-
-```simple
-cli:
-    verbose: false
-
-    command build:
-        target: "debug"       # --target option for build
-        release: false        # --release flag for build
-
-    command test:
-        filter: ""            # --filter option for test
-        parallel: true        # --parallel flag for test
-
-    command run:
-        positional file: text  # positional argument
-        args: []               # pass-through remaining args
-```
-
+## Verification guidance and troubleshooting
+Rerun the command above after any change to `simple_parser_api.spl` or
+`cli_option_route.spl`. A failure means real subcommand dispatch, option
+isolation, global-flag inheritance, positional handling, or `--` pass-through
+classification has regressed.
 """
-
-
+# Lifecycle: doc/01_research/local/pure_simple_cli_completeness.md ;
+# doc/03_plan/agent_tasks/pure_simple_cli_completeness.md ;
+# doc/04_architecture/pure_simple_cli_completeness.md ;
+# doc/05_design/app/tools/cli_args_design.md
+# @manual_section: cli_args_subcommand
 
 # ============================================================================
 # CLI Args Subcommands
 # ============================================================================
 
+use std.spec.step
+use std.cli.simple_parser_api.{simple_parser}
+use std.nogc_sync_mut.composition.cli_option_route.{classify_cli_tokens_v1,
+    CLI_TOKEN_TERMINATOR, CLI_TOKEN_PROGRAM_ARG}
+
 describe "CLI Args Subcommands":
-    # @manual scenario evidence
     # ## Subcommand Dispatch and Positional Args
     #
-    # Tests subcommand definition, dispatch, and argument handling.
+    # Tests subcommand definition, dispatch, and argument handling against
+    # the real SimpleParser library.
 
     context "subcommand dispatch":
         it "dispatches to named subcommand":
-            # cli:
-            #     command build:
-            #         target: "debug"
-            # val args = cli.parse(["build"])
-            # expect(args.command).to_equal("build")
-            val command = "build"
-            expect(command).to_equal("build")
+            # @req REQ-CLI-SUB-001
+            step("Register a 'build' subcommand and parse ['build']")
+            # @capture(protocol_json): ParsedResult.subcommand field
+            val parser = simple_parser("tool", "tool").subcommand("build", "build the project")
+            val parsed = parser.parse(["build"])
+            match parsed:
+                case Ok(result):
+                    expect(result.get_subcommand() ?? "").to_equal("build")
+                case Err(message):
+                    expect(message).to_equal("__unreachable__")
 
         it "parses subcommand-specific options":
-            # cli:
-            #     command build:
-            #         target: "debug"
-            # val args = cli.parse(["build", "--target", "release"])
-            # expect(args.build.target).to_equal("release")
-            val target = "release"
-            expect(target).to_equal("release")
+            # @req REQ-CLI-SUB-002
+            step("Route ['build', '--target', 'release'] to the build subcommand and parse its own option")
+            # @capture(protocol_json): subcommand_args re-parsed by a build-scoped parser
+            val parser = simple_parser("tool", "tool").subcommand("build", "build the project")
+            val parsed = parser.parse(["build", "--target", "release"])
+            match parsed:
+                case Ok(result):
+                    expect(result.get_subcommand() ?? "").to_equal("build")
+                    val build_parser = simple_parser("build", "build the project")
+                        .option("target", "t", "build target", false, Some("debug"))
+                    val build_parsed = build_parser.parse(result.get_subcommand_args())
+                    match build_parsed:
+                        case Ok(build_result):
+                            expect(build_result.get_option_or("target", "debug")).to_equal("release")
+                        case Err(message):
+                            expect(message).to_equal("__unreachable__")
+                case Err(message):
+                    expect(message).to_equal("__unreachable__")
 
         it "isolates options per subcommand":
-            # build's --target should not be available under test
-            # cli.parse(["test", "--target", "x"]) should error
-            val build_has_target = true
-            val test_has_target = false
-            expect(build_has_target).to_equal(true)
-            expect(test_has_target).to_equal(false)
+            # @req REQ-CLI-SUB-003
+            step("Feed --target to a 'test' subcommand parser that never registered it")
+            # @capture(protocol_json): Err result naming the unrecognized option
+            val test_parser = simple_parser("test", "run tests")
+                .option("filter", "f", "filter pattern", false, Some(""))
+            val parsed = test_parser.parse(["--target", "x"])
+            match parsed:
+                case Ok(_):
+                    expect(true).to_equal(false)
+                case Err(message):
+                    expect(message).to_contain("Unknown argument: --target")
 
         it "inherits global options in subcommands":
-            # cli:
-            #     verbose: false
-            #     command build:
-            #         target: "debug"
-            # val args = cli.parse(["--verbose", "build"])
-            # expect(args.verbose).to_equal(true)
-            val global_verbose = true
-            expect(global_verbose).to_equal(true)
+            # @req REQ-CLI-SUB-004
+            step("Parse ['--verbose', 'build'] and confirm the global flag survives past the subcommand token")
+            # @capture(protocol_json): ParsedResult.flags and ParsedResult.subcommand
+            val parser = simple_parser("tool", "tool")
+                .flag("verbose", "v", "verbose output")
+                .subcommand("build", "build the project")
+            val parsed = parser.parse(["--verbose", "build"])
+            match parsed:
+                case Ok(result):
+                    expect(result.get_flag("verbose")).to_equal(true)
+                    expect(result.get_subcommand() ?? "").to_equal("build")
+                case Err(message):
+                    expect(message).to_equal("__unreachable__")
 
     context "positional arguments":
         it "parses positional argument":
-            # cli:
-            #     command run:
-            #         positional file: text
-            # val args = cli.parse(["run", "main.spl"])
-            # expect(args.run.file).to_equal("main.spl")
-            val file = "main.spl"
-            expect(file).to_equal("main.spl")
+            # @req REQ-CLI-SUB-005
+            step("Route ['run', 'main.spl'] to the run subcommand and parse its own positional")
+            # @capture(protocol_json): subcommand_args re-parsed by a run-scoped parser
+            val parser = simple_parser("tool", "tool").subcommand("run", "run a file")
+            val parsed = parser.parse(["run", "main.spl"])
+            match parsed:
+                case Ok(result):
+                    expect(result.get_subcommand() ?? "").to_equal("run")
+                    val run_parser = simple_parser("run", "run a file")
+                        .positional("file", "input file", true)
+                    val run_parsed = run_parser.parse(result.get_subcommand_args())
+                    match run_parsed:
+                        case Ok(run_result):
+                            expect(run_result.get_positional_at(0) ?? "").to_equal("main.spl")
+                        case Err(message):
+                            expect(message).to_equal("__unreachable__")
+                case Err(message):
+                    expect(message).to_equal("__unreachable__")
 
-        it "requires positional argument":
-            # cli.parse(["run"]) without file should produce error
-            val error_expected = true
-            expect(error_expected).to_equal(true)
+        it "rejects a missing required positional argument":
+            # @req REQ-CLI-SUB-006
+            step("Parse an empty argument list against a parser requiring one positional")
+            # @capture(protocol_json): Err result naming the missing argument
+            val run_parser = simple_parser("run", "run a file")
+                .no_auto_stage()
+                .positional("file", "input file", true)
+            val parsed = run_parser.parse([])
+            match parsed:
+                case Ok(_):
+                    expect(true).to_equal(false)
+                case Err(message):
+                    expect(message).to_contain("Missing required argument: file")
 
         it "handles multiple positional args":
-            # cli:
-            #     command copy:
-            #         positional source: text
-            #         positional dest: text
-            # val args = cli.parse(["copy", "a.txt", "b.txt"])
-            val source = "a.txt"
-            val dest = "b.txt"
-            expect(source).to_equal("a.txt")
-            expect(dest).to_equal("b.txt")
+            # @req REQ-CLI-SUB-007
+            step("Parse ['a.txt', 'b.txt'] against a parser registering two positionals")
+            # @capture(protocol_json): ParsedResult.positionals at index 0 and 1
+            val copy_parser = simple_parser("copy", "copy files")
+                .positional("source", "source file", false)
+                .positional("dest", "dest file", false)
+            val parsed = copy_parser.parse(["a.txt", "b.txt"])
+            match parsed:
+                case Ok(result):
+                    expect(result.get_positional_at(0) ?? "").to_equal("a.txt")
+                    expect(result.get_positional_at(1) ?? "").to_equal("b.txt")
+                case Err(message):
+                    expect(message).to_equal("__unreachable__")
 
     context "pass-through arguments":
         it "collects remaining args after --":
-            # cli:
-            #     command run:
-            #         positional file: text
-            # val args = cli.parse(["run", "main.spl", "--", "-x", "42"])
-            # expect(args.rest).to_equal(["-x", "42"])
-            val rest = ["-x", "42"]
-            expect(rest[0]).to_equal("-x")
-            expect(rest.len()).to_equal(2)  # oracle: 2 — pinned expected value for this behavior
-            expect(rest[1]).to_equal("42")
+            # @req REQ-CLI-SUB-008
+            step("Classify ['run', '--', '-x', '42'] with the real hard-terminator token classifier")
+            # @capture(protocol_json): token kinds after the '--' terminator
+            val tokens = classify_cli_tokens_v1(["run", "--", "-x", "42"])
+            expect(tokens[1].kind).to_equal(CLI_TOKEN_TERMINATOR)  # oracle: index 1 is the literal '--' token
+            expect(tokens[2].kind).to_equal(CLI_TOKEN_PROGRAM_ARG)
+            expect(tokens[3].kind).to_equal(CLI_TOKEN_PROGRAM_ARG)
 
         it "passes empty rest when no -- separator":
-            # val args = cli.parse(["run", "main.spl"])
-            # expect(args.rest).to_equal([])
-            val rest = []
-            expect(rest.len()).to_equal(0)  # oracle: 0 — pinned expected value for this behavior
+            # @req REQ-CLI-SUB-009
+            step("Classify ['run', 'main.spl'] with no '--' terminator present")
+            # @capture(protocol_json): zero PROGRAM_ARG-classified tokens
+            val tokens = classify_cli_tokens_v1(["run", "main.spl"])
+            var program_arg_count = 0
+            for t in tokens:
+                if t.kind == CLI_TOKEN_PROGRAM_ARG:
+                    program_arg_count = program_arg_count + 1
+            expect(program_arg_count).to_equal(0)  # oracle: no terminator token means nothing is classified as pass-through
 
     context "no subcommand given":
         it "uses default when no subcommand specified":
-            # cli:
-            #     verbose: false
-            #     command build:
-            #         target: "debug"
-            # val args = cli.parse(["--verbose"])
-            # expect(args.command).to_be_nil()
-            # expect(args.verbose).to_equal(true)
-            val command = nil
-            val verbose = true
-            expect(command).to_be_nil()
-            expect(verbose).to_equal(true)
+            # @req REQ-CLI-SUB-010
+            step("Parse ['--verbose'] against a parser with a registered subcommand that never appears")
+            # @capture(protocol_json): ParsedResult.has_subcommand() and ParsedResult.flags
+            val parser = simple_parser("tool", "tool")
+                .flag("verbose", "v", "verbose output")
+                .subcommand("build", "build the project")
+            val parsed = parser.parse(["--verbose"])
+            match parsed:
+                case Ok(result):
+                    expect(result.get_subcommand() ?? "__none__").to_equal("__none__")
+                    expect(result.get_flag("verbose")).to_equal(true)
+                case Err(message):
+                    expect(message).to_equal("__unreachable__")
