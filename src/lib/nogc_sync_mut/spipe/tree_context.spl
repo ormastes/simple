@@ -335,6 +335,11 @@ fn _render_parent_chain(doc: TreeDoc, node: TreeNode) -> text:
         d = d + 1
     if node.kind != "dir":
         parts.push("@parent d={dirs.len() + 1} kind=file path=\"{node.path}\"")
+    else:
+        # A directory node's own path was omitted entirely, so a top-level
+        # dir (an `ls -l` entry with no descendants) rendered no path= at
+        # all. Emit it symmetrically with the file case.
+        parts.push("@parent d={dirs.len() + 1} kind=dir path=\"{node.path}\"")
     parts.join("\n")
 
 fn _render_range_parents(doc: TreeDoc, start_line: i64, end_line: i64) -> text:
@@ -691,14 +696,25 @@ fn _tree_line_name(line: text) -> text:
     ""
 
 fn _tree_line_depth(line: text) -> i64:
+    # Indexing and .len() are BYTE-based, so the box-drawing indent unit
+    # "│   " is 6 bytes, not 4. Comparing a 4-byte chunk against it never
+    # matched and every tree entry collapsed to depth 0.
     var depth: i64 = 0
     var i: i64 = 0
-    while i + 4 <= line.len():
-        val chunk = line[i:i + 4]
-        if chunk == "│   " or chunk == "    ":
-            depth = depth + 1
-            i = i + 4
-        else:
+    while i < line.len():
+        var matched = false
+        if i + 6 <= line.len():
+            if line[i:i + 6] == "│   ":
+                depth = depth + 1
+                i = i + 6
+                matched = true
+        if not matched:
+            if i + 4 <= line.len():
+                if line[i:i + 4] == "    ":
+                    depth = depth + 1
+                    i = i + 4
+                    matched = true
+        if not matched:
             return depth
     depth
 

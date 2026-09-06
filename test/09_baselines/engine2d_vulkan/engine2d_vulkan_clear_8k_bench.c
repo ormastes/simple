@@ -98,6 +98,7 @@ int main(int argc, char **argv) {
     int64_t pipe = rt_vulkan_create_compute_pipeline(shader, (int64_t)(uintptr_t)"main", 64);
     if (!buffer || !shader || !pipe) return 4;
     int64_t source = 0;
+    uint32_t *source_pixels = NULL;
     int64_t rect_shader = 0, rect_pipe = 0;
     if (rect_mode) {
         size_t rect_spirv_size = 0;
@@ -112,13 +113,9 @@ int main(int argc, char **argv) {
         if (image_mode) {
             uint64_t source_bytes = active_pixels * 4;
             source = rt_vulkan_alloc_buffer((int64_t)source_bytes, 0x83);
-            uint32_t *source_pixels = malloc((size_t)source_bytes);
+            source_pixels = malloc((size_t)source_bytes);
             if (!source || !source_pixels) return 4;
             for (uint64_t i = 0; i < active_pixels; i++) source_pixels[i] = 0xff8844ccu;
-            int uploaded = rt_vulkan_copy_to_buffer_raw(source,
-                (int64_t)(uintptr_t)source_pixels, (int64_t)source_bytes, 0);
-            free(source_pixels);
-            if (!uploaded) return 4;
         }
     }
     uint64_t *times = calloc(samples, sizeof(uint64_t));
@@ -147,6 +144,8 @@ int main(int argc, char **argv) {
         int64_t desc = rt_vulkan_create_descriptor_set(active_pipe);
         int64_t cmd = 0, fence = 0;
         int ok = desc > 0 && rt_vulkan_bind_buffer(desc, 0, buffer);
+        if (ok && image_mode) ok = rt_vulkan_copy_to_buffer_raw(source,
+            (int64_t)(uintptr_t)source_pixels, (int64_t)(active_pixels * 4), 0);
         if (ok && image_mode) ok = rt_vulkan_bind_buffer(desc, 1, source);
         if (ok) { cmd = rt_vulkan_begin_compute(); ok = cmd > 0; }
         if (ok) ok = rt_vulkan_bind_pipeline(cmd, active_pipe);
@@ -288,10 +287,10 @@ int main(int argc, char **argv) {
     printf("engine2d_vulkan_timed_readback_bytes=0\n");
     printf("engine2d_vulkan_evidence_readback_bytes=%llu\n", (unsigned long long)readback_bytes);
     printf("engine2d_vulkan_mismatch_count=%llu\n", (unsigned long long)mismatch);
-    printf("engine2d_vulkan_checksum=%llu\n", (unsigned long long)checksum);
+    printf("engine2d_vulkan_checksum=%lld\n", (long long)checksum);
     printf("engine2d_vulkan_swapchain_presented=false\n");
     printf("engine2d_vulkan_dynamic_frame_80fps_proven=false\n");
-    free(readback); free(times); free(spirv);
+    free(readback); free(times); free(spirv); free(source_pixels);
     if (rect_pipe) rt_vulkan_destroy_pipeline(rect_pipe);
     if (rect_shader) rt_vulkan_destroy_shader(rect_shader);
     if (source) rt_vulkan_free_buffer(source);

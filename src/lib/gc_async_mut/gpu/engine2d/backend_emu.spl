@@ -49,6 +49,66 @@ fn emu_draw_rect(mut core: RenderBackend, x: i32, y: i32, w: i32, h: i32, color:
     core.draw_rect_filled(x + w - 1, y + 1, 1, h - 2, color)
 
 # ============================================================================
+# Run batching helpers — one draw_rect_filled per RUN, not per pixel
+# ============================================================================
+#
+# Every emu_* outline rasterizer below plots isolated points. Emitting a 1x1
+# core.draw_rect_filled per point is ~ns on a CPU backend but is a full GPU
+# COMPUTE DISPATCH (~8us) on the Vulkan backend, so an outline costs one
+# dispatch per pixel. See
+# doc/08_tracking/bug/emu_shape_decomposition_emits_one_gpu_dispatch_per_pixel_2026-09-03.md
+#
+# These helpers flush a RUN of consecutive, axis-collinear points as a single
+# rectangle. They change no pixel: a run of unit steps along one axis covers
+# exactly the rectangle spanning its endpoints, and (for thickness > 1) the
+# union of the t x t stamps along that run is exactly the grown rectangle.
+
+# Stamp the run whose endpoints are (x0, y0) and (x1, y1). Callers guarantee
+# the run is a single row or a single column of consecutive pixels.
+fn _emu_stamp_run(mut core: RenderBackend, x0: i32, y0: i32, x1: i32, y1: i32, color: u32, thickness: i32):
+    val xlo = _emu_min(x0, x1)
+    val xhi = _emu_max(x0, x1)
+    val ylo = _emu_min(y0, y1)
+    val yhi = _emu_max(y0, y1)
+    if thickness <= 1:
+        core.draw_rect_filled(xlo, ylo, xhi - xlo + 1, yhi - ylo + 1, color)
+    else:
+        val half = thickness / 2
+        core.draw_rect_filled(xlo - half, ylo - half, xhi - xlo + thickness, yhi - ylo + thickness, color)
+
+# Flush one constant-x segment of the 8-way symmetric midpoint circle: the
+# four (cx +- x, cy +- y) points form VERTICAL runs at a constant column and
+# the four (cx +- y, cy +- x) points form HORIZONTAL runs at a constant row.
+fn _emu_circle_flush(mut core: RenderBackend, cx: i32, cy: i32, x: i32, y0: i32, y1: i32, color: u32):
+    val n = y1 - y0 + 1
+    core.draw_rect_filled(cx + x, cy + y0, 1, n, color)
+    core.draw_rect_filled(cx - x, cy + y0, 1, n, color)
+    core.draw_rect_filled(cx + x, cy - y1, 1, n, color)
+    core.draw_rect_filled(cx - x, cy - y1, 1, n, color)
+    core.draw_rect_filled(cx + y0, cy + x, n, 1, color)
+    core.draw_rect_filled(cx - y1, cy + x, n, 1, color)
+    core.draw_rect_filled(cx + y0, cy - x, n, 1, color)
+    core.draw_rect_filled(cx - y1, cy - x, n, 1, color)
+
+# Flush one constant-y segment of the midpoint ellipse (region 1: x advances
+# every iteration) as four horizontal runs.
+fn _emu_ellipse_flush_h(mut core: RenderBackend, cx: i32, cy: i32, y: i32, x0: i32, x1: i32, color: u32):
+    val n = x1 - x0 + 1
+    core.draw_rect_filled(cx + x0, cy + y, n, 1, color)
+    core.draw_rect_filled(cx - x1, cy + y, n, 1, color)
+    core.draw_rect_filled(cx + x0, cy - y, n, 1, color)
+    core.draw_rect_filled(cx - x1, cy - y, n, 1, color)
+
+# Flush one constant-x segment of the midpoint ellipse (region 2: y advances
+# every iteration) as four vertical runs.
+fn _emu_ellipse_flush_v(mut core: RenderBackend, cx: i32, cy: i32, x: i32, ylo: i32, yhi: i32, color: u32):
+    val n = yhi - ylo + 1
+    core.draw_rect_filled(cx + x, cy + ylo, 1, n, color)
+    core.draw_rect_filled(cx - x, cy + ylo, 1, n, color)
+    core.draw_rect_filled(cx + x, cy - yhi, 1, n, color)
+    core.draw_rect_filled(cx - x, cy - yhi, 1, n, color)
+
+# ============================================================================
 # Line — Bresenham
 # ============================================================================
 
@@ -71,15 +131,50 @@ fn emu_draw_line(mut core: RenderBackend, x1: i32, y1: i32, x2: i32, y2: i32, co
     var cx = x1
     var cy = y1
     val t = thickness
-    val half = t / 2
+
+    # Same Bresenham walk, batched output. A shallow line advances +-1 in x
+    # with only occasional y steps, so its points fall into long axis-aligned
+    # runs; each run is one rect instead of one dispatch per pixel.
+    var rx0 = cx
+    var ry0 = cy
+    var lx = cx
+    var ly = cy
+    var axis: i32 = 0
+    var step: i32 = 0
+    var have: bool = false
 
     while true:
-        if t <= 1:
-            core.draw_rect_filled(cx, cy, 1, 1, color)
+        if have == false:
+            rx0 = cx
+            ry0 = cy
+            lx = cx
+            ly = cy
+            axis = 0
+            have = true
+        elif cx == lx and cy == ly:
+            pass
+        elif axis == 0 and cy == ly and (cx - lx == 1 or cx - lx == -1):
+            axis = 1
+            step = cx - lx
+            lx = cx
+        elif axis == 0 and cx == lx and (cy - ly == 1 or cy - ly == -1):
+            axis = 2
+            step = cy - ly
+            ly = cy
+        elif axis == 1 and cy == ly and cx - lx == step:
+            lx = cx
+        elif axis == 2 and cx == lx and cy - ly == step:
+            ly = cy
         else:
-            core.draw_rect_filled(cx - half, cy - half, t, t, color)
+            _emu_stamp_run(core, rx0, ry0, lx, ly, color, t)
+            rx0 = cx
+            ry0 = cy
+            lx = cx
+            ly = cy
+            axis = 0
 
         if cx == x2 and cy == y2:
+            _emu_stamp_run(core, rx0, ry0, lx, ly, color, t)
             return
 
         val e2 = 2 * err
@@ -99,26 +194,32 @@ fn emu_draw_circle(mut core: RenderBackend, cx: i32, cy: i32, r: i32, color: u32
         core.draw_rect_filled(cx, cy, 1, 1, color)
         return
 
+    # Identical midpoint recurrence; only the OUTPUT is batched. y advances by
+    # exactly 1 every iteration while x holds constant across a run of them, so
+    # each constant-x segment contributes one vertical run per (cx +- x, cy +- y)
+    # family and one horizontal run per (cx +- y, cy +- x) family — 8 rects per
+    # segment instead of 8 dispatches per iteration. Pixel set is unchanged.
     var x: i32 = r
     var y: i32 = 0
     var d: i32 = 1 - r
+    var y0: i32 = 0
+    var y_last: i32 = -1
 
     while x >= y:
-        core.draw_rect_filled(cx + x, cy + y, 1, 1, color)
-        core.draw_rect_filled(cx - x, cy + y, 1, 1, color)
-        core.draw_rect_filled(cx + x, cy - y, 1, 1, color)
-        core.draw_rect_filled(cx - x, cy - y, 1, 1, color)
-        core.draw_rect_filled(cx + y, cy + x, 1, 1, color)
-        core.draw_rect_filled(cx - y, cy + x, 1, 1, color)
-        core.draw_rect_filled(cx + y, cy - x, 1, 1, color)
-        core.draw_rect_filled(cx - y, cy - x, 1, 1, color)
-
+        y_last = y
+        val x_cur = x
         y = y + 1
         if d < 0:
             d = d + 2 * y + 1
         else:
             x = x - 1
             d = d + 2 * (y - x) + 1
+        if x != x_cur:
+            _emu_circle_flush(core, cx, cy, x_cur, y0, y_last, color)
+            y0 = y
+
+    if y_last >= y0:
+        _emu_circle_flush(core, cx, cy, x, y0, y_last, color)
 
 # ============================================================================
 # Circle Filled — Per-row exact distance test (Metal-exact)
@@ -307,11 +408,14 @@ fn emu_draw_ellipse(mut core: RenderBackend, cx: i32, cy: i32, rx: i32, ry: i32,
     var px = 0
     var py = 2 * rx2 * y
     var d1 = ry2 - rx2 * ry + rx2 / 4
+    # Region 1: x advances every iteration, y holds constant across runs, so
+    # each constant-y segment is four HORIZONTAL runs. Output-only batching —
+    # the recurrence and therefore the pixel set are untouched.
+    var x0: i32 = 0
+    var x_last: i32 = -1
     while px < py:
-        core.draw_rect_filled(cx + x, cy + y, 1, 1, color)
-        core.draw_rect_filled(cx - x, cy + y, 1, 1, color)
-        core.draw_rect_filled(cx + x, cy - y, 1, 1, color)
-        core.draw_rect_filled(cx - x, cy - y, 1, 1, color)
+        x_last = x
+        val y_cur = y
         x = x + 1
         px = px + 2 * ry2
         if d1 < 0:
@@ -320,12 +424,24 @@ fn emu_draw_ellipse(mut core: RenderBackend, cx: i32, cy: i32, rx: i32, ry: i32,
             y = y - 1
             py = py - 2 * rx2
             d1 = d1 + ry2 + px - py
+        if y != y_cur:
+            _emu_ellipse_flush_h(core, cx, cy, y_cur, x0, x_last, color)
+            x0 = x
+    if x_last >= x0:
+        _emu_ellipse_flush_h(core, cx, cy, y, x0, x_last, color)
+
     var d2 = ry2 * (2 * x + 1) * (2 * x + 1) / 4 + rx2 * (y - 1) * (y - 1) - rx2 * ry2
+    # Region 2: y advances (downward) every iteration, x holds constant across
+    # runs, so each constant-x segment is four VERTICAL runs.
+    var yhi: i32 = y
+    var ylo: i32 = y
+    var pending: bool = false
     while y >= 0:
-        core.draw_rect_filled(cx + x, cy + y, 1, 1, color)
-        core.draw_rect_filled(cx - x, cy + y, 1, 1, color)
-        core.draw_rect_filled(cx + x, cy - y, 1, 1, color)
-        core.draw_rect_filled(cx - x, cy - y, 1, 1, color)
+        val x_cur = x
+        if pending == false:
+            yhi = y
+            pending = true
+        ylo = y
         y = y - 1
         py = py - 2 * rx2
         if d2 > 0:
@@ -334,6 +450,11 @@ fn emu_draw_ellipse(mut core: RenderBackend, cx: i32, cy: i32, rx: i32, ry: i32,
             x = x + 1
             px = px + 2 * ry2
             d2 = d2 + ry2 - py + px + rx2
+        if x != x_cur:
+            _emu_ellipse_flush_v(core, cx, cy, x_cur, ylo, yhi, color)
+            pending = false
+    if pending:
+        _emu_ellipse_flush_v(core, cx, cy, x, ylo, yhi, color)
 
 # ============================================================================
 # Ellipse Filled — Midpoint ellipse + horizontal scanline spans
@@ -381,16 +502,53 @@ fn emu_draw_ellipse_filled(mut core: RenderBackend, cx: i32, cy: i32, rx: i32, r
 fn emu_draw_arc(mut core: RenderBackend, cx: i32, cy: i32, r: i32, start_deg: i32, end_deg: i32, color: u32, thickness: i32):
     if r <= 0:
         return
+    # Same 1-degree sampling; only the OUTPUT is batched. Consecutive samples
+    # are very often the SAME pixel (the arc is oversampled) or an axis-adjacent
+    # one, and each used to be its own draw_rect_filled = its own GPU dispatch.
+    # A run is extended only while samples stay collinear along one axis with
+    # unit steps, so the flushed rect covers exactly the sampled pixels.
+    var rx0: i32 = 0
+    var ry0: i32 = 0
+    var lx: i32 = 0
+    var ly: i32 = 0
+    var axis: i32 = 0
+    var step: i32 = 0
+    var have: bool = false
     var ang = start_deg
     while ang <= end_deg:
         val px = cx + r * _emu_cos_approx(ang) / 1000
         val py = cy - r * _emu_sin_approx(ang) / 1000
-        val half = thickness / 2
-        if thickness <= 1:
-            core.draw_rect_filled(px, py, 1, 1, color)
+        if have == false:
+            rx0 = px
+            ry0 = py
+            lx = px
+            ly = py
+            axis = 0
+            have = true
+        elif px == lx and py == ly:
+            pass
+        elif axis == 0 and py == ly and (px - lx == 1 or px - lx == -1):
+            axis = 1
+            step = px - lx
+            lx = px
+        elif axis == 0 and px == lx and (py - ly == 1 or py - ly == -1):
+            axis = 2
+            step = py - ly
+            ly = py
+        elif axis == 1 and py == ly and px - lx == step:
+            lx = px
+        elif axis == 2 and px == lx and py - ly == step:
+            ly = py
         else:
-            core.draw_rect_filled(px - half, py - half, thickness, thickness, color)
+            _emu_stamp_run(core, rx0, ry0, lx, ly, color, thickness)
+            rx0 = px
+            ry0 = py
+            lx = px
+            ly = py
+            axis = 0
         ang = ang + 1
+    if have:
+        _emu_stamp_run(core, rx0, ry0, lx, ly, color, thickness)
 
 # ============================================================================
 # Cubic Bezier — De Casteljau subdivision to line segments
@@ -512,14 +670,36 @@ fn emu_draw_circle_thick(mut core: RenderBackend, cx: i32, cy: i32, r: i32, colo
     val r_inner = _emu_max(r - thickness, 0)
     val r_outer_sq = r_outer * r_outer
     val r_inner_sq = r_inner * r_inner
+    # Span form of the same annulus test. The old body scanned the whole
+    # (2r+1)^2 bounding box and emitted a 1x1 rect per covered pixel; on a GPU
+    # backend a 1x1 draw_rect_filled is a COMPUTE DISPATCH, so an r=35 ring
+    # cost ~1021 dispatches (measured 9.1-10.0 ms on vulkan vs 0.12 ms on cpu).
+    # See doc/08_tracking/bug/emu_shape_decomposition_emits_one_gpu_dispatch_per_pixel_2026-09-03.md
+    #
+    # Each row of an annulus is at most TWO horizontal runs, and the run bounds
+    # are exact integers, so coverage is pixel-identical to the per-pixel test:
+    #   included iff px*px + py*py <= r_outer_sq AND >= r_inner_sq
+    #   outer: |px| <= ho where ho = floor(sqrt(r_outer_sq - py*py))
+    #   inner: excluded iff px*px < d, d = r_inner_sq - py*py, i.e. |px| <= hi
+    #          where hi is the largest integer with hi*hi < d
     var py: i32 = -r_outer
     while py <= r_outer:
-        var px: i32 = -r_outer
-        while px <= r_outer:
-            val dist_sq = px * px + py * py
-            if dist_sq <= r_outer_sq and dist_sq >= r_inner_sq:
-                core.draw_rect_filled(cx + px, cy + py, 1, 1, color)
-            px = px + 1
+        val outer_rem = r_outer_sq - py * py
+        if outer_rem >= 0:
+            val ho = _emu_isqrt(outer_rem)
+            val d = r_inner_sq - py * py
+            if d <= 0:
+                core.draw_rect_filled(cx - ho, cy + py, 2 * ho + 1, 1, color)
+            else:
+                var hi = _emu_isqrt(d)
+                if hi * hi >= d:
+                    hi = hi - 1
+                if hi >= ho:
+                    pass
+                else:
+                    val run = ho - hi
+                    core.draw_rect_filled(cx - ho, cy + py, run, 1, color)
+                    core.draw_rect_filled(cx + hi + 1, cy + py, run, 1, color)
         py = py + 1
 
 # ============================================================================
@@ -549,14 +729,36 @@ fn _emu_thick_corner_arc(mut core: RenderBackend, cx: i32, cy: i32, r: i32, thic
     val r_inner = _emu_max(r - thickness, 0)
     val ro_sq = r_outer * r_outer
     val ri_sq = r_inner * r_inner
+    # Span form of the same quarter-annulus test. The old body scanned the whole
+    # (r+1)^2 quadrant box and emitted a 1x1 rect per covered pixel; on a GPU
+    # backend a 1x1 draw_rect_filled is a COMPUTE DISPATCH.
+    # See doc/08_tracking/bug/emu_shape_decomposition_emits_one_gpu_dispatch_per_pixel_2026-09-03.md
+    #
+    # For a fixed py and px >= 0, px*px + py*py is monotone increasing in px, so
+    # the pixels satisfying ri_sq <= px*px + py*py <= ro_sq form exactly ONE
+    # contiguous run [lo, hi] per row:
+    #   hi = floor(sqrt(ro_sq - py*py))
+    #   lo = smallest px >= 0 with px*px >= ri_sq - py*py
+    # hi <= r_outer always, so the original px <= r_outer loop bound is never
+    # binding and coverage is pixel-identical. dx_sign/dy_sign are always +-1.
     var py: i32 = 0
     while py <= r_outer:
-        var px: i32 = 0
-        while px <= r_outer:
-            val d = px * px + py * py
-            if d <= ro_sq and d >= ri_sq:
-                core.draw_rect_filled(cx + dx_sign * px, cy + dy_sign * py, 1, 1, color)
-            px = px + 1
+        val outer_rem = ro_sq - py * py
+        if outer_rem >= 0:
+            val hi = _emu_isqrt(outer_rem)
+            val inner_rem = ri_sq - py * py
+            var lo: i32 = 0
+            if inner_rem > 0:
+                lo = _emu_isqrt(inner_rem)
+                if lo * lo < inner_rem:
+                    lo = lo + 1
+            if lo <= hi:
+                val run = hi - lo + 1
+                val row = cy + dy_sign * py
+                if dx_sign < 0:
+                    core.draw_rect_filled(cx - hi, row, run, 1, color)
+                else:
+                    core.draw_rect_filled(cx + lo, row, run, 1, color)
         py = py + 1
 
 # ============================================================================
@@ -604,7 +806,10 @@ fn emu_draw_radial_gradient(mut core: RenderBackend, cx: i32, cy: i32, r: i32, c
     # cpu-lane-loop-ok: radial gradient scanline walk: one iteration per row of the bounding circle; per-pixel gradient evaluation is the CPU lane reference body
     while py <= r:
         var px: i32 = -r
-        # cpu-lane-loop-ok: radial gradient per-pixel column walk; the CPU lane evaluates the gradient per pixel by design and is the parity oracle for the GPU shader
+        var run_start: i32 = 0
+        var run_len: i32 = 0
+        var run_color: u32 = 0u32
+        # cpu-lane-loop-ok: radial gradient per-pixel column walk; the CPU lane still EVALUATES the gradient per pixel by design and is the parity oracle for the GPU shader. Emission is run-merged: consecutive pixels whose packed color is identical are flushed as ONE draw_rect_filled, which is pixel-exact (draw_rect_filled overwrites) and avoids one GPU dispatch per pixel on the Vulkan backend.
         while px <= r:
             val dist_sq = px * px + py * py
             val r_sq = r * r
@@ -614,8 +819,22 @@ fn emu_draw_radial_gradient(mut core: RenderBackend, cx: i32, cy: i32, r: i32, c
                 val gg = cg + (eg - cg) * dist / _emu_max(r, 1)
                 val bb = cb + (eb - cb) * dist / _emu_max(r, 1)
                 val aa = ca + (ea - ca) * dist / _emu_max(r, 1)
-                core.draw_rect_filled(cx + px, cy + py, 1, 1, rgba(rr, gg, bb, aa))
+                val pc = rgba(rr, gg, bb, aa)
+                if run_len > 0 and pc == run_color:
+                    run_len = run_len + 1
+                else:
+                    if run_len > 0:
+                        core.draw_rect_filled(cx + run_start, cy + py, run_len, 1, run_color)
+                    run_start = px
+                    run_color = pc
+                    run_len = 1
+            else:
+                if run_len > 0:
+                    core.draw_rect_filled(cx + run_start, cy + py, run_len, 1, run_color)
+                    run_len = 0
             px = px + 1
+        if run_len > 0:
+            core.draw_rect_filled(cx + run_start, cy + py, run_len, 1, run_color)
         py = py + 1
 
 # ============================================================================
@@ -682,8 +901,13 @@ fn emu_draw_linear_gradient_stops(mut core: RenderBackend, x: i32, y: i32, w: i3
     if t11 > t_max: t_max = t11
     val t_span = _emu_max(t_max - t_min, 1)
     var py: i32 = 0
+    # cpu-lane-loop-ok: N-stop linear gradient scanline walk: one iteration per row of the rect
     while py < h:
         var px: i32 = 0
+        var run_start: i32 = 0
+        var run_len: i32 = 0
+        var run_color: u32 = 0u32
+        # cpu-lane-loop-ok: N-stop linear gradient per-pixel column walk; the gradient is still EVALUATED per pixel, but emission is run-merged (consecutive identical packed colors become ONE draw_rect_filled) so the Vulkan backend does not issue one compute dispatch per pixel
         while px < w:
             val nx = 2 * px - hw
             val ny = 2 * py - hh
@@ -694,8 +918,17 @@ fn emu_draw_linear_gradient_stops(mut core: RenderBackend, x: i32, y: i32, w: i3
             if pos_permille > 1000:
                 pos_permille = 1000
             val c = _emu_gradient_color_at(colors, positions_permille, pos_permille)
-            core.draw_rect_filled(x + px, y + py, 1, 1, c)
+            if run_len > 0 and c == run_color:
+                run_len = run_len + 1
+            else:
+                if run_len > 0:
+                    core.draw_rect_filled(x + run_start, y + py, run_len, 1, run_color)
+                run_start = px
+                run_color = c
+                run_len = 1
             px = px + 1
+        if run_len > 0:
+            core.draw_rect_filled(x + run_start, y + py, run_len, 1, run_color)
         py = py + 1
 
 fn emu_draw_radial_gradient_stops(mut core: RenderBackend, cx: i32, cy: i32, r: i32, colors: [u32], positions_permille: [i32]):
@@ -708,7 +941,10 @@ fn emu_draw_radial_gradient_stops(mut core: RenderBackend, cx: i32, cy: i32, r: 
     # cpu-lane-loop-ok: N-stop radial gradient scanline walk: one iteration per row of the bounding circle
     while py <= r:
         var px: i32 = -r
-        # cpu-lane-loop-ok: N-stop radial gradient per-pixel column walk; CPU lane reference body for the GPU gradient shader
+        var run_start: i32 = 0
+        var run_len: i32 = 0
+        var run_color: u32 = 0u32
+        # cpu-lane-loop-ok: N-stop radial gradient per-pixel column walk; CPU lane reference body for the GPU gradient shader. The gradient is still EVALUATED per pixel; emission is run-merged (consecutive identical packed colors become ONE draw_rect_filled, and a run is flushed at any uncovered pixel so it can never span a gap outside the circle).
         while px <= r:
             val dist_sq = px * px + py * py
             val r_sq = r * r
@@ -718,8 +954,21 @@ fn emu_draw_radial_gradient_stops(mut core: RenderBackend, cx: i32, cy: i32, r: 
                 if pos_permille > 1000:
                     pos_permille = 1000
                 val c = _emu_gradient_color_at(colors, positions_permille, pos_permille)
-                core.draw_rect_filled(cx + px, cy + py, 1, 1, c)
+                if run_len > 0 and c == run_color:
+                    run_len = run_len + 1
+                else:
+                    if run_len > 0:
+                        core.draw_rect_filled(cx + run_start, cy + py, run_len, 1, run_color)
+                    run_start = px
+                    run_color = c
+                    run_len = 1
+            else:
+                if run_len > 0:
+                    core.draw_rect_filled(cx + run_start, cy + py, run_len, 1, run_color)
+                    run_len = 0
             px = px + 1
+        if run_len > 0:
+            core.draw_rect_filled(cx + run_start, cy + py, run_len, 1, run_color)
         py = py + 1
 
 # ============================================================================

@@ -5,6 +5,7 @@ set "BOOTSTRAP_BASH="
 rem Prefer the Bash shipped beside Git.  Windows' System32 bash.exe is the
 rem WSL launcher and cannot consume the native path passed below.
 for /f "delims=" %%G in ('where git.exe 2^>nul') do call :bash_from_git "%%~dpG"
+if not defined BOOTSTRAP_BASH if exist "C:\Program Files\Git\bin\bash.exe" set "BOOTSTRAP_BASH=C:\Program Files\Git\bin\bash.exe"
 if not defined BOOTSTRAP_BASH if exist "C:\msys64\usr\bin\bash.exe" set "BOOTSTRAP_BASH=C:\msys64\usr\bin\bash.exe"
 if not defined BOOTSTRAP_BASH for /f "delims=" %%B in ('where bash.exe 2^>nul') do call :bash_from_path "%%~fB"
 
@@ -12,8 +13,11 @@ if not defined BOOTSTRAP_BASH (
   echo error: bootstrap-windows.cmd requires Git Bash or MSYS2 bash.exe 1>&2
   exit /b 1
 )
-"%BOOTSTRAP_BASH%" "%~dp0bootstrap-windows.sh" %*
-exit /b %ERRORLEVEL%
+pushd "%~dp0"
+"%BOOTSTRAP_BASH%" "./bootstrap-windows.sh" %*
+set "BOOTSTRAP_RC=%ERRORLEVEL%"
+popd
+exit /b %BOOTSTRAP_RC%
 
 :bash_from_git
 if defined BOOTSTRAP_BASH exit /b 0

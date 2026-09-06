@@ -72,6 +72,30 @@ All public API signatures use typed wrappers. Internal implementation may use pr
 | `Matrix<T>` | `struct Matrix<T> { _inner: NDArray<T> }` | `std.linalg.types` | rank-2 assertion on construction |
 | `Vector<T>` | `struct Vector<T> { _inner: NDArray<T> }` | `std.linalg.types` | rank-1 assertion on construction |
 
+**As-built correction — `Matrix<T>` / `Vector<T>` are declared but never constructed (2026-09-05).**
+The table above specifies `Matrix<T> { _inner: NDArray<T> }` and `Vector<T> { _inner: NDArray<T> }`
+in `std.linalg.types`, each applying a rank assertion on construction. The shipped tree does not
+match on any of those three points:
+
+- They live in `src/lib/nogc_async_mut/ndarray/mod.spl:49,52` as `struct Matrix<T>: inner: NDArray`
+  and `struct Vector<T>: inner: NDArray` — in the ndarray area, not a `std.linalg.types` module
+  (no `types.spl` exists in either area).
+- **Neither is ever constructed.** `/usr/bin/grep -rn "Matrix(\|Vector("
+  src/lib/nogc_async_mut/ndarray/` returns zero hits; the whole tree constructs no generic struct.
+  So there is no construction site at which a rank assertion could run — the assertion is not
+  merely unimplemented, it has nowhere to live.
+- Every shipped generator and consumer therefore passes a bare rank-2 `NDArray` carrying its own
+  `Shape`, and the rank check is a runtime guard inside the callee. `eye_matrix(size: Index) ->
+  NDArray` (`nogc_async_mut/linalg/linalg_core.spl:203`) and `trace(matrix: NDArray) ->
+  Result<Float64, LinalgError>` (`nogc_async_mut/linalg/mod.spl:209`, which rejects
+  `dtype != DType.F64` and `shape.dims.len() != 2` with `LinalgError.DimensionMismatch`) are the
+  canonical shape of that idiom.
+
+Treat the bare rank-2 `NDArray` as the current contract. Until `Matrix<T>` gains a constructor that
+performs the rank-2 assertion, adding the wrapper to a signature buys no checking and only widens
+the API. Reconcile in one direction — either implement the constructors and migrate the linalg
+surface onto them, or retire the two unconstructed structs — rather than leaving both shapes live.
+
 **Construction ergonomics:** Typed numeric literals (`2.718f64`) are available in Simple syntax. `Float64(x)` construction sugar should be a zero-cost wrapper. Free functions `f64(x)`, `idx(n)`, `shape(...)` may be provided as internal construction helpers that are not exported publicly — they return typed wrappers and are defined in `types.spl`.
 
 **Conversion at FFI:** Layers A and B form the primitive/wrapper conversion boundary. Layer A is raw `extern fn` with primitives (`i64`, `f64`, `ptr-as-i64`). Layer B wraps primitives in typed wrappers for return values and unwraps typed wrappers to primitives for arguments. Layer C (public API) is primitive-free throughout.
@@ -141,7 +165,26 @@ Unsupported dtype + operation combinations return `Result.Err(UnsupportedDType)`
 
 ## 5. `std.linalg` Public API
 
-Physical location: `src/lib/common/linalg/` (renamed from `common/linear_algebra/`).  
+> **As-built refresh (2026-09-05, verified by `/usr/bin/grep`/`ls`).** The
+> layout below was the plan; what shipped is a flat one-file-per-area package
+> at `src/lib/common/science_math/` (`blas.spl`, `blas_provider.spl`,
+> `cuda_provider.spl`, `fortran_abi.spl`, `lapack.spl`, `lapack_provider.spl`,
+> `linalg.spl`, `math_block.spl`, `math_block_ops.spl`, `ndarray.spl`,
+> `ml_linear.spl`, `ml_metrics.spl`, `numerical.spl`, `statistics.spl`).
+> `src/lib/common/linalg/` does not exist, and no `mod.spl`/`types.spl`/
+> `ffi_blas.spl`/`ffi_lapack.spl` was ever created. Layer A (§6) is not a set
+> of static `extern fn` declarations: symbols are resolved dynamically through
+> `_scilib_call*` helpers in `src/lib/nogc_sync_mut/linalg/{cuda_blas,
+> fortran_wrapper,lapack_lapacke}.spl`; Layer C is the `pub fn blas_*_f64`
+> free functions in `science_math/blas.spl:201-229`, not `linalg.gemm(...)`.
+> `Workspace` in `science_math/lapack.spl` is non-generic and `pub`. The
+> `math{}` slice AST (§7) shipped as per-dimension
+> `MathExpr::Slice { start, end }` under `Subscript`
+> (`src/compiler_rust/compiler/src/blocks/math/ast.rs:53-54`), not
+> `Slice { base, ranges: [SliceRange] }`. The port plans under
+> `doc/03_plan/lib/scilib/ports/` carry the per-box status against this layout.
+
+Physical location (planned): `src/lib/common/linalg/` (renamed from `common/linear_algebra/`).  
 Import: `use std.linalg`.  
 Tier: `common/` — pure math, no async, no GC.
 

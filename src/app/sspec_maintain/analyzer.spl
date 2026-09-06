@@ -5,6 +5,7 @@ use app.sspec_maintain.rules.*
 use app.sspec_maintain.score.*
 use std.crypto.sha256.{sha256_text}
 use std.tooling.easy_fix.types.{EasyFix, Replacement, FixConfidence}
+use std.text_advanced.{split_whitespace}
 
 fn normalize_sspec_path(path: text) -> text:
     var out = path.replace("\\", "/")
@@ -50,7 +51,7 @@ fn _rule(rule_id: text) -> SspecRuleDefinition:
 
 fn _stable_evidence_text(evidence: text) -> text:
     var normalized = ""
-    for token in evidence.lower().split():
+    for token in split_whitespace(evidence.lower()):
         if normalized != "": normalized = normalized + " "
         normalized = normalized + token
     normalized
@@ -98,7 +99,8 @@ fn _generic_outcome_name(name: text) -> bool:
     val lower = name.trim().lower()
     lower == "works" or lower == "test" or lower == "passes" or
         lower.contains("is unresolved") or lower.starts_with("test ") or
-        lower.starts_with("should ") or lower.starts_with("can ")
+        lower == "should work" or lower == "should pass" or
+        lower == "can work" or lower == "can pass"
 
 fn _bare_step_fix(path: text, source: text) -> Option<EasyFix>:
     var offset: i64 = 0
@@ -144,25 +146,52 @@ fn _sort_findings(findings: [SspecDocumentizationFinding]) -> [SspecDocumentizat
         i = i + 1
     ordered
 
-fn _source_findings(facts: SspecSourceFacts, source: text) -> [SspecDocumentizationFinding]:
+# ============================================================================
+# Detector registry — one function per SSDOC rule, paired with its rule_id.
+#
+# Extension seam: to add a new scoring algorithm, write one `_detect_*`
+# function with the matching signature below and add one row to
+# `sspec_source_detectors()` or `sspec_manual_detectors()`. No dispatcher
+# needs editing — orchestration (`_source_findings`/`_manual_findings`) just
+# iterates the registry. Function values stored in a record and called
+# through it are supported by this binary (verified empirically before this
+# refactor landed); this mirrors the named-registration pattern used by
+# `simd_provider.spl` / `static_table.spl` while still holding real behavior.
+# ============================================================================
+
+struct SspecSourceDetector:
+    rule_id: text
+    detect: fn(SspecSourceFacts, text) -> [SspecDocumentizationFinding]
+
+struct SspecManualDetector:
+    rule_id: text
+    detect: fn(SspecSourceFacts, Option<SspecManualFacts>, text) -> [SspecDocumentizationFinding]
+
+fn _detect_nar_001(facts: SspecSourceFacts, source: text) -> [SspecDocumentizationFinding]:
     var findings: [SspecDocumentizationFinding] = []
     if not facts.has_purpose:
         findings.push(_make_finding(facts.path, "SSDOC-NAR-001", 1,
             "missing authored purpose and audience", "Add authored purpose, scope, and audience facts.", 20, None))
+    findings
+
+fn _detect_nar_002(facts: SspecSourceFacts, source: text) -> [SspecDocumentizationFinding]:
+    var findings: [SspecDocumentizationFinding] = []
     if facts.has_placeholder_narrative:
         findings.push(_make_finding(facts.path, "SSDOC-NAR-002", 1,
             "generic placeholder narrative remains", "Replace generated filler with source-evidenced prose.", 20, None))
+    findings
+
+fn _detect_nar_003(facts: SspecSourceFacts, source: text) -> [SspecDocumentizationFinding]:
+    var findings: [SspecDocumentizationFinding] = []
     if facts.has_duplicated_narrative_boilerplate:
         findings.push(_make_finding(facts.path, "SSDOC-NAR-003", 1,
             "the same narrative header comment is repeated verbatim three or more times",
             "Deduplicate the purpose/req/lifecycle header block; keep one authored copy.", 15, None))
+    findings
+
+fn _detect_beh_001(facts: SspecSourceFacts, source: text) -> [SspecDocumentizationFinding]:
+    var findings: [SspecDocumentizationFinding] = []
     var missing_step_deduction: i64 = 0
-    var naming_deduction: i64 = 0
-    var evidence_deduction: i64 = 0
-    var has_pending = false
-    var has_source_oracle = false
-    var has_local_arithmetic_oracle = false
-    var magic_expected_count: i64 = 0
     for scenario in facts.scenarios:
         if scenario.step_count == 0 and missing_step_deduction < 40:
             val deduction = if missing_step_deduction + 10 > 40: 40 - missing_step_deduction else: 10
@@ -170,22 +199,37 @@ fn _source_findings(facts: SspecSourceFacts, source: text) -> [SspecDocumentizat
                 "scenario '{scenario.name}' has no visible step flow",
                 "Add ordered step(\"...\") calls for meaningful actions.", deduction, None))
             missing_step_deduction = missing_step_deduction + deduction
+    findings
+
+fn _detect_beh_002(facts: SspecSourceFacts, source: text) -> [SspecDocumentizationFinding]:
+    var findings: [SspecDocumentizationFinding] = []
+    var naming_deduction: i64 = 0
+    for scenario in facts.scenarios:
         if _generic_outcome_name(scenario.name) and naming_deduction < 30:
             val deduction = if naming_deduction + 5 > 30: 30 - naming_deduction else: 5
             findings.push(_make_finding(facts.path, "SSDOC-BEH-002", scenario.line,
                 "scenario name '{scenario.name}' describes the test rather than its outcome",
                 "Rename it to the observable product outcome.", deduction, None))
             naming_deduction = naming_deduction + deduction
+    findings
+
+fn _detect_evd_001(facts: SspecSourceFacts, source: text) -> [SspecDocumentizationFinding]:
+    var findings: [SspecDocumentizationFinding] = []
+    var evidence_deduction: i64 = 0
+    for scenario in facts.scenarios:
         if scenario.step_count > 0 and scenario.capture_count == 0 and evidence_deduction < 30:
             val deduction = if evidence_deduction + 10 > 30: 30 - evidence_deduction else: 10
             findings.push(_make_finding(facts.path, "SSDOC-EVD-001", scenario.line,
                 "visible scenario '{scenario.name}' has no retained capture or evidence",
                 "Capture typed user/operator-facing evidence or explain why the oracle is complete.", deduction, None))
             evidence_deduction = evidence_deduction + deduction
+    findings
+
+fn _detect_ora_001(facts: SspecSourceFacts, source: text) -> [SspecDocumentizationFinding]:
+    var findings: [SspecDocumentizationFinding] = []
+    var has_pending = false
+    for scenario in facts.scenarios:
         if scenario.pending: has_pending = true
-        if scenario.source_only_oracle: has_source_oracle = true
-        if scenario.local_arithmetic_oracle: has_local_arithmetic_oracle = true
-        magic_expected_count = magic_expected_count + scenario.magic_expected_count
     if facts.real_assertion_count == 0 or has_pending:
         val evidence = if facts.real_assertion_count == 0:
             "no real executed assertion or compiler oracle"
@@ -193,6 +237,15 @@ fn _source_findings(facts: SspecSourceFacts, source: text) -> [SspecDocumentizat
             "unconditional pending or fail-fast scaffold remains"
         findings.push(_make_finding(facts.path, "SSDOC-ORA-001", 1, evidence,
             "Replace placeholders with an observable production assertion.", 50, None))
+    findings
+
+fn _detect_ora_002(facts: SspecSourceFacts, source: text) -> [SspecDocumentizationFinding]:
+    var findings: [SspecDocumentizationFinding] = []
+    var has_source_oracle = false
+    var has_local_arithmetic_oracle = false
+    for scenario in facts.scenarios:
+        if scenario.source_only_oracle: has_source_oracle = true
+        if scenario.local_arithmetic_oracle: has_local_arithmetic_oracle = true
     if has_source_oracle or has_local_arithmetic_oracle:
         val oracle_evidence = if has_source_oracle:
             "scenario relies on source-text inspection as system evidence"
@@ -201,43 +254,86 @@ fn _source_findings(facts: SspecSourceFacts, source: text) -> [SspecDocumentizat
         findings.push(_make_finding(facts.path, "SSDOC-ORA-002", 1,
             oracle_evidence,
             "Observe runtime behavior or a stable generated artifact instead.", 50, None))
+    findings
+
+fn _detect_ora_003(facts: SspecSourceFacts, source: text) -> [SspecDocumentizationFinding]:
+    var findings: [SspecDocumentizationFinding] = []
+    var magic_expected_count: i64 = 0
+    for scenario in facts.scenarios:
+        magic_expected_count = magic_expected_count + scenario.magic_expected_count
     if magic_expected_count > 0:
         val deduction = if magic_expected_count * 10 > 30: 30 else: magic_expected_count * 10
         findings.push(_make_finding(facts.path, "SSDOC-ORA-003", 1,
             "{magic_expected_count} unexplained numeric expected value(s)",
             "Name the authoritative expected value or add a '# oracle:' explanation.",
             deduction, None))
+    findings
+
+fn _detect_trc_001(facts: SspecSourceFacts, source: text) -> [SspecDocumentizationFinding]:
+    var findings: [SspecDocumentizationFinding] = []
     if facts.requirement_count == 0:
         findings.push(_make_finding(facts.path, "SSDOC-TRC-001", 1,
             "no implemented requirement identity", "Bind scenarios to stable selected REQ identities.", 20, None))
+    findings
+
+fn _detect_trc_002(facts: SspecSourceFacts, source: text) -> [SspecDocumentizationFinding]:
+    var findings: [SspecDocumentizationFinding] = []
     if facts.planned_requirement_count > 0:
         findings.push(_make_finding(facts.path, "SSDOC-TRC-002", 1,
             "{facts.planned_requirement_count} requirement(s) remain selected or planned",
             "Bind each applicable requirement to implemented evidence or explicit blocked status.", 40, None))
+    findings
+
+fn _detect_trc_003(facts: SspecSourceFacts, source: text) -> [SspecDocumentizationFinding]:
+    var findings: [SspecDocumentizationFinding] = []
     if facts.dangling_requirement_count > 0:
         findings.push(_make_finding(facts.path, "SSDOC-TRC-003", 1,
             "{facts.dangling_requirement_count} declared requirement(s) have no scenario binding",
             "Bind the stable requirement ID inside its executable scenario or explicit blocked case.", 40, None))
+    findings
+
+fn _detect_cov_001(facts: SspecSourceFacts, source: text) -> [SspecDocumentizationFinding]:
+    var findings: [SspecDocumentizationFinding] = []
     if facts.coverage_required and facts.coverage_scenario_count == 0:
         findings.push(_make_finding(facts.path, "SSDOC-COV-001", 1,
             "the authored requirement defines adverse behavior but no adverse scenario is named",
             "Add adverse-path scenarios required by the source, or record a reasoned suppression.", 20, None))
+    findings
+
+fn _detect_mnt_001(facts: SspecSourceFacts, source: text) -> [SspecDocumentizationFinding]:
+    var findings: [SspecDocumentizationFinding] = []
     if facts.scenario_count > 1 and not facts.has_folding:
         findings.push(_make_finding(facts.path, "SSDOC-MNT-001", 1,
             "multiple scenarios form a flat, unfolded presentation",
             "Group secondary detail and keep the primary workflow visible.", 15, None))
+    findings
+
+fn _detect_mnt_003(facts: SspecSourceFacts, source: text) -> [SspecDocumentizationFinding]:
+    var findings: [SspecDocumentizationFinding] = []
     if facts.has_bare_step_annotation:
         findings.push(_make_finding(facts.path, "SSDOC-MNT-003", 1,
             "unsupported bare @step annotation", "Apply the supported '# @step:' metadata form.",
             10, _bare_step_fix(facts.path, source)))
+    findings
+
+fn _detect_mnt_004_source(facts: SspecSourceFacts, source: text) -> [SspecDocumentizationFinding]:
+    var findings: [SspecDocumentizationFinding] = []
     if facts.has_internal_reader_tags:
         findings.push(_make_finding(facts.path, "SSDOC-MNT-004", 1,
             "internal execution tags can leak into reader-facing output",
             "Hide harness routing metadata from the user manual.", 10, None))
+    findings
+
+fn _detect_mnt_006(facts: SspecSourceFacts, source: text) -> [SspecDocumentizationFinding]:
+    var findings: [SspecDocumentizationFinding] = []
     if facts.has_repeated_setup:
         findings.push(_make_finding(facts.path, "SSDOC-MNT-006", 1,
             "repeated setup is not expressed through a named helper",
             "Extract a domain-named setup helper shared by the scenarios.", 10, None))
+    findings
+
+fn _detect_mnt_007(facts: SspecSourceFacts, source: text) -> [SspecDocumentizationFinding]:
+    var findings: [SspecDocumentizationFinding] = []
     val metadata = source.contains("doc/01_research/") and source.contains("doc/03_plan/") and
         source.contains("doc/04_architecture/") and source.contains("doc/05_design/")
     if not metadata:
@@ -246,30 +342,100 @@ fn _source_findings(facts: SspecSourceFacts, source: text) -> [SspecDocumentizat
             "Link the selected lifecycle artifacts or configure a reasoned scope suppression.", 10, None))
     findings
 
-fn _manual_findings(source_facts: SspecSourceFacts, manual: Option<SspecManualFacts>,
+fn sspec_source_detectors() -> [SspecSourceDetector]:
+    """Data catalog pairing every source-fact rule_id with its detector fn."""
+    [
+        SspecSourceDetector(rule_id: "SSDOC-NAR-001", detect: _detect_nar_001),
+        SspecSourceDetector(rule_id: "SSDOC-NAR-002", detect: _detect_nar_002),
+        SspecSourceDetector(rule_id: "SSDOC-NAR-003", detect: _detect_nar_003),
+        SspecSourceDetector(rule_id: "SSDOC-BEH-001", detect: _detect_beh_001),
+        SspecSourceDetector(rule_id: "SSDOC-BEH-002", detect: _detect_beh_002),
+        SspecSourceDetector(rule_id: "SSDOC-EVD-001", detect: _detect_evd_001),
+        SspecSourceDetector(rule_id: "SSDOC-ORA-001", detect: _detect_ora_001),
+        SspecSourceDetector(rule_id: "SSDOC-ORA-002", detect: _detect_ora_002),
+        SspecSourceDetector(rule_id: "SSDOC-ORA-003", detect: _detect_ora_003),
+        SspecSourceDetector(rule_id: "SSDOC-TRC-001", detect: _detect_trc_001),
+        SspecSourceDetector(rule_id: "SSDOC-TRC-002", detect: _detect_trc_002),
+        SspecSourceDetector(rule_id: "SSDOC-TRC-003", detect: _detect_trc_003),
+        SspecSourceDetector(rule_id: "SSDOC-COV-001", detect: _detect_cov_001),
+        SspecSourceDetector(rule_id: "SSDOC-MNT-001", detect: _detect_mnt_001),
+        SspecSourceDetector(rule_id: "SSDOC-MNT-003", detect: _detect_mnt_003),
+        SspecSourceDetector(rule_id: "SSDOC-MNT-004", detect: _detect_mnt_004_source),
+        SspecSourceDetector(rule_id: "SSDOC-MNT-006", detect: _detect_mnt_006),
+        SspecSourceDetector(rule_id: "SSDOC-MNT-007", detect: _detect_mnt_007)
+    ]
+
+fn _source_findings(facts: SspecSourceFacts, source: text) -> [SspecDocumentizationFinding]:
+    var findings: [SspecDocumentizationFinding] = []
+    for detector in sspec_source_detectors():
+        for finding in (detector.detect)(facts, source): findings.push(finding)
+    findings
+
+fn _detect_mnt_002(source_facts: SspecSourceFacts, manual: Option<SspecManualFacts>,
         mirror_state: text) -> [SspecDocumentizationFinding]:
     var findings: [SspecDocumentizationFinding] = []
     if mirror_state == "missing" or mirror_state == "stale":
         findings.push(_make_finding(source_facts.path, "SSDOC-MNT-002", 1,
             "mirrored manual is {mirror_state}", "Regenerate the canonical mirrored SPipe manual.", 25, None))
+    findings
+
+fn _detect_mnt_004_manual(source_facts: SspecSourceFacts, manual: Option<SspecManualFacts>,
+        mirror_state: text) -> [SspecDocumentizationFinding]:
+    var findings: [SspecDocumentizationFinding] = []
     match manual:
         case Some(facts):
             if facts.has_internal_tags:
                 findings.push(_make_finding(facts.path, "SSDOC-MNT-004", 1,
                     "internal execution tags are visible in the generated manual",
                     "Adjust docgen visibility metadata and regenerate.", 10, None))
+        case None:
+            ()
+    findings
+
+fn _detect_mnt_005(source_facts: SspecSourceFacts, manual: Option<SspecManualFacts>,
+        mirror_state: text) -> [SspecDocumentizationFinding]:
+    var findings: [SspecDocumentizationFinding] = []
+    match manual:
+        case Some(facts):
             if not facts.has_verification or not facts.has_troubleshooting:
                 findings.push(_make_finding(facts.path, "SSDOC-MNT-005", 1,
                     "generated manual lacks verification or troubleshooting guidance",
                     "Author verification and recovery facts in SSpec and regenerate.", 10, None))
+        case None:
+            ()
+    findings
+
+fn _detect_evd_002(source_facts: SspecSourceFacts, manual: Option<SspecManualFacts>,
+        mirror_state: text) -> [SspecDocumentizationFinding]:
+    var findings: [SspecDocumentizationFinding] = []
+    match manual:
+        case Some(facts):
             if source_facts.step_count > 0 and facts.visible_step_count == 0:
                 findings.push(_make_finding(facts.path, "SSDOC-EVD-002", 1,
                     "source steps are not visible in the generated manual",
                     "Use supported literal step calls and regenerate the manual.", 15, None))
+        case None:
+            ()
+    findings
+
+fn _detect_evd_003(source_facts: SspecSourceFacts, manual: Option<SspecManualFacts>,
+        mirror_state: text) -> [SspecDocumentizationFinding]:
+    var findings: [SspecDocumentizationFinding] = []
+    match manual:
+        case Some(facts):
             if source_facts.capture_count > 0 and facts.evidence_block_count == 0:
                 findings.push(_make_finding(facts.path, "SSDOC-EVD-003", 1,
                     "source captures are not rendered as manual evidence",
                     "Select a supported evidence display and regenerate.", 15, None))
+        case None:
+            ()
+    findings
+
+fn _detect_mnt_008(source_facts: SspecSourceFacts, manual: Option<SspecManualFacts>,
+        mirror_state: text) -> [SspecDocumentizationFinding]:
+    var findings: [SspecDocumentizationFinding] = []
+    match manual:
+        case Some(facts):
             if facts.missing_professional_sections.len() > 0:
                 val missing_sections = facts.missing_professional_sections.join(", ")
                 findings.push(_make_finding(facts.path, "SSDOC-MNT-008", 1,
@@ -279,6 +445,37 @@ fn _manual_findings(source_facts: SspecSourceFacts, manual: Option<SspecManualFa
         case None:
             ()
     findings
+
+fn sspec_manual_detectors() -> [SspecManualDetector]:
+    """Data catalog pairing every manual-fact rule_id with its detector fn."""
+    [
+        SspecManualDetector(rule_id: "SSDOC-MNT-002", detect: _detect_mnt_002),
+        SspecManualDetector(rule_id: "SSDOC-MNT-004", detect: _detect_mnt_004_manual),
+        SspecManualDetector(rule_id: "SSDOC-MNT-005", detect: _detect_mnt_005),
+        SspecManualDetector(rule_id: "SSDOC-EVD-002", detect: _detect_evd_002),
+        SspecManualDetector(rule_id: "SSDOC-EVD-003", detect: _detect_evd_003),
+        SspecManualDetector(rule_id: "SSDOC-MNT-008", detect: _detect_mnt_008)
+    ]
+
+fn _manual_findings(source_facts: SspecSourceFacts, manual: Option<SspecManualFacts>,
+        mirror_state: text) -> [SspecDocumentizationFinding]:
+    var findings: [SspecDocumentizationFinding] = []
+    for detector in sspec_manual_detectors():
+        for finding in (detector.detect)(source_facts, manual, mirror_state): findings.push(finding)
+    findings
+
+fn sspec_own_detector_rule_ids() -> [text]:
+    """Union of this module's registered detector rule_ids, deduplicated.
+    Combined with the lifecycle module's rule_ids by sspec_detector_rule_ids()
+    in registry.spl (kept in a separate file to avoid analyzer.spl <->
+    lifecycle.spl import circularity, since lifecycle.spl already imports
+    analyzer.spl for make_sspec_finding/append_sspec_findings)."""
+    var ids: [text] = []
+    for detector in sspec_source_detectors():
+        if not ids.contains(detector.rule_id): ids.push(detector.rule_id)
+    for detector in sspec_manual_detectors():
+        if not ids.contains(detector.rule_id): ids.push(detector.rule_id)
+    ids
 
 fn _report(path: text, source: text, mirror: Option<text>, inspect_mirror: bool) -> SspecDocumentizationReport:
     val normalized_path = normalize_sspec_path(path)

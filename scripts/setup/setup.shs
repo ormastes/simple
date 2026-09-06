@@ -8,6 +8,41 @@ set -eu
 repo_root="$(cd "$(dirname "$0")/../.." && pwd)"
 . "${repo_root}/scripts/setup/platform-detect.shs"
 
+# --- Windows: materialize git symlinks before anything reads the tree --------
+# On Windows without Developer Mode / SeCreateSymbolicLinkPrivilege, git checks
+# out `core.symlinks=false`, so every tracked mode-120000 path lands as a plain
+# regular file whose entire content is the target path. The compiler then reads
+# e.g. `src/std` (content: "lib") or `src/app/debug/coordinator.spl` as Simple
+# SOURCE and dies with `parse: Unexpected token: found Slash`, and the directory
+# aliases under `src/compiler/` break module resolution outright. A fresh
+# Windows clone therefore cannot run `bin/simple test` at all.
+#
+# The materialiser replaces those placeholders with NTFS junctions (directory
+# targets) and hard links (file targets) — both privilege-free. It ran only from
+# `scripts/bootstrap/bootstrap-windows.sh`, which a fresh clone doing
+# `setup.shs && bin/simple test` never reaches; wiring it here is what closes
+# the fresh-checkout hole.
+#
+# UNIX: the script's own first statement is a `uname -s` case that exits 0 for
+# anything that is not MINGW*/MSYS*/CYGWIN*, touching nothing. On Linux and
+# macOS these paths are REAL symlinks and must stay that way, so this block is a
+# no-op there by construction. `--strict-missing` is deliberately NOT passed:
+# setup may legitimately run before `bin/release/**` exists, and those unbuilt
+# targets must stay benign skips.
+if [ -f "${repo_root}/scripts/setup/materialize-symlinks-windows.shs" ]; then
+  # `set -e` is active, so a bare invocation would abort before any assignment.
+  # `|| rc=$?` suppresses that AND captures the status directly from the command
+  # itself -- never through a pipe, whose $? is the last stage's status and has
+  # produced false greens in this repo before.
+  materialize_rc=0
+  sh "${repo_root}/scripts/setup/materialize-symlinks-windows.shs" "${repo_root}" || materialize_rc=$?
+  if [ "${materialize_rc}" -ne 0 ]; then
+    echo "setup: FAILED to materialize git symlinks (rc=${materialize_rc}); the checkout will not compile" >&2
+    exit "${materialize_rc}"
+  fi
+fi
+# ---------------------------------------------------------------------------
+
 # platform-detect emits the 3-part Rust triple (e.g. aarch64-apple-darwin), but
 # release binaries live under the 4-part Simple-native triple (…-macho on macOS).
 # Resolve PLATFORM_TRIPLE to whichever release dir actually exists.
@@ -116,7 +151,7 @@ fi
 
 # Production launches only an admitted cached native server.
 
-_MCP_PROBE_WRAPPER_VERSION="simple_mcp_server:4.1.4-search-call"
+_MCP_PROBE_WRAPPER_VERSION="simple_mcp_server:4.2.0-probe-flag"
 
 _mcp_probe_identity() {
   awk 'NR == 1 { print $1 }' "$1.sha256" 2>/dev/null || printf ''
@@ -163,6 +198,25 @@ mcp_probe_native() {
   fi
   # Stale or missing stamp: delete it before probing so a probe failure leaves no stamp
   _mcp_probe_stamp_delete "${probe_native}"
+
+  # Fast path: the candidate's own --probe flag. It prints version, build id and
+  # tool count and exits 0 without MCP framing or handler imports, so it costs a
+  # process start instead of a four-message JSON-RPC handshake. Admission is
+  # positive-only: exit 0 AND the documented "simple-mcp probe ok" marker on
+  # stdout. An older native that does not know the flag fails one of those and
+  # falls through to the full handshake below, which stays the authority.
+  # stdin comes from /dev/null and the timeout is short, because a native that
+  # predates the flag treats --probe as no argument at all, starts serving MCP on
+  # stdin, and would otherwise block until the long handshake timeout.
+  probe_flag_out="$(probe_timeout "${SIMPLE_MCP_NATIVE_PROBE_QUICK_TIMEOUT:-2}" \
+    "${probe_native}" --probe </dev/null 2>>"${log_dir}/simple_mcp_stderr.log")" && \
+  probe_flag_status=0 || probe_flag_status=$?
+  if [ "${probe_flag_status}" = "0" ] && printf '%s' "${probe_flag_out}" | grep -q 'simple-mcp probe ok'; then
+    _mcp_probe_stamp_write "${probe_native}" || true
+    printf 'probe_flag_ok wrapper=simple_mcp_server native=%s stamp=written\n' "${probe_native}" >>"${log_dir}/simple_mcp_startup.log"
+    return 0
+  fi
+  printf 'probe_flag_unsupported wrapper=simple_mcp_server native=%s rc=%s fallback=full_handshake\n' "${probe_native}" "${probe_flag_status}" >>"${log_dir}/simple_mcp_startup.log"
 
   probe_tmp="$(mktemp "${TMPDIR:-/tmp}/simple_mcp_probe.XXXXXX")" || probe_tmp=""
   if [ -z "${probe_tmp}" ]; then

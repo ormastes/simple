@@ -125,6 +125,37 @@ The generated manual should be useful without opening the test source. If it
 shows raw test mechanics as the primary content, revise step helpers,
 `@step` text, `@capture` evidence, and folded visibility policy.
 
+### Benchmarking startup — what NOT to measure with
+
+Two measurement paths report numbers that are dominated by the harness rather
+than by the server, and neither may be used as a startup benchmark:
+
+- **Never benchmark via `test/03_system/tools/mcp/mcp_startup_test_system.shs`.**
+  It feeds the server from a sleep-delayed subshell so each JSON-RPC message
+  arrives separately: three one-second delays per server (`sleep 1` x 3 for the
+  MCP run and again for the LSP MCP run, 7 `sleep` occurrences in the file). Its
+  wall time therefore has a ~3000 ms floor that has nothing to do with startup
+  cost, which is larger than the entire 5000 ms budget's headroom. That script is
+  a message-framing smoke harness, not a stopwatch.
+- **Never benchmark via `npx`.** An `npx @simple-lang/mcp-server` invocation pays
+  Node process start, npm registry/cache resolution, and package extraction
+  before the native binary is even exec'd. That prelude is unbounded (it can hit
+  the network) and is not part of the server's startup path.
+
+Use instead:
+
+```bash
+# Whole-gate timing: prints mcp_startup_ms= and lsp_mcp_startup_ms= itself
+sh scripts/check/check-mcp-native-smoke.shs
+
+# Single-process startup floor: no MCP framing, no handler imports
+bin/simple_mcp_server --probe
+```
+
+Both drive the real binary directly with no sleeps. Record binary identity
+(`readlink -f`, size, mtime) alongside any number you report — the deployed
+artifacts are replaced in place.
+
 ### Repair Broken Tool Discovery
 
 If an MCP client starts the server but refuses to load tools, first verify the

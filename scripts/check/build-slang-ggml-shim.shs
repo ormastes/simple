@@ -1,0 +1,57 @@
+#!/bin/sh
+# Builds the slang ggml backend shim into build/sffi/libslang_ggml.so.
+#
+# Not part of the main runtime link: the shim needs llama.h, an external SDK
+# header that is deliberately not vendored (CLAUDE.md Owned-Code Scope). The
+# C-runtime gate therefore classifies slang_ggml_shim.c as SKIP, not as a
+# compile failure -- same treatment as scv_wasm_shim.c.
+#
+# LLAMA_ROOT must point at a built llama.cpp checkout (one holding
+# include/llama.h and build/bin/libllama.so). It stays outside this repo.
+#
+# Verdict is the last line of stdout, same convention as scripts/check/*:
+#   PASS  -- <n> symbol(s) exported, <path>        exit 0
+#   FAIL  -- <reason>                              exit 1
+#   ERROR -- nothing was built (<reason>)          exit 2
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd -P)
+LLAMA_ROOT=${LLAMA_ROOT:-/home/yoon/dev/llama.cpp}
+OUT_DIR=${SLANG_SHIM_OUT_DIR:-$ROOT/build/sffi}
+OUT=$OUT_DIR/libslang_ggml.so
+SRC=$ROOT/src/runtime/slang_ggml_shim.c
+
+# Every precondition is ERROR, never PASS: absence of a toolchain or of the
+# external SDK is absence of evidence, not evidence of success.
+[ -f "$SRC" ] || { echo "ERROR -- nothing was built (missing $SRC)"; exit 2; }
+[ -f "$LLAMA_ROOT/include/llama.h" ] || { echo "ERROR -- nothing was built (no llama.h under LLAMA_ROOT=$LLAMA_ROOT)"; exit 2; }
+[ -f "$LLAMA_ROOT/build/bin/libllama.so" ] || { echo "ERROR -- nothing was built (no libllama.so under $LLAMA_ROOT/build/bin)"; exit 2; }
+
+CC=${CC:-cc}
+command -v "$CC" >/dev/null 2>&1 || { echo "ERROR -- nothing was built (no C compiler: $CC)"; exit 2; }
+
+mkdir -p "$OUT_DIR"
+
+# Status is read directly into a variable on the next line, never through a
+# pipe: a pipeline's $? is the last stage's status and has produced false
+# greens in this repo before.
+"$CC" -O2 -fPIC -shared -o "$OUT" "$SRC" \
+    -I"$LLAMA_ROOT/include" -I"$LLAMA_ROOT/ggml/include" \
+    -L"$LLAMA_ROOT/build/bin" -lllama \
+    -Wl,-rpath,"$LLAMA_ROOT/build/bin" 2>"$OUT_DIR/build.log"
+cc_rc=$?
+if [ "$cc_rc" -ne 0 ]; then
+    echo "compile output:" >&2
+    cat "$OUT_DIR/build.log" >&2
+    echo "FAIL -- compile failed (exit $cc_rc)"
+    exit 1
+fi
+
+[ -f "$OUT" ] || { echo "ERROR -- nothing was built (compiler reported success but $OUT is absent)"; exit 2; }
+
+# Non-vacuity: a .so that exports none of our entries is a failed build that
+# happens to link, which is exactly the shape a symbol-count check catches.
+n_sym=$(nm -D --defined-only "$OUT" 2>/dev/null | grep -c ' T slang_ggml_' || true)
+[ "$n_sym" -gt 0 ] || { echo "FAIL -- built $OUT but it exports 0 slang_ggml_* symbols"; exit 1; }
+
+echo "PASS -- $n_sym symbol(s) exported, $OUT"

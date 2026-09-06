@@ -1,8 +1,32 @@
+"""
+## Purpose and audience
+For engineers who own `app.spipe.search.launch_policy`: P5's launch policy
+must approve at most one process fallback per launch, and only when the
+candidate proves logical-root parity with the process it replaces — never a
+silent retry loop, and never a restart budget that is unbounded.
+## Operator workflow
+bin/simple test test/01_unit/app/spipe/search_launch_policy_spec.spl
+## Compatibility and limitations
+Pure unit-level: exercises `LaunchPolicyV1` directly with no process spawn and
+no live search runtime.
+## Verification guidance and troubleshooting
+A failure means either the fallback budget was not enforced (a second
+fallback was approved) or parity was not actually checked before approval —
+read the `Err` message text, which names the exact policy violation.
+"""
+# Lifecycle: doc/01_research/infra/spipe/spipe_knowledge_compiler.md ;
+# doc/03_plan/infra/spipe/spipe_search_providers_impl_plan.md ;
+# doc/04_architecture/infra/spipe/spipe_knowledge_compiler.md ;
+# doc/05_design/infra/spipe/spipe_knowledge_compiler_search_providers.md
+# @manual_section: launch-policy
+
 use std.spec
 use app.spipe.search.launch_policy.{LaunchPolicyV1, approve_fallback, allow_restart}
 
 describe "P5 launch policy — single fallback, proven logical-root parity":
     it "approves exactly one fallback when logical roots match":
+        # @req REQ-SPIPE-LAUNCH-001
+        # @capture(protocol_json): the approved policy's fallback_used flag
         step("Fresh policy approves a parity-proven fallback")
         val policy = LaunchPolicyV1.fresh(3)
         val approved = approve_fallback(policy, "root-a", "root-a")
@@ -13,6 +37,8 @@ describe "P5 launch policy — single fallback, proven logical-root parity":
                 expect(true).to_equal(false)
 
     it "rejects a second fallback on the same policy instance":
+        # @req REQ-SPIPE-LAUNCH-002
+        # @capture(protocol_json): the Err message returned for a reused fallback
         step("Fallback already consumed must never be reused")
         val policy = LaunchPolicyV1.fresh(3)
         val first = approve_fallback(policy, "root-a", "root-a")
@@ -28,6 +54,8 @@ describe "P5 launch policy — single fallback, proven logical-root parity":
                 expect(true).to_equal(false)
 
     it "rejects a fallback whose candidate does not prove logical-root parity":
+        # @req REQ-SPIPE-LAUNCH-003
+        # @capture(protocol_json): the Err message returned for a mismatched logical root
         step("Mismatched logical root must fail closed")
         val policy = LaunchPolicyV1.fresh(3)
         val approved = approve_fallback(policy, "root-a", "root-b")
@@ -38,10 +66,10 @@ describe "P5 launch policy — single fallback, proven logical-root parity":
                 expect(true).to_equal(false)
 
     it "bounds restarts to the configured budget":
+        # @req REQ-SPIPE-LAUNCH-004
+        # @capture(protocol_json): allow_restart's verdict at, below, and past the configured budget
         step("Restart budget is independent of the fallback budget")
         val policy = LaunchPolicyV1.fresh(2)
         expect(allow_restart(policy, 0)).to_equal(true)
         expect(allow_restart(policy, 1)).to_equal(true)
         expect(allow_restart(policy, 2)).to_equal(false)
-
-return ()

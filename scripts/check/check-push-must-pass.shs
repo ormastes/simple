@@ -150,7 +150,7 @@ validate_ledger_text() {
     # implementation launched awk/sed/tr once per field per row (roughly 400
     # processes for the current ledger), dominating the supposedly light hook.
     awk -F, -v want_fp="$_want_fp" -v allow_unpromoted="$ALLOW_UNPROMOTED_LEDGER" \
-        -v required="$REQUIRED_BOOTSTRAP_IDS" '
+        -v required="$(printf '%s' "$REQUIRED_BOOTSTRAP_IDS" | tr '\n' ' ')" '
         function trim(v) { gsub(/^[[:space:]]+|[[:space:]]+$/, "", v); return v }
         function unquote(v) { v=trim(v); sub(/^"/, "", v); sub(/"$/, "", v); return v }
         function fail() { bad=1 }
@@ -189,7 +189,13 @@ validate_ledger_text() {
             unpromoted=(fingerprint == "unrecorded" && allow_unpromoted == 1)
             if (!unpromoted && fingerprint != want_fp) fail()
             if (manifest_count != ledger_count) fail()
-            required_count=split(required, required_ids, "\n")
+            # Split on runs of space OR newline. `required` is handed in
+            # newline-flattened because a literal newline inside an awk -v
+            # assignment is a hard error on BSD awk (macOS): the whole guard died
+            # with "awk: newline in string compiler-stage1\ncomp... at source
+            # line 1" and every push from a mac was rejected as "ledger is
+            # malformed". gawk accepted it, which is why it went unnoticed.
+            required_count=split(required, required_ids, /[ \n]+/)
             for (i=1; i<=required_count; i++)
                 if (required_ids[i] != "" && !(required_ids[i] in manifest_seen)) fail()
             for (id in ledger_seen) if (!(id in manifest_seen)) fail()
@@ -343,8 +349,12 @@ run_manifest_push_gates() {
                 run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-rt-dual-implementation-ratchet.shs" || { rm -f "$_push_rows"; return 1; } ;;
             'push-dual-run-shadow:tree:sh scripts/check/check-dual-run-shadow.shs')
                 run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-dual-run-shadow.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-parser-source-global-ratchet:tree:sh scripts/check/check-parser-source-global-ratchet.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-parser-source-global-ratchet.shs" || { rm -f "$_push_rows"; return 1; } ;;
             'push-runtime-source-list-parity:tree:sh scripts/check/check-runtime-source-list-parity.shs')
                 run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-runtime-source-list-parity.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-lifecycle-reachability:tree:sh scripts/check/check-lifecycle-reachability.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-lifecycle-reachability.shs" || { rm -f "$_push_rows"; return 1; } ;;
             'push-windows-checkout-damage:range:sh scripts/check/check-windows-checkout-damage-push.shs --scan-only')
                 run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-windows-checkout-damage-push.shs" --scan-only "$_range" || { rm -f "$_push_rows"; return 1; } ;;
             'push-c-runtime-compiles:tree:sh scripts/check/check-c-runtime-compiles-push.shs')
@@ -357,6 +367,8 @@ run_manifest_push_gates() {
                 run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-perf-regression-tests.shs" || { rm -f "$_push_rows"; return 1; } ;;
             'push-process-wait-eintr-retry:tree:sh scripts/check/check-process-wait-eintr-retry.shs')
                 run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-process-wait-eintr-retry.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-plan-acceptance-swept:tree:sh scripts/check/check-plan-acceptance-swept.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-plan-acceptance-swept.shs" || { rm -f "$_push_rows"; return 1; } ;;
             *) rm -f "$_push_rows"; return 2 ;;
         esac
     done < "$_push_rows"

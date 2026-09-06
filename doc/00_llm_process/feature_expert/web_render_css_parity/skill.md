@@ -133,6 +133,18 @@ the current measured state.
 
 Template: `.spipe/spipe/doc/00_llm_process/template/feature_skill.md`
 
+## 2026-09-05: Vulkan 4K showcase hardening is active
+
+The active lane is `.spipe/web_renderer_vulkan_4k_showcase_hardening/state.md`.
+The canonical source runner and seven-tab page are being repaired above the
+existing HTML/CSS -> Draw IR -> Engine2D contract. Two hot-path fixes are in
+scope: linear preallocated tile-op construction and bounded Draw IR route-cache
+keys. Do not promote current lexical HTML/CSS fixture occurrence as production
+renderability, or synthetic Chrome timing as comparison evidence. The current
+admitted compiler lacks a full `test`/`check` CLI and its unscoped compile path
+hit ~1.69 GiB RSS; use only bounded explicit entry-closure commands and retain
+the compiler blocker separately from runtime 4K measurements.
+
 ## 2026-07-05: window fixture 97.11% — the ceiling was a byte/char slice bug
 
 - **Always suspect infrastructure before compositing math.** The documented

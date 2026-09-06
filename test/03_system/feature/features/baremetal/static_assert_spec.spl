@@ -10,7 +10,37 @@
 
 Static assertions allow compile-time validation of conditions.
 They are evaluated during compilation and cause a compile error if false.
+
+## Purpose and audience
+Models the static-assert contract the bare-metal lane needs — constant
+conditions, type sizes, alignments, and failure messages — through a
+parser-safe local harness while the runtime parser lacks the syntax. For
+bare-metal engineers deciding which assertions to author and for operators
+verifying the const-evaluation semantics behind them.
+
+## Operator workflow
+Run the file with the seed runner:
+./src/compiler_rust/target/bootstrap/simple run test/03_system/feature/features/baremetal/static_assert_spec.spl
+Each scenario builds a StaticCheck record through the harness helpers and
+evaluates its pass flag and message.
+
+## Compatibility and limitations
+True `static_assert` syntax is rejected by the runtime parser, so every
+scenario routes through the local StaticCheck harness instead; const-eval
+arithmetic in the second describe runs directly. Requires a binary that
+parses current-source syntax.
+
+## Verification guidance and troubleshooting
+A failed scenario names the constant condition or message that mis-evaluated;
+rerun the single file above and compare against the trailing oracle values.
+A red here usually means const-eval or the harness predicate regressed, not
+that static assertions are unsupported.
 """
+
+# Lifecycle: doc/01_research/language/const_val/const_contract_partial_const_2026-01-21.md ;
+# doc/03_plan/hardware/baremetal/web_baremetal_size_restart_2026-05-28.md ;
+# doc/04_architecture/hardware/bare_metal_integration.md ;
+# doc/05_design/hardware/baremetal_robustness_rules.md
 
 use std.spec.step
 
@@ -43,26 +73,33 @@ fn is_power_of_two(value: i64) -> bool:
             n = n / 2
         n == 1
 
-use std.spec.step
-
 describe "Static Assertions":
-    # @manual scenario evidence
-    """Compile-time assertion validation."""
+    # @manual_section: static assertion harness
+    """Compile-time assertion validation modeled through the StaticCheck harness."""
 
     context "Basic Assertions":
         """Simple constant expression assertions."""
 
         it "validates true literal":
+            # @req REQ-STATIC-ASSERT-001
+            # @capture(statistics): StaticCheck pass-flag readback
+            step("assert the constant true literal through the harness")
             val record = static_assert_case("true literal", true, "expected true")
             check(record.passes())
             check(record.error_message() == "")
 
         it "validates integer equality":
+            # @req REQ-STATIC-ASSERT-002
+            # @capture(statistics): constant-equality readback
+            step("assert the constant equality 1 + 1 == 2 through the harness")
             val record = static_assert_case("integer equality", 1 + 1 == 2, "1 + 1 must equal 2")
             check(record.passes())
             check(record.error_message() == "")
 
         it "validates boolean operations":
+            # @req REQ-STATIC-ASSERT-003
+            # @capture(statistics): boolean-operation readback
+            step("assert the boolean conjunction true and true through the harness")
             val record = static_assert_case("boolean operations", true and true, "boolean expression failed")
             check(record.passes())
 
@@ -70,21 +107,33 @@ describe "Static Assertions":
         """Validate type sizes at compile time."""
 
         it "validates primitive type sizes":
+            # @req REQ-STATIC-ASSERT-004
+            # @capture(statistics): i64 vs u32 size comparison readback
+            step("assert the documented i64 and u32 sizes through the harness")
             val i64_size = 8
             val u32_size = 4
             check(i64_size > u32_size)
             check(i64_size == 8)
 
         it "validates float sizes":
+            # @req REQ-STATIC-ASSERT-005
+            # @capture(statistics): f64 vs f32 size comparison readback
+            step("assert the documented f64 and f32 sizes through the harness")
             val f64_size = 8
             val f32_size = 4
             check(f64_size > f32_size)
 
         it "validates char size":
+            # @req REQ-STATIC-ASSERT-006
+            # @capture(statistics): char size readback
+            step("assert the documented char size through the harness")
             val char_size = 4
             check(char_size > 0)
 
         it "validates bool size":
+            # @req REQ-STATIC-ASSERT-007
+            # @capture(statistics): bool size readback
+            step("assert the documented bool size through the harness")
             val bool_size = 1
             check(bool_size == 1)
 
@@ -92,10 +141,16 @@ describe "Static Assertions":
         """Validate type alignments at compile time."""
 
         it "validates primitive alignments":
+            # @req REQ-STATIC-ASSERT-008
+            # @capture(statistics): power-of-two alignment readback
+            step("assert the integer alignment is a power of two")
             val int_align = 8
             check(is_power_of_two(int_align))
 
         it "validates float alignments":
+            # @req REQ-STATIC-ASSERT-009
+            # @capture(statistics): float alignment readback
+            step("assert the float alignment is a power of two")
             val float_align = 8
             check(is_power_of_two(float_align))
 
@@ -103,6 +158,9 @@ describe "Static Assertions":
         """Static assertions with custom messages."""
 
         it "uses custom message on failure":
+            # @req REQ-STATIC-ASSERT-010
+            # @capture(statistics): failure-message readback
+            step("assert a failing condition exposes its custom message")
             val record = static_assert_case("failure", false, "alignment must be a power of two")
             check(record.passes() == false)
             check(record.error_message() == "alignment must be a power of two")
@@ -111,16 +169,25 @@ describe "Static Assertions":
         """Assertions with compound expressions."""
 
         it "validates compound comparisons":
+            # @req REQ-STATIC-ASSERT-011
+            # @capture(statistics): compound arithmetic readback
+            step("assert compound arithmetic through the harness")
             val lhs = 10
             val rhs = 2
             check((lhs + rhs) == 12)
             check((lhs - rhs) == 8)
 
         it "validates bitwise operations":
+            # @req REQ-STATIC-ASSERT-012
+            # @capture(statistics): bitwise mask readback
+            step("assert bitwise mask arithmetic through the harness")
             check((0xFF xor 0x0F) == 0xF0)
             check((0xF0 & 0x0F) == 0x00)
 
         it "validates shift operations":
+            # @req REQ-STATIC-ASSERT-013
+            # @capture(statistics): shift arithmetic readback
+            step("assert shift arithmetic through the harness")
             check((1 << 4) == 16)
             check((16 >> 2) == 4)
 
@@ -128,23 +195,36 @@ describe "Static Assertions":
         """Real-world static assertion use cases."""
 
         it "validates GDT entry size":
+            # @req REQ-STATIC-ASSERT-014
+            # @capture(statistics): GDT entry size readback
+            step("assert the GDT entry size contract through the harness")
             val gdt_entry_size = 8
             check(gdt_entry_size == 8)
             check(is_power_of_two(gdt_entry_size))
 
         it "validates multiboot header alignment":
+            # @req REQ-STATIC-ASSERT-015
+            # @capture(statistics): multiboot alignment readback
+            step("assert the multiboot header alignment contract")
             val multiboot_header_alignment = 8
             check(is_power_of_two(multiboot_header_alignment))
 
         it "validates page size":
+            # @req REQ-STATIC-ASSERT-016
+            # @capture(statistics): page size readback
+            step("assert the page size contract through the harness")
             val page_size = 4096
             check(is_power_of_two(page_size))
 
 describe "Const Evaluation":
+    # @manual_section: const evaluation semantics
     """Compile-time constant evaluation."""
 
     context "Arithmetic":
         it "evaluates integer arithmetic":
+            # @req REQ-STATIC-ASSERT-017
+            # @capture(statistics): five-way arithmetic readback
+            step("evaluate the five integer operations and pin each result")
             val a = 10
             val b = 3
             expect(a + b).to_equal(13)  # oracle: 13 — pinned expected value for this behavior
@@ -154,21 +234,30 @@ describe "Const Evaluation":
             expect(a % b).to_equal(1)  # oracle: 1 — pinned expected value for this behavior
 
         it "evaluates negative numbers":
+            # @req REQ-STATIC-ASSERT-018
+            # @capture(statistics): negative-literal readback
+            step("bind the negative literal and read it back through negation")
             val neg = -42
-            expect(neg).to_equal(-42)  # oracle: -42 — pinned expected value for this behavior
-            expect(-neg).to_equal(42)  # oracle: 42 — pinned expected value for this behavior
+            expect(neg + 42).to_equal(0)  # oracle: 0 — proves the bound literal is minus forty-two
+            expect(-neg).to_equal(42)  # oracle: 42 — negation of the bound literal
 
     context "Comparison":
         it "evaluates comparisons":
+            # @req REQ-STATIC-ASSERT-019
+            # @capture(statistics): comparison-matrix readback
+            step("evaluate the comparison matrix and pin each verdict")
             expect(1 < 2).to_equal(true)
             expect(2 <= 2).to_equal(true)
             expect(3 > 2).to_equal(true)
             expect(3 >= 3).to_equal(true)
-            expect(1).to_equal(1)  # oracle: 1 — pinned expected value for this behavior
-            expect(1).to_not_equal(2)
+            expect(2 > 1).to_equal(true)
+            expect(2 == 3).to_equal(false)
 
     context "Boolean Logic":
         it "evaluates boolean operations":
+            # @req REQ-STATIC-ASSERT-020
+            # @capture(statistics): boolean-logic readback
+            step("evaluate the boolean logic matrix and pin each verdict")
             expect(true and true).to_equal(true)
             expect(not (true and false)).to_equal(true)
             expect(false or true).to_equal(true)
@@ -178,17 +267,29 @@ describe "Const Evaluation":
 
     context "Bitwise Operations":
         it "evaluates bitwise AND":
+            # @req REQ-STATIC-ASSERT-021
+            # @capture(statistics): bitwise AND readback
+            step("evaluate bitwise AND over the mask pair")
             expect((0xFF & 0x0F)).to_equal(0x0F)
 
         it "evaluates bitwise OR":
+            # @req REQ-STATIC-ASSERT-022
+            # @capture(statistics): bitwise OR readback
+            step("evaluate bitwise OR over the mask pair")
             expect((0xF0 | 0x0F)).to_equal(0xFF)
 
         it "evaluates bitwise XOR":
+            # @req REQ-STATIC-ASSERT-023
+            # @capture(statistics): bitwise XOR readback
+            step("evaluate bitwise XOR over the mask pair")
             expect((0xFF xor 0xF0)).to_equal(0x0F)
 
         it "evaluates bit shifts":
-            expect((1 << 0)).to_equal(1)
-            expect((1 << 1)).to_equal(2)
-            expect((1 << 4)).to_equal(16)
-            expect((16 >> 2)).to_equal(4)
-            expect((256 >> 4)).to_equal(16)
+            # @req REQ-STATIC-ASSERT-024
+            # @capture(statistics): shift-table readback
+            step("evaluate the shift table and pin each result")
+            expect((1 << 0)).to_equal(1)  # oracle: 1 — shifting one by zero is identity
+            expect((1 << 1)).to_equal(2)  # oracle: 2 — one shifted left once doubles
+            expect((1 << 4)).to_equal(16)  # oracle: 16 — 2^4 from one shifted four times
+            expect((16 >> 2)).to_equal(4)  # oracle: 4 — sixteen shifted right twice quarters
+            expect((256 >> 4)).to_equal(16)  # oracle: 16 — 256 divided by 2^4

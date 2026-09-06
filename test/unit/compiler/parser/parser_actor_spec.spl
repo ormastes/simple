@@ -1,120 +1,132 @@
 """
 ## Purpose and audience
 
-This specification is maintained for compiler and library engineers reviewing UNIT-COMPILER behavior, and for operators verifying a build.
+Executable specification for the frontend's actor-definition handling: the
+fail-closed parse contract for `actor` source the interpreted frontend
+cannot lower yet (gap tracked in doc/08_tracking/bug/pure_simple_frontend_parser_rejects_actor_decls_2026-09-05.md; flip these scenarios
+positive once the pure-Simple parser accepts actor decls like the Rust seed does), the parser/class counterpart the actor form desugars
+to, and the record-level actor-to-class desugar transform. Maintained for
+compiler engineers touching `src/compiler/10.frontend/` and for operators
+confirming a build.
 
 ## Operator workflow
 
-Run `bin/simple test --no-session-daemon test/unit/compiler/parser/parser_actor_spec.spl` and confirm the Results line reports 0 failed. Each scenario names the requirement it traces to and starts with a Verify step.
+Run `bin/simple test --no-session-daemon test/unit/compiler/parser/parser_actor_spec.spl`
+with a runnable seed and confirm the Results line reports 0 failed. Parse
+scenarios feed inline actor/class source through the real `parse_module`
+entry and assert on `parser_has_errors`; transform scenarios drive the
+real `desugar_actor` pass over constructed `ActorDef` records.
 
 ## Compatibility and limitations
 
-Covers only the behavior explicitly asserted below on the current toolchain. No external standard or cross-version contract is claimed; numeric oracles are explained inline where they appear.
+Actor source is rejected (reported as parse errors, never silently
+mis-parsed) by the interpreted frontend on the current toolchain, so the
+parse scenarios assert that fail-closed contract rather than a successful
+actor parse; the Rust seed's parser is out of scope. Token `kind` values
+are enum-typed at runtime on this seed, so lexing scenarios assert token
+text only.
 
-## Recovery and troubleshooting
+## Verification guidance and troubleshooting
 
-If a scenario fails, re-run the single spec file, read the first failing Verify step, and compare the reported value against the inline oracle comment before bisecting recent changes.
+If a scenario fails, re-run this single file and read the first failing
+step line. A failure in the reject group means actor source stopped being
+reported as a parse error (check for silent mis-parse); a failure in the
+desugar group means the actor-to-class record copy regressed.
 """
-use std.spec.{step}
-# @manual: primary
-# REQ-UNIT-COMPILER-001
-# doc-path: doc/01_research/app/
-# doc-path: doc/03_plan/app/
-# doc-path: doc/04_architecture/app/
-# doc-path: doc/05_design/app/
-#!/usr/bin/env simple
-# Purpose and audience: executable specification evidence for the owning engineering team.
-# @req REQ-SSPEC-UNIT
-# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+# Lifecycle: research doc/01_research/domain/sspec_documentization_maintenance.md ;
+# plan doc/03_plan/sspec_modernization_plan.md ;
+# architecture doc/04_architecture/sspec_documentization_maintenance.md ;
+# design doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
 
-# Parser Tests for Actor Definitions
-#
-# Tests that the parser correctly recognizes and parses actor definitions,
-# including outline parsing and full parsing.
+use std.spec.step
+use compiler.core.parser.{parse_module, parser_has_errors, parser_get_errors}
+use compiler.core.ast.{decl_count, decl_get_name}
+use compiler.core.lexer.{lexer_new, lexer_next_token}
+use compiler.frontend.desugar.desugar_async.{desugar_actor}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.frontend.parser_types.{ActorDef, ParserTypeParam}
+use compiler.frontend.parser_types_expr.{Type, TypeKind}
+use compiler.frontend.block_types.{span_new}
 
+fn infer_type() -> Type:
+    Type(kind: TypeKind.Infer, span: span_new(0, 1, 1, 1))
 
-describe "Parser - Actor Definitions":
-    # @manual scenario evidence
-    it "parses simple actor definition":
-        # Simple actor with one method
-        # Should parse without errors
-        expect(1).to_equal(1)  # oracle: expected value 1 is the behavior asserted by this regression spec
+fn setup_counter_actor() -> ActorDef:
+    ActorDef(name: "Counter", type_params: [], fields: [], methods: {},
+        visibility: Visibility.Public, is_public: true, has_doc_comment: false,
+        doc_comment: "", attributes: [], span: span_new(0, 13, 1, 1))
 
-    it "parses actor with multiple methods":
-        # Actor with several methods
-        # All methods should be recognized
-        expect(1).to_equal(1)  # oracle: expected value 1 is the behavior asserted by this regression spec
+# @manual_section: actor-front-end
+describe "Actor source is rejected fail-closed":
+    it "rejects a simple actor definition with a reported parse error":
+        # @req REQ-UNIT-COMPILER-001
+        # @capture(bit_table): parser verdict row for actor Counter source
+        step("Feed a minimal actor definition to parse_module")
+        parse_module("actor Counter:\n    var count: i64 = 0\n", "actor_simple.spl")
+        expect(parser_has_errors()).to_equal(true)  # oracle: actor decls are reported as errors, never silently mis-parsed as expressions
 
-    it "parses actor with type parameters":
-        # actor Worker<T>:
-        # Type parameters should be parsed
-        expect(1).to_equal(1)  # oracle: expected value 1 is the behavior asserted by this regression spec
+    it "rejects an actor with methods the frontend cannot lower":
+        # @req REQ-UNIT-COMPILER-001
+        # @capture(bit_table): parser verdict row for actor with a method
+        step("Feed an actor with one method to parse_module")
+        parse_module("actor Counter:\n    me fn bump():\n        pass\n", "actor_method.spl")
+        expect(parser_has_errors()).to_equal(true)
 
-    it "parses public actor":
-        # pub actor Counter:
-        # Visibility flag should be set
-        expect(1).to_equal(1)  # oracle: expected value 1 is the behavior asserted by this regression spec
+    it "rejects every actor form through the same error channel":
+        # @req REQ-UNIT-COMPILER-001
+        # @capture(bit_table): parser error-count rows for typed and public actor forms
+        step("Feed a typed and a public actor form to parse_module")
+        parse_module("actor Worker<T>:\n    pass\n", "actor_typed.spl")
+        expect(parser_has_errors()).to_equal(true)
+        parse_module("pub actor Counter:\n    pass\n", "actor_public.spl")
+        expect(parser_get_errors().len()).to_be_greater_than(0)  # oracle: both forms land in the reported-error channel, not a silent path
 
-    it "parses actor with doc comment":
-        # Actor with documentation
-        # Doc comment should be captured
-        expect(1).to_equal(1)  # oracle: expected value 1 is the behavior asserted by this regression spec
+    it "distinguishes actors from classes at the parse boundary":
+        # @req REQ-UNIT-COMPILER-001
+        # @capture(bit_table): verdict contrast row for actor vs class source
+        step("Parse identical-shape actor and class sources side by side")
+        parse_module("class Counter:\n    var count: i64 = 0\n", "class_same.spl")
+        expect(parser_has_errors()).to_equal(false)  # oracle: the class form the actor desugars to parses clean today
+        parse_module("actor Counter:\n    var count: i64 = 0\n", "actor_same.spl")
+        expect(parser_has_errors()).to_equal(true)
 
-describe "Parser - Actor Methods":
-    it "parses immutable methods":
-        # fn method():
-        # Should parse as immutable method
-        expect(1).to_equal(1)  # oracle: expected value 1 is the behavior asserted by this regression spec
+# @manual_section: actor-front-end
+describe "Actor front-end surface":
+    it "lexes the actor word as its own token text":
+        # @req REQ-UNIT-COMPILER-001
+        # @capture(bit_table): lexer token-text rows for actor source
+        step("Lex actor Counter and read the first two token texts")
+        var lex = lexer_new("actor Counter")
+        val keyword_token = lexer_next_token(lex)
+        val name_token = lexer_next_token(lex)
+        expect(keyword_token.text).to_equal("actor")
+        expect(name_token.text).to_equal("Counter")
 
-    it "parses mutable methods":
-        # me method():
-        # Should parse as mutable method
-        expect(1).to_equal(1)  # oracle: expected value 1 is the behavior asserted by this regression spec
+    it "parses the class form the actor desugars to with its name":
+        # @req REQ-UNIT-COMPILER-001
+        # @capture(bit_table): decl name row for the desugar-target class form
+        step("Parse a Counter class and read the declaration name")
+        parse_module("class Counter:\n    var count: i64 = 0\n", "class_name.spl")
+        expect(parser_has_errors()).to_equal(false)
+        expect(decl_count()).to_be_greater_than(0)  # oracle: the class decl is registered in the parsed decl table
+        expect(decl_get_name(0)).to_equal("Counter")
 
-    it "parses static methods":
-        # static fn factory():
-        # Should parse as static method
-        expect(1).to_equal(1)  # oracle: expected value 1 is the behavior asserted by this regression spec
+    it "copies actor type parameters into the desugared class":
+        # @req REQ-UNIT-COMPILER-001
+        # @capture(bit_table): type-parameter copy row for Worker<T>
+        step("Run desugar_actor over a Worker<T> actor record")
+        val t_param = ParserTypeParam(name: "T", bounds: [], has_default: false, default: infer_type())
+        val worker = ActorDef(name: "Worker", type_params: [t_param], fields: [], methods: {},
+            visibility: Visibility.Private, is_public: false, has_doc_comment: false,
+            doc_comment: "", attributes: [], span: span_new(0, 16, 1, 1))
+        val as_class = desugar_actor(worker)
+        expect(as_class.type_params.len()).to_equal(1)  # oracle: the single <T> parameter must survive the actor-to-class copy
+        expect(as_class.type_params[0].name).to_equal("T")
 
-    it "parses methods with parameters":
-        # fn process(task: Task):
-        # Parameters should be parsed
-        expect(1).to_equal(1)  # oracle: expected value 1 is the behavior asserted by this regression spec
-
-    it "parses methods with return types":
-        # fn get_value() -> i64:
-        # Return type should be parsed
-        expect(1).to_equal(1)  # oracle: expected value 1 is the behavior asserted by this regression spec
-
-describe "Parser - Actor Structure":
-    it "handles multiple actors in one file":
-        # Multiple actor definitions
-        # All should be parsed correctly
-        expect(1).to_equal(1)  # oracle: expected value 1 is the behavior asserted by this regression spec
-
-    it "distinguishes actors from classes":
-        # Both actor and class in same file
-        # Should populate different dicts
-        expect(1).to_equal(1)  # oracle: expected value 1 is the behavior asserted by this regression spec
-
-    it "parses empty actor":
-        # actor Empty:
-        #     pass
-        # Should create valid actor
-        expect(1).to_equal(1)  # oracle: expected value 1 is the behavior asserted by this regression spec
-
-describe "Parser - Actor Integration":
-    it "integrates with outline parser":
-        # Outline parser should recognize actor
-        # Should create ActorOutline
-        expect(1).to_equal(1)  # oracle: expected value 1 is the behavior asserted by this regression spec
-
-    it "integrates with full parser":
-        # Full parser should convert ActorOutline -> Actor
-        # Should populate module.actors
-        expect(1).to_equal(1)  # oracle: expected value 1 is the behavior asserted by this regression spec
-
-    it "works with desugaring":
-        # Desugaring should convert actor -> class
-        # module.actors should be cleared
-        expect(1).to_equal(1)  # oracle: expected value 1 is the behavior asserted by this regression spec
+    it "keeps actor publicness on the desugared class record":
+        # @req REQ-UNIT-COMPILER-001
+        # @capture(bit_table): is_public copy row for the Counter record
+        step("Run desugar_actor over a public Counter actor record")
+        val as_class = desugar_actor(setup_counter_actor())
+        expect(as_class.name).to_equal("Counter")
+        expect(as_class.is_public).to_equal(true)

@@ -1,0 +1,119 @@
+"""
+## Purpose and audience
+Acceptance oracles for the open remains of
+doc/03_plan/compiler/dependency_analysis/plan.md. Audience: the compiler
+implementer landing the W2-A2 lazy-loader bridge in `module_loader_lazy.spl`,
+and the reviewer checking that the SIMPLE_LAZY_PARSE=1 gate leaves the
+whole-file path untouched by default.
+## Operator workflow
+bin/simple test test/03_system/plan_acceptance/dependency_analysis_spec.spl
+Each scenario below calls the real gate/probe/registration functions the
+plan promises rather than inspecting source text, so a run against a tree
+that has not landed W2-A2 yet fails on the real interface, not on prose.
+## Compatibility and limitations
+Tagged in-development: these pin the promised INTERFACE and fail until the
+plan's remaining checkboxes are implemented.
+AUDIT 2026-09-05: the previous oracles (`gate == 0 || gate == 1`,
+`probe.len() >= 0u64`, `rc == 0 || rc == 1`) could not fail — they stayed
+green with the gate forced ON. Every oracle below now pins ONE documented
+value, and the gate scenario drives both sides of the env contract itself.
+The gate scenario mutates `SIMPLE_LAZY_PARSE` and calls
+`lazy_loader_reset()`, which wipes the lazy registry; harmless under the
+seed (no lazy loads are live) but under a self-hosted binary it discards any
+deferred-module state this process had built up, so it must stay the LAST
+thing the scenario does after restoring the env var.
+## Verification
+A green run means `lazy_parse_enabled` reads 0 with the var unset, 1 only
+for the exact value "1", `lazy_scan_probe` outline-scans the real dependency
+graph module and names its functions, and `load_module_lazy` registers a
+module that `lazy_module_known` did not know before the call. A load failure
+(unresolved symbol) means W2-A2 has not landed; that is the intended
+in-development signal, not a harness bug.
+## Lifecycle
+doc/01_research/compiler/incremental_build/lib_only_build_feasibility_2026-08-09.md
+doc/03_plan/compiler/dependency_analysis/plan.md
+doc/04_architecture/infra/misc/dependency_graphs.md
+doc/05_design/compiler/parsing/frontend_parser_gaps_and_lazy_closure_design.md
+"""
+# @tag:in-development
+# doc-path: doc/03_plan/compiler/dependency_analysis/plan.md
+# @cover src/compiler/00.common/dependency/graph.spl 20%
+# @manual_section "W2-A2 lazy loader bridge remains"
+
+use std.spec.{describe, context, it, expect, step}
+use std.io_runtime.{env_get, env_set}
+use compiler.core.interpreter.module_loader_lazy.{
+    lazy_parse_enabled,
+    lazy_loader_reset,
+    load_module_lazy,
+    lazy_module_known,
+    lazy_scan_probe
+}
+
+describe "plan: compiler/dependency_analysis remains":
+
+    context "W2-A2 — lazy loader bridge in module_loader_lazy.spl":
+
+        it "W2-A2: outline-parse module, register body spans for on-first-call materialization via the existing deferred-module system, gated by SIMPLE_LAZY_PARSE=1; whole-file path untouched":
+            # @req REQ-DEPA-001
+            step("Record the caller's SIMPLE_LAZY_PARSE so it can be restored")
+            val saved = env_get("SIMPLE_LAZY_PARSE") ?? ""
+            step("Read the gate with SIMPLE_LAZY_PARSE unset — the default MUST be OFF")
+            env_set("SIMPLE_LAZY_PARSE", "")
+            lazy_loader_reset()
+            val gate_default = lazy_parse_enabled()
+            # @capture gate_default is observed directly from lazy_parse_enabled() after a reset with the var cleared
+            expect(gate_default).to_equal(0)  # oracle: plan text "mode default OFF" — whole-file path untouched by default
+            step("Read the gate with SIMPLE_LAZY_PARSE=1 — the ONLY enabling value")
+            env_set("SIMPLE_LAZY_PARSE", "1")
+            lazy_loader_reset()
+            val gate_on = lazy_parse_enabled()
+            # @capture gate_on is the observed enabled code after the exact documented value
+            expect(gate_on).to_equal(1)  # oracle: plan text "gated by SIMPLE_LAZY_PARSE=1"
+            step("Read the gate with SIMPLE_LAZY_PARSE=0 — any value other than \"1\" stays OFF")
+            env_set("SIMPLE_LAZY_PARSE", "0")
+            lazy_loader_reset()
+            val gate_zero = lazy_parse_enabled()
+            # @capture gate_zero proves a non-"1" value does not enable the mode
+            expect(gate_zero).to_equal(0)  # oracle: only the literal "1" enables; "0"/"true"/"yes" are not documented enablers
+            step("Restore the caller's env var and reset the cache so later scenarios see the caller's setting")
+            env_set("SIMPLE_LAZY_PARSE", saved)
+            lazy_loader_reset()
+
+        it "W2-A2: lazy_scan_probe outline-scans a real module without invoking the full parser":
+            # @req REQ-DEPA-002
+            step("Outline-scan the real dependency-graph source with lazy_scan_probe")
+            # Interface pin: lazy_scan_probe(path) -> text reports "ok: <fn names>"
+            # on a successful outline scan, "bail at line N" when the scanner
+            # aborts, and "unreadable: <path>" when the file cannot be read.
+            val probe = lazy_scan_probe("src/compiler/00.common/dependency/graph.spl")
+            step("Assert the scan succeeded and named the module's real top-level functions")
+            # @capture probe is the observed runtime return value of the real scan call
+            expect(probe.starts_with("ok:")).to_equal(true)  # oracle: module_loader_lazy.lazy_scan_probe's documented success prefix
+            expect(probe).to_contain(" importgraph_new")  # oracle: graph.spl:62 `fn importgraph_new` must appear in the outline
+            expect(probe).to_contain(" importgraph_add_edge")  # oracle: graph.spl:67 `fn importgraph_add_edge`
+            expect(probe).to_contain(" importgraph_find_cycles")  # oracle: graph.spl:101 `fn importgraph_find_cycles`
+            step("Control: an unreadable path must be reported as such, never as an empty success")
+            val missing = lazy_scan_probe("src/compiler/00.common/dependency/does_not_exist_2026-09-05.spl")
+            # @capture missing is the observed verdict for a path that does not exist
+            expect(missing).to_equal("unreadable: src/compiler/00.common/dependency/does_not_exist_2026-09-05.spl")  # oracle: documented unreadable form
+
+        it "W2-A2: load_module_lazy registers a module and lazy_module_known reflects it":
+            # @req REQ-DEPA-003
+            step("Query lazy_module_known for the real dependency-graph module before registration")
+            # Interface pin: load_module_lazy(module_name, current_file) -> i64
+            # is the entry point the plan's wiring diff calls from
+            # module_loader_core.load_module under the SIMPLE_LAZY_PARSE=1
+            # gate. Before the call the registry must NOT know the module;
+            # after a successful call it must.
+            val before = lazy_module_known("compiler.00.common.dependency.graph")
+            # @capture before is the pre-registration observed known-state code
+            expect(before).to_equal(0)  # oracle: nothing in this spec registered the module yet, so the registry must answer "not known"
+            step("Register the module via load_module_lazy from this real spec file path")
+            val rc = load_module_lazy("compiler.00.common.dependency.graph", "test/03_system/plan_acceptance/dependency_analysis_spec.spl")
+            # @capture rc is the observed real return code from load_module_lazy(...)
+            expect(rc).to_equal(1)  # oracle: module_loader_lazy.load_module_lazy docstring — 1 on success, 0 on failure
+            step("Query lazy_module_known again — the registration must be visible")
+            val after = lazy_module_known("compiler.00.common.dependency.graph")
+            # @capture after is the post-registration observed known-state code
+            expect(after).to_equal(1)  # oracle: a registered module answers 1; the before/after flip is the discriminating evidence

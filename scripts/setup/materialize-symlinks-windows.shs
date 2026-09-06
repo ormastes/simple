@@ -47,7 +47,23 @@ case "$(uname -s 2>/dev/null || echo unknown)" in
         ;;
 esac
 
-repo_root="${1:-}"
+# --strict-missing: a placeholder whose target does not exist on disk is a
+# FAILURE (loud, exit 1, named on stderr) instead of a silent skipped_pending.
+# Default OFF, so the bootstrap wiring keeps its "run me before AND after the
+# build" property for not-yet-built artifacts such as bin/simple. Callers that
+# materialise COMMITTED source content — where every target is tracked and must
+# already be present — pass this so a dangling symlink can never degrade into
+# path text that a compiler then parses as source.
+strict_missing=0
+repo_root=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --strict-missing) strict_missing=1; shift ;;
+        --) shift; break ;;
+        -*) echo "$SELF: unknown option '$1'" >&2; exit 2 ;;
+        *) repo_root="$1"; shift ;;
+    esac
+done
 if [ -z "$repo_root" ]; then
     script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd) || exit 1
     repo_root=$(CDPATH= cd -- "$script_dir/../.." && pwd) || exit 1
@@ -98,6 +114,24 @@ placeholder_looks_like_target() {
     [ -f "$1" ] || return 1
     size=$(wc -c < "$1" 2>/dev/null) || return 1
     [ "$size" -gt 0 ] && [ "$size" -lt 4096 ]
+}
+
+target_is_tracked() {
+    # $1 = absolute target path. True (0) only when git TRACKS that path in this
+    # repo. This is what scopes --strict-missing so it stays honest:
+    #   * a TRACKED target that is absent from disk means the checkout itself is
+    #     broken and the placeholder would be read as source — a hard failure;
+    #   * an UNTRACKED target (an unbuilt binary like bin/simple, a tool under
+    #     tools/*-cli, or content inside an unpopulated submodule such as
+    #     examples/spipe) is legitimately not there yet — still skipped_pending.
+    # Without this scoping, --strict-missing failed on 16 submodule/tool links
+    # that have nothing to do with the defect it exists to catch (measured
+    # 2026-09-02 on a fresh worktree: created=100 failed=16, all outside src/).
+    case "$1" in
+        "$repo_root"/*) _tit_rel=${1#"$repo_root"/} ;;
+        *) return 1 ;;
+    esac
+    git -C "$repo_root" ls-files --error-unmatch -- "$_tit_rel" >/dev/null 2>&1
 }
 
 created=0
@@ -174,6 +208,15 @@ while IFS= read -r path; do
             echo "$SELF: FAILED to create hardlink: $path -> $target_rel" >&2
             failed=$((failed + 1))
         fi
+    elif [ "$strict_missing" -eq 1 ] && target_is_tracked "$target_abs"; then
+        # Under --strict-missing a dangling target is a hard failure, named.
+        # This is the whole point of the flag: leaving the placeholder means
+        # leaving a file whose entire content is a relative path, which the
+        # Simple compiler then parses as source and rejects with
+        # "expected expression, found Slash" — a diagnostic that points at the
+        # wrong thing entirely. Fail loudly here instead.
+        echo "$SELF: DANGLING symlink (target does not exist): $path -> $target_rel" >&2
+        failed=$((failed + 1))
     else
         # Target does not exist yet (e.g. an unbuilt binary). Not an error —
         # leave the placeholder; re-run this script after the target exists.
@@ -182,5 +225,7 @@ while IFS= read -r path; do
 done < /tmp/materialize-symlinks-windows.$$.list
 rm -f /tmp/materialize-symlinks-windows.$$.list
 
-echo "$SELF: created=$created already_ok=$already_ok skipped_pending(target missing)=$skipped_pending failed=$failed"
+_strict_note=""
+[ "$strict_missing" -eq 1 ] && _strict_note=" strict_missing=1"
+echo "$SELF: created=$created already_ok=$already_ok skipped_pending(target missing)=$skipped_pending failed=$failed$_strict_note"
 [ "$failed" -eq 0 ]

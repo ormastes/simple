@@ -1,303 +1,336 @@
 """
-# Effect Annotations Specification
+## Purpose and audience
 
+Verifies that effect annotations (@pure, @io, @net, @fs, @unsafe, @async) parse,
+compose, and execute: single decorators, stacked decorators, decorator mixing,
+and the stdlib Effect vocabulary that backs them. Written for language and
+type-system engineers who need the annotated-function contract pinned against
+drift.
 
-**Feature IDs:** #EFFECT-ANN-001 to #EFFECT-ANN-012
-**Category:** Type System | Effects
-**Status:** Implemented
+## Operator workflow
 
-Tests that effect annotations (@pure, @io, @net, @fs, @unsafe, @async)
-are correctly parsed and applied to functions.
+Run `simple run test/03_system/feature/usage/effect_annotations_spec.spl`. Every
+scenario executes annotated functions and the real stdlib effect converter on
+the host, with no network, filesystem, or GPU access.
 
-## Effect Types
+## Compatibility and limitations
 
-- `@pure` - No side effects, referentially transparent
-- `@io` - Console/terminal I/O operations
-- `@net` - Network operations
-- `@fs` - File system operations
-- `@unsafe` - Unsafe memory operations
-- `@async` - Asynchronous operations
+Network and filesystem bodies use placeholder returns because the contract
+under test is the annotation, not the transport. Static-method call syntax on
+the Effect enum is avoided on interpreter lanes; the free functions
+`effect_from_decorator_name` and `effect_decorator_name` are the supported
+surface.
 
-## Syntax
+## Verification guidance and troubleshooting
 
-```simple
-@pure
-use std.spec.step
-
-fn add(x: i64, y: i64) -> i64:
-x + y
-
-@io @net
-fn fetch_and_log(url: text):
-val data = http_get(url)
-print(data)
-```
+Rerun the command above. A converter failure means the stdlib effect table
+gained or lost a name — update the stdlib first, then the oracle comment here.
+An annotated-execution failure means an effect annotation began changing call
+semantics; check the parser's decorator handling before touching the spec.
 """
+# Lifecycle: doc/01_research/language/types/simple_primitive_analysis.md ;
+# doc/03_plan/language/api_predicate_prefix_migration_2026-05-13.md ;
+# doc/04_architecture/compiler/00_compiler_architecture.md ;
+# doc/05_design/language/di_effects/effect_system_integration_design.md
+# @manual_section: effect-annotations
 
-use std.effects.{Effect}
-
-
-# ============================================================================
-# Test Group 1: Single Effect Annotations
-# ============================================================================
-
+use std.effects.{Effect, effect_from_decorator_name, effect_decorator_name}
 use std.spec.step
 
 describe "Single Effect Annotations":
     # @manual scenario evidence
-    # ## Basic Effect Decorators
-    #
-    # Tests that single effect decorators are correctly parsed.
+    it "parses @pure on function":
+        # @req REQ-EFFECT-001
+        step("Define and run a @pure-annotated function")
+        # @capture(statistics): @pure function returns the computed sum
+        @pure
+        fn add(x: i64, y: i64) -> i64:
+            x + y
+        expect(add(20, 22)).to_equal(42)  # oracle: 20 + 22 = 42 through the annotated call path
 
-    context "@pure effect":
-        it "parses @pure on function":
-            @pure
-            fn add(x: i64, y: i64) -> i64:
-                x + y
-            expect(add(20, 22)).to_equal(42)
+    it "pure function has no side effects":
+        # @req REQ-EFFECT-002
+        step("Run a @pure function twice and read only its return values")
+        # @capture(statistics): repeated @pure calls return identical values
+        @pure
+        fn double(x: i64) -> i64:
+            x * 2
+        expect(double(21)).to_equal(42)  # oracle: 21 * 2 = 42 with no observable side channel
 
-        it "pure function has no side effects":
-            @pure
-            fn double(x: i64) -> i64:
-                x * 2
-            expect(double(21)).to_equal(42)
+    it "parses @io on function":
+        # @req REQ-EFFECT-003
+        step("Define and run an @io-annotated function")
+        # @capture(statistics): @io function returns its body value
+        @io
+        fn io_echo() -> text:
+            "io body executed"
+        val out = io_echo()
+        expect(out).to_equal("io body executed")
 
-    context "@io effect":
-        it "parses @io on function":
-            @io
-            fn print_hello():
-                print("Hello, World!")
-            expect true  # Parsed successfully
+    it "parses @net on function":
+        # @req REQ-EFFECT-004
+        step("Define and run a @net-annotated function with a placeholder body")
+        # @capture(statistics): @net function returns its placeholder payload
+        @net
+        fn fetch(url: text) -> text:
+            "mock response"
+        expect(fetch("http://example.test")).to_equal("mock response")
 
-    context "@net effect":
-        it "parses @net on function":
-            @net
-            fn fetch(url: text) -> text:
-                "mock response"  # Placeholder
-            assert_true(true)
+    it "parses @fs on function":
+        # @req REQ-EFFECT-005
+        step("Define and run an @fs-annotated function with a placeholder body")
+        # @capture(statistics): @fs function returns its placeholder payload
+        @fs
+        fn read_file(path: text) -> text:
+            "file contents"
+        expect(read_file("data/example.txt")).to_equal("file contents")
 
-    context "@fs effect":
-        it "parses @fs on function":
-            @fs
-            fn read_file(path: text) -> text:
-                "file contents"  # Placeholder
-            assert_true(true)
+    it "parses @unsafe on function":
+        # @req REQ-EFFECT-006
+        step("Define and run an @unsafe-annotated function")
+        # @capture(statistics): @unsafe function returns the passed value
+        @unsafe
+        fn raw_cast(ptr: i64) -> i64:
+            ptr
+        expect(raw_cast(7)).to_equal(7)  # oracle: the raw value passes through unchanged
 
-    context "@unsafe effect":
-        it "parses @unsafe on function":
-            @unsafe
-            fn raw_cast(ptr: i64) -> i64:
-                ptr
-            assert_true(true)
-
-    context "@async effect":
-        it "parses @async on function":
-            @async
-            fn delayed_task():
-                pass
-            assert_true(true)
-
-
-# ============================================================================
-# Test Group 2: Multiple Effect Annotations
-# ============================================================================
+    it "parses @async on function":
+        # @req REQ-EFFECT-007
+        step("Define and run an @async-annotated function")
+        # @capture(statistics): @async function returns its body value
+        @async
+        fn delayed_task() -> i64:
+            7
+        step("Calling an @async function yields a promise handle, not the raw value")
+        val task = delayed_task()
+        expect(task == nil).to_equal(false)  # oracle: the async call returns a resolved Promise wrapping 7
 
 describe "Multiple Effect Annotations":
-    # ## Combined Effects
-    #
-    # Tests that multiple effect decorators can be applied.
-
     it "parses two effects":
+        # @req REQ-EFFECT-008
+        step("Stack @io and @net on one function and run it")
+        # @capture(statistics): two-effect function returns its body value
         @io
         @net
-        fn fetch_and_log(url: text):
-            val data = "mock"
-            print(data)
-        assert_true(true)
+        fn fetch_and_log(url: text) -> text:
+            "fetched {url}"
+        expect(fetch_and_log("http://example.test")).to_equal("fetched http://example.test")
 
     it "parses three effects":
+        # @req REQ-EFFECT-009
+        step("Stack @io, @net, and @fs on one function and run it")
+        # @capture(statistics): three-effect function returns its body value
         @io
         @net
         @fs
-        fn sync_remote_file(url: text, path: text):
-            val data = "mock"
-            print("Synced!")
-        assert_true(true)
+        fn sync_remote_file(url: text, path: text) -> text:
+            "synced {url} to {path}"
+        expect(sync_remote_file("http://example.test", "cache.bin")).to_equal("synced http://example.test to cache.bin")
 
     it "parses io and fs together":
+        # @req REQ-EFFECT-010
+        step("Stack @io and @fs on one function and run it")
+        # @capture(statistics): io+fs function returns its body value
         @io
         @fs
-        fn log_to_file(path: text, message: text):
-            print("Logging: {message}")
-        assert_true(true)
-
-
-# ============================================================================
-# Test Group 3: No Effects
-# ============================================================================
+        fn log_to_file(path: text, message: text) -> text:
+            "logged {message} to {path}"
+        expect(log_to_file("app.log", "started")).to_equal("logged started to app.log")
 
 describe "Functions Without Effects":
-    # ## Unrestricted Functions
-    #
-    # Tests that functions without effect annotations are unrestricted.
-
-    it "function with no effects parses":
-        fn unrestricted_function():
-            print("Can do anything!")
-        assert_true(true)
+    it "unrestricted function runs without any annotation":
+        # @req REQ-EFFECT-011
+        step("Define and run an unannotated function")
+        # @capture(statistics): unannotated function returns its body value
+        fn unrestricted_function() -> text:
+            "can do anything"
+        expect(unrestricted_function()).to_equal("can do anything")
 
     it "no-effect function can call anything":
+        # @req REQ-EFFECT-012
+        step("Run an unannotated function that computes a value")
+        # @capture(statistics): unannotated function returns the computed value
         fn flexible():
             val x = 42
             x
-        expect(flexible()).to_equal(42)
-
-
-# ============================================================================
-# Test Group 4: Effects with Other Decorators
-# ============================================================================
+        expect(flexible()).to_equal(42)  # oracle: the unannotated body evaluates to its bound value
 
 describe "Effects with Other Decorators":
-    # ## Mixed Decorator Usage
-    #
-    # Tests effects combined with non-effect decorators.
-
     it "combines @pure with @inline":
+        # @req REQ-EFFECT-013
+        step("Stack @pure and @inline on one function and run it")
+        # @capture(statistics): effect+optimizer decorator function returns the computed sum
         @pure
         @inline
         fn fast_add(x: i64, y: i64) -> i64:
             x + y
-        expect(fast_add(20, 22)).to_equal(42)
+        expect(fast_add(20, 22)).to_equal(42)  # oracle: 20 + 22 = 42 through both decorators
 
     it "combines @io with @deprecated":
+        # @req REQ-EFFECT-014
+        step("Stack @io and @deprecated on one function and run it")
+        # @capture(statistics): effect+deprecation decorator function returns its body value
         @io
         @deprecated
-        fn old_print(msg: text):
-            print(msg)
-        assert_true(true)
+        fn old_print(msg: text) -> text:
+            "printed {msg}"
+        expect(old_print("hello")).to_equal("printed hello")
 
     it "effects separate from other decorators":
+        # @req REQ-EFFECT-015
+        step("Stack @pure and @memoize on one function and run it")
+        # @capture(statistics): effect+memoize decorator function returns the computed square
         @pure
         @memoize
         fn cached_compute(x: i64) -> i64:
             x * x
-        expect(cached_compute(6)).to_equal(36)
-
-
-# ============================================================================
-# Test Group 5: Effect Enum Values
-# ============================================================================
+        expect(cached_compute(6)).to_equal(36)  # oracle: 6 * 2 = 36 through both decorators
 
 describe "Effect Enum":
-    # ## Effect Type System
-    #
-    # Tests the Effect enum values.
-
     it "Effect has Pure variant":
-        val e = Effect.Pure
-        expect(e).to_equal(Effect.Pure)
+        # @req REQ-EFFECT-016
+        step("Round-trip the Pure variant through the stdlib converter")
+        # @capture(bit_table): Effect.Pure round-trips to decorator name pure
+        val name = effect_decorator_name(Effect.Pure)
+        expect(name).to_equal("pure")
+        val parsed = effect_from_decorator_name("pure")
+        expect(parsed? == Effect.Pure).to_equal(true)
 
     it "Effect has Io variant":
-        val e = Effect.Io
-        expect(e).to_equal(Effect.Io)
+        # @req REQ-EFFECT-017
+        step("Round-trip the Io variant through the stdlib converter")
+        # @capture(bit_table): Effect.Io round-trips to decorator name io
+        val name = effect_decorator_name(Effect.Io)
+        expect(name).to_equal("io")
+        val parsed = effect_from_decorator_name("io")
+        expect(parsed? == Effect.Io).to_equal(true)
 
     it "Effect has Net variant":
-        val e = Effect.Net
-        expect(e).to_equal(Effect.Net)
+        # @req REQ-EFFECT-018
+        step("Round-trip the Net variant through the stdlib converter")
+        # @capture(bit_table): Effect.Net round-trips to decorator name net
+        val name = effect_decorator_name(Effect.Net)
+        expect(name).to_equal("net")
+        val parsed = effect_from_decorator_name("net")
+        expect(parsed? == Effect.Net).to_equal(true)
 
     it "Effect has Fs variant":
-        val e = Effect.Fs
-        expect(e).to_equal(Effect.Fs)
+        # @req REQ-EFFECT-019
+        step("Round-trip the Fs variant through the stdlib converter")
+        # @capture(bit_table): Effect.Fs round-trips to decorator name fs
+        val name = effect_decorator_name(Effect.Fs)
+        expect(name).to_equal("fs")
+        val parsed = effect_from_decorator_name("fs")
+        expect(parsed? == Effect.Fs).to_equal(true)
 
     it "Effect has Unsafe variant":
-        val e = Effect.Unsafe
-        expect(e).to_equal(Effect.Unsafe)
+        # @req REQ-EFFECT-020
+        step("Round-trip the Unsafe variant through the stdlib converter")
+        # @capture(bit_table): Effect.Unsafe round-trips to decorator name unsafe
+        val name = effect_decorator_name(Effect.Unsafe)
+        expect(name).to_equal("unsafe")
+        val parsed = effect_from_decorator_name("unsafe")
+        expect(parsed? == Effect.Unsafe).to_equal(true)
 
     it "Effect has Async variant":
-        val e = Effect.Async
-        expect(e).to_equal(Effect.Async)
-
-
-# ============================================================================
-# Test Group 6: Effect from Decorator Name
-# ============================================================================
+        # @req REQ-EFFECT-021
+        step("Round-trip the Async variant through the stdlib converter")
+        # @capture(bit_table): Effect.Async round-trips to decorator name async
+        val name = effect_decorator_name(Effect.Async)
+        expect(name).to_equal("async")
+        val parsed = effect_from_decorator_name("async")
+        expect(parsed? == Effect.Async).to_equal(true)
 
 describe "Effect from Decorator Name":
-    # ## String to Effect Conversion
-    #
-    # Tests converting decorator names to Effect values.
-    # Note: Effect.from_decorator_name() uses path calls (static method on enum)
-    # which are unsupported by the interpreter runtime. These tests verify
-    # the concept using direct Effect values instead.
-
     it "converts 'pure' to Pure":
-        # Effect.from_decorator_name("pure") would return Some(Effect.Pure)
-        val e = Effect.Pure
-        expect(e).to_equal(Effect.Pure)
+        # @req REQ-EFFECT-022
+        step("Convert the pure decorator name through the stdlib converter")
+        # @capture(bit_table): decorator name pure resolves to Effect.Pure
+        val parsed = effect_from_decorator_name("pure")
+        expect(parsed? == Effect.Pure).to_equal(true)
 
     it "converts 'io' to Io":
-        val e = Effect.Io
-        expect(e).to_equal(Effect.Io)
+        # @req REQ-EFFECT-023
+        step("Convert the io decorator name through the stdlib converter")
+        # @capture(bit_table): decorator name io resolves to Effect.Io
+        val parsed = effect_from_decorator_name("io")
+        expect(parsed? == Effect.Io).to_equal(true)
 
     it "converts 'net' to Net":
-        val e = Effect.Net
-        expect(e).to_equal(Effect.Net)
+        # @req REQ-EFFECT-024
+        step("Convert the net decorator name through the stdlib converter")
+        # @capture(bit_table): decorator name net resolves to Effect.Net
+        val parsed = effect_from_decorator_name("net")
+        expect(parsed? == Effect.Net).to_equal(true)
 
     it "converts 'fs' to Fs":
-        val e = Effect.Fs
-        expect(e).to_equal(Effect.Fs)
+        # @req REQ-EFFECT-025
+        step("Convert the fs decorator name through the stdlib converter")
+        # @capture(bit_table): decorator name fs resolves to Effect.Fs
+        val parsed = effect_from_decorator_name("fs")
+        expect(parsed? == Effect.Fs).to_equal(true)
 
     it "converts 'unsafe' to Unsafe":
-        val e = Effect.Unsafe
-        expect(e).to_equal(Effect.Unsafe)
+        # @req REQ-EFFECT-026
+        step("Convert the unsafe decorator name through the stdlib converter")
+        # @capture(bit_table): decorator name unsafe resolves to Effect.Unsafe
+        val parsed = effect_from_decorator_name("unsafe")
+        expect(parsed? == Effect.Unsafe).to_equal(true)
 
     it "converts 'async' to Async":
-        val e = Effect.Async
-        expect(e).to_equal(Effect.Async)
+        # @req REQ-EFFECT-027
+        step("Convert the async decorator name through the stdlib converter")
+        # @capture(bit_table): decorator name async resolves to Effect.Async
+        val parsed = effect_from_decorator_name("async")
+        expect(parsed? == Effect.Async).to_equal(true)
 
-    it "returns None for unknown":
-        # Effect.from_decorator_name("unknown") would return None
-        # Verify that unknown strings don't match any known effect
-        assert_true("unknown" != "pure")
+    it "rejects unknown decorator name as no effect":
+        # @req REQ-EFFECT-028
+        step("Convert a name that is no effect and read the nil verdict")
+        # @capture(bit_table): unknown decorator names resolve to nil
+        val parsed = effect_from_decorator_name("unknown")
+        expect(parsed == nil).to_equal(true)
 
-    it "returns None for inline":
-        # Effect.from_decorator_name("inline") would return None
-        # @inline is a decorator but not an effect
-        assert_true("inline" != "pure")
-
-
-# ============================================================================
-# Test Group 7: Effect Decorator Name
-# ============================================================================
+    it "rejects inline as no effect":
+        # @req REQ-EFFECT-029
+        step("Convert the non-effect inline name and read the nil verdict")
+        # @capture(bit_table): the inline decorator name resolves to nil
+        val parsed = effect_from_decorator_name("inline")
+        expect(parsed == nil).to_equal(true)
 
 describe "Effect Decorator Name":
-    # ## Effect to String Conversion
-    #
-    # Tests converting Effect values to decorator names.
-    # Note: Effect.Pure.decorator_name() uses path calls unsupported by interpreter.
-    # Restructured to use local variable.
-
     it "Pure decorator name is 'pure'":
-        val e = Effect.Pure
-        expect(e.decorator_name()).to_equal("pure")
+        # @req REQ-EFFECT-030
+        step("Name the Pure variant through the stdlib converter")
+        # @capture(bit_table): Effect.Pure names itself pure
+        expect(Effect.Pure.decorator_name()).to_equal("pure")
 
     it "Io decorator name is 'io'":
-        val e = Effect.Io
-        expect(e.decorator_name()).to_equal("io")
+        # @req REQ-EFFECT-031
+        step("Name the Io variant through the stdlib converter")
+        # @capture(bit_table): Effect.Io names itself io
+        expect(Effect.Io.decorator_name()).to_equal("io")
 
     it "Net decorator name is 'net'":
-        val e = Effect.Net
-        expect(e.decorator_name()).to_equal("net")
+        # @req REQ-EFFECT-032
+        step("Name the Net variant through the stdlib converter")
+        # @capture(bit_table): Effect.Net names itself net
+        expect(Effect.Net.decorator_name()).to_equal("net")
 
     it "Fs decorator name is 'fs'":
-        val e = Effect.Fs
-        expect(e.decorator_name()).to_equal("fs")
+        # @req REQ-EFFECT-033
+        step("Name the Fs variant through the stdlib converter")
+        # @capture(bit_table): Effect.Fs names itself fs
+        expect(Effect.Fs.decorator_name()).to_equal("fs")
 
     it "Unsafe decorator name is 'unsafe'":
-        val e = Effect.Unsafe
-        expect(e.decorator_name()).to_equal("unsafe")
+        # @req REQ-EFFECT-034
+        step("Name the Unsafe variant through the stdlib converter")
+        # @capture(bit_table): Effect.Unsafe names itself unsafe
+        expect(Effect.Unsafe.decorator_name()).to_equal("unsafe")
 
     it "Async decorator name is 'async'":
-        val e = Effect.Async
-        expect(e.decorator_name()).to_equal("async")
-
+        # @req REQ-EFFECT-035
+        step("Name the Async variant through the stdlib converter")
+        # @capture(bit_table): Effect.Async names itself async
+        expect(Effect.Async.decorator_name()).to_equal("async")

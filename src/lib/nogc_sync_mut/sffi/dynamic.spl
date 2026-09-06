@@ -54,6 +54,20 @@ fn _sffi_call_i64_raw_checked(fptr: i64, args: [i64]) -> [i64]:
 
 @unsafe(reason: "checked loader returns an unverified raw provider handle", capabilities: [ffi, raw_ptr])
 fn _sffi_dlopen_checked(path: text) -> Result<i64, text>:
+    # An absent provider artifact can never load. Reject it before entering the
+    # raw loader: the interpreter lane's `spl_dlopen` raises
+    # `spl_dlopen failed for '<path>'` and aborts instead of returning a
+    # non-positive handle, so without this the documented Err path is
+    # unobservable there and every checked caller dies rather than failing
+    # closed. Existence is probed through the typed `file_exists` alias of
+    # std.io_runtime (already imported here), not a new raw `rt_*` call site.
+    if path == "":
+        return Err("E-SFFI-001: failed to load provider: empty provider path")
+    # Only a path (one containing a separator) names a filesystem artifact. A
+    # bare soname such as `libsimple_audio_cuda.so` is resolved by the dynamic
+    # loader's own search path and must still be handed to it.
+    if path.contains("/") and not file_exists(path):
+        return Err("E-SFFI-001: failed to load provider: {path} (artifact not present)")
     var handle: i64 = 0
     val status = unsafe(capabilities: [ffi, raw_ptr]):
         spl_dlopen_checked(path, &mut handle)
@@ -110,7 +124,7 @@ impl DynI64FnSlot:
         Err("E-SFFI-014: foreign bridge rejected {self.symbol} with status {status}")
 
 use std.common.structural.digest.hash256.{hash256_hex_valid}
-use std.io_runtime.{env_get}
+use std.io_runtime.{env_get, file_exists}
 use std.sffi.admission.{
     SffiAdmissionTrustRootV1, SignatureVerifiedSffiAdmissionV1,
     verify_sffi_evidence_v2,

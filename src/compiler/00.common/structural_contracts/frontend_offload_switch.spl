@@ -1,0 +1,158 @@
+"""Frontend offload switch: resolves CLI/env/config text into a CompilerOffloadProfile decision.
+
+Pure — no env, rt, or process access. The driver reads the keys and forwards text.
+Design: doc/05_design/compiler/frontend/gpu_frontend_offload_switch_design.md
+"""
+
+use compiler.common.structural_contracts.offload_profile.{
+    CompilerStage, OffloadMode, OffloadFallbackPolicy, CompilerOffloadProfile, OffloadDecision, cpu_only_profile
+}
+use std.common.structural.parse.parse_types.{
+    PARSE_MODE_CPU_REFERENCE, PARSE_MODE_HYBRID_VECTOR_GPU, PARSE_MODE_RESIDENT_GPU, PARSE_FALLBACK_MODE_UNIMPLEMENTED
+}
+
+struct FrontendOffloadInputs:
+    cli: text                 # "" when absent
+    env: text
+    config: text
+    fallback_cli: text
+    fallback_env: text
+    fallback_config: text
+
+struct FrontendOffloadSwitch:
+    mode: OffloadMode         # CpuReference | HybridVectorGpu | ResidentGpu
+    auto: bool                # true only for "auto"; mode is the evidence-less floor (CpuReference)
+    fallback: OffloadFallbackPolicy
+    source: text              # "cli" | "env" | "config" | "default"
+    raw: text                 # the winning input text
+
+fn offload_mode_text(mode: OffloadMode) -> text:
+    if mode == OffloadMode.HybridVectorGpu:
+        return PARSE_MODE_HYBRID_VECTOR_GPU
+    if mode == OffloadMode.ResidentGpu:
+        return PARSE_MODE_RESIDENT_GPU
+    PARSE_MODE_CPU_REFERENCE
+
+fn parse_frontend_offload_value(raw: text) -> Result<FrontendOffloadSwitch, text>:
+    var mode = OffloadMode.CpuReference
+    var auto = false
+    if raw == "on" or raw == "hybrid":
+        mode = OffloadMode.HybridVectorGpu
+    elif raw == "resident":
+        mode = OffloadMode.ResidentGpu
+    elif raw == "auto":
+        auto = true
+    elif raw != "off":
+        return Err("unknown --frontend-offload value '{raw}' (expected off|on|hybrid|resident|auto)")
+    Ok(FrontendOffloadSwitch(mode: mode, auto: auto, fallback: OffloadFallbackPolicy.AllowCpu, source: "default", raw: raw))
+
+fn parse_frontend_offload_fallback(raw: text) -> Result<OffloadFallbackPolicy, text>:
+    if raw == "require-requested":
+        return Ok(OffloadFallbackPolicy.RequireRequested)
+    if raw == "" or raw == "allow-cpu":
+        return Ok(OffloadFallbackPolicy.AllowCpu)
+    Err("unknown --frontend-offload-fallback value '{raw}' (expected allow-cpu|require-requested)")
+
+# Precedence: cli > env > config > default; empty text means absent.
+fn resolve_frontend_offload(inputs: FrontendOffloadInputs) -> Result<FrontendOffloadSwitch, text>:
+    var source = "default"
+    var raw = "off"
+    if inputs.cli != "":
+        source = "cli"
+        raw = inputs.cli
+    elif inputs.env != "":
+        source = "env"
+        raw = inputs.env
+    elif inputs.config != "":
+        source = "config"
+        raw = inputs.config
+    var fallback_source = "default"
+    var fallback_raw = ""
+    if inputs.fallback_cli != "":
+        fallback_source = "cli"
+        fallback_raw = inputs.fallback_cli
+    elif inputs.fallback_env != "":
+        fallback_source = "env"
+        fallback_raw = inputs.fallback_env
+    elif inputs.fallback_config != "":
+        fallback_source = "config"
+        fallback_raw = inputs.fallback_config
+    val parsed = parse_frontend_offload_value(raw)
+    if parsed.is_err():
+        return Err("{parsed.unwrap_err()} from {source}")
+    val fallback = parse_frontend_offload_fallback(fallback_raw)
+    if fallback.is_err():
+        return Err("{fallback.unwrap_err()} from {fallback_source}")
+    val switch = parsed.unwrap()
+    Ok(FrontendOffloadSwitch(mode: switch.mode, auto: switch.auto, fallback: fallback.unwrap(), source: source, raw: raw))
+
+# cpu_only_profile() with stage_modes[LexStructure] (1) and [Parse] (2) set to switch.mode.
+fn frontend_offload_profile(switch: FrontendOffloadSwitch) -> CompilerOffloadProfile:
+    val base = cpu_only_profile()
+    var modes = base.stage_modes
+    modes[1] = switch.mode
+    modes[2] = switch.mode
+    CompilerOffloadProfile(
+        profile_id: base.profile_id,
+        contract_version: base.contract_version,
+        stage_modes: modes,
+        fallback: base.fallback,
+        deterministic: base.deterministic,
+        execution: base.execution
+    )
+
+# Wave 0: gpu_parse_available is false (fail-closed stubs), so "on" demotes with a receipt or refuses.
+fn frontend_offload_decision(switch: FrontendOffloadSwitch, gpu_parse_available: bool) -> Result<OffloadDecision, text>:
+    val requested = switch.mode
+    var selected = requested
+    var reason = ""
+    if switch.auto:
+        # No retained crossover evidence yet: auto is an explicit demotion, never a silent "off".
+        if switch.fallback == OffloadFallbackPolicy.RequireRequested:
+            return Err("frontend_offload_required_mode_unavailable: auto")
+        reason = FRONTEND_OFFLOAD_AUTO_REASON
+    elif requested != OffloadMode.CpuReference and not gpu_parse_available:
+        if switch.fallback == OffloadFallbackPolicy.RequireRequested:
+            return Err("frontend_offload_required_mode_unavailable: {offload_mode_text(requested)}")
+        selected = OffloadMode.CpuReference
+        reason = PARSE_FALLBACK_MODE_UNIMPLEMENTED
+    Ok(OffloadDecision(stage: CompilerStage.Parse, requested: requested, selected: selected, fallback_reason: reason, evidence_digest: ""))
+
+# Wave 0: the GPU parse executors are fail-closed stubs. Single source of truth for
+# every caller; flips to real admission once parser_framework lands contracts v2.
+val FRONTEND_OFFLOAD_GPU_PARSE_AVAILABLE: bool = false
+# Same text auto_profile.spl records while no retained crossover evidence exists.
+val FRONTEND_OFFLOAD_AUTO_REASON: text = "auto_profile_not_implemented_wave_1"
+
+# One env reading -> the four canonical receipt rows (or one error row). The
+# driver twin and the native-build warm receipt both derive from this, so the
+# two receipts cannot drift in encoding.
+fn frontend_offload_rows(env_value: text, fallback_value: text) -> [text]:
+    val switch_result = resolve_frontend_offload(FrontendOffloadInputs(
+        cli: "", env: env_value, config: "",
+        fallback_cli: "", fallback_env: fallback_value, fallback_config: ""))
+    if switch_result.is_err():
+        return ["frontend_offload_error=" + switch_result.unwrap_err()]
+    val switch = switch_result.unwrap()
+    val decision_result = frontend_offload_decision(switch, FRONTEND_OFFLOAD_GPU_PARSE_AVAILABLE)
+    if decision_result.is_err():
+        return ["frontend_offload_error=" + decision_result.unwrap_err()]
+    val decision = decision_result.unwrap()
+    [
+        "frontend_offload_requested=" + offload_mode_text(decision.requested),
+        "frontend_offload_selected=" + offload_mode_text(decision.selected),
+        "frontend_offload_reason=" + decision.fallback_reason,
+        "frontend_offload_source=" + switch.source
+    ]
+
+fn frontend_offload_parse_mode_text(decision: OffloadDecision) -> text:
+    offload_mode_text(decision.selected)
+
+fn frontend_offload_receipt_line(decision: OffloadDecision, source: text) -> text:
+    "[frontend-offload] requested={offload_mode_text(decision.requested)} selected={offload_mode_text(decision.selected)} reason={decision.fallback_reason} source={source}"
+
+export FrontendOffloadInputs, FrontendOffloadSwitch
+export parse_frontend_offload_value, resolve_frontend_offload
+export frontend_offload_profile, frontend_offload_decision, frontend_offload_rows
+export FRONTEND_OFFLOAD_GPU_PARSE_AVAILABLE, FRONTEND_OFFLOAD_AUTO_REASON
+export frontend_offload_parse_mode_text, frontend_offload_receipt_line

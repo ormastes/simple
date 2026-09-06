@@ -94,6 +94,15 @@ highest-capability Codex):
 
 ## Pixel/Perf Reality (WS-D; read before any SIMD work)
 
+- **2026-09-05 web 4K hot paths:** the Simple web tile painter must build its
+  at-most-three-ops-per-node list with one bounded allocation and indexed
+  writes; repeated value-array `push` is quadratic. The GPU route cache must
+  not retain full serialized Draw IR scene text per entry; bounded identity is
+  safe only because current-frame pixel, command-completeness, device, and
+  dimension proof remains mandatory before promotion. Focused specs are
+  `tile_op_buffer_linear_finish_spec.spl` and
+  `web_draw_ir_route_key_memory_spec.spl`.
+
 - **Pixels are boxed `int64_t`**, via `engine2d_box_pixel` / `engine2d_unbox_pixel`
   (`src/runtime/runtime_simd_dispatch.c:663` / `:667`). They are **not packed
   u32**. Any kernel design assuming packed u32 SIMD lanes is **invalid** and will
@@ -264,3 +273,21 @@ unreachable from any construction path.
 
 Guide: `doc/07_guide/ui/engine2d_font_offload_fallback.md`.
 Feature expert: `doc/00_llm_process/feature_expert/engine2d_font_offload/skill.md`.
+
+## Engine2D ↔ C Vulkan parity (added 2026-09-03)
+
+Per-primitive perf and byte-for-byte pixel comparison against a C Vulkan
+reference now have gates and a feature-expert page:
+[engine2d_vulkan_parity](../../feature_expert/engine2d_vulkan_parity/skill.md).
+
+Two facts that change how this layer should be read:
+
+- Only **13 of 34** vulkan-backend primitives run on the GPU; 16 are shared
+  `emu_*` CPU code and 5 force a device→host round trip per call.
+- `emu_*` outlines emit **one GPU dispatch per pixel** (1x1
+  `draw_rect_filled`), which is why identical CPU code runs 26-144x slower on
+  the vulkan backend. Span-form is the fix — see
+  `doc/08_tracking/bug/emu_shape_decomposition_emits_one_gpu_dispatch_per_pixel_2026-09-03.md`.
+
+Rendering correctness is NOT the problem here: cpu-vs-vulkan is bit-identical
+across 38 primitives, and Simple matches the C reference byte for byte.
