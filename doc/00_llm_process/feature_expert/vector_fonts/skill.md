@@ -48,7 +48,7 @@ instead of rediscovering them per glyph bug.
 
 ## Native-Lane Landmine Classes (2026-07-19 rasterizer campaign)
 
-Six boring-construct recipes, backed by 4 filed compiler bugs (recipes 2-4
+Eight boring-construct recipes, backed by 6 filed bug docs (recipes 2-4
 share one doc), all specific to `--target x86_64-unknown-none
 --entry-closure --mode dynload` (cranelift); none reproduce under the
 hosted interpreter/JIT. Prefer the boring form over a clever one in any
@@ -96,6 +96,37 @@ code that must run on this lane:
    compare. **Status: this specific pin in `engine2d_default_font_config_for`
    (engine.spl) is IN FLIGHT, not yet landed** — do not cite it as shipped
    until confirmed on origin.
+7. **Value-position `Option` match extracts the nil sentinel** —
+   [sfnt_fvar_option_match_nil_baremetal_2026-08-04.md](../../../../doc/08_tracking/bug/sfnt_fvar_option_match_nil_baremetal_2026-08-04.md).
+   `val table = match find_table(...): Some(v): v / None: return []`
+   compiles (disassembly-proven) to two discriminant checks whose
+   fall-through default loads the nil sentinel `0x3` into `table`; the
+   first field read then trips the nil guard (`field access on nil
+   receiver`, fault RIP in `parse_fvar_axes`). Statement-form matches on
+   the same `Option<OtTable>` values work. Recipe: never bind an Option
+   payload through a value-position match on this lane — use a flat scalar
+   scan with a found-flag + typed locals (see `parse_fvar_axes` in
+   sfnt.spl), keep `Option` out of `val` extraction, compare against
+   `None` with a statement match, and prefer indexed `while` over
+   `for x in structs`.
+8. **A 3-or-more-operand `text` `+` chain silently drops its operands** —
+   [freestanding_text_concat_chain_drops_operands_2026-08-05.md](../../../../doc/08_tracking/bug/freestanding_text_concat_chain_drops_operands_2026-08-05.md).
+   Guest-measured with `name` len 11 and `prop_val` len 3: `a + ":"` →
+   len 12 (correct); `a + ":" + b` → len **-1**; `a + ":" + b + "\n"` →
+   len **1** (only the trailing literal survives); `"{a}:{b}\n"` → len 16
+   (correct). Root cause: ANY+ANY `+` routes to the freestanding
+   `rt_any_add` stub, which did raw pointer arithmetic on tagged heap
+   strings — FIXED 2026-08-05 in `examples/09_embedded/simple_os/arch/
+   {x86_64,arm64}/boot/baremetal_stubs.c` (heap-tag check → `rt_string_concat`).
+   Recipe: use string interpolation for any 3+ piece join; a single
+   two-operand `+` is safe; treat `.len() == -1` on a concat result as the
+   stale-stub signature. Blast radius when it fired: all 45 CSS custom
+   properties collapsed to bare newlines, every `var(...)` resolved empty,
+   a two-layer `background` lost its base layer, and the material-
+   provenance gate failed three layers from the cause. Sibling hazard:
+   `index_of` on a `substring(...)` slice returns a bogus `0` instead of
+   `-1` (the untagged-slice trap `find_from`'s docstring warns about) —
+   use `find_from(s, needle, 0)`.
 
 Shares a signature with the general BoxInt `<<3` tag-shift family
 (2026-07-04 seed ANY-channel enum-handle mangling) — same "tagged value
@@ -134,7 +165,7 @@ read at the wrong shift" shape, different call sites.
 ## Gotchas
 
 - A fix that works hosted (interpreter/JIT) says nothing about the
-  freestanding native lane — all 6 recipes above are freestanding-only.
+  freestanding native lane — all 8 recipes above are freestanding-only.
   Re-probe via serial / gated `_probe_debug()` output after any change to
   this pipeline that must run on SimpleOS baremetal.
 - Two miscompiled reads can cancel and look correct — verify a fix by
