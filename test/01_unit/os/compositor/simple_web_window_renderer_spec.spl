@@ -1,6 +1,45 @@
+"""
+Simple Web compositor adapter specification
+
+## Purpose and audience
+Executable contract for the SimpleOS compositor's web window adapter
+(`src/os/compositor/simple_web_window_renderer.spl`) and its pixel backend,
+written for the SimpleOS WM team and the web-render hardening reviewers. It
+pins themed HTML projection, material-fallback provenance, the Draw IR /
+Engine2D path, CSS animation cache identity, and the fail-closed theme
+receipt checks.
+
+## Operator workflow
+Run `./src/compiler_rust/target/bootstrap/simple run
+test/01_unit/os/compositor/simple_web_window_renderer_spec.spl` from the
+repository root; every scenario renders into in-memory software pixel
+caches, so no window system or GPU session is needed.
+
+## Compatibility and limitations
+Rendering uses the software backend with the canonical Web Draw IR path;
+Metal-device compositing is asserted at the provenance-contract level only.
+Several scenarios are legitimate REDs at the 2026-09-06 working tree (see
+the NOTE lines): the hosted app-HTML helpers were removed from src and the
+generated Aetheric snapshot fn is no longer exported.
+
+## Verification guidance and troubleshooting
+A provenance failure means the material-fallback witness changed shape
+(check `material_fallback_sha256` lengths in the message); an animation
+failure means the untimed/terminal cache identity rules drifted. Compare
+the failing expect against `web_render_pixel_backend` cache counters
+(`stores`/`hits`) before touching the eviction logic.
+"""
+# Lifecycle: doc/01_research/domain/web_renderer_vulkan_4k_showcase_hardening.md ;
+# doc/03_plan/agent_tasks/web_renderer_vulkan_4k_showcase_hardening.md ;
+# doc/04_architecture/web_renderer_vulkan_4k_showcase_hardening.md ;
+# doc/05_design/web_renderer_vulkan_4k_showcase_hardening.md
+# @manual_section: simple web window renderer
+# @req REQ-WEB4K-003
+
 use std.spec.*
 use app.io.mod.{file_read}
 use os.compositor.simple_web_window_renderer.{simple_web_content_frame_cached, simple_web_content_full_html_with_theme, simple_web_content_render_request_with_theme, simple_web_content_revision, simple_web_content_revision_with_theme}
+use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
 use common.ui.window_scene.{WM_CONTENT_ORIGIN_SIMPLE_WEB, wm_content_frame_web_provenance_valid}
 use common.ui.web_render_api.{WEB_RENDER_TARGET_SIMPLE_WEB, WebRenderRequest}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
@@ -17,7 +56,7 @@ fn contains_pixel(pixels: [u32], value: u32) -> bool:
     false
 
 fn expect_no_published_web_frame(frame: WmContentFrame):
-    expect(frame.pixels.len()).to_equal(0)
+    expect(frame.pixels.len()).to_equal(0)  # oracle: a rejected receipt publishes nothing, so the frame carries zero pixels
     expect(frame.checksum).to_equal(0u64)
 
 fn _web_provenance_frame(material_kind: text, material_reason: text, material_sha256: text, manifest_sha256: text) -> WmContentFrame:
@@ -45,27 +84,56 @@ fn _web_provenance_frame(material_kind: text, material_reason: text, material_sh
 describe "Simple Web compositor adapter":
 
     it "provides app HTML for the SimpleOS browser window":
+        # @req REQ-WEB4K-003
+        # @capture(protocol_json): app HTML markers for the hosted browser window
+        step("Request the hosted app HTML and check its network stub markers")
+        # NOTE: pre-existing RED at edit time (2026-09-06) — the runner reports
+        # `semantic: function simple_web_app_html not found`; no definition of
+        # simple_web_app_html exists anywhere under src/ any more. The scenario
+        # stays red until the hosted app-HTML helper is restored or re-homed.
         val html = simple_web_app_html("Simple Browser", "")
         expect(html.contains("about:network")).to_equal(true)
         expect(html.contains("Simple Web")).to_equal(true)
 
     it "exposes SimpleOS app content through the common web render request":
+        # @req REQ-WEB4K-003
+        # @capture(protocol_json): target, viewport, body, and css markers of the app request
+        step("Build the themed app render request and inspect its target and body")
+        # NOTE: pre-existing RED at edit time (2026-09-06) — the runner reports
+        # `semantic: function simple_web_app_render_request_with_theme not found`;
+        # no definition exists under src/. The scenario stays red until the
+        # helper is restored.
         val req = simple_web_app_render_request_with_theme("glass_dark", "Terminal", "ready", 80, 40)
         expect(req.target).to_equal(WEB_RENDER_TARGET_SIMPLE_WEB)
-        expect(req.viewport_w).to_equal(80)
-        expect(req.viewport_h).to_equal(40)
+        expect(req.viewport_w).to_equal(80)  # oracle: the request is built for the 80-column WM app viewport by contract
+        expect(req.viewport_h).to_equal(40)  # oracle: matching 40-row height pairs with the 80-column viewport above
         expect(req.body_html.contains("wm-app-container")).to_equal(true)
         expect(req.css.contains("simple-web-line")).to_equal(true)
 
     it "exposes SimpleOS app pixels through the common web render artifact":
+        # @req REQ-WEB4K-003
+        # @capture(gui_image): 32x20 app pixel artifact with non-empty painted pixels
+        step("Render the app pixel artifact and verify its viewport-sized payload")
+        # NOTE: pre-existing RED at edit time (2026-09-06) — the runner reports
+        # `semantic: function simple_web_app_pixel_artifact_with_theme not found`;
+        # no definition exists under src/. The scenario stays red until the
+        # helper is restored.
         val artifact = simple_web_app_pixel_artifact_with_theme("glass_dark", "Terminal", 32, 20, "ready")
         expect(artifact.target).to_equal(WEB_RENDER_TARGET_SIMPLE_WEB)
-        expect(artifact.viewport_w).to_equal(32)
-        expect(artifact.viewport_h).to_equal(20)
-        expect(artifact.pixels.len()).to_equal(32 * 20)
+        expect(artifact.viewport_w).to_equal(32)  # oracle: the artifact is requested at the 32-pixel demo viewport width
+        expect(artifact.viewport_h).to_equal(20)  # oracle: paired 20-pixel height completes the 32x20 demo viewport
+        expect(artifact.pixels.len()).to_equal(32 * 20)  # oracle: the payload must be exactly viewport-area-sized, one u32 per pixel
         expect(_count_changed(artifact.pixels, 0xFFFFFFFFu32)).to_be_greater_than(0)
 
     it "projects exact accepted snapshot CSS and identity into hosted HTML":
+        # @req REQ-WEB4K-003
+        # @capture(protocol_json): themed html identity attributes and accepted-receipt verdicts
+        step("Encode the theme install wire and project it into hosted HTML")
+        # NOTE: pre-existing RED at edit time (2026-09-06) — the runner reports
+        # `semantic: function aetheric_dark_theme_render_snapshot not found`; the fn
+        # at src/lib/common/ui/generated/aetheric_dark_theme_snapshot.spl:5 is
+        # declared without export, so no import path reaches it. The scenario
+        # stays red until the generated snapshot is exported again.
         val snapshot = aetheric_dark_theme_render_snapshot()
         val wire = theme_package_install_wire_v1_encode(
             snapshot.id, snapshot.id, "active-wm-theme", snapshot
@@ -90,6 +158,9 @@ describe "Simple Web compositor adapter":
         ).to_be(false)
 
     it "accepts only exact solid, CPU, and Metal material provenance reasons":
+        # @req REQ-WEB4K-003
+        # @capture(bit_table): provenance verdicts for exact and swapped kind/reason pairs
+        step("Validate exact provenance pairs and three deliberately swapped ones")
         val sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
         val solid = _web_provenance_frame(
             "solid-material",
@@ -135,6 +206,9 @@ describe "Simple Web compositor adapter":
         expect(wm_content_frame_web_provenance_valid(wrong_metal)).to_be(false)
 
     it "rejects non-lowercase or nonhex material and manifest SHA-256 receipts":
+        # @req REQ-WEB4K-003
+        # @capture(bit_table): provenance verdicts for uppercase and non-hex digest variants
+        step("Feed uppercase and non-hex digests through the provenance validator")
         val valid_sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
         val uppercase_sha256 = "0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF"
         val nonhex_sha256 = "g123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
@@ -168,6 +242,9 @@ describe "Simple Web compositor adapter":
         expect(wm_content_frame_web_provenance_valid(nonhex_manifest)).to_be(false)
 
     it "uses the canonical Web Draw IR and Engine2D backend by default":
+        # @req REQ-WEB4K-003
+        # @capture(bit_table): canonical import and call markers across the three compositor sources
+        step("Read the three compositor sources and check the canonical backend wiring")
         val renderer = file_read("src/os/compositor/simple_web_window_renderer.spl")
         val host = file_read("src/os/compositor/host_compositor_core.spl")
         val surface = file_read("src/os/compositor/web_render_surface.spl")
@@ -180,28 +257,39 @@ describe "Simple Web compositor adapter":
         expect(surface.contains("web_render_request_to_native_safe_pixel_artifact")).to_be(false)
 
     it "produces an authoritative shared-WM frame from runtime HTML":
+        # @req REQ-WEB4K-003
+        # @capture(gui_image): 36x18 runtime frame identity and provenance verdict
+        step("Render runtime HTML into the shared-WM frame cache and validate provenance")
+        # NOTE: pre-existing RED at edit time (2026-09-06) — the runner logs
+        # `[web-material-provenance] witness-unconverted cpu_witness=1 cpu_executed=0`
+        # and the provenance verdict comes back false. The material witness is not
+        # converted on the cached-frame path in the current working tree, so the
+        # scenario stays red until that conversion is restored.
         val cache = web_render_pixel_artifact_cache(36, 18, "software")
         val body = "<p data-runtime='yes'>runtime-created content</p>"
         val frame = simple_web_content_frame_cached(cache, "window-42", 9, 4, "glass_dark", "Arbitrary runtime title", body, 36, 18, 0)
         expect(frame.window_id).to_equal("window-42")
-        expect(frame.scene_revision).to_equal(9)
-        expect(frame.content_revision).to_equal(4)
+        expect(frame.scene_revision).to_equal(9)  # oracle: the caller supplied scene revision 9 and the frame must carry it verbatim
+        expect(frame.content_revision).to_equal(4)  # oracle: the caller supplied content revision 4 and the frame must carry it verbatim
         expect(frame.origin_kind).to_equal(WM_CONTENT_ORIGIN_SIMPLE_WEB)
-        expect(frame.width).to_equal(36)
-        expect(frame.height).to_equal(18)
-        expect(frame.pixels.len()).to_equal(36 * 18)
+        expect(frame.width).to_equal(36)  # oracle: the cache was built at 36-pixel width and the frame must match it
+        expect(frame.height).to_equal(18)  # oracle: paired 18-pixel height completes the 36x18 cache geometry
+        expect(frame.pixels.len()).to_equal(36 * 18)  # oracle: one u32 per pixel for the full 36x18 frame area
         expect(frame.checksum).to_be_greater_than(0u64)
         expect(frame.engine2d_status).to_equal("engine2d_rendered")
-        expect(frame.engine2d_backend.len()).to_be_greater_than(0)
+        expect(frame.engine2d_backend.len()).to_be_greater_than(0)  # oracle: the backend tag names the executing engine and must never be empty
         assert_not_equal(frame.engine2d_backend, "native-safe-fallback")
         expect(frame.material_fallback_kind).to_equal("cpu-composited-material")
         expect(frame.material_fallback_reason).to_equal("native-device-backdrop-path-pending")
-        expect(frame.material_fallback_sha256.len()).to_equal(64)
+        expect(frame.material_fallback_sha256.len()).to_equal(64)  # oracle: a SHA-256 hex digest is exactly 64 characters
         expect(frame.theme_id).to_equal("glass_dark")
-        expect(frame.theme_source_manifest_sha256.len()).to_equal(64)
+        expect(frame.theme_source_manifest_sha256.len()).to_equal(64)  # oracle: the theme manifest digest is a full SHA-256, 64 hex characters
         expect(wm_content_frame_web_provenance_valid(frame)).to_be(true)
 
     it "turns validated external DrawIR execution into a web frame":
+        # @req REQ-WEB4K-003
+        # @capture(gui_image): 64x48 externally-executed DrawIR frame with valid provenance
+        step("Execute the DrawIR composition externally and wrap it into a web frame")
         val html = simple_web_content_full_html_with_theme(
             "glass_dark", "External", "<p>worker-owned</p>", 64, 48
         )
@@ -224,12 +312,19 @@ describe "Simple Web compositor adapter":
             layout.material_witness.solid_material_count,
             layout.material_witness.solid_material_sha256
         )
-        expect(frame.pixels.len()).to_equal(64 * 48)
+        expect(frame.pixels.len()).to_equal(64 * 48)  # oracle: one u32 per pixel for the full 64x48 externally-rendered frame
         expect(frame.checksum).to_be_greater_than(0u64)
         expect(wm_content_frame_web_provenance_valid(frame)).to_be(true)
         raster.shutdown()
 
     it "publishes no external frame for a mismatched theme receipt":
+        # @req REQ-WEB4K-003
+        # @capture(bit_table): publish verdicts for source, material, revision, and id receipt mismatches
+        step("Publish with a valid receipt, then with each of four mutated receipts")
+        # NOTE: pre-existing RED at edit time (2026-09-06) — the runner reports
+        # `semantic: function aetheric_dark_theme_render_snapshot not found`
+        # (see the generated snapshot's missing export, above). The scenario
+        # stays red until that export is restored.
         val snapshot = aetheric_dark_theme_render_snapshot()
         val wire = theme_package_install_wire_v1_encode(
             snapshot.id, snapshot.id, "active-wm-theme", snapshot
@@ -263,7 +358,7 @@ describe "Simple Web compositor adapter":
             layout.material_witness.solid_material_count,
             layout.material_witness.solid_material_sha256
         )
-        expect(valid.pixels.len()).to_equal(64 * 48)
+        expect(valid.pixels.len()).to_equal(64 * 48)  # oracle: the accepted receipt publishes a full 64x48 pixel payload
         expect(valid.checksum).to_be_greater_than(0u64)
 
         val wrong_source = (
@@ -318,6 +413,9 @@ describe "Simple Web compositor adapter":
         raster.shutdown()
 
     it "renders bounded CSS animation frames then becomes quiescent":
+        # @req REQ-WEB4K-003
+        # @capture(gui_image): animation frame pixels and cache store/hit counters over time
+        step("Prime the cache, run the finite animation to terminal, and reuse it")
         val body = "<style>@keyframes pulse { from { background-color:#ef4444; } to { background-color:#2563eb; } } #stage { width:32px; height:24px; animation:pulse 1000ms linear forwards; }</style><div id='stage'></div>"
         val revision = simple_web_content_revision_with_theme(
             "glass_dark", "Animation", body, 64, 48, 0
@@ -328,15 +426,14 @@ describe "Simple Web compositor adapter":
             "glass_dark", "Stale", "<p>old-static-cache-marker</p>", 64, 48
         )
         val stale = cache.request_to_pixel_artifact(stale_req)
-        expect(stale.pixels.len()).to_equal(64 * 48)
+        expect(stale.pixels.len()).to_equal(64 * 48)  # oracle: one u32 per pixel for the full 64x48 primed artifact
         expect(cache.pixel_cache.last_html).to_contain(
             "old-static-cache-marker"
         )
-        expect(cache.pixel_cache.last_pixels.len()).to_equal(64 * 48)
+        expect(cache.pixel_cache.last_pixels.len()).to_equal(64 * 48)  # oracle: the retained pixels cover the whole 64x48 artifact
         expect(cache.pixel_cache.last_render_mode).to_equal("untimed-static")
-        expect(cache.pixel_cache.last_content_revision).to_equal(-1)
-        expect(cache.stores()).to_equal(1)
-
+        expect(cache.pixel_cache.last_content_revision).to_equal(-1)  # oracle: untimed static entries carry the sentinel revision -1 by contract
+        expect(cache.stores()).to_equal(1)  # oracle: exactly one artifact has been stored so far
         step("Start the finite animation and invalidate the stale artifact")
         val first = simple_web_content_frame_cached_at_time(
             cache, "animated", 1, revision, "glass_dark", "Animation",
@@ -344,13 +441,12 @@ describe "Simple Web compositor adapter":
         )
         expect(contains_pixel(first.pixels, 0xFFEF4444u32)).to_be(true)
         expect(cache.pixel_cache.last_html).to_equal("")
-        expect(cache.pixel_cache.last_pixels.len()).to_equal(0)
+        expect(cache.pixel_cache.last_pixels.len()).to_equal(0)  # oracle: a timed animation start evicts the retained static entry, leaving zero cached pixels
         expect(cache.pixel_cache.last_render_mode).to_equal("")
-        expect(cache.pixel_cache.last_content_revision).to_equal(-1)
-        expect(cache.stores()).to_equal(1)
+        expect(cache.pixel_cache.last_content_revision).to_equal(-1)  # oracle: invalidation resets the retained revision to the -1 sentinel
+        expect(cache.stores()).to_equal(1)  # oracle: the animation start invalidated the stale entry without storing a new one, so the count stays at one
         expect(cache.animation_frame_due(1015)).to_be(false)
         expect(cache.animation_frame_due(1016)).to_be(true)
-
         step("Render the midpoint and retain the finite terminal artifact")
         val middle = simple_web_content_frame_cached_at_time(
             cache, "animated", 2, revision, "glass_dark", "Animation",
@@ -367,12 +463,11 @@ describe "Simple Web compositor adapter":
         expect(cache.pixel_cache.last_html.contains(
             "old-static-cache-marker"
         )).to_be(false)
-        expect(cache.pixel_cache.last_pixels.len()).to_equal(64 * 48)
+        expect(cache.pixel_cache.last_pixels.len()).to_equal(64 * 48)  # oracle: the finite terminal artifact is retained whole, 64x48 pixels
         expect(cache.pixel_cache.last_render_mode).to_equal("terminal")
         expect(cache.pixel_cache.last_content_revision).to_equal(revision)
-        expect(cache.stores()).to_equal(2)
+        expect(cache.stores()).to_equal(2)  # oracle: the terminal artifact is the second store after the primed static one
         expect(cache.animation_frame_due(2001)).to_be(false)
-
         step("Reuse the retained terminal artifact after unrelated damage")
         val repeated = simple_web_content_frame_cached_at_time(
             cache, "animated", 4, revision, "glass_dark", "Animation",
@@ -380,11 +475,14 @@ describe "Simple Web compositor adapter":
         )
         expect(repeated.checksum).to_equal(last.checksum)
         expect(repeated.pixels).to_equal(last.pixels)
-        expect(cache.stores()).to_equal(2)
-        expect(cache.hits()).to_equal(1)
+        expect(cache.stores()).to_equal(2)  # oracle: an identical repeat must hit the cache, not store a third artifact
+        expect(cache.hits()).to_equal(1)  # oracle: the repeat above is the single cache hit so far
         expect(cache.animation_frame_due(2001)).to_be(false)
 
     it "separates untimed and terminal animation cache identities":
+        # @req REQ-WEB4K-003
+        # @capture(bit_table): render-mode and revision tags across timed/untimed interleavings
+        step("Interleave timed and untimed requests and track the retained identity")
         val body = "<style>@keyframes pulse { from { background-color:#ef4444; } to { background-color:#2563eb; } } #stage { width:32px; height:24px; animation:pulse 1000ms linear forwards; }</style><div id='stage'></div>"
         val req = simple_web_content_render_request_with_theme(
             "glass_dark", "Animation", body, 64, 48
@@ -392,7 +490,6 @@ describe "Simple Web compositor adapter":
         val revision = simple_web_content_revision_with_theme(
             "glass_dark", "Animation", body, 64, 48, 0
         )
-
         step("Replace a timed terminal entry with an untimed static entry")
         val timed_first_cache = web_render_pixel_artifact_cache(
             64, 48, "software"
@@ -418,10 +515,9 @@ describe "Simple Web compositor adapter":
         )
         expect(
             timed_first_cache.pixel_cache.last_content_revision
-        ).to_equal(-1)
-        expect(timed_first_cache.stores()).to_equal(2)
-        expect(timed_first_cache.hits()).to_equal(0)
-
+        ).to_equal(-1)  # oracle: untimed static entries always reset the retained revision to the -1 sentinel
+        expect(timed_first_cache.stores()).to_equal(2)  # oracle: the timed start, terminal, and untimed entry collapse to two retained identities
+        expect(timed_first_cache.hits()).to_equal(0)  # oracle: no timed request has been served from the cache yet, so the hit counter stays at zero
         step("Reject the untimed entry when the terminal frame is requested")
         val terminal_after_untimed = simple_web_content_frame_cached_at_time(
             timed_first_cache, "timed-first", 3, revision,
@@ -434,16 +530,15 @@ describe "Simple Web compositor adapter":
         expect(
             timed_first_cache.pixel_cache.last_content_revision
         ).to_equal(revision)
-        expect(timed_first_cache.stores()).to_equal(3)
-        expect(timed_first_cache.hits()).to_equal(0)
+        expect(timed_first_cache.stores()).to_equal(3)  # oracle: the rejected untimed entry forces a third real store for the terminal frame
+        expect(timed_first_cache.hits()).to_equal(0)  # oracle: no timed request has been served from the cache yet, so the hit counter stays at zero
         val terminal_hit = simple_web_content_frame_cached_at_time(
             timed_first_cache, "timed-first", 4, revision,
             "glass_dark", "Animation", body, 64, 48, 0, 2000
         )
         expect(terminal_hit.pixels).to_equal(timed_terminal.pixels)
-        expect(timed_first_cache.stores()).to_equal(3)
-        expect(timed_first_cache.hits()).to_equal(1)
-
+        expect(timed_first_cache.stores()).to_equal(3)  # oracle: the immediate repeat must be served from the retained terminal entry
+        expect(timed_first_cache.hits()).to_equal(1)  # oracle: exactly one cache hit has accumulated across the four requests
         step("Reject an untimed entry when a fresh timed session reaches terminal")
         val untimed_first_cache = web_render_pixel_artifact_cache(
             64, 48, "software"
@@ -454,7 +549,7 @@ describe "Simple Web compositor adapter":
         )
         expect(
             untimed_first_cache.pixel_cache.last_content_revision
-        ).to_equal(-1)
+        ).to_equal(-1)  # oracle: the untimed static entry always resets the retained revision to the -1 sentinel
         val _fresh_start = simple_web_content_frame_cached_at_time(
             untimed_first_cache, "untimed-first", 1, revision,
             "glass_dark", "Animation", body, 64, 48, 0, 3000
@@ -472,23 +567,29 @@ describe "Simple Web compositor adapter":
         expect(
             untimed_first_cache.pixel_cache.last_content_revision
         ).to_equal(revision)
-        expect(untimed_first_cache.stores()).to_equal(2)
-        expect(untimed_first_cache.hits()).to_equal(0)
+        expect(untimed_first_cache.stores()).to_equal(2)  # oracle: the fresh session stores its start and terminal entries only, rejecting the untimed one
+        expect(untimed_first_cache.hits()).to_equal(0)  # oracle: this fresh cache has served nothing from retention yet, so zero hits
         val fresh_terminal_hit = simple_web_content_frame_cached_at_time(
             untimed_first_cache, "untimed-first", 3, revision,
             "glass_dark", "Animation", body, 64, 48, 0, 4000
         )
         expect(fresh_terminal_hit.pixels).to_equal(fresh_terminal.pixels)
-        expect(untimed_first_cache.stores()).to_equal(2)
-        expect(untimed_first_cache.hits()).to_equal(1)
+        expect(untimed_first_cache.stores()).to_equal(2)  # oracle: the repeat must hit rather than store again
+        expect(untimed_first_cache.hits()).to_equal(1)  # oracle: the repeat is this cache's first and only hit
         expect(untimed_first_cache.animation_frame_due(4001)).to_be(false)
 
     it "keeps shared-WM content requests free of a duplicate inner titlebar":
+        # @req REQ-WEB4K-003
+        # @capture(protocol_json): body markers proving one titlebar per window
+        step("Build the content request and check the titlebar lives only in the WM chrome")
         val req = simple_web_content_render_request_with_theme("glass_dark", "Runtime title", "<p>body</p>", 80, 40)
         expect(req.body_html.contains("wm-app-titlebar")).to_be(false)
         expect(req.body_html.contains("wm-app-content")).to_be(true)
 
     it "composes Aetheric package CSS instead of a renderer-owned palette":
+        # @req REQ-WEB4K-003
+        # @capture(protocol_json): package CSS custom properties and fallback data attributes
+        step("Build the themed request and verify package-owned CSS composition")
         val req = simple_web_content_render_request_with_theme("aetheric_dark", "Runtime title", "<p>body</p>", 80, 40)
         expect(req.css).to_contain("--ui-accent: #adc6ff")
         expect(req.css).to_contain(".widget-panel")
@@ -501,6 +602,13 @@ describe "Simple Web compositor adapter":
         expect(req.css.contains("#f8fafc")).to_be(false)
 
     it "serializes production WM aliases through the canonical request":
+        # @req REQ-WEB4K-003
+        # @capture(protocol_json): WM alias selectors present in the full themed document
+        step("Serialize WM window markup through the themed document builder")
+        # NOTE: pre-existing RED at edit time (2026-09-06) — the composed document
+        # no longer carries the `.widget-dialog, .wm-window` alias selector block,
+        # so this scenario fails on the alias serialization. It stays red until
+        # the production aliases are re-serialized through the canonical request.
         val body = "<section class='wm-window focused'><header class='wm-titlebar'><h1 class='wm-title'>Aetheric</h1></header></section>"
         val html = simple_web_content_full_html_with_theme("aetheric_dark", "Aetheric", body, 320, 200)
         expect(html).to_contain("<html data-wm-theme=\"aetheric_dark\"")
@@ -511,6 +619,14 @@ describe "Simple Web compositor adapter":
         expect(html).to_contain(body)
 
     it "does not overlay the legacy blue slate WM heuristic on themed content":
+        # @req REQ-WEB4K-003
+        # @capture(gui_image): themed window pixels proving the legacy slate is gone
+        step("Render themed content and scan for the legacy blue slate colors")
+        # NOTE: pre-existing RED at edit time (2026-09-06) — the runner reports
+        # `expected false to equal true` on the 0xFF1F1F21 scan: the Aetheric
+        # background color is not realized in the rendered pixels on the current
+        # working tree. The scenario stays red until the themed background is
+        # realized again.
         val cache = web_render_pixel_artifact_cache(80, 40, "software")
         val revision = simple_web_content_revision_with_theme("aetheric_dark", "Theme", "<div>content</div>", 80, 40, 0)
         val frame = simple_web_content_frame_cached(cache, "theme-window", 1, revision, "aetheric_dark", "Theme", "<div>content</div>", 80, 40, 0)
@@ -519,47 +635,75 @@ describe "Simple Web compositor adapter":
         expect(contains_pixel(frame.pixels, 0xFF182230u32)).to_be(false)
 
     it "realizes the declared solid fallback instead of the translucent surface RGB":
+        # @req REQ-WEB4K-003
+        # @capture(gui_image): pixels proving the solid fallback colors are realized
+        step("Render the translucent div and verify the declared fallback colors win")
         val html = "<div data-wm-theme-fallback='solid-material' data-wm-theme-bg='#123456' data-wm-theme-fg='#FEDCBA' style='width:24px;height:16px;background:rgba(255,0,0,0.2);color:#FFFFFF;backdrop-filter:blur(12px)'>fallback</div>"
         val pixels = simple_web_layout_render_html_software_pixels(html, 24, 16)
         expect(contains_pixel(pixels, 0xFF123456u32)).to_be(true)
         expect(contains_pixel(pixels, 0xFFFEDCBAu32)).to_be(true)
 
     it "clears an earlier multilayer background when realizing the WM fallback":
+        # @req REQ-WEB4K-003
+        # @capture(bit_table): fallback kind and digest parity across software and Draw IR
+        step("Render a gradient-stacked fallback div through both execution paths")
         val html = "<div data-wm-theme-fallback='solid-material' data-wm-theme-bg='#123456' data-wm-theme-fg='#FEDCBA' style='width:24px;height:16px;background:radial-gradient(circle,#FF0000,#0000FF),rgba(255,0,0,0.2);backdrop-filter:blur(12px)'>fallback</div>"
         val software = simple_web_layout_render_html_software_result(html, 24, 16)
         val draw_ir = simple_web_layout_render_html_readback_engine2d_result(html, 24, 16, "software")
         expect(contains_pixel(software.pixels, 0xFF123456u32)).to_be(true)
         expect(software.material_fallback.kind).to_equal("solid-material")
-        expect(software.material_fallback.material_sha256.len()).to_equal(64)
+        expect(software.material_fallback.material_sha256.len()).to_equal(64)  # oracle: the realized fallback digest is a full SHA-256, 64 hex characters
         expect(draw_ir.material_fallback.kind).to_equal("solid-material")
         expect(draw_ir.material_fallback.material_sha256).to_equal(software.material_fallback.material_sha256)
 
     it "honors a later background shorthand after background-image none":
+        # @req REQ-WEB4K-003
+        # @capture(gui_image): pixels for both background declaration orders
+        step("Render both background-image:none orderings and require different pixels")
+        # NOTE: pre-existing RED at edit time (2026-09-06) — the runner reports
+        # `assert_not_equal failed: both sides equal`: the layout engine currently
+        # ignores declaration ORDER for `background-image: none` vs a later
+        # `background:` shorthand, so both documents render identically. The
+        # scenario stays red until shorthand ordering is honored.
         val later_none = simple_web_layout_render_html_software_pixels("<div style='width:24px;height:16px;background:radial-gradient(circle,#FF0000,#0000FF);background-image:none'>x</div>", 24, 16)
         val later_gradient = simple_web_layout_render_html_software_pixels("<div style='width:24px;height:16px;background-image:none;background:radial-gradient(circle,#FF0000,#0000FF)'>x</div>", 24, 16)
         assert_not_equal(later_gradient, later_none)
 
     it "propagates stable realized fallback provenance through cache hits":
+        # @req REQ-WEB4K-003
+        # @capture(statistics): fallback digest stability across a served cache hit
+        step("Request the same themed artifact twice and compare fallback digests")
+        # NOTE: pre-existing RED at edit time (2026-09-06) — the runner reports
+        # `expected 0 to equal 64`: the first request's material_fallback_sha256
+        # is empty on the current working tree, i.e. the realized fallback
+        # provenance is not attached on this request path. The scenario stays
+        # red until provenance propagation is restored.
         val req = simple_web_content_render_request_with_theme("aetheric_dark", "Theme", "<p>fallback</p>", 80, 40)
         val cache = web_render_pixel_artifact_cache(80, 40, "software")
         val first = cache.request_to_pixel_artifact(req)
         val second = cache.request_to_pixel_artifact(req)
         expect(first.material_fallback.kind).to_equal("cpu-composited-material")
         expect(first.material_fallback.reason).to_equal("native-device-backdrop-path-pending")
-        expect(first.material_fallback.material_sha256.len()).to_equal(64)
+        expect(first.material_fallback.material_sha256.len()).to_equal(64)  # oracle: the realized fallback carries a full SHA-256 digest, 64 hex characters
         expect(second.material_fallback.material_sha256).to_equal(first.material_fallback.material_sha256)
-        expect(cache.hits()).to_equal(1)
+        expect(cache.hits()).to_equal(1)  # oracle: the second identical request is exactly one served cache hit
 
     it "keeps Aetheric fallback provenance for an empty runtime window":
+        # @req REQ-WEB4K-003
+        # @capture(bit_table): provenance fields and verdict for an empty-body frame
+        step("Render an empty themed window and check its fallback provenance")
         val cache = web_render_pixel_artifact_cache(80, 40, "software")
         val revision = simple_web_content_revision_with_theme("aetheric_dark", "System Console", "", 80, 40, 0)
         val frame = simple_web_content_frame_cached(cache, "empty-window", 1, revision, "aetheric_dark", "System Console", "", 80, 40, 0)
         expect(frame.material_fallback_kind).to_equal("cpu-composited-material")
         expect(frame.material_fallback_reason).to_equal("native-device-backdrop-path-pending")
-        expect(frame.material_fallback_sha256.len()).to_equal(64)
+        expect(frame.material_fallback_sha256.len()).to_equal(64)  # oracle: even an empty window pins a full SHA-256 fallback digest, 64 hex characters
         expect(wm_content_frame_web_provenance_valid(frame)).to_be(true)
 
     it "hashes resolved fallback colors rather than CSS spelling":
+        # @req REQ-WEB4K-003
+        # @capture(statistics): digest equality across hex and rgb spellings, divergence on change
+        step("Request hex, rgb, and changed-color spellings and compare their digests")
         val hex_req = WebRenderRequest.html(WEB_RENDER_TARGET_SIMPLE_WEB, "hex", "<div data-wm-theme-fallback='solid-material' data-wm-theme-bg='#123456' data-wm-theme-fg='#FEDCBA'>x</div>", "", "", 24, 16)
         val rgb_req = WebRenderRequest.html(WEB_RENDER_TARGET_SIMPLE_WEB, "rgb", "<div data-wm-theme-fallback='solid-material' data-wm-theme-bg='rgb(18,52,86)' data-wm-theme-fg='rgb(254,220,186)'>x</div>", "", "", 24, 16)
         val changed_req = WebRenderRequest.html(WEB_RENDER_TARGET_SIMPLE_WEB, "changed", "<div data-wm-theme-fallback='solid-material' data-wm-theme-bg='#654321' data-wm-theme-fg='#FEDCBA'>x</div>", "", "", 24, 16)
@@ -568,25 +712,39 @@ describe "Simple Web compositor adapter":
         val changed_artifact = web_render_request_to_pixel_artifact(changed_req)
         expect(hex_artifact.material_fallback.kind).to_equal("solid-material")
         expect(rgb_artifact.material_fallback.kind).to_equal("solid-material")
-        expect(hex_artifact.material_fallback.material_sha256.len()).to_equal(64)
+        expect(hex_artifact.material_fallback.material_sha256.len()).to_equal(64)  # oracle: the digest is a full SHA-256, 64 hex characters, regardless of CSS spelling
         expect(hex_artifact.material_fallback.material_sha256).to_equal(rgb_artifact.material_fallback.material_sha256)
         assert_not_equal(hex_artifact.material_fallback.material_sha256, changed_artifact.material_fallback.material_sha256)
 
     it "does not report fallback provenance for ordinary opaque HTML":
+        # @req REQ-WEB4K-003
+        # @capture(bit_table): fallback kind for plain unthemed opaque HTML
+        step("Render plain opaque HTML and confirm no fallback provenance is claimed")
         val req = WebRenderRequest.html(WEB_RENDER_TARGET_SIMPLE_WEB, "plain", "<div style='background:#123456;color:#FEDCBA'>x</div>", "", "", 24, 16)
         val artifact = web_render_request_to_pixel_artifact(req)
         expect(artifact.material_fallback.kind).to_equal("none")
 
     it "uses the same realized fallback hash for software and Draw IR execution":
+        # @req REQ-WEB4K-003
+        # @capture(bit_table): digest parity between the software and Draw IR paths
+        step("Render the fallback div through both engines and compare digests")
         val html = "<div data-wm-theme-fallback='solid-material' data-wm-theme-bg='#123456' data-wm-theme-fg='#FEDCBA' style='width:24px;height:16px;background:rgba(255,0,0,0.2);color:#FFFFFF;backdrop-filter:blur(12px)'>fallback</div>"
         val software = simple_web_layout_render_html_software_result(html, 24, 16)
         val draw_ir = simple_web_layout_render_html_readback_engine2d_result(html, 24, 16, "software")
         expect(software.material_fallback.kind).to_equal("solid-material")
         expect(draw_ir.material_fallback.kind).to_equal("solid-material")
-        expect(software.material_fallback.material_sha256.len()).to_equal(64)
+        expect(software.material_fallback.material_sha256.len()).to_equal(64)  # oracle: the software path's digest is a full SHA-256, 64 hex characters
         expect(draw_ir.material_fallback.material_sha256).to_equal(software.material_fallback.material_sha256)
 
     it "keeps compatibility aliases package-owned and themes cache revisions":
+        # @req REQ-WEB4K-003
+        # @capture(statistics): revision equality for the alias and divergence for a missing theme
+        step("Compare revisions for the alias theme and a missing theme id")
+        # NOTE: pre-existing RED at edit time (2026-09-06) — the runner reports
+        # `expected 1730462021 to equal 2119056480`: the glass_light alias no
+        # longer resolves to the canonical aetheric revision fingerprint on the
+        # current working tree. The scenario stays red until the alias mapping
+        # is restored to package ownership.
         val canonical = simple_web_content_revision_with_theme("aetheric_dark", "title", "<p>body</p>", 80, 40, 0)
         val alias = simple_web_content_revision_with_theme("glass_light", "title", "<p>body</p>", 80, 40, 0)
         val missing = simple_web_content_revision_with_theme("missing_theme_for_revision_test", "title", "<p>body</p>", 80, 40, 0)
@@ -594,6 +752,9 @@ describe "Simple Web compositor adapter":
         assert_not_equal(missing, canonical)
 
     it "keeps unchanged content identity stable and changes it on mutation":
+        # @req REQ-WEB4K-003
+        # @capture(statistics): revision/checksum stability across identical and mutated content
+        step("Render identical content twice and mutated content once, compare identities")
         val first_cache = web_render_pixel_artifact_cache(96, 48, "software")
         val second_cache = web_render_pixel_artifact_cache(96, 48, "software")
         val changed_cache = web_render_pixel_artifact_cache(96, 48, "software")

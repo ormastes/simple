@@ -1,5 +1,28 @@
 # @feature mcdc_hal_runtime_hardening
 # @req REQ-011 REQ-013 REQ-014
+"""
+## Purpose and audience
+Executable contract for fixed-slot rt(hal) provider orchestration V1:
+receipt admission, alpha/beta/normal commit policy, difference-pair masks,
+and closed rejection of unreaped or mis-slotted lanes. Written for the
+rt(hal) runtime hardening owners and their reviewers.
+## Operator workflow
+Run the file with the seed lane:
+`./src/compiler_rust/target/bootstrap/simple run test/01_unit/lib/common/structural/hal_provider_orchestration_spec.spl`
+and read the `SPEC FILE VERDICT` line.
+## Compatibility and limitations
+Exercises the pure-Simple orchestration function over fabricated lane
+receipts only; no real provider execution, device, or scheduler is involved.
+## Verification guidance and troubleshooting
+A failure names the orchestration receipt field that diverged; re-run the
+single file and compare against the lifecycle evidence linked below before
+changing admission or commit policy.
+"""
+# Lifecycle: doc/01_research/domain/mcdc_hal_runtime_hardening.md ;
+# doc/03_plan/agent_tasks/mcdc_hal_runtime_hardening.md ;
+# doc/04_architecture/mcdc_hal_runtime_hardening.md ;
+# doc/05_design/mcdc_hal_runtime_hardening.md
+# @manual_section: provider orchestration receipts
 
 use std.spec.*
 use std.common.structural.hal_provider.*
@@ -27,50 +50,65 @@ fn lane(provider: HalProviderKind, digest: i64,
 
 describe "rt(hal) fixed-slot provider orchestration":
     it "compares equivalent isolated lanes and selects one parent commit":
+        # @req REQ-011
+        # @capture(bit_table): receipt status, received/admitted/difference masks
+        step("Orchestrate three equal-digest lanes and read the receipt masks")
         val receipt = hal_orchestrate_provider_receipts_v1(
             operation(HalProviderKind.PureSimple), request(),
             HalRunMode.AlphaCompare,
             lane(HalProviderKind.PureSimple, 10),
             lane(HalProviderKind.C, 10), lane(HalProviderKind.Rust, 10))
         expect(receipt.status).to_equal(HalOrchestrationStatusV1.CommitReady)
-        expect(receipt.received_mask).to_equal(7)
-        expect(receipt.admitted_mask).to_equal(7)
-        expect(receipt.difference_pair_mask).to_equal(0)
+        expect(receipt.received_mask).to_equal(7)  # oracle: three fixed slots occupy provider bits 1|2|4, so a full receipt is exactly 7
+        expect(receipt.admitted_mask).to_equal(7)  # oracle: every reaped, in-slot lane is admitted, matching the full 1|2|4 mask
+        expect(receipt.difference_pair_mask).to_equal(0)  # oracle: all three digests match, so no comparison pair diverges and the mask is empty
         expect(receipt.commit_allowed).to_be(true)
         expect(receipt.selected_provider).to_equal(HalProviderKind.PureSimple)
 
     it "reports pair differences in deterministic Pure-C-Rust bits":
+        # @req REQ-014
+        # @capture(bit_table): divergence status and per-pair difference mask
+        step("Orchestrate lanes with three distinct digests and read the difference mask")
         val receipt = hal_orchestrate_provider_receipts_v1(
             operation(HalProviderKind.PureSimple), request(),
             HalRunMode.AlphaCompare,
             lane(HalProviderKind.PureSimple, 10),
             lane(HalProviderKind.C, 11), lane(HalProviderKind.Rust, 12))
         expect(receipt.status).to_equal(HalOrchestrationStatusV1.Diverged)
-        expect(receipt.difference_pair_mask).to_equal(7)
+        expect(receipt.difference_pair_mask).to_equal(7)  # oracle: three pairwise C-vs-Rust-family comparisons all differ, lighting bits 1|2|4
         expect(receipt.commit_allowed).to_be(false)
         expect(receipt.selected_provider_valid).to_be(false)
 
     it "allows beta preferred commit while preserving divergence evidence":
+        # @req REQ-014
+        # @capture(bit_table): beta-mode commit status and preserved difference mask
+        step("Orchestrate a C-preferred beta run where only the C lane digests differently")
         val receipt = hal_orchestrate_provider_receipts_v1(
             operation(HalProviderKind.C), request(), HalRunMode.BetaCompare,
             lane(HalProviderKind.PureSimple, 10),
             lane(HalProviderKind.C, 11), lane(HalProviderKind.Rust, 10))
         expect(receipt.status).to_equal(HalOrchestrationStatusV1.CommitReady)
-        expect(receipt.difference_pair_mask).to_equal(5)
+        expect(receipt.difference_pair_mask).to_equal(5)  # oracle: only the pairs involving the C lane (bits 1 and 4) diverge, so the mask is 1|4 = 5
         expect(receipt.commit_allowed).to_be(true)
         expect(receipt.selected_provider).to_equal(HalProviderKind.C)
 
     it "normal mode admits only the preferred terminal reaped lane":
+        # @req REQ-011
+        # @capture(bit_table): normal-mode expected and received provider masks
+        step("Orchestrate a normal run where only the preferred Rust lane is present and reaped")
         val receipt = hal_orchestrate_provider_receipts_v1(
             operation(HalProviderKind.Rust), request(),
             HalRunMode.NormalPreferred,
             lane(HalProviderKind.PureSimple, 0, false),
             lane(HalProviderKind.C, 0, false), lane(HalProviderKind.Rust, 10))
-        expect(receipt.expected_mask).to_equal(4)
-        expect(receipt.received_mask).to_equal(4)
+        expect(receipt.expected_mask).to_equal(4)  # oracle: normal mode expects only the preferred Rust provider, whose slot bit is 4
+        expect(receipt.received_mask).to_equal(4)  # oracle: only the Rust lane is present and reaped, so the received mask equals that one bit
         expect(receipt.commit_allowed).to_be(true)
 
     it "rejects an unreaped lane before comparison or commit":
+        # @req REQ-013
+        # @capture(bit_table): invalid-receipt status and rejected provider mask
+        step("Orchestrate an alpha run whose C lane was never reaped")
         val receipt = hal_orchestrate_provider_receipts_v1(
             operation(HalProviderKind.PureSimple), request(),
             HalRunMode.AlphaCompare,
@@ -78,15 +116,18 @@ describe "rt(hal) fixed-slot provider orchestration":
             lane(HalProviderKind.C, 10, true, false),
             lane(HalProviderKind.Rust, 10))
         expect(receipt.status).to_equal(HalOrchestrationStatusV1.InvalidReceipt)
-        expect(receipt.rejected_mask).to_equal(2)
+        expect(receipt.rejected_mask).to_equal(2)  # oracle: only the unreaped C lane is rejected, and the C slot owns provider bit 2
         expect(receipt.commit_allowed).to_be(false)
 
     it "rejects a provider receipt placed in another provider slot":
+        # @req REQ-013
+        # @capture(bit_table): mis-slot rejection status and rejected provider mask
+        step("Orchestrate an alpha run with a C receipt occupying the PureSimple slot")
         val receipt = hal_orchestrate_provider_receipts_v1(
             operation(HalProviderKind.PureSimple), request(),
             HalRunMode.AlphaCompare,
             lane(HalProviderKind.C, 10), lane(HalProviderKind.C, 10),
             lane(HalProviderKind.Rust, 10))
         expect(receipt.status).to_equal(HalOrchestrationStatusV1.InvalidReceipt)
-        expect(receipt.rejected_mask).to_equal(1)
+        expect(receipt.rejected_mask).to_equal(1)  # oracle: the mis-slotted receipt sits in the PureSimple slot, whose provider bit is 1
         expect(receipt.commit_allowed).to_be(false)

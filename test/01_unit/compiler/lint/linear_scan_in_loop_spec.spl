@@ -1,69 +1,102 @@
+"""
+## Purpose and audience
+Executable spec of PERF-SCAN-001, the linear-scan-in-loop hot-path lint, for
+compiler-tooling maintainers. Scope: detection of a whole-container scan
+invoked inside a loop body, and the negative cases that must NOT fire. Out of
+scope: severity escalation policy and the ratchet that freezes the existing
+population — neither is this file's job.
+## Operator workflow
+Run: ./src/compiler_rust/target/bootstrap/simple run
+test/01_unit/compiler/lint/linear_scan_in_loop_spec.spl — each scenario feeds a
+short fixture text to check_linear_scan_in_loop and asserts the finding list.
+## Compatibility and limitations
+The detector is line-based text heuristics (no AST dependency, one linear
+pass) so the fixtures are raw source strings. Historical note: the rule was
+FIRST motivated by the Stage-3 stall in `rt_transient_heap_promote`, but that
+diagnosis was later corrected — promote has a single call site (see
+doc/08_tracking/bug/stage3_quadratic_transient_heap_promote_2026-09-02.md).
+The rule is kept because the O(n^2) shape it detects is a real cost class.
+## Verification guidance and troubleshooting
+A failure here means the detector's loop-state machine dropped or duplicated
+an offending line, fired outside a loop, or lost the actionable hint. Each
+scenario names which of those contracts broke.
+"""
+# Lifecycle: doc/01_research/local/simple_compiler_linter_performance_memory_bug_detection.md ;
+# doc/03_plan/infra/agent_sessions/lint_spec.md ;
+# doc/04_architecture/compiler/00_compiler_architecture.md ;
+# doc/05_design/compiler/simd/simd_lint_design.md
+# @manual_section: linear-scan-in-loop
+
 use std.spec.*
 use compiler.semantics.lint.linear_scan_in_loop.{check_linear_scan_in_loop}
-
-# Purpose and audience: executable spec of PERF-SCAN-001, the linear-scan-in-loop
-# hot-path lint, for compiler-tooling maintainers.
-# Scope: detection of a whole-container scan invoked inside a loop body, and the
-# negative cases that must NOT fire. Out of scope: severity escalation policy and
-# the ratchet that freezes the existing population — neither is this file's job.
-# @req REQ-LINT-PERF-SCAN
-#
-# Regression guard for
-# doc/08_tracking/bug/stage3_quadratic_transient_heap_promote_2026-09-02.md
-#
-# The defect this rule exists to catch: `rt_transient_heap_promote` ends in
-# `scope.objects.retain(...)` (O(|scope.objects|)) and was called once per module
-# surface. Across 760 modules Stage 3 stopped progressing entirely — 6,600
-# objects, zero new in 90 seconds — while emitting NO error and NO diagnostic.
-# `sample` showed 100% of frames in that one chain. Nothing in the toolchain
-# flagged it; that gap is what this rule closes.
 
 describe "PERF-SCAN-001 linear scan in loop":
 
     it "flags the Stage-3 defect shape: promote called per loop item":
+        # @req REQ-LINT-PERF-SCAN
+        # @capture(statistics): finding count plus code and line for the promote fixture
+        step("Feed a for-loop body that promotes each surface element")
         val src = "me module_surfaces_promote(self):\n" +
                   "    for surface in self.surfaces:\n" +
                   "        rt_transient_heap_promote(surface)\n"
         val found = check_linear_scan_in_loop(src, "fixture.spl")
-        expect(found.len()).to_equal(1)
-        expect(found[0].code).to_equal("PERF-SCAN-001")
-        expect(found[0].line_num).to_equal(3)
+        expect(found.len()).to_equal(1)  # oracle: exactly one offending line exists in the fixture
+        expect(found[0].code).to_equal("PERF-SCAN-001")  # oracle: the rule's pinned diagnostic code
+        expect(found[0].line_num).to_equal(3)  # oracle: the promote call sits on the fixture's third line
 
     it "flags .retain( inside a while body":
+        # @req REQ-LINT-PERF-SCAN
+        # @capture(statistics): finding count for the while-body retain fixture
+        step("Feed a while body that retains the whole container per iteration")
         val src = "fn compact(xs):\n" +
                   "    while i < n:\n" +
                   "        xs.retain(pred)\n"
-        expect(check_linear_scan_in_loop(src, "f.spl").len()).to_equal(1)
+        expect(check_linear_scan_in_loop(src, "f.spl").len()).to_equal(1)  # oracle: one retain call, one finding
 
     it "does NOT flag the same call OUTSIDE any loop":
+        # @req REQ-LINT-PERF-SCAN
+        # @capture(statistics): finding count for the loop-free control fixture
+        step("Feed the same retain call with no enclosing loop")
         val src = "fn once(xs):\n" +
                   "    xs.retain(pred)\n"
-        expect(check_linear_scan_in_loop(src, "f.spl").len()).to_equal(0)
+        expect(check_linear_scan_in_loop(src, "f.spl").len()).to_equal(0)  # oracle: no loop, so zero findings is the only correct verdict
 
     it "does NOT flag after the loop is dedented out of":
+        # @req REQ-LINT-PERF-SCAN
+        # @capture(statistics): finding count for the post-loop call fixture
+        step("Feed a retain call that sits after the dedented loop body")
         val src = "fn after(xs):\n" +
                   "    for x in xs:\n" +
                   "        touch(x)\n" +
                   "    xs.retain(pred)\n"
-        expect(check_linear_scan_in_loop(src, "f.spl").len()).to_equal(0)
+        expect(check_linear_scan_in_loop(src, "f.spl").len()).to_equal(0)  # oracle: the dedent ends the loop scope before the call
 
     it "resets at a function header so a loop cannot capture the next function":
+        # @req REQ-LINT-PERF-SCAN
+        # @capture(statistics): finding count for the adjacent-function fixture
+        step("Feed two functions where only the first contains a loop")
         val src = "fn a(xs):\n" +
                   "    for x in xs:\n" +
                   "        touch(x)\n" +
                   "fn b(xs):\n" +
                   "    xs.retain(pred)\n"
-        expect(check_linear_scan_in_loop(src, "f.spl").len()).to_equal(0)
+        expect(check_linear_scan_in_loop(src, "f.spl").len()).to_equal(0)  # oracle: fn b resets loop state, so its retain is out-of-loop
 
     it "reports each offending line once, not once per matching primitive":
+        # @req REQ-LINT-PERF-SCAN
+        # @capture(statistics): finding count for the two-primitive single-line fixture
+        step("Feed one loop line that chains two scanning primitives")
         val src = "fn m(xs):\n" +
                   "    for x in xs:\n" +
                   "        xs.retain(a).contains(b)\n"
-        expect(check_linear_scan_in_loop(src, "f.spl").len()).to_equal(1)
+        expect(check_linear_scan_in_loop(src, "f.spl").len()).to_equal(1)  # oracle: one line is one diagnostic regardless of how many primitives match
 
     it "carries an actionable hint naming the remedy":
+        # @req REQ-LINT-PERF-SCAN
+        # @capture(statistics): hint text of the single finding
+        step("Read the hint attached to a flagged retain call")
         val src = "fn m(xs):\n" +
                   "    for x in xs:\n" +
                   "        xs.retain(p)\n"
         val f = check_linear_scan_in_loop(src, "f.spl")
-        expect(f[0].hint.contains("after the loop")).to_equal(true)
+        expect(f[0].hint.contains("after the loop")).to_equal(true)  # oracle: the remedy the lint prescribes is hoisting the call out of the loop

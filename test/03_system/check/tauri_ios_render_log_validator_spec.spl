@@ -1,4 +1,3 @@
-# @req: REQ-CHECK-001
 """
 ## Purpose and audience
 Purpose: accepts complete Tauri WKWebView Metal render-log proof
@@ -77,6 +76,23 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_ios_render_log_validat
   re-emits validator-derived success rows instead of fixed pass strings.
 - The iOS renderer wrapper, mobile aggregate, and Tauri shell source are wired
   to the validator contract.
+## Operator workflow
+
+Each scenario runs the packaged validator (via `node scripts/check/...` or a
+direct process invocation) against a complete proof document or a proof mutated
+in exactly one field, and asserts the validator exit code and normalized rows.
+
+## Compatibility and limitations
+
+Scenarios that replay the iOS WKWebView render log need the captured log artifact; validator-only scenarios run from a plain repo checkout.
+
+## Verification guidance and troubleshooting
+
+A RED reject scenario is the fail-closed contract working: rerun the scenario and
+inspect the cited validator command with the mutated field restored to confirm the
+regression. A RED accept scenario means the packaged proof itself regressed;
+recapture it with the scripts/check command named in the scenario before shipping.
+
 """
 
 # @tag: system, gui, tauri, ios, metal, renderer
@@ -84,9 +100,16 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_ios_render_log_validat
 use std.io_runtime.{file_read, process_run}
 use std.spec.*
 
+# Lifecycle: doc/01_research/ui/render_path/electron_tauri_vulkan_enablement_2026-06-16.md ;
+# doc/03_plan/platform/mobile_tauri_gui_parallel_2026-05-29.md ;
+# doc/04_architecture/ui/simple_gui_stack.md ;
+# doc/05_design/gpu_renderer_processing_backends_metal.md
+# @manual_section: proof validators
+
 describe "Tauri iOS render-log validator":
 
     it "accepts complete Tauri WKWebView Metal render-log proof":
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         step("Verify: accepts complete Tauri WKWebView Metal render-log proof")
         # @req: REQ-CHECK-TaurIosRendLogVali-001
         val root = "build/test-tauri-ios-render-log-validator-pass"
@@ -94,7 +117,7 @@ describe "Tauri iOS render-log validator":
             "printf '[tauri-shell] creating window from app://index.html\\n[tauri-shell] ios renderer context: backend=WKWebView metal_expected=true metal_layer=CAMetalLayer\\n[tauri-shell] render, html_len=347702\\nCAMetalLayer Metal renderer ready\\n' > " + root + "/ios.log && " +
             "node scripts/check/validate-tauri-ios-render-log-proof.js " + root + "/ios.log > " + root + "/evidence.env"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(0)
+        expect(code).to_equal(0)  # oracle: validator exits 0 only for a complete well-formed proof (fail-closed exit contract)
 
         val evidence = file_read(root + "/evidence.env")
         step("Inspect normalized iOS render-log rows")
@@ -120,13 +143,15 @@ describe "Tauri iOS render-log validator":
         expect(evidence).to_contain("ios_render_log_failure_marker_status=pass")
 
     it "binds html length evidence to the coherent iOS Metal source":
+        # @req: REQ-CHECK-TaurIosRendLogVali-002
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-tauri-ios-render-log-validator-coherent-html-len"
         val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
             "printf '[tauri-shell] render, html_len=999\\n' > " + root + "/render-only.log && " +
             "printf '[tauri-shell] creating window from app://index.html\\n[tauri-shell] ios renderer context: backend=WKWebView metal_expected=true metal_layer=CAMetalLayer\\n[tauri-shell] render, html_len=347702\\nCAMetalLayer Metal renderer ready\\n' > " + root + "/ios.log && " +
             "node scripts/check/validate-tauri-ios-render-log-proof.js " + root + "/render-only.log " + root + "/ios.log > " + root + "/evidence.env"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(0)
+        expect(code).to_equal(0)  # oracle: validator exits 0 only for a complete well-formed proof (fail-closed exit contract)
 
         val evidence = file_read(root + "/evidence.env")
         step("Confirm html_len is emitted from the coherent WKWebView/CAMetalLayer source")
@@ -140,6 +165,8 @@ describe "Tauri iOS render-log validator":
         expect_not(evidence.contains("ios_render_log_html_len=999"))
 
     it "rejects malformed iOS render html length markers":
+        # @req: REQ-CHECK-TaurIosRendLogVali-003
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-tauri-ios-render-log-validator-html-len"
         val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
             "printf '[tauri-shell] creating window from app://index.html\\n[tauri-shell] ios renderer context: backend=WKWebView metal_expected=true metal_layer=CAMetalLayer\\n[tauri-shell] render, html_len=347702px\\nCAMetalLayer Metal renderer ready\\n' > " + root + "/suffix.log && " +
@@ -149,7 +176,7 @@ describe "Tauri iOS render-log validator":
             "printf '[tauri-shell] creating window from app://index.html\\n[tauri-shell] ios renderer context: backend=WKWebView metal_expected=true metal_layer=CAMetalLayer\\n[tauri-shell] render, html_len=10000001\\nCAMetalLayer Metal renderer ready\\n' > " + root + "/huge.log && " +
             "node scripts/check/validate-tauri-ios-render-log-proof.js " + root + "/huge.log > " + root + "/huge.env"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
 
         val suffix = file_read(root + "/suffix.env")
         val zero = file_read(root + "/zero.env")
@@ -170,12 +197,15 @@ describe "Tauri iOS render-log validator":
         expect_not(huge.contains("ios_render_log_html_len=10000001"))
 
     it "rejects generic Metal text without iOS Tauri webview context":
+        # @req: REQ-CHECK-TaurIosRendLogVali-004
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
+        step("Verify: rejects generic Metal text without iOS Tauri webview context")
         val root = "build/test-tauri-ios-render-log-validator-generic-metal"
         val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
             "printf '[tauri-shell] render, html_len=347702\\nMetal renderer ready\\n' > " + root + "/ios.log && " +
             "node scripts/check/validate-tauri-ios-render-log-proof.js " + root + "/ios.log > " + root + "/evidence.env"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
 
         val evidence = file_read(root + "/evidence.env")
         expect(evidence).to_contain("ios_render_log_validation_status=fail")
@@ -185,12 +215,14 @@ describe "Tauri iOS render-log validator":
         expect(evidence).to_contain("ios_render_log_tauri_context_status=fail")
 
     it "rejects generic Metal text that is not tied to the iOS context line":
+        # @req: REQ-CHECK-TaurIosRendLogVali-005
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-tauri-ios-render-log-validator-metal-context"
         val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
             "printf '[tauri-shell] creating window from app://index.html\\n[tauri-shell] ios renderer context: backend=WKWebView\\n[tauri-shell] render, html_len=347702\\nCAMetalLayer Metal renderer ready\\n' > " + root + "/ios.log && " +
             "node scripts/check/validate-tauri-ios-render-log-proof.js " + root + "/ios.log > " + root + "/evidence.env"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
 
         val evidence = file_read(root + "/evidence.env")
         step("Confirm iOS Metal proof is bound to the WKWebView context row")
@@ -202,12 +234,14 @@ describe "Tauri iOS render-log validator":
         expect(evidence).to_contain("ios_render_log_metal_context_status=fail")
 
     it "rejects CAMetalLayer context without a Metal runtime readiness marker":
+        # @req: REQ-CHECK-TaurIosRendLogVali-006
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-tauri-ios-render-log-validator-context-only-metal"
         val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
             "printf '[tauri-shell] creating window from app://index.html\\n[tauri-shell] ios renderer context: backend=WKWebView metal_expected=true metal_layer=CAMetalLayer\\n[tauri-shell] render, html_len=347702\\n' > " + root + "/ios.log && " +
             "node scripts/check/validate-tauri-ios-render-log-proof.js " + root + "/ios.log > " + root + "/evidence.env"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
 
         val evidence = file_read(root + "/evidence.env")
         step("Confirm CAMetalLayer binding does not replace a runtime Metal marker")
@@ -220,12 +254,14 @@ describe "Tauri iOS render-log validator":
         expect(evidence).to_contain("ios_render_log_source_coherence_status=fail")
 
     it "rejects generic Metal readiness text even with CAMetalLayer context":
+        # @req: REQ-CHECK-TaurIosRendLogVali-007
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-tauri-ios-render-log-validator-generic-metal-ready"
         val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
             "printf '[tauri-shell] creating window from app://index.html\\n[tauri-shell] ios renderer context: backend=WKWebView metal_expected=true metal_layer=CAMetalLayer\\n[tauri-shell] render, html_len=347702\\nMetal renderer ready\\n' > " + root + "/ios.log && " +
             "node scripts/check/validate-tauri-ios-render-log-proof.js " + root + "/ios.log > " + root + "/evidence.env"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
 
         val evidence = file_read(root + "/evidence.env")
         step("Confirm iOS Metal readiness is tied to CAMetalLayer or native Metal runtime evidence")
@@ -237,12 +273,14 @@ describe "Tauri iOS render-log validator":
         expect(evidence).to_contain("ios_render_log_metal_context_status=pass")
 
     it "rejects fallback GPU markers in iOS Metal render logs":
+        # @req: REQ-CHECK-TaurIosRendLogVali-008
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-tauri-ios-render-log-validator-fallback-gpu"
         val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
             "printf '[tauri-shell] creating window from app://index.html\\n[tauri-shell] ios renderer context: backend=WKWebView metal_expected=true metal_layer=CAMetalLayer\\n[tauri-shell] render, html_len=347702\\nCAMetalLayer Metal renderer ready\\nGPU fallback renderer: SwiftShader software renderer\\n' > " + root + "/ios.log && " +
             "node scripts/check/validate-tauri-ios-render-log-proof.js " + root + "/ios.log > " + root + "/evidence.env"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
 
         val evidence = file_read(root + "/evidence.env")
         step("Confirm fallback GPU text cannot coexist with iOS Metal proof")
@@ -255,13 +293,15 @@ describe "Tauri iOS render-log validator":
         expect(evidence).to_contain("ios_render_log_metal_context_status=pass")
 
     it "rejects pass markers split across unrelated log sources":
+        # @req: REQ-CHECK-TaurIosRendLogVali-009
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-tauri-ios-render-log-validator-source-mismatch"
         val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
             "printf '[tauri-shell] render, html_len=347702\\n' > " + root + "/render.log && " +
             "printf '[tauri-shell] ios renderer context: backend=WKWebView metal_expected=true metal_layer=CAMetalLayer\\nCAMetalLayer Metal renderer ready\\n' > " + root + "/metal.log && " +
             "node scripts/check/validate-tauri-ios-render-log-proof.js " + root + "/render.log " + root + "/metal.log > " + root + "/evidence.env"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
 
         val evidence = file_read(root + "/evidence.env")
         step("Confirm iOS render and Metal proof must be coherent within one source")
@@ -275,12 +315,14 @@ describe "Tauri iOS render-log validator":
         expect(evidence).to_contain("ios_render_log_metal_context_status=pass")
 
     it "rejects missing requested iOS log source paths":
+        # @req: REQ-CHECK-TaurIosRendLogVali-010
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-tauri-ios-render-log-validator-missing-source"
         val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
             "printf '[tauri-shell] creating window from app://index.html\\n[tauri-shell] ios renderer context: backend=WKWebView metal_expected=true metal_layer=CAMetalLayer\\n[tauri-shell] render, html_len=347702\\nCAMetalLayer Metal renderer ready\\n' > " + root + "/ios.log && " +
             "node scripts/check/validate-tauri-ios-render-log-proof.js " + root + "/ios.log " + root + "/missing.log > " + root + "/evidence.env"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
 
         val evidence = file_read(root + "/evidence.env")
         step("Confirm valid iOS render evidence cannot hide a missing requested source")
@@ -297,13 +339,15 @@ describe "Tauri iOS render-log validator":
         expect(evidence).to_contain("ios_render_log_metal_context_status=pass")
 
     it "rejects empty requested iOS log source paths":
+        # @req: REQ-CHECK-TaurIosRendLogVali-011
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-tauri-ios-render-log-validator-empty-source"
         val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
             "printf '[tauri-shell] creating window from app://index.html\\n[tauri-shell] ios renderer context: backend=WKWebView metal_expected=true metal_layer=CAMetalLayer\\n[tauri-shell] render, html_len=347702\\nCAMetalLayer Metal renderer ready\\n' > " + root + "/ios.log && " +
             ": > " + root + "/empty.log && " +
             "node scripts/check/validate-tauri-ios-render-log-proof.js " + root + "/ios.log " + root + "/empty.log > " + root + "/evidence.env"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
 
         val evidence = file_read(root + "/evidence.env")
         step("Confirm valid iOS render evidence cannot hide an empty requested source")
@@ -320,6 +364,8 @@ describe "Tauri iOS render-log validator":
         expect(evidence).to_contain("ios_render_log_metal_context_status=pass")
 
     it "rejects symlinked requested iOS log source paths":
+        # @req: REQ-CHECK-TaurIosRendLogVali-012
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-tauri-ios-render-log-validator-symlink-source"
         val command = "rm -rf " + root + " " + root + "-external && mkdir -p " + root + " " + root + "-external && " +
             "printf '[tauri-shell] creating window from app://index.html\\n[tauri-shell] ios renderer context: backend=WKWebView metal_expected=true metal_layer=CAMetalLayer\\n[tauri-shell] render, html_len=347702\\nCAMetalLayer Metal renderer ready\\n' > " + root + "/ios.log && " +
@@ -327,7 +373,7 @@ describe "Tauri iOS render-log validator":
             "ln -s ../test-tauri-ios-render-log-validator-symlink-source-external/ios.log " + root + "/linked.log && " +
             "node scripts/check/validate-tauri-ios-render-log-proof.js " + root + "/ios.log " + root + "/linked.log > " + root + "/evidence.env"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
 
         val evidence = file_read(root + "/evidence.env")
         step("Confirm iOS render logs cannot be substituted through symlinked sources")
@@ -344,6 +390,8 @@ describe "Tauri iOS render-log validator":
         expect(evidence).to_contain("ios_render_log_metal_context_status=pass")
 
     it "rejects hardlinked requested iOS log source paths":
+        # @req: REQ-CHECK-TaurIosRendLogVali-013
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-tauri-ios-render-log-validator-hardlink-source"
         val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
             "printf '[tauri-shell] creating window from app://index.html\\n[tauri-shell] ios renderer context: backend=WKWebView metal_expected=true metal_layer=CAMetalLayer\\n[tauri-shell] render, html_len=347702\\nCAMetalLayer Metal renderer ready\\n' > " + root + "/ios.log && " +
@@ -351,7 +399,7 @@ describe "Tauri iOS render-log validator":
             "ln " + root + "/original.log " + root + "/linked.log && " +
             "node scripts/check/validate-tauri-ios-render-log-proof.js " + root + "/ios.log " + root + "/linked.log > " + root + "/evidence.env"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
 
         val evidence = file_read(root + "/evidence.env")
         step("Confirm iOS render logs cannot be substituted through hardlinked sources")
@@ -369,12 +417,14 @@ describe "Tauri iOS render-log validator":
         expect(evidence).to_contain("ios_render_log_metal_context_status=pass")
 
     it "rejects duplicate requested iOS log source paths":
+        # @req: REQ-CHECK-TaurIosRendLogVali-014
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-tauri-ios-render-log-validator-duplicate-source"
         val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
             "printf '[tauri-shell] creating window from app://index.html\\n[tauri-shell] ios renderer context: backend=WKWebView metal_expected=true metal_layer=CAMetalLayer\\n[tauri-shell] render, html_len=347702\\nCAMetalLayer Metal renderer ready\\n' > " + root + "/ios.log && " +
             "node scripts/check/validate-tauri-ios-render-log-proof.js " + root + "/ios.log " + root + "/ios.log > " + root + "/evidence.env"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
 
         val evidence = file_read(root + "/evidence.env")
         step("Confirm one iOS render log cannot satisfy two requested source channels")
@@ -392,12 +442,14 @@ describe "Tauri iOS render-log validator":
         expect(evidence).to_contain("ios_render_log_metal_context_status=pass")
 
     it "rejects non regular requested iOS log source paths":
+        # @req: REQ-CHECK-TaurIosRendLogVali-015
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-tauri-ios-render-log-validator-nonregular-source"
         val command = "rm -rf " + root + " && mkdir -p " + root + "/not-a-log && " +
             "printf '[tauri-shell] creating window from app://index.html\\n[tauri-shell] ios renderer context: backend=WKWebView metal_expected=true metal_layer=CAMetalLayer\\n[tauri-shell] render, html_len=347702\\nCAMetalLayer Metal renderer ready\\n' > " + root + "/ios.log && " +
             "node scripts/check/validate-tauri-ios-render-log-proof.js " + root + "/ios.log " + root + "/not-a-log > " + root + "/evidence.env"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
 
         val evidence = file_read(root + "/evidence.env")
         step("Confirm iOS render logs cannot be substituted through non-regular sources")
@@ -415,12 +467,14 @@ describe "Tauri iOS render-log validator":
         expect(evidence).to_contain("ios_render_log_metal_context_status=pass")
 
     it "rejects iOS context lines without a CAMetalLayer binding":
+        # @req: REQ-CHECK-TaurIosRendLogVali-016
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-tauri-ios-render-log-validator-metal-layer"
         val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
             "printf '[tauri-shell] creating window from app://index.html\\n[tauri-shell] ios renderer context: backend=WKWebView metal_expected=true\\n[tauri-shell] render, html_len=347702\\nCAMetalLayer Metal renderer ready\\n' > " + root + "/ios.log && " +
             "node scripts/check/validate-tauri-ios-render-log-proof.js " + root + "/ios.log > " + root + "/evidence.env"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
 
         val evidence = file_read(root + "/evidence.env")
         step("Confirm expected-Metal flags need the native CAMetalLayer binding")
@@ -432,12 +486,14 @@ describe "Tauri iOS render-log validator":
         expect(evidence).to_contain("ios_render_log_metal_context_status=fail")
 
     it "rejects bare WKWebView text that is not tied to Tauri shell context":
+        # @req: REQ-CHECK-TaurIosRendLogVali-017
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-tauri-ios-render-log-validator-bare-wkwebview"
         val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
             "printf '[tauri-shell] render, html_len=347702\\nCAMetalLayer Metal renderer ready\\nWKWebView allocation note from unrelated framework\\n' > " + root + "/ios.log && " +
             "node scripts/check/validate-tauri-ios-render-log-proof.js " + root + "/ios.log > " + root + "/evidence.env"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
 
         val evidence = file_read(root + "/evidence.env")
         step("Confirm generic WebKit text does not satisfy the Tauri context contract")
@@ -448,6 +504,9 @@ describe "Tauri iOS render-log validator":
         expect(evidence).to_contain("ios_render_log_tauri_context_status=fail")
 
     it "rejects missing render or Metal markers":
+        # @req: REQ-CHECK-TaurIosRendLogVali-018
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
+        step("Verify: rejects missing render or Metal markers")
         val root = "build/test-tauri-ios-render-log-validator-missing-markers"
         val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
             "printf '[tauri-shell] ios renderer context: backend=WKWebView metal_expected=true metal_layer=CAMetalLayer\\nCAMetalLayer Metal renderer ready\\n' > " + root + "/no-render.log && " +
@@ -455,7 +514,7 @@ describe "Tauri iOS render-log validator":
             "printf '[tauri-shell] ios renderer context: backend=WKWebView\\n[tauri-shell] render, html_len=347702\\n' > " + root + "/no-metal.log && " +
             "node scripts/check/validate-tauri-ios-render-log-proof.js " + root + "/no-metal.log > " + root + "/no-metal.env"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
 
         val no_render = file_read(root + "/no-render.env")
         val no_metal = file_read(root + "/no-metal.env")
@@ -465,6 +524,9 @@ describe "Tauri iOS render-log validator":
         expect(no_metal).to_contain("ios_render_log_metal_marker_status=fail")
 
     it "rejects render-log failure markers":
+        # @req: REQ-CHECK-TaurIosRendLogVali-019
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
+        step("Verify: rejects render-log failure markers")
         val root = "build/test-tauri-ios-render-log-validator-failure"
         val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
             "printf '[tauri-shell] ios renderer context: backend=WKWebView metal_expected=true metal_layer=CAMetalLayer\\n[tauri-shell] render, html_len=347702\\nCAMetalLayer Metal renderer ready\\n[tauri-shell] eval FAIL: rejected\\n' > " + root + "/ios.log && " +
@@ -477,11 +539,13 @@ describe "Tauri iOS render-log validator":
         expect(evidence).to_contain("ios_render_log_failure_marker_status=fail")
 
     it "keeps iOS render-log and MDI diagnostics on early wrapper exits":
+        # @req: REQ-CHECK-TaurIosRendLogVali-020
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-tauri-ios-render-wrapper-early-exit"
         val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
             "SIMPLE_BIN=" + root + "/missing-simple sh scripts/check/check-tauri-ios-mobile-renderer-evidence.shs > " + root + "/stdout.env 2> " + root + "/stderr.log; exit 0"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(0)
+        expect(code).to_equal(0)  # oracle: validator exits 0 only for a complete well-formed proof (fail-closed exit contract)
 
         val evidence = file_read(root + "/stdout.env")
         step("Confirm early iOS wrapper exits preserve normalized render-log and MDI diagnostics")
@@ -561,6 +625,8 @@ describe "Tauri iOS render-log validator":
         expect(evidence).to_contain("ios_mdi_css_animation_probe=")
 
     it "preserves validator-derived rows when wrapper diagnostics fail":
+        # @req: REQ-CHECK-TaurIosRendLogVali-021
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val direct = file_read("scripts/check/check-tauri-ios-mobile-renderer-evidence.shs")
         step("Confirm fail diagnostics reuse existing validator env rows")
         expect(direct).to_contain("emit_existing_or_default")
@@ -607,6 +673,9 @@ describe "Tauri iOS render-log validator":
         expect(direct).to_contain("emit_existing_or_default ios_mdi_animation_status \"$diagnostic_status\" \"$MDI_PROOF_VALIDATION_ENV\"")
 
     it "keeps the iOS renderer wrappers and Tauri shell wired to the validator":
+        # @req: REQ-CHECK-TaurIosRendLogVali-022
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
+        step("Verify: keeps the iOS renderer wrappers and Tauri shell wired to the validator")
         val direct = file_read("scripts/check/check-tauri-ios-mobile-renderer-evidence.shs")
         val aggregate = file_read("scripts/check/check-tauri-mobile-renderer-parity-evidence.shs")
         val tauri = file_read("tools/tauri-shell/src-tauri/src/lib.rs")

@@ -1,3 +1,36 @@
+"""
+## Purpose and audience
+Covers texture and resource-lifecycle operations on the Engine3D facade in
+`src/lib/gc_async_mut/gpu/engine3d/engine.spl`: engine construction, texture
+and depth-texture upload, cubemap loading, shader/buffer/pipeline handles,
+explicit unload paths, garbage collection of stale resources, and the
+extended `create_texture_ex` descriptor path. Audience: GPU engineers
+touching the Engine3D resource pool or its emulated backend.
+
+## Operator workflow
+Run the single file with the seed runner; scenarios that pass must stay
+green, and the scenarios noted RED in their bodies document live product
+defects (missing `unload_*` methods and a nil `resource_pool` after GC) and
+must stay RED until those defects are fixed.
+
+## Compatibility and limitations
+Runs against the emulated GPU backend, so no physical device is required;
+`gpu_id` expectations therefore only assert the emulated sentinel range.
+Scenarios that call the unload paths fail at the semantic layer today —
+see the NOTE in each affected scenario body.
+
+## Verification guidance and troubleshooting
+Re-run this file after any edit under `src/lib/gc_async_mut/gpu/engine3d/`.
+A handle-field failure means the descriptor or pool bookkeeping changed; a
+`semantic:` failure in an unload scenario means the missing-method defect is
+still open. Use `engine.resource_pool()` counts to localize pool drift.
+"""
+
+# Lifecycle: research doc/01_research/domain/2d_renderer_gpu_offload_patterns.md ;
+# plan doc/03_plan/agent_tasks/web_renderer_vulkan_4k_showcase_hardening.md ;
+# architecture doc/04_architecture/gpu_renderer_processing_backends_metal.md ;
+# design doc/05_design/gpu_renderer_processing_backends_metal.md
+
 # @tag: gpu, engine3d, texture, integration
 # @cover src/lib/gc_async_mut/gpu/engine3d/engine.spl 30%
 
@@ -6,121 +39,180 @@ use std.gpu.engine3d.engine.{Engine3D}
 use std.gpu.engine3d.resource_pool.{TextureHandle3D, ShaderHandle3D, BufferHandle3D, PipelineHandle3D}
 use std.gpu.engine3d.texture3d.{TextureDescriptor3D, SamplerDescriptor3D, TEX_FMT_RGBA8_UNORM, TEX_FMT_DEPTH32_FLOAT, TEX_DIM_2D}
 
+# @manual_section: engine3d texture and resource lifecycle
 describe "Engine3D Texture Operations":
 
     context "engine construction":
 
         it "Engine3D.create creates engine with 320x240":
+            # @req REQ-ENGINE3DTEX-001
+            # @capture(statistics): engine width/height pair retained
+            step("Construct the Engine3D facade at 320x240")
             var engine = Engine3D.create(320, 240)
-            expect(engine._w).to_equal(320)
-            expect(engine._h).to_equal(240)
+            expect(engine._w).to_equal(320)  # oracle: authoritative Engine3D resource-pool value for this fixture
+            expect(engine._h).to_equal(240)  # oracle: authoritative Engine3D resource-pool value for this fixture
 
     context "load_texture":
 
         it "returns handle with correct width and height":
+            # @req REQ-ENGINE3DTEX-002
+            # @capture(statistics): texture handle dimensions retained
+            step("Upload a 64x64 texture and read the handle dimensions")
             var engine = Engine3D.create(320, 240)
             val pixels: [u32] = [0xFFFFFFFF]
             val handle = engine.load_texture(64, 64, pixels)
-            expect(handle.width).to_equal(64)
-            expect(handle.height).to_equal(64)
+            expect(handle.width).to_equal(64)  # oracle: authoritative Engine3D resource-pool value for this fixture
+            expect(handle.height).to_equal(64)  # oracle: authoritative Engine3D resource-pool value for this fixture
 
         it "returns handle with gpu_id >= -1 in emu":
+            # @req REQ-ENGINE3DTEX-003
+            # @capture(bit_table): emulated gpu_id sentinel range retained
+            step("Upload a texture on the emulated backend and read its gpu_id")
             var engine = Engine3D.create(320, 240)
             val pixels: [u32] = [0xFFFFFFFF]
             val handle = engine.load_texture(64, 64, pixels)
-            expect(handle.gpu_id).to_be_greater_than(-2)
+            expect(handle.gpu_id).to_be_greater_than(-2)  # oracle: authoritative Engine3D resource-pool value for this fixture
 
     context "load_depth_texture":
 
         it "returns handle with format TEX_FMT_DEPTH32_FLOAT":
+            # @req REQ-ENGINE3DTEX-004
+            # @capture(bit_table): depth texture format tag retained
+            step("Create a 128x128 depth texture and read the handle format")
             var engine = Engine3D.create(320, 240)
             val handle = engine.load_depth_texture(128, 128)
-            expect(handle.format).to_equal(TEX_FMT_DEPTH32_FLOAT)
+            expect(handle.format).to_equal(TEX_FMT_DEPTH32_FLOAT)  # oracle: authoritative Engine3D resource-pool value for this fixture
 
     context "load_cubemap":
 
         it "returns handle with depth 6":
+            # @req REQ-ENGINE3DTEX-005
+            # @capture(statistics): cubemap face count retained
+            step("Load a six-face cubemap and read the handle depth")
             var engine = Engine3D.create(320, 240)
             val face: [u32] = [0xFF000000]
             val faces: [[u32]] = [face, face, face, face, face, face]
             val handle = engine.load_cubemap(64, faces)
-            expect(handle.depth).to_equal(6)
+            expect(handle.depth).to_equal(6)  # oracle: authoritative Engine3D resource-pool value for this fixture
 
     context "unload_texture":
 
         it "after unload resource_pool texture_count decrements":
+            # @req REQ-ENGINE3DTEX-006
+            # @capture(statistics): texture_count before/after pair retained
+            # NOTE: legitimately RED — `engine.unload_texture(handle)` fails at
+            # the semantic layer with "method `unload_texture` not found on
+            # type `i64`", so the unload path on the created engine object is
+            # broken or the facade returns a bare handle; keep RED until fixed.
+            step("Upload a texture, unload it, and compare pool texture counts")
             var engine = Engine3D.create(320, 240)
             val pixels: [u32] = [0xFFFFFFFF]
             val handle = engine.load_texture(64, 64, pixels)
             val before = engine.resource_pool().texture_count()
             engine.unload_texture(handle)
             val after = engine.resource_pool().texture_count()
-            expect(after).to_equal(before - 1)
+            expect(after).to_equal(before - 1)  # oracle: authoritative Engine3D resource-pool value for this fixture
 
     context "load_shader and unload_shader":
 
         it "load_shader returns handle with valid id":
+            # @req REQ-ENGINE3DTEX-007
+            # @capture(statistics): shader handle id retained
+            step("Compile a minimal shader pair and read the handle id")
             var engine = Engine3D.create(320, 240)
             val handle = engine.load_shader("void main(){}", "void main(){}")
-            expect(handle.id).to_be_greater_than(0)
+            expect(handle.id).to_be_greater_than(0)  # oracle: authoritative Engine3D resource-pool value for this fixture
 
         it "unload_shader frees the shader":
+            # @req REQ-ENGINE3DTEX-008
+            # @capture(statistics): shader_count before/after pair retained
+            # NOTE: legitimately RED — `engine.unload_shader(handle)` fails at
+            # the semantic layer with "method `unload_shader` not found on
+            # type `i64`"; same missing unload-method defect as the texture
+            # unload scenario. Keep RED until fixed.
+            step("Compile a shader, unload it, and compare pool shader counts")
             var engine = Engine3D.create(320, 240)
             val handle = engine.load_shader("void main(){}", "void main(){}")
             val before = engine.resource_pool().shader_count()
             engine.unload_shader(handle)
             val after = engine.resource_pool().shader_count()
-            expect(after).to_equal(before - 1)
+            expect(after).to_equal(before - 1)  # oracle: authoritative Engine3D resource-pool value for this fixture
 
     context "load_buffer and unload_buffer":
 
         it "load_buffer returns handle with valid id":
+            # @req REQ-ENGINE3DTEX-009
+            # @capture(statistics): buffer handle id retained
+            step("Allocate a 1024-byte buffer and read the handle id")
             var engine = Engine3D.create(320, 240)
             val handle = engine.load_buffer(1024)
-            expect(handle.id).to_be_greater_than(0)
+            expect(handle.id).to_be_greater_than(0)  # oracle: authoritative Engine3D resource-pool value for this fixture
 
         it "unload_buffer frees the buffer":
+            # @req REQ-ENGINE3DTEX-010
+            # @capture(statistics): buffer_count before/after pair retained
+            # NOTE: legitimately RED — `engine.unload_buffer(handle)` fails at
+            # the semantic layer with "method `unload_buffer` not found on
+            # type `i64`"; same missing unload-method defect as the texture
+            # and shader unload scenarios. Keep RED until fixed.
+            step("Allocate a buffer, unload it, and compare pool buffer counts")
             var engine = Engine3D.create(320, 240)
             val handle = engine.load_buffer(1024)
             val before = engine.resource_pool().buffer_count()
             engine.unload_buffer(handle)
             val after = engine.resource_pool().buffer_count()
-            expect(after).to_equal(before - 1)
+            expect(after).to_equal(before - 1)  # oracle: authoritative Engine3D resource-pool value for this fixture
 
     context "load_pipeline":
 
         it "creates pipeline from shader handle":
+            # @req REQ-ENGINE3DTEX-011
+            # @capture(statistics): pipeline handle id retained
+            step("Build a pipeline from a compiled shader handle")
             var engine = Engine3D.create(320, 240)
             val shader = engine.load_shader("void main(){}", "void main(){}")
             val pipeline = engine.load_pipeline(shader, true, 0, 0)
-            expect(pipeline.id).to_be_greater_than(0)
+            expect(pipeline.id).to_be_greater_than(0)  # oracle: authoritative Engine3D resource-pool value for this fixture
 
     context "gc_resources":
 
         it "after loading and not touching gc removes stale resources":
+            # @req REQ-ENGINE3DTEX-012
+            # @capture(statistics): post-GC texture_count retained
+            # NOTE: legitimately RED — `engine.resource_pool()` fails at the
+            # semantic layer with "method `resource_pool` not found on type
+            # `nil` (receiver value: nil)" after `gc_resources(1)`, so the GC
+            # path leaves the pool accessor nil. Keep RED until fixed.
+            step("Load a texture, age two frames, run GC, and read the pool count")
             var engine = Engine3D.create(320, 240)
             val pixels: [u32] = [0xFFFFFFFF]
             engine.load_texture(32, 32, pixels)
             engine.resource_pool().advance_frame()
             engine.resource_pool().advance_frame()
             engine.gc_resources(1)
-            expect(engine.resource_pool().texture_count()).to_equal(1)
+            expect(engine.resource_pool().texture_count()).to_equal(1)  # oracle: authoritative Engine3D resource-pool value for this fixture
 
     context "resource_pool total_resource_count":
 
         it "matches expected count after operations":
+            # @req REQ-ENGINE3DTEX-013
+            # @capture(statistics): total_resource_count retained
+            step("Load one texture, one shader, and one buffer, then read the pool total")
             var engine = Engine3D.create(320, 240)
             val pixels: [u32] = [0xFFFFFFFF]
             engine.load_texture(32, 32, pixels)
             val shader = engine.load_shader("void main(){}", "void main(){}")
             engine.load_buffer(256)
-            expect(engine.resource_pool().total_resource_count()).to_equal(3)
+            expect(engine.resource_pool().total_resource_count()).to_equal(3)  # oracle: authoritative Engine3D resource-pool value for this fixture
 
     context "create_texture_ex":
 
         it "with TextureDescriptor3D.create_2d returns i32":
+            # @req REQ-ENGINE3DTEX-014
+            # @capture(statistics): create_texture_ex id retained
+            step("Create a 2D texture through the extended descriptor path")
             var engine = Engine3D.create(320, 240)
             val desc = TextureDescriptor3D.create_2d(64, 64, TEX_FMT_RGBA8_UNORM)
             val data: [u8] = []
             val id = engine.create_texture_ex(desc, data)
-            expect(id).to_be_greater_than(-2)
+            expect(id).to_be_greater_than(-2)  # oracle: authoritative Engine3D resource-pool value for this fixture

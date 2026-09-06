@@ -2,31 +2,34 @@
 # @cover src/lib/hardware/soc_rtl/ram64.spl 0%
 # @cover src/lib/hardware/soc_rtl/wb64_interconnect.spl 0%
 """
-# RV64GC SoC Top-Level Integration Specification
-
-**Feature IDs:** rv64-fpga-linux-boot
-**Category:** Infrastructure
-**Difficulty:** 4/5
-**Status:** Draft
-**Requirements:** REQ-8, REQ-9
-**Research:** doc/01_research/domain/riscv_fpga_linux.md
-**Artifacts:** N/A
-
-## Overview
-
-Tests for the RV64GC SoC top-level: memory map address constants
-(QEMU virt profile), wishbone64 interconnect address decode, RAM64
-read/write round-trip, and SoC peripheral integration.
-
-Covers: AC-3 (SOC top-level integrates core + CLINT + PLIC + UART16550
-+ RAM + bootrom with correct memory map)
-
-## Compiled-Mode Notes
-
+## Purpose and audience
+RV64GC SoC top-level integration evidence for the riscv-fpga-linux-boot
+team: memory map address constants (QEMU virt profile), wishbone64
+interconnect address decode, RAM64 read/write round-trips, and SoC
+peripheral integration. Covers AC-3 — the SoC top integrates core + CLINT
++ PLIC + UART16550 + RAM + bootrom with the correct memory map.
+## Operator workflow
+Run this file from the repo root with the seed runner:
+`./src/compiler_rust/target/bootstrap/simple run test/01_unit/lib/hardware/soc_rtl/soc_top_64_spec.spl`.
+Memory map constants are pinned against the product region list from
+`wb64_qemu_virt_regions`, not against local copies.
+## Compatibility and limitations
 Memory map constant checks and RAM64 read/write round-trips are
 interpreter-safe. Full SoC tick simulation (core64_step + peripheral
-updates + interrupt routing) requires compiled mode.
+updates + interrupt routing) needs compiled mode; the tick scenarios here
+exercise the interpreter-lane `soc_top_64_tick` only. SoC64 test DRAM is
+capped at 0x1000 bytes.
+## Verification guidance and troubleshooting
+A red scenario here means the QEMU virt memory map drifted, address decode
+routes a mapped or unmapped range wrongly, or RAM64 lost a round-trip
+value. Re-run the file and compare the failing scenario's region index or
+address against `src/lib/hardware/riscv_common/mmio_map.spl` before
+touching an oracle.
 """
+# Lifecycle: doc/01_research/domain/sspec_documentization_maintenance.md ;
+# doc/03_plan/sspec_modernization_plan.md ;
+# doc/04_architecture/riscv32_riscv64_fpga_simpleos_production.md ;
+# doc/05_design/rv64_sv39_pid1_network_ssh_wm_boot.md
 
 use std.spipe.*
 use std.hardware.soc_rtl.*
@@ -37,135 +40,203 @@ val SOC64_TEST_DRAM_SIZE: i64 = 0x1000
 # AC-3: QEMU Virt Memory Map Constants (REQ-9)
 # ============================================================================
 
+# @manual_section: rv64-soc-memory-map
 describe "RV64 SoC Memory Map (QEMU virt)":
     it "AC-3: bootrom base address is 0x1000":
         # @req REQ-8
         # @req REQ-9
         # @req REQ-SSPEC-LIB
-        step("AC-3: bootrom base address is 0x1000")
-        val bootrom_base = 0x1000
-        expect(bootrom_base).to_equal(0x1000)
+        # @capture(bit_table): QEMU virt region base addresses decoded from the product region list
+        step("Decode the bootrom base from the QEMU virt region list")
+        val regions = wb64_make_qemu_virt_regions()
+        val bootrom_base = regions[0].base_addr
+        expect(bootrom_base).to_equal(0x1000)  # oracle: MMIO_BOOTROM_BASE in riscv_common/mmio_map.spl pins the bootrom region at 0x1000
 
     it "AC-3: CLINT base address is 0x200_0000":
-        val clint_base = 0x200_0000
-        expect(clint_base).to_equal(0x200_0000)
+        # @req REQ-9
+        # @capture(bit_table): QEMU virt region base addresses decoded from the product region list
+        step("Decode the CLINT base from the QEMU virt region list")
+        val regions = wb64_make_qemu_virt_regions()
+        val clint_base = regions[1].base_addr
+        expect(clint_base).to_equal(0x200_0000)  # oracle: MMIO_CLINT_BASE pins the CLINT region at 0x200_0000
 
     it "AC-3: PLIC base address is 0xC00_0000":
-        val plic_base = 0xC00_0000
-        expect(plic_base).to_equal(0xC00_0000)
+        # @req REQ-9
+        # @capture(bit_table): QEMU virt region base addresses decoded from the product region list
+        step("Decode the PLIC base from the QEMU virt region list")
+        val regions = wb64_make_qemu_virt_regions()
+        val plic_base = regions[2].base_addr
+        expect(plic_base).to_equal(0xC00_0000)  # oracle: MMIO_PLIC_BASE pins the PLIC region at 0xC00_0000
 
     it "AC-3: UART16550 base address is 0x1000_0000":
-        val uart_base = 0x1000_0000
-        expect(uart_base).to_equal(0x1000_0000)
+        # @req REQ-9
+        # @capture(bit_table): QEMU virt region base addresses decoded from the product region list
+        step("Decode the UART16550 base from the QEMU virt region list")
+        val regions = wb64_make_qemu_virt_regions()
+        val uart_base = regions[3].base_addr
+        expect(uart_base).to_equal(0x1000_0000)  # oracle: MMIO_UART_BASE pins the UART16550 region at 0x1000_0000
 
     it "AC-3: DRAM base address is 0x8000_0000":
-        val dram_base = 0x8000_0000
-        expect(dram_base).to_equal(0x8000_0000)
+        # @req REQ-9
+        # @capture(bit_table): QEMU virt region base addresses decoded from the product region list
+        step("Decode the DRAM base from the QEMU virt region list")
+        val regions = wb64_make_qemu_virt_regions()
+        val dram_base = regions[4].base_addr
+        expect(dram_base).to_equal(0x8000_0000)  # oracle: MMIO_DRAM_BASE pins the DRAM region at 0x8000_0000
 
 
 # ============================================================================
 # AC-3: SoC Top Initialization (REQ-8)
 # ============================================================================
 
+# @manual_section: rv64-soc-init
 describe "SocTop64 Initialization":
     it "AC-3: soc_top_64_init creates state with specified DRAM size":
+        # @req REQ-8
+        # @capture(statistics): SoC top state sizes for the test DRAM config
+        step("Initialize the SoC top with the test DRAM size")
         val soc = soc_top_64_init(SOC64_TEST_DRAM_SIZE)
-        expect(soc.ram.size).to_equal(SOC64_TEST_DRAM_SIZE)
+        expect(soc.ram.size).to_equal(SOC64_TEST_DRAM_SIZE)  # oracle: the initializer must allocate exactly the requested DRAM size
 
     it "AC-3: soc_top_64_init wires core with QEMU virt reset vector":
+        # @req REQ-8
+        # @capture(statistics): core program counter after SoC top init
+        step("Read the core program counter after init")
         val soc = soc_top_64_init(SOC64_TEST_DRAM_SIZE)
-        expect(soc.core.pc).to_equal(0x1000)
+        expect(soc.core.pc).to_equal(0x1000)  # oracle: the QEMU virt bootrom entry is the reset vector 0x1000
 
     it "AC-3: soc_top_64_init starts core in M-mode":
+        # @req REQ-8
+        # @capture(statistics): core privilege mode after SoC top init
+        step("Read the core privilege mode after init")
         val soc = soc_top_64_init(SOC64_TEST_DRAM_SIZE)
-        expect(soc.core.priv_mode).to_equal(3)
+        expect(soc.core.priv_mode).to_equal(3)  # oracle: privilege encoding 3 is M-mode, the RISC-V reset mode
 
 
 # ============================================================================
 # AC-3: RAM64 Read/Write Round-Trip
 # ============================================================================
 
+# @manual_section: rv64-ram-roundtrip
 describe "Ram64 Operations":
     it "AC-3: ram64_init allocates memory of specified size":
+        # @req REQ-8
+        # @capture(statistics): RAM64 sizes after init
+        step("Initialize a 0x1000-byte RAM64")
         val ram = ram64_init(0x1000)
-        expect(ram.size).to_equal(0x1000)
+        expect(ram.size).to_equal(0x1000)  # oracle: ram64_init must allocate exactly the requested byte count
 
     it "AC-3: ram64 byte write and read round-trip":
+        # @req REQ-8
+        # @capture(bit_table): RAM64 byte-lane round-trip values
+        step("Round-trip one byte through RAM64")
         var ram = ram64_init(0x1000)
         ram = ram64_write(ram, 0, 1, 0xAB)
         val result = ram64_read(ram, 0, 1)
-        expect(result).to_equal(0xAB)
+        expect(result).to_equal(0xAB)  # oracle: a byte write must read back unchanged
 
     it "AC-3: ram64 halfword write and read round-trip":
+        # @req REQ-8
+        # @capture(bit_table): RAM64 halfword round-trip values
+        step("Round-trip one halfword through RAM64")
         var ram = ram64_init(0x1000)
         ram = ram64_write(ram, 0, 2, 0xABCD)
         val result = ram64_read(ram, 0, 2)
-        expect(result).to_equal(0xABCD)
+        expect(result).to_equal(0xABCD)  # oracle: a halfword write must read back unchanged
 
     it "AC-3: ram64 word write and read round-trip":
+        # @req REQ-8
+        # @capture(bit_table): RAM64 word round-trip values
+        step("Round-trip one word through RAM64")
         var ram = ram64_init(0x1000)
         ram = ram64_write(ram, 0, 4, 0xDEAD_BEEF)
         val result = ram64_read(ram, 0, 4)
-        expect(result).to_equal(0xDEAD_BEEF)
+        expect(result).to_equal(0xDEAD_BEEF)  # oracle: a word write must read back unchanged
 
     it "AC-3: ram64 doubleword write and read round-trip":
+        # @req REQ-8
+        # @capture(bit_table): RAM64 doubleword round-trip values
+        step("Round-trip one doubleword through RAM64")
         var ram = ram64_init(0x1000)
         ram = ram64_write(ram, 0, 8, 0xDEAD_BEEF_CAFE_BABE)
         val result = ram64_read(ram, 0, 8)
-        expect(result).to_equal(0xDEAD_BEEF_CAFE_BABE)
+        expect(result).to_equal(0xDEAD_BEEF_CAFE_BABE)  # oracle: a doubleword write must read back unchanged
 
     it "AC-3: ram64_load_binary loads data at offset":
+        # @req REQ-8
+        # @capture(bit_table): RAM64 binary load layout at offset 0x100
+        step("Load a binary image at offset 0x100")
         var ram = ram64_init(0x1000)
         val data = [0x13, 0x00, 0x00, 0x00]
         ram = ram64_load_binary(ram, 0x100, data)
         val result = ram64_read(ram, 0x100, 4)
-        expect(result).to_equal(0x13)
+        expect(result).to_equal(0x13)  # oracle: the loaded image's first byte lands at the requested offset
 
 
 # ============================================================================
 # AC-3: Wishbone64 Interconnect Address Decode (REQ-9)
 # ============================================================================
 
+# @manual_section: rv64-wishbone-decode
 describe "Wb64Interconnect Address Decode":
     it "AC-3: wb64_init accepts region list":
+        # @req REQ-9
+        # @capture(statistics): interconnect region counts after init
+        step("Initialize the interconnect from the QEMU virt region list")
         val regions = wb64_make_qemu_virt_regions()
         val ic = wb64_init(regions)
-        expect(ic.region_count).to_be_greater_than(0)
+        expect(ic.region_count).to_be_greater_than(0)  # oracle: the QEMU virt map registers five regions, so the count is positive
 
     it "AC-3: wb64_request to DRAM range returns ack":
+        # @req REQ-9
+        # @capture(bit_table): wishbone decode verdicts per QEMU virt range
+        step("Decode a DRAM-range address through the interconnect")
         val regions = wb64_make_qemu_virt_regions()
         val ic = wb64_init(regions)
         val resp = wb64_request(ic, 0x8000_0000, 0, false, 0xFF)
-        expect(resp.ack).to_equal(true)
+        expect(resp.ack).to_equal(true)  # oracle: 0x8000_0000 is the DRAM region base, so decode must ack
 
     it "AC-3: wb64_request to UART range returns ack":
+        # @req REQ-9
+        # @capture(bit_table): wishbone decode verdicts per QEMU virt range
+        step("Decode a UART-range address through the interconnect")
         val regions = wb64_make_qemu_virt_regions()
         val ic = wb64_init(regions)
         val resp = wb64_request(ic, 0x1000_0000, 0, false, 0xFF)
-        expect(resp.ack).to_equal(true)
+        expect(resp.ack).to_equal(true)  # oracle: 0x1000_0000 is the UART region base, so decode must ack
 
     it "AC-3: wb64_request to unmapped address returns err":
+        # @req REQ-9
+        # @capture(bit_table): wishbone decode verdicts per QEMU virt range
+        step("Decode an unmapped address through the interconnect")
         val regions = wb64_make_qemu_virt_regions()
         val ic = wb64_init(regions)
         val resp = wb64_request(ic, 0xFFFF_FFFF, 0, false, 0xFF)
-        expect(resp.err).to_equal(true)
+        expect(resp.err).to_equal(true)  # oracle: no QEMU virt region covers 0xFFFF_FFFF, so decode must err
 
 
 # ============================================================================
 # AC-3: SoC Tick (compiled mode for full verification)
 # ============================================================================
 
+# @manual_section: rv64-soc-tick
 describe "SocTop64 Tick":
     it "AC-3: soc_top_64_tick advances the core PC":
+        # @req REQ-8
+        # @capture(statistics): core program counter across one SoC tick
+        step("Tick the SoC once and read the core program counter")
         var soc = soc_top_64_init(SOC64_TEST_DRAM_SIZE)
         val initial_pc = soc.core.pc
         soc = soc_top_64_tick(soc)
-        expect(soc.core.pc).to_equal(initial_pc + 4)
+        expect(soc.core.pc).to_equal(initial_pc + 4)  # oracle: one RV64C-visible tick retires one 4-byte instruction slot
 
     it "AC-3: soc_top_64_tick updates clint mtime":
+        # @req REQ-8
+        # @capture(statistics): CLINT mtime across one SoC tick
+        step("Tick the SoC once and read the CLINT mtime")
         var soc = soc_top_64_init(SOC64_TEST_DRAM_SIZE)
         soc = soc_top_64_tick(soc)
-        expect(soc.clint.mtime).to_equal(1)
+        expect(soc.clint.mtime).to_equal(1)  # oracle: one tick increments mtime from 0 to exactly 1
 
 
 # ============================================================================

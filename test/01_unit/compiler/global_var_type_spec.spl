@@ -1,18 +1,36 @@
-# Purpose and audience: executable specification evidence for the owning engineering team.
-# @req REQ-SSPEC-COMPILER
-# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+"""
+## Purpose and audience
 
-# Regression test: module-level typed var declarations resolve correctly
-#
-# Phase 0A fix: HIR module_pass.rs extract_pattern_type()
-# Before fix: `var x: u64 = 42` at module level resolved as TypeId::ANY
-# causing Cranelift to emit rt_string_concat instead of iadd.
-# After fix: resolves as u64 → native integer arithmetic.
-#
-# CRITICAL: The variables below MUST be at module level (not inside it blocks)
-# to exercise the register_declarations_from_node path in module_pass.rs.
-#
+Regression specification for module-level typed `var`/`val` declarations —
+Phase 0A's HIR `module_pass.rs extract_pattern_type()` fix — for compiler
+owners touching global variable type resolution or Cranelift codegen for
+module-scope arithmetic.
+
+## Operator workflow
+
+Run this spec with the repo test runner and confirm zero failed scenarios.
+Each scenario exercises a module-level `u64`/`i64` global through a real
+compiled function, not a locally constructed value.
+
+## Compatibility and limitations
+
+The variables under test MUST stay at module level (not inside `it` blocks)
+to exercise `register_declarations_from_node` in `module_pass.rs`; moving them
+into a scenario body would silently stop testing the regression.
+
+## Verification guidance and troubleshooting
+
+Re-run after any change to HIR module-level pattern-type extraction or
+Cranelift integer codegen. Before the fix, module-level `var x: u64 = 42`
+resolved as `TypeId::ANY`, causing Cranelift to emit `rt_string_concat`
+instead of `iadd`; a regression here reproduces as a wrong arithmetic result
+or a runtime type error, not a compile failure.
+"""
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+# @manual_section: module-level typed variable declarations
 # @tag: compiler,regression,global
+
+use std.spec.step
 
 # Module-level typed var — this is the exact pattern that was broken
 var g_addr: u64 = 0xFD000000
@@ -33,18 +51,33 @@ fn signed_add() -> i64:
 
 describe "Module-level typed variable declarations":
     it "var g_addr: u64 preserves integer addition":
+        # @req REQ-COMPILER-GLOBAL-VAR-001
+        # @capture(statistics): resolved address value retained for review
+        step("Add the module-level u64 base address to the module-level u64 offset")
         expect(compute_address()).to_equal(0xFD001000)
 
     it "var g_count: u64 preserves integer arithmetic":
-        expect(increment_count()).to_equal(101)
+        # @req REQ-COMPILER-GLOBAL-VAR-002
+        # @capture(statistics): incremented counter value retained for review
+        step("Increment the module-level u64 counter by one")
+        expect(increment_count()).to_equal(101)  # oracle: g_count starts at 100, incremented once
 
     it "val g_offset: u64 preserves value":
+        # @req REQ-COMPILER-GLOBAL-VAR-003
+        # @capture(statistics): offset value retained for review
+        step("Read the module-level u64 val offset directly")
         expect(g_offset).to_equal(0x1000)
 
     it "var g_signed: i64 supports negative values":
-        expect(signed_add()).to_equal(10)
+        # @req REQ-COMPILER-GLOBAL-VAR-004
+        # @capture(statistics): signed result value retained for review
+        step("Add twenty to the module-level negative i64 signed value")
+        expect(signed_add()).to_equal(10)  # oracle: g_signed starts at -10, plus 20
 
     it "module-level var can be mutated":
+        # @req REQ-COMPILER-GLOBAL-VAR-005
+        # @capture(statistics): mutated-then-restored counter value retained for review
+        step("Mutate the module-level u64 counter and read it back, then restore it")
         g_count = 200
-        expect(g_count).to_equal(200)
+        expect(g_count).to_equal(200)  # oracle: the value just assigned on the previous line
         g_count = 100

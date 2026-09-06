@@ -1,12 +1,34 @@
-# Purpose and audience: executable specification evidence for the owning engineering team.
-# @req REQ-SSPEC-UNIT
+"""
+## Purpose and audience
+For maintainers of the async runtime surface (`std.async`: futures,
+executors, schedulers, and async I/O). Exercises the async runtime's
+observable contract -- poll/ready semantics, promise completion, executor
+task lifecycle, priority scheduling, and utility combinators (`join`,
+`select`) -- using local doubles that model the same state machine as the
+production module, so the suite stays executable without depending on
+parser/runtime features that previously gated the whole file.
+## Operator workflow
+Run after touching `std.async` or its executor/scheduler counterparts:
+`bin/simple test test/01_unit/lib/std/async_spec.spl`. Each scenario builds
+a `Future`/`Task`/`Executor`/`Scheduler` double, drives it through one
+lifecycle transition, and checks the resulting state.
+## Compatibility and limitations
+This file intentionally uses local doubles (`Poll`, `Future`, `Promise`,
+`Task`, `Executor`, `Scheduler`, `AsyncIO`) rather than importing
+`std.async` directly, because earlier parser/runtime gaps blocked the whole
+file when it depended on the real module. The doubles model the identical
+state machine (ready/pending polling, single-completion promises,
+FIFO-with-priority scheduling), so a passing suite documents the intended
+contract even where the production module cannot yet be imported here.
+## Verification guidance and troubleshooting
+A failure names the exact state transition that broke (e.g. an executor
+that does not drain its task count to zero after `run()`, or a promise that
+completes twice). Re-open the corresponding class in this file or its
+production counterpart in `std.async`, compare the polling/scheduling logic
+against the scenario's step description, and re-run this file.
+"""
 # research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
 
-# Async Runtime Test Suite
-#
-# Comprehensive tests for async runtime: futures, executors,
-# and async I/O (std.async).
-#
 # This file uses local doubles so the tests stay executable without relying on
 # parser/runtime features that were previously gating the whole file.
 
@@ -268,22 +290,35 @@ fn unwrap_checked(poll: Poll) -> Result<i64, text>:
 # Poll Tests
 # ============================================================================
 
+# @manual_section: async-poll
 describe "Poll<T>":
     it "should create ready poll":
+        # @req REQ-ASYNC-POLL-001
+        # @capture(statistics): ready/pending flags for a poll constructed as ready
+        step("Construct a ready poll carrying value 42")
         val p = Poll.ready(42)
         expect(p.is_ready()).to_equal(true)
         expect(p.is_pending()).to_equal(false)
 
     it "should create pending poll":
+        # @req REQ-ASYNC-POLL-002
+        # @capture(statistics): ready/pending flags for a poll constructed as pending
+        step("Construct a pending poll")
         val p = Poll.pending()
         expect(p.is_ready()).to_equal(false)
         expect(p.is_pending()).to_equal(true)
 
     it "should unwrap ready value":
+        # @req REQ-ASYNC-POLL-003
+        # @capture(statistics): unwrapped value of a ready poll
+        step("Construct a ready poll carrying value 42 and unwrap it")
         val p = Poll.ready(42)
-        expect(p.unwrap()).to_equal(42)
+        expect(p.unwrap()).to_equal(42)  # oracle: the poll was constructed with value 42
 
-    it "should reject unwrap of pending value":
+    it "rejects unwrap of a pending value":
+        # @req REQ-ASYNC-POLL-004
+        # @capture(statistics): checked-unwrap result for a pending poll
+        step("Construct a pending poll and unwrap it through the checked helper")
         val p = Poll.pending()
         match unwrap_checked(p):
             case Ok(_): expect(true).to_equal(false)
@@ -293,63 +328,95 @@ describe "Poll<T>":
 # Future Tests
 # ============================================================================
 
+# @manual_section: async-future
 describe "Future<T>":
     it "should create ready future":
+        # @req REQ-ASYNC-FUTURE-001
+        # @capture(statistics): ready flag and unwrapped value of a ready future
+        step("Construct a ready future carrying value 42")
         val f = Future.from_value(42)
         expect(f.is_ready()).to_equal(true)
-        expect(f.poll().unwrap()).to_equal(42)
+        expect(f.poll().unwrap()).to_equal(42)  # oracle: the future was constructed with value 42
 
     it "should create pending future":
+        # @req REQ-ASYNC-FUTURE-002
+        # @capture(statistics): ready flag and poll state of a pending future
+        step("Construct a pending future")
         val f = Future.pending()
         expect(f.is_ready()).to_equal(false)
         expect(f.poll().is_pending()).to_equal(true)
 
     it "should poll ready future":
+        # @req REQ-ASYNC-FUTURE-003
+        # @capture(statistics): poll ready state and unwrapped value
+        step("Construct a ready future carrying value 7 and poll it")
         val f = Future.from_value(7)
         expect(f.poll().is_ready()).to_equal(true)
-        expect(f.poll().unwrap()).to_equal(7)
+        expect(f.poll().unwrap()).to_equal(7)  # oracle: the future was constructed with value 7
 
     it "should poll pending future":
+        # @req REQ-ASYNC-FUTURE-004
+        # @capture(statistics): poll pending state of a pending future
+        step("Construct a pending future and poll it")
         val f = Future.pending()
         expect(f.poll().is_pending()).to_equal(true)
 
     it "should transform future value":
+        # @req REQ-ASYNC-FUTURE-005
+        # @capture(statistics): mapped future's ready state and doubled value
+        step("Construct a ready future carrying 21 and map it through a doubling function")
         val f = Future.from_value(21)
         val mapped = f.map(_1 * 2)
         expect(mapped.is_ready()).to_equal(true)
-        expect(mapped.poll().unwrap()).to_equal(42)
+        expect(mapped.poll().unwrap()).to_equal(42)  # oracle: map doubles 21 -> 42
 
     it "should chain map operations":
+        # @req REQ-ASYNC-FUTURE-006
+        # @capture(statistics): result of two chained map transformations
+        step("Construct a ready future carrying 5 and chain a +1 then a x10 map")
         val f = Future.from_value(5)
         val mapped = f.map(_1 + 1).map(_1 * 10)
-        expect(mapped.poll().unwrap()).to_equal(60)
+        expect(mapped.poll().unwrap()).to_equal(60)  # oracle: (5 + 1) * 10 = 60
 
 # ============================================================================
 # Promise Tests
 # ============================================================================
 
+# @manual_section: async-promise
 describe "Promise<T>":
     it "should create promise-future pair":
+        # @req REQ-ASYNC-PROMISE-001
+        # @capture(statistics): initial ready/completed flags of a fresh promise-future pair
+        step("Construct a fresh promise-future pair")
         val (future, promise) = Promise.new()
         expect(future.is_ready()).to_equal(false)
         expect(promise.is_completed()).to_equal(false)
 
     it "should complete promise":
+        # @req REQ-ASYNC-PROMISE-002
+        # @capture(statistics): completion result and completed flag after one completion
+        step("Complete a fresh promise with value 11")
         val (_, promise) = Promise.new()
         expect(promise.complete(11)).to_equal(true)
         expect(promise.is_completed()).to_equal(true)
 
-    it "should not complete twice":
+    it "rejects completing the same promise twice":
+        # @req REQ-ASYNC-PROMISE-003
+        # @capture(statistics): completion results for a first and a second completion attempt
+        step("Complete a fresh promise, then attempt to complete it again")
         val (_, promise) = Promise.new()
         expect(promise.complete(11)).to_equal(true)
         expect(promise.complete(22)).to_equal(false)
 
     it "should make future ready after completion":
+        # @req REQ-ASYNC-PROMISE-004
+        # @capture(statistics): future ready state before and after promise completion
+        step("Complete a promise with value 33 and observe its paired future")
         val (future, promise) = Promise.new()
         expect(future.is_ready()).to_equal(false)
         expect(promise.complete(33)).to_equal(true)
         expect(future.is_ready()).to_equal(true)
-        expect(future.poll().unwrap()).to_equal(33)
+        expect(future.poll().unwrap()).to_equal(33)  # oracle: the promise was completed with value 33
 
 # ============================================================================
 # Task Tests
@@ -361,213 +428,313 @@ fn make_task_ready_1() -> Future:
 fn make_task_ready_2() -> Future:
     Future.from_value(2)
 
+# @manual_section: async-task
 describe "Task":
     it "should create task from function":
+        # @req REQ-ASYNC-TASK-001
+        # @capture(statistics): assigned task id and initial completed flag
+        step("Create a task from a function that resolves immediately")
         val task = Task.new(make_task_ready_1)
         expect(task.id).to_be_greater_than(-1)
         expect(task.is_completed()).to_equal(false)
 
     it "should create task with priority":
+        # @req REQ-ASYNC-TASK-002
+        # @capture(statistics): priority value stored on the created task
+        step("Create a task with an explicit priority of 7")
         val task = Task.with_priority(make_task_ready_1, 7)
-        expect(task.priority).to_equal(7)
+        expect(task.priority).to_equal(7)  # oracle: the task was constructed with priority 7
 
     it "should start as pending":
+        # @req REQ-ASYNC-TASK-003
+        # @capture(statistics): completed/running flags immediately after task creation
+        step("Create a task and inspect its state before it is scheduled")
         val task = Task.new(make_task_ready_1)
         expect(task.state.is_completed()).to_equal(false)
         expect(task.is_running()).to_equal(false)
 
     it "should track completion":
+        # @req REQ-ASYNC-TASK-004
+        # @capture(statistics): the task's own future ready state and unwrapped value
+        step("Create a task from an immediately-ready function and inspect its future")
         val task = Task.new(make_task_ready_1)
         expect(task.future.is_ready()).to_equal(true)
-        expect(task.future.poll().unwrap()).to_equal(1)
+        expect(task.future.poll().unwrap()).to_equal(1)  # oracle: make_task_ready_1 resolves to 1
 
 # ============================================================================
 # Executor Tests
 # ============================================================================
 
+# @manual_section: async-executor
 describe "Executor":
     it "should create empty executor":
+        # @req REQ-ASYNC-EXEC-001
+        # @capture(statistics): task count and running flag of a fresh executor
+        step("Construct a fresh executor")
         val executor = Executor.new()
-        expect(executor.task_count()).to_equal(0)
+        expect(executor.task_count()).to_equal(0)  # oracle: a fresh executor holds no tasks
         expect(executor.is_running()).to_equal(false)
 
     it "should spawn single task":
+        # @req REQ-ASYNC-EXEC-002
+        # @capture(statistics): task count after spawning one task
+        step("Spawn one immediately-ready task onto a fresh executor")
         val executor = Executor.new()
         executor.spawn(Task.new(make_task_ready_1))
-        expect(executor.task_count()).to_equal(1)
+        expect(executor.task_count()).to_equal(1)  # oracle: exactly one task was spawned
 
     it "should spawn multiple tasks":
+        # @req REQ-ASYNC-EXEC-003
+        # @capture(statistics): task count after spawning two tasks
+        step("Spawn two immediately-ready tasks onto a fresh executor")
         val executor = Executor.new()
         executor.spawn(Task.new(make_task_ready_1))
         executor.spawn(Task.new(make_task_ready_2))
-        expect(executor.task_count()).to_equal(2)
+        expect(executor.task_count()).to_equal(2)  # oracle: exactly two tasks were spawned
 
     it "should run single ready task":
+        # @req REQ-ASYNC-EXEC-004
+        # @capture(statistics): task count and running flag after draining one ready task
+        step("Spawn one ready task and run the executor to completion")
         val executor = Executor.new()
         executor.spawn(Task.new(make_task_ready_1))
         executor.run()
-        expect(executor.task_count()).to_equal(0)
+        expect(executor.task_count()).to_equal(0)  # oracle: a ready task completes and is removed
         expect(executor.is_running()).to_equal(false)
 
     it "should run multiple tasks":
+        # @req REQ-ASYNC-EXEC-005
+        # @capture(statistics): task count after draining two ready tasks
+        step("Spawn two ready tasks and run the executor to completion")
         val executor = Executor.new()
         executor.spawn(Task.new(make_task_ready_1))
         executor.spawn(Task.new(make_task_ready_2))
         executor.run()
-        expect(executor.task_count()).to_equal(0)
+        expect(executor.task_count()).to_equal(0)  # oracle: both ready tasks complete and are removed
 
     it "should run one iteration":
+        # @req REQ-ASYNC-EXEC-006
+        # @capture(statistics): task count after a single scheduling iteration
+        step("Spawn one ready task and run exactly one executor iteration")
         val executor = Executor.new()
         executor.spawn(Task.new(make_task_ready_1))
         executor.run_iteration()
-        expect(executor.task_count()).to_equal(0)
+        expect(executor.task_count()).to_equal(0)  # oracle: one iteration is enough to drain a single ready task
 
     it "should wake suspended task":
+        # @req REQ-ASYNC-EXEC-007
+        # @capture(statistics): task count before and after a suspended task's promise completes
+        step("Spawn a task blocked on a pending promise, complete the promise, then run the executor")
         val (future, promise) = Promise.new()
         val executor = Executor.new()
         val task = Task.new(\: future)
         executor.spawn(task)
-        expect(executor.task_count()).to_equal(1)
+        expect(executor.task_count()).to_equal(1)  # oracle: the still-pending task remains on the executor
         expect(promise.complete(99)).to_equal(true)
         executor.run()
-        expect(executor.task_count()).to_equal(0)
+        expect(executor.task_count()).to_equal(0)  # oracle: completing the promise lets the task drain
 
 # ============================================================================
 # Scheduler Tests
 # ============================================================================
 
+# @manual_section: async-scheduler
 describe "Scheduler":
     it "should create empty scheduler":
+        # @req REQ-ASYNC-SCHED-001
+        # @capture(statistics): pending count of a fresh scheduler
+        step("Construct a fresh scheduler")
         val scheduler = Scheduler.new()
-        expect(scheduler.pending_count()).to_equal(0)
+        expect(scheduler.pending_count()).to_equal(0)  # oracle: a fresh scheduler holds no tasks
 
     it "should schedule high priority task":
+        # @req REQ-ASYNC-SCHED-002
+        # @capture(statistics): pending count after scheduling one high-priority task
+        step("Schedule one task with priority 10, above the high-priority threshold")
         val scheduler = Scheduler.new()
         scheduler.schedule(Task.with_priority(make_task_ready_1, 10))
-        expect(scheduler.pending_count()).to_equal(1)
+        expect(scheduler.pending_count()).to_equal(1)  # oracle: exactly one task was scheduled
 
     it "should schedule normal priority task":
+        # @req REQ-ASYNC-SCHED-003
+        # @capture(statistics): pending count after scheduling one normal-priority task
+        step("Schedule one task with priority 0, the normal-priority band")
         val scheduler = Scheduler.new()
         scheduler.schedule(Task.with_priority(make_task_ready_1, 0))
-        expect(scheduler.pending_count()).to_equal(1)
+        expect(scheduler.pending_count()).to_equal(1)  # oracle: exactly one task was scheduled
 
     it "should schedule low priority task":
+        # @req REQ-ASYNC-SCHED-004
+        # @capture(statistics): pending count after scheduling one low-priority task
+        step("Schedule one task with priority -1, below the normal-priority band")
         val scheduler = Scheduler.new()
         scheduler.schedule(Task.with_priority(make_task_ready_1, -1))
-        expect(scheduler.pending_count()).to_equal(1)
+        expect(scheduler.pending_count()).to_equal(1)  # oracle: exactly one task was scheduled
 
     it "should schedule mixed priority tasks":
+        # @req REQ-ASYNC-SCHED-005
+        # @capture(statistics): pending count after scheduling one task at each priority band
+        step("Schedule one high, one normal, and one low priority task")
         val scheduler = Scheduler.new()
         scheduler.schedule(Task.with_priority(make_task_ready_1, 10))
         scheduler.schedule(Task.with_priority(make_task_ready_2, 0))
         scheduler.schedule(Task.with_priority(make_task_ready_1, -1))
-        expect(scheduler.pending_count()).to_equal(3)
+        expect(scheduler.pending_count()).to_equal(3)  # oracle: three tasks were scheduled across the three bands
 
     it "should run all scheduled tasks":
+        # @req REQ-ASYNC-SCHED-006
+        # @capture(statistics): pending and executor task counts after running the scheduler
+        step("Schedule three mixed-priority ready tasks and run the scheduler")
         val scheduler = Scheduler.new()
         scheduler.schedule(Task.with_priority(make_task_ready_1, 10))
         scheduler.schedule(Task.with_priority(make_task_ready_2, 0))
         scheduler.schedule(Task.with_priority(make_task_ready_1, -1))
         scheduler.run()
-        expect(scheduler.pending_count()).to_equal(0)
-        expect(scheduler.executor.task_count()).to_equal(0)
+        expect(scheduler.pending_count()).to_equal(0)  # oracle: run() drains the scheduler's pending queues
+        expect(scheduler.executor.task_count()).to_equal(0)  # oracle: all three ready tasks complete on the executor
 
 # ============================================================================
 # AsyncIO Tests
 # ============================================================================
 
+# @manual_section: async-io
 describe "AsyncIO":
     it "should create async I/O runtime":
+        # @req REQ-ASYNC-IO-001
+        # @capture(statistics): task count of a fresh AsyncIO runtime's executor
+        step("Construct a fresh AsyncIO runtime")
         val io = AsyncIO.new()
-        expect(io.executor.task_count()).to_equal(0)
+        expect(io.executor.task_count()).to_equal(0)  # oracle: a fresh runtime's executor holds no tasks
 
     it "should create yield future":
+        # @req REQ-ASYNC-IO-002
+        # @capture(statistics): ready state and value of a yield_now future
+        step("Request a yield_now future from a fresh AsyncIO runtime")
         val f = AsyncIO.new().yield_now()
         expect(f.is_ready()).to_equal(true)
-        expect(f.poll().unwrap()).to_equal(0)
+        expect(f.poll().unwrap()).to_equal(0)  # oracle: yield_now resolves with sentinel value 0
 
     it "should create sleep future":
+        # @req REQ-ASYNC-IO-003
+        # @capture(statistics): ready state and value of a sleep future
+        step("Request a 25-millisecond sleep future from a fresh AsyncIO runtime")
         val f = AsyncIO.new().sleep(25)
         expect(f.is_ready()).to_equal(true)
-        expect(f.poll().unwrap()).to_equal(25)
+        expect(f.poll().unwrap()).to_equal(25)  # oracle: sleep echoes back the requested duration, 25ms
 
 # ============================================================================
 # Utility Functions Tests
 # ============================================================================
 
+# @manual_section: async-utility
 describe "Utility Functions":
     it "should spawn task":
+        # @req REQ-ASYNC-UTIL-001
+        # @capture(statistics): completed flag and resolved value of a spawned task
+        step("Spawn a task via the top-level spawn() helper")
         val task = spawn(make_task_ready_1)
         expect(task.is_completed()).to_equal(false)
-        expect(task.future.poll().unwrap()).to_equal(1)
+        expect(task.future.poll().unwrap()).to_equal(1)  # oracle: make_task_ready_1 resolves to 1
 
     it "should join multiple futures":
+        # @req REQ-ASYNC-UTIL-002
+        # @capture(statistics): ready state and value of the joined future
+        step("Join two already-ready futures")
         val joined = join([Future.from_value(1), Future.from_value(2)])
         expect(joined.is_ready()).to_equal(true)
-        expect(joined.poll().unwrap()).to_equal(2)
+        expect(joined.poll().unwrap()).to_equal(2)  # oracle: join resolves to the count of ready futures, 2
 
     it "should select first ready future":
+        # @req REQ-ASYNC-UTIL-003
+        # @capture(statistics): ready state and value of the selected future
+        step("Select between one pending and one ready future")
         val selected = select([Future.pending(), Future.from_value(7)])
         expect(selected.is_ready()).to_equal(true)
-        expect(selected.poll().unwrap()).to_equal(7)
+        expect(selected.poll().unwrap()).to_equal(7)  # oracle: the only ready candidate carries value 7
 
 # ============================================================================
 # Integration Tests
 # ============================================================================
 
+# @manual_section: async-integration
 describe "Integration":
     it "should complete async workflow":
+        # @req REQ-ASYNC-INTEGRATION-001
+        # @capture(statistics): future readiness before/after completion and its resolved value
+        step("Complete a promise with value 123 and observe its paired future")
         val (future, promise) = Promise.new()
         expect(future.is_ready()).to_equal(false)
         expect(promise.complete(123)).to_equal(true)
-        expect(future.poll().unwrap()).to_equal(123)
+        expect(future.poll().unwrap()).to_equal(123)  # oracle: the promise was completed with value 123
 
     it "should execute task to completion":
+        # @req REQ-ASYNC-INTEGRATION-002
+        # @capture(statistics): executor task count and an unrelated promise's completed flag
+        step("Spawn an inline-future task and run it to completion on the executor")
         val executor = Executor.new()
         val (_, promise) = Promise.new()
         val task = Task.new(\: Future.from_value(1))
         executor.spawn(task)
         executor.run()
-        expect(executor.task_count()).to_equal(0)
+        expect(executor.task_count()).to_equal(0)  # oracle: the ready task completes and is removed
         expect(promise.is_completed()).to_equal(false)
 
     it "should run high priority first":
+        # @req REQ-ASYNC-INTEGRATION-003
+        # @capture(statistics): pending count after the scheduler runs a high- and normal-priority task
+        step("Schedule a high-priority and a normal-priority ready task, then run the scheduler")
         val scheduler = Scheduler.new()
         scheduler.schedule(Task.with_priority(make_task_ready_1, 10))
         scheduler.schedule(Task.with_priority(make_task_ready_2, 0))
         scheduler.run()
-        expect(scheduler.pending_count()).to_equal(0)
+        expect(scheduler.pending_count()).to_equal(0)  # oracle: run() drains both scheduled tasks
 
     it "should chain future transformations":
+        # @req REQ-ASYNC-INTEGRATION-004
+        # @capture(statistics): resolved value after a map-then-then chain
+        step("Chain a +2 map, then a x4 then-continuation, on a future carrying 3")
         val f = Future.from_value(3)
         val chained = f.map(_1 + 2).then(Future.from_value(_1 * 4))
-        expect(chained.poll().unwrap()).to_equal(20)
+        expect(chained.poll().unwrap()).to_equal(20)  # oracle: (3 + 2) * 4 = 20
 
 # ============================================================================
 # Use Cases
 # ============================================================================
 
+# @manual_section: async-use-cases
 describe "Use Cases":
     it "should compute value asynchronously":
+        # @req REQ-ASYNC-USECASE-001
+        # @capture(statistics): completion result, future readiness, and resolved value
+        step("Complete a promise with value 88 and read its paired future")
         val (future, promise) = Promise.new()
         expect(promise.complete(88)).to_equal(true)
         expect(future.is_ready()).to_equal(true)
-        expect(future.poll().unwrap()).to_equal(88)
+        expect(future.poll().unwrap()).to_equal(88)  # oracle: the promise was completed with value 88
 
     it "should run multiple tasks concurrently":
+        # @req REQ-ASYNC-USECASE-002
+        # @capture(statistics): executor task count after concurrently running two tasks
+        step("Spawn two ready tasks and run the executor")
         val executor = Executor.new()
         executor.spawn(Task.new(make_task_ready_1))
         executor.spawn(Task.new(make_task_ready_2))
         executor.run()
-        expect(executor.task_count()).to_equal(0)
+        expect(executor.task_count()).to_equal(0)  # oracle: both ready tasks complete and are removed
 
     it "should prioritize urgent tasks":
+        # @req REQ-ASYNC-USECASE-003
+        # @capture(statistics): pending count after scheduling two urgent tasks
+        step("Schedule two above-normal-priority tasks (10 and 1)")
         val scheduler = Scheduler.new()
         scheduler.schedule(Task.with_priority(make_task_ready_1, 10))
         scheduler.schedule(Task.with_priority(make_task_ready_2, 1))
-        expect(scheduler.pending_count()).to_equal(2)
+        expect(scheduler.pending_count()).to_equal(2)  # oracle: both scheduled tasks are still pending
 
     it "should delay execution with promise":
+        # @req REQ-ASYNC-USECASE-004
+        # @capture(statistics): future readiness before/after promise completion
+        step("Complete a promise with value 9 and observe its paired future")
         val (future, promise) = Promise.new()
         expect(future.is_ready()).to_equal(false)
         expect(promise.complete(9)).to_equal(true)

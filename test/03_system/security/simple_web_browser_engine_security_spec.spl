@@ -1,16 +1,31 @@
-# Purpose and audience: executable specification evidence for the owning engineering team.
-# @req REQ-SSPEC-SYSTEM
-# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
-
 # codex-system-test
 # @req REQ-WEB-BROWSER-005 REQ-WEB-BROWSER-010 REQ-WEB-BROWSER-011 REQ-WEB-BROWSER-012 REQ-WEB-BROWSER-013 REQ-WEB-BROWSER-014 REQ-WEB-BROWSER-015 REQ-WEB-BROWSER-016 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-019 REQ-WEB-BROWSER-020 REQ-WEB-BROWSER-021 NFR-WEB-BROWSER-009 NFR-WEB-BROWSER-010 NFR-WEB-BROWSER-011 NFR-WEB-BROWSER-012 NFR-WEB-BROWSER-013
 # @evidence-display: links
-"""# Production Simple Browser Security Envelope
-
-Treats pages, scripts, URLs, redirects, responses, and renderer messages as
-hostile. Proves HTTPS, origin/storage policy, bounded IPC, and an OS-sandboxed
-renderer without ambient host capabilities.
+"""## Purpose and audience
+Executable security-envelope evidence for the hosted Simple browser: pages,
+scripts, URLs, redirects, responses, and renderer messages are treated as
+hostile while HTTPS, origin/storage policy, bounded IPC, and an OS-sandboxed
+renderer are proven without ambient host capabilities. Audience: engineers
+changing the browser session, cookie store, fetch engine, or renderer
+registry security paths.
+## Operator workflow
+Run the spec from the repository root with the bootstrap binary. Platform
+sandbox scenarios additionally require HOSTED_WM_ARTIFACT and
+HOSTED_WM_ARTIFACT_SHA256 to name the admitted production renderer binary.
+## Compatibility and limitations
+Scenarios that call _require_production_security_evidence stay RED until
+REQ-WEB-BROWSER-010..019 product evidence lands; they fail loudly rather
+than skip. The HSTS learn scenarios require the broker TLS path, which is
+still unimplemented on some hosts.
+## Verification guidance and troubleshooting
+A failure names the rejected request, header, or cookie row that diverged.
+Re-derive the expected value from the hostile-input fixture inline in the
+scenario before touching any assertion; never weaken a RED security guard.
 """
+# Lifecycle: doc/01_research/domain/simple_web_browser_engine_production_hardening.md ;
+# doc/03_plan/agent_tasks/simple_web_browser_engine_production_hardening.md ;
+# doc/04_architecture/simple_web_browser_engine_production_hardening.md ;
+# doc/05_design/simple_web_browser_engine_production_hardening.md
 use std.spec.*
 use std.env.variables.{env_get}
 use std.io_runtime.{file_hash_sha256}
@@ -265,6 +280,7 @@ fn _await_security_registry_document(
 fn _require_production_security_evidence():
     fail("REQ-WEB-BROWSER-010..019: production security evidence not implemented")
 
+# @manual_section: production browser security envelope
 describe "Production Simple browser security envelope":
     # @req REQ-WEB-BROWSER-014
     # @manual: show
@@ -272,8 +288,9 @@ describe "Production Simple browser security envelope":
     # @capture(protocol)
     it "should isolate positive-owner rendering and input behind exact-window frames":
         # @req REQ-WEB-BROWSER-010..019
-        # @req REQ-SSPEC-SYSTEM..019
+        # @req REQ-WEB-BROWSER-014
         # @req REQ-SSPEC-SYSTEM
+        # @capture(gui_image): owner-zero lane pixels stay blank while the admitted frame paints
         step("should isolate positive-owner rendering and input behind exact-window frames")
         val hostile = (
             "<style>body{background-color:#ef4444}</style>" +
@@ -313,17 +330,17 @@ describe "Production Simple browser security envelope":
         expect(remote.render_frame_engine2d(remote_raster)).to_be(false)
         expect(_csp_alias_color_count(
             remote.pure_simple_pixel_buffer(), 0xFFEF4444u32
-        )).to_equal(0)
+        )).to_equal(0)  # oracle: hostile positive-owner content must paint zero background pixels
 
         step("Route positive-owner input only to an admitted renderer registry")
         remote.pointer_move(16, 80)
         remote.handle_mouse_wheel(0.0, 1.0)
-        expect(remote.scroll_offset_for(1)).to_equal(0.0)
+        expect(remote.scroll_offset_for(1)).to_equal(0.0)  # oracle: unadmitted input must leave the scroll offset untouched
         var renderers = HostedBrowserRendererRegistry.create(
             "", "https://example.test/"
         )
         val denied = renderers.dispatch_pointer(41, 1, 8, 8, true)
-        expect(denied.callback_count).to_equal(0)
+        expect(denied.callback_count).to_equal(0)  # oracle: pointer dispatch without a renderer must reach zero callbacks
         expect(denied.reason).to_equal("renderer-unavailable")
 
         step("Paint only an admitted frame bound to the exact window")
@@ -349,7 +366,9 @@ describe "Production Simple browser security envelope":
     # @manual: show
     # @capture(protocol)
     it "should persist shared preloaded HSTS without trusting generic responses":
+        # @req REQ-WEB-BROWSER-011 REQ-WEB-BROWSER-014
         # @req REQ-SSPEC-SYSTEM
+        # @capture(protocol): HSTS snapshot load, share, and persist round trip
         step("should persist shared preloaded HSTS without trusting generic responses")
         step("Navigate through verified HTTPS")
         val now_ms: i64 = 100000
@@ -366,7 +385,7 @@ describe "Production Simple browser security envelope":
         )
         expect(registry.load_hsts_snapshot(
             BrowserHstsSnapshot.create(initial_entries), now_ms
-        )).to_equal(1)
+        )).to_equal(1)  # oracle: exactly the one preloaded entry is admitted
         expect(registry.hsts_upgrade_url(
             "http://sub.preload.test/path"
         )).to_equal("https://sub.preload.test/path")
@@ -375,7 +394,7 @@ describe "Production Simple browser security envelope":
         var secondary = HostedBrowserRendererProcess.create(42, 64, 48)
         expect(secondary.load_hsts_snapshot(
             registry.hsts_snapshot(now_ms), now_ms
-        )).to_equal(1)
+        )).to_equal(1)  # oracle: the secondary window admits exactly the shared preload entry
         val untrusted = secondary._finalize_network(
             "document",
             FetchRequest(
@@ -398,12 +417,12 @@ describe "Production Simple browser security envelope":
         expect(secondary.hsts_dirty).to_be(false)
         expect(secondary.hsts_snapshot(
             now_ms + 1000
-        ).entries.len()).to_equal(1)
+        ).entries.len()).to_equal(1)  # oracle: the generic HTTPS response must add no HSTS entry
         expect(registry.hsts_upgrade_url(
             "http://secondary.test/account"
         )).to_equal("http://secondary.test/account")
         expect(registry.hsts_dirty()).to_be(false)
-        expect(registry.hsts_revision()).to_equal(0)
+        expect(registry.hsts_revision()).to_equal(0)  # oracle: an untrusted response must not bump the HSTS revision
 
         step("Persist shared HSTS before every browser window closes")
         var profile = match BrowserProfileStore.memory():
@@ -411,13 +430,14 @@ describe "Production Simple browser security envelope":
                 fail("memory profile creation failed: {error.message()}")
             Ok(opened):
                 opened
-        match profile.save_hsts(
+        val saved = match profile.save_hsts(
             registry.hsts_snapshot(now_ms + 1000), now_ms + 1000
         ):
             Err(error):
                 fail("HSTS save failed: {error.message()}")
             Ok(_):
-                pass_dn("preloaded HSTS snapshot persisted")
+                true
+        expect(saved).to_be(true)  # oracle: the preloaded snapshot must persist through the memory profile store
         expect(registry.hsts_dirty()).to_be(false)
         val persisted = match profile.load_hsts(now_ms + 2000):
             Err(error):
@@ -429,17 +449,18 @@ describe "Production Simple browser security envelope":
         )
         expect(restarted.load_hsts_snapshot(
             persisted, now_ms + 2000
-        )).to_equal(1)
+        )).to_equal(1)  # oracle: the restarted registry restores exactly the persisted preload entry
         expect(restarted.hsts_upgrade_url(
             "http://sub.preload.test/account"
         )).to_equal("https://sub.preload.test/account")
-        match profile.close():
+        val closed = match profile.close():
             Err(error):
                 fail("memory profile close failed: {error.message()}")
             Ok(_):
-                pass_dn("memory profile closed")
+                true
+        expect(closed).to_be(true)  # oracle: the memory profile must close cleanly after persisting
         expect(restarted.hsts_dirty()).to_be(false)
-        expect(restarted.hsts_revision()).to_equal(0)
+        expect(restarted.hsts_revision()).to_equal(0)  # oracle: a restarted registry starts at HSTS revision zero
         expect(restarted.ensure(
             84, "<div>secondary</div>", 64, 48, 0, now_ms + 2000
         )).to_equal("none")
@@ -453,7 +474,9 @@ describe "Production Simple browser security envelope":
     # @manual: show
     # @capture(protocol)
     it "should learn HSTS only from the completed platform HTTPS job":
+        # @req REQ-WEB-BROWSER-011
         # @req REQ-SSPEC-SYSTEM
+        # @capture(protocol): mock finalize keeps HSTS state clean
         step("should learn HSTS only from the completed platform HTTPS job")
         _two_origin_https_fixture()
         step("Reject generic mock and ordinary HTTPS finalization")
@@ -470,7 +493,7 @@ describe "Production Simple browser security envelope":
                 headers: "Strict-Transport-Security: max-age=60", body: []
             )
         )
-        expect(mock.status).to_equal(200)
+        expect(mock.status).to_equal(200)  # oracle: the mock navigation itself must still complete with HTTP 200
         expect(mock.error).to_equal("")
         expect(broker.hsts_dirty).to_be(false)
         expect(broker._hsts_upgrade_url(
@@ -478,16 +501,18 @@ describe "Production Simple browser security envelope":
         )).to_equal("http://mock.test/next")
 
         step("Reject failed TLS without response or policy state")
-        expect(broker.hsts_snapshot(100000).entries.len()).to_equal(0)
-        fail(
-            "REQ-WEB-BROWSER-011: trusted HTTPS learn/save/clean and " +
-            "invalid TLS failure/retry evidence not implemented"
-        )
+        expect(broker.hsts_snapshot(100000).entries.len()).to_equal(0)  # oracle: no mocked response may seed an HSTS entry
+        # NOTE: legitimately RED — trusted HTTPS learn/save/clean and invalid
+        # TLS failure/retry evidence is not implemented yet (REQ-WEB-BROWSER-011).
+        # The pinned assertion documents the target state and fails until then.
+        expect(broker.hsts_dirty).to_be(true)  # oracle: a completed trusted HTTPS job must mark broker HSTS state dirty
 
     # @req REQ-WEB-BROWSER-010 REQ-WEB-BROWSER-013
     # @manual: show
     it "should validate opaque renderer initiators before cookie writes":
+        # @req REQ-WEB-BROWSER-005
         # @req REQ-SSPEC-SYSTEM
+        # @capture(protocol): initiator admission verdicts per forged credential case
         step("should validate opaque renderer initiators before cookie writes")
         var broker = HostedBrowserRendererProcess.create(44, 64, 48)
         broker.document_url = "https://trusted.test/app"
@@ -515,7 +540,9 @@ describe "Production Simple browser security envelope":
     # @manual: show
     # @capture(protocol)
     it "should replace a forged CORS Origin with the requester origin":
+        # @req REQ-WEB-BROWSER-012
         # @req REQ-SSPEC-SYSTEM
+        # @capture(protocol): rewritten CORS header block
         step("should replace a forged CORS Origin with the requester origin")
         step("Construct browser-owned CORS request identity")
         var fetch = FetchEngine.new_for_origin(
@@ -549,7 +576,9 @@ describe "Production Simple browser security envelope":
     # @manual: show
     # @capture(protocol)
     it "should apply head meta CSP in source order to every active resource":
+        # @req REQ-WEB-BROWSER-012
         # @req REQ-SSPEC-SYSTEM
+        # @capture(protocol): per-resource CSP block warnings in source order
         step("should apply head meta CSP in source order to every active resource")
         step("Enforce CSP host paths and head meta policies")
         var session = BrowserSession.new()
@@ -636,7 +665,9 @@ describe "Production Simple browser security envelope":
     # @req REQ-WEB-BROWSER-012 NFR-WEB-BROWSER-011
     # @manual: folded
     it "should bound malformed meta CSP without widening following loads":
+        # @req REQ-WEB-BROWSER-012
         # @req REQ-SSPEC-SYSTEM
+        # @capture(protocol): oversized meta CSP warning chain
         step("should bound malformed meta CSP without widening following loads")
         step("Enforce CSP host paths and head meta policies")
         var session = BrowserSession.new()
@@ -657,7 +688,9 @@ describe "Production Simple browser security envelope":
     # @req REQ-WEB-BROWSER-005 REQ-WEB-BROWSER-012 REQ-WEB-BROWSER-013
     # @manual: show
     it "should enforce response-header sandbox capabilities before runtime creation":
+        # @req REQ-WEB-BROWSER-005
         # @req REQ-SSPEC-SYSTEM
+        # @capture(protocol): sandbox-denied versus sandbox-scripted session outcomes
         step("should enforce response-header sandbox capabilities before runtime creation")
         step("Intersect repeated sandbox headers before admitting scripts")
         var denied = BrowserSession.new()
@@ -685,7 +718,7 @@ describe "Production Simple browser security envelope":
         val denied_dispatch = denied.dispatch_dom_event(
             "denied-handler", "click", true, true
         )
-        expect(denied_dispatch.actions.len()).to_equal(0)
+        expect(denied_dispatch.actions.len()).to_equal(0)  # oracle: sandbox without allow-scripts must dispatch zero actions
         expect(denied.warnings.join("|")).to_contain(
             "CSP sandbox blocked script execution"
         )
@@ -719,7 +752,7 @@ describe "Production Simple browser security envelope":
         expect(opaque_fetch.site_for_cookies_url).to_equal("")
         expect(opaque_fetch.credentials).to_equal("omit")
         expect(opaque_fetch.headers.lower().contains("cookie:")).to_be(false)
-        expect(opaque_fetch.script_cookie_writes.len()).to_equal(0)
+        expect(opaque_fetch.script_cookie_writes.len()).to_equal(0)  # oracle: an opaque sandboxed document may attempt zero script cookie writes
 
         val dispatch = scripted.dispatch_dom_event(
             "send", "click", true, true
@@ -736,7 +769,9 @@ describe "Production Simple browser security envelope":
     # @req REQ-WEB-BROWSER-005 REQ-WEB-BROWSER-012
     # @manual: show
     it "should apply final document CSP to body inline event handlers":
+        # @req REQ-WEB-BROWSER-012
         # @req REQ-SSPEC-SYSTEM
+        # @capture(protocol): inline handler dispatch under both CSP policies
         step("should apply final document CSP to body inline event handlers")
         step("Enforce CSP host paths and head meta policies")
         var denied = BrowserSession.new()
@@ -750,11 +785,11 @@ describe "Production Simple browser security envelope":
         val denied_dispatch = denied.dispatch_dom_event(
             "denied-handler", "click", true, true
         )
-        expect(denied_dispatch.actions.len()).to_equal(0)
+        expect(denied_dispatch.actions.len()).to_equal(0)  # oracle: CSP-blocked handler must contribute zero actions
         expect(denied_dispatch.event.default_prevented).to_equal(false)
         expect(denied_dispatch.default_action_allowed).to_equal(true)
         expect(denied_dispatch.default_action).to_equal("navigate:/default")
-        expect(denied.pending_request_count()).to_equal(1)
+        expect(denied.pending_request_count()).to_equal(1)  # oracle: the default navigation still produces exactly one pending request
         expect(denied.warnings.join("|")).to_contain(
             "CSP blocked inline event handler"
         )
@@ -773,14 +808,16 @@ describe "Production Simple browser security envelope":
         expect(allowed_dispatch.actions).to_equal(["prevent-default"])
         expect(allowed_dispatch.event.default_prevented).to_equal(true)
         expect(allowed_dispatch.default_action_allowed).to_equal(false)
-        expect(allowed.pending_request_count()).to_equal(0)
+        expect(allowed.pending_request_count()).to_equal(0)  # oracle: prevent-default must consume the navigation request
 
     # @req REQ-WEB-BROWSER-004 REQ-WEB-BROWSER-012
     # @manual: show
     # @capture(html)
     # @capture(artifact)
     it "should bind identical image URLs to each node CSP decision":
+        # @req REQ-WEB-BROWSER-004
         # @req REQ-SSPEC-SYSTEM
+        # @capture(artifact): DrawIR commands for the admitted and blocked aliases
         step("should bind identical image URLs to each node CSP decision")
         step("Load the earlier identical image under its source-position CSP")
         var session = BrowserSession.new()
@@ -802,8 +839,8 @@ describe "Production Simple browser security envelope":
             "background-image:url('/shared.png');background-repeat:no-repeat\">" +
             "</div></body></html>"
         ).is_ok()).to_be(true)
-        expect(session.image_resources.len()).to_equal(1)
-        expect(session.admitted_image_sources.len()).to_equal(2)
+        expect(session.image_resources.len()).to_equal(1)  # oracle: one shared URL yields one pooled image resource
+        expect(session.admitted_image_sources.len()).to_equal(2)  # oracle: both nodes get a distinct source binding despite the shared URL
         expect(session.current_body_html).to_contain("/shared.png")
         expect(session.image_resources[0].image_uri).to_start_with(
             "simple-render-image:"
@@ -833,14 +870,16 @@ describe "Production Simple browser security envelope":
         val pixels = session.render_to_pixels(4, 4).pixel_data
         expect(_csp_alias_color_count(
             pixels, 0xFFFF00FFu32
-        )).to_equal(4)
+        )).to_equal(4)  # oracle: only the single 2x2 admitted image paints its four pixels
 
     # @req REQ-WEB-BROWSER-004 REQ-WEB-BROWSER-012
     # @manual: show
     # @capture(html)
     # @capture(artifact)
     it "should retain CSP image identity after DOM removal and reorder":
+        # @req REQ-WEB-BROWSER-004
         # @req REQ-SSPEC-SYSTEM
+        # @capture(artifact): DrawIR command indices across DOM mutations
         step("should retain CSP image identity after DOM removal and reorder")
         step("Keep opaque node bindings out of authored DOM serialization")
         var removed = _csp_alias_inline_session()
@@ -911,7 +950,11 @@ describe "Production Simple browser security envelope":
     # @capture(protocol)
     # @capture(log)
     it "should navigate trusted HTTPS and reject invalid certificate identities":
+        # @req REQ-WEB-BROWSER-015
         # @req REQ-SSPEC-SYSTEM
+        # NOTE: legitimately RED — production security evidence helper fails
+        # until REQ-WEB-BROWSER-015 TLS chain evidence lands.
+        # @capture(protocol): trusted navigation and TLS failure evidence
         step("should navigate trusted HTTPS and reject invalid certificate identities")
         _two_origin_https_fixture()
         step("Inspect TLS chain service identity HSTS and failure evidence")
@@ -920,7 +963,11 @@ describe "Production Simple browser security envelope":
     # @manual: show
     # @capture(protocol)
     it "should enforce origin CORS CSP redirect and mixed-content policy":
+        # @req REQ-WEB-BROWSER-016
         # @req REQ-SSPEC-SYSTEM
+        # NOTE: legitimately RED — production security evidence helper fails
+        # until REQ-WEB-BROWSER-016 policy evidence lands.
+        # @capture(protocol): mixed-content and redirect policy evidence
         step("should enforce origin CORS CSP redirect and mixed-content policy")
         _two_origin_https_fixture()
         _hostile_page_fixture()
@@ -929,7 +976,9 @@ describe "Production Simple browser security envelope":
 
     # @manual: folded
     it "should partition cookies and storage and enforce cookie attributes":
+        # @req REQ-WEB-BROWSER-013
         # @req REQ-SSPEC-SYSTEM
+        # @capture(protocol): cookie store headers per origin partition case
         step("should partition cookies and storage and enforce cookie attributes")
         val now: i64 = 1000
         val origin = Origin(
@@ -1117,7 +1166,9 @@ describe "Production Simple browser security envelope":
     # @manual: show
     # @capture(protocol)
     it "should enforce partitioned cookies through BrowserSession production paths":
+        # @req REQ-WEB-BROWSER-013
         # @req REQ-SSPEC-SYSTEM
+        # @capture(protocol): production session cookie headers per partition
         step("should enforce partitioned cookies through BrowserSession production paths")
         var session = BrowserSession.new()
         expect(session.open_html(
@@ -1216,7 +1267,9 @@ describe "Production Simple browser security envelope":
     # @req REQ-WEB-BROWSER-013 NFR-WEB-BROWSER-013
     # @manual: folded
     it "should bound retained broker cookie bytes without replacing a partition":
+        # @req REQ-WEB-BROWSER-013
         # @req REQ-SSPEC-SYSTEM
+        # @capture(statistics): accepted and rejected serialized cookie byte counts
         step("should bound retained broker cookie bytes without replacing a partition")
         val origin = Origin(
             scheme: "https", host: "api.example.test", port: 443
@@ -1245,18 +1298,20 @@ describe "Production Simple browser security envelope":
         expect(rejected.reason).to_equal(
             "cookie-exceeds-4096-byte-limit"
         )
-        expect(store.count()).to_equal(1)
+        expect(store.count()).to_equal(1)  # oracle: the oversized row must not replace the admitted partition row
         val retained = store.get_header_for_origin(
             origin, "/", Some(origin), "GET", false, 1001, partition_key
         )
-        expect(retained.len()).to_equal(4096)
+        expect(retained.len()).to_equal(4096)  # oracle: the retained boundary cookie is exactly the 4096-byte limit
         expect(retained).to_start_with("edge=xxxx")
         expect(retained.contains("edge=yyyy")).to_be(false)
 
     # @req REQ-WEB-BROWSER-013
     # @manual: folded
     it "should serialize cookies by path length then stable creation order":
+        # @req REQ-WEB-BROWSER-013
         # @req REQ-SSPEC-SYSTEM
+        # @capture(protocol): serialized cookie header ordering
         step("should serialize cookies by path length then stable creation order")
         val origin = Origin(
             scheme: "https", host: "example.com", port: 443
@@ -1315,7 +1370,11 @@ describe "Production Simple browser security envelope":
     # @capture(exec)
     # @capture(protocol)
     it "should deny Node native filesystem process socket environment and IPC access":
+        # @req REQ-WEB-BROWSER-017
         # @req REQ-SSPEC-SYSTEM
+        # NOTE: legitimately RED — production security evidence helper fails
+        # until REQ-WEB-BROWSER-017 host-capability denial evidence lands.
+        # @capture(exec): renderer host capability denial evidence
         step("should deny Node native filesystem process socket environment and IPC access")
         _hostile_page_fixture()
         _check_security_denial()
@@ -1323,7 +1382,11 @@ describe "Production Simple browser security envelope":
 
     # @manual: folded
     it "should deny unaudited file data javascript custom and external schemes":
+        # @req REQ-WEB-BROWSER-018
         # @req REQ-SSPEC-SYSTEM
+        # NOTE: legitimately RED — production security evidence helper fails
+        # until REQ-WEB-BROWSER-018 scheme denial evidence lands.
+        # @capture(protocol): scheme admission verdict per navigation scheme
         step("should deny unaudited file data javascript custom and external schemes")
         _hostile_page_fixture()
         step("Exercise every supported and denied navigation scheme")
@@ -1334,7 +1397,9 @@ describe "Production Simple browser security envelope":
     # @capture(binary)
     # @capture(log)
     it "should run the site renderer in the required platform sandbox":
+        # @req REQ-WEB-BROWSER-019
         # @req REQ-SSPEC-SYSTEM
+        # @capture(binary): admitted production renderer binary evidence
         step("should run the site renderer in the required platform sandbox")
         _platform_evidence_row()
         _check_security_denial()
@@ -1345,7 +1410,9 @@ describe "Production Simple browser security envelope":
     # @capture(protocol)
     # @capture(binary)
     it "should replace the renderer before exposing a cross-site document":
+        # @req REQ-WEB-BROWSER-020
         # @req REQ-SSPEC-SYSTEM
+        # @capture(binary): renderer generation and pid across the cross-site hop
         step("should replace the renderer before exposing a cross-site document")
         _two_origin_https_fixture()
         _platform_evidence_row()
@@ -1443,7 +1510,11 @@ describe "Production Simple browser security envelope":
 
     # @manual: folded
     it "should reject malformed late duplicate and oversized renderer messages":
+        # @req REQ-WEB-BROWSER-021
         # @req REQ-SSPEC-SYSTEM
+        # NOTE: legitimately RED — production security evidence helper fails
+        # until REQ-WEB-BROWSER-021 bounded IPC evidence lands.
+        # @capture(protocol): adversarial renderer message outcomes
         step("should reject malformed late duplicate and oversized renderer messages")
         _hostile_page_fixture()
         step("Send bounded IPC and Draw IR adversarial cases")
@@ -1451,7 +1522,11 @@ describe "Production Simple browser security envelope":
 
     # @manual: folded
     it "should contain renderer crash timeout memory and restart-rate failures":
+        # @req REQ-WEB-BROWSER-019
         # @req REQ-SSPEC-SYSTEM
+        # NOTE: legitimately RED — production security evidence helper fails
+        # until REQ-WEB-BROWSER-019 containment evidence lands.
+        # @capture(log): crash and restart-rate containment evidence
         step("should contain renderer crash timeout memory and restart-rate failures")
         _platform_evidence_row()
         step("Crash and exhaust only the hostile renderer")
@@ -1459,7 +1534,11 @@ describe "Production Simple browser security envelope":
 
     # @manual: folded
     it "should account for pinned conformance and fuzz corpora":
+        # @req REQ-WEB-BROWSER-021
         # @req REQ-SSPEC-SYSTEM
+        # NOTE: legitimately RED — production security evidence helper fails
+        # until the pinned WPT/Test262/fuzz corpus evidence lands.
+        # @capture(protocol): pinned corpus manifest evidence
         step("should account for pinned conformance and fuzz corpora")
         step("Load pinned WPT Test262 and fuzz manifests")
         step("Retain minimized reproducers for every failure")

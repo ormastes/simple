@@ -1,5 +1,37 @@
+"""
+SimpleOS Vulkan device port specification
+
+## Purpose and audience
+Executable contract for the Vulkan device evidence and the Adreno/Turnip
+staged admission path (`os.drivers.gpu.vulkan_device_port` and
+`os.drivers.gpu.adreno_turnip_adapter`), written for the SimpleOS GPU team
+and board bring-up reviewers gating UNO Q native promotion.
+
+## Operator workflow
+Run `./src/compiler_rust/target/bootstrap/simple run
+test/01_unit/os/drivers/gpu/vulkan_device_port_spec.spl` from the repository
+root; all scenarios build receipts and capabilities in memory, so no GPU
+device or board is required.
+
+## Compatibility and limitations
+Host offload is never admissible as guest-native evidence; only fully
+correlated guest-native readback passes the receipt gate, and UNO Q stays
+below native promotion until firmware, MMU, queue, fence, and readback
+owners exist. Probe caching is per generation and resets on shutdown.
+
+## Verification guidance and troubleshooting
+A receipt-gate failure means the evidence-class correlation rules moved; an
+admission failure naming `blocked:...` means a capability owner is missing
+by design — check `reason` strings before relaxing any gate. Every scenario
+prints its verdict line; re-run the single file after editing either driver
+module.
+"""
+# Lifecycle: doc/01_research/domain/web_renderer_vulkan_4k_showcase_hardening.md ;
+# doc/03_plan/agent_tasks/web_renderer_vulkan_4k_showcase_hardening.md ;
+# doc/04_architecture/web_renderer_vulkan_4k_showcase_hardening.md ;
+# doc/05_design/web_renderer_vulkan_4k_showcase_hardening.md
+# @manual_section: vulkan device port admission
 # @req REQ-001 REQ-003 REQ-004 REQ-010 NFR-001 NFR-002 NFR-007
-"""Vulkan device evidence and Adreno/Turnip staged admission contract."""
 
 use std.spec.*
 use std.common.processing.processing_ir.*
@@ -8,6 +40,9 @@ use os.drivers.gpu.adreno_turnip_adapter.*
 
 describe "SimpleOS Vulkan device port":
     it "should reject host offload as guest-native Vulkan evidence":
+        # @req REQ-001 NFR-001
+        # @capture(bit_table): native-validity verdict for a host-offload evidence receipt
+        step("Build a host-offload receipt and submit it to the native gate")
         # @covers VD_CLASS:true
         val receipt = VulkanDeviceReceipt(evidence_class: VULKAN_EVIDENCE_HOST_OFFLOAD,
             backend: "vulkan", generation: 4, submission_id: 5, fence_id: 5,
@@ -16,6 +51,9 @@ describe "SimpleOS Vulkan device port":
         expect(vulkan_device_receipt_native_valid(receipt, 4, [7u32])).to_equal(false)
 
     it "should admit only fully correlated guest-native readback":
+        # @req REQ-003 NFR-002
+        # @capture(bit_table): gate verdicts across generation, payload, handle, and checksum mutations
+        step("Mutate generation, payload, handle, and checksum on a guest-native receipt")
         # @covers VD_CLASS:false VD_CORRELATION:true VD_CORRELATION:false
         # @covers VD_PROVENANCE:true VD_PROVENANCE:false VD_INTEGRITY:true VD_INTEGRITY:false
         val receipt = VulkanDeviceReceipt(evidence_class: VULKAN_EVIDENCE_GUEST_NATIVE,
@@ -37,6 +75,9 @@ describe "SimpleOS Vulkan device port":
         expect(vulkan_device_receipt_native_valid(mismatch, 4, [7u32])).to_equal(false)
 
     it "should require every native capability owner":
+        # @req REQ-004 NFR-007
+        # @capture(bit_table): native-ready verdicts for a complete capability and a firmware-blocked one
+        step("Compare a fully-owned capability against a firmware-blocked one")
         val ready = VulkanDeviceCapability(generation: 1, available: true,
             evidence_class: VULKAN_EVIDENCE_GUEST_NATIVE, backend: "vulkan",
             board_identity: "qualcomm-uno-q", device_identity: 73,
@@ -47,6 +88,9 @@ describe "SimpleOS Vulkan device port":
         expect(vulkan_device_capability_native_ready(blocked)).to_equal(false)
 
     it "should keep UNO Q source readiness below native promotion":
+        # @req REQ-010
+        # @capture(statistics): probed evidence class, availability, and blocked reason for UNO Q
+        step("Probe the UNO Q board environment and read its blocked reason")
         # @covers AD_PROVENANCE:true AD_LINUX_ID:false AD_PROBE_CACHE:true
         val adapter = AdrenoTurnipAdapter.linux_board_oracle(
             "qualcomm-uno-q", "mesa-turnip-pinned", "MIT", 73)
@@ -58,18 +102,24 @@ describe "SimpleOS Vulkan device port":
         expect(ADRENO_TURNIP_RESUME_COMMAND).to_equal("SIMPLEOS_UNO_Q_ADRENO_LIVE=1 bin/simple test test/03_system/os/board/uno_q_adreno_turnip_live_spec.spl --mode=interpreter --no-session-daemon")
 
     it "should cache one probe per generation and invalidate on change":
+        # @req REQ-010
+        # @capture(statistics): probe counter across repeat, new-generation, and post-shutdown probes
+        step("Probe the same generation twice, then a new one, then after shutdown")
         # @covers AD_PROBE_CACHE:false AD_LINUX_ID:true
         val adapter = AdrenoTurnipAdapter.blocked("qualcomm-uno-q", "mesa-turnip-pinned", "MIT")
         val _first = adapter.probe_environment(10)
         val _repeat = adapter.probe_environment(10)
-        expect(adapter.probe_count).to_equal(1)
+        expect(adapter.probe_count).to_equal(1)  # oracle: a repeated same-generation probe must be served from the cache, so only one real probe ran
         val _next = adapter.probe_environment(11)
-        expect(adapter.probe_count).to_equal(2)
+        expect(adapter.probe_count).to_equal(2)  # oracle: a new generation invalidates the cache and costs exactly one more real probe
         adapter.shutdown()
         val _after_reset = adapter.probe_environment(11)
-        expect(adapter.probe_count).to_equal(3)
+        expect(adapter.probe_count).to_equal(3)  # oracle: shutdown invalidates the cache, so even the same generation probes anew
 
     it "should reject lowering and submission until native owners exist":
+        # @req REQ-004 NFR-007
+        # @capture(statistics): blocked reasons from lowering, submission, and provenance gates
+        step("Submit processing IR through a blocked adapter and read every rejection reason")
         # @covers AD_LOWER_VALID:false AD_SUBMIT_VALID:false AD_PROVENANCE:false
         val adapter = AdrenoTurnipAdapter.blocked("qualcomm-uno-q", "mesa-turnip-pinned", "MIT")
         val ir = processing_ir_fill_u32(4, 7u32)
@@ -83,6 +133,9 @@ describe "SimpleOS Vulkan device port":
         expect(adreno_turnip_resume_gate(no_provenance)).to_equal("blocked:turnip-provenance-missing")
 
     it "should reject malformed IR before staged backend admission":
+        # @req REQ-003
+        # @capture(statistics): invalid-element-count rejections from both lowering and submission
+        step("Lower and submit a zero-element IR and expect identical rejection reasons")
         # @covers AD_LOWER_VALID:true AD_SUBMIT_VALID:true
         val adapter = AdrenoTurnipAdapter.blocked("qualcomm-uno-q", "mesa-turnip-pinned", "MIT")
         val invalid = processing_ir_fill_u32(0, 7u32)

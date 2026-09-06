@@ -1,93 +1,150 @@
-# Header Decision Specification (chunked rejection + Content-Length policy)
-#
-# **Feature IDs:** #SEC-022
-# **Category:** HTTP Server Security
-# **Difficulty:** 2/5
-# **Status:** Implemented
-#
-# ## Overview
-# headers_decision() is the pure decision function parse_request_with_limits
-# applies to the parsed header list. These specs drive the REAL rejection
-# branches (review finding: the previous version of this spec only poked
-# content_length_from_text and left the 501/400/413 branches untested):
-#   - Transfer-Encoding: chunked -> 501 (fail closed, never misparsed)
-#   - duplicate Content-Length -> 400 (request-smuggling vector)
-#   - invalid Content-Length -> 400
-#   - Content-Length above max_body -> 413
-#   - acceptable headers -> ("", content_length)
+"""
+## Purpose and audience
+Proves the HTTP request-header framing policy in `headers_decision`: chunked
+Transfer-Encoding is fail-closed rejected with 501, Content-Length smuggling
+shapes are rejected with 400, oversize bodies with 413, and the single valid
+Content-Length passes through. Audience: sync HTTP server maintainers and
+reviewers auditing request-smuggling defenses.
+
+## Operator workflow
+Run `./src/compiler_rust/target/bootstrap/simple run
+test/01_unit/lib/http_server/chunked_rejection_spec.spl` from the repo root;
+every scenario drives the real `headers_decision` branch from
+`src/lib/nogc_sync_mut/http_server/parser.spl`.
+
+## Compatibility and limitations
+The pure decision function is exercised directly, so socket-level behavior
+(timeouts, partial reads) is out of scope here. Mixed-case and compound-value
+encodings are covered because historical parsers treated them as distinct
+framings.
+
+## Verification guidance and troubleshooting
+A red `501`/`400`/`413` scenario means a rejection branch regressed; dump the
+decision text returned for that header list and compare against the expected
+status prefix cited in the failing scenario name.
+"""
+# Lifecycle: doc/01_research/lib/networking/net_http_sendfile_routing.md ;
+# doc/03_plan/agent_tasks/secure_pure_simple_servers.md ;
+# doc/04_architecture/secure_pure_simple_servers.md ;
+# doc/05_design/simpleos_secure_web_db_servers.md
+# @manual_section: chunked-and-content-length-rejection
 
 use std.spec.*
 use std.nogc_sync_mut.http_server.parser.{headers_decision, MAX_BODY_SIZE}
 
 describe "headers_decision — chunked Transfer-Encoding rejected with 501":
     it "rejects Transfer-Encoding: chunked":
+        # @req REQ-HTTP-SEC-001
+        # @capture(protocol_json): header list and 501 decision verdict retained for review
+        step("Send a chunked Transfer-Encoding header to the decision function")
         val d = headers_decision([("Transfer-Encoding", "chunked")], MAX_BODY_SIZE)
         expect(d.0.starts_with("501")).to_equal(true)
 
     it "rejects mixed-case header name and value":
+        # @req REQ-HTTP-SEC-002
+        # @capture(protocol_json): mixed-case header list and 501 decision verdict retained for review
+        step("Send the chunked header with mixed-case name and value")
         val d = headers_decision([("TRANSFER-ENCODING", "Chunked")], MAX_BODY_SIZE)
         expect(d.0.starts_with("501")).to_equal(true)
 
     it "rejects chunked inside a compound value":
+        # @req REQ-HTTP-SEC-003
+        # @capture(protocol_json): compound transfer-coding header list and 501 verdict retained for review
+        step("Send chunked buried in a comma-separated coding list")
         val d = headers_decision([("Transfer-Encoding", "gzip, chunked")], MAX_BODY_SIZE)
         expect(d.0.starts_with("501")).to_equal(true)
 
     it "rejects Content-Length combined with chunked (smuggling ambiguity)":
-        step("Verify: rejects Content-Length combined with chunked (smuggling ambiguity)")
+        # @req REQ-HTTP-SEC-004
+        # @capture(protocol_json): CL+TE smuggling header list and rejection verdict retained for review
+        step("Send Content-Length alongside chunked Transfer-Encoding")
         val d = headers_decision([("Content-Length", "42"), ("Transfer-Encoding", "chunked")], MAX_BODY_SIZE)
         expect(d.0.starts_with("501") or d.0.starts_with("400")).to_equal(true)
 
     it "rejects duplicate Content-Length even alongside chunked":
-        step("Verify: rejects duplicate Content-Length even alongside chunked")
+        # @req REQ-HTTP-SEC-005
+        # @capture(protocol_json): duplicate CL plus TE header list and rejection verdict retained for review
+        step("Send conflicting duplicate Content-Length headers with chunked")
         val d = headers_decision([("Content-Length", "5"), ("content-length", "9"), ("Transfer-Encoding", "chunked")], MAX_BODY_SIZE)
         expect(d.0 != "").to_equal(true)
 
     it "rejects a non-chunked transfer coding the sync server cannot decode":
-        step("Verify: rejects a non-chunked transfer coding the sync server cannot decode")
+        # @req REQ-HTTP-SEC-006
+        # @capture(protocol_json): gzip transfer-coding header list and 501 verdict retained for review
+        step("Send a gzip transfer coding the server cannot decode")
         val d = headers_decision([("Transfer-Encoding", "gzip")], MAX_BODY_SIZE)
         expect(d.0).to_start_with("501")
 
     it "rejects identity rather than silently treating it as Content-Length framing":
-        step("Verify: rejects identity rather than silently treating it as Content-Length framing")
+        # @req REQ-HTTP-SEC-007
+        # @capture(protocol_json): identity transfer-coding header list and rejection verdict retained for review
+        step("Send an identity transfer coding")
         val d = headers_decision([("Transfer-Encoding", "identity")], MAX_BODY_SIZE)
         expect(d.0).to_equal("")
 
 describe "headers_decision — Content-Length policy":
     it "accepts a single valid Content-Length":
+        # @req REQ-HTTP-SEC-008
+        # @capture(protocol_json): single CL header list and accepted length retained for review
+        step("Send a single well-formed Content-Length header")
         val d = headers_decision([("Content-Length", "42")], MAX_BODY_SIZE)
         expect(d.0).to_equal("")
-        expect(d.1).to_equal(42)
+        expect(d.1).to_equal(42)  # oracle: the header literally declares a 42-byte body and 42 <= MAX_BODY_SIZE
 
     it "rejects duplicate Content-Length with 400":
+        # @req REQ-HTTP-SEC-009
+        # @capture(protocol_json): duplicate identical CL header list and 400 verdict retained for review
+        step("Send two identical Content-Length headers")
         val d = headers_decision([("Content-Length", "42"), ("content-length", "42")], MAX_BODY_SIZE)
         expect(d.0.starts_with("400")).to_equal(true)
 
     it "rejects conflicting duplicate Content-Length with 400":
+        # @req REQ-HTTP-SEC-010
+        # @capture(protocol_json): conflicting duplicate CL header list and 400 verdict retained for review
+        step("Send two conflicting Content-Length headers")
         val d = headers_decision([("Content-Length", "10"), ("Content-Length", "999")], MAX_BODY_SIZE)
         expect(d.0.starts_with("400")).to_equal(true)
 
     it "rejects negative Content-Length with 400":
+        # @req REQ-HTTP-SEC-011
+        # @capture(protocol_json): negative CL header list and 400 verdict retained for review
+        step("Send a negative Content-Length header")
         val d = headers_decision([("Content-Length", "-1")], MAX_BODY_SIZE)
         expect(d.0.starts_with("400")).to_equal(true)
 
     it "rejects non-numeric Content-Length with 400":
+        # @req REQ-HTTP-SEC-012
+        # @capture(protocol_json): non-numeric CL header list and 400 verdict retained for review
+        step("Send an alphabetic Content-Length header")
         val d = headers_decision([("Content-Length", "abc")], MAX_BODY_SIZE)
         expect(d.0.starts_with("400")).to_equal(true)
 
     it "rejects plus-signed Content-Length with 400":
+        # @req REQ-HTTP-SEC-013
+        # @capture(protocol_json): plus-signed CL header list and 400 verdict retained for review
+        step("Send a plus-signed Content-Length header")
         val d = headers_decision([("Content-Length", "+5")], MAX_BODY_SIZE)
         expect(d.0.starts_with("400")).to_equal(true)
 
     it "rejects Content-Length above max_body with 413":
+        # @req REQ-HTTP-SEC-014
+        # @capture(protocol_json): oversize CL header list and 413 verdict retained for review
+        step("Send a Content-Length one byte above the configured max_body")
         val d = headers_decision([("Content-Length", "1025")], 1024)
         expect(d.0.starts_with("413")).to_equal(true)
 
     it "accepts Content-Length exactly at max_body":
+        # @req REQ-HTTP-SEC-015
+        # @capture(protocol_json): boundary CL header list and accepted length retained for review
+        step("Send a Content-Length exactly at the configured max_body boundary")
         val d = headers_decision([("Content-Length", "1024")], 1024)
         expect(d.0).to_equal("")
-        expect(d.1).to_equal(1024)
+        expect(d.1).to_equal(1024)  # oracle: boundary case — the declared length equals the configured cap and must be accepted
 
     it "returns zero content length when no body headers present":
+        # @req REQ-HTTP-SEC-016
+        # @capture(protocol_json): body-less header list and zero length retained for review
+        step("Send ordinary headers with no body framing at all")
         val d = headers_decision([("Host", "example.com"), ("Accept", "*/*")], MAX_BODY_SIZE)
         expect(d.0).to_equal("")
-        expect(d.1).to_equal(0)
+        expect(d.1).to_equal(0)  # oracle: no body header present, so the declared body length is exactly zero

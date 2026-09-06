@@ -1,15 +1,45 @@
-# Purpose and audience: executable specification evidence for the owning engineering team.
-# @req REQ-SSPEC-APP
-# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+"""
+## Purpose and audience
+Executable specification for the lightweight rich-query numeric guard in
+src/app/cli/query_rich_common.spl. Written for the CLI tooling owners who rely
+on `query_file_read_rich` staying a mmap-backed read at the parser boundary and
+on `query_rich_nonnegative_int_or_zero` coercing malformed coordinates to zero
+instead of erroring.
+
+## Operator workflow
+Run one file: `bin/simple test test/01_unit/app/cli/query_rich_numeric_guard_spec.spl`.
+The write/read scenarios exercise the real query helpers against a temp file;
+the boundary scenario is a source contract naming the exact mapping call.
+
+## Compatibility and limitations
+The mmap boundary assertions are source contracts (the product exposes no
+runtime seam to observe the mapping itself), so they read the shipped source
+via a genuinely-named local. The temp file path is fixed under /tmp and is
+rewritten between assertions.
+
+## Verification guidance and troubleshooting
+A failure in the coerce scenarios means the numeric guard grammar changed; a
+failure in the boundary scenario means query_file_read_rich stopped using
+file_mmap_read_text. Compare against src/app/cli/query_rich_common.spl before
+touching either side.
+"""
+
+# Lifecycle: doc/01_research/infra/sspec/modern_sspec_typed_evidence_research_2026-08-08.md
+# doc/03_plan/sspec_modernization_plan.md
+# doc/04_architecture/sspec_documentization_maintenance.md
+# doc/05_design/pure_simple_cli_completeness.md
+# @manual_section: query rich numeric guard
 
 use std.spec.step
 
+use std.nogc_sync_mut.io.file_ops.{file_read}
 use app.cli.query_rich_common.{query_file_write, query_file_exists, query_file_read_rich, query_rich_nonnegative_int_or_zero}
 
 describe "query rich numeric guard":
     it "maps source files before the lightweight query parser consumes them":
-        # @req REQ-SSPEC-APP
-        step("maps source files before the lightweight query parser consumes them")
+        # @req REQ-CLI-QUERY-RICH-001
+        # @capture(protocol_json): mapped-read roundtrip bytes retained for review
+        step("Write probe payloads through query_file_write and read them back through query_file_read_rich")
         # oracle: the mapped read must return the exact bytes written, including
         # newlines and non-ASCII payload, for the parser boundary to be correct.
         val tmp = "/tmp/query_rich_numeric_guard_probe.txt"
@@ -20,21 +50,26 @@ describe "query rich numeric guard":
         expect(query_file_write(tmp, "héllo wörld")).to_equal(true)
         expect(query_file_read_rich(tmp)).to_equal("héllo wörld")
 
-        expect(source).to_contain("file_mmap_read_text")
-        expect(source).to_contain("fn query_file_read_rich(path: text) -> text:")
-        expect(source).to_contain("file_mmap_read_text(path)")
-        expect(source.contains("fn query_file_read_rich(path: text) -> text:\n    file_read(path)")).to_equal(false)
+        step("Read the shipped query source and observe the parser boundary contract")
+        val query_rich_source = file_read("src/app/cli/query_rich_common.spl")
+        # oracle: the query entrypoint must map (file_mmap_read_text), not buffer-read
+        expect(query_rich_source.contains("file_mmap_read_text(path)")).to_equal(true)
+        # oracle: the mapping helper keeps its documented signature
+        expect(query_rich_source.contains("fn query_file_read_rich(path: text) -> text:")).to_equal(true)
+        # oracle: a buffered file_read body would silently drop the mmap guarantee
+        expect(query_rich_source.contains("fn query_file_read_rich(path: text) -> text:\n    file_read(path)")).to_equal(false)
 
     it "defaults malformed rich query coordinates":
-        # @req REQ-SSPEC-APP
-        step("defaults malformed rich query coordinates")
+        # @req REQ-CLI-QUERY-RICH-001
+        # @capture(bit_table): coerce table for malformed coordinate spellings
+        step("Coerce malformed, empty, and negative coordinate spellings through the guard")
         # oracle: any non-digit text, empty text, or negative number must coerce to 0
-        expect(query_rich_nonnegative_int_or_zero("notanumber")).to_equal(0)
-        expect(query_rich_nonnegative_int_or_zero("")).to_equal(0)
-        expect(query_rich_nonnegative_int_or_zero("   ")).to_equal(0)
-        expect(query_rich_nonnegative_int_or_zero("-5")).to_equal(0)
-        expect(query_rich_nonnegative_int_or_zero("12a34")).to_equal(0)
+        expect(query_rich_nonnegative_int_or_zero("notanumber")).to_equal(0)  # oracle: letters carry no numeric prefix, so the guard defaults to zero
+        expect(query_rich_nonnegative_int_or_zero("")).to_equal(0)  # oracle: empty text has no digits to parse, so zero is the only safe default
+        expect(query_rich_nonnegative_int_or_zero("   ")).to_equal(0)  # oracle: whitespace-only text trims to empty, so the guard defaults to zero
+        expect(query_rich_nonnegative_int_or_zero("-5")).to_equal(0)  # oracle: negative coordinates are outside the nonnegative domain, so clamp to zero
+        expect(query_rich_nonnegative_int_or_zero("12a34")).to_equal(0)  # oracle: an embedded letter breaks the decimal run, so the whole spelling is malformed
         # oracle: well-formed decimal text parses exactly, surrounding whitespace trimmed
-        expect(query_rich_nonnegative_int_or_zero("128")).to_equal(128)
-        expect(query_rich_nonnegative_int_or_zero("  77 ")).to_equal(77)
-        expect(query_rich_nonnegative_int_or_zero("0")).to_equal(0)
+        expect(query_rich_nonnegative_int_or_zero("128")).to_equal(128)  # oracle: the digits parse to their face value with no coercion applied
+        expect(query_rich_nonnegative_int_or_zero("  77 ")).to_equal(77)  # oracle: the guard trims surrounding whitespace before parsing, leaving 77
+        expect(query_rich_nonnegative_int_or_zero("0")).to_equal(0)  # oracle: the literal digit zero parses to zero, distinct from the malformed default

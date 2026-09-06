@@ -1,29 +1,148 @@
-# Duplicate Check Benchmark Tests
-#
-# **Feature IDs:** app.duplicate_check - Benchmarking
-# **Category:** Testing | Performance
-# **Status:** Pending (requires compiled mode)
-#
-# These tests depend on app.duplicate_check.* modules which are only
-# available in compiled mode. In interpreter mode, we verify file loading only.
+"""
+## Purpose and audience
+Executable system contract for the duplicate-check benchmark surface
+(`compiler.tools.duplicate_check`): running a token-mode benchmark over real
+repo files, aggregating BenchmarkStats, formatting results, persisting and
+reloading a result set, and comparing a baseline against a current run.
+Audience: engineers tuning the duplication detector and reviewers of its
+benchmark plumbing.
+## Operator workflow
+Run: src/compiler_rust/target/bootstrap/simple run test/05_perf/duplicate_check_benchmark_spec.spl
+and read the SPEC FILE VERDICT line; every scenario must pass.
+## Compatibility and limitations
+The scenarios build a token-mode DuplicationConfig (use_semantic=false) so no
+Ollama server is contacted and no wall-clock threshold is asserted — durations
+are recorded but only compared structurally. Save/load writes one scratch file
+under build/.
+## Verification guidance and troubleshooting
+A failure names the benchmark operation under test (execution, stats,
+formatting, persistence, comparison). Re-run after touching
+src/compiler/90.tools/duplicate_check/benchmark.spl; a stats failure usually
+means min/max/average aggregation drifted, a save/load failure means the
+pipe-delimited result format changed without a version bump.
+"""
+# Lifecycle: doc/01_research/domain/sspec_documentization_maintenance.md ;
+# doc/03_plan/sspec_modernization_plan.md ;
+# doc/04_architecture/sspec_documentization_maintenance.md ;
+# doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+# @manual_section: duplicate-check-benchmark
+
+use std.spec
+use compiler.tools.duplicate_check.{
+    BenchmarkResult, BenchmarkStats, run_benchmark, compute_stats,
+    format_benchmark_result, format_benchmark_stats,
+    save_benchmark_results, load_benchmark_results, compare_benchmarks
+}
+use compiler.tools.duplicate_check.config.{DuplicationConfig}
+
+fn token_mode_config() -> DuplicationConfig:
+    DuplicationConfig(
+        selected_mode: "token",
+        min_tokens: 30,
+        min_lines: 5,
+        ignore_identifiers: true,
+        ignore_literals: false,
+        ignore_comments: true,
+        ignore_whitespace: true,
+        similarity_threshold: 0.85,
+        output_format: "text",
+        report_path: "build/duplicate_check_benchmark_report.sdn",
+        max_allowed: 0,
+        min_impact: 10,
+        exclude_patterns: [],
+        use_ast_features: false,
+        use_cosine_similarity: false,
+        verbose: false,
+        quiet: true,
+        show_progress: false,
+        progress_interval_ms: 5000,
+        use_parallel: false,
+        num_workers: 0,
+        use_incremental: false,
+        incremental_cache_path: "build/duplicate_check_benchmark_cache.sdn",
+        use_semantic: false,
+        semantic_threshold: 0.90,
+        semantic_drift_threshold: 0.40,
+        semantic_model: "nomic-embed-text",
+        ollama_url: "http://localhost:11434",
+        rebuild_embeddings: false,
+        use_lsh_prefilter: false
+    )
+
+fn result_named(name: text, files: i64, blocks: i64, groups: i64, duration: i64) -> BenchmarkResult:
+    BenchmarkResult(
+        name: name,
+        files_count: files,
+        blocks_found: blocks,
+        groups_found: groups,
+        duration_ms: duration,
+        timestamp: 0,
+        config_hash: "token-fixed"
+    )
 
 describe "Benchmark: Execution":
     slow_it "requires compiled mode for benchmark execution":
-        # app.duplicate_check modules not available in interpreter
-        expect(true).to_equal(true)
+        # @req REQ-DUPCHECK-BENCH-001
+        # @capture(statistics): BenchmarkResult fields from a real two-file run
+        step("Run the duplicate-check benchmark over two real compiler source files")
+        val cfg = token_mode_config()
+        val result = run_benchmark("execution",
+            ["src/compiler/90.tools/duplicate_check/config.spl",
+             "src/compiler/90.tools/duplicate_check/math_utils.spl"], cfg)
+        expect(result.name).to_equal("execution")
+        expect(result.files_count).to_equal(2)  # oracle: exactly the two files handed to run_benchmark were analysed
 
 describe "Benchmark: Statistics":
     slow_it "requires compiled mode for stats computation":
-        expect(true).to_equal(true)
+        # @req REQ-DUPCHECK-BENCH-002
+        # @capture(statistics): BenchmarkStats min/max/average over pinned durations
+        step("Aggregate three benchmark results with durations 10, 20, and 30 ms")
+        val runs = [
+            result_named("run-a", 2, 1, 1, 10),
+            result_named("run-b", 2, 1, 1, 20),
+            result_named("run-c", 2, 1, 1, 30)
+        ]
+        val stats = compute_stats(runs)
+        expect(stats.runs.len()).to_equal(3)  # oracle: compute_stats must retain every run it was handed
+        expect(stats.min_ms).to_equal(10)  # oracle: 10 is the smallest of the pinned durations 10/20/30
+        expect(stats.max_ms).to_equal(30)  # oracle: 30 is the largest of the pinned durations 10/20/30
+        expect(stats.average_ms).to_equal(20)  # oracle: (10+20+30)/3 = 20
 
 describe "Benchmark: Formatting":
     slow_it "requires compiled mode for result formatting":
-        expect(true).to_equal(true)
+        # @req REQ-DUPCHECK-BENCH-003
+        # @capture(protocol_json): formatted single-result and stats text
+        step("Format one benchmark result and a stats block to text")
+        val result = result_named("fmt-run", 2, 3, 1, 12)
+        val line = format_benchmark_result(result)
+        expect(line).to_contain("fmt-run")
+        expect(line).to_contain("2 files")
+        expect(line).to_contain("12ms")
+        val runs = [result_named("fmt-run", 2, 3, 1, 12)]
+        val stats_text = format_benchmark_stats(compute_stats(runs))
+        expect(stats_text).to_contain("1 runs")
+        expect(stats_text).to_contain("Min:")
 
 describe "Benchmark: Persistence":
     slow_it "requires compiled mode for save/load":
-        expect(true).to_equal(true)
+        # @req REQ-DUPCHECK-BENCH-004
+        # @capture(protocol_binary): saved benchmark result file round-trip
+        step("Save one benchmark result to disk and load it back")
+        val saved = [result_named("persist-run", 4, 5, 2, 44)]
+        save_benchmark_results(saved, "build/duplicate_check_benchmark_results.tmp")
+        val loaded = load_benchmark_results("build/duplicate_check_benchmark_results.tmp")
+        expect(loaded.len()).to_equal(1)  # oracle: exactly the one saved result round-trips
+        expect(loaded.get(0).name).to_equal("persist-run")
+        expect(loaded.get(0).duration_ms).to_equal(44)  # oracle: the pinned duration 44 must survive the file round-trip
 
 describe "Benchmark: Comparison":
     slow_it "requires compiled mode for baseline comparison":
-        expect(true).to_equal(true)
+        # @req REQ-DUPCHECK-BENCH-005
+        # @capture(protocol_json): baseline-vs-current comparison text
+        step("Compare a 200 ms baseline against a 100 ms current run")
+        val baseline = result_named("baseline", 2, 1, 1, 200)
+        val current = result_named("current", 2, 1, 1, 100)
+        val verdict = compare_benchmarks(baseline, current)
+        expect(verdict).to_contain("Baseline: 200ms")
+        expect(verdict).to_contain("Current: 100ms")
+        expect(verdict).to_contain("100% faster")  # oracle: 200ms vs 100ms is a 100% speedup by the product's own formula

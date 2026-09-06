@@ -1,3 +1,31 @@
+"""
+## Purpose and audience
+Executable spec of the REQ-010 `rt(hal)` entry-closure assurance check for
+the runtime-assurance maintainers who own
+`src/compiler/semantics/rt_hal_assurance_closure`. Scope: transitive
+assurance-rank rejection from critical entries, justified lower-rank
+admission, fail-closed unknown callees, and shared-cycle visit accounting.
+## Operator workflow
+Run: ./src/compiler_rust/target/bootstrap/simple run
+test/01_unit/compiler/semantics/rt_hal_assurance_closure_spec.spl — the
+assurance_node helper builds small call graphs and each scenario asserts on
+the finding list returned by rt_hal_assurance_closure_check_v1.
+## Compatibility and limitations
+Graphs are hand-built node lists, so the spec pins the checker's closure
+contract, not source discovery. Bounds are passed explicitly (8, 8) and are
+not exercised at their shipped scale.
+## Verification guidance and troubleshooting
+A failure means the checker rejected a justified operation, admitted an
+unjustified lower-rank one, ignored an unknown callee reached from a
+critical entry, or mis-attributed a finding in a shared cyclic closure.
+Each scenario name names which contract broke.
+"""
+# Lifecycle: doc/01_research/domain/mcdc_rt_hal_hardening.md ;
+# doc/03_plan/agent_tasks/mcdc_hal_runtime_hardening.md ;
+# doc/04_architecture/language/assurance/standards_crosswalk_2026-08-07.md ;
+# doc/05_design/rt_hal_typed_exit_protocol.md
+# @manual_section: rt-hal-assurance-closure
+
 use std.spec.*
 use compiler.semantics.rt_hal_assurance_closure.{
     RtHalAssuranceNodeV1, rt_hal_assurance_closure_check_v1
@@ -9,36 +37,48 @@ fn assurance_node(identity: text, callees: [text], critical_entry: bool,
         callees: callees, is_critical_entry: critical_entry,
         has_rt_hal: has_hal, assurance_rank: rank, line: 7)
 
-describe "REQ-010 rt(hal) entry-closure assurance":
+describe "rt(hal) entry-closure assurance":
     it "rejects a transitive lower assurance operation from a Critical entry":
+        # @req REQ-010
+        # @capture(statistics): root/offender pair of the assurance finding
+        step("Check a critical entry that reaches a rank-2 legacy HAL node")
         val nodes = [
             assurance_node("app::entry", ["io::bridge"], true, false, 3),
             assurance_node("io::bridge", ["io::legacy"], false, false, 3),
             assurance_node("io::legacy", [], false, true, 2),
         ]
         val findings = rt_hal_assurance_closure_check_v1(nodes, 8, 8)
-        expect(findings.len()).to_equal(1)
+        expect(findings.len()).to_equal(1)  # oracle: only io::legacy carries rt(hal) below the entry's rank, so one violation
         expect(findings[0].root).to_equal("app::entry")
         expect(findings[0].offender).to_equal("io::legacy")
 
     it "admits an unrelated explicitly justified lower assurance operation":
+        # @req REQ-010
+        # @capture(statistics): finding count for the justified rank-1 operation
+        step("Check a rank-1 rt(hal) node unreachable from the critical entry")
         val nodes = [
             assurance_node("app::entry", ["io::critical"], true, false, 3),
             assurance_node("io::critical", [], false, true, 3),
             assurance_node("tools::legacy", [], false, true, 1),
         ]
-        expect(rt_hal_assurance_closure_check_v1(nodes, 8, 8).len()).to_equal(0)
+        expect(rt_hal_assurance_closure_check_v1(nodes, 8, 8).len()).to_equal(0)  # oracle: the rank-1 node is not in the critical entry's closure, so nothing is violated
 
     it "fails closed only for unknown calls reached from a Critical entry":
+        # @req REQ-010
+        # @capture(statistics): the offender name of the unknown-callee finding
+        step("Give a critical and a non-critical entry one unknown callee each")
         val reachable = [
             assurance_node("app::entry", ["<unknown:dispatch>"], true, false, 3),
             assurance_node("tools::entry", ["<unknown:offline>"], false, false, 3),
         ]
         val findings = rt_hal_assurance_closure_check_v1(reachable, 8, 8)
-        expect(findings.len()).to_equal(1)
+        expect(findings.len()).to_equal(1)  # oracle: only the critical entry's unknown callee fails closed; the offline entry is out of scope
         expect(findings[0].offender).to_equal("<unknown:dispatch>")
 
     it "visits shared cyclic closure nodes once":
+        # @req REQ-010
+        # @capture(statistics): the root attribution of the single cycle finding
+        step("Check two critical entries sharing one cyclic lower-rank closure")
         val nodes = [
             assurance_node("a::entry", ["shared::one"], true, false, 3),
             assurance_node("b::entry", ["shared::one"], true, false, 3),
@@ -46,5 +86,5 @@ describe "REQ-010 rt(hal) entry-closure assurance":
             assurance_node("shared::two", ["shared::one"], false, true, 2),
         ]
         val findings = rt_hal_assurance_closure_check_v1(nodes, 8, 8)
-        expect(findings.len()).to_equal(1)
+        expect(findings.len()).to_equal(1)  # oracle: the shared cycle is visited once per entry, so no duplicated violation may leak in
         expect(findings[0].root).to_equal("a::entry")

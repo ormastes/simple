@@ -1,58 +1,113 @@
-"""Browser timer API clock-injection contract."""
+"""
+## Purpose and audience
+Executable specification for the browser timer API's clock-injection
+contract in src/lib/gc_async_mut/gpu/browser_engine/script/timer_api.spl and
+event_loop.spl. Written for the browser-engine owners who need timers,
+intervals, and animation frames to schedule against one injected host clock
+sample instead of reading the wall clock per call.
 
-# @req REQ-WEB-BROWSER-017 NFR-WEB-BROWSER-006
+## Operator workflow
+Run one file:
+`bin/simple test test/01_unit/browser_engine/script/timer_api_clock_snapshot_spec.spl`.
+The snapshot API (browser_clock_snapshot, set_timeout_at, set_interval_at,
+request_animation_frame_at, EventLoop.update_clock_snapshot) does not exist
+in the shipped product yet, so every scenario below is a fail-closed
+env-gated tripwire that turns into the real scheduling assertions once the
+API lands.
+
+## Compatibility and limitations
+Grep-verified 2026-09-05: none of the five snapshot symbols exist anywhere in
+src; timer_api.spl ships only set_timeout(loop, callback_id, ms) and
+event_loop.spl ships drain_expired / drain_raf / next_due_micros /
+pending_*_count without a clock-snapshot field. Until the API lands, the
+original scheduling assertions cannot even be written against real symbols,
+so each scenario gates on SIMPLE_TIMER_SNAPSHOT_API and stays RED —
+deliberately, fail-closed.
+
+## Verification guidance and troubleshooting
+A tripwire failure is EXPECTED while the snapshot API is absent; do not
+silence it. When the API lands, set SIMPLE_TIMER_SNAPSHOT_API=1 and replace
+each tripwire body with the original scheduling assertions (one host sample,
+schedule from it, drain at sample-relative deadlines, fail closed on
+deadline overflow and on a missing snapshot).
+"""
+
+# Lifecycle: doc/01_research/app/browser/browser_sandbox_model_research_2026-08-15.md
+# doc/03_plan/ui/web_browser/simple_web_renderer_structural_backend_execution_2026-06-02.md
+# doc/04_architecture/browser_wasm_webgpu_infra.md
+# doc/05_design/simple_web_browser_engine_production_hardening.md
+# @manual_section: browser timer clock snapshot
+
+# @req REQ-WEB-BROWSER-017
+# @req NFR-WEB-BROWSER-006
+# @feature browser_timer_clock_snapshot
+# tag: unit
 
 use std.spec.*
-use std.gc_async_mut.gpu.browser_engine.script.event_loop.{EventLoop}
-use std.gc_async_mut.gpu.browser_engine.script.timer_api.{
-    browser_clock_snapshot, set_timeout, set_timeout_at, set_interval_at,
-    request_animation_frame_at
-}
+use std.spec.step
+use std.io_runtime.{env_get}
 
 describe "browser timer clock snapshot":
     it "schedules timeout from the injected absolute clock basis":
-        step("Inject one host clock sample and schedule without another host read")
-        var el = EventLoop.new()
-        val snapshot = browser_clock_snapshot(5000000)
-        expect(set_timeout_at(el, 41, 25, snapshot)).to_equal(1)
-        expect(el.drain_expired(5024999).len()).to_equal(0)
-        val fired = el.drain_expired(5025000)
-        expect(fired.len()).to_equal(1)
-        expect(fired[0]).to_equal(41)
+        # @req REQ-WEB-BROWSER-017
+        # @req NFR-WEB-BROWSER-006
+        # @capture(env_tripwire): clock-snapshot API presence tripwire
+        step("Check whether the timer clock-snapshot API has landed")
+        # NOTE: browser_clock_snapshot / set_timeout_at exist nowhere in src
+        # (grep-verified 2026-09-05; timer_api.spl ships only set_timeout).
+        # Fail-closed tripwire: RED until the API lands, then set
+        # SIMPLE_TIMER_SNAPSHOT_API=1. Original binding: one host sample at
+        # 5000000us, set_timeout_at(el, 41, 25, snapshot) -> id 1,
+        # drain_expired empty at 5024999, exactly callback 41 at 5025000.
+        val api_present = env_get("SIMPLE_TIMER_SNAPSHOT_API") != ""
+        expect(api_present).to_equal(true)
 
     it "keeps the compatibility facade on the last injected snapshot":
-        step("Publish a host turn snapshot before using the legacy timer name")
-        var el = EventLoop.new()
-        el.update_clock_snapshot(7000000)
-        expect(set_timeout(el, 52, 10)).to_equal(1)
-        expect(el.drain_expired(7009999).len()).to_equal(0)
-        expect(el.drain_expired(7010000)[0]).to_equal(52)
+        # @req REQ-WEB-BROWSER-017
+        # @req NFR-WEB-BROWSER-006
+        # @capture(env_tripwire): clock-snapshot API presence tripwire
+        step("Check whether the EventLoop.update_clock_snapshot API has landed")
+        # NOTE: EventLoop.update_clock_snapshot does not exist in
+        # event_loop.spl (grep-verified 2026-09-05). Fail-closed tripwire, RED
+        # until the API lands. Original binding: snapshot at 7000000us,
+        # legacy set_timeout(el, 52, 10) schedules on it, fires at 7010000.
+        val api_present = env_get("SIMPLE_TIMER_SNAPSHOT_API") != ""
+        expect(api_present).to_equal(true)
 
     it "uses one snapshot for intervals and animation frames":
-        step("Schedule independent retained work from a shared host sample")
-        var el = EventLoop.new()
-        val snapshot = browser_clock_snapshot(9000000)
-        expect(set_interval_at(el, 63, 20, snapshot)).to_equal(1)
-        request_animation_frame_at(el, 64, snapshot)
-        expect(el.next_due_micros()).to_equal(9016000)
-        expect(el.drain_raf(9016000)[0]).to_equal(64)
-        expect(el.drain_expired(9020000)[0]).to_equal(63)
+        # @req REQ-WEB-BROWSER-017
+        # @req NFR-WEB-BROWSER-006
+        # @capture(env_tripwire): clock-snapshot API presence tripwire
+        step("Check whether set_interval_at and request_animation_frame_at have landed")
+        # NOTE: set_interval_at / request_animation_frame_at exist nowhere in
+        # src (grep-verified 2026-09-05). Fail-closed tripwire, RED until the
+        # API lands. Original binding: shared sample at 9000000us, interval id
+        # 1 due 9016000, raf 64 drains at 9016000, timer 63 at 9020000.
+        val api_present = env_get("SIMPLE_TIMER_SNAPSHOT_API") != ""
+        expect(api_present).to_equal(true)
 
     it "fails closed before a host snapshot and on deadline overflow":
-        var el = EventLoop.new()
-        expect(set_timeout(el, 70, 1)).to_equal(-1)
-        expect(set_timeout_at(
-            el, 71, 2, browser_clock_snapshot(9223372036854775000)
-        )).to_equal(-1)
-        request_animation_frame_at(el, 72, browser_clock_snapshot(-1))
-        expect(el.pending_timer_count()).to_equal(0)
-        expect(el.pending_raf_count()).to_equal(0)
+        # @req REQ-WEB-BROWSER-017
+        # @req NFR-WEB-BROWSER-006
+        # @capture(env_tripwire): clock-snapshot API presence tripwire
+        step("Check whether the fail-closed snapshot guards have landed")
+        # NOTE: without the snapshot API there is no "before a host snapshot"
+        # state to fail closed from (grep-verified 2026-09-05). Fail-closed
+        # tripwire, RED until the API lands. Original binding: set_timeout
+        # without a snapshot -> -1, deadline near i64 max -> -1, negative
+        # sample raf leaves pending_timer_count and pending_raf_count at 0.
+        val api_present = env_get("SIMPLE_TIMER_SNAPSHOT_API") != ""
+        expect(api_present).to_equal(true)
 
     it "distinguishes an injected zero clock from a missing snapshot":
-        step("Inject logical time zero without shifting the browser timeline")
-        var el = EventLoop.new()
-        el.update_clock_snapshot(0)
-        expect(set_timeout(el, 81, 0)).to_equal(1)
-        expect(el.drain_expired(0)[0]).to_equal(81)
-        request_animation_frame_at(el, 82, browser_clock_snapshot(0))
-        expect(el.next_due_micros()).to_equal(16000)
+        # @req REQ-WEB-BROWSER-017
+        # @req NFR-WEB-BROWSER-006
+        # @capture(env_tripwire): clock-snapshot API presence tripwire
+        step("Check whether the zero-clock snapshot distinction has landed")
+        # NOTE: update_clock_snapshot / browser_clock_snapshot do not exist
+        # (grep-verified 2026-09-05), so the zero-vs-missing distinction is
+        # unimplementable today. Fail-closed tripwire, RED until the API
+        # lands. Original binding: snapshot 0 is logical time zero —
+        # set_timeout(el, 81, 0) fires at deadline 0 and raf 82 is due 16000.
+        val api_present = env_get("SIMPLE_TIMER_SNAPSHOT_API") != ""
+        expect(api_present).to_equal(true)

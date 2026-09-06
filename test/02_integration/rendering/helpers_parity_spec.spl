@@ -1,9 +1,34 @@
-"""Helpers Parity Spec
-
+"""
+## Purpose and audience
 Focused parity tests proving that the extracted shared helpers
 (helpers_clip, helpers_pixel, helpers_text, helpers_availability)
 produce the same results as the inline code they replace inside
-the CPU/software backends.
+the CPU/software backends. The text-metric contract (advance = 5 *
+scale) is unified with the browser paint path via the web layout
+manager, so the helpers lane and the web renderer cannot drift
+apart silently.
+Audience: Engine2D backend engineers touching any helper module or
+inlining equivalent logic back into a backend.
+
+## Operator workflow
+Run the single file with the seed runner (`simple run
+test/02_integration/rendering/helpers_parity_spec.spl`). Every
+scenario is host-neutral: pure function calls, no GPU, no window
+system, no environment gating.
+
+## Compatibility and limitations
+These are direct contract checks on the helper functions, not full
+backend renders — a backend that bypasses the helpers can still
+drift and is caught by the backend-level parity specs instead.
+Numeric literals are pinned to the documented helper contracts
+(4 bytes per pixel, advance 5 per glyph unit scale, priority ranks).
+
+## Verification guidance and troubleshooting
+A failure names the helper and input that diverged: for clip
+helpers check the exclusive-edge convention, for pixel helpers the
+premultiply rounding, for text helpers the advance formula shared
+with `src/lib/.../web_layout_manager.spl`, for availability helpers
+the preference-order table.
 
 @tag: rendering, engine2d, helpers
 @cover src/lib/gc_async_mut/gpu/engine2d/helpers_clip.spl 80%
@@ -12,7 +37,12 @@ the CPU/software backends.
 @cover src/lib/gc_async_mut/gpu/engine2d/helpers_availability.spl 70%
 """
 
-use std.spec.{describe, it, expect}
+# Lifecycle: research doc/01_research/domain/web_layout_manager.md ;
+# plan doc/03_plan/agent_tasks/web_layout_manager.md ;
+# architecture doc/04_architecture/web_layout_manager.md ;
+# design doc/05_design/web_layout_manager.md
+
+use std.spec.{describe, context, it, expect}
 use std.gpu.engine2d.helpers_clip.{
     clip_point_in_bounds, clip_point_in_rect,
     clip_pixel_allowed, rect_intersect_w, rect_intersect_h,
@@ -37,80 +67,147 @@ use std.gpu.engine2d.color.{rgba, rgb, color_r, color_g, color_b, color_a, blend
 # helpers_clip parity
 # ============================================================================
 
+# @manual_section: clip helpers
 describe "helpers_clip — bounds checking":
 
     it "clip_point_in_bounds: interior point is in bounds":
+        # @req REQ-HELPERSPAR-001
+        # @capture(bit_table): in-bounds verdict retained
+        step("Check an interior point against the clip bounds")
         expect(clip_point_in_bounds(5, 5, 10, 10)).to_be(true)
 
     it "clip_point_in_bounds: (0,0) is in bounds":
+        # @req REQ-HELPERSPAR-002
+        # @capture(bit_table): origin in-bounds verdict retained
+        step("Check the origin against the clip bounds")
         expect(clip_point_in_bounds(0, 0, 10, 10)).to_be(true)
 
     it "clip_point_in_bounds: right edge (exclusive) is out of bounds":
+        # @req REQ-HELPERSPAR-003
+        # @capture(bit_table): exclusive-right-edge verdict retained
+        step("Check that the exclusive right edge is rejected")
         expect(clip_point_in_bounds(10, 5, 10, 10)).to_be(false)
 
     it "clip_point_in_bounds: bottom edge (exclusive) is out of bounds":
+        # @req REQ-HELPERSPAR-004
+        # @capture(bit_table): exclusive-bottom-edge verdict retained
+        step("Check that the exclusive bottom edge is rejected")
         expect(clip_point_in_bounds(5, 10, 10, 10)).to_be(false)
 
     it "clip_point_in_bounds: negative x is out of bounds":
+        # @req REQ-HELPERSPAR-005
+        # @capture(bit_table): negative-x verdict retained
+        step("Check that a negative x coordinate is rejected")
         expect(clip_point_in_bounds(-1, 5, 10, 10)).to_be(false)
 
     it "clip_point_in_rect: point inside clip rect":
+        # @req REQ-HELPERSPAR-006
+        # @capture(bit_table): point-inside-rect verdict retained
+        step("Check a point inside the clip rect")
         expect(clip_point_in_rect(6, 6, 5, 5, 5, 5)).to_be(true)
 
     it "clip_point_in_rect: point outside clip rect":
+        # @req REQ-HELPERSPAR-007
+        # @capture(bit_table): point-outside-rect verdict retained
+        step("Check a point outside the clip rect")
         expect(clip_point_in_rect(3, 3, 5, 5, 5, 5)).to_be(false)
 
     it "clip_pixel_allowed: no clip — passes bounds check":
+        # @req REQ-HELPERSPAR-008
+        # @capture(bit_table): unclipped-pixel verdict retained
+        step("Check that an in-bounds pixel passes with clipping disabled")
         expect(clip_pixel_allowed(3, 3, 10, 10, false, 0, 0, 10, 10)).to_be(true)
 
     it "clip_pixel_allowed: clip enabled, point inside — allowed":
+        # @req REQ-HELPERSPAR-009
+        # @capture(bit_table): clipped-inside verdict retained
+        step("Check that an in-clip pixel passes with clipping enabled")
         expect(clip_pixel_allowed(6, 6, 10, 10, true, 5, 5, 5, 5)).to_be(true)
 
     it "clip_pixel_allowed: clip enabled, point outside — blocked":
+        # @req REQ-HELPERSPAR-010
+        # @capture(bit_table): clipped-outside verdict retained
+        step("Check that an out-of-clip pixel is blocked")
         expect(clip_pixel_allowed(3, 3, 10, 10, true, 5, 5, 5, 5)).to_be(false)
 
     it "clip_pixel_allowed: out of framebuffer — blocked regardless of clip":
+        # @req REQ-HELPERSPAR-011
+        # @capture(bit_table): framebuffer-bounds verdict retained
+        step("Check that an out-of-framebuffer pixel is blocked even unclipped")
         expect(clip_pixel_allowed(-1, 5, 10, 10, false, 0, 0, 10, 10)).to_be(false)
 
     it "rect_intersect_w: overlapping rects":
+        # @req REQ-HELPERSPAR-012
+        # @capture(statistics): intersection width retained
+        step("Intersect two overlapping rects horizontally")
         val w = rect_intersect_w(0, 8, 4, 8)
-        expect(w).to_equal(4)
+        expect(w).to_equal(4)  # oracle: rects spanning x 0-8 and 4-12 overlap for exactly 4 pixels
 
     it "rect_intersect_w: disjoint rects yields non-positive width":
+        # @req REQ-HELPERSPAR-013
+        # @capture(bit_table): disjoint-rect verdict retained
+        step("Intersect two disjoint rects horizontally")
         val w = rect_intersect_w(0, 5, 10, 5)
         expect(w <= 0).to_be_true()
 
     it "rect_intersect_h: overlapping rects":
+        # @req REQ-HELPERSPAR-014
+        # @capture(statistics): intersection height retained
+        step("Intersect two overlapping rects vertically")
         val h = rect_intersect_h(0, 8, 4, 8)
-        expect(h).to_equal(4)
+        expect(h).to_equal(4)  # oracle: rects spanning y 0-8 and 4-12 overlap for exactly 4 pixels
 
     it "clip_rect_to_viewport: rect fully inside":
+        # @req REQ-HELPERSPAR-015
+        # @capture(bit_table): rect-inside-viewport verdict retained
+        step("Check that a fully inside rect passes the viewport clip")
         expect(clip_rect_to_viewport(1, 1, 5, 5, 10, 10)).to_be(true)
 
     it "clip_rect_to_viewport: rect fully outside right":
+        # @req REQ-HELPERSPAR-016
+        # @capture(bit_table): rect-outside-right verdict retained
+        step("Check that a rect past the right edge fails the viewport clip")
         expect(clip_rect_to_viewport(15, 0, 5, 5, 10, 10)).to_be(false)
 
     it "clip_rect_to_viewport: rect fully outside top":
+        # @req REQ-HELPERSPAR-017
+        # @capture(bit_table): rect-outside-top verdict retained
+        step("Check that a rect above the top edge fails the viewport clip")
         expect(clip_rect_to_viewport(0, -10, 5, 5, 10, 10)).to_be(false)
 
     it "pixel_index: correct flat index":
-        expect(pixel_index(3, 2, 10)).to_equal(23)
+        # @req REQ-HELPERSPAR-018
+        # @capture(statistics): flat index retained
+        step("Flatten the coordinate (3,2) on a 10-wide buffer")
+        expect(pixel_index(3, 2, 10)).to_equal(23)  # oracle: flat index is y*width+x, so 2*10+3 = 23
 
 describe "helpers_clip — mask":
 
     it "mask_blocks_at: empty mask never blocks":
+        # @req REQ-HELPERSPAR-019
+        # @capture(bit_table): empty-mask verdict retained
+        step("Check that an empty mask blocks nothing")
         var empty_mask: [u8] = []
         expect(mask_blocks_at(empty_mask, 10, 5, 5)).to_be(false)
 
     it "mask_blocks_at: mask byte 0 blocks":
+        # @req REQ-HELPERSPAR-020
+        # @capture(bit_table): mask-zero-blocks verdict retained
+        step("Check that a zero mask byte blocks the pixel")
         var mask: [u8] = [1u8, 0u8, 1u8]
         expect(mask_blocks_at(mask, 3, 1, 0)).to_be(true)
 
     it "mask_blocks_at: mask byte 1 does not block":
+        # @req REQ-HELPERSPAR-021
+        # @capture(bit_table): mask-one-passes verdict retained
+        step("Check that a one mask byte lets the pixel through")
         var mask: [u8] = [1u8, 0u8, 1u8]
         expect(mask_blocks_at(mask, 3, 0, 0)).to_be(false)
 
     it "mask_blocks_at: out-of-range coordinate does not block":
+        # @req REQ-HELPERSPAR-022
+        # @capture(bit_table): out-of-range-mask verdict retained
+        step("Check that an out-of-range mask coordinate blocks nothing")
         var mask: [u8] = [0u8]
         expect(mask_blocks_at(mask, 1, 5, 5)).to_be(false)
 
@@ -118,114 +215,187 @@ describe "helpers_clip — mask":
 # helpers_pixel parity
 # ============================================================================
 
+# @manual_section: pixel helpers
 describe "helpers_pixel — buffer access":
 
     it "buf_get_pixel: returns 0 for out-of-bounds":
+        # @req REQ-HELPERSPAR-023
+        # @capture(statistics): out-of-bounds read value retained
+        step("Read outside a 1x1 buffer and require the zero sentinel")
         var buf: [u32] = [0xFFFF0000u32]
-        expect(buf_get_pixel(buf, 1, 0, 1, 1)).to_equal(0u32)
+        expect(buf_get_pixel(buf, 1, 0, 1, 1)).to_equal(0u32)  # oracle: out-of-bounds reads return the documented 0 sentinel, never memory noise
 
     it "buf_get_pixel: reads in-bounds pixel":
+        # @req REQ-HELPERSPAR-024
+        # @capture(statistics): in-bounds read value retained
+        step("Read a planted pixel back from the buffer")
         var buf: [u32] = [0u32, 0u32, 0xAABBCCDDu32, 0u32]
         val got = buf_get_pixel(buf, 2, 0, 4, 1)
-        expect(got).to_equal(0xAABBCCDDu32)
+        expect(got).to_equal(0xAABBCCDDu32)  # oracle: the read must return the exact planted pixel value
 
     it "buf_set_pixel: writes in-bounds pixel":
+        # @req REQ-HELPERSPAR-025
+        # @capture(statistics): written pixel value retained
+        step("Write a pixel in-bounds and read it back")
         var buf: [u32] = [0u32, 0u32, 0u32, 0u32]
         buf_set_pixel(buf, 2, 0, 4, 1, 0xDEADBEEFu32)
-        expect(buf[2]).to_equal(0xDEADBEEFu32)
+        expect(buf[2]).to_equal(0xDEADBEEFu32)  # oracle: the write must land the exact value at the requested index
 
     it "buf_set_pixel: out-of-bounds write is ignored":
+        # @req REQ-HELPERSPAR-026
+        # @capture(statistics): untouched buffer slot retained
+        step("Write far out of bounds and require the buffer to stay untouched")
         var buf: [u32] = [0u32]
         buf_set_pixel(buf, 5, 5, 1, 1, 0xFFFFFFFFu32)
-        expect(buf[0]).to_equal(0u32)
+        expect(buf[0]).to_equal(0u32)  # oracle: an out-of-bounds write must not corrupt any in-bounds slot
 
     it "buf_set_pixel_blend: opaque src replaces dst":
+        # @req REQ-HELPERSPAR-027
+        # @capture(statistics): blended opaque pixel retained
+        step("Blend an opaque red over black and check the red channel")
         var buf: [u32] = [rgb(0, 0, 0)]
         val src = rgb(255, 0, 0)
         buf_set_pixel_blend(buf, 0, 0, 1, 1, src)
-        expect(color_r(buf[0])).to_equal(255)
+        expect(color_r(buf[0])).to_equal(255)  # oracle: alpha-255 src fully replaces the dst red channel
 
     it "buf_set_pixel_blend: transparent src leaves dst unchanged":
+        # @req REQ-HELPERSPAR-028
+        # @capture(statistics): blended transparent pixel retained
+        step("Blend a fully transparent source over green and check the green channel")
         var buf: [u32] = [rgb(0, 255, 0)]
         val src = rgba(255, 0, 0, 0)
         buf = buf_set_pixel_blend(buf, 0, 0, 1, 1, src)
-        expect(color_g(buf[0])).to_equal(255)
+        expect(color_g(buf[0])).to_equal(255)  # oracle: alpha-0 src contributes nothing, dst stays fully green
 
 describe "helpers_pixel — alpha compositing":
 
     it "alpha_premultiply: opaque color is unchanged":
+        # @req REQ-HELPERSPAR-029
+        # @capture(statistics): premultiplied opaque color retained
+        step("Premultiply an opaque color and require it unchanged")
         val c = rgb(100, 150, 200)
         expect(alpha_premultiply(c)).to_equal(c)
 
     it "alpha_premultiply: transparent returns 0":
+        # @req REQ-HELPERSPAR-030
+        # @capture(statistics): premultiplied transparent color retained
+        step("Premultiply a fully transparent color and require zero")
         val c = rgba(255, 255, 255, 0)
-        expect(alpha_premultiply(c)).to_equal(0u32)
+        expect(alpha_premultiply(c)).to_equal(0u32)  # oracle: alpha-0 channels premultiply to exactly 0
 
     it "alpha_premultiply: 50% alpha halves RGB":
+        # @req REQ-HELPERSPAR-031
+        # @capture(statistics): premultiplied half-alpha channel retained
+        step("Premultiply a half-alpha color and check the red channel range")
         val c = rgba(200, 200, 200, 128)
         val pm = alpha_premultiply(c)
         val r = color_r(pm)
         expect(r >= 98 and r <= 102).to_be_true()
 
     it "alpha_unpremultiply: zero alpha returns 0":
-        expect(alpha_unpremultiply(0u32)).to_equal(0u32)
+        # @req REQ-HELPERSPAR-032
+        # @capture(statistics): unpremultiplied zero-alpha color retained
+        step("Unpremultiply zero and require zero")
+        expect(alpha_unpremultiply(0u32)).to_equal(0u32)  # oracle: unpremultiply of 0 cannot divide by zero — it must return exactly 0
 
     it "alpha_unpremultiply: opaque color is unchanged":
+        # @req REQ-HELPERSPAR-033
+        # @capture(statistics): unpremultiplied opaque color retained
+        step("Unpremultiply an opaque color and require it unchanged")
         val c = rgb(80, 160, 240)
         expect(alpha_unpremultiply(c)).to_equal(c)
 
     it "pixels_to_bytes: 4 bytes per pixel":
-        expect(pixels_to_bytes(10)).to_equal(40)
+        # @req REQ-HELPERSPAR-034
+        # @capture(statistics): byte count retained
+        step("Convert 10 pixels to bytes")
+        expect(pixels_to_bytes(10)).to_equal(40)  # oracle: the RGBA8 contract is exactly 4 bytes per pixel
 
     it "bytes_to_pixels: inverse of pixels_to_bytes":
-        expect(bytes_to_pixels(pixels_to_bytes(7))).to_equal(7)
+        # @req REQ-HELPERSPAR-035
+        # @capture(statistics): round-trip pixel count retained
+        step("Round-trip 7 pixels through the byte conversion")
+        expect(bytes_to_pixels(pixels_to_bytes(7))).to_equal(7)  # oracle: bytes_to_pixels must invert pixels_to_bytes exactly
 
 # ============================================================================
 # helpers_text parity
 # ============================================================================
 
+# @manual_section: text helpers
 describe "helpers_text — dimensions":
 
     it "text_buf_height equals glyph_height at font_size 7":
+        # @req REQ-HELPERSPAR-036
+        # @capture(statistics): buffer height retained
+        step("Measure the text buffer height at font size 7")
         val h = text_buf_height(7)
-        expect(h).to_equal(7)
+        expect(h).to_equal(7)  # oracle: buffer height equals the font size at the base scale
 
     it "text_buf_height scales with font_size":
+        # @req REQ-HELPERSPAR-037
+        # @capture(statistics): scaled buffer height retained
+        step("Measure the text buffer height at font size 14")
         val h = text_buf_height(14)
-        expect(h).to_equal(14)
+        expect(h).to_equal(14)  # oracle: buffer height tracks a doubled font size one-to-one
 
     it "text_buf_width: empty string returns 0":
-        expect(text_buf_width("", 7)).to_equal(0)
+        # @req REQ-HELPERSPAR-038
+        # @capture(statistics): empty-string width retained
+        step("Measure the width of an empty string")
+        expect(text_buf_width("", 7)).to_equal(0)  # oracle: zero glyphs consume zero advance width
 
     it "text_buf_width: single char at scale 1":
-        step("text_buf_width: single char at scale 1")
+        # @req REQ-HELPERSPAR-039
+        # @capture(statistics): single-char width retained
+        step("Measure the width of one character at scale 1")
         # advance = 5 * scale (unified with browser paint); scale = 7/7 = 1
-        expect(text_buf_width("A", 7)).to_equal(5)
+        expect(text_buf_width("A", 7)).to_equal(5)  # oracle: the shared glyph advance is exactly 5 at unit scale, matching the browser paint path
 
     it "text_buf_width: 3 chars at scale 1":
-        expect(text_buf_width("ABC", 7)).to_equal(15)
+        # @req REQ-HELPERSPAR-040
+        # @capture(statistics): three-char width retained
+        step("Measure the width of three characters at scale 1")
+        expect(text_buf_width("ABC", 7)).to_equal(15)  # oracle: three glyphs at advance 5 each sum to 15
 
     it "text_scale: font_size 7 gives scale 1":
-        expect(text_scale(7)).to_equal(1)
+        # @req REQ-HELPERSPAR-041
+        # @capture(statistics): base scale retained
+        step("Compute the text scale at font size 7")
+        expect(text_scale(7)).to_equal(1)  # oracle: font size 7 is the base glyph height, so scale is exactly 1
 
     it "text_scale: font_size 14 gives scale 2":
-        expect(text_scale(14)).to_equal(2)
+        # @req REQ-HELPERSPAR-042
+        # @capture(statistics): doubled scale retained
+        step("Compute the text scale at font size 14")
+        expect(text_scale(14)).to_equal(2)  # oracle: 14 is double the base 7, so scale is exactly 2
 
     it "text_scale: font_size < 7 is clamped to 1":
-        expect(text_scale(1)).to_equal(1)
+        # @req REQ-HELPERSPAR-043
+        # @capture(statistics): clamped scale retained
+        step("Compute the text scale below the base font size")
+        expect(text_scale(1)).to_equal(1)  # oracle: the scale floor is 1 — sub-base font sizes never downscale
 
 describe "helpers_text — render_to_buf":
 
     it "text_render_to_buf: empty text returns empty buffer":
+        # @req REQ-HELPERSPAR-044
+        # @capture(statistics): empty render buffer size retained
+        step("Render an empty string and require an empty buffer")
         val buf = text_render_to_buf("", 0xFFFFFFFFu32, 0xFF000000u32, 7)
-        expect(buf.len()).to_equal(0)
+        expect(buf.len()).to_equal(0)  # oracle: zero-width text must produce a zero-length buffer
 
     it "text_render_to_buf: buffer size matches dimensions":
+        # @req REQ-HELPERSPAR-045
+        # @capture(statistics): rendered buffer size retained
+        step("Render two characters and check the buffer length formula")
         val buf = text_render_to_buf("Hi", 0xFFFFFFFFu32, 0xFF000000u32, 7)
         val expected_len = text_buf_width("Hi", 7) * text_buf_height(7)
         expect(buf.len()).to_equal(expected_len)
 
     it "text_render_to_buf: background color fills non-glyph pixels":
+        # @req REQ-HELPERSPAR-046
+        # @capture(statistics): background fill ratio retained
+        step("Render a blank space glyph and require an all-background buffer")
         val bg = rgba(0, 0, 255, 255)
         val fg = rgba(255, 0, 0, 255)
         val buf = text_render_to_buf(" ", fg, bg, 7)
@@ -239,6 +409,9 @@ describe "helpers_text — render_to_buf":
         expect(all_bg).to_be(true)
 
     it "text_render_to_buf: parity with inline draw_text_bg pattern":
+        # @req REQ-HELPERSPAR-047
+        # @capture(statistics): inline-vs-helper buffer diff retained
+        step("Render via the helper and the inline draw_text_bg pattern and diff every pixel")
         # This mirrors the body in each GPU backend's draw_text_bg:
         #   fill buffer with bg, call render_text_to_buffer, blit.
         # We verify text_render_to_buf produces same buffer as the inline form.
@@ -274,33 +447,55 @@ describe "helpers_text — render_to_buf":
 # helpers_availability parity
 # ============================================================================
 
+# @manual_section: availability helpers
 describe "helpers_availability — backend names":
 
     it "backend_display_name: rocm includes HIP":
+        # @req REQ-HELPERSPAR-048
+        # @capture(statistics): rocm display name retained
+        step("Read the display name for the rocm backend")
         val n = backend_display_name("rocm")
         expect(n).to_equal("AMD ROCm/HIP")
 
     it "backend_display_name: vulkan":
+        # @req REQ-HELPERSPAR-049
+        # @capture(statistics): vulkan display name retained
+        step("Read the display name for the vulkan backend")
         val n = backend_display_name("vulkan")
         expect(n).to_equal("Vulkan Compute")
 
     it "backend_display_name: cpu":
+        # @req REQ-HELPERSPAR-050
+        # @capture(statistics): cpu display name retained
+        step("Read the display name for the cpu backend")
         val n = backend_display_name("cpu")
         expect(n).to_equal("CPU Software (fallback)")
 
     it "backend_display_name: unknown":
+        # @req REQ-HELPERSPAR-051
+        # @capture(statistics): unknown display name retained
+        step("Read the display name for an unknown backend id")
         val n = backend_display_name("unknown_xyz")
         expect(n.starts_with("Unknown")).to_be_true()
 
     it "backend_priority: metal is highest priority (0)":
-        expect(backend_priority("metal")).to_equal(0)
-        expect(backend_priority("cuda")).to_equal(1)
-        expect(backend_priority("rocm")).to_equal(2)
+        # @req REQ-HELPERSPAR-052
+        # @capture(statistics): top-three priority ranks retained
+        step("Read the priority ranks for metal cuda and rocm")
+        expect(backend_priority("metal")).to_equal(0)  # oracle: rank 0 is the documented head of the preference order
+        expect(backend_priority("cuda")).to_equal(1)  # oracle: cuda follows metal at rank 1 in the documented order
+        expect(backend_priority("rocm")).to_equal(2)  # oracle: rocm follows cuda at rank 2 in the documented order
 
     it "backend_priority: cpu is lowest priority (12)":
-        expect(backend_priority("cpu")).to_equal(12)
+        # @req REQ-HELPERSPAR-053
+        # @capture(statistics): cpu priority rank retained
+        step("Read the priority rank for the cpu fallback")
+        expect(backend_priority("cpu")).to_equal(12)  # oracle: the software fallback is documented last at rank 12
 
     it "backend_priority: vulkan < software < cpu":
+        # @req REQ-HELPERSPAR-054
+        # @capture(statistics): vulkan-software-cpu rank ordering retained
+        step("Check the vulkan software and cpu ranks are strictly ordered")
         val v = backend_priority("vulkan")
         val s = backend_priority("software")
         val c = backend_priority("cpu")
@@ -308,6 +503,9 @@ describe "helpers_availability — backend names":
         expect(s).to_be_less_than(c)
 
     it "backend_default_priority_order starts at Metal then CUDA HIP then Vulkan":
+        # @req REQ-HELPERSPAR-055
+        # @capture(statistics): default preference order retained
+        step("Read the default preference order and check its documented slots")
         val order = backend_default_priority_order()
         expect(order[0]).to_equal("metal")
         expect(order[1]).to_equal("cuda")
@@ -318,6 +516,9 @@ describe "helpers_availability — backend names":
         expect(order[order.len() - 1]).to_equal("cpu")
 
     it "backend_full_preference_order keeps native surfaces before auto GPU order":
+        # @req REQ-HELPERSPAR-056
+        # @capture(statistics): full preference order retained
+        step("Read the full preference order and check its native-surface head")
         val order = backend_full_preference_order()
         expect(order[0]).to_equal("baremetal")
         expect(order[1]).to_equal("virtio_gpu")
@@ -326,24 +527,45 @@ describe "helpers_availability — backend names":
         expect(order[4]).to_equal("rocm")
 
     it "backend_is_hardware: cuda is hardware":
+        # @req REQ-HELPERSPAR-057
+        # @capture(bit_table): cuda hardware flag retained
+        step("Check that cuda is classified as hardware")
         expect(backend_is_hardware("cuda")).to_be(true)
 
     it "backend_is_hardware: cpu is not hardware":
+        # @req REQ-HELPERSPAR-058
+        # @capture(bit_table): cpu hardware flag retained
+        step("Check that cpu is not classified as hardware")
         expect(backend_is_hardware("cpu")).to_be(false)
 
     it "backend_is_hardware: software is not hardware":
+        # @req REQ-HELPERSPAR-059
+        # @capture(bit_table): software hardware flag retained
+        step("Check that software is not classified as hardware")
         expect(backend_is_hardware("software")).to_be(false)
 
     it "backend_requires_gpu: cuda requires GPU":
+        # @req REQ-HELPERSPAR-060
+        # @capture(bit_table): cuda gpu requirement retained
+        step("Check that cuda is marked GPU-required")
         expect(backend_requires_gpu("cuda")).to_be(true)
 
     it "backend_requires_gpu: vulkan does not require (can software fallback)":
+        # @req REQ-HELPERSPAR-061
+        # @capture(bit_table): vulkan gpu requirement retained
+        step("Check that vulkan is not marked GPU-required")
         expect(backend_requires_gpu("vulkan")).to_be(false)
 
     it "backend_requires_gpu: cpu does not require GPU":
+        # @req REQ-HELPERSPAR-062
+        # @capture(bit_table): cpu gpu requirement retained
+        step("Check that cpu is not marked GPU-required")
         expect(backend_requires_gpu("cpu")).to_be(false)
 
     it "feature_gate_description: returns non-empty text for all known backends":
+        # @req REQ-HELPERSPAR-063
+        # @capture(bit_table): per-backend gate description flags retained
+        step("Read the feature gate description for every known backend")
         val names = ["cuda", "rocm", "metal", "qualcomm", "vulkan", "opengl", "intel", "webgpu", "software", "cpu"]
         var all_ok = true
         var ni = 0
@@ -357,13 +579,25 @@ describe "helpers_availability — backend names":
 describe "helpers_availability — numeric conversions":
 
     it "backend_i64: converts i32 to i64":
-        expect(backend_i64(42)).to_equal(42)
+        # @req REQ-HELPERSPAR-064
+        # @capture(statistics): widened conversion value retained
+        step("Widen 42 from i32 to i64")
+        expect(backend_i64(42)).to_equal(42)  # oracle: a sign-preserving widening of 42 is exactly 42
 
     it "backend_i64: handles negative":
-        expect(backend_i64(-1)).to_equal(-1)
+        # @req REQ-HELPERSPAR-065
+        # @capture(statistics): negative conversion value retained
+        step("Widen -1 from i32 to i64")
+        expect(backend_i64(-1)).to_equal(-1)  # oracle: a sign-preserving widening of -1 must stay -1, never wrap
 
     it "backend_bool_to_i32: true -> 1":
-        expect(backend_bool_to_i32(true)).to_equal(1)
+        # @req REQ-HELPERSPAR-066
+        # @capture(statistics): true conversion value retained
+        step("Convert true to its i32 encoding")
+        expect(backend_bool_to_i32(true)).to_equal(1)  # oracle: the boolean encoding maps true to exactly 1
 
     it "backend_bool_to_i32: false -> 0":
-        expect(backend_bool_to_i32(false)).to_equal(0)
+        # @req REQ-HELPERSPAR-067
+        # @capture(statistics): false conversion value retained
+        step("Convert false to its i32 encoding")
+        expect(backend_bool_to_i32(false)).to_equal(0)  # oracle: the boolean encoding maps false to exactly 0

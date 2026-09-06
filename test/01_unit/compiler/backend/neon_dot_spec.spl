@@ -1,13 +1,30 @@
-# Purpose and audience: executable specification evidence for the owning engineering team.
-# @req REQ-SSPEC-COMPILER
-# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+"""
+## Purpose and audience
+Byte-level golden encoding evidence for the compiler's native AArch64 backend
+SDOT/UDOT int8 dot-product emit functions. Audience: the ARM64 backend
+engineer verifying ARMv8.2-DotProd instruction encoding matches the ARMv8
+ARM opcode layout bit-for-bit before trusting the codegen path.
 
-# Purpose and audience: executable specification evidence for the owning engineering team.
-# @req REQ-SSPEC-COMPILER
-# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+## Operator workflow
+bin/simple test test/01_unit/compiler/backend/neon_dot_spec.spl
 
-# test/unit/compiler/backend/neon_dot_spec.spl
-#
+## Compatibility and limitations
+Interpreter-mode note (per .claude/rules/testing.md): the test runner in
+interpreter mode only verifies file loading and describe/it block
+reachability; assertions inside it-blocks execute under compiled mode.
+Unsupported: dot-product lane widths outside 4S/2S (not implemented by the
+backend).
+
+## Verification guidance and troubleshooting
+Each scenario captures the emitted little-endian byte layout of one
+SDOT/UDOT instruction as a bit_table. A mismatch names the offending byte;
+cross-reference ARMv8 ARM §C7.2.258 (SDOT) / §C7.2.363 (UDOT) and the
+per-scenario derivation comment (`base + Rm*65536 + Rn*32 + Rd`) to locate
+which register field produced the wrong byte.
+"""
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+# @manual_section: neon-dot-encoding
+
 # Feature ID: #COMPILER-BACKEND-NATIVE-NEON-DOT
 # Category:   Compiler | Backend | Native | AArch64 SDOT/UDOT Encoding
 #
@@ -21,11 +38,6 @@
 # Encoding: base + Rm*65536 + Rn*32 + Rd
 #
 # ARMv8 ARM §C7.2.258 (SDOT) and §C7.2.363 (UDOT)
-#
-# Interpreter-mode note (per .claude/rules/testing.md):
-#   The test runner in interpreter mode only verifies file loading and
-#   describe/it block reachability.  Assertions inside it-blocks are not
-#   executed.  Compiled-mode execution will exercise them.
 
 use compiler.backend.native.arm_neon.{emit_neon_sdot_4s, emit_neon_udot_4s, emit_neon_sdot_2s, emit_neon_udot_2s}
 
@@ -36,22 +48,29 @@ use compiler.backend.native.arm_neon.{emit_neon_sdot_4s, emit_neon_udot_4s, emit
 
 describe "emit_neon_sdot_4s — signed int8 dot product 4 lanes":
     it "SDOT V0.4S, V0.16B, V0.16B encodes to base opcode bytes":
+        # @req REQ-NEON-DOT-001
+        step("Encode SDOT V0.4S, V0.16B, V0.16B (Rd=Rn=Rm=0)")
         var b = emit_neon_sdot_4s(0, 0, 0)
-        expect(b.len()).to_equal(4)
-        expect(b[0]).to_equal(0x00)
-        expect(b[1]).to_equal(0x94)
-        expect(b[2]).to_equal(0x80)
-        expect(b[3]).to_equal(0x4E)
+        # @capture(bit_table): little-endian 4-byte SDOT.4S base opcode layout
+        step("Verify the emitted bytes equal the ARMv8 base opcode 0x4E809400")
+        expect(b.len()).to_equal(4)  # oracle: SDOT is a fixed 4-byte AArch64 instruction
+        expect(b[0]).to_equal(0x00)  # oracle: byte0 = Rd field, Rd=0 contributes nothing
+        expect(b[1]).to_equal(0x94)  # oracle: byte1 = base opcode bits identifying the dot-product form
+        expect(b[2]).to_equal(0x80)  # oracle: byte2 = base opcode bits with Rm=0 and U=0 (signed)
+        expect(b[3]).to_equal(0x4E)  # oracle: byte3 = top opcode byte, Q=1 selects the .4S/.16B lane form
 
     it "SDOT V1.4S, V2.16B, V3.16B encodes register fields correctly":
+        # @req REQ-NEON-DOT-002
+        step("Encode SDOT V1.4S, V2.16B, V3.16B (Rd=1, Rn=2, Rm=3)")
         # word = 0x4E809400 + 3*65536 + 2*32 + 1 = 0x4E839441
-        # LE bytes: 0x41, 0x94, 0x83, 0x4E
         var b = emit_neon_sdot_4s(1, 2, 3)
-        expect(b.len()).to_equal(4)
-        expect(b[0]).to_equal(0x41)
-        expect(b[1]).to_equal(0x94)
-        expect(b[2]).to_equal(0x83)
-        expect(b[3]).to_equal(0x4E)
+        # @capture(bit_table): little-endian 4-byte SDOT.4S register-field layout
+        step("Verify Rd/Rn/Rm are folded into the base opcode word 0x4E839441")
+        expect(b.len()).to_equal(4)  # oracle: SDOT is a fixed 4-byte AArch64 instruction
+        expect(b[0]).to_equal(0x41)  # oracle: byte0 = base 0x00 + Rd(1) + Rn*32(64) folded low byte
+        expect(b[1]).to_equal(0x94)  # oracle: byte1 unchanged — Rn*32 carry stayed within byte0
+        expect(b[2]).to_equal(0x83)  # oracle: byte2 = base 0x80 + Rm(3) from the Rm*65536 term
+        expect(b[3]).to_equal(0x4E)  # oracle: byte3 = top opcode byte, unaffected by register fields
 
 # ============================================================================
 # UDOT V0.4S, V0.16B, V0.16B => base 0x6E809400
@@ -60,22 +79,29 @@ describe "emit_neon_sdot_4s — signed int8 dot product 4 lanes":
 
 describe "emit_neon_udot_4s — unsigned int8 dot product 4 lanes":
     it "UDOT V0.4S, V0.16B, V0.16B encodes to base opcode bytes":
+        # @req REQ-NEON-DOT-003
+        step("Encode UDOT V0.4S, V0.16B, V0.16B (Rd=Rn=Rm=0)")
         var b = emit_neon_udot_4s(0, 0, 0)
-        expect(b.len()).to_equal(4)
-        expect(b[0]).to_equal(0x00)
-        expect(b[1]).to_equal(0x94)
-        expect(b[2]).to_equal(0x80)
-        expect(b[3]).to_equal(0x6E)
+        # @capture(bit_table): little-endian 4-byte UDOT.4S base opcode layout
+        step("Verify the emitted bytes equal the ARMv8 base opcode 0x6E809400")
+        expect(b.len()).to_equal(4)  # oracle: UDOT is a fixed 4-byte AArch64 instruction
+        expect(b[0]).to_equal(0x00)  # oracle: byte0 = Rd field, Rd=0 contributes nothing
+        expect(b[1]).to_equal(0x94)  # oracle: byte1 = base opcode bits identifying the dot-product form
+        expect(b[2]).to_equal(0x80)  # oracle: byte2 = base opcode bits with Rm=0
+        expect(b[3]).to_equal(0x6E)  # oracle: byte3 = top opcode byte, U=1 (bit29) selects unsigned dot
 
     it "UDOT V5.4S, V6.16B, V7.16B encodes register fields correctly":
+        # @req REQ-NEON-DOT-004
+        step("Encode UDOT V5.4S, V6.16B, V7.16B (Rd=5, Rn=6, Rm=7)")
         # word = 0x6E809400 + 7*65536 + 6*32 + 5 = 0x6E8794C5
-        # LE bytes: 0xC5, 0x94, 0x87, 0x6E
         var b = emit_neon_udot_4s(5, 6, 7)
-        expect(b.len()).to_equal(4)
-        expect(b[0]).to_equal(0xC5)
-        expect(b[1]).to_equal(0x94)
-        expect(b[2]).to_equal(0x87)
-        expect(b[3]).to_equal(0x6E)
+        # @capture(bit_table): little-endian 4-byte UDOT.4S register-field layout
+        step("Verify Rd/Rn/Rm are folded into the base opcode word 0x6E8794C5")
+        expect(b.len()).to_equal(4)  # oracle: UDOT is a fixed 4-byte AArch64 instruction
+        expect(b[0]).to_equal(0xC5)  # oracle: byte0 = base 0x00 + Rd(5) + Rn*32(192) folded low byte
+        expect(b[1]).to_equal(0x94)  # oracle: byte1 unchanged — Rn*32 carry stayed within byte0
+        expect(b[2]).to_equal(0x87)  # oracle: byte2 = base 0x80 + Rm(7) from the Rm*65536 term
+        expect(b[3]).to_equal(0x6E)  # oracle: byte3 = top opcode byte, unaffected by register fields
 
 # ============================================================================
 # SDOT V0.2S, V0.8B, V0.8B => base 0x0E809400
@@ -84,12 +110,16 @@ describe "emit_neon_udot_4s — unsigned int8 dot product 4 lanes":
 
 describe "emit_neon_sdot_2s — signed int8 dot product 2 lanes":
     it "SDOT V0.2S, V0.8B, V0.8B encodes to base opcode bytes":
+        # @req REQ-NEON-DOT-005
+        step("Encode SDOT V0.2S, V0.8B, V0.8B (Rd=Rn=Rm=0)")
         var b = emit_neon_sdot_2s(0, 0, 0)
-        expect(b.len()).to_equal(4)
-        expect(b[0]).to_equal(0x00)
-        expect(b[1]).to_equal(0x94)
-        expect(b[2]).to_equal(0x80)
-        expect(b[3]).to_equal(0x0E)
+        # @capture(bit_table): little-endian 4-byte SDOT.2S base opcode layout
+        step("Verify the emitted bytes equal the ARMv8 base opcode 0x0E809400")
+        expect(b.len()).to_equal(4)  # oracle: SDOT is a fixed 4-byte AArch64 instruction
+        expect(b[0]).to_equal(0x00)  # oracle: byte0 = Rd field, Rd=0 contributes nothing
+        expect(b[1]).to_equal(0x94)  # oracle: byte1 = base opcode bits identifying the dot-product form
+        expect(b[2]).to_equal(0x80)  # oracle: byte2 = base opcode bits with Rm=0 and U=0 (signed)
+        expect(b[3]).to_equal(0x0E)  # oracle: byte3 = top opcode byte, Q=0 selects the .2S/.8B lane form
 
 # ============================================================================
 # UDOT V0.2S, V0.8B, V0.8B => base 0x2E809400
@@ -98,21 +128,29 @@ describe "emit_neon_sdot_2s — signed int8 dot product 2 lanes":
 
 describe "emit_neon_udot_2s — unsigned int8 dot product 2 lanes":
     it "UDOT V0.2S, V0.8B, V0.8B encodes to base opcode bytes":
+        # @req REQ-NEON-DOT-006
+        step("Encode UDOT V0.2S, V0.8B, V0.8B (Rd=Rn=Rm=0)")
         var b = emit_neon_udot_2s(0, 0, 0)
-        expect(b.len()).to_equal(4)
-        expect(b[0]).to_equal(0x00)
-        expect(b[1]).to_equal(0x94)
-        expect(b[2]).to_equal(0x80)
-        expect(b[3]).to_equal(0x2E)
+        # @capture(bit_table): little-endian 4-byte UDOT.2S base opcode layout
+        step("Verify the emitted bytes equal the ARMv8 base opcode 0x2E809400")
+        expect(b.len()).to_equal(4)  # oracle: UDOT is a fixed 4-byte AArch64 instruction
+        expect(b[0]).to_equal(0x00)  # oracle: byte0 = Rd field, Rd=0 contributes nothing
+        expect(b[1]).to_equal(0x94)  # oracle: byte1 = base opcode bits identifying the dot-product form
+        expect(b[2]).to_equal(0x80)  # oracle: byte2 = base opcode bits with Rm=0
+        expect(b[3]).to_equal(0x2E)  # oracle: byte3 = top opcode byte, Q=0 U=1 selects unsigned 2-lane dot
 
 # ============================================================================
 # Property: all variants always return exactly 4 bytes
 # ============================================================================
 
 describe "SDOT/UDOT emit output length":
-    it "emit_neon_sdot_4s always returns 4 bytes":
+    it "emit_neon_sdot_4s always returns 4 bytes regardless of register operands":
+        # @req REQ-NEON-DOT-007
+        step("Encode SDOT V1.4S, V2.16B, V3.16B with non-zero registers")
         var b = emit_neon_sdot_4s(1, 2, 3)
-        expect(b.len()).to_equal(4)
+        # @capture(bit_table): SDOT.4S output length invariant
+        step("Verify the fixed-width AArch64 instruction is exactly 4 bytes")
+        expect(b.len()).to_equal(4)  # oracle: every AArch64 instruction word is 4 bytes wide
 
 # ============================================================================
 # Property: SDOT vs UDOT differ only in byte[3] (MSB in LE encoding)
@@ -120,10 +158,14 @@ describe "SDOT/UDOT emit output length":
 
 describe "SDOT vs UDOT byte[3] distinction":
     it "SDOT and UDOT 4S with same registers match bytes 0-2 and differ at byte[3]":
+        # @req REQ-NEON-DOT-008
+        step("Encode SDOT and UDOT 4S with identical registers V1.4S, V2.16B, V3.16B")
         var s = emit_neon_sdot_4s(1, 2, 3)
         var u = emit_neon_udot_4s(1, 2, 3)
+        # @capture(bit_table): SDOT vs UDOT byte-by-byte U-bit distinction
+        step("Verify the register-field bytes match and only the U-bit byte differs")
         expect(s[0]).to_equal(u[0])
         expect(s[1]).to_equal(u[1])
         expect(s[2]).to_equal(u[2])
         # UDOT has U=1 (bit 29), which raises byte[3] by 0x20
-        expect(u[3] - s[3]).to_equal(0x20)
+        expect(u[3] - s[3]).to_equal(0x20)  # oracle: bit29 (U=1 for unsigned) adds 0x20 to the top byte

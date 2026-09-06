@@ -1,7 +1,41 @@
+"""
+## Purpose and audience
+Pins the pure component candidate parser, validator, and resolution kernel:
+catalog parsing of static candidates and dynamic locators, fail-closed
+validation of unknown fields / invalid capability text / incomplete records,
+and the resolution policy that prefers the compatible static candidate, falls
+through to the dynamic locator when target gating rejects static, discriminates
+missing identity / target / profile / capability, and fails closed on ambiguity.
+Written for engineers touching `src/lib/common/structural/component/resolver.spl`
+and the MDSOC component admission path it serves.
+## Operator workflow
+Run the single file with the seeded runner:
+`./src/compiler_rust/target/bootstrap/simple run test/01_unit/lib/structural/component_resolver_kernel_spec.spl`
+and read the `SPEC FILE VERDICT` line. Scenarios build catalogs and requests
+through the product constructors; no installed components are needed.
+## Compatibility and limitations
+This spec currently fails to LOAD in the seeded runner: the stdlib path
+`std.common.structural.component.resolver` does not resolve from the unit-test
+root, so the runner reports executed=0. The assertions below are the intended
+kernel contract and stay RED-by-load until that resolution defect is fixed; do
+not soften them. Coverage is parser + policy only; no artifact loading or
+process spawning is exercised.
+## Verification guidance and troubleshooting
+A failing parse-status expectation means the record grammar or error taxonomy
+changed; a failing verdict expectation means resolution policy (preference,
+gating, discrimination, ambiguity) changed. Once the module-path defect is
+fixed, rerun with the command above and compare per-scenario pass/fail counts.
+"""
+# Lifecycle: doc/01_research/domain/aspect_component_admission.md ;
+# doc/03_plan/platform/structural_compute/layout_framework_plan.md ;
+# doc/04_architecture/stage4_reexport_resolver.md ;
+# doc/05_design/stage4_reexport_resolver.md
+# @manual_section: component-resolver-kernel
+
 # @cover src/lib/common/structural/component/resolver.spl 90%
 """Pure component candidate parser, validator, and resolution kernel."""
 
-use std.spec.{describe, it, assert_eq}
+use std.spec.{describe, it, expect, step}
 use std.common.structural.component.resolver.{
     ComponentResolverCatalog,
     component_resolver_catalog_default,
@@ -43,32 +77,53 @@ fn resolver_source() -> text:
 
 describe "component resolver catalog parser":
     it "parses and validates static candidates and dynamic locators":
-        assert_eq(component_resolver_parse_status(resolver_source()), "ok:1:1")
+        # @req REQ-COMPONENT-RESOLVER-001
+        # @capture(protocol_json): parse status for a mixed static+dynamic catalog record
+        step("Parse a catalog source carrying one static candidate and one dynamic locator")
+        expect(component_resolver_parse_status(resolver_source())).to_equal("ok:1:1")
 
     it "fails closed on unknown fields and invalid capability text":
-        assert_eq(component_resolver_parse_status("static_candidate:\n  mystery: value\n"), "err:unknown_key:mystery")
-        assert_eq(component_resolver_parse_status("static_candidate:\n  capability_bits: -1\n"), "err:invalid_capability_bits:-1")
+        # @req REQ-COMPONENT-RESOLVER-002
+        # @capture(protocol_json): parse statuses for unknown-key and negative-capability records
+        step("Parse records carrying an unknown field and a negative capability_bits")
+        expect(component_resolver_parse_status("static_candidate:\n  mystery: value\n")).to_equal("err:unknown_key:mystery")
+        expect(component_resolver_parse_status("static_candidate:\n  capability_bits: -1\n")).to_equal("err:invalid_capability_bits:-1")
 
     it "reports incomplete records through validation":
-        assert_eq(component_resolver_parse_status("dynamic_locator:\n  component_id: only.id\n"), "err:incomplete_dynamic_locator:only.id||")
+        # @req REQ-COMPONENT-RESOLVER-002
+        # @capture(protocol_json): parse status for a truncated dynamic locator record
+        step("Parse a dynamic locator missing every field after component_id")
+        expect(component_resolver_parse_status("dynamic_locator:\n  component_id: only.id\n")).to_equal("err:incomplete_dynamic_locator:only.id||")
 
 describe "component resolver policy":
     it "prefers the compatible static candidate":
+        # @req REQ-COMPONENT-RESOLVER-003
+        # @capture(protocol_json): resolution verdict for a compatible static request
+        step("Resolve a request the static candidate satisfies on its own target and profile")
         val req = component_resolve_request("compiler.frontend", "frontend.parse", 1, "linux-x86_64", "release")
-        assert_eq(component_resolve_verdict(resolver_catalog(), req), "ok:static:frontend.static:static_candidate:")
+        expect(component_resolve_verdict(resolver_catalog(), req)).to_equal("ok:static:frontend.static:static_candidate:")
 
     it "uses the dynamic locator when static target gating rejects it":
+        # @req REQ-COMPONENT-RESOLVER-003
+        # @capture(protocol_json): resolution verdict when the static target gate denies the request
+        step("Resolve a request whose target and profile the static candidate does not cover")
         val req = component_resolve_request("compiler.frontend", "frontend.parse", 4, "macos-arm64", "debug")
-        assert_eq(component_resolve_verdict(resolver_catalog(), req), "ok:dynamic:frontend.smf:smf_artifact:build/components/frontend.smf")
+        expect(component_resolve_verdict(resolver_catalog(), req)).to_equal("ok:dynamic:frontend.smf:smf_artifact:build/components/frontend.smf")
 
     it "discriminates missing identity, target, profile, and capability":
-        assert_eq(component_resolve_verdict(resolver_catalog(), component_resolve_request("missing", "iface", 0, "linux-x86_64", "release")), "err:component_interface_not_found")
-        assert_eq(component_resolve_verdict(resolver_catalog(), component_resolve_request("optimizer.basic", "optimizer.run", 0, "macos-arm64", "release")), "err:target_denied")
-        assert_eq(component_resolve_verdict(resolver_catalog(), component_resolve_request("optimizer.basic", "optimizer.run", 0, "linux-x86_64", "debug")), "err:profile_denied")
-        assert_eq(component_resolve_verdict(resolver_catalog(), component_resolve_request("optimizer.basic", "optimizer.run", 2, "linux-x86_64", "release")), "err:capability_denied")
+        # @req REQ-COMPONENT-RESOLVER-004
+        # @capture(protocol_json): rejection verdicts for identity, target, profile and capability gates
+        step("Resolve requests that each trip exactly one admission gate")
+        expect(component_resolve_verdict(resolver_catalog(), component_resolve_request("missing", "iface", 0, "linux-x86_64", "release"))).to_equal("err:component_interface_not_found")
+        expect(component_resolve_verdict(resolver_catalog(), component_resolve_request("optimizer.basic", "optimizer.run", 0, "macos-arm64", "release"))).to_equal("err:target_denied")
+        expect(component_resolve_verdict(resolver_catalog(), component_resolve_request("optimizer.basic", "optimizer.run", 0, "linux-x86_64", "debug"))).to_equal("err:profile_denied")
+        expect(component_resolve_verdict(resolver_catalog(), component_resolve_request("optimizer.basic", "optimizer.run", 2, "linux-x86_64", "release"))).to_equal("err:capability_denied")
 
     it "fails closed when two compatible implementations occupy one tier":
+        # @req REQ-COMPONENT-RESOLVER-004
+        # @capture(protocol_json): ambiguity verdict for a duplicated static tier
+        step("Push a second compatible static candidate and resolve the contested request")
         var catalog = resolver_catalog()
         catalog.static_candidates.push(static_component_candidate("compiler.frontend", "frontend.parse", "frontend.static.alt", "1", "sha-alt", 3, ["linux-x86_64"], ["release"] ))
         val req = component_resolve_request("compiler.frontend", "frontend.parse", 1, "linux-x86_64", "release")
-        assert_eq(component_resolve_verdict(catalog, req), "err:ambiguous_static_candidate")
+        expect(component_resolve_verdict(catalog, req)).to_equal("err:ambiguous_static_candidate")

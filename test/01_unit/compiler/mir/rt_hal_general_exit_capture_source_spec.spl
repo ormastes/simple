@@ -1,61 +1,175 @@
+"""
+## Purpose and audience
+
+Executable specification for the RT/HAL general exit capture source
+contract — sealed resolved-call provenance, the cold staged installer's
+compiler-private boundary, and typed terminal exits for the V2 bounded
+encoder — for compiler owners changing `mir_rt_hal_boundary.spl` or its
+call-site provenance tracking.
+
+## Operator workflow
+
+Run this spec with the repo test runner and confirm zero failed scenarios.
+Each scenario reads one or more owning source files once and asserts
+specific wiring substrings against genuinely named locals.
+
+## Compatibility and limitations
+
+These are source-contract scenarios: they pin cross-file wiring shape
+(which symbol is exported where, which stage seals which arena), not
+runtime MIR lowering behavior. A failure means a symbol was renamed, moved,
+or removed from its expected owner.
+
+## Verification guidance and troubleshooting
+
+Re-run after any change to `mir_rt_hal_boundary.spl`, `rt_hal_tag.spl`,
+`mir_json.spl`, or the `app.io` RT/HAL host surfaces. A failing scenario
+names the exact substring it expected; grep the named source file for it to
+see what changed.
+
+# NOTE: as of 2026-09-06 all three scenarios in this spec are RED.
+# `src/compiler/50.mir/mir_rt_hal_boundary.spl` is currently 115 lines and
+# defines only `rt_hal_boundary_receipt`, `rt_hal_boundary_call`,
+# `inject_rt_hal_boundary`, `inject_rt_hal_controller_finalize`, and
+# `inject_rt_hal_worker_complete` — none of the provenance, exit-arena,
+# schema-bind, controller-seal, or V2 exit-codec symbols this spec asserts
+# (`rt_hal_env_access_marked_plan`, `rt_hal_exact_exit_arena_install_or_fail`,
+# `RtHalExitCapture`, `rt_hal_exit_type_descriptor_v2`, etc.) appear anywhere
+# under `src/compiler/` (verified by repo-wide grep, zero hits for every
+# name). This is either a large undocumented removal or the described
+# feature surface was never implemented under these names. Filed:
+# doc/08_tracking/bug/rt_hal_general_exit_capture_surface_absent_2026-09-06.md
+"""
 # @cover src/compiler/50.mir/mir_rt_hal_boundary.spl 70%
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+# @manual_section: RT/HAL general exit capture source contract
 
 use std.spec.*
-use std.fs
+use std.spec.step
+
+extern fn rt_file_read_text(path: text) -> text
 
 describe "RT/HAL general exit capture source contract":
     it "uses sealed resolved-call provenance rather than a callable spelling":
-        val lowering = fs.read_text("src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl")
-        val boundary = fs.read_text("src/compiler/50.mir/mir_rt_hal_boundary.spl")
-        val semantics = fs.read_text("src/compiler/35.semantics/rt_hal_tag.spl")
-        val json = fs.read_text("src/compiler/50.mir/mir_json.spl")
-        expect(lowering.contains("rt_hal_env_executor_kind_for_symbol")).to_equal(true)
-        expect(lowering.contains("resolved.defining_module")).to_equal(true)
-        expect(lowering.contains("RtHalEnvExecutorProvenance")).to_equal(true)
-        expect(boundary.contains("rt_hal_env_access_marked_plan")).to_equal(true)
-        expect(boundary.contains("marker -> Call")).to_equal(true)
-        expect(boundary.contains("rt_hal_env_access_same_direct_operand")).to_equal(true)
-        expect(boundary.contains("rt_hal_env_access_same_plan_operand")).to_equal(true)
-        expect(boundary.contains("rt_hal_env_access_provenance_record_matches")).to_equal(true)
-        expect(boundary.contains("rt_hal_env_executor_provenance_register")).to_equal(true)
-        expect(boundary.contains("rt_hal_env_access_executor_name")).to_equal(false)
-        expect(json.contains("E-MIR-RTHAL-UNSTRIPPED-PROVENANCE")).to_equal(true)
-        expect(semantics.contains("RT_HAL_ENV_CAPABILITY_EDGE_CAP")).to_equal(true)
-        expect(semantics.contains("fixed-degree reverse graph")).to_equal(true)
+        # @req REQ-MIR-RTHAL-EXIT-001
+        # @capture(statistics): provenance-marker presence across lowering/boundary/semantics/json sources retained
+        step("Read the lowering, boundary, semantics, and JSON sources and pin sealed-provenance markers")
+        val lowering = rt_file_read_text("src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl")
+        val boundary = rt_file_read_text("src/compiler/50.mir/mir_rt_hal_boundary.spl")
+        val semantics = rt_file_read_text("src/compiler/35.semantics/rt_hal_tag.spl")
+        val json = rt_file_read_text("src/compiler/50.mir/mir_json.spl")
+        val lowering_resolves_executor_kind_by_symbol =
+            lowering.contains("rt_hal_env_executor_kind_for_symbol")
+        val lowering_reads_the_resolved_defining_module =
+            lowering.contains("resolved.defining_module")
+        val lowering_carries_a_provenance_type =
+            lowering.contains("RtHalEnvExecutorProvenance")
+        val boundary_marks_the_access_plan =
+            boundary.contains("rt_hal_env_access_marked_plan")
+        val boundary_routes_the_marker_through_a_call =
+            boundary.contains("marker -> Call")
+        val boundary_compares_same_direct_operand =
+            boundary.contains("rt_hal_env_access_same_direct_operand")
+        val boundary_compares_same_plan_operand =
+            boundary.contains("rt_hal_env_access_same_plan_operand")
+        val boundary_matches_provenance_records =
+            boundary.contains("rt_hal_env_access_provenance_record_matches")
+        val boundary_registers_executor_provenance =
+            boundary.contains("rt_hal_env_executor_provenance_register")
+        val boundary_still_exposes_a_bare_executor_name =
+            boundary.contains("rt_hal_env_access_executor_name")
+        val json_carries_the_unstripped_provenance_error_code =
+            json.contains("E-MIR-RTHAL-UNSTRIPPED-PROVENANCE")
+        val semantics_bounds_the_capability_edge_count =
+            semantics.contains("RT_HAL_ENV_CAPABILITY_EDGE_CAP")
+        val semantics_documents_a_fixed_degree_reverse_graph =
+            semantics.contains("fixed-degree reverse graph")
+        expect(lowering_resolves_executor_kind_by_symbol).to_equal(true)
+        expect(lowering_reads_the_resolved_defining_module).to_equal(true)
+        expect(lowering_carries_a_provenance_type).to_equal(true)
+        expect(boundary_marks_the_access_plan).to_equal(true)
+        expect(boundary_routes_the_marker_through_a_call).to_equal(true)
+        expect(boundary_compares_same_direct_operand).to_equal(true)
+        expect(boundary_compares_same_plan_operand).to_equal(true)
+        expect(boundary_matches_provenance_records).to_equal(true)
+        expect(boundary_registers_executor_provenance).to_equal(true)
+        expect(boundary_still_exposes_a_bare_executor_name).to_equal(false)
+        expect(json_carries_the_unstripped_provenance_error_code).to_equal(true)
+        expect(semantics_bounds_the_capability_edge_count).to_equal(true)
+        expect(semantics_documents_a_fixed_degree_reverse_graph).to_equal(true)
 
     it "keeps the cold staged installer compiler-private and orders its real seal":
-        val boundary = fs.read_text("src/compiler/50.mir/mir_rt_hal_boundary.spl")
-        val app_surface = fs.read_text("src/app/io/__init__.spl")
-        val compat_surface = fs.read_text("src/app/io/mod.spl")
-        val host = fs.read_text("src/app/io/rt_hal_isolated_host.spl")
-        val environment_host = fs.read_text("src/app/io/env_access_host.spl")
+        # @req REQ-MIR-RTHAL-EXIT-002
+        # @capture(statistics): compiler-private export boundary and controller-seal ordering markers retained
+        step("Read the boundary and app.io host sources and pin the compiler-private installer boundary")
+        val boundary = rt_file_read_text("src/compiler/50.mir/mir_rt_hal_boundary.spl")
+        val app_surface = rt_file_read_text("src/app/io/__init__.spl")
+        val compat_surface = rt_file_read_text("src/app/io/mod.spl")
+        val host = rt_file_read_text("src/app/io/rt_hal_isolated_host.spl")
+        val environment_host = rt_file_read_text("src/app/io/env_access_host.spl")
         # MIR owns the linker symbol; neither user-facing app.io facade may
         # re-export it for source calls that could leave an arena Installing.
-        expect(boundary.contains("rt_hal_compiler_stage_isolated_exact_host_from_plan_path_or_fail")).to_equal(true)
-        expect(app_surface.contains("rt_hal_compiler_stage_isolated_exact_host_from_plan_path")).to_equal(false)
-        expect(compat_surface.contains("rt_hal_compiler_stage_isolated_exact_host_from_plan_path")).to_equal(false)
-        expect(environment_host.contains("pub(package) fn rt_hal_compiler_stage_isolated_exact_host_from_plan_path")).to_equal(true)
-        expect(host.contains("pub(package) fn rt_hal_install_isolated_exact_host_from_plan_v3")).to_equal(true)
-        expect(host.contains("export rt_hal_install_isolated_exact_host_from_plan_v3")).to_equal(false)
+        val boundary_names_the_isolated_exact_host_installer =
+            boundary.contains("rt_hal_compiler_stage_isolated_exact_host_from_plan_path_or_fail")
+        val app_surface_still_names_the_installer =
+            app_surface.contains("rt_hal_compiler_stage_isolated_exact_host_from_plan_path")
+        val compat_surface_still_names_the_installer =
+            compat_surface.contains("rt_hal_compiler_stage_isolated_exact_host_from_plan_path")
+        val environment_host_declares_the_installer_package_private =
+            environment_host.contains("pub(package) fn rt_hal_compiler_stage_isolated_exact_host_from_plan_path")
+        val host_declares_the_v3_installer_package_private =
+            host.contains("pub(package) fn rt_hal_install_isolated_exact_host_from_plan_v3")
+        val host_still_exports_the_v3_installer =
+            host.contains("export rt_hal_install_isolated_exact_host_from_plan_v3")
         # The controller prefix must stage the complete plan, install its
         # bounded exit arena, then bind schemas and perform the controller
         # seal, whose runtime owner is the only Ready publication point.
-        expect(boundary.contains("rt_hal_exact_exit_arena_install_or_fail")).to_equal(true)
-        expect(boundary.contains("rt_hal_exact_exit_schema_bind_descriptors")).to_equal(true)
-        expect(boundary.contains("rt_hal_exact_exit_controller_seal")).to_equal(true)
+        val boundary_installs_the_exact_exit_arena_or_fails =
+            boundary.contains("rt_hal_exact_exit_arena_install_or_fail")
+        val boundary_binds_exit_schema_descriptors =
+            boundary.contains("rt_hal_exact_exit_schema_bind_descriptors")
+        val boundary_performs_the_controller_seal =
+            boundary.contains("rt_hal_exact_exit_controller_seal")
+        expect(boundary_names_the_isolated_exact_host_installer).to_equal(true)
+        expect(app_surface_still_names_the_installer).to_equal(false)
+        expect(compat_surface_still_names_the_installer).to_equal(false)
+        expect(environment_host_declares_the_installer_package_private).to_equal(true)
+        expect(host_declares_the_v3_installer_package_private).to_equal(true)
+        expect(host_still_exports_the_v3_installer).to_equal(false)
+        expect(boundary_installs_the_exact_exit_arena_or_fails).to_equal(true)
+        expect(boundary_binds_exit_schema_descriptors).to_equal(true)
+        expect(boundary_performs_the_controller_seal).to_equal(true)
 
     it "preserves typed terminal exits for the V2 bounded encoder":
-        val source = fs.read_text("src/compiler/50.mir/mir_rt_hal_boundary.spl")
-        expect(source.contains("RtHalExitCapture")).to_equal(true)
-        expect(source.contains("rt_hal_exit_type_descriptor_v2")).to_equal(true)
-        expect(source.contains("rt_hal_exit_schema_id_v2")).to_equal(true)
-        expect(source.contains("rt_hal_exit_codec_plan_v2")).to_equal(true)
-        expect(source.contains("RtHalExitCodecPlan.Utf8Text(4096)")).to_equal(true)
-        expect(source.contains("value_type: MirType")).to_equal(true)
-        expect(source.contains("case Throw(_, _)")).to_equal(true)
-        expect(source.contains("case Resume(_, _)")).to_equal(true)
-        expect(source.contains("case Abort(_)")).to_equal(true)
-        expect(source.contains("v2;array;" )).to_equal(true)
-        expect(source.contains("v2;tuple;" )).to_equal(true)
-        expect(source.contains("v2;result;" )).to_equal(true)
-        expect(source.contains("case Vec4f | Vec8f | Vec4d | Vec4i | Vec8i | Ptr(_, _) | Ref(_, _) |")).to_equal(true)
+        # @req REQ-MIR-RTHAL-EXIT-003
+        # @capture(statistics): V2 exit-capture type and codec-plan markers retained
+        step("Read the boundary source and pin the V2 typed terminal exit contract")
+        val source = rt_file_read_text("src/compiler/50.mir/mir_rt_hal_boundary.spl")
+        val declares_the_exit_capture_type = source.contains("RtHalExitCapture")
+        val declares_the_v2_type_descriptor = source.contains("rt_hal_exit_type_descriptor_v2")
+        val declares_the_v2_schema_id = source.contains("rt_hal_exit_schema_id_v2")
+        val declares_the_v2_codec_plan = source.contains("rt_hal_exit_codec_plan_v2")
+        val declares_the_bounded_utf8_codec_plan =
+            source.contains("RtHalExitCodecPlan.Utf8Text(4096)")
+        val carries_a_mir_value_type_field = source.contains("value_type: MirType")
+        val matches_the_throw_terminal_case = source.contains("case Throw(_, _)")
+        val matches_the_resume_terminal_case = source.contains("case Resume(_, _)")
+        val matches_the_abort_terminal_case = source.contains("case Abort(_)")
+        val encodes_the_v2_array_schema_prefix = source.contains("v2;array;")
+        val encodes_the_v2_tuple_schema_prefix = source.contains("v2;tuple;")
+        val encodes_the_v2_result_schema_prefix = source.contains("v2;result;")
+        val matches_the_wide_vector_and_pointer_case =
+            source.contains("case Vec4f | Vec8f | Vec4d | Vec4i | Vec8i | Ptr(_, _) | Ref(_, _) |")
+        expect(declares_the_exit_capture_type).to_equal(true)
+        expect(declares_the_v2_type_descriptor).to_equal(true)
+        expect(declares_the_v2_schema_id).to_equal(true)
+        expect(declares_the_v2_codec_plan).to_equal(true)
+        expect(declares_the_bounded_utf8_codec_plan).to_equal(true)
+        expect(carries_a_mir_value_type_field).to_equal(true)
+        expect(matches_the_throw_terminal_case).to_equal(true)
+        expect(matches_the_resume_terminal_case).to_equal(true)
+        expect(matches_the_abort_terminal_case).to_equal(true)
+        expect(encodes_the_v2_array_schema_prefix).to_equal(true)
+        expect(encodes_the_v2_tuple_schema_prefix).to_equal(true)
+        expect(encodes_the_v2_result_schema_prefix).to_equal(true)
+        expect(matches_the_wide_vector_and_pointer_case).to_equal(true)
