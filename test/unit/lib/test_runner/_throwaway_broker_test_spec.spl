@@ -1,6 +1,37 @@
+"""
+## Purpose and audience
+A throwaway smoke spec proving the app.test_daemon.qemu_broker module
+loads and its pure in-memory session pool behaves on first acquire. For
+test-runner developers who need a cheap load-and-construct check that
+never boots a real QEMU instance.
+## Operator workflow
+./src/compiler_rust/target/bootstrap/simple run test/unit/lib/test_runner/_throwaway_broker_test_spec.spl
+Expect outcome=OK with exactly 1 passed example and exit code 0.
+## Compatibility and limitations
+Covers only the constructor and the first-acquire path, which are pure
+in-memory operations; session eviction, cleanup, and real QEMU sessions
+are out of scope for this file. The filename's `_throwaway` prefix is
+historical and load-bearing for discovery ordering — do not rename.
+## Verification guidance and troubleshooting
+Rerun the single file above; a red means the broker constructor or the
+acquire status transition regressed. Compare the session status against
+the oracle line before digging into the broker module itself.
+"""
+# Lifecycle: doc/01_research/infra/sspec/modern_sspec_typed_evidence_research_2026-08-08.md ;
+# doc/03_plan/infra/testing/sspec_prevention_mock_plan_2026-08-07.md ;
+# doc/04_architecture/test/00_test_architecture.md ;
+# doc/05_design/infra/test_runner/unstable_mode_scope_finding_2026-08-17.md
+# @manual_section: qemu broker smoke
+
 use std.spec.{describe, it, expect}
-use app.test_daemon.qemu_broker.{QemuBroker, qemu_broker_new}
+use std.spec.step
+use app.test_daemon.qemu_broker.{QEMU_IN_USE, qemu_broker_new}
 
 describe "throwaway broker import check":
-    it "loads broker module":
-        expect(1).to_equal(1)
+    it "hands out one in-use session on first acquire":
+        # @req REQ-TEST-DAEMON-BROKER-001
+        # @capture(statistics): broker session status and test-count readback
+        step("acquire a session from a freshly constructed broker")
+        val broker = qemu_broker_new(2)
+        val session = broker.acquire("x86_64", "bin/qemu-system-test")
+        expect(session.status).to_equal(QEMU_IN_USE)  # oracle: a fresh acquire must mark the session in use

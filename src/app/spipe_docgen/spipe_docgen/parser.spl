@@ -99,24 +99,38 @@ fn parse_spipe_file(path: text) -> Result<SspecDoc, text>:
             if id != "":
                 feature_ids.push(id)
 
-        # Check for doc block start (standalone """ on its own line)
-        if trimmed == "\"\"\"" and not string_continuation[i]:
+        # Check for doc block start: a standalone `"""` on its own line, or a
+        # column-0 `"""` that already carries its first content line (the
+        # `"""# Title` form most feature specs open with). The inline form is
+        # accepted only at column 0 so that indented function docstrings are
+        # not mistaken for the file's documentation block.
+        val doc_open_inline = line.starts_with("\"\"\"") and trimmed.len() > 3
+        if not string_continuation[i] and (trimmed == "\"\"\"" or doc_open_inline):
             val start_line = i
-            i = i + 1
 
             var block_lines: [text] = []
             var found_end = false
 
-            # Collect lines until closing """
-            while i < lines.len():
-                val block_line = lines[i]
-
-                if block_line.trim() == "\"\"\"":
-                    found_end = true
-                    break
-
-                block_lines.push(block_line)
+            val opener_rest = trimmed[3:]
+            if opener_rest.len() >= 3 and opener_rest.ends_with("\"\"\""):
+                # Single-line documentation block: `"""text"""`
+                block_lines.push(opener_rest[0:opener_rest.len() - 3])
+                found_end = true
+            else:
+                if opener_rest != "":
+                    block_lines.push(opener_rest)
                 i = i + 1
+
+                # Collect lines until closing """
+                while i < lines.len():
+                    val block_line = lines[i]
+
+                    if block_line.trim() == "\"\"\"":
+                        found_end = true
+                        break
+
+                    block_lines.push(block_line)
+                    i = i + 1
 
             val block_content = block_lines.join("\n") + "\n"
 
@@ -837,6 +851,47 @@ fn scenario_capture_policy(lines: [text], scenario_index: i64) -> text:
         break
     ""
 
+fn requirement_id_from_metadata_line(trimmed: text) -> text:
+    """The requirement id declared by an already-trimmed `@req <ID>` metadata
+    line, or "" when the line declares none."""
+    if trimmed.starts_with("# @req "):
+        return trimmed["# @req ".len():].trim()
+    if trimmed.starts_with("@req "):
+        return trimmed["@req ".len():].trim()
+    ""
+
+fn scenario_requirement_ids(lines: [text], scenario_index: i64) -> [text]:
+    """Requirement ids declared by the `@req` metadata block directly above a
+    scenario, in source order and without duplicates."""
+    var reversed: [text] = []
+    var j = scenario_index - 1
+    while j >= 0:
+        val trimmed = lines[j].trim()
+        if trimmed == "":
+            j = j - 1
+            continue
+        val req = requirement_id_from_metadata_line(trimmed)
+        if req != "" and not reversed.contains(req):
+            reversed.push(req)
+        if trimmed.starts_with("#") or trimmed.starts_with("@"):
+            j = j - 1
+            continue
+        break
+    var ids: [text] = []
+    var k = reversed.len() - 1
+    while k >= 0:
+        ids.push(reversed[k])
+        k = k - 1
+    ids
+
+fn render_scenario_requirements(ids: [text]) -> text:
+    if ids.len() == 0:
+        return ""
+    var quoted: [text] = []
+    for id in ids:
+        quoted.push("`" + id + "`")
+    "\n_Requirements: " + quoted.join(", ") + "_\n"
+
 fn artifact_path_from_metadata_line(trimmed: text) -> text:
     if not (trimmed.starts_with("# @artifact") or trimmed.starts_with("@artifact")):
         return ""
@@ -998,6 +1053,70 @@ fn scenario_title_at(lines: [text], scenario_index: i64) -> text:
     if not is_scenario_line(trimmed):
         return ""
     extract_quoted_name(trimmed)
+
+fn _spipe_pending_marker_line(trimmed: text) -> bool:
+    """True when an already-trimmed source line IS a pending/skip placeholder
+    statement, rather than merely mentioning one.
+
+    Statement position is required for the same reason
+    `src/app/sspec_maintain/source_facts.spl:148 _is_pending` requires it: a
+    comment, a reason string ("migration pending"), or a spec that TESTS this
+    detector must not be counted as a scaffold.
+    """
+    val lower = trimmed.lower()
+    if lower.starts_with("#"):
+        return false
+    if lower == "pass_todo" or lower == "pass_do_nothing" or lower == "pass_dn":
+        return true
+    if lower.starts_with("pass_todo(") or lower.starts_with("pass_do_nothing(") or
+            lower.starts_with("pass_dn("):
+        return true
+    if lower == "pending" or lower.starts_with("pending("):
+        return true
+    lower.starts_with("skip(") or lower.starts_with("fail(\"todo:")
+
+fn scenario_at_is_unconditional_pending(lines: [text], scenario_index: i64) -> bool:
+    """True when the scenario opened at `scenario_index` pends unconditionally.
+
+    "Unconditional" is decided by INDENTATION, not by searching the body for
+    the keyword: a placeholder that sits at the scenario body's own level always
+    executes, whereas one nested deeper sits under an `if`/`match`/loop and is a
+    conditional gate, which is a real oracle rather than a scaffold. Counting
+    the latter as pending is what made the manual's pending column lie.
+
+    Docstring bodies are skipped so a manual that documents the placeholder
+    syntax cannot be misread as using it. A non-scenario index, or an index off
+    the end, is `false` rather than an error — callers scan every line.
+    """
+    if scenario_index < 0 or scenario_index >= lines.len():
+        return false
+    val scenario_line = lines[scenario_index]
+    if not is_scenario_line(scenario_line.trim()):
+        return false
+    val scenario_indent = count_leading_indent(scenario_line)
+    val end_index = find_scenario_body_end(lines, scenario_index + 1, scenario_indent)
+    var body_indent = -1
+    var in_docstring = false
+    var index = scenario_index + 1
+    while index < end_index:
+        val line = lines[index]
+        val trimmed = line.trim()
+        if trimmed.starts_with("\"\"\""):
+            # A one-line `"""..."""` opens and closes on the same line.
+            if not (trimmed.len() > 5 and trimmed.ends_with("\"\"\"")):
+                in_docstring = not in_docstring
+            index = index + 1
+            continue
+        if in_docstring or trimmed == "" or trimmed.starts_with("#"):
+            index = index + 1
+            continue
+        val indent = count_leading_indent(line)
+        if body_indent < 0:
+            body_indent = indent
+        if indent == body_indent and _spipe_pending_marker_line(trimmed):
+            return true
+        index = index + 1
+    false
 
 fn previous_scenario_title(lines: [text], scenario_index: i64) -> text:
     var j = scenario_index - 1
@@ -1603,10 +1722,10 @@ fn render_scenario_body_with_capture(lines: [text], scenario_capture: text) -> t
     val evidence = if steps != "": "" else: render_capture_evidence_summary(scenario_capture, lines)
     warnings + steps + evidence + render_executable_spipe(without_metadata)
 
-fn render_manual_scenario(name: text, suffix: text, body: [text], visibility: text, capture_policy: text) -> text:
+fn render_manual_scenario(name: text, suffix: text, body: [text], visibility: text, capture_policy: text, requirement_ids: [text]) -> text:
     if visibility == "skip":
         return ""
-    val heading = "#### " + name + suffix + "\n"
+    val heading = "#### " + name + suffix + "\n" + render_scenario_requirements(requirement_ids)
     val rendered_body = render_scenario_body_with_capture(body, capture_policy)
     if visibility == "folded" or visibility == "detail":
         val label = if visibility == "detail": "Details: " else: "Advanced: "
@@ -1818,7 +1937,8 @@ fn extract_test_structure_with_default(content: text, default_visibility: text) 
             val fallback_visibility = scenario_builtin_manual_visibility(name, "show")
             val visibility = scenario_manual_visibility(lines, i, manual_default(resolved_file_visibility, fallback_visibility))
             val capture = scenario_capture_policy(lines, i)
-            result_parts.push(render_manual_scenario(name, " _(skipped)_", final_body, visibility, capture))
+            val requirement_ids = scenario_requirement_ids(lines, i)
+            result_parts.push(render_manual_scenario(name, " _(skipped)_", final_body, visibility, capture, requirement_ids))
             i = next_index - 1
 
         # pending -> pending bullet
@@ -1832,7 +1952,8 @@ fn extract_test_structure_with_default(content: text, default_visibility: text) 
             val fallback_visibility = scenario_builtin_manual_visibility(name, "show")
             val visibility = scenario_manual_visibility(lines, i, manual_default(resolved_file_visibility, fallback_visibility))
             val capture = scenario_capture_policy(lines, i)
-            result_parts.push(render_manual_scenario(name, " _(pending)_", final_body, visibility, capture))
+            val requirement_ids = scenario_requirement_ids(lines, i)
+            result_parts.push(render_manual_scenario(name, " _(pending)_", final_body, visibility, capture, requirement_ids))
             i = next_index - 1
 
         # slow it -> slow bullet
@@ -1845,7 +1966,8 @@ fn extract_test_structure_with_default(content: text, default_visibility: text) 
             val final_body = add_scenario_metadata_warnings(lines, i, included_body)
             val visibility = scenario_manual_visibility(lines, i, manual_default(resolved_file_visibility, "folded"))
             val capture = scenario_capture_policy(lines, i)
-            result_parts.push(render_manual_scenario(name, " _(slow)_", final_body, visibility, capture))
+            val requirement_ids = scenario_requirement_ids(lines, i)
+            result_parts.push(render_manual_scenario(name, " _(slow)_", final_body, visibility, capture, requirement_ids))
             i = next_index - 1
 
         # regular it -> check bullet
@@ -1859,7 +1981,8 @@ fn extract_test_structure_with_default(content: text, default_visibility: text) 
             val fallback_visibility = scenario_builtin_manual_visibility(name, "show")
             val visibility = scenario_manual_visibility(lines, i, manual_default(resolved_file_visibility, fallback_visibility))
             val capture = scenario_capture_policy(lines, i)
-            result_parts.push(render_manual_scenario(name, "", final_body, visibility, capture))
+            val requirement_ids = scenario_requirement_ids(lines, i)
+            result_parts.push(render_manual_scenario(name, "", final_body, visibility, capture, requirement_ids))
             i = next_index - 1
 
         i = i + 1

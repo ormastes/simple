@@ -169,3 +169,208 @@ falsy at every branch site needs a decided answer for the other falsy-candidate
 values (`0`, `""`, empty collections) so the JIT and the interpreter converge on
 one table rather than two. That is a language-semantics decision plus a seed
 rebuild, which this lane could not land safely alongside live parallel sessions.
+
+---
+
+## 2026-09-06: the PURE-SIMPLE half is FIXED (50.mir). The seed half is untouched and still open.
+
+This row has two independent halves and they must not be conflated:
+
+- **Rust seed (`src/compiler_rust/**`) — STILL OPEN.** Everything above measured
+  the seed's Cranelift/interpreter engines. Nothing in this entry changes them,
+  and the two `cross_engine_*` specs that shell out to `bin/simple` stay RED.
+- **Pure-Simple compiler (`src/compiler/50.mir/**`) — FIXED here.** The 2026-08-17
+  widening note above named the pure-Simple blind spot precisely, and it was real:
+  `lower_cond_expr` (`src/compiler/50.mir/mir_lowering_stmts.spl`) rewrote a
+  condition to the `rt_is_some` presence predicate ONLY when the lowered value was
+  a LOCAL carrying a REGISTERED HIR type of kind `Optional`. Two shapes never
+  register one, so both branched on the raw non-zero `RT_NIL` (3) and read TRUTHY:
+  a bare `nil` literal (`HirExprKind.NilLit`, `has_type_ = false`), and a CALL
+  whose declared return type is `T?` used directly in condition position (the
+  `emit_call` result temp is registered under no HIR type). The call case is
+  exactly the `condA_call_returning_nil` form the 2026-08-17 sweep reported
+  failing on BOTH engines.
+
+**Lane covered by the evidence below, stated precisely:** the MIR that the
+pure-Simple compiler EMITS, inspected in process by calling
+`MirLowering.lower_cond_expr` and reading back `MirLowering.builder.instructions`.
+The emitted MIR is NOT executed, and no subprocess is used — a
+`bin/simple run` probe would run the Rust seed, and the test runner exports
+`SIMPLE_EXECUTION_MODE=interpret` which children inherit, so such a probe is
+structurally incapable of observing this code. The defect IS the emitted MIR, so
+the emitted MIR is the oracle.
+
+BEFORE (same harness, fix reverted — `calls=` is the emitted call-target list):
+
+```
+A_bare_nil: calls=[] result_local=0                       <- no presence test
+B_call_returning_opt: calls=[get_opt] result_local=0      <- no presence test
+C_bool_literal_control: calls=[] result_local=0           <- correct, control
+```
+
+AFTER:
+
+```
+A_bare_nil: calls=[rt_is_some] result_local=1
+B_call_returning_opt: calls=[get_opt, rt_is_some] result_local=1
+C_bool_literal_control: calls=[] result_local=0           <- unchanged
+```
+
+Regression spec (new):
+`test/01_unit/compiler/codegen/pure_simple_cond_optional_presence_lowering_spec.spl`.
+It discriminates — measured on the same tree, the only difference being the
+`mir_lowering_stmts.spl` hunk:
+
+```
+fix reverted: Results: 3 total, 1 passed, 2 failed
+fix applied:  Results: 3 total, 3 passed, 0 failed
+```
+
+The third `it` is a CONTROL: a plain `true` condition must emit NO `rt_is_some`.
+It passes in both runs, which is what makes the other two failures attributable
+to the rewrite rather than to the harness.
+
+**Feature preservation.** Nothing was deleted or narrowed. The call case still
+emits the callee (`get_opt` is asserted present in the AFTER list) — the rewrite
+wraps the result, it does not replace the call. Present optionals still branch
+true, because `rt_is_some` is the same predicate the already-correct
+registered-local path uses; the only behaviour that changes is the previously
+wrong ABSENT case.
+
+**Blast radius.** `lower_cond_expr` has four condition-position callers
+(`mir_lowering_stmts.spl:2507,2510,2546` for if/while, and the `And`/`Or` operand
+recursion at `_MirLoweringExpr/expr_dispatch.spl:2464,2495`), plus one
+`function_lowering.spl:1398` call that is guarded to `ExistsCheck` only and
+therefore takes the pre-existing first arm, unaffected. Because `and`/`or` funnel
+their operands back through this function, the `nil and x` / `x or nil` leaf
+forms from the 2026-08-17 sweep are covered by the same hunk.
+
+**Still not fixed by this entry, listed so it is not read as more than it is:**
+the seed engines; the `while nil:` form on the seed; and the repo-wide
+truthiness table (`0`, `""`, empty collections) that the 2026-08-04 disposition
+called for — this change pins only the nil/presence case, which both readings
+already agree on.
+
+### 2026-09-06 (same lane, second hunk): `not nil` was a THIRD blind spot, and this file's own docstring was wrong about it
+
+The 2026-08-17 sweep listed `not nil` among the seven failing forms. The
+pure-Simple `lower_cond_expr` docstring asserted that `not`, like `and`/`or`,
+"already funnel[s] its operands back through the condition path via their own
+lowering". Verified 2026-09-06: **only `and`/`or` do.**
+`_MirLoweringExpr/expr_dispatch.spl`'s `case Unary(op, operand)` lowered its
+operand with the plain value dispatcher `lower_expr` for every operator, `Not`
+included, so `if not nil:` negated the RAW non-zero RT_NIL word (3) and took the
+FALSE branch where the presence rule requires TRUE — an inversion, not merely a
+missed rewrite. `HirUnaryOp.Not` is the LOGICAL negation (`BitNot` is the
+separate bitwise operator, `20.hir/hir_operators.spl:59-66`), so its operand is
+unambiguously in condition position.
+
+Measured in the same harness, with the first hunk already applied so the delta
+is attributable to this one alone:
+
+```
+before: D_not_nil: calls=[]            <- operand read raw
+after:  D_not_nil: calls=[rt_is_some]
+```
+
+Mechanism of the fix: `lower_cond_expr` was split into `lower_cond_operand`
+(the presence rewrite, byte-for-byte the old body) and `lower_cond_expr`
+(= `lower_cond_operand` + the pre-existing MC/DC decision probe). The `Not` arm
+calls `lower_cond_operand`, NOT `lower_cond_expr` — the operand of a `not` is
+not itself a decision, and routing it through the probing wrapper would emit a
+second MC/DC condition probe for it. Every pre-existing caller of
+`lower_cond_expr` is unchanged, so MC/DC instrumentation is bit-identical.
+
+The docstring's incorrect `not` claim was corrected in place rather than
+deleted, with the correction naming what it used to say.
+
+Spec grew from 3 to 5 examples; the two new ones are a defect example and its
+control. Discrimination measured with ONLY the `expr_dispatch.spl` hunk reverted:
+
+```
+not-hunk reverted: Results: 5 total, 4 passed, 1 failed
+                   (the single failure is "presence-tests the operand of a logical not";
+                    "leaves the operand of a logical not over a plain bool alone" stays green)
+both hunks applied: Results: 5 total, 5 passed, 0 failed
+```
+
+Blast radius for this hunk is wider than the first — it touches EVERY `not` in
+compiled code — so it was measured, not assumed. For any operand that is not
+nil-shaped, `lower_cond_operand` and `lower_expr` emit identical MIR, which is
+what the second control example pins. Suite evidence on the same tree:
+
+```
+test/03_system/compiler/mir_system_spec.spl              Results: 33 total, 33 passed, 0 failed
+test/02_integration/e2e/ast_mir_integration_2_spec.spl   Results: 10 total, 10 passed, 0 failed
+test/02_integration/e2e/mir_backend_integration_1_spec.spl Results: 10 total, 10 passed, 0 failed
+```
+
+Pre-existing RED, NOT caused by either hunk (verified by re-running with
+`mir_lowering_stmts.spl` restored to its pre-fix content — identical result):
+`test/03_system/compiler/controlflow_bool_codegen_regression_spec.spl`
+`Results: 2 total, 0 passed, 2 failed` before and after.
+
+Forms now covered in pure-Simple, all through the single `lower_cond_operand`
+chokepoint reached by `if` (`mir_lowering_stmts.spl:2744`), if-chain arms
+(`:2920`) and `while` (`:3089`), plus the `and`/`or` operand recursion
+(`expr_dispatch.spl:2464,2495`) and now the `not` operand: bare `if nil:`,
+`while nil:`, `not nil`, `nil and x`, `x or nil`, and a call returning a nil
+optional. That is 6 of the 7 forms the 2026-08-17 sweep enumerated; the seventh
+is the seed's own engine behaviour, which is untouched.
+
+### 2026-09-06 corrections to the two entries above — measured, not assumed
+
+Three claims made above were tightened after being tested rather than reasoned
+about. They are corrected here in place; the original wording stays visible in
+the entries above so the record of what was believed is not erased.
+
+**1. "a CALL returning `T?` never registers an HIR type" — too broad.** When the
+callee's declared return type IS known to MIR (`fn_return_types`, filled by
+`lower_module`'s pre-pass), the call result temp IS registered with it and the
+PRE-EXISTING registered-local probe fires on its own. A third probe keyed on
+`resolved_call_hir_return_type` was written, measured against exactly that
+shape, found redundant (the spec passed identically with and without it), and
+REMOVED rather than left in as unused code (`.claude/rules/code-style.md`:
+"NEVER add unused code"). What the static-type arm in hunk 1 actually covers is
+the narrower case of a call node that carries a type which MIR could not
+otherwise derive. Two spec examples for the untyped-call shape were kept, but
+relabelled in the file as a FENCE on the pre-existing path, explicitly NOT as
+proof of this fix — they pass either way, and saying so is the point.
+
+**2. Blast radius of the `not` hunk: say "optional-typed", not "nil-shaped".**
+Every operand whose lowered local carries an `Optional` HIR type changes, not
+only literal nils. Concretely `val b: bool? = false; if not b:` flips from TRUE
+to FALSE — CORRECT under the presence rule
+(`test/01_unit/compiler/codegen/condition_tag_decode_spec.spl` pins that rule
+and already names this exact `bool? = false` case as a known residual of the
+truthiness-table disagreement), but it IS a behaviour change and must not be
+described as a no-op. Census of the affected idiom in owned source:
+
+```
+$ /usr/bin/grep -rEn "not [A-Za-z_][A-Za-z0-9_.]*\.\?" src/compiler src/lib --include=*.spl | wc -l
+367
+```
+
+367 `not <expr>.?` sites in the compiler and stdlib now route their operand
+through the presence rewrite. Direction is correct-ward — `.?` in condition
+position was always specified as a presence test — but this is a source count,
+NOT execution evidence: no self-hosted binary exists on this host to run them.
+Stated as unverified rather than implied safe.
+
+**3. Lint verdict for the new spec: NOT OBTAINED.** `bin/simple lint` fails
+internally on it (`string index out of bounds: index is 13083 but length is
+13083`) and SIGSEGVs on its untouched neighbour
+`condition_tag_decode_spec.spl`, so lint coverage for this directory is
+currently zero. Filed as
+`doc/08_tracking/bug/lint_internal_error_and_segv_on_compiler_codegen_specs_2026-09-06.md`
+rather than worked around by reshuffling the spec's text.
+
+**PR collision check (35 open PRs, swept 2026-09-06):** no open PR touches
+`src/compiler/50.mir/mir_lowering_stmts.spl` or
+`src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl`. (PR #257 does claim
+`50.mir/_MirLowering/function_lowering.spl` and
+`50.mir/_MirLoweringExpr/switch_operators_calls.spl`; neither was edited here.)
+
+**Landing note:** the new spec exists only under `test/01_unit/`, with no
+`test/unit/` mirror, so `scripts/check/check-test-tree-divergence.shs` may want
+a baseline row when this lands.

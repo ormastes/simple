@@ -1670,6 +1670,7 @@ int main(int argc, char** argv) {
                             build_core_c_runtime_library(&temp_dir.join("core_c_bootstrap_supplement"))
                                 .ok_or_else(|| "failed to build the core-c-bootstrap runtime supplement".to_string())?;
                         cmd.arg(core_c_runtime);
+                        // TODO: [driver][P2] Establish which runtime actually wins a hosted link: native_all and the core-C supplement both define the ~514 overlapping rt_* symbols counted below and archive order alone decides, but no nm dump over a produced link artifact has ever been inspected -- that dump is the missing evidence, and until it exists the precedence claimed here is asserted, not measured
                         // Archive members resolve at OBJECT granularity, not
                         // symbol granularity: pulling runtime_native.obj to
                         // satisfy rt_iocp_create also drags in every other
@@ -1872,13 +1873,16 @@ int main(int argc, char** argv) {
             // sets SIMPLE_NO_STUB_FALLBACK=1, which is why the two-group bug
             // has been latent rather than fatal.
             //
-            // NOTE (not changed here): the bare `/WHOLEARCHIVE` has no `:lib`
-            // argument, so it whole-archives EVERY input archive, which is what
-            // multiplies duplicate import descriptors such as
-            // __IMPORT_DESCRIPTOR_kernel32 (measured 4x in
-            // simple_native_all.lib). Narrowing that is a linker-contract
-            // change and is deliberately left for its own commit.
-            clang_cl_link_args.push("/WHOLEARCHIVE".to_string());
+            // REMOVED 2026-09-06 (patch item 3 of
+            // doc/08_tracking/bug/windows_whole_archive_duplicate_import_descriptors_2026-08-30.md):
+            // the bare `/WHOLEARCHIVE` had no `:lib` argument, so it
+            // whole-archived EVERY input archive, which is what multiplies
+            // duplicate import descriptors such as __IMPORT_DESCRIPTOR_kernel32
+            // (measured 4x in simple_native_all.lib). Nothing depends on it:
+            // the runtime archive's retention roots are emitted unconditionally
+            // on the non-force path above, and SIMPLE_NATIVE_FORCE_WHOLE_ARCHIVE=1
+            // remains the escape hatch. `/FORCE:MULTIPLE,UNRESOLVED` stays --
+            // that is what makes the stub-fallback path tolerant.
             clang_cl_link_args.push("/FORCE:MULTIPLE,UNRESOLVED".to_string());
         } else if is_msvc && !strict_no_stub_fallback {
             cmd.arg("-Xlinker").arg("/FORCE:MULTIPLE,UNRESOLVED");

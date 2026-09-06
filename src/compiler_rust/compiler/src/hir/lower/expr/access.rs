@@ -425,7 +425,13 @@ impl Lowerer {
                             for (idx, (field_name, field_ty)) in fields.iter().enumerate() {
                                 if field_name == field {
                                     let count = fields.len();
-                                    if best.as_ref().is_none_or(|(_, _, c)| count > *c) {
+                                    // Smallest index wins -- memory-safe, see the
+                                    // proof on `get_field_info`'s TypeId::ANY
+                                    // branch in type_resolver.rs.
+                                    if best
+                                        .as_ref()
+                                        .is_none_or(|(i, _, c)| idx < *i || (idx == *i && count > *c))
+                                    {
                                         best = Some((idx, *field_ty, count));
                                     }
                                 }

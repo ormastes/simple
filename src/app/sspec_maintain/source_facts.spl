@@ -375,6 +375,13 @@ fn extract_sspec_source_facts(path: text, source: text) -> SspecSourceFacts:
     # string-state tracking those lines END the current scenario early and
     # every assertion after the fixture lands outside any scenario (2026-08-22).
     # The state is now CoreLexer's, not a parity count of this file's own.
+    # Enum members are bare capitalized names (`Pending`, `Ok`) and the bare
+    # form of `_is_pending` matches them exactly — wave 4D hit this on
+    # primitive_types_spec.spl (2026-09-05), where an enum variant line named
+    # `Pending` flagged the whole scenario as a pending scaffold even though
+    # the scenario carried real assertions. Track enum blocks: opened by a
+    # `enum ... :` header, closed by the first line at or left of its indent.
+    var enum_indent: i64 = -1
     for raw in lines:
         line_number = line_number + 1
         if string_continuation[line_number - 1]:
@@ -389,6 +396,13 @@ fn extract_sspec_source_facts(path: text, source: text) -> SspecSourceFacts:
             guard_indent = -1
         if opens_lane_guard:
             guard_indent = indent
+        if enum_indent >= 0:
+            # close the enum block on dedent to its header's level (blank
+            # lines inside an enum body do not close it)
+            if line != "" and indent <= enum_indent:
+                enum_indent = -1
+        if line != "" and line_lower.starts_with("enum ") and line.ends_with(":"):
+            enum_indent = indent
         if current_line > 0 and line != "" and indent <= current_indent:
             scenarios.push(_finish_scenario(current_name, current_line,
                 line_number - 1, scenario_steps, scenario_assertions,
@@ -518,7 +532,10 @@ fn extract_sspec_source_facts(path: text, source: text) -> SspecSourceFacts:
                     planned_requirement_ids.push(requirement_id)
             requirements = all_requirement_ids.len()
             scenario_requirements = scenario_requirement_ids.len()
-        if current_line > 0 and _is_pending(line, code_lines[line_number - 1]):
+        # `enum_indent < 0` keeps an enum member literally named `Pending` from
+        # scoring as a pending scaffold (PR #386); the gated-skip test below is
+        # the independent lane-guard rule from #371 -- both apply.
+        if current_line > 0 and enum_indent < 0 and _is_pending(line, code_lines[line_number - 1]):
             # Lane-gated skip: a `skip(...)` reached only through a probe
             # branch reports the documented `skip:` outcome for an absent
             # lane, so it is not the unconditional scaffold ORA-001 names.

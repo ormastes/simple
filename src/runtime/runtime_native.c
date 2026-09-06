@@ -386,6 +386,18 @@ SPL_HOSTED_UNAVAILABLE_WEAK int64_t rt_vulkan_is_available(void) {
 SPL_HOSTED_UNAVAILABLE_WEAK int64_t rt_vulkan_device_count(void) {
     return spl_hosted_provider_i64_probe("rt_vulkan_provider_device_count");
 }
+
+/*
+ * C twin of the Rust lane's `cfg(not(feature = "vulkan"))` arm of
+ * rt_vulkan_readback_u32_checksum (vulkan_graphics_runtime_buffer.rs): the
+ * core C runtime has no Vulkan device, so it is always the unavailable
+ * fallback. -1 is the documented failure sentinel there (a real checksum is
+ * in [0, 2^31-2]); a Vulkan-featured provider overrides this weak definition.
+ */
+SPL_HOSTED_UNAVAILABLE_WEAK int64_t rt_vulkan_readback_u32_checksum(int64_t data, int64_t pixel_count, int64_t handle, int64_t offset) {
+    (void)data; (void)pixel_count; (void)handle; (void)offset;
+    return -1;
+}
 #endif
 
 /*
@@ -5554,15 +5566,15 @@ void rt_eprintln_value(int64_t value) {
     fflush(stderr);
 }
 
-__attribute__((weak)) bool rt_math_is_nan(double value) {
+SPL_WEAK bool rt_math_is_nan(double value) {
     return isnan(value);
 }
 
-__attribute__((weak)) bool rt_math_is_inf(double value) {
+SPL_WEAK bool rt_math_is_inf(double value) {
     return isinf(value);
 }
 
-__attribute__((weak)) bool rt_math_is_finite(double value) {
+SPL_WEAK bool rt_math_is_finite(double value) {
     return isfinite(value);
 }
 
@@ -5570,16 +5582,16 @@ static int rt_core_argc = 0;
 static char** rt_core_argv = NULL;
 static char** rt_core_filtered_argv = NULL;
 
-__attribute__((weak)) void spl_init_args(int argc, char** argv) {
+SPL_WEAK void spl_init_args(int argc, char** argv) {
     rt_core_argc = simple_runtime_filter_startup_args(
         argc, argv, &rt_core_filtered_argv, &rt_core_argv);
 }
 
-__attribute__((weak)) int64_t spl_arg_count(void) {
+SPL_WEAK int64_t spl_arg_count(void) {
     return (int64_t)rt_core_argc;
 }
 
-__attribute__((weak)) const char* spl_get_arg(int64_t idx) {
+SPL_WEAK const char* spl_get_arg(int64_t idx) {
     if (idx < 0 || idx >= rt_core_argc) return "";
     return rt_core_argv && rt_core_argv[idx] ? rt_core_argv[idx] : "";
 }
@@ -5615,7 +5627,7 @@ __attribute__((weak)) const char* spl_get_arg(int64_t idx) {
 #if defined(_WIN32)
 void rt_set_args(int argc, char** argv) {
 #else
-__attribute__((weak)) void rt_set_args(int argc, char** argv) {
+SPL_WEAK void rt_set_args(int argc, char** argv) {
 #endif
     spl_init_args(argc, argv);
 }
@@ -5663,11 +5675,11 @@ void rt_set_args_wide(int argc, const wchar_t** argv) {
 }
 #endif /* _WIN32 */
 
-__attribute__((weak)) int32_t rt_get_argc(void) {
+SPL_WEAK int32_t rt_get_argc(void) {
     return (int32_t)spl_arg_count();
 }
 
-__attribute__((weak)) SplArray* rt_get_args(void) {
+SPL_WEAK SplArray* rt_get_args(void) {
     return rt_cli_get_args();
 }
 
@@ -5675,11 +5687,11 @@ __attribute__((weak)) SplArray* rt_get_args(void) {
  * interpreter registers it on every lane). No native C definition existed, so
  * entry-closure binaries linked it as a silent 0-returning stub and
  * get_args() saw an empty array (native_sys_get_args_missing 2026-07-23). */
-__attribute__((weak)) SplArray* sys_get_args(void) {
+SPL_WEAK SplArray* sys_get_args(void) {
     return rt_cli_get_args();
 }
 
-__attribute__((weak)) SplArray* rt_cli_get_args(void) {
+SPL_WEAK SplArray* rt_cli_get_args(void) {
     int64_t argc = spl_arg_count();
     SplArray* args = rt_array_new(argc);
     if (!args) return (SplArray*)rt_core_nil();
@@ -5691,11 +5703,11 @@ __attribute__((weak)) SplArray* rt_cli_get_args(void) {
     return args;
 }
 
-__attribute__((weak)) int64_t rt_cli_arg_count(void) {
+SPL_WEAK int64_t rt_cli_arg_count(void) {
     return spl_arg_count();
 }
 
-__attribute__((weak)) int64_t rt_cli_arg_at(int64_t index) {
+SPL_WEAK int64_t rt_cli_arg_at(int64_t index) {
     if (index < 0 || index >= spl_arg_count()) {
         return rt_string_new(NULL, 0);
     }
@@ -6189,7 +6201,14 @@ void rt_volatile_write_u64(int64_t addr, int64_t value) {
 }
 
 void rt_memory_barrier(void) {
+#if defined(_MSC_VER) && !defined(__clang__)
+    /* cl.exe has no __atomic_* builtins. MemoryBarrier() (windows.h, included
+     * above on _WIN32) is the documented full seq-cst fence and is defined for
+     * every MSVC target arch; clang/gcc keep the builtin byte-identically. */
+    MemoryBarrier();
+#else
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
+#endif
 }
 
 /*
@@ -6237,7 +6256,7 @@ int64_t rt_black_box(int64_t value) {
     return rt_black_box_sink;
 }
 #elif defined(__GNUC__) || defined(__clang__)
-__attribute__((weak)) int64_t rt_black_box(int64_t value) {
+SPL_WEAK int64_t rt_black_box(int64_t value) {
     __asm__ __volatile__("" : "+r"(value) : : "memory");
     return value;
 }
@@ -6379,13 +6398,21 @@ int64_t rt_dma_phys_of(int64_t handle) {
 void rt_dma_sync_for_device(int64_t handle, int32_t dir_raw) {
     (void)handle;
     (void)dir_raw;
+#if defined(_MSC_VER) && !defined(__clang__)
+    _ReadWriteBarrier();  /* compiler barrier only */
+#else
     __asm__ volatile ("" ::: "memory");  /* compiler barrier only */
+#endif
 }
 
 void rt_dma_sync_for_cpu(int64_t handle, int32_t dir_raw) {
     (void)handle;
     (void)dir_raw;
+#if defined(_MSC_VER) && !defined(__clang__)
+    _ReadWriteBarrier();
+#else
     __asm__ volatile ("" ::: "memory");
+#endif
 }
 
 int64_t rt_dma_cache_line_size(void) {
@@ -7199,6 +7226,28 @@ int64_t rt_array_get(SplArray* a, int64_t idx) {
         return (int64_t)((uint8_t*)array->data)[idx];
     }
     return ((int64_t*)array->data)[idx];
+}
+
+/* C twin of the Rust lane's rt_vulkan_copy_u32_slots
+ * (vulkan_graphics_runtime_buffer.rs): copy `count` leading SLOTS from `src`
+ * into the caller-owned `dst`, never raw u32 bytes, so the destination keeps
+ * the tagging the source already has. Fails closed (-1) rather than copying a
+ * partial prefix — a short copy would leave the tail holding an earlier frame,
+ * the silent-stale-pixels failure the readback path exists to avoid. Both
+ * arrays must share one element representation for a slot copy to mean the
+ * same thing on both sides, so differing BYTES/packed flags are refused. */
+int64_t rt_vulkan_copy_u32_slots(int64_t dst, int64_t src, int64_t count) {
+    if (count < 0) return -1;
+    if (count == 0) return 0;
+    RtCoreArray* dst_array = rt_core_as_array(dst);
+    RtCoreArray* src_array = rt_core_as_array(src);
+    if (!dst_array || !src_array || !dst_array->data || !src_array->data) return -1;
+    if (dst_array->len < count || src_array->len < count) return -1;
+    if (dst_array->flags != src_array->flags) return -1;
+    if (dst_array->data == src_array->data) return count;
+    size_t slot = (dst_array->flags & RT_CORE_ARRAY_FLAG_BYTES) ? 1 : sizeof(int64_t);
+    memcpy(dst_array->data, src_array->data, (size_t)count * slot);
+    return count;
 }
 
 int64_t rt_array_get_text(SplArray* a, int64_t idx) {
@@ -12030,7 +12079,7 @@ void panic(int64_t msg) {
 }
 
 #if defined(__GNUC__) || defined(__clang__)
-__attribute__((weak))
+SPL_WEAK
 #endif
 int64_t spl_str_ptr(const char* value) {
     int64_t raw = (int64_t)(uintptr_t)value;
