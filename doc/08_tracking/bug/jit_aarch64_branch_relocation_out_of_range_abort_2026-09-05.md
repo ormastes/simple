@@ -2,7 +2,7 @@
 
 **Filed:** 2026-09-05
 **Severity:** medium — non-deterministic abort of any JIT-executed tool invocation on aarch64
-**Status:** open, observed once, not reproduced on demand
+**Status:** open, **now reproduced deterministically** (2026-09-06, see below)
 **Area:** Rust seed JIT (`codegen::jit`) over vendored `cranelift-jit`
 
 ## What happened
@@ -83,3 +83,71 @@ between passed. Same binary: `bin/release/aarch64-unknown-linux-gnu/simple`,
 `crash_2425695.log`, `crash_2425892.log`). No lint verdict is obtainable for
 these two files on this host until the seed is fixed; the lane records them as
 **not linted**, not as clean.
+
+## Deterministic reproducer (2026-09-06)
+
+The 2026-09-05 entry said "observed once, not reproduced on demand". It now
+reproduces on every run:
+
+```
+SIMPLE_LIB=src VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/nvidia_icd.json \
+  VK2D_W=800 VK2D_H=600 VK2D_RECTS=64 VK2D_FRAMES=300 \
+  src/compiler_rust/target/vulkan/release/simple run \
+  test/05_perf/bench/vulkan_2d_c/vk2d_bench.spl
+```
+-> `timeout: the monitored command dumped core`, crash log
+`Message: assertion failed: (diff >> 26 == -1) || (diff >> 26 == 0)` at
+`vendor/cranelift-jit/src/compiled_blob.rs:90`, via
+`JITModule::finalize_definitions` <- `JitCompiler::compile_module` <-
+`ExecCore::run_file_jit`.
+
+This is a bigger JIT module than `fmt` on a scratch file, which matches the
+original note that "the larger the JIT-compiled module the more likely it is" —
+past some size it is not probabilistic any more, it is certain.
+
+**Consequence beyond tooling:** this is what blocks
+`scripts/check/check-vulkan-2d-c-compare.shs` from ever producing a Simple-leg
+number. With the gate's platform assumptions fixed the C leg now measures
+(`c-vulkan-2d ... fps=10272.0`), and the Simple leg dies here. So the
+Simple-vs-C 2D perf gap cannot be measured on aarch64 until this is fixed.
+
+## Corrected root-cause analysis
+
+`src/compiler_rust/compiler/src/codegen/common_backend.rs` (`BackendSettings::jit()`)
+sets `is_pic = cfg!(target_arch = "x86_64")` and explains it as:
+
+> PLT entries needed by is_pic=true are only implemented for x86_64 ...
+> On aarch64/riscv/etc., disable PIC so the assert never fires.
+
+**That reasoning is inverted for this defect.** There are two different asserts:
+
+| setting | aarch64 path | assert |
+|---|---|---|
+| `is_pic = false` (current) | direct `BL`, `Reloc::Aarch64Call` | `compiled_blob.rs:90` range check — **the one we hit** |
+| `is_pic = true` | needs a PLT stub | `backend.rs:296` `"PLT is currently only supported on x86_64"` |
+
+Disabling PIC does not avoid an assert; it *chooses* this one. The comment
+should say so, otherwise the next reader concludes aarch64 is already safe.
+
+## Concrete fix path
+
+`Reloc::Aarch64AdrGotPage21` and `Aarch64Ld64GotLo12Nc` are **already
+implemented** for aarch64 in `compiled_blob.rs` — GOT addressing works. The only
+missing piece is the PLT stub in `backend.rs::write_plt_entry_bytes`, which is
+hardcoded to x86_64. An aarch64 stub fits the existing 16-byte entry:
+
+```
+adrp x16, <got page>      ; page of the GOT slot
+ldr  x16, [x16, #<lo12>]  ; load target
+br   x16                  ; tail-call it
+```
+
+12 bytes of the 16 available, and `x16` (IP0) is the architecturally reserved
+inter-procedural scratch register, so clobbering it across a call is legal.
+With that in place `is_pic` can be true on aarch64 and every call goes
+indirect, making the ±128 MB displacement irrelevant.
+
+**Not done here** because `vendor/cranelift-jit/**` is vendored third-party code
+and CLAUDE.md scopes it out; this needs an explicit decision to patch vendor (or
+to carry the change upstream). Filed with the reproducer so that decision can be
+made on evidence.
