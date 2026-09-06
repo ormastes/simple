@@ -81,6 +81,20 @@ emit_unavailable() {
         echo "- reason: $reason"
     } >"$REPORT_PATH"
     cat "$BUILD_DIR/evidence.env"
+    # Verdict line (2026-09-06): this function used to end at the `cat` above,
+    # so every caller died on a bare `exit 1` with an env dump as the last
+    # stdout line and no PASS/FAIL/ERROR verdict at all. Absence of a runtime
+    # or a binary is absence of evidence, so it is ERROR (exit 2), never a pass.
+    case "$reason" in
+        *-failed|*-not-allowed|invalid-*)
+            echo "FAIL — 0 of 1 bitmap comparison(s) completed ($reason)"
+            exit 1
+            ;;
+        *)
+            echo "ERROR — nothing was checked ($reason)"
+            exit 2
+            ;;
+    esac
 }
 
 UNAME_S="$(uname -s)"
@@ -93,18 +107,15 @@ fi
 for required in $REQUIRED_CMDS; do
     if ! have "$required"; then
         emit_unavailable "missing-command:$required"
-        exit 1
     fi
 done
 
 if [ ! -x "$SIMPLE_BIN" ]; then
     emit_unavailable "missing-simple-bin"
-    exit 1
 fi
 
 if [ ! -f "$VALIDATOR" ]; then
     emit_unavailable "missing-electron-proof-validator"
-    exit 1
 fi
 
 ELECTRON_BIN=""
@@ -118,7 +129,6 @@ fi
 
 if [ "$ELECTRON_BIN" = "" ]; then
     emit_unavailable "missing-electron-dependency"
-    exit 1
 fi
 
 cat >"$SIMPLE_SRC" <<SIMPLE_EOF
@@ -199,7 +209,6 @@ set -e
 
 if [ "$simple_code" -ne 0 ]; then
     emit_unavailable "simple-render-failed"
-    exit 1
 fi
 
 simple_checksum="$(field_of checksum "$SIMPLE_OUT")"
@@ -209,17 +218,14 @@ simple_status="$(field_of simple_status "$SIMPLE_OUT")"
 
 if [ "$simple_status" != "pass" ] || [ ! -s "$EXPECTED_ARGB" ]; then
     emit_unavailable "missing-expected-argb-file"
-    exit 1
 fi
 
 if [ -z "$simple_checksum" ] || [ "$simple_checksum" = "0" ] || [ -z "$simple_weighted" ] || [ "$simple_weighted" = "0" ]; then
     emit_unavailable "missing-simple-checksum"
-    exit 1
 fi
 
 if [ "$simple_blur" != "false" ]; then
     emit_unavailable "simple-blur-or-tolerance-not-allowed"
-    exit 1
 fi
 
 set +e
@@ -520,4 +526,13 @@ fi
 
 cat "$BUILD_DIR/evidence.env"
 
-[ "$status" = "pass" ]
+# Verdict line (2026-09-06): this script used to end on a bare
+# `[ "$status" = "pass" ]`, which under `set -e` exits 1 with an env dump as
+# the last stdout line and no PASS/FAIL/ERROR verdict. A reader could not tell
+# a real comparison failure from a gate that never compared anything.
+if [ "$status" = "pass" ]; then
+    echo "PASS — 1 scene ($SCENE) checked at ${WIDTH}x${HEIGHT} against the electron baseline (checksum $simple_checksum), 0 mismatches"
+else
+    echo "FAIL — 1 scene ($SCENE) checked at ${WIDTH}x${HEIGHT} against the electron baseline (checksum $simple_checksum), $reason"
+    exit 1
+fi
