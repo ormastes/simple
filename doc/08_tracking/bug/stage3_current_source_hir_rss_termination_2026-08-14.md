@@ -1145,3 +1145,64 @@ already quoted there; the scoped variant wraps each 1/1000th of the loop in
 `extern fn rt_transient_array_scope_begin() -> bool` /
 `rt_transient_array_scope_end() -> bool` and prints both return values on the
 first batch, so a silently-refused scope cannot be mistaken for a flat curve.
+
+### 10. Refinement to §7's bridge — the paused window is REAL but probably SMALL; the likelier owner is what promotion un-owns
+
+§7's mechanism (a paused-window `rt_alloc` leaks at 48.0 B, measured) stands.
+Its *arithmetic bridge* to 63 MiB/module does not survive inspection of what
+actually runs in that window, and this is recorded now rather than left for the
+next session to chase:
+
+- `driver_promote_frontend_registry_owners`
+  (`src/compiler/80.driver/driver_source_pipeline_parsing.spl:248-253`) is four
+  calls to `*_promote_transient_owner()` and an `and` — no Simple-side
+  allocation of consequence.
+- `HirLowering.promote_diagnostics_transient_owner`
+  (`src/compiler/20.hir/hir_lowering/types.spl:564-571`) is three
+  `rt_transient_heap_promote` calls and an `and` — likewise.
+- `rt_transient_heap_promote` itself allocates its plan/seen arrays with
+  `calloc`/`realloc` and `free`s both before returning
+  (`src/runtime/runtime_native.c:2162-2163`), so it does not go through
+  `rt_alloc` at all and cannot leak through the paused registry.
+
+So the paused window on Stage 3 probably allocates hundreds of blocks per
+module, not ~1.4 million. **§7's bridge is therefore unlikely, and should be
+treated as refuted-pending-measurement rather than as a lead.** The measured
+mechanism remains worth fixing (it is an unbounded leak with no upper bound in
+the code), but it is not the 63 MiB.
+
+**The candidate this promotes to first place instead.** `rt_transient_heap_promote`
+clears the owned bit on *every* node it reaches
+(`src/runtime/runtime_native.c:2141-2162`), and for a `RT_CORE_TRANSIENT_RAW`
+node it enumerates children by scanning **every 8-byte word of the block** and
+calling `rt_core_transient_add` on each (`:2131-2139`). Two consequences:
+
+1. Everything transitively reachable from the promoted HIR module survives the
+   scope end by design — so the per-module retained cost is the *closure* of the
+   HIR graph, not the HIR graph. If any HIR node still points into the
+   `ParserModule`/AST or into per-module lowering scratch, the whole of it is
+   retained, and `ast_reset()` at `driver_hir_pipeline_lowering.spl:427` (which
+   runs once after the loop, not per source) cannot give it back.
+2. The word scan is untyped. Any i64 field whose value happens to collide with a
+   live registered pointer is followed, and whatever it reaches is un-owned too.
+   That is a *conservative* retention path with no bound stated anywhere in the
+   runtime.
+
+Neither is measured here. What distinguishes them from §7's bridge is that the
+2026-08-22 instrumentation already reports exactly the number that would settle
+it — `hir-promotion-total` promoted **38,060 nodes / 1,218,945 bytes** for
+module 1, i.e. ~1.2 MB against an RSS of 640,932 KiB at that point. If the next
+Stage 3 shows promoted bytes staying near 1.2 MB per module while RSS climbs 63
+MiB per module, promotion is *not* the owner either and the remaining candidate
+is the pre-HIR streaming surface phase. If promoted bytes track the RSS slope,
+it is.
+
+**Revised cheapest next test** (supersedes §7's, same spirit, one extra counter):
+report, per source, (a) blocks/bytes registered while the scope was PAUSED,
+(b) blocks/bytes un-owned by promotion, and (c) blocks/bytes actually freed by
+`rt_core_reclaim_transient_raw`, beside the existing `hir-promotion` /
+`hir-promotion-total` rows. All three are already visible inside
+`rt_core_transient_raw_register_state`, `rt_transient_heap_promote` and
+`rt_core_reclaim_transient_raw`; none requires a representation or behaviour
+change. Those three numbers plus RSS rank all four candidates in a single
+transaction.
