@@ -3,7 +3,7 @@
 //! NVIDIA CUDA backend using the CUDA Driver API.
 
 use std::collections::HashMap;
-use std::ffi::{c_void, CString};
+use std::ffi::{c_char, c_void, CString};
 use std::ptr;
 use std::sync::Mutex;
 
@@ -50,7 +50,7 @@ extern "C" {
     fn cuInit(flags: u32) -> CUresult;
     fn cuDeviceGetCount(count: *mut i32) -> CUresult;
     fn cuDeviceGet(device: *mut CUdevice, ordinal: i32) -> CUresult;
-    fn cuDeviceGetName(name: *mut std::os::raw::c_char, len: i32, dev: CUdevice) -> CUresult;
+    fn cuDeviceGetName(name: *mut c_char, len: i32, dev: CUdevice) -> CUresult;
     fn cuDeviceGetAttribute(pi: *mut i32, attrib: i32, dev: CUdevice) -> CUresult;
     fn cuDeviceTotalMem_v2(bytes: *mut usize, dev: CUdevice) -> CUresult;
     fn cuCtxCreate_v2(ctx: *mut CUcontext, flags: u32, dev: CUdevice) -> CUresult;
@@ -67,7 +67,7 @@ extern "C" {
     fn cuMemsetD8_v2(dst: CUdeviceptr, value: u8, n: usize) -> CUresult;
     fn cuModuleLoadData(module: *mut CUmodule, image: *const c_void) -> CUresult;
     fn cuModuleUnload(hmod: CUmodule) -> CUresult;
-    fn cuModuleGetFunction(hfunc: *mut CUfunction, hmod: CUmodule, name: *const std::os::raw::c_char) -> CUresult;
+    fn cuModuleGetFunction(hfunc: *mut CUfunction, hmod: CUmodule, name: *const c_char) -> CUresult;
     fn cuLaunchKernel(
         f: CUfunction,
         gridDimX: u32,
@@ -295,7 +295,7 @@ impl Backend for CudaBackend {
             cuda_check(cuDeviceGet(&mut device, index as i32))?;
 
             // Get device name
-            let mut name_buf = [0 as std::os::raw::c_char; 256];
+            let mut name_buf = [0 as c_char; 256];
             cuda_check(cuDeviceGetName(name_buf.as_mut_ptr(), 256, device))?;
             let name = std::ffi::CStr::from_ptr(name_buf.as_ptr())
                 .to_string_lossy()

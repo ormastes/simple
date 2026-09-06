@@ -1,40 +1,7 @@
 # A docs-titled commit (`2313821fd77`) re-clobbered origin main, reverting five landed fixes
 
 **Filed:** 2026-08-10 (independent review lane)
-Status: RESOLVED 2026-09-02 — **all five clobbered fixes and all the named
-collateral are present again at `origin/main` @ `1b76db1d6c3`.** The content
-half of this record is repaired; the process half (revert detection is still
-documented as manual in `.claude/rules/vcs.md`) is tracked there, not here.
-
-### Repair verification (2026-09-02) — this record's own probes, re-run
-
-Each row re-runs the probe this record specified, at `origin/main`:
-
-| clobbered commit | this record's probe | result 2026-09-02 |
-|---|---|---|
-| `4f755fdeb930` deep-copy `AggregateCopy` | `grep -c visited closures_structs.rs` -> 0 | **fix present, the probe is stale** — see below |
-| `2009e71905e4` AOT f64 struct-field interpolation | `check-aot-smoke.shs` reverted | file present |
-| `6ff0c263d0f` JIT unresolved `GlobalLoad` | `run_semantic_error_exit_code_spec.spl` deleted | file present |
-| `bb47d3c4cd4` divergence guard `--ref` | `check-test-tree-divergence.shs` reverted | 13 `--ref` hits |
-| `c28e1b008b02` blink cascade->layout | `src/lib/blink/layout/style_bridge.spl` deleted | file present |
-| collateral | 4 deleted `scripts/check/*.shs` + `blink/html_parser/**` | all present (`check-numeric-builtin-result-type`, `check-bdd-tagged-block-drop`, `check-native-print-stdout-oracle`, `check-test-tree-divergence-delta`; `html_parser/{__init__,token,tokenizer,tree_builder}.spl`) |
-
-**Correction — the `grep -c visited` probe is a false negative and must not be
-reused.** It returns 0, but the deep-copy fix IS present and has been developed
-further since. `deep_fields` threads through 10 files
-(`crate::mir::AggregateFieldCopy` at `mir/inst_enum.rs:14`, `cranelift_emitter.rs:69`,
-`emitter_trait.rs:47`, `instr/closures_structs.rs:520,550`, `llvm/emitter.rs:434`,
-`llvm/functions/objects.rs:122,163`, `mir_interpreter.rs:126`,
-`pipeline/native_project/compiler.rs:1915`). The cycle guard was not deleted —
-it was **renamed and moved** to the descriptor builder, `struct_deep_fields` in
-`src/compiler_rust/compiler/src/mir/lower/lowering_core.rs:994-1032`, where the
-repeated-type-name guard is now `if path.iter().any(|p| *p == fname_ty) { continue; }`
-(`:1011`) with the depth cap at `:1000` (`if path.len() >= 16`). A later
-addition, `resolve_deep_field_vtables` (`compiler.rs:1909`), resolves
-`owner_has_vtable` per field — work that postdates the clobber, which is
-independent confirmation the fix was re-landed rather than merely restored.
-
-Previously: OPEN (P1)
+Status: OPEN (P1)
 Status re-verified 2026-08-17 by source inspection (triage shard 01).
 **Severity:** HIGH — five verified fixes and 26 files are absent from origin main while
 their commits are still ancestors of the tip, so ancestry checks report them as landed.

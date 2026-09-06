@@ -1,6 +1,6 @@
 # `Result<u8>.unwrap_or` returns 222<<3; `(u8?)` via `!` returns the nil tag
 
-Status: CLOSED 2026-09-02 (not reproducible; second independent lane, different architecture -- see the CLOSED section at the bottom). Was: OPEN (P1)
+Status: OPEN (P1)
 **Found:** 2026-08-17 — interpreter, `bin/simple run` probe (no daemon involved)
 
 ## Symptom
@@ -98,28 +98,3 @@ bug.
 **Not fixed here** either way: every candidate site is in the Rust bootstrap
 seed, so it is out of scope for a pure-Simple fix, and the record's root cause
 is still unlocated — deliberately not guessed at.
-
----
-
-## CLOSED 2026-09-02 — not reproducible, second independent lane
-
-Host aarch64-apple-darwin. Binary: `src/compiler_rust/target/release/simple` (Rust seed, 37,291,896 B, 2026-09-01 09:24). `bin/simple` on this host is the BOOTSTRAP cli (`simple-bootstrap 1.0.0-beta`, `compile`/`native-build` only) and answers `unknown command 'run'`, so it is NOT the lane used below.
-
-A third reconstruction, on a DIFFERENT architecture from the 2026-08-17
-re-verification (aarch64 vs x86_64), of every shape the record names:
-
-```
-res_u8_unwrap_or: 222     # Result<u8,text>.unwrap_or -- filed as 1776 (222<<3)
-res_i64_unwrap_or: 222    # i64 control
-opt_u8_bang: 222          # (u8?) via ! -- filed as 3 (the nil tag word)
-arr_first: 222            # xs.first().unwrap_or(0u8) on [u8]
-arr_get: 222              # xs.get(0)!
-```
-
-No shift, no nil tag. Two independent lanes on two architectures now fail to
-reproduce, and the record itself states "Root cause file:line not located",
-carries no minimal repro, and names "close it as unreproducible" as an accepted
-disposition for exactly this outcome. Closing on that basis.
-
-This is NOT a claim that a fix landed -- no fix was identified. If the original
-ByteBuffer-adjacent program surfaces, reopen with it attached.

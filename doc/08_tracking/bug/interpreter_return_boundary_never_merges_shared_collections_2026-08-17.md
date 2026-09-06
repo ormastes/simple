@@ -3,28 +3,7 @@
 - **Date:** 2026-08-17
 - **Severity:** P1 — silently wrong results, no diagnostic
 - **Root cause:** `src/compiler_rust/compiler/src/interpreter_call/core/function_exec.rs:1203`
-- **Status:** RESOLVED 2026-09-02 for the shape this record failed on —
-  see the differential below. The source-level claim about
-  `function_exec.rs:1203` was NOT re-audited; what was measured is behaviour.
-
-Probe: a struct whose field is a Dict, mutated inside a free function that
-RETURNS the struct (the record's own failing example,
-"preserves struct dictionary-field mutations through returning free
-functions"). Run on aarch64-apple-darwin:
-
-| binary | `returned` | `caller` |
-|---|---|---|
-| deployed seed of 2026-07-25 (pre-fix) | 11 | **1** — the caller kept its pre-call snapshot |
-| seed built from `origin/main` `1b76db1d6c3` | 11 | **11** |
-
-The `returned`/`caller` split is what makes this non-vacuous: the old binary
-gets the returned handle right and the caller's binding wrong, which is
-precisely the argument-boundary-only merge this record describes.
-Guarded by `scripts/check/check-return-boundary-shared-collection.shs`
-(PASS on the fixed binary; `FAIL — 2 case(s) checked, lost: caller(caller=1)`
-on the old one). Lane caveat: interpreter lane only on the verifying host.
-
-**Previous status:** OPEN, reproduced. Collapses at least two separately-filed rows.
+- **Status:** OPEN, reproduced. Collapses at least two separately-filed rows.
 
 ## The mechanism
 

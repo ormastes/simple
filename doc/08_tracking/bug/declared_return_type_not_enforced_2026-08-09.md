@@ -3,48 +3,9 @@
 - **Filed:** 2026-08-09
 - **Lane:** G4
 - **Severity:** High (silent wrong values; hides entire defect classes)
-- Status: OPEN (P1) — **re-verified 2026-09-02 by EXECUTION, not inspection.
-  Still reproduces.**
+- Status: OPEN (P1)
 - Status re-verified 2026-08-17 by source inspection (triage shard 00).
 - **Discovered via:** `dotq_tail_position_in_bool_returning_fns_2026-08-09.md`
-
-## Re-reproduction 2026-09-02 (aarch64-apple-darwin)
-
-Binary identity (an unstated binary invalidates evidence in this repo):
-`bin/release/aarch64-apple-darwin/simple`, 29,315,096 bytes, mtime
-2026-07-25 14:15:52, sha256 prefix `f2c216a660da83da1a253d2e8191a305`,
-`--version` -> `Simple v1.0.0-beta`. It prints the Rust-seed banner on the
-`run`/`test` paths, so this attributes to the **seed** engine, interpreter mode
-(runner reports `Running 1 test file(s) [mode: interpreter]`).
-
-Fixture, run as `simple test <spec> --no-cover-check`:
-
-```simple
-fn ret_text() -> bool:
-    "not-a-bool"
-
-describe "probes":
-    it "sanity":
-        expect(1).to_equal(1)
-    it "P26 declared return type not enforced":
-        expect(ret_text()).to_equal(true)
-```
-
-Observed: `Results: 2 total, 1 passed, 1 failed`. The control passes; the
-declared-`-> bool` function returning `text` fails `to_equal(true)`, i.e. the
-`text` reaches the caller unconverted and undiagnosed. No compile error, no
-warning — exactly as filed.
-
-**Trap re-confirmed, restated because it will bite the next person:** a
-`run`-and-`print` probe of the same fixture prints `rettext=true`, because
-`.to_text()` coerces the leaked value. Only a strict `to_equal(true)` exposes it.
-Checking this family with `print` will wrongly report it fixed.
-
-**Not fixed in this pass.** The producer is the type checker under
-`src/compiler/**`, which is compiled into the binary rather than read as source,
-so a fix there cannot be exercised on this host without a bootstrap (one was in
-flight and out of scope). Reason for leaving open: **needs-bootstrap**, not lack
-of a reproduction.
 
 ## Symptom
 
