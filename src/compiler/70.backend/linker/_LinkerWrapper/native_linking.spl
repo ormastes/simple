@@ -31,6 +31,7 @@ use std.string_builder.{StringBuilder}
 
 use compiler.backend.linker.lld_sffi.{LldResult, lld_elf_link}
 use compiler.backend.linker.mold.{MoldBackend, MoldConfig, find_linker, LinkerType, execute_linker, create_temp_dir, cleanup_temp_dir, linker_file_size}
+use compiler.backend.linker.mold.{find_requested_linker, requested_linker_override, linker_fuse_ld_name}
 use compiler.backend.linker.object_provider.{ObjectProvider, ObjectProviderConfig}
 use compiler.backend.linker.object_code_unit.{ObjectCodeUnit}
 use compiler.backend.linker.object_emitter.{assemble_code_units}
@@ -241,6 +242,13 @@ fn link_native_unix(object_files: [text], output: text, config: NativeLinkConfig
     if trace:
         print "[LINKER] find_linker returned, is_err={linker_result.is_err()}"
     if linker_result.is_err():
+        # An explicit SIMPLE_LINKER request that cannot be resolved is a user
+        # error, not "no linker found" — falling back to cc would silently
+        # link with whatever the compiler driver defaults to (on a host where
+        # `ld` is mold, that is the very linker the user asked to avoid).
+        # Surface the alias-resolution error instead of swallowing it.
+        if requested_linker_override() != "":
+            return Err(linker_result.unwrap_err())
         if not config.allow_cc_fallback:
             return Err("Direct native linker is required by the strict link profile")
         if trace:
@@ -786,6 +794,37 @@ fn native_direct_platform_flags(os: text, linker_type: text) -> [text]:
     if os == "macos" or os == "darwin": return ["-dead_strip"]
     []
 
+fn cc_requested_fuse_ld_flag(os_name: text, hosted_cross: bool) -> Result<text, text>:
+    """Resolve SIMPLE_LINKER into a -fuse-ld= flag for the cc fallback path.
+
+    Returns Ok("") when SIMPLE_LINKER is unset, which means "leave this arm's
+    existing behaviour alone". Alias resolution is delegated to
+    find_requested_linker so the accepted names (mold / lld / ld.lld /
+    lld-link / ld / gnu / bfd) stay defined in exactly one place; an
+    unsupported or unfindable value propagates its Err here just as it does on
+    the direct path.
+
+    Two arms cannot honour the request and say so instead of emitting a flag
+    that would do nothing or the wrong thing:
+      - macOS/darwin links with ld64. mold dropped Mach-O support and LLD's
+        Mach-O port is a different driver; -fuse-ld= here would either be
+        ignored or select a linker that cannot produce a Mach-O image.
+      - A hosted CROSS link runs the cross driver, but find_requested_linker
+        resolves HOST binaries (which mold / which ld.lld), so honouring the
+        request would point the cross driver at a host-native linker."""
+    val requested = requested_linker_override()
+    if requested == "":
+        return Ok("")
+    if os_name == "macos" or os_name == "darwin":
+        return Err("SIMPLE_LINKER={requested} is not supported on the macOS cc link path (ld64 has no -fuse-ld= equivalent for mold/lld); unset SIMPLE_LINKER or use the direct linker path")
+    if hosted_cross:
+        return Err("SIMPLE_LINKER={requested} is not supported for hosted cross links: the alias resolves a host linker, which the cross compiler driver cannot use")
+    val resolved = find_requested_linker(requested)
+    if resolved.is_err():
+        return Err(resolved.unwrap_err())
+    val info = resolved.unwrap()
+    Ok("-fuse-ld=" + linker_fuse_ld_name(info[1]))
+
 fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) -> Result:
     # SimpleOS targets must NEVER reach this function. SimpleOS has no
     # fork/exec, so subprocess cc is unavailable — in-process LLD is the
@@ -814,6 +853,13 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
     if not compiler_plan.supported:
         return Err("hosted C target '" + target + "' is unsupported on '" + arch_name + "-" + os_name + "'")
     val hosted_cross = compiler_plan.requires_cross
+    # Resolve the SIMPLE_LINKER preference before any arm builds its argv, so
+    # an unsupported value fails the link on every platform arm rather than
+    # only on the ones that can act on it.
+    val fuse_ld_result = cc_requested_fuse_ld_flag(os_name, hosted_cross)
+    if fuse_ld_result.is_err():
+        return Err(fuse_ld_result.unwrap_err())
+    val requested_fuse_ld = fuse_ld_result.unwrap()
     var cc = env_get("SIMPLE_CC") ?? ""
     if cc == "":
         if hosted_cross:
@@ -864,6 +910,8 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
         return Err("cc linking failed: {err_msg}")
     elif os_name == "freebsd":
         var args = native_retained_symbol_cc_args(config.retained_symbols, os_name)
+        if requested_fuse_ld != "":
+            args.push(requested_fuse_ld)
         for obj in cc_fallback_object_args(object_files):
             args.push(obj)
         if not config.pie:
@@ -896,7 +944,11 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
         return Err("cc linking failed: {err_msg}")
     else:
         var args: [text] = []
-        if not hosted_cross:
+        # An explicit SIMPLE_LINKER request wins over this arm's historical
+        # default. With neither set, behaviour is byte-identical to before.
+        if requested_fuse_ld != "":
+            args.push(requested_fuse_ld)
+        elif not hosted_cross:
             args.push("-fuse-ld=lld")
         if not config.pie:
             args.push("-no-pie")
@@ -931,7 +983,10 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
         if config.allow_duplicate_definitions:
             args.push("-Wl,--allow-multiple-definition")
         args.push("-Wl,--gc-sections")
-        if not hosted_cross:
+        # --icf is an lld/mold/gold extension; GNU bfd rejects it outright, so
+        # honouring SIMPLE_LINKER=ld/gnu/bfd here means dropping the flag
+        # rather than handing bfd an option that fails the link.
+        if not hosted_cross and requested_fuse_ld != "-fuse-ld=bfd":
             args.push("-Wl,--icf=safe")
         args.push("-o")
         args.push(output)

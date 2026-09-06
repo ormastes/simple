@@ -118,6 +118,25 @@ fn find_requested_linker(name: text) -> Result<(text, LinkerType), text>:
 
     Err("Unsupported SIMPLE_LINKER value: {name}")
 
+fn requested_linker_override() -> text:
+    """Return the trimmed SIMPLE_LINKER override, or "" when unset.
+
+    Single reader for the variable so the direct-linker path and the cc
+    fallback path cannot drift on what counts as "set"."""
+    (env_get("SIMPLE_LINKER") ?? "").trim()
+
+fn linker_fuse_ld_name(linker_type: LinkerType) -> text:
+    """Map a resolved LinkerType to the driver name accepted by -fuse-ld=.
+
+    Deliberately NOT LinkerType.to_string(): that yields "ld" for the GNU
+    linker, which no compiler driver accepts after -fuse-ld=. Both gcc and
+    clang spell that one "bfd". Names (not paths) are used because gcc only
+    accepts a name, while clang accepts either."""
+    match linker_type:
+        case Mold: "mold"
+        case Lld: "lld"
+        case Ld: "bfd"
+
 fn execute_linker(linker_path: text, args: [text]) -> Result<i64, text>:
     """Execute linker with arguments. Returns exit code."""
     val (stdout, stderr, code) = process_run(linker_path, args)
@@ -665,8 +684,8 @@ impl MoldBackend:
 
 fn find_linker() -> Result<(text, LinkerType), text>:
     """Find an available linker in order of preference."""
-    val requested_linker = env_get("SIMPLE_LINKER") ?? ""
-    if requested_linker.trim() != "":
+    val requested_linker = requested_linker_override()
+    if requested_linker != "":
         return find_requested_linker(requested_linker)
 
     # Try mold first
@@ -737,6 +756,9 @@ fn mold_post_link_check(output_path: text) -> Result<ElfInspector, text>:
 # ============================================================================
 
 export LinkerError
+export find_requested_linker
+export requested_linker_override
+export linker_fuse_ld_name
 export MoldDiagnostic
 export parse_linker_diagnostics
 export mold_post_link_check
