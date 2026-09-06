@@ -867,3 +867,9 @@ optimization because a capability bit exists.
 | WS-B ScreenHost/showcase, WS-C input HAL | Unchanged; U3 builds on WS-C's ring + `HostInputEvent` (already POD-shaped). |
 | WS-E Vulkan | Unchanged and still blocked on this host (Venus gap bug); G1 defines the target contract it will adopt. |
 | WS-A config/evidence | Unchanged; F0's receipt v2 extends (not replaces) the multiconfig evidence rows. |
+
+## Acceptance
+
+Runnable oracles for the remaining open boxes: `test/03_system/plan_acceptance/render_perf_redesign_plan_spec.spl`
+(tagged `@tag:in-development`; one `it` per open box — see
+`doc/03_plan/agent_tasks/plan_remains_acceptance_2026-09-05.md`).

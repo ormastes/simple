@@ -15,7 +15,7 @@ extern int64_t rt_vulkan_bind_pipeline(int64_t, int64_t), rt_vulkan_bind_descrip
 extern int64_t rt_vulkan_dispatch(int64_t, int64_t, int64_t, int64_t), rt_vulkan_end_compute(int64_t);
 extern int64_t rt_vulkan_submit_and_wait_fence(int64_t), rt_vulkan_wait_fence(int64_t, int64_t);
 extern int64_t rt_vulkan_destroy_fence(int64_t);
-extern const char *rt_vulkan_selected_device_name(void), *rt_vulkan_selected_device_type(void);
+extern const char *rt_vulkan_selected_device_name(void), *rt_vulkan_selected_device_type(void), *rt_vulkan_selected_device_driver_identity(void);
 extern int64_t rt_vulkan_copy_to_buffer_raw(int64_t, int64_t, int64_t, int64_t);
 extern int64_t rt_vulkan_copy_from_buffer_raw(int64_t, int64_t, int64_t, int64_t);
 
@@ -41,7 +41,7 @@ int main(int argc,char**argv){
     int64_t fb=rt_vulkan_alloc_buffer((int64_t)bytes,0x83),atlas=rt_vulkan_alloc_buffer(gw*gh*4,0x83);
     int64_t shader=rt_vulkan_compile_spirv_raw((int64_t)(uintptr_t)spv,(int64_t)spv_n);
     int64_t pipe=rt_vulkan_create_compute_pipeline(shader,(int64_t)(uintptr_t)"main",0);
-    uint32_t*seed=malloc((size_t)bytes);uint32_t mask[gw*gh];
+    uint32_t*seed=malloc((size_t)bytes);uint32_t mask[16*16];
     if(!fb||!atlas||!shader||!pipe||!seed)return 4;
     for(uint64_t i=0;i<pixels;i++)seed[i]=0xff101010u;
     for(uint32_t i=0;i<gw*gh;i++)mask[i]=0xffffffffu;
@@ -74,16 +74,17 @@ int main(int argc,char**argv){
     }
     qsort(times,samples,sizeof(uint64_t),cmp_u64);uint32_t p95=(95*samples+99)/100-1;if(p95>=samples)p95=samples-1;
     if(!download_chunks(seed,fb,bytes))return 6;
-    uint64_t mismatch=0,changed=0;
-    for(uint64_t i=0;i<pixels;i++){uint32_t x=(uint32_t)(i%w),y=(uint32_t)(i/w);uint32_t gx=x/20,gy=y/20;int ink=gx<256&&(x%20)<gw&&(y%20)<gh&&(gy*256+gx)<glyphs;uint32_t expected=ink?0xffffffffu:0xff101010u;if(seed[i]!=expected)mismatch++;if(seed[i]!=0xff101010u)changed++;}
+    uint64_t mismatch=0,changed=0,checksum=1469598103934665603ULL;
+    for(uint64_t i=0;i<pixels;i++){uint32_t x=(uint32_t)(i%w),y=(uint32_t)(i/w);uint32_t gx=x/20,gy=y/20;int ink=gx<256&&(x%20)<gw&&(y%20)<gh&&(gy*256+gx)<glyphs;uint32_t expected=ink?0xffffffffu:0xff101010u;if(seed[i]!=expected)mismatch++;if(seed[i]!=0xff101010u)changed++;checksum^=seed[i];checksum*=1099511628211ULL;}
     printf("engine2d_vulkan_font_schema=%s\nengine2d_vulkan_font_width=%u\nengine2d_vulkan_font_height=%u\n",packed?"font-packed-v1":"font-warm-pool-v1",w,h);
-    printf("engine2d_vulkan_font_adapter_name=%s\nengine2d_vulkan_font_adapter_type=%s\n",
-        rt_vulkan_selected_device_name(), rt_vulkan_selected_device_type());
+    printf("engine2d_vulkan_font_adapter_name=%s\nengine2d_vulkan_font_adapter_type=%s\nengine2d_vulkan_font_adapter_driver_identity=%s\n",
+        rt_vulkan_selected_device_name(), rt_vulkan_selected_device_type(), rt_vulkan_selected_device_driver_identity());
     printf("engine2d_vulkan_font_glyphs=%u\nengine2d_vulkan_font_samples=%u\n",glyphs,samples);
     printf("engine2d_vulkan_font_frame_p50_ns=%llu\nengine2d_vulkan_font_frame_p95_ns=%llu\n",(unsigned long long)times[(samples-1)/2],(unsigned long long)times[p95]);
     printf("engine2d_vulkan_font_within_80fps_budget=%s\n",times[p95]<=12500000?"true":"false");
     printf("engine2d_vulkan_font_timed_readback_bytes=0\nengine2d_vulkan_font_evidence_readback_bytes=%llu\n",(unsigned long long)bytes);
     printf("engine2d_vulkan_font_changed_pixels=%llu\nengine2d_vulkan_font_mismatch_count=%llu\n",(unsigned long long)changed,(unsigned long long)mismatch);
+    printf("engine2d_vulkan_font_checksum=%lld\n",(long long)checksum);
     printf("engine2d_vulkan_font_swapchain_presented=false\nengine2d_vulkan_font_dynamic_frame_80fps_proven=false\n");
     if(packed){rt_vulkan_destroy_descriptor_set(packed_desc);rt_vulkan_free_buffer(packed_params);}else for(uint32_t i=0;i<glyphs;i++){rt_vulkan_destroy_descriptor_set(desc[i]);rt_vulkan_free_buffer(params[i]);}
     free(packed_host);free(times);free(host);free(desc);free(params);free(seed);free(spv);rt_vulkan_destroy_pipeline(pipe);rt_vulkan_destroy_shader(shader);rt_vulkan_free_buffer(atlas);rt_vulkan_free_buffer(fb);rt_vulkan_shutdown();return mismatch?7:0;

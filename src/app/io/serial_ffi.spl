@@ -43,6 +43,38 @@ struct SerialPort:
     path: text
     baud_rate: i32
     is_valid: bool
+    # Set once `serial_close` has released `fd`. A SerialPort is passed BY VALUE,
+    # so this field alone cannot stop a second close through a stale copy of the
+    # record — `_closed_fds` below is the authoritative guard. The field is kept
+    # so a caller that threads the returned port sees the state directly.
+    closed: bool
+
+# Process-global set of file descriptors this module has already closed.
+# Without it, two copies of the same SerialPort each pass their own
+# `closed: false` and both reach `rt_serial_close(fd)`, double-freeing the fd —
+# and after the kernel recycles that number a later open() aliases it, so the
+# second close tears down an unrelated port. Keyed by fd because that is the
+# resource actually being released.
+var _closed_fds: [i64] = []
+
+fn _fd_already_closed(fd: i64) -> bool:
+    """True when `fd` was already released by `serial_close` in this process."""
+    for closed_fd in _closed_fds:
+        if closed_fd == fd:
+            return true
+    false
+
+fn _mark_fd_closed(fd: i64) -> void:
+    """Record `fd` as released so a repeat `serial_close` is rejected."""
+    _closed_fds.push(fd)
+
+fn _forget_closed_fd(fd: i64) -> void:
+    """Drop `fd` from the closed set when the OS hands the same number back."""
+    var remaining: [i64] = []
+    for closed_fd in _closed_fds:
+        if closed_fd != fd:
+            remaining.push(closed_fd)
+    _closed_fds = remaining
 
 struct SerialConfig:
     baud_rate: i32
@@ -63,13 +95,34 @@ fn serial_open(path: text, baud_rate: i32) -> SerialPort:
     Returns: SerialPort (check is_valid)
     """
     val fd = rt_serial_open(path, baud_rate)
-    SerialPort(fd: fd, path: path, baud_rate: baud_rate, is_valid: fd >= 0)
+    # The OS reuses descriptor numbers, so a freshly opened fd must drop any
+    # stale "already closed" record or the first close of this port is refused.
+    if fd >= 0:
+        _forget_closed_fd(fd)
+    SerialPort(fd: fd, path: path, baud_rate: baud_rate, is_valid: fd >= 0, closed: false)
 
 fn serial_close(port: SerialPort) -> bool:
-    """Close a serial port"""
+    """Close a serial port.
+
+    Rejects a repeat close instead of double-freeing the descriptor: returns
+    false (without calling into termios) when this port was never valid, when
+    the caller's own record is already `closed`, or when any copy of this port
+    has already released `fd`.
+    """
     if not port.is_valid:
         return false
+    if port.closed:
+        return false
+    if _fd_already_closed(port.fd):
+        return false
+    _mark_fd_closed(port.fd)
     rt_serial_close(port.fd)
+
+fn serial_is_closed(port: SerialPort) -> bool:
+    """True when this port's descriptor has already been released."""
+    if not port.is_valid:
+        return true
+    port.closed or _fd_already_closed(port.fd)
 
 fn serial_configure(port: SerialPort, config: SerialConfig) -> bool:
     """Configure a serial port with all parameters"""

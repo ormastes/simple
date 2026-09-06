@@ -1,0 +1,98 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-APP
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+"""A legacy sj argv line reaches the typed operation layer and yields a printed dry-run plan."""
+# @req: REQ-SSPEC-APP
+# @ac: AC-5
+use std.spec.step
+
+use std.spec.{describe, it, expect, step}
+use app.sj.operation.{SJ_OP_INTEGRATE}
+use std.io.{file_read}
+use app.sj.integrate_plan.{
+    LegacyPlanReport,
+    legacy_argv_integrate_plan_with_policy,
+    PROTECTED_REF_POLICY_PATH,
+    PROTECTED_GATE_MANIFEST_PATH
+}
+use app.sj.plan_main.{sj_plan_legacy_args_from}
+
+fn _joined(lines: [text]) -> text:
+    lines.join("\n")
+
+# Mirrors `plan_main.main`: the committed authority sources are read here and
+# handed to the pure planner, so these assertions exercise the same composition
+# the `sj plan` entry point performs.
+fn _plan(argv: [text]) -> LegacyPlanReport:
+    legacy_argv_integrate_plan_with_policy(argv, file_read(PROTECTED_REF_POLICY_PATH), file_read(PROTECTED_GATE_MANIFEST_PATH))
+
+describe "Legacy sj argv reaches the typed dry-run plan":
+    it "routes the land.shs push argv through the typed integrate planner":
+        # @req REQ-SSPEC-APP
+        step("routes the land.shs push argv through the typed integrate planner")
+        val report = _plan(["git", "push", "--bookmark", "main"])
+        expect(report.operation_kind).to_equal(SJ_OP_INTEGRATE)
+        expect(report.entity_id).to_equal("legacy-unbound")
+        expect(report.target_ref).to_equal("main")
+        expect(report.dry_run).to_be(true)
+        expect(report.planned).to_equal(1)
+        expect(report.reason).to_equal("legacy push requires exact lifecycle identity before execution")
+
+    it "refuses to admit the legacy push and names the exact rejection code":
+        # @req REQ-SSPEC-APP
+        step("refuses to admit the legacy push and names the exact rejection code")
+        # `main` IS declared by the committed protected-ref policy, so the
+        # protected-target guard now clears and the plan is refused one check
+        # later, on the identity a legacy argv line cannot carry. Before the
+        # policy was wired this read SJ_POLICY_TARGET, which meant the guard's
+        # success branch had never executed.
+        val report = _plan(["git", "push", "--bookmark", "main"])
+        expect(report.admitted).to_be(false)
+        expect(report.code).to_equal("SJ_IDENTITY_MISSING")
+        expect(report.verdict).to_equal("FAIL")
+        expect(report.exit_code).to_equal(1)
+
+    it "prints a plan whose text carries the typed operation and the fail-closed verdict":
+        # @req REQ-SSPEC-APP
+        step("prints a plan whose text carries the typed operation and the fail-closed verdict")
+        val text_plan = _joined(_plan(["git", "push", "--bookmark", "main"]).lines)
+        expect(text_plan.contains("sj typed dry-run plan (no refs are mutated)")).to_be(true)
+        expect(text_plan.contains("legacy argv     : git push --bookmark main")).to_be(true)
+        expect(text_plan.contains("typed operation : integrate")).to_be(true)
+        expect(text_plan.contains("legacy push requires exact lifecycle identity before execution")).to_be(true)
+        expect(text_plan.contains("protected-ref policy: consulted")).to_be(true)
+        expect(text_plan.contains("protected target : true")).to_be(true)
+        expect(text_plan.contains("policy gate profile: standard")).to_be(true)
+        expect(text_plan.contains("would require gate: push-conflict-tree")).to_be(true)
+        expect(text_plan.contains("FAIL — 1 operation(s) planned, not admitted: SJ_IDENTITY_MISSING")).to_be(true)
+
+    it "maps an explicit legacy integrate argv onto the same typed planner":
+        # @req REQ-SSPEC-APP
+        step("maps an explicit legacy integrate argv onto the same typed planner")
+        val report = _plan(["integrate", "chg_7", "integration/main"])
+        expect(report.operation_kind).to_equal(SJ_OP_INTEGRATE)
+        expect(report.entity_id).to_equal("chg_7")
+        expect(report.target_ref).to_equal("integration/main")
+        expect(report.planned).to_equal(1)
+        expect(report.verdict).to_equal("FAIL")
+
+    it "strips the entry path and the plan selector from the forwarded argv":
+        # @req REQ-SSPEC-APP
+        step("strips the entry path and the plan selector from the forwarded argv")
+        val forwarded = ["simple", "run", "/repo/src/app/sj/plan_main.spl", "plan", "git", "push", "--bookmark", "main"]
+        val legacy = sj_plan_legacy_args_from(forwarded)
+        expect(legacy.join(" ")).to_equal("git push --bookmark main")
+        expect(_plan(legacy).operation_kind).to_equal(SJ_OP_INTEGRATE)
+
+    it "reports ERROR with a zero count when no typed integration is derivable":
+        # @req REQ-SSPEC-APP
+        step("reports ERROR with a zero count when no typed integration is derivable")
+        val empty_report = _plan([])
+        expect(empty_report.planned).to_equal(0)
+        expect(empty_report.verdict).to_equal("ERROR")
+        expect(empty_report.exit_code).to_equal(2)
+        expect(_joined(empty_report.lines).contains("ERROR — nothing was checked")).to_be(true)
+        val fetch_report = _plan(["git", "fetch"])
+        expect(fetch_report.planned).to_equal(0)
+        expect(fetch_report.exit_code).to_equal(2)

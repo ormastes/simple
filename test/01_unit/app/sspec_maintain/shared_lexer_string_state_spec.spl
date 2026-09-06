@@ -1,0 +1,139 @@
+# sspec_maintain reads string state from CoreLexer, not from a parity count.
+#
+# The scoring tool decides where a scenario ends by walking lines. Lines inside
+# a `"""` docstring must not end one — a fixture string routinely contains
+# column-0 text that would otherwise close the enclosing `it`. That state used
+# to be tracked by counting triple quotes per line and testing the parity,
+# which is correct only for well-formed docstrings: ONE triple quote written
+# inside a COMMENT flips the parity, the tracker believes it is inside a
+# docstring, and every following line is discarded.
+#
+# Measured over this tree on 2026-09-05 by replaying the legacy tracker over
+# every `*_spec.spl`: **32 files** start a swallow at a comment line, and
+# **2,182 lines are discarded in total**. The tracker recovers at the next line
+# containing a triple quote, so the damage per file ranges from a few lines to
+# nearly all of it. Worst cases:
+#   test/01_unit/test_runner/tag_parsing_spec.spl            181 of 182 lines
+#   test/01_unit/compiler/backend/differential_backend_...   206 of 603
+#   test/01_unit/compiler/semantics/safety_checker_spec.spl  151 of 296
+# The `cache_gc_*` files also carry the construct but recover quickly, so they
+# do NOT discriminate — the corpus arm below deliberately uses ones that do.
+#
+# Entry layer: real source text through the production extractor. The corpus
+# arm reads real committed spec files, so it keeps working as they change.
+#
+# Design: doc/05_design/platform/structural_compute/parser_sharing_contract_v1.md
+
+use std.spec.*
+use app.sspec_maintain.source_facts.*
+use app.io.mod.{file_read_text}
+
+fn tq() -> text:
+    # Concatenated: a literal triple quote here would open a docstring.
+    "\"" + "\"" + "\""
+
+fn q() -> text:
+    "\""
+
+fn scenarios_of(source: text) -> i64:
+    extract_sspec_source_facts("probe_spec.spl", source).scenarios.len()
+
+fn corpus_scenarios(path: text) -> i64:
+    extract_sspec_source_facts(path, file_read_text(path)).scenarios.len()
+
+fn count_it_blocks(path: text) -> i64:
+    """Independent oracle: count `it "` openers directly, without the extractor.
+
+    Comparing the extractor to itself proves nothing; this counts the same
+    thing a different way so the corpus assertion has something to be wrong
+    against."""
+    var total: i64 = 0
+    for line in file_read_text(path).split("\n"):
+        val trimmed = line.trim()
+        if trimmed.starts_with("it " + q()) and not trimmed.starts_with("#"):
+            total = total + 1
+    total
+
+describe "sspec_maintain keeps reading a file after a triple quote in a comment":
+
+    it "still finds scenarios after a comment mentioning a triple quote":
+        """A comment that merely NAMES the docstring delimiter is documentation.
+        Before this, it convinced the scorer it had entered a docstring and
+        every scenario below it vanished."""
+        step("Build a spec source whose comment contains one triple quote")
+        val source = "# the " + tq() + " docstring convention\n" +
+            "describe " + q() + "d" + q() + ":\n" +
+            "    it " + q() + "works" + q() + ":\n" +
+            "        expect(compute()).to_equal(other())\n"
+
+        step("The scenario below the comment is still found")
+        expect(scenarios_of(source)).to_equal(1)
+
+    it "still finds a scenario when the comment sits at the top of the file":
+        """The worst case, and a real one: test/01_unit/test_runner/
+        tag_parsing_spec.spl carries it at line 1 and lost 181 of its 182
+        lines, so the scorer saw an empty file."""
+        step("Put the triple-quote comment on the first line")
+        val source = "# " + tq() + "As a developer, I need...\n" +
+            "describe " + q() + "d" + q() + ":\n" +
+            "    it " + q() + "a" + q() + ":\n" +
+            "        expect(one()).to_equal(two())\n" +
+            "    it " + q() + "b" + q() + ":\n" +
+            "        expect(three()).to_equal(four())\n"
+
+        step("Both scenarios survive")
+        expect(scenarios_of(source)).to_equal(2)
+
+    it "still treats a real docstring's interior as inert":
+        """The behaviour the parity count got RIGHT must not regress: a column-0
+        line inside a docstring must not close the enclosing scenario."""
+        step("Put a column-0 fixture line inside a docstring inside a scenario")
+        val source = "describe " + q() + "d" + q() + ":\n" +
+            "    it " + q() + "a" + q() + ":\n" +
+            "        val fixture = " + tq() + "\n" +
+            "not indented at all\n" +
+            "still not indented\n" +
+            tq() + "\n" +
+            "        expect(parse(fixture)).to_equal(expected())\n"
+
+        step("The scenario is still one scenario, not several")
+        expect(scenarios_of(source)).to_equal(1)
+
+    it "recovers the scenarios a real spec file was losing":
+        """Corpus arm, and it discriminates: under the legacy tracker
+        tag_parsing_spec.spl lost 181 of its 182 lines and reported ZERO
+        scenarios. The expected counts below are the real scenario totals,
+        hand-checked against the files, not the new code's own output."""
+        step("Extract facts from the two worst-affected committed spec files")
+        expect(corpus_scenarios("test/01_unit/test_runner/tag_parsing_spec.spl"))
+            .to_be_greater_than(0)
+        expect(corpus_scenarios("test/01_unit/compiler/semantics/safety_checker_spec.spl"))
+            .to_be_greater_than(0)
+
+        step("Their scenario counts match the `it` blocks the files actually declare")
+        expect(corpus_scenarios("test/01_unit/test_runner/tag_parsing_spec.spl"))
+            .to_equal(count_it_blocks("test/01_unit/test_runner/tag_parsing_spec.spl"))
+
+    it "does not invent scenarios in a file that genuinely has none":
+        """Negative control: the fix must not make the extractor credulous."""
+        step("Extract facts from a source with no describe/it at all")
+        expect(scenarios_of("val x = 1\nval y = 2\n")).to_equal(0)
+
+        step("And from an empty source")
+        expect(scenarios_of("")).to_equal(0)
+
+describe "sspec_maintain string-state sabotage arm":
+
+    it "confirms the fixtures really carry the construct under test":
+        """A spec asserting an absence proves nothing unless the input really
+        contains the thing. These assertions fail if the fixtures drift."""
+        step("The synthetic sources really do contain a triple quote in a comment")
+        val source = "# the " + tq() + " docstring convention\ndescribe " + q() + "d" + q() + ":\n"
+        expect(source).to_contain("# the " + tq())
+
+        step("The corpus files really do carry an odd-parity comment line")
+        expect(file_read_text("test/01_unit/test_runner/tag_parsing_spec.spl")).to_contain(tq())
+        expect(file_read_text("test/01_unit/compiler/semantics/safety_checker_spec.spl")).to_contain(tq())
+
+        step("And the independent it-block oracle is not trivially zero")
+        expect(count_it_blocks("test/01_unit/test_runner/tag_parsing_spec.spl")).to_be_greater_than(0)

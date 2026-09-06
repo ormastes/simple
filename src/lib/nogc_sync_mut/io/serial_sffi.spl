@@ -48,6 +48,37 @@ struct SerialPort:
     device: text
     baud: i64
     is_valid: bool
+    # Set once `serial_close` has released `handle`. A SerialPort is passed BY
+    # VALUE, so this field alone cannot stop a second close made through a stale
+    # copy — `_closed_handles` below is the authoritative guard. The field is
+    # kept so a caller that threads the returned record sees the state directly.
+    closed: bool
+
+# Process-global set of descriptors this module has already closed. Without it
+# two copies of the same SerialPort each carry `closed: false` and both reach
+# `rt_serial_close(handle)`, double-freeing the descriptor; once the kernel
+# recycles that number a later open() aliases it and the second close tears down
+# an unrelated port. Keyed by handle because that is the resource released.
+var _closed_handles: [i64] = []
+
+fn _handle_already_closed(handle: i64) -> bool:
+    """True when `handle` was already released by `serial_close` this process."""
+    for closed_handle in _closed_handles:
+        if closed_handle == handle:
+            return true
+    false
+
+fn _mark_handle_closed(handle: i64) -> void:
+    """Record `handle` as released so a repeat `serial_close` is rejected."""
+    _closed_handles.push(handle)
+
+fn _forget_closed_handle(handle: i64) -> void:
+    """Drop `handle` from the closed set when the OS hands the number back."""
+    var remaining: [i64] = []
+    for closed_handle in _closed_handles:
+        if closed_handle != handle:
+            remaining.push(closed_handle)
+    _closed_handles = remaining
 
 fn serial_open(device: text, baud: i64) -> SerialPort:
     """Open a serial port at the given baud rate in raw mode.
@@ -64,13 +95,40 @@ fn serial_open(device: text, baud: i64) -> SerialPort:
             serial_write(port, "hello\n")
     """
     val handle = rt_serial_open(device, baud)
-    SerialPort(handle: handle, device: device, baud: baud, is_valid: is_valid_handle(handle))
+    # The OS reuses descriptor numbers, so a freshly opened handle must drop any
+    # stale "already closed" record or the first close of this port is refused.
+    if is_valid_handle(handle):
+        _forget_closed_handle(handle)
+    SerialPort(
+        handle: handle,
+        device: device,
+        baud: baud,
+        is_valid: is_valid_handle(handle),
+        closed: false
+    )
 
 fn serial_close(port: SerialPort) -> bool:
-    """Close the serial port."""
+    """Close the serial port.
+
+    Rejects a repeat close instead of double-freeing the descriptor: returns
+    false (without entering termios) when the handle was never valid, when the
+    caller's own record is already `closed`, or when any copy of this port has
+    already released `handle`.
+    """
     if is_invalid_handle(port.handle):
         return false
+    if port.closed:
+        return false
+    if _handle_already_closed(port.handle):
+        return false
+    _mark_handle_closed(port.handle)
     rt_serial_close(port.handle)
+
+fn serial_is_closed(port: SerialPort) -> bool:
+    """True when this port's descriptor has already been released."""
+    if is_invalid_handle(port.handle):
+        return true
+    port.closed or _handle_already_closed(port.handle)
 
 fn serial_read(port: SerialPort, max_bytes: i64) -> text:
     """Read up to max_bytes from the serial port. Blocks until data arrives."""
