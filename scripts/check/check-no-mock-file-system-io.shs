@@ -38,11 +38,42 @@
 #
 # Flags: --selftest (runs first, always, and is fatal)
 #        --generate-baseline  (reviewed updates ONLY -- read the diff first)
+#        --rev <REV>   scan the COMMITTED tree at REV instead of the working
+#                      checkout, reading the baseline committed at REV too
+#        --root <DIR>  treat DIR as the repository root
+#        --baseline <F> explicit baseline path (overrides --rev's committed one)
+#
+# Why --rev exists (2026-09-06): as a `tree`-mode push row this gate scanned the
+# shared WORKING CHECKOUT, not the commit being pushed. Under concurrent agent
+# load those disagree, and on 2026-09-06 a session pushed 12 PRs after the hook
+# reported on content that was not being pushed while missing a real regression
+# in content that was. See
+# doc/08_tracking/bug/push_gates_evaluate_working_checkout_not_pushed_commit_2026-09-06.md
 
 set -u
 
-ROOT=${ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}
-BASELINE="$ROOT/scripts/check/mock_file_system_io_baseline.txt"
+SELF=$0
+ROOT=${ROOT:-}
+REV=""
+BASELINE=""
+BASELINE_EXPLICIT=0
+GENERATE=0
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --selftest) shift ;;
+        --rev) [ $# -ge 2 ] || { echo "ERROR — nothing was checked (--rev needs a value)"; exit 2; }
+               REV="$2"; shift 2 ;;
+        --root) [ $# -ge 2 ] || { echo "ERROR — nothing was checked (--root needs a value)"; exit 2; }
+               ROOT="$2"; shift 2 ;;
+        --baseline) [ $# -ge 2 ] || { echo "ERROR — nothing was checked (--baseline needs a value)"; exit 2; }
+               BASELINE="$2"; BASELINE_EXPLICIT=1; shift 2 ;;
+        --generate-baseline) GENERATE=1; shift ;;
+        *) echo "ERROR — nothing was checked (unknown argument $1)"; exit 2 ;;
+    esac
+done
+
+[ -n "$ROOT" ] || ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 
 # Names whose mock definition silently succeeds or silently reports absence.
 # Read/write/exists primitives only -- pure path helpers are not affected.
@@ -111,15 +142,99 @@ selftest() {
         echo "selftest FAIL: empty tree produced offenders"; rc=1
     fi
 
+    # fixture 6: --rev must read the COMMITTED tree and the COMMITTED baseline,
+    # never the working checkout, and the two paths must genuinely DISAGREE.
+    # This is what keeps the 2026-09-06 wrong-tree fix from rotting: without a
+    # fixture that fails when --rev silently falls back to the working copy, the
+    # gate can drift back to scanning the wrong tree and still report PASS.
+    if ! command -v git >/dev/null 2>&1; then
+        echo "selftest FAIL: git unavailable, cannot verify the --rev committed-content path"
+        rc=1
+    else
+        mkdir -p "$t/f6/src/a" "$t/f6/scripts/check"
+        printf 'use std.file_system.{file_write_text}\n' > "$t/f6/src/a/committed.spl"
+        printf 'src/a/committed.spl:file_write_text\n' > "$t/f6/scripts/check/mock_file_system_io_baseline.txt"
+        ( cd "$t/f6" \
+          && git init -q . \
+          && git config user.email selftest@example.com \
+          && git config user.name selftest \
+          && git add -A && git commit -q -m committed ) >/dev/null 2>&1
+        # Working copy ONLY: a NEW offending import plus a baseline row that
+        # would excuse it. A working-tree scan sees a clean, self-consistent
+        # pair and PASSes; only a committed-content scan is right, and it must
+        # also ignore the working copy's doctored baseline.
+        printf 'use std.file_system.{file_read_bytes}\n' > "$t/f6/src/a/dirty.spl"
+        printf 'src/a/dirty.spl:file_read_bytes\n' >> "$t/f6/scripts/check/mock_file_system_io_baseline.txt"
+
+        got=$(NO_MOCK_FS_IO_SELFTEST_CHILD=1 sh "$SELF" --root "$t/f6" --rev HEAD 2>&1 | tail -1)
+        case "$got" in
+          "PASS — 1 import site(s) checked, 0 new, 0 stale") : ;;
+          *) echo "selftest FAIL: --rev did not read committed content, got [$got]"; rc=1 ;;
+        esac
+        # The SAME tree scanned as a working tree must see 2 sites, proving the
+        # two paths differ rather than both being blind to the edit.
+        got=$(NO_MOCK_FS_IO_SELFTEST_CHILD=1 sh "$SELF" --root "$t/f6" 2>&1 | tail -1)
+        case "$got" in
+          "PASS — 2 import site(s) checked, 0 new, 0 stale") : ;;
+          *) echo "selftest FAIL: working-tree scan did not see the dirty edit, got [$got]"; rc=1 ;;
+        esac
+    fi
+
     trap - EXIT; rm -rf "$t"
     [ "$rc" -eq 0 ] || { echo "FAIL — selftest failed"; exit 1; }
 }
 
-selftest
+# Fixture 6 invokes this script recursively; re-running the selftest there would
+# recurse without end. The child exercises the real scan path, which is the
+# point of the fixture.
+[ "${NO_MOCK_FS_IO_SELFTEST_CHILD:-0}" = 1 ] || selftest
 
-CURRENT=$(scan "$ROOT")
+WORK=$(mktemp -d) || { echo "ERROR — nothing was checked (mktemp failed)"; exit 2; }
+trap 'rm -rf "$WORK"' EXIT INT TERM
 
-if [ "${1:-}" = "--generate-baseline" ]; then
+SCAN_ROOT="$ROOT"
+if [ -n "$REV" ]; then
+    # Read COMMITTED content, never the shared working copy — a plumbing-built
+    # commit may never have been checked out, and under concurrent agent load
+    # the working copy disagrees with what is actually being pushed.
+    mkdir -p "$WORK/rev"
+    # The baseline is archived alongside the sources on purpose: scanning the
+    # committed tree while comparing it against the WORKING COPY's baseline is
+    # still a wrong-tree verdict.
+    ( cd "$ROOT" && git archive "$REV" -- ':(glob)src/**/*.spl' \
+        scripts/check/mock_file_system_io_baseline.txt ) 2>/dev/null \
+        | tar -x -C "$WORK/rev" 2>/dev/null
+    if [ ! -d "$WORK/rev/src" ]; then
+        echo "ERROR — nothing was checked (could not materialise $REV)"
+        exit 2
+    fi
+    SCAN_ROOT="$WORK/rev"
+fi
+
+if [ -z "$BASELINE" ]; then
+    BASELINE="$ROOT/scripts/check/mock_file_system_io_baseline.txt"
+    if [ -n "$REV" ]; then
+        if [ -f "$WORK/rev/scripts/check/mock_file_system_io_baseline.txt" ]; then
+            BASELINE="$WORK/rev/scripts/check/mock_file_system_io_baseline.txt"
+        else
+            echo "ERROR — nothing was checked (baseline absent from $REV)"
+            exit 2
+        fi
+    fi
+fi
+if [ "$BASELINE_EXPLICIT" -eq 1 ] && [ -n "$REV" ]; then
+    echo "note: --baseline overrides the baseline committed at $REV" >&2
+fi
+
+CURRENT=$(scan "$SCAN_ROOT")
+
+if [ "$GENERATE" -eq 1 ]; then
+    if [ -n "$REV" ] && [ "$BASELINE_EXPLICIT" -eq 0 ]; then
+        # Writing into the materialised rev would vanish with the trap — a
+        # silent no-op that looks like success.
+        echo "ERROR — nothing was checked (--generate-baseline with --rev needs an explicit --baseline path)"
+        exit 2
+    fi
     printf '%s\n' "$CURRENT" > "$BASELINE"
     echo "wrote $BASELINE ($(printf '%s\n' "$CURRENT" | grep -c .) entries)"
     exit 0
