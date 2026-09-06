@@ -86,3 +86,42 @@ adds a forbidden-extension file or orphans a guard is still hard-blocked, and
 1. Wire `check-context-pack-reduces.shs`, or opt it out with a stated reason.
 2. Triage the 86 hygiene violations: port, or record justified exemptions.
 3. Once both are green, this record should be closed and the escape retired.
+
+---
+
+## Step-over record — 2026-09-01, NVMe master-plan branch
+
+**Commit:** `4f0c5ad9a62647f17c6000eb6d0306b8651ecce6`
+**Branch:** `nvme-master-plan-2026-09-01`
+
+Blocked by the same debt. Observed verbatim on `git push`:
+
+```
+check-hook-installation: PASS — 10 check(s) performed, hook wiring intact
+push-must-check: FAIL — ledger is malformed stale or has a non-passing push-blocking row
+error: failed to push some refs
+```
+
+Note the hook wiring itself is intact (10 checks PASS) — this is ledger/manifest
+debt, not a disabled-guard situation.
+
+**Delta is clean — this commit introduces zero offenders.** Evidence:
+- Content is **docs only**: 12 files under `doc/03_plan/hardware/`, 4 under
+  `doc/08_tracking/bug/`. **Zero** files under `scripts/`, `.github/`, `src/`,
+  `test/`, or `examples/`, so it cannot affect guard wiring or the must-check
+  manifest, which is what `check-push-must-pass.shs` validates
+  (`:124-138` — schema, `source_fingerprint`, and manifest/ledger id-set equality).
+- Tree integrity verified before commit: **134,414 files vs origin's 134,398 —
+  exactly +16, zero deletions, zero modifications.** `src/` entries 19 (guard
+  band 13..25); `src/runtime` 255 (canary floor 150).
+- Built by plumbing (`read-tree origin/main` + `update-index` per path +
+  `commit-tree`), never a working-copy snapshot, so no other session's
+  in-flight work is carried.
+
+**Action:** pushed with `--no-verify`, which is authorized for this repo's
+landing flow. Recorded here because `.claude/rules/vcs.md` requires an
+unrecorded step-over to be treated as a violation even when the delta is clean.
+
+**Not fixed by this session.** The ledger/manifest staleness is `main`'s debt and
+needs an owner; regenerating it from a shared, concurrently-edited tree would
+risk baselining other sessions' in-flight changes.

@@ -1,0 +1,155 @@
+"""
+nvme_ready_gate_check — the NON-VACUITY WITNESS that command submission is
+GATED on CSTS.RDY.
+
+Why this file exists: `nvme_registers_check.spl` proves the CC.EN / CSTS.RDY
+handshake *computes* the right register values, and it happens to call
+`bringup()` before doing I/O. Neither fact stops a host from submitting while
+the controller is disabled. A controller with NO gate at all passes every
+assertion in that file. So this check is built the other way round: its central
+assertions REQUIRE a submission attempted while `CSTS.RDY = 0` to be REFUSED.
+Delete the gate and this check goes red.
+
+GATING SEMANTICS IMPLEMENTED (stated, not implied)
+
+  DROPPED, NOT COMPLETED-WITH-ERROR.
+
+  NVMe Base 2.3 §3.5.1 makes CSTS.RDY the controller's statement that it is
+  able to process commands, and the initialization sequence has the host wait
+  for RDY=1 *before* it submits anything. A controller that is not ready is not
+  fetching SQEs, so there is nothing to generate a completion: no CQE is
+  posted, and the host's phase-tagged poll simply finds nothing. Completing
+  with an error status would be strictly WRONG here — it would require the
+  controller to have processed a command it is by definition not processing,
+  and it would let a host that never enabled the device still make forward
+  progress through the CQ.
+
+  Two independent gates, because one alone is routable-around:
+    * `submit_sqe`     refuses (returns false) and writes NOTHING into SQ
+                       memory — the fail-fast a driver bug should hit;
+    * `device_service` refuses to FETCH while RDY=0 — so poking the doorbell
+                       register directly, bypassing `submit_sqe` entirely,
+                       still gets nowhere. This is the gate that makes it a
+                       gate rather than a convention.
+
+  `serviced` is the evidence counter: it counts SQEs the DEVICE fetched. Every
+  refusal below asserts it did not move. Without the `device_service` gate the
+  raw-doorbell section of this file fails.
+
+CONSTRUCTOR POLICY (the migration decision, stated plainly)
+
+  `attach()` binds the substrate and powers on BAR0; it does NOT enable the
+  controller — CSTS.RDY is 0 after `attach()`, exactly as after a real power-on
+  reset. There is no "constructor leaves it enabled for backward compatibility"
+  escape, because that would make the gate unreachable for every existing test
+  and therefore vacuous. Callers that want to do I/O call `bringup()`. The one
+  caller this broke, `host_equiv_transport_check.spl`, was migrated.
+
+Run: bin/simple run examples/09_embedded/simpleos_nvme_fw/fw/nvme_ready_gate_check.spl
+     (from the REPO ROOT — fw/nvme_transport_config.spl resolves its SDN path
+      relative to cwd; see
+      doc/08_tracking/bug/transport_profile_sdn_path_cwd_dependent_2026-09-01.md)
+Gate: prints "NVME READY GATE OK".
+(Do NOT assert on the process exit code: bug
+ doc/08_tracking/bug/simple_run_exit_code_garbage_for_unit_main_2026-09-01.md.)
+"""
+
+use nvme_types.*
+use nvme_mmio.*
+use nvme_transport_config.*
+use nvme_reg_defs.*
+use nvme_reg_file.*
+use nvme_host_driver.*
+
+fn main():
+    var fail: i64 = 0
+
+    print "-- A. after attach() the controller is NOT ready --"
+    var h = host_nvme_open(BACKEND_EMU)
+    fail = fail + expect_eq(bool_to_int(h.attach()), 1, "emu transport attaches")
+    fail = fail + expect_eq(bool_to_int(h.regs_present()), 1, "the emu profile HAS a property window (the gate is reachable)")
+    fail = fail + expect_eq(bool_to_int(h.controller_ready()), 0, "attach() does not enable the controller: CSTS.RDY is 0")
+    fail = fail + expect_eq(bf_get(h.reg_read32(REG_CC), bf_cc_en()), 0, "CC.EN is 0 after a power-on reset")
+
+    print "-- B. WITNESS: submission while RDY=0 is REFUSED, not silently accepted --"
+    val sq0: i64 = h.sq_entry_addr(0)
+    fail = fail + expect_eq(h.peek32(sq0), 0, "SQ slot 0 is zero before the attempt")
+    val cmd = cmd_make(7, OP_WRITE, 33, 1, 0xC3)
+    fail = fail + expect_eq(bool_to_int(h.submit_sqe(cmd)), 0, "WITNESS: submit_sqe REFUSES while CSTS.RDY is 0")
+    fail = fail + expect_eq(h.peek32(sq0), 0, "WITNESS: nothing was written into SQ memory")
+    fail = fail + expect_eq(h.sq_tail, 0, "WITNESS: the shadow SQ tail did not advance")
+    fail = fail + expect_eq(h.serviced, 0, "WITNESS: the device fetched nothing")
+    val none = h.exec_io(cmd)
+    fail = fail + expect_eq(bool_to_int(cqe_is_none(none)), 1, "WITNESS: exec_io yields NO completion (dropped, not error-completed)")
+    fail = fail + expect_eq(h.serviced, 0, "WITNESS: exec_io still fetched nothing")
+    fail = fail + expect_eq(bool_to_int(h.cq_ready()), 0, "WITNESS: no CQE was posted for the refused command")
+
+    print "-- C. WITNESS: the DOORBELL itself is gated (submit_sqe cannot be routed around) --"
+    # Bypass submit_sqe entirely: forge an SQE straight into queue memory and
+    # poke the doorbell register. A gate that lived only in submit_sqe would let
+    # this through, and `serviced` would advance.
+    val bytes = sqe_encode(cmd_make(9, OP_FLUSH, 0, 0, 0))
+    var k: i64 = 0
+    while k < SQE_BYTES:
+        h.mem[sq0 + k] = bytes[k]
+        k = k + 1
+    fail = fail + expect_eq(h.peek32(sq0) & 0xFF, OP_FLUSH, "the forged SQE really is in queue memory")
+    h.poke(MemWrite(addr: h.sq_db_addr(), width: 4, value: 1))
+    fail = fail + expect_eq(h.peek32(h.sq_db_addr()), 1, "the doorbell register really was rung")
+    fail = fail + expect_eq(h.device_service(), 0, "WITNESS: a not-ready controller FETCHES NOTHING on a doorbell ring")
+    fail = fail + expect_eq(h.serviced, 0, "WITNESS: the evidence counter did not move")
+    fail = fail + expect_eq(bool_to_int(h.cq_ready()), 0, "WITNESS: still no completion")
+    # Put the doorbell back so the enabled path below starts from a clean shadow.
+    h.poke(MemWrite(addr: h.sq_db_addr(), width: 4, value: 0))
+
+    print "-- D. POSITIVE: once bringup() sets CSTS.RDY, the very same command works --"
+    fail = fail + expect_eq(bool_to_int(h.bringup()), 1, "bringup() brings CSTS.RDY to 1")
+    val wc = h.exec_io(cmd_make(11, OP_WRITE, 40, 1, 0x5A))
+    fail = fail + expect_eq(wc.cid, 11, "write completes once ready")
+    fail = fail + expect_eq(wc.status, SC_SUCCESS, "write status is success once ready")
+    fail = fail + expect_eq(h.serviced, 1, "the device fetched exactly one SQE")
+    val rc = h.exec_io(cmd_make(12, OP_READ, 40, 1, 0))
+    fail = fail + expect_eq(rc.data, 0x5A, "read returns the written payload")
+    fail = fail + expect_eq(h.serviced, 2, "the device fetched the read too")
+
+    print "-- E. RESET: CC.EN 1->0 makes submission fail again until re-enabled --"
+    fail = fail + expect_eq(bool_to_int(h.controller_disable()), 1, "clearing CC.EN takes CSTS.RDY back to 0")
+    fail = fail + expect_eq(bool_to_int(h.controller_ready()), 0, "the controller is not ready after the reset")
+    val before: i64 = h.serviced
+    fail = fail + expect_eq(bool_to_int(h.submit_sqe(cmd_make(13, OP_WRITE, 41, 1, 0x77))), 0,
+                            "WITNESS: submission is refused again after the Controller Reset")
+    val none2 = h.exec_io(cmd_make(14, OP_READ, 40, 1, 0))
+    fail = fail + expect_eq(bool_to_int(cqe_is_none(none2)), 1, "WITNESS: exec_io yields no completion after the reset")
+    fail = fail + expect_eq(h.serviced, before, "WITNESS: the device fetched nothing after the reset")
+    # Consistent with the reset semantics nvme_registers_check already pins:
+    # queue state is discarded, admin queue properties are preserved.
+    fail = fail + expect_eq(h.sq_tail, 0, "reset discarded the shadow SQ tail")
+    fail = fail + expect_eq(h.cq_phase, 1, "reset discarded the expected phase tag")
+    fail = fail + expect_eq(h.reg_read32(REG_AQA), aqa_for_depth(h.cfg.queue_depth), "reset PRESERVED AQA")
+    fail = fail + expect_eq(h.reg_read32(REG_ASQ), h.cfg.sq_base, "reset PRESERVED ASQ")
+
+    print "-- F. RE-ENABLE: a second bringup() restores submission --"
+    fail = fail + expect_eq(bool_to_int(h.bringup()), 1, "the controller re-enables through the registers alone")
+    val wc2 = h.exec_io(cmd_make(15, OP_WRITE, 42, 1, 0x99))
+    fail = fail + expect_eq(wc2.cid, 15, "I/O works again after the re-enable")
+    fail = fail + expect_eq(wc2.status, SC_SUCCESS, "and it succeeds")
+    fail = fail + expect_eq(h.serviced, before + 1, "exactly one more SQE was fetched")
+
+    print "-- G. a controller that CFS'd on an invalid AQA never accepts submissions --"
+    var n = host_nvme_open(BACKEND_EMU)
+    n.attach()
+    n.reg_write32(RegWrite(off: REG_AQA, value: 0))
+    n.reg_write32(RegWrite(off: REG_CC, value: cc_enable_value()))
+    n.controller_step()
+    fail = fail + expect_eq(bool_to_int(n.controller_fatal()), 1, "the fixture really is in CSTS.CFS")
+    fail = fail + expect_eq(bool_to_int(n.controller_ready()), 0, "and it is not ready")
+    fail = fail + expect_eq(bool_to_int(n.submit_sqe(cmd_make(16, OP_WRITE, 1, 1, 1))), 0,
+                            "a fatal controller refuses submissions")
+    fail = fail + expect_eq(n.serviced, 0, "and fetches nothing")
+
+    print ""
+    if fail == 0:
+        print "NVME READY GATE OK"
+    else:
+        print "NVME READY GATE FAIL ({fail})"
+    return ()

@@ -1,0 +1,113 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-SYSTEM
+# plan: doc/03_plan/hardware/nvme_ssd_firmware_hardening_design_plan.md
+
+# @tag: system, nvme, hardware, register-ir, gate
+# @req REQ-SSPEC-SYSTEM
+"""
+The Cosmos NFC register header is generated, not hand-maintained.
+
+`src/os/kernel/arch/arm32/cosmos/cosmos_nfc_regs.h` is committed as ordinary C,
+so nothing in a normal review stops someone hand-editing an aperture base or a
+field width in it and letting the header drift away from the RegisterIR it is
+supposed to be a projection of. `scripts/check/check-hw-ir-register-header-identity.shs`
+closes that: it regenerates the header from `spec/hw/cosmos_nfc/register_ir.sdn`
+via `src/hardware/ir/register_ir_gen.spl` and requires BYTE-identity.
+
+This scenario pins the gate's contract, not merely that it exits 0. A gate that
+cannot turn red protects nothing, and a gate that reports a pass without saying
+what it examined can pass vacuously. So the scenario requires three things: a
+well-formed verdict as the LAST line of stdout naming the artifact it compared;
+an ERROR/exit-2 refusal (never a pass) when the inputs are absent; and a real
+RED against a sabotaged header.
+
+GAP, STATED NOT ABSORBED: unlike the other three firmware gates, this one has
+no `--selftest` and therefore no built-in must-FAIL fixtures. Against the repo's
+detector standard that is a real shortfall. The mutation property is proven live
+instead, below, which is stronger evidence than a fixture but does not run on
+every invocation the way a fatal selftest would.
+
+The sabotage is done in a shadow ROOT built from symlinks with one private copy
+of the header, so no tracked file is ever modified. That the shadow ROOT is a
+faithful stand-in is proven by the positive control: the same shadow ROOT with an
+unmodified header copy PASSes.
+
+Exit codes here are read into a variable on the line after the invocation and
+never through a pipe — a pipeline's `$?` is `tail`'s status, which has produced
+false greens in this repo.
+"""
+
+use std.spec.step
+
+use std.spec.*
+use std.io_runtime.{process_run}
+
+val GATE: text = "scripts/check/check-hw-ir-register-header-identity.shs"
+
+fn _run(cmd: text) -> (text, text, i64):
+    process_run("/bin/sh", ["-c", cmd])
+
+describe "RegisterIR register-header identity gate":
+
+    # @manual scenario evidence
+    it "should report a well-formed PASS verdict naming the header it regenerated":
+        # @req REQ-SSPEC-SYSTEM
+        step("should report a well-formed PASS verdict naming the header it regenerated")
+
+        step("Run the gate against the repository as-is")
+        val (out, err, rc) = _run("out=$(sh " + GATE + " 2>&1); rc=$?; last=$(printf '%s\\n' \"$out\" | tail -1); printf 'VERDICT %s\\n' \"$last\"; printf 'GATE_RC %s\\n' \"$rc\"")
+        val log: text = out + err
+
+        step("The verdict is the LAST line of stdout and announces a PASS")
+        expect(log).to_contain("VERDICT PASS")
+
+        step("The passing verdict states WHAT it compared, so it cannot pass vacuously")
+        expect(log).to_contain("1 header regenerated from RegisterIR")
+        expect(log).to_contain("byte-identical to")
+        expect(log).to_contain("cosmos_nfc_regs.h")
+
+        step("A PASS carries exit 0, captured before any pipe")
+        expect(log).to_contain("GATE_RC 0")
+
+    # @manual scenario evidence
+    it "should refuse with ERROR and exit 2 when there is nothing to check":
+        # @req REQ-SSPEC-SYSTEM
+        step("should refuse with ERROR and exit 2 when there is nothing to check")
+
+        step("Point the gate at a root that does not exist")
+        # Absence of inputs must never launder into a pass: this gate takes its
+        # tree from $ROOT, so a nonexistent ROOT is its empty-directory case.
+        val (out, err, rc) = _run("out=$(ROOT=/nonexistent/simple-gate-probe sh " + GATE + " 2>&1); rc=$?; last=$(printf '%s\\n' \"$out\" | tail -1); printf 'VERDICT %s\\n' \"$last\"; printf 'GATE_RC %s\\n' \"$rc\"")
+        val log: text = out + err
+
+        step("The verdict is ERROR — nothing was checked, never PASS")
+        expect(log).to_contain("VERDICT ERROR — nothing was checked")
+
+        step("And the exit code is 2, distinct from both a pass and a real failure")
+        expect(log).to_contain("GATE_RC 2")
+
+    # @manual scenario evidence
+    it "should turn RED when the committed header drifts from the RegisterIR":
+        # @req REQ-SSPEC-SYSTEM
+        step("should turn RED when the committed header drifts from the RegisterIR")
+
+        step("Build a shadow ROOT: symlinks to the real inputs, one private header copy")
+        # No tracked file is modified. Only the private copy is sabotaged.
+        val setup: text = "T=$(mktemp -d) && mkdir -p $T/src/os/kernel/arch/arm32/cosmos && ln -s $PWD/spec $T/spec && ln -s $PWD/bin $T/bin && ln -s $PWD/src/hardware $T/src/hardware && ln -s $PWD/src/lib $T/src/lib && cp src/os/kernel/arch/arm32/cosmos/cosmos_nfc_regs.h $T/src/os/kernel/arch/arm32/cosmos/"
+
+        step("Positive control: the untouched shadow ROOT must PASS")
+        # If the shadow ROOT could not pass, a later FAIL would prove nothing
+        # about drift detection — it would only prove the harness is broken.
+        val (cout, cerr, crc) = _run(setup + " && out=$(ROOT=$T sh " + GATE + " 2>&1); rc=$?; last=$(printf '%s\\n' \"$out\" | tail -1); printf 'CONTROL %s\\n' \"$last\"; printf 'CONTROL_RC %s\\n' \"$rc\"; rm -rf $T")
+        val clog: text = cout + cerr
+        expect(clog).to_contain("CONTROL PASS")
+        expect(clog).to_contain("CONTROL_RC 0")
+
+        step("Sabotage the private header copy by one appended line")
+        val (sout, serr, src) = _run(setup + " && echo '/* drift */' >> $T/src/os/kernel/arch/arm32/cosmos/cosmos_nfc_regs.h && out=$(ROOT=$T sh " + GATE + " 2>&1); rc=$?; last=$(printf '%s\\n' \"$out\" | tail -1); printf 'SABOTAGE %s\\n' \"$last\"; printf 'SABOTAGE_RC %s\\n' \"$rc\"; rm -rf $T")
+        val slog: text = sout + serr
+
+        step("The gate FAILs, naming the differing header, and exits 1")
+        expect(slog).to_contain("SABOTAGE FAIL")
+        expect(slog).to_contain("generated header differs from committed")
+        expect(slog).to_contain("SABOTAGE_RC 1")

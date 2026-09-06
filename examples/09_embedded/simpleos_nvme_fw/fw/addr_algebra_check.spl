@@ -1,0 +1,173 @@
+"""
+addr_algebra_check — runnable oracles for fw/addr_algebra.spl (workstream I,
+wave 1 of doc/03_plan/hardware/nvme_typed_address_algebra_plan.md).
+
+Absolute oracles, not self-comparison. Every one of them is a RUNTIME check:
+Simple does not check argument types (see addr_algebra.spl's header), so this
+file plus scripts/check/check-typed-address-algebra.shs are the enforcement.
+
+  A. Geometry self-consistency: (1 << pg_bits) == PAGES_PER_BLOCK and
+     (1 << blk_bits) == NUM_BLOCKS. The bit widths cannot be derived statically
+     in this language, so they are asserted here.
+  B. Codec anti-drift: the bit-packed ftl_ppn_pack agrees with nvme_types'
+     canonical block_first_ppn(blk)+page for EVERY (blk,page) pair, and
+     ftl_ppn_block_of / ftl_ppn_page_of agree with ppn_block / ppn_page for
+     EVERY ppn. The codec must never become a disagreeing re-derivation.
+  C. L1/L2 round-trip, exhaustive over all NUM_PAGES ppns:
+     packed -> NdAddr -> packed and (blk,page) -> packed -> (blk,page).
+  D. L3 injectivity: NUM_BLOCKS*PAGES_PER_BLOCK distinct in-range (blk,page)
+     pairs produce NUM_PAGES distinct packed values (checked by a seen-array,
+     not by assuming disjoint bit ranges).
+  E. Range rejection: out-of-range raws come back absent, in-range present.
+     Includes the transposition case that range checks CANNOT catch, asserted
+     as a documented fact rather than a passing check.
+  F. Inter-layer conversion: ftl_blk_to_fil_ch -> fil_ch_to_nd_channel agrees
+     with fil_scheduler.channel_of (an independent oracle in another module)
+     on every block, and with nd_types' nd_channel_of_ppn.
+  G. Option types: absence is a distinct shape; the three domains
+     (L2P / block-allocation / queue-slot handle) are separate carriers.
+  H. Module-boundary gate: every value below is constructed HERE, in a module
+     separate from addr_algebra.spl, passed in, and read back.
+
+Run: bin/simple run examples/09_embedded/simpleos_nvme_fw/fw/addr_algebra_check.spl
+Gate: prints "ADDR ALGEBRA OK" as its last line.
+
+Known limit, shared with every other fw/*_check.spl in this tree: the process
+exit code is 0 either way — the VERDICT LINE is authoritative, not the status.
+Verified red-then-green by mutation (an injected wrong expectation prints
+"ADDR ALGEBRA FAIL (1)"), so a green verdict here is evidence, not silence.
+"""
+
+use nvme_types.*
+use nd_types.*
+use addr_algebra.*
+use fil_scheduler.*   # channel_of — independent oracle, same pattern as nd_types_check.spl
+
+fn main():
+    var fail: i64 = 0
+    val g: FwGeometry = fw_geometry()
+
+    # ── A. geometry self-consistency ──
+    fail = fail + expect_eq(1 << g.pg_bits, PAGES_PER_BLOCK, "geometry: (1 << pg_bits) == PAGES_PER_BLOCK")
+    fail = fail + expect_eq(1 << g.blk_bits, NUM_BLOCKS, "geometry: (1 << blk_bits) == NUM_BLOCKS")
+    fail = fail + expect_eq(g.blocks * g.pages, NUM_PAGES, "geometry: blocks * pages == NUM_PAGES")
+    fail = fail + expect_eq(g.channels, NUM_CHANNELS, "geometry: profile channel count agrees with fil_scheduler.NUM_CHANNELS")
+
+    # ── B+C+D. codec anti-drift, exhaustive round-trip, injectivity ──
+    var pack_mismatches: i64 = 0
+    var unpack_blk_mismatches: i64 = 0
+    var unpack_page_mismatches: i64 = 0
+    var roundtrip_mismatches: i64 = 0
+    var nd_roundtrip_mismatches: i64 = 0
+    var distinct: i64 = 0
+    var seen: [bool] = []
+    var z: i64 = 0
+    while z < NUM_PAGES:
+        seen.push(false)
+        z = z + 1
+
+    var b: i64 = 0
+    while b < NUM_BLOCKS:
+        var p: i64 = 0
+        while p < PAGES_PER_BLOCK:
+            val packed: FtlPpn = ftl_ppn_pack(ftl_blk_trusted(b), nd_page(p), g)
+            # B1: bit-packed codec == nvme_types' canonical arithmetic form
+            if packed.idx != block_first_ppn(b) + p:
+                pack_mismatches = pack_mismatches + 1
+            # B2: unpack halves agree with nvme_types' canonical helpers
+            if ftl_ppn_block_of(packed, g).idx != ppn_block(packed.idx):
+                unpack_blk_mismatches = unpack_blk_mismatches + 1
+            if ftl_ppn_page_of(packed, g).idx != ppn_page(packed.idx):
+                unpack_page_mismatches = unpack_page_mismatches + 1
+            # C/L2: (blk,page) -> packed -> (blk,page) is the identity
+            if ftl_ppn_block_of(packed, g).idx != b or ftl_ppn_page_of(packed, g).idx != p:
+                roundtrip_mismatches = roundtrip_mismatches + 1
+            # C/L1: packed -> NdAddr -> packed is the identity
+            val addr: NdAddr = ftl_ppn_to_nd_addr(packed, g)
+            if nd_addr_to_ftl_ppn(addr, g).idx != packed.idx:
+                nd_roundtrip_mismatches = nd_roundtrip_mismatches + 1
+            # D/L3: injectivity, measured with a seen-array
+            if packed.idx >= 0 and packed.idx < NUM_PAGES:
+                if not seen[packed.idx]:
+                    seen[packed.idx] = true
+                    distinct = distinct + 1
+            p = p + 1
+        b = b + 1
+
+    fail = fail + expect_eq(pack_mismatches, 0, "codec: ftl_ppn_pack agrees with nvme_types block_first_ppn(blk)+page for every (blk,page)")
+    fail = fail + expect_eq(unpack_blk_mismatches, 0, "codec: ftl_ppn_block_of agrees with nvme_types ppn_block for every ppn")
+    fail = fail + expect_eq(unpack_page_mismatches, 0, "codec: ftl_ppn_page_of agrees with nvme_types ppn_page for every ppn")
+    fail = fail + expect_eq(roundtrip_mismatches, 0, "L2: (blk,page) -> packed -> (blk,page) is the identity for every pair")
+    fail = fail + expect_eq(nd_roundtrip_mismatches, 0, "L1: FtlPpn -> NdAddr -> FtlPpn is the identity for every in-range ppn")
+    fail = fail + expect_eq(distinct, NUM_PAGES, "L3: the packed codec is injective — {NUM_PAGES} pairs give {NUM_PAGES} distinct ppns")
+
+    # ── E. range rejection (and what range checks cannot catch) ──
+    fail = fail + expect_eq(bool_to_int(ftl_blk_checked(0, g).present), 1, "range: block 0 is accepted")
+    fail = fail + expect_eq(bool_to_int(ftl_blk_checked(NUM_BLOCKS - 1, g).present), 1, "range: last block is accepted")
+    fail = fail + expect_eq(bool_to_int(ftl_blk_checked(NUM_BLOCKS, g).present), 0, "range: block == NUM_BLOCKS is rejected")
+    fail = fail + expect_eq(bool_to_int(ftl_blk_checked(0 - 1, g).present), 0, "range: block -1 is rejected (no in-band sentinel is a valid address)")
+    fail = fail + expect_eq(bool_to_int(nd_page_checked(PAGES_PER_BLOCK, g).present), 0, "range: page == PAGES_PER_BLOCK is rejected")
+    fail = fail + expect_eq(bool_to_int(ftl_ppn_checked(NUM_PAGES, g).present), 0, "range: ppn == NUM_PAGES is rejected")
+    fail = fail + expect_eq(bool_to_int(ftl_ppn_checked(NUM_PAGES - 1, g).present), 1, "range: last ppn is accepted")
+    fail = fail + expect_eq(bool_to_int(hst_lba_checked(LBA_COUNT, g).present), 0, "range: lba == LBA_COUNT is rejected")
+    fail = fail + expect_eq(bool_to_int(hst_nsid_checked(0, g).present), 0, "range: nsid 0 is rejected (NVMe nsids are 1-based)")
+    fail = fail + expect_eq(bool_to_int(hst_qid_checked(0, g).present), 1, "range: qid 0 is accepted")
+    fail = fail + expect_eq(bool_to_int(hst_qslot_checked(0 - 1, g).present), 0, "range: queue slot -1 is rejected")
+    fail = fail + expect_eq(bool_to_int(fil_ch_checked(NUM_CHANNELS, g).present), 0, "range: channel == NUM_CHANNELS is rejected")
+
+    # The transposition hazard, asserted rather than hoped: PAGES_PER_BLOCK and
+    # NUM_BLOCKS are both 64, so block/page range checks are numerically
+    # IDENTICAL predicates. This assertion documents that the checks are blind
+    # to a transposition; only the constructor and conversion NAMES are not.
+    var transposition_visible: i64 = 0
+    var t: i64 = 0
+    while t < 128:
+        val as_blk: bool = ftl_blk_checked(t, g).present
+        val as_page: bool = nd_page_checked(t, g).present
+        if as_blk != as_page:
+            transposition_visible = transposition_visible + 1
+        t = t + 1
+    fail = fail + expect_eq(transposition_visible, 0, "hazard: block/page range checks are indistinguishable at every value (why NAMES, not ranges, carry the distinction)")
+
+    # ── F. inter-layer conversion vs an independent oracle ──
+    var ch_mismatches: i64 = 0
+    var nd_ch_mismatches: i64 = 0
+    var blk: i64 = 0
+    while blk < NUM_BLOCKS:
+        val lane: FilCh = ftl_blk_to_fil_ch(ftl_blk_trusted(blk), g)
+        if lane.idx != channel_of(blk):
+            ch_mismatches = ch_mismatches + 1
+        if fil_ch_to_nd_channel(lane).idx != nd_channel_of_ppn(block_first_ppn(blk)).idx:
+            nd_ch_mismatches = nd_ch_mismatches + 1
+        blk = blk + 1
+    fail = fail + expect_eq(ch_mismatches, 0, "conversion: ftl_blk_to_fil_ch agrees with fil_scheduler.channel_of on every block")
+    fail = fail + expect_eq(nd_ch_mismatches, 0, "conversion: fil_ch_to_nd_channel agrees with nd_types.nd_channel_of_ppn on every block")
+
+    val vpn: FtlVpn = host_lba_to_ftl_vpn(hst_lba_trusted(1234))
+    fail = fail + expect_eq(vpn.idx, 1234, "conversion: host_lba_to_ftl_vpn carries the index across the HOST/FTL boundary")
+    fail = fail + expect_eq(ftl_vpn_to_host_lba(vpn).idx, 1234, "conversion: FtlVpn -> HstLba round-trips")
+    fail = fail + expect_eq(nd_page_to_nd_wordline(nd_page(41)).idx, 41, "conversion: nd_page_to_nd_wordline is the identity in v1 SLC")
+
+    # ── G. option types: absence is a shape, and the domains are separate ──
+    fail = fail + expect_eq(bool_to_int(ftl_ppn_is_mapped(ftl_ppn_none())), 0, "opt: ftl_ppn_none() is unmapped (no -1 anywhere)")
+    fail = fail + expect_eq(bool_to_int(ftl_ppn_is_mapped(ftl_ppn_some(ftl_ppn_trusted(77)))), 1, "opt: ftl_ppn_some is mapped")
+    fail = fail + expect_eq(ftl_ppn_or(ftl_ppn_none(), ftl_ppn_trusted(5)).idx, 5, "opt: ftl_ppn_or returns the fallback when absent")
+    fail = fail + expect_eq(ftl_ppn_or(ftl_ppn_some(ftl_ppn_trusted(77)), ftl_ppn_trusted(5)).idx, 77, "opt: ftl_ppn_or returns the value when present")
+    fail = fail + expect_eq(bool_to_int(ftl_blk_is_present(ftl_blk_none())), 0, "opt: ftl_blk_none() is the block-allocation domain's absence, distinct from the L2P one")
+    fail = fail + expect_eq(bool_to_int(ftl_blk_is_present(ftl_blk_some(ftl_blk_trusted(9)))), 1, "opt: ftl_blk_some is present")
+    fail = fail + expect_eq(bool_to_int(hst_qslot_none().present), 0, "opt: hst_qslot_none() is the handle domain's absence, distinct from both above")
+    fail = fail + expect_eq(hst_qslot_some(hst_qslot_trusted(3)).value.idx, 3, "opt: hst_qslot_some carries its slot")
+
+    # ── H. module boundary: values built here survive the crossing ──
+    val local_blk: FtlBlk = ftl_blk_trusted(11)
+    val local_page: NdPage = nd_page(22)
+    val composed: FtlPpn = ftl_ppn_pack(local_blk, local_page, g)
+    fail = fail + expect_eq(composed.idx, block_first_ppn(11) + 22, "module boundary: a FtlPpn packed from values built in this module matches block_first_ppn(11)+22")
+    fail = fail + expect_eq(ftl_ppn_to_nd_addr(composed, g).block.idx, 11, "module boundary: NdAddr.block survives the FTL->ND conversion")
+    fail = fail + expect_eq(ftl_ppn_to_nd_addr(composed, g).page.idx, 22, "module boundary: NdAddr.page survives the FTL->ND conversion")
+    fail = fail + expect_eq(ftl_ppn_to_nd_addr(composed, g).way.idx, 0, "module boundary: way stays 0 — no fake conversion math (nd_types.spl's honesty rule)")
+
+    if fail == 0:
+        print "ADDR ALGEBRA OK"
+    else:
+        print "ADDR ALGEBRA FAIL ({fail})"

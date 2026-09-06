@@ -1,0 +1,100 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-SYSTEM
+# plan: doc/03_plan/hardware/nvme_emu_first_increment_plan.md ; hardening: doc/03_plan/hardware/nvme_ssd_firmware_hardening_design_plan.md ; emulator: doc/03_plan/hardware/simpleemu_unified_emulator_nvme_riscv_test_infra_plan.md
+
+# @tag: system, nvme, media, emulation, retention, slice-b
+# @req REQ-SSPEC-SYSTEM NFR-NVME-EMU-001 NFR-NVME-EMU-002 NFR-NVME-EMU-003
+"""
+NVMe host traffic over emulated media with real threshold-voltage physics.
+
+An SSD's job is to keep host data intact while the flash underneath it decays.
+Until now that promise was only tested one layer down: `fil_nand_emu_e2e_check`
+drives the FTL directly, and everything a host actually touches — command
+validation, opcode dispatch, the task pool, the DRAM write buffer, completion
+construction, SMART accounting — was exercised only against a behavioural NAND
+whose bytes never change.
+
+This scenario closes that gap. It submits ordinary NVMe commands to a
+controller built on the Vt-physics NeChip emulator, ages the exact block a
+write landed on, and requires the data to survive an ordinary host read.
+
+The decisive step is the last one. A test that degrades media and then observes
+correct data proves nothing unless the degradation was real, so the scenario
+also takes a raw device read that bypasses the recovery ladder and requires it
+to fail ECC. Recovery is only meaningful against damage that actually happened.
+
+Fault injection uses the typed `emu_*` seam exclusively — no media backing
+array is touched and no `.nandram` word is poked. That is deliberate: this is
+the shape the raw-offset test-control bypass is meant to be replaced by.
+"""
+
+use std.spec.step
+
+use std.spec.*
+use std.io_runtime.{process_run}
+
+val CHECK: text = "examples/09_embedded/simpleos_nvme_fw/fw/nvme_emu_media_check.spl"
+
+fn _run(cmd: text) -> (text, text, i64):
+    process_run("/bin/sh", ["-c", cmd])
+
+describe "NVMe host IO over Vt-physics emulated media":
+
+    # @manual scenario evidence
+    it "should keep host data intact across retention drift on the ordinary NVMe read path":
+        # @req REQ-SSPEC-SYSTEM
+        step("should keep host data intact across retention drift on the ordinary NVMe read path")
+
+        step("Run the Slice B media check through the full NVMe controller")
+        val (out, err, rc) = _run("bin/simple run " + CHECK + " 2>&1")
+        val log: text = out + err
+
+        step("Confirm the run reached a verdict rather than dying early")
+        # A silent exit 0 with no verdict line is INCONCLUSIVE, not a pass
+        # (.claude/rules/testing.md). Require the verdict explicitly.
+        expect(log).to_contain("NVME EMU MEDIA OK")
+
+        step("Host write and read round-trip over emulated media")
+        expect(log).to_contain("host WRITE lba0 completes SC_SUCCESS")
+        expect(log).to_contain("host READ returns the written pattern")
+
+        step("A second LBA returns its own pattern, so the read is not a constant")
+        expect(log).to_contain("host READ lba1 returns ITS pattern, not lba0's")
+
+        step("The host write is backed by a real physical page on live emu media")
+        expect(log).to_contain("lba0 maps to a physical page")
+        expect(log).to_contain("emu backend live")
+
+        step("An aged, worn page still returns correct data through an NVMe read")
+        expect(log).to_contain("aged page still returns correct data through NVMe read")
+        expect(log).to_contain("aged page read completes SC_SUCCESS")
+
+        step("The drift that recovery absorbed was real, not absent")
+        expect(log).to_contain("raw device read senses retention-flipped bits")
+        expect(log).to_contain("raw device read FAILS ECC")
+
+    # @manual scenario evidence
+    it "should route all fault injection through the typed seam, never raw media state":
+        # @req REQ-SSPEC-SYSTEM
+        step("should route all fault injection through the typed seam, never raw media state")
+
+        step("Read the Slice B check source")
+        val (src, serr, src_rc) = _run("cat " + CHECK)
+        val body: text = src + serr
+
+        step("Confirm ageing goes through the typed emu_* test-control seam")
+        expect(body).to_contain("emu_set_block_wear")
+        expect(body).to_contain("emu_advance_time_s")
+
+        step("Confirm no raw .nandram word poking leaked into the media path")
+        # Emit a distinct token rather than a count: `to_contain("0")` would also
+        # be satisfied by "10", which would make this assertion unfalsifiable.
+        val (hits, herr, hrc) = _run("if grep -q '_nand_ram_load\\|_nand_ram_store\\|_nandram_start' " + CHECK + "; then echo RAW_POKING_PRESENT; else echo RAW_POKING_ABSENT; fi")
+        expect(hits).to_contain("RAW_POKING_ABSENT")
+
+        step("Control: the same probe must detect raw poking where it does exist")
+        # Absence of evidence is only evidence of absence if the probe can find
+        # something (.claude/rules/testing.md — a scan that finds nothing may
+        # have scanned nothing). entry.spl is known to be full of raw pokes.
+        val (ctl, cerr, crc) = _run("if grep -q '_nand_ram_load\\|_nand_ram_store\\|_nandram_start' examples/09_embedded/simpleos_nvme_fw/fw_rv32/entry.spl; then echo RAW_POKING_PRESENT; else echo RAW_POKING_ABSENT; fi")
+        expect(ctl).to_contain("RAW_POKING_PRESENT")
