@@ -1,0 +1,44 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+
+# Regression for doc/08_tracking/bug/bare_assert_statement_vacuity_2026-08-02.md
+#
+# A bare `assert <cond>` statement used to be silently inert in the Rust seed
+# interpreter (`Node::Assert` had no arm in `exec_node` / block-closure exec,
+# so it fell through the catch-all wildcard). This spec runs a subprocess
+# probe under BOTH engines and asserts that a deliberately-false bare assert
+# actually fails the example, rather than asserting it in-process (a spec
+# body cannot observe whether ITS OWN assert statement was skipped by the
+# very engine executing it).
+#
+# NOTE (per the bug doc's own "OPEN 1"): this only pins the INTERPRETER path
+# (what `bin/simple test` uses). The pure-Simple compiler's parser still
+# discards a top-level `assert` statement's condition entirely
+# (`src/compiler/10.frontend/core/parser_stmts.spl`), so bare `assert`
+# remains inert on that path — OPEN 1 is a separate, still-open defect and is
+# NOT covered by this spec.
+
+use std.spec.step
+use std.spec.*
+use std.io_runtime.{process_run, env_get}
+
+fn run_probe() -> text:
+    var bin = env_get("SIMPLE_TEST_BINARY")
+    if bin == "":
+        bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    val fixture = "val x = 1\nval y = 2\ndescribe \"probe\":\n    it \"bare assert catches a false condition\":\n        assert x == y\n"
+    val write_cmd = "cat > /tmp/bare_assert_probe_spec.spl <<'EOF'\n" + fixture + "EOF\n"
+    process_run("sh", ["-c", write_cmd])
+    val cmd = "SIMPLE_RUST_SEED_WARNING=0 " + bin + " test /tmp/bare_assert_probe_spec.spl 2>&1"
+    val out = process_run("sh", ["-c", cmd])
+    out.0
+
+describe "bare assert statement is live under the tree-walk interpreter":
+    it "fails an example whose only assertion is a false bare assert":
+        # @req REQ-SSPEC-COMPILER
+        step("Run a one-example fixture whose sole assertion is `assert x == y` with x != y")
+        val out = run_probe()
+        step("The interpreter must report the example as failed, not pass it silently")
+        expect(out).to_contain("1 failed")

@@ -248,3 +248,30 @@ Completed 2026-08-10 in commit `6f66d2a6c9885c70fd8fb0163e445cadd0881e1c`, which
 method: `doc/08_tracking/test/half_landed_fixes_across_duplicate_test_trees_2026-08-10.md`.
 The class is now fenced: `scripts/check/check-test-tree-divergence.shs`
 fails a push whose range edits one leg and leaves the twin divergent.
+
+## Re-probed 2026-09-06 — NOT REPRODUCIBLE
+
+Binary probed: `bin/release/aarch64-unknown-linux-gnu/simple` (Rust seed,
+aarch64). Both engines exercised: `SIMPLE_EXECUTION_MODE=interpret` (tree-walk)
+and `env -u SIMPLE_EXECUTION_MODE` (default Cranelift JIT). Probe sources are
+listed with each entry; they were run on both lanes and compared.
+
+Probed with a four-case DISCRIMINATING spec rather than the record's two-case
+one, so that a vacuous "both passed" cannot be mistaken for correctness — two
+of the four MUST fail if the matcher is honest:
+
+```
+  A: different strings, to_equal(false) -- MUST PASS   -> PASS
+  B: different strings, to_equal(true)  -- MUST FAIL   -> FAIL
+  C: equal strings,     to_equal(false) -- MUST FAIL   -> FAIL
+  D: equal strings,     to_equal(true)  -- MUST PASS   -> PASS
+Results: 4 total, 2 passed, 2 failed        EXIT=1
+```
+
+All four behave correctly, so `expect(a == b).to_equal(false)` is genuinely
+asserting inequality and is not being rewritten to `expect(a).to_equal(b)`.
+Lane note: `bin/simple test` pins the interpreter, which is the right lane —
+the rewrite lived in `interpreter_call/bdd.rs`. The mechanism that fixed it is
+visible there now: the comparison arm returns `Value::Bool(matched)` and marks a
+false result PROVISIONAL, so a chained `.to_*()` matcher stays authoritative.
+Probe `_scratch/eq_probe2_spec.spl`. Not fixed by this session.

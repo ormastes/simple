@@ -2500,6 +2500,20 @@ pub fn rt_file_close(args: &[Value]) -> Result<Value, CompileError> {
     }
 }
 
+/// `EINVAL`, spelled literally rather than as `libc::EINVAL`.
+///
+/// The argument-validation failure below is on the SHARED path, not inside a
+/// `#[cfg(unix)]` block, so it is compiled on Windows too -- where the `libc`
+/// crate is not linked at all (`compiler/Cargo.toml` gates it to
+/// `[target.'cfg(unix)'.dependencies]`). Same reasoning as the literal
+/// `ENOSYS` returns in the `#[cfg(not(unix))]` branches further down.
+///
+/// The `const` assertion below is the proof that this changes nothing on unix:
+/// it fails the build if the platform's `libc::EINVAL` is ever not 22.
+const EINVAL: i32 = 22;
+#[cfg(unix)]
+const _: () = assert!(EINVAL == libc::EINVAL);
+
 fn fd_positioned_args(name: &str, args: &[Value]) -> Result<Option<(i32, i64, i64, i64)>, CompileError> {
     if args.len() != 4 {
         return Err(CompileError::runtime(&format!(
@@ -2519,7 +2533,7 @@ fn fd_positioned_args(name: &str, args: &[Value]) -> Result<Option<(i32, i64, i6
 /// Exact `pread(2)` into a caller-owned buffer address; bytes read or `-errno`.
 pub fn rt_fd_pread(args: &[Value]) -> Result<Value, CompileError> {
     let Some((fd, buffer, len, offset)) = fd_positioned_args("rt_fd_pread", args)? else {
-        return Ok(Value::Int(-i64::from(libc::EINVAL)));
+        return Ok(Value::Int(-i64::from(EINVAL)));
     };
     #[cfg(unix)]
     {
@@ -2543,7 +2557,7 @@ pub fn rt_fd_pread(args: &[Value]) -> Result<Value, CompileError> {
 /// Exact `pwrite(2)` from a caller-owned buffer address; bytes written or `-errno`.
 pub fn rt_fd_pwrite(args: &[Value]) -> Result<Value, CompileError> {
     let Some((fd, buffer, len, offset)) = fd_positioned_args("rt_fd_pwrite", args)? else {
-        return Ok(Value::Int(-i64::from(libc::EINVAL)));
+        return Ok(Value::Int(-i64::from(EINVAL)));
     };
     #[cfg(unix)]
     {

@@ -1,0 +1,282 @@
+#!/bin/sh
+# gen-api-registry.shs — regenerate config/api/api_registry.sdn.
+#
+# The registry is DERIVED, never hand-maintained. Sources, in order of
+# authority:
+#
+#   1. scripts/check/rt-dual-implementation-census.shs — the symbol universe
+#      and the C/Rust lane split. It reads DEFINED symbols out of real link
+#      artifacts via nm wherever an artifact can be produced (text-grep
+#      undercounts: `pub fn rt_*` without #[no_mangle] is mangled). The
+#      measurement mode it reports is copied verbatim into the registry
+#      header so a reader cannot mistake a text fallback for an nm read.
+#   2. scripts/check/check-no-direct-rt.shs's scanner definition (RT_RE,
+#      DECL_RE, no_direct_rt_allowlist.txt) — the forbidden call sites, so
+#      `sites` in this registry means exactly what that gate's count means.
+#   3. scripts/check/rt_alias_map.sdn — the typed std alias for a symbol
+#      (module + fn) and its migration class, where one exists.
+#   4. config/api/api_group_overrides.sdn — the ONE hand-maintained input.
+#      A row assigns a symbol to an existing named group, overriding the
+#      family heuristic below. It exists so that a genuinely small family can
+#      be GROUPED rather than baselined as permanent `misc` debt; see that
+#      file's header.
+#
+# Group derivation (mechanical, no curation — see
+# doc/04_architecture/runtime/rt_api/rt_api_group_policy.md):
+#   family = first `_`-delimited token after the `rt_` prefix.
+#   A family with >= GROUP_MIN (5) distinct symbols IS a group.
+#   Everything below the threshold lands in the residual group `misc` — NOT
+#   `core`, which is already a real family (`rt_core_*`); reusing that name
+#   would silently merge a genuine group with the leftovers.
+#   The residual group stays visible so it can be shrunk over time.
+#   An override row (source 4) wins over both rules for the symbol it names.
+#
+# Usage: sh scripts/check/gen-api-registry.shs [--root DIR] [--out FILE]
+#                                              [--census FILE]
+# Exit: 0 wrote the registry, 2 nothing was generated.
+
+set -u
+
+ROOT=""
+OUT=""
+CENSUS=""
+GROUP_MIN=5
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --root) ROOT="$2"; shift 2 ;;
+        --out) OUT="$2"; shift 2 ;;
+        --census) CENSUS="$2"; shift 2 ;;
+        *) echo "unknown argument: $1" >&2; exit 2 ;;
+    esac
+done
+
+[ -n "$ROOT" ] || ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
+if [ -z "$ROOT" ] || [ ! -d "$ROOT/src" ]; then
+    echo "ERROR — nothing was generated (no repo root)" >&2; exit 2
+fi
+[ -n "$OUT" ] || OUT="$ROOT/config/api/api_registry.sdn"
+
+WORK=$(mktemp -d) || { echo "ERROR — nothing was generated (mktemp)" >&2; exit 2; }
+trap 'rm -rf "$WORK"' EXIT INT TERM
+
+# ---- 1. symbol universe + lanes -------------------------------------------
+if [ -z "$CENSUS" ]; then
+    CENSUS="$WORK/census.tsv"
+    sh "$ROOT/scripts/check/rt-dual-implementation-census.shs" --root "$ROOT" \
+        --out "$CENSUS" >/dev/null 2>&1 \
+        || { echo "ERROR — nothing was generated (census failed)" >&2; exit 2; }
+fi
+[ -s "$CENSUS" ] || { echo "ERROR — nothing was generated (empty census)" >&2; exit 2; }
+
+C_MODE=$(grep -m1 '^# c_lane_mode=' "$CENSUS" | sed 's/^# //')
+R_MODE=$(grep -m1 '^# rust_lane_mode=' "$CENSUS" | sed 's/^# //')
+grep -v '^#' "$CENSUS" | grep -v '^symbol	' > "$WORK/lanes.tsv"
+
+# ---- 1b. text-visible definitions -----------------------------------------
+# nm and text-grep each see symbols the other misses, and the difference is
+# not small (measured 2026-09-06: 328 text-visible symbols nm never reported,
+# 100 nm-reported symbols with no greppable definition line). A registry built
+# on nm alone would leave those 328 permanently "unregistered" to any cheap
+# checker, so the universe is the UNION and the `backing` column records which
+# instrument actually saw each one.
+find "$ROOT/src/runtime" \( -name '*.c' -o -name '*.h' \) -not -path '*/vendor/*' -print0 \
+    | xargs -0 grep -hoE '\brt_[A-Za-z0-9_]+[[:space:]]*\([^;]*\)[[:space:]]*\{' 2>/dev/null \
+    | grep -oE '^rt_[A-Za-z0-9_]+' | sort -u > "$WORK/ctext.txt"
+find "$ROOT/src/compiler_rust/runtime/src" -name '*.rs' -print0 2>/dev/null \
+    | xargs -0 grep -hoE '\bfn[[:space:]]+rt_[A-Za-z0-9_]+' 2>/dev/null \
+    | grep -oE 'rt_[A-Za-z0-9_]+' | sort -u > "$WORK/rtext.txt"
+
+# ---- 2. forbidden call sites, per symbol ----------------------------------
+# Same RT_RE / DECL_RE / allowlist semantics as check-no-direct-rt.shs.
+sh "$ROOT/scripts/check/rt-call-site-census.shs" --root "$ROOT" --roots src \
+    --out "$WORK/sites.tsv" --provider-out "$WORK/prov.tsv" >/dev/null 2>&1 \
+    || { echo "ERROR — nothing was generated (call-site census failed)" >&2; exit 2; }
+
+# ---- 3. typed alias, from rt_alias_map.sdn --------------------------------
+awk '
+    /^    rt_[A-Za-z0-9_]+:$/ { sym = $1; sub(/:$/, "", sym); mod = ""; fn = ""; cls = ""; next }
+    sym == "" { next }
+    /^      class:/  { cls = $2; next }
+    /^      module:/ { mod = $2; next }
+    /^      fn:/     { fn = $2;
+                       if (mod != "" && fn != "") printf "%s\t%s.%s\t%s\n", sym, mod, fn, cls;
+                       next }
+' "$ROOT/scripts/check/rt_alias_map.sdn" 2>/dev/null | sort -u > "$WORK/alias.tsv"
+awk '
+    /^    rt_[A-Za-z0-9_]+:$/ { sym = $1; sub(/:$/, "", sym); next }
+    sym != "" && /^      class:/ { print sym "\t" $2; sym = "" }
+' "$ROOT/scripts/check/rt_alias_map.sdn" 2>/dev/null | sort -u > "$WORK/aliascls.tsv"
+
+# ---- 3b. hand-maintained group overrides ----------------------------------
+# The only curated input. Rows are `surface, symbol, group, reason`; only the
+# `rt` surface is consumed here.
+OVERRIDES="$ROOT/config/api/api_group_overrides.sdn"
+: > "$WORK/ovr.tsv"
+if [ -f "$OVERRIDES" ]; then
+    awk '
+        substr($0, 1, 1) == "#" { next }
+        /^    rt, / {
+            n = split($0, f, ", ")
+            if (n < 3) next
+            for (i = 1; i <= n; i++) gsub(/^[ \t"]+|[ \t"]+$/, "", f[i])
+            if (f[2] == "" || f[3] == "") next
+            print f[2] "\t" f[3]
+        }
+    ' "$OVERRIDES" | sort -u > "$WORK/ovr.tsv"
+fi
+
+# ---- join: universe = census symbols UNION called symbols -----------------
+{ cut -f1 "$WORK/lanes.tsv"; grep -v '^#' "$WORK/sites.tsv" | cut -f1;
+  cat "$WORK/ctext.txt" "$WORK/rtext.txt"; } | sort -u > "$WORK/all.txt"
+TOTAL=$(wc -l < "$WORK/all.txt" | tr -d ' ')
+if [ "$TOTAL" -eq 0 ]; then
+    echo "ERROR — nothing was generated (0 symbols)" >&2; exit 2
+fi
+
+# family sizes -> group set
+awk '{ s = $0; sub(/^rt_/, "", s); n = split(s, a, "_"); print a[1] }' "$WORK/all.txt" \
+    | sort | uniq -c | awk -v m="$GROUP_MIN" '$1 >= m { print $2 }' | sort > "$WORK/groups.txt"
+NGROUP=$(wc -l < "$WORK/groups.txt" | tr -d ' ')
+[ "$NGROUP" -gt 0 ] || { echo "ERROR — nothing was generated (0 groups)" >&2; exit 2; }
+
+# An override ASSIGNS membership; it may not INVENT a group. Both this file's
+# header and the policy doc claim that — enforce it here rather than leaving
+# the claim to a typo. A group is legitimate only if the family heuristic
+# formed it above (>= GROUP_MIN symbols sharing the prefix).
+BAD_OVR=$(awk 'FILENAME == ARGV[1] { grp[$0] = 1; next }
+               { if (!($2 in grp)) print $1 "->" $2 }' \
+              "$WORK/groups.txt" "$WORK/ovr.tsv" | tr '\n' ' ')
+if [ -n "$BAD_OVR" ]; then
+    echo "ERROR — nothing was generated (override names a group that does not exist: $BAD_OVR)" >&2
+    exit 2
+fi
+
+mkdir -p "$(dirname "$OUT")"
+
+awk -v cmode="$C_MODE" -v rmode="$R_MODE" -v gmin="$GROUP_MIN" \
+    -v total="$TOTAL" -v ngroup="$NGROUP" -v stamp="$(date -u +%Y-%m-%d)" \
+    -v base="$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null)" '
+    # A hand-maintained override wins; otherwise the family heuristic, with
+    # the residual bucket `misc` for families below the threshold.
+    function group_of(sym,   s, a) {
+        if (sym in ovr) return ovr[sym]
+        s = sym; sub(/^rt_/, "", s); split(s, a, "_")
+        return (a[1] in grp) ? a[1] : "misc"
+    }
+    function desc_of(sym, g,   s, n, a, i, out) {
+        s = sym; sub("^rt_" g "_", "", s); sub("^rt_", "", s)
+        gsub(/_/, " ", s)
+        if (s == "" || s == g) s = "entry point"
+        return g ": " s
+    }
+    FILENAME == ARGV[1] { ovr[$1] = $2; novr++; next }
+    FILENAME == ARGV[2] { grp[$0] = 1; next }
+    FILENAME == ARGV[3] { cl[$1] = $2; rl[$1] = $3; tw[$1] = $4; next }
+    FILENAME == ARGV[4] { st[$1] = $2; next }
+    FILENAME == ARGV[5] { al[$1] = $2; next }
+    FILENAME == ARGV[6] { ac[$1] = $2; next }
+    FILENAME == ARGV[7] {
+        # symbol -> allowlisted provider entry -> allowlisted call count.
+        # The group provider is the entry serving the most of the group`s
+        # allowlisted calls; a group with none has provider "-", which is
+        # exactly the "no provider yet" case the policy calls out.
+        pv[group_of($1) SUBSEP $2] += $3
+        next
+    }
+    FILENAME == ARGV[8] { ctx[$0] = 1; next }
+    FILENAME == ARGV[9] { rtx[$0] = 1; next }
+    {
+        sym = $0
+        g = group_of(sym)
+        cnm = (cl[sym] == "yes"); rnm = (rl[sym] == "yes")
+        c = cnm || (sym in ctx); r = rnm || (sym in rtx)
+        lane = (c && r) ? "both" : (c ? "c" : (r ? "rust" : "none"))
+        back = (lane == "none") ? "unbacked" : ((cmode ~ /=nm/ && cnm) ? "nm" : "text")
+        sites = (sym in st) ? st[sym] : 0
+        alias = (sym in al) ? al[sym] : "-"
+        cls = (sym in ac) ? ac[sym] : "unclassified"
+        twin = (tw[sym] == "yes") ? "yes" : "no"
+        rows[++nr] = sprintf("    rt, %s, %s, %s, %s, %s, %d, %s, %s, \"%s\"",
+                             g, sym, lane, back, cls, sites, twin, alias, desc_of(sym, g))
+        gsyms[g]++; gsites[g] += sites
+        if (lane == "none") unbacked++
+        if (lane == "both") nboth++; else if (lane == "c") nc++; else if (lane == "rust") nrust++
+        tsites += sites
+    }
+    END {
+        printf "# API group registry — one schema for every callable API surface in the tree.\n"
+        printf "#\n"
+        printf "# GENERATED by scripts/check/gen-api-registry.shs. Do not hand-edit rows;\n"
+        printf "# edit the generator or the sources it reads and regenerate. The policy this\n"
+        printf "# database enforces is doc/04_architecture/runtime/rt_api/rt_api_group_policy.md;\n"
+        printf "# the gate that reads it is scripts/check/check-rt-api-groups.shs.\n"
+        printf "#\n"
+        printf "# generated: %s  base: %s\n", stamp, base
+        printf "# %s\n", cmode
+        printf "# %s\n", rmode
+        printf "# group threshold: a `rt_<family>_*` family with >= %d distinct symbols is a\n", gmin
+        printf "#   group; smaller families fall into the residual group `misc`\n"
+        printf "#   (NOT `core` — `rt_core_*` is a real family of its own).\n"
+        printf "# group overrides applied from config/api/api_group_overrides.sdn: %d\n", novr+0
+        ngrp = asorti_keys(gsyms, karr)
+        printf "# rt surface counts: symbols=%d groups=%d (including the residual `misc`)\n",
+               total, ngrp
+        printf "#   lanes: both=%d c-only=%d rust-only=%d unbacked=%d\n", nboth+0, nc+0, nrust+0, unbacked+0
+        printf "#   forbidden direct call sites under src/: %d\n", tsites+0
+        printf "#\n"
+        printf "# Columns\n"
+        printf "#   surface  rt | hal | sosix | stdlib — which API surface the row belongs to\n"
+        printf "#   group    the named API group; every symbol MUST have one\n"
+        printf "#   symbol   the exported name\n"
+        printf "#   lane     both | c | rust | none  (none = called but defined in neither lane)\n"
+        printf "#   backing  nm | text | unbacked — HOW lane presence was measured\n"
+        printf "#   class    rt_alias_map class: same | adapted | provider | missing | unclassified\n"
+        printf "#   sites    forbidden direct call sites under src/ at generation time (the\n"
+        printf "#            per-group sum is what check-rt-api-groups.shs ratchets)\n"
+        printf "#   twin     yes if a Simple twin is recorded in the C-migration inventory\n"
+        printf "#   alias    typed std alias `module.fn`, or `-` when none exists\n"
+        printf "#   desc     one line. Mechanically derived from the symbol name unless a\n"
+        printf "#            group owner has replaced it; it is a placeholder, not prose.\n"
+        printf "\n"
+        printf "api_groups |surface, group, symbols, sites, provider, access|\n"
+        n = ngrp
+        for (i = 1; i <= n; i++) {
+            g = karr[i]
+            best = "-"; bestn = 0
+            for (k in pv) {
+                split(k, kk, SUBSEP)
+                if (kk[1] == g && pv[k] > bestn) { bestn = pv[k]; best = kk[2] }
+            }
+            printf "    rt, %s, %d, %d, \"%s\", %s\n",
+                   g, gsyms[g], gsites[g], best, (best == "-" ? "unowned" : "group")
+        }
+        printf "    hal, rt_hal, 0, 0, \"src/lib/nogc_sync_mut/rt_hal/\", group\n"
+        printf "    sosix, process, 7, 0, \"src/lib/nogc_async_mut/sosix/\", sosix\n"
+        printf "    stdlib, string_core, 0, 0, \"src/lib/common/string_core.spl\", group\n"
+        printf "\n"
+        printf "api_symbols |surface, group, symbol, lane, backing, class, sites, twin, alias, desc|\n"
+        for (i = 1; i <= nr; i++) print rows[i]
+        printf "    sosix, process, sosix_platform, none, simple, provider, 0, no, std.nogc_async_mut.sosix.sosix_platform, \"sosix: host platform name\"\n"
+        printf "    sosix, process, sosix_run, none, simple, provider, 0, no, std.nogc_async_mut.sosix.sosix_run, \"sosix: run a process to completion\"\n"
+        printf "    sosix, process, sosix_spawn, none, simple, provider, 0, no, std.nogc_async_mut.sosix.sosix_spawn, \"sosix: spawn a process asynchronously\"\n"
+        printf "    sosix, process, sosix_is_running, none, simple, provider, 0, no, std.nogc_async_mut.sosix.sosix_is_running, \"sosix: liveness of a spawned process\"\n"
+        printf "    sosix, process, sosix_kill, none, simple, provider, 0, no, std.nogc_async_mut.sosix.sosix_kill, \"sosix: terminate a spawned process\"\n"
+        printf "    sosix, process, sosix_proc_usage, none, simple, provider, 0, no, std.nogc_async_mut.sosix.sosix_proc_usage, \"sosix: resource usage of a process\"\n"
+        printf "    sosix, process, sosix_which, none, simple, provider, 0, no, std.nogc_async_mut.sosix.sosix_which, \"sosix: resolve an executable on PATH\"\n"
+    }
+    function asorti_keys(arr, out,   k, n, i, j, t) {
+        n = 0
+        for (k in arr) out[++n] = k
+        for (i = 2; i <= n; i++) { t = out[i]; j = i - 1
+            while (j > 0 && out[j] > t) { out[j+1] = out[j]; j-- }
+            out[j+1] = t }
+        return n
+    }
+' "$WORK/ovr.tsv" "$WORK/groups.txt" "$WORK/lanes.tsv" "$WORK/sites.tsv" \
+  "$WORK/alias.tsv" "$WORK/aliascls.tsv" "$WORK/prov.tsv" "$WORK/ctext.txt" \
+  "$WORK/rtext.txt" "$WORK/all.txt" > "$OUT"
+
+[ -s "$OUT" ] || { echo "ERROR — nothing was generated (empty output)" >&2; exit 2; }
+echo "wrote $OUT ($TOTAL symbol(s), $NGROUP named family group(s) plus the residual \`misc\`)"
+exit 0

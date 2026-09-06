@@ -70,3 +70,57 @@ Compare interpreter-mode lowering/evaluation of `if val` pattern-binding
 against the JIT path's handling of the same node — the JIT path (or whatever
 lowering `world.spl`'s passing specs exercise) evidently distinguishes
 `Some`/`nil` correctly; the plain tree-walking interpreter fallback does not.
+
+## Re-reproduction attempt 2026-09-06 — NOT REPRODUCIBLE on the current seed
+
+Host: `bin/release/aarch64-unknown-linux-gnu/simple`, 50093192 bytes,
+mtime 2026-09-06 09:59 (aarch64 Linux), `SIMPLE_EXECUTION_MODE=interpret` —
+i.e. exactly the "interpreter fallback" lane this record isolates.
+
+Fixture (`build/wi/r_ifval.spl`), the record's own repro plus a positive
+control so a "never takes the branch" regression could not read as a pass:
+
+```simple
+fn maybe_none() -> Option<i64>:
+    nil
+
+fn maybe_some() -> Option<i64>:
+    7
+
+fn main() -> void:
+    val v = maybe_none()
+    var matched = false
+    if val x = v:
+        matched = true
+    print("nil case matched={matched} (expected false)")
+
+    val w = maybe_some()
+    var matched2 = false
+    var seen = 0
+    if val y = w:
+        matched2 = true
+        seen = y
+    print("some case matched={matched2} seen={seen} (expected true 7)")
+```
+
+Observed:
+
+```
+nil case matched=false (expected false)
+some case matched=true seen=7 (expected true 7)
+```
+
+Both directions are correct: `if val` does not fire on a nil `Option`, and it
+does fire — with the payload bound — on a `Some`. The positive control matters
+here: without it, a binary that had regressed to "never take the `if val`
+branch" would have produced a green first line and looked fixed.
+
+Scope, and a correction to this record's own header: the body of this record
+diagnoses the **Rust seed's** tree-walking interpreter fallback (its
+"Suggested fix direction" section is explicitly not investigated further), so
+the "SOURCE FIXED (2026-07-15)" header and the "pending a runnable pure-Simple
+compiler artifact" clause do not describe the same engine the Symptom section
+measured. This re-reproduction covers the seed's interpreter. The pure-Simple
+interpreter's own `if val` desugar was NOT exercised — driving it from a spec
+needs the parser's `if val` lowering shape, which was not reconstructed in this
+pass.

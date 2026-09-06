@@ -901,6 +901,35 @@ impl Lowerer {
                 return *inner;
             }
         }
+        // Presence predicates on a flat-nullable `T?` are BOOL, not ANY.
+        //
+        // Same receiver shape and same rationale as the `unwrap`/`expect` rule
+        // directly above: `T?` is `HirType::Pointer { inner: T }`, genuine
+        // `Option`/`Result` ENUM receivers are consumed earlier by
+        // `lower_builtin_method_call`, so the only shape reaching here with an
+        // otherwise-ANY result is the nullable pointer. Typing it ANY made the
+        // JIT print `nil` for `true` and `0` for `false`: with an ANY result the
+        // MIR carries no boxing, and the Cranelift arm for `.is_some()` hands
+        // `rt_is_some`'s RAW C bool straight to `rt_println_value`, where a raw
+        // `1` is `0b001` = TAG_HEAP (renders `nil`) and a raw `0` collides with
+        // boxed integer zero (renders `0`). `.contains()` never showed this
+        // because HIR already types it BOOL, so MIR boxes it.
+        // doc/08_tracking/bug/jit_is_some_is_none_method_dispatch_gap_2026-08-17.md
+        //
+        // Type-only upgrade: the call stays a dynamic `MethodCall` and the
+        // emitted value is untouched, so `if x.is_some():` keeps consuming the
+        // same raw 0/1 the branch wants.
+        // Scoped to `is_some`/`is_none` ONLY, and measured that way: `is_ok`/
+        // `is_err` are called on genuine `Result<T, E>` receivers, which are
+        // `HirType::Enum` and never reach this Pointer gate — they are handled
+        // earlier by `lower_builtin_method_call` and were verified correct on
+        // both engines before and after this change. Listing them here would be
+        // dead code.
+        if matches!(method, "is_some" | "is_none") {
+            if matches!(self.module.types.get(recv_ty), Some(HirType::Pointer { .. })) {
+                return TypeId::BOOL;
+            }
+        }
         if recv_ty != TypeId::ANY && recv_ty != TypeId::VOID {
             if let Some(HirType::Struct { fields, .. }) = self.module.types.get(recv_ty) {
                 if let Some((_, field_ty)) = fields.iter().find(|(field_name, _)| field_name == method) {
