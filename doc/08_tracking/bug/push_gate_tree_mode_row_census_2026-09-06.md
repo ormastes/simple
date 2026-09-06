@@ -161,9 +161,47 @@ rotted selftest rc=2
 restored rc=0
 ```
 
-Note both rotted runs produce a real wrong-tree VERDICT (`FAIL — Brandnew`,
-`FAIL — 1 new`) rather than an error — that is exactly the shape that slipped
-past everyone on 2026-09-06, and it is what the fixtures now catch.
+Note the rotted runs produce a real wrong-tree VERDICT (`FAIL — Brandnew`,
+`FAIL — 1 new`, `FAIL — b.c`) rather than an error — that is exactly the shape
+that slipped past everyone on 2026-09-06, and it is what the fixtures now catch.
+
+### There are TWO rot axes, and a fixture must catch both
+
+`--rev` has two independently rottable halves: the SCAN ROOT and the
+BASELINE/ALLOWLIST. A fixture that dirties only the sources cannot see the
+baseline half regress. Inject the second axis separately — leave `SCAN_ROOT` on
+the rev and let the baseline path resolve against the working copy:
+
+```
+=== no-mock-fs-io: baseline reverts to working copy ===
+rotted rc=1
+  selftest FAIL: --rev did not read committed content, got [FAIL — 1 import site(s) checked, 1 stale]
+
+=== type-walk: allowlist reverts to working copy ===
+rotted rc=2
+  selftest: fixture 7 --rev did not read committed content: FAIL — 6 constructor(s) checked; unprojected and unallowlisted: Brandnew
+
+=== rt-src-list: baseline reverts to working copy ===
+rotted rc=0        <-- MISSED IT
+```
+
+**`check-runtime-source-list-parity.shs` fixture 8 failed this test as first
+written** and was strengthened before landing: it dirtied only the rosters, so
+the working copy's baseline was byte-identical to the committed one and the rot
+was invisible. It now also appends a row naming a nonexistent file to the
+working copy's baseline, so a baseline-half regression surfaces as a
+stale-baseline offender. After the fix:
+
+```
+=== rt-src-list: baseline reverts to working copy ===
+rotted rc=2
+  selftest FAIL: --rev did not read committed content (exit 1): FAIL — 3 file(s) checked, 1 offender(s) (0 changed, 0 new, 1 stale-baseline, 0 stale-roster): zz_not_a_real_file.c
+```
+
+**Every future conversion must run BOTH injections.** A fixture proven on one
+axis is proven on one axis. (`type-walk` fixture 7 dirties only the allowlist,
+so its sources half rests on the real-repo tree-vs-rev comparison rather than on
+the fixture — weaker, and stated here rather than glossed.)
 
 ## The 24 rows
 
