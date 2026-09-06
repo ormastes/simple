@@ -1,59 +1,7 @@
 # Effect inference pass is dead code; STUB-002 falsely marked Fixed
 
 **Date:** 2026-08-01
-**Status:** Open — still needs an owner ruling (delete vs implement). **Defect 3
-(STUB-002 falsely marked Fixed) is now REPAIRED**; defects 1 and 2 have changed
-shape rather than being resolved. Re-verified 2026-09-02 against `origin/main`
-@ `1b76db1d6c3`.
-
-### Re-verification 2026-09-02 — the subject was deleted, the requirement was not
-
-`/usr/bin/grep -rn "run_effect_pass" src/ test/` returns **zero hits** (control:
-the same method finds `effects` in `src/compiler/00.common/effects.spl`,
-`30.types/type_system/__init__.spl` and
-`20.hir/hir_lowering/_Items/declaration_lowering.spl`). Since this record was
-filed, someone removed the subject without recording the ruling:
-
-- `src/compiler/30.types/type_system/effect_pass.spl` — **deleted**. The
-  directory now holds only `__init__.spl`, `builtin_registry.spl`,
-  `checker.spl`, `effects.spl`.
-- Both specs named in defect 3 — `test/02_integration/compiler/driver/effect_inference_wiring_spec.spl`
-  and `test/01_unit/compiler/type_system/effect_pass_spec.spl` — **deleted**.
-- The call site at `driver_hir_pipeline_lowering.spl:204` is gone. What sat at
-  `:914-915` until this pass was a comment claiming the pass is *"skipped in
-  bootstrap empty-HIR mode"* followed by `log_debug("effect inference done")` —
-  i.e. the false-completion claim of defect 3 had migrated out of the
-  requirements doc and into the compiler itself.
-
-**Repaired here (2026-09-02):**
-
-1. `doc/02_requirements/language/features/eliminate_dummy_impls.md` STUB-002 no
-   longer reads *"Fixed — wired `run_effect_pass(self.ctx.hir_modules)`"*. It now
-   reads NOT FIXED, names the deleted files, and points back at this record. A
-   tracked P1 requirement is no longer recorded as satisfied by a function that
-   does not exist.
-2. `src/compiler/80.driver/driver_hir_pipeline_lowering.spl:914` no longer logs
-   `"effect inference done"` for a pass that does not exist. It carries a
-   `TODO(P1, compiler/types)` stating the open ruling and citing this record.
-
-**Deliberately NOT done — the ruling is still the owner's:** effect inference
-was not implemented, and nothing further was deleted. In particular
-`src/compiler/00.common/effects_solver.spl` (`effectsolver_create` at `:70`,
-`effectsolver_solve` at `:66`) is now **orphaned** — the deleted
-`effect_pass.spl` was its only in-tree consumer, so it is dead code under repo
-policy, and removing it would silently close STUB-002 by destroying its subject.
-That is the same reason this record originally gave for not deleting.
-
-**No regression test was added, and none is meaningful yet:** a test can only
-assert one of the two outcomes the ruling has not chosen between. Once the
-ruling lands, the test is obvious in either direction — a driver-level assertion
-that the pass runs and refines a call-graph effect (implement), or a lint/census
-assertion that no orphaned effect-solver symbols remain (delete). Note the
-deleted `effect_inference_wiring_spec.spl` is exactly the trap to avoid
-repeating: empty dict in, empty dict out, passing identically against a working
-pass and an early-return stub.
-
-**Status (historical):** Open — needs an owner ruling (delete vs implement)
+**Status:** Open — needs an owner ruling (delete vs implement)
 **Severity:** P2 — no wrong compiler output today, but a tracked P1 requirement
 is recorded as Fixed when it is not, and its guarding spec is false-green.
 **Files:**

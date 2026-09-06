@@ -22,7 +22,7 @@ lane. No Stage 3, bootstrap, Git operation, service, or heavy build ran.
 - Result files are opened, hashed, fsynced, parent-fsynced, and retained in one
   descriptor walk. Candidate, provenance, transcript, raw, memory, and phase
   inputs are not closed and reopened between durability and use.
-- `bootstrap-stage3-provenance-verifier.shs` has descriptor-only primary input
+- `bootstrap-stage3-provenance-verifier.sh` has descriptor-only primary input
   validation plus canonical display-path companions.
 - `bootstrap_stage3_runner_publication_contract_test.shs` extracts and invokes
   the exact production publication/recovery helper definitions; mutation
