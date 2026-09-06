@@ -274,6 +274,20 @@ it cancels the running gate and re-queues you behind everything else. Get the
 commit message and the rebase right BEFORE the first push; amending a message
 afterwards costs a full queue cycle.
 
+**There is a receipt fast path for the idiom gate, and it does not work yet.**
+`code-idiom-gates` now consults a signed local-CI receipt
+(`simple.local-ci-receipt/v1`) and picks one of three modes: `sanity` (~60 s,
+receipt verify plus the conflict-class guards), `escalate` (sanity set plus only
+the gates whose declared `inputs` intersect a rebase diff) or `full` (everything,
+and every undecidable case). It is fail-closed: an unset `skip_ids` runs every
+gate. **Today every real PR here gets `full`**, for two measured reasons — the
+verifier reads jj `change-id` headers only, and 0 of the last 40 origin/main
+commits and 0 of PR #380's head commits carry one (the `git worktree add
+--detach` + `gh pr create` route does not write it); and the receipt has no
+delivery mechanism a PR can use. So the "push ONCE" advice above still governs.
+Full details, key onboarding and the verdict-string troubleshooting table:
+[`doc/07_guide/infra/local_ci_receipt/operator_guide.md`](../../doc/07_guide/infra/local_ci_receipt/operator_guide.md).
+
 **The admission check has two traps, and the fix for one causes the other.**
 1. `gh pr edit --body-file` with byte-identical content fires no `edited`
    event, so no check-run is ever created and the PR sits `BLOCKED` forever.
