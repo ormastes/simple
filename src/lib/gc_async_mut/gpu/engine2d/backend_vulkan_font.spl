@@ -8,7 +8,10 @@ use std.gc_async_mut.gpu.engine2d.backend_vulkan_helpers.{vulkan_order_trace, vu
 use std.gc_async_mut.gpu.engine2d.backend_vulkan_font_types.{VulkanFontPipelineEvidence, VulkanFontCompositeEvidence}
 use std.gc_async_mut.gpu.engine2d.backend_vulkan_font_spirv.{FONT_ATLAS_COMPOSITE_VULKAN_SPIRV_SHA256}
 use std.gpu.engine2d.backend_software.{SoftwareBackend}
-use std.gc_async_mut.text_layout.font_renderer.{FontRenderBatch, font_render_batch_atlas_owner_identity, font_render_batch_atlas_cache_identity}
+use std.gc_async_mut.text_layout.font_renderer.{FontRenderBatch, FontRenderQuad, FontExecutionPolicy, font_render_batch_atlas_owner_identity, font_render_batch_atlas_cache_identity}
+use std.gpu.engine2d.helpers_text.{text_metrics}
+use std.gpu.engine2d.glyph.{glyph_data}
+use std.common.string_core.{char_from_code}
 use std.common.ui.ui_frame_clock.{FrameClock}
 use std.nogc_sync_mut.ui.host_frame_clock.{default_frame_clock}
 use std.nogc_sync_mut.gpu.engine2d.sffi_vulkan.{
@@ -373,7 +376,319 @@ fn _vulkan_font_with_fallback(evidence: VulkanFontCompositeEvidence,
     replayable.fallback_pixels = pixels
     replayable
 
+# ============================================================================
+# Bitmap-font atlas batch — the draw_text / draw_text_bg entry points
+# ============================================================================
+# `Engine2D.draw_text` already routes VECTOR (TTF) text through
+# `_draw_font_batch_staged` -> `_draw_font_batch_plan` -> `composite_font_batch`
+# (engine.spl:1790 / :1869 / :1705). `VulkanBackend.draw_text` is reached only
+# when no vector face is selected, i.e. for the built-in 5x7 BITMAP font — and
+# that face had no atlas at all, so every string was CPU-rasterised by
+# `text_blit_buffer` and uploaded as an image.
+#
+# These helpers give the bitmap face a per-scale coverage atlas and the matching
+# quad list, so the bitmap path reuses the SAME `composite_font_batch` entry
+# point as the vector path. There is no second font pipeline and no parallel
+# dispatch: everything below only builds the batch that entry point already
+# consumes.
+#
+# Exactness (why the atlas result is byte-identical to the CPU raster it
+# replaces, for the inputs the gate admits):
+#   * the CPU raster writes the raw `fg` word for every set glyph bit and leaves
+#     unset bits at the fill colour;
+#   * `font_atlas_subrect_pixels` / the SPIR-V kernel compute
+#     `sa = (atlas_alpha * colour_alpha + 127) / 255`, return early when
+#     `sa == 0`, and for `sa == 255` reduce to `dst = colour` exactly;
+#   * this atlas stores binary coverage (alpha 0 or 255), and the gate below
+#     admits only fully opaque text colours, so both sides collapse to the same
+#     "write `fg`, else leave the destination alone" behaviour;
+#   * `glyph_advance(scale) == 5 * scale` equals the cell width, so quads tile
+#     the CPU buffer's columns with no gap and no overlap.
+
+val VULKAN_BITMAP_FONT_FIRST_CODE: i64 = 32
+val VULKAN_BITMAP_FONT_LAST_CODE: i64 = 126
+val VULKAN_BITMAP_FONT_CELL_COUNT: i64 = 95
+val VULKAN_BITMAP_FONT_CELL_COLUMNS: i64 = 5
+val VULKAN_BITMAP_FONT_CONFIG_IDENTITY: text = "bitmap-coverage1;hint=none;subpixel=none"
+
+# Provenance values recorded on VulkanBackend.last_text_path. They sit beside
+# the readback-provenance vocabulary (`completion_unknown` / `readback_failed` /
+# `cpu_fallback` / `device_readback` / `host_cache_after_device_copy`,
+# backend_vulkan.spl:1446-1523) but describe a DIFFERENT axis — which lane a
+# text draw took — so they are deliberately distinct strings and never mix with
+# `readback_source`.
+val VULKAN_TEXT_PATH_FONT_ATLAS: text = "font-atlas-batch"
+val VULKAN_TEXT_PATH_FONT_ATLAS_ABANDONED: text = "font-atlas-batch-abandoned"
+val VULKAN_TEXT_PATH_CPU_RASTER: text = "cpu-raster-blit"
+# No lane ran at all: the surface was quarantined by `completion_unknown`, so the
+# draw was dropped exactly as every other primitive drops it.
+val VULKAN_TEXT_PATH_NOT_DRAWN: text = "not-drawn"
+
+fn vulkan_bitmap_font_atlas_width(scale: i32) -> i32:
+    """Atlas width for one integer scale: every printable-ASCII cell, side by side."""
+    if scale <= 0: return 0
+    (VULKAN_BITMAP_FONT_CELL_COUNT * VULKAN_BITMAP_FONT_CELL_COLUMNS * scale.to_i64()) as i32
+
+fn vulkan_bitmap_font_atlas_height(scale: i32, glyph_height_px: i32) -> i32:
+    """Atlas height for one integer scale: a single row of cells."""
+    if scale <= 0 or glyph_height_px <= 0: return 0
+    glyph_height_px * scale
+
+fn vulkan_bitmap_font_identity(scale: i32, glyph_height_px: i32) -> text:
+    """Stable owner identity for the built-in face at one scale.
+
+    Keyed by scale only, so repeated draws at the same size reuse the uploaded
+    atlas instead of re-uploading (and re-flushing) once per string.
+    """
+    "engine2d-bitmap-" + VULKAN_BITMAP_FONT_CELL_COLUMNS.to_string() + "x" +
+        glyph_height_px.to_string() + "-scale" + scale.to_string()
+
+fn vulkan_bitmap_text_atlas_eligible(text_val: text) -> bool:
+    """True when every character of `text_val` has its own cell in the atlas.
+
+    Codes outside printable ASCII fall back to the shared unknown-box glyph on
+    the CPU path; rather than guess which cell that is, such strings stay on the
+    CPU raster path.
+    """
+    if text_val.len() == 0:
+        return false
+    var i: i64 = 0
+    while i < text_val.len():
+        val code = text_val.char_code_at(i)
+        if code < VULKAN_BITMAP_FONT_FIRST_CODE or code > VULKAN_BITMAP_FONT_LAST_CODE:
+            return false
+        i = i + 1
+    true
+
+fn vulkan_bitmap_font_atlas_pixels(scale: i32, glyph_height_px: i32) -> [u32]:
+    """Coverage atlas for the built-in 5x7 face at one integer scale.
+
+    Alpha carries the glyph's binary coverage; RGB is unused because both the
+    CPU subrect helper and the SPIR-V kernel take RGB from the quad colour.
+    """
+    val width = vulkan_bitmap_font_atlas_width(scale)
+    val height = vulkan_bitmap_font_atlas_height(scale, glyph_height_px)
+    if width <= 0 or height <= 0:
+        var empty: [u32] = []
+        return empty
+    val w64 = width.to_i64()
+    val s64 = scale.to_i64()
+    val gh64 = glyph_height_px.to_i64()
+    var pixels: [u32] = [0u32; w64 * height.to_i64()]
+    var cell: i64 = 0
+    while cell < VULKAN_BITMAP_FONT_CELL_COUNT:
+        val bitmap = glyph_data(char_from_code(VULKAN_BITMAP_FONT_FIRST_CODE + cell))
+        val cell_x = cell * VULKAN_BITMAP_FONT_CELL_COLUMNS * s64
+        var row: i64 = 0
+        while row < gh64:
+            val row_data = bitmap[row]
+            var col: i64 = 0
+            while col < VULKAN_BITMAP_FONT_CELL_COLUMNS:
+                val bit = (row_data >> (VULKAN_BITMAP_FONT_CELL_COLUMNS - 1 - col)) & 1
+                if bit != 0:
+                    val glyph_x = cell_x + col * s64
+                    var sy: i64 = 0
+                    while sy < s64:
+                        val row_base = (row * s64 + sy) * w64 + glyph_x
+                        var sx: i64 = 0
+                        while sx < s64:
+                            pixels[row_base + sx] = 0xFF000000u32
+                            sx = sx + 1
+                        sy = sy + 1
+                col = col + 1
+            row = row + 1
+        cell = cell + 1
+    pixels
+
+fn vulkan_bitmap_text_quads(text_val: text, color: u32, scale: i32, advance: i32,
+                            glyph_height_px: i32) -> [FontRenderQuad]:
+    """One quad per character, tiling the same columns the CPU raster fills.
+
+    Returns an EMPTY list — never a partial one — for any character without an
+    atlas cell, so a caller can only ever composite the whole string or none of
+    it.
+    """
+    var quads: [FontRenderQuad] = []
+    if scale <= 0 or advance <= 0 or glyph_height_px <= 0 or text_val.len() == 0:
+        return quads
+    val cell_w = (VULKAN_BITMAP_FONT_CELL_COLUMNS * scale.to_i64()) as i32
+    val cell_h = glyph_height_px * scale
+    val advance64 = advance.to_i64()
+    var i: i64 = 0
+    while i < text_val.len():
+        val code = text_val.char_code_at(i)
+        if code < VULKAN_BITMAP_FONT_FIRST_CODE or code > VULKAN_BITMAP_FONT_LAST_CODE:
+            var rejected: [FontRenderQuad] = []
+            return rejected
+        val cell = code - VULKAN_BITMAP_FONT_FIRST_CODE
+        quads.push(FontRenderQuad(
+            codepoint: code as i32,
+            byte_offset: i,
+            dst_x: (i * advance64) as i32,
+            dst_y: 0,
+            width: cell_w,
+            height: cell_h,
+            atlas_x: (cell * cell_w.to_i64()) as i32,
+            atlas_y: 0,
+            color: color,
+            cluster: -1
+        ))
+        i = i + 1
+    quads
+
+fn vulkan_bitmap_text_atlas_block_reason(initialized: bool, clip_enabled: bool, mask_bytes: i64,
+                                         pipeline_status: text, shader_handle: i64,
+                                         pipeline_handle: i64, color: u32, glyph_count: i64,
+                                         text_eligible: bool, scale: i32,
+                                         glyph_height_px: i32) -> text:
+    """Empty when the bitmap atlas path may run; otherwise the honest reason it may not.
+
+    Every rejection here is a case where the font composite would NOT reproduce
+    the CPU raster: it applies neither the scissor rect nor the mask buffer, and
+    it alpha-blends rather than writing, so a non-opaque colour would diverge.
+    """
+    if not initialized: return "backend-uninitialized"
+    if pipeline_status != "ready" or shader_handle <= 0 or pipeline_handle <= 0:
+        return "font-pipeline-not-ready"
+    if clip_enabled: return "clip-unsupported-by-font-composite"
+    if mask_bytes > 0: return "mask-unsupported-by-font-composite"
+    if ((color >> 24) & 0xFFu32) != 255u32: return "non-opaque-text-color"
+    if not text_eligible: return "glyph-outside-atlas-charset"
+    if glyph_count <= 0 or glyph_count > VULKAN_FONT_FRAME_GLYPH_CAP:
+        return "glyph-count-outside-atlas-batch"
+    if scale <= 0 or glyph_height_px <= 0: return "degenerate-text-metrics"
+    ""
+
+fn vulkan_font_batch_composited(status: text, quad_count: i64, dispatch_count: i64,
+                                batch_quads: i64) -> bool:
+    """TWIN of `engine2d_vulkan_font_batch_admits` (engine.spl:92).
+
+    It is duplicated rather than imported because engine.spl imports this module,
+    so importing back would close a cycle across the engine boundary. The two are
+    pinned against each other over a shared status/count table by
+    `backend_vulkan_bitmap_text_atlas_spec.spl`, which imports BOTH and asserts
+    they agree; change one without the other and that spec fails.
+
+    `executed` and `recorded` are the literal statuses this module emits for a
+    completed batch (:873 and :1077 record into a frame command; :935 and :1165
+    report a waited submit), so the admitted set is not hypothetical.
+    """
+    (status == "executed" or status == "recorded") and
+        quad_count == batch_quads and dispatch_count > 0
+
+fn vulkan_text_atlas_fallback_safe(status: text) -> bool:
+    """True only for the statuses `composite_font_batch` returns BEFORE recording.
+
+    `unavailable` and `rejected` are all raised by pre-flight validation, so the
+    destination is untouched and a CPU redraw cannot double-composite. `failed`
+    can be raised after the batch was recorded or submitted, so it is never safe.
+    """
+    status == "unavailable" or status == "rejected"
+
 impl VulkanBackend:
+    me _bitmap_text_atlas_path(x: i32, y: i32, text_val: text, color: u32,
+                               font_size: i32) -> bool:
+        """Composite bitmap text through the font atlas.
+
+        Returns true when the caller must still run the CPU raster path, and
+        records on `last_text_path` / `last_text_fallback_reason` which lane
+        actually ran — never claiming the atlas ran when it did not.
+        """
+        val metrics = text_metrics(text_val, font_size)
+        val pipeline = self.font_atlas_pipeline_evidence()
+        val blocked = vulkan_bitmap_text_atlas_block_reason(
+            self.initialized, self.clip_enabled, self.mask_buf.len(),
+            pipeline.status, pipeline.shader_handle, pipeline.pipeline_handle,
+            color, text_val.len(), vulkan_bitmap_text_atlas_eligible(text_val),
+            metrics.scale, metrics.glyph_height_px)
+        if blocked != "":
+            self.last_text_path = VULKAN_TEXT_PATH_CPU_RASTER
+            self.last_text_fallback_reason = blocked
+            return true
+        val quads = vulkan_bitmap_text_quads(
+            text_val, color, metrics.scale, metrics.advance, metrics.glyph_height_px)
+        if quads.len() == 0:
+            self.last_text_path = VULKAN_TEXT_PATH_CPU_RASTER
+            self.last_text_fallback_reason = "empty-glyph-batch"
+            return true
+        var no_dirty: [FontRenderQuad] = []
+        # Built as a function-local literal and passed INBOUND, exactly like
+        # engine.spl:1593 — a FontRenderBatch must never cross a return.
+        val batch = FontRenderBatch(
+            program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION,
+            font_identity: vulkan_bitmap_font_identity(metrics.scale, metrics.glyph_height_px),
+            face_generation: metrics.scale.to_i64(),
+            valid: true,
+            atlas_width: vulkan_bitmap_font_atlas_width(metrics.scale),
+            atlas_height: vulkan_bitmap_font_atlas_height(metrics.scale, metrics.glyph_height_px),
+            atlas_pixels: vulkan_bitmap_font_atlas_pixels(metrics.scale, metrics.glyph_height_px),
+            quads: quads,
+            atlas_generation: metrics.scale.to_i64(),
+            dirty_rects: no_dirty,
+            atlas_owner_generation: -1,
+            render_config_identity: VULKAN_BITMAP_FONT_CONFIG_IDENTITY,
+            transform_identity: "uniform-scale;translate-late",
+            execution_target: "vulkan",
+            execution_policy: FontExecutionPolicy.Suggested
+        )
+        val evidence = self.composite_font_batch(x, y, batch)
+        if vulkan_font_batch_composited(evidence.status, evidence.quad_count,
+                                        evidence.dispatch_count, quads.len()):
+            self.last_text_path = VULKAN_TEXT_PATH_FONT_ATLAS
+            self.last_text_fallback_reason = ""
+            return false
+        if vulkan_text_atlas_fallback_safe(evidence.status):
+            self.last_text_path = VULKAN_TEXT_PATH_CPU_RASTER
+            self.last_text_fallback_reason = evidence.reason
+            return true
+        # Fail closed: the batch may already be recorded or submitted, so a CPU
+        # redraw would blend a second copy of the same glyphs over it. Leave the
+        # surface exactly as composite_font_batch left it and say so.
+        self.last_text_path = VULKAN_TEXT_PATH_FONT_ATLAS_ABANDONED
+        self.last_text_fallback_reason = evidence.reason
+        false
+
+    me _bitmap_text_bg_atlas_path(x: i32, y: i32, text_val: text, fg: u32, bg: u32,
+                                  font_size: i32) -> bool:
+        """Background band plus the glyph batch; true when the CPU path must still run."""
+        val metrics = text_metrics(text_val, font_size)
+        val pipeline = self.font_atlas_pipeline_evidence()
+        val blocked = vulkan_bitmap_text_atlas_block_reason(
+            self.initialized, self.clip_enabled, self.mask_buf.len(),
+            pipeline.status, pipeline.shader_handle, pipeline.pipeline_handle,
+            fg, text_val.len(), vulkan_bitmap_text_atlas_eligible(text_val),
+            metrics.scale, metrics.glyph_height_px)
+        if blocked != "" or metrics.width <= 0 or metrics.height <= 0:
+            self.last_text_path = VULKAN_TEXT_PATH_CPU_RASTER
+            self.last_text_fallback_reason = if blocked != "": blocked else: "degenerate-text-metrics"
+            return true
+        # The CPU path COPIED a background-filled buffer over the whole band, so
+        # the band is a plain rect write and the glyphs then blend over it.
+        self.draw_rect_filled(x, y, metrics.width, metrics.height, bg)
+        # Nothing in this backend emits a Vulkan barrier between compute
+        # dispatches, so a batched glyph dispatch could read the band before the
+        # rect dispatch wrote it. `_flush_pending_compute` submits AND waits on a
+        # fence (`vulkan_sffi_submit_and_wait_fence`,
+        # backend_vulkan_helpers.spl:236), so the band is complete before the
+        # glyphs are recorded.
+        # TODO: [gpu][P2] this flushes the WHOLE pending primitive batch, not
+        # just the background band, so a text-heavy frame with `draw_text_bg`
+        # degrades from one submit per frame to one per background-text draw.
+        # The fix is a pipeline barrier between the two dispatches; `sffi_vulkan`
+        # exposes no barrier entry point today (grep: zero `barrier` call sites
+        # in src/lib/**/engine2d). Add `vulkan_sffi_pipeline_barrier` and replace
+        # this flush. `draw_text` (no background band) is unaffected.
+        if self.pending_compute_command > 0:
+            val flushed = self._flush_pending_compute()
+            if flushed <= 0:
+                self.last_text_path = VULKAN_TEXT_PATH_FONT_ATLAS_ABANDONED
+                self.last_text_fallback_reason = if flushed < 0:
+                    "background-band-completion-unknown"
+                else:
+                    "background-band-submit-failed"
+                return false
+        self._bitmap_text_atlas_path(x, y, text_val, fg, font_size)
+
     me set_font_oracle_mode(enabled: bool):
         # Production rendering never reads the full surface or runs the CPU
         # renderer. Tests and evidence collectors opt in explicitly.
@@ -904,4 +1219,14 @@ export vulkan_font_frame_batch_contract
 export VULKAN_FONT_FRAME_GLYPH_CAP, vulkan_font_gpu_resource_bytes_for_params
 export VULKAN_FONT_PACKED_HEADER_WORDS, VULKAN_FONT_PACKED_GLYPH_WORDS
 export VULKAN_FONT_PACKED_MAX_BYTES, vulkan_font_packed_params
+export VULKAN_BITMAP_FONT_FIRST_CODE, VULKAN_BITMAP_FONT_LAST_CODE
+export VULKAN_BITMAP_FONT_CELL_COUNT, VULKAN_BITMAP_FONT_CELL_COLUMNS
+export VULKAN_BITMAP_FONT_CONFIG_IDENTITY
+export VULKAN_TEXT_PATH_FONT_ATLAS, VULKAN_TEXT_PATH_FONT_ATLAS_ABANDONED
+export VULKAN_TEXT_PATH_CPU_RASTER, VULKAN_TEXT_PATH_NOT_DRAWN
+export vulkan_bitmap_font_atlas_width, vulkan_bitmap_font_atlas_height
+export vulkan_bitmap_font_identity, vulkan_bitmap_text_atlas_eligible
+export vulkan_bitmap_font_atlas_pixels, vulkan_bitmap_text_quads
+export vulkan_bitmap_text_atlas_block_reason, vulkan_font_batch_composited
+export vulkan_text_atlas_fallback_safe
 use std.gc_async_mut.gpu.engine2d.backend.{RenderBackend, Engine2DExtended}
