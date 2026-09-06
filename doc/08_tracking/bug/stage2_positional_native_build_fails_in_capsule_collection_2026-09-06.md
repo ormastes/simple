@@ -102,6 +102,37 @@ native-build unit must state why. About attributability, not success: a build
 that succeeds passes; a build that fails passes only if it named a reason.
 Fatal 5-fixture selftest. Scope limit: positional form, `--backend llvm` only.
 
+## A cranelift-built Stage 2 is NOT a cheap substitute for verification
+
+Measured 2026-09-06. A Stage-2-equivalent compiler was rebuilt from the edited
+sources with the aarch64 Rust seed (`/home/yoon/.cargo-target-segv/release/simple`,
+`--entry src/app/cli/bootstrap_main.spl`, `--backend cranelift`): **834 modules
+compiled, 0 failed, 733s**, binary 152,357 KB. That the build succeeded also
+proves the diagnostics edits parse and lower cleanly.
+
+Running that binary positional on the fixture, `--backend llvm`:
+
+```
+rc=139 (SIGSEGV)
+last progress line: [build] hir 1/1 step 2/6 ... hello_world
+```
+
+It dies in the **HIR phase**, several steps before the capsule-collection
+checkpoint, so it never exercises the code under investigation. The failure is
+therefore backend-of-the-compiler dependent, and cranelift — the ~12-minute
+option — cannot verify the ~40-minute LLVM lane's defect. Two separate defects
+are now visible on this host:
+
+1. an LLVM-built Stage 2 reaches codegen, produces a correct object, and fails
+   in collection with no diagnostic (this record);
+2. a cranelift-built Stage 2 SEGVs in HIR and never gets that far (new, and not
+   the same bug).
+
+Note also: the rebuilt binary links against `libunwind.so.1`, which the tracked
+`simple.rejected` does not; it needs
+`LD_LIBRARY_PATH=/home/yoon/dev/llvm/install/lib/aarch64-unknown-linux-gnu` or it
+exits before `main` with a loader error. Do not mistake that for a compiler fault.
+
 ## Next step
 
 Rebuild a Stage 2 carrying these diagnostics and read the
