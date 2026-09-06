@@ -171,11 +171,26 @@ Bitbucket coordinates resolve on the same shape:
 ```sdn
 # .spipe/config.sdn — tracked by git, so NAMES of secrets only, never secrets
 devhub:
-  git_backend: bitbucket
+  git_backend: bitbucket       # devhub gh / git
+  wiki_backend: confluence     # devhub wiki
+  tasks_backend: jira          # devhub tasks
   bb_workspace: acme
   bb_repo: widgets
   bitbucket_token_env: BB_TOKEN
 ```
+
+**This one committed section answers "which backends does this project use" for
+every facade.** `wiki` and `tasks` previously read the *user* config only, so a
+team could not record that its wiki is Confluence and its tracker is Jira —
+each developer configured it in their own home directory, and an agent in a
+fresh clone silently got the hardcoded default. Each facade now resolves:
+
+```
+--backend flag  >  DEVHUB_{GIT,WIKI,TASKS}_BACKEND  >  .spipe/config.sdn  >  ~/.config/itf/config.sdn  >  default
+```
+
+(`git` adds the origin-remote sniff before its default, and errors rather than
+defaulting.) Unset everywhere, every facade behaves exactly as it did before.
 
 Credentials resolve `[token_env]` (read `$NAME` from the environment) >
 `[token_cmd]` (run a command, e.g. `pass show ...`) > `auth.sdn` plaintext.

@@ -44,12 +44,14 @@ class RepoDevhubConfig:
     different rungs.
     """
     git_backend: text
+    wiki_backend: text   # confluence | github
+    tasks_backend: text  # jira | github
     bb_workspace: text
     bb_repo: text
     token_envs: [(text, text)]  # (provider, ENV VAR NAME) — never a secret
 
     static fn empty() -> RepoDevhubConfig:
-        RepoDevhubConfig(git_backend: "", bb_workspace: "", bb_repo: "", token_envs: [])
+        RepoDevhubConfig(git_backend: "", wiki_backend: "", tasks_backend: "", bb_workspace: "", bb_repo: "", token_envs: [])
 
 
 # ============================================================================
@@ -112,6 +114,32 @@ fn pick_git_backend(flag: text, env_value: text, repo_value: text, user_value: t
     ("", "")
 
 
+fn pick_facade_backend(env_value: text, repo_value: text, user_value: text, fallback: text) -> text:
+    """The `wiki` and `tasks` equivalent of pick_git_backend's chain:
+    env > repo config > user config > the facade's hardcoded fallback.
+
+    These two facades resolved from the USER config only, so a team could not
+    commit "this repository's wiki is Confluence and its tracker is Jira" —
+    every developer had to configure it in their own home directory, and an
+    agent working in a fresh clone got the hardcoded default regardless of what
+    the project actually uses. Adding the repo rung is what makes the committed
+    answer shared, matching what `git` already does.
+
+    Deliberately NOT validated against a known-backend list here, unlike
+    pick_git_backend: `wiki` and `tasks` each validate their own two accepted
+    values at the dispatch site and must keep reporting their own error text.
+    A value is passed through as configured; only emptiness moves to the next
+    rung.
+    """
+    if env_value.trim() != "":
+        return env_value.trim()
+    if repo_value.trim() != "":
+        return repo_value.trim()
+    if user_value.trim() != "":
+        return user_value.trim()
+    fallback
+
+
 fn unresolved_backend_message() -> text:
     """The error shown when every rung came up empty. Names each way to fix
     it — an error that does not say what to do is a dead end."""
@@ -155,21 +183,29 @@ fn parse_repo_devhub_config(content: text) -> RepoDevhubConfig:
     records the NAME of an environment variable, never a secret. That matters
     because `.spipe/config.sdn` is a git-TRACKED file.
     """
-    var out = RepoDevhubConfig.empty()
+    var git_backend = ""
+    var wiki_backend = ""
+    var tasks_backend = ""
+    var bb_workspace = ""
+    var bb_repo = ""
+    var token_envs: [(text, text)] = []
     for entry in parse_sdn_sections(content):
         if entry.0 == "devhub":
             val key = entry.1
             val value = strip_inline_comment(entry.2)
             if key == "git_backend":
-                out = RepoDevhubConfig(git_backend: value, bb_workspace: out.bb_workspace, bb_repo: out.bb_repo, token_envs: out.token_envs)
+                git_backend = value
+            else if key == "wiki_backend":
+                wiki_backend = value
+            else if key == "tasks_backend":
+                tasks_backend = value
             else if key == "bb_workspace":
-                out = RepoDevhubConfig(git_backend: out.git_backend, bb_workspace: value, bb_repo: out.bb_repo, token_envs: out.token_envs)
+                bb_workspace = value
             else if key == "bb_repo":
-                out = RepoDevhubConfig(git_backend: out.git_backend, bb_workspace: out.bb_workspace, bb_repo: value, token_envs: out.token_envs)
+                bb_repo = value
             else if key.ends_with("_token_env"):
-                val provider = key[0:key.len() - 10]
-                out = RepoDevhubConfig(git_backend: out.git_backend, bb_workspace: out.bb_workspace, bb_repo: out.bb_repo, token_envs: out.token_envs + [(provider, value)])
-    out
+                token_envs = token_envs + [(key[0:key.len() - 10], value)]
+    RepoDevhubConfig(git_backend: git_backend, wiki_backend: wiki_backend, tasks_backend: tasks_backend, bb_workspace: bb_workspace, bb_repo: bb_repo, token_envs: token_envs)
 
 
 # ============================================================================

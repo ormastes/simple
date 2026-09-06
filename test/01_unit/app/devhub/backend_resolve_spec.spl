@@ -20,6 +20,7 @@ use app.devhub.backend_resolve.{
     sniff_backend_from_remote_url,
     pick_git_backend,
     parse_repo_devhub_config,
+    pick_facade_backend,
     strip_inline_comment,
     unresolved_backend_message
 }
@@ -97,6 +98,36 @@ describe "devhub git backend resolution":
             expect(backend).to_equal("github")
             expect(source).to_equal("git remote origin")
 
+    describe "pick_facade_backend (wiki and tasks)":
+        # `wiki` and `tasks` resolved from the USER config only, so a team
+        # could not commit "this project's wiki is Confluence and its tracker
+        # is Jira" — every developer configured it in their own home
+        # directory, and an agent in a fresh clone got the hardcoded default
+        # regardless of what the project actually uses.
+        it "prefers the environment over both config files":
+            expect(pick_facade_backend("jira", "github", "github", "x")).to_equal("jira")
+
+        it "prefers the repo config over the user config":
+            expect(pick_facade_backend("", "jira", "github", "x")).to_equal("jira")
+
+        it "prefers the user config over the facade's fallback":
+            expect(pick_facade_backend("", "", "github", "confluence")).to_equal("github")
+
+        it "falls back when nothing is configured, preserving old behaviour":
+            # The whole point of the fallback rung: an unconfigured repo
+            # behaves exactly as it did before this chain existed.
+            expect(pick_facade_backend("", "", "", "confluence")).to_equal("confluence")
+            expect(pick_facade_backend("", "", "", "github")).to_equal("github")
+
+        it "treats a whitespace-only value as unset":
+            expect(pick_facade_backend("   ", "", "", "github")).to_equal("github")
+
+        it "passes an unrecognised value through for the facade to reject":
+            # Unlike pick_git_backend, this does NOT validate: `wiki` and
+            # `tasks` each validate their own two accepted values at the
+            # dispatch site and must keep emitting their own error text.
+            expect(pick_facade_backend("", "sharepoint", "", "confluence")).to_equal("sharepoint")
+
     describe "unresolved_backend_message":
         it "names every way to fix it":
             val msg = unresolved_backend_message()
@@ -122,6 +153,20 @@ describe "devhub git backend resolution":
             expect(cfg.git_backend).to_equal("bitbucket")
             expect(cfg.bb_workspace).to_equal("acme")
             expect(cfg.bb_repo).to_equal("widgets")
+
+        it "carries every facade's backend, not just git":
+            # One committed section answers "which backends does this project
+            # use" for all three facades.
+            val content = "devhub:\n  git_backend: bitbucket\n  wiki_backend: github\n  tasks_backend: jira\n"
+            val cfg = parse_repo_devhub_config(content)
+            expect(cfg.git_backend).to_equal("bitbucket")
+            expect(cfg.wiki_backend).to_equal("github")
+            expect(cfg.tasks_backend).to_equal("jira")
+
+        it "leaves unset facade backends empty so their fallbacks apply":
+            val cfg = parse_repo_devhub_config("devhub:\n  git_backend: github\n")
+            expect(cfg.wiki_backend).to_equal("")
+            expect(cfg.tasks_backend).to_equal("")
 
         it "ignores same-named keys in other sections":
             # A bare grep for `git_backend:` would wrongly match this.

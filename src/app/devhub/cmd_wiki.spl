@@ -8,6 +8,8 @@
 # doc/05_design/app/devhub/facade_tasks_git_wiki.md §4).
 
 use app.devhub.config.{ItfConfig, load_config, resolve_editor}
+use app.devhub.backend_resolve.{pick_facade_backend, load_repo_devhub_config}
+use std.nogc_sync_mut.env.{env_get}
 use app.devhub.auth.{check_confluence_auth}
 use app.devhub.adapter_confluence.{confluence_list_pages, confluence_get_page, confluence_create_page, confluence_update_page, confluence_delete_page, confluence_search_pages, PageListItem, PageContent, PageRef}
 use app.devhub.flags.{_extract_flag, _has_flag, _positional_args}
@@ -99,11 +101,21 @@ fn handle_wiki(args: [text]) -> i64:
 
 
 fn _wiki_backend_default() -> text:
-    """D1 precedence, step 2: the configured `wiki: default_backend:` in
-    config.sdn (ItfConfig.wiki_default_backend, gap G6), else "confluence"
-    (matches pre-existing behavior verbatim when unset)."""
-    val configured = load_config().wiki_default_backend
-    if configured != "": configured else: "confluence"
+    """D1 precedence, step 2, now with the repo rung `git` already had:
+    DEVHUB_WIKI_BACKEND > `.spipe/config.sdn` devhub: wiki_backend >
+    `~/.config/itf/config.sdn` wiki: default_backend > "confluence".
+
+    Previously this read the USER config only, so a team could not commit
+    which wiki the project actually uses — every developer configured it in
+    their own home directory, and an agent in a fresh clone silently got
+    "confluence" regardless. Unset everywhere still yields "confluence",
+    identical to the previous behavior."""
+    pick_facade_backend(
+        env_get("DEVHUB_WIKI_BACKEND"),
+        load_repo_devhub_config().wiki_backend,
+        load_config().wiki_default_backend,
+        "confluence"
+    )
 
 
 fn _wiki_dispatch_backend(args: [text]) -> text:
