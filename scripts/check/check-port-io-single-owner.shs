@@ -1,0 +1,81 @@
+#!/bin/sh
+# check-port-io-single-owner.shs -- exactly one file may declare rt_port_* externs.
+#
+# Why this exists. Until 2026-09-06, nine files under src/os each declared their
+# own `extern fn rt_port_*`. They did not agree: src/os/kernel/boot/cpu.spl had
+# `rt_port_inb(port: u64) -> u64` while src/os/drivers/rtc/rtc.spl had
+# `rt_port_inb(port: u16) -> u8`, against a C ABI of
+# `uint8_t rt_port_inb(uint16_t)`. Nothing caught it, because the only check on
+# that boundary enumerated consumers BY NAME and asserted they imported a
+# compile-time adapter -- so a consumer that dropped the import simply joined an
+# already-red check, and the contract decayed to one live consumer unnoticed.
+#
+# A per-file extern is one-by-one rt_ access: the failure mode is not "a call is
+# missing" but "two callers disagree about a symbol's ABI", which no per-file
+# check can see. So this gate is tree-wide and negative -- it counts DECLARERS,
+# not calls, and the bar is one.
+#
+# Verdict is the LAST stdout line, per the repo convention:
+#   PASS  -- <n> declaring file(s) checked ...      exit 0   (n is always > 0)
+#   FAIL  -- ...                                    exit 1
+#   ERROR -- nothing was checked (<reason>)         exit 2
+# Scanning zero files is ERROR, never PASS: absence of evidence is not evidence.
+set -eu
+
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+SCAN_DIR=${PORT_IO_SCAN_DIR:-"$ROOT/src/os"}
+OWNER=${PORT_IO_OWNER:-"src/os/kernel/arch/x86/port_io_owner.spl"}
+PATTERN='extern fn rt_port_'
+
+scan() {
+    # Prints one repo-relative path per declaring file. Deliberately NOT piped
+    # into the caller's status check -- a pipeline's $? is the last command's,
+    # which has produced false greens in this repo before.
+    ( cd "$1" && grep -rl "$PATTERN" . 2>/dev/null | sed 's|^\./||' ) || true
+}
+
+selftest() {
+    st=$(mktemp -d) || { echo "ERROR — nothing was checked (mktemp failed)"; exit 2; }
+    # 1. one declarer, and it is the owner -> PASS
+    mkdir -p "$st/a/kernel/arch/x86"
+    printf 'extern fn rt_port_inb(port: u16) -> u8\n' > "$st/a/kernel/arch/x86/port_io_owner.spl"
+    n=$(scan "$st/a" | wc -l); [ "$n" -eq 1 ] || { echo "selftest: clean fixture saw $n"; rm -rf "$st"; return 1; }
+    # 2. a second declarer must be visible (the incident's exact shape)
+    mkdir -p "$st/a/drivers/rtc"
+    printf 'extern fn rt_port_inb(port: u64) -> u64\n' > "$st/a/drivers/rtc/rtc.spl"
+    n=$(scan "$st/a" | wc -l); [ "$n" -eq 2 ] || { echo "selftest: offender fixture saw $n"; rm -rf "$st"; return 1; }
+    # 3. a tree with no declarer at all must scan to 0, forcing the caller to ERROR
+    mkdir -p "$st/b"; printf 'val x = 1\n' > "$st/b/nothing.spl"
+    n=$(scan "$st/b" | wc -l); [ "$n" -eq 0 ] || { echo "selftest: empty fixture saw $n"; rm -rf "$st"; return 1; }
+    rm -rf "$st"
+    echo "selftest: 3 fixtures, ok"
+}
+
+selftest || { echo "ERROR — nothing was checked (selftest failed)"; exit 2; }
+
+[ -d "$SCAN_DIR" ] || { echo "ERROR — nothing was checked (no scan dir $SCAN_DIR)"; exit 2; }
+
+files=$(scan "$SCAN_DIR")
+count=$(printf '%s' "$files" | grep -c . || true)
+
+if [ "$count" -eq 0 ]; then
+    echo "ERROR — nothing was checked (no file under $SCAN_DIR declares $PATTERN; the owner should)"
+    exit 2
+fi
+
+owner_rel=${OWNER#src/os/}
+offenders=$(printf '%s\n' "$files" | grep -v "^${owner_rel}$" || true)
+n_off=$(printf '%s' "$offenders" | grep -c . || true)
+
+if [ "$n_off" -ne 0 ]; then
+    echo "== files declaring rt_port_* externs that are not the owner =="
+    printf '%s\n' "$offenders" | sed 's|^|offender=src/os/|'
+    echo
+    echo "Port I/O must reach the runtime through $OWNER, not through a per-file"
+    echo "extern. Two files declaring the same symbol can and did disagree about"
+    echo "its ABI. Import the owner instead of redeclaring."
+    echo "FAIL — $count declaring file(s) checked, $n_off must not declare rt_port_* externs"
+    exit 1
+fi
+
+echo "PASS — $count declaring file(s) checked, all rt_port_* externs confined to $OWNER"
