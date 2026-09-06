@@ -15,6 +15,11 @@
 #      `sites` in this registry means exactly what that gate's count means.
 #   3. scripts/check/rt_alias_map.sdn — the typed std alias for a symbol
 #      (module + fn) and its migration class, where one exists.
+#   4. config/api/api_group_overrides.sdn — the ONE hand-maintained input.
+#      A row assigns a symbol to an existing named group, overriding the
+#      family heuristic below. It exists so that a genuinely small family can
+#      be GROUPED rather than baselined as permanent `misc` debt; see that
+#      file's header.
 #
 # Group derivation (mechanical, no curation — see
 # doc/04_architecture/runtime/rt_api/rt_api_group_policy.md):
@@ -24,6 +29,7 @@
 #   `core`, which is already a real family (`rt_core_*`); reusing that name
 #   would silently merge a genuine group with the leftovers.
 #   The residual group stays visible so it can be shrunk over time.
+#   An override row (source 4) wins over both rules for the symbol it names.
 #
 # Usage: sh scripts/check/gen-api-registry.shs [--root DIR] [--out FILE]
 #                                              [--census FILE]
@@ -102,6 +108,24 @@ awk '
     sym != "" && /^      class:/ { print sym "\t" $2; sym = "" }
 ' "$ROOT/scripts/check/rt_alias_map.sdn" 2>/dev/null | sort -u > "$WORK/aliascls.tsv"
 
+# ---- 3b. hand-maintained group overrides ----------------------------------
+# The only curated input. Rows are `surface, symbol, group, reason`; only the
+# `rt` surface is consumed here.
+OVERRIDES="$ROOT/config/api/api_group_overrides.sdn"
+: > "$WORK/ovr.tsv"
+if [ -f "$OVERRIDES" ]; then
+    awk '
+        substr($0, 1, 1) == "#" { next }
+        /^    rt, / {
+            n = split($0, f, ", ")
+            if (n < 3) next
+            for (i = 1; i <= n; i++) gsub(/^[ \t"]+|[ \t"]+$/, "", f[i])
+            if (f[2] == "" || f[3] == "") next
+            print f[2] "\t" f[3]
+        }
+    ' "$OVERRIDES" | sort -u > "$WORK/ovr.tsv"
+fi
+
 # ---- join: universe = census symbols UNION called symbols -----------------
 { cut -f1 "$WORK/lanes.tsv"; grep -v '^#' "$WORK/sites.tsv" | cut -f1;
   cat "$WORK/ctext.txt" "$WORK/rtext.txt"; } | sort -u > "$WORK/all.txt"
@@ -121,33 +145,38 @@ mkdir -p "$(dirname "$OUT")"
 awk -v cmode="$C_MODE" -v rmode="$R_MODE" -v gmin="$GROUP_MIN" \
     -v total="$TOTAL" -v ngroup="$NGROUP" -v stamp="$(date -u +%Y-%m-%d)" \
     -v base="$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null)" '
+    # A hand-maintained override wins; otherwise the family heuristic, with
+    # the residual bucket `misc` for families below the threshold.
+    function group_of(sym,   s, a) {
+        if (sym in ovr) return ovr[sym]
+        s = sym; sub(/^rt_/, "", s); split(s, a, "_")
+        return (a[1] in grp) ? a[1] : "misc"
+    }
     function desc_of(sym, g,   s, n, a, i, out) {
         s = sym; sub("^rt_" g "_", "", s); sub("^rt_", "", s)
         gsub(/_/, " ", s)
         if (s == "" || s == g) s = "entry point"
         return g ": " s
     }
-    FILENAME == ARGV[1] { grp[$0] = 1; next }
-    FILENAME == ARGV[2] { cl[$1] = $2; rl[$1] = $3; tw[$1] = $4; next }
-    FILENAME == ARGV[3] { st[$1] = $2; next }
-    FILENAME == ARGV[4] { al[$1] = $2; next }
-    FILENAME == ARGV[5] { ac[$1] = $2; next }
-    FILENAME == ARGV[6] {
+    FILENAME == ARGV[1] { ovr[$1] = $2; novr++; next }
+    FILENAME == ARGV[2] { grp[$0] = 1; next }
+    FILENAME == ARGV[3] { cl[$1] = $2; rl[$1] = $3; tw[$1] = $4; next }
+    FILENAME == ARGV[4] { st[$1] = $2; next }
+    FILENAME == ARGV[5] { al[$1] = $2; next }
+    FILENAME == ARGV[6] { ac[$1] = $2; next }
+    FILENAME == ARGV[7] {
         # symbol -> allowlisted provider entry -> allowlisted call count.
         # The group provider is the entry serving the most of the group`s
         # allowlisted calls; a group with none has provider "-", which is
         # exactly the "no provider yet" case the policy calls out.
-        s = $1; sub(/^rt_/, "", s); split(s, pa, "_")
-        pg = (pa[1] in grp) ? pa[1] : "misc"
-        pv[pg SUBSEP $2] += $3
+        pv[group_of($1) SUBSEP $2] += $3
         next
     }
-    FILENAME == ARGV[7] { ctx[$0] = 1; next }
-    FILENAME == ARGV[8] { rtx[$0] = 1; next }
+    FILENAME == ARGV[8] { ctx[$0] = 1; next }
+    FILENAME == ARGV[9] { rtx[$0] = 1; next }
     {
         sym = $0
-        s = sym; sub(/^rt_/, "", s); split(s, a, "_"); fam = a[1]
-        g = (fam in grp) ? fam : "misc"
+        g = group_of(sym)
         cnm = (cl[sym] == "yes"); rnm = (rl[sym] == "yes")
         c = cnm || (sym in ctx); r = rnm || (sym in rtx)
         lane = (c && r) ? "both" : (c ? "c" : (r ? "rust" : "none"))
@@ -177,6 +206,7 @@ awk -v cmode="$C_MODE" -v rmode="$R_MODE" -v gmin="$GROUP_MIN" \
         printf "# group threshold: a `rt_<family>_*` family with >= %d distinct symbols is a\n", gmin
         printf "#   group; smaller families fall into the residual group `misc`\n"
         printf "#   (NOT `core` — `rt_core_*` is a real family of its own).\n"
+        printf "# group overrides applied from config/api/api_group_overrides.sdn: %d\n", novr+0
         ngrp = asorti_keys(gsyms, karr)
         printf "# rt surface counts: symbols=%d groups=%d (including the residual `misc`)\n",
                total, ngrp
@@ -231,9 +261,9 @@ awk -v cmode="$C_MODE" -v rmode="$R_MODE" -v gmin="$GROUP_MIN" \
             out[j+1] = t }
         return n
     }
-' "$WORK/groups.txt" "$WORK/lanes.tsv" "$WORK/sites.tsv" "$WORK/alias.tsv" \
-  "$WORK/aliascls.tsv" "$WORK/prov.tsv" "$WORK/ctext.txt" "$WORK/rtext.txt" \
-  "$WORK/all.txt" > "$OUT"
+' "$WORK/ovr.tsv" "$WORK/groups.txt" "$WORK/lanes.tsv" "$WORK/sites.tsv" \
+  "$WORK/alias.tsv" "$WORK/aliascls.tsv" "$WORK/prov.tsv" "$WORK/ctext.txt" \
+  "$WORK/rtext.txt" "$WORK/all.txt" > "$OUT"
 
 [ -s "$OUT" ] || { echo "ERROR — nothing was generated (empty output)" >&2; exit 2; }
 echo "wrote $OUT ($TOTAL symbol(s), $NGROUP named family group(s) plus the residual \`misc\`)"
