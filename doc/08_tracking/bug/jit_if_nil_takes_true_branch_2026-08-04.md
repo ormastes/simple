@@ -317,3 +317,60 @@ chokepoint reached by `if` (`mir_lowering_stmts.spl:2744`), if-chain arms
 `while nil:`, `not nil`, `nil and x`, `x or nil`, and a call returning a nil
 optional. That is 6 of the 7 forms the 2026-08-17 sweep enumerated; the seventh
 is the seed's own engine behaviour, which is untouched.
+
+### 2026-09-06 corrections to the two entries above — measured, not assumed
+
+Three claims made above were tightened after being tested rather than reasoned
+about. They are corrected here in place; the original wording stays visible in
+the entries above so the record of what was believed is not erased.
+
+**1. "a CALL returning `T?` never registers an HIR type" — too broad.** When the
+callee's declared return type IS known to MIR (`fn_return_types`, filled by
+`lower_module`'s pre-pass), the call result temp IS registered with it and the
+PRE-EXISTING registered-local probe fires on its own. A third probe keyed on
+`resolved_call_hir_return_type` was written, measured against exactly that
+shape, found redundant (the spec passed identically with and without it), and
+REMOVED rather than left in as unused code (`.claude/rules/code-style.md`:
+"NEVER add unused code"). What the static-type arm in hunk 1 actually covers is
+the narrower case of a call node that carries a type which MIR could not
+otherwise derive. Two spec examples for the untyped-call shape were kept, but
+relabelled in the file as a FENCE on the pre-existing path, explicitly NOT as
+proof of this fix — they pass either way, and saying so is the point.
+
+**2. Blast radius of the `not` hunk: say "optional-typed", not "nil-shaped".**
+Every operand whose lowered local carries an `Optional` HIR type changes, not
+only literal nils. Concretely `val b: bool? = false; if not b:` flips from TRUE
+to FALSE — CORRECT under the presence rule
+(`test/01_unit/compiler/codegen/condition_tag_decode_spec.spl` pins that rule
+and already names this exact `bool? = false` case as a known residual of the
+truthiness-table disagreement), but it IS a behaviour change and must not be
+described as a no-op. Census of the affected idiom in owned source:
+
+```
+$ /usr/bin/grep -rEn "not [A-Za-z_][A-Za-z0-9_.]*\.\?" src/compiler src/lib --include=*.spl | wc -l
+367
+```
+
+367 `not <expr>.?` sites in the compiler and stdlib now route their operand
+through the presence rewrite. Direction is correct-ward — `.?` in condition
+position was always specified as a presence test — but this is a source count,
+NOT execution evidence: no self-hosted binary exists on this host to run them.
+Stated as unverified rather than implied safe.
+
+**3. Lint verdict for the new spec: NOT OBTAINED.** `bin/simple lint` fails
+internally on it (`string index out of bounds: index is 13083 but length is
+13083`) and SIGSEGVs on its untouched neighbour
+`condition_tag_decode_spec.spl`, so lint coverage for this directory is
+currently zero. Filed as
+`doc/08_tracking/bug/lint_internal_error_and_segv_on_compiler_codegen_specs_2026-09-06.md`
+rather than worked around by reshuffling the spec's text.
+
+**PR collision check (35 open PRs, swept 2026-09-06):** no open PR touches
+`src/compiler/50.mir/mir_lowering_stmts.spl` or
+`src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl`. (PR #257 does claim
+`50.mir/_MirLowering/function_lowering.spl` and
+`50.mir/_MirLoweringExpr/switch_operators_calls.spl`; neither was edited here.)
+
+**Landing note:** the new spec exists only under `test/01_unit/`, with no
+`test/unit/` mirror, so `scripts/check/check-test-tree-divergence.shs` may want
+a baseline row when this lands.
