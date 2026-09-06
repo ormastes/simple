@@ -11,16 +11,16 @@ bootstrap_stage3_error() {
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
 source_output=${1:?usage: resume-stage3-from-admitted.sh OUTPUT_DIR}
-case "$source_output" in /*|*../*|../*|*/..|..) bootstrap_stage3_error "OUTPUT_DIR must be a repo-relative path without .. components: $source_output" ;; esac
-output="$root/$source_output"
-[ "$(CDPATH= cd -- "$output" && pwd -P)" = "$output" ] ||
-  bootstrap_stage3_error "OUTPUT_DIR is not a canonical existing directory: $output"
 
 BOOTSTRAP_STAGE3_FACADE_PATH="$root/scripts/check/lib/bootstrap-stage3-provenance.shs"
 BOOTSTRAP_STAGE3_VERSION_ROOT=$root
 export BOOTSTRAP_STAGE3_FACADE_PATH BOOTSTRAP_STAGE3_VERSION_ROOT
 . "$BOOTSTRAP_STAGE3_FACADE_PATH"
 . "$root/scripts/check/lib/bootstrap-planner-admission-bound.shs"
+bootstrap_stage3_resume_output_path "$source_output" "$root" \
+  "${SIMPLE_BOOTSTRAP_EXTERNAL_OUTPUT_ROOT:-}" ||
+  bootstrap_stage3_error "OUTPUT_DIR is not a canonical allowlisted directory: $source_output"
+output=$BOOTSTRAP_STAGE3_RESUME_OUTPUT
 planner_admission=${SIMPLE_BOOTSTRAP_REASON_RECEIPT:-}
 [ -n "$planner_admission" ] || {
   echo "bootstrap-policy-error: planner-admission-v2-required" >&2; exit 64;
@@ -95,6 +95,120 @@ runtime_origin_after="$stage3/runtime-origin-after.txt"
 runtime_admitted="$stage3/runtime-admitted.txt"
 lock="$output.lock"
 archive="$stage3/recovery-threads1"
+if [ -e "$archive" ] || [ -L "$archive" ]; then
+  [ -d "$archive" ] && [ ! -L "$archive" ] ||
+    bootstrap_stage3_error "recovery-threads1 must be a real directory: $archive"
+else
+  mkdir -- "$archive" ||
+    bootstrap_stage3_error "could not create recovery-threads1: $archive"
+fi
+[ "$(bootstrap_stage3_canonical_path "$archive")" = "$archive" ] ||
+  bootstrap_stage3_error "recovery-threads1 is not canonical: $archive"
+
+# A self-hosted native-build controller can contain a crashed worker, print the
+# worker's unsigned exit code, and still return shell status 0.  The recovery
+# wrapper is the supervising parent, so it must classify both channels before
+# any sanity or provenance receipt can be minted.
+bootstrap_stage3_resume_effective_status() {
+  bootstrap_stage3_resume_shell_status=$1
+  bootstrap_stage3_resume_log=$2
+  bootstrap_stage3_resume_candidate=$3
+  bootstrap_stage3_resume_worker_status=absent
+  bootstrap_stage3_resume_diagnostic_class=none
+  bootstrap_stage3_resume_signal_identity=none
+  case "$bootstrap_stage3_resume_shell_status" in
+    ''|*[!0-9]*|*[0-9][0-9][0-9][0-9]*) return 125 ;;
+  esac
+  [ "$bootstrap_stage3_resume_shell_status" -le 255 ] || return 125
+  { [ -f "$bootstrap_stage3_resume_log" ] &&
+    [ ! -L "$bootstrap_stage3_resume_log" ]; } || return 125
+
+  bootstrap_stage3_resume_worker_rows=$(grep -c \
+    '^error: native-build worker exited with code ' \
+    "$bootstrap_stage3_resume_log" || true)
+  if [ "$bootstrap_stage3_resume_worker_rows" -ne 0 ]; then
+    bootstrap_stage3_resume_worker_status=$(sed -n \
+      's/^error: native-build worker exited with code \([0-9][0-9]*\)[.]$/\1/p' \
+      "$bootstrap_stage3_resume_log" | tail -n 1)
+    [ -n "$bootstrap_stage3_resume_worker_status" ] || \
+      bootstrap_stage3_resume_worker_status=malformed
+    bootstrap_stage3_resume_diagnostic_class=worker-nonzero-exit
+    if [ "$bootstrap_stage3_resume_worker_status" = 4294967295 ]; then
+      # Simple's process facade represents its signed -1 sentinel as u32 in
+      # this compiled lane. It means signal OR wait failure, not a known
+      # signal number; retain that distinction instead of inventing SIGSEGV.
+      bootstrap_stage3_resume_diagnostic_class=worker-signal-or-wait-failure
+      bootstrap_stage3_resume_signal_identity=unresolved-signal-or-wait-failure
+    fi
+  fi
+  if grep -q '^timeout: .* dumped core$' "$bootstrap_stage3_resume_log"; then
+    bootstrap_stage3_resume_diagnostic_class=worker-core-dump
+    bootstrap_stage3_resume_signal_identity=core-dump-signal-unspecified
+    return 1
+  fi
+  if [ "$bootstrap_stage3_resume_worker_rows" -ne 0 ]; then
+    return 1
+  fi
+  if [ "$bootstrap_stage3_resume_shell_status" -ge 128 ]; then
+    bootstrap_stage3_resume_diagnostic_class=shell-signal-exit
+    bootstrap_stage3_resume_signal_identity=signal-number-$((bootstrap_stage3_resume_shell_status - 128))
+  elif [ "$bootstrap_stage3_resume_shell_status" -ne 0 ]; then
+    bootstrap_stage3_resume_diagnostic_class=shell-nonzero-exit
+  fi
+  [ "$bootstrap_stage3_resume_shell_status" -eq 0 ] || \
+    return "$bootstrap_stage3_resume_shell_status"
+  { [ -f "$bootstrap_stage3_resume_candidate" ] &&
+    [ ! -L "$bootstrap_stage3_resume_candidate" ] &&
+    [ -x "$bootstrap_stage3_resume_candidate" ]; } || {
+      bootstrap_stage3_resume_diagnostic_class=missing-executable-candidate
+      return 1
+    }
+  return 0
+}
+
+bootstrap_stage3_resume_write_status_receipt() {
+  bootstrap_stage3_resume_receipt=$1
+  bootstrap_stage3_resume_receipt_log=$2
+  bootstrap_stage3_resume_receipt_transcript=$3
+  bootstrap_stage3_resume_receipt_shell_status=$4
+  bootstrap_stage3_resume_receipt_effective_status=$5
+  bootstrap_stage3_resume_receipt_worker_status=$6
+  bootstrap_stage3_resume_receipt_requested_route=$7
+  bootstrap_stage3_resume_receipt_fallback_route=$8
+  bootstrap_stage3_resume_receipt_diagnostic_class=$9
+  shift 9
+  bootstrap_stage3_resume_receipt_signal_identity=$1
+  bootstrap_stage3_resume_receipt_tmp="${bootstrap_stage3_resume_receipt}.tmp.$$"
+  [ ! -L "$bootstrap_stage3_resume_receipt" ] || return 125
+  [ ! -e "$bootstrap_stage3_resume_receipt_tmp" ] &&
+    [ ! -L "$bootstrap_stage3_resume_receipt_tmp" ] || return 125
+  bootstrap_stage3_resume_receipt_result=fail
+  [ "$bootstrap_stage3_resume_receipt_effective_status" -ne 0 ] ||
+    bootstrap_stage3_resume_receipt_result=pass
+  {
+    echo schema=simple-bootstrap-stage3-native-build-status-v1
+    echo status="$bootstrap_stage3_resume_receipt_result"
+    echo shell_exit_status="$bootstrap_stage3_resume_receipt_shell_status"
+    echo effective_exit_status="$bootstrap_stage3_resume_receipt_effective_status"
+    echo worker_exit_status="$bootstrap_stage3_resume_receipt_worker_status"
+    echo requested_route="$bootstrap_stage3_resume_receipt_requested_route"
+    echo fallback_route="$bootstrap_stage3_resume_receipt_fallback_route"
+    echo diagnostic_class="$bootstrap_stage3_resume_receipt_diagnostic_class"
+    echo signal_identity="$bootstrap_stage3_resume_receipt_signal_identity"
+    echo log_sha256="$(bootstrap_stage3_hash_file \
+      "$bootstrap_stage3_resume_receipt_log")"
+    echo transcript_sha256="$(bootstrap_stage3_hash_file \
+      "$bootstrap_stage3_resume_receipt_transcript")"
+  } >"$bootstrap_stage3_resume_receipt_tmp" || {
+    rm -f "$bootstrap_stage3_resume_receipt_tmp"
+    return 125
+  }
+  mv "$bootstrap_stage3_resume_receipt_tmp" \
+    "$bootstrap_stage3_resume_receipt" || {
+    rm -f "$bootstrap_stage3_resume_receipt_tmp"
+    return 125
+  }
+}
 
 # A self-hosted native-build controller can contain a crashed worker, print the
 # worker's unsigned exit code, and still return shell status 0.  The recovery
@@ -276,17 +390,22 @@ else
   --runtime-path "$runtime" -o "$stage2")
 fi
 bootstrap_stage3_verify_sanity_evidence_receipt \
-  "$stage2_sanity" "$stage2" "$root"
+  "$stage2_sanity" "$stage2_sanity" "$(dirname -- "$stage2_sanity")" \
+  "$stage2" "$root"
 bootstrap_stage3_verify_receiver_evidence_receipt \
-  "$stage2_receiver" "$stage2" "$runtime_admitted" "$stage2_receiver_log"
+  "$stage2_receiver" "$stage2_receiver" "$stage2" "$stage2" \
+  "$runtime_admitted" "$runtime_admitted" "$stage2_receiver_log" "$stage2_receiver_log"
 bootstrap_stage3_verify_stage2_admission_receipt \
-  "$stage2_admission" "$admitted" "$source_before" "$runtime_admitted" \
-  "$tool_before" "$stage2_args" "$stage2_sanity" "$stage2_receiver" "$root"
+  "$stage2_admission" "$stage2_admission" "$admitted" "$admitted" \
+  "$source_before" "$source_before" "$runtime_admitted" "$runtime_admitted" \
+  "$runtime" "$runtime" \
+  "$tool_before" "$tool_before" "$stage2_args" "$stage2_sanity" "$stage2_sanity" \
+  "$(dirname -- "$stage2_sanity")" "$stage2_receiver" "$stage2_receiver" \
+  "$stage2_receiver_log" "$stage2_receiver_log" "$root"
 path=$(bootstrap_stage3_transcript_host_value "$stage2_transcript" PATH)
 cmp -s "$runtime_origin_before" "$runtime_origin_after"
 cmp -s "$runtime_origin_after" "$runtime_admitted"
 runtime_check="$archive/runtime-preflight.$$"
-mkdir -p "$archive"
 bootstrap_stage3_directory_snapshot "$runtime_check" "$runtime"
 cmp -s "$runtime_admitted" "$runtime_check"
 rm -f "$runtime_check"
@@ -324,7 +443,9 @@ cmp -s "$tool_before" "$resume_tool_check" || {
 }
 rm -f "$resume_source_check" "$resume_git_check" "$resume_tool_check"
 
-if [ -f "$manifest" ] && bootstrap_stage3_verify_manifest "$manifest" "$root" "$candidate" >/dev/null 2>&1; then
+if [ -f "$manifest" ] && bootstrap_stage3_verify_manifest \
+  "$manifest" "$manifest" "$root" "$candidate" "$candidate" \
+  "${manifest}.authority-map.env" >/dev/null 2>&1; then
   echo "error: canonical Stage 3 already converged: $manifest" >&2
   exit 1
 fi
@@ -542,7 +663,7 @@ rm -f "$runtime_check"
 
 CANDIDATE_FRONTEND_ROOT=$root
 COMPILER_PROBE_TIMEOUT_SECONDS=${COMPILER_PROBE_TIMEOUT_SECONDS:-5}
-COMPILER_BUILD_TIMEOUT_SECONDS=${COMPILER_BUILD_TIMEOUT_SECONDS:-60}
+COMPILER_BUILD_TIMEOUT_SECONDS=${COMPILER_BUILD_TIMEOUT_SECONDS:-180}
 COMPILER_EXEC_TIMEOUT_SECONDS=${COMPILER_EXEC_TIMEOUT_SECONDS:-5}
 COMPILER_CHECK_KILL_GRACE_SECONDS=${COMPILER_CHECK_KILL_GRACE_SECONDS:-1}
 . "$root/scripts/check/cert/redeploy_gate/candidate_frontend_admission.shs"
@@ -555,7 +676,22 @@ bootstrap_stage_sanity() (
   for name in $(env | sed 's/=.*//'); do unset "$name"; done
   HOME=$sanity_home TMPDIR=$sanity_tmp PATH=$sanity_path LC_ALL=C LANG=C
   export HOME TMPDIR PATH LC_ALL LANG
-  evidence_tmp="$evidence.tmp.$$" frontend_log="$evidence_tmp.frontend"
+  evidence_tmp="$evidence.tmp.$$"
+  frontend_log="$evidence.frontend-driver.log"
+  frontend0_log="$evidence.frontend-bootstrap-0.log"
+  frontend0_receipt="$evidence.frontend-bootstrap-0.status.env"
+  frontend1_log="$evidence.frontend-bootstrap-1.log"
+  frontend1_receipt="$evidence.frontend-bootstrap-1.status.env"
+  frontend_owner_pid=$(perl -e 'print getppid') || return 1
+  exec 6<"${frontend0_log%/*}" 7<"$root/scripts/bootstrap/run-process-group-bounded-log.pl" \
+      8<"$(command -v perl)" || return 1
+  BOOTSTRAP_STAGE3_PERL_DESCRIPTOR=/proc/$frontend_owner_pid/fd/8
+  BOOTSTRAP_STAGE3_BOUNDED_LOG_DESCRIPTOR=/proc/$frontend_owner_pid/fd/7
+  frontend_log_authority=/proc/$frontend_owner_pid/fd/6/${frontend_log##*/}
+  export BOOTSTRAP_STAGE3_PERL_DESCRIPTOR BOOTSTRAP_STAGE3_BOUNDED_LOG_DESCRIPTOR
+  frontend_hash_or_dash() { [ -f "$1" ] && bootstrap_stage3_hash_file "$1" || echo -; }
+  rm -f "$frontend_log" "$frontend0_log" "$frontend0_receipt" \
+    "$frontend1_log" "$frontend1_receipt"
   before=$(bootstrap_stage3_hash_file "$candidate_sanity")
   version_status=0; version=$(run_timeout 10 "$candidate_sanity" --version 2>&1) || version_status=$?
   version_match_status=1
@@ -568,12 +704,20 @@ bootstrap_stage_sanity() (
   frontend_status=0
   CANDIDATE_FRONTEND_BACKEND="$stage2_backend" \
     CANDIDATE_FRONTEND_BOOTSTRAP=0 \
-    candidate_frontend_smoke "$candidate_sanity" >"$frontend_log" 2>&1 || frontend_status=$?
+    CANDIDATE_FRONTEND_LOG_PATH="/proc/$frontend_owner_pid/fd/6/${frontend0_log##*/}" \
+    CANDIDATE_FRONTEND_LOG_DISPLAY_PATH="$frontend0_log" \
+    CANDIDATE_FRONTEND_STATUS_PATH="/proc/$frontend_owner_pid/fd/6/${frontend0_receipt##*/}" \
+    candidate_frontend_smoke "$candidate_sanity" >"$frontend_log_authority" 2>&1 || frontend_status=$?
   frontend_bootstrap_status=0
+  frontend_bootstrap_ran=false
   if [ "$frontend_status" -eq 0 ]; then
+    frontend_bootstrap_ran=true
     CANDIDATE_FRONTEND_BACKEND="$stage2_backend" \
       CANDIDATE_FRONTEND_BOOTSTRAP=1 \
-      candidate_frontend_smoke "$candidate_sanity" >>"$frontend_log" 2>&1 || \
+      CANDIDATE_FRONTEND_LOG_PATH="/proc/$frontend_owner_pid/fd/6/${frontend1_log##*/}" \
+      CANDIDATE_FRONTEND_LOG_DISPLAY_PATH="$frontend1_log" \
+      CANDIDATE_FRONTEND_STATUS_PATH="/proc/$frontend_owner_pid/fd/6/${frontend1_receipt##*/}" \
+      candidate_frontend_smoke "$candidate_sanity" >>"$frontend_log_authority" 2>&1 || \
       frontend_bootstrap_status=$?
     frontend_status=$frontend_bootstrap_status
   fi
@@ -591,10 +735,24 @@ bootstrap_stage_sanity() (
     echo unsupported_status="$unsupported_status"; \
     printf 'unsupported_output_sha256=%s\n' "$(printf %s "$unsupported" | bootstrap_stage3_hash_stream)"; \
     echo frontend_smoke_status="$frontend_status"; \
+    echo frontend_smoke_backend="$stage2_backend"; \
     echo frontend_smoke_bootstrap_mode_status="$frontend_bootstrap_status"; \
-    echo frontend_smoke_output_sha256="$(bootstrap_stage3_hash_file "$frontend_log")"; \
+    echo frontend_smoke_bootstrap0_raw_status="$([ -f "$frontend0_receipt" ] && sed -n 's/^raw_status=//p' "$frontend0_receipt" || echo "$frontend_status")"; \
+    echo frontend_smoke_bootstrap0_log_path="$frontend0_log"; \
+    echo frontend_smoke_bootstrap0_log_sha256="$(frontend_hash_or_dash "$frontend0_log")"; \
+    echo frontend_smoke_bootstrap0_status_path="$frontend0_receipt"; \
+    echo frontend_smoke_bootstrap0_status_sha256="$(frontend_hash_or_dash "$frontend0_receipt")"; \
+    echo frontend_smoke_bootstrap1_ran="$frontend_bootstrap_ran"; \
+    echo frontend_smoke_bootstrap1_raw_status="$([ -f "$frontend1_receipt" ] && sed -n 's/^raw_status=//p' "$frontend1_receipt" || echo not-run)"; \
+    echo frontend_smoke_bootstrap1_log_path="$([ "$frontend_bootstrap_ran" = true ] && echo "$frontend1_log" || echo -)"; \
+    echo frontend_smoke_bootstrap1_log_sha256="$([ "$frontend_bootstrap_ran" = true ] && frontend_hash_or_dash "$frontend1_log" || echo -)"; \
+    echo frontend_smoke_bootstrap1_status_path="$([ "$frontend_bootstrap_ran" = true ] && echo "$frontend1_receipt" || echo -)"; \
+    echo frontend_smoke_bootstrap1_status_sha256="$([ "$frontend_bootstrap_ran" = true ] && frontend_hash_or_dash "$frontend1_receipt" || echo -)"; \
+    echo frontend_smoke_output_sha256="$(frontend_hash_or_dash "$frontend_log")"; \
+    echo frontend_smoke_driver_log_path="$frontend_log"; \
+    echo frontend_smoke_driver_log_sha256="$(frontend_hash_or_dash "$frontend_log")"; \
     echo candidate_sha256_after="$after"; } >"$evidence_tmp"
-  mv "$evidence_tmp" "$evidence"; rm -f "$frontend_log"; [ "$sanity_status" = pass ]
+  mv "$evidence_tmp" "$evidence"; [ "$sanity_status" = pass ]
 )
 bootstrap_stage_sanity "$candidate" "$stage3_sanity" "$home" "$tmp" "$path"
 bootstrap_stage3_source_snapshot "$source_after" "$root"
@@ -626,14 +784,35 @@ BSTAGE3_SEED_INPUTS_FINGERPRINT=$seed_fingerprint BSTAGE3_SEED_FEATURES=
 BSTAGE3_GIT_BEFORE=$git_before BSTAGE3_GIT_AFTER=$git_after
 BSTAGE3_STAGE2_TRANSCRIPT=$stage2_transcript BSTAGE3_STAGE3_TRANSCRIPT=$stage3_transcript
 BSTAGE3_STAGE2_SANITY=$stage2_sanity BSTAGE3_STAGE2_RECEIVER=$stage2_receiver
+BSTAGE3_STAGE2_SANITY_DISPLAY=$stage2_sanity
+BSTAGE3_STAGE2_SANITY_COMPANION_PARENT=$(dirname -- "$stage2_sanity")
 BSTAGE3_STAGE3_SANITY=$stage3_sanity
-BSTAGE3_LOCK=$lock BSTAGE3_RUST_LOG=error
+BSTAGE3_MANIFEST_DISPLAY=$manifest
+BSTAGE3_STAGE2_RECEIVER_LOG="$(dirname -- "$stage2_receiver")/stage2-receiver.log"
+BSTAGE3_STAGE3_SANITY_COMPANION_PARENT="$(dirname -- "$stage3_sanity")"
+BSTAGE3_JOBS_RECEIPT="$(dirname -- "$manifest")/effective-build-jobs.env"
+[ -f "$BSTAGE3_JOBS_RECEIPT" ] || { printf 'schema=simple-bootstrap-effective-build-jobs-v1\nstatus=ready\njobs=%s\n' "$stage3_threads" >"$BSTAGE3_JOBS_RECEIPT"; chmod 0400 "$BSTAGE3_JOBS_RECEIPT"; }
+BSTAGE3_SEED_DISPLAY=$seed BSTAGE3_NATIVE_ALL_DISPLAY=$native_all BSTAGE3_BACKFILL_DISPLAY=$backfill
+BSTAGE3_STAGE2_DISPLAY=$stage2 BSTAGE3_STAGE2_ADMITTED_DISPLAY=$admitted BSTAGE3_STAGE2_ADMISSION_DISPLAY=$stage2_admission
+BSTAGE3_STAGE2_LOG_DISPLAY=$stage2_log BSTAGE3_STAGE3_LOG_DISPLAY=$stage3_log
+BSTAGE3_STAGE2_TRANSCRIPT_DISPLAY=$stage2_transcript BSTAGE3_STAGE3_TRANSCRIPT_DISPLAY=$stage3_transcript
+BSTAGE3_STAGE2_SANITY_COMPANION_PARENT_DISPLAY=$BSTAGE3_STAGE2_SANITY_COMPANION_PARENT
+BSTAGE3_STAGE2_RECEIVER_DISPLAY=$stage2_receiver BSTAGE3_STAGE2_RECEIVER_LOG_DISPLAY=$BSTAGE3_STAGE2_RECEIVER_LOG
+BSTAGE3_STAGE3_SANITY_DISPLAY=$stage3_sanity BSTAGE3_STAGE3_SANITY_COMPANION_PARENT_DISPLAY=$BSTAGE3_STAGE3_SANITY_COMPANION_PARENT
+BSTAGE3_GIT_AFTER_DISPLAY=$git_after BSTAGE3_RUNTIME_ORIGIN_AFTER_DISPLAY=$runtime_origin_after
+BSTAGE3_RUNTIME_ADMITTED_DISPLAY=$runtime_admitted BSTAGE3_TOOL_AUTHORITY_DISPLAY=$tool_after
+BSTAGE3_SEED_STAMP_DISPLAY=$stamp BSTAGE3_SOURCE_AFTER_DISPLAY=$source_after BSTAGE3_STAGE3_DISPLAY=$candidate
+BSTAGE3_BOOTSTRAP_SCRIPT_DISPLAY=$script BSTAGE3_HELPER_DISPLAY=$helper
+BSTAGE3_STAGE2_CACHE_DIR_DISPLAY=$stage2_cache BSTAGE3_STAGE3_CACHE_DIR_DISPLAY=$stage3_cache
+BSTAGE3_RUNTIME_PATH_DISPLAY=$runtime BSTAGE3_SOURCE_BEFORE_DISPLAY=$source_before
+BSTAGE3_TOOL_AUTHORITY_BEFORE_DISPLAY=$tool_before BSTAGE3_JOBS_RECEIPT_DISPLAY=$BSTAGE3_JOBS_RECEIPT
+BSTAGE3_LOCK=$lock BSTAGE3_LOCK_DISPLAY=$lock BSTAGE3_RUST_LOG=error
 export BSTAGE3_ROOT BSTAGE3_MANIFEST BSTAGE3_PLATFORM BSTAGE3_BACKEND BSTAGE3_MODE \
   BSTAGE3_SEED BSTAGE3_SEED_STAMP BSTAGE3_NATIVE_ALL BSTAGE3_BACKFILL \
   BSTAGE3_RUNTIME_ORIGIN_BEFORE BSTAGE3_RUNTIME_ORIGIN_AFTER \
   BSTAGE3_RUNTIME_ADMITTED_SNAPSHOT BSTAGE3_TOOL_AUTHORITY \
   BSTAGE3_TOOL_AUTHORITY_BEFORE BSTAGE3_STAGE2 BSTAGE3_STAGE2_ADMITTED \
-  BSTAGE3_STAGE2_ADMISSION BSTAGE3_STAGE3 BSTAGE3_SOURCE_BEFORE BSTAGE3_SOURCE_AFTER \
+  BSTAGE3_STAGE2_ADMISSION BSTAGE3_STAGE3 BSTAGE3_SOURCE_BEFORE BSTAGE3_SOURCE_AFTER BSTAGE3_LOCK_DISPLAY \
   BSTAGE3_STAGE2_LOG BSTAGE3_STAGE3_LOG BSTAGE3_STAGE2_ARGS_SHA256 \
   BSTAGE3_STAGE3_ARGS_SHA256 BSTAGE3_STAGE2_THREADS BSTAGE3_STAGE3_THREADS \
   BSTAGE3_STAGE2_CACHE_DIR BSTAGE3_STAGE3_CACHE_DIR BSTAGE3_RUNTIME_PATH \
@@ -642,6 +821,10 @@ export BSTAGE3_ROOT BSTAGE3_MANIFEST BSTAGE3_PLATFORM BSTAGE3_BACKEND BSTAGE3_MO
   BSTAGE3_BOOTSTRAP_SCRIPT_SHA256_BEFORE BSTAGE3_SEED_INPUTS_FINGERPRINT \
   BSTAGE3_SEED_FEATURES BSTAGE3_GIT_BEFORE BSTAGE3_GIT_AFTER \
   BSTAGE3_STAGE2_TRANSCRIPT BSTAGE3_STAGE3_TRANSCRIPT BSTAGE3_STAGE2_SANITY \
-  BSTAGE3_STAGE2_RECEIVER BSTAGE3_STAGE3_SANITY BSTAGE3_LOCK BSTAGE3_RUST_LOG
+  BSTAGE3_STAGE2_SANITY_DISPLAY BSTAGE3_STAGE2_SANITY_COMPANION_PARENT \
+  BSTAGE3_STAGE2_RECEIVER BSTAGE3_STAGE2_RECEIVER_DISPLAY \
+  BSTAGE3_STAGE2_RECEIVER_LOG BSTAGE3_STAGE2_RECEIVER_LOG_DISPLAY \
+  BSTAGE3_STAGE3_SANITY BSTAGE3_LOCK BSTAGE3_RUST_LOG
 bootstrap_stage3_write_manifest
-bootstrap_stage3_verify_manifest "$manifest" "$root" "$candidate"
+bootstrap_stage3_verify_manifest "$manifest" "$manifest" "$root" "$candidate" \
+  "$candidate" "${manifest}.authority-map.env"

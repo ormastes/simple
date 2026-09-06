@@ -14,33 +14,31 @@ fail() {
 # The receipts must be verified before their exact paths are bound and
 # exported to manifest writing; ordering prevents an unverified directory from
 # being recorded as proof.
-smoke_verify_line=$(grep -n -F 'bootstrap_stage3_verify_receiver_smoke_evidence \' \
+receiver_verify_line=$(grep -n -F 'bootstrap_stage3_verify_receiver_evidence_receipt \' \
   "$resume" | sed -n '1s/:.*//p')
-llvm_verify_line=$(grep -n -F 'bootstrap_stage3_verify_llvm_receiver_evidence \' \
+receiver_bind_line=$(grep -n -F 'BSTAGE3_STAGE2_RECEIVER=$stage2_receiver' \
   "$resume" | sed -n '1s/:.*//p')
-smoke_bind_line=$(grep -n -F 'BSTAGE3_STAGE2_RECEIVER_SMOKE=$stage2_receiver_smoke' \
+receiver_display_bind_line=$(grep -n -F 'BSTAGE3_STAGE2_RECEIVER_DISPLAY=$stage2_receiver' \
   "$resume" | sed -n '1s/:.*//p')
-llvm_bind_line=$(grep -n -F 'BSTAGE3_STAGE2_LLVM_RECEIVER=$stage2_llvm_receiver/receipt.env' \
+receiver_log_bind_line=$(grep -n -F 'BSTAGE3_STAGE2_RECEIVER_LOG="$(dirname -- "$stage2_receiver")/stage2-receiver.log"' \
   "$resume" | sed -n '1s/:.*//p')
 write_line=$(grep -n -F 'bootstrap_stage3_write_manifest' "$resume" | \
   tail -n 1 | sed -n 's/:.*//p')
-case "$smoke_verify_line:$llvm_verify_line:$smoke_bind_line:$llvm_bind_line:$write_line" in
+case "$receiver_verify_line:$receiver_bind_line:$receiver_display_bind_line:$receiver_log_bind_line:$write_line" in
   *[!0-9:]*|:*|*::*) fail 'receiver verification/binding markers missing' ;;
 esac
-[ "$smoke_verify_line" -lt "$smoke_bind_line" ] || fail 'smoke receipt bound before verification'
-[ "$llvm_verify_line" -lt "$llvm_bind_line" ] || fail 'LLVM receipt bound before verification'
-[ "$smoke_bind_line" -lt "$write_line" ] || fail 'smoke receipt bound after manifest write'
-[ "$llvm_bind_line" -lt "$write_line" ] || fail 'LLVM receipt bound after manifest write'
+[ "$receiver_verify_line" -lt "$receiver_bind_line" ] || fail 'receiver receipt bound before verification'
+[ "$receiver_bind_line" -lt "$write_line" ] || fail 'receiver receipt bound after manifest write'
+[ "$receiver_display_bind_line" -lt "$write_line" ] || fail 'receiver display bound after manifest write'
+[ "$receiver_log_bind_line" -lt "$write_line" ] || fail 'receiver log bound after manifest write'
 
 # Execute the exact manifest-binding tail from the resume wrapper. The fake
 # writer reads both values through a child shell, proving they were exported
 # rather than only assigned in the parent shell.
-smoke_receipt="$tmp/stage2-struct-receiver-smoke.env"
-llvm_dir="$tmp/stage2-llvm-struct-receiver"
-llvm_receipt="$llvm_dir/receipt.env"
-mkdir -p "$llvm_dir"
-printf 'verified smoke receipt\n' >"$smoke_receipt"
-printf 'verified LLVM receipt\n' >"$llvm_receipt"
+receiver_receipt="$tmp/stage2-receiver.env"
+receiver_log="$tmp/stage2-receiver.log"
+printf 'verified receiver receipt\n' >"$receiver_receipt"
+printf 'verified receiver log\n' >"$receiver_log"
 
 harness="$tmp/manifest-env-harness.sh"
 manifest="$tmp/provenance.env"
@@ -57,8 +55,10 @@ backfill=$tmp/libsimple_compiler_backfill.a
 runtime_origin_before=$tmp/runtime-origin-before.txt
 runtime_origin_after=$tmp/runtime-origin-after.txt
 runtime_admitted=$tmp/runtime-admitted.txt
+tool_before=$tmp/tool-before.txt
 tool_after=$tmp/tool-after.txt
 stage2=$tmp/stage2
+stage2_admission=$tmp/stage2-admission.env
 admitted=$tmp/admitted
 candidate=$tmp/stage3
 source_before=$tmp/source-before.txt
@@ -66,8 +66,10 @@ source_after=$tmp/source-after.txt
 stage2_log=$tmp/stage2.log
 stage3_log=$tmp/stage3.log
 stage2_args=stage2-args
+stage2_backend=cranelift
 stage3_args=stage3-args
 stage2_threads=1
+stage3_threads=1
 stage2_cache=$tmp/stage2-cache
 stage3_cache=$tmp/stage3-cache
 runtime=$tmp/runtime
@@ -82,28 +84,29 @@ git_after=$tmp/git-after.env
 stage2_transcript=$tmp/stage2.transcript
 stage3_transcript=$tmp/stage3.transcript
 stage2_sanity=$tmp/stage2-sanity.env
-stage2_receiver_smoke=$smoke_receipt
-stage2_llvm_receiver=$llvm_dir
+stage2_receiver=$receiver_receipt
 stage3_sanity=$tmp/stage3-sanity.env
 lock=$tmp/lock
-stage2_receiver_smoke_expected=$smoke_receipt
-stage2_llvm_receiver_expected=$llvm_receipt
+stage2_receiver_expected=$receiver_receipt
+stage2_receiver_log_expected=$receiver_log
 bootstrap_stage3_write_manifest() {
-  [ "\$(sh -c 'printf %s "\$BSTAGE3_STAGE2_RECEIVER_SMOKE"')" = "\$stage2_receiver_smoke_expected" ] || exit 41
-  [ "\$(sh -c 'printf %s "\$BSTAGE3_STAGE2_LLVM_RECEIVER"')" = "\$stage2_llvm_receiver_expected" ] || exit 42
-  printf 'smoke=%s\\nllvm=%s\\n' "\$BSTAGE3_STAGE2_RECEIVER_SMOKE" "\$BSTAGE3_STAGE2_LLVM_RECEIVER" >"\$BSTAGE3_MANIFEST"
+  [ "\$(sh -c 'printf %s "\$BSTAGE3_STAGE2_RECEIVER"')" = "\$stage2_receiver_expected" ] || exit 41
+  [ "\$(sh -c 'printf %s "\$BSTAGE3_STAGE2_RECEIVER_LOG"')" = "\$stage2_receiver_log_expected" ] || exit 42
+  printf 'receiver=%s\\nreceiver_log=%s\\n' "\$BSTAGE3_STAGE2_RECEIVER" "\$BSTAGE3_STAGE2_RECEIVER_LOG" >"\$BSTAGE3_MANIFEST"
 }
 bootstrap_stage3_verify_manifest() {
-  [ "\$1" = "\$manifest" ] && [ "\$2" = "\$root" ] && [ "\$3" = "\$candidate" ]
+  [ "\$#" = 6 ] && [ "\$1" = "\$manifest" ] && [ "\$2" = "\$manifest" ] &&
+  [ "\$3" = "\$root" ] && [ "\$4" = "\$candidate" ]
 }
 EOF
-sed -n '/^BSTAGE3_ROOT=/,/^bootstrap_stage3_verify_manifest /p' "$resume" >>"$harness"
+sed -n '/^BSTAGE3_ROOT=/,/^  "\$candidate" "\${manifest}\.authority-map\.env"/p' \
+  "$resume" >>"$harness"
 chmod +x "$harness"
 "$harness" || fail 'manifest-binding tail did not execute'
 
-[ "$(sed -n '1s/^smoke=//p' "$manifest")" = "$smoke_receipt" ] || \
-  fail 'manifest writer did not receive smoke receipt path'
-[ "$(sed -n '2s/^llvm=//p' "$manifest")" = "$llvm_receipt" ] || \
-  fail 'manifest writer did not receive LLVM receipt path'
+[ "$(sed -n '1s/^receiver=//p' "$manifest")" = "$receiver_receipt" ] || \
+  fail 'manifest writer did not receive receiver receipt path'
+[ "$(sed -n '2s/^receiver_log=//p' "$manifest")" = "$receiver_log" ] || \
+  fail 'manifest writer did not receive receiver log path'
 
 echo 'bootstrap_stage3_resume_manifest_receiver_env_contract_test: PASS'

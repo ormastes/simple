@@ -101,31 +101,10 @@ impl CompilerDriver:
         Ok(hir_module)
 
     me lower_and_check_streaming_surfaces_impl() -> (CompileContext, bool):
-        if (not self.streaming_surface_owner_ready or
-            self.streaming_module_surfaces_owner == nil):
+        if not self.streaming_surface_owner_ready:
             self.ctx.add_error("Streaming module surfaces missing after phase 2")
             return (self.ctx, false)
-        # The driver owner is an explicit Option. Native class-field assignment
-        # can preserve the readiness scalar while losing a raw class handle;
-        # validate absence first, then unwrap. Never dereference a value merely
-        # because the adjacent scalar says it is ready.
-        # `??`, NOT `.unwrap()`. This line used the bare method and it is the
-        # reason the guard below fired on every self-hosted build: any module
-        # publishing a bare `unwrap` (Poll, FailSafeResult) steals every
-        # `Option.unwrap` binding, so `.unwrap()` here returned raw 0 -- the same
-        # keystone defect recorded for the Stage-4 macOS lane. The owner was
-        # never malformed; the unwrap was. `??`, `if val` and `match` are immune
-        # to that binding, which is why the sibling guard at :437 already uses
-        # `??`.
-        #
-        # Presence is checked with `.?` FIRST and separately, because `== nil`
-        # cannot do it: the nil sentinel is raw 3, so a zeroed value reports
-        # "present" to every `== nil` test. Absence and malformation are
-        # different questions and keep different answers.
-        if not self.streaming_module_surfaces_owner.?:
-            self.ctx.add_error("Streaming module surface owner payload missing after phase 2")
-            return (self.ctx, false)
-        val surfaces = self.streaming_module_surfaces_owner ?? ModuleSurfacesByName.empty()
+        val surfaces = self.streaming_module_surfaces_owner
         # Fail closed on a malformed payload, never on a valid one. A
         # heap-typed payload must be a tagged pointer outside the zero page;
         # the 2026-08-22 incident read back a Some-tagged Option with payload
@@ -453,7 +432,7 @@ impl CompilerDriver:
         log_phase("phase3:streaming_source_reclaim:done sources={reclaimed_sources} owners={reclaimed_streaming_owners}")
         self.ctx.evict_sources()
         self.ctx.module_surfaces = nil
-        self.streaming_module_surfaces_owner = nil
+        self.streaming_module_surfaces_owner = ModuleSurfacesByName.empty()
         self.streaming_surface_owner_ready = false
         (self.ctx, true)
 
@@ -501,7 +480,10 @@ impl CompilerDriver:
         # `module_surface_registry_index`. `??` (and `if val` / `match`) are not
         # affected. doc/08_tracking/bug/stage2_positional_entry_segv_module_surfaces_null_2026-08-31.md
         val retained_module_surfaces: ModuleSurfacesByName = if self.ctx.module_surfaces != nil:
-            self.ctx.module_surfaces ?? ModuleSurfacesByName.empty()
+            # Phase 2 commits the same graph to this direct owner.  Do not
+            # unwrap Option<class> across the phase method boundary: the
+            # staged native ABI can preserve Some while dropping its payload.
+            self.streaming_module_surfaces_owner
         elif self.ctx.sources.len() > 0:
             match module_surfaces_from_modules(self.ctx.modules, self.ctx.sources):
                 case Ok(value): value

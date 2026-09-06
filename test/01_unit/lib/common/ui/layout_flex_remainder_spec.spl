@@ -30,7 +30,7 @@ use std.spec.step
 #
 # Design call pinned here: the remainder goes to the LAST child that actually
 # takes space (flex > 0). A child that asked for zero width gets zero width.
-# That matches layout_vbox's `flex_idx == flex_count` remainder invariant
+# That matches layout_vbox's identical remainder invariant
 # (awarded once, to the last space-taking child).
 
 use std.spec.step
@@ -139,3 +139,69 @@ describe "layout_hbox flex remainder":
         val rects = compute_layout(_hbox("flexlead_root", [b, a]), 0, 0, 10, 4)
         expect(_w(rects, "flexlead_b")).to_equal(0)
         expect(_w(rects, "flexlead_a")).to_equal(10)
+
+# A border-free vbox container, for the same reason `_hbox` above exists: a
+# panel's 1px border would inset the height and shift every number by 2.
+fn _vbox(id: text, kids: [WidgetNode]) -> WidgetNode:
+    var node = WidgetNode.new(id, WidgetKind.Card.to_wire())
+    node = node.set_layout("vbox")
+    for k in kids:
+        node = node.add_child(k)
+    node
+
+# Height of a laid-out child, or 0 when it was given no rect at all (a
+# zero-height child is dropped by `if actual_h > 0`).
+fn _h(rects: [WidgetRect], id: text) -> i32:
+    match find_rect(rects, id):
+        case Some(r): r.h
+        case _: 0
+
+describe "layout_vbox flex weighting":
+    # @manual scenario evidence
+    """layout_vbox weights each child's height by its `flex` prop and awards
+    the integer-division remainder exactly once, to the last child with
+    flex > 0 — the same contract layout_hbox applies on the other axis."""
+
+    it "weights heights by the flex prop instead of splitting equally":
+        # @req REQ-SSPEC-LIB
+        step("weights heights by the flex prop instead of splitting equally")
+        step("Verify: weights heights by the flex prop instead of splitting equally")
+        # REGRESSION: vbox used to count the children with no fixed height and
+        # divide the box equally, so flex 3 vs flex 1 both got 5 of a h=10 box.
+        # Weighted: total_flex=4, flex_unit=2, flex_remainder=10-8=2.
+        # A: flex_idx 0->3, 3<4  -> 3*2   = 6
+        # B: flex_idx 3->4, 4>=4 -> 1*2+2 = 4
+        val a = with_flex(label("vflex_a", "A"), 3)
+        val b = with_flex(label("vflex_b", "B"), 1)
+        val rects = compute_layout(_vbox("vflex_root", [a, b]), 0, 0, 4, 10)
+        expect(_h(rects, "vflex_a")).to_equal(6)  # oracle: 6 — weighted 3/4 of 10
+        expect(_h(rects, "vflex_b")).to_equal(4)  # oracle: 4 — weighted 1/4 of 10, plus remainder
+
+    it "gives a flex=0 child no height and awards the remainder once":
+        # @req REQ-SSPEC-LIB
+        step("gives a flex=0 child no height and awards the remainder once")
+        step("Verify: gives a flex=0 child no height and awards the remainder once")
+        # REGRESSION: with_flex(n, 0) used to still collect an equal share.
+        # Mirror of the hbox case above: total_flex=3, flex_unit=3,
+        # flex_remainder=1, so A takes the whole box and B takes nothing.
+        val a = with_flex(label("vzero_a", "A"), 3)
+        val b = with_flex(label("vzero_b", "B"), 0)
+        val rects = compute_layout(_vbox("vzero_root", [a, b]), 0, 0, 4, 10)
+        val a_h = _h(rects, "vzero_a")
+        val b_h = _h(rects, "vzero_b")
+        expect(b_h).to_equal(0)  # oracle: 0 — a child that asked for zero height gets zero
+        expect(a_h).to_equal(10)  # oracle: 10 — named expected value from the requirement
+        expect(a_h + b_h).to_equal(10)  # oracle: 10 — children still sum to the box
+
+    it "leaves children with no flex prop splitting the box equally (control)":
+        # @req REQ-SSPEC-LIB
+        step("leaves children with no flex prop splitting the box equally (control)")
+        step("Verify: leaves children with no flex prop splitting the box equally (control)")
+        # Discriminating control: get_flex() defaults to 1, so two unannotated
+        # children weight 1/1 and land on the same 5/5 the equal-division code
+        # produced. A green here with a red above proves the oracle
+        # discriminates rather than failing wholesale.
+        val rects = compute_layout(
+            _vbox("vctl_root", [label("vctl_a", "A"), label("vctl_b", "B")]), 0, 0, 4, 10)
+        expect(_h(rects, "vctl_a")).to_equal(5)
+        expect(_h(rects, "vctl_b")).to_equal(5)

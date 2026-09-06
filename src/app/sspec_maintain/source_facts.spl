@@ -4,6 +4,7 @@ use std.crypto.sha256.{sha256_text}
 # The code-vs-text question is CoreLexer's to answer, not this file's. See
 # doc/05_design/platform/structural_compute/parser_sharing_contract_v1.md.
 use compiler.frontend.core.source_facts.{simple_code_lines, simple_string_continuation_lines}
+use std.text_advanced.{split_whitespace}
 
 fn _quoted_name(line: text) -> text:
     val parts = line.split("\"")
@@ -17,7 +18,34 @@ fn _is_standalone_assertion(line: text) -> bool:
         lower.contains("assert_true(") or lower.contains("assert_false(") or
         lower.contains("assert_contains(") or lower.contains("assert_nil(")
 
-fn _is_real_assertion(line: text) -> bool:
+fn _cut_comment(line: text) -> text:
+    # The line up to the first `#` outside a double-quoted string, string
+    # contents kept. A trailing comment after an assertion used to defeat
+    # every text comparison on its expected side: `expect(x).to_equal(7)  #
+    # oracle: ...` parsed its expected value as `7)  # oracle: ...`, so a
+    # `var x = 7` tautology no longer matched its binding (ORA-002 missed)
+    # while the same comment's `# oracle:` marker excused ORA-003 — one line
+    # earned both exemptions (plan-acceptance lane, 2026-09-05).
+    var out = ""
+    var in_string = false
+    var escaped = false
+    for ch in line:
+        if in_string:
+            if escaped:
+                escaped = false
+            elif ch == "\\":
+                escaped = true
+            elif ch == "\"":
+                in_string = false
+        elif ch == "\"":
+            in_string = true
+        elif ch == "#":
+            return out
+        out = out + ch
+    out
+
+fn _is_real_assertion(raw_line: text) -> bool:
+    val line = _cut_comment(raw_line)
     val lower = line.lower()
     val trimmed = lower.trim()
     val assertion = lower.contains("expect(") or lower.contains("assert(") or
@@ -91,6 +119,18 @@ fn _calls_skip(trimmed_lower: text) -> bool:
         rest = rest.substring(index + 4)
     false
 
+fn _opens_lane_guard(trimmed_lower: text) -> bool:
+    """True when a scenario-body line opens a conditional branch.
+
+    A `skip(...)` inside such a branch is a lane-gated outcome — the spec
+    probed a lane (GPU driver, board, QEMU toolchain) and reported the
+    documented `skip:` result — not the "unconditional pending or fail-fast
+    scaffold" SSDOC-ORA-001 names. See
+    `doc/08_tracking/todo/sspec_maintain_lane_aware_scoring_2026-08-08.md`.
+    """
+    trimmed_lower.starts_with("if ") or trimmed_lower.starts_with("elif ") or
+        trimmed_lower.starts_with("else:")
+
 fn _is_pending(line: text, code_line: text) -> bool:
     # ORA-001 pending detection must fire only on a pending STATEMENT, not on
     # any line that mentions the keyword: specs that TEST pass_todo behavior,
@@ -150,12 +190,13 @@ fn _requirement_ids(line: text) -> [text]:
     for separator in ["\"", "'", "(", ")", "[", "]", "{", "}", ":", ",", ";", ".", "#", "\\"]:
         normalized = normalized.replace(separator, " ")
     var ids: [text] = []
-    for token in normalized.split():
+    for token in split_whitespace(normalized):
         if token.starts_with("REQ-") and not ids.contains(token):
             ids.push(token)
     ids
 
-fn _assertion_parts(line: text) -> (text, text):
+fn _assertion_parts(raw_line: text) -> (text, text):
+    val line = _cut_comment(raw_line)
     val lower = line.lower()
     val actual_start = lower.index_of("expect(")
     val separator = lower.index_of(").to_equal(")
@@ -180,17 +221,35 @@ fn _is_numeric_literal(value: text) -> bool:
 
 fn _assignment(line: text) -> (text, text):
     val trimmed = line.trim()
-    # Only immutable `val` bindings feed the tautology heuristic: a `var`
-    # initialized to a literal is typically a flag mutated inside a loop
-    # (`var found = false` ... `expect(found).to_equal(false)`), where the
-    # binding's initial text says nothing about the asserted value.
-    if not trimmed.starts_with("val ") or not trimmed.contains("="):
+    # Both `val` and `var` bindings feed the tautology heuristic. `var` used
+    # to be exempt (a loop flag `var found = false` ... `expect(found)
+    # .to_equal(false)` is not a tautology), but the exemption was keyed on
+    # the KEYWORD, so `var x = 3` / `expect(x).to_equal(3)` passed ORA-002 by
+    # a one-word swap — and acceptance specs written 2026-09-05 leaned on
+    # exactly that. The loop-flag case is now handled where it belongs: a
+    # binding that is REASSIGNED before the assertion (`_is_reassignment`)
+    # is excluded from the tautology check instead of the keyword.
+    if (not trimmed.starts_with("val ") and not trimmed.starts_with("var ")) or
+            not trimmed.contains("="):
         return ("", "")
     val pieces = trimmed.split("=")
     if pieces.len() < 2: return ("", "")
-    val names = pieces[0].trim().split()
+    val names = split_whitespace(pieces[0].trim())
     if names.len() < 2: return ("", "")
     (names[names.len() - 1], pieces[1].trim())
+
+fn _is_reassignment(line: text, name: text) -> bool:
+    # `name = ...`, `name += ...`, `name[i] = ...`, `name.push(...)` — any
+    # statement that can change what `name` holds after its binding line.
+    # Method calls are counted as mutations without inspecting them: erring
+    # towards "reassigned" only ever REMOVES a tautology finding, so a
+    # non-mutating `name.len()` can hide a tautology but never invent one.
+    val trimmed = line.trim()
+    if trimmed.starts_with(name + " =") or trimmed.starts_with(name + "=") or
+            trimmed.starts_with(name + " +=") or trimmed.starts_with(name + " -=") or
+            trimmed.starts_with(name + "[") or trimmed.starts_with(name + "."):
+        return true
+    false
 
 fn _is_adverse_name(name: text) -> bool:
     val lower = name.lower()
@@ -280,6 +339,9 @@ fn extract_sspec_source_facts(path: text, source: text) -> SspecSourceFacts:
     var scenario_captures: i64 = 0
     var scenario_requirements: i64 = 0
     var scenario_pending = false
+    # Indent of the innermost open conditional inside the current scenario,
+    # or -1 when the walker is at the scenario body's own level.
+    var guard_indent: i64 = -1
     var scenario_source_only = false
     var scenario_local_arithmetic = false
     var scenario_magic_expected: i64 = 0
@@ -288,6 +350,11 @@ fn extract_sspec_source_facts(path: text, source: text) -> SspecSourceFacts:
     # scenario; asserting <name>.contains(...) downstream is the same
     # source-text pseudo-oracle as the direct expect(source.contains(...)).
     var scenario_source_vars: [text] = []
+    # Names bound in this scenario (insertion order) and the subset that has
+    # been reassigned since binding; a reassigned binding's initial text says
+    # nothing about the asserted value, so it leaves the tautology check.
+    var scenario_binding_names: [text] = []
+    var scenario_reassigned: [text] = []
     # Duplicated-narrative boilerplate detection (2026-08-27): the same long
     # Purpose/plan/design comment pasted 3+ times marks generated filler.
     # (Origin/main used these two without declaring them; declared at merge.)
@@ -315,6 +382,13 @@ fn extract_sspec_source_facts(path: text, source: text) -> SspecSourceFacts:
         val line = raw.trim()
         val line_lower = line.lower()
         val indent = _indent_width(raw)
+        val opens_lane_guard = current_line > 0 and _opens_lane_guard(line_lower)
+        # A guard closes on the first non-blank line back at or above its own
+        # indent; an `elif`/`else:` at that same indent continues it.
+        if guard_indent >= 0 and line != "" and indent <= guard_indent and not opens_lane_guard:
+            guard_indent = -1
+        if opens_lane_guard:
+            guard_indent = indent
         if current_line > 0 and line != "" and indent <= current_indent:
             scenarios.push(_finish_scenario(current_name, current_line,
                 line_number - 1, scenario_steps, scenario_assertions,
@@ -357,18 +431,28 @@ fn extract_sspec_source_facts(path: text, source: text) -> SspecSourceFacts:
             scenario_captures = 0
             scenario_requirements = 0
             scenario_pending = false
+            guard_indent = -1
             scenario_source_only = false
             scenario_local_arithmetic = false
             scenario_magic_expected = 0
             scenario_bindings = {}
             scenario_source_vars = []
+            scenario_binding_names = []
+            scenario_reassigned = []
             scenario_requirement_ids = []
         val (assigned_name, assigned_value) = _assignment(line)
         if current_line > 0 and assigned_name != "":
             scenario_bindings[assigned_name] = assigned_value
+            if not scenario_binding_names.contains(assigned_name):
+                scenario_binding_names.push(assigned_name)
             if assigned_value.contains("file_read(") and assigned_value.contains("src/") and
                     not scenario_source_vars.contains(assigned_name):
                 scenario_source_vars.push(assigned_name)
+        elif current_line > 0 and not line.starts_with("#"):
+            for bound_name in scenario_binding_names:
+                if not scenario_reassigned.contains(bound_name) and
+                        _is_reassignment(line, bound_name):
+                    scenario_reassigned.push(bound_name)
         if current_line > 0 and line_lower.contains("step(\""):
             steps = steps + 1
             scenario_steps = scenario_steps + 1
@@ -385,7 +469,8 @@ fn extract_sspec_source_facts(path: text, source: text) -> SspecSourceFacts:
             if current_line > 0: scenario_assertions = scenario_assertions + 1
             val (actual, expected) = _assertion_parts(line)
             val local_arithmetic = actual != "" and (_is_numeric_literal(actual) or
-                (scenario_bindings.has(actual) and scenario_bindings[actual] == expected))
+                (scenario_bindings.has(actual) and scenario_bindings[actual] == expected and
+                    not scenario_reassigned.contains(actual)))
             if local_arithmetic: scenario_local_arithmetic = true
             if expected != "" and _is_numeric_literal(expected) and
                     not line_lower.contains("# explained:") and
@@ -399,14 +484,25 @@ fn extract_sspec_source_facts(path: text, source: text) -> SspecSourceFacts:
         # per-kind modules (terminal_grid, gui_image/action_trace,
         # binary_layout/bit_table) or a `<spec>.evidence.sdn` sidecar — none of
         # which contain the literal `capture_`/`evidence(` substrings.
-        if current_line > 0 and (line_lower.contains("capture_") or
+        # A COMMENT line counts only through the two forms docgen actually
+        # renders as evidence — a `# @capture` annotation (attached to the
+        # next step, see spipe_docgen parser `pending_capture`) or a named
+        # `<spec>.evidence.sdn` sidecar. The call-form substrings are code
+        # signals; matched inside a comment they let an explanatory remark
+        # like `# evidence(pinned oracle): ...` earn the evidence dimension
+        # without any capture (found in the plan-acceptance lane, 2026-09-05).
+        val capture_line = if line.starts_with("#"):
+            line_lower.contains("@capture") or line_lower.contains(".evidence.sdn")
+        else:
+            line_lower.contains("capture_") or
                 line_lower.contains("@capture") or line_lower.contains("evidence(") or
                 line_lower.contains("evidence_manifest(") or
                 line_lower.contains("render_manual(") or
                 line_lower.contains("terminal_grid") or line_lower.contains("tui_grid") or
                 line_lower.contains("gui_image") or line_lower.contains("action_trace") or
                 line_lower.contains("bit_table") or line_lower.contains("binary_layout") or
-                line_lower.contains(".evidence.sdn")):
+                line_lower.contains(".evidence.sdn")
+        if current_line > 0 and capture_line:
             captures = captures + 1
             scenario_captures = scenario_captures + 1
         if _contains_requirement(line):
@@ -423,7 +519,16 @@ fn extract_sspec_source_facts(path: text, source: text) -> SspecSourceFacts:
             requirements = all_requirement_ids.len()
             scenario_requirements = scenario_requirement_ids.len()
         if current_line > 0 and _is_pending(line, code_lines[line_number - 1]):
-            scenario_pending = true
+            # Lane-gated skip: a `skip(...)` reached only through a probe
+            # branch reports the documented `skip:` outcome for an absent
+            # lane, so it is not the unconditional scaffold ORA-001 names.
+            # Every other marker (pass_todo/pending/fail("todo:) still
+            # flags wherever it sits, and a gated scenario with no real
+            # assertion still fails ORA-001 on real_assertion_count == 0.
+            val gated_skip = _calls_skip(code_lines[line_number - 1].trim().lower()) and
+                (opens_lane_guard or (guard_indent >= 0 and indent > guard_indent))
+            if not gated_skip:
+                scenario_pending = true
         # Source-text inspection is not system evidence, but reading a
         # GENERATED artifact (build output, tmp root) IS runtime observation
         # (2026-08-22): only flag when the read/assert targets src/ source or
@@ -458,7 +563,21 @@ fn extract_sspec_source_facts(path: text, source: text) -> SspecSourceFacts:
         lower.contains("ambiguity behavior")
     var lifecycle_paths: [text] = []
     for raw in lines:
-        for token in raw.replace("`", " ").replace("\"", " ").split():
+        # "\\" splits escape sequences off a path embedded in a string literal
+        # ("doc/03_plan/x.md.\nSee" -> doc/03_plan/x.md), as _requirement_ids does.
+        for raw_token in split_whitespace(raw.replace("`", " ").replace("\"", " ").replace("\\", " ")):
+            # Prose punctuation is not part of a path: "see doc/03_plan/x.md."
+            # and "doc/03_plan/x.md," used to become MNT-009 stale-link
+            # findings for paths that exist (every plan-acceptance spec hit
+            # this, 2026-09-05). A bare directory token ("doc/01_research/")
+            # names no file and is skipped rather than reported missing.
+            var token = raw_token
+            while token.ends_with(".") or token.ends_with(",") or
+                    token.ends_with(";") or token.ends_with(":") or
+                    token.ends_with(")"):
+                token = token[:-1]
+            if token.ends_with("/"):
+                continue
             if (token.starts_with("doc/01_research/") or
                     token.starts_with("doc/03_plan/") or
                     token.starts_with("doc/04_architecture/") or
