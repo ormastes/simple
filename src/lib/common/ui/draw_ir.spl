@@ -110,6 +110,14 @@ struct DrawIrComposition:
     scene_key: text
     backend_target: text
     batches: [DrawIrBatch]
+    # Process-unique identity of this composition VALUE, handed out by
+    # draw_ir_next_composition_generation(). 0 means "unassigned" — a consumer
+    # must never memoize on 0, because every unassigned composition carries it.
+    # A non-zero value is never reused, so two compositions with different
+    # content can never share one; the converse does NOT hold — rebuilding
+    # identical content yields a new generation. Consumers may therefore use it
+    # to detect staleness, not to prove two builds are equal.
+    generation: i64 = 0
 
 struct DrawIrEventTargetContext:
     schema: text
@@ -515,13 +523,23 @@ fn draw_ir_batch_with_source(batch_id: text, backend_target: text, embedding: Dr
 fn draw_ir_batch(batch_id: text, backend_target: text, embedding: DrawIrEmbeddingConfig, commands: [DrawIrCommand]) -> DrawIrBatch:
     draw_ir_batch_with_source(batch_id, backend_target, embedding, commands, draw_ir_source_manual())
 
+var _draw_ir_composition_generation: i64 = 0
+
+# Hand out the next composition generation. Strictly monotonic within a
+# process and never zero, so a value that was issued once is never issued
+# again for different content.
+pub fn draw_ir_next_composition_generation() -> i64:
+    _draw_ir_composition_generation = _draw_ir_composition_generation + 1
+    _draw_ir_composition_generation
+
 fn draw_ir_composition(composition_id: text, scene_key: text, backend_target: text, batches: [DrawIrBatch]) -> DrawIrComposition:
     DrawIrComposition(
         schema: DRAW_IR_SCHEMA_VERSION,
         composition_id: composition_id,
         scene_key: scene_key,
         backend_target: backend_target,
-        batches: batches
+        batches: batches,
+        generation: draw_ir_next_composition_generation()
     )
 
 # Flatten a child composition into its embedding owner.  The flat batch order
