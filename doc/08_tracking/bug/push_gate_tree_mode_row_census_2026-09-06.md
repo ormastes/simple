@@ -32,6 +32,42 @@ Reproduce the census:
 grep -n '^    [a-z0-9-]*, push, [a-z]*, tree,' config/check/must_check_gates.sdn
 ```
 
+### Re-count 2026-09-07 at `60479fbf013`
+
+`origin/main` moves constantly and this file's "24 rows" is now stale. Counting
+by TIER and MODE rather than by a bare `, tree,` grep (which spans tiers — it
+returns **48**, of which 26 are `ci`-tier and have nothing to do with the push
+hook):
+
+```sh
+awk -F', ' '/^    [a-z]/ {gsub(/^ +/,"",$1); print $2"\t"$4}' \
+  config/check/must_check_gates.sdn | sort | uniq -c
+```
+
+| tier | mode | rows |
+|---|---|---|
+| push | tree | **22** (before this commit's two deletions) |
+| push | ref | 7 |
+| push | range | 5 |
+| ci | tree | 26 |
+| bootstrap | automated/receipt/external-receipt/todo | 51 |
+
+Delta from the 24 in the table below: **−1** `push-ui-slim-closure` duplicate
+(already removed), **−3** conversions to `ref`
+(`type-walk-constructor-parity`, `runtime-source-list-parity`,
+`no-mock-file-system-io`), **+1** genuinely new row
+`push-port-io-single-owner` (blocking, added 2026-09-06, was NOT in the table
+below), **+1** genuinely new row `push-rt-api-groups` — which appeared
+**TWICE**, byte-identically in `id:mode:command` (manifest lines 32 and 36; the
+two descriptions differ, line 36's is the older and shorter). That is the same
+defect as the ui-slim duplicate: the guard ran twice per push. Line 36 and the
+duplicate dispatch arm are removed in this commit. `push-rt-dual-implementation`
+also converted earlier and no longer counts.
+
+Six of the 22 are **blocking**: `c-runtime-compiles`, `no-direct-rt`,
+`port-io-single-owner`, `guard-wiring`, `interpreter-extern-registry-gap`,
+`sffi-v2-authority`.
+
 ## The dispatcher byte-match check (run this before EVERY push)
 
 Each manifest row's `id:mode:command` must byte-match a case arm in
@@ -240,6 +276,14 @@ of rows 14/15 are truly properties of the pushing machine rather than of the
 pushed commit. Everything else is a property of the commit and belongs on `--rev`.
 "Needs a runnable binary" (16, 23) is a *blocker*, not a justification.
 
+## Rows added after the original table
+
+| row id | script | B | decision | status |
+|---|---|---|---|---|
+| `push-port-io-single-owner` | `check-port-io-single-owner.shs` | **yes** | `--rev` over `src/os` (whole directory, not a `*.spl` glob — the scan is content-based, so a `.c`/`.S` declarer must stay visible). **No baseline or allowlist file exists for this guard**, so the census's second rot axis has no surface; fixture 4 covering the scan root is the COMPLETE form here, not the weak one-axis form. Stated in the script header and the manifest description so nobody "strengthens" it wrongly. | **DONE 2026-09-07** |
+| `push-rt-api-groups` (dup) | `check-rt-api-groups.shs` | no | duplicate row, delete (kept the fuller description at line 32) | **DONE 2026-09-07** |
+| `push-rt-api-groups` | `check-rt-api-groups.shs` | no | `--rev` plus `config/api/api_registry.sdn` and `rt_api_group_baseline.txt` from the rev; needs `rg` | TODO |
+
 ## Blocking gates found RED on a pristine checkout
 
 Measured 2026-09-06 in a clean worktree at `506601075df`, before any edit, all
@@ -263,6 +307,22 @@ stopped ratcheting: 1,570 new forbidden call sites could land before it noticed.
 Ratcheting the baseline down to the measured value is a separate, reviewed
 change (`--generate-baseline` after reading the diff), deliberately not made
 here.
+
+### Re-measured 2026-09-07 at `60479fbf013`, clean worktree, before any edit
+
+```
+port-io-single-owner       rc=0 PASS — 1 declaring file(s) checked, all rt_port_* externs confined to src/os/kernel/arch/x86/port_io_owner.spl
+extern-registry-gap        rc=0 PASS — 234 symbol(s) checked, 0 new, 0 stale        <-- REPAIRED since 2026-09-06
+guard-wiring               rc=0 PASS — 1596 guard(s) checked, 431 invoked, 1145 orphaned (734 baselined as known unwired debt, rest justified), 0 NEW unwired, 0 copied hook(s)
+no-direct-rt               rc=0 PASS — 16342 file(s) scanned (roots=src, src=6072), forbidden=6072, extern_decls=6455 (baseline 7776)
+c-runtime-compiles         rc=0 PASS — 130 file(s) compiled, 0 errors (5 skipped for unavailable external dependencies)
+sffi-v2-authority          rc=1 FAIL — 3 of 46 guard(s) failed                      <-- STILL RED, improved from 12
+```
+
+So **one** blocking gate is red on `main` now, not two: the extern-registry-gap
+red was repaired by another lane, and `sffi-v2-authority` went 12 → 3. The
+`no-direct-rt` under-baseline observation below is worse, not better: it now
+measures **6072 against a baseline of 7776**, 1,704 sites of unused headroom.
 
 **Two BLOCKING push gates are red on `main` itself**, in a clean checkout, with
 no local edits to blame:
