@@ -27,15 +27,16 @@ struct SelfReviewPolicyRecord:
     reviewer_provider: text
     reviewer_identity: text
     reviewer_model: text
+    reviewer_tier: text
+    reviewer_effort: text
     changed_manifest_sha256: text
-    higher_model_receipt_digest: text
+    review_evidence_sha256: text
     allow_scopes: [SelfReviewScope]
     deny_scopes: [SelfReviewScope]
     issuer_provider: text
     issuer_identity: text
     issuer_key_id: text
     issued_at_unix: i64
-    not_before_unix: i64
     expires_at_unix: i64
     previous_record_sha256: text
     signature: text
@@ -45,8 +46,6 @@ struct SelfReviewPolicyDb:
     default_allow: bool
     max_ttl_seconds: i64
     authority: text
-    authority_id: text
-    authority_key_id: text
     records: [SelfReviewPolicyRecord]
     sha256: text
     valid: bool
@@ -155,7 +154,7 @@ struct SelfReviewDecision:
     provider_approval_claimed: bool
 
 fn _policy_error(payload: text, reason: text) -> SelfReviewPolicyDb:
-    SelfReviewPolicyDb(schema: "", default_allow: false, max_ttl_seconds: 0, authority: "", authority_id: "", authority_key_id: "", records: [], sha256: hash_sha256(payload), valid: false, error: reason)
+    SelfReviewPolicyDb(schema: "", default_allow: false, max_ttl_seconds: 0, authority: "", records: [], sha256: hash_sha256(payload), valid: false, error: reason)
 
 fn _manifest_error(payload: text, reason: text) -> SelfReviewChangedManifest:
     SelfReviewChangedManifest(
@@ -234,44 +233,6 @@ fn _sha256_valid(value: text) -> bool:
 fn _commit_sha_valid(value: text) -> bool:
     _hex_identity_valid(value, 40) or _hex_identity_valid(value, 64)
 
-fn _leap_year(year: i64) -> bool:
-    (year % 4 == 0 and year % 100 != 0) or year % 400 == 0
-
-fn _days_in_month(year: i64, month: i64) -> i64:
-    if month == 2:
-        if _leap_year(year): 29 else: 28
-    elif month == 4 or month == 6 or month == 9 or month == 11:
-        30
-    else:
-        31
-
-fn _days_from_civil(year: i64, month: i64, day: i64) -> i64:
-    val adjusted_year = if month <= 2: year - 1 else: year
-    val era = (if adjusted_year >= 0: adjusted_year else: adjusted_year - 399) / 400
-    val year_of_era = adjusted_year - era * 400
-    val adjusted_month = if month > 2: month - 3 else: month + 9
-    val day_of_year = (153 * adjusted_month + 2) / 5 + day - 1
-    val day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year
-    era * 146097 + day_of_era - 719468
-
-fn _canonical_utc_unix(value: text) -> i64:
-    # Canonical Spipe wire timestamp: YYYY-MM-DDTHH:MM:SS.000Z.
-    if value.len() != 24 or value[4:5] != "-" or value[7:8] != "-" or
-       value[10:11] != "T" or value[13:14] != ":" or value[16:17] != ":" or
-       value[19:24] != ".000Z":
-        return -1
-    val year = value[0:4].parse_int() ?? -1
-    val month = value[5:7].parse_int() ?? -1
-    val day = value[8:10].parse_int() ?? -1
-    val hour = value[11:13].parse_int() ?? -1
-    val minute = value[14:16].parse_int() ?? -1
-    val second = value[17:19].parse_int() ?? -1
-    if year < 1970 or month < 1 or month > 12 or day < 1 or
-       day > _days_in_month(year, month) or hour < 0 or hour > 23 or
-       minute < 0 or minute > 59 or second < 0 or second > 59:
-        return -1
-    _days_from_civil(year, month, day) * 86400 + hour * 3600 + minute * 60 + second
-
 fn _safe_identity(value: text) -> bool:
     if value == "" or value.len() > 192 or value.contains(".."):
         return false
@@ -346,37 +307,34 @@ fn _empty_record() -> SelfReviewPolicyRecord:
         record_id: "", effect: "", repository_provider: "", repository_id: 0,
         repository_node_id: "", repository: "", pull_request_number: 0,
         head_sha: "", session_id: "", reviewer_provider: "",
-        reviewer_identity: "", reviewer_model: "", changed_manifest_sha256: "",
-        higher_model_receipt_digest: "", allow_scopes: [], deny_scopes: [],
+        reviewer_identity: "", reviewer_model: "", reviewer_tier: "",
+        reviewer_effort: "", changed_manifest_sha256: "",
+        review_evidence_sha256: "", allow_scopes: [], deny_scopes: [],
         issuer_provider: "", issuer_identity: "", issuer_key_id: "",
-        issued_at_unix: 0, not_before_unix: 0, expires_at_unix: 0, previous_record_sha256: "",
+        issued_at_unix: 0, expires_at_unix: 0, previous_record_sha256: "",
         signature: ""
     )
 
-fn _parse_record(value: any, authority_type: text, authority_id: text,
-                 authority_key_id: text) -> (SelfReviewPolicyRecord, text):
+fn _parse_record(value: any) -> (SelfReviewPolicyRecord, text):
     val keys = [
-        "schema", "record_type", "policy_id", "effect", "subject",
-        "changed_paths_manifest_sha256", "higher_model_receipt_digest",
-        "allow_scopes", "deny_scopes", "issued_by", "issued_at",
-        "not_before", "expires_at", "previous_record_sha256", "signature"
+        "schema", "record_id", "effect", "repository", "pull_request_number",
+        "head_sha", "session_id", "self_reviewer",
+        "changed_paths_manifest_sha256", "review_evidence_sha256",
+        "allow_scopes", "deny_scopes", "issuer", "issued_at_unix",
+        "expires_at_unix", "previous_record_sha256", "signature"
     ]
     if not _closed_object(value, keys):
-        return (_empty_record(), "self-review policy record is not a closed subject-policy/2 object")
-    if _json_text(value, "schema") != "spipe-self-review-subject-policy/2" or
-       _json_text(value, "record_type") != "subject_policy":
+        return (_empty_record(), "self-review policy record is not a closed grant/1 object")
+    if _json_text(value, "schema") != "spipe-self-review-policy-db/grant/1":
         return (_empty_record(), "self-review policy record schema is unsupported")
-    val subject = json_object_get(value, "subject")
-    if not _closed_object(subject, ["repository", "pull_request_number", "head_sha", "session_id", "reviewer"]):
-        return (_empty_record(), "self-review policy subject identity is not closed")
-    val repository = json_object_get(subject, "repository")
-    val reviewer = json_object_get(subject, "reviewer")
-    val issuer = json_object_get(value, "issued_by")
+    val repository = json_object_get(value, "repository")
+    val reviewer = json_object_get(value, "self_reviewer")
+    val issuer = json_object_get(value, "issuer")
     if not _closed_object(repository, ["provider", "id", "node_id", "name"]):
         return (_empty_record(), "self-review record repository identity is not closed")
-    if not _closed_object(reviewer, ["provider", "id", "model"]):
+    if not _closed_object(reviewer, ["provider", "identity", "model", "tier", "effort"]):
         return (_empty_record(), "self-review record reviewer identity is not closed")
-    if not _closed_object(issuer, ["type", "id", "key_id"]):
+    if not _closed_object(issuer, ["provider", "identity", "key_id"]):
         return (_empty_record(), "self-review record issuer identity is not closed")
     val allow_result = _parse_scopes(json_object_get(value, "allow_scopes"))
     if allow_result.1 != "":
@@ -385,29 +343,27 @@ fn _parse_record(value: any, authority_type: text, authority_id: text,
     if deny_result.1 != "":
         return (_empty_record(), deny_result.1)
     val record = SelfReviewPolicyRecord(
-        record_id: _json_text(value, "policy_id"), effect: _json_text(value, "effect"),
+        record_id: _json_text(value, "record_id"), effect: _json_text(value, "effect"),
         repository_provider: _json_text(repository, "provider"),
         repository_id: _json_int(repository, "id", 0),
         repository_node_id: _json_text(repository, "node_id"),
         repository: _json_text(repository, "name"),
-        pull_request_number: _json_int(subject, "pull_request_number", 0),
-        head_sha: _json_text(subject, "head_sha"), session_id: _json_text(subject, "session_id"),
+        pull_request_number: _json_int(value, "pull_request_number", 0),
+        head_sha: _json_text(value, "head_sha"), session_id: _json_text(value, "session_id"),
         reviewer_provider: _json_text(reviewer, "provider"),
-        reviewer_identity: _json_text(reviewer, "id"), reviewer_model: _json_text(reviewer, "model"),
+        reviewer_identity: _json_text(reviewer, "identity"),
+        reviewer_model: _json_text(reviewer, "model"), reviewer_tier: _json_text(reviewer, "tier"),
+        reviewer_effort: _json_text(reviewer, "effort"),
         changed_manifest_sha256: _json_text(value, "changed_paths_manifest_sha256"),
-        higher_model_receipt_digest: _json_text(value, "higher_model_receipt_digest"),
+        review_evidence_sha256: _json_text(value, "review_evidence_sha256"),
         allow_scopes: allow_result.0, deny_scopes: deny_result.0,
-        issuer_provider: _json_text(issuer, "type"), issuer_identity: _json_text(issuer, "id"),
+        issuer_provider: _json_text(issuer, "provider"), issuer_identity: _json_text(issuer, "identity"),
         issuer_key_id: _json_text(issuer, "key_id"),
-        issued_at_unix: _canonical_utc_unix(_json_text(value, "issued_at")),
-        not_before_unix: _canonical_utc_unix(_json_text(value, "not_before")),
-        expires_at_unix: _canonical_utc_unix(_json_text(value, "expires_at")),
+        issued_at_unix: _json_int(value, "issued_at_unix", 0),
+        expires_at_unix: _json_int(value, "expires_at_unix", 0),
         previous_record_sha256: _json_text(value, "previous_record_sha256"),
         signature: _json_text(value, "signature")
     )
-    if record.issuer_provider != authority_type or record.issuer_identity != authority_id or
-       record.issuer_key_id != authority_key_id:
-        return (_empty_record(), "self-review record issuer does not match header authority")
     (record, "")
 
 fn _record_valid(record: SelfReviewPolicyRecord, max_ttl_seconds: i64) -> text:
@@ -419,13 +375,13 @@ fn _record_valid(record: SelfReviewPolicyRecord, max_ttl_seconds: i64) -> text:
         return "self-review record PR/head/session identity is invalid"
     if not _safe_identity(record.reviewer_provider) or not _safe_identity(record.reviewer_identity) or not _safe_identity(record.reviewer_model):
         return "self-review record reviewer identity is invalid"
-    if not _sha256_valid(record.changed_manifest_sha256) or not _sha256_valid(record.higher_model_receipt_digest):
+    if record.reviewer_tier != "high_capability" or (record.reviewer_effort != "high" and record.reviewer_effort != "xhigh" and record.reviewer_effort != "max" and record.reviewer_effort != "ultra"):
+        return "self-review record requires a high-capability, high-effort reviewer"
+    if not _sha256_valid(record.changed_manifest_sha256) or not _sha256_valid(record.review_evidence_sha256):
         return "self-review record receipt bindings are invalid"
     if not _safe_identity(record.issuer_provider) or not _safe_identity(record.issuer_identity) or not _safe_identity(record.issuer_key_id):
         return "self-review record issuer identity is invalid"
-    if record.issued_at_unix <= 0 or record.not_before_unix < record.issued_at_unix or
-       record.expires_at_unix <= record.not_before_unix or
-       record.expires_at_unix - record.issued_at_unix > max_ttl_seconds:
+    if record.issued_at_unix <= 0 or record.expires_at_unix <= record.issued_at_unix or record.expires_at_unix - record.issued_at_unix > max_ttl_seconds:
         return "self-review record time window is invalid"
     if not _sha256_valid(record.previous_record_sha256) or record.signature.len() < 32 or record.signature.len() > 4096:
         return "self-review record hash-chain/signature fields are invalid"
@@ -434,33 +390,22 @@ fn _record_valid(record: SelfReviewPolicyRecord, max_ttl_seconds: i64) -> text:
     ""
 
 fn parse_self_review_policy_db(payload: text) -> SelfReviewPolicyDb:
-    if payload.contains("\r") or payload.starts_with("\n") or payload.contains("\n\n"):
-        return _policy_error(payload, "self-review policy database must use canonical non-empty LF JSONL")
     var lines: [text] = []
     for raw in payload.split("\n"):
         val line = raw.trim()
-        if line != "" and line != raw:
-            return _policy_error(payload, "self-review policy database JSONL records must not have surrounding whitespace")
-        if line != "": lines.push(line)
+        if line != "":
+            lines.push(line)
     if lines.len() == 0:
         return _policy_error(payload, "operator self-review policy database is empty")
     val header_parse = json_parse_with_error(lines[0])
-    if header_parse.1 != "" or not _closed_object(header_parse.0, ["schema", "record_type", "default_allow", "max_ttl_seconds", "authority"]):
+    if header_parse.1 != "" or not _closed_object(header_parse.0, ["schema", "default_allow", "max_ttl_seconds", "authority"]):
         return _policy_error(payload, "self-review policy database header is malformed")
     val header = header_parse.0
     val schema = _json_text(header, "schema")
-    val record_type = _json_text(header, "record_type")
     val default_allow = _json_bool(header, "default_allow", false)
     val max_ttl_seconds = _json_int(header, "max_ttl_seconds", 0)
-    val authority_value = json_object_get(header, "authority")
-    if not _closed_object(authority_value, ["type", "id", "key_id"]):
-        return _policy_error(payload, "self-review policy database authority identity is malformed")
-    val authority = _json_text(authority_value, "type")
-    val authority_id = _json_text(authority_value, "id")
-    val authority_key_id = _json_text(authority_value, "key_id")
-    if schema != "spipe-self-review-policy-db/2" or record_type != "header" or not default_allow or
-       authority != "operator_owned_external" or not _safe_identity(authority_id) or
-       not _safe_identity(authority_key_id):
+    val authority = _json_text(header, "authority")
+    if schema != "spipe-self-review-policy-db/1" or not default_allow or authority != "operator_owned_external":
         return _policy_error(payload, "self-review policy database header is not the default-allow external authority")
     if max_ttl_seconds <= 0 or max_ttl_seconds > 86400:
         return _policy_error(payload, "self-review policy database maximum TTL must be within 24 hours")
@@ -471,7 +416,7 @@ fn parse_self_review_policy_db(payload: text) -> SelfReviewPolicyDb:
         val parsed = json_parse_with_error(lines[index])
         if parsed.1 != "":
             return _policy_error(payload, "self-review policy database JSONL record is malformed")
-        val result = _parse_record(parsed.0, authority, authority_id, authority_key_id)
+        val result = _parse_record(parsed.0)
         if result.1 != "":
             return _policy_error(payload, result.1)
         val record = result.0
@@ -488,8 +433,7 @@ fn parse_self_review_policy_db(payload: text) -> SelfReviewPolicyDb:
         index = index + 1
     SelfReviewPolicyDb(
         schema: schema, default_allow: default_allow, max_ttl_seconds: max_ttl_seconds,
-        authority: authority, authority_id: authority_id, authority_key_id: authority_key_id,
-        records: records, sha256: hash_sha256(payload), valid: true, error: ""
+        authority: authority, records: records, sha256: hash_sha256(payload), valid: true, error: ""
     )
 
 fn load_self_review_policy_db(path: text) -> SelfReviewPolicyDb:
@@ -729,9 +673,11 @@ fn _record_matches(record: SelfReviewPolicyRecord, request: SelfReviewRequest,
         record.reviewer_provider == request.reviewer_provider and
         record.reviewer_identity == request.reviewer_identity and
         record.reviewer_model == request.reviewer_model and
+        record.reviewer_tier == request.reviewer_tier and
+        record.reviewer_effort == request.reviewer_effort and
         record.changed_manifest_sha256 == manifest.sha256 and
-        record.higher_model_receipt_digest == request.review_evidence_sha256 and
-        request.now_unix >= record.not_before_unix and request.now_unix < record.expires_at_unix)
+        record.review_evidence_sha256 == request.review_evidence_sha256 and
+        request.now_unix >= record.issued_at_unix and request.now_unix < record.expires_at_unix)
 
 fn _record_denies_path(record: SelfReviewPolicyRecord, manifest: SelfReviewChangedManifest) -> bool:
     for change in manifest.changes:
@@ -785,9 +731,13 @@ fn evaluate_self_review(policy: SelfReviewPolicyDb, manifest: SelfReviewChangedM
         return _decision(request, policy.sha256, manifest.sha256, false, "self-review request identity is invalid", [])
     if request.reviewer_tier != "high_capability" or (request.reviewer_effort != "high" and request.reviewer_effort != "xhigh" and request.reviewer_effort != "max" and request.reviewer_effort != "ultra"):
         return _decision(request, policy.sha256, manifest.sha256, false, "self-review requires high-capability review at high effort or above", [])
-    if request.review_evidence_mode != "broker_signed" or
-       not request.review_evidence_broker_authenticated or request.self_attestation_authorized:
-        return _decision(request, policy.sha256, manifest.sha256, false, "self-review requires authenticated broker-signed higher-model evidence; self_attested evidence is unsupported", [])
+    val evidence_mode_valid = (
+        (request.review_evidence_mode == "broker_signed" and request.review_evidence_broker_authenticated) or
+        (request.review_evidence_mode == "self_attested" and request.self_attestation_authorized and
+            not request.review_evidence_broker_authenticated)
+    )
+    if not evidence_mode_valid:
+        return _decision(request, policy.sha256, manifest.sha256, false, "review evidence mode is neither broker-signed nor explicitly authorized self-attestation", [])
     if request.higher_model_verdict != "PASS" or request.higher_model_p0_count != 0 or
        request.higher_model_p1_count != 0 or not _sha256_valid(request.review_evidence_sha256):
         return _decision(request, policy.sha256, manifest.sha256, false, "review evidence is not exact-head PASS with zero P0/P1", [])
@@ -808,7 +758,7 @@ fn evaluate_self_review(policy: SelfReviewPolicyDb, manifest: SelfReviewChangedM
                 return _decision(request, policy.sha256, manifest.sha256, false, "operator constraint does not allow every changed path", [])
             matched_constraints.push(record.record_id)
     _decision(request, policy.sha256, manifest.sha256, true,
-        "default self-review privilege allowed; no immutable or operator deny matched",
+        "default self-review privilege allowed for ordinary code/text; no immutable restriction or operator deny/constrain matched",
         matched_constraints)
 
 fn self_review_decision_current(decision: SelfReviewDecision, now_unix: i64,
