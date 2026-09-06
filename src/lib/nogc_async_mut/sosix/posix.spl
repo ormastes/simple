@@ -1,0 +1,47 @@
+"""Exact POSIX positioned I/O surface for the hosted SOSIX capsule.
+
+Every function is an `@always_inline` alias over the runtime-owned descriptor
+externs, so a native build resolves a call site straight to `pread@plt` /
+`pwrite@plt` with no intermediate symbol and no allocation: the buffer is a
+caller-owned address (`rt_alloc` family), never a `text`.
+
+Return convention for `pread`/`pwrite`: bytes transferred, or `-errno` (the
+io_uring completion convention). A raw `-1` + thread errno was rejected because
+an interpreted caller cannot read errno before the interpreter clobbers it.
+
+Availability: `rt_fd_pread` / `rt_fd_pwrite` land with the seed change of
+2026-09-05 (plan task C1). On a binary that predates it they are unbacked and
+return nil; `test/01_unit/lib/nogc_async_mut/sosix/posix_spec.spl` is then red
+by design, never skipped. Re-exported from the capsule `__init__` since the
+2026-09-05 deploy backs the pair on this host.
+"""
+
+# TODO: (sosix C3) prove the zero-wrapper lowering once native-build works on this
+# host: native-build a probe calling sosix_posix_pread, objdump for `bl <pread@plt>`
+# with no sosix_posix_pread/file_pread_fd symbol, then sabotage by removing
+# @always_inline. Blocked by doc/08_tracking/bug/native_build_fails_on_hello_world_aarch64_2026-09-06.md
+use std.nogc_sync_mut.sffi.fs.{file_open, file_close, file_pread_fd, file_pwrite_fd}
+
+pub val SOSIX_POSIX_OPEN_READ: i32 = 0
+pub val SOSIX_POSIX_OPEN_READ_WRITE: i32 = 1
+pub val SOSIX_POSIX_OPEN_WRITE: i32 = 2
+
+@always_inline
+pub fn sosix_posix_open(path: text, mode: i32) -> i32:
+    """Open a descriptor (-1 on failure); mode is one of the SOSIX_POSIX_OPEN_* values."""
+    file_open(path, mode)
+
+@always_inline
+pub fn sosix_posix_close(fd: i32) -> bool:
+    file_close(fd)
+
+@always_inline
+pub fn sosix_posix_pread(fd: i32, buffer: i64, len: i64, offset: i64) -> i64:
+    file_pread_fd(fd, buffer, len, offset)
+
+@always_inline
+pub fn sosix_posix_pwrite(fd: i32, buffer: i64, len: i64, offset: i64) -> i64:
+    file_pwrite_fd(fd, buffer, len, offset)
+
+export SOSIX_POSIX_OPEN_READ, SOSIX_POSIX_OPEN_READ_WRITE, SOSIX_POSIX_OPEN_WRITE
+export sosix_posix_open, sosix_posix_close, sosix_posix_pread, sosix_posix_pwrite
