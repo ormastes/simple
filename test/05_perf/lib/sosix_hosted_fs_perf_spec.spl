@@ -1,0 +1,85 @@
+"""Perf mechanism check for the unified SOSIX hosted capsule: the per-operation cost of a full ring cycle (submit, provider take, complete, pump, release) stays flat as the number of operations grows, and one unified read over the reference file driver costs exactly one ring hop (one reserve, one commit, one provider take, one completion, one native read). Timings are printed as evidence for the perf report; the assertions pin the mechanism, not a wall-clock budget."""
+
+use std.spec.*
+use std.env.platform.{get_temp_dir}
+use std.common.contracts.sosix.capability_ref_v1.{SosixCapabilityRef, SosixBufferRef}
+use std.nogc_async_mut.io.{file_read_text_at, file_write_text_at, file_remove}
+use std.nogc_async_mut.sosix.fs.{SosixHostedFs}
+use std.nogc_async_mut.sosix.sync.{sosix_sync_fs_read_at}
+use std.nogc_async_mut.sosix.file_driver.{SosixHostedFileDriver}
+use std.nogc_async_mut.sosix.time.{sosix_time_monotonic_now_ns}
+
+fn setup_sosix_hosted_fs(capacity: i64) -> SosixHostedFs:
+    match SosixHostedFs.create(94u64, 7u64, capacity):
+        case Ok(fs): fs
+        case Err(_):
+            fail("unresolved sosix oracle: hosted fs could not be created")
+            SosixHostedFs.create(94u64, 7u64, capacity).unwrap()
+
+# One full lifecycle per iteration on a capacity-1 ring: the cost has no batching to hide behind.
+fn ring_cycle_ns_per_op(count: i64) -> u64:
+    val fs = setup_sosix_hosted_fs(1)
+    val file = SosixCapabilityRef(slot: 3, generation: 1)
+    val buffer = SosixBufferRef(slot: 5, generation: 1)
+    val started = sosix_time_monotonic_now_ns()
+    var i = 0
+    while i < count:
+        val submit = fs.read_at(file, buffer, 0u64, 0u64, 8u64, 0u64)
+        if not submit.accepted:
+            fail("ring cycle rejected a submission on an empty ring")
+        fs.service_one(0, 8u64)
+        fs.pump()
+        fs.release(submit.operation)
+        i = i + 1
+    (sosix_time_monotonic_now_ns() - started) / count.to_u64()
+
+fn scratch_path() -> text:
+    val path = get_temp_dir() + "/sosix_hosted_fs_perf.txt"
+    file_remove(path)
+    path
+
+describe "SOSIX hosted capsule perf mechanisms":
+    it "keeps the per-operation ring cycle cost flat from 64 to 512 operations":
+        # @req REQ-SOSIX-PERF-FLAT
+        step("Time 64 and 512 full lifecycles on a capacity-1 ring")
+        val small = ring_cycle_ns_per_op(64)
+        val large = ring_cycle_ns_per_op(512)
+        print("sosix_perf ring_cycle ns/op n=64: " + small.to_string() + " n=512: " + large.to_string())
+        step("Per-op cost at 512 stays within 3x of the cost at 64 (no quadratic term in the lifecycle)")
+        expect(large).to_be_less_than(small * 3u64 + 1u64)
+
+    it "performs exactly one ring hop per unified read over the file driver":
+        # @req REQ-SOSIX-PERF-HOP
+        step("Prepare a 64-byte file on the host")
+        val path = scratch_path()
+        expect(file_write_text_at(path, 0, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")).to_equal(64)
+        step("Time 64 direct positioned reads through the typed alias")
+        val direct_started = sosix_time_monotonic_now_ns()
+        var i = 0
+        while i < 64:
+            match file_read_text_at(path, 16, 16):
+                case Ok(_): i = i + 1
+                case Err(_): fail("direct positioned read failed")
+        val direct = (sosix_time_monotonic_now_ns() - direct_started) / 64u64
+        step("Time 64 reads through the unified ring, sync leg, reference file driver")
+        val fs = setup_sosix_hosted_fs(1)
+        val driver = SosixHostedFileDriver.create()
+        val file = driver.open_path(path)
+        val sink = driver.buffer_from("")
+        val ring_started = sosix_time_monotonic_now_ns()
+        var j = 0
+        while j < 64:
+            val result = sosix_sync_fs_read_at(fs, driver, file, sink, 16u64, 0u64, 16u64, 0u64)
+            if result.completion.transferred != 16u64:
+                fail("unified read did not transfer 16 bytes")
+            j = j + 1
+        val unified = (sosix_time_monotonic_now_ns() - ring_started) / 64u64
+        print("sosix_perf read16 ns/op direct: " + direct.to_string() + " unified: " + unified.to_string() + " ratio_x100: " + (unified * 100u64 / direct).to_string())
+        step("Mechanism budget from design §7: one reserve, one commit, one provider take, one completion, one native read per op, and the ring is empty afterwards")
+        expect(fs.telemetry().reservations).to_equal(64u64)
+        expect(fs.telemetry().commits).to_equal(64u64)
+        expect(fs.telemetry().provider_takes).to_equal(64u64)
+        expect(fs.telemetry().completions).to_equal(64u64)
+        expect(driver.services).to_equal(64u64)
+        expect(fs.occupancy()).to_equal(0u64)
+        expect(driver.buffer_bytes(sink)).to_equal("0123456789abcdef")

@@ -1,0 +1,105 @@
+#!/bin/sh
+# check-sosix-capsule-boundaries.shs — fail-closed gate on the SOSIX unification capsule boundaries.
+# Verdict is ALWAYS the last stdout line: PASS exit 0 / FAIL exit 1 / ERROR exit 2.
+# Design: doc/05_design/runtime/sosix_runtime_unification_design.md §3 (ownership rules) and §7 (budgets).
+# Usage: sh scripts/check/check-sosix-capsule-boundaries.shs [--root DIR] [--selftest] [--max-lines N]
+#
+# Rules (each violation is named in the FAIL line):
+#   R1 src/lib/common/contracts/sosix/**  must not `use os.` and must not declare `extern fn rt_`
+#   R2 src/lib/nogc_async_mut/sosix/**    must not `use os.`
+#   R3 src/os/**                          must not `use std.nogc_async_mut.sosix` (direction is os -> common only)
+#   R4 every .spl under the two capsules  must be <= MAX_LINES (lint cost is superlinear per file)
+#   R5 direct rt_* ratchet for --roots src must not exceed SRC_CEILING (measured 6240 on 2026-09-05,
+#      doc/10_metrics/runtime/sosix_unification_baseline_2026-09-05.md); skipped with a note when
+#      check-no-direct-rt.shs is absent from the root (fixture roots), never counted as a pass.
+set -u
+ROOT="$(pwd)"
+SELFTEST=0
+MAX_LINES=300
+SRC_CEILING=6240
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --root) shift; ROOT="$1" ;;
+    --selftest) SELFTEST=1 ;;
+    --max-lines) shift; MAX_LINES="$1" ;;
+    --src-ceiling) shift; SRC_CEILING="$1" ;;
+    *) echo "unknown argument: $1"; echo "ERROR — nothing was checked (bad argument)"; exit 2 ;;
+  esac
+  shift
+done
+
+scan_root() {
+  # $1 = root; prints "<checked-count>|<violations>" ; violations newline-separated
+  r="$1"
+  common="$r/src/lib/common/contracts/sosix"
+  capsule="$r/src/lib/nogc_async_mut/sosix"
+  checked=0
+  viol=""
+  for f in "$common"/*.spl "$capsule"/*.spl; do
+    [ -f "$f" ] || continue
+    checked=$((checked + 1))
+    rel="${f#"$r"/}"
+    if /usr/bin/grep -qE '^use os\.' "$f"; then viol="$viol R1/R2:os-import:$rel"; fi
+    case "$f" in
+      "$common"/*) if /usr/bin/grep -qE '^extern fn rt_' "$f"; then viol="$viol R1:extern-rt:$rel"; fi ;;
+    esac
+    lines=$(wc -l < "$f")
+    if [ "$lines" -gt "$MAX_LINES" ]; then viol="$viol R4:too-long($lines):$rel"; fi
+  done
+  if [ -d "$r/src/os" ]; then
+    checked=$((checked + 1))
+    hits=$(/usr/bin/grep -rlE '^use std\.nogc_async_mut\.sosix' "$r/src/os" --include='*.spl' 2>/dev/null | head -5)
+    for h in $hits; do viol="$viol R3:os-imports-lib-capsule:${h#"$r"/}"; done
+  fi
+  echo "$checked|$viol"
+}
+
+selftest() {
+  t=$(mktemp -d)
+  mkdir -p "$t/good/src/lib/common/contracts/sosix" "$t/good/src/lib/nogc_async_mut/sosix" "$t/good/src/os/x"
+  printf 'pub val A: u8 = 1\nexport A\n' > "$t/good/src/lib/common/contracts/sosix/a.spl"
+  printf 'use std.common.contracts.sosix.a.{A}\nfn f() -> u8: A\nexport f\n' > "$t/good/src/lib/nogc_async_mut/sosix/f.spl"
+  printf 'use std.common.contracts.sosix.a.{A}\n' > "$t/good/src/os/x/y.spl"
+  out=$(scan_root "$t/good"); good_checked="${out%%|*}"; good_viol="${out#*|}"
+  mkdir -p "$t/bad/src/lib/common/contracts/sosix" "$t/bad/src/lib/nogc_async_mut/sosix" "$t/bad/src/os/x"
+  printf 'use os.kernel.errno.{EIO}\nextern fn rt_read(fd: i64) -> i64\n' > "$t/bad/src/lib/common/contracts/sosix/a.spl"
+  printf 'use os.sosix.io_state.{x}\n' > "$t/bad/src/lib/nogc_async_mut/sosix/f.spl"
+  printf 'use std.nogc_async_mut.sosix.fs.{SosixHostedFs}\n' > "$t/bad/src/os/x/y.spl"
+  awk 'BEGIN{for(i=0;i<301;i++)print "# line"}' > "$t/bad/src/lib/nogc_async_mut/sosix/long.spl"
+  out=$(scan_root "$t/bad"); bad_viol="${out#*|}"
+  rm -rf "$t"
+  [ "$good_checked" -eq 3 ] || { echo "selftest: good fixture checked=$good_checked (want 3)"; return 1; }
+  [ -z "$(echo "$good_viol" | tr -d ' ')" ] || { echo "selftest: good fixture flagged: $good_viol"; return 1; }
+  for want in "R1/R2:os-import" "R1:extern-rt" "R3:os-imports-lib-capsule" "R4:too-long"; do
+    case "$bad_viol" in *"$want"*) ;; *) echo "selftest: bad fixture missed $want"; return 1 ;; esac
+  done
+  echo "selftest: 2 fixtures ok (good=clean, bad=4 rule hits)"
+  return 0
+}
+
+selftest || { echo "ERROR — nothing was checked (selftest failed)"; exit 2; }
+[ "$SELFTEST" -eq 1 ] && { echo "PASS — selftest only"; exit 0; }
+
+out=$(scan_root "$ROOT"); checked="${out%%|*}"; viol="${out#*|}"
+if [ "$checked" -eq 0 ]; then echo "ERROR — nothing was checked (no capsule files under $ROOT)"; exit 2; fi
+
+r5_note="R5 skipped (no ratchet script in root)"
+if [ -x "$ROOT/scripts/check/check-no-direct-rt.shs" ] || [ -f "$ROOT/scripts/check/check-no-direct-rt.shs" ]; then
+  rt_out=$(cd "$ROOT" && sh scripts/check/check-no-direct-rt.shs --roots src 2>/dev/null)
+  rt_rc=$?
+  src_count=$(printf '%s\n' "$rt_out" | /usr/bin/grep -oE 'forbidden_product: [0-9]+' | head -1 | /usr/bin/grep -oE '[0-9]+')
+  if [ -z "$src_count" ]; then
+    src_count=$(printf '%s\n' "$rt_out" | /usr/bin/grep -oE 'forbidden=[0-9]+' | head -1 | /usr/bin/grep -oE '[0-9]+')
+  fi
+  if [ -z "$src_count" ]; then
+    echo "ERROR — nothing was checked (could not read the src forbidden count from check-no-direct-rt.shs, rc=$rt_rc)"; exit 2
+  fi
+  checked=$((checked + 1))
+  if [ "$src_count" -gt "$SRC_CEILING" ]; then viol="$viol R5:direct-rt-src=$src_count>ceiling=$SRC_CEILING"; fi
+  r5_note="R5 direct-rt src=$src_count ceiling=$SRC_CEILING"
+fi
+
+if [ -n "$(echo "$viol" | tr -d ' ')" ]; then
+  echo "FAIL — $checked file(s)/gate(s) checked, violations:$viol ($r5_note)"; exit 1
+fi
+echo "PASS — $checked file(s)/gate(s) checked, 0 violations ($r5_note)"; exit 0
