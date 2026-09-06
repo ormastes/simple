@@ -95,7 +95,16 @@ class Vk2dBench:
             self.engine.submit_batch()
             self.engine.present()
             warm = warm + 1
+        # The scene is fixed, so every frame MUST fold to the same `acc`. The
+        # old accumulator was `checksum ^= acc`, which cancels itself on any
+        # even frame count and printed checksum=0 for frames=2/4/6/8 while the
+        # renderer was perfectly correct — a silent blind spot, because 0 also
+        # reads as "blank surface". Latch the first frame's fold instead and
+        # COUNT later frames that disagree, so the value is independent of the
+        # frame count and a genuine mid-run divergence is still reported.
         var checksum: i64 = 0
+        var checksum_latched = false
+        var frame_mismatches: i64 = 0
         var draw_us: i64 = 0
         var batch_us: i64 = 0
         var present_us: i64 = 0
@@ -121,7 +130,11 @@ class Vk2dBench:
                 while i < n:
                     acc = acc ^ rb.pixels[i].to_i32().to_i64()
                     i = i + 4096
-                checksum = checksum ^ acc
+                if not checksum_latched:
+                    checksum = acc
+                    checksum_latched = true
+                else if acc != checksum:
+                    frame_mismatches = frame_mismatches + 1
                 # Raw framebuffer dump for the byte-for-byte comparator,
                 # little-endian ARGB exactly as the C leg writes it.
                 val dump_path = env_get("VK2D_DUMP_FB").trim()
@@ -161,7 +174,7 @@ class Vk2dBench:
         var fps_num: i64 = 0
         if ms > 0:
             fps_num = frames.to_i64() * 1000 / ms
-        "simple-vulkan-2d w={self.w} h={self.h} rects={rects.len()} frames={frames} readback={readback} ms={ms} fps~={fps_num} draw_us={draw_us} batch_us={batch_us} present_us={present_us} readback_us={readback_us} checksum={checksum}"
+        "simple-vulkan-2d w={self.w} h={self.h} rects={rects.len()} frames={frames} readback={readback} ms={ms} fps~={fps_num} draw_us={draw_us} batch_us={batch_us} present_us={present_us} readback_us={readback_us} checksum={checksum} frame_mismatches={frame_mismatches}"
 
 fn _loop_probe(w: i32, h: i32):
     """Time the three O(pixels) marshalling loop shapes from the engine's
