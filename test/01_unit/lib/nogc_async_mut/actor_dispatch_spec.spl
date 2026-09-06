@@ -1,66 +1,177 @@
-# Actor Dispatch Tests
-#
-# Tests for actor system dispatch, handler table, and mailbox integration.
-# Verifies ActorRuntime, ActorRef, HandlerTable, and dispatch flow.
+"""
+## Purpose and audience
+Exercises the actor dispatch machinery in `std.nogc_async_mut.actors.actor` —
+HandlerTable registration and dispatch, ActorRef identity and reply
+addressing, and Mailbox queueing with drop-oldest back-pressure. Audience:
+maintainers of the actor runtime, the process manager lanes, and the sosix
+service code that dispatches through these tables.
+## Operator workflow
+Run this file alone with the seed runner:
+`./src/compiler_rust/target/bootstrap/simple run test/01_unit/lib/nogc_async_mut/actor_dispatch_spec.spl`
+## Compatibility and limitations
+Dispatch is exercised through the synchronous HandlerTable.dispatch path, which
+is the same path call() and the scheduler tick use; full mailbox-drain
+scheduling under ActorRuntime.run is not exercised here. Mailbox scenarios
+construct Mailbox values directly so back-pressure is observable without a
+running scheduler loop.
+## Verification guidance and troubleshooting
+A dispatch failure means handler lookup or result wrapping drifted in
+actor.spl; a mailbox failure means the queue or back-pressure contract moved.
+Rerun the file alone and compare the failing expect against
+`src/lib/nogc_async_mut/actors/actor.spl`. A "rejects" scenario failing means
+unknown methods crash or mis-route instead of returning the typed
+MethodNotFound error — treat that as blocking.
+"""
+# Lifecycle: doc/01_research/runtime/actor_runtime_policy.md ;
+# doc/03_plan/agent_tasks/parent_authoritative_actor_process.md ;
+# doc/04_architecture/sosix_parallel_qemu_refactor.md ;
+# doc/05_design/sosix_parallel_qemu_refactor.md
+# @manual_section: actor_dispatch_machinery
 
 use std.spec.step
+use std.nogc_async_mut.actors.actor.{
+    ActorId,
+    DispatchResult,
+    DispatchStatus,
+    HandlerTable,
+    Mailbox,
+    Message,
+    make_handlers,
+    spawn_actor
+}
 
-describe "Actor Dispatch":
-    # @manual scenario evidence
-    describe "HandlerTable":
-        it "creates empty handler table":
-            # HandlerTable stores method name -> handler function mappings
-            val table_size = 0
-            expect(table_size).to_equal(0)
+fn handler_greet(args: [text]) -> text:
+    if args.is_empty():
+        return "Hello, stranger!"
+    "Hello, {args[0]}!"
 
-        it "registers handler by method name":
-            # register("greet", handler_fn) adds to table
-            val method = "greet"
-            expect(method).to_equal("greet")
+fn handler_upper(args: [text]) -> text:
+    if args.is_empty():
+        return ""
+    args[0]
 
-        it "dispatches to correct handler":
-            # dispatch("greet", args) finds and calls handler_fn
-            val method = "greet"
-            val found = method == "greet"
-            expect(found).to_equal(true)
+fn handler_lower(args: [text]) -> text:
+    "lower_result"
 
-    describe "ActorRef":
-        it "sends message to actor mailbox":
-            # ActorRef.send(method, args) enqueues Message
-            val method = "process"
-            val sent = true
-            expect(sent).to_equal(true)
+describe "HandlerTable dispatch":
+    it "creates an empty handler table that resolves no methods":
+        # @req REQ-ACTOR-DISPATCH-001
+        # @capture(statistics): empty-table dispatch verdict retained as evidence
+        step("Dispatch against a handler table with no registrations")
+        var ht = make_handlers()
+        val result = ht.dispatch("anything", [])
+        expect(result.is_ok()).to_equal(false)  # oracle: an empty table has no handler to resolve
 
-        it "stores actor pid":
-            val pid = 42
-            expect(pid).to_equal(42)
+    it "dispatches a registered handler and returns its value":
+        # @req REQ-ACTOR-DISPATCH-001
+        # @capture(statistics): dispatched handler result retained as evidence
+        step("Register a greeting handler and dispatch to it by name")
+        var ht = make_handlers()
+        ht.register("greet", handler_greet)
+        val result = ht.dispatch("greet", ["Bob"])
+        expect(result.is_ok()).to_equal(true)  # oracle: the registered method must resolve
+        expect(result.value).to_equal("Hello, Bob!")  # oracle: dispatch returns the handler's own return value
 
-    describe "Actor Lifecycle":
-        it "spawns actor with handler table":
-            # spawn_actor creates actor with mailbox + handlers
-            val spawned = true
-            expect(spawned).to_equal(true)
+    it "routes distinct method names to their own handlers":
+        # @req REQ-ACTOR-DISPATCH-001
+        # @capture(statistics): per-method routing results retained as evidence
+        step("Register two handlers and dispatch each method once")
+        var ht = make_handlers()
+        ht.register("upper", handler_upper)
+        ht.register("lower", handler_lower)
+        val upper = ht.dispatch("upper", ["loud"])
+        val lower = ht.dispatch("lower", [])
+        expect(upper.value).to_equal("loud")  # oracle: the upper handler echoes its argument
+        expect(lower.value).to_equal("lower_result")  # oracle: the lower handler returns its own marker value
 
-        it "processes messages from mailbox in order":
-            # Actor loop: pull message -> lookup handler -> call -> reply
-            var order = [1, 2, 3]
-            expect(order.len()).to_equal(3)
+    it "rejects an unknown method with a typed not-found error":
+        # @req REQ-ACTOR-DISPATCH-001
+        # @capture(statistics): not-found error text retained as evidence
+        step("Dispatch a method name that was never registered")
+        var ht = make_handlers()
+        ht.register("greet", handler_greet)
+        val result = ht.dispatch("no_such_method", [])
+        expect(result.is_ok()).to_equal(false)  # oracle: an unregistered method must not resolve
+        expect(result.error_msg).to_contain("no_such_method")  # oracle: the error names the missing method
 
-    describe "DispatchResult":
-        it "returns Ok for successful dispatch":
-            val result = "ok"
-            expect(result).to_equal("ok")
+    it "replaces a handler re-registered under the same method name":
+        # @req REQ-ACTOR-DISPATCH-001
+        # @capture(statistics): replacement dispatch result retained as evidence
+        step("Register two handlers under one name and dispatch it")
+        var ht = make_handlers()
+        ht.register("greet", handler_upper)
+        ht.register("greet", handler_greet)
+        val result = ht.dispatch("greet", ["World"])
+        expect(result.value).to_equal("Hello, World!")  # oracle: the most recent registration wins the table slot
 
-        it "returns NotFound for unknown method":
-            val result = "not_found"
-            expect(result).to_equal("not_found")
+describe "ActorRef and mailbox":
+    it "spawns actors with unique runtime ids":
+        # @req REQ-ACTOR-DISPATCH-002
+        # @capture(statistics): spawned actor ids retained as evidence
+        step("Spawn two actors from the same handler table")
+        var ht = make_handlers()
+        ht.register("greet", handler_greet)
+        val first = spawn_actor(ht)
+        val second = spawn_actor(ht)
+        expect(first.get_id()).to_not_equal(second.get_id())  # oracle: the runtime must never hand out a duplicate actor id
 
-    describe "Reply Mechanism":
-        it "sends reply when reply_to is set":
-            val reply_to = 7
-            val has_reply = reply_to > 0
-            expect(has_reply).to_equal(true)
+    it "returns a distinct reply address for each ask":
+        # @req REQ-ACTOR-DISPATCH-002
+        # @capture(statistics): ask reply addresses retained as evidence
+        step("Ask the same actor twice and compare the reply addresses")
+        var ht = make_handlers()
+        ht.register("greet", handler_greet)
+        val ref = spawn_actor(ht)
+        val reply_a = ref.ask("greet", ["a"])
+        val reply_b = ref.ask("greet", ["b"])
+        expect(reply_a.value).to_not_equal(reply_b.value)  # oracle: every request gets its own fresh reply address
 
-        it "skips reply when reply_to is nil":
-            var reply_to = nil
-            expect(reply_to).to_be_nil()
+    it "delivers fire-and-forget messages to the actor mailbox":
+        # @req REQ-ACTOR-DISPATCH-002
+        # @capture(statistics): delivered message method names retained as evidence
+        step("Send a fire-and-forget message to a spawned actor")
+        var ht = make_handlers()
+        ht.register("greet", handler_greet)
+        val ref = spawn_actor(ht)
+        ref.send("greet", ["queue"])
+        expect(ref.mailbox.queue.len()).to_equal(1)  # oracle: send enqueues exactly one message
+        expect(ref.mailbox.queue[0].method).to_equal("greet")  # oracle: the queued message carries the dispatched method name
+
+    it "applies drop-oldest back-pressure when the mailbox fills":
+        # @req REQ-ACTOR-DISPATCH-003
+        # @capture(statistics): post-back-pressure queue contents retained as evidence
+        step("Push three messages into a capacity-two mailbox")
+        var mb = Mailbox.new(2)
+        mb.push(Message(method: "first", args: [], reply_to: nil))
+        mb.push(Message(method: "second", args: [], reply_to: nil))
+        mb.push(Message(method: "third", args: [], reply_to: nil))
+        expect(mb.queue.len()).to_equal(2)  # oracle: capacity is never exceeded
+        expect(mb.queue[0].method).to_equal("second")  # oracle: the oldest message was dropped to admit the newest
+
+    it "pops messages in arrival order and drains to nil":
+        # @req REQ-ACTOR-DISPATCH-003
+        # @capture(statistics): pop sequence results retained as evidence
+        step("Push two messages, pop them, and drain past the end")
+        var mb = Mailbox.new(4)
+        mb.push(Message(method: "alpha", args: [], reply_to: nil))
+        mb.push(Message(method: "beta", args: [], reply_to: nil))
+        val first = mb.pop()
+        val second = mb.pop()
+        expect(first.?.method).to_equal("alpha")  # oracle: the earliest message pops first
+        expect(second.?.method).to_equal("beta")  # oracle: FIFO order is preserved across pops
+        expect(mb.pop()).to_be_nil()  # oracle: an exhausted mailbox reports absence instead of crashing
+
+describe "Message reply addressing":
+    it "keeps plain fire-and-forget messages reply-free":
+        # @req REQ-ACTOR-DISPATCH-002
+        # @capture(statistics): reply-free message verdict retained as evidence
+        step("Construct a message without a reply address")
+        val msg = Message(method: "work", args: [], reply_to: nil)
+        expect(msg.reply_to.?).to_equal(false)  # oracle: fire-and-forget messages carry no reply address
+
+    it "binds a reply address when the caller asks for one":
+        # @req REQ-ACTOR-DISPATCH-002
+        # @capture(statistics): reply-bound message verdict retained as evidence
+        step("Construct a message carrying a fresh reply address")
+        val msg = Message(method: "work", args: [], reply_to: Some(ActorId.new()))
+        expect(msg.reply_to.?).to_equal(true)  # oracle: a request message must carry its reply address

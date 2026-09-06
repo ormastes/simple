@@ -1,0 +1,162 @@
+"""
+# Simple 2D / GPU Per-Frame Cost Lint
+
+**Requirements:** doc/02_requirements/nfr/engine2d_vulkan_2d_perf.md NFR-2DP-001
+**Plan:** N/A
+**Design:** N/A
+**Research:** doc/01_research/local/2d_rendering_perf_dma_alignment_soa_async.md
+
+## Overview
+
+Two silent per-frame costs were found by benchmarking Engine2D's vulkan
+backend against the equivalent C Vulkan program (`test/05_perf/bench/vulkan_2d_c/`). Neither
+is a crash, a type error, or visibly wrong output — both simply cost more than
+the GPU work they wrap, which is exactly the kind of defect review misses and a
+lint can catch mechanically.
+
+This spec pins the two shapes using the REAL pre-fix and post-fix source, so
+the rule cannot silently stop matching the thing it was written for.
+
+## Behavior
+
+- A function returning an array inside a tuple is flagged (G2DP001). Measured
+  ~12.1 ms per frame for a 480,000-pixel framebuffer — more than the device
+  download and the native fill combined.
+- The fixed shape, passing the destination in and returning a scalar, is
+  silent.
+- A per-element array copy loop is flagged (G2DP002). Measured ~3.4 ms per
+  frame for 480,000 u32.
+- Single-element indexed assignment is NOT a copy loop and stays silent.
+- The rule is scoped to the 2D/GPU lane: identical code outside it is silent,
+  because a per-frame cost is only a per-frame cost where frames happen.
+"""
+
+# @feature engine2d_vulkan_2d_perf
+# tag: unit
+
+use std.spec
+use compiler.tools.lint._LintMain.gpu_2d_perf_lints.{
+    gpu_2d_perf_codes, gpu_2d_perf_in_scope
+}
+
+const LANE: text = "src/lib/gc_async_mut/gpu/engine2d/backend_vulkan.spl"
+const OUTSIDE: text = "src/app/cli/main.spl"
+
+fn _has(path: text, src: text, code: text) -> bool:
+    for c in gpu_2d_perf_codes(path, src):
+        if c == code:
+            return true
+    false
+
+describe "G2DP001: array returned inside a tuple":
+
+    it "flags the readback facade shape that cost 12.1 ms per frame":
+        """
+        This is the real pre-fix signature from sffi_vulkan.spl. Returning the
+        480,000-element framebuffer through the tuple deep-copied it; assigning
+        the same array costs 22 us, so the cost is the tuple boundary itself.
+        """
+        step("Lint the pre-fix signature")
+        val src = "fn vulkan_sffi_readback_u32_checksum(handle: i64, pixel_count: i32, offset: i64) -> ([u32], i64):"
+
+        step("The tuple-carried array is reported")
+        expect(_has(LANE, src, "G2DP001")).to_equal(true)
+
+    it "stays silent on the fixed shape that replaced it":
+        """
+        The fix passes the destination in and returns only the checksum, so the
+        array never crosses a tuple boundary.
+        """
+        val src = "fn vulkan_sffi_readback_u32_into(dest: [u32], handle: i64, pixel_count: i32, offset: i64) -> i64:"
+        expect(_has(LANE, src, "G2DP001")).to_equal(false)
+
+    it "does not flag a tuple of scalars":
+        """
+        Tuples are not the problem — arrays crossing them are. A scalar tuple
+        return is free and must not be discouraged.
+        """
+        val src = "fn cs_effective_size(cols: i64, rows: i64) -> (i64, i64):"
+        expect(_has(LANE, src, "G2DP001")).to_equal(false)
+
+describe "G2DP002: per-element array copy loop":
+
+    it "flags the defensive host_buf copy that cost 3.4 ms per frame":
+        """
+        The real shape from read_pixels_with_source: 480,000 iterations to copy
+        an array the runtime can copy in bulk.
+        """
+        val src = "            copy[i] = self.host_buf[i]"
+        expect(_has(LANE, src, "G2DP002")).to_equal(true)
+
+    it "does not flag a single indexed element assignment":
+        """
+        Writing one pixel is ordinary work, not a bulk copy.
+        """
+        expect(_has(LANE, "    dst[0] = src[0]", "G2DP002")).to_equal(false)
+
+    it "does not flag an index-shifting write, which is not a plain copy":
+        """
+        Different index expressions mean the loop is doing something a bulk
+        copy cannot do, so recommending one would be wrong.
+        """
+        expect(_has(LANE, "    dst[i] = src[j]", "G2DP002")).to_equal(false)
+
+describe "G2DP003: 1x1 draw inside a loop (one GPU dispatch per pixel)":
+
+    it "flags the per-pixel outline plot that ran 127x slower than the cpu backend":
+        """
+        The real shape from emu_draw_circle. draw_rect_filled is a memory write
+        on the cpu backend but a COMPUTE DISPATCH on vulkan, so an r=35 outline
+        cost ~200 dispatches: 16 us on cpu vs 2,025 us on vulkan.
+        """
+        step("Lint a 1x1 draw inside a loop")
+        val src = "fn f(core: RenderBackend, cx: i32, cy: i32, r: i32, color: u32):\n" +
+            "    var y: i32 = 0\n" +
+            "    while y < r:\n" +
+            "        core.draw_rect_filled(cx, cy + y, 1, 1, color)\n" +
+            "        y = y + 1"
+
+        step("The per-pixel dispatch is reported")
+        expect(_has(LANE, src, "G2DP003")).to_equal(true)
+
+    it "does not flag a degenerate-case guard, which is one pixel and correct":
+        """
+        Twelve such guards exist in backend_emu.spl, firing when r <= 0 and
+        returning immediately. Flagging them would be pure noise and would
+        train reviewers to ignore the rule.
+        """
+        val src = "fn f(core: RenderBackend, cx: i32, cy: i32, r: i32, color: u32):\n" +
+            "    if r <= 0:\n" +
+            "        core.draw_rect_filled(cx, cy, 1, 1, color)\n" +
+            "        return"
+        expect(_has(LANE, src, "G2DP003")).to_equal(false)
+
+    it "does not flag the span form, which is the fix":
+        """
+        emu_draw_circle_filled and emu_draw_circle_thick already emit one rect
+        per horizontal run. The rule must stay silent on the shape it is
+        steering people toward, or it would never go green.
+        """
+        val src = "fn f(core: RenderBackend, cx: i32, cy: i32, r: i32, w: i32, color: u32):\n" +
+            "    var y: i32 = 0\n" +
+            "    while y < r:\n" +
+            "        core.draw_rect_filled(cx, cy + y, w, 1, color)\n" +
+            "        y = y + 1"
+        expect(_has(LANE, src, "G2DP003")).to_equal(false)
+
+describe "gpu_2d_perf scope":
+
+    it "only applies inside the 2D/GPU lane":
+        """
+        A per-frame cost is only a per-frame cost where frames happen. The same
+        source outside the lane must stay silent, so the rule cannot become a
+        repo-wide style opinion.
+        """
+        step("The lane is in scope and the CLI is not")
+        expect(gpu_2d_perf_in_scope(LANE)).to_equal(true)
+        expect(gpu_2d_perf_in_scope(OUTSIDE)).to_equal(false)
+
+        step("Identical offending source is silent outside the lane")
+        val src = "fn f(a: i64) -> ([u32], i64):"
+        expect(_has(LANE, src, "G2DP001")).to_equal(true)
+        expect(_has(OUTSIDE, src, "G2DP001")).to_equal(false)

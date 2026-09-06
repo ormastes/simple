@@ -83,12 +83,31 @@ Phase 1 (parallel now):
       signature extraction vs full parse over a fixed sample of real
       modules — same fn/class/export surface; (b) parse-time benchmark
       outline-vs-full (pattern: `test/05_perf/mcp_json_perf_spec.spl`).
-- [ ] W2-A2 (full-strength, new module only) — lazy loader bridge in NEW
+- [x] W2-A2 (full-strength, new module only) — lazy loader bridge in NEW
       `src/compiler/10.frontend/core/interpreter/module_loader_lazy.spl`:
       outline-parse module, register body spans for on-first-call
       materialization via the existing deferred-module system, gated by
       `SIMPLE_LAZY_PARSE=1`; whole-file path untouched. Returns exact
       wiring diff for `module_loader_core.spl` (applied in integration).
+      — verified src/compiler/10.frontend/core/interpreter/module_loader_lazy.spl:403 `load_module_lazy`
+      (gate `lazy_parse_enabled` :49-53 reads `SIMPLE_LAZY_PARSE`; deferred
+      registration via `register_deferred_module` :34; wired at
+      module_loader_core.spl:45 import and :446 gate)
+      — RE-verified 2026-09-05 after the earlier oracle was found to be
+      unfalsifiable (`gate == 0 || gate == 1` etc.): scenario 3 of
+      `test/03_system/plan_acceptance/dependency_analysis_spec.spl` was
+      honestly RED (`load_module_lazy` returned rc=0, `lazy_module_known`
+      stayed 0) because `resolve_module_path` cannot resolve dotted module
+      names that spell a numbered directory as two segments
+      (`compiler.00.common.dependency.graph` vs. the real
+      `src/compiler/00.common/dependency/graph.spl`). Fixed by adding
+      `_lazy_compiler_numbered_candidate` (re-merges an all-digit segment
+      with the following segment into `NN.name`) as a retry candidate in
+      `load_module_lazy`. `src/compiler_rust/target/debug/simple run
+      test/03_system/plan_acceptance/dependency_analysis_spec.spl` →
+      3 examples, 0 failures, 2026-09-05. SCAN score unchanged at 97
+      (`sh scripts/check/sspec-score-seed-lane.shs
+      test/03_system/plan_acceptance/dependency_analysis_spec.spl`).
 - [x] W2-B1 (Sonnet, read-only) — deps normal|deep over the handshake
       closure: baseline 39 files / 9,031 code lines / ~309 KB est. native;
       top candidates verified by symbol-usage grep. Found that the W1-D
@@ -121,3 +140,13 @@ origin file-count guard.
 ## 4. Acceptance
 
 Mirrors `.spipe/dep-analysis-handshake-perf/state.md` AC-1..AC-7.
+
+## Acceptance
+
+Runnable oracles for the remaining open boxes: `test/03_system/plan_acceptance/dependency_analysis_spec.spl`
+(tagged `@tag:in-development`; one `it` per open box — see
+`doc/03_plan/agent_tasks/plan_remains_acceptance_2026-09-05.md`).
+Slug collision: this file and `runtime/process_safety/plan.md` are both
+`plan.md`; the disambiguated slug would be `dependency_analysis_plan`, but the
+spec already exists under `dependency_analysis_spec.spl` (its `doc-path`
+header points at this plan), so that existing name is used.

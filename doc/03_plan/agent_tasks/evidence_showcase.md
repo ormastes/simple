@@ -271,3 +271,33 @@ This future lane is not a dependency for the first showcase implementation.
 - [ ] Generated manuals are operator-readable and zero-stub.
 - [ ] Traceability is 100%.
 - [ ] Final independent review reports PASS or lists unresolved blockers.
+
+## Refresh 2026-09-05
+
+Verified against the tree with `/usr/bin/grep -rn` over `src/` and `test/`:
+
+- Of the frozen contract types, only the two marked *preserved* exist:
+  `src/lib/common/spec/scenario_evidence.spl:44 pub struct ScenarioEvidenceArtifact`
+  and `src/lib/nogc_sync_mut/spec/evidence_receipt.spl:26 struct EvidenceReceipt`.
+  `ScenarioEvidenceManifest`, `ScenarioTextEvidencePolicy`, `ScenarioTextMask`,
+  `ScenarioTextMatchResult`, `ScenarioMotionEvidence`,
+  `ScenarioProtocolFieldEvidence` and the checkers `prepare_evidence_workspace`,
+  `check_text_evidence`, `check_visual_evidence`, `check_html_evidence`,
+  `check_protocol_evidence` have 0 definitions in `src/` — they exist only as
+  signatures in `doc/05_design/evidence_showcase.md` (e.g. `:80`, `:98`).
+- Lane 4 has a partial landing: `src/app/spipe_docgen/spipe_docgen/showcase.spl:157
+  pub fn parse_evidence_showcase_inventory` and
+  `spipe_docgen/evidence_manifest.spl`; no atomic manifest writer or
+  root/subproject page emitter was found.
+- The "later spec-to-SSpec lane" names `migrate_spec_to_spl.spl`, which has no
+  source under `src/app` (only a stale row in
+  `scripts/check/use_target_resolves_baseline.txt`).
+
+Every box in the checklist below therefore stays open; Lane 0 (contract freeze
+in code) has not started.
+
+## Acceptance
+
+Runnable oracles for the remaining open boxes: `test/03_system/plan_acceptance/evidence_showcase_spec.spl`
+(tagged `@tag:in-development`; one `it` per open box — see
+`doc/03_plan/agent_tasks/plan_remains_acceptance_2026-09-05.md`).

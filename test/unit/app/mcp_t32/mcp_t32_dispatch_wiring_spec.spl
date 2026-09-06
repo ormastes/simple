@@ -1,21 +1,44 @@
-# # T32 MCP Dispatch Wiring Tests
-#
-# **Bug:** #6 — default frontend changed from `cold` to `full`
-# **Category:** Integration / Module Test
-# **Difficulty:** 2/5
-# **Status:** Implemented
-#
-# ## Overview
-#
-# Self-contained SPipe tests verifying T32 MCP tool dispatch wiring:
-# - All 36 tool names are recognized by the full dispatch
-# - Cold frontend only handles a 13-tool subset
-# - Tool name detection works for both compact and spaced JSON
-# - JSON-RPC method routing covers all protocol methods
-#
-# No imports from t32_mcp.* or t32_lsp_mcp.* — all helpers are inlined.
+"""
+## Purpose and audience
+
+Executable specification for the T32 MCP tool dispatch wiring: which tool
+names the full and cold frontends recognize, how JSON-RPC methods route in
+each dispatch loop, and which frontend the `bin/t32_mcp_server` wrapper
+selects by default. Maintained for T32 MCP maintainers and reviewers of the
+bug #6 fix that moved the default frontend from `cold` to `full`.
+
+## Operator workflow
+
+Run `bin/simple test --no-session-daemon test/01_unit/app/mcp_t32/mcp_t32_dispatch_wiring_spec.spl`
+and read the Results line. Tool-detection scenarios build minimal JSON-RPC
+`tools/call` messages with inlined helpers and run them through the mirrored
+`detect_tool_name` logic; wrapper scenarios read `bin/t32_mcp_server` and pin
+its default-frontend and entry-point wiring lines.
+
+## Compatibility and limitations
+
+The tool and method tables below are snapshots derived from the dispatch
+source; adding a tool means updating `full_tools`/`cold_tools` here in the
+same change. The wrapper scenarios pin `bin/t32_mcp_server` text, so
+relocating the wrapper or rewording its assignment lines is a deliberate
+contract change. No imports from t32_mcp.* or t32_lsp_mcp.* — all helpers
+are inlined.
+
+## Verification guidance and troubleshooting
+
+If a detection scenario fails, compare the built message against the
+compact vs spaced `"name":"..."` forms the detector mirrors. If a wrapper
+scenario fails, check whether `bin/t32_mcp_server` moved or its
+`T32_MCP_FRONTEND` / `*_ENTRY` assignment lines were reworded, and update
+the pinned anchors only when the routing change is intentional.
+"""
+# Lifecycle: research doc/01_research/domain/sspec_documentization_maintenance.md ;
+# plan doc/03_plan/sspec_modernization_plan.md ;
+# architecture doc/04_architecture/sspec_documentization_maintenance.md ;
+# design doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
 
 use std.spipe.*
+use std.io_runtime.{file_read}
 
 # ---------------------------------------------------------------------------
 # Inline JSON helpers
@@ -274,6 +297,7 @@ fn check(condition: bool):
 # Tests
 # ===========================================================================
 
+# @manual_section: t32-dispatch-wiring
 describe "T32 MCP dispatch wiring":
 
     # -----------------------------------------------------------------------
@@ -281,35 +305,59 @@ describe "T32 MCP dispatch wiring":
     # -----------------------------------------------------------------------
 
         it "detects t32_sessions_list":
+            # @req REQ-APP-MCP-T32-DISPATCH-001
+            # @capture(statistics): detected tool name for the sessions_list call
+            step("Build a tools/call message for t32_sessions_list and detect it")
             val msg = make_tools_call("t32_sessions_list")
             expect(detect_tool_name(msg)).to_equal("t32_sessions_list")
 
         it "detects t32_session_open":
+            # @req REQ-APP-MCP-T32-DISPATCH-001
+            # @capture(statistics): detected tool name for the session_open call
+            step("Build a tools/call message for t32_session_open and detect it")
             val msg = make_tools_call("t32_session_open")
             expect(detect_tool_name(msg)).to_equal("t32_session_open")
 
         it "detects t32_cmd_run":
+            # @req REQ-APP-MCP-T32-DISPATCH-001
+            # @capture(statistics): detected tool name for the cmd_run call
+            step("Build a tools/call message for t32_cmd_run and detect it")
             val msg = make_tools_call("t32_cmd_run")
             expect(detect_tool_name(msg)).to_equal("t32_cmd_run")
 
         it "detects t32_eval":
+            # @req REQ-APP-MCP-T32-DISPATCH-001
+            # @capture(statistics): detected tool name for the eval call
+            step("Build a tools/call message for t32_eval and detect it")
             val msg = make_tools_call("t32_eval")
             expect(detect_tool_name(msg)).to_equal("t32_eval")
 
         it "detects t32_cmm_run":
+            # @req REQ-APP-MCP-T32-DISPATCH-001
+            # @capture(statistics): detected tool name for the cmm_run call
+            step("Build a tools/call message for t32_cmm_run and detect it")
             val msg = make_tools_call("t32_cmm_run")
             expect(detect_tool_name(msg)).to_equal("t32_cmm_run")
 
         it "detects t32_window_capture":
+            # @req REQ-APP-MCP-T32-DISPATCH-001
+            # @capture(statistics): detected tool name for the window_capture call
+            step("Build a tools/call message for t32_window_capture and detect it")
             val msg = make_tools_call("t32_window_capture")
             expect(detect_tool_name(msg)).to_equal("t32_window_capture")
 
         it "detects t32_field_get with space-colon":
+            # @req REQ-APP-MCP-T32-DISPATCH-001
+            # @capture(statistics): spaced-JSON detection row for field_get
+            step("Detect a tool name written with a space after the colon")
             # Build message with "name": "t32_field_get" (space before value)
             val msg = LB() + Q() + "method" + Q() + ": " + Q() + "tools/call" + Q() + ", " + Q() + "params" + Q() + ": " + LB() + Q() + "name" + Q() + ": " + Q() + "t32_field_get" + Q() + RB() + RB()
             expect(detect_tool_name(msg)).to_equal("t32_field_get")
 
         it "detects t32_dialog_click":
+            # @req REQ-APP-MCP-T32-DISPATCH-001
+            # @capture(statistics): detected tool name for the dialog_click call
+            step("Build a tools/call message for t32_dialog_click and detect it")
             val msg = make_tools_call("t32_dialog_click")
             expect(detect_tool_name(msg)).to_equal("t32_dialog_click")
 
@@ -326,7 +374,8 @@ describe "T32 MCP dispatch wiring":
     # -----------------------------------------------------------------------
 
         it "full tool set has exactly 36 entries":
-            expect(full_tools().len()).to_equal(36)
+            # @req REQ-APP-MCP-T32-DISPATCH-001
+            expect(full_tools().len()).to_equal(36)  # oracle: the full frontend dispatch table registers 36 tools, counted from source
 
         it "t32_session_open is in full tool set":
             check(list_contains(full_tools(), "t32_session_open"))
@@ -375,7 +424,7 @@ describe "T32 MCP dispatch wiring":
     # -----------------------------------------------------------------------
 
         it "full-only set has 23 entries":
-            expect(full_only_tools().len()).to_equal(23)
+            expect(full_only_tools().len()).to_equal(23)  # oracle: 23 of the 36 tools were unreachable under the cold default, 36 minus 13 cold tools
 
         it "full-only tools are not in cold set":
             val cold = cold_tools()
@@ -404,7 +453,7 @@ describe "T32 MCP dispatch wiring":
     # -----------------------------------------------------------------------
 
         it "cold tool set has exactly 13 entries":
-            expect(cold_tools().len()).to_equal(13)
+            expect(cold_tools().len()).to_equal(13)  # oracle: the cold frontend handles exactly the 13 low-cost tools its table lists
 
         it "cold handles t32_sessions_list":
             check(list_contains(cold_tools(), "t32_sessions_list"))
@@ -522,22 +571,31 @@ describe "T32 MCP dispatch wiring":
     # -----------------------------------------------------------------------
 
         it "default T32_MCP_FRONTEND should be full":
-            # The wrapper script sets: T32_MCP_FRONTEND="${T32_MCP_FRONTEND:-full}"
-            # This means when unset, it defaults to "full" not "cold"
-            val default_frontend = "full"
-            expect(default_frontend).to_equal("full")
+            # @req REQ-APP-MCP-T32-DISPATCH-001
+            # @capture(statistics): wrapper default-frontend assignment line
+            step("Read the wrapper and pin its default-frontend assignment")
+            val wrapper = file_read("bin/t32_mcp_server")
+            val default_line = "T32_MCP_FRONTEND=\"" + "$" + "{T32_MCP_FRONTEND:-full}\""
+            val defaults_to_full = wrapper.contains(default_line)
+            expect(defaults_to_full).to_equal(true)  # oracle: bug #6 fix — an unset T32_MCP_FRONTEND must resolve to full, not cold
 
         it "full mode routes to full entry point":
-            # In full mode: SOURCE_ARTIFACT="$FULL_ENTRY"
-            # FULL_ENTRY="${REPO_ROOT}/src/app/t32_mcp_server/main.spl"
-            val full_entry = "src/app/t32_mcp_server/main.spl"
-            check(full_entry.contains("t32_mcp_server"))
+            # @req REQ-APP-MCP-T32-DISPATCH-001
+            # @capture(statistics): wrapper full-mode source artifact wiring lines
+            step("Read the wrapper and pin the full-mode entry routing")
+            val wrapper = file_read("bin/t32_mcp_server")
+            val routes_full_entry = wrapper.contains("SOURCE_ARTIFACT=\"" + "$" + "FULL_ENTRY\"")
+            expect(routes_full_entry).to_equal(true)  # oracle: full mode must dispatch through the FULL_ENTRY artifact
+            expect(wrapper.contains("FULL_ENTRY=\"")).to_equal(true)  # oracle: FULL_ENTRY is assigned before the routing line consumes it
+            expect(wrapper.contains("/examples/10_tooling/trace32_tools/t32_mcp/main.spl\"")).to_equal(true)  # oracle: the full entry artifact is the examples-tree t32_mcp main
 
         it "cold mode routes to cold entry point":
-            # In cold mode: SOURCE_ARTIFACT="$COLD_ENTRY"
-            # COLD_ENTRY="${REPO_ROOT}/examples/10_tooling/trace32_tools/t32_mcp/frontend_cold.spl"
-            val cold_entry = "examples/10_tooling/trace32_tools/t32_mcp/frontend_cold.spl"
-            check(cold_entry.contains("frontend_cold"))
+            # @req REQ-APP-MCP-T32-DISPATCH-001
+            # @capture(statistics): wrapper cold-mode entry wiring lines
+            step("Read the wrapper and pin the cold-mode entry routing")
+            val wrapper = file_read("bin/t32_mcp_server")
+            expect(wrapper.contains("SOURCE_ARTIFACT=\"" + "$" + "COLD_ENTRY\"")).to_equal(true)  # oracle: cold mode is the initial source artifact before frontend selection
+            expect(wrapper.contains("/examples/10_tooling/trace32_tools/t32_mcp/frontend_cold.spl\"")).to_equal(true)  # oracle: the cold entry artifact is the frontend_cold module
 
         it "full dispatch handles all tools cold cannot":
             # The key invariant: every full_only tool must be in full but not cold

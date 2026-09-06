@@ -54,6 +54,11 @@ use compiler.driver.driver_phase_gates.{
 use compiler.semantics.layer_call_wiring.{check_project_layer_calls}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 use std.io.{file_lock, file_unlock, file_exists, file_write}
+use compiler.common.structural_contracts.offload_profile.{OffloadDecision}
+use compiler.common.structural_contracts.frontend_offload_switch.{
+    FrontendOffloadInputs, FrontendOffloadSwitch, resolve_frontend_offload,
+    frontend_offload_decision, FRONTEND_OFFLOAD_GPU_PARSE_AVAILABLE, frontend_offload_receipt_line
+}
 
 @unsafe(reason: "raw stdout flush ABI", capabilities: [ffi])
 extern fn rt_stdout_flush()
@@ -270,6 +275,49 @@ class ParsedEntryModuleBox:
 pub fn dtrace(msg: text) -> ():
     if (_sffi_env_get("SIMPLE_INTERP_TRACE") ?? "") == "1":
         eprint(msg)
+
+# cli is "" because the CLI layer only sets SIMPLE_FRONTEND_OFFLOAD; config is
+# "" because this driver imports no project-config reader (design: no new parser).
+fn _driver_frontend_offload_switch_for(env_value: text, fallback_value: text) -> Result<FrontendOffloadSwitch, text>:
+    resolve_frontend_offload(FrontendOffloadInputs(
+        cli: "", env: env_value, config: "",
+        fallback_cli: "", fallback_env: fallback_value, fallback_config: ""))
+
+pub fn driver_frontend_offload_switch() -> Result<FrontendOffloadSwitch, text>:
+    _driver_frontend_offload_switch_for(
+        _sffi_env_get("SIMPLE_FRONTEND_OFFLOAD") ?? "",
+        _sffi_env_get("SIMPLE_FRONTEND_OFFLOAD_FALLBACK") ?? "")
+
+fn _driver_frontend_offload_decide(switch: FrontendOffloadSwitch) -> Result<OffloadDecision, text>:
+    frontend_offload_decision(switch, FRONTEND_OFFLOAD_GPU_PARSE_AVAILABLE)
+
+# Pure per-input twin of driver_frontend_offload_decision(): no env read, no
+# memo, returns the exact receipt line the driver traces for those inputs.
+pub fn driver_frontend_offload_receipt_for(env_value: text, fallback_value: text) -> Result<text, text>:
+    val switch_result = _driver_frontend_offload_switch_for(env_value, fallback_value)
+    if switch_result.is_err():
+        return Err(switch_result.unwrap_err())
+    val switch = switch_result.unwrap()
+    val decision_result = _driver_frontend_offload_decide(switch)
+    if decision_result.is_err():
+        return Err(decision_result.unwrap_err())
+    Ok(frontend_offload_receipt_line(decision_result.unwrap(), switch.source))
+
+var _driver_frontend_offload_receipt_memo: text = "@@unset@@"
+
+pub fn driver_frontend_offload_decision() -> Result<OffloadDecision, text>:
+    val switch_result = driver_frontend_offload_switch()
+    if switch_result.is_err():
+        return Err(switch_result.unwrap_err())
+    val switch = switch_result.unwrap()
+    val decision_result = _driver_frontend_offload_decide(switch)
+    if decision_result.is_err():
+        return Err(decision_result.unwrap_err())
+    val decision = decision_result.unwrap()
+    if _driver_frontend_offload_receipt_memo == "@@unset@@":
+        _driver_frontend_offload_receipt_memo = frontend_offload_receipt_line(decision, switch.source)
+        dtrace(_driver_frontend_offload_receipt_memo)
+    Ok(decision)
 
 pub fn driver_end_transient_parse_scope() -> bool:
     # ORDER IS LOAD-BEARING. End the transient array scope BEFORE replacing
@@ -551,6 +599,10 @@ impl CompilerDriver:
         (self.ctx, ok)
 
     me parse_all_committing_impl() -> bool:
+        val offload = driver_frontend_offload_decision()
+        if offload.is_err():
+            self.ctx.add_error(offload.unwrap_err())
+            return false
         compiler_work_parser_schedule_v1(self.ctx.sources.len())
         if driver_streaming_surface_enabled(self.ctx):
             return self.parse_all_streaming_surfaces_in_place_impl()

@@ -161,6 +161,8 @@ pub const VULKAN_FNS: &[(&str, Ret, &str)] = &[
     ("rt_vulkan_push_constants", Ret::I, "iiv"),
     ("rt_vulkan_push_constants_raw", Ret::I, "iiii"),
     ("rt_vulkan_read_buffer_bytes", Ret::V, "iii"),
+    ("rt_vulkan_readback_u32_checksum", Ret::I, "viii"),
+    ("rt_vulkan_copy_u32_slots", Ret::I, "vvi"),
     ("rt_vulkan_reset_fence", Ret::I, "i"),
     ("rt_vulkan_select_device", Ret::I, "i"),
     ("rt_vulkan_selected_device_driver_identity", Ret::T, ""),

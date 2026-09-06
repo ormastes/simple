@@ -1,3 +1,28 @@
+"""
+## Purpose and audience
+Verifies that the spipe-quality linter correctly identifies placeholder and tautological assertions
+in test code. Targets test engineers and spec maintainers who need to catch incomplete test
+implementations before they reach the test suite.
+
+## Operator workflow
+Run the spec with `bin/simple test test/02_integration/app/spipe_quality_lint_spec.spl`. The test
+exercises the linter on source snippets and verifies the expected lint codes and severity levels.
+
+## Compatibility and limitations
+Works with the current linter API (`Linter.new()`, `lint_source()`). Tests only the linter's
+detection logic, not the full diagnostic output pipeline. Does not verify remediation suggestions.
+
+## Verification guidance and troubleshooting
+If a test fails, inspect the linter's output for the named lint code. A missing code indicates
+the linter rule may have changed or the detection pattern needs adjustment. The `count_lint` and
+related helper functions demonstrate the expected lint-counting pattern for debugging.
+"""
+# Lifecycle: doc/01_research/domain/spec_to_spipe_toolchain.md ;
+# doc/03_plan/agent_tasks/spipe_knowledge_compiler.md ;
+# doc/04_architecture/app/spec_to_spipe.md ;
+# doc/05_design/app/spec_to_spipe_evidence_extension.md
+# @manual_section: lint_quality
+
 use compiler.tools.lint.main.{Linter, LintLevel}
 
 fn count_lint(source: text, code: text) -> i64:
@@ -47,30 +72,42 @@ fn count_lint_message_containing(source: text, code: text, needle: text) -> i64:
 
 describe "spipe placeholder quality lint":
     it "flags tautological literal assertions":
+        # @req REQ-LINT-001
+        # @capture(bit_table): SPIPE001 detection result
+        step("Detect tautological literal assertions")
         val source =
             "describe \"demo\":\n" +
             "    it \"uses fake success\":\n" +
             "        expect(true).to_equal(" + "true)\n"
 
-        expect(count_lint(source, "SPIPE001")).to_equal(1)
+        expect(count_lint(source, "SPIPE001")).to_equal(1)  # oracle: exactly one tautology
 
     it "flags placeholder pass helpers inside examples":
+        # @req REQ-LINT-002
+        # @capture(bit_table): SPIPE002 detection result
+        step("Detect pass_todo placeholders")
         val source =
             "describe \"demo\":\n" +
             "    it \"uses pass helper\":\n" +
             "        pass_" + "todo\n"
 
-        expect(count_lint(source, "SPIPE002")).to_equal(1)
+        expect(count_lint(source, "SPIPE002")).to_equal(1)  # oracle: one placeholder
 
     it "flags placeholder pass helpers with rationale arguments inside examples":
+        # @req REQ-LINT-003
+        # @capture(bit_table): SPIPE002 with argument detection result
+        step("Detect pass_todo with arguments")
         val source =
             "describe \"demo\":\n" +
             "    it \"uses pass helper call\":\n" +
             "        pass_" + "todo(\"blocked until driver smoke exists\")\n"
 
-        expect(count_lint(source, "SPIPE002")).to_equal(1)
+        expect(count_lint(source, "SPIPE002")).to_equal(1)  # oracle: one placeholder with argument
 
     it "flags placeholder match-arm success assertions":
+        # @req REQ-LINT-004
+        # @capture(bit_table): SPIPE003 detection result
+        step("Detect tautological assertions in match arms")
         val source =
             "describe \"demo\":\n" +
             "    it \"uses fake ok arm\":\n" +
@@ -78,52 +115,70 @@ describe "spipe placeholder quality lint":
             "            case Ok(_): expect(true).to_equal(" + "true)\n" +
             "            case Err(e): expect(e).to_equal(\"boom\")\n"
 
-        expect(count_lint(source, "SPIPE003")).to_equal(1)
+        expect(count_lint(source, "SPIPE003")).to_equal(1)  # oracle: one tautological ok arm
 
     it "flags print based skip placeholders":
+        # @req REQ-LINT-005
+        # @capture(bit_table): SPIPE004 detection result
+        step("Detect print-based skip patterns")
         val source =
             "describe \"demo\":\n" +
             "    it \"prints skip and returns\":\n" +
             "        print \"" + "[skip] env unavailable\"\n" +
             "        return\n"
 
-        expect(count_lint(source, "SPIPE004")).to_equal(1)
+        expect(count_lint(source, "SPIPE004")).to_equal(1)  # oracle: one print-based skip
 
     it "flags examples with no real assertion":
+        # @req REQ-LINT-006
+        # @capture(bit_table): SPIPE005 detection result
+        step("Detect scenarios without assertions")
         val source =
             "describe \"demo\":\n" +
             "    it \"just calls helper\":\n" +
             "        run_check()\n"
 
-        expect(count_lint(source, "SPIPE005")).to_equal(1)
+        expect(count_lint(source, "SPIPE005")).to_equal(1)  # oracle: one unasserted scenario
 
     it "flags examples with empty bodies":
+        # @req REQ-LINT-007
+        # @capture(bit_table): SPIPE005 empty body detection
+        step("Detect empty test scenarios")
         val source =
             "describe \"demo\":\n" +
             "    it \"empty\":\n"
 
-        expect(count_lint(source, "SPIPE005")).to_equal(1)
+        expect(count_lint(source, "SPIPE005")).to_equal(1)  # oracle: one empty scenario
 
     it "warns for true boolean-wrapper assertions":
+        # @req REQ-LINT-008
+        # @capture(bit_table): SPIPE006 true wrapper detection
+        step("Detect true boolean wrappers")
         val source =
             "describe \"demo\":\n" +
             "    it \"wraps comparison\":\n" +
             "        expect(code != 0).to_equal(" + "true)\n"
 
-        expect(count_lint(source, "SPIPE006")).to_equal(1)
-        expect(count_lint_with_level(source, "SPIPE006", LintLevel.Warn)).to_equal(1)
+        expect(count_lint(source, "SPIPE006")).to_equal(1)  # oracle: one SPIPE006 finding
+        expect(count_lint_with_level(source, "SPIPE006", LintLevel.Warn)).to_equal(1)  # oracle: warning level
 
     it "warns for false boolean-wrapper assertions":
+        # @req REQ-LINT-009
+        # @capture(bit_table): SPIPE007 false wrapper detection
+        step("Detect false boolean wrappers")
         val source =
             "describe \"demo\":\n" +
             "    it \"wraps negative boolean\":\n" +
             "        val ok = false\n" +
             "        expect(ok).to_equal(" + "false)\n"
 
-        expect(count_lint(source, "SPIPE007")).to_equal(1)
-        expect(count_lint_with_level(source, "SPIPE007", LintLevel.Warn)).to_equal(1)
+        expect(count_lint(source, "SPIPE007")).to_equal(1)  # oracle: one SPIPE007 finding
+        expect(count_lint_with_level(source, "SPIPE007", LintLevel.Warn)).to_equal(1)  # oracle: warning level
 
     it "flags to_be boolean wrappers":
+        # @req REQ-LINT-010
+        # @capture(bit_table): SPIPE006 and SPIPE007 to_be detection
+        step("Detect to_be method boolean wrappers")
         val true_source =
             "describe \"demo\":\n" +
             "    it \"wraps true with to_be\":\n" +
@@ -133,10 +188,13 @@ describe "spipe placeholder quality lint":
             "    it \"wraps false with to_be\":\n" +
             "        expect(ok).to_be(" + "false)\n"
 
-        expect(count_lint(true_source, "SPIPE006")).to_equal(1)
-        expect(count_lint(false_source, "SPIPE007")).to_equal(1)
+        expect(count_lint(true_source, "SPIPE006")).to_equal(1)  # oracle: one SPIPE006
+        expect(count_lint(false_source, "SPIPE007")).to_equal(1)  # oracle: one SPIPE007
 
     it "warns for is_equal boolean wrappers":
+        # @req REQ-LINT-011
+        # @capture(bit_table): SPIPE006 and SPIPE007 is_equal detection with messages
+        step("Detect is_equal method boolean wrappers")
         val true_source =
             "describe \"demo\":\n" +
             "    it \"wraps true with is_equal\":\n" +
@@ -146,16 +204,19 @@ describe "spipe placeholder quality lint":
             "    it \"wraps false with is_equal\":\n" +
             "        expect(ok).is_equal(" + "false)\n"
 
-        expect(count_lint(true_source, "SPIPE006")).to_equal(1)
-        expect(count_lint_with_level(true_source, "SPIPE006", LintLevel.Warn)).to_equal(1)
-        expect(count_lint_message_containing(true_source, "SPIPE006", "expect(bool) is called with a boolean matcher")).to_equal(1)
-        expect(count_lint_message_containing(true_source, "SPIPE006", "use assert_true(condition)")).to_equal(1)
-        expect(count_lint(false_source, "SPIPE007")).to_equal(1)
-        expect(count_lint_with_level(false_source, "SPIPE007", LintLevel.Warn)).to_equal(1)
-        expect(count_lint_message_containing(false_source, "SPIPE007", "expect(bool) is called with a boolean matcher")).to_equal(1)
-        expect(count_lint_message_containing(false_source, "SPIPE007", "use expect_not(condition)")).to_equal(1)
+        expect(count_lint(true_source, "SPIPE006")).to_equal(1)  # oracle: one SPIPE006
+        expect(count_lint_with_level(true_source, "SPIPE006", LintLevel.Warn)).to_equal(1)  # oracle: warn level
+        expect(count_lint_message_containing(true_source, "SPIPE006", "expect(bool) is called with a boolean matcher")).to_equal(1)  # oracle: message present
+        expect(count_lint_message_containing(true_source, "SPIPE006", "use assert_true(condition)")).to_equal(1)  # oracle: suggestion present
+        expect(count_lint(false_source, "SPIPE007")).to_equal(1)  # oracle: one SPIPE007
+        expect(count_lint_with_level(false_source, "SPIPE007", LintLevel.Warn)).to_equal(1)  # oracle: warn level
+        expect(count_lint_message_containing(false_source, "SPIPE007", "expect(bool) is called with a boolean matcher")).to_equal(1)  # oracle: message present
+        expect(count_lint_message_containing(false_source, "SPIPE007", "use expect_not(condition)")).to_equal(1)  # oracle: suggestion present
 
     it "allows concise boolean assertions":
+        # @req REQ-LINT-012
+        # @capture(bit_table): clean linting result for concise assertions
+        step("Verify concise boolean assertions pass linting")
         val source =
             "describe \"demo\":\n" +
             "    it \"uses concise boolean expectations\":\n" +
@@ -164,35 +225,47 @@ describe "spipe placeholder quality lint":
             "        expect(ok)\n" +
             "        expect_not(failed)\n"
 
-        expect(total_spipe_quality_lints(source)).to_equal(0)
+        expect(total_spipe_quality_lints(source)).to_equal(0)  # oracle: no lints for concise form
 
     it "flags pass_todo in production code":
+        # @req REQ-LINT-013
+        # @capture(bit_table): STUB003 production code detection
+        step("Detect pass_todo in production code paths")
         val source =
             "fn not_done(port: i64) -> i64:\n" +
             "    pass_" + "todo(\"implement driver\")\n"
 
-        expect(count_lint_for_path("src/os/demo.spl", source, "STUB003")).to_equal(1)
+        expect(count_lint_for_path("src/os/demo.spl", source, "STUB003")).to_equal(1)  # oracle: one stub in production
 
     it "flags bare pass_todo in production code":
+        # @req REQ-LINT-014
+        # @capture(bit_table): STUB003 bare detection
+        step("Detect bare pass_todo without arguments")
         val source =
             "fn not_done(port: i64) -> i64:\n" +
             "    pass_" + "todo\n"
 
-        expect(count_lint_for_path("src/os/demo.spl", source, "STUB003")).to_equal(1)
+        expect(count_lint_for_path("src/os/demo.spl", source, "STUB003")).to_equal(1)  # oracle: bare stub flagged
 
     it "allows sanctioned skip syntax":
+        # @req REQ-LINT-015
+        # @capture(bit_table): clean linting result for skip syntax
+        step("Verify sanctioned skip syntax passes linting")
         val source =
             "describe \"demo\":\n" +
             "    it \"skips honestly\":\n" +
             "        skip:\n"
 
-        expect(total_spipe_quality_lints(source)).to_equal(0)
+        expect(total_spipe_quality_lints(source)).to_equal(0)  # oracle: sanctioned skip syntax clean
 
     it "respects allow on spipe_placeholder_tests":
+        # @req REQ-LINT-016
+        # @capture(bit_table): allow attribute suppression verification
+        step("Verify allow(spipe_placeholder_tests) exempts violations")
         val source =
             "@" + "allow(spipe_placeholder_tests)\n" +
             "describe \"demo\":\n" +
             "    it \"permits migration file\":\n" +
             "        expect(true).to_equal(" + "true)\n"
 
-        expect(total_spipe_quality_lints(source)).to_equal(0)
+        expect(total_spipe_quality_lints(source)).to_equal(0)  # oracle: allow attribute suppresses lints

@@ -1,660 +1,490 @@
 """
-# Arithmetic Operators Specification
+## Purpose and audience
 
+Pins the arithmetic operator contract: +, -, *, /, %, **, unary negation,
+floor division via .fdiv(), operator precedence and associativity, Int/Float
+coercion, and the zero/one edge identities. Written for language engineers who
+need numeric evaluation drift caught at the spec level before it reaches user
+code.
 
-**Feature IDs:** #100-110
-**Category:** Syntax
-**Difficulty:** 2/5
-**Status:** Implemented
+## Operator workflow
 
-## Overview
+Run `simple run test/03_system/feature/usage/operators_arithmetic_spec.spl`.
+Every scenario evaluates real numeric expressions on the host interpreter.
 
-Arithmetic operators in Simple provide standard mathematical operations on numeric types
-(Int and Float). The language supports binary operators (+, -, *, /, %, **, //), unary
-negation (-), automatic type coercion between Int and Float, and special behaviors for
-strings and arrays.
+## Compatibility and limitations
 
-## Syntax
+Division and modulo by zero are documented errors and are deliberately not
+triggered here — the diagnostics lane owns error-path coverage. `//` is no
+longer floor division; it is the parallel-execution operator, so floor
+division is exercised through `.fdiv()`.
 
-### Binary Operators
+## Verification guidance and troubleshooting
 
-```simple
-use std.spec.step
-
-val sum = 2 + 3           # Addition: 5
-val diff = 10 - 4         # Subtraction: 6
-val product = 4 * 5       # Multiplication: 20
-val quotient = 20 / 4     # Division: 5
-val remainder = 17 % 5    # Modulo: 2
-val power = 2 ** 8        # Exponentiation: 256
-val floor_div = 17.fdiv(5) # Floor division: 3 (// is now parallel operator)
-```
-
-### Unary Operators
-
-```simple
-val neg = -42             # Negation: -42
-val pos_to_neg = -(5 + 3) # Negate expression: -8
-```
-
-### Operator Precedence
-
-```simple
-2 + 3 * 4         # 14 (multiplication before addition)
-(2 + 3) * 4       # 20 (parentheses override)
-2 ** 3 ** 2       # 512 (right-associative: 2 ** (3 ** 2)
-```
-
-## Key Concepts
-
-| Concept | Description |
-|---------|-------------|
-| Binary Operators | Operators requiring two operands (+, -, *, /, %, **, //) |
-| Unary Operators | Operators requiring one operand (-) |
-| Precedence | Order of evaluation (** > *, /, %, // > +, -) |
-| Associativity | Left-to-right except ** (right-to-left) |
-| Type Coercion | Int + Float automatically promotes to Float |
-
-## Behavior
-
-- **Addition (+)**: Works on Int, Float, String (concatenation), Array (concatenation)
-- **Subtraction (-)**: Works on Int, Float
-- **Multiplication (*)**: Works on Int, Float, String repetition (String * Int)
-- **Division (/)**: Always returns numeric result, errors on division by zero
-- **Modulo (%)**: Integer remainder, errors on modulo by zero
-- **Exponentiation (**)**: Power operator, right-associative, no negative Int exponents
-- **Floor Division (//)**: Euclidean division, rounds toward negative infinity
-- **Negation (-)**: Unary minus, negates numeric values
-
-## Related Specifications
-
-- [Type Inference](../type_inference/type_inference_spec.md) - Type deduction for expressions
-- [Comparison Operators](../operators_comparison/operators_comparison_spec.md) - Relational operators
-- [Bitwise Operators](../operators_bitwise/operators_bitwise_spec.md) - Bit manipulation
-
-## Implementation Notes
-
-**Parser:** `src/parser/src/expressions/binary.rs`
-- Precedence climbing algorithm
-- Right-associativity for exponentiation
-
-**Interpreter:** `src/compiler/src/interpreter/expr/ops.rs`
-- Runtime evaluation with type coercion
-- Error handling for division by zero
-- Special handling for String and Array types
-
-**Performance:** Most operations compile to native CPU instructions. Type coercion adds
-minimal overhead (single conversion per mixed-type expression).
-
-## Examples
-
-```simple
-# Basic arithmetic
-val x = 10 + 20          # 30
-val y = 100 - 25         # 75
-val z = 6 * 7            # 42
-
-# Type coercion
-val mixed = 10 + 3.5     # 13.5 (Int promoted to Float)
-val result = 2.0 * 5     # 10.0 (Int promoted to Float)
-
-# String operations
-val greeting = "Hello" + " " + "World"  # "Hello World"
-val repeated = "x" * 5                  # "xxxxx"
-
-# Exponentiation
-val squared = 5 ** 2     # 25
-val cubed = 2 ** 3       # 8
-```
+Rerun the command above. Every oracle comment states the arithmetic identity
+behind its expected value, so a mismatch points at evaluation order, coercion,
+or the operator itself — not at the spec. Change an expectation only when the
+language's arithmetic semantics officially changed.
 """
+# Lifecycle: doc/01_research/language/grammar/const_vs_val_grammar.md ;
+# doc/03_plan/language/api_predicate_prefix_migration_2026-05-13.md ;
+# doc/04_architecture/compiler/00_compiler_architecture.md ;
+# doc/05_design/language/language_features/syntax_features/ufcs_dot_operator_design.md
+# @manual_section: operators-arithmetic
 
-
-
-# ============================================================================
-# Addition Operator (+)
-# ============================================================================
+use std.spec.step
 
 describe "Arithmetic Operators - Addition":
     # @manual scenario evidence
-    # ## Addition Operator (+)
-    #
-    # The addition operator performs numeric addition on Int and Float types,
-    # with automatic type promotion when mixing types.
-
     context "with integers":
-        # ### Scenario: Integer Addition
-        #
-        # Adding two integers produces an integer result.
-        #
-        # ```simple
-        # val sum = 2 + 3  # 5
-        # ```
-
         it "adds positive integers":
+            # @req REQ-ARITH-001
+            step("Add 2 and 3 as integers")
+            # @capture(statistics): 2 + 3 evaluated to 5
             val result = 2 + 3
-            expect(result).to_equal(5)
+            expect(result).to_equal(5)  # oracle: 2 + 3 = 5
 
         it "adds negative integers":
+            # @req REQ-ARITH-002
+            step("Add -5 and -3 as integers")
+            # @capture(statistics): -5 + -3 evaluated to -8
             val result = -5 + (-3)
-            expect(result).to_equal(-8)
+            expect(result).to_equal(-8)  # oracle: -5 + -3 = -8
 
         it "adds zero":
+            # @req REQ-ARITH-003
+            step("Add zero to 42 as the identity")
+            # @capture(statistics): 42 + 0 stays 42
             val result = 42 + 0
-            expect(result).to_equal(42)
+            expect(result).to_equal(42)  # oracle: 0 is the additive identity
 
         it "adds large integers":
+            # @req REQ-ARITH-004
+            step("Add 1000 and 2000 without overflow")
+            # @capture(statistics): 1000 + 2000 evaluated to 3000
             val result = 1000 + 2000
-            expect(result).to_equal(3000)
+            expect(result).to_equal(3000)  # oracle: 1000 + 2000 = 3000
 
     context "with floats":
-        # ### Scenario: Float Addition
-        #
-        # Adding two floats produces a float result.
-        #
-        # ```simple
-        # val sum = 2.5 + 3.5  # 6.0
-        # ```
-
         it "adds positive floats":
+            # @req REQ-ARITH-005
+            step("Add 2.5 and 3.5 as floats")
+            # @capture(statistics): 2.5 + 3.5 evaluated to 6.0
             val result = 2.5 + 3.5
-            expect(result).to_equal(6.0)
+            expect(result).to_equal(6.0)  # oracle: 2.5 + 3.5 = 6.0 exactly in binary
 
         it "adds negative floats":
+            # @req REQ-ARITH-006
+            step("Add -1.5 and -2.5 as floats")
+            # @capture(statistics): -1.5 + -2.5 evaluated to -4.0
             val result = -1.5 + (-2.5)
-            expect(result).to_equal(-4.0)
+            expect(result).to_equal(-4.0)  # oracle: -1.5 + -2.5 = -4.0 exactly in binary
 
     context "with mixed types":
-        # ### Scenario: Mixed Type Addition
-        #
-        # Adding Int and Float promotes Int to Float.
-        #
-        # ```simple
-        # val sum = 10 + 3.5  # 13.5 (Float)
-        # ```
-
         it "promotes int to float (int + float)":
+            # @req REQ-ARITH-007
+            step("Add int 10 to float 3.5 and require the promoted result")
+            # @capture(statistics): 10 + 3.5 promotes to 13.5
             val result = 10 + 3.5
-            expect(result).to_equal(13.5)
+            expect(result).to_equal(13.5)  # oracle: Int promotes to Float, 10 + 3.5 = 13.5
 
         it "promotes int to float (float + int)":
+            # @req REQ-ARITH-008
+            step("Add float 2.5 to int 7 and require the promoted result")
+            # @capture(statistics): 2.5 + 7 promotes to 9.5
             val result = 2.5 + 7
-            expect(result).to_equal(9.5)
-
-
-# ============================================================================
-# Subtraction Operator (-)
-# ============================================================================
+            expect(result).to_equal(9.5)  # oracle: promotion is order-independent, 2.5 + 7 = 9.5
 
 describe "Arithmetic Operators - Subtraction":
-    # ## Subtraction Operator (-)
-    #
-    # The subtraction operator performs numeric subtraction on Int and Float types.
-
     context "with integers":
-        # ### Scenario: Integer Subtraction
-        #
-        # Subtracting two integers produces an integer result.
-        #
-        # ```simple
-        # val diff = 10 - 3  # 7
-        # ```
-
         it "subtracts positive integers":
+            # @req REQ-ARITH-009
+            step("Subtract 3 from 10")
+            # @capture(statistics): 10 - 3 evaluated to 7
             val result = 10 - 3
-            expect(result).to_equal(7)
+            expect(result).to_equal(7)  # oracle: 10 - 3 = 7
 
         it "subtracts resulting in negative":
+            # @req REQ-ARITH-010
+            step("Subtract 10 from 3 and cross zero")
+            # @capture(statistics): 3 - 10 evaluated to -7
             val result = 3 - 10
-            expect(result).to_equal(-7)
+            expect(result).to_equal(-7)  # oracle: 3 - 10 = -7
 
         it "subtracts zero":
+            # @req REQ-ARITH-011
+            step("Subtract zero from 42 as the identity")
+            # @capture(statistics): 42 - 0 stays 42
             val result = 42 - 0
-            expect(result).to_equal(42)
+            expect(result).to_equal(42)  # oracle: 0 is the additive identity in reverse
 
     context "with floats":
-        # ### Scenario: Float Subtraction
-        #
-        # Subtracting two floats produces a float result.
-
         it "subtracts positive floats":
+            # @req REQ-ARITH-012
+            step("Subtract 3.2 from 10.5 and accept float rounding")
+            # @capture(statistics): 10.5 - 3.2 evaluates to 7.3 within float rounding
             val result = 10.5 - 3.2
-            expect(result).to_equal(7.3)
+            expect(result).to_equal(7.3)  # oracle: 10.5 - 3.2 = 7.3 at float precision
 
     context "with mixed types":
-        # ### Scenario: Mixed Type Subtraction
-        #
-        # Subtracting Int and Float promotes Int to Float.
-
         it "promotes int to float (int - float)":
+            # @req REQ-ARITH-013
+            step("Subtract float 2.5 from int 10 with promotion")
+            # @capture(statistics): 10 - 2.5 promotes to 7.5
             val result = 10 - 2.5
-            expect(result).to_equal(7.5)
+            expect(result).to_equal(7.5)  # oracle: Int promotes to Float, 10 - 2.5 = 7.5
 
         it "promotes int to float (float - int)":
+            # @req REQ-ARITH-014
+            step("Subtract int 3 from float 10.5 with promotion")
+            # @capture(statistics): 10.5 - 3 promotes to 7.5
             val result = 10.5 - 3
-            expect(result).to_equal(7.5)
-
-
-# ============================================================================
-# Multiplication Operator (*)
-# ============================================================================
+            expect(result).to_equal(7.5)  # oracle: promotion is order-independent, 10.5 - 3 = 7.5
 
 describe "Arithmetic Operators - Multiplication":
-    # ## Multiplication Operator (*)
-    #
-    # The multiplication operator performs numeric multiplication on Int and Float types.
-
     context "with integers":
-        # ### Scenario: Integer Multiplication
-        #
-        # Multiplying two integers produces an integer result.
-        #
-        # ```simple
-        # val product = 4 * 5  # 20
-        # ```
-
         it "multiplies positive integers":
+            # @req REQ-ARITH-015
+            step("Multiply 4 by 5")
+            # @capture(statistics): 4 * 5 evaluated to 20
             val result = 4 * 5
-            expect(result).to_equal(20)
+            expect(result).to_equal(20)  # oracle: 4 * 5 = 20
 
         it "multiplies by zero":
+            # @req REQ-ARITH-016
+            step("Multiply 42 by the annihilator zero")
+            # @capture(statistics): 42 * 0 annihilates to 0
             val result = 42 * 0
-            expect(result == 0).to_equal(true)
+            expect(result == 0).to_equal(true)  # oracle: 0 annihilates any product
 
         it "multiplies by one":
+            # @req REQ-ARITH-017
+            step("Multiply 42 by the identity one")
+            # @capture(statistics): 42 * 1 stays 42
             val result = 42 * 1
-            expect(result).to_equal(42)
+            expect(result).to_equal(42)  # oracle: 1 is the multiplicative identity
 
         it "multiplies negative numbers":
+            # @req REQ-ARITH-018
+            step("Multiply -3 by positive 4")
+            # @capture(statistics): -3 * 4 evaluated to -12
             val result = -3 * 4
-            expect(result).to_equal(-12)
+            expect(result).to_equal(-12)  # oracle: negative times positive is negative
 
         it "multiplies two negatives":
+            # @req REQ-ARITH-019
+            step("Multiply -3 by -4 and require a positive product")
+            # @capture(statistics): -3 * -4 evaluated to 12
             val result = -3 * -4
-            expect(result).to_equal(12)
+            expect(result).to_equal(12)  # oracle: negative times negative is positive
 
     context "with floats":
-        # ### Scenario: Float Multiplication
-        #
-        # Multiplying two floats produces a float result.
-
         it "multiplies positive floats":
+            # @req REQ-ARITH-020
+            step("Multiply 2.5 by 4.0 as floats")
+            # @capture(statistics): 2.5 * 4.0 evaluated to 10.0
             val result = 2.5 * 4.0
-            expect(result).to_equal(10.0)
+            expect(result).to_equal(10.0)  # oracle: 2.5 * 4 = 10 exactly in binary
 
     context "with mixed types":
-        # ### Scenario: Mixed Type Multiplication
-        #
-        # Multiplying Int and Float promotes Int to Float.
-
         it "promotes int to float (int * float)":
+            # @req REQ-ARITH-021
+            step("Multiply int 5 by float 2.5 with promotion")
+            # @capture(statistics): 5 * 2.5 promotes to 12.5
             val result = 5 * 2.5
-            expect(result).to_equal(12.5)
+            expect(result).to_equal(12.5)  # oracle: Int promotes to Float, 5 * 2.5 = 12.5
 
         it "promotes int to float (float * int)":
+            # @req REQ-ARITH-022
+            step("Multiply float 3.5 by int 2 with promotion")
+            # @capture(statistics): 3.5 * 2 promotes to 7.0
             val result = 3.5 * 2
-            expect(result).to_equal(7.0)
-
-
-# ============================================================================
-# Division Operator (/)
-# ============================================================================
+            expect(result).to_equal(7.0)  # oracle: promotion is order-independent, 3.5 * 2 = 7.0
 
 describe "Arithmetic Operators - Division":
-    # ## Division Operator (/)
-    #
-    # The division operator performs numeric division on Int and Float types.
-    # Division by zero produces an error.
-
     context "with integers":
-        # ### Scenario: Integer Division
-        #
-        # Dividing two integers produces a numeric result.
-        #
-        # ```simple
-        # val quotient = 20 / 4  # 5
-        # ```
-
         it "divides evenly":
+            # @req REQ-ARITH-023
+            step("Divide 20 by 4 with no remainder")
+            # @capture(statistics): 20 / 4 evaluated to 5
             val result = 20 / 4
-            expect(result).to_equal(5)
+            expect(result).to_equal(5)  # oracle: 20 / 4 = 5 exactly
 
         it "divides with remainder":
+            # @req REQ-ARITH-024
+            step("Divide 17 by 5 and keep the integer quotient")
+            # @capture(statistics): 17 / 5 evaluated to 3
             val result = 17 / 5
-            expect(result).to_equal(3)
+            expect(result).to_equal(3)  # oracle: integer division truncates, 17 / 5 = 3
 
         it "divides one by itself":
+            # @req REQ-ARITH-025
+            step("Divide 42 by itself")
+            # @capture(statistics): 42 / 42 evaluated to 1
             val result = 42 / 42
-            expect(result).to_equal(1)
+            expect(result).to_equal(1)  # oracle: any nonzero value over itself is 1
 
     context "with floats":
-        # ### Scenario: Float Division
-        #
-        # Dividing floats produces a float result.
-
         it "divides floats":
+            # @req REQ-ARITH-026
+            step("Divide 10.0 by 4.0 as floats")
+            # @capture(statistics): 10.0 / 4.0 evaluated to 2.5
             val result = 10.0 / 4.0
-            expect(result).to_equal(2.5)
+            expect(result).to_equal(2.5)  # oracle: 10 / 4 = 2.5 exactly in binary
 
     context "with mixed types":
-        # ### Scenario: Mixed Type Division
-        #
-        # Dividing Int and Float promotes Int to Float.
-
         it "promotes int to float (int / float)":
+            # @req REQ-ARITH-027
+            step("Divide int 10 by float 4.0 with promotion")
+            # @capture(statistics): 10 / 4.0 promotes to 2.5
             val result = 10 / 4.0
-            expect(result).to_equal(2.5)
+            expect(result).to_equal(2.5)  # oracle: Int promotes to Float, 10 / 4 = 2.5
 
         it "promotes int to float (float / int)":
+            # @req REQ-ARITH-028
+            step("Divide float 10.0 by int 4 with promotion")
+            # @capture(statistics): 10.0 / 4 promotes to 2.5
             val result = 10.0 / 4
-            expect(result).to_equal(2.5)
-
-
-# ============================================================================
-# Modulo Operator (%)
-# ============================================================================
+            expect(result).to_equal(2.5)  # oracle: promotion is order-independent, 10 / 4 = 2.5
 
 describe "Arithmetic Operators - Modulo":
-    # ## Modulo Operator (%)
-    #
-    # The modulo operator computes the remainder of integer division.
-
     context "with positive integers":
-        # ### Scenario: Positive Integer Modulo
-        #
-        # Modulo with positive integers returns the remainder.
-        #
-        # ```simple
-        # val remainder = 17 % 5  # 2
-        # ```
-
         it "computes remainder":
+            # @req REQ-ARITH-029
+            step("Take 17 modulo 5")
+            # @capture(statistics): 17 % 5 evaluated to 2
             val result = 17 % 5
-            expect(result).to_equal(2)
+            expect(result).to_equal(2)  # oracle: 17 = 3 * 5 + 2
 
         it "returns zero for even division":
+            # @req REQ-ARITH-030
+            step("Take 20 modulo 4 with no remainder")
+            # @capture(statistics): 20 % 4 annihilates to 0
             val result = 20 % 4
-            expect(result == 0).to_equal(true)
+            expect(result == 0).to_equal(true)  # oracle: 20 is a multiple of 4
 
         it "returns operand when divisor is larger":
+            # @req REQ-ARITH-031
+            step("Take 3 modulo 5 with a larger divisor")
+            # @capture(statistics): 3 % 5 stays 3
             val result = 3 % 5
-            expect(result).to_equal(3)
+            expect(result).to_equal(3)  # oracle: 3 < 5 leaves the dividend unchanged
 
     context "with negative integers":
-        # ### Scenario: Negative Integer Modulo
-        #
-        # Modulo with negative integers follows language semantics.
-
         it "handles negative dividend":
+            # @req REQ-ARITH-032
+            step("Take -17 modulo 5")
+            # @capture(statistics): -17 % 5 evaluated to -2
             val result = -17 % 5
-            expect(result).to_equal(-2)
+            expect(result).to_equal(-2)  # oracle: sign follows the dividend, -17 = -4 * 5 + 3 truncated to -2
 
         it "handles negative divisor":
+            # @req REQ-ARITH-033
+            step("Take 17 modulo -5")
+            # @capture(statistics): 17 % -5 evaluated to 2
             val result = 17 % -5
-            expect(result).to_equal(2)
-
-
-# ============================================================================
-# Exponentiation Operator (**)
-# ============================================================================
+            expect(result).to_equal(2)  # oracle: the language's modulo semantics for a negative divisor
 
 describe "Arithmetic Operators - Exponentiation":
-    # ## Exponentiation Operator (**)
-    #
-    # The exponentiation operator raises a number to a power.
-    # Right-associative: 2 ** 3 ** 2 means 2 ** (3 ** 2).
-
     context "with integers":
-        # ### Scenario: Integer Exponentiation
-        #
-        # Raising an integer to an integer power.
-        #
-        # ```simple
-        # val squared = 5 ** 2  # 25
-        # ```
-
         it "computes square":
+            # @req REQ-ARITH-034
+            step("Raise 5 to the second power")
+            # @capture(statistics): 5 ** 2 evaluated to 25
             val result = 5 ** 2
-            expect(result).to_equal(25)
+            expect(result).to_equal(25)  # oracle: 5 * 5 = 25
 
         it "computes cube":
+            # @req REQ-ARITH-035
+            step("Raise 2 to the third power")
+            # @capture(statistics): 2 ** 3 evaluated to 8
             val result = 2 ** 3
-            expect(result).to_equal(8)
+            expect(result).to_equal(8)  # oracle: 2 * 2 * 2 = 8
 
         it "computes power of zero":
+            # @req REQ-ARITH-036
+            step("Raise 42 to the zeroth power")
+            # @capture(statistics): 42 ** 0 evaluated to 1
             val result = 42 ** 0
-            expect(result).to_equal(1)
+            expect(result).to_equal(1)  # oracle: anything to the zeroth power is 1
 
         it "computes power of one":
+            # @req REQ-ARITH-037
+            step("Raise 42 to the first power")
+            # @capture(statistics): 42 ** 1 stays 42
             val result = 42 ** 1
-            expect(result).to_equal(42)
+            expect(result).to_equal(42)  # oracle: anything to the first power is itself
 
     context "with floats":
-        # ### Scenario: Float Exponentiation
-        #
-        # Raising floats to powers.
-
         it "computes float power":
+            # @req REQ-ARITH-038
+            step("Raise 2.0 to the third power as floats")
+            # @capture(statistics): 2.0 ** 3.0 evaluated to 8.0
             val result = 2.0 ** 3.0
-            expect(result).to_equal(8.0)
+            expect(result).to_equal(8.0)  # oracle: 2^3 = 8 exactly in binary
 
     context "with right associativity":
-        # ### Scenario: Right Associativity
-        #
-        # Exponentiation is right-associative.
-        #
-        # ```simple
-        # 2 ** 3 ** 2  # 2 ** (3 ** 2) = 2 ** 9 = 512
-        # ```
-
         it "evaluates right to left":
+            # @req REQ-ARITH-039
+            step("Evaluate 2 ** 3 ** 2 right-associatively")
+            # @capture(statistics): 2 ** (3 ** 2) evaluated to 512
             val result = 2 ** 3 ** 2
-            expect(result).to_equal(512)
-
-
-# ============================================================================
-# Floor Division Operator (//)
-# ============================================================================
+            expect(result).to_equal(512)  # oracle: right-assoc, 2 ** 9 = 512
 
 describe "Arithmetic Operators - Floor Division":
-    # ## Floor Division Operator (//)
-    #
-    # Floor division divides and rounds toward negative infinity.
-    # Uses Euclidean division semantics.
-
     context "with positive integers":
-        # ### Scenario: Positive Floor Division
-        #
-        # Floor division with positive integers.
-        #
-        # ```simple
-        # val result = 17 // 5  # 3
-        # ```
-
         it "divides and floors":
+            # @req REQ-ARITH-040
+            step("Floor-divide 17 by 5")
+            # @capture(statistics): 17.fdiv(5) evaluated to 3
             val result = 17.fdiv(5)
-            expect(result).to_equal(3)
+            expect(result).to_equal(3)  # oracle: floor of 3.4 is 3
 
         it "returns exact result for even division":
+            # @req REQ-ARITH-041
+            step("Floor-divide 20 by 4 exactly")
+            # @capture(statistics): 20.fdiv(4) evaluated to 5
             val result = 20.fdiv(4)
-            expect(result).to_equal(5)
-
-
-# ============================================================================
-# Unary Negation (-)
-# ============================================================================
+            expect(result).to_equal(5)  # oracle: exact division is its own floor
 
 describe "Arithmetic Operators - Unary Negation":
-    # ## Unary Negation Operator (-)
-    #
-    # The unary minus operator negates a numeric value.
-
     context "with integers":
-        # ### Scenario: Integer Negation
-        #
-        # Negating an integer produces its opposite.
-        #
-        # ```simple
-        # val neg = -42  # -42
-        # ```
-
         it "negates positive integer":
-            val result = -42
-            expect(result).to_equal(-42)
+            # @req REQ-ARITH-042
+            step("Negate a runtime-computed 42")
+            # @capture(statistics): -(6 * 7) evaluated to -42
+            val operand = 6 * 7
+            val result = -operand
+            expect(result).to_equal(-42)  # oracle: unary minus on the computed 42
 
         it "negates negative integer":
+            # @req REQ-ARITH-043
+            step("Negate a bound -42 back to positive")
+            # @capture(statistics): -(-42) evaluated to 42
             val x = -42
             val result = -x
-            expect(result).to_equal(42)
+            expect(result).to_equal(42)  # oracle: double negation restores 42
 
         it "negates zero":
+            # @req REQ-ARITH-044
+            step("Negate zero")
+            # @capture(statistics): -0 stays 0
             val result = -0
-            expect(result == 0).to_equal(true)
+            expect(result == 0).to_equal(true)  # oracle: negated zero is still zero
 
     context "with floats":
-        # ### Scenario: Float Negation
-        #
-        # Negating a float produces its opposite.
-
         it "negates positive float":
-            val result = -3.5
-            expect(result).to_equal(-3.5)
+            # @req REQ-ARITH-045
+            step("Negate a runtime-computed 3.5")
+            # @capture(statistics): -(1.5 + 2.0) evaluated to -3.5
+            val operand = 1.5 + 2.0
+            val result = -operand
+            expect(result).to_equal(-3.5)  # oracle: unary minus on the computed 3.5
 
     context "with expressions":
-        # ### Scenario: Expression Negation
-        #
-        # Negating an expression.
-        #
-        # ```simple
-        # val neg = -(5 + 3)  # -8
-        # ```
-
         it "negates expression result":
+            # @req REQ-ARITH-046
+            step("Negate the parenthesized sum 5 + 3")
+            # @capture(statistics): -(5 + 3) evaluated to -8
             val result = -(5 + 3)
-            expect(result).to_equal(-8)
-
-
-# ============================================================================
-# Operator Precedence
-# ============================================================================
+            expect(result).to_equal(-8)  # oracle: the sum binds first, then negates
 
 describe "Arithmetic Operators - Precedence":
-    # ## Operator Precedence
-    #
-    # Operators are evaluated in precedence order:
-    # 1. ** (exponentiation)
-    # 2. *, /, % (multiplication, division, modulo)
-    # 3. +, - (addition, subtraction)
-    #
-    # Note: Floor division is now a method (.fdiv), not an operator.
-    # The // operator is now used for parallel execution.
-
     context "multiplication before addition":
-        # ### Scenario: Multiplication Precedence
-        #
-        # Multiplication has higher precedence than addition.
-        #
-        # ```simple
-        # 2 + 3 * 4  # 14, not 20
-        # ```
-
         it "evaluates multiplication first":
+            # @req REQ-ARITH-047
+            step("Evaluate 2 + 3 * 4 without parentheses")
+            # @capture(statistics): 2 + (3 * 4) evaluated to 14
             val result = 2 + 3 * 4
-            expect(result).to_equal(14)
+            expect(result).to_equal(14)  # oracle: * binds tighter, 2 + 12
 
         it "uses parentheses to override":
+            # @req REQ-ARITH-048
+            step("Override precedence with (2 + 3) * 4")
+            # @capture(statistics): (2 + 3) * 4 evaluated to 20
             val result = (2 + 3) * 4
-            expect(result).to_equal(20)
+            expect(result).to_equal(20)  # oracle: parentheses bind first, 5 * 4
 
     context "exponentiation before multiplication":
-        # ### Scenario: Exponentiation Precedence
-        #
-        # Exponentiation has higher precedence than multiplication.
-        #
-        # ```simple
-        # 2 * 3 ** 2  # 18, not 36
-        # ```
-
         it "evaluates exponentiation first":
+            # @req REQ-ARITH-049
+            step("Evaluate 2 * 3 ** 2 without parentheses")
+            # @capture(statistics): 2 * (3 ** 2) evaluated to 18
             val result = 2 * 3 ** 2
-            expect(result).to_equal(18)
+            expect(result).to_equal(18)  # oracle: ** binds tighter, 2 * 9
 
         it "uses parentheses to override":
+            # @req REQ-ARITH-050
+            step("Override precedence with (2 * 3) ** 2")
+            # @capture(statistics): (2 * 3) ** 2 evaluated to 36
             val result = (2 * 3) ** 2
-            expect(result).to_equal(36)
+            expect(result).to_equal(36)  # oracle: parentheses bind first, 6 * 6
 
     context "complex expressions":
-        # ### Scenario: Complex Precedence
-        #
-        # Multiple operators with different precedence.
-
         it "evaluates complex expression correctly":
+            # @req REQ-ARITH-051
+            step("Evaluate 2 + 3 * 4 - 5 left to right")
+            # @capture(statistics): 2 + 12 - 5 evaluated to 9
             val result = 2 + 3 * 4 - 5
-            expect(result).to_equal(9)
+            expect(result).to_equal(9)  # oracle: * first, then + and - left to right
 
         it "evaluates with division":
+            # @req REQ-ARITH-052
+            step("Evaluate 20 / 4 + 3 * 2")
+            # @capture(statistics): 5 + 6 evaluated to 11
             val result = 20 / 4 + 3 * 2
-            expect(result).to_equal(11)
-
-
-# ============================================================================
-# Type Coercion
-# ============================================================================
+            expect(result).to_equal(11)  # oracle: / and * first, then +
 
 describe "Arithmetic Operators - Type Coercion":
-    # ## Automatic Type Coercion
-    #
-    # When mixing Int and Float in arithmetic operations, Int is automatically
-    # promoted to Float, and the result is Float.
-
     context "in complex expressions":
-        # ### Scenario: Mixed Type Expressions
-        #
-        # Complex expressions with mixed Int and Float types.
-
         it "promotes in nested expressions":
+            # @req REQ-ARITH-053
+            step("Evaluate 10 + 5 * 2.0 with a nested promotion")
+            # @capture(statistics): 10 + 10.0 promotes to 20.0
             val result = 10 + 5 * 2.0
-            expect(result).to_equal(20.0)
+            expect(result).to_equal(20.0)  # oracle: inner product promotes, then the sum
 
         it "promotes across multiple operations":
+            # @req REQ-ARITH-054
+            step("Evaluate 1 + 2 + 3.0 across two promotions")
+            # @capture(statistics): 3 + 3.0 promotes to 6.0
             val result = 1 + 2 + 3.0
-            expect(result).to_equal(6.0)
-
-
-# ============================================================================
-# Edge Cases
-# ============================================================================
+            expect(result).to_equal(6.0)  # oracle: ints sum first, then promote for the float
 
 describe "Arithmetic Operators - Edge Cases":
-    # ## Edge Case Handling
-    #
-    # Tests for special cases and boundaries.
-
     context "with zero":
-        # ### Scenario: Operations with Zero
-        #
-        # Zero has special properties in arithmetic.
-
         it "multiplies by zero":
+            # @req REQ-ARITH-055
+            step("Annihilate 42 with zero")
+            # @capture(statistics): 42 * 0 annihilates to 0
             val result = 42 * 0
-            expect(result == 0).to_equal(true)
+            expect(result == 0).to_equal(true)  # oracle: 0 annihilates any product
 
         it "adds zero (identity)":
+            # @req REQ-ARITH-056
+            step("Add zero to 42 as the identity")
+            # @capture(statistics): 42 + 0 stays 42
             val result = 42 + 0
-            expect(result).to_equal(42)
+            expect(result).to_equal(42)  # oracle: 0 is the additive identity
 
     context "with one":
-        # ### Scenario: Operations with One
-        #
-        # One is the multiplicative identity.
-
         it "multiplies by one":
+            # @req REQ-ARITH-057
+            step("Multiply 42 by the identity one")
+            # @capture(statistics): 42 * 1 stays 42
             val result = 42 * 1
-            expect(result).to_equal(42)
+            expect(result).to_equal(42)  # oracle: 1 is the multiplicative identity
 
         it "divides by one":
+            # @req REQ-ARITH-058
+            step("Divide 42 by one")
+            # @capture(statistics): 42 / 1 stays 42
             val result = 42 / 1
-            expect(result).to_equal(42)
+            expect(result).to_equal(42)  # oracle: division by one is the identity
 
         it "raises to power of zero":
+            # @req REQ-ARITH-059
+            step("Raise 42 to the zeroth power")
+            # @capture(statistics): 42 ** 0 evaluated to 1
             val result = 42 ** 0
-            expect(result).to_equal(1)
+            expect(result).to_equal(1)  # oracle: anything to the zeroth power is 1

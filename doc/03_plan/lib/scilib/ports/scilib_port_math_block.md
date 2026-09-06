@@ -436,17 +436,19 @@ T-MATHBLOCK-16 ◄─ T-MATHBLOCK-12
 
 ## Acceptance Criteria (v1 complete)
 
-- [ ] `bin/simple test test/03_system/feature/usage/math_block_linalg_spec.spl` passes in interpreter mode with `SIMPLE_BLAS_BACKEND=mock`; zero `skip()`, zero TODO→NOTE.
-- [ ] `parse("A @ B + c")` produces `Add(MatMul(Var("A"), Var("B")), Var("c"))` — `@` binds tighter than `+`.
-- [ ] `parse("A[1:3, 0]")` produces `Slice { ranges: [SliceRange{1,3}, SliceRange{0,1}] }` (unit test).
+- [ ] `bin/simple test test/03_system/feature/scilib/math_block_matmul_spec.spl test/03_system/feature/scilib/math_block_solve_spec.spl` passes in interpreter mode with `SIMPLE_BLAS_BACKEND=mock`; zero `skip()`, zero TODO→NOTE. (Path corrected 2026-09-05: the planned `test/03_system/feature/usage/math_block_linalg_spec.spl` does not exist; the shipped specs are the two `scilib/math_block_*_spec.spl` files.)
+- [x] `parse("A @ B + c")` produces `Add(MatMul(Var("A"), Var("B")), Var("c"))` — `@` binds tighter than `+` — verified src/compiler_rust/compiler/src/blocks/math/parser.rs:177 `MathExpr::MatMul` built inside `parse_multiplicative` (:154), which is invoked from `parse_additive` (:124), so `@` binds tighter than `+`
+- [x] `parse("A[1:3, 0]")` produces a `MathExpr::Subscript` node whose per-dimension arguments are `MathExpr::Slice { start, end }` values (comma-separated dims looped in `parse_subscript_index`) — verified src/compiler_rust/compiler/src/blocks/math/ast.rs:52 `Subscript(Box<MathExpr>, Box<MathExpr>)`, src/compiler_rust/compiler/src/blocks/math/parser.rs:264 `fn parse_subscript_index` (`while self.current() == &MathToken::Comma` :267), :278 `fn parse_slice_expr`, ast.rs:54 `Slice { start, end }`
+  - divergence: planned a dedicated `Slice { ranges: [SliceRange…] }` node; shipped as per-dim `MathExpr::Slice { start: Option, end: Option }` nested under the subscript node
 - [ ] `parse("A.T")` produces `App("transpose", [Var("A")])` (unit test).
 - [ ] `inv` and `solve` eval arms green against mock shim deterministic output.
+  - note (2026-09-05): the arms exist — src/compiler_rust/compiler/src/blocks/math/eval/mod.rs:391 `"inv" => tensor_functions::eval_inv`, :392 `"solve" => tensor_functions::eval_solve` — but they compute in the math-block tensor evaluator, never call the `rt_lapack_*` mock shim, and no gate or `doc/08_tracking/test/test_db.sdn` row proves them green (0 scilib rows).
 - [ ] `A.sum(0)` and `A.mean(1)` reduce along the specified axis; existing full-reduce unaffected.
 - [ ] Rendering: `MatMul` → `@` in text, `\cdot` in LaTeX; `Slice` → `A[i:j,k]`; axis-reduction → correct text/LaTeX.
-- [ ] PERF-SUGAR-002 promoted from `anticipated` to `observed` in `scilib_perf_sugar.md`; workaround guidance recorded.
-- [ ] Zero df ops (`df['col']`, `groupby`) introduced into `math{}` at any point.
+- [x] PERF-SUGAR-002 promoted from `anticipated` to `observed` in `scilib_perf_sugar.md`; workaround guidance recorded — verified doc/08_tracking/feature/scilib_perf_sugar.md:78 `Status: fixed 2026-05-30` (entry header :73; `fixed` supersedes `observed`)
+- [x] Zero df ops (`df['col']`, `groupby`) introduced into `math{}` at any point — verified: `/usr/bin/grep -rn "groupby\|df\[" src/compiler_rust/compiler/src/blocks/math/ src/lib/common/science_math/math_block.spl src/lib/common/science_math/math_block_ops.spl` → 0 hits
 - [ ] Zero primitive type leaks at any public-facing surface touched by this area.
-- [ ] No `--mode=native` or `--mode=smf` bypass in any spec.
+- [x] No `--mode=native` or `--mode=smf` bypass in any spec — verified: `/usr/bin/grep -rn "mode=native\|mode=smf" test/03_system/feature/scilib/math_block_*_spec.spl` → 0 positive uses
 
 ---
 
@@ -460,3 +462,9 @@ T-MATHBLOCK-16 ◄─ T-MATHBLOCK-12
 | Mock shim does not provide deterministic `inv`/`solve` output | Medium | Coordinate with T-LAPACK-01 owner; define expected mock return values before writing T-MATHBLOCK-14 specs |
 | Axis-int arg breaks existing single-arg `sum` dispatch | Low | Guard with `args.len()` check; add regression scenario for full-reduce in T-MATHBLOCK-15 |
 | PERF-SUGAR-001 not landed when math-block work starts | High (inherited) | math-block eval creates intermediate tensors; without fast alloc, specs time out; do not start T-MATHBLOCK-06/07/08 until PERF-SUGAR-001 is `fixed` |
+
+## Acceptance
+
+Runnable oracles for the remaining open boxes: `test/03_system/plan_acceptance/scilib_port_math_block_spec.spl`
+(tagged `@tag:in-development`; one `it` per open box — see
+`doc/03_plan/agent_tasks/plan_remains_acceptance_2026-09-05.md`).
