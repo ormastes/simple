@@ -129,6 +129,47 @@ sets `is_pic = cfg!(target_arch = "x86_64")` and explains it as:
 Disabling PIC does not avoid an assert; it *chooses* this one. The comment
 should say so, otherwise the next reader concludes aarch64 is already safe.
 
+## Three states measured 2026-09-06 (the cheap fixes are ruled OUT)
+
+Each row was built and run against the deterministic reproducer above. This
+supersedes the "just flip is_pic" reading that the earlier text invited.
+
+| # | configuration | result |
+|---|---|---|
+| 1 | `is_pic=false` (current tree) | `compiled_blob.rs:90` CALL26 range assert — the shipped symptom |
+| 2 | `is_pic=true`, stock vendor | aborts at once: `PLT is currently only supported on x86_64` (`backend.rs:297`) |
+| 3 | `is_pic=true` + an aarch64 PLT stub added to the vendored crate | PLT assert gone; **back to the `compiled_blob.rs:90` CALL26 assert** |
+
+State 3 is the important one. An aarch64 PLT stub
+(`adrp x16 / ldr x16, [x16] / br x16`, 12 of the 16 available bytes, x16 being
+the AAPCS64 inter-procedural scratch register) builds and removes the
+x86_64-only limitation — but it is **necessary and not sufficient**. `is_pic`
+governs how *external* symbols are referenced; calls between functions defined
+in the same JIT module still lower to a direct `BL`/CALL26, and those are what
+overflow once the JIT's code regions are more than 128 MB apart.
+
+So the fix cannot be a relocation-*kind* change. It has to be one of:
+
+- **veneers/islands** — in the `Reloc::Aarch64Call` arm of `compiled_blob.rs`,
+  when `diff` does not fit in 26 bits, emit a trampoline within range that does
+  the full 64-bit `adrp`/`ldr`/`br` and retarget the `BL` at it. This is what a
+  real linker does for long branches; it is the standard answer.
+- **bounded code allocation** — reserve one contiguous region up front and
+  allocate every JIT blob inside it, so the displacement can never exceed
+  +/-128 MB. Simpler, but caps total JIT code size.
+
+**A trap for whoever does this.** `src/compiler_rust/vendor/` is wired in by
+`.cargo/config.toml` (`[source.crates-io] replace-with = "vendored-sources"`),
+so edits there DO reach the build — but cargo treats vendored crates as
+immutable. Editing a file silently changes nothing: three consecutive builds
+reported `Finished in ~1.3s` with the old code still linked, and
+`cargo clean -p cranelift-jit` removed 0 files. To actually rebuild you must
+(a) update that file's hash in `vendor/cranelift-jit/.cargo-checksum.json`, and
+(b) delete `target/**/deps/libcranelift_jit-*.{rlib,rmeta}` and
+`target/**/.fingerprint/cranelift-jit-*`. Verify with
+`strings <binary> | grep 'PLT is currently only supported'` — if the string is
+still present, your patch is not in the binary no matter what cargo printed.
+
 ## Concrete fix path
 
 `Reloc::Aarch64AdrGotPage21` and `Aarch64Ld64GotLo12Nc` are **already
@@ -144,8 +185,9 @@ br   x16                  ; tail-call it
 
 12 bytes of the 16 available, and `x16` (IP0) is the architecturally reserved
 inter-procedural scratch register, so clobbering it across a call is legal.
-With that in place `is_pic` can be true on aarch64 and every call goes
-indirect, making the ±128 MB displacement irrelevant.
+That was the original hypothesis. It was TESTED on 2026-09-06 and is wrong:
+see state 3 in the table above — local JIT-to-JIT calls stay direct, so the
+displacement problem survives.
 
 **Not done here** because `vendor/cranelift-jit/**` is vendored third-party code
 and CLAUDE.md scopes it out; this needs an explicit decision to patch vendor (or
