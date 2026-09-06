@@ -1,0 +1,77 @@
+use std.spec.*
+use std.common.crypto.sha256 (sha256_text)
+use compiler.common.cache_contract.snapshot_contract_v1.{LogicalSourcePathV1, PathSemanticsV1}
+use compiler.common.cache_contract.virtual_source_store_v1 (SummaryAuthV1)
+use compiler.common.cache_contract.virtual_source_registration_v1.*
+use compiler.frontend.cache_artifact.public_summary_projector.{FrontendPublicFactKindV1, FrozenPublicFactV1, PublicSummaryProjectionInputV1, project_public_summary_v1}
+use compiler.driver.cache.catalog.cache_catalog_projection (CacheCatalogProjectionV1)
+use compiler.driver.cache.summary.summary_store_v1.{SummaryStoreV1, VirtualSourceStoreAdapterV1}
+use compiler.driver.cache.gateway.cache_gateway_adapter (CacheGatewayAdapterV1)
+use app.mcp.virtual_summary_protocol.*
+use app.mcp.main_lazy_protocol.{handle_resource_templates_list, handle_resources_read}
+use app.simple_lsp_mcp.tools (handle_resource_read)
+use app.spipe.evidence_registry.*
+
+fn digest(value: text) -> text: sha256_text(value)
+
+fn auth() -> SummaryAuthV1:
+    SummaryAuthV1(root_digest: digest("repo"), session_digest: digest("session"),
+        capability_digest: digest("capability"), capability_admission_receipt: digest("admission"),
+        request_epoch: 10, expires_epoch: 20)
+
+fn summary(snapshot: text):
+    val signature = "pub extern fn visible() -> i64"
+    val facts = [FrozenPublicFactV1(fact_kind: FrontendPublicFactKindV1.ForwardDeclaration,
+        stable_symbol_id: "sym:visible", canonical_bytes: signature, is_public: true,
+        contains_executable_body: false, contains_private_source: false, dependency_symbol_ids: []),
+        FrozenPublicFactV1(fact_kind: FrontendPublicFactKindV1.Declaration,
+        stable_symbol_id: "sym:visible", canonical_bytes: signature, is_public: true,
+        contains_executable_body: false, contains_private_source: false, dependency_symbol_ids: [])]
+    project_public_summary_v1(PublicSummaryProjectionInputV1(snapshot_id: snapshot,
+        logical_path: LogicalSourcePathV1(repository_namespace_digest: digest("repo"),
+            module_relative_utf8: "pkg/example.spl", path_semantics: PathSemanticsV1.CaseSensitiveNfc),
+        source_blob_digest: digest("source"), compiler_owner_digest: digest("compiler"),
+        grammar_digest: digest("grammar"), facts: facts)).unwrap()
+
+fn gateway_with_summary(snapshot: text) -> CacheGatewayAdapterV1:
+    val catalog = CacheCatalogProjectionV1.memory().unwrap()
+    var summaries = SummaryStoreV1.memory().unwrap()
+    summaries.publish(summary(snapshot), digest("ast"), "generated/untrusted;public-only").unwrap()
+    CacheGatewayAdapterV1(catalog: catalog,
+        summaries: VirtualSourceStoreAdapterV1.new(summaries, digest("admission")),
+        cache_root: "/tmp/simple-cache-virtual-summary-test",
+        process_instance_nonce: digest("process"), boot_identity_digest: digest("boot"),
+        reader_admission_epoch: 1, journal_generation: 0,
+        pinned_manifest_digest: digest("manifest"), monotonic_now: 10, next_pin: 0)
+
+describe "registered virtual summary protocols":
+    it "fails closed before cache startup injects a gateway":
+        clear_virtual_source_consumers_v1()
+        val snapshot = digest("snapshot")
+        val uri = "simple-summary://{snapshot}/pkg/example.spl/_tldr.spl"
+        expect(handle_virtual_summary_read_v1("1", "{\"uri\":\"{uri}\"}").contains("unavailable")).to_equal(true)
+        expect(handle_resources_read("2", uri).contains("unavailable")).to_equal(true)
+        expect(handle_resource_read("3", "{\"uri\":\"{uri}\"}").contains("unavailable")).to_equal(true)
+
+    it "registers bounded MCP, LSP, compiler, and SPipe views from one gateway":
+        val snapshot = digest("snapshot")
+        var gateway = gateway_with_summary(snapshot)
+        install_virtual_source_consumers_from_gateway_v1(gateway, auth(), snapshot)
+        val uri = "simple-summary://{snapshot}/pkg/example.spl/_tldr.spl"
+        expect(handle_virtual_summary_list_v1("1", "{\"logical_directory\":\"pkg\",\"max_entries\":8}").contains(uri)).to_equal(true)
+        expect(handle_virtual_summary_stat_v1("2", "{\"uri\":\"{uri}\"}").contains("\"status\":\"ready\"")).to_equal(true)
+        expect(handle_virtual_summary_read_v1("3", "{\"uri\":\"{uri}\",\"max_bytes\":65536}").contains("visible")).to_equal(true)
+        expect(handle_virtual_summary_page_v1("4", "{\"uri\":\"{uri}\",\"max_bytes\":4096,\"max_entries\":32}").contains("visible")).to_equal(true)
+        expect(handle_resources_read("5", uri).contains("visible")).to_equal(true)
+        expect(handle_resource_read("6", "{\"uri\":\"{uri}\"}").contains("visible")).to_equal(true)
+        expect(compiler_virtual_source_read_registered_v1(uri, 65536).status).to_equal(VirtualSourceRegistrationStatusV1.Ready)
+        expect(compiler_virtual_source_read_registered_v1("pkg/example.spl", 65536).status).to_equal(VirtualSourceRegistrationStatusV1.Miss)
+        var registry = SPipeEvidenceRegistryV1.empty()
+        register_spipe_virtual_summary_evidence_v1(registry)
+        val evidence = registry.read(SPipeEvidenceRequestV1(uri: uri, continuation: nil, max_bytes: 4096, max_entries: 32))
+        expect(evidence.status).to_equal(VirtualSourceRegistrationStatusV1.Ready)
+        expect(evidence.page?.rendered_text.contains("visible")).to_equal(true)
+
+    it "advertises the resource but rejects oversize protocol requests":
+        expect(handle_resource_templates_list("1").contains("simple-summary://")).to_equal(true)
+        expect(handle_virtual_summary_read_v1("2", "{\"uri\":\"simple-summary://bad/x/_tldr.spl\",\"max_bytes\":65537}").contains("invalid read bounds")).to_equal(true)

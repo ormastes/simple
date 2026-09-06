@@ -196,6 +196,40 @@ fn test_typed_string_url() {
     }
 }
 
+#[test]
+fn test_path_typed_string_desugars_to_named_path_constructor() {
+    let module = parse(r#"let path = "config/app.toml"_path"#).unwrap();
+    let Node::Let(stmt) = &module.items[0] else {
+        panic!("Expected let statement");
+    };
+    let Some(Expr::Call { callee, args }) = &stmt.value else {
+        panic!("Expected Path constructor call, got {:?}", stmt.value);
+    };
+    assert_eq!(callee.as_ref(), &Expr::Identifier("Path".to_string()));
+    assert_eq!(args.len(), 1);
+    assert_eq!(args[0].name.as_deref(), Some("path"));
+    assert_eq!(args[0].value, Expr::String("config/app.toml".to_string()));
+}
+
+#[test]
+fn test_path_suffix_invalid_forms_fail_parsing() {
+    let spaced = parse(r#"let path = "config/app.toml" _path"#)
+        .unwrap_err()
+        .to_string();
+    assert!(spaced.contains("_path suffix must be adjacent to its string literal"));
+
+    let interpolated = parse(r#"let name = "app"
+let path = "config/{name}"_path"#)
+    .unwrap_err()
+    .to_string();
+    assert!(interpolated.contains("_path does not support interpolated strings"));
+
+    let triple = parse(r#"let path = """config/app.toml"""_path"#)
+        .unwrap_err()
+        .to_string();
+    assert!(triple.contains("_path does not support triple-quoted strings"));
+}
+
 // === Array Type Tests ===
 
 #[test]

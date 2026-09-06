@@ -22,6 +22,8 @@ use app.startup.contract.startup_plan_v1.{
     startup_plan_encode,
     startup_plan_from_request,
     startup_plan_hash,
+    startup_plan_sealed,
+    startup_plan_zero,
     startup_request_v1
 }
 
@@ -69,6 +71,28 @@ describe "StartupRequestV1 -> StartupPlanV1":
         val b = startup_plan_from_request(command_request())
         assert_eq(startup_plan_encode(a), startup_plan_encode(b))
         assert_eq(a.plan_hash, b.plan_hash)
+
+    it "canonicalizes duplicate cache capsule and provider sets before hashing":
+        step("sort and deduplicate startup cache identities")
+        var plan = startup_plan_zero()
+        plan.route_kind = "command"
+        plan.required_capsules = ["z", "a", "z"]
+        plan.provider_manifest_digests = ["bb", "aa", "bb"]
+        val sealed = startup_plan_sealed(plan)
+        assert_eq(sealed.required_capsules, ["a", "z"])
+        assert_eq(sealed.provider_manifest_digests, ["aa", "bb"])
+        assert_eq(sealed.plan_hash, startup_plan_hash(sealed))
+
+    it "rejects a capsule required and forbidden by the same plan":
+        step("reject conflicting startup cache capsule sets")
+        var plan = startup_plan_zero()
+        plan.route_kind = "command"
+        plan.required_capsules = ["compiler"]
+        plan.forbidden_capsules = ["compiler"]
+        plan.forbidden_receipt_count = 1
+        val sealed = startup_plan_sealed(plan)
+        assert_eq(sealed.route_kind, "")
+        assert_eq(sealed.plan_hash, "")
 
 describe "StartupPlanV1 SDN round-trip":
     it "encodes to SDN key: value lines, version first and hash last":

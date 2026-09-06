@@ -1,0 +1,63 @@
+"""Lane-local composition of the reusable service base and cache lifecycle."""
+
+use std.service.daemon_base
+use compiler.driver.cache.daemon.cache_daemon_lifecycle
+use common.cache_host_authority_v1.{CacheRootAuthorityV1}
+use common.cache_daemon_host_authority_v1
+
+struct CacheDaemonAdmission:
+    admitted: bool
+    peer: AuthenticatedPeerReceiptV1
+    lock: ExclusiveCacheLockReceiptV1
+    boot: HostBootIdentityV1
+    epoch: DurableWriterEpochV1
+    readiness: CacheReadinessReceiptV1
+
+# Credential, boot identity, exclusive lock, durable epoch and readiness are
+# all runtime-owned opaque receipts. Any unsupported/forged step remains
+# closed because validation admits only exact status 1.
+fn cache_daemon_try_host_admission(
+    root: CacheRootAuthorityV1,
+    transport_peer_handle: i64,
+    readiness_nonce: [u8],
+) -> CacheDaemonAdmission:
+    val peer = cache_host_authenticate_peer_v1(root, transport_peer_handle)
+    val lock = cache_host_acquire_exclusive_lock_v1(root, peer)
+    val boot = cache_host_boot_identity_v1(lock)
+    val epoch = cache_host_advance_writer_epoch_v1(lock, boot)
+    val readiness = cache_host_publish_readiness_v1(lock, epoch, readiness_nonce)
+    val status = cache_host_validate_readiness_v1(peer, readiness, readiness_nonce, epoch)
+    CacheDaemonAdmission(
+        admitted: status == 1i64,
+        peer: peer,
+        lock: lock,
+        boot: boot,
+        epoch: epoch,
+        readiness: readiness,
+    )
+
+class CacheDaemonHost:
+    base: DaemonBase
+    lifecycle: CacheDaemonLifecycle
+
+    static fn create(config: DaemonConfig, start_ms: i64) -> CacheDaemonHost:
+        CacheDaemonHost(
+            base: daemon_base_new(config),
+            lifecycle: cache_daemon_lifecycle_new(start_ms),
+        )
+
+    me start_after_admission(admission: CacheDaemonAdmission) -> bool:
+        if not admission.admitted:
+            return false
+        daemon_base_start(self.base)
+
+    # Called only after the host-authority layer has closed admission, drained
+    # work, checkpointed, and released its opaque exclusive-writer receipt.
+    me stop_after_authority_release() -> bool:
+        if not self.lifecycle.finish_shutdown():
+            return false
+        daemon_base_stop(self.base)
+        true
+
+fn cache_daemon_host_new(config: DaemonConfig, start_ms: i64) -> CacheDaemonHost:
+    CacheDaemonHost.create(config, start_ms)
