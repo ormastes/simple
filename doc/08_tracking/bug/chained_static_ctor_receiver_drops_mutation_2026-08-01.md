@@ -98,3 +98,55 @@ Bisect in `src/compiler/` whether a static-method call in receiver position is
 lowered to a distinct temporary that argument mutations are applied to and then
 discarded. Until then, **never chain a mutating method off `Class.create(...)`**
 — bind the receiver to a `val` first.
+
+## Re-reproduction attempt 2026-09-06 — NOT REPRODUCIBLE on the current seed
+
+Host: `bin/release/aarch64-unknown-linux-gnu/simple`, 50093192 bytes,
+mtime 2026-09-06 09:59 (aarch64 Linux), run with
+`SIMPLE_EXECUTION_MODE=interpret`. The original measurement used
+`src/compiler_rust/target/bootstrap/simple` on x86_64.
+
+The record's fixture is MirToWat-specific, so a minimal one was written with
+the same three shapes it isolates — A: receiver is a static constructor call,
+chained; B: receiver is a plain fn returning that same static ctor call;
+C: receiver bound to a `val` first. The mutating method takes a `mut` argument
+and pushes to it, exactly like `emit_operand` mutating a `WatBuilder`
+(`build/wi/r_ctor.spl`):
+
+```simple
+class Sink:
+    var items: [i64] = []
+    static fn create() -> Sink: Sink(items: [])
+
+class Emitter:
+    var tag: text = ""
+    static fn create(t: text) -> Emitter: Emitter(tag: t)
+    fn emit(mut s: Sink, v: i64) -> void: s.items.push(v)
+
+fn mk() -> Emitter: Emitter.create("m")
+```
+
+Observed:
+
+```
+A static-ctor chained : 1
+B plain-fn chained    : 1
+C bound receiver      : 1
+```
+
+All three agree. The record's signature — A produces nothing while B and C are
+correct — does not occur; the varying factor it identified (whether the
+receiver expression is *syntactically* a static-method call) no longer changes
+the outcome.
+
+Caveat worth stating rather than hiding: this is a REBUILT minimal fixture, not
+the original MirToWat one, so it reproduces the shape and not the exact
+program. If the defect turns out to depend on something MirToWat-specific
+(e.g. a receiver whose class also has a `translate_module`, or the
+`unresolved external symbol 'MirToWat_dot_create'` interpreter drop the record
+mentions), this note does not rule that out. What it does establish is that the
+plain "mutating method chained off a static constructor" shape is correct on
+this binary and this lane.
+
+Scope: the **Rust seed's** interpreter lane only. The pure-Simple interpreter
+under `src/compiler/10.frontend/core/interpreter/` was not exercised.
