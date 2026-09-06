@@ -43,6 +43,18 @@ extern fn mmap(addr: i64, length: i64, prot: i64, flags: i64, fd: i64, offset: i
 extern fn munmap(addr: i64, length: i64) -> i64
 @unsafe(reason: "raw libc path pointer and directory-mode status ABI", capabilities: [ffi, raw_ptr])
 extern fn mkdir(path: i64, mode: i64) -> i64
+@unsafe(reason: "raw libc mutable template secure-directory ABI", capabilities: [ffi, raw_ptr])
+extern fn mkdtemp(template: i64) -> i64
+@unsafe(reason: "raw libc path permission ABI", capabilities: [ffi, raw_ptr])
+extern fn chmod(path: i64, mode: i64) -> i64
+@unsafe(reason: "raw libc hard-link publication ABI", capabilities: [ffi, raw_ptr])
+extern fn link(old_path: i64, new_path: i64) -> i64
+@unsafe(reason: "raw libc path unlink ABI", capabilities: [ffi, raw_ptr])
+extern fn unlink(path: i64) -> i64
+@unsafe(reason: "raw libc empty-directory removal ABI", capabilities: [ffi, raw_ptr])
+extern fn rmdir(path: i64) -> i64
+@unsafe(reason: "raw libc thread-local errno pointer ABI", capabilities: [ffi, raw_ptr])
+extern fn __errno_location() -> i64
 @unsafe(reason: "raw libc path pointer and DIR handle ABI; zero means failure", capabilities: [ffi, raw_ptr])
 extern fn opendir(path: i64) -> i64
 @unsafe(reason: "raw libc DIR handle and borrowed dirent pointer ABI", capabilities: [ffi, raw_ptr])
@@ -193,6 +205,31 @@ fn _sffi_core_fs_munmap(addr: i64, length: i64) -> i64:
 fn _sffi_core_fs_mkdir(path: i64, mode: i64) -> i64:
     unsafe(capabilities: [ffi, raw_ptr]):
         mkdir(path, mode)
+
+fn _sffi_core_fs_mkdtemp(template: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        mkdtemp(template)
+
+fn _sffi_core_fs_chmod(path: i64, mode: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        chmod(path, mode)
+
+fn _sffi_core_fs_link(old_path: i64, new_path: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        link(old_path, new_path)
+
+fn _sffi_core_fs_unlink(path: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        unlink(path)
+
+fn _sffi_core_fs_rmdir(path: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        rmdir(path)
+
+fn _sffi_core_fs_errno() -> i64:
+    val ptr = unsafe(capabilities: [ffi, raw_ptr]):
+        __errno_location()
+    if ptr < 1: -1 else: _sffi_core_fs_load_u8(ptr, 0)
 
 @always_inline
 fn _sffi_core_fs_opendir(path: i64) -> i64:
@@ -594,6 +631,56 @@ pub fn rt_file_rename(src_ptr: i64, src_len: i64, dst_ptr: i64, dst_len: i64) ->
     _sffi_core_fs_free(src)
     _sffi_core_fs_free(dst)
     if result == 0: 1 else: 0
+
+pub fn rt_secure_temp_dir(parent_ptr: i64, parent_len: i64, prefix_ptr: i64, prefix_len: i64) -> i64:
+    if parent_ptr < 1 or parent_len < 1 or prefix_ptr < 1 or prefix_len < 1:
+        return _sffi_core_fs_rt_string_new(0, 0)
+    var i = 0
+    while i < prefix_len:
+        val byte = _sffi_core_fs_load_u8(prefix_ptr, i)
+        if byte == 0 or byte == 47 or byte == 92:
+            return _sffi_core_fs_rt_string_new(0, 0)
+        i = i + 1
+    val path_len = parent_len + prefix_len + 8
+    val path = _sffi_core_fs_malloc(path_len + 1)
+    if path < 1:
+        return _sffi_core_fs_rt_string_new(0, 0)
+    i = 0
+    while i < parent_len:
+        _sffi_core_fs_store_u8(path, i, _sffi_core_fs_load_u8(parent_ptr, i))
+        i = i + 1
+    _sffi_core_fs_store_u8(path, parent_len, 47)
+    i = 0
+    while i < prefix_len:
+        _sffi_core_fs_store_u8(path, parent_len + 1 + i, _sffi_core_fs_load_u8(prefix_ptr, i))
+        i = i + 1
+    _sffi_core_fs_store_u8(path, parent_len + prefix_len + 1, 45)
+    i = 0
+    while i < 6:
+        _sffi_core_fs_store_u8(path, parent_len + prefix_len + 2 + i, 88)
+        i = i + 1
+    _sffi_core_fs_store_u8(path, path_len, 0)
+    if _sffi_core_fs_mkdtemp(path) < 1 or _sffi_core_fs_chmod(path, 448) != 0:
+        _sffi_core_fs_rmdir(path)
+        _sffi_core_fs_free(path)
+        return _sffi_core_fs_rt_string_new(0, 0)
+    val result = _sffi_core_fs_rt_string_new(path, path_len)
+    _sffi_core_fs_free(path)
+    result
+
+pub fn rt_file_publish_noreplace(src_ptr: i64, src_len: i64, dst_ptr: i64, dst_len: i64) -> i64:
+    val src = fs_copy_cstr(src_ptr, src_len)
+    val dst = fs_copy_cstr(dst_ptr, dst_len)
+    if src < 1 or dst < 1:
+        if src > 0: _sffi_core_fs_free(src)
+        if dst > 0: _sffi_core_fs_free(dst)
+        return -1
+    val linked = _sffi_core_fs_link(src, dst)
+    val error = if linked == 0: 0 else: _sffi_core_fs_errno()
+    if linked == 0: _sffi_core_fs_unlink(src)
+    _sffi_core_fs_free(src)
+    _sffi_core_fs_free(dst)
+    if linked == 0: 1 else: if error == 17: 0 else: -1
 
 # ponytail: guest stat lacks mtime; zero disables cache freshness until VFS stat returns it.
 pub fn rt_file_stat(path_ptr: i64, path_len: i64) -> i64:

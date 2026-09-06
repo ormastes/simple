@@ -12,6 +12,10 @@ Commands:
   skill                Print the SPipe skill guide.
   release-guide        Print the protected software-release operator guide.
   release-capabilities Print release/session/candidate schemas and capabilities.
+  reverse-references <inventory.json> <target_uid> --cursor-key-file <path>
+                       Query references whose owning artifacts are within a folder.
+                       Optional: --folder <path> --limit <n> --max-work-units <n>
+                                 --cursor <token>
   release-session-plan <json>
                        Validate and plan an isolated release session.
   release-beta-backport-plan <json>

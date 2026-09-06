@@ -30,6 +30,112 @@ use std.spec.step
 
 describe "resolve_import_symbols 2-pass import resolver":
     """The import pre-pass must preserve module identity before HIR lowering resolves symbol uses."""
+    it "finds the importing surface for an absolute positional entry with host punctuation":
+        val log = make_logger()
+        val path = "/tmp/stage3-integrated-migration/hello_world.spl"
+        val logical_name = ".tmp.stage3_integrated_migration.hello_world"
+        val source = "fn main() -> i64:\n    0"
+        # Bootstrap parsing retains the authored physical path as module.name,
+        # while the driver and surface registry use the shared logical name.
+        val module = parse_full_frontend(source, path, path, log)
+        var modules: Dict<text, Module> = {}
+        modules[logical_name] = module
+        val surfaces = resolve_import_symbols_spec_build_surfaces(modules, [
+            SourceFile(path: path, content: source, module_name: logical_name)
+        ])
+        var lowering = hirlowering_for_module(logical_name, surfaces)
+        val hir = lowering.lower_module(module)
+
+        expect(lowering.errors.len()).to_equal(0)
+        expect(hir.functions.keys().len()).to_equal(1)
+
+    it "resolves a relative sibling from a punctuated absolute importer":
+        val log = make_logger()
+        val root = "/tmp/stage3-integrated-migration/pkg"
+        val helper_path = root + "/helper.spl"
+        val entry_path = root + "/main.spl"
+        val helper_name = ".tmp.stage3_integrated_migration.pkg.helper"
+        val entry_name = ".tmp.stage3_integrated_migration.pkg.main"
+        val helper_source = "pub fn answer() -> i64:\n    42"
+        val entry_source = "use .helper.\{answer\}\nfn main() -> i64:\n    answer()"
+        val helper = parse_full_frontend(helper_source, helper_path, helper_path, log)
+        val entry = parse_full_frontend(entry_source, entry_path, entry_path, log)
+        var modules: Dict<text, Module> = {}
+        modules[helper_name] = helper
+        modules[entry_name] = entry
+        val surfaces = resolve_import_symbols_spec_build_surfaces(modules, [
+            SourceFile(path: helper_path, content: helper_source, module_name: helper_name),
+            SourceFile(path: entry_path, content: entry_source, module_name: entry_name)
+        ])
+        var lowering = hirlowering_for_module(entry_name, surfaces)
+        val hir = lowering.lower_module(entry)
+
+        expect(lowering.errors.len()).to_equal(0)
+        expect(hir.symbols.lookup("answer") != nil).to_equal(true)
+
+    it "follows a glob re-export from a punctuated absolute importer":
+        val log = make_logger()
+        val root = "/tmp/stage3-integrated-migration/glob_pkg"
+        val provider_path = root + "/provider.spl"
+        val facade_path = root + "/facade.spl"
+        val entry_path = root + "/main.spl"
+        val provider_name = ".tmp.stage3_integrated_migration.glob_pkg.provider"
+        val facade_name = ".tmp.stage3_integrated_migration.glob_pkg.facade"
+        val entry_name = ".tmp.stage3_integrated_migration.glob_pkg.main"
+        val provider_source = "struct ExportedType:\n    value: i64"
+        val facade_source = "export use .provider.\{ExportedType\}"
+        val entry_source = "use .facade.*\nfn accept(value: ExportedType) -> ExportedType:\n    value"
+        val provider = parse_full_frontend(provider_source, provider_path, provider_path, log)
+        val facade = parse_full_frontend(facade_source, facade_path, facade_path, log)
+        val entry = parse_full_frontend(entry_source, entry_path, entry_path, log)
+        var modules: Dict<text, Module> = {}
+        modules[provider_name] = provider
+        modules[facade_name] = facade
+        modules[entry_name] = entry
+        val surfaces = resolve_import_symbols_spec_build_surfaces(modules, [
+            SourceFile(path: provider_path, content: provider_source, module_name: provider_name),
+            SourceFile(path: facade_path, content: facade_source, module_name: facade_name),
+            SourceFile(path: entry_path, content: entry_source, module_name: entry_name)
+        ])
+        var lowering = hirlowering_for_module(entry_name, surfaces)
+        val hir = lowering.lower_module(entry)
+
+        expect(lowering.errors.len()).to_equal(0)
+        expect(hir.symbols.lookup("ExportedType") != nil).to_equal(true)
+
+    it "bounds a cyclic glob re-export reached from a punctuated absolute importer":
+        val log = make_logger()
+        val root = "/tmp/stage3-integrated-migration/cycle_pkg"
+        val provider_path = root + "/provider.spl"
+        val facade_a_path = root + "/facade_a.spl"
+        val facade_b_path = root + "/facade_b.spl"
+        val entry_path = root + "/main.spl"
+        val prefix = ".tmp.stage3_integrated_migration.cycle_pkg."
+        val provider_source = "struct CycleType:\n    value: i64"
+        val facade_a_source = "export use .provider.\{CycleType\}\nexport use .facade_b.*"
+        val facade_b_source = "export use .facade_a.*"
+        val entry_source = "use .facade_a.*\nfn accept(value: CycleType) -> CycleType:\n    value"
+        val provider = parse_full_frontend(provider_source, provider_path, provider_path, log)
+        val facade_a = parse_full_frontend(facade_a_source, facade_a_path, facade_a_path, log)
+        val facade_b = parse_full_frontend(facade_b_source, facade_b_path, facade_b_path, log)
+        val entry = parse_full_frontend(entry_source, entry_path, entry_path, log)
+        var modules: Dict<text, Module> = {}
+        modules[prefix + "provider"] = provider
+        modules[prefix + "facade_a"] = facade_a
+        modules[prefix + "facade_b"] = facade_b
+        modules[prefix + "main"] = entry
+        val surfaces = resolve_import_symbols_spec_build_surfaces(modules, [
+            SourceFile(path: provider_path, content: provider_source, module_name: prefix + "provider"),
+            SourceFile(path: facade_a_path, content: facade_a_source, module_name: prefix + "facade_a"),
+            SourceFile(path: facade_b_path, content: facade_b_source, module_name: prefix + "facade_b"),
+            SourceFile(path: entry_path, content: entry_source, module_name: prefix + "main")
+        ])
+        var lowering = hirlowering_for_module(prefix + "main", surfaces)
+        val hir = lowering.lower_module(entry)
+
+        expect(lowering.errors.len()).to_equal(0)
+        expect(hir.symbols.lookup("CycleType") != nil).to_equal(true)
+
     it "preserves wildcard re-export surfaces and enum payload dependencies":
         val log = make_logger()
         val owner_source = "struct Payload:\n    value: i64\nenum Event:\n    Wrapped(Payload)\nexport Payload, Event"

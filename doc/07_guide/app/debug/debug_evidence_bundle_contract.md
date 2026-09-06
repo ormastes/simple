@@ -2,9 +2,9 @@
 
 ## Status (read this first)
 
-**A reader exists. A writer does not.** This document exists so a future
-writer/producer has an exact, verifiable target instead of a description that
-can drift out from under the code.
+**A reader exists, and as of Wave 2 a writer does too.** This document exists
+so the writer/producer has an exact, verifiable target instead of a description
+that can drift out from under the code.
 
 - **Reader (exists, real, exercised):**
   `src/app/cli_debug/evidence_inspect_v1.spl` —
@@ -15,11 +15,16 @@ can drift out from under the code.
   `execute_debug_evidence_semantic_v1`, which hard-codes
   `deterministic: true, original_defect_fixed: false` at :135 — replay proves
   deterministic reproduction, never that a defect was fixed.
-- **Writer (does not exist):** nothing in this repo emits a `manifest.sdn`.
-  There is no coredump/minidump capture path and no ELF-core parser. A
-  conforming bundle must currently be produced outside this repo (or
-  hand-built, as this contract's own conformance spec does) and handed to the
-  reader.
+- **Writer (exists, real, exercised):**
+  `src/app/cli_debug/evidence_write_v1.spl` —
+  `write_debug_evidence_bundle_v1(root, build_id, artifact_paths)`. CLI:
+  `simple debug write <root> --build-id sha256:<hex> <artifact>...`. It copies
+  already-existing files under `<root>/artifacts/`, emits `manifest.sdn`,
+  `receipts.sdn` and an all-`Unverified` `normalized/state_capsule.sdn`, and
+  fails closed on an inexact build id, a missing/duplicate artifact, an empty
+  list, or a root that already holds a bundle. It performs no coredump/minidump
+  CAPTURE — there is still no ELF-core parser. Round trip pinned by
+  `test/01_unit/app/cli_debug/evidence_write_v1_spec.spl`.
 - **Conformance spec pinning this contract:**
   `test/01_unit/app/cli_debug/debug_evidence_bundle_contract_v1_spec.spl`.
   6 of 7 assertions are green; the 7th (a hand-built minimal valid bundle

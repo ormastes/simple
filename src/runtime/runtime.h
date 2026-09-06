@@ -222,6 +222,11 @@ bool     rt_dir_create(const uint8_t* path_ptr, uint64_t path_len, bool recursiv
 bool     rt_dir_create_cpath(const char* path, bool recursive);
 bool     rt_dir_remove_all(const uint8_t* path_ptr, uint64_t path_len);
 bool     rt_dir_remove_all_cpath(const char* path);
+int64_t  rt_secure_temp_dir(const uint8_t* parent_ptr, uint64_t parent_len,
+                            const uint8_t* prefix_ptr, uint64_t prefix_len);
+/* 1=published, 0=destination exists, -1=operational failure. */
+int64_t  rt_file_publish_noreplace(const uint8_t* staged_ptr, uint64_t staged_len,
+                                   const uint8_t* destination_ptr, uint64_t destination_len);
 /* -> RuntimeValue (I64) array of text, per runtime_sffi.rs:1888. */
 int64_t  rt_dir_list(const uint8_t* path_ptr, uint64_t path_len);
 /* (path_ptr, path_len, recursive) -> bool; recursive=false is a plain rmdir. */
@@ -381,6 +386,13 @@ int8_t rt_transient_array_scope_begin(void);
 int8_t rt_transient_array_scope_pause(void);
 int8_t rt_transient_array_scope_end(void);
 int8_t rt_transient_heap_promote(int64_t value);
+/* Raw-allocation owner bridge. runtime_native.c owns the one transient graph
+ * registry; an alternate rt_alloc provider must register through this API. */
+int8_t rt_transient_raw_owner_register(void* ptr, uint64_t bytes);
+int8_t rt_transient_raw_owner_register_state(void* ptr, uint64_t bytes, int8_t owned);
+int8_t rt_transient_raw_owner_query(void* ptr, uint64_t* bytes, int8_t* owned);
+void rt_transient_raw_owner_unregister(void* ptr);
+int8_t rt_transient_raw_owner_thread_allows(void);
 int64_t  rt_time_now_unix(void);
 int64_t  rt_entropy_hardware_ready(void);
 void     rt_sleep_nanos(int64_t ns);
@@ -670,8 +682,8 @@ int64_t  rt_enum_id(int64_t value);
 int64_t  rt_enum_discriminant(int64_t value);
 int64_t  rt_enum_payload(int64_t value);
 /* Formation probe for heap-typed enum/Option payloads at fail-closed
- * handoffs: 1 only for a heap-tagged pointer outside the zero page. This is a
- * FORMATION check, not liveness -- see runtime_native.c. */
+ * handoffs: 1 for a tagged or raw/untagged class reference outside the zero
+ * page. This is a FORMATION check, not liveness -- see runtime_native.c. */
 int8_t   rt_heap_ref_wellformed(int64_t value);
 int64_t  rt_closure_new(int64_t func_ptr, int64_t capture_count);
 int64_t  rt_closure_set_capture(int64_t closure, int64_t index, int64_t value);
@@ -1132,6 +1144,9 @@ void        rt_set_args_wide(int argc, const wchar_t** argv);
 #endif
 int32_t     rt_get_argc(void);
 SplArray*   rt_get_args(void);
+bool        rt_math_is_nan(double value);
+bool        rt_math_is_inf(double value);
+bool        rt_math_is_finite(double value);
 
 /* ===== File Prefetch (CLI keyword support) ===== */
 
