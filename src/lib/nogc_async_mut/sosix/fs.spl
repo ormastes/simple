@@ -1,0 +1,276 @@
+"""Hosted SOSIX positioned file I/O over the canonical SimpleRing.
+
+One owner binds the three frozen contracts together without adding a second
+lifecycle: `file_operation_v1` validates the descriptor, `SimpleRing` admits and
+retires the submission, `operation_v1` is the single state machine, and
+`completion_v1` publishes the typed result. The ring slot index IS the
+operation slot index, so a `RingToken` and a `SosixOperationId` name the same
+storage.
+
+Budgets (design §7): a rejected submission touches no ring slot and allocates
+nothing; a committed one is exactly one reserve + one commit; a completion wakes
+the one token it names; `release` is refused until the ring has retired the
+lease (`take_completion`), so a timeout can never expose a live buffer.
+"""
+
+use std.common.contracts.execution.simple_ring_async_v1.{RingToken, RingGeneration, TaskPollResult}
+use std.common.contracts.sosix.operation_v1.{
+    SOSIX_OPERATION_FREE, SOSIX_OPERATION_PENDING, SOSIX_OPERATION_CANCELED, SosixOperationId, SosixOperationSlot,
+    SosixOperationTransition, sosix_operation_slot_new, sosix_operation_begin,
+    sosix_operation_complete, sosix_operation_cancel, sosix_operation_expire_deadline,
+    sosix_operation_release, sosix_operation_is_terminal
+}
+use std.common.contracts.sosix.capability_ref_v1.{SosixCapabilityRef, SosixBufferRef}
+use std.common.contracts.sosix.completion_v1.{SosixCompletion, SosixCompletionQueue, sosix_completion_from_slot}
+use std.common.contracts.sosix.file_operation_v1.{
+    SOSIX_FS_READ_AT, SOSIX_FS_WRITE_AT, SosixFileOperation, sosix_file_operation_create
+}
+use std.common.contracts.sosix.error_v1.{
+    SOSIX_ERROR_UNSUPPORTED, SOSIX_ERROR_INVALID_CAPABILITY, SOSIX_ERROR_INVALID_BUFFER,
+    SOSIX_ERROR_QUEUE_FULL, SOSIX_ERROR_NATIVE, SOSIX_NATIVE_DOMAIN_POSIX,
+    SosixError, sosix_error_new, sosix_error_from_status
+}
+use std.nogc_async_mut.async_ring.simple_ring.{SimpleRing, SimpleRingError, RingTelemetry}
+use std.nogc_async_mut.async.future.{Future}
+use std.nogc_async_mut.async_ring.future_compat_adapter.{poll_future_compat}
+
+pub struct SosixFsSubmit:
+    accepted: bool
+    error: SosixError
+    operation: SosixOperationId
+    token: RingToken?
+
+fn _no_error() -> SosixError:
+    SosixError(kind: 0, native_domain: 0, native_code: 0, transferred: 0)
+
+fn _rejected(kind: u8) -> SosixFsSubmit:
+    SosixFsSubmit(accepted: false, error: sosix_error_new(kind), operation: SosixOperationId(slot: 0, generation: 0), token: nil)
+
+fn _placeholder_token() -> RingToken:
+    RingToken(ring_id: 0u64, slot: 0u64, generation: RingGeneration(value: 0u64))
+
+class SosixFsTaken:
+    """A submission handed to a provider: the ring token plus the typed request."""
+    taken: bool
+    canceled: bool
+    token: RingToken
+    request: SosixFileOperation
+
+fn _not_taken(canceled: bool) -> SosixFsTaken:
+    SosixFsTaken(taken: false, canceled: canceled,
+        token: RingToken(ring_id: 0u64, slot: 0u64, generation: RingGeneration(value: 0u64)),
+        request: SosixFileOperation(operation: SosixOperationId(slot: 0u32, generation: 0u32), api_id: 0u32,
+            file: SosixCapabilityRef(slot: 0, generation: 0), buffer: SosixBufferRef(slot: 0, generation: 0),
+            file_offset: 0u64, buffer_offset: 0u64, length: 0u64, deadline_ns: 0u64))
+
+class SosixHostedFs:
+    owner_id: u64
+    ring: SimpleRing<SosixFileOperation, SosixCompletion>
+    slots: [SosixOperationSlot]
+    tokens: [RingToken]
+    retired: [bool]
+    api_ids: [u32]
+    requested: [u64]
+    completions: SosixCompletionQueue
+    stale_completions: u64
+    late_completions: u64
+    next_task_key: u64
+
+impl SosixHostedFs:
+    static fn create(ring_id: u64, owner_id: u64, capacity: i64) -> Result<SosixHostedFs, SosixError>:
+        val ring_result = SimpleRing<SosixFileOperation, SosixCompletion>.create(ring_id, owner_id, capacity)
+        match ring_result:
+            case Err(_): Err(sosix_error_new(SOSIX_ERROR_UNSUPPORTED))
+            case Ok(ring):
+                var slots: [SosixOperationSlot] = []
+                var tokens: [RingToken] = []
+                var retired: [bool] = []
+                var api_ids: [u32] = []
+                var requested: [u64] = []
+                var i: i64 = 0
+                # cpu-lane-loop-ok: one-time bounded storage allocation
+                while i < capacity:
+                    slots = slots.push(sosix_operation_slot_new())
+                    tokens = tokens.push(_placeholder_token())
+                    retired = retired.push(true)
+                    api_ids = api_ids.push(0u32)
+                    requested = requested.push(0u64)
+                    i = i + 1
+                Ok(SosixHostedFs(
+                    owner_id: owner_id, ring: ring, slots: slots,
+                    tokens: tokens, retired: retired, api_ids: api_ids, requested: requested,
+                    completions: SosixCompletionQueue.create(capacity),
+                    stale_completions: 0u64, late_completions: 0u64, next_task_key: 1u64))
+
+    me read_at(file: SosixCapabilityRef, buffer: SosixBufferRef, file_offset: u64, buffer_offset: u64, length: u64, deadline_ns: u64) -> SosixFsSubmit:
+        self._submit(SOSIX_FS_READ_AT, file, buffer, file_offset, buffer_offset, length, deadline_ns)
+
+    me write_at(file: SosixCapabilityRef, buffer: SosixBufferRef, file_offset: u64, buffer_offset: u64, length: u64, deadline_ns: u64) -> SosixFsSubmit:
+        self._submit(SOSIX_FS_WRITE_AT, file, buffer, file_offset, buffer_offset, length, deadline_ns)
+
+    me _submit(api_id: u32, file: SosixCapabilityRef, buffer: SosixBufferRef, file_offset: u64, buffer_offset: u64, length: u64, deadline_ns: u64) -> SosixFsSubmit:
+        # Validate before any ring traffic: a rejection is a value, not a slot.
+        val probe = sosix_file_operation_create(SosixOperationId(slot: 0, generation: 0), api_id, file, buffer, file_offset, buffer_offset, length, deadline_ns)
+        if not probe.accepted:
+            if probe.reason == "invalid-file-capability":
+                return _rejected(SOSIX_ERROR_INVALID_CAPABILITY)
+            if probe.reason == "unsupported-api":
+                return _rejected(SOSIX_ERROR_UNSUPPORTED)
+            return _rejected(SOSIX_ERROR_INVALID_BUFFER)
+        val task_key = self.next_task_key
+        self.next_task_key = self.next_task_key + 1u64
+        val reserved = self.ring.reserve(self.owner_id, task_key)
+        match reserved:
+            case Err(_): _rejected(SOSIX_ERROR_QUEUE_FULL)
+            case Ok(reservation):
+                val slot = reservation.token.slot.to_i64()
+                val begun = sosix_operation_begin(slot.to_u32(), self.slots[slot], deadline_ns)
+                if not begun.accepted:
+                    self.ring.release(self.owner_id, reservation)
+                    return _rejected(SOSIX_ERROR_QUEUE_FULL)
+                val request = sosix_file_operation_create(begun.operation, api_id, file, buffer, file_offset, buffer_offset, length, deadline_ns)
+                val committed = self.ring.commit(self.owner_id, reservation, request.request)
+                match committed:
+                    case Err(_):
+                        self.ring.release(self.owner_id, reservation)
+                        _rejected(SOSIX_ERROR_QUEUE_FULL)
+                    case Ok(token):
+                        self.slots[slot] = begun.slot
+                        self.tokens[slot] = token
+                        self.retired[slot] = false
+                        self.api_ids[slot] = api_id
+                        self.requested[slot] = length
+                        SosixFsSubmit(accepted: true, error: _no_error(), operation: begun.operation, token: token)
+
+    me take_next() -> SosixFsTaken:
+        """Provider side: take the oldest committed submission off the ring.
+
+        The ring is driven directly: a `SimpleRing` passed as an argument is a
+        copy under the interpreter, so a provider wrapper's take/complete pair
+        would act on two different rings (measured 2026-09-05). A submission
+        whose cancel was requested is answered here with the cancelled terminal
+        (the ring refuses any other) and reported as not taken."""
+        match self.ring.provider_take(1):
+            case Err(_): _not_taken(false)
+            case Ok(maybe):
+                if val submission = maybe:
+                    if submission.cancel_requested:
+                        return match self.ring.complete_cancelled(submission.token, "sosix-cancel"):
+                            case Ok(_): _not_taken(true)
+                            case Err(_): _not_taken(false)
+                    SosixFsTaken(taken: true, canceled: false, token: submission.token, request: submission.operation)
+                else:
+                    _not_taken(false)
+
+    me complete_taken(taken: SosixFsTaken, status: i32, transferred: u64) -> bool:
+        """Provider side: publish the native result for a taken submission."""
+        val request = taken.request
+        val completion = SosixCompletion(
+            operation: request.operation, api_id: request.api_id, status: status,
+            transferred: transferred, partial_progress: transferred < request.length,
+            terminal_state: 0)
+        match self.ring.complete_success(taken.token, completion):
+            case Ok(_): true
+            case Err(_): false
+
+    me service_one(status: i32, transferred: u64) -> bool:
+        """Software-provider execution of the oldest submission with a scripted native result."""
+        val taken = self.take_next()
+        if not taken.taken:
+            return taken.canceled
+        self.complete_taken(taken, status, transferred)
+
+    me pump() -> i64:
+        """Drain ring completions into the typed lifecycle; each retires its lease exactly once."""
+        var delivered: i64 = 0
+        var draining = true
+        while draining:
+            match self.ring.take_completion(self.owner_id):
+                case Err(_): draining = false
+                case Ok(maybe):
+                    if val completion = maybe:
+                        val slot = completion.token.slot.to_i64()
+                        if completion.token.generation.value != self.tokens[slot].generation.value:
+                            self.stale_completions = self.stale_completions + 1u64
+                        else:
+                            self.retired[slot] = true
+                            if self.slots[slot].state == SOSIX_OPERATION_CANCELED:
+                                # Canceled locally before the ring answered: lease retired, nothing to publish.
+                                delivered = delivered + 1
+                                continue
+                            var status: i32 = -5
+                            var transferred: u64 = 0u64
+                            if val value = completion.value:
+                                status = value.status
+                                transferred = value.transferred
+                            val identity = SosixOperationId(slot: slot.to_u32(), generation: self.slots[slot].generation)
+                            val transition = sosix_operation_complete(self.slots[slot], identity, status, transferred, self.requested[slot])
+                            if transition.accepted:
+                                self.slots[slot] = transition.slot
+                                val typed = sosix_completion_from_slot(identity, self.api_ids[slot], transition.slot)
+                                if typed.accepted:
+                                    self.completions.publish(typed.completion)
+                                delivered = delivered + 1
+                            else:
+                                self.late_completions = self.late_completions + 1u64
+                    else:
+                        draining = false
+        delivered
+
+    me expire(operation: SosixOperationId, now_ns: u64) -> SosixOperationTransition:
+        val slot = operation.slot.to_i64()
+        val transition = sosix_operation_expire_deadline(self.slots[slot], operation, now_ns)
+        if transition.accepted:
+            self.slots[slot] = transition.slot
+        transition
+
+    me cancel(operation: SosixOperationId) -> SosixOperationTransition:
+        val slot = operation.slot.to_i64()
+        val transition = sosix_operation_cancel(self.slots[slot], operation)
+        if transition.accepted:
+            self.slots[slot] = transition.slot
+            self.ring.cancel(self.owner_id, self.tokens[slot])
+        transition
+
+    me release(operation: SosixOperationId) -> SosixOperationTransition:
+        """Refused until the ring retired the lease: a timed-out slot still owns its buffer."""
+        val slot = operation.slot.to_i64()
+        if not self.retired[slot]:
+            return SosixOperationTransition(accepted: false, reason: "lease-not-retired", slot: self.slots[slot])
+        val transition = sosix_operation_release(self.slots[slot], operation)
+        if transition.accepted:
+            self.slots[slot] = transition.slot
+        transition
+
+    fn result_of(operation: SosixOperationId) -> Result<SosixCompletion, SosixError>?:
+        val slot = operation.slot.to_i64()
+        val state = self.slots[slot]
+        if state.generation != operation.generation or not sosix_operation_is_terminal(state):
+            return nil
+        val typed = sosix_completion_from_slot(operation, self.api_ids[slot], state)
+        if state.status < 0:
+            return Err(sosix_error_from_status(state.status, SOSIX_NATIVE_DOMAIN_POSIX, state.transferred))
+        Ok(typed.completion)
+
+    fn future_of(operation: SosixOperationId) -> Future<Result<SosixCompletion, SosixError>>:
+        if val ready = self.result_of(operation):
+            return Future.from_value(ready)
+        Future.pending<Result<SosixCompletion, SosixError>>()
+
+    fn poll(operation: SosixOperationId) -> TaskPollResult<Result<SosixCompletion, SosixError>>:
+        """Consumer view: Ready(result) or Pending(the exact ring token that will wake it)."""
+        val slot = operation.slot.to_i64()
+        match poll_future_compat(self.future_of(operation), self.tokens[slot]):
+            case Ok(receipt): receipt.poll_result
+            case Err(_): TaskPollResult.Pending(self.tokens[slot])
+
+    fn take_completion() -> SosixCompletion?:
+        self.completions.take()
+
+    fn occupancy() -> u64:
+        self.ring.occupancy()
+
+    fn telemetry() -> RingTelemetry:
+        self.ring.telemetry()
+
+export SosixFsSubmit, SosixFsTaken, SosixHostedFs
