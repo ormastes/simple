@@ -88,6 +88,13 @@ fn abs_if_needed(p: text) -> text:
         return windows_native_path(p)
     abs_path(p)
 
+# Opt-in parent-side receipt for distinguishing a worker that was never
+# spawned from one that is still executing below process_run_timeout_live.
+# Keep the gate independent of broader compiler/profile traces so normal
+# native-build output remains unchanged.
+fn native_build_worker_spawn_trace_enabled() -> bool:
+    (env_get("SIMPLE_NATIVE_BUILD_WORKER_SPAWN_TRACE") ?? "") == "1"
+
 # Resolve the compiler binary used to run the native-build worker. The old
 # `SIMPLE_BINARY -> SIMPLE_BIN -> "bin/simple"` chain handed an empty/relative
 # argv[0] to the worker during bootstrap:
@@ -729,8 +736,13 @@ pub fn run_native_build_worker(args: [text]) -> i64:
     # env into warm-up children would let a partial child author the candidate.
     if warm_receipt.eligible:
         env_set(NATIVE_BUILD_WARM_CANDIDATE_ENV, warm_receipt.candidate_path)
+    val worker_spawn_trace = native_build_worker_spawn_trace_enabled()
+    if worker_spawn_trace:
+        eprint "[native-build-trace] worker_spawn:start timeout_ms={native_build_timeout_ms(args)} args={worker_args.len()}"
     val (stdout, stderr, code_raw) = process_run_timeout_live(simple_bin, worker_args, native_build_timeout_ms(args))
     val code = native_build_normalize_exit_code(code_raw as i64)
+    if worker_spawn_trace:
+        eprint "[native-build-trace] worker_spawn:returned status={code} stdout_len={stdout.len()} stderr_len={stderr.len()}"
     env_set("SIMPLE_NATIVE_BUILD_WORKER", old_worker_marker)
     val output_path = output_path_arg(args)
     val output_ok = output_path != "" and file_exists(output_path)

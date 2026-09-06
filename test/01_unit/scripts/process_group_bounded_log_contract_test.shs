@@ -1,0 +1,245 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+helper=$root/scripts/bootstrap/run-process-group-bounded-log.pl
+work=$(mktemp -d "${TMPDIR:-/tmp}/bounded-log-contract.XXXXXX")
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+fail() { echo "FAIL: $1" >&2; exit 1; }
+hash() { sha256sum -- "$1" | awk '{print $1}'; }
+wait_dead() {
+    dead_pid=$1 dead_limit=200
+    while kill -0 "$dead_pid" 2>/dev/null && [ "$dead_limit" -gt 0 ]; do
+        sleep 0.01; dead_limit=$((dead_limit - 1))
+    done
+    ! kill -0 "$dead_pid" 2>/dev/null || fail "descendant $dead_pid survived"
+}
+run_helper() {
+    perl "$helper" --output-parent="/proc/$$/fd/9" \
+        --log-leaf="$1" --receipt-leaf="$1.bounded.env" \
+        --max-bytes="${2:-4194304}" --timeout-seconds="${3:-5}" \
+        --term-grace-seconds=1 -- "${4}" ${5+"$5"}
+}
+mkdir "$work/output"
+exec 9<"$work/output"
+
+# Combined output and ordinary return status are preserved and hash-bound.
+normal=$work/normal.sh
+cat >"$normal" <<'EOF'
+#!/bin/sh
+echo stdout
+echo stderr >&2
+exit 7
+EOF
+chmod +x "$normal"
+set +e; run_helper normal.log 4194304 5 "$normal"; status=$?; set -e
+[ "$status" -eq 7 ] || fail "normal status $status"
+grep -qx stdout "$work/output/normal.log" || fail "stdout missing"
+grep -qx stderr "$work/output/normal.log" || fail "stderr missing"
+grep -qx 'reason=child-exit' "$work/output/normal.log.bounded.env" || fail "normal reason"
+grep -qx "log_sha256=$(hash "$work/output/normal.log")" \
+    "$work/output/normal.log.bounded.env" || fail "normal hash binding"
+
+# Overflow caps only the combined stream and kills the whole session.
+overflow=$work/overflow.sh
+cat >"$overflow" <<EOF
+#!/bin/sh
+sleep 30 & echo \$! >"$work/overflow.pid"
+exec perl -e 'print "x" x 5000000'
+EOF
+chmod +x "$overflow"
+set +e; run_helper overflow.log 4194304 10 "$overflow" 2>"$work/overflow.err"; status=$?; set -e
+[ "$status" -eq 125 ] || fail "overflow status $status"
+[ "$(wc -c <"$work/output/overflow.log")" -eq 4194304 ] || fail "overflow cap"
+grep -qx 'reason=overflow' "$work/output/overflow.log.bounded.env" || fail "overflow reason"
+wait_dead "$(cat "$work/overflow.pid")"
+
+# EOF alone is not completion: a closed-stdio descendant remains supervised.
+closed=$work/closed.sh
+cat >"$closed" <<EOF
+#!/bin/sh
+(exec >/dev/null 2>&1; sleep 30) & echo \$! >"$work/closed.pid"
+exit 0
+EOF
+chmod +x "$closed"
+set +e; run_helper closed.log 4194304 1 "$closed" 2>"$work/closed.err"; status=$?; set -e
+[ "$status" -eq 124 ] || fail "closed-stdio timeout status $status"
+grep -qx 'reason=timeout' "$work/output/closed.log.bounded.env" || fail "closed timeout reason"
+wait_dead "$(cat "$work/closed.pid")"
+
+# Large command artifacts are not charged to the output-stream cap.
+artifact=$work/artifact.sh
+cat >"$artifact" <<EOF
+#!/bin/sh
+dd if=/dev/zero of="$work/artifact.bin" bs=1048576 count=5 2>/dev/null
+echo artifact-ok
+EOF
+chmod +x "$artifact"
+run_helper artifact.log 1024 10 "$artifact"
+[ "$(wc -c <"$work/artifact.bin")" -eq 5242880 ] || fail "artifact capped"
+grep -qx 'artifact_limit=none' "$work/output/artifact.log.bounded.env" || fail "artifact policy"
+
+# A signal to the supervisor cleans descendants and is preserved at its boundary.
+signaled=$work/signaled.sh
+cat >"$signaled" <<EOF
+#!/bin/sh
+sleep 30 & echo \$! >"$work/signaled.pid"
+wait
+EOF
+chmod +x "$signaled"
+perl "$helper" --output-parent="/proc/$$/fd/9" --log-leaf=signaled.log \
+    --receipt-leaf=signaled.log.bounded.env --max-bytes=4194304 \
+    --timeout-seconds=20 --term-grace-seconds=1 -- "$signaled" & supervisor=$!
+signal_limit=200
+while [ ! -s "$work/signaled.pid" ] && [ "$signal_limit" -gt 0 ]; do
+    sleep 0.01; signal_limit=$((signal_limit - 1))
+done
+[ -s "$work/signaled.pid" ] || fail "signal fixture did not start"
+kill -TERM "$supervisor"
+set +e; wait "$supervisor" 2>/dev/null; status=$?; set -e
+[ "$status" -eq 143 ] || fail "supervisor signal status $status"
+wait_dead "$(cat "$work/signaled.pid")"
+grep -qx 'reason=supervisor-signal' "$work/output/signaled.log.bounded.env" || fail "supervisor signal reason"
+grep -qx "log_sha256=$(hash "$work/output/signaled.log")" \
+    "$work/output/signaled.log.bounded.env" || fail "supervisor signal hash"
+
+# A child signal and an exec failure remain distinct typed outcomes. Use the
+# full CLI for the multi-argument child-signal command.
+set +e
+perl "$helper" --output-parent="/proc/$$/fd/9" --log-leaf=child-signal.log \
+    --receipt-leaf=child-signal.log.bounded.env --max-bytes=1024 \
+    --timeout-seconds=5 --term-grace-seconds=1 -- /bin/sh -c 'kill -TERM $$'
+status=$?
+set -e
+[ "$status" -eq 143 ] || fail "child signal status $status"
+grep -qx 'reason=child-signal' "$work/output/child-signal.log.bounded.env" || fail "child signal reason"
+set +e; run_helper exec-failure.log 1024 5 "$work/does-not-exist" 2>/dev/null; status=$?; set -e
+[ "$status" -eq 127 ] || fail "exec failure status $status"
+grep -qx 'reason=exec-failure' "$work/output/exec-failure.log.bounded.env" || fail "exec failure reason"
+
+# Cancellation at the deterministic prepublication checkpoint publishes a
+# cancellation receipt, cleans temporary files, then preserves TERM.
+mkfifo "$work/publication.ready" "$work/publication.ack"
+exec 6<>"$work/publication.ready"
+exec 5<>"$work/publication.ack"
+BOUNDED_LOG_TEST_PUBLICATION_READY_FD=6 BOUNDED_LOG_TEST_PUBLICATION_ACK_FD=5 \
+perl "$helper" --output-parent="/proc/$$/fd/9" --log-leaf=publish-signal.log \
+    --receipt-leaf=publish-signal.log.bounded.env --max-bytes=1024 \
+    --timeout-seconds=5 --term-grace-seconds=1 -- /bin/echo checkpoint & publish_pid=$!
+dd bs=1 count=1 <&6 >/dev/null 2>&1
+kill -TERM "$publish_pid"
+printf A >&5
+set +e; wait "$publish_pid" 2>/dev/null; status=$?; set -e
+[ "$status" -eq 143 ] || fail "publication signal status $status"
+grep -qx 'reason=supervisor-signal' "$work/output/publish-signal.log.bounded.env" || fail "publication signal reason"
+grep -qx "log_sha256=$(hash "$work/output/publish-signal.log")" \
+    "$work/output/publish-signal.log.bounded.env" || fail "publication signal hash"
+exec 6>&- 5>&-
+
+# TERM ordered after the final pending check cannot contradict the irrevocable
+# normal receipt/exit outcome.
+mkfifo "$work/late.ready" "$work/late.ack"
+exec 4<>"$work/late.ready"
+exec 3<>"$work/late.ack"
+BOUNDED_LOG_TEST_LATE_SIGNAL_READY_FD=4 BOUNDED_LOG_TEST_LATE_SIGNAL_ACK_FD=3 \
+perl "$helper" --output-parent="/proc/$$/fd/9" --log-leaf=late-signal.log \
+    --receipt-leaf=late-signal.log.bounded.env --max-bytes=1024 \
+    --timeout-seconds=5 --term-grace-seconds=1 -- /bin/echo committed & late_pid=$!
+dd bs=1 count=1 <&4 >/dev/null 2>&1
+kill -TERM "$late_pid"
+printf A >&3
+set +e; wait "$late_pid"; status=$?; set -e
+[ "$status" -eq 0 ] || fail "late signal changed committed status $status"
+grep -qx 'reason=child-exit' "$work/output/late-signal.log.bounded.env" || fail "late signal changed receipt"
+grep -qx "log_sha256=$(hash "$work/output/late-signal.log")" \
+    "$work/output/late-signal.log.bounded.env" || fail "late signal hash"
+exec 4>&- 3>&-
+
+# Parent pathname replacement cannot redirect descriptor-relative publication.
+mkdir "$work/bound-parent"
+exec 7<"$work/bound-parent"
+mv "$work/bound-parent" "$work/bound-parent-held"
+mkdir "$work/bound-parent"
+perl "$helper" --output-parent="/proc/$$/fd/7" --log-leaf=bound.log \
+    --receipt-leaf=bound.log.bounded.env --max-bytes=1024 --timeout-seconds=5 \
+    --term-grace-seconds=1 -- /bin/echo bound
+[ -f "$work/bound-parent-held/bound.log" ] || fail "held parent not used"
+[ ! -e "$work/bound-parent/bound.log" ] || fail "replacement parent used"
+
+# Existing leaves, symlink leaves, unsafe parents/leaves, and temp collisions fail closed.
+printf old >"$work/output/existing.log"
+if run_helper existing.log 1024 5 /bin/true 2>/dev/null; then fail "existing leaf overwritten"; fi
+ln -s normal.log "$work/output/symlink.log"
+if run_helper symlink.log 1024 5 /bin/true 2>/dev/null; then fail "symlink leaf overwritten"; fi
+if perl "$helper" --output-parent="$work/output" --log-leaf=bad.log \
+    --receipt-leaf=bad.env --max-bytes=1 --timeout-seconds=1 \
+    --term-grace-seconds=1 -- /bin/true 2>/dev/null; then fail "pathname parent accepted"; fi
+if perl "$helper" --output-parent="/proc/$$/fd/9" --log-leaf=../bad \
+    --receipt-leaf=bad.env --max-bytes=1 --timeout-seconds=1 \
+    --term-grace-seconds=1 -- /bin/true 2>/dev/null; then fail "unsafe leaf accepted"; fi
+mkfifo "$work/temp.ready" "$work/temp.ack"
+exec 6<>"$work/temp.ready"
+exec 5<>"$work/temp.ack"
+BOUNDED_LOG_TEST_TEMP_READY_FD=6 BOUNDED_LOG_TEST_TEMP_ACK_FD=5 \
+perl "$helper" --output-parent="/proc/$$/fd/9" --log-leaf=temp.log \
+    --receipt-leaf=temp.log.bounded.env --max-bytes=1024 --timeout-seconds=5 \
+    --term-grace-seconds=1 -- /bin/true 2>/dev/null & temp_pid=$!
+dd bs=1 count=1 <&6 >/dev/null 2>&1
+printf collision >"$work/output/.temp.log.tmp.$temp_pid"
+printf A >&5
+set +e; wait "$temp_pid"; status=$?; set -e
+[ "$status" -eq 126 ] || fail "temp collision status $status"
+[ "$(cat "$work/output/.temp.log.tmp.$temp_pid")" = collision ] || fail "temp collision overwritten"
+rm "$work/output/.temp.log.tmp.$temp_pid"
+exec 6>&- 5>&-
+
+# A pre-existing receipt fails closed after durable log publication: the log
+# remains diagnostic-only and the colliding receipt is never replaced.
+printf authoritative >"$work/output/receipt-collision.log.bounded.env"
+set +e; run_helper receipt-collision.log 1024 5 /bin/echo 2>"$work/receipt-collision.err"; status=$?; set -e
+[ "$status" -eq 126 ] || fail "receipt collision status $status"
+[ -f "$work/output/receipt-collision.log" ] || fail "partial log policy lost log"
+[ "$(cat "$work/output/receipt-collision.log.bounded.env")" = authoritative ] || fail "receipt collision overwritten"
+grep -q 'log retained without authoritative receipt' "$work/receipt-collision.err" || fail "partial log policy untyped"
+
+# Argument grammar fails with the supervisor/setup code before any output.
+for malformed in unknown duplicate missing; do
+    set +e
+    case "$malformed" in
+      unknown) perl "$helper" --unknown=x -- /bin/true 2>/dev/null ;;
+      duplicate) perl "$helper" --output-parent="/proc/$$/fd/9" \
+        --output-parent="/proc/$$/fd/9" --log-leaf=x --receipt-leaf=y \
+        --max-bytes=1 --timeout-seconds=1 --term-grace-seconds=1 -- /bin/true 2>/dev/null ;;
+      missing) perl "$helper" --output-parent="/proc/$$/fd/9" \
+        --log-leaf=x --receipt-leaf=y --max-bytes=1 --timeout-seconds=1 -- /bin/true 2>/dev/null ;;
+    esac
+    status=$?; set -e
+    [ "$status" -eq 126 ] || fail "$malformed option status $status"
+done
+
+# Invocation through a held helper descriptor ignores later pathname mutation.
+cp "$helper" "$work/helper.snapshot"
+chmod +x "$work/helper.snapshot"
+exec 8<"$work/helper.snapshot"
+printf '#!/bin/sh\nexit 99\n' >"$work/helper.replacement"
+chmod +x "$work/helper.replacement"
+mv "$work/helper.replacement" "$work/helper.snapshot"
+perl "/proc/$$/fd/8" --output-parent="/proc/$$/fd/9" --log-leaf=held.log \
+    --receipt-leaf=held.log.bounded.env --max-bytes=1024 --timeout-seconds=5 \
+    --term-grace-seconds=1 -- /bin/echo held
+grep -qx held "$work/output/held.log" || fail "held helper descriptor changed"
+
+# Rapid exits exercise the setsid readiness handshake; no setup race may leak a group.
+handshake_index=0
+while [ "$handshake_index" -lt 20 ]; do
+    run_helper "handshake-$handshake_index.log" 1024 2 /bin/true
+    handshake_index=$((handshake_index + 1))
+done
+
+if find "$work/output" -maxdepth 1 -name '.*.tmp.*' -print | grep -q .; then
+    echo 'temporary leak inventory (basename bytes):' >&2
+    find "$work/output" -maxdepth 1 -name '.*.tmp.*' \
+        -printf '%f %s\n' | LC_ALL=C sort >&2
+    fail "temporary file leaked"
+fi
+echo 'PASS: descriptor-safe bounded process-group log collector'
