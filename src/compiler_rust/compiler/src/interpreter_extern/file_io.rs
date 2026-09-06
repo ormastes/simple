@@ -2532,7 +2532,11 @@ pub fn rt_fd_pread(args: &[Value]) -> Result<Value, CompileError> {
     }
     #[cfg(not(unix))]
     {
-        Ok(Value::Int(-i64::from(libc::ENOSYS)))
+        // ENOSYS. Spelled literally rather than as `libc::ENOSYS` so this
+        // non-unix branch does not depend on the libc crate exposing that
+        // constant for Windows targets, which cannot be verified on the
+        // aarch64 Linux host this landed from.
+        Ok(Value::Int(-38))
     }
 }
 
@@ -2552,7 +2556,11 @@ pub fn rt_fd_pwrite(args: &[Value]) -> Result<Value, CompileError> {
     }
     #[cfg(not(unix))]
     {
-        Ok(Value::Int(-i64::from(libc::ENOSYS)))
+        // ENOSYS. Spelled literally rather than as `libc::ENOSYS` so this
+        // non-unix branch does not depend on the libc crate exposing that
+        // constant for Windows targets, which cannot be verified on the
+        // aarch64 Linux host this landed from.
+        Ok(Value::Int(-38))
     }
 }
 

@@ -254,7 +254,11 @@ pub unsafe extern "C" fn rt_fd_pread(fd: i32, buffer: *mut u8, len: i64, offset:
     #[cfg(not(unix))]
     {
         let _ = (fd, buffer, len, offset);
-        -(libc::ENOSYS as i64)
+        // ENOSYS. Spelled literally rather than as `libc::ENOSYS` so this
+        // non-unix branch does not depend on the libc crate exposing that
+        // constant for Windows targets, which cannot be verified on the
+        // aarch64 Linux host this landed from.
+        -38
     }
 }
 
@@ -277,6 +281,10 @@ pub unsafe extern "C" fn rt_fd_pwrite(fd: i32, buffer: *const u8, len: i64, offs
     #[cfg(not(unix))]
     {
         let _ = (fd, buffer, len, offset);
-        -(libc::ENOSYS as i64)
+        // ENOSYS. Spelled literally rather than as `libc::ENOSYS` so this
+        // non-unix branch does not depend on the libc crate exposing that
+        // constant for Windows targets, which cannot be verified on the
+        // aarch64 Linux host this landed from.
+        -38
     }
 }
