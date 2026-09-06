@@ -1,3 +1,11 @@
+/* Windows: runtime_process_owned.c is gated `#if !defined(_WIN32) && defined(__unix__)` and has no Windows implementation,
+ * so the behaviour exercised below does not exist on this platform.  The file is
+ * still fed to the compiler by scripts/check/check-c-runtime-compiles-push.shs and
+ * still proves it parses; it compiles to a well-formed no-op rather than being
+ * excluded from the scan.  The POSIX body below is unchanged. */
+#if defined(_WIN32)
+int main(void) { return 0; }
+#else
 #include "../runtime.h"
 
 #include <assert.h>
@@ -157,3 +165,4 @@ int main(void) {
     puts("runtime_process_owned_adapter_selfcheck: PASS");
     return 0;
 }
+#endif /* !_WIN32 */

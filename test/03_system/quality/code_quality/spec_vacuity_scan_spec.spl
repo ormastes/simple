@@ -1,75 +1,127 @@
-# spec_vacuity_scan_spec
-#
-# Unit-level proof for the WP-23 spec-vacuity census scanner
-# (src/compiler/90.tools/verify/spec_vacuity_scan.spl): bare-`assert`
-# detection, zero-assertion `it`-block detection, and the comma-shape
-# parser-crash-class tripwire — driven over small synthetic source strings,
-# no disk I/O, no dependency on the real repo tree's current state.
+"""
+## Purpose and audience
+Executable evidence for the WP-23 spec-vacuity census scanner
+(`src/compiler/90.tools/verify/spec_vacuity_scan.spl`): bare-`assert`
+detection, zero-assertion `it`-block detection, and the comma-shape
+parser-crash-class tripwire. Written for the quality team that owns the
+code-quality census lanes.
 
+## Operator workflow
+Run this file with the pure-Simple binary, e.g.
+`./src/compiler_rust/target/bootstrap/simple run test/03_system/quality/code_quality/spec_vacuity_scan_spec.spl`
+and read the per-scenario verdicts; every scenario feeds a small synthetic
+source string straight into `scan_file_content` — no disk I/O and no
+dependency on the repo tree's current state.
+
+## Compatibility and limitations
+The scanner under test parses synthetic text only, so results are
+deterministic across hosts; the scenarios deliberately do NOT exercise the
+tree-walking entry point, which depends on the live working copy.
+
+## Verification guidance and troubleshooting
+A failure here means the vacuity scanner's classification moved: re-run
+the file and compare the reported hit count against the synthetic input in
+the failing scenario. A hit count one too high usually means a non-bare
+assert form (paren call, helper, macro) has started to be flagged.
+"""
+# Lifecycle: doc/01_research/domain/sspec_documentization_maintenance.md ;
+# doc/03_plan/sspec_modernization_plan.md ;
+# doc/04_architecture/sspec_documentization_maintenance.md ;
+# doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+# @manual_section: spec vacuity census scanner
+
+use std.spec.*
 use std.spec.step
-
-use std.spec
 use compiler.tools.verify.spec_vacuity_scan.{scan_file_content}
 
 describe "spec_vacuity_scan — bare assert detection":
-    # @manual scenario evidence
-
     it "flags a bare `assert <cond>` line":
+        # @req REQ-VACUITY-001
+        # @capture(bit_table): bare-assert hit count for the synthetic source
+        step("Scan a synthetic it block that uses a bare assert statement")
         val src = "describe \"x\":\n    it \"y\":\n        assert 1 == 2\n"
         val r = scan_file_content("f.spl", src)
-        expect(r.bare_asserts.len()).to_equal(1)
+        expect(r.bare_asserts.len()).to_equal(1)  # oracle: exactly the one bare assert line must be classified as vacuous
 
     it "does not flag assert(...) paren-call form":
+        # @req REQ-VACUITY-001
+        # @capture(bit_table): bare-assert hit count for the paren-call form
+        step("Scan a synthetic it block that uses an assert(...) call")
         val src = "it \"y\":\n    assert(1 == 1)\n"
         val r = scan_file_content("f.spl", src)
-        expect(r.bare_asserts.len()).to_equal(0)
+        expect(r.bare_asserts.len()).to_equal(0)  # oracle: a paren call is a real executed assertion, not a vacuity hit
 
-    it "does not flag assert_true(...)":
+    it "does not flag assert_true(...) helper calls":
+        # @req REQ-VACUITY-001
+        # @capture(bit_table): bare-assert hit count for the assert_true helper
+        step("Scan a synthetic it block that uses the assert_true helper")
         val src = "it \"y\":\n    assert_true(true)\n"
         val r = scan_file_content("f.spl", src)
-        expect(r.bare_asserts.len()).to_equal(0)
+        expect(r.bare_asserts.len()).to_equal(0)  # oracle: the assert_true helper is a real assertion the census must accept
 
     it "does not flag assert!(...) macro form":
+        # @req REQ-VACUITY-001
+        # @capture(bit_table): bare-assert hit count for the macro form
+        step("Scan a synthetic it block that uses an assert! macro invocation")
         val src = "it \"y\":\n    assert!(true)\n"
         val r = scan_file_content("f.spl", src)
-        expect(r.bare_asserts.len()).to_equal(0)
+        expect(r.bare_asserts.len()).to_equal(0)  # oracle: the macro form is not a Simple bare-assert statement
 
 describe "spec_vacuity_scan — zero-assertion it blocks":
-
     it "flags an it block with no assertion call at all":
+        # @req REQ-VACUITY-002
+        # @capture(bit_table): scanned and empty it-block counts for the synthetic source
+        step("Scan a synthetic it block whose body only binds a value")
         val src = "describe \"x\":\n    it \"does nothing\":\n        val a = 1\n"
         val r = scan_file_content("f.spl", src)
-        expect(r.it_blocks_scanned).to_equal(1)
-        expect(r.empty_it_blocks.len()).to_equal(1)
+        expect(r.it_blocks_scanned).to_equal(1)  # oracle: the synthetic source contains exactly one it block
+        expect(r.empty_it_blocks.len()).to_equal(1)  # oracle: an it block without any assertion is exactly the vacuity class
 
     it "does not flag an it block using expect(...)":
-        val src = "describe \"x\":\n    it \"checks\":\n        expect(1).to_equal(1)\n"
+        # @req REQ-VACUITY-002
+        # @capture(bit_table): empty it-block count for the expect(...) form
+        step("Scan a synthetic it block that asserts with expect(...)")
+        val src = "describe \"x\":\n    it \"checks\":\n        expect(\"a\").to_equal(\"a\")\n"
         val r = scan_file_content("f.spl", src)
-        expect(r.empty_it_blocks.len()).to_equal(0)
+        expect(r.empty_it_blocks.len()).to_equal(0)  # oracle: expect(...) is a real oracle, so the block is not vacuous
 
     it "does not flag an it block using an expect_* helper (expect_not regression)":
+        # @req REQ-VACUITY-002
+        # @capture(bit_table): empty it-block count for the expect_* helper form
+        step("Scan a synthetic it block that asserts with the expect_not helper")
         val src = "describe \"x\":\n    it \"checks\":\n        expect_not(false)\n"
         val r = scan_file_content("f.spl", src)
-        expect(r.empty_it_blocks.len()).to_equal(0)
+        expect(r.empty_it_blocks.len()).to_equal(0)  # oracle: expect_* helper calls must keep counting as real assertions
 
     it "does not flag an it block using assert_true":
+        # @req REQ-VACUITY-002
+        # @capture(bit_table): empty it-block count for the assert_true form
+        step("Scan a synthetic it block that asserts with assert_true")
         val src = "describe \"x\":\n    it \"checks\":\n        assert_true(true)\n"
         val r = scan_file_content("f.spl", src)
-        expect(r.empty_it_blocks.len()).to_equal(0)
+        expect(r.empty_it_blocks.len()).to_equal(0)  # oracle: assert_true is a standalone assertion the census must accept
 
 describe "spec_vacuity_scan — comma-shape tripwire (3695df74c59 crash class)":
-
     it "flags describe \"...\", fn(): as the shape the parser used to reject":
+        # @req REQ-VACUITY-003
+        # @capture(bit_table): comma-shape hit count for the describe form
+        step("Scan a synthetic source with a comma-terminated describe header")
         val src = "describe \"x\", fn():\n    it \"y\":\n        assert_true(true)\n"
         val r = scan_file_content("f.spl", src)
-        expect(r.comma_shape_hits.len()).to_equal(1)
+        expect(r.comma_shape_hits.len()).to_equal(1)  # oracle: the crash-class describe form must trip the tripwire exactly once
 
     it "flags it \"...\", fn(): the same way":
+        # @req REQ-VACUITY-003
+        # @capture(bit_table): comma-shape hit count for the it form
+        step("Scan a synthetic source with a comma-terminated it header")
         val src = "describe \"x\":\n    it \"y\", fn():\n        assert_true(true)\n"
         val r = scan_file_content("f.spl", src)
-        expect(r.comma_shape_hits.len()).to_equal(1)
+        expect(r.comma_shape_hits.len()).to_equal(1)  # oracle: the crash-class it form must trip the tripwire exactly once
 
     it "does not flag a plain describe \"...\": with no comma":
+        # @req REQ-VACUITY-003
+        # @capture(bit_table): comma-shape hit count for the clean control form
+        step("Scan a synthetic source with comma-free headers as the control")
         val src = "describe \"x\":\n    it \"y\":\n        assert_true(true)\n"
         val r = scan_file_content("f.spl", src)
-        expect(r.comma_shape_hits.len()).to_equal(0)
+        expect(r.comma_shape_hits.len()).to_equal(0)  # oracle: the control form must stay clean or every census run would be red

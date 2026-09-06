@@ -810,3 +810,66 @@ with the locus named rather than attempted from a pattern-lowering lane.
 Row f is a second, separate finding: the INTERPRETER gets `val x: i64? = 4`
 wrong (answers `_`) while the JIT gets it right. That is §13's defect, now
 confirmed to be independent of the value 3.
+
+## Still REPRODUCIBLE 2026-09-06 — re-measured, not fixed
+
+Host: `bin/release/aarch64-unknown-linux-gnu/simple`, 50093192 bytes,
+mtime 2026-09-06 09:59 (aarch64 Linux), `SIMPLE_EXECUTION_MODE=interpret`.
+
+Fixture (`build/wi/r_optpat.spl`):
+
+```simple
+fn main() -> void:
+    val plain: i64 = 5
+    var arm = "none"
+    match plain:
+        case Some(v): arm = "Some({v})"
+        case _: arm = "wildcard"
+    print("match Some(_) on non-Option i64 -> {arm}")
+
+    val r = plain.unwrap_or(9)
+    print("i64.unwrap_or(9) -> {r}")
+```
+
+Observed:
+
+```
+match Some(_) on non-Option i64 -> Some(5)
+i64.unwrap_or(9) -> 5
+```
+
+Both halves of the record still hold on this binary: `case Some(v)` matches a
+plain `i64` and binds the scrutinee itself as the payload, and `.unwrap_or` is
+accepted on a non-Option receiver. Neither produces an error, a warning, or a
+lint.
+
+### Why this was NOT fixed in this pass, stated rather than glossed
+
+Every fix that suggests itself here REMOVES a currently-working code path —
+making `case Some(v)` on a non-Option a hard error, or making `.unwrap_or`
+reject a non-Option receiver. The repo rule for this lane is that a fix must
+not delete a language behaviour to make a symptom go away, and this codebase
+has an unknown number of call sites relying on the permissive shape (the
+record's own §"engines disagree" analysis notes 20,360 unresolved arms in the
+sibling `case_bare_ident` audit). Turning permissiveness into an error is a
+language-semantics decision with a corpus-wide blast radius, not a bounded
+interpreter fix, so it needs an owner and a migration, not a one-line change.
+
+Concretely, what an owner needs to decide first:
+
+1. Is `Some(x)` on a non-Option a **type error** (reject at semantic analysis),
+   a **never-matching arm** (fall through to `case _`), or an **identity
+   match** (today's behaviour)? The three give different answers for the same
+   corpus and only one can be right.
+2. Whichever is chosen, the same answer must be given by the JIT, the Rust
+   seed's interpreter, AND the pure-Simple interpreter — the record's core
+   complaint is that they disagree, and fixing one engine alone widens the gap
+   rather than closing it.
+3. A corpus scan for `case Some(` / `case None` arms over provably non-Option
+   scrutinees is the prerequisite for (1); without it the blast radius is
+   unknown.
+
+Scope note: this run measured the **Rust seed's** interpreter. The package
+attributed the row to
+`src/compiler/10.frontend/core/interpreter/eval_calls.spl`; that is a heuristic
+path mapping, and the pure-Simple interpreter was not separately measured here.
