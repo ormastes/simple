@@ -1097,7 +1097,7 @@ impl CudaDevice {
             }
 
             // Get device name
-            let mut name_buf = [0i8; 256];
+            let mut name_buf = [0 as std::os::raw::c_char; 256];
             let err = cuDeviceGetName(name_buf.as_mut_ptr(), 256, handle);
             if err != 0 {
                 return Err(std::mem::transmute(err));
@@ -1552,7 +1552,7 @@ pub extern "C" fn rt_cuda_device_name(device: i64) -> *const c_char {
     }
 
     unsafe {
-        let mut name_buf = [0i8; 256];
+        let mut name_buf = [0 as std::os::raw::c_char; 256];
         let err = cuDeviceGetName(name_buf.as_mut_ptr(), 256, device as CUdevice);
         if err != 0 {
             return c"Unknown".as_ptr();

@@ -265,7 +265,7 @@ impl Backend for RocmBackend {
             let device = index as HipDevice;
 
             // Get device name
-            let mut name_buf = [0i8; 256];
+            let mut name_buf = [0 as std::os::raw::c_char; 256];
             hip_check(hipDeviceGetName(name_buf.as_mut_ptr(), 256, device))?;
             let name = std::ffi::CStr::from_ptr(name_buf.as_ptr())
                 .to_string_lossy()

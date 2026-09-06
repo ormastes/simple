@@ -295,7 +295,7 @@ impl Backend for CudaBackend {
             cuda_check(cuDeviceGet(&mut device, index as i32))?;
 
             // Get device name
-            let mut name_buf = [0i8; 256];
+            let mut name_buf = [0 as std::os::raw::c_char; 256];
             cuda_check(cuDeviceGetName(name_buf.as_mut_ptr(), 256, device))?;
             let name = std::ffi::CStr::from_ptr(name_buf.as_ptr())
                 .to_string_lossy()
