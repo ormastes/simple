@@ -208,6 +208,21 @@ fn _limit_shell(scope: ExecutionResourceScope) -> text:
             return shell
     ""
 
+# `ulimit -v` maps to RLIMIT_AS, which Darwin's kernel does not implement: EVERY
+# shell on macOS answers `ulimit: virtual memory: cannot modify limit: Invalid
+# argument` (verified 2026-09-05 on /bin/sh and /bin/bash alike), so pairing it
+# with `|| exit 125` killed every bounded child with an infrastructure failure.
+# That is what made `simple test <dir>` report 79/79 "Compilation failed" here.
+# There is no substitute shell -- unlike `ulimit -u`, no shell can enforce this
+# on Darwin -- so the address-space cap is dropped with a LOUD stderr note
+# rather than silently. The `-t`/`-u`/`-n` caps below are unaffected and keep
+# their fail-closed `|| exit 125`.
+# Detected by a single stat rather than `uname -s`: this runs once per bounded
+# child spawn, and shelling out for platform detection inside the spawn path
+# would cost more than the check it guards.
+fn _rlimit_as_enforceable() -> bool:
+    not file_exists("/System/Library/CoreServices/SystemVersion.plist")
+
 fn _run_with_unix_limits(scope: ExecutionResourceScope, cmd: text, args: [text]) -> ObservedProcessResult:
     val shell = _limit_shell(scope)
     if shell == "":
@@ -218,7 +233,10 @@ fn _run_with_unix_limits(scope: ExecutionResourceScope, cmd: text, args: [text])
     var prefix = ""
     val memory_bytes = if scope.budget.max_tree_charge_bytes > 0: scope.budget.max_tree_charge_bytes else: scope.budget.max_direct_child_rss_bytes
     if memory_bytes > 0:
-        prefix = prefix + "ulimit -v {memory_bytes / 1024} || exit 125; "
+        if _rlimit_as_enforceable():
+            prefix = prefix + "ulimit -v {memory_bytes / 1024} || exit 125; "
+        else:
+            eprint("[resource-scope] address-space cap of {memory_bytes} bytes NOT enforced: RLIMIT_AS (`ulimit -v`) is unimplemented on this platform; cpu/pid/fd caps still apply")
     if scope.budget.max_cpu_ms > 0:
         prefix = prefix + "ulimit -t {(scope.budget.max_cpu_ms + 999) / 1000} || exit 125; "
     if scope.budget.max_pids > 0:

@@ -25,3 +25,5 @@ Maintain process knowledge for the `compiler` layer: owned source, architecture 
 When project work changes this layer's public contract, source ownership, tests, architecture, or verification requirements, update this skill with current links and handoff notes.
 
 Template: [layer_skill.md](../../template/layer_skill.md)
+
+- 2026-09-05 gpu_frontend_offload: default-off frontend offload switch (`structural_contracts/frontend_offload_switch.spl`, driver gate in `80.driver/driver_source_pipeline_parsing.spl`) — see `doc/00_llm_process/feature_expert/gpu_frontend_offload/skill.md`.

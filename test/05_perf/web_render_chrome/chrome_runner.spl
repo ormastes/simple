@@ -1,221 +1,149 @@
-# chrome_runner.spl
-#
-# Chrome DevTools Protocol fixture runner.
-# Launches Chrome with --headless --remote-debugging-port, opens each fixture
-# HTML file, collects DevTools trace data (FPS, dropped_frames, gpu_raster_ms,
-# memory_mb, frame_ms_p50, frame_ms_p95), and writes per-fixture JSON artifacts.
-#
-# When Chrome is not installed or the DevTools protocol is unavailable, the
-# runner writes a synthetic artifact flagged source="synthetic" so downstream
-# consumers (trace_normalizer.spl, report_spec.spl) can accept the result as
-# PENDING rather than failing.
-#
-# Output artifacts: test/perf/web_render_chrome/artifacts/chrome_<fixture>.json
-#
-# Usage:
-#   bin/simple run test/perf/web_render_chrome/chrome_runner.spl [base_dir]
+# Real, fail-closed Chrome 4K reference capture.
+use std.io_runtime.{cwd_process, dir_create_all, file_exists, file_hash_sha256_or_empty, file_read, file_read_bytes, file_size, file_write, process_run_bounded, remove_file_if_exists, time_now_unix_micros}
+use std.gc_async_mut.gpu.browser_engine.web_renderable_feature_inventory.{web_renderable_feature_inventory, web_renderable_feature_inventory_apply_to_showcase}
 
-extern fn rt_file_read_text(path: text) -> text
-extern fn rt_file_write_text(path: text, content: text) -> bool
-extern fn rt_file_exists(path: text) -> bool
-extern fn rt_time_now_unix_micros() -> i64
-
-# ---------------------------------------------------------------------------
-# ChromeTraceRecord: collected data for one fixture run
-# ---------------------------------------------------------------------------
+val VIEWPORT_WIDTH = 3840
+val VIEWPORT_HEIGHT = 2160
+val CHROME_TIMEOUT_MS = 30000
+val CHROME_OUTPUT_LIMIT = 65536
+val FIXTURES = ["static_page", "scroll_heavy", "layout_stress", "paint_heavy"]
+val SHOWCASE_TABS = ["overview", "html", "css-layout", "css-paint", "forms-media", "animation", "evidence"]
 
 class ChromeTraceRecord:
-    fixture:        text
-    source:         text   # "measured" | "synthetic"
-    fps:            f64
-    dropped_frames: f64
-    gpu_raster_ms:  f64
-    memory_mb:      f64
-    frame_ms_p50:   f64
-    frame_ms_p95:   f64
-    error_msg:      text
+    fixture: text
+    tab: text
+    source: text
+    status: text
+    first_frame_ms: f64
+    screenshot_path: text
+    screenshot_sha256: text
+    screenshot_bytes: i64
+    error_msg: text
 
-fn make_chrome_record(fixture: text) -> ChromeTraceRecord:
+fn make_chrome_record(fixture: text, tab: text) -> ChromeTraceRecord:
     ChromeTraceRecord(
-        fixture:        fixture,
-        source:         "synthetic",
-        fps:            0.0,
-        dropped_frames: 0.0,
-        gpu_raster_ms:  0.0,
-        memory_mb:      0.0,
-        frame_ms_p50:   0.0,
-        frame_ms_p95:   0.0,
-        error_msg:      "",
+        fixture: fixture, tab: tab, source: "synthetic", status: "PENDING",
+        first_frame_ms: 0.0, screenshot_path: "", screenshot_sha256: "",
+        screenshot_bytes: 0, error_msg: "measurement not attempted",
     )
 
-# ---------------------------------------------------------------------------
-# Chrome availability probe
-# ---------------------------------------------------------------------------
-
 fn chrome_binary() -> text:
-    # Common install paths; runner checks the first that exists
     val candidates = [
-        "/usr/bin/google-chrome",
-        "/usr/bin/google-chrome-stable",
-        "/usr/bin/chromium-browser",
-        "/usr/bin/chromium",
+        "/usr/bin/google-chrome", "/usr/bin/google-chrome-stable",
+        "/usr/bin/chromium-browser", "/usr/bin/chromium",
         "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
     ]
     var i = 0
     while i < candidates.len():
-        if rt_file_exists(candidates[i]):
+        if file_exists(candidates[i]):
             return candidates[i]
         i = i + 1
     ""
 
-fn chrome_available() -> bool:
-    chrome_binary() != ""
-
-# ---------------------------------------------------------------------------
-# DevTools Protocol timing helpers
-# ---------------------------------------------------------------------------
-
-# Percentile helper over a sorted f64 list
-fn percentile_sorted(sorted: [f64], pct: f64) -> f64:
-    val n = sorted.len()
-    if n == 0:
-        return 0.0
-    val idx_f = pct / 100.0 * (n - 1).to_f64()
-    val lo = idx_f.floor().to_i64()
-    val hi = lo + 1
-    if hi >= n:
-        return sorted[lo]
-    val frac = idx_f - lo.to_f64()
-    sorted[lo] * (1.0 - frac) + sorted[hi] * frac
-
-# Parse a flat comma-separated frame_ms list embedded in a trace JSON.
-# Chrome DevTools protocol emits FrameTimingRecords; this helper expects
-# a synthetic structure produced by the probe script below.
-fn parse_frame_ms_list(json: text, key: text) -> [f64]:
-    val search = "\"" + key + "\":"
-    val idx = json.index_of(search)
-    if idx < 0:
-        return []
-    val after = json.substring(idx + search.len(), json.len())
-    val open = after.index_of("[")
-    val close = after.index_of("]")
-    if open < 0 or close < 0 or close <= open:
-        return []
-    val inner = after.substring(open + 1, close)
-    val parts = inner.split(",")
-    var result: [f64] = []
-    var pi = 0
-    while pi < parts.len():
-        val t = parts[pi].trim()
-        if t != "":
-            result.push(t.parse_f64())
-        pi = pi + 1
-    result
-
-# ---------------------------------------------------------------------------
-# Simulate a Chrome run (used when Chrome is installed but DevTools protocol
-# handshake is out of scope for this harness).
-#
-# In a full implementation this would:
-#   1. Spawn: chrome --headless --disable-gpu --remote-debugging-port=9222 <url>
-#   2. Connect to ws://localhost:9222/json/version
-#   3. Send Page.enable, Tracing.start
-#   4. Navigate to fixture URL
-#   5. Wait for loadEventFired, run 60-frame animation, send Tracing.end
-#   6. Collect traceEvents and extract FrameTimingRecords
-#
-# For now: if Chrome is present, we write source="synthetic" with zero timings
-# and a note explaining the DevTools handshake step is pending.
-# ---------------------------------------------------------------------------
-
-fn run_chrome_fixture(base_dir: text, fixture: text) -> ChromeTraceRecord:
-    var rec = make_chrome_record(fixture)
-    val bin = chrome_binary()
-    if bin == "":
-        rec.error_msg = "Chrome not found — synthetic record"
-        return rec
-
-    # Chrome is present — DevTools protocol handshake is the next implementation
-    # step (see doc/05_design/graphics_backend_acceleration.md).
-    # Mark as synthetic until the protocol bridge is wired.
-    rec.error_msg = "Chrome found at " + bin + " — DevTools trace pending"
-    rec.fps = 60.0
-    rec
-
-# ---------------------------------------------------------------------------
-# Serialize a ChromeTraceRecord to JSON
-# ---------------------------------------------------------------------------
+fn absolute_path(path: text) -> text:
+    if path.starts_with("/"):
+        return path
+    cwd_process() + "/" + path
 
 fn chrome_record_to_json(rec: ChromeTraceRecord) -> text:
-    "{\"source\":\"" + rec.source + "\","
-    + "\"fixture\":\"" + rec.fixture + "\","
-    + "\"runner\":\"chrome\","
-    + "\"fps\":" + rec.fps.to_text() + ","
-    + "\"dropped_frames\":" + rec.dropped_frames.to_text() + ","
-    + "\"gpu_raster_ms\":" + rec.gpu_raster_ms.to_text() + ","
-    + "\"memory_mb\":" + rec.memory_mb.to_text() + ","
-    + "\"frame_ms_p50\":" + rec.frame_ms_p50.to_text() + ","
-    + "\"frame_ms_p95\":" + rec.frame_ms_p95.to_text() + ","
-    + "\"note\":\"" + rec.error_msg + "\"}"
+    "{\"source\":\"" + rec.source + "\",\"status\":\"" + rec.status +
+    "\",\"fixture\":\"" + rec.fixture + "\",\"tab\":\"" + rec.tab +
+    "\",\"runner\":\"chrome-headless-4k\",\"viewport_width\":" + VIEWPORT_WIDTH.to_text() +
+    ",\"viewport_height\":" + VIEWPORT_HEIGHT.to_text() +
+    ",\"first_frame_ms\":" + rec.first_frame_ms.to_text() +
+    ",\"frame_ms_p50\":0.0,\"frame_ms_p95\":0.0,\"warm_sample_count\":0" +
+    ",\"screenshot_path\":\"" + rec.screenshot_path +
+    "\",\"screenshot_sha256\":\"" + rec.screenshot_sha256 +
+    "\",\"screenshot_bytes\":" + rec.screenshot_bytes.to_text() +
+    ",\"fps\":0.0,\"dropped_frames\":0.0,\"gpu_raster_ms\":0.0,\"memory_mb\":0.0," +
+    "\"gpu_backend_status\":\"unverified\",\"comparison_admitted\":false," +
+    "\"note\":\"" + rec.error_msg + "\"}"
 
-# ---------------------------------------------------------------------------
-# Run all fixtures and write artifacts
-# ---------------------------------------------------------------------------
+fn png_has_4k_ihdr(path: text) -> bool:
+    val bytes = file_read_bytes(path)
+    if bytes.len() < 24:
+        return false
+    val width = bytes[16].to_i64() * 16777216 + bytes[17].to_i64() * 65536 + bytes[18].to_i64() * 256 + bytes[19].to_i64()
+    val height = bytes[20].to_i64() * 16777216 + bytes[21].to_i64() * 65536 + bytes[22].to_i64() * 256 + bytes[23].to_i64()
+    width == VIEWPORT_WIDTH and height == VIEWPORT_HEIGHT
 
-val FIXTURES = ["static_page", "scroll_heavy", "layout_stress", "paint_heavy"]
+fn capture_chrome(bin: text, fixture: text, tab: text, html_path: text, png_path: text) -> ChromeTraceRecord:
+    var rec = make_chrome_record(fixture, tab)
+    rec.screenshot_path = png_path
+    if bin == "":
+        rec.error_msg = "Chrome executable unavailable"
+        return rec
+    if not file_exists(html_path):
+        rec.error_msg = "HTML input unavailable"
+        return rec
+    val _removed = remove_file_if_exists(png_path)
+    val start_us = time_now_unix_micros()
+    val (_stdout, _stderr, exit_code) = process_run_bounded(bin, [
+        "--headless=new", "--disable-dev-shm-usage", "--no-first-run",
+        "--no-default-browser-check", "--hide-scrollbars",
+        "--window-size=3840,2160", "--force-device-scale-factor=1",
+        "--run-all-compositor-stages-before-draw", "--virtual-time-budget=1000",
+        "--screenshot=" + absolute_path(png_path), "file://" + absolute_path(html_path),
+    ], CHROME_TIMEOUT_MS, CHROME_OUTPUT_LIMIT)
+    val elapsed_ms = (time_now_unix_micros() - start_us).to_f64() / 1000.0
+    if exit_code != 0:
+        rec.error_msg = "Chrome capture failed with exit " + exit_code.to_text()
+        return rec
+    val bytes = file_size(png_path)
+    val digest = file_hash_sha256_or_empty(png_path)
+    if bytes <= 0 or digest.len() != 64 or not png_has_4k_ihdr(png_path):
+        rec.error_msg = "Chrome returned without complete 3840x2160 PNG evidence"
+        return rec
+    rec.source = "measured"
+    rec.status = "MEASURED"
+    rec.first_frame_ms = elapsed_ms
+    rec.screenshot_bytes = bytes
+    rec.screenshot_sha256 = digest
+    rec.error_msg = "real Chrome process and 4K screenshot evidence; GPU backend and warm aggregates unverified"
+    rec
+
+fn write_capture(bin: text, artifact_dir: text, fixture: text, tab: text, html_path: text):
+    val suffix = if tab == "": fixture else: fixture + "_tab_" + tab
+    val png_path = artifact_dir + "/chrome_" + suffix + "_3840x2160.png"
+    val rec = capture_chrome(bin, fixture, tab, html_path, png_path)
+    val _written = file_write(artifact_dir + "/chrome_" + suffix + ".json", chrome_record_to_json(rec))
+    print "[chrome_runner] " + suffix + ": " + rec.status + " " + rec.first_frame_ms.to_text() + "ms"
+
+fn tab_html(source: text, tab: text) -> text:
+    val injection = "<script>(function(){var t=document.getElementById('tab-" + tab + "');if(t)t.click();}());</script>"
+    source.replace("</body>", injection + "</body>")
+
+fn run_showcase_tabs(bin: text, artifact_dir: text):
+    val showcase_path = "examples/06_io/ui/browser_common_elements_showcase.html"
+    if not file_exists(showcase_path):
+        var missing = make_chrome_record("showcase", "all")
+        missing.error_msg = "canonical showcase unavailable"
+        val _written = file_write(artifact_dir + "/chrome_showcase.json", chrome_record_to_json(missing))
+        return
+    val inventory = web_renderable_feature_inventory()
+    # Keep Chrome and Simple source-equivalent: both fill the same named panel
+    # slots from the same typed inventory before selecting a tab.
+    val source = web_renderable_feature_inventory_apply_to_showcase(
+        file_read(showcase_path), inventory)
+    var i = 0
+    while i < SHOWCASE_TABS.len():
+        val tab = SHOWCASE_TABS[i]
+        val tab_path = artifact_dir + "/chrome_showcase_input_" + tab + ".html"
+        val _written = file_write(tab_path, tab_html(source, tab))
+        write_capture(bin, artifact_dir, "showcase", tab, tab_path)
+        i = i + 1
 
 fn run_all(base_dir: text):
     val artifact_dir = base_dir + "/artifacts"
+    val _created = dir_create_all(artifact_dir)
+    val bin = chrome_binary()
     var i = 0
     while i < FIXTURES.len():
-        val fx = FIXTURES[i]
-        val out_path = artifact_dir + "/chrome_" + fx + ".json"
-
-        # Skip if a pre-recorded artifact already exists (allow manual override)
-        if rt_file_exists(out_path):
-            val existing = rt_file_read_text(out_path)
-            val src = json_text_field_local(existing, "source")
-            if src == "measured":
-                print "[chrome_runner] " + fx + ": using existing measured artifact"
-                i = i + 1
-                continue
-
-        val rec = run_chrome_fixture(base_dir, fx)
-        val json = chrome_record_to_json(rec)
-        val ok = rt_file_write_text(out_path, json)
-        if ok:
-            print "[chrome_runner] " + fx + ": wrote " + out_path
-        else:
-            print "[chrome_runner] " + fx + ": ERROR writing " + out_path
+        val fixture = FIXTURES[i]
+        write_capture(bin, artifact_dir, fixture, "", base_dir + "/fixtures/" + fixture + ".html")
         i = i + 1
-
-# Local copy of the JSON text extractor (avoids cross-file import requirement)
-fn json_text_field_local(json: text, key: text) -> text:
-    val search = "\"" + key + "\":"
-    val idx = json.index_of(search)
-    if idx < 0:
-        return ""
-    val after = json.substring(idx + search.len(), json.len())
-    var ci = 0
-    while ci < after.len():
-        val c = after.char_at(ci)
-        if c != " " and c != "\t" and c != "\n" and c != "\r":
-            break
-        ci = ci + 1
-    if ci >= after.len():
-        return ""
-    if after.char_at(ci) != "\"":
-        return ""
-    ci = ci + 1
-    var result = ""
-    while ci < after.len():
-        val c = after.char_at(ci)
-        if c == "\"":
-            break
-        result = result + c
-        ci = ci + 1
-    result
+    run_showcase_tabs(bin, artifact_dir)
 
 fn main() -> i64:
-    run_all("test/perf/web_render_chrome")
+    run_all("test/05_perf/web_render_chrome")
     0

@@ -71,33 +71,52 @@ for backend in $BACKENDS; do
         run_bin=$VULKAN_BIN
     fi
     if ! SIMPLE_SHOWCASE_BACKEND=$backend SIMPLE_SHOWCASE_W=320 \
-        SIMPLE_SHOWCASE_H=240 SIMPLE_SHOWCASE_FRAMES=1 \
-        SIMPLE_SHOWCASE_SCRIPT='click 10,10;wheel 10,80,1' \
+        SIMPLE_SHOWCASE_H=240 SIMPLE_SHOWCASE_FRAMES=2 \
+        SIMPLE_SHOWCASE_SCRIPT='click 80,10;resize 400,300' \
         SIMPLE_SHOWCASE_CAPTURE=$capture "$run_bin" >"$log" 2>&1; then
         fail "$backend showcase execution failed (see $log)"
     fi
     grep -Fq "showcase status=pass" "$log" || fail "$backend did not report PASS"
     grep -Fq "renderer=$backend" "$log" || fail "$backend receipt identity mismatch"
+    grep -Eq 'font_target=[^ ]+' "$log" || fail "$backend vector-font target missing"
+    grep -Eq 'font_identity=[^ ]+' "$log" || fail "$backend vector-font identity missing"
     if [ "$backend" != vulkan ]; then
         grep -Fq "fallback=false" "$log" || fail "$backend reported fallback"
     fi
     [ -s "$capture" ] || fail "$backend capture is missing or empty"
     first_line=$(sed -n '1p' "$capture")
     [ "$first_line" = P6 ] || fail "$backend capture is not binary PPM"
+    dimensions=$(sed -n '2p' "$capture")
+    [ "$dimensions" = "400 300" ] || fail "$backend capture did not use resized viewport"
     if [ "$backend" = cpu_simd ]; then
         grep -Eq 'native_simd_hits=[1-9][0-9]*' "$log" ||
             fail "cpu_simd did not prove native SIMD execution"
+    fi
+    if [ "$backend" = software ] || [ "$backend" = cpu ]; then
+        grep -Fq 'font_target=cpu' "$log" || fail "$backend vector font did not execute on CPU"
+    fi
+    if [ "$backend" = cpu_simd ]; then
+        grep -Eq 'font_target=(cpu|cpu_simd)' "$log" || fail "cpu_simd vector font target missing"
     fi
     if [ "$backend" = metal ]; then
         grep -Fq 'source=device_readback' "$log" || fail "Metal device readback missing"
         grep -Eq 'backend_handle=[1-9][0-9]*' "$log" || fail "Metal backend handle missing"
         grep -Eq 'device_identity=[1-9][0-9]*' "$log" || fail "Metal device identity missing"
+        grep -Fq 'font_target=metal' "$log" || fail "Metal vector font did not execute on Metal"
     fi
     if [ "$backend" = vulkan ]; then
         grep -Fq 'source=device_readback' "$log" || fail "Vulkan device readback missing"
         grep -Eq 'backend_handle=[1-9][0-9]*' "$log" || fail "Vulkan backend handle missing"
         grep -Eq 'device_identity=[1-9][0-9]*' "$log" || fail "Vulkan device identity missing"
         grep -Fq 'font_target=vulkan' "$log" || fail "Vulkan text execution receipt missing"
+        grep -Eq 'font_device_checksum=-?[1-9][0-9]*' "$log" || fail "Vulkan font checksum missing"
+        grep -Eq 'font_oracle_checksum=-?[1-9][0-9]*' "$log" || fail "Vulkan font oracle missing"
+        grep -Eq 'font_nonblank=[1-9][0-9]*' "$log" || fail "Vulkan font pixels are blank"
+        grep -Eq 'font_atlas_sha256=[0-9a-f]{64}' "$log" || fail "Vulkan font atlas provenance missing"
+        grep -Fq 'font_parity=true' "$log" || fail "Vulkan font parity missing"
+        grep -Fq 'frame_mode=fresh-device' "$log" || fail "Vulkan changed frame was not fresh"
+        grep -Fq 'fresh_frames=2 retained_idle_frames=0' "$log" || fail "Vulkan changed-frame counts mismatch"
+        grep -Fq 'idle_readback_bytes=0' "$log" || fail "Vulkan receipt lacks idle readback bound"
     fi
     bytes=$(wc -c <"$capture" | tr -d ' ')
     echo "ui_showcase_exact_backend_${backend}_status=pass" >>"$EVIDENCE"
@@ -106,6 +125,53 @@ for backend in $BACKENDS; do
     IFS=,
 done
 IFS=$old_ifs
+
+# The primary row proves vector-font provenance and resize. These Vulkan-only
+# rows prove that the other showcase features cross the native C/SFFI boundary
+# into the strict Vulkan executor and return real device pixels as well.
+run_vulkan_showcase_case() {
+    case_name=$1
+    case_script=$2
+    case_capture=$BUILD_DIR/vulkan-$case_name.ppm
+    case_log=$BUILD_DIR/vulkan-$case_name.log
+    if ! SIMPLE_SHOWCASE_W=320 SIMPLE_SHOWCASE_H=240 SIMPLE_SHOWCASE_FRAMES=2 \
+        SIMPLE_SHOWCASE_SCRIPT=$case_script SIMPLE_SHOWCASE_CAPTURE=$case_capture \
+        "$VULKAN_BIN" >"$case_log" 2>&1; then
+        fail "Vulkan $case_name showcase execution failed (see $case_log)"
+    fi
+    grep -Fq 'showcase status=pass' "$case_log" || fail "Vulkan $case_name did not report PASS"
+    grep -Fq 'renderer=vulkan source=device_readback' "$case_log" || fail "Vulkan $case_name lacks device readback"
+    [ -s "$case_capture" ] || fail "Vulkan $case_name capture is missing"
+    echo "ui_showcase_vulkan_${case_name}_status=pass" >>"$EVIDENCE"
+}
+
+case ",$BACKENDS," in
+    *,vulkan,*)
+        run_vulkan_showcase_case shapes 'click 140,10'
+        grep -Eq 'path_commands=[3-9][0-9]*' "$BUILD_DIR/vulkan-shapes.log" || fail "Vulkan Shapes paths missing"
+        grep -Eq 'edge_commands=[1-9][0-9]*' "$BUILD_DIR/vulkan-shapes.log" || fail "Vulkan Shapes EDGE missing"
+
+        run_vulkan_showcase_case events 'click 205,10;wheel 40,45,3;down 155,45;move 155,60;up 155,60;type z'
+        grep -Eq 'clicks=[1-9][0-9]*' "$BUILD_DIR/vulkan-events.log" || fail "Vulkan click event missing"
+        grep -Eq 'drags=[1-9][0-9]*' "$BUILD_DIR/vulkan-events.log" || fail "Vulkan drag event missing"
+        grep -Fq 'typed="z"' "$BUILD_DIR/vulkan-events.log" || fail "Vulkan key event missing"
+        grep -Eq 'left=[1-9][0-9]* right=[1-9][0-9]*' "$BUILD_DIR/vulkan-events.log" || fail "Vulkan linked scroll missing"
+
+        run_vulkan_showcase_case dialogs 'click 10,10'
+        grep -Eq 'dialog_titles=[2-9][0-9]*' "$BUILD_DIR/vulkan-dialogs.log" || fail "Vulkan dialog titles missing"
+
+        case_capture=$BUILD_DIR/vulkan-retained-idle.ppm
+        case_log=$BUILD_DIR/vulkan-retained-idle.log
+        SIMPLE_SHOWCASE_W=320 SIMPLE_SHOWCASE_H=240 SIMPLE_SHOWCASE_FRAMES=20 \
+            SIMPLE_SHOWCASE_SCRIPT='' SIMPLE_SHOWCASE_CAPTURE=$case_capture \
+            "$VULKAN_BIN" >"$case_log" 2>&1 || fail "Vulkan retained-idle showcase failed"
+        grep -Fq 'showcase status=pass' "$case_log" || fail "Vulkan retained-idle did not report PASS"
+        grep -Fq 'frame_mode=retained-idle' "$case_log" || fail "Vulkan retained-idle mode missing"
+        grep -Fq 'fresh_frames=1 retained_idle_frames=19' "$case_log" || fail "Vulkan retained-idle counts mismatch"
+        grep -Fq 'idle_readback_bytes=0' "$case_log" || fail "Vulkan retained-idle performed readback"
+        echo "ui_showcase_vulkan_retained_idle_status=pass" >>"$EVIDENCE"
+        ;;
+esac
 
 echo "ui_showcase_exact_backend_matrix_status=pass" >>"$EVIDENCE"
 echo "ui-showcase-exact-backend-matrix: PASS — $BACKENDS"

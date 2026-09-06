@@ -1,3 +1,41 @@
+"""
+## Purpose and audience
+
+Pins the bounded preflight contract of the FreeBSD QEMU bootstrap check
+(`scripts/check/check-freebsd-bootstrap-qemu.shs --preflight`): canonical
+inputs with spaces are accepted, every rejection carries its exact reason
+before any live prerequisite runs, a present image is only admitted with a
+trusted media digest, and PASS evidence stays scoped to the preflight
+receipt. Audience: bootstrap lane owners verifying the FreeBSD QEMU gate
+without network or QEMU on the host.
+
+## Operator workflow
+
+Run `simple run test/03_system/check/freebsd_bootstrap_qemu_preflight_spec.spl`.
+Each scenario drives the real preflight in a throwaway fixture directory
+with stub tools on PATH, so no network, VM or real toolchain is touched.
+
+## Compatibility and limitations
+
+The scenarios exercise the `--preflight` bounded mode only; the live smoke
+and full bootstrap passes need QEMU plus network and are owned by the
+wrapper's own lanes, not this spec. Stub tools answer `false`, so an
+unexpected tool invocation surfaces as a preflight failure, never a silent
+pass.
+
+## Verification guidance and troubleshooting
+
+A failure names the receipt field that moved (`reason`, `status`,
+`checks`, `order`). Rerun the single file; the fixture directory is
+removed by the shell trap on exit. A wrong `reason` after editing the
+wrapper means the rejection order or validation set changed — update the
+`PREFLIGHT_ORDER` contract here in the same change.
+"""
+# Lifecycle: research doc/01_research/os/qemu/qemu_install_notes.md ;
+# plan doc/03_plan/compiler/bootstrap/bootstrap_lane_plan_2026-08-19.md ;
+# architecture doc/04_architecture/os/simpleos/desktop/simpleos_arm_qemu_fs_toolchain_verification.md ;
+# design doc/05_design/sosix_qemu_direct_kernel_evidence_v2.md
+
 use std.io.{file_read}
 use std.io_runtime.{process_run}
 use std.spec.*
@@ -48,10 +86,14 @@ fn step_freebsd_bootstrap_preflight(extra_env: text) -> (text, text, i64):
     process_run("/bin/sh", ["-c", command])
 
 describe "FreeBSD QEMU bootstrap bounded preflight":
-    # @manual scenario evidence
+    # @manual_section: freebsd-bootstrap-qemu-preflight
+
     it "accepts canonical memory and key paths containing spaces without live execution":
+        # @req REQ-FREEBSD-PREFLIGHT-001
+        # @capture(statistics): the passing preflight receipt (checks, order, reason, status)
+        step("Drive the preflight with canonical inputs whose paths contain spaces")
         val (stdout, stderr, code) = step_freebsd_bootstrap_preflight("")
-        expect(code).to_equal(0)
+        expect(code).to_equal(0)  # oracle: canonical inputs must pass the bounded preflight with exit 0
         expect(stderr).to_equal("")
         expect(receipt_value(stdout, "freebsd_qemu_preflight_checks")).to_equal("19")
         expect(receipt_value(stdout, "freebsd_qemu_preflight_order")).to_equal(PREFLIGHT_ORDER)
@@ -61,9 +103,12 @@ describe "FreeBSD QEMU bootstrap bounded preflight":
         expect(stdout.contains("Full bootstrap PASSED")).to_equal(false)
 
     it "rejects an invalid port with its exact reason before live prerequisites":
+        # @req REQ-FREEBSD-PREFLIGHT-002
+        # @capture(statistics): the port-rejection receipt naming reason=port
+        step("Drive the preflight with a non-numeric QEMU_PORT override")
         val (stdout, _stderr, code) = step_freebsd_bootstrap_preflight(
             "QEMU_PORT=not-a-port")
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: a rejected input must exit 1, not fall through to the live check
         expect(receipt_value(stdout, "freebsd_qemu_preflight_checks")).to_equal("19")
         expect(receipt_value(stdout, "freebsd_qemu_preflight_order")).to_equal(PREFLIGHT_ORDER)
         expect(receipt_value(stdout, "freebsd_qemu_preflight_reason")).to_equal("port")
@@ -72,9 +117,12 @@ describe "FreeBSD QEMU bootstrap bounded preflight":
         expect(stdout.contains("Full bootstrap PASSED")).to_equal(false)
 
     it "rejects a leading-hyphen guest user with its exact reason":
+        # @req REQ-FREEBSD-PREFLIGHT-003
+        # @capture(statistics): the user-rejection receipt naming reason=user
+        step("Drive the preflight with a QEMU_USER that starts with a hyphen")
         val (stdout, _stderr, code) = step_freebsd_bootstrap_preflight(
             "QEMU_USER=-root")
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: an option-injection-shaped user must exit 1
         expect(receipt_value(stdout, "freebsd_qemu_preflight_checks")).to_equal("19")
         expect(receipt_value(stdout, "freebsd_qemu_preflight_order")).to_equal(PREFLIGHT_ORDER)
         expect(receipt_value(stdout, "freebsd_qemu_preflight_reason")).to_equal("user")
@@ -83,23 +131,32 @@ describe "FreeBSD QEMU bootstrap bounded preflight":
         expect(stdout.contains("Full bootstrap PASSED")).to_equal(false)
 
     it "refuses a present image without a trusted media digest":
+        # @req REQ-FREEBSD-PREFLIGHT-004
+        # @capture(statistics): the digest-rejection receipt naming reason=admitted_media
+        step("Drive the preflight with the trusted media digest cleared")
         val (stdout, _stderr, code) = step_freebsd_bootstrap_preflight(
             "SIMPLE_FREEBSD_MEDIA_SHA256=")
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: an untrusted image present on disk must be refused
         expect(receipt_value(stdout, "freebsd_qemu_preflight_reason")).to_equal("admitted_media")
         expect(receipt_value(stdout, "freebsd_qemu_preflight_status")).to_equal("fail")
 
     it "refuses a present image whose trusted digest mismatches":
+        # @req REQ-FREEBSD-PREFLIGHT-005
+        # @capture(statistics): the mismatch-rejection receipt naming reason=admitted_media
+        step("Drive the preflight with an all-zero trusted digest that cannot match")
         val zero_digest = "0000000000000000000000000000000000000000000000000000000000000000"
         val (stdout, _stderr, code) = step_freebsd_bootstrap_preflight(
             "SIMPLE_FREEBSD_MEDIA_SHA256=" + zero_digest)
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: a present image whose digest does not match must be refused
         expect(receipt_value(stdout, "freebsd_qemu_preflight_reason")).to_equal("admitted_media")
         expect(receipt_value(stdout, "freebsd_qemu_preflight_status")).to_equal("fail")
 
     it "keeps PASS evidence scoped to the FreeBSD QEMU preflight contract":
-        val source = file_read(SCRIPT)
-        expect(source).to_contain("freebsd_qemu_preflight_status=pass")
-        expect(source).to_contain("freebsd_qemu_preflight_status=fail")
-        expect(source.contains("Smoke test PASSED")).to_equal(false)
-        expect(source.contains("Full bootstrap PASSED")).to_equal(false)
+        # @req REQ-FREEBSD-PREFLIGHT-006
+        # @capture(statistics): the pass/fail receipt markers present in the wrapper source
+        step("Read the wrapper source and assert its PASS vocabulary stays preflight-scoped")
+        val pass_evidence_contract = file_read(SCRIPT)
+        expect(pass_evidence_contract).to_contain("freebsd_qemu_preflight_status=pass")
+        expect(pass_evidence_contract).to_contain("freebsd_qemu_preflight_status=fail")
+        expect(pass_evidence_contract.contains("Smoke test PASSED")).to_equal(false)  # oracle: the preflight receipt must not borrow the smoke pass phrase
+        expect(pass_evidence_contract.contains("Full bootstrap PASSED")).to_equal(false)  # oracle: the preflight receipt must not borrow the full-bootstrap pass phrase

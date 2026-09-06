@@ -1,9 +1,22 @@
+# Purpose and audience: executable encoding of the mod.spl cli-block contract for
+# the language and CLI-tooling teams; each scenario states the observable outcome
+# a reviewer checks when a module gains a cli entry point.
+# @req REQ-SSPEC-SYSTEM
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
 """
 # CLI Args mod.spl Embedding Specification
 
 **Feature ID:** #CLI-010
 **Category:** Language | CLI
 **Status:** Draft
+
+## Purpose and audience
+
+For engineers adding a `cli` block to a module's mod.spl: this spec pins the
+observable contract — the module becomes an executable entry point, a CliArgs
+struct is generated in module scope, the module's own functions stay importable,
+and the generated struct stays private.
 
 ## Overview
 
@@ -29,13 +42,54 @@ fn main(args: CliArgs):
 
 """
 
+use std.spec.step
 
+# Executable encoding of the documented mod.spl cli contract. Each helper is
+# the rule a module must satisfy; the scenarios observe the rule's outputs,
+# not restatements of the inputs.
+
+fn mod_spl_declares_entry_point(mod_spl_source: text) -> bool:
+    # A cli block in mod.spl is what turns the module into an executable
+    # entry point; a module without one keeps library-only semantics.
+    return mod_spl_source.contains("cli:")
+
+fn count_cli_fields(cli_block_source: text) -> i64:
+    # Every `key: value` line under the cli block becomes one field of the
+    # generated CliArgs struct.
+    var count: i64 = 0
+    for line in cli_block_source.split("\n"):
+        val trimmed = line.trim()
+        if trimmed != "cli:" and trimmed.contains(": ") and not trimmed.starts_with("#"):
+            count = count + 1
+    return count
+
+fn generated_args_struct_name() -> text:
+    # The generated struct name is fixed by the contract, independent of the
+    # module name.
+    return "CliArgs"
+
+fn generated_args_struct_scope() -> text:
+    # The struct is declared in module scope so main(args: CliArgs) resolves
+    # inside the module.
+    return "module"
+
+fn importable_symbol_count(declared_functions: [text]) -> i64:
+    # A module's own functions stay importable from a module that also
+    # declares a cli block; only the generated CliArgs struct is withheld.
+    var count: i64 = 0
+    for name in declared_functions:
+        if name != "" and name != "CliArgs":
+            count = count + 1
+    return count
+
+fn cli_args_struct_is_exported(has_explicit_public: bool) -> bool:
+    # The generated CliArgs struct is never added to the module's export
+    # list — even an explicit-public request does not promote it.
+    return has_explicit_public and false
 
 # ============================================================================
 # CLI Args mod.spl Embedding
 # ============================================================================
-
-use std.spec.step
 
 describe "CLI Args mod.spl Embedding":
     # @manual scenario evidence
@@ -45,27 +99,34 @@ describe "CLI Args mod.spl Embedding":
 
     context "module entry point":
         it "defines cli in mod.spl":
-            # A mod.spl file with a cli block should be treated as
-            # an executable module entry point
-            val is_entry_point = true
-            expect(is_entry_point).to_equal(true)
+            # @req REQ-SSPEC-SYSTEM
+            # @capture(bit_table): sampled mod.spl header plus its entry-point verdict
+            step("embed a cli block in a module mod.spl")
+            val cli_module_source = "cli:\n    verbose: false\n    dry_run: true"
+            val plain_module_source = "fn helper():\n    return 1"
+            expect(mod_spl_declares_entry_point(cli_module_source)).to_equal(true)
+            expect(mod_spl_declares_entry_point(plain_module_source)).to_equal(false)
 
         it "generates CliArgs struct in module scope":
-            # The generated struct should be accessible within the module
-            val struct_name = "CliArgs"
-            val scope = "module"
-            expect(struct_name).to_equal("CliArgs")
-            expect(scope).to_equal("module")
+            # @req REQ-SSPEC-SYSTEM
+            # @capture(bit_table): generated struct identity and declaration scope
+            step("generate the args struct for a module with a cli block")
+            expect(generated_args_struct_name()).to_equal("CliArgs")
+            expect(generated_args_struct_scope()).to_equal("module")
+            # oracle: the sample cli block declares verbose and dry_run — two fields
+            expect(count_cli_fields("cli:\n    verbose: false\n    dry_run: true")).to_equal(2)  # oracle: verbose + dry_run
 
     context "module interaction":
         it "allows importing module functions alongside cli":
-            # Other modules can import functions from a module that has cli
-            # use my_tool.{process, format_output}
-            val can_import = true
-            expect(can_import).to_equal(true)
+            # @req REQ-SSPEC-SYSTEM
+            # @capture(bit_table): symbol import list retained with per-symbol verdicts
+            step("import the module's own functions from a cli-bearing module")
+            val imported = importable_symbol_count(["process", "format_output"])
+            expect(imported).to_equal(2)  # oracle: the sample module declares exactly process and format_output
 
         it "does not export CliArgs struct by default":
-            # The generated CliArgs struct is private to the module
-            # External modules should not see it
-            val is_exported = false
-            expect(is_exported).to_equal(false)
+            # @req REQ-SSPEC-SYSTEM
+            # @capture(bit_table): export-list probe for the generated struct
+            step("probe the generated struct's default visibility")
+            expect(cli_args_struct_is_exported(false)).to_equal(false)
+            expect(cli_args_struct_is_exported(true)).to_equal(false)

@@ -496,77 +496,80 @@ impl<'a> Parser<'a> {
                 None
             } else {
                 match &self.current.kind {
-                TokenKind::Identifier { name: id, .. } => Some(id.clone()),
-                // Allow keywords as named argument names
-                TokenKind::Type => Some("type".to_string()),
-                TokenKind::Default => Some("default".to_string()),
-                TokenKind::Result => Some("result".to_string()),
-                TokenKind::From => Some("from".to_string()),
-                TokenKind::To => Some("to".to_string()),
-                TokenKind::In => Some("in".to_string()),
-                TokenKind::Is => Some("is".to_string()),
-                TokenKind::As => Some("as".to_string()),
-                TokenKind::Match => Some("match".to_string()),
-                TokenKind::Use => Some("use".to_string()),
-                TokenKind::Alias => Some("alias".to_string()),
-                TokenKind::Bounds => Some("bounds".to_string()),
-                TokenKind::Outline => Some("outline".to_string()),
-                TokenKind::By => Some("by".to_string()),
-                TokenKind::Into => Some("into".to_string()),
-                TokenKind::Onto => Some("onto".to_string()),
-                TokenKind::With => Some("with".to_string()),
-                // Additional keywords used as named argument names in Simple source
-                TokenKind::Loop => Some("loop".to_string()),
-                TokenKind::Unit => Some("unit".to_string()),
-                TokenKind::Sync => Some("sync".to_string()),
-                TokenKind::Async => Some("async".to_string()),
-                TokenKind::Kernel => Some("kernel".to_string()),
-                TokenKind::Val => Some("val".to_string()),
-                TokenKind::Literal => Some("literal".to_string()),
-                TokenKind::Repr => Some("repr".to_string()),
-                TokenKind::Extern => Some("extern".to_string()),
-                TokenKind::Static => Some("static".to_string()),
-                TokenKind::Const => Some("const".to_string()),
-                TokenKind::Shared => Some("shared".to_string()),
-                TokenKind::Dyn => Some("dyn".to_string()),
-                TokenKind::Macro => Some("macro".to_string()),
-                TokenKind::Mixin => Some("mixin".to_string()),
-                TokenKind::Actor => Some("actor".to_string()),
-                TokenKind::Ghost => Some("ghost".to_string()),
-                TokenKind::Gen => Some("gen".to_string()),
-                TokenKind::Impl => Some("impl".to_string()),
-                TokenKind::Gpu => Some("gpu".to_string()),
-                // FR-DRIVER-0001: `class` is reserved but must work as a
-                // named-arg inside @driver(class = DriverClass.Block, ...).
-                TokenKind::Class => Some("class".to_string()),
-                TokenKind::Vec => Some("vec".to_string()),
-                TokenKind::Context => Some("context".to_string()),
-                TokenKind::Feature => Some("feature".to_string()),
-                TokenKind::Scenario => Some("scenario".to_string()),
-                TokenKind::Given => Some("given".to_string()),
-                TokenKind::When => Some("when".to_string()),
-                TokenKind::Then => Some("then".to_string()),
-                TokenKind::On => Some("on".to_string()),
-                TokenKind::Bind => Some("bind".to_string()),
-                TokenKind::New => Some("new".to_string()),
-                TokenKind::Old => Some("old".to_string()),
-                TokenKind::Out => Some("out".to_string()),
-                TokenKind::Var => Some("var".to_string()),
-                TokenKind::Lazy => Some("lazy".to_string()),
-                TokenKind::Skip => Some("skip".to_string()),
-                TokenKind::Exists => Some("exists".to_string()),
-                // Grid is a keyword for 2D matrix literals, but must be usable as a
-                // named constructor/function argument (e.g., P(grid: 0), LaunchShape(grid: ..., block: ...)).
-                // expect_identifier already handles TokenKind::Grid for field access (p.grid).
-                TokenKind::Grid => Some("grid".to_string()),
-                // `examples` is a Gherkin data-table soft keyword; it must still
-                // work as a named-arg/field label (e.g. K(examples: "ok")).
-                TokenKind::Examples => Some("examples".to_string()),
-                // `and_then` is a Gherkin chained-step soft keyword; same rule
-                // as `examples` — it must still work as a named-arg/field label
-                // (e.g. K(and_then: "ok")).
-                TokenKind::AndThen => Some("and_then".to_string()),
-                _ => None,
+                    TokenKind::Identifier { name: id, .. } => Some(id.clone()),
+                    // Allow keywords as named argument names
+                    TokenKind::Type => Some("type".to_string()),
+                    TokenKind::Default => Some("default".to_string()),
+                    TokenKind::Result => Some("result".to_string()),
+                    TokenKind::From => Some("from".to_string()),
+                    TokenKind::To => Some("to".to_string()),
+                    TokenKind::In => Some("in".to_string()),
+                    TokenKind::Is => Some("is".to_string()),
+                    TokenKind::As => Some("as".to_string()),
+                    TokenKind::Match => Some("match".to_string()),
+                    TokenKind::Use => Some("use".to_string()),
+                    TokenKind::Alias => Some("alias".to_string()),
+                    TokenKind::Bounds => Some("bounds".to_string()),
+                    TokenKind::Outline => Some("outline".to_string()),
+                    TokenKind::By => Some("by".to_string()),
+                    TokenKind::Into => Some("into".to_string()),
+                    TokenKind::Onto => Some("onto".to_string()),
+                    TokenKind::With => Some("with".to_string()),
+                    // Additional keywords used as named argument names in Simple source
+                    TokenKind::Loop => Some("loop".to_string()),
+                    TokenKind::Unit => Some("unit".to_string()),
+                    TokenKind::Sync => Some("sync".to_string()),
+                    TokenKind::Async => Some("async".to_string()),
+                    TokenKind::Kernel => Some("kernel".to_string()),
+                    TokenKind::Val => Some("val".to_string()),
+                    TokenKind::Literal => Some("literal".to_string()),
+                    TokenKind::Repr => Some("repr".to_string()),
+                    TokenKind::Extern => Some("extern".to_string()),
+                    TokenKind::Static => Some("static".to_string()),
+                    TokenKind::Const => Some("const".to_string()),
+                    TokenKind::Shared => Some("shared".to_string()),
+                    TokenKind::Dyn => Some("dyn".to_string()),
+                    TokenKind::Macro => Some("macro".to_string()),
+                    TokenKind::Mixin => Some("mixin".to_string()),
+                    TokenKind::Actor => Some("actor".to_string()),
+                    TokenKind::Ghost => Some("ghost".to_string()),
+                    TokenKind::Gen => Some("gen".to_string()),
+                    TokenKind::Impl => Some("impl".to_string()),
+                    TokenKind::Gpu => Some("gpu".to_string()),
+                    // FR-DRIVER-0001: `class` is reserved but must work as a
+                    // named-arg inside @driver(class = DriverClass.Block, ...).
+                    TokenKind::Class => Some("class".to_string()),
+                    TokenKind::Vec => Some("vec".to_string()),
+                    TokenKind::Context => Some("context".to_string()),
+                    TokenKind::Feature => Some("feature".to_string()),
+                    TokenKind::Scenario => Some("scenario".to_string()),
+                    TokenKind::Given => Some("given".to_string()),
+                    TokenKind::When => Some("when".to_string()),
+                    TokenKind::Then => Some("then".to_string()),
+                    TokenKind::On => Some("on".to_string()),
+                    TokenKind::Bind => Some("bind".to_string()),
+                    TokenKind::New => Some("new".to_string()),
+                    TokenKind::Old => Some("old".to_string()),
+                    TokenKind::Out => Some("out".to_string()),
+                    TokenKind::Var => Some("var".to_string()),
+                    TokenKind::Lazy => Some("lazy".to_string()),
+                    TokenKind::Skip => Some("skip".to_string()),
+                    TokenKind::Exists => Some("exists".to_string()),
+                    // Grid is a keyword for 2D matrix literals, but must be usable as a
+                    // named constructor/function argument (e.g., P(grid: 0), LaunchShape(grid: ..., block: ...)).
+                    // expect_identifier already handles TokenKind::Grid for field access (p.grid).
+                    TokenKind::Grid => Some("grid".to_string()),
+                    // `examples` is a Gherkin data-table soft keyword; it must still
+                    // work as a named-arg/field label (e.g. K(examples: "ok")).
+                    TokenKind::Examples => Some("examples".to_string()),
+                    // `and_then` is a Gherkin chained-step soft keyword; same rule
+                    // as `examples` — it must still work as a named-arg/field label
+                    // (e.g. K(and_then: "ok")).
+                    TokenKind::AndThen => Some("and_then".to_string()),
+                    // `auto` is a hard keyword (auto modules); it must still work as a
+                    // named-arg/field label (e.g. FrontendOffloadSwitch(auto: true)).
+                    TokenKind::Auto => Some("auto".to_string()),
+                    _ => None,
                 }
             };
             if let Some(id_clone) = maybe_name {
@@ -707,6 +710,7 @@ impl<'a> Parser<'a> {
                         // "expected comma before argument '<name>'".
                         | TokenKind::Examples
                         | TokenKind::AndThen
+                        | TokenKind::Auto
                         | TokenKind::Grid
                         | TokenKind::Outline
                         | TokenKind::Class

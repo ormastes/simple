@@ -25,6 +25,12 @@ use std.nogc_sync_mut.ptr.raw.{rt_alloc, rt_free, rt_ptr_read_i64, rt_ptr_write_
 
 pub fn blas_handle_create() -> Result<i64, BackendError>:
     """Create a BLAS handle.  Returns the opaque handle as i64 (mock: always 1)."""
+    # cuBLAS C API: cublasCreate(cublasHandle_t*) — src/runtime/scilib/cublas_shim.c:73
+    # creates the process-wide handle on first use.
+    # GAP, stated rather than implied: no shim in src/runtime/scilib/ actually
+    # DEFINES `rt_blas_handle_create`, so this lookup fails on every backend
+    # today and the call returns BackendUnavailable. Do not read the citation
+    # as evidence the symbol resolves.
     val h = _scilib_call0("rt_blas_handle_create")
     if h == 0:
         return Err(BackendError.BackendUnavailable("rt_blas_handle_create returned null handle"))
@@ -32,6 +38,8 @@ pub fn blas_handle_create() -> Result<i64, BackendError>:
 
 pub fn blas_handle_destroy(handle: i64) -> Result<i64, BackendError>:
     """Destroy a BLAS handle obtained from blas_handle_create."""
+    # cuBLAS C API: cublasDestroy(cublasHandle_t). Same gap as
+    # blas_handle_create above — `rt_blas_handle_destroy` is defined by no shim.
     val rc = _scilib_call_n("rt_blas_handle_destroy", [handle])
     Ok(rc)
 
@@ -160,6 +168,12 @@ pub fn blas_ddot(n: i64, x: [f64], y: [f64]) -> Result<f64, BackendError>:
         rt_ptr_write_i64(x_buf, i * 8, spl_f64_to_bits(x[i]))
         rt_ptr_write_i64(y_buf, i * 8, spl_f64_to_bits(y[i]))
         i = i + 1
+    # This entry point is the OpenBLAS/mock lane: `rt_scilib_openblas_ddot_bits`
+    # is defined in src/runtime/scilib/openblas_shim.c:174 and mock_shim.c:139.
+    # The cuBLAS lane is the parallel symbol `rt_scilib_cuda_ddot_bits`
+    # (cublas_shim.c:343), which calls the cuBLAS C API `cublasDdot_64(handle,
+    # n, x, incx, y, incy, result)` — the `_64` variant per T-CUDA-05/06, with
+    # incx/incy pinned to 1 by the shim.
     val result_bits = _scilib_call_n("rt_scilib_openblas_ddot_bits", [x_buf, n, y_buf])
     rt_free(x_buf)
     rt_free(y_buf)
@@ -273,6 +287,14 @@ pub fn blas_dgemm_values(
     rt_ptr_write_i64(params_buf, 24, spl_f64_to_bits(alpha))
     rt_ptr_write_i64(params_buf, 32, spl_f64_to_bits(beta))
 
+    # OpenBLAS/mock lane: `rt_scilib_openblas_dgemm_bits`
+    # (openblas_shim.c:211, mock_shim.c:166). The cuBLAS lane is the parallel
+    # symbol `rt_scilib_cuda_dgemm_bits` (cublas_shim.c:383), which calls the
+    # cuBLAS C API `cublasDgemm_64(handle, transa, transb, m, n, k, alpha, A,
+    # lda, B, ldb, beta, C, ldc)` with the operands swapped for column-major
+    # (cublas_shim.c:213). gemm takes both operands as matrices and the scalar
+    # first — see the gemv operand-swap note in blas.spl; do not feed it a
+    # gemv-shaped operand pair.
     val rc = _scilib_call_n("rt_scilib_openblas_dgemm_bits", [
         params_buf, a_buf, b_buf, c_buf, out_buf
     ])
