@@ -1,0 +1,97 @@
+# Regression spec for
+# doc/08_tracking/bug/interp_scope_slot_reuse_stale_bucket_heads_2026-09-06.md
+#
+# `env_push_scope` recycles a scope slot once the depth has been reached
+# before. Recycling cleared keys/vals/nexts but NOT the bucket heads, because
+# the reset helper took the bucket row as a plain (non-`mut`) array parameter —
+# a snapshot — so every write was discarded. The next `env_define` in a reused
+# slot then followed a stale chain head into an empty keys array and died with
+# "array index out of bounds: index is 0 but length is 0".
+#
+# Consequence: the SECOND iteration of any scoped construct in the pure-Simple
+# tree-walking interpreter (while body, block, match arm) aborted.
+
+use compiler.core.interpreter.eval.{eval_reset}
+use compiler.core.interpreter.env.{env_reset, env_define, env_lookup, env_scope_depth}
+use compiler.core.interpreter.env.{env_push_scope, env_pop_scope}
+use compiler.core.interpreter.value.{val_reset, val_make_int, val_get_int}
+
+describe "Interpreter env scope-slot reuse":
+    fn fresh():
+        val_reset()
+        eval_reset()
+        env_reset()
+
+    # ---- reproduction: the exact defect ----
+
+    it "can define the same name again in a recycled scope slot":
+        fresh()
+        env_define("x", val_make_int(99))
+
+        env_push_scope()
+        env_define("y", val_make_int(1))
+        expect(val_get_int(env_lookup("y"))).to_equal(1)
+        env_pop_scope()
+
+        # Second push at the same depth takes the slot-REUSE path. Before the
+        # fix this line aborted the interpreter.
+        env_push_scope()
+        env_define("y", val_make_int(2))
+        expect(val_get_int(env_lookup("y"))).to_equal(2)
+        env_pop_scope()
+
+        expect(val_get_int(env_lookup("x"))).to_equal(99)
+
+    it "does not resurrect a binding from a previous use of the same slot":
+        fresh()
+        env_push_scope()
+        env_define("ghost", val_make_int(42))
+        env_pop_scope()
+
+        env_push_scope()
+        # The recycled slot must be empty: `ghost` was defined in the slot's
+        # previous life and must not be visible.
+        expect(env_lookup("ghost") < 0).to_equal(true)
+        env_pop_scope()
+
+    # ---- generalization: many recycles, and nesting deeper than one level ----
+
+    it "survives repeated push/pop cycles at the same depth":
+        fresh()
+        env_define("base", val_make_int(7))
+        var i: i64 = 0
+        while i < 10:
+            env_push_scope()
+            env_define("loop_local", val_make_int(i))
+            expect(val_get_int(env_lookup("loop_local"))).to_equal(i)
+            env_pop_scope()
+            i = i + 1
+        expect(val_get_int(env_lookup("base"))).to_equal(7)
+        expect(env_lookup("loop_local") < 0).to_equal(true)
+
+    it "recycles slots correctly at more than one nesting level":
+        fresh()
+        env_push_scope()
+        env_push_scope()
+        env_define("deep", val_make_int(1))
+        env_pop_scope()
+        env_pop_scope()
+
+        env_push_scope()
+        env_push_scope()
+        expect(env_lookup("deep") < 0).to_equal(true)
+        env_define("deep", val_make_int(2))
+        expect(val_get_int(env_lookup("deep"))).to_equal(2)
+        env_pop_scope()
+        env_pop_scope()
+
+    it "keeps the scope stack balanced across recycles":
+        fresh()
+        val depth_before = env_scope_depth()
+        env_push_scope()
+        env_define("a", val_make_int(1))
+        env_pop_scope()
+        env_push_scope()
+        env_define("a", val_make_int(2))
+        env_pop_scope()
+        expect(env_scope_depth()).to_equal(depth_before)
