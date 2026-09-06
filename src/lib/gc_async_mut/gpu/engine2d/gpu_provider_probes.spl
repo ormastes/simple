@@ -1,0 +1,140 @@
+"""Real provider probes behind the Engine2D GPU conformance contract.
+
+One probe per provider (Vulkan, Metal, DirectX). Each returns an
+`Engine2dGpuProviderReport` describing what the host actually offers. A probe
+never crashes on a host without the backend: availability is checked before any
+session or device handle is touched, and every failure path returns the
+`unavailable` constructor with a concrete `probe_error`.
+
+Honest current state: no provider in this tree exposes a fence token, device
+timestamps, or distinguishable submit / gpu_finished / complete / retire
+phases, so every present provider grades `routing_only`. Those three seams are
+marked with TODOs naming the externs that must land first — nothing here
+fabricates them.
+"""
+
+use std.common.gpu.engine2d.gpu_provider_conformance.{
+    ENGINE2D_GPU_API_LEVEL_METAL,
+    ENGINE2D_GPU_API_LEVEL_VULKAN,
+    ENGINE2D_GPU_PROVIDER_DIRECTX,
+    ENGINE2D_GPU_PROVIDER_METAL,
+    ENGINE2D_GPU_PROVIDER_VULKAN,
+    Engine2dGpuProviderReport,
+    engine2d_gpu_provider_api_level,
+    engine2d_gpu_provider_report_unavailable
+}
+use std.common.ui.draw_ir_v3_ports.{DRAW_IR_V3_CAP_COMPUTE_PASSES}
+use std.gc_async_mut.gpu.engine2d.backend_vulkan.{vulkan_available}
+use std.gc_async_mut.gpu.engine2d.vulkan_session.{VulkanSession}
+use std.nogc_sync_mut.io.metal_sffi.{
+    metal_available,
+    metal_device_count,
+    metal_device_info,
+    metal_init,
+    metal_sffi_create_device,
+    metal_sffi_destroy_device,
+    metal_sffi_device_registry_identity,
+    metal_sffi_device_supports_metal3
+}
+use std.nogc_sync_mut.gpu.engine2d.sffi_directx.{directx_hardware_adapter_identity}
+use std.nogc_sync_mut.env.platform.{detect_os}
+
+fn engine2d_gpu_probe_vulkan() -> Engine2dGpuProviderReport:
+    """Probe Vulkan. Returns an unavailable report when the loader or device is absent."""
+    if not vulkan_available():
+        return engine2d_gpu_provider_report_unavailable(ENGINE2D_GPU_PROVIDER_VULKAN, "vulkan runtime not available on this host")
+    val session = VulkanSession.create()
+    val code = session.init()
+    if code != 0:
+        val reason = if session.init_error != "": session.init_error else: "vulkan session init failed with code {code}"
+        return engine2d_gpu_provider_report_unavailable(ENGINE2D_GPU_PROVIDER_VULKAN, reason)
+    val report = Engine2dGpuProviderReport(
+        provider: ENGINE2D_GPU_PROVIDER_VULKAN,
+        api_level: ENGINE2D_GPU_API_LEVEL_VULKAN,
+        available: true,
+        device_name: session.device_name,
+        device_type: session.device_type,
+        driver_identity: session.driver_identity,
+        capabilities: DRAW_IR_V3_CAP_COMPUTE_PASSES,
+        # TODO: [gpu][P2] report distinct submit/gpu_finished/complete/retire phases once a per-submission completion callback exists; the tree has no such Vulkan extern today
+        distinct_phases: false,
+        # TODO: [gpu][P2] set fence_token_available once rt_vulkan_create_fence / rt_vulkan_wait_fence land; submit_and_wait() blocks and returns no fence handle
+        fence_token_available: false,
+        # TODO: [gpu][P2] set device_timestamps_available once rt_vulkan_create_query_pool / rt_vulkan_get_query_results land; never fabricate device ticks
+        device_timestamps_available: false,
+        probe_error: ""
+    )
+    session.release()
+    report
+
+fn engine2d_gpu_probe_metal() -> Engine2dGpuProviderReport:
+    """Probe Metal through the SFFI device layer, without compiling the Engine2D shader library."""
+    # TODO: [gpu][P2] verify this probe against a host where metal_available() is true; on an Apple M4 under the 2026-09-05 bootstrap seed it returns false (Vulkan/MoltenVK reports the same device as "Apple M4"), so the Metal branch below is unexercised
+    if not metal_available():
+        return engine2d_gpu_provider_report_unavailable(ENGINE2D_GPU_PROVIDER_METAL, "metal runtime not available on this host")
+    if not metal_init():
+        return engine2d_gpu_provider_report_unavailable(ENGINE2D_GPU_PROVIDER_METAL, "metal runtime initialisation failed")
+    val device_count = metal_device_count()
+    if device_count <= 0:
+        return engine2d_gpu_provider_report_unavailable(ENGINE2D_GPU_PROVIDER_METAL, "metal reports no devices")
+    val info = metal_device_info(0)
+    val handle = metal_sffi_create_device(0)
+    if handle == 0:
+        return engine2d_gpu_provider_report_unavailable(ENGINE2D_GPU_PROVIDER_METAL, "metal device 0 could not be created")
+    val identity = metal_sffi_device_registry_identity(handle)
+    val metal3 = metal_sffi_device_supports_metal3(handle)
+    metal_sffi_destroy_device(handle)
+    Engine2dGpuProviderReport(
+        provider: ENGINE2D_GPU_PROVIDER_METAL,
+        api_level: ENGINE2D_GPU_API_LEVEL_METAL,
+        available: true,
+        device_name: info.name,
+        device_type: if metal3: "metal3" else: "metal2",
+        driver_identity: identity,
+        capabilities: DRAW_IR_V3_CAP_COMPUTE_PASSES,
+        # TODO: [gpu][P2] report distinct submit/gpu_finished/complete/retire phases once an addCompletedHandler-backed extern exists; metal_sffi_run_compute_frame collapses submit and completion
+        distinct_phases: false,
+        # TODO: [gpu][P2] set fence_token_available once rt_metal_command_buffer_event / shared-event externs land; metal_wait() blocks and returns no token
+        fence_token_available: false,
+        # TODO: [gpu][P2] set device_timestamps_available once MTLCounterSampleBuffer externs land; never fabricate device ticks
+        device_timestamps_available: false,
+        probe_error: ""
+    )
+
+fn engine2d_gpu_probe_directx() -> Engine2dGpuProviderReport:
+    """Probe DirectX (D3D11 via DXVK). Never touched off Windows/Linux: the extern is unbacked elsewhere.
+
+    There is no D3D12 lane in this tree, so the api_level stays `d3d11-dxvk`.
+    """
+    # TODO: [gpu][P2] D3D12 provider does not exist in this tree; add rt_d3d12_* externs before claiming a D3D12 conformance lane
+    val host = detect_os()
+    if host != "windows" and host != "linux":
+        return engine2d_gpu_provider_report_unavailable(ENGINE2D_GPU_PROVIDER_DIRECTX, "no D3D11/DXVK provider on {host}")
+    val identity = directx_hardware_adapter_identity()
+    if identity <= 0:
+        return engine2d_gpu_provider_report_unavailable(ENGINE2D_GPU_PROVIDER_DIRECTX, "no D3D11 hardware adapter reported on {host}")
+    Engine2dGpuProviderReport(
+        provider: ENGINE2D_GPU_PROVIDER_DIRECTX,
+        api_level: engine2d_gpu_provider_api_level(ENGINE2D_GPU_PROVIDER_DIRECTX),
+        available: true,
+        device_name: "adapter:{identity}",
+        device_type: "d3d11_hardware_adapter",
+        driver_identity: "dxvk-adapter-{identity}",
+        capabilities: DRAW_IR_V3_CAP_COMPUTE_PASSES,
+        # TODO: [gpu][P2] report distinct submit/gpu_finished/complete/retire phases once a D3D11 event-query extern exists; rt_directx_execute_readback_checked collapses submit and readback
+        distinct_phases: false,
+        # TODO: [gpu][P2] set fence_token_available once rt_directx_create_fence / rt_directx_wait_fence land
+        fence_token_available: false,
+        # TODO: [gpu][P2] set device_timestamps_available once D3D11 timestamp-query externs land; never fabricate device ticks
+        device_timestamps_available: false,
+        probe_error: ""
+    )
+
+fn engine2d_gpu_probe_all() -> [Engine2dGpuProviderReport]:
+    """Every provider report this host can produce, in canonical provider order."""
+    [engine2d_gpu_probe_vulkan(), engine2d_gpu_probe_metal(), engine2d_gpu_probe_directx()]
+
+export engine2d_gpu_probe_vulkan
+export engine2d_gpu_probe_metal
+export engine2d_gpu_probe_directx
+export engine2d_gpu_probe_all

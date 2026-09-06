@@ -1,57 +1,26 @@
-# Purpose and audience: executable specification evidence for the owning engineering team.
-# @req REQ-SSPEC-UNIT
-# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
-
 # @cover src/lib/nogc_async_mut/gpu/engine2d/draw_ir_runtime_queue.spl 80%
 # @tag: unit, gpu, draw_ir, host_gpu_queue, nogc
 """
-# No-GC Engine2D Draw IR Runtime Queue Spec
-
-## Overview
-
-This focused spec covers the no-GC Draw IR queue-dispatch helper. It proves
-payload checksum/SDN text generation and runtime submit/drain/dispatch receipts
-without importing the GC Engine2D renderer.
-
-## Requirements
-
-**Requirements:** N/A
-
-## Plan
-
-**Plan:** doc/03_plan/sys_test/production_gui_web_host_gpu_queue_readback.md
-
-## Design
-
-**Design:** doc/04_architecture/ui/simple_gui_stack.md
-
-## Research
-
-**Research:** doc/01_research/language/host_gpu_lane/later_gpu_host_grammar.md
-
-## Syntax
-
-The no-GC dispatch helper is imported directly from
-`std.nogc_async_mut.gpu.engine2d.draw_ir_runtime_queue`. The queue identity
-comes from `engine2d_host_gpu_runtime_queue_with_backend_handle`, and the test
-uses only built-in SSpec matchers.
-
-## Examples
-
-```simple
-use std.spec.step
-
-val queue = engine2d_host_gpu_runtime_queue_with_backend_handle("vulkan", 1, 7, true, 4096)
-val result = engine2d_draw_ir_runtime_queue_dispatch_only(batch, true, queue)
-expect(result.runtime_dispatch.backend_handle).to_equal(7)
-```
-
-## Acceptance
-
-The scenario builds a GPU-selected Draw IR batch, submits it through the no-GC
-runtime queue helper, and asserts that the runtime receipt carries the backend
-handle, payload hash, and Draw IR v2 payload text.
+## Purpose and audience
+The no-GC DrawIR runtime queue is the seam where a composed DrawIR batch either
+becomes a bounded host-GPU packet or is refused. This manual is for the
+engineers wiring a GPU lane onto it: it shows the registered packed submit path
+(no serialized text), the retained SDN compatibility adapter, and every way the
+seam fails closed. Feature IDs: gpu_scheduler_hardening. Category: Stdlib.
+## Operator workflow
+SIMPLE_LIB=src bin/simple test test/01_unit/lib/nogc_async_mut/gpu/engine2d/draw_ir_runtime_queue_spec.spl
+## Compatibility and limitations
+Pure queue/payload logic over the process-local bounded runtime queue; runs on
+every host with no device. Queue admission is routing evidence only and never
+proves physical GPU execution.
+## Verification guidance and troubleshooting
+A RED here means the queue seam changed: payload ownership, profile policy,
+bounded capacity, or the non-admission default. Fix the seam or its caller,
+never the spec. Each scenario resets the process-global queue first.
 """
+# Lifecycle: doc/01_research/local/gpu_scheduler_hardening_gpu_resident_rendering.md ; doc/03_plan/ui/gpu_scheduler_hardening_gpu_resident_rendering.md ;
+# doc/04_architecture/gpu_scheduler_hardening_gpu_resident_rendering.md ; doc/05_design/gpu_scheduler_hardening_gpu_resident_rendering.md
+# @manual_section: primary
 
 use std.spec.*
 use common.ui.draw_ir.{
@@ -60,9 +29,22 @@ use common.ui.draw_ir.{
     draw_ir_embedding_config,
     draw_ir_rect
 }
+use common.gpu.engine2d.gpu_epoch.{
+    ENGINE2D_GPU_PHASE_QUEUED,
+    ENGINE2D_GPU_PHASE_REJECTED,
+    ENGINE2D_GPU_PROFILE_SCENE_BALANCED,
+    ENGINE2D_GPU_PROFILE_SCENE_REQUIRED,
+    engine2d_gpu_epoch_receipt_summary
+}
+use common.contracts.execution.simple_ring_async_v1.{RingPayloadOwnership}
+use common.ui.draw_ir_v3_execution_route.{DRAW_IR_V3_REASON_NO_DEVICE}
+use common.ui.draw_ir_v3_ports.{DRAW_IR_V3_CAP_COMPUTE_PASSES}
 use std.nogc_async_mut.gpu.engine2d.draw_ir_runtime_queue.{
+    engine2d_draw_ir_epoch_request_from_batch,
+    engine2d_draw_ir_payload_summary_sdn_compat,
     engine2d_draw_ir_runtime_queue_dispatch_only,
-    engine2d_draw_ir_runtime_queue_submit_deferred
+    engine2d_draw_ir_runtime_queue_submit_deferred,
+    engine2d_draw_ir_runtime_queue_submit_packed
 }
 use std.nogc_async_mut.gpu.engine2d.host_gpu_event_queue.{
     ENGINE2D_HOST_GPU_RUNTIME_KIND_DRAW_IR,
@@ -181,3 +163,90 @@ describe "no-GC Engine2D Draw IR runtime queue dispatch":
         expect(receipt.terminal).to_be(true)
         expect(receipt.status).to_equal("queue_full_or_emit_failed")
         engine2d_host_gpu_runtime_reset()
+
+    it "queues a registered packed payload whose receipt carries no serialized DrawIR text":
+        # @req REQ-GPU-SCHED-PAYLOAD-001
+        step("Freeze a DrawIR batch into a packed epoch request with a registered lease")
+        engine2d_host_gpu_runtime_reset()
+        val queue = engine2d_host_gpu_runtime_queue_with_backend_handle("vulkan", 1, 7, true, 4096)
+        val request = engine2d_draw_ir_epoch_request_from_batch(deferred_batch("packed-ok"), ENGINE2D_GPU_PROFILE_SCENE_BALANCED, queue, 4096u64, 1u64, 2u64, 3u64, 4u64, 5u64)
+        expect(request.payload_lease.ownership).to_equal(RingPayloadOwnership.RegisteredLease)
+        expect(request.payload_lease.owner_id).to_equal(7u64)  # oracle: queue backend_handle 7 widened to u64
+        expect(request.packet_bytes).to_equal(64)  # oracle: 1 command x 64 bytes per command
+
+        step("Submit it through the packed seam on a compute-capable device")
+        val receipt = engine2d_draw_ir_runtime_queue_submit_packed(request, queue, true, DRAW_IR_V3_CAP_COMPUTE_PASSES)
+
+        expect(receipt.phase).to_equal(ENGINE2D_GPU_PHASE_QUEUED)
+        expect(receipt.terminal).to_be(false)
+        expect(receipt.routing_evidence_only).to_be(true)
+        expect(receipt.device_execution_proven).to_be(false)
+        expect(receipt.token).to_not_be_nil()
+        step("Confirm the receipt summary carries no DrawIR SDN text")
+        val summary = engine2d_gpu_epoch_receipt_summary(receipt)
+        expect(summary).to_not_contain("schema=simple-draw-ir")
+        expect(summary).to_contain("phase=queued")
+        engine2d_host_gpu_runtime_reset()
+
+    it "refuses a required profile without a device instead of emitting an orphan packet":
+        # @req REQ-GPU-SCHED-PROFILE-001
+        step("Submit a gpu_scene_required packed epoch against an absent device")
+        engine2d_host_gpu_runtime_reset()
+        val queue = engine2d_host_gpu_runtime_queue_with_backend_handle("vulkan", 1, 7, true, 4096)
+        val request = engine2d_draw_ir_epoch_request_from_batch(deferred_batch("packed-required"), ENGINE2D_GPU_PROFILE_SCENE_REQUIRED, queue, 4096u64, 1u64, 2u64, 3u64, 4u64, 5u64)
+
+        val receipt = engine2d_draw_ir_runtime_queue_submit_packed(request, queue, false, DRAW_IR_V3_CAP_COMPUTE_PASSES)
+
+        expect(receipt.phase).to_equal(ENGINE2D_GPU_PHASE_REJECTED)
+        expect(receipt.terminal).to_be(true)
+        expect(receipt.reason_code).to_equal(DRAW_IR_V3_REASON_NO_DEVICE)
+        expect(receipt.diagnostic).to_contain("CPU semantic fallback is forbidden")
+        step("Prove the refusal left the bounded queue empty")
+        val submitted = engine2d_host_gpu_runtime_submit_pending(queue, 1)
+        expect(submitted.count).to_equal(0)
+        engine2d_host_gpu_runtime_reset()
+
+    it "refuses a packed epoch whose packet exceeds the bounded queue limit":
+        # @req REQ-GPU-SCHED-SAFE-001
+        step("Submit a packed epoch against a queue whose packet limit is smaller than the payload")
+        engine2d_host_gpu_runtime_reset()
+        val undersized = engine2d_host_gpu_runtime_queue_with_backend_handle("vulkan", 1, 7, true, 32)
+        val request = engine2d_draw_ir_epoch_request_from_batch(deferred_batch("packed-oversized"), ENGINE2D_GPU_PROFILE_SCENE_BALANCED, undersized, 4096u64, 1u64, 2u64, 3u64, 4u64, 5u64)
+
+        val receipt = engine2d_draw_ir_runtime_queue_submit_packed(request, undersized, true, DRAW_IR_V3_CAP_COMPUTE_PASSES)
+
+        expect(receipt.phase).to_equal(ENGINE2D_GPU_PHASE_REJECTED)
+        expect(receipt.terminal).to_be(true)
+        expect(receipt.diagnostic).to_contain("packet exceeds runtime queue limit")
+        expect(receipt.token).to_be_nil()
+        step("Prove the refusal left the bounded queue empty")
+        val submitted = engine2d_host_gpu_runtime_submit_pending(undersized, 1)
+        expect(submitted.count).to_equal(0)
+        engine2d_host_gpu_runtime_reset()
+
+    it "derives one content hash per batch content and a different one when a command changes":
+        # @req REQ-GPU-SCHED-PAYLOAD-002
+        step("Freeze two epoch requests over batches with identical commands")
+        engine2d_host_gpu_runtime_reset()
+        val queue = engine2d_host_gpu_runtime_queue_with_backend_handle("vulkan", 1, 7, true, 4096)
+        val left = engine2d_draw_ir_epoch_request_from_batch(deferred_batch("hash-left"), ENGINE2D_GPU_PROFILE_SCENE_BALANCED, queue, 4096u64, 1u64, 2u64, 3u64, 4u64, 5u64)
+        val right = engine2d_draw_ir_epoch_request_from_batch(deferred_batch("hash-right"), ENGINE2D_GPU_PROFILE_SCENE_BALANCED, queue, 4096u64, 1u64, 2u64, 3u64, 4u64, 5u64)
+        step("Freeze a third request whose single rect is moved by one pixel")
+        val moved = draw_ir_batch("hash-moved", DRAW_IR_BACKEND_GPU, draw_ir_embedding_config("surf1", "win1", 0, 0, 20, 16, 10, 1000, false), [
+            draw_ir_rect("body", 3, 3, 6, 5, GREEN)
+        ])
+        val other = engine2d_draw_ir_epoch_request_from_batch(moved, ENGINE2D_GPU_PROFILE_SCENE_BALANCED, queue, 4096u64, 1u64, 2u64, 3u64, 4u64, 5u64)
+
+        expect(right.content_hash).to_equal(left.content_hash)
+        expect(other.content_hash).to_not_equal(left.content_hash)
+
+    it "keeps the SDN adapter as the only DrawIR text producer on this seam":
+        # @req REQ-GPU-SCHED-PAYLOAD-001
+        step("Render the compatibility payload summary for one batch")
+        engine2d_host_gpu_runtime_reset()
+        val summary = engine2d_draw_ir_payload_summary_sdn_compat(deferred_batch("sdn-compat"), 64)
+
+        expect(summary.payload_sdn).to_contain("schema=simple-draw-ir-v2")
+        expect(summary.payload_sdn_bytes).to_be_greater_than(0)
+        expect(summary.command_count).to_equal(1)
+        expect(summary.summary).to_contain("sdn_bytes={summary.payload_sdn_bytes}")
