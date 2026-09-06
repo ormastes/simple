@@ -1,0 +1,150 @@
+"""
+## Purpose and audience
+Pins the clock-carrying half of the central debug service as the interpreter
+adapter uses it: `central_debug_service_v1_authorize_at` and
+`central_debug_service_v1_record_at` stamp the CALLER's nanosecond clock onto a
+session-bound receipt, and a policy that denies Control denies it through the
+same path. Audience: engineers changing
+`src/app/debug/interpreter_service_adapter_v1.spl` or
+`src/lib/common/debug/service_v1.spl`.
+## Operator workflow
+src/compiler_rust/target/bootstrap/simple run test/01_unit/app/debug/interpreter_service_adapter_v1_spec.spl
+## Compatibility and limitations
+`InterpreterDebugServiceAdapterV1.launch` hard-codes
+`debug_policy_development_v1()`, so an observe-only policy cannot be reached
+through the adapter's own surface; the adverse case therefore opens an
+observe-only session directly and drives the same `_authorize_at`/`_record_at`
+pair the adapter calls. The adapter's `InterpreterBackend.attach` only sets
+in-process debug state -- no program is executed here, and no receipt trail is
+readable back out of the service yet (see the bug record named below).
+`set_semantic_breakpoint` and `close` are deliberately not exercised: they reach
+`rt_debug_add_breakpoint` / `rt_debug_remove_all_breakpoints`, which this
+interpreter has no runtime backing for ("unknown extern function"), so covering
+them here would test the extern gap rather than the receipt contract; the
+session the adapter opened is closed through the service instead.
+## Verification guidance and troubleshooting
+A RED on `captured_at_ns` means an `_at` entry point started dropping the
+caller's clock and behaving as a plain wrapper -- exactly the regression
+`doc/08_tracking/bug/debug_service_v1_probe_and_adapter_call_undefined_symbols_2026-09-05.md`
+was filed over.
+"""
+# Lifecycle: doc/02_requirements/feature/simple_unified_debugging_evidence.md ;
+# doc/01_research/infra/dump_replay/simple_dump_replay_fw_spipe_devhub_design_plan_2026-09-05.md ;
+# doc/03_plan/app/debug/dump_replay_wave_plan.md ;
+# doc/04_architecture/simple_unified_debugging_evidence.md ;
+# doc/05_design/app/debug/debug_capability_truth_wave0_design.md
+# @manual_section: primary
+
+use std.spec.*
+use app.debug.interpreter_service_adapter_v1.{InterpreterDebugServiceAdapterV1}
+use std.common.debug.capability.{CapLevel}
+use std.common.debug.contracts_v1.{
+    DebugRootOperationV1, DebugPerturbationV1, DebugCapabilityV1,
+    DebugVerificationV1,
+}
+use std.common.debug.service_v1.{
+    central_debug_service_v1_open, central_debug_service_v1_close,
+    central_debug_service_v1_update_target_capability,
+    central_debug_service_v1_authorize_at, central_debug_service_v1_record_at,
+    central_debug_service_v1_session_count, debug_policy_observe_only_v1,
+}
+
+val PROGRAM = "test/01_unit/app/debug/interpreter_service_adapter_v1_spec.spl"
+
+describe "interpreter debug service adapter clock-stamped receipts":
+    it "binds an authorized receipt to the adapter's own session and clock":
+        # @req REQ-014
+        # Reproduction for
+        # doc/08_tracking/bug/debug_service_v1_probe_and_adapter_call_undefined_symbols_2026-09-05.md:
+        # before the fix neither `_authorize_at` nor `_record_at` existed, so the
+        # adapter did not compile and `launch` could not open a session at all.
+        # @capture(evidence_manifest): the open central-session count before launch and the adapter's target program path
+        step("Launch the adapter against a readable program so it opens a central session")
+        val before = central_debug_service_v1_session_count()
+        var adapter = InterpreterDebugServiceAdapterV1.create()
+        match adapter.launch(PROGRAM, []):
+            case Err(reason): expect(reason).to_equal("")
+            case Ok(session_id):
+                # @capture(evidence_manifest): the receipt issued for a Control operation on the adapter's session at an explicit clock
+                step("Authorize a Control operation on that session at an explicit caller clock")
+                val receipt = central_debug_service_v1_authorize_at(
+                    session_id, DebugRootOperationV1.Control,
+                    DebugPerturbationV1.Cooperative, "interpreter.attach", 4200000000,
+                )
+                expect(receipt.allowed).to_equal(true)
+                expect(receipt.session_id).to_equal(session_id.value)
+                expect(receipt.receipt_id.contains(session_id.value)).to_equal(true)
+                expect(receipt.captured_at_ns).to_equal(4200000000)  # oracle: the clock this it passed to _authorize_at, recorded verbatim rather than sourced from the service
+                # @capture(evidence_manifest): the outcome receipt recorded for the same operation at a later clock
+                step("Record the operation's outcome at a later clock on the same session")
+                val outcome = central_debug_service_v1_record_at(
+                    session_id, DebugRootOperationV1.Control,
+                    DebugPerturbationV1.Cooperative, "interpreter.attach.outcome",
+                    true, false, "", 4300000000,
+                )
+                expect(outcome.succeeded).to_equal(true)
+                expect(outcome.captured_at_ns).to_equal(4300000000)  # oracle: the later clock this it passed to _record_at, distinct from the authorize stamp above
+                expect(outcome.receipt_id == receipt.receipt_id).to_equal(false)
+                # @capture(evidence_manifest): the open central-session count after close, compared against the pre-launch count
+                step("Close the session the adapter opened and verify it is not leaked")
+                central_debug_service_v1_close(session_id)
+                expect(central_debug_service_v1_session_count()).to_equal(before)
+
+    it "rejects a capability update for a target the session never registered":
+        # @req REQ-014
+        # Generalization for the `_at`-less capability update the adapter calls
+        # once its target has actually run: it upgrades a REGISTERED target and
+        # never registers one as a side effect.
+        # @capture(evidence_manifest): the session opened by launch and the adapter's registered target id
+        step("Launch the adapter so exactly one target is registered on its session")
+        var adapter = InterpreterDebugServiceAdapterV1.create()
+        match adapter.launch(PROGRAM, []):
+            case Err(reason): expect(reason).to_equal("")
+            case Ok(session_id):
+                # @capture(evidence_manifest): the result of raising the registered target to live-verified
+                step("Raise the registered target to live-verified")
+                val raised = central_debug_service_v1_update_target_capability(session_id,
+                    DebugCapabilityV1(adapter.target_id, CapLevel.Native, DebugVerificationV1.LiveVerified,
+                        DebugPerturbationV1.Cooperative, "interpreter target executed"))
+                match raised:
+                    case Err(reason): expect(reason).to_equal("")
+                    case Ok(_): expect(adapter.target_id.starts_with("simple-interpreter://")).to_equal(true)
+                # @capture(evidence_manifest): the Err(reason) returned for an unknown target id
+                step("Update a target this session never registered and verify the refusal names it")
+                match central_debug_service_v1_update_target_capability(session_id,
+                        DebugCapabilityV1("simple-interpreter://never-registered", CapLevel.Native,
+                            DebugVerificationV1.LiveVerified, DebugPerturbationV1.Cooperative, "not registered")):
+                    case Ok(_): expect("accepted").to_equal("rejected")
+                    case Err(reason): expect(reason).to_contain("unregistered target")
+                central_debug_service_v1_close(session_id)
+
+    it "rejects a Control operation under an observe-only policy and still receipts it":
+        # @req REQ-014
+        # Generalization: the denial is a property of the policy on the session,
+        # not of the adapter, and a denied operation is still receipted -- it is
+        # never silently skipped.
+        # @capture(evidence_manifest): the observe-only policy name and the session it was opened under
+        step("Open a session whose policy denies Control")
+        match central_debug_service_v1_open("sha256:observe-only-unit", debug_policy_observe_only_v1()):
+            case Err(reason): expect(reason).to_equal("")
+            case Ok(session_id):
+                # @capture(evidence_manifest): the denial receipt's allowed flag, reason text and captured clock
+                step("Authorize a Control operation and verify it is denied by name")
+                val denied = central_debug_service_v1_authorize_at(
+                    session_id, DebugRootOperationV1.Control,
+                    DebugPerturbationV1.Cooperative, "interpreter.attach", 77,
+                )
+                expect(denied.allowed).to_equal(false)
+                expect(denied.reason).to_contain("observe-only")
+                expect(denied.captured_at_ns).to_equal(77)  # oracle: the clock this it passed to _authorize_at, unchanged by the denial path
+                # @capture(evidence_manifest): the outcome receipt recorded for the refused attach
+                step("Record the refused attach and verify the receipt names the denial")
+                val outcome = central_debug_service_v1_record_at(
+                    session_id, DebugRootOperationV1.Control,
+                    DebugPerturbationV1.Cooperative, "interpreter.attach.outcome",
+                    false, false, denied.reason, 78,
+                )
+                expect(outcome.succeeded).to_equal(false)
+                expect(outcome.reason).to_contain("denies Control")
+                expect(outcome.receipt_id.contains(session_id.value)).to_equal(true)
+                central_debug_service_v1_close(session_id)

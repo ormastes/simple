@@ -4,13 +4,18 @@
 # WASM support, and optimization level mapping.
 # Split from llvm_backend.spl.
 
-use compiler.backend.backend.backend_types.{CompiledSymbol, CompiledSymbolKind, CodegenTarget, OptimizationLevel}
+use compiler.backend.backend.backend_types.{CompiledSymbol, CompiledSymbolKind,
+    CodegenTarget, OptimizationLevel}
+use compiler.backend.backend.aot_path_diagnostic.{backend_aot_write_diagnostic}
 use compiler.backend.backend.runtime_compiler.{_get_temp_dir}
 use compiler.backend.backend.llvm_target.{LlvmTargetConfig}
 use compiler.mir_opt.mod.{OptLevel}
 use compiler.interp.interpreter.llvm.tools.*
 use compiler.backend.backend.io_compat.{backend_shell_tuple}
-use std.nogc_sync_mut.io.file_ops.{file_write, file_delete, file_exists}
+use std.nogc_sync_mut.io.file_ops.{file_write, file_delete, file_exists,
+    file_is_regular_no_follow, file_size_raw}
+use std.nogc_sync_mut.io.dir_ops.{dir_remove}
+use std.nogc_sync_mut.path.{dirname}
 use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
 use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
 use std.nogc_sync_mut.io_runtime.{process_run}
@@ -19,6 +24,8 @@ use std.nogc_sync_mut.io_runtime.{process_run}
 extern fn rt_file_read_bytes(path: text) -> [u8]
 extern fn rt_env_get(key: text) -> text
 extern fn rt_file_write_text_at(path: text, offset: i64, data: text) -> i64
+extern fn rt_secure_temp_dir(parent: text, prefix: text) -> text
+extern fn rt_file_publish_noreplace(staged_path: text, destination: text) -> i64
 
 fn llvm_bootstrap_last_object_path() -> text:
     "{_get_temp_dir()}/simple_llvm_{getpid()}.o"
@@ -263,6 +270,145 @@ pub fn compile_ir_to_object(llvm_ir: text, config: LlvmTargetConfig, opt_level: 
     val byte_arr: [u8] = bytes ?? []
     Ok(LlvmObjectCode(bytes: byte_arr, symbols: symbols))
 
+fn llvm_object_stage_fail(
+    stage_dir: text, diagnostic_path: text,
+    message: text, status: i64
+) -> i64:
+    var final_message = message
+    if not dir_remove(stage_dir, true):
+        final_message = "{message}; private staging cleanup failed"
+    backend_aot_write_diagnostic(diagnostic_path, final_message)
+    if status == 0: 1 else: status
+
+pub fn compile_ir_to_object_path(
+    llvm_ir: text, config: LlvmTargetConfig, opt_level: OptimizationLevel,
+    obj_path: text, diagnostic_path: text
+) -> i64:
+    """Compile directly into caller-owned storage and return scalar status."""
+    # Keep the rendered triple owned by this frame.  Returning the interpolated
+    # text from LlvmTargetTriple.to_text() leaves the self-hosted caller holding
+    # the callee's temporary payload; later process/file calls can then turn it
+    # into `<invalid-heap:...>` before llc consumes argv.
+    var frozen_target_triple = (
+        "{config.triple.arch}-{config.triple.vendor}-{config.triple.os}")
+    match config.triple.env:
+        case Some(target_env):
+            frozen_target_triple = "{frozen_target_triple}-{target_env}"
+        case nil: ()
+    val parent = dirname(obj_path)
+    val stage_dir = rt_secure_temp_dir(parent, "simple-llvm-aot")
+    if stage_dir == "":
+        backend_aot_write_diagnostic(
+            diagnostic_path, "secure temporary directory creation failed")
+        return 1
+    val ir_path = stage_dir + "/module.ll"
+    val bitcode_path = stage_dir + "/module.bc"
+    val staged_obj_path = stage_dir + "/module.o"
+    val llc = find_llc()
+    if llc == "":
+        return llvm_object_stage_fail(
+            stage_dir, diagnostic_path, "llc not found", 1)
+    val bootstrap_io = (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1"
+    val wrote_ir = if bootstrap_io:
+        rt_file_write_text_at(ir_path, 0, llvm_ir)
+        file_exists(ir_path)
+    else:
+        file_write(ir_path, llvm_ir)
+    if not wrote_ir:
+        return llvm_object_stage_fail(stage_dir, diagnostic_path,
+            "Failed to write LLVM IR to private staging", 1)
+    var compile_input_path = ir_path
+    val bitcode_debug = (rt_env_get("SIMPLE_LLVM_BITCODE_DEBUG") ?? "") == "1"
+    if bitcode_debug:
+        val llvm_as = find_llvm_as()
+        if llvm_as == "":
+            return llvm_object_stage_fail(stage_dir, diagnostic_path,
+                "SIMPLE_LLVM_BITCODE_DEBUG requires llvm-as", 1)
+        val (as_out, as_err, as_code) = process_run(
+            llvm_as, [ir_path, "-o", bitcode_path])
+        if as_code != 0:
+            return llvm_object_stage_fail(stage_dir, diagnostic_path,
+                "llvm-as failed (exit {as_code}):\n{as_out}{as_err}",
+                1)
+        val opt_tool = find_opt()
+        if opt_tool == "":
+            return llvm_object_stage_fail(stage_dir, diagnostic_path,
+                "SIMPLE_LLVM_BITCODE_DEBUG requires opt", 1)
+        val (verify_out, verify_err, verify_code) = process_run(
+            opt_tool, ["-passes=verify", "-disable-output", bitcode_path])
+        if verify_code != 0:
+            return llvm_object_stage_fail(stage_dir, diagnostic_path,
+                "LLVM bitcode verify failed (exit {verify_code}):\n{verify_out}{verify_err}",
+                1)
+        compile_input_path = bitcode_path
+    var opt_flag = "-O0"
+    if opt_level == OptimizationLevel.Size:
+        opt_flag = "-Oz"
+    elif opt_level == OptimizationLevel.Speed:
+        opt_flag = "-O2"
+    elif opt_level == OptimizationLevel.Aggressive:
+        opt_flag = "-O3"
+    var cpu = config.to_cpu_string()
+    if cpu == "x86-64-v1":
+        cpu = "x86-64"
+    var args = ["--filetype=obj", "--relocation-model=pic",
+        "--function-sections", "--data-sections"]
+    if not bootstrap_io:
+        args.push("-mtriple={frozen_target_triple}")
+        args.push("-mcpu={cpu}")
+        if config.features.len() > 0:
+            args.push("-mattr={config.to_feature_string()}")
+        match config.abi:
+            case Some(abi): args.push("-target-abi={abi}")
+            case nil: ()
+        args.push(opt_flag)
+    args.push("-o")
+    args.push(staged_obj_path)
+    args.push(compile_input_path)
+    val (llc_out, llc_err, llc_code) = process_run(llc, args)
+    if llc_code != 0:
+        return llvm_object_stage_fail(stage_dir, diagnostic_path,
+            "llc failed (exit {llc_code}):\n{llc_out}{llc_err}",
+            1)
+    if (not file_exists(staged_obj_path)
+        or not file_is_regular_no_follow(staged_obj_path)
+        or file_size_raw(staged_obj_path) <= 0):
+        return llvm_object_stage_fail(stage_dir, diagnostic_path,
+            "llc produced invalid private staged object", 1)
+    val produced_bytes = rt_file_read_bytes(staged_obj_path) ?? []
+    if produced_bytes.len() < 4:
+        return llvm_object_stage_fail(stage_dir, diagnostic_path,
+            "llc produced object without recognized magic", 1)
+    val b0 = produced_bytes[0].to_i64()
+    val b1 = produced_bytes[1].to_i64()
+    val b2 = produced_bytes[2].to_i64()
+    val b3 = produced_bytes[3].to_i64()
+    val elf_magic = b0 == 0x7F and b1 == 0x45 and b2 == 0x4C and b3 == 0x46
+    val macho_magic = (
+        (b0 == 0xCF and b1 == 0xFA and b2 == 0xED and b3 == 0xFE) or
+        (b0 == 0xFE and b1 == 0xED and b2 == 0xFA and b3 == 0xCF) or
+        (b0 == 0xCE and b1 == 0xFA and b2 == 0xED and b3 == 0xFE) or
+        (b0 == 0xFE and b1 == 0xED and b2 == 0xFA and b3 == 0xCE))
+    val coff_magic = (
+        (b0 == 0x64 and b1 == 0x86) or (b0 == 0x4C and b1 == 0x01) or
+        (b0 == 0x64 and b1 == 0xAA))
+    if not elf_magic and not macho_magic and not coff_magic:
+        return llvm_object_stage_fail(stage_dir, diagnostic_path,
+            "llc produced object without recognized magic", 1)
+    val publish_status = rt_file_publish_noreplace(staged_obj_path, obj_path)
+    if publish_status == 1:
+        # Publication is the commit point. Once the canonical destination is
+        # visible and valid, cleanup cannot turn success into failure.
+        if not dir_remove(stage_dir, true):
+            backend_aot_write_diagnostic(diagnostic_path,
+                "warning: published object; private staging cleanup failed")
+        return 0
+    if publish_status == 0:
+        return llvm_object_stage_fail(stage_dir, diagnostic_path,
+            "AOT object destination already exists", 1)
+    llvm_object_stage_fail(stage_dir, diagnostic_path,
+        "AOT object publication failed", 1)
+
 fn llvm_target_flags(config: LlvmTargetConfig) -> text:
     var flags = ""
     if config.features.len() > 0:
@@ -467,6 +613,7 @@ export llvm_bootstrap_last_object_path, extract_symbols_nm
 export llvm_target_flags, generate_wasm_runtime_declarations
 export compile_ir_to_wasm, to_mir_opt_level
 export compile_ir_to_object
+export compile_ir_to_object_path
 export find_llc, find_opt, opt_available, llc_available
 export find_wasm_ld, find_wasm_opt, find_wasi_sysroot
 # ============================================================================

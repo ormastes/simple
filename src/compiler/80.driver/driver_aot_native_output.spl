@@ -6,10 +6,16 @@
 #
 # Backend helpers for module compilation and backend resolution
 use compiler.common.diagnostics.span.{Span}
-use std.io_runtime.{dir_create, file_copy, file_exists, hash_text}
+use std.io_runtime.{dir_create, file_copy, file_exists, hash_text,
+    file_size_raw, file_delete}
+use std.nogc_sync_mut.io.file_ops.{file_is_regular_no_follow,
+    file_read_regular_no_follow_bounded, secure_temp_dir_raw}
+use std.nogc_sync_mut.io.dir_ops.{dir_remove}
+use std.nogc_sync_mut.path.{dirname}
 use std.file_system.{file_write_text, file_read_text}
 use compiler.backend.backend.backend_helpers.{compile_module_with_backend,
     compile_module_with_backend_target_cpu_storage_bindings, get_effective_backend_name}
+use compiler.backend.backend.backend_types.{CompiledModule, CompileError}
 use compiler.backend.llvm_backend_tools.{llvm_bootstrap_last_object_path}
 use compiler.backend.backend.llvm_capability.{find_archive_portable}
 use std.platform.{get_host_os}
@@ -322,25 +328,57 @@ fn driver_native_build_cache_scope(backend: text, cache_dir: text, target: text,
     val cache_scope_root = _sffi_path_join(cache_dir, scope)
     (cache_scope_root, scope)
 
-fn driver_native_module_cache_source(ctx: CompileContext, module_name: text) -> text:
+fn driver_native_frozen_source_lookup(
+    source_paths: [text], source_contents: [text], source_module_names: [text],
+    module_name: text
+) -> (text, text):
+    """Return the unique physical path and full-content identity retained by
+    phase 1. Malformed inventories, duplicate module names, and path aliases
+    fail closed instead of admitting an object under an ambiguous source."""
+    if source_paths.len() != source_contents.len() or
+            source_paths.len() != source_module_names.len():
+        return ("", "")
     var found_path = ""
-    for source in ctx.sources:
-        if source.module_name == module_name:
-            found_path = source.path
-            break
-    if found_path == "":
-        return ""
+    var identity = ""
+    var module_count = 0
+    var source_index = 0
+    while source_index < source_module_names.len():
+        if source_module_names[source_index] == module_name:
+            found_path = source_paths[source_index]
+            identity = sha256_text(source_contents[source_index])
+            module_count = module_count + 1
+        source_index = source_index + 1
+    if module_count != 1 or found_path == "":
+        return ("", "")
     # A single file can be loaded under multiple module aliases. BuildCache is
     # keyed by source path, so sharing that entry would let one alias reuse the
     # other alias's object. Fail closed for aliases instead of guessing.
     var path_count = 0
-    for source in ctx.sources:
-        if source.path == found_path:
+    for source_path in source_paths:
+        if source_path == found_path:
             path_count = path_count + 1
     if path_count == 1:
-        found_path
-    else:
-        ""
+        return (found_path, identity)
+    ("", "")
+
+fn driver_native_module_cache_source(ctx: CompileContext, module_name: text) -> text:
+    val (path, _) = driver_native_frozen_source_lookup(
+        ctx.source_paths_owner, ctx.source_contents_owner,
+        ctx.source_module_names_owner, module_name)
+    path
+
+fn driver_native_module_source_identity(
+    ctx: CompileContext, module_name: text
+) -> text:
+    val (_, identity) = driver_native_frozen_source_lookup(
+        ctx.source_paths_owner, ctx.source_contents_owner,
+        ctx.source_module_names_owner, module_name)
+    identity
+
+fn driver_native_disk_source_identity(source_path: text) -> text:
+    match SourceFile.load(source_path):
+        case Ok(source): sha256_text(source.content)
+        case Err(_): ""
 
 fn driver_native_module_source_identity(
     ctx: CompileContext, module_name: text
@@ -1493,12 +1531,15 @@ fn _compile_frozen_module_capsule(
     if trace:
         print "[NATIVE] compiling module: {name}"
         _sffi_stdout_flush()
-    val result = _compile_selected_module(backend_name, is_release, opt_level,
+    # Rebuild the error variant while its text payload is bound in this frame.
+    # Returning the already-consumed composite `result` forwarded only its tag
+    # through an early self-hosted bootstrap ABI, so the next caller observed
+    # `Err("")` even though the object-path driver had read the llc diagnostic.
+    match _compile_selected_module(backend_name, is_release, opt_level,
         capsule.output_base,
         name, capsule.mir_module, capsule.storage_snapshot,
-        capsule.target_cpu, backend_session)
-    match result:
-        case Err(_): return result
+        capsule.target_cpu, backend_session):
+        case Err(error): return Err(error)
         case Ok(object_path):
             if not capsule.identity_valid():
                 return Err("AOT compile error in {name}: capsule-mir-lease-violated")
@@ -1538,26 +1579,53 @@ fn _compile_selected_module(backend_name: text, is_release: bool, opt_level: i64
             return Err("Bootstrap empty object compile failed: {cc_err}")
         return Ok(obj_path)
 
-    val compiled = if val session = backend_session:
-        session.compile_aot_module(
+    # Finish the Result inside the selected provider branch. A self-hosted
+    # conditional composite temporary can outlive its active flat payload and
+    # later render that raw word as `<invalid-heap:...>`.
+    if val session = backend_session:
+        val obj_path = "{output_base}.{name}.o"
+        val diagnostic_dir = secure_temp_dir_raw(
+            dirname(obj_path), "simple-aot-diagnostic")
+        if diagnostic_dir == "":
+            return Err("AOT compile error in {name}: diagnostic staging unavailable")
+        val diagnostic_path = diagnostic_dir + "/message"
+        val status = session.compile_aot_into_path(
             mir_module, is_release, opt_level, frozen_target_cpu,
-            storage_snapshot.sites)
-    else:
+            storage_snapshot.sites, obj_path, diagnostic_path)
+        if status != 0:
+            var detail = "backend object-path status {status}"
+            match file_read_regular_no_follow_bounded(diagnostic_path, 4096):
+                case Ok(message):
+                    if message != "":
+                        detail = message
+                case Err(_): ()
+            if not dir_remove(diagnostic_dir, true):
+                detail = "{detail}; diagnostic staging cleanup failed: {diagnostic_dir}"
+            return Err("AOT compile error in {name}: {detail}")
+        match file_read_regular_no_follow_bounded(diagnostic_path, 4096):
+            case Ok(message):
+                if message != "":
+                    print "warning: backend AOT: {message}"
+            case Err(_): ()
+        if not dir_remove(diagnostic_dir, true):
+            print "warning: published object; diagnostic staging cleanup failed: {diagnostic_dir}"
+        if (not file_is_regular_no_follow(obj_path)
+            or file_size_raw(obj_path) <= 0):
+            return Err("AOT compile error in {name}: invalid object output")
+        return Ok(obj_path)
+    _finish_selected_module_compile(
         compile_module_with_backend_target_cpu_storage_bindings(
             backend_name, mir_module, is_release, opt_level, frozen_target_cpu,
-            storage_snapshot.sites)
+            storage_snapshot.sites), output_base, name)
 
+fn _finish_selected_module_compile(
+    compiled: Result<CompiledModule, CompileError>,
+    output_base: text, name: text
+) -> Result<text, text>:
+    # Keep Result and optional object-code payloads inside their binding scope.
     match compiled:
         case Err(err):
-            return Err("AOT compile error in {name}: {err.to_text()}")
-        case _:
-            ()
-
-    # Flat-safe extraction: .unwrap() on this Result returns a 0-nil on the
-    # stage4 native lane (the nil-receiver guard catches 0 while `== nil`
-    # only sees sentinel 3); match-arm payload extraction is the verified
-    # path. Same for the flat [u8]? object_code — if-val, not .unwrap().
-    match compiled:
+            Err("AOT compile error in {name}: {err.to_text()}")
         case Ok(module):
             if val obj_bytes = module.object_code:
                 val obj_path = "{output_base}.{name}.o"

@@ -1,0 +1,93 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+cd "$ROOT_DIR"
+
+BUILD_DIR=${BUILD_DIR:-build/test-artifacts/01_unit/runtime/math-classification-parity}
+RUNTIME_OBJ=$BUILD_DIR/runtime_native.o
+TEST_OBJ=$BUILD_DIR/test.o
+HOSTED_TEST_BIN=$BUILD_DIR/hosted-c-test
+PURE_ARCHIVE=$BUILD_DIR/core_math.a
+PURE_TEST_BIN=$BUILD_DIR/pure-simple-test
+CO_LINK_TEST_BIN=$BUILD_DIR/pure-strong-c-weak-test
+mkdir -p "$BUILD_DIR"
+
+for symbol in rt_math_is_nan rt_math_is_inf rt_math_is_finite; do
+    grep -Fq "pub fn $symbol(x: f64) -> bool:" src/runtime/simple_core/core_math.spl
+    grep -Fq "extern fn $symbol(x: f64) -> bool" \
+        src/compiler_rust/lib/std/src/core/math.spl
+done
+if rg -n 'extern fn rt_math_is_(nan|inf|finite)\(x: f32\)' \
+        --glob '*.spl' src >/dev/null; then
+    echo 'FAIL: f32 caller still targets the canonical f64 classification ABI' >&2
+    exit 1
+fi
+grep -Fq 'extern fn rt_math_is_nan(x: f64) -> bool' \
+    src/lib/nogc_sync_mut/sffi/math.spl
+grep -Fq 'rt_math_is_nan(x as f64)' src/lib/nogc_sync_mut/sffi/math.spl
+grep -Fq 'extern fn rt_math_is_inf(x: f64) -> bool' \
+    src/lib/nogc_sync_mut/sffi/math.spl
+grep -Fq 'rt_math_is_inf(x as f64)' src/lib/nogc_sync_mut/sffi/math.spl
+grep -Fq 'return x != x' src/runtime/simple_core/core_math.spl
+grep -Fq 'return not rt_math_is_nan(x) and not rt_math_is_inf(x)' \
+    src/runtime/simple_core/core_math.spl
+
+case "$(uname -s)" in
+    Linux) ;;
+    *) echo 'SKIP: portable source/ABI contract passed; production co-link probe requires ELF'; exit 0 ;;
+esac
+
+cc -std=c11 -D_GNU_SOURCE -O0 -ffunction-sections -fdata-sections \
+    -Isrc/runtime -c src/runtime/runtime_native.c -o "$RUNTIME_OBJ"
+cc -std=c11 -D_GNU_SOURCE -O0 -ffunction-sections -fdata-sections \
+    -Isrc/runtime -c test/01_unit/runtime/runtime_math_classification_parity_test.c \
+    -o "$TEST_OBJ"
+cc "$TEST_OBJ" "$RUNTIME_OBJ" -Wl,-z,defs -Wl,--gc-sections \
+    -lm -ldl -lpthread -o "$HOSTED_TEST_BIN"
+
+for symbol in rt_math_is_nan rt_math_is_inf rt_math_is_finite; do
+    test "$(nm -g --defined-only "$HOSTED_TEST_BIN" | awk -v symbol="$symbol" '$NF == symbol { count++ } END { print count + 0 }')" -eq 1
+done
+"$HOSTED_TEST_BIN"
+
+if [ "${1-}" = --hosted-c-only ]; then
+    echo 'PASS: hosted-C behavior/ABI and pure-Simple source contract'
+    exit 0
+fi
+
+SIMPLE_BINARY=${SIMPLE_BINARY:?set SIMPLE_BINARY to an admitted pure-Simple compiler}
+identity=$($SIMPLE_BINARY --version 2>&1) || {
+    printf '%s\n' "$identity" >&2
+    exit 1
+}
+case "$identity" in
+    *'Rust-built'*|*'bootstrap seed only'*|*'non-production'*)
+        echo 'FAIL: Rust seed/fallback cannot certify the pure-Simple owner' >&2
+        exit 1
+        ;;
+esac
+
+SIMPLE_NO_STUB_FALLBACK=1 "$SIMPLE_BINARY" native-build \
+    --backend cranelift --source src/runtime/simple_core --entry-closure \
+    --entry src/runtime/simple_core/core_math.spl --no-mangle --emit-archive \
+    --cache-dir "$BUILD_DIR/pure-cache" --target x86_64-unknown-linux-gnu \
+    --output "$PURE_ARCHIVE"
+cc "$TEST_OBJ" "$PURE_ARCHIVE" -Wl,-z,defs -Wl,--gc-sections \
+    -lm -o "$PURE_TEST_BIN"
+for symbol in rt_math_is_nan rt_math_is_inf rt_math_is_finite; do
+    test "$(nm -g --defined-only "$PURE_TEST_BIN" | awk -v symbol="$symbol" '$NF == symbol { count++ } END { print count + 0 }')" -eq 1
+done
+"$PURE_TEST_BIN"
+
+# Production composition carries both archives: the pure object is strong and
+# must resolve ahead of the hosted C compatibility provider, which stays weak.
+cc "$TEST_OBJ" -Wl,--whole-archive "$PURE_ARCHIVE" "$RUNTIME_OBJ" \
+    -Wl,--no-whole-archive -Wl,-z,defs -Wl,--gc-sections \
+    -lm -ldl -lpthread -o "$CO_LINK_TEST_BIN"
+for symbol in rt_math_is_nan rt_math_is_inf rt_math_is_finite; do
+    test "$(nm -g --defined-only "$CO_LINK_TEST_BIN" | awk -v symbol="$symbol" '$NF == symbol && $2 == "T" { count++ } END { print count + 0 }')" -eq 1
+done
+"$CO_LINK_TEST_BIN"
+
+echo 'PASS: pure-Simple and hosted-C math classification providers preserve IEEE-754 parity'

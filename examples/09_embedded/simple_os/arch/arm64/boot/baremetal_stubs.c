@@ -328,7 +328,7 @@ RuntimeValue rt_string_new(RuntimeValue data, RuntimeValue len_val)
     if (!s) return NIL_VALUE;
     s->hdr.type = HEAP_STRING;
     s->hdr.size = (uint32_t)(sizeof(RuntimeString) + (size_t)len + 1);
-    s->len = (uint32_t)len;
+    s->len = (uint64_t)len;
     const char *src = (const char *)(uintptr_t)data;
     if (src && len > 0) __builtin_memcpy(s->data, src, (size_t)len);
     s->data[len] = '\0';
@@ -343,7 +343,7 @@ RuntimeValue rt_string_from_cstr(const char *cstr)
     if (!s) return NIL_VALUE;
     s->hdr.type = HEAP_STRING;
     s->hdr.size = (uint32_t)(sizeof(RuntimeString) + len + 1);
-    s->len = (uint32_t)len;
+    s->len = (uint64_t)len;
     __builtin_memcpy(s->data, cstr, len);
     s->data[len] = '\0';
     return ENCODE_PTR(s);
@@ -2306,7 +2306,14 @@ S1(rt_math_abs) S1(rt_math_floor) S1(rt_math_ceil) S1(rt_math_round)
 S1(rt_math_log) S1(rt_math_log2) S1(rt_math_log10) S1(rt_math_exp)
 S2(rt_math_min) S2(rt_math_max) S2(rt_math_pow)
 S0(rt_math_random) S0(rt_math_pi) S0(rt_math_e) S0(rt_math_inf) S0(rt_math_nan)
-S1(rt_math_is_nan) S1(rt_math_is_inf)
+_Bool rt_math_is_nan(double x) { return x != x; }
+_Bool rt_math_is_inf(double x) {
+    double inf = 1.0e308 * 10.0;
+    return x == inf || x == -inf;
+}
+_Bool rt_math_is_finite(double x) {
+    return !rt_math_is_nan(x) && !rt_math_is_inf(x);
+}
 
 RuntimeValue rt_port_outb(RuntimeValue p, RuntimeValue v) { (void)p; (void)v; return NIL_VALUE; }
 RuntimeValue rt_port_outw(RuntimeValue p, RuntimeValue v) { (void)p; (void)v; return NIL_VALUE; }
