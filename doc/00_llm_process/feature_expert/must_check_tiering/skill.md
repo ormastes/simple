@@ -90,15 +90,30 @@ logic are read from the BASE ref, never the PR head, and a PR touching
 refused admission outright — a receipt may never admit its own rules, so the PR
 that adds a key always runs `full` itself.
 
-Two gaps are open and must not be papered over. **Delivery:** design D2 puts the
-receipt in a git note under `refs/notes/ci-receipts` keyed by the TREE object;
-the landed scripts and `repo-hygiene.yml` instead read the tracked path
-`doc/08_tracking/check/local_ci_receipt.v1.txt`, and `git notes` appears nowhere
-in them. Committing the receipt re-creates the §3.1 circularity, so no PR can
-deliver one today. **Identity:** `decide()` resolves change-id header, else
-`git patch-id --stable` for non-merge commits, else unbindable; but
-`verify-local-ci-receipt.shs` reads change-id headers only and has no fallback by
-design. Measured 2026-09-06, 0 of the last 40 origin/main commits and 0 of PR
-#380's head commits carry a change-id header, so every real PR resolves as
-patch-id and is refused into `full`. Operator guide, with the full verdict-string
+Identity is TWO KINDS and both are supported. The receipt carries
+`identities: <n>` then `identity: <kind> <value>` lines, kind in
+`{change, patch}`, deduplicated and sorted ascending on the whole
+`"<kind> <value>"` string: the jj `change-id` header when present, else
+`git show <sha> | git patch-id --stable` for non-merge commits, else unbindable
+with no third fallback. The kind is part of the SIGNED bytes, so a `patch`
+identity never satisfies a `change` identity and a kind mismatch has its own
+verdict — deliberate, because interchangeable kinds would be a forgery surface.
+The fallback is load-bearing, not a nicety: measured 2026-09-06, 0 of the last
+40 origin/main commits and 0 of PR #380's head commits carry a change-id header,
+so without it the feature would never engage on a real PR. Verified end to end
+on `c70a818a0` (no change-id header): sign exit 0 binding
+`patch a251811056b6100759aab75b4863154ba3d3ad3f`, verify exit 0, tamper exit 1.
+Selftests verifier 25/25, signer 18/18.
+
+Delivery is a git note on `refs/notes/ci-receipts` keyed by the PR HEAD SHA (not
+the tree, as design D2 first proposed) — it cannot be a tracked file, because
+committing the receipt changes the tree it binds. **The signer has no
+note-emission flag** (`git notes` and `--note` occur zero times in it), so the
+producer runs `cat <receipt> <receipt>.sig > /tmp/note`,
+`git notes --ref=ci-receipts add -f -F /tmp/note <head-sha>`,
+`git push origin refs/notes/ci-receipts` by hand. That is the top usability gap.
+The whole fast path is LOCAL-ONLY so far — it has never been exercised on a CI
+runner; do not describe it as runner-proven. Also note the workflow emits FOUR
+modes (`docs` was added alongside `sanity`/`escalate`/`full`) while its own
+header comment still says three. Operator guide, with the full verdict-string
 troubleshooting table: `doc/07_guide/infra/local_ci_receipt/operator_guide.md`.
