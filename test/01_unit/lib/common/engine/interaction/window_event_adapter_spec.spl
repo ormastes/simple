@@ -1,47 +1,43 @@
 # @cover src/lib/common/engine/interaction/window_event_adapter.spl 80%
 """
-# Window-event → interaction-core input transport — conformance spec
+## Purpose and audience
+Conformance specification for the input-transport bridge
+`src/lib/common/engine/interaction/window_event_adapter.spl`: the
+normalized scalar `WindowEventRecord` contract mapped onto the
+interaction core's `PointerEvent2D`. Audience: maintainers of the
+hosted/SimpleOS window backends and the winit bridge that enqueue
+records into `WindowEventLoop`, and anyone adding a new
+`WINDOW_EVENT_*` kind that must (or must not) cross this bridge.
 
-**Feature IDs:** N/A (lane L3 / decision D4 of the unified 2D event plan)
-**Category:** Stdlib / Engine
-**Status:** Implemented
-**Requirements:** N/A
-**Plan:** doc/03_plan/ui/unified_2d_engine/unified_2d_event_panel_offload_2026-07-30.md
-**Design:** N/A
-**Research:** N/A
+## Operator workflow
+Run the spec from the repo root with the seed runner:
+./src/compiler_rust/target/bootstrap/simple run test/01_unit/lib/common/engine/interaction/window_event_adapter_spec.spl
+Read the trailing SPEC FILE VERDICT line. Records are injected through
+the same `WindowEventLoop.enqueue` path production backends use,
+drained with `drain_pointer_events`, and one drained event is routed
+end-to-end through `hit_stack` plus `event_route.dispatch`.
 
-## Overview
+## Compatibility and limitations
+The adapter carries the milli-unit contract: `x_milli`/`delta_*_milli`
+divide by 1000 into whole `PointerEvent2D` units. Only POINTER_BUTTON,
+POINTER_MOVE, and WHEEL records map; key, text, focus, resize, and
+close records are consumed and discarded. Adapter output keeps
+`target == -1` — the caller resolves it via `hit_stack` before
+dispatch. WHEEL is the newest kind (code 8) and deltas are additive
+and signed.
 
-Covers the input-transport bridge
-(`src/lib/common/engine/interaction/window_event_adapter.spl`): the
-normalized scalar `WindowEventRecord` contract (the ring that hosted/
-SimpleOS backends and the winit bridge enqueue into) mapped onto the
-interaction core's `PointerEvent2D`, including the FIRST consumer of
-`WINDOW_EVENT_WHEEL`. Records are injected through the same
-`WindowEventLoop.enqueue` path that `SimpleWindowBackend.
-inject_window_event` forwards to, drained with `drain_pointer_events`,
-and one drained event is routed end-to-end through `hit_stack` +
-`event_route.dispatch` to a listener.
-
-## Key Concepts
-
-| Concept | Description |
-|---------|-------------|
-| Milli-unit contract | `WindowEventRecord` carries `x_milli`/`delta_*_milli`; the adapter divides by 1000 into `PointerEvent2D` whole units |
-| Pointer filter | Only POINTER_BUTTON / POINTER_MOVE / WHEEL records map; key, text, focus, resize, close are consumed and discarded |
-| POINTER_WHEEL | New `PointerEvent2D` kind (code 8) with additive `delta_x`/`delta_y` fields (0 on every non-wheel event) |
-| Unresolved target | Adapter output has `target == -1`; the caller resolves it via `hit_stack` before dispatch |
-
-## Examples
-
-A press record at (50_000, 60_000) milli with button 2 drains as one
-POINTER_DOWN at (50, 60) with buttons 2. A wheel record with
-`delta_y_milli = -3000` drains as POINTER_WHEEL with `delta_y == -3`.
-A key record and a resize record injected between pointer records are
-filtered out, leaving only the pointer events in queue order. A drained
-POINTER_DOWN whose coords hit a `HitProxy2D` box dispatches through
-`event_route.dispatch` and fires the box's listener.
+## Verification guidance and troubleshooting
+A scenario that loses the button id or a milli->unit coordinate means
+the mapping dropped a record field — compare the stamped statistics
+against the `_button_record`/`_wheel_record` literals in the scenario.
+A drained list that is too long means the pointer filter started
+letting key/resize records through; the filter scenarios pin that.
 """
+
+# Lifecycle: doc/01_research/ui/engine2d_gc_tier/analysis_2026-07-25.md ;
+# doc/03_plan/ui/unified_2d_engine/unified_2d_event_panel_offload_2026-07-30.md ;
+# doc/04_architecture/ui/engine_2d.md ;
+# doc/05_design/engine2d_four_backend_capture.md
 
 use std.spec.*
 use std.common.io.window_event.{
@@ -95,110 +91,143 @@ fn _resize_record(handle: i64, width: i64, height: i64) -> WindowEventRecord:
 fn handler_none(e: PointerEvent2D) -> i32:
     ACTION_NONE
 
+# @manual_section: record-mapping
+
 describe "pointer_event_from_window_record — record-to-event mapping":
 
     it "maps a button PRESS record to POINTER_DOWN preserving button id and milli->unit coords":
+        # @req REQ-2DUI-ADAPTER-001
+        step("Inject a press record at (50000, 60000) milli with button 2")
         val rec = _button_record(7, 1, WINDOW_ACTION_PRESS, 2, 50000, 60000)
         val mapped = pointer_event_from_window_record(rec)
         assert_true(mapped.matched)
+        # @capture(statistics): the mapped kind, coordinates, button and pointer id
         expect(mapped.event.kind).to_equal(POINTER_DOWN)
-        expect(mapped.event.x).to_equal(50)
-        expect(mapped.event.y).to_equal(60)
-        expect(mapped.event.buttons).to_equal(2)
-        expect(mapped.event.pointer_id).to_equal(7)
-        step("target starts unresolved -- hit testing is the caller's job")
-        expect(mapped.event.target).to_equal(-1)
+        expect(mapped.event.x).to_equal(50)  # oracle: 50000 milli units divide by 1000 to 50 whole units
+        expect(mapped.event.y).to_equal(60)  # oracle: 60000 milli units divide by 1000 to 60 whole units
+        expect(mapped.event.buttons).to_equal(2)  # oracle: the record's button id passes through unchanged
+        expect(mapped.event.pointer_id).to_equal(7)  # oracle: the record's window handle becomes the pointer id
+        step("Confirm the target starts unresolved -- hit testing is the caller's job")
+        expect(mapped.event.target).to_equal(-1)  # oracle: the adapter never resolves a target itself
 
     it "maps a button RELEASE record to POINTER_UP":
+        # @req REQ-2DUI-ADAPTER-002
+        step("Inject a release record with button 1")
         val rec = _button_record(7, 2, WINDOW_ACTION_RELEASE, 1, 10000, 20000)
         val mapped = pointer_event_from_window_record(rec)
         assert_true(mapped.matched)
+        # @capture(statistics): the mapped kind and button id
         expect(mapped.event.kind).to_equal(POINTER_UP)
-        expect(mapped.event.buttons).to_equal(1)
+        expect(mapped.event.buttons).to_equal(1)  # oracle: the release keeps the button that was released
 
     it "maps a pointer-move record to POINTER_MOVE with zero deltas":
+        # @req REQ-2DUI-ADAPTER-003
+        step("Inject a move record at (15000, 25000) milli")
         val rec = window_event_pointer(7, 3, 0, WINDOW_EVENT_POINTER_MOVE, 15000, 25000, 0, 0)
         val mapped = pointer_event_from_window_record(rec)
         assert_true(mapped.matched)
+        # @capture(statistics): the mapped kind, coordinates and zero deltas
         expect(mapped.event.kind).to_equal(POINTER_MOVE)
-        expect(mapped.event.x).to_equal(15)
-        expect(mapped.event.y).to_equal(25)
-        expect(mapped.event.delta_x).to_equal(0)
-        expect(mapped.event.delta_y).to_equal(0)
+        expect(mapped.event.x).to_equal(15)  # oracle: 15000 milli units divide by 1000 to 15 whole units
+        expect(mapped.event.y).to_equal(25)  # oracle: 25000 milli units divide by 1000 to 25 whole units
+        expect(mapped.event.delta_x).to_equal(0)  # oracle: move records carry no wheel delta
+        expect(mapped.event.delta_y).to_equal(0)  # oracle: move records carry no wheel delta
 
     it "maps a WHEEL record to POINTER_WHEEL preserving signed milli->unit deltas":
-        step("WINDOW_EVENT_WHEEL gets its first consumer")
+        # @req REQ-2DUI-ADAPTER-004
+        step("Inject a wheel record with signed deltas (+2000, -3000) milli")
         val rec = _wheel_record(7, 4, 30000, 40000, 2000, -3000)
         val mapped = pointer_event_from_window_record(rec)
         assert_true(mapped.matched)
+        # @capture(statistics): the mapped kind, position and signed deltas
         expect(mapped.event.kind).to_equal(POINTER_WHEEL)
-        expect(mapped.event.x).to_equal(30)
-        expect(mapped.event.y).to_equal(40)
-        expect(mapped.event.delta_x).to_equal(2)
-        expect(mapped.event.delta_y).to_equal(-3)
+        expect(mapped.event.x).to_equal(30)  # oracle: 30000 milli units divide by 1000 to 30 whole units
+        expect(mapped.event.y).to_equal(40)  # oracle: 40000 milli units divide by 1000 to 40 whole units
+        expect(mapped.event.delta_x).to_equal(2)  # oracle: +2000 milli units divide by 1000 to +2
+        expect(mapped.event.delta_y).to_equal(-3)  # oracle: -3000 milli units divide by 1000 to -3, sign preserved
 
     it "does not map key or resize records":
+        # @req REQ-2DUI-ADAPTER-005
+        step("Offer a key record and a resize record to the mapper")
         val key_rec = window_event_key(7, 5, 0, 65, 30, WINDOW_ACTION_PRESS, 0)
         val key_mapped = pointer_event_from_window_record(key_rec)
         expect(key_mapped.matched).to_equal(false)
         val resize_mapped = pointer_event_from_window_record(_resize_record(7, 800, 600))
         expect(resize_mapped.matched).to_equal(false)
-        step("the placeholder event carries an unresolved target and must not be dispatched")
-        expect(key_mapped.event.target).to_equal(-1)
+        # @capture(statistics): the unmatched flags for key and resize records
+        step("Confirm the placeholder event carries an unresolved target and must not be dispatched")
+        expect(key_mapped.event.target).to_equal(-1)  # oracle: an unmapped record yields an unusable placeholder target
+
+# @manual_section: ring-drain
 
 describe "drain_pointer_events — ring-to-event-list transport":
 
     it "drains injected down/move/up/wheel records in queue order and empties the ring":
+        # @req REQ-2DUI-ADAPTER-006
+        step("Enqueue down, move, up and wheel records in that order")
         var events = WindowEventLoop.create(16, 4)
         expect(events.enqueue(_button_record(9, 1, WINDOW_ACTION_PRESS, 1, 5000, 6000))).to_equal(WINDOW_STATUS_OK)
         expect(events.enqueue(window_event_pointer(9, 2, 0, WINDOW_EVENT_POINTER_MOVE, 7000, 8000, 0, 0))).to_equal(WINDOW_STATUS_OK)
         expect(events.enqueue(_button_record(9, 3, WINDOW_ACTION_RELEASE, 1, 7000, 8000))).to_equal(WINDOW_STATUS_OK)
         expect(events.enqueue(_wheel_record(9, 4, 7000, 8000, 0, -120000))).to_equal(WINDOW_STATUS_OK)
 
+        step("Drain the ring and check each event in queue order")
         val drained = drain_pointer_events(events)
-        expect(drained.len()).to_equal(4)
+        # @capture(statistics): drained event kinds, coordinates and deltas in order
+        expect(drained.len()).to_equal(4)  # oracle: four pointer records drain as four events
         expect(drained[0].kind).to_equal(POINTER_DOWN)
-        expect(drained[0].x).to_equal(5)
-        expect(drained[0].y).to_equal(6)
-        expect(drained[0].buttons).to_equal(1)
+        expect(drained[0].x).to_equal(5)  # oracle: 5000 milli units divide by 1000 to 5 whole units
+        expect(drained[0].y).to_equal(6)  # oracle: 6000 milli units divide by 1000 to 6 whole units
+        expect(drained[0].buttons).to_equal(1)  # oracle: the press button id survives the ring roundtrip
         expect(drained[1].kind).to_equal(POINTER_MOVE)
-        expect(drained[1].x).to_equal(7)
+        expect(drained[1].x).to_equal(7)  # oracle: 7000 milli units divide by 1000 to 7 whole units
         expect(drained[2].kind).to_equal(POINTER_UP)
         expect(drained[3].kind).to_equal(POINTER_WHEEL)
-        expect(drained[3].delta_y).to_equal(-120)
-        step("the ring is fully consumed")
-        expect(events.queued_count()).to_equal(0)
+        expect(drained[3].delta_y).to_equal(-120)  # oracle: -120000 milli units divide by 1000 to -120
+        step("Confirm the ring is fully consumed")
+        expect(events.queued_count()).to_equal(0)  # oracle: a full drain leaves no records queued
 
     it "filters key and resize records out of the drained list but still consumes them":
+        # @req REQ-2DUI-ADAPTER-007
+        step("Enqueue key, press and resize records interleaved")
         var events = WindowEventLoop.create(16, 4)
         expect(events.enqueue(window_event_key(9, 1, 0, 65, 30, WINDOW_ACTION_PRESS, 0))).to_equal(WINDOW_STATUS_OK)
         expect(events.enqueue(_button_record(9, 2, WINDOW_ACTION_PRESS, 1, 5000, 6000))).to_equal(WINDOW_STATUS_OK)
         expect(events.enqueue(_resize_record(9, 800, 600))).to_equal(WINDOW_STATUS_OK)
 
+        step("Drain the ring and keep only the pointer event")
         val drained = drain_pointer_events(events)
-        expect(drained.len()).to_equal(1)
+        # @capture(statistics): drained length and the surviving event kind
+        expect(drained.len()).to_equal(1)  # oracle: only the pointer record among three drains
         expect(drained[0].kind).to_equal(POINTER_DOWN)
-        expect(events.queued_count()).to_equal(0)
+        expect(events.queued_count()).to_equal(0)  # oracle: filtered records are consumed, not left queued
 
     it "an empty ring drains to an empty list":
+        # @req REQ-2DUI-ADAPTER-008
+        step("Drain a freshly created ring with no records")
         var events = WindowEventLoop.create(4, 1)
         val drained = drain_pointer_events(events)
-        expect(drained.len()).to_equal(0)
+        # @capture(statistics): the drained list length
+        expect(drained.len()).to_equal(0)  # oracle: no records in means no events out
+
+# @manual_section: end-to-end-dispatch
 
 describe "end-to-end — injected record dispatched through the interaction core":
 
     it "a drained POINTER_DOWN resolves via hit_stack and fires a listener via dispatch":
+        # @req REQ-2DUI-ADAPTER-009
         step("Inject a press at (50, 50) in milli units")
         var events = WindowEventLoop.create(4, 1)
         expect(events.enqueue(_button_record(1, 1, WINDOW_ACTION_PRESS, 1, 50000, 50000))).to_equal(WINDOW_STATUS_OK)
         val drained = drain_pointer_events(events)
-        expect(drained.len()).to_equal(1)
+        # @capture(statistics): hit node id and fired listener node ids
+        expect(drained.len()).to_equal(1)  # oracle: the single press drains as one event
 
         step("Resolve the target with hit_stack over one proxy covering the point")
         val proxy = HitProxy2D.create(900, 0, 0, 100, 100)
         val parents: Dict<i64, i64> = {}
         val hit = hit_stack([proxy], parents, drained[0].x, drained[0].y)
-        expect(hit.primary).to_equal(900)
+        expect(hit.primary).to_equal(900)  # oracle: the point (50, 50) falls inside node 900's box
 
         step("Dispatch the drained event through event_route to a bubble listener")
         var event = drained[0]
@@ -207,6 +236,6 @@ describe "end-to-end — injected record dispatched through the interaction core
             EventListener2D.create(900, POINTER_DOWN, false, false, handler_none)
         ]
         val outcome = dispatch(event, listeners, hit.ancestor_path)
-        expect(outcome.fired_node_ids.len()).to_equal(1)
-        expect(outcome.fired_node_ids[0]).to_equal(900)
+        expect(outcome.fired_node_ids.len()).to_equal(1)  # oracle: exactly the target's listener fires
+        expect(outcome.fired_node_ids[0]).to_equal(900)  # oracle: the fired listener belongs to node 900
         assert_false(outcome.stopped)

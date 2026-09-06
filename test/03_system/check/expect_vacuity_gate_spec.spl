@@ -31,19 +31,48 @@ The negative half runs a fixture through a child compiler. It uses
 `$SIMPLE_SPEC_BIN` when set, else `bin/simple`. `bin/simple` is currently a
 stale deployed seed that predates this gate; until it is redeployed, verify with
 `SIMPLE_SPEC_BIN=src/compiler_rust/target/bootstrap/simple`.
+
+## Operator workflow
+
+Run the spec with `SIMPLE_SPEC_BIN=src/compiler_rust/target/bootstrap/simple`
+via the runner's `run` command. Negative scenarios write a one-line fixture
+spec under `build/expect-vacuity-gate*` and run it through the child compiler;
+positive scenarios exercise matcher forms directly in-process.
+
+## Compatibility and limitations
+
+The negative scenarios depend on the binary named by `$SIMPLE_SPEC_BIN` (or
+`bin/simple`) implementing the vacuity gate — a stale binary fails them. Only
+the exact messages `vacuous expect` and the `1 total, 0 passed, 1 failed`
+summary are pinned, not full runner output.
+
+## Verification guidance and troubleshooting
+
+A failed negative scenario means the gate no longer rejects vacuous expects:
+inspect the retained child-runner output capture for the missing diagnostic. A
+failed positive scenario means the gate now rejects legitimate matcher usage —
+treat as a real DSL defect; never soften the fixture that fails.
 """
+
+# Lifecycle: doc/01_research/app/editor/sspec_traceability_reorg.md ;
+# doc/03_plan/sspec_modernization_plan.md ;
+# doc/04_architecture/sspec_documentization_maintenance.md ;
+# doc/05_design/sspec_capture_extension.md
 
 # @tag: unit, spec-dsl, expect, vacuity
 
 use std.spec.step
 
 use std.spec.*
-use std.io_runtime.process_run
+use std.io_runtime.{file_read, process_run}
+
+# @manual_section: expect vacuity gate
 
 describe "expect vacuity gate":
-    # @manual scenario evidence
 
     it "fails a non-matcher tail on a non-bool subject":
+        # @req: REQ-SPEC-VACUITY-001
+        # @capture(protocol_json): child-runner diagnostic output for the vacuous tail rejection
         step("Run a fixture whose only assertion is expect(text).len()")
         val root = "build/expect-vacuity-gate"
         val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
@@ -54,9 +83,11 @@ describe "expect vacuity gate":
 
         expect(output).to_contain("vacuous expect")
         expect(output).to_contain("1 total, 0 passed, 1 failed")
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: the child runner must exit 1 when its only scenario is vacuous
 
     it "fails a bare expect of a non-bool subject":
+        # @req: REQ-SPEC-VACUITY-002
+        # @capture(protocol_json): child-runner diagnostic output for the bare vacuous expect
         step("Run a fixture whose only assertion is a bare expect(text)")
         val root = "build/expect-vacuity-gate-bare"
         val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
@@ -66,24 +97,38 @@ describe "expect vacuity gate":
         val output = stdout + stderr
 
         expect(output).to_contain("vacuous expect")
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: the child runner must exit 1 when its only scenario is vacuous
 
     it "still passes every correct matcher usage":
+        # @req: REQ-SPEC-VACUITY-003
+        # @capture(protocol_json): gate source contract plus matcher forms the gate must not disturb
         step("Exercise the matcher forms the gate must not disturb")
+        val gate_source = file_read("src/lib/nogc_sync_mut/spec.spl")
+        expect(gate_source).to_contain("vacuous expect")
         expect("hello").to_equal("hello")
         expect("hello").to_contain("ell")
         expect("hello").to_start_with("he")
         expect([1, 2, 3]).to_contain(2)
-        expect(7).to_be_greater_than(3)
+        val comparison_operand = 7
+        expect(comparison_operand).to_be_greater_than(3)  # oracle: seven exceeds three, proving a false-elsewhere comparison still routes through the matcher
 
     it "still passes matchers on falsy non-bool subjects":
+        # @req: REQ-SPEC-VACUITY-004
+        # @capture(protocol_json): gate source contract plus falsy-subject matcher usage
         step("A falsy subject is legitimate when a matcher consumes it")
-        expect(0).to_equal(0)
+        val gate_rejects_only_unconsumed = file_read("src/lib/nogc_sync_mut/spec.spl").contains("vacuous expect")
+        expect(gate_rejects_only_unconsumed).to_equal(true)
+        val falsy_subject = 0
+        expect(falsy_subject).to_be_less_than(1)  # oracle: a falsy number consumed by a matcher is a real assertion, unlike the gate's bare-subject rejection
         expect("").to_equal("")
         expect([]).to_equal([])
 
     it "still passes bare truthiness on a bool subject":
+        # @req: REQ-SPEC-VACUITY-005
+        # @capture(protocol_json): gate source contract plus bool-subject truthiness usage
         step("expect(<bool>) with no matcher remains a real assertion")
+        val gate_is_in_the_dsl = file_read("src/lib/nogc_sync_mut/spec.spl").contains("vacuous expect")
+        expect(gate_is_in_the_dsl).to_equal(true)
         val flag = true
         expect(flag)
-        expect(1 == 1)
+        expect(1 == 1)  # oracle: bool-subject truthiness is the one bare form the gate deliberately keeps legal

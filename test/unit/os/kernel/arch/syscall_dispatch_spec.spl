@@ -1,181 +1,222 @@
-# Purpose and audience: executable specification evidence for the owning engineering team.
-# @req REQ-SSPEC-UNIT
-# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+"""
+## Purpose and audience
+Executable contract for the SimpleOS syscall numbering table. The kernel's
+user-facing ABI is the set of `case N:` match arms in the dispatch table of
+`src/os/kernel/ipc/syscall.spl` (mirrored by `rt_syscall_dispatch` in the
+riscv baremetal boot stubs); any renumbering or handler rename silently breaks
+every ring-3 caller. Audience: kernel engineers touching the dispatch table
+and reviewers of syscall ABI stability.
+
+## Operator workflow
+Run this file with the seeded runner from the repository root
+(`./src/compiler_rust/target/bootstrap/simple run test/unit/os/kernel/arch/syscall_dispatch_spec.spl`)
+and read the `SPEC FILE VERDICT` line. Each scenario reads the shipped dispatch
+source, locates the numbered match arm for one syscall group, and asserts the
+arm is still present under its documented number.
+
+## Compatibility and limitations
+These scenarios pin the shipped source contract rather than booting a kernel:
+the runner environment cannot enter ring-3 or execute the riscv boot stubs, so
+the dispatch table itself is the deepest observable artifact. The contract
+covers the numbers the spec historically locked (0-13 process, 10-12 memory,
+20-23 IPC, 30-48 file, 50-51 time, 57-69 POSIX/libc, 70-77 net, 80-85 device,
+90-97 log/sysinfo); arms added later (78+, 98+) are out of scope.
+
+## Verification guidance and troubleshooting
+A failure means a numbered arm was renumbered, its handler comment renamed, or
+the dispatch table moved; re-check `src/os/kernel/ipc/syscall.spl` for the new
+number or spelling before editing the token here. All scenarios are
+deterministic and need no filesystem, network, or device.
+"""
+# Lifecycle: doc/01_research/hardware/riscv/rv64_user_mode_exec_local.md ;
+# doc/03_plan/os/in_guest_clang_selfhost_board_plan.md ;
+# doc/04_architecture/os/simpleos/kernel/simpleos_interfaces.md ;
+# doc/05_design/hardware/semihosting_system_api_design.md
+# @manual_section: syscall dispatch numbers
 
 # syscall_dispatch_spec.spl — Wave 10B
 #
 # Locks the canonical syscall number assignments used by the SimpleOS kernel.
-# These must match the switch cases in rt_syscall_dispatch (baremetal_stubs.c)
-# and the match arms in syscall_handler (src/os/kernel/ipc/syscall.spl).
-#
-# No FFI is used. We assert the numeric values are distinct small integers and
-# match the expected constants so that any future renumbering is caught here.
+# These must match the match arms in syscall_handler
+# (src/os/kernel/ipc/syscall.spl) and the switch cases in rt_syscall_dispatch
+# (baremetal_stubs.c). Each scenario reads the shipped dispatch source and
+# asserts the numbered arm for its group is still present, so any renumbering
+# is caught here.
 
-use std.spec.{describe, it, expect_eq, expect_true}
+use std.spec.{describe, it, expect}
+use std.spec.step
 
-# Canonical syscall numbers — must stay in sync with syscall.spl and
-# baremetal_stubs.c rt_syscall_dispatch.
-val SYS_EXIT:              u64 = 0
-val SYS_YIELD:             u64 = 1
-val SYS_SPAWN:             u64 = 2
-val SYS_WAIT:              u64 = 3
-val SYS_GETPID:            u64 = 4
-val SYS_LIST_TASKS:        u64 = 5
-val SYS_GET_TASK_INFO:     u64 = 6
-val SYS_SIGNAL:            u64 = 7
-val SYS_SET_PRIORITY:      u64 = 8
-val SYS_GET_PARENT_PID:    u64 = 9
-val SYS_MMAP:              u64 = 10
-val SYS_MUNMAP:            u64 = 11
-val SYS_MPROTECT:          u64 = 12
-val SYS_SPAWN_BINARY:      u64 = 13
-val SYS_IPC_SEND:          u64 = 20
-val SYS_IPC_RECV:          u64 = 21
-val SYS_IPC_CREATE_PORT:   u64 = 22
-val SYS_IPC_CONNECT:       u64 = 23
-val SYS_NOTIF_CREATE:      u64 = 24
-val SYS_NOTIF_SIGNAL:      u64 = 25
-val SYS_NOTIF_WAIT:        u64 = 26
-val SYS_NOTIF_POLL:        u64 = 27
-val SYS_NOTIF_DESTROY:     u64 = 28
-val SYS_NOTIF_WAIT_ANY:    u64 = 29
-val SYS_FILE_OPEN:         u64 = 30
-val SYS_FILE_READ:         u64 = 31
-val SYS_FILE_WRITE:        u64 = 32
-val SYS_FILE_CLOSE:        u64 = 33
-val SYS_FILE_STAT:         u64 = 34
-val SYS_FILE_MKDIR:        u64 = 35
-val SYS_FILE_READDIR:      u64 = 36
-val SYS_MOUNT:             u64 = 37
-val SYS_UNMOUNT:           u64 = 38
-val SYS_UNLINK:            u64 = 39
-val SYS_PLEDGE:            u64 = 40
-val SYS_UNVEIL:            u64 = 41
-val SYS_CAP_GRANT:         u64 = 42
-val SYS_FTRUNCATE:         u64 = 43
-val SYS_RENAME:            u64 = 44
-val SYS_RMDIR:             u64 = 45
-val SYS_LSEEK:             u64 = 46
-val SYS_GETCWD:            u64 = 47
-val SYS_CHDIR:             u64 = 48
-val SYS_CLOCK_GETTIME:     u64 = 50
-val SYS_SLEEP:             u64 = 51
-val SYS_POSIX_PROC_CREATE: u64 = 57
-val SYS_POSIX_IMAGE_RUN:   u64 = 59
-val SYS_DEBUG_WRITE:       u64 = 60
-val SYS_POSIX_CHILD_WAIT:  u64 = 61
-val SYS_POSIX_PIPE_PAIR:   u64 = 62
-val SYS_POSIX_FD_DUP2:     u64 = 63
-val SYS_POSIX_FD_DUP:      u64 = 64
-val SYS_DLOPEN:            u64 = 65
-val SYS_DLSYM:             u64 = 66
-val SYS_DLCLOSE:           u64 = 67
-val SYS_POSIX_POLL:        u64 = 68
-val SYS_POSIX_FCNTL:       u64 = 69
-val SYS_NET_SOCKET:        u64 = 70
-val SYS_NET_BIND:          u64 = 71
-val SYS_NET_LISTEN:        u64 = 72
-val SYS_NET_CONNECT:       u64 = 73
-val SYS_NET_ACCEPT:        u64 = 74
-val SYS_NET_SEND_TO:       u64 = 75
-val SYS_NET_RECV_FROM:     u64 = 76
-val SYS_NET_IF_CONFIG:     u64 = 77
-val SYS_DEV_ENUMERATE:     u64 = 80
-val SYS_DEV_GET_INFO:      u64 = 81
-val SYS_DEVICE_GRANT:      u64 = 82
-val SYS_MAP_BAR:           u64 = 83
-val SYS_ALLOC_DMA:         u64 = 84
-val SYS_FREE_DMA:          u64 = 85
-val SYS_LOG_WRITE:         u64 = 90
-val SYS_LOG_READ:          u64 = 91
-val SYS_SYSINFO:           u64 = 95
-val SYS_GET_HOSTNAME:      u64 = 96
-val SYS_SET_HOSTNAME:      u64 = 97
+extern fn rt_file_read_text(path: text) -> text
+
+val KERNEL_DISPATCH_SOURCE = "src/os/kernel/ipc/syscall.spl"
 
 describe "syscall dispatch numbers":
-    # @manual scenario evidence
     it "core process syscalls have expected values":
-        expect_eq(SYS_EXIT,           0)
-        expect_eq(SYS_YIELD,          1)
-        expect_eq(SYS_SPAWN,          2)
-        expect_eq(SYS_WAIT,           3)
-        expect_eq(SYS_GETPID,         4)
-        expect_eq(SYS_SPAWN_BINARY,   13)
+        # @req REQ-OS-SYSCALL-001
+        # @capture(statistics): process-group arm numbers found in the dispatch table
+        step("Read the kernel dispatch table and locate the process-group arms")
+        val kernel_dispatch = rt_file_read_text(KERNEL_DISPATCH_SOURCE)
+        val exit_routes_case_0 = kernel_dispatch.contains("case 0:     # Exit")
+        val yield_routes_case_1 = kernel_dispatch.contains("case 1:     # Yield")
+        val spawn_routes_case_2 = kernel_dispatch.contains("case 2:     # Spawn")
+        val wait_routes_case_3 = kernel_dispatch.contains("case 3:     # Wait")
+        val getpid_routes_case_4 = kernel_dispatch.contains("case 4:     # GetPid")
+        val spawn_binary_routes_case_13 = kernel_dispatch.contains("case 13:    # SpawnBinary")
+        expect(exit_routes_case_0).to_equal(true)  # oracle: SYS_EXIT is contracted as arm 0, the first dispatch entry
+        expect(yield_routes_case_1).to_equal(true)  # oracle: SYS_YIELD is contracted as arm 1
+        expect(spawn_routes_case_2).to_equal(true)  # oracle: SYS_SPAWN is contracted as arm 2
+        expect(wait_routes_case_3).to_equal(true)  # oracle: SYS_WAIT is contracted as arm 3
+        expect(getpid_routes_case_4).to_equal(true)  # oracle: SYS_GETPID is contracted as arm 4
+        expect(spawn_binary_routes_case_13).to_equal(true)  # oracle: SYS_SPAWN_BINARY is contracted as arm 13, closing the process group
 
     it "SYS_EXIT SYS_YIELD and SYS_SPAWN_BINARY are distinct":
-        expect_true(SYS_EXIT != SYS_YIELD)
-        expect_true(SYS_EXIT != SYS_SPAWN_BINARY)
-        expect_true(SYS_YIELD != SYS_SPAWN_BINARY)
+        # @req REQ-OS-SYSCALL-001
+        # @capture(bit_table): distinctness of the three core process arm numbers
+        step("Read the dispatch table and confirm the three core arms sit at different numbers")
+        val kernel_dispatch = rt_file_read_text(KERNEL_DISPATCH_SOURCE)
+        val exit_arm_at_zero = kernel_dispatch.contains("case 0:     # Exit")
+        val yield_arm_at_one = kernel_dispatch.contains("case 1:     # Yield")
+        val spawn_binary_arm_at_thirteen = kernel_dispatch.contains("case 13:    # SpawnBinary")
+        expect(exit_arm_at_zero).to_equal(true)  # oracle: arm 0 is reserved for Exit
+        expect(yield_arm_at_one).to_equal(true)  # oracle: arm 1 is reserved for Yield, distinct from Exit
+        expect(spawn_binary_arm_at_thirteen).to_equal(true)  # oracle: arm 13 is reserved for SpawnBinary, distinct from 0 and 1
 
     it "memory syscalls are in the 10-12 range":
-        expect_eq(SYS_MMAP,     10)
-        expect_eq(SYS_MUNMAP,   11)
-        expect_eq(SYS_MPROTECT, 12)
-        expect_true(SYS_MMAP < SYS_MUNMAP)
-        expect_true(SYS_MUNMAP < SYS_MPROTECT)
+        # @req REQ-OS-SYSCALL-002
+        # @capture(statistics): memory-group arm numbers found in the dispatch table
+        step("Read the kernel dispatch table and locate the memory-group arms")
+        val kernel_dispatch = rt_file_read_text(KERNEL_DISPATCH_SOURCE)
+        val mmap_routes_case_10 = kernel_dispatch.contains("case 10:    # Mmap")
+        val munmap_routes_case_11 = kernel_dispatch.contains("case 11:    # Munmap")
+        val mprotect_routes_case_12 = kernel_dispatch.contains("case 12:    # Mprotect")
+        expect(mmap_routes_case_10).to_equal(true)  # oracle: the memory group opens at arm 10
+        expect(munmap_routes_case_11).to_equal(true)  # oracle: Munmap sits between Mmap and Mprotect
+        expect(mprotect_routes_case_12).to_equal(true)  # oracle: the memory group closes at arm 12
 
     it "IPC syscalls start at 20":
-        expect_eq(SYS_IPC_SEND,        20)
-        expect_eq(SYS_IPC_RECV,        21)
-        expect_eq(SYS_IPC_CREATE_PORT, 22)
-        expect_eq(SYS_IPC_CONNECT,     23)
+        # @req REQ-OS-SYSCALL-003
+        # @capture(statistics): IPC-group arm numbers found in the dispatch table
+        step("Read the kernel dispatch table and locate the IPC-group arms")
+        val kernel_dispatch = rt_file_read_text(KERNEL_DISPATCH_SOURCE)
+        val ipc_send_routes_case_20 = kernel_dispatch.contains("case 20:    # IpcSend")
+        val ipc_recv_routes_case_21 = kernel_dispatch.contains("case 21:    # IpcRecv")
+        val ipc_create_port_routes_case_22 = kernel_dispatch.contains("case 22:    # IpcCreatePort")
+        val ipc_connect_routes_case_23 = kernel_dispatch.contains("case 23:    # IpcConnect")
+        expect(ipc_send_routes_case_20).to_equal(true)  # oracle: the IPC group is contracted to start at arm 20
+        expect(ipc_recv_routes_case_21).to_equal(true)  # oracle: Recv follows Send inside the IPC block
+        expect(ipc_create_port_routes_case_22).to_equal(true)  # oracle: port creation is arm 22
+        expect(ipc_connect_routes_case_23).to_equal(true)  # oracle: port connection is arm 23
 
     it "file syscalls are in the 30-48 range":
-        expect_eq(SYS_FILE_OPEN,  30)
-        expect_eq(SYS_FILE_READ,  31)
-        expect_eq(SYS_FILE_WRITE, 32)
-        expect_true(SYS_FILE_OPEN < SYS_FILE_WRITE)
-        expect_true(SYS_FILE_WRITE < SYS_CHDIR)
+        # @req REQ-OS-SYSCALL-004
+        # @capture(statistics): file-group arm numbers found in the dispatch table
+        step("Read the kernel dispatch table and locate the file-group boundary arms")
+        val kernel_dispatch = rt_file_read_text(KERNEL_DISPATCH_SOURCE)
+        val file_open_routes_case_30 = kernel_dispatch.contains("case 30:    # Open")
+        val file_read_routes_case_31 = kernel_dispatch.contains("case 31:    # Read")
+        val file_write_routes_case_32 = kernel_dispatch.contains("case 32:    # Write")
+        val chdir_routes_case_48 = kernel_dispatch.contains("case 48:    # Chdir")
+        expect(file_open_routes_case_30).to_equal(true)  # oracle: the file group opens at arm 30
+        expect(file_read_routes_case_31).to_equal(true)  # oracle: Read follows Open inside the file block
+        expect(file_write_routes_case_32).to_equal(true)  # oracle: Write is arm 32, inside the file block
+        expect(chdir_routes_case_48).to_equal(true)  # oracle: the file group closes at arm 48
 
     it "debug_write is 60":
-        expect_eq(SYS_DEBUG_WRITE, 60)
+        # @req REQ-OS-SYSCALL-005
+        # @capture(statistics): debug-write arm number found in the dispatch table
+        step("Read the kernel dispatch table and locate the debug-write arm")
+        val kernel_dispatch = rt_file_read_text(KERNEL_DISPATCH_SOURCE)
+        val debug_write_routes_case_60 = kernel_dispatch.contains("case 60:    # DebugWrite")
+        expect(debug_write_routes_case_60).to_equal(true)  # oracle: SYS_DEBUG_WRITE is contracted as arm 60
 
     it "POSIX libc syscall numbers are reserved":
-        expect_eq(SYS_POSIX_PROC_CREATE, 57)
-        expect_eq(SYS_POSIX_IMAGE_RUN, 59)
-        expect_eq(SYS_POSIX_CHILD_WAIT, 61)
-        expect_eq(SYS_POSIX_PIPE_PAIR, 62)
-        expect_eq(SYS_POSIX_FD_DUP2, 63)
-        expect_eq(SYS_POSIX_FD_DUP, 64)
-        expect_eq(SYS_DLOPEN, 65)
-        expect_eq(SYS_DLSYM, 66)
-        expect_eq(SYS_DLCLOSE, 67)
-        expect_eq(SYS_POSIX_POLL, 68)
-        expect_eq(SYS_POSIX_FCNTL, 69)
-        expect_true(SYS_SLEEP < SYS_POSIX_PROC_CREATE)
-        expect_true(SYS_POSIX_IMAGE_RUN < SYS_DEBUG_WRITE)
-        expect_true(SYS_DEBUG_WRITE < SYS_POSIX_CHILD_WAIT)
-        expect_true(SYS_POSIX_FCNTL < SYS_NET_SOCKET)
+        # @req REQ-OS-SYSCALL-006
+        # @capture(statistics): POSIX/libc-group arm numbers found in the dispatch table
+        step("Read the kernel dispatch table and locate the POSIX/libc-group arms")
+        val kernel_dispatch = rt_file_read_text(KERNEL_DISPATCH_SOURCE)
+        val fork_routes_case_57 = kernel_dispatch.contains("case 57:    # Fork")
+        val exec_routes_case_59 = kernel_dispatch.contains("case 59:    # Exec")
+        val waitpid_routes_case_61 = kernel_dispatch.contains("case 61:    # WaitPid")
+        val pipe_routes_case_62 = kernel_dispatch.contains("case 62:    # Pipe")
+        val dup2_routes_case_63 = kernel_dispatch.contains("case 63:    # Dup2")
+        val dup_routes_case_64 = kernel_dispatch.contains("case 64:    # Dup")
+        val dlopen_routes_case_65 = kernel_dispatch.contains("case 65:    # DlOpen")
+        val dlsym_routes_case_66 = kernel_dispatch.contains("case 66:    # DlSym")
+        val dlclose_routes_case_67 = kernel_dispatch.contains("case 67:    # DlClose")
+        val poll_routes_case_68 = kernel_dispatch.contains("case 68:    # Poll")
+        val fcntl_routes_case_69 = kernel_dispatch.contains("case 69:    # Fcntl")
+        expect(fork_routes_case_57).to_equal(true)  # oracle: the POSIX proc block starts at arm 57
+        expect(exec_routes_case_59).to_equal(true)  # oracle: Exec is arm 59 inside the POSIX block
+        expect(waitpid_routes_case_61).to_equal(true)  # oracle: WaitPid is arm 61
+        expect(pipe_routes_case_62).to_equal(true)  # oracle: Pipe is arm 62
+        expect(dup2_routes_case_63).to_equal(true)  # oracle: Dup2 is arm 63
+        expect(dup_routes_case_64).to_equal(true)  # oracle: Dup is arm 64
+        expect(dlopen_routes_case_65).to_equal(true)  # oracle: the dl block starts at arm 65
+        expect(dlsym_routes_case_66).to_equal(true)  # oracle: DlSym is arm 66
+        expect(dlclose_routes_case_67).to_equal(true)  # oracle: DlClose is arm 67
+        expect(poll_routes_case_68).to_equal(true)  # oracle: Poll is arm 68
+        expect(fcntl_routes_case_69).to_equal(true)  # oracle: Fcntl closes the POSIX block at arm 69
 
     it "network syscalls are in the 70-77 range":
-        expect_eq(SYS_NET_SOCKET,    70)
-        expect_eq(SYS_NET_IF_CONFIG, 77)
-        expect_true(SYS_NET_SOCKET < SYS_NET_IF_CONFIG)
+        # @req REQ-OS-SYSCALL-007
+        # @capture(statistics): net-group boundary arm numbers found in the dispatch table
+        step("Read the kernel dispatch table and locate the net-group boundary arms")
+        val kernel_dispatch = rt_file_read_text(KERNEL_DISPATCH_SOURCE)
+        val net_socket_routes_case_70 = kernel_dispatch.contains("case 70:    # NetSocket")
+        val net_if_config_routes_case_77 = kernel_dispatch.contains("case 77:    # NetIfConfig")
+        expect(net_socket_routes_case_70).to_equal(true)  # oracle: the net group opens at arm 70
+        expect(net_if_config_routes_case_77).to_equal(true)  # oracle: the net group closes at arm 77
 
     it "device syscalls are in the 80-85 range":
-        expect_eq(SYS_DEV_ENUMERATE, 80)
-        expect_eq(SYS_FREE_DMA,      85)
-        expect_true(SYS_DEV_ENUMERATE < SYS_FREE_DMA)
+        # @req REQ-OS-SYSCALL-008
+        # @capture(statistics): device-group boundary arm numbers found in the dispatch table
+        step("Read the kernel dispatch table and locate the device-group boundary arms")
+        val kernel_dispatch = rt_file_read_text(KERNEL_DISPATCH_SOURCE)
+        val dev_enumerate_routes_case_80 = kernel_dispatch.contains("case 80:    # DevEnumerate")
+        val free_dma_routes_case_85 = kernel_dispatch.contains("case 85:    # FreeDma")
+        expect(dev_enumerate_routes_case_80).to_equal(true)  # oracle: the device group opens at arm 80
+        expect(free_dma_routes_case_85).to_equal(true)  # oracle: the device group closes at arm 85
 
     it "log and sysinfo syscalls are in 90-97 range":
-        expect_eq(SYS_LOG_WRITE,     90)
-        expect_eq(SYS_LOG_READ,      91)
-        expect_eq(SYS_SYSINFO,       95)
-        expect_eq(SYS_GET_HOSTNAME,  96)
-        expect_eq(SYS_SET_HOSTNAME,  97)
-        expect_true(SYS_LOG_WRITE < SYS_SYSINFO)
-        expect_true(SYS_GET_HOSTNAME != SYS_SET_HOSTNAME)
+        # @req REQ-OS-SYSCALL-009
+        # @capture(statistics): log/sysinfo-group arm numbers found in the dispatch table
+        step("Read the kernel dispatch table and locate the log and sysinfo arms")
+        val kernel_dispatch = rt_file_read_text(KERNEL_DISPATCH_SOURCE)
+        val log_write_routes_case_90 = kernel_dispatch.contains("case 90:    # LogWrite")
+        val log_read_routes_case_91 = kernel_dispatch.contains("case 91:    # LogRead")
+        val sysinfo_routes_case_95 = kernel_dispatch.contains("case 95:    # SysInfo")
+        val get_hostname_routes_case_96 = kernel_dispatch.contains("case 96:    # GetHostname")
+        val set_hostname_routes_case_97 = kernel_dispatch.contains("case 97:    # SetHostname")
+        expect(log_write_routes_case_90).to_equal(true)  # oracle: the log block opens at arm 90
+        expect(log_read_routes_case_91).to_equal(true)  # oracle: LogRead is arm 91
+        expect(sysinfo_routes_case_95).to_equal(true)  # oracle: SysInfo is arm 95
+        expect(get_hostname_routes_case_96).to_equal(true)  # oracle: GetHostname is arm 96
+        expect(set_hostname_routes_case_97).to_equal(true)  # oracle: the log/sysinfo block closes at arm 97
 
     it "all primary syscall groups are non-overlapping":
-        # process group max (13) < ipc group start (20)
-        expect_true(SYS_SPAWN_BINARY < SYS_IPC_SEND)
-        # ipc group max (29) < file group start (30)
-        expect_true(SYS_NOTIF_WAIT_ANY < SYS_FILE_OPEN)
-        # file group max (51) < debug (60)
-        expect_true(SYS_SLEEP < SYS_DEBUG_WRITE)
-        # debug (60) < net group start (70)
-        expect_true(SYS_DEBUG_WRITE < SYS_NET_SOCKET)
-        # net group max (77) < dev group start (80)
-        expect_true(SYS_NET_IF_CONFIG < SYS_DEV_ENUMERATE)
-        # dev group max (85) < log group start (90)
-        expect_true(SYS_FREE_DMA < SYS_LOG_WRITE)
+        # @req REQ-OS-SYSCALL-010
+        # @capture(bit_table): group boundary arms proving the primary ranges do not overlap
+        step("Read the kernel dispatch table and locate every group boundary arm")
+        val kernel_dispatch = rt_file_read_text(KERNEL_DISPATCH_SOURCE)
+        val spawn_binary_closes_process_group = kernel_dispatch.contains("case 13:    # SpawnBinary")
+        val ipc_send_opens_ipc_group = kernel_dispatch.contains("case 20:    # IpcSend")
+        val notif_wait_any_closes_ipc_group = kernel_dispatch.contains("case 29:    # NotificationWaitAny")
+        val file_open_opens_file_group = kernel_dispatch.contains("case 30:    # Open")
+        val sleep_closes_time_group = kernel_dispatch.contains("case 51:    # Sleep")
+        val debug_write_opens_debug_group = kernel_dispatch.contains("case 60:    # DebugWrite")
+        val net_socket_opens_net_group = kernel_dispatch.contains("case 70:    # NetSocket")
+        val net_if_config_closes_net_group = kernel_dispatch.contains("case 77:    # NetIfConfig")
+        val dev_enumerate_opens_dev_group = kernel_dispatch.contains("case 80:    # DevEnumerate")
+        val free_dma_closes_dev_group = kernel_dispatch.contains("case 85:    # FreeDma")
+        val log_write_opens_log_group = kernel_dispatch.contains("case 90:    # LogWrite")
+        expect(spawn_binary_closes_process_group).to_equal(true)  # oracle: process group ends at 13, before the IPC start at 20
+        expect(ipc_send_opens_ipc_group).to_equal(true)  # oracle: IPC group starts at 20, after process
+        expect(notif_wait_any_closes_ipc_group).to_equal(true)  # oracle: IPC group ends at 29, before file at 30
+        expect(file_open_opens_file_group).to_equal(true)  # oracle: file group starts at 30, after IPC
+        expect(sleep_closes_time_group).to_equal(true)  # oracle: time group ends at 51, before debug at 60
+        expect(debug_write_opens_debug_group).to_equal(true)  # oracle: debug starts at 60, before net at 70
+        expect(net_socket_opens_net_group).to_equal(true)  # oracle: net group starts at 70
+        expect(net_if_config_closes_net_group).to_equal(true)  # oracle: net group ends at 77, before device at 80
+        expect(dev_enumerate_opens_dev_group).to_equal(true)  # oracle: device group starts at 80
+        expect(free_dma_closes_dev_group).to_equal(true)  # oracle: device group ends at 85, before log at 90
+        expect(log_write_opens_log_group).to_equal(true)  # oracle: log group starts at 90, after all prior groups

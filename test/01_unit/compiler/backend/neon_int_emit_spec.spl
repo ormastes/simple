@@ -1,13 +1,32 @@
-# Purpose and audience: executable specification evidence for the owning engineering team.
-# @req REQ-SSPEC-COMPILER
-# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+"""
+## Purpose and audience
+Byte-level golden encoding evidence for the compiler's native AArch64 backend
+NEON integer arithmetic/logic/shift/compare emit functions (ADD/SUB/MUL/
+AND/ORR/EOR/SHL/SSHR/CMEQ/CMGT). Audience: the ARM64 backend engineer
+verifying each emitted instruction matches the ARMv8 ARM opcode layout
+bit-for-bit before trusting the codegen path.
 
-# Purpose and audience: executable specification evidence for the owning engineering team.
-# @req REQ-SSPEC-COMPILER
-# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+## Operator workflow
+bin/simple test test/01_unit/compiler/backend/neon_int_emit_spec.spl
 
-# test/unit/compiler/backend/neon_int_emit_spec.spl
-#
+## Compatibility and limitations
+Interpreter-mode note (per .claude/rules/testing.md): the test runner in
+interpreter mode only verifies file loading and describe/it block
+reachability; assertions inside it-blocks execute under compiled mode.
+Unsupported: NEON integer ops outside the 10 listed here (not implemented
+by the backend).
+
+## Verification guidance and troubleshooting
+Each scenario captures the emitted little-endian byte layout of one
+instruction as a bit_table. A mismatch names the offending byte;
+cross-reference the ARMv8 ARM section cited above each `describe` block and
+the per-scenario derivation comment (3-reg: `base | (Rm<<16) | (Rn<<5) | Rd`;
+imm: `base | ((imm & 0x1F)<<16) | (Rn<<5) | Rd`) to locate which field
+produced the wrong byte.
+"""
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+# @manual_section: neon-int-arith-encoding
+
 # Feature ID: #COMPILER-BACKEND-NATIVE-NEON-INT
 # Category:   Compiler | Backend | Native | AArch64 NEON Integer Arithmetic Encoding
 #
@@ -30,11 +49,6 @@
 # NOTE: ADD V.4S base is 0x4EA08400 (opcode field=10000, size=10, U=0, Q=1).
 # The task spec had 0x4EA01C00 which is ORR, and 0x4E209C00 for MUL which is
 # MUL V.16B (size=00). Corrected per ARMv8 ARM §C7.2 three-same format.
-#
-# Interpreter-mode note (per .claude/rules/testing.md):
-#   The test runner in interpreter mode only verifies file loading and
-#   describe/it block reachability.  Assertions inside it-blocks are not
-#   executed.  Compiled-mode execution will exercise them.
 
 use compiler.backend.native.encode_aarch64_neon_int.{emit_addv_4s, emit_subv_4s, emit_mulv_4s, emit_andv_16b, emit_orrv_16b, emit_eorv_16b, emit_shlv_4s, emit_sshrv_4s, emit_cmpeqv_4s, emit_cmgtv_4s}
 
@@ -45,28 +59,37 @@ use compiler.backend.native.encode_aarch64_neon_int.{emit_addv_4s, emit_subv_4s,
 
 describe "emit_addv_4s — integer add 4x32-bit lanes":
     it "ADD V0.4S, V0.4S, V0.4S encodes to base opcode bytes":
+        # @req REQ-NEON-INT-001
+        step("Encode ADD V0.4S, V0.4S, V0.4S (Rd=Rn=Rm=0)")
         var b = emit_addv_4s(0, 0, 0)
-        expect(b.len()).to_equal(4)
-        expect(b[0]).to_equal(0x00)
-        expect(b[1]).to_equal(0x84)
-        expect(b[2]).to_equal(0xA0)
-        expect(b[3]).to_equal(0x4E)
+        # @capture(bit_table): little-endian 4-byte ADD.4S base opcode layout
+        step("Verify the emitted bytes equal the ARMv8 base opcode 0x4EA08400")
+        expect(b.len()).to_equal(4)  # oracle: ADD is a fixed 4-byte AArch64 instruction
+        expect(b[0]).to_equal(0x00)  # oracle: byte0 = Rd field, Rd=0 contributes nothing
+        expect(b[1]).to_equal(0x84)  # oracle: byte1 = base opcode field=10000 identifying ADD
+        expect(b[2]).to_equal(0xA0)  # oracle: byte2 = base opcode bits with Rm=0
+        expect(b[3]).to_equal(0x4E)  # oracle: byte3 = top opcode byte, U=0 selects signed ADD
 
     it "ADD V1.4S, V2.4S, V3.4S encodes register fields correctly":
-        # word = 0x4EA08400 | (3 << 16) | (2 << 5) | 1
-        #      = 0x4EA08400 | 0x30000 | 0x40 | 1
-        #      = 0x4EA38441
-        # LE bytes: 0x41, 0x84, 0xA3, 0x4E
+        # @req REQ-NEON-INT-002
+        step("Encode ADD V1.4S, V2.4S, V3.4S (Rd=1, Rn=2, Rm=3)")
+        # word = 0x4EA08400 | (3 << 16) | (2 << 5) | 1 = 0x4EA38441
         var b = emit_addv_4s(1, 2, 3)
-        expect(b.len()).to_equal(4)
-        expect(b[0]).to_equal(0x41)
-        expect(b[1]).to_equal(0x84)
-        expect(b[2]).to_equal(0xA3)
-        expect(b[3]).to_equal(0x4E)
+        # @capture(bit_table): little-endian 4-byte ADD.4S register-field layout
+        step("Verify Rd/Rn/Rm are bit-packed into the base opcode word 0x4EA38441")
+        expect(b.len()).to_equal(4)  # oracle: ADD is a fixed 4-byte AArch64 instruction
+        expect(b[0]).to_equal(0x41)  # oracle: byte0 = Rd(1) | Rn(2)<<5 = 0x41
+        expect(b[1]).to_equal(0x84)  # oracle: byte1 unaffected by register fields
+        expect(b[2]).to_equal(0xA3)  # oracle: byte2 = base 0xA0 | Rm(3) low bits
+        expect(b[3]).to_equal(0x4E)  # oracle: byte3 = top opcode byte, unaffected by register fields
 
-    it "emit_addv_4s always returns 4 bytes":
+    it "emit_addv_4s always returns 4 bytes regardless of register operands":
+        # @req REQ-NEON-INT-003
+        step("Encode ADD V5.4S, V6.4S, V7.4S with non-zero registers")
         var b = emit_addv_4s(5, 6, 7)
-        expect(b.len()).to_equal(4)
+        # @capture(bit_table): ADD.4S output length invariant
+        step("Verify the fixed-width AArch64 instruction is exactly 4 bytes")
+        expect(b.len()).to_equal(4)  # oracle: every AArch64 instruction word is 4 bytes wide
 
 # ============================================================================
 # SUB V.4S — base 0x6EA08400
@@ -75,26 +98,37 @@ describe "emit_addv_4s — integer add 4x32-bit lanes":
 
 describe "emit_subv_4s — integer subtract 4x32-bit lanes":
     it "SUB V0.4S, V0.4S, V0.4S encodes to base opcode bytes":
+        # @req REQ-NEON-INT-004
+        step("Encode SUB V0.4S, V0.4S, V0.4S (Rd=Rn=Rm=0)")
         var b = emit_subv_4s(0, 0, 0)
-        expect(b.len()).to_equal(4)
-        expect(b[0]).to_equal(0x00)
-        expect(b[1]).to_equal(0x84)
-        expect(b[2]).to_equal(0xA0)
-        expect(b[3]).to_equal(0x6E)
+        # @capture(bit_table): little-endian 4-byte SUB.4S base opcode layout
+        step("Verify the emitted bytes equal the ARMv8 base opcode 0x6EA08400")
+        expect(b.len()).to_equal(4)  # oracle: SUB is a fixed 4-byte AArch64 instruction
+        expect(b[0]).to_equal(0x00)  # oracle: byte0 = Rd field, Rd=0 contributes nothing
+        expect(b[1]).to_equal(0x84)  # oracle: byte1 = base opcode field=10000, shared with ADD
+        expect(b[2]).to_equal(0xA0)  # oracle: byte2 = base opcode bits with Rm=0
+        expect(b[3]).to_equal(0x6E)  # oracle: byte3 = top opcode byte, U=1 selects SUB over ADD
 
     it "SUB V1.4S, V2.4S, V3.4S encodes register fields correctly":
+        # @req REQ-NEON-INT-005
+        step("Encode SUB V1.4S, V2.4S, V3.4S (Rd=1, Rn=2, Rm=3)")
         # word = 0x6EA08400 | (3 << 16) | (2 << 5) | 1 = 0x6EA38441
-        # LE bytes: 0x41, 0x84, 0xA3, 0x6E
         var b = emit_subv_4s(1, 2, 3)
-        expect(b.len()).to_equal(4)
-        expect(b[0]).to_equal(0x41)
-        expect(b[1]).to_equal(0x84)
-        expect(b[2]).to_equal(0xA3)
-        expect(b[3]).to_equal(0x6E)
+        # @capture(bit_table): little-endian 4-byte SUB.4S register-field layout
+        step("Verify Rd/Rn/Rm are bit-packed into the base opcode word 0x6EA38441")
+        expect(b.len()).to_equal(4)  # oracle: SUB is a fixed 4-byte AArch64 instruction
+        expect(b[0]).to_equal(0x41)  # oracle: byte0 = Rd(1) | Rn(2)<<5 = 0x41
+        expect(b[1]).to_equal(0x84)  # oracle: byte1 unaffected by register fields
+        expect(b[2]).to_equal(0xA3)  # oracle: byte2 = base 0xA0 | Rm(3) low bits
+        expect(b[3]).to_equal(0x6E)  # oracle: byte3 = top opcode byte, unaffected by register fields
 
-    it "emit_subv_4s always returns 4 bytes":
+    it "emit_subv_4s always returns 4 bytes regardless of register operands":
+        # @req REQ-NEON-INT-006
+        step("Encode SUB V4.4S, V5.4S, V6.4S with non-zero registers")
         var b = emit_subv_4s(4, 5, 6)
-        expect(b.len()).to_equal(4)
+        # @capture(bit_table): SUB.4S output length invariant
+        step("Verify the fixed-width AArch64 instruction is exactly 4 bytes")
+        expect(b.len()).to_equal(4)  # oracle: every AArch64 instruction word is 4 bytes wide
 
 # ============================================================================
 # MUL V.4S — base 0x4EA09C00
@@ -103,28 +137,37 @@ describe "emit_subv_4s — integer subtract 4x32-bit lanes":
 
 describe "emit_mulv_4s — integer multiply 4x32-bit lanes":
     it "MUL V0.4S, V0.4S, V0.4S encodes to base opcode bytes":
+        # @req REQ-NEON-INT-007
+        step("Encode MUL V0.4S, V0.4S, V0.4S (Rd=Rn=Rm=0)")
         var b = emit_mulv_4s(0, 0, 0)
-        expect(b.len()).to_equal(4)
-        expect(b[0]).to_equal(0x00)
-        expect(b[1]).to_equal(0x9C)
-        expect(b[2]).to_equal(0xA0)
-        expect(b[3]).to_equal(0x4E)
+        # @capture(bit_table): little-endian 4-byte MUL.4S base opcode layout
+        step("Verify the emitted bytes equal the ARMv8 base opcode 0x4EA09C00")
+        expect(b.len()).to_equal(4)  # oracle: MUL is a fixed 4-byte AArch64 instruction
+        expect(b[0]).to_equal(0x00)  # oracle: byte0 = Rd field, Rd=0 contributes nothing
+        expect(b[1]).to_equal(0x9C)  # oracle: byte1 = base opcode field=10011 identifying MUL
+        expect(b[2]).to_equal(0xA0)  # oracle: byte2 = base opcode bits with Rm=0
+        expect(b[3]).to_equal(0x4E)  # oracle: byte3 = top opcode byte, U=0 Q=1
 
     it "MUL V2.4S, V3.4S, V4.4S encodes register fields correctly":
-        # word = 0x4EA09C00 | (4 << 16) | (3 << 5) | 2
-        #      = 0x4EA09C00 | 0x40000 | 0x60 | 2
-        #      = 0x4EA49C62
-        # LE bytes: 0x62, 0x9C, 0xA4, 0x4E
+        # @req REQ-NEON-INT-008
+        step("Encode MUL V2.4S, V3.4S, V4.4S (Rd=2, Rn=3, Rm=4)")
+        # word = 0x4EA09C00 | (4 << 16) | (3 << 5) | 2 = 0x4EA49C62
         var b = emit_mulv_4s(2, 3, 4)
-        expect(b.len()).to_equal(4)
-        expect(b[0]).to_equal(0x62)
-        expect(b[1]).to_equal(0x9C)
-        expect(b[2]).to_equal(0xA4)
-        expect(b[3]).to_equal(0x4E)
+        # @capture(bit_table): little-endian 4-byte MUL.4S register-field layout
+        step("Verify Rd/Rn/Rm are bit-packed into the base opcode word 0x4EA49C62")
+        expect(b.len()).to_equal(4)  # oracle: MUL is a fixed 4-byte AArch64 instruction
+        expect(b[0]).to_equal(0x62)  # oracle: byte0 = Rd(2) | Rn(3)<<5 = 0x62
+        expect(b[1]).to_equal(0x9C)  # oracle: byte1 unaffected by register fields
+        expect(b[2]).to_equal(0xA4)  # oracle: byte2 = base 0xA0 | Rm(4) low bits
+        expect(b[3]).to_equal(0x4E)  # oracle: byte3 = top opcode byte, unaffected by register fields
 
-    it "emit_mulv_4s always returns 4 bytes":
+    it "emit_mulv_4s always returns 4 bytes regardless of register operands":
+        # @req REQ-NEON-INT-009
+        step("Encode MUL V7.4S, V8.4S, V9.4S with non-zero registers")
         var b = emit_mulv_4s(7, 8, 9)
-        expect(b.len()).to_equal(4)
+        # @capture(bit_table): MUL.4S output length invariant
+        step("Verify the fixed-width AArch64 instruction is exactly 4 bytes")
+        expect(b.len()).to_equal(4)  # oracle: every AArch64 instruction word is 4 bytes wide
 
 # ============================================================================
 # AND V.16B — base 0x4E201C00
@@ -133,28 +176,37 @@ describe "emit_mulv_4s — integer multiply 4x32-bit lanes":
 
 describe "emit_andv_16b — bitwise AND 128-bit":
     it "AND V0.16B, V0.16B, V0.16B encodes to base opcode bytes":
+        # @req REQ-NEON-INT-010
+        step("Encode AND V0.16B, V0.16B, V0.16B (Rd=Rn=Rm=0)")
         var b = emit_andv_16b(0, 0, 0)
-        expect(b.len()).to_equal(4)
-        expect(b[0]).to_equal(0x00)
-        expect(b[1]).to_equal(0x1C)
-        expect(b[2]).to_equal(0x20)
-        expect(b[3]).to_equal(0x4E)
+        # @capture(bit_table): little-endian 4-byte AND.16B base opcode layout
+        step("Verify the emitted bytes equal the ARMv8 base opcode 0x4E201C00")
+        expect(b.len()).to_equal(4)  # oracle: AND is a fixed 4-byte AArch64 instruction
+        expect(b[0]).to_equal(0x00)  # oracle: byte0 = Rd field, Rd=0 contributes nothing
+        expect(b[1]).to_equal(0x1C)  # oracle: byte1 = base opcode field=00011 identifying logical ops
+        expect(b[2]).to_equal(0x20)  # oracle: byte2 = base opcode bits (size=00) with Rm=0
+        expect(b[3]).to_equal(0x4E)  # oracle: byte3 = top opcode byte, size[1]=0 U=0 selects AND
 
     it "AND V1.16B, V2.16B, V3.16B encodes register fields correctly":
-        # word = 0x4E201C00 | (3 << 16) | (2 << 5) | 1
-        #      = 0x4E201C00 | 0x30000 | 0x40 | 1
-        #      = 0x4E231C41
-        # LE bytes: 0x41, 0x1C, 0x23, 0x4E
+        # @req REQ-NEON-INT-011
+        step("Encode AND V1.16B, V2.16B, V3.16B (Rd=1, Rn=2, Rm=3)")
+        # word = 0x4E201C00 | (3 << 16) | (2 << 5) | 1 = 0x4E231C41
         var b = emit_andv_16b(1, 2, 3)
-        expect(b.len()).to_equal(4)
-        expect(b[0]).to_equal(0x41)
-        expect(b[1]).to_equal(0x1C)
-        expect(b[2]).to_equal(0x23)
-        expect(b[3]).to_equal(0x4E)
+        # @capture(bit_table): little-endian 4-byte AND.16B register-field layout
+        step("Verify Rd/Rn/Rm are bit-packed into the base opcode word 0x4E231C41")
+        expect(b.len()).to_equal(4)  # oracle: AND is a fixed 4-byte AArch64 instruction
+        expect(b[0]).to_equal(0x41)  # oracle: byte0 = Rd(1) | Rn(2)<<5 = 0x41
+        expect(b[1]).to_equal(0x1C)  # oracle: byte1 unaffected by register fields
+        expect(b[2]).to_equal(0x23)  # oracle: byte2 = base 0x20 | Rm(3) low bits
+        expect(b[3]).to_equal(0x4E)  # oracle: byte3 = top opcode byte, unaffected by register fields
 
-    it "emit_andv_16b always returns 4 bytes":
+    it "emit_andv_16b always returns 4 bytes regardless of register operands":
+        # @req REQ-NEON-INT-012
+        step("Encode AND V3.16B, V4.16B, V5.16B with non-zero registers")
         var b = emit_andv_16b(3, 4, 5)
-        expect(b.len()).to_equal(4)
+        # @capture(bit_table): AND.16B output length invariant
+        step("Verify the fixed-width AArch64 instruction is exactly 4 bytes")
+        expect(b.len()).to_equal(4)  # oracle: every AArch64 instruction word is 4 bytes wide
 
 # ============================================================================
 # ORR V.16B — base 0x4EA01C00
@@ -163,28 +215,37 @@ describe "emit_andv_16b — bitwise AND 128-bit":
 
 describe "emit_orrv_16b — bitwise OR 128-bit":
     it "ORR V0.16B, V0.16B, V0.16B encodes to base opcode bytes":
+        # @req REQ-NEON-INT-013
+        step("Encode ORR V0.16B, V0.16B, V0.16B (Rd=Rn=Rm=0)")
         var b = emit_orrv_16b(0, 0, 0)
-        expect(b.len()).to_equal(4)
-        expect(b[0]).to_equal(0x00)
-        expect(b[1]).to_equal(0x1C)
-        expect(b[2]).to_equal(0xA0)
-        expect(b[3]).to_equal(0x4E)
+        # @capture(bit_table): little-endian 4-byte ORR.16B base opcode layout
+        step("Verify the emitted bytes equal the ARMv8 base opcode 0x4EA01C00")
+        expect(b.len()).to_equal(4)  # oracle: ORR is a fixed 4-byte AArch64 instruction
+        expect(b[0]).to_equal(0x00)  # oracle: byte0 = Rd field, Rd=0 contributes nothing
+        expect(b[1]).to_equal(0x1C)  # oracle: byte1 = base opcode field=00011 shared with AND/EOR
+        expect(b[2]).to_equal(0xA0)  # oracle: byte2 = base opcode bits (size=10) with Rm=0
+        expect(b[3]).to_equal(0x4E)  # oracle: byte3 = top opcode byte, size[1]=1 U=0 selects ORR
 
     it "ORR V1.16B, V2.16B, V3.16B encodes register fields correctly":
-        # word = 0x4EA01C00 | (3 << 16) | (2 << 5) | 1
-        #      = 0x4EA01C00 | 0x30000 | 0x40 | 1
-        #      = 0x4EA31C41
-        # LE bytes: 0x41, 0x1C, 0xA3, 0x4E
+        # @req REQ-NEON-INT-014
+        step("Encode ORR V1.16B, V2.16B, V3.16B (Rd=1, Rn=2, Rm=3)")
+        # word = 0x4EA01C00 | (3 << 16) | (2 << 5) | 1 = 0x4EA31C41
         var b = emit_orrv_16b(1, 2, 3)
-        expect(b.len()).to_equal(4)
-        expect(b[0]).to_equal(0x41)
-        expect(b[1]).to_equal(0x1C)
-        expect(b[2]).to_equal(0xA3)
-        expect(b[3]).to_equal(0x4E)
+        # @capture(bit_table): little-endian 4-byte ORR.16B register-field layout
+        step("Verify Rd/Rn/Rm are bit-packed into the base opcode word 0x4EA31C41")
+        expect(b.len()).to_equal(4)  # oracle: ORR is a fixed 4-byte AArch64 instruction
+        expect(b[0]).to_equal(0x41)  # oracle: byte0 = Rd(1) | Rn(2)<<5 = 0x41
+        expect(b[1]).to_equal(0x1C)  # oracle: byte1 unaffected by register fields
+        expect(b[2]).to_equal(0xA3)  # oracle: byte2 = base 0xA0 | Rm(3) low bits
+        expect(b[3]).to_equal(0x4E)  # oracle: byte3 = top opcode byte, unaffected by register fields
 
-    it "emit_orrv_16b always returns 4 bytes":
+    it "emit_orrv_16b always returns 4 bytes regardless of register operands":
+        # @req REQ-NEON-INT-015
+        step("Encode ORR V6.16B, V7.16B, V8.16B with non-zero registers")
         var b = emit_orrv_16b(6, 7, 8)
-        expect(b.len()).to_equal(4)
+        # @capture(bit_table): ORR.16B output length invariant
+        step("Verify the fixed-width AArch64 instruction is exactly 4 bytes")
+        expect(b.len()).to_equal(4)  # oracle: every AArch64 instruction word is 4 bytes wide
 
 # ============================================================================
 # EOR V.16B — base 0x6E201C00
@@ -193,28 +254,37 @@ describe "emit_orrv_16b — bitwise OR 128-bit":
 
 describe "emit_eorv_16b — bitwise XOR 128-bit":
     it "EOR V0.16B, V0.16B, V0.16B encodes to base opcode bytes":
+        # @req REQ-NEON-INT-016
+        step("Encode EOR V0.16B, V0.16B, V0.16B (Rd=Rn=Rm=0)")
         var b = emit_eorv_16b(0, 0, 0)
-        expect(b.len()).to_equal(4)
-        expect(b[0]).to_equal(0x00)
-        expect(b[1]).to_equal(0x1C)
-        expect(b[2]).to_equal(0x20)
-        expect(b[3]).to_equal(0x6E)
+        # @capture(bit_table): little-endian 4-byte EOR.16B base opcode layout
+        step("Verify the emitted bytes equal the ARMv8 base opcode 0x6E201C00")
+        expect(b.len()).to_equal(4)  # oracle: EOR is a fixed 4-byte AArch64 instruction
+        expect(b[0]).to_equal(0x00)  # oracle: byte0 = Rd field, Rd=0 contributes nothing
+        expect(b[1]).to_equal(0x1C)  # oracle: byte1 = base opcode field=00011 shared with AND/ORR
+        expect(b[2]).to_equal(0x20)  # oracle: byte2 = base opcode bits (size=00) with Rm=0
+        expect(b[3]).to_equal(0x6E)  # oracle: byte3 = top opcode byte, U=1 selects EOR over AND
 
     it "EOR V1.16B, V2.16B, V3.16B encodes register fields correctly":
-        # word = 0x6E201C00 | (3 << 16) | (2 << 5) | 1
-        #      = 0x6E201C00 | 0x30000 | 0x40 | 1
-        #      = 0x6E231C41
-        # LE bytes: 0x41, 0x1C, 0x23, 0x6E
+        # @req REQ-NEON-INT-017
+        step("Encode EOR V1.16B, V2.16B, V3.16B (Rd=1, Rn=2, Rm=3)")
+        # word = 0x6E201C00 | (3 << 16) | (2 << 5) | 1 = 0x6E231C41
         var b = emit_eorv_16b(1, 2, 3)
-        expect(b.len()).to_equal(4)
-        expect(b[0]).to_equal(0x41)
-        expect(b[1]).to_equal(0x1C)
-        expect(b[2]).to_equal(0x23)
-        expect(b[3]).to_equal(0x6E)
+        # @capture(bit_table): little-endian 4-byte EOR.16B register-field layout
+        step("Verify Rd/Rn/Rm are bit-packed into the base opcode word 0x6E231C41")
+        expect(b.len()).to_equal(4)  # oracle: EOR is a fixed 4-byte AArch64 instruction
+        expect(b[0]).to_equal(0x41)  # oracle: byte0 = Rd(1) | Rn(2)<<5 = 0x41
+        expect(b[1]).to_equal(0x1C)  # oracle: byte1 unaffected by register fields
+        expect(b[2]).to_equal(0x23)  # oracle: byte2 = base 0x20 | Rm(3) low bits
+        expect(b[3]).to_equal(0x6E)  # oracle: byte3 = top opcode byte, unaffected by register fields
 
-    it "emit_eorv_16b always returns 4 bytes":
+    it "emit_eorv_16b always returns 4 bytes regardless of register operands":
+        # @req REQ-NEON-INT-018
+        step("Encode EOR V9.16B, V10.16B, V11.16B with non-zero registers")
         var b = emit_eorv_16b(9, 10, 11)
-        expect(b.len()).to_equal(4)
+        # @capture(bit_table): EOR.16B output length invariant
+        step("Verify the fixed-width AArch64 instruction is exactly 4 bytes")
+        expect(b.len()).to_equal(4)  # oracle: every AArch64 instruction word is 4 bytes wide
 
 # ============================================================================
 # SHL V.4S — base 0x4F205400
@@ -224,38 +294,50 @@ describe "emit_eorv_16b — bitwise XOR 128-bit":
 
 describe "emit_shlv_4s — left shift immediate 4x32-bit lanes":
     it "SHL V0.4S, V0.4S, #0 encodes to base opcode bytes":
+        # @req REQ-NEON-INT-019
+        step("Encode SHL V0.4S, V0.4S, #0 (Rd=Rn=0, imm=0)")
         var b = emit_shlv_4s(0, 0, 0)
-        expect(b.len()).to_equal(4)
-        expect(b[0]).to_equal(0x00)
-        expect(b[1]).to_equal(0x54)
-        expect(b[2]).to_equal(0x20)
-        expect(b[3]).to_equal(0x4F)
+        # @capture(bit_table): little-endian 4-byte SHL.4S base opcode layout
+        step("Verify the emitted bytes equal the ARMv8 base opcode 0x4F205400")
+        expect(b.len()).to_equal(4)  # oracle: SHL is a fixed 4-byte AArch64 instruction
+        expect(b[0]).to_equal(0x00)  # oracle: byte0 = Rd field, Rd=0 contributes nothing
+        expect(b[1]).to_equal(0x54)  # oracle: byte1 = base opcode field=01010 identifying SHL
+        expect(b[2]).to_equal(0x20)  # oracle: byte2 = base opcode bits with imm=0 (no shift in the immh/immb field)
+        expect(b[3]).to_equal(0x4F)  # oracle: byte3 = top opcode byte, U=1 immediate-shift class
 
     it "SHL V0.4S, V0.4S, #1 encodes imm=1 in bits[20:16]":
+        # @req REQ-NEON-INT-020
+        step("Encode SHL V0.4S, V0.4S, #1 (imm=1)")
         # word = 0x4F205400 | (1 << 16) = 0x4F215400
-        # LE: 0x00, 0x54, 0x21, 0x4F
         var b = emit_shlv_4s(0, 0, 1)
-        expect(b.len()).to_equal(4)
-        expect(b[0]).to_equal(0x00)
-        expect(b[1]).to_equal(0x54)
-        expect(b[2]).to_equal(0x21)
-        expect(b[3]).to_equal(0x4F)
+        # @capture(bit_table): little-endian 4-byte SHL.4S imm=1 layout
+        step("Verify imm=1 raises byte2 via bits[20:16]")
+        expect(b.len()).to_equal(4)  # oracle: SHL is a fixed 4-byte AArch64 instruction
+        expect(b[0]).to_equal(0x00)  # oracle: byte0 = Rd field, Rd=0 contributes nothing
+        expect(b[1]).to_equal(0x54)  # oracle: byte1 = base opcode field, unaffected by imm
+        expect(b[2]).to_equal(0x21)  # oracle: byte2 = base 0x20 | imm(1) in bits[20:16]
+        expect(b[3]).to_equal(0x4F)  # oracle: byte3 = top opcode byte, unaffected by imm
 
     it "SHL V1.4S, V2.4S, #4 encodes register and imm correctly":
-        # word = 0x4F205400 | (4 << 16) | (2 << 5) | 1
-        #      = 0x4F205400 | 0x40000 | 0x40 | 1
-        #      = 0x4F245441
-        # LE: 0x41, 0x54, 0x24, 0x4F
+        # @req REQ-NEON-INT-021
+        step("Encode SHL V1.4S, V2.4S, #4 (Rd=1, Rn=2, imm=4)")
+        # word = 0x4F205400 | (4 << 16) | (2 << 5) | 1 = 0x4F245441
         var b = emit_shlv_4s(1, 2, 4)
-        expect(b.len()).to_equal(4)
-        expect(b[0]).to_equal(0x41)
-        expect(b[1]).to_equal(0x54)
-        expect(b[2]).to_equal(0x24)
-        expect(b[3]).to_equal(0x4F)
+        # @capture(bit_table): little-endian 4-byte SHL.4S register+imm layout
+        step("Verify Rd/Rn/imm are bit-packed into the base opcode word 0x4F245441")
+        expect(b.len()).to_equal(4)  # oracle: SHL is a fixed 4-byte AArch64 instruction
+        expect(b[0]).to_equal(0x41)  # oracle: byte0 = Rd(1) | Rn(2)<<5 = 0x41
+        expect(b[1]).to_equal(0x54)  # oracle: byte1 unaffected by register/imm fields
+        expect(b[2]).to_equal(0x24)  # oracle: byte2 = base 0x20 | imm(4) in bits[20:16]
+        expect(b[3]).to_equal(0x4F)  # oracle: byte3 = top opcode byte, unaffected by register/imm fields
 
-    it "emit_shlv_4s always returns 4 bytes":
+    it "emit_shlv_4s always returns 4 bytes regardless of register/imm operands":
+        # @req REQ-NEON-INT-022
+        step("Encode SHL V3.4S, V4.4S, #8 with non-zero registers/imm")
         var b = emit_shlv_4s(3, 4, 8)
-        expect(b.len()).to_equal(4)
+        # @capture(bit_table): SHL.4S output length invariant
+        step("Verify the fixed-width AArch64 instruction is exactly 4 bytes")
+        expect(b.len()).to_equal(4)  # oracle: every AArch64 instruction word is 4 bytes wide
 
 # ============================================================================
 # SSHR V.4S — base 0x4F200400
@@ -267,40 +349,51 @@ describe "emit_shlv_4s — left shift immediate 4x32-bit lanes":
 
 describe "emit_sshrv_4s — signed right shift immediate 4x32-bit lanes":
     it "SSHR V0.4S, V0.4S, #32 encodes max shift (imm=32, bits[20:16]=0)":
+        # @req REQ-NEON-INT-023
+        step("Encode SSHR V0.4S, V0.4S, #32 (max shift amount)")
         # (32 - 32) & 0x1F = 0 => word = 0x4F200400
-        # LE: 0x00, 0x04, 0x20, 0x4F
         var b = emit_sshrv_4s(0, 0, 32)
-        expect(b.len()).to_equal(4)
-        expect(b[0]).to_equal(0x00)
-        expect(b[1]).to_equal(0x04)
-        expect(b[2]).to_equal(0x20)
-        expect(b[3]).to_equal(0x4F)
+        # @capture(bit_table): little-endian 4-byte SSHR.4S max-shift layout
+        step("Verify the max shift amount (#32) collapses to bits[20:16]=0")
+        expect(b.len()).to_equal(4)  # oracle: SSHR is a fixed 4-byte AArch64 instruction
+        expect(b[0]).to_equal(0x00)  # oracle: byte0 = Rd field, Rd=0 contributes nothing
+        expect(b[1]).to_equal(0x04)  # oracle: byte1 = base opcode field=00000 identifying SSHR
+        expect(b[2]).to_equal(0x20)  # oracle: byte2 = (32-32)&0x1F=0 in bits[20:16], base with Rm slot=0
+        expect(b[3]).to_equal(0x4F)  # oracle: byte3 = top opcode byte, U=1 immediate-shift class
 
     it "SSHR V0.4S, V0.4S, #1 encodes imm=1 (bits[20:16]=31=0x1F)":
+        # @req REQ-NEON-INT-024
+        step("Encode SSHR V0.4S, V0.4S, #1 (minimum shift amount)")
         # (32 - 1) & 0x1F = 31 = 0x1F => word = 0x4F200400 | (0x1F << 16) = 0x4F3F0400
-        # LE: 0x00, 0x04, 0x3F, 0x4F
         var b = emit_sshrv_4s(0, 0, 1)
-        expect(b.len()).to_equal(4)
-        expect(b[0]).to_equal(0x00)
-        expect(b[1]).to_equal(0x04)
-        expect(b[2]).to_equal(0x3F)
-        expect(b[3]).to_equal(0x4F)
+        # @capture(bit_table): little-endian 4-byte SSHR.4S imm=1 layout
+        step("Verify the shift-amount encoding inverts imm as (32-imm)&0x1F")
+        expect(b.len()).to_equal(4)  # oracle: SSHR is a fixed 4-byte AArch64 instruction
+        expect(b[0]).to_equal(0x00)  # oracle: byte0 = Rd field, Rd=0 contributes nothing
+        expect(b[1]).to_equal(0x04)  # oracle: byte1 = base opcode field, unaffected by imm
+        expect(b[2]).to_equal(0x3F)  # oracle: byte2 = (32-1)&0x1F=0x1F encoded in bits[20:16]
+        expect(b[3]).to_equal(0x4F)  # oracle: byte3 = top opcode byte, unaffected by imm
 
     it "SSHR V1.4S, V2.4S, #4 encodes register and imm correctly":
-        # (32 - 4) & 0x1F = 28 = 0x1C => word = 0x4F200400 | (0x1C << 16) | (2 << 5) | 1
-        #      = 0x4F200400 | 0x1C0000 | 0x40 | 1
-        #      = 0x4F3C0441
-        # LE: 0x41, 0x04, 0x3C, 0x4F
+        # @req REQ-NEON-INT-025
+        step("Encode SSHR V1.4S, V2.4S, #4 (Rd=1, Rn=2, imm=4)")
+        # (32 - 4) & 0x1F = 28 = 0x1C => word = 0x4F200400 | (0x1C << 16) | (2 << 5) | 1 = 0x4F3C0441
         var b = emit_sshrv_4s(1, 2, 4)
-        expect(b.len()).to_equal(4)
-        expect(b[0]).to_equal(0x41)
-        expect(b[1]).to_equal(0x04)
-        expect(b[2]).to_equal(0x3C)
-        expect(b[3]).to_equal(0x4F)
+        # @capture(bit_table): little-endian 4-byte SSHR.4S register+imm layout
+        step("Verify Rd/Rn/imm are bit-packed into the base opcode word 0x4F3C0441")
+        expect(b.len()).to_equal(4)  # oracle: SSHR is a fixed 4-byte AArch64 instruction
+        expect(b[0]).to_equal(0x41)  # oracle: byte0 = Rd(1) | Rn(2)<<5 = 0x41
+        expect(b[1]).to_equal(0x04)  # oracle: byte1 unaffected by register/imm fields
+        expect(b[2]).to_equal(0x3C)  # oracle: byte2 = (32-4)&0x1F=0x1C encoded in bits[20:16]
+        expect(b[3]).to_equal(0x4F)  # oracle: byte3 = top opcode byte, unaffected by register/imm fields
 
-    it "emit_sshrv_4s always returns 4 bytes":
+    it "emit_sshrv_4s always returns 4 bytes regardless of register/imm operands":
+        # @req REQ-NEON-INT-026
+        step("Encode SSHR V5.4S, V6.4S, #8 with non-zero registers/imm")
         var b = emit_sshrv_4s(5, 6, 8)
-        expect(b.len()).to_equal(4)
+        # @capture(bit_table): SSHR.4S output length invariant
+        step("Verify the fixed-width AArch64 instruction is exactly 4 bytes")
+        expect(b.len()).to_equal(4)  # oracle: every AArch64 instruction word is 4 bytes wide
 
 # ============================================================================
 # CMEQ V.4S — base 0x6EA08C00
@@ -309,28 +402,37 @@ describe "emit_sshrv_4s — signed right shift immediate 4x32-bit lanes":
 
 describe "emit_cmpeqv_4s — compare equal 4x32-bit lanes":
     it "CMEQ V0.4S, V0.4S, V0.4S encodes to base opcode bytes":
+        # @req REQ-NEON-INT-027
+        step("Encode CMEQ V0.4S, V0.4S, V0.4S (Rd=Rn=Rm=0)")
         var b = emit_cmpeqv_4s(0, 0, 0)
-        expect(b.len()).to_equal(4)
-        expect(b[0]).to_equal(0x00)
-        expect(b[1]).to_equal(0x8C)
-        expect(b[2]).to_equal(0xA0)
-        expect(b[3]).to_equal(0x6E)
+        # @capture(bit_table): little-endian 4-byte CMEQ.4S base opcode layout
+        step("Verify the emitted bytes equal the ARMv8 base opcode 0x6EA08C00")
+        expect(b.len()).to_equal(4)  # oracle: CMEQ is a fixed 4-byte AArch64 instruction
+        expect(b[0]).to_equal(0x00)  # oracle: byte0 = Rd field, Rd=0 contributes nothing
+        expect(b[1]).to_equal(0x8C)  # oracle: byte1 = base opcode field=10001 identifying CMEQ
+        expect(b[2]).to_equal(0xA0)  # oracle: byte2 = base opcode bits with Rm=0
+        expect(b[3]).to_equal(0x6E)  # oracle: byte3 = top opcode byte, U=1 selects CMEQ (register form)
 
     it "CMEQ V1.4S, V2.4S, V3.4S encodes register fields correctly":
-        # word = 0x6EA08C00 | (3 << 16) | (2 << 5) | 1
-        #      = 0x6EA08C00 | 0x30000 | 0x40 | 1
-        #      = 0x6EA38C41
-        # LE: 0x41, 0x8C, 0xA3, 0x6E
+        # @req REQ-NEON-INT-028
+        step("Encode CMEQ V1.4S, V2.4S, V3.4S (Rd=1, Rn=2, Rm=3)")
+        # word = 0x6EA08C00 | (3 << 16) | (2 << 5) | 1 = 0x6EA38C41
         var b = emit_cmpeqv_4s(1, 2, 3)
-        expect(b.len()).to_equal(4)
-        expect(b[0]).to_equal(0x41)
-        expect(b[1]).to_equal(0x8C)
-        expect(b[2]).to_equal(0xA3)
-        expect(b[3]).to_equal(0x6E)
+        # @capture(bit_table): little-endian 4-byte CMEQ.4S register-field layout
+        step("Verify Rd/Rn/Rm are bit-packed into the base opcode word 0x6EA38C41")
+        expect(b.len()).to_equal(4)  # oracle: CMEQ is a fixed 4-byte AArch64 instruction
+        expect(b[0]).to_equal(0x41)  # oracle: byte0 = Rd(1) | Rn(2)<<5 = 0x41
+        expect(b[1]).to_equal(0x8C)  # oracle: byte1 unaffected by register fields
+        expect(b[2]).to_equal(0xA3)  # oracle: byte2 = base 0xA0 | Rm(3) low bits
+        expect(b[3]).to_equal(0x6E)  # oracle: byte3 = top opcode byte, unaffected by register fields
 
-    it "emit_cmpeqv_4s always returns 4 bytes":
+    it "emit_cmpeqv_4s always returns 4 bytes regardless of register operands":
+        # @req REQ-NEON-INT-029
+        step("Encode CMEQ V4.4S, V5.4S, V6.4S with non-zero registers")
         var b = emit_cmpeqv_4s(4, 5, 6)
-        expect(b.len()).to_equal(4)
+        # @capture(bit_table): CMEQ.4S output length invariant
+        step("Verify the fixed-width AArch64 instruction is exactly 4 bytes")
+        expect(b.len()).to_equal(4)  # oracle: every AArch64 instruction word is 4 bytes wide
 
 # ============================================================================
 # CMGT V.4S — base 0x4EA03400
@@ -339,28 +441,37 @@ describe "emit_cmpeqv_4s — compare equal 4x32-bit lanes":
 
 describe "emit_cmgtv_4s — compare signed greater-than 4x32-bit lanes":
     it "CMGT V0.4S, V0.4S, V0.4S encodes to base opcode bytes":
+        # @req REQ-NEON-INT-030
+        step("Encode CMGT V0.4S, V0.4S, V0.4S (Rd=Rn=Rm=0)")
         var b = emit_cmgtv_4s(0, 0, 0)
-        expect(b.len()).to_equal(4)
-        expect(b[0]).to_equal(0x00)
-        expect(b[1]).to_equal(0x34)
-        expect(b[2]).to_equal(0xA0)
-        expect(b[3]).to_equal(0x4E)
+        # @capture(bit_table): little-endian 4-byte CMGT.4S base opcode layout
+        step("Verify the emitted bytes equal the ARMv8 base opcode 0x4EA03400")
+        expect(b.len()).to_equal(4)  # oracle: CMGT is a fixed 4-byte AArch64 instruction
+        expect(b[0]).to_equal(0x00)  # oracle: byte0 = Rd field, Rd=0 contributes nothing
+        expect(b[1]).to_equal(0x34)  # oracle: byte1 = base opcode field=00110 identifying CMGT
+        expect(b[2]).to_equal(0xA0)  # oracle: byte2 = base opcode bits with Rm=0
+        expect(b[3]).to_equal(0x4E)  # oracle: byte3 = top opcode byte, U=0 selects signed CMGT
 
     it "CMGT V1.4S, V2.4S, V3.4S encodes register fields correctly":
-        # word = 0x4EA03400 | (3 << 16) | (2 << 5) | 1
-        #      = 0x4EA03400 | 0x30000 | 0x40 | 1
-        #      = 0x4EA33441
-        # LE: 0x41, 0x34, 0xA3, 0x4E
+        # @req REQ-NEON-INT-031
+        step("Encode CMGT V1.4S, V2.4S, V3.4S (Rd=1, Rn=2, Rm=3)")
+        # word = 0x4EA03400 | (3 << 16) | (2 << 5) | 1 = 0x4EA33441
         var b = emit_cmgtv_4s(1, 2, 3)
-        expect(b.len()).to_equal(4)
-        expect(b[0]).to_equal(0x41)
-        expect(b[1]).to_equal(0x34)
-        expect(b[2]).to_equal(0xA3)
-        expect(b[3]).to_equal(0x4E)
+        # @capture(bit_table): little-endian 4-byte CMGT.4S register-field layout
+        step("Verify Rd/Rn/Rm are bit-packed into the base opcode word 0x4EA33441")
+        expect(b.len()).to_equal(4)  # oracle: CMGT is a fixed 4-byte AArch64 instruction
+        expect(b[0]).to_equal(0x41)  # oracle: byte0 = Rd(1) | Rn(2)<<5 = 0x41
+        expect(b[1]).to_equal(0x34)  # oracle: byte1 unaffected by register fields
+        expect(b[2]).to_equal(0xA3)  # oracle: byte2 = base 0xA0 | Rm(3) low bits
+        expect(b[3]).to_equal(0x4E)  # oracle: byte3 = top opcode byte, unaffected by register fields
 
-    it "emit_cmgtv_4s always returns 4 bytes":
+    it "emit_cmgtv_4s always returns 4 bytes regardless of register operands":
+        # @req REQ-NEON-INT-032
+        step("Encode CMGT V7.4S, V8.4S, V9.4S with non-zero registers")
         var b = emit_cmgtv_4s(7, 8, 9)
-        expect(b.len()).to_equal(4)
+        # @capture(bit_table): CMGT.4S output length invariant
+        step("Verify the fixed-width AArch64 instruction is exactly 4 bytes")
+        expect(b.len()).to_equal(4)  # oracle: every AArch64 instruction word is 4 bytes wide
 
 # ============================================================================
 # Cross-instruction property tests
@@ -368,26 +479,38 @@ describe "emit_cmgtv_4s — compare signed greater-than 4x32-bit lanes":
 
 describe "ADD vs SUB U-bit distinction":
     it "ADD and SUB with same regs match bytes 0-2 and differ at byte[3] by U-bit (0x20)":
+        # @req REQ-NEON-INT-033
+        step("Encode ADD and SUB with identical registers V0.4S, V0.4S, V0.4S")
         # ADD base 0x4EA08400 vs SUB base 0x6EA08400: differ in bit 29 (byte[3] 0x4E vs 0x6E)
         var a = emit_addv_4s(0, 0, 0)
         var s = emit_subv_4s(0, 0, 0)
+        # @capture(bit_table): ADD vs SUB byte-by-byte U-bit distinction
+        step("Verify the register-field bytes match and only the U-bit byte differs")
         expect(a[0]).to_equal(s[0])
         expect(a[1]).to_equal(s[1])
         expect(a[2]).to_equal(s[2])
-        expect(s[3] - a[3]).to_equal(0x20)
+        expect(s[3] - a[3]).to_equal(0x20)  # oracle: bit29 (U=1 selects SUB over ADD) adds 0x20 to the top byte
 
 describe "AND vs EOR U-bit distinction":
     it "AND (U=0) and EOR (U=1) with same regs differ at byte[3] by 0x20":
+        # @req REQ-NEON-INT-034
+        step("Encode AND and EOR with identical registers V0.16B, V0.16B, V0.16B")
         var a = emit_andv_16b(0, 0, 0)
         var e = emit_eorv_16b(0, 0, 0)
+        # @capture(bit_table): AND vs EOR byte-by-byte U-bit distinction
+        step("Verify the register-field bytes match and only the U-bit byte differs")
         expect(a[0]).to_equal(e[0])
         expect(a[1]).to_equal(e[1])
         expect(a[2]).to_equal(e[2])
-        expect(e[3] - a[3]).to_equal(0x20)
+        expect(e[3] - a[3]).to_equal(0x20)  # oracle: bit29 (U=1 selects EOR over AND) adds 0x20 to the top byte
 
 describe "SHL vs SSHR base opcode byte consistency":
     it "SHL and SSHR for same rd/rn share byte[3] = 0x4F":
+        # @req REQ-NEON-INT-035
+        step("Encode SHL V0.4S, V0.4S, #0 and SSHR V0.4S, V0.4S, #32")
         var sh = emit_shlv_4s(0, 0, 0)
         var ss = emit_sshrv_4s(0, 0, 32)
-        expect(sh[3]).to_equal(0x4F)
-        expect(ss[3]).to_equal(0x4F)
+        # @capture(bit_table): SHL vs SSHR shared immediate-shift class byte
+        step("Verify both immediate-shift instructions share the same top opcode byte")
+        expect(sh[3]).to_equal(0x4F)  # oracle: byte3 = 0x4F identifies the immediate-shift instruction class
+        expect(ss[3]).to_equal(0x4F)  # oracle: byte3 = 0x4F identifies the immediate-shift instruction class

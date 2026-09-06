@@ -1,4 +1,36 @@
-# LLM Caret JSON Helpers Specification
+"""
+## Purpose and audience
+Pins the LLM-caret inline JSON toolkit: text escaping, object/array
+builders, substring search, integer parsing, and the extract_* accessors
+used to read model-message payloads back. Written for maintainers of
+src/app/llm_caret/json_helpers.spl and for anyone wiring caret messages
+into a new transport.
+## Operator workflow
+./src/compiler_rust/target/bootstrap/simple run test/unit/app/llm_caret/json_helpers_spec.spl
+## Compatibility and limitations
+The product functions are bound through an explicit
+`use app.llm_caret.json_helpers` import; without that binding the runner's
+co-compiled std.mcp.helpers same-named extractors hijack the calls. The
+spec-local builder helpers below exist only to construct JSON fixture
+strings; all assertions run against shipped product code.
+## Verification guidance and troubleshooting
+A failure names the escape, builder, or extractor contract that drifted.
+The oracle comment on each expect line states the JSON wire semantics the
+expected value comes from. Two PINS DEFECT scenarios intentionally assert
+today's permissive json_parse_int behaviour; do not "fix" them to the
+strict contract until TODO(json-parse-int-strict) lands.
+"""
+# Lifecycle: doc/01_research/app/llm_caret/caret_suite_ide_workbench_smux_migration_2026-09-05.md ;
+# doc/03_plan/app/llm_caret/messaging.md ;
+# doc/04_architecture/llm_caret_multi_process_manager.md ;
+# doc/05_design/llm_caret_embedded_tmux.md
+
+use app.llm_caret.json_helpers.{
+    json_find, json_parse_int,
+    extract_json_string, extract_json_value, extract_json_int,
+    extract_json_bool, extract_nested_string,
+    build_message_json, build_messages_json
+}
 
 # Inline helpers for test isolation
 fn LB() -> text:
@@ -44,134 +76,273 @@ fn jp(key: text, val_str: text) -> text:
     r = r + val_str
     r
 
+fn _lb() -> text:
+    LB()
+
+fn _rb() -> text:
+    RB()
+
+fn _str(s: text) -> text:
+    js(s)
+
+fn _pair(key: text, val_str: text) -> text:
+    jp(key, val_str)
+
+fn _join_pairs(pairs: [text]) -> text:
+    var body = ""
+    var i = 0
+    while i < pairs.len():
+        if i > 0:
+            body = body + ","
+        body = body + pairs[i]
+        i = i + 1
+    body
+
 fn jo1(pair: text) -> text:
     var r = LB()
     r = r + pair
     r = r + RB()
     r
 
+fn jo2(p1: text, p2: text) -> text:
+    LB() + _join_pairs([p1, p2]) + RB()
+
+fn jo3(p1: text, p2: text, p3: text) -> text:
+    LB() + _join_pairs([p1, p2, p3]) + RB()
+
+fn jo4(p1: text, p2: text, p3: text, p4: text) -> text:
+    LB() + _join_pairs([p1, p2, p3, p4]) + RB()
+
+fn jo5(p1: text, p2: text, p3: text, p4: text, p5: text) -> text:
+    LB() + _join_pairs([p1, p2, p3, p4, p5]) + RB()
+
+fn jo6(p1: text, p2: text, p3: text, p4: text, p5: text, p6: text) -> text:
+    LB() + _join_pairs([p1, p2, p3, p4, p5, p6]) + RB()
+
+fn ja(items: [text]) -> text:
+    var body = ""
+    var i = 0
+    while i < items.len():
+        if i > 0:
+            body = body + ","
+        body = body + items[i]
+        i = i + 1
+    "[" + body + "]"
+
+# @manual_section: json-escaping
 describe "JSON Escaping":
     it "escapes plain text unchanged":
-        expect(escape_json_text("hello")).to_equal("hello")
+        # @req REQ-LLMCARET-JSON-001
+        # @capture(protocol_json): unescaped payload pass-through
+        step("Escape a plain payload and require it to pass through byte-for-byte")
+        expect(escape_json_text("hello")).to_equal("hello")  # oracle: JSON escapes only the five special characters, plain text is verbatim
 
     it "escapes double quotes":
-        expect(escape_json_text("say \"hi\"")).to_equal("say \\\"hi\\\"")
+        # @req REQ-LLMCARET-JSON-002
+        # @capture(protocol_json): quote escaping vs the JSON string grammar
+        step("Escape a payload containing double quotes")
+        expect(escape_json_text("say \"hi\"")).to_equal("say \\\"hi\\\"")  # oracle: a double quote inside a JSON string must become the backslash-quote escape
 
     it "escapes backslashes":
-        expect(escape_json_text("a\\b")).to_equal("a\\\\b")
+        # @req REQ-LLMCARET-JSON-003
+        # @capture(protocol_json): backslash escaping vs the JSON string grammar
+        step("Escape a payload containing a backslash")
+        expect(escape_json_text("a\\b")).to_equal("a\\\\b")  # oracle: a backslash must be doubled first, or every later escape is corrupt
 
     it "escapes newlines":
-        expect(escape_json_text("line1\nline2")).to_equal("line1\\nline2")
+        # @req REQ-LLMCARET-JSON-004
+        # @capture(protocol_json): newline escaping vs the JSON single-line string rule
+        step("Escape a payload containing a newline")
+        expect(escape_json_text("line1\nline2")).to_equal("line1\\nline2")  # oracle: a raw newline is illegal inside a JSON string and must become the \\n escape
 
     it "escapes tabs":
-        expect(escape_json_text("a\tb")).to_equal("a\\tb")
+        # @req REQ-LLMCARET-JSON-005
+        # @capture(protocol_json): tab escaping vs the JSON control-character rule
+        step("Escape a payload containing a tab")
+        expect(escape_json_text("a\tb")).to_equal("a\\tb")  # oracle: a raw tab is a control character and must become the \\t escape
 
+# @manual_section: json-building
 describe "JSON Building":
     it "builds string value":
+        # @req REQ-LLMCARET-JSON-006
+        # @capture(protocol_json): quoted string value vs the JSON grammar
+        step("Wrap a payload in the string-value helper and require JSON quoting around it")
         val result = js("hello")
-        expect(result).to_equal("\"hello\"")
+        expect(result).to_equal("\"hello\"")  # oracle: a JSON string value is the payload wrapped in double quotes
 
     it "builds key-value pair":
+        # @req REQ-LLMCARET-JSON-007
+        # @capture(protocol_json): member pair vs the JSON object grammar
+        step("Join a key and a string value into a JSON member pair")
         val result = jp("name", js("Alice"))
-        expect(result).to_contain("\"name\"")
-        expect(result).to_contain("\"Alice\"")
+        expect(result).to_contain("\"name\"")  # oracle: the member key is a quoted JSON string
+        expect(result).to_contain("\"Alice\"")  # oracle: the member value is a quoted JSON string
 
     it "builds single-pair object":
+        # @req REQ-LLMCARET-JSON-008
+        # @capture(protocol_json): one-member object framing vs the JSON braces
+        step("Wrap one member pair in the single-pair object builder and require brace framing")
         val result = jo1(_pair("key", _str("val")))
-        expect(result).to_start_with(_lb())
-        expect(result).to_end_with(_rb())
+        expect(result).to_start_with(_lb())  # oracle: a JSON object opens with a left brace
+        expect(result).to_end_with(_rb())  # oracle: a JSON object closes with a right brace
 
     it "builds two-pair object":
+        # @req REQ-LLMCARET-JSON-009
+        # @capture(protocol_json): two-member object vs the comma separator rule
+        step("Wrap two member pairs in the two-pair object builder and require the comma separator")
         val result = jo2(_pair("a", _str("1")), _pair("b", _str("2")))
-        expect(result).to_contain(",")
-        expect(result).to_contain("\"a\"")
-        expect(result).to_contain("\"b\"")
+        expect(result).to_contain(",")  # oracle: adjacent JSON members are separated by a comma
+        expect(result).to_contain("\"a\"")  # oracle: each member key survives as a quoted JSON string
+        expect(result).to_contain("\"b\"")  # oracle: each member key survives as a quoted JSON string
 
     it "builds three-pair object":
+        # @req REQ-LLMCARET-JSON-010
+        # @capture(protocol_json): three-member object framing vs the JSON braces
+        step("Wrap three member pairs in the three-pair object builder and require brace framing plus the last member")
         val result = jo3(_pair("a", _str("1")), _pair("b", _str("2")), _pair("c", _str("3")))
-        expect(result).to_start_with(_lb())
-        expect(result).to_end_with(_rb())
-        expect(result).to_contain("\"c\"")
+        expect(result).to_start_with(_lb())  # oracle: a JSON object opens with a left brace
+        expect(result).to_end_with(_rb())  # oracle: a JSON object closes with a right brace
+        expect(result).to_contain("\"c\"")  # oracle: the trailing member must not be dropped by the builder
 
     it "builds four-pair object":
+        # @req REQ-LLMCARET-JSON-011
+        # @capture(protocol_json): four-member object read-back vs the shipped extractor
+        step("Build a four-member object and read the fourth member back with the shipped extractor")
         val result = jo4(_pair("a", "1"), _pair("b", "2"), _pair("c", "3"), _pair("d", "4"))
-        expect(extract_json_value(result, "d")).to_equal("4")
+        expect(extract_json_value(result, "d")).to_equal("4")  # oracle: the extractor must find the last of four members and return its raw value
 
     it "builds five-pair object":
+        # @req REQ-LLMCARET-JSON-012
+        # @capture(protocol_json): five-member object read-back vs the shipped extractor
+        step("Build a five-member object and read the fifth member back with the shipped extractor")
         val result = jo5(_pair("a", "1"), _pair("b", "2"), _pair("c", "3"), _pair("d", "4"), _pair("e", "5"))
-        expect(extract_json_value(result, "e")).to_equal("5")
+        expect(extract_json_value(result, "e")).to_equal("5")  # oracle: the extractor must find the last of five members and return its raw value
 
     it "builds six-pair object":
+        # @req REQ-LLMCARET-JSON-013
+        # @capture(protocol_json): six-member object read-back vs the shipped extractor
+        step("Build a six-member object and read the sixth member back with the shipped extractor")
         val result = jo6(_pair("a", "1"), _pair("b", "2"), _pair("c", "3"), _pair("d", "4"), _pair("e", "5"), _pair("f", "6"))
-        expect(extract_json_value(result, "f")).to_equal("6")
+        expect(extract_json_value(result, "f")).to_equal("6")  # oracle: the extractor must find the last of six members and return its raw value
 
     it "builds array from items":
+        # @req REQ-LLMCARET-JSON-014
+        # @capture(protocol_json): three-item array framing vs the JSON array grammar
+        step("Wrap three string items in the array builder and require bracket framing with comma separation")
         val result = ja([_str("a"), _str("b"), _str("c")])
-        expect(result).to_start_with("[")
-        expect(result).to_end_with("]")
-        expect(result).to_contain("\"a\"")
-        expect(result).to_contain(",")
+        expect(result).to_start_with("[")  # oracle: a JSON array opens with a left bracket
+        expect(result).to_end_with("]")  # oracle: a JSON array closes with a right bracket
+        expect(result).to_contain("\"a\"")  # oracle: each element survives as a quoted JSON string
+        expect(result).to_contain(",")  # oracle: adjacent array elements are separated by a comma
 
     it "builds empty array":
+        # @req REQ-LLMCARET-JSON-015
+        # @capture(protocol_json): empty-array literal vs the canonical JSON form
+        step("Wrap zero items in the array builder and require the canonical empty array literal")
         val result = ja([])
-        expect(result).to_equal("[]")
+        expect(result).to_equal("[]")  # oracle: the canonical JSON empty array is the two-character literal []
 
+# @manual_section: json-substring-search
 describe "JSON Substring Search":
     # json_find is the shipped hand-written replacement for text.index_of().
     # It had no coverage at all while the spec carried its own index_of copy.
     it "finds a needle at the start":
-        expect(json_find("abcdef", "abc")).to_equal(0)
+        # @req REQ-LLMCARET-JSON-016
+        # @capture(statistics): prefix match index vs pinned value 0
+        step("Search for a needle that prefixes the haystack and require index zero")
+        expect(json_find("abcdef", "abc")).to_equal(0)  # oracle: a prefix match starts at byte offset 0
 
     it "finds a needle in the middle":
-        expect(json_find("abcdef", "cd")).to_equal(2)
+        # @req REQ-LLMCARET-JSON-017
+        # @capture(statistics): mid-string match index vs pinned value 2
+        step("Search for a needle two bytes into the haystack and require its offset")
+        expect(json_find("abcdef", "cd")).to_equal(2)  # oracle: "cd" starts after "ab", at byte offset 2
 
     it "finds a needle at index 3":
         # Index 3 is the exact value the seed's Option<i64> tag-box collides
         # with the nil sentinel on; json_find exists to avoid that.
-        expect(json_find("abcdef", "d")).to_equal(3)
+        # @req REQ-LLMCARET-JSON-018
+        # @capture(statistics): sentinel-collision index vs pinned value 3
+        step("Search for a needle at the offset where the seed's Option tag-box collides with the nil sentinel")
+        expect(json_find("abcdef", "d")).to_equal(3)  # oracle: "d" sits at byte offset 3, the exact value the erased Option<i64> representation cannot return
 
     it "returns -1 when absent":
-        expect(json_find("abcdef", "xyz")).to_equal(-1)
+        # @req REQ-LLMCARET-JSON-019
+        # @capture(statistics): absent-needle sentinel vs pinned value -1
+        step("Search for a needle the haystack does not contain and require the not-found sentinel")
+        expect(json_find("abcdef", "xyz")).to_equal(-1)  # oracle: a missing needle reports the -1 not-found sentinel, never a valid offset
 
     it "returns -1 when the needle is longer than the haystack":
-        expect(json_find("ab", "abcdef")).to_equal(-1)
+        # @req REQ-LLMCARET-JSON-020
+        # @capture(statistics): oversized-needle sentinel vs pinned value -1
+        step("Search with a needle longer than the haystack and require the not-found sentinel")
+        expect(json_find("ab", "abcdef")).to_equal(-1)  # oracle: an oversized needle cannot match, so the -1 sentinel is the only correct answer
 
     it "returns 0 for an empty needle":
-        expect(json_find("abcdef", "")).to_equal(0)
+        # @req REQ-LLMCARET-JSON-021
+        # @capture(statistics): empty-needle index vs pinned value 0
+        step("Search with an empty needle and require index zero")
+        expect(json_find("abcdef", "")).to_equal(0)  # oracle: the empty string is a prefix of every string, so the match offset is 0
 
+# @manual_section: json-integer-parsing
 describe "JSON Integer Parsing":
     # json_parse_int is the shipped boxing-free replacement for int().
     it "parses a positive integer":
-        expect(json_parse_int("42")).to_equal(42)
+        # @req REQ-LLMCARET-JSON-022
+        # @capture(statistics): parsed positive integer vs pinned value 42
+        step("Parse a positive integer literal and require its numeric value")
+        expect(json_parse_int("42")).to_equal(42)  # oracle: the digit run 42 denotes the integer 42
 
     it "parses zero":
-        expect(json_parse_int("0")).to_equal(0)
+        # @req REQ-LLMCARET-JSON-023
+        # @capture(statistics): parsed zero vs pinned value 0
+        step("Parse a zero literal and require its numeric value")
+        expect(json_parse_int("0")).to_equal(0)  # oracle: the single digit 0 denotes the integer 0
 
     it "parses a negative integer":
-        expect(json_parse_int("-17")).to_equal(-17)
+        # @req REQ-LLMCARET-JSON-024
+        # @capture(statistics): parsed negative integer vs pinned value -17
+        step("Parse a negative integer literal and require its numeric value")
+        expect(json_parse_int("-17")).to_equal(-17)  # oracle: a leading minus negates the digit run 17
 
     it "parses a multi-digit integer":
-        expect(json_parse_int("12345")).to_equal(12345)
+        # @req REQ-LLMCARET-JSON-025
+        # @capture(statistics): parsed multi-digit integer vs pinned value 12345
+        step("Parse a five-digit integer literal and require its numeric value")
+        expect(json_parse_int("12345")).to_equal(12345)  # oracle: positional decimal accumulation of the digits 1..5 is 12345
 
     # DEFECT PIN (positive control, not an endorsement).
     # TODO(json-parse-int-strict): json_parse_int silently SKIPS any non-digit
     # character instead of rejecting the input, so "1a2" parses as 12 and a
     # non-numeric string parses as 0. See src/app/llm_caret/json_helpers.spl:194.
     it "PINS DEFECT: skips embedded non-digits instead of rejecting":
-        expect(json_parse_int("1a2")).to_equal(12)
+        # @req REQ-LLMCARET-JSON-026
+        # @capture(statistics): permissive-parse defect pin vs pinned value 12
+        step("Parse a literal with an embedded letter and pin today's skip-non-digit behaviour")
+        expect(json_parse_int("1a2")).to_equal(12)  # oracle: DEFECT PIN — the parser skips the non-digit, so the remaining digits 1 and 2 accumulate to 12
 
     it "PINS DEFECT: returns 0 for a wholly non-numeric string":
-        expect(json_parse_int("abc")).to_equal(0)
+        # @req REQ-LLMCARET-JSON-027
+        # @capture(statistics): empty-accumulation defect pin vs pinned value 0
+        step("Parse a letter-only literal and pin today's zero-accumulation behaviour")
+        expect(json_parse_int("abc")).to_equal(0)  # oracle: DEFECT PIN — with no digits to accumulate the parser returns the 0 identity instead of rejecting
 
+# @manual_section: json-parsing
 describe "JSON Parsing":
     it "extracts string value":
+        # @req REQ-LLMCARET-JSON-028
+        # @capture(protocol_json): extracted member value vs the built payload
+        step("Build a one-member object and extract its string value with the shipped extractor")
         val json = jo1(_pair("name", _str("Alice")))
         val result = extract_json_string(json, "name")
-        expect(result).to_equal("Alice")
+        expect(result).to_equal("Alice")  # oracle: the extractor returns the member value with the JSON quotes stripped
 
     it "returns empty for missing key":
+        # @req REQ-LLMCARET-JSON-029
+        # @capture(protocol_json): missing-key fallback vs the empty-string contract
+        step("Extract a key the object does not carry and require the empty-string fallback")
         val json = jo1(_pair("name", _str("Alice")))
-        expect(extract_json_string(json, "missing")).to_equal("")
+        expect(extract_json_string(json, "missing")).to_equal("")  # oracle: a absent key has no value, and the extractor's not-found contract is the empty string
 
     # KNOWN RED — this example is expected to fail today and is deliberately
     # NOT weakened. It asserts the CORRECT behaviour of the imported subject.
@@ -186,92 +357,147 @@ describe "JSON Parsing":
     # shipped module moves json_find's own examples but leaves every
     # extract_json_* example untouched — they are served by the other module.
     # Recorded in doc/08_tracking/bug/vacuous_spec_census_2026-07-30.md.
+    # NOTE: this file now binds the subject through an explicit
+    # `use app.llm_caret.json_helpers` import, which removes the hijack under
+    # `simple run`; the scenario stays in place as the regression canary for
+    # the `simple test` co-compile path.
     it "extracts a string value containing an escaped quote":
+        # @req REQ-LLMCARET-JSON-030
+        # @capture(protocol_json): escape-aware extraction vs the tracked-escape contract
+        step("Build a member whose value contains an escaped quote and extract it with escape tracking intact")
         # The shipped extractor tracks backslash escapes; this is the behaviour
         # that std.mcp.helpers' same-named function does NOT have.
         val json = jo1(_pair("name", _str("say \"hi\"")))
-        expect(extract_json_string(json, "name")).to_equal("say \\\"hi\\\"")
+        expect(extract_json_string(json, "name")).to_equal("say \\\"hi\\\"")  # oracle: the escape-aware extractor keeps the backslash-quote pair because the backslash is tracked, not a terminator
 
     it "extracts a string whose escaped quote is the last char (backslash before closing quote)":
+        # @req REQ-LLMCARET-JSON-031
+        # @capture(protocol_json): trailing-escaped-quote extraction vs the escape-state contract
         step("Verify: escaped quote directly before the closing quote")
         val json = jo1(_pair("name", _str("end\"")))
-        expect(extract_json_string(json, "name")).to_equal("end\\\"")
+        expect(extract_json_string(json, "name")).to_equal("end\\\"")  # oracle: a backslash escapes the following quote, so the final quote is payload and extraction continues to the real terminator
 
     it "extracts a string ending in an escaped backslash":
+        # @req REQ-LLMCARET-JSON-032
+        # @capture(protocol_json): trailing-escaped-backslash extraction vs the escape-state contract
         step("Verify: backslash at end resets escape state before the closing quote")
         val json = jo1(_pair("name", _str("dir\\")))
-        expect(extract_json_string(json, "name")).to_equal("dir\\\\")
+        expect(extract_json_string(json, "name")).to_equal("dir\\\\")  # oracle: the trailing backslash escapes itself, resetting escape state so the next quote really terminates the string
 
     it "extracts a string containing a double backslash":
+        # @req REQ-LLMCARET-JSON-033
+        # @capture(protocol_json): embedded-double-backslash extraction vs the verbatim rule
         step("Verify: double backslash in the middle is kept verbatim")
         val json = jo1(_pair("name", _str("a\\b")))
-        expect(extract_json_string(json, "name")).to_equal("a\\\\b")
+        expect(extract_json_string(json, "name")).to_equal("a\\\\b")  # oracle: an escaped backslash pair is payload, kept verbatim through extraction
 
     it "extracts a string containing a unicode escape":
+        # @req REQ-LLMCARET-JSON-034
+        # @capture(protocol_json): unicode-escape extraction vs the verbatim rule
         step("Verify: \\u escape sequence is kept verbatim")
         val json = jo1(_pair("name", "\"caf\\u00e9\""))
-        expect(extract_json_string(json, "name")).to_equal("caf\\u00e9")
+        expect(extract_json_string(json, "name")).to_equal("caf\\u00e9")  # oracle: the extractor carries \\u sequences through untouched rather than decoding them
 
     it "extracts numeric value":
+        # @req REQ-LLMCARET-JSON-035
+        # @capture(protocol_json): raw numeric member value vs the built payload
+        step("Build a two-member object with a raw numeric member and extract it as a raw string")
         val json = jo2(_pair("count", "42"), _pair("name", _str("test")))
         val result = extract_json_value(json, "count")
-        expect(result).to_equal("42")
+        expect(result).to_equal("42")  # oracle: extract_json_value returns the raw untyped member text, here the digits 42
 
     it "returns null for a missing raw value":
+        # @req REQ-LLMCARET-JSON-036
+        # @capture(protocol_json): missing-raw-key fallback vs the null-literal contract
+        step("Extract a raw value for a key the object does not carry and require the null literal")
         val json = jo1(_pair("count", "42"))
-        expect(extract_json_value(json, "missing")).to_equal("null")
+        expect(extract_json_value(json, "missing")).to_equal("null")  # oracle: the raw accessor's not-found contract is the JSON null literal
 
     it "extracts integer value":
+        # @req REQ-LLMCARET-JSON-037
+        # @capture(statistics): extracted integer vs pinned value 99
+        step("Build a one-member object with a numeric member and extract it as an integer")
         val json = jo1(_pair("count", "99"))
-        expect(extract_json_int(json, "count")).to_equal(99)
+        expect(extract_json_int(json, "count")).to_equal(99)  # oracle: the digits 99 parse to the integer 99
 
     it "returns 0 for missing int":
+        # @req REQ-LLMCARET-JSON-038
+        # @capture(statistics): missing-int fallback vs pinned value 0
+        step("Extract an integer for a key the object does not carry and require the zero fallback")
         val json = jo1(_pair("name", _str("test")))
-        expect(extract_json_int(json, "missing")).to_equal(0)
+        expect(extract_json_int(json, "missing")).to_equal(0)  # oracle: the integer accessor's not-found contract is the 0 identity
 
     it "extracts a negative integer value":
+        # @req REQ-LLMCARET-JSON-039
+        # @capture(statistics): extracted negative integer vs pinned value -5
+        step("Build a one-member object with a negative numeric member and extract it as an integer")
         val json = jo1(_pair("delta", "-5"))
-        expect(extract_json_int(json, "delta")).to_equal(-5)
+        expect(extract_json_int(json, "delta")).to_equal(-5)  # oracle: the leading minus negates the digit 5
 
     it "extracts boolean value":
+        # @req REQ-LLMCARET-JSON-040
+        # @capture(bit_table): extracted true literal vs the JSON boolean grammar
+        step("Build a one-member object carrying the true literal and extract it as a boolean")
         val json = jo1(_pair("active", "true"))
-        expect(extract_json_bool(json, "active")).to_equal(true)
+        expect(extract_json_bool(json, "active")).to_equal(true)  # oracle: the JSON true literal maps to the boolean true
 
     it "extracts false boolean":
+        # @req REQ-LLMCARET-JSON-041
+        # @capture(bit_table): extracted false literal vs the JSON boolean grammar
+        step("Build a one-member object carrying the false literal and extract it as a boolean")
         val json = jo1(_pair("active", "false"))
-        expect(extract_json_bool(json, "active")).to_equal(false)
+        expect(extract_json_bool(json, "active")).to_equal(false)  # oracle: the JSON false literal maps to the boolean false
 
     it "extracts nested string":
+        # @req REQ-LLMCARET-JSON-042
+        # @capture(protocol_json): two-level extraction vs the nested-object payload
+        step("Build a nested object and extract the inner member through the two-key accessor")
         val inner = jo1(_pair("name", _str("Bob")))
         val json = jo1(_pair("user", inner))
-        expect(extract_nested_string(json, "user", "name")).to_equal("Bob")
+        expect(extract_nested_string(json, "user", "name")).to_equal("Bob")  # oracle: the two-key accessor descends into the "user" object and returns its "name" member with quotes stripped
 
     it "returns empty for a missing outer key in a nested lookup":
+        # @req REQ-LLMCARET-JSON-043
+        # @capture(protocol_json): missing-outer-key fallback vs the empty-string contract
+        step("Run the two-key accessor against an outer key the object does not carry and require the empty-string fallback")
         val inner = jo1(_pair("name", _str("Bob")))
         val json = jo1(_pair("user", inner))
-        expect(extract_nested_string(json, "missing", "name")).to_equal("")
+        expect(extract_nested_string(json, "missing", "name")).to_equal("")  # oracle: with no outer object to descend into, the accessor's not-found contract is the empty string
 
+# @manual_section: message-json
 describe "Message JSON":
     it "builds single message":
+        # @req REQ-LLMCARET-JSON-044
+        # @capture(protocol_json): message payload members vs the chat wire format
+        step("Build a single chat message payload and require both member keys and values")
         val result = build_message_json("user", "Hello")
-        expect(result).to_contain("\"role\"")
-        expect(result).to_contain("\"user\"")
-        expect(result).to_contain("\"content\"")
-        expect(result).to_contain("\"Hello\"")
+        expect(result).to_contain("\"role\"")  # oracle: the chat wire format names the speaker member "role"
+        expect(result).to_contain("\"user\"")  # oracle: the speaker value survives as a quoted JSON string
+        expect(result).to_contain("\"content\"")  # oracle: the chat wire format names the payload member "content"
+        expect(result).to_contain("\"Hello\"")  # oracle: the payload value survives as a quoted JSON string
 
     it "round-trips a message through the extractors":
+        # @req REQ-LLMCARET-JSON-045
+        # @capture(protocol_json): built message read back through the extractors
+        step("Build a single chat message and read both members back with the shipped extractor")
         val result = build_message_json("user", "Hello")
-        expect(extract_json_string(result, "role")).to_equal("user")
-        expect(extract_json_string(result, "content")).to_equal("Hello")
+        expect(extract_json_string(result, "role")).to_equal("user")  # oracle: the round-trip must return the speaker the builder was given
+        expect(extract_json_string(result, "content")).to_equal("Hello")  # oracle: the round-trip must return the payload the builder was given
 
     it "builds messages array":
+        # @req REQ-LLMCARET-JSON-046
+        # @capture(protocol_json): two-message array framing vs the chat wire format
+        step("Build a two-message array payload and require bracket framing with both roles present")
         val result = build_messages_json(["user", "assistant"], ["Hi", "Hello!"])
-        expect(result).to_start_with("[")
-        expect(result).to_end_with("]")
-        expect(result).to_contain("\"user\"")
-        expect(result).to_contain("\"assistant\"")
+        expect(result).to_start_with("[")  # oracle: a message list is a JSON array and opens with a left bracket
+        expect(result).to_end_with("]")  # oracle: a message list is a JSON array and closes with a right bracket
+        expect(result).to_contain("\"user\"")  # oracle: the first message's role survives in the array payload
+        expect(result).to_contain("\"assistant\"")  # oracle: the second message's role survives in the array payload
 
     it "pads missing content with an empty string":
+        # @req REQ-LLMCARET-JSON-047
+        # @capture(protocol_json): role/content arity mismatch padding vs the empty-string contract
+        step("Build a two-role payload with only one content string and require the missing content to be padded empty")
         val result = build_messages_json(["user", "assistant"], ["Hi"])
-        expect(result).to_contain("\"assistant\"")
-        expect(result).to_contain("\"\"")
+        expect(result).to_contain("\"assistant\"")  # oracle: the role without content must still appear in the payload
+        expect(result).to_contain("\"\"")  # oracle: a role with no content gets the empty JSON string as its padded payload

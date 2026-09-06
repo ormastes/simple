@@ -1,5 +1,32 @@
+"""
+## Purpose and audience
+Purpose: pin the bounded socket environment executor's capture/replay
+contract: loopback-only endpoint policy, exact open/send/receive/close
+transcript ordering, divergence rejection, and replay with no second network
+effect.
+Audience: MCDC HAL runtime engineers who own the socket environment
+instruction executor and its transcript cursor wire contract.
+## Operator workflow
+Run this spec with
+`simple run test/02_integration/app/hal_environment_socket_executor_spec.spl`
+and read the per-scenario verdict lines; a failing scenario pinpoints the
+regressed executor behavior.
+## Compatibility and limitations
+Exercises the hosted socket executor wrappers against a captured request/
+response pair only; no real socket is ever opened, so network-visible
+behavior and timeout handling are outside this spec's reach.
+## Verification guidance and troubleshooting
+A failure names the transcript stage or policy condition that regressed;
+re-run this spec and compare the failing scenario's receipt fields and
+cursor sequence numbers to reproduce locally.
+"""
 # @feature mcdc_hal_runtime_hardening
 # @req REQ-011 REQ-016 REQ-017
+# Lifecycle: doc/01_research/local/mcdc_hal_runtime_hardening.md ;
+# doc/03_plan/agent_tasks/mcdc_hal_runtime_hardening.md ;
+# doc/04_architecture/mcdc_hal_runtime_hardening.md ;
+# doc/05_design/mcdc_hal_runtime_hardening.md
+# @manual_section: hosted-socket-environment-executor
 
 use std.spec.*
 use app.test.hal_environment_socket_executor.*
@@ -22,14 +49,20 @@ fn instruction(sequence: i64, opcode: EnvOpcodeV1, capability_id: i64,
 
 describe "bounded socket environment capture and replay":
     it "accepts only bounded loopback endpoints under explicit capability policy":
+        # @req REQ-016
+        # @capture(bit_table): endpoint-policy verdicts for loopback, remote, and privileged ports
+        step("Classify loopback, remote, and privileged-port endpoint policies")
         expect(hosted_socket_endpoint_policy_v1_well_formed(
             socket_policy(14))).to_be(true)
         expect(hosted_socket_endpoint_policy_v1_well_formed(
-            socket_policy(14, "10.0.0.1:18080"))).to_be(false)
+            socket_policy(14, "10.0.0.1:18080"))).to_be(false)  # oracle: a non-loopback endpoint must fail the bounded policy check
         expect(hosted_socket_endpoint_policy_v1_well_formed(
-            socket_policy(14, "127.0.0.1:80"))).to_be(false)
+            socket_policy(14, "127.0.0.1:80"))).to_be(false)  # oracle: a privileged loopback port must fail the bounded policy check
 
     it "commits a captured exchange in exact open send receive close order":
+        # @req REQ-011
+        # @capture(protocol_binary): four-stage socket transcript with receipt per stage
+        step("Replay a captured exchange through open, send, receive, and close in order")
         val request: [u8] = [1u8, 2u8, 3u8]
         val response: [u8] = [9u8, 8u8]
         val capture = hosted_prepare_socket_exchange_from_capture_v1(
@@ -68,9 +101,12 @@ describe "bounded socket environment capture and replay":
         expect(closed.receipt.applied).to_be(true)
         expect(receive_result).to_equal(response)
         expect(hosted_socket_transcript_complete_v1(cursor)).to_be(true)
-        expect(closed.receipt.allocation_count_after_seal).to_equal(0)
+        expect(closed.receipt.allocation_count_after_seal).to_equal(0)  # oracle: a sealed capture must allocate nothing after the seal point
 
     it "rejects reordered or capability-divergent operations without advancing":
+        # @req REQ-017
+        # @capture(protocol_binary): diverged rejection receipts with unadvanced cursor sequence
+        step("Submit a reordered close and a wrong-capability open and expect both to diverge")
         val capture = hosted_prepare_socket_exchange_from_capture_v1(
             socket_policy(14), [1u8], [2u8])
         val cursor = hosted_socket_transcript_cursor_v1()
@@ -90,11 +126,14 @@ describe "bounded socket environment capture and replay":
         expect(env_instruction_status_to_i64(
             wrong_capability.receipt.observation.status)).to_equal(
                 env_instruction_status_to_i64(EnvInstructionStatusV1.Diverged))
-        expect(reordered.cursor.next_sequence).to_equal(0)
-        expect(wrong_capability.cursor.next_sequence).to_equal(0)
-        expect(result[0]).to_equal(77u8)
+        expect(reordered.cursor.next_sequence).to_equal(0)  # oracle: a diverged operation must not advance the transcript sequence
+        expect(wrong_capability.cursor.next_sequence).to_equal(0)  # oracle: a diverged operation must not advance the transcript sequence
+        expect(result[0]).to_equal(77u8)  # oracle: the sentinel 77 must survive because a diverged operation may not touch result storage
 
     it "replays exact captured receive bytes with no second network effect":
+        # @req REQ-011
+        # @capture(protocol_binary): receive capture plus replay observation with interaction digest
+        step("Capture a receive at sequence 2 and replay it with equivalent observations")
         val capture = hosted_prepare_socket_exchange_from_capture_v1(
             socket_policy(14), [1u8], [4u8, 5u8])
         val op = instruction(2, EnvOpcodeV1.SocketReceive, 14, 0, 2)
@@ -108,14 +147,14 @@ describe "bounded socket environment capture and replay":
         val replay = env_replay_exact_v1(
             op, op, captured.receipt.observation, [], recorded, replayed)
 
-        expect(captured.receipt.physical_effect).to_be(false)
+        expect(captured.receipt.physical_effect).to_be(false)  # oracle: the pre-captured exchange replays from the snapshot, never the network
         expect(replay.applied).to_be(true)
-        expect(replay.physical_effect).to_be(false)
-        expect(replay.allocation_count_after_seal).to_equal(0)
+        expect(replay.physical_effect).to_be(false)  # oracle: replay must serve the snapshot without a second network effect
+        expect(replay.allocation_count_after_seal).to_equal(0)  # oracle: replay allocates nothing after the seal point either
         expect(replayed).to_equal(recorded)
         expect(env_replay_observations_equivalent(
             captured.receipt.observation, replay.observation)).to_be(true)
         expect(captured.receipt.observation.interaction_digest_hi
-            != 0).to_be(true)
+            != 0).to_be(true)  # oracle: a real captured interaction must leave a nonzero high digest word
         expect(captured.receipt.observation.interaction_digest_lo
-            != 0).to_be(true)
+            != 0).to_be(true)  # oracle: a real captured interaction must leave a nonzero low digest word

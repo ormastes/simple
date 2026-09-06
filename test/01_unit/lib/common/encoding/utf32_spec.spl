@@ -1,10 +1,39 @@
-# UTF-32 Encoding / Decoding Tests
-#
-# Tests for src/lib/common/encoding/utf32.spl
-# Covers: utf32_encode_one, utf32_decode_one, utf32_encode_all,
-#         utf32_decode_all, utf32_to_bytes_le, utf32_to_bytes_be,
-#         utf32_from_bytes_le, utf32_from_bytes_be,
-#         utf32_to_utf8, utf8_to_utf32
+# @cover src/lib/common/encoding/utf32.spl
+"""
+## Purpose and audience
+Executable specification for the UTF-32 codec in
+src/lib/common/encoding/utf32.spl: scalar validation, LE/BE byte
+serialization, and the UTF-32 <-> UTF-8 cross-codec bridges.
+Audience: maintainers of the text encoding stack and anyone wiring a
+new byte transport (file, network, IPC) that must agree with this
+module's fixed-width contract.
+
+## Operator workflow
+Run the spec from the repo root with the seed runner:
+./src/compiler_rust/target/bootstrap/simple run test/01_unit/lib/common/encoding/utf32_spec.spl
+Read the trailing SPEC FILE VERDICT line; every scenario prints its
+retained bit_table/protocol_binary evidence as a capture comment that
+spipe-docgen folds into the mirrored manual under doc/06_spec.
+
+## Compatibility and limitations
+The codec is fixed-width: one scalar value per 4-byte word, validated
+into the Unicode scalar range with surrogates and out-of-range values
+replaced by U+FFFD at both encode and decode. Truncated tails decode
+as one U+FFFD. The spec runs wherever the pure-Simple stdlib runs; no
+locale tables or GPU offload are involved.
+
+## Verification guidance and troubleshooting
+Each scenario stamps the exact byte words it observed, so a failing
+word pins the offending encode/decode step directly. A U+FFFD where a
+real scalar was expected means the input crossed a surrogate or range
+boundary; compare the stamped bit_table against the scenario's input
+literals before touching the codec.
+"""
+
+# Lifecycle: doc/01_research/language/types/simple_primitive_analysis.md ;
+# doc/03_plan/design/interpreter_shared_text_refactor.md ;
+# doc/04_architecture/lib/text_i18n/utf8_internationalized_text_architecture.md ;
+# doc/05_design/lib/text_i18n/text_encoding_engine.md
 
 use std.common.encoding.utf32.{
     utf32_encode_one, utf32_decode_one,
@@ -19,182 +48,268 @@ use std.common.encoding.utf8.{utf8_encode_all, utf8_decode_all}
 # utf32_encode_one / utf32_decode_one
 # ============================================================================
 
+# @manual_section: scalar-validation
+
 describe "utf32_encode_one":
     it "passes through valid codepoints":
-        expect(utf32_encode_one(0x41)).to_equal(0x41)
-        expect(utf32_encode_one(0xAC00)).to_equal(0xAC00)
-        expect(utf32_encode_one(0x1F600)).to_equal(0x1F600)
-        expect(utf32_encode_one(0x10FFFF)).to_equal(0x10FFFF)
-        expect(utf32_encode_one(0x00)).to_equal(0x00)
+        # @req REQ-UTF32-SCALAR-001
+        step("Encode one representative from each scalar band")
+        # @capture(bit_table): scalar values echoed through utf32_encode_one
+        expect(utf32_encode_one(0x41)).to_equal(0x41)  # oracle: Latin A is inside the scalar range and encodes to itself
+        expect(utf32_encode_one(0xAC00)).to_equal(0xAC00)  # oracle: Hangul syllable start is a valid scalar and is identity-encoded
+        expect(utf32_encode_one(0x1F600)).to_equal(0x1F600)  # oracle: supplementary-plane emoji is a valid scalar and is identity-encoded
+        expect(utf32_encode_one(0x10FFFF)).to_equal(0x10FFFF)  # oracle: U+10FFFF is the last valid scalar value
+        expect(utf32_encode_one(0x00)).to_equal(0x00)  # oracle: U+0000 is the lowest valid scalar value
 
     it "replaces surrogates with U+FFFD":
-        expect(utf32_encode_one(0xD800)).to_equal(0xFFFD)
-        expect(utf32_encode_one(0xDBFF)).to_equal(0xFFFD)
-        expect(utf32_encode_one(0xDC00)).to_equal(0xFFFD)
-        expect(utf32_encode_one(0xDFFF)).to_equal(0xFFFD)
+        # @req REQ-UTF32-SCALAR-002
+        step("Encode both surrogate halves at the range edges")
+        # @capture(bit_table): surrogate inputs and the U+FFFD replacements
+        expect(utf32_encode_one(0xD800)).to_equal(0xFFFD)  # oracle: U+D800 opens the surrogate block and is not a scalar
+        expect(utf32_encode_one(0xDBFF)).to_equal(0xFFFD)  # oracle: U+DBFF ends the high-surrogate block and is not a scalar
+        expect(utf32_encode_one(0xDC00)).to_equal(0xFFFD)  # oracle: U+DC00 opens the low-surrogate block and is not a scalar
+        expect(utf32_encode_one(0xDFFF)).to_equal(0xFFFD)  # oracle: U+DFFF ends the surrogate block and is not a scalar
 
     it "replaces out-of-range with U+FFFD":
-        expect(utf32_encode_one(0x110000)).to_equal(0xFFFD)
-        expect(utf32_encode_one(-1)).to_equal(0xFFFD)
+        # @req REQ-UTF32-SCALAR-003
+        step("Encode one value above the scalar maximum and one negative value")
+        # @capture(bit_table): out-of-range inputs and the U+FFFD replacements
+        expect(utf32_encode_one(0x110000)).to_equal(0xFFFD)  # oracle: U+110000 is one past the scalar maximum
+        expect(utf32_encode_one(-1)).to_equal(0xFFFD)  # oracle: negative values are outside the scalar range
 
 describe "utf32_decode_one":
     it "passes through valid values":
-        expect(utf32_decode_one(0x41)).to_equal(0x41)
-        expect(utf32_decode_one(0xAC00)).to_equal(0xAC00)
-        expect(utf32_decode_one(0x1F600)).to_equal(0x1F600)
+        # @req REQ-UTF32-SCALAR-004
+        step("Decode one representative from each scalar band")
+        # @capture(bit_table): scalar values echoed through utf32_decode_one
+        expect(utf32_decode_one(0x41)).to_equal(0x41)  # oracle: Latin A decodes to itself
+        expect(utf32_decode_one(0xAC00)).to_equal(0xAC00)  # oracle: Hangul syllable decodes to itself
+        expect(utf32_decode_one(0x1F600)).to_equal(0x1F600)  # oracle: supplementary-plane scalar decodes to itself
 
     it "replaces surrogates with U+FFFD":
-        expect(utf32_decode_one(0xD800)).to_equal(0xFFFD)
+        # @req REQ-UTF32-SCALAR-005
+        step("Decode the first surrogate value")
+        # @capture(bit_table): surrogate input and the U+FFFD replacement
+        expect(utf32_decode_one(0xD800)).to_equal(0xFFFD)  # oracle: surrogates never decode as scalars
 
     it "replaces out-of-range with U+FFFD":
-        expect(utf32_decode_one(0x110000)).to_equal(0xFFFD)
+        # @req REQ-UTF32-SCALAR-006
+        step("Decode one value above the scalar maximum")
+        # @capture(bit_table): out-of-range input and the U+FFFD replacement
+        expect(utf32_decode_one(0x110000)).to_equal(0xFFFD)  # oracle: one past the scalar maximum is replaced
 
 # ============================================================================
 # utf32_encode_all / utf32_decode_all roundtrip
 # ============================================================================
 
+# @manual_section: bulk-roundtrip
+
 describe "utf32_encode_all and utf32_decode_all":
     it "roundtrips valid codepoints":
+        # @req REQ-UTF32-BULK-001
+        step("Encode a mixed-script list and decode it back")
+        # @capture(statistics): word count and restored scalar list
         val cps = [0x41, 0xAC00, 0x1F600, 0x4F60]
         val encoded = utf32_encode_all(cps)
-        expect(encoded.len()).to_equal(4)
+        expect(encoded.len()).to_equal(4)  # oracle: four input scalars map to four fixed-width words
         val decoded = utf32_decode_all(encoded)
         expect(decoded).to_equal(cps)
 
     it "roundtrips Korean":
+        # @req REQ-UTF32-BULK-002
+        step("Encode a Hangul list and decode it back")
+        # @capture(statistics): word count and restored scalar list
         val cps = [0xAC00, 0xB098, 0xB2E4]
         val encoded = utf32_encode_all(cps)
         val decoded = utf32_decode_all(encoded)
         expect(decoded).to_equal(cps)
 
     it "roundtrips Cyrillic":
+        # @req REQ-UTF32-BULK-003
+        step("Encode the Cyrillic word and decode it back")
+        # @capture(statistics): word count and restored scalar list
         val cps = [0x041F, 0x0440, 0x0438, 0x0432, 0x0435, 0x0442]
         val encoded = utf32_encode_all(cps)
         val decoded = utf32_decode_all(encoded)
         expect(decoded).to_equal(cps)
 
     it "handles empty input":
+        # @req REQ-UTF32-BULK-004
+        step("Encode and decode the empty sequence")
+        # @capture(statistics): element counts for empty encode/decode
         val encoded = utf32_encode_all([])
-        expect(encoded.len()).to_equal(0)
+        expect(encoded.len()).to_equal(0)  # oracle: an empty list encodes to zero words
         val decoded = utf32_decode_all([])
-        expect(decoded.len()).to_equal(0)
+        expect(decoded.len()).to_equal(0)  # oracle: an empty word list decodes to zero scalars
 
     it "replaces invalid codepoints in bulk":
+        # @req REQ-UTF32-BULK-005
+        step("Encode a list with a surrogate wedged between valid scalars")
+        # @capture(bit_table): per-position words showing the isolated U+FFFD
         val mixed = [0x41, 0xD800, 0x42]
         val encoded = utf32_encode_all(mixed)
-        expect(encoded[0]).to_equal(0x41)
-        expect(encoded[1]).to_equal(0xFFFD)
-        expect(encoded[2]).to_equal(0x42)
+        expect(encoded[0]).to_equal(0x41)  # oracle: the valid first scalar survives unchanged
+        expect(encoded[1]).to_equal(0xFFFD)  # oracle: only the surrogate position is replaced
+        expect(encoded[2]).to_equal(0x42)  # oracle: the valid trailing scalar survives unchanged
 
 # ============================================================================
 # UTF-32 LE/BE byte serialization
 # ============================================================================
 
+# @manual_section: byte-serialization
+
 describe "utf32_to_bytes_le":
     it "serializes as little-endian 4 bytes":
+        # @req REQ-UTF32-BYTES-001
+        step("Serialize U+0041 as little-endian bytes")
+        # @capture(bit_table): the four emitted LE byte words
         # U+0041 -> 41 00 00 00
         val bytes = utf32_to_bytes_le([0x41])
-        expect(bytes.len()).to_equal(4)
-        expect(bytes[0]).to_equal(0x41)
-        expect(bytes[1]).to_equal(0x00)
-        expect(bytes[2]).to_equal(0x00)
-        expect(bytes[3]).to_equal(0x00)
+        expect(bytes.len()).to_equal(4)  # oracle: UTF-32 is a fixed 4-byte encoding
+        expect(bytes[0]).to_equal(0x41)  # oracle: the low byte of U+0041 lands first in LE order
+        expect(bytes[1]).to_equal(0x00)  # oracle: byte 1 of U+0041 is zero
+        expect(bytes[2]).to_equal(0x00)  # oracle: byte 2 of U+0041 is zero
+        expect(bytes[3]).to_equal(0x00)  # oracle: the high byte of U+0041 is zero
 
     it "serializes Hangul as little-endian":
+        # @req REQ-UTF32-BYTES-002
+        step("Serialize U+AC00 as little-endian bytes")
+        # @capture(bit_table): the four emitted LE byte words
         # U+AC00 -> 00 AC 00 00
         val bytes = utf32_to_bytes_le([0xAC00])
-        expect(bytes.len()).to_equal(4)
-        expect(bytes[0]).to_equal(0x00)
-        expect(bytes[1]).to_equal(0xAC)
-        expect(bytes[2]).to_equal(0x00)
-        expect(bytes[3]).to_equal(0x00)
+        expect(bytes.len()).to_equal(4)  # oracle: UTF-32 is a fixed 4-byte encoding
+        expect(bytes[0]).to_equal(0x00)  # oracle: the low byte of U+AC00 is zero
+        expect(bytes[1]).to_equal(0xAC)  # oracle: 0xAC is byte 1 of U+AC00 in LE order
+        expect(bytes[2]).to_equal(0x00)  # oracle: byte 2 of U+AC00 is zero
+        expect(bytes[3]).to_equal(0x00)  # oracle: the high byte of U+AC00 is zero
 
 describe "utf32_to_bytes_be":
     it "serializes as big-endian 4 bytes":
+        # @req REQ-UTF32-BYTES-003
+        step("Serialize U+0041 as big-endian bytes")
+        # @capture(bit_table): the four emitted BE byte words
         # U+0041 -> 00 00 00 41
         val bytes = utf32_to_bytes_be([0x41])
-        expect(bytes.len()).to_equal(4)
-        expect(bytes[0]).to_equal(0x00)
-        expect(bytes[1]).to_equal(0x00)
-        expect(bytes[2]).to_equal(0x00)
-        expect(bytes[3]).to_equal(0x41)
+        expect(bytes.len()).to_equal(4)  # oracle: UTF-32 is a fixed 4-byte encoding
+        expect(bytes[0]).to_equal(0x00)  # oracle: the high byte of U+0041 is zero
+        expect(bytes[1]).to_equal(0x00)  # oracle: byte 1 of U+0041 is zero
+        expect(bytes[2]).to_equal(0x00)  # oracle: byte 2 of U+0041 is zero
+        expect(bytes[3]).to_equal(0x41)  # oracle: the low byte of U+0041 lands last in BE order
 
 describe "utf32 bytes roundtrip":
     it "roundtrips LE serialization":
+        # @req REQ-UTF32-BYTES-004
+        step("Serialize a mixed-script list to LE bytes and restore it")
+        # @capture(protocol_binary): the LE byte stream and restored scalars
         val values = [0x41, 0xAC00, 0x1F600]
         val bytes = utf32_to_bytes_le(values)
         val restored = utf32_from_bytes_le(bytes)
         expect(restored).to_equal(values)
 
     it "roundtrips BE serialization":
+        # @req REQ-UTF32-BYTES-005
+        step("Serialize a mixed-script list to BE bytes and restore it")
+        # @capture(protocol_binary): the BE byte stream and restored scalars
         val values = [0x41, 0xAC00, 0x1F600]
         val bytes = utf32_to_bytes_be(values)
         val restored = utf32_from_bytes_be(bytes)
         expect(restored).to_equal(values)
 
     it "replaces truncated LE byte sequence":
+        # @req REQ-UTF32-BYTES-006
+        step("Decode an LE word list with a two-byte tail")
+        # @capture(bit_table): the truncated input words and decoded replacement
         val restored = utf32_from_bytes_le([0x41, 0x00, 0x00, 0x00, 0x7A, 0x00])
-        expect(restored).to_equal([0x41, 0xFFFD])
+        expect(restored).to_equal([0x41, 0xFFFD])  # oracle: the two-byte tail is not a word and becomes U+FFFD
 
     it "replaces truncated BE byte sequence":
+        # @req REQ-UTF32-BYTES-007
+        step("Decode a BE word list with a two-byte tail")
+        # @capture(bit_table): the truncated input words and decoded replacement
         val restored = utf32_from_bytes_be([0x00, 0x00, 0x00, 0x41, 0x00, 0x7A])
-        expect(restored).to_equal([0x41, 0xFFFD])
+        expect(restored).to_equal([0x41, 0xFFFD])  # oracle: the two-byte tail is not a word and becomes U+FFFD
 
     it "replaces invalid numeric bytes in LE input":
-        step("Verify: replaces invalid numeric bytes in LE input")
-        expect(utf32_from_bytes_le([-1, 0x00, 0x00, 0x00])).to_equal([0xFFFD])
-        expect(utf32_from_bytes_le([0x00, 0x00, 0x00, 256])).to_equal([0xFFFD])
+        # @req REQ-UTF32-BYTES-008
+        step("Decode LE words whose bytes sit outside the byte range")
+        # @capture(bit_table): the out-of-range byte words and decoded replacement
+        expect(utf32_from_bytes_le([-1, 0x00, 0x00, 0x00])).to_equal([0xFFFD])  # oracle: a negative byte is not a valid word and becomes U+FFFD
+        expect(utf32_from_bytes_le([0x00, 0x00, 0x00, 256])).to_equal([0xFFFD])  # oracle: a byte value above 255 is not a valid word and becomes U+FFFD
 
     it "replaces invalid numeric bytes in BE input":
-        step("Verify: replaces invalid numeric bytes in BE input")
-        expect(utf32_from_bytes_be([-1, 0x00, 0x00, 0x00])).to_equal([0xFFFD])
-        expect(utf32_from_bytes_be([0x00, 0x00, 0x00, 256])).to_equal([0xFFFD])
+        # @req REQ-UTF32-BYTES-009
+        step("Decode BE words whose bytes sit outside the byte range")
+        # @capture(bit_table): the out-of-range byte words and decoded replacement
+        expect(utf32_from_bytes_be([-1, 0x00, 0x00, 0x00])).to_equal([0xFFFD])  # oracle: a negative byte is not a valid word and becomes U+FFFD
+        expect(utf32_from_bytes_be([0x00, 0x00, 0x00, 256])).to_equal([0xFFFD])  # oracle: a byte value above 255 is not a valid word and becomes U+FFFD
 
     it "serializes invalid UTF-32 values as the replacement scalar":
-        step("Verify: serializes invalid UTF-32 values as the replacement scalar")
-        expect(utf32_to_bytes_le([-1])).to_equal([0xFD, 0xFF, 0x00, 0x00])
-        expect(utf32_to_bytes_be([0x110000])).to_equal([0x00, 0x00, 0xFF, 0xFD])
+        # @req REQ-UTF32-BYTES-010
+        step("Serialize out-of-range values through both byte orders")
+        # @capture(bit_table): the U+FFFD byte words in LE and BE order
+        expect(utf32_to_bytes_le([-1])).to_equal([0xFD, 0xFF, 0x00, 0x00])  # oracle: U+FFFD little-endian is FD FF 00 00
+        expect(utf32_to_bytes_be([0x110000])).to_equal([0x00, 0x00, 0xFF, 0xFD])  # oracle: U+FFFD big-endian is 00 00 FF FD
 
 # ============================================================================
 # Cross-codec: UTF-32 <-> UTF-8
 # ============================================================================
 
+# @manual_section: cross-codec
+
 describe "utf32 to utf8 cross-codec":
     it "converts ASCII":
+        # @req REQ-UTF32-XCODEC-001
+        step("Convert an ASCII pair through the cross-codec")
+        # @capture(bit_table): the emitted UTF-8 bytes
         val utf32_values = [0x48, 0x69]
         val utf8_bytes = utf32_to_utf8(utf32_values)
-        expect(utf8_bytes).to_equal([0x48, 0x69])
+        expect(utf8_bytes).to_equal([0x48, 0x69])  # oracle: ASCII passes through UTF-8 as single bytes
 
     it "converts Korean":
+        # @req REQ-UTF32-XCODEC-002
+        step("Convert U+AC00 through the cross-codec")
+        # @capture(bit_table): the three emitted UTF-8 bytes
         val utf32_values = [0xAC00]
         val utf8_bytes = utf32_to_utf8(utf32_values)
-        expect(utf8_bytes.len()).to_equal(3)
-        expect(utf8_bytes[0]).to_equal(0xEA)
-        expect(utf8_bytes[1]).to_equal(0xB0)
-        expect(utf8_bytes[2]).to_equal(0x80)
+        expect(utf8_bytes.len()).to_equal(3)  # oracle: U+AC00 needs a three-byte UTF-8 sequence
+        expect(utf8_bytes[0]).to_equal(0xEA)  # oracle: three-byte lead byte for the U+AC00 band
+        expect(utf8_bytes[1]).to_equal(0xB0)  # oracle: first continuation byte of U+AC00
+        expect(utf8_bytes[2]).to_equal(0x80)  # oracle: second continuation byte of U+AC00
 
     it "converts emoji":
+        # @req REQ-UTF32-XCODEC-003
+        step("Convert U+1F600 through the cross-codec")
+        # @capture(bit_table): the four emitted UTF-8 bytes
         val utf32_values = [0x1F600]
         val utf8_bytes = utf32_to_utf8(utf32_values)
-        expect(utf8_bytes.len()).to_equal(4)
-        expect(utf8_bytes[0]).to_equal(0xF0)
-        expect(utf8_bytes[1]).to_equal(0x9F)
-        expect(utf8_bytes[2]).to_equal(0x98)
-        expect(utf8_bytes[3]).to_equal(0x80)
+        expect(utf8_bytes.len()).to_equal(4)  # oracle: U+1F600 needs a four-byte UTF-8 sequence
+        expect(utf8_bytes[0]).to_equal(0xF0)  # oracle: four-byte lead byte for the U+1F600 band
+        expect(utf8_bytes[1]).to_equal(0x9F)  # oracle: first continuation byte of U+1F600
+        expect(utf8_bytes[2]).to_equal(0x98)  # oracle: second continuation byte of U+1F600
+        expect(utf8_bytes[3]).to_equal(0x80)  # oracle: third continuation byte of U+1F600
 
 describe "utf8 to utf32 cross-codec":
     it "converts ASCII":
+        # @req REQ-UTF32-XCODEC-004
+        step("Convert an ASCII byte pair back to UTF-32")
+        # @capture(bit_table): the decoded scalar list
         val utf8_bytes = [0x48, 0x69]
         val utf32_values = utf8_to_utf32(utf8_bytes)
-        expect(utf32_values).to_equal([0x48, 0x69])
+        expect(utf32_values).to_equal([0x48, 0x69])  # oracle: single-byte UTF-8 decodes one scalar per byte
 
     it "converts Korean":
+        # @req REQ-UTF32-XCODEC-005
+        step("Convert the three-byte Korean sequence back to UTF-32")
+        # @capture(bit_table): the decoded scalar value
         val utf8_bytes = [0xEA, 0xB0, 0x80]
         val utf32_values = utf8_to_utf32(utf8_bytes)
-        expect(utf32_values.len()).to_equal(1)
-        expect(utf32_values[0]).to_equal(0xAC00)
+        expect(utf32_values.len()).to_equal(1)  # oracle: one three-byte sequence decodes to one scalar
+        expect(utf32_values[0]).to_equal(0xAC00)  # oracle: the bytes reassemble to the original Hangul scalar
 
     it "roundtrips 12-language codepoints":
+        # @req REQ-UTF32-XCODEC-006
+        step("Roundtrip one representative per script through both codecs")
+        # @capture(statistics): script count and restored scalar list
         # One representative codepoint from each script
         val cps = [
             0x41,     # Latin A

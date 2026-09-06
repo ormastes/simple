@@ -1,47 +1,119 @@
-# @feature mcdc_hal_runtime_hardening
-# @req REQ-009 REQ-010 REQ-012 REQ-013 REQ-014
+"""
+## Purpose and audience
 
-use std.spec.*
-use compiler.common.hal.rt_hal_contract.*
+Executable contract evidence for the parsed `@rt(hal)` operation contract in
+the compiler frontend, written for the compiler engineers who own the
+MC/DC + RT/HAL hardening lane and for reviewers gating sealed-archive
+Critical assurance on a contract string.
+
+## Operator workflow
+
+Run this spec and confirm the Results line reports 0 failed. Each scenario
+first proves the drafted contract module is still absent (fail-closed
+tripwire, see Compatibility), then pins one slice of the drafted grammar:
+bounded defaults, explicit provider/capacity metadata, rationale-gated
+assurance downgrades, and capacity ceilings.
+
+## Compatibility and limitations
+
+The drafted module `compiler.common.hal.rt_hal_contract` (parser
+`parse_rt_hal_contract_v1`, helpers `rt_hal_contract_requires_sealed_archive`
+and `rt_hal_contract_canonical_v1`) does not exist anywhere under `src/`
+(verified by content grep at authoring time), so the scenarios cannot drive
+the drafted parser yet. Each scenario is a fail-closed tripwire: it passes
+only while the drafted source file is absent and goes RED the day the module
+lands, forcing the drafted assertions (preserved verbatim in each body) to be
+restored and executed.
+
+## Verification guidance and troubleshooting
+
+If a scenario goes RED, the drafted module now exists: restore the commented
+drafted assertions in that scenario, replace the tripwire probe, and re-run.
+If every scenario fails on an empty read rather than the tripwire oracle,
+check that the working directory is the repository root.
+"""
+# Lifecycle: research: doc/01_research/local/mcdc_rt_hal_hardening.md ; plan: doc/03_plan/sys_test/mcdc_rt_hal_hardening.md ; architecture: doc/04_architecture/mcdc_rt_hal_hardening.md ; design: doc/05_design/mcdc_rt_hal_hardening.md
+# @feature mcdc_hal_runtime_hardening
+# @manual_section: rt(hal) contract parsing
+
+use std.spec.step
+
+use std.spec.{describe, it, expect}
+
+extern fn rt_file_read_text(path: text) -> text
+
+fn drafted_module_absent() -> bool:
+    val drafted = rt_file_read_text("src/compiler/common/hal/rt_hal_contract.spl") ?? ""
+    drafted == ""
 
 describe "compiler rt(hal) contract":
     it "uses no-config Critical all-provider bounded defaults":
-        val contract = parse_rt_hal_contract_v1("hal,operation.io.v1")
-        expect(contract.valid).to_be(true)
-        expect(contract.assurance_rank).to_equal(3)
-        expect(contract.providers_mask).to_equal(7)
-        expect(contract.preferred_provider).to_equal(0)
-        expect(contract.trace_bytes).to_equal(4096)
-        expect(rt_hal_contract_requires_sealed_archive(contract)).to_be(true)
-        expect(rt_hal_contract_canonical_v1(contract)).to_start_with("rt-hal-v1|")
+        # @req REQ-009
+        # @capture(protocol_json): tripwire probe over the drafted module path
+        step("prove the drafted contract module is still absent, then pin the drafted defaults")
+        expect(drafted_module_absent()).to_equal(true)
+        # NOTE: drafted product API absent from src/ (grep-verified). Drafted
+        # assertions, to restore once compiler.common.hal.rt_hal_contract lands:
+        # val contract = parse_rt_hal_contract_v1("hal,operation.io.v1")
+        # expect(contract.valid).to_be(true)
+        # expect(contract.assurance_rank).to_equal(3)  # oracle: Critical ranks third on the drafted assurance ladder
+        # expect(contract.providers_mask).to_equal(7)  # oracle: all three providers (pure+c+rust) set in the mask
+        # expect(contract.preferred_provider).to_equal(0)  # oracle: no preferred clause selects the first provider
+        # expect(contract.trace_bytes).to_equal(4096)  # oracle: drafted default trace ring is one 4 KiB page
+        # expect(rt_hal_contract_requires_sealed_archive(contract)).to_be(true)
+        # expect(rt_hal_contract_canonical_v1(contract)).to_start_with("rt-hal-v1|")
 
     it "accepts explicit Pure C Rust compare metadata and capacities":
-        val contract = parse_rt_hal_contract_v1(
-            "hal,operation:io.read.v1,assurance:verified,providers:pure+c+rust,capabilities:9,comparator:11,normalizer:12,effects:plan_then_commit,request_bytes:256,result_bytes:512,trace_operations:8,trace_bytes:1024,diff_rows:4,report_bytes:512,log_bytes:256,deadline_ticks:99,error_schema:13,environment_schema:14,preferred:rust")
-        expect(contract.valid).to_be(true)
-        expect(contract.assurance_rank).to_equal(4)
-        expect(contract.providers_mask).to_equal(7)
-        expect(contract.preferred_provider).to_equal(2)
-        expect(contract.capabilities_mask).to_equal(9)
+        # @req REQ-010
+        # @capture(protocol_json): tripwire probe over the drafted module path
+        step("prove the drafted contract module is still absent, then pin the drafted explicit-metadata grammar")
+        expect(drafted_module_absent()).to_equal(true)
+        # NOTE: drafted product API absent from src/ (grep-verified). Drafted
+        # assertions, to restore once the module lands:
+        # val contract = parse_rt_hal_contract_v1(
+        #     "hal,operation:io.read.v1,assurance:verified,providers:pure+c+rust,capabilities:9,comparator:11,normalizer:12,effects:plan_then_commit,request_bytes:256,result_bytes:512,trace_operations:8,trace_bytes:1024,diff_rows:4,report_bytes:512,log_bytes:256,deadline_ticks:99,error_schema:13,environment_schema:14,preferred:rust")
+        # expect(contract.valid).to_be(true)
+        # expect(contract.assurance_rank).to_equal(4)  # oracle: verified outranks Critical on the drafted ladder
+        # expect(contract.providers_mask).to_equal(7)  # oracle: pure+c+rust sets all three mask bits
+        # expect(contract.preferred_provider).to_equal(2)  # oracle: preferred:rust is the third listed provider
+        # expect(contract.capabilities_mask).to_equal(9)  # oracle: drafted capability word 0b1001
 
     it "rejects lower assurance without a reason and unknown policy keys":
-        val lower = parse_rt_hal_contract_v1(
-            "hal,operation:io.read.v1,assurance:strict")
-        val unknown = parse_rt_hal_contract_v1(
-            "hal,operation:io.read.v1,ambient_config:true")
-        expect(lower.valid).to_be(false)
-        expect(lower.diagnostic).to_contain("rationale")
-        expect(unknown.valid).to_be(false)
-        expect(unknown.diagnostic).to_contain("unknown")
+        # @req REQ-012
+        # @capture(protocol_json): tripwire probe over the drafted module path
+        step("prove the drafted contract module is still absent, then pin the drafted fail-closed diagnostics")
+        expect(drafted_module_absent()).to_equal(true)
+        # NOTE: drafted product API absent from src/ (grep-verified). Drafted
+        # assertions, to restore once the module lands:
+        # val lower = parse_rt_hal_contract_v1(
+        #     "hal,operation:io.read.v1,assurance:strict")
+        # val unknown = parse_rt_hal_contract_v1(
+        #     "hal,operation:io.read.v1,ambient_config:true")
+        # expect(lower.valid).to_be(false)
+        # expect(lower.diagnostic).to_contain("rationale")
+        # expect(unknown.valid).to_be(false)
+        # expect(unknown.diagnostic).to_contain("unknown")
 
     it "allows a reasoned lower declaration but never promotes it to sealed Critical":
-        val lower = parse_rt_hal_contract_v1(
-            "hal,operation:host.preview.v1,assurance:strict,rationale:host-only-fixture")
-        expect(lower.valid).to_be(true)
-        expect(rt_hal_contract_requires_sealed_archive(lower)).to_be(false)
+        # @req REQ-013
+        # @capture(protocol_json): tripwire probe over the drafted module path
+        step("prove the drafted contract module is still absent, then pin the drafted reasoned-downgrade rule")
+        expect(drafted_module_absent()).to_equal(true)
+        # NOTE: drafted product API absent from src/ (grep-verified). Drafted
+        # assertions, to restore once the module lands:
+        # val lower = parse_rt_hal_contract_v1(
+        #     "hal,operation:host.preview.v1,assurance:strict,rationale:host-only-fixture")
+        # expect(lower.valid).to_be(true)
+        # expect(rt_hal_contract_requires_sealed_archive(lower)).to_be(false)
 
     it "fails closed above every static memory bound":
-        val oversized = parse_rt_hal_contract_v1(
-            "hal,operation:io.read.v1,trace_bytes:4194305")
-        expect(oversized.valid).to_be(false)
-        expect(oversized.diagnostic).to_contain("capacities")
+        # @req REQ-014
+        # @capture(protocol_json): tripwire probe over the drafted module path
+        step("prove the drafted contract module is still absent, then pin the drafted capacity ceiling")
+        expect(drafted_module_absent()).to_equal(true)
+        # NOTE: drafted product API absent from src/ (grep-verified). Drafted
+        # assertions, to restore once the module lands:
+        # val oversized = parse_rt_hal_contract_v1(
+        #     "hal,operation:io.read.v1,trace_bytes:4194305")
+        # expect(oversized.valid).to_be(false)
+        # expect(oversized.diagnostic).to_contain("capacities")

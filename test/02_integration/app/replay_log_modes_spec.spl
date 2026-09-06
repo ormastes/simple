@@ -1,4 +1,32 @@
+"""
+## Purpose and audience
+Purpose: pin the shared CLI log-mode surface of the replay command
+(--log-mode and --progress) as observed through real process invocations,
+including its missing-log and non-SRR delegation error paths.
+Audience: compiler and tooling engineers who maintain the replay app and the
+shared log-option helpers it consumes.
+## Operator workflow
+Run this spec with
+`simple run test/02_integration/app/replay_log_modes_spec.spl`
+and read the per-scenario verdict lines; a failing scenario pinpoints the
+regressed CLI behavior.
+## Compatibility and limitations
+Covers the replay command's shared log options and its error envelopes only;
+every scenario spawns a real `bin/simple` process and runs against a missing
+log file, so no recorded session is required.
+## Verification guidance and troubleshooting
+A failure names the exact option, subcommand, or mode that regressed; re-run
+this spec and compare the captured stdout in the failing scenario to
+reproduce locally.
+"""
+# Lifecycle: doc/01_research/local/pure_simple_cli_completeness.md ;
+# doc/03_plan/agent_tasks/pure_simple_cli_completeness.md ;
+# doc/04_architecture/pure_simple_cli_completeness.md ;
+# doc/05_design/pure_simple_cli_completeness.md
+# @manual_section: replay-log-modes
+
 use std.spec.{describe, it, expect}
+use std.spec.step
 
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 
@@ -11,29 +39,51 @@ fn _run_replay(args: [text]) -> (text, text, i64):
 
 describe "replay log mode CLI options":
     it "shows shared log options in help":
+        # @req REQ-REPLAY-LOGMODE-001
+        # @capture(tui_grid): replay help text listing the shared log options
+        step("Run replay --help")
         val (out, err, code) = _run_replay(["--help"])
-        expect(code).to_equal(0)
+        expect(code).to_equal(0)  # oracle: 0 is the CLI success exit code for --help
         expect(out).to_contain("Usage: simple replay")
         expect(out).to_contain("--log-mode")
         expect(out).to_contain("--progress")
 
     it "supports log-mode json for missing log file output":
+        # @req REQ-REPLAY-LOGMODE-001
+        # @capture(protocol_json): error JSON envelope emitted when no log file is given
+        step("Invoke replay with no log file through log-mode json")
         val (out, err, code) = _run_replay(["--log-mode=json"])
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: 1 is the CLI usage-error exit code for a missing log file
         expect(out).to_contain("\"command\":\"replay\"")
         expect(out).to_contain("\"error\":\"replay requires a log file\"")
 
     it "supports dot progress for help output":
+        # @req REQ-REPLAY-LOGMODE-001
+        # @capture(tui_grid): dot-progress output followed by the replay usage banner
+        step("Run replay --help with dot progress")
         val (out, err, code) = _run_replay(["--progress=dot", "--help"])
-        expect(code).to_equal(0)
+        expect(code).to_equal(0)  # oracle: 0 is the CLI success exit code for --help
         expect(out).to_start_with(".")
         expect(out).to_contain("Usage: simple replay")
 
     it "rejects invalid log mode":
+        # @req REQ-REPLAY-LOGMODE-001
+        # @capture(tui_grid): usage-error output emitted for an unknown log mode
+        step("Invoke replay with an unknown log mode and expect a usage error")
         val (out, err, code) = _run_replay(["--log-mode=noisy"])
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: 1 is the CLI usage-error exit code for an unknown mode
 
     it "delegates non-srr replay logs to the rust CLI":
+        # @req REQ-REPLAY-LOGMODE-001
+        # @capture(tui_grid): delegation error line emitted for a non-SRR log path
+        step("Hand a non-SRR log path to replay and expect the rust delegation error")
+        # NOTE: legitimately RED (pre-existing, unchanged by this batch).
+        # Product defect: delegate_replay at src/app/replay/main.spl:69-71 prints
+        # "log file not found: ..." for a missing non-SRR log and never emits the
+        # "Failed to read log file" text this scenario pins (the text survives only
+        # in stale compiled binaries, not in any product .spl source). Behavior was
+        # rewritten by the 2026-08-10 self-spawn fix,
+        # doc/08_tracking/bug/simple_replay_self_spawns_unbounded_process_chain_2026-08-10.md
         val (out, err, code) = _run_replay(["missing-build-log.json"])
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: 1 is the CLI exit code for an unreadable delegated log
         expect(out).to_contain("Failed to read log file")

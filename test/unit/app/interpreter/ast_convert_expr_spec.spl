@@ -1,389 +1,604 @@
-# # AST Expression Conversion Specification
-#
-# **Feature IDs:** #3031-3060
-# **Category:** Interpreter
-# **Difficulty:** 4/5
-# **Status:** In Progress
-#
-# ## Overview
-#
-# AST expression conversion transforms parse tree (CST) expressions to interpreter AST.
-# It handles all expression types including literals, operators, calls, collections,
-# control flow, and special expressions.
-#
-# ## Key Features
-#
-# - Literal conversion (int, float, string, bool, nil)
-# - Binary operators (17 types: arithmetic, comparison, logical, bitwise)
-# - Unary operators (5 types: neg, not, bit_not, ref, deref)
-# - Call expressions (functions and methods)
-# - Collection literals (arrays, dicts, tuples)
-# - Lambda expressions with parameter lists
-# - Control flow (if, match, range)
-# - Special expressions (await, try, parenthesized)
-#
-# ## Implementation
-#
-# File: `/home/ormastes/dev/pub/simple/src/app/interpreter/ast_convert_expr.spl`
-#
-# ## Test Note
-#
-# These tests validate successful conversion from parse tree nodes to AST expressions.
-# Full AST structure validation requires integration tests with actual parser output.
+"""
+## Purpose and audience
+Pins the AST expression conversion contract of the legacy tree-sitter
+interpreter front end: which parse-tree node kinds convert_expression
+recognizes, which operator tokens map to which BinaryOp/UnaryOp variants,
+which converter functions exist per expression family, and which error
+message every malformed node produces. Written for maintainers of
+src/app/interpreter/ast_convert_expr.spl and for reviewers of interpreter
+front-end changes.
+## Operator workflow
+./src/compiler_rust/target/bootstrap/simple run test/unit/app/interpreter/ast_convert_expr_spec.spl
+## Compatibility and limitations
+The subject module is written in the legacy tree-sitter syntax and does not
+compile under the current seed, so these scenarios are source contracts:
+each one reads the shipped converter file and requires the exact case
+label, operator mapping, function name, or error message that carries the
+contract. They cannot execute the converter; behaviour-level coverage needs
+the parser integration tests once the module is ported.
+## Verification guidance and troubleshooting
+A failure names the node kind, operator mapping, converter function, or
+error message that drifted from this contract. The oracle comment on each
+expect line states why that exact source text is the contract. If the
+source file itself cannot be read, every scenario fails together — check
+the repository layout before debugging individual scenarios.
+"""
+# Lifecycle: doc/01_research/compiler/parser/ast_memory_management_survey_2026-07-24.md ;
+# doc/03_plan/agent_tasks/bootstrap_compiler_interpreter_loader_arch_refactor.md ;
+# doc/04_architecture/interpreter_shared_text.md ;
+# doc/05_design/compiler/interpreter/m5_strict_interpreter_mode_design.md
 
-use std.spec
+use std.nogc_sync_mut.fs.{read_to_string}
+use std.spec.step
 
+fn _converter_source() -> text:
+    val src_opt = read_to_string("src/app/interpreter/ast_convert_expr.spl")
+    src_opt ?? ""
 
-# ============================================================================
-# Test Group 1: convert_expression Entry Point
-# ============================================================================
-
+# @manual_section: convert-expression-entry-point
 describe "convert_expression Entry Point":
-    # ## Main Conversion Function
-    #
-    # Validates convert_expression() handles all node types.
-
     it "converts integer literals":
-        # Test that integer nodes are recognized
-        # Actual conversion requires parser integration
-        pass
+        # @req REQ-AST-CONVERT-001
+        # @capture(bit_table): integer node kind vs the shipped case label
+        step("Require the shipped converter to dispatch integer nodes through a dedicated case label")
+        val converter_source = _converter_source()
+        val converts_integer_literal_nodes = converter_source.contains("case \"integer\":")
+        expect(converts_integer_literal_nodes).to_equal(true)  # oracle: the "integer" case label is the only path that turns an integer node into an Expr
 
     it "converts float literals":
-        # Test that float nodes are recognized
-        pass
+        # @req REQ-AST-CONVERT-002
+        # @capture(bit_table): float node kind vs the shipped case label
+        step("Require the shipped converter to dispatch float nodes through a dedicated case label")
+        val converter_source = _converter_source()
+        val converts_float_literal_nodes = converter_source.contains("case \"float\":")
+        expect(converts_float_literal_nodes).to_equal(true)  # oracle: the "float" case label is the only path that turns a float node into an Expr
 
     it "converts string literals":
-        # Test that string nodes are recognized
-        pass
+        # @req REQ-AST-CONVERT-003
+        # @capture(bit_table): string node kind vs the shipped case label
+        step("Require the shipped converter to dispatch string nodes through a dedicated case label")
+        val converter_source = _converter_source()
+        val converts_string_literal_nodes = converter_source.contains("case \"string\":")
+        expect(converts_string_literal_nodes).to_equal(true)  # oracle: the "string" case label is the only path that turns a string node into an Expr
 
     it "converts boolean literals":
-        # Test that boolean nodes are recognized
-        pass
+        # @req REQ-AST-CONVERT-004
+        # @capture(bit_table): boolean node kinds vs the shipped case label group
+        step("Require the shipped converter to dispatch boolean, true, and false nodes through one case group")
+        val converter_source = _converter_source()
+        val converts_boolean_literal_nodes = converter_source.contains("case \"boolean\" | \"true\" | \"false\":")
+        expect(converts_boolean_literal_nodes).to_equal(true)  # oracle: boolean spellings share one case group so true/false node text decides the value
 
     it "converts nil literals":
-        # Test that nil nodes are recognized
-        pass
+        # @req REQ-AST-CONVERT-005
+        # @capture(bit_table): nil node kinds vs the shipped case label group
+        step("Require the shipped converter to dispatch nil and none nodes through one case group")
+        val converter_source = _converter_source()
+        val converts_nil_literal_nodes = converter_source.contains("case \"nil\" | \"none\":")
+        expect(converts_nil_literal_nodes).to_equal(true)  # oracle: both nil spellings must map to the nil literal or "none" sources crash the interpreter
 
     it "converts identifiers":
-        # Test that identifier nodes are recognized
-        pass
+        # @req REQ-AST-CONVERT-006
+        # @capture(bit_table): identifier node kind vs the shipped case label
+        step("Require the shipped converter to dispatch identifier nodes through a dedicated case label")
+        val converter_source = _converter_source()
+        val converts_identifier_nodes = converter_source.contains("case \"identifier\":")
+        expect(converts_identifier_nodes).to_equal(true)  # oracle: the "identifier" case label is the only path that turns a name into a variable reference
 
-
-# ============================================================================
-# Test Group 2: Binary Operators - Arithmetic
-# ============================================================================
-
+# @manual_section: binary-arithmetic-operators
 describe "convert_binary_expression - Arithmetic":
-    # ## Arithmetic Binary Operators
-    #
-    # Validates binary arithmetic operators (+, -, *, /, %, **).
-
     it "recognizes addition operator":
-        # Tests operator recognition for +
-        pass
+        # @req REQ-AST-CONVERT-007
+        # @capture(bit_table): plus token vs the BinaryOp.Add mapping
+        step("Require the shipped operator table to map the plus token to BinaryOp.Add")
+        val converter_source = _converter_source()
+        val recognizes_plus_token = converter_source.contains("case \"+\" | \"plus\":")
+        val maps_plus_to_add = converter_source.contains("BinaryOp.Add")
+        val addition_contract_holds = recognizes_plus_token and maps_plus_to_add
+        expect(addition_contract_holds).to_equal(true)  # oracle: only the "+"|plus case feeding BinaryOp.Add makes source addition reach the evaluator
 
     it "recognizes subtraction operator":
-        # Tests operator recognition for -
-        pass
+        # @req REQ-AST-CONVERT-008
+        # @capture(bit_table): minus token vs the BinaryOp.Sub mapping
+        step("Require the shipped operator table to map the minus token to BinaryOp.Sub")
+        val converter_source = _converter_source()
+        val recognizes_minus_token = converter_source.contains("case \"-\" | \"minus\":")
+        val maps_minus_to_sub = converter_source.contains("BinaryOp.Sub")
+        val subtraction_contract_holds = recognizes_minus_token and maps_minus_to_sub
+        expect(subtraction_contract_holds).to_equal(true)  # oracle: only the "-"|minus case feeding BinaryOp.Sub makes source subtraction reach the evaluator
 
     it "recognizes multiplication operator":
-        # Tests operator recognition for *
-        pass
+        # @req REQ-AST-CONVERT-009
+        # @capture(bit_table): star token vs the BinaryOp.Mul mapping
+        step("Require the shipped operator table to map the star token to BinaryOp.Mul")
+        val converter_source = _converter_source()
+        val recognizes_star_token = converter_source.contains("case \"*\" | \"star\":")
+        val maps_star_to_mul = converter_source.contains("BinaryOp.Mul")
+        val multiplication_contract_holds = recognizes_star_token and maps_star_to_mul
+        expect(multiplication_contract_holds).to_equal(true)  # oracle: only the "*"|star case feeding BinaryOp.Mul makes source multiplication reach the evaluator
 
     it "recognizes division operator":
-        # Tests operator recognition for /
-        pass
+        # @req REQ-AST-CONVERT-010
+        # @capture(bit_table): slash token vs the BinaryOp.Div mapping
+        step("Require the shipped operator table to map the slash token to BinaryOp.Div")
+        val converter_source = _converter_source()
+        val recognizes_slash_token = converter_source.contains("case \"/\" | \"slash\":")
+        val maps_slash_to_div = converter_source.contains("BinaryOp.Div")
+        val division_contract_holds = recognizes_slash_token and maps_slash_to_div
+        expect(division_contract_holds).to_equal(true)  # oracle: only the "/"|slash case feeding BinaryOp.Div makes source division reach the evaluator
 
     it "recognizes modulo operator":
-        # Tests operator recognition for %
-        pass
+        # @req REQ-AST-CONVERT-011
+        # @capture(bit_table): percent token vs the BinaryOp.Mod mapping
+        step("Require the shipped operator table to map the percent token to BinaryOp.Mod")
+        val converter_source = _converter_source()
+        val recognizes_percent_token = converter_source.contains("case \"%\" | \"percent\":")
+        val maps_percent_to_mod = converter_source.contains("BinaryOp.Mod")
+        val modulo_contract_holds = recognizes_percent_token and maps_percent_to_mod
+        expect(modulo_contract_holds).to_equal(true)  # oracle: only the "%"|percent case feeding BinaryOp.Mod makes source modulo reach the evaluator
 
     it "recognizes power operator":
-        # Tests operator recognition for **
-        pass
+        # @req REQ-AST-CONVERT-012
+        # @capture(bit_table): power token vs the BinaryOp.Pow mapping
+        step("Require the shipped operator table to map the double-star token to BinaryOp.Pow")
+        val converter_source = _converter_source()
+        val recognizes_power_token = converter_source.contains("case \"**\" | \"power\":")
+        val maps_power_to_pow = converter_source.contains("BinaryOp.Pow")
+        val power_contract_holds = recognizes_power_token and maps_power_to_pow
+        expect(power_contract_holds).to_equal(true)  # oracle: only the "**"|power case feeding BinaryOp.Pow makes source exponentiation reach the evaluator
 
-
-# ============================================================================
-# Test Group 3: Binary Operators - Comparison
-# ============================================================================
-
+# @manual_section: binary-comparison-operators
 describe "convert_binary_expression - Comparison":
-    # ## Comparison Binary Operators
-    #
-    # Validates comparison operators (==, !=, <, <=, >, >=).
-
     it "recognizes equality operator":
-        # Tests operator recognition for ==
-        pass
+        # @req REQ-AST-CONVERT-013
+        # @capture(bit_table): eq token vs the BinaryOp.Eq mapping
+        step("Require the shipped operator table to map the double-equals token to BinaryOp.Eq")
+        val converter_source = _converter_source()
+        val recognizes_eq_token = converter_source.contains("case \"==\" | \"eq\":")
+        val maps_eq_to_eq = converter_source.contains("BinaryOp.Eq")
+        val equality_contract_holds = recognizes_eq_token and maps_eq_to_eq
+        expect(equality_contract_holds).to_equal(true)  # oracle: only the "=="|eq case feeding BinaryOp.Eq makes source equality reach the evaluator
 
     it "recognizes inequality operator":
-        # Tests operator recognition for !=
-        pass
+        # @req REQ-AST-CONVERT-014
+        # @capture(bit_table): not_eq token vs the BinaryOp.NotEq mapping
+        step("Require the shipped operator table to map the bang-equals token to BinaryOp.NotEq")
+        val converter_source = _converter_source()
+        val recognizes_not_eq_token = converter_source.contains("case \"!=\" | \"not_eq\":")
+        val maps_to_not_eq = converter_source.contains("BinaryOp.NotEq")
+        val inequality_contract_holds = recognizes_not_eq_token and maps_to_not_eq
+        expect(inequality_contract_holds).to_equal(true)  # oracle: only the "!="|not_eq case feeding BinaryOp.NotEq makes source inequality reach the evaluator
 
     it "recognizes less than operator":
-        # Tests operator recognition for <
-        pass
+        # @req REQ-AST-CONVERT-015
+        # @capture(bit_table): lt token vs the BinaryOp.Lt mapping
+        step("Require the shipped operator table to map the angle-open token to BinaryOp.Lt")
+        val converter_source = _converter_source()
+        val recognizes_lt_token = converter_source.contains("case \"<\" | \"lt\":")
+        val maps_to_lt = converter_source.contains("BinaryOp.Lt")
+        val less_than_contract_holds = recognizes_lt_token and maps_to_lt
+        expect(less_than_contract_holds).to_equal(true)  # oracle: only the "<"|lt case feeding BinaryOp.Lt makes source less-than reach the evaluator
 
     it "recognizes less than or equal operator":
-        # Tests operator recognition for <=
-        pass
+        # @req REQ-AST-CONVERT-016
+        # @capture(bit_table): lt_eq token vs the BinaryOp.LtEq mapping
+        step("Require the shipped operator table to map the angle-open-equals token to BinaryOp.LtEq")
+        val converter_source = _converter_source()
+        val recognizes_lt_eq_token = converter_source.contains("case \"<=\" | \"lt_eq\":")
+        val maps_to_lt_eq = converter_source.contains("BinaryOp.LtEq")
+        val less_equal_contract_holds = recognizes_lt_eq_token and maps_to_lt_eq
+        expect(less_equal_contract_holds).to_equal(true)  # oracle: only the "<="|lt_eq case feeding BinaryOp.LtEq makes source less-equal reach the evaluator
 
     it "recognizes greater than operator":
-        # Tests operator recognition for >
-        pass
+        # @req REQ-AST-CONVERT-017
+        # @capture(bit_table): gt token vs the BinaryOp.Gt mapping
+        step("Require the shipped operator table to map the angle-close token to BinaryOp.Gt")
+        val converter_source = _converter_source()
+        val recognizes_gt_token = converter_source.contains("case \">\" | \"gt\":")
+        val maps_to_gt = converter_source.contains("BinaryOp.Gt")
+        val greater_than_contract_holds = recognizes_gt_token and maps_to_gt
+        expect(greater_than_contract_holds).to_equal(true)  # oracle: only the ">"|gt case feeding BinaryOp.Gt makes source greater-than reach the evaluator
 
     it "recognizes greater than or equal operator":
-        # Tests operator recognition for >=
-        pass
+        # @req REQ-AST-CONVERT-018
+        # @capture(bit_table): gt_eq token vs the BinaryOp.GtEq mapping
+        step("Require the shipped operator table to map the angle-close-equals token to BinaryOp.GtEq")
+        val converter_source = _converter_source()
+        val recognizes_gt_eq_token = converter_source.contains("case \">=\" | \"gt_eq\":")
+        val maps_to_gt_eq = converter_source.contains("BinaryOp.GtEq")
+        val greater_equal_contract_holds = recognizes_gt_eq_token and maps_to_gt_eq
+        expect(greater_equal_contract_holds).to_equal(true)  # oracle: only the ">="|gt_eq case feeding BinaryOp.GtEq makes source greater-equal reach the evaluator
 
-
-# ============================================================================
-# Test Group 4: Binary Operators - Logical & Bitwise
-# ============================================================================
-
+# @manual_section: binary-logical-bitwise-operators
 describe "convert_binary_expression - Logical & Bitwise":
-    # ## Logical and Bitwise Binary Operators
-    #
-    # Validates logical (and, or) and bitwise (&, |, ^, <<, >>) operators.
-
     it "recognizes logical and operator":
-        # Tests operator recognition for and
-        pass
+        # @req REQ-AST-CONVERT-019
+        # @capture(bit_table): and keyword vs the BinaryOp.And mapping
+        step("Require the shipped operator table to map the and keyword to BinaryOp.And")
+        val converter_source = _converter_source()
+        val recognizes_and_keyword = converter_source.contains("case \"and\":")
+        val maps_to_and = converter_source.contains("BinaryOp.And")
+        val logical_and_contract_holds = recognizes_and_keyword and maps_to_and
+        expect(logical_and_contract_holds).to_equal(true)  # oracle: only the and keyword case feeding BinaryOp.And keeps short-circuit semantics reachable
 
     it "recognizes logical or operator":
-        # Tests operator recognition for or
-        pass
+        # @req REQ-AST-CONVERT-020
+        # @capture(bit_table): or keyword vs the BinaryOp.Or mapping
+        step("Require the shipped operator table to map the or keyword to BinaryOp.Or")
+        val converter_source = _converter_source()
+        val recognizes_or_keyword = converter_source.contains("case \"or\":")
+        val maps_to_or = converter_source.contains("BinaryOp.Or")
+        val logical_or_contract_holds = recognizes_or_keyword and maps_to_or
+        expect(logical_or_contract_holds).to_equal(true)  # oracle: only the or keyword case feeding BinaryOp.Or keeps short-circuit semantics reachable
 
     it "recognizes bitwise and operator":
-        # Tests operator recognition for &
-        pass
+        # @req REQ-AST-CONVERT-021
+        # @capture(bit_table): ampersand token vs the BinaryOp.BitAnd mapping
+        step("Require the shipped operator table to map the ampersand token to BinaryOp.BitAnd")
+        val converter_source = _converter_source()
+        val recognizes_bit_and_token = converter_source.contains("case \"&\" | \"bit_and\":")
+        val maps_to_bit_and = converter_source.contains("BinaryOp.BitAnd")
+        val bitwise_and_contract_holds = recognizes_bit_and_token and maps_to_bit_and
+        expect(bitwise_and_contract_holds).to_equal(true)  # oracle: only the "&"|bit_and case feeding BinaryOp.BitAnd makes source bit-and reach the evaluator
 
     it "recognizes bitwise or operator":
-        # Tests operator recognition for |
-        pass
+        # @req REQ-AST-CONVERT-022
+        # @capture(bit_table): pipe token vs the BinaryOp.BitOr mapping
+        step("Require the shipped operator table to map the pipe token to BinaryOp.BitOr")
+        val converter_source = _converter_source()
+        val recognizes_bit_or_token = converter_source.contains("case \"|\" | \"bit_or\":")
+        val maps_to_bit_or = converter_source.contains("BinaryOp.BitOr")
+        val bitwise_or_contract_holds = recognizes_bit_or_token and maps_to_bit_or
+        expect(bitwise_or_contract_holds).to_equal(true)  # oracle: only the "|"|bit_or case feeding BinaryOp.BitOr makes source bit-or reach the evaluator
 
     it "recognizes bitwise xor operator":
-        # Tests operator recognition for ^
-        pass
+        # @req REQ-AST-CONVERT-023
+        # @capture(bit_table): caret token vs the BinaryOp.BitXor mapping
+        step("Require the shipped operator table to map the caret token to BinaryOp.BitXor")
+        val converter_source = _converter_source()
+        val recognizes_bit_xor_token = converter_source.contains("case \"^\" | \"bit_xor\":")
+        val maps_to_bit_xor = converter_source.contains("BinaryOp.BitXor")
+        val bitwise_xor_contract_holds = recognizes_bit_xor_token and maps_to_bit_xor
+        expect(bitwise_xor_contract_holds).to_equal(true)  # oracle: only the "^"|bit_xor case feeding BinaryOp.BitXor makes source bit-xor reach the evaluator
 
     it "recognizes left shift operator":
-        # Tests operator recognition for <<
-        pass
+        # @req REQ-AST-CONVERT-024
+        # @capture(bit_table): shl token vs the BinaryOp.Shl mapping
+        step("Require the shipped operator table to map the double angle-open token to BinaryOp.Shl")
+        val converter_source = _converter_source()
+        val recognizes_shl_token = converter_source.contains("case \"<<\" | \"shl\":")
+        val maps_to_shl = converter_source.contains("BinaryOp.Shl")
+        val shift_left_contract_holds = recognizes_shl_token and maps_to_shl
+        expect(shift_left_contract_holds).to_equal(true)  # oracle: only the "<<"|shl case feeding BinaryOp.Shl makes source left-shift reach the evaluator
 
     it "recognizes right shift operator":
-        # Tests operator recognition for >>
-        pass
+        # @req REQ-AST-CONVERT-025
+        # @capture(bit_table): shr token vs the BinaryOp.Shr mapping
+        step("Require the shipped operator table to map the double angle-close token to BinaryOp.Shr")
+        val converter_source = _converter_source()
+        val recognizes_shr_token = converter_source.contains("case \">>\" | \"shr\":")
+        val maps_to_shr = converter_source.contains("BinaryOp.Shr")
+        val shift_right_contract_holds = recognizes_shr_token and maps_to_shr
+        expect(shift_right_contract_holds).to_equal(true)  # oracle: only the ">>"|shr case feeding BinaryOp.Shr makes source right-shift reach the evaluator
 
-
-# ============================================================================
-# Test Group 5: Unary Operators
-# ============================================================================
-
+# @manual_section: unary-operators
 describe "convert_unary_expression":
-    # ## Unary Operators
-    #
-    # Validates unary operators (-, not, ~, &, *).
-
     it "recognizes negation operator":
-        # Tests operator recognition for -
-        pass
+        # @req REQ-AST-CONVERT-026
+        # @capture(bit_table): minus token vs the UnaryOp.Neg mapping
+        step("Require the shipped unary table to map the minus token to UnaryOp.Neg")
+        val converter_source = _converter_source()
+        val recognizes_unary_minus = converter_source.contains("case \"-\" | \"minus\": op = Some(UnaryOp.Neg)")
+        expect(recognizes_unary_minus).to_equal(true)  # oracle: the unary minus case feeding UnaryOp.Neg is the only path that negates an expression
 
     it "recognizes logical not operator":
-        # Tests operator recognition for not
-        pass
+        # @req REQ-AST-CONVERT-027
+        # @capture(bit_table): not keyword vs the UnaryOp.Not mapping
+        step("Require the shipped unary table to map the not keyword to UnaryOp.Not")
+        val converter_source = _converter_source()
+        val recognizes_logical_not = converter_source.contains("case \"not\" | \"!\": op = Some(UnaryOp.Not)")
+        expect(recognizes_logical_not).to_equal(true)  # oracle: the not/! case feeding UnaryOp.Not is the only path that negates truthiness
 
     it "recognizes bitwise not operator":
-        # Tests operator recognition for ~
-        pass
+        # @req REQ-AST-CONVERT-028
+        # @capture(bit_table): tilde token vs the UnaryOp.BitNot mapping
+        step("Require the shipped unary table to map the tilde token to UnaryOp.BitNot")
+        val converter_source = _converter_source()
+        val recognizes_bitwise_not = converter_source.contains("case \"~\": op = Some(UnaryOp.BitNot)")
+        expect(recognizes_bitwise_not).to_equal(true)  # oracle: the tilde case feeding UnaryOp.BitNot is the only path that complements an integer
 
     it "recognizes reference operator":
-        # Tests operator recognition for &
-        pass
+        # @req REQ-AST-CONVERT-029
+        # @capture(bit_table): ampersand token vs the UnaryOp.Ref mapping
+        step("Require the shipped unary table to map the ampersand token to UnaryOp.Ref")
+        val converter_source = _converter_source()
+        val recognizes_reference = converter_source.contains("case \"&\": op = Some(UnaryOp.Ref)")
+        expect(recognizes_reference).to_equal(true)  # oracle: the ampersand case feeding UnaryOp.Ref is the only path that takes a reference
 
     it "recognizes dereference operator":
-        # Tests operator recognition for *
-        pass
+        # @req REQ-AST-CONVERT-030
+        # @capture(bit_table): star token vs the UnaryOp.Deref mapping
+        step("Require the shipped unary table to map the star token to UnaryOp.Deref")
+        val converter_source = _converter_source()
+        val recognizes_dereference = converter_source.contains("case \"*\": op = Some(UnaryOp.Deref)")
+        expect(recognizes_dereference).to_equal(true)  # oracle: the star case feeding UnaryOp.Deref is the only path that dereferences a reference
 
-
-# ============================================================================
-# Test Group 6: Call Expressions
-# ============================================================================
-
+# @manual_section: call-conversion
 describe "Call Expression Conversion":
-    # ## Function and Method Calls
-    #
-    # Validates function calls and method calls.
-
     it "converts function calls via convert_call_expression":
-        # Tests function call node conversion
-        pass
+        # @req REQ-AST-CONVERT-031
+        # @capture(bit_table): call converter presence vs the shipped function name
+        step("Require the shipped converter to define the call-expression converter")
+        val converter_source = _converter_source()
+        val defines_call_converter = converter_source.contains("fn convert_call_expression(")
+        expect(defines_call_converter).to_equal(true)  # oracle: convert_call_expression is the named entry point every call node routes through
 
     it "extracts call arguments via convert_arguments":
-        # Tests argument list extraction
-        pass
+        # @req REQ-AST-CONVERT-032
+        # @capture(bit_table): argument extraction vs the shipped function name
+        step("Require the shipped converter to define the argument-list extractor")
+        val converter_source = _converter_source()
+        val defines_argument_extractor = converter_source.contains("fn convert_arguments(")
+        val recognizes_argument_lists = converter_source.contains("\"arguments\" | \"argument_list\"")
+        val arguments_contract_holds = defines_argument_extractor and recognizes_argument_lists
+        expect(arguments_contract_holds).to_equal(true)  # oracle: convert_arguments over the arguments/argument_list child node is the only path that fills a call's operand list
 
     it "converts method calls via convert_method_call":
-        # Tests method call node conversion
-        pass
+        # @req REQ-AST-CONVERT-033
+        # @capture(bit_table): method-call converter presence vs the shipped function name
+        step("Require the shipped converter to define the method-call converter")
+        val converter_source = _converter_source()
+        val defines_method_call_converter = converter_source.contains("fn convert_method_call(")
+        expect(defines_method_call_converter).to_equal(true)  # oracle: convert_method_call is the named entry point every receiver.method node routes through
 
-
-# ============================================================================
-# Test Group 7: Access Expressions
-# ============================================================================
-
+# @manual_section: access-conversion
 describe "Access Expression Conversion":
-    # ## Index and Field Access
-    #
-    # Validates index and field access expressions.
-
     it "converts index expressions via convert_index_expression":
-        # Tests array/dict indexing
-        pass
+        # @req REQ-AST-CONVERT-034
+        # @capture(bit_table): index converter presence vs the shipped function name
+        step("Require the shipped converter to define the index-expression converter")
+        val converter_source = _converter_source()
+        val defines_index_converter = converter_source.contains("fn convert_index_expression(")
+        expect(defines_index_converter).to_equal(true)  # oracle: convert_index_expression is the named entry point for array and dict indexing
 
     it "converts field access via convert_field_expression":
-        # Tests struct field access
-        pass
+        # @req REQ-AST-CONVERT-035
+        # @capture(bit_table): field-access converter presence vs the shipped function name
+        step("Require the shipped converter to define the field-access converter")
+        val converter_source = _converter_source()
+        val defines_field_converter = converter_source.contains("fn convert_field_expression(")
+        expect(defines_field_converter).to_equal(true)  # oracle: convert_field_expression is the named entry point for struct field access
 
-
-# ============================================================================
-# Test Group 8: Collection Literals
-# ============================================================================
-
+# @manual_section: collection-literals
 describe "Collection Literal Conversion":
-    # ## Collection Literals
-    #
-    # Validates array, dict, and tuple literals.
-
     it "converts array literals via convert_array_literal":
-        # Tests array literal conversion
-        pass
+        # @req REQ-AST-CONVERT-036
+        # @capture(bit_table): array-literal converter vs the shipped function name
+        step("Require the shipped converter to define the array-literal converter")
+        val converter_source = _converter_source()
+        val defines_array_converter = converter_source.contains("fn convert_array_literal(")
+        val recognizes_array_kinds = converter_source.contains("case \"array\" | \"array_literal\":")
+        val array_contract_holds = defines_array_converter and recognizes_array_kinds
+        expect(array_contract_holds).to_equal(true)  # oracle: the array/array_literal kind is the only dispatch into convert_array_literal
 
     it "converts dict literals via convert_dict_literal":
-        # Tests dict literal conversion
-        pass
+        # @req REQ-AST-CONVERT-037
+        # @capture(bit_table): dict-literal converter vs the shipped function name
+        step("Require the shipped converter to define the dict-literal converter")
+        val converter_source = _converter_source()
+        val defines_dict_converter = converter_source.contains("fn convert_dict_literal(")
+        val recognizes_dict_kinds = converter_source.contains("case \"dict\" | \"dict_literal\":")
+        val dict_contract_holds = defines_dict_converter and recognizes_dict_kinds
+        expect(dict_contract_holds).to_equal(true)  # oracle: the dict/dict_literal kind is the only dispatch into convert_dict_literal
 
     it "converts dict entries via convert_dict_entry":
-        # Tests key-value pair conversion
-        pass
+        # @req REQ-AST-CONVERT-038
+        # @capture(bit_table): dict-entry converter vs the shipped function name
+        step("Require the shipped converter to define the dict-entry converter and route entry kinds to it")
+        val converter_source = _converter_source()
+        val defines_entry_converter = converter_source.contains("fn convert_dict_entry(")
+        val recognizes_entry_kinds = converter_source.contains("\"dict_entry\" or child.kind == \"key_value_pair\"")
+        val entry_contract_holds = defines_entry_converter and recognizes_entry_kinds
+        expect(entry_contract_holds).to_equal(true)  # oracle: dict_entry/key_value_pair children are the only paths that produce key-value pairs
 
     it "converts tuple literals via convert_tuple_literal":
-        # Tests tuple literal conversion
-        pass
+        # @req REQ-AST-CONVERT-039
+        # @capture(bit_table): tuple-literal converter vs the shipped function name
+        step("Require the shipped converter to define the tuple-literal converter")
+        val converter_source = _converter_source()
+        val defines_tuple_converter = converter_source.contains("fn convert_tuple_literal(")
+        val recognizes_tuple_kinds = converter_source.contains("case \"tuple\" | \"tuple_literal\":")
+        val tuple_contract_holds = defines_tuple_converter and recognizes_tuple_kinds
+        expect(tuple_contract_holds).to_equal(true)  # oracle: the tuple/tuple_literal kind is the only dispatch into convert_tuple_literal
 
-
-# ============================================================================
-# Test Group 9: Lambda Expressions
-# ============================================================================
-
+# @manual_section: lambda-conversion
 describe "Lambda Expression Conversion":
-    # ## Lambda Expressions
-    #
-    # Validates lambda expressions and parameter lists.
-
     it "converts lambda expressions via convert_lambda":
-        # Tests lambda expression conversion
-        pass
+        # @req REQ-AST-CONVERT-040
+        # @capture(bit_table): lambda converter vs the shipped function name
+        step("Require the shipped converter to define the lambda converter and route lambda kinds to it")
+        val converter_source = _converter_source()
+        val defines_lambda_converter = converter_source.contains("fn convert_lambda(")
+        val recognizes_lambda_kinds = converter_source.contains("case \"lambda\" | \"lambda_expression\":")
+        val lambda_contract_holds = defines_lambda_converter and recognizes_lambda_kinds
+        expect(lambda_contract_holds).to_equal(true)  # oracle: the lambda/lambda_expression kind is the only dispatch into convert_lambda
 
     it "extracts lambda parameters via convert_lambda_params":
-        # Tests parameter list extraction
-        pass
+        # @req REQ-AST-CONVERT-041
+        # @capture(bit_table): lambda parameter extraction vs the shipped function name
+        step("Require the shipped converter to define the lambda parameter extractor")
+        val converter_source = _converter_source()
+        val defines_param_extractor = converter_source.contains("fn convert_lambda_params(")
+        val recognizes_param_lists = converter_source.contains("\"parameters\" | \"lambda_parameters\"")
+        val params_contract_holds = defines_param_extractor and recognizes_param_lists
+        expect(params_contract_holds).to_equal(true)  # oracle: convert_lambda_params over the parameters/lambda_parameters child is the only path that names a lambda's parameters
 
-
-# ============================================================================
-# Test Group 10: Control Flow Expressions
-# ============================================================================
-
+# @manual_section: control-flow-conversion
 describe "Control Flow Expression Conversion":
-    # ## Control Flow Expressions
-    #
-    # Validates if, match, and range expressions.
-
     it "converts if expressions via convert_if_expression":
-        # Tests if-then-else conversion
-        pass
+        # @req REQ-AST-CONVERT-042
+        # @capture(bit_table): if-expression converter vs the shipped function name
+        step("Require the shipped converter to define the if-expression converter and route the if kind to it")
+        val converter_source = _converter_source()
+        val defines_if_converter = converter_source.contains("fn convert_if_expression(")
+        val recognizes_if_kind = converter_source.contains("case \"if_expression\":")
+        val if_contract_holds = defines_if_converter and recognizes_if_kind
+        expect(if_contract_holds).to_equal(true)  # oracle: the if_expression kind is the only dispatch into convert_if_expression
 
     it "converts match expressions via convert_match_expression":
-        # Tests pattern matching conversion
-        pass
+        # @req REQ-AST-CONVERT-043
+        # @capture(bit_table): match-expression converter vs the shipped function name
+        step("Require the shipped converter to define the match-expression converter and route the match kind to it")
+        val converter_source = _converter_source()
+        val defines_match_converter = converter_source.contains("fn convert_match_expression(")
+        val recognizes_match_kind = converter_source.contains("case \"match_expression\":")
+        val match_contract_holds = defines_match_converter and recognizes_match_kind
+        expect(match_contract_holds).to_equal(true)  # oracle: the match_expression kind is the only dispatch into convert_match_expression
 
     it "converts match arms via convert_match_arm":
-        # Tests case clause conversion
-        pass
+        # @req REQ-AST-CONVERT-044
+        # @capture(bit_table): match-arm converter vs the shipped function name
+        step("Require the shipped converter to define the match-arm converter")
+        val converter_source = _converter_source()
+        val defines_arm_converter = converter_source.contains("fn convert_match_arm(")
+        expect(defines_arm_converter).to_equal(true)  # oracle: convert_match_arm is the named entry point every case clause routes through
 
     it "converts range expressions via convert_range_expression":
-        # Tests range literal conversion
-        pass
+        # @req REQ-AST-CONVERT-045
+        # @capture(bit_table): range-expression converter vs the shipped function name
+        step("Require the shipped converter to define the range-expression converter and route the range kind to it")
+        val converter_source = _converter_source()
+        val defines_range_converter = converter_source.contains("fn convert_range_expression(")
+        val recognizes_range_kind = converter_source.contains("case \"range_expression\":")
+        val range_contract_holds = defines_range_converter and recognizes_range_kind
+        expect(range_contract_holds).to_equal(true)  # oracle: the range_expression kind is the only dispatch into convert_range_expression
 
-
-# ============================================================================
-# Test Group 11: Error Handling
-# ============================================================================
-
+# @manual_section: conversion-error-handling
 describe "Conversion Error Handling":
-    # ## Error Cases
-    #
-    # Validates error handling for invalid or incomplete nodes.
-
     it "returns error for unknown expression kind":
-        # Tests unknown node type handling
-        pass
+        # @req REQ-AST-CONVERT-046
+        # @capture(protocol_json): unknown-kind failure vs the shipped error message
+        step("Require the shipped converter to reject unknown node kinds with its named error")
+        val converter_source = _converter_source()
+        val rejects_unknown_kinds = converter_source.contains("Err(\"Unknown expression kind:")
+        expect(rejects_unknown_kinds).to_equal(true)  # oracle: the catch-all case must fail closed naming the kind, or unknown nodes silently become wrong Exprs
 
     it "returns error for incomplete binary expression":
-        # Tests missing operand detection
-        pass
+        # @req REQ-AST-CONVERT-047
+        # @capture(protocol_json): incomplete-binary failure vs the shipped error message
+        step("Require the shipped converter to fail binary nodes without both operands with its named error")
+        val converter_source = _converter_source()
+        val rejects_incomplete_binary = converter_source.contains("Err(\"Incomplete binary expression\")")
+        expect(rejects_incomplete_binary).to_equal(true)  # oracle: a missing operand must fail closed or the evaluator sees a half-applied operator
 
     it "returns error for incomplete unary expression":
-        # Tests missing operand detection
-        pass
+        # @req REQ-AST-CONVERT-048
+        # @capture(protocol_json): incomplete-unary failure vs the shipped error message
+        step("Require the shipped converter to fail unary nodes without an operand with its named error")
+        val converter_source = _converter_source()
+        val rejects_incomplete_unary = converter_source.contains("Err(\"Incomplete unary expression\")")
+        expect(rejects_incomplete_unary).to_equal(true)  # oracle: a missing operand must fail closed or the evaluator sees an operator with nothing to apply
 
     it "returns error for call missing callee":
-        # Tests invalid call expression
-        pass
+        # @req REQ-AST-CONVERT-049
+        # @capture(protocol_json): callee-less call failure vs the shipped error message
+        step("Require the shipped converter to fail call nodes with no callee with its named error")
+        val converter_source = _converter_source()
+        val rejects_callee_less_calls = converter_source.contains("Err(\"Call missing callee\")")
+        expect(rejects_callee_less_calls).to_equal(true)  # oracle: a call with nothing to call must fail closed at conversion, not at dispatch
 
     it "returns error for method call missing object":
-        # Tests invalid method call
-        pass
+        # @req REQ-AST-CONVERT-050
+        # @capture(protocol_json): receiver-less method failure vs the shipped error message
+        step("Require the shipped converter to fail method calls with no receiver with its named error")
+        val converter_source = _converter_source()
+        val rejects_receiver_less_calls = converter_source.contains("Err(\"Method call missing object\")")
+        expect(rejects_receiver_less_calls).to_equal(true)  # oracle: a method call with no receiver must fail closed at conversion, not at dispatch
 
     it "returns error for incomplete index expression":
-        # Tests missing index detection
-        pass
+        # @req REQ-AST-CONVERT-051
+        # @capture(protocol_json): index-less index failure vs the shipped error message
+        step("Require the shipped converter to fail index nodes without an index with its named error")
+        val converter_source = _converter_source()
+        val rejects_index_less_indexing = converter_source.contains("Err(\"Incomplete index expression\")")
+        expect(rejects_index_less_indexing).to_equal(true)  # oracle: an index expression without an index must fail closed, not index by a default
 
     it "returns error for field access missing object":
-        # Tests invalid field access
-        pass
+        # @req REQ-AST-CONVERT-052
+        # @capture(protocol_json): object-less field failure vs the shipped error message
+        step("Require the shipped converter to fail field access with no object with its named error")
+        val converter_source = _converter_source()
+        val rejects_object_less_fields = converter_source.contains("Err(\"Field access missing object\")")
+        expect(rejects_object_less_fields).to_equal(true)  # oracle: a field access with no base object must fail closed at conversion
 
     it "returns error for incomplete dict entry":
-        # Tests missing key or value
-        pass
+        # @req REQ-AST-CONVERT-053
+        # @capture(protocol_json): half-entry failure vs the shipped error message
+        step("Require the shipped converter to fail dict entries missing a key or value with its named error")
+        val converter_source = _converter_source()
+        val rejects_half_entries = converter_source.contains("Err(\"Incomplete dict entry\")")
+        expect(rejects_half_entries).to_equal(true)  # oracle: an entry without both key and value must fail closed or the dict silently loses data
 
     it "returns error for lambda missing body":
-        # Tests incomplete lambda
-        pass
+        # @req REQ-AST-CONVERT-054
+        # @capture(protocol_json): body-less lambda failure vs the shipped error message
+        step("Require the shipped converter to fail lambdas without a body with its named error")
+        val converter_source = _converter_source()
+        val rejects_body_less_lambdas = converter_source.contains("Err(\"Lambda missing body\")")
+        expect(rejects_body_less_lambdas).to_equal(true)  # oracle: a bodyless lambda must fail closed, not evaluate to nil when called
 
     it "returns error for incomplete if expression":
-        # Tests missing branch detection
-        pass
+        # @req REQ-AST-CONVERT-055
+        # @capture(protocol_json): branch-less if failure vs the shipped error message
+        step("Require the shipped converter to fail if nodes missing a branch with its named error")
+        val converter_source = _converter_source()
+        val rejects_branch_less_ifs = converter_source.contains("Err(\"Incomplete if expression\")")
+        expect(rejects_branch_less_ifs).to_equal(true)  # oracle: a missing branch must fail closed or the if silently picks the wrong arm
 
     it "returns error for match missing value":
-        # Tests invalid match expression
-        pass
+        # @req REQ-AST-CONVERT-056
+        # @capture(protocol_json): value-less match failure vs the shipped error message
+        step("Require the shipped converter to fail match nodes with no scrutinee with its named error")
+        val converter_source = _converter_source()
+        val rejects_value_less_matches = converter_source.contains("Err(\"Match expression missing value\")")
+        expect(rejects_value_less_matches).to_equal(true)  # oracle: a match with nothing to match on must fail closed at conversion
 
     it "returns error for incomplete match arm":
-        # Tests invalid case clause
-        pass
+        # @req REQ-AST-CONVERT-057
+        # @capture(protocol_json): half-arm failure vs the shipped error message
+        step("Require the shipped converter to fail case clauses without pattern and body with its named error")
+        val converter_source = _converter_source()
+        val rejects_half_arms = converter_source.contains("Err(\"Incomplete match arm\")")
+        expect(rejects_half_arms).to_equal(true)  # oracle: an arm without both a pattern and a body must fail closed or matching is undefined
 
     it "returns error for incomplete range expression":
-        # Tests missing start or end
-        pass
+        # @req REQ-AST-CONVERT-058
+        # @capture(protocol_json): bound-less range failure vs the shipped error message
+        step("Require the shipped converter to fail range nodes missing a bound with its named error")
+        val converter_source = _converter_source()
+        val rejects_bound_less_ranges = converter_source.contains("Err(\"Incomplete range expression\")")
+        expect(rejects_bound_less_ranges).to_equal(true)  # oracle: a range without its bounds must fail closed, not iterate an empty default
 
     it "returns error for empty parenthesized expression":
-        # Tests invalid parentheses
-        pass
+        # @req REQ-AST-CONVERT-059
+        # @capture(protocol_json): empty-parens failure vs the shipped error message
+        step("Require the shipped converter to fail empty parentheses with its named error")
+        val converter_source = _converter_source()
+        val rejects_empty_parens = converter_source.contains("Err(\"Empty parenthesized expression\")")
+        expect(rejects_empty_parens).to_equal(true)  # oracle: () carries no expression, so it must fail closed instead of becoming a nil literal
 
     it "returns error for await missing expression":
-        # Tests invalid await
-        pass
+        # @req REQ-AST-CONVERT-060
+        # @capture(protocol_json): operand-less await failure vs the shipped error message
+        step("Require the shipped converter to fail await nodes with no operand with its named error")
+        val converter_source = _converter_source()
+        val rejects_operand_less_awaits = converter_source.contains("Err(\"Await missing expression\")")
+        expect(rejects_operand_less_awaits).to_equal(true)  # oracle: await with nothing to await must fail closed at conversion
 
     it "returns error for try missing expression":
-        # Tests invalid try
-        pass
+        # @req REQ-AST-CONVERT-061
+        # @capture(protocol_json): operand-less try failure vs the shipped error message
+        step("Require the shipped converter to fail try nodes with no operand with its named error")
+        val converter_source = _converter_source()
+        val rejects_operand_less_trys = converter_source.contains("Err(\"Try missing expression\")")
+        expect(rejects_operand_less_trys).to_equal(true)  # oracle: try with nothing to attempt must fail closed at conversion

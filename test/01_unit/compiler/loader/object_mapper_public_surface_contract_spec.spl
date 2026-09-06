@@ -1,5 +1,30 @@
-"""Freeze the root compatibility mapper's nominal and numeric API."""
+"""
+## Purpose and audience
+Executable contract freezing the root compatibility mapper's nominal and
+numeric API (`src/compiler/99.loader/object_mapper.spl`): exported classes,
+field types, constructor and method signatures, the absence of a
+fabricated-address formula, and the single shared RW-to-RX mapping
+transaction. Written for the loader owners and for lanes that guard the
+JIT mapping surface against silent drift.
+## Operator workflow
+./src/compiler_rust/target/bootstrap/simple run test/01_unit/compiler/loader/object_mapper_public_surface_contract_spec.spl
+## Compatibility and limitations
+This is a source-contract spec by design: the frozen surface is a file-level
+API whose implementations are load-time singletons, so each scenario reads
+exactly the shipped product files named in the module constants and asserts
+their text. A signature reform here must update this spec in the same change.
+## Verification guidance and troubleshooting
+Every scenario reads exactly one named product file; a failure names the
+contract local or the frozen signature whose text disappeared, so grep the
+named product file for that token to locate the drift.
+"""
+# Lifecycle: doc/01_research/runtime/execution/simple_smf_runtime_replacement.md ;
+# doc/03_plan/compiler/aspect_dynload/aspect_dynload_lane_plan_2026-08-19.md ;
+# doc/04_architecture/runtime/jit_index.md ;
+# doc/05_design/compiler/aspect_mapping_receipt_owner_bridge_2026-08-26.md
+# @manual_section: loader-object-mapper
 
+use std.spec
 use std.io_runtime.{read_file_text}
 
 val ROOT_OBJECT_MAPPER = "src/compiler/99.loader/object_mapper.spl"
@@ -10,6 +35,9 @@ val SHADOW_JIT = "src/compiler/99.loader/loader/jit_instantiator.spl"
 
 describe "Object mapper public compatibility surface":
     it "keeps every exported compatibility type as a class":
+        # @req REQ-LOADER-MAPPER-001
+        # @capture(bit_table): exported class inventory contract
+        step("Inventory the exported compatibility classes in the root mapper")
         val source = read_file_text(ROOT_OBJECT_MAPPER)
         expect(source).to_contain("class SharedExecMapperConfig:")
         expect(source).to_contain("class SharedExecRecord:")
@@ -19,9 +47,13 @@ describe "Object mapper public compatibility surface":
         expect(source).to_contain("class LoaderMapper:")
         expect(source).to_contain("class JitMapperConfig:")
         expect(source).to_contain("class JitMapper:")
-        expect(source.contains("export use compiler.loader.loader.object_mapper")).to_equal(false)
+        val avoids_duplicate_root_reexport = source.contains("export use compiler.loader.loader.object_mapper")
+        expect(avoids_duplicate_root_reexport).to_equal(false)
 
     it "keeps public fields and numeric widths exact":
+        # @req REQ-LOADER-MAPPER-002
+        # @capture(bit_table): public field declaration contract
+        step("Freeze the declared field names and types of the mapper classes")
         val source = read_file_text(ROOT_OBJECT_MAPPER)
         expect(source).to_contain("records: Dict<text, SharedExecRecord>")
         expect(source).to_contain("mapped_symbols: i64")
@@ -33,6 +65,9 @@ describe "Object mapper public compatibility surface":
         expect(source).to_contain("allow_replace: bool")
 
     it "keeps constructor and method signatures exact":
+        # @req REQ-LOADER-MAPPER-003
+        # @capture(bit_table): method signature contract
+        step("Freeze every public constructor and method signature verbatim")
         val source = read_file_text(ROOT_OBJECT_MAPPER)
         expect(source).to_contain("static fn default() -> SharedExecMapperConfig:")
         expect(source).to_contain("static fn new(config: SharedExecMapperConfig) -> SharedExecMapper:")
@@ -51,15 +86,23 @@ describe "Object mapper public compatibility surface":
         expect(source).to_contain("fn map(exec_mapper: SharedExecMapper, owner_id: text, symbol: text, code: [u8]) -> Result<i64, text>:")
 
     it "contains no fabricated-address formula and keeps shadow JIT canonical":
+        # @req REQ-LOADER-MAPPER-004
+        # @capture(bit_table): address-formula and import-shape contract
+        step("Verify no fabricated-address formula and canonical shadow-JIT imports")
         val source = read_file_text(ROOT_OBJECT_MAPPER)
         val shadow = read_file_text(SHADOW_JIT)
-        expect(source.contains("4096 + (self.generation * 256)")).to_equal(false)
+        val carries_no_fabricated_address_formula = source.contains("4096 + (self.generation * 256)")
+        expect(carries_no_fabricated_address_formula).to_equal(false)
         expect(source).to_contain("exec_mapping_map_rx(symbol, code)")
         expect(source).to_contain("exec_mapping_free(rec.address, rec.size)")
         expect(shadow).to_contain("use .object_mapper.{{")
-        expect(shadow.contains("use compiler.loader.object_mapper.{{")).to_equal(false)
+        val shadow_imports_canonical_root = shadow.contains("use compiler.loader.object_mapper.{{")
+        expect(shadow_imports_canonical_root).to_equal(false)
 
     it "shares one stateless RW-to-RX mapping transaction":
+        # @req REQ-LOADER-MAPPER-005
+        # @capture(bit_table): RW-to-RX transaction contract
+        step("Trace the shared mapping transaction from mapper to native calls")
         val root = read_file_text(ROOT_OBJECT_MAPPER)
         val canonical = read_file_text(CANONICAL_OBJECT_MAPPER)
         val mapping = read_file_text(EXEC_MAPPING)

@@ -1,3 +1,34 @@
+"""
+## Purpose and audience
+Pins the blink::PaintArtifact and PaintChunk value contracts: empty artifacts
+report zero chunks and items, counts stay independent and reflect exactly what
+the artifact was built from, root chunk properties carry all-zero ids, equality
+is the full id triple, creation stores the begin/end span and property triple,
+size is the half-open span, and is_empty holds only when begin equals end.
+Written for engineers touching `src/lib/blink/entity/paint_artifact.spl` and the
+display-item pipeline it feeds.
+## Operator workflow
+Run the single file with the seeded runner:
+`./src/compiler_rust/target/bootstrap/simple run test/01_unit/lib/blink/paint_artifact_spec.spl`
+and read the `SPEC FILE VERDICT` line. Every scenario calls the product
+constructors directly; no renderer or GPU device is needed.
+## Compatibility and limitations
+Covers only PaintArtifact, PaintChunk and PaintChunkProperties value semantics;
+it does not exercise painting into a frame, display-item flattening, or any
+GPU-backed path.
+## Verification guidance and troubleshooting
+A failing count expectation means artifact construction or the counters
+changed; a failing id/equality expectation means PaintChunkProperties identity
+changed; a failing span expectation means PaintChunk.begin_index/end_index
+handling changed. Rerun after any edit to the paint-artifact entities and
+compare per-scenario pass/fail counts.
+"""
+# Lifecycle: doc/01_research/lib/blink/paint_pipeline_wiring_2026-08-10.md ;
+# doc/03_plan/ui/rendering/blink_wiring_plan.md ;
+# doc/04_architecture/chromium_web_renderer_primitive_differential.md ;
+# doc/05_design/chromium_web_renderer_primitive_differential.md
+# @manual_section: blink-paint-artifact
+
 # Tests for blink::PaintArtifact and PaintChunk types.
 
 use std.blink.entity.paint_artifact.{PaintArtifact, PaintChunk, PaintChunkProperties}
@@ -10,14 +41,22 @@ use std.spec.step
 
 describe "PaintArtifact":
     it "empty artifact has zero chunks":
+        # @req REQ-BLINK-PAINT-001
+        # @capture(statistics): chunk count of an empty artifact
+        step("Build an empty PaintArtifact and read its chunk count")
         val artifact = PaintArtifact.empty()
-        expect(artifact.chunk_count()).to_equal(0)
+        expect(artifact.chunk_count()).to_equal(0)  # oracle: an empty artifact carries no chunks
 
     it "empty artifact has zero items":
+        # @req REQ-BLINK-PAINT-001
+        # @capture(statistics): item count of an empty artifact
+        step("Build an empty PaintArtifact and read its item count")
         val artifact = PaintArtifact.empty()
-        expect(artifact.item_count()).to_equal(0)
+        expect(artifact.item_count()).to_equal(0)  # oracle: an empty artifact carries no display items
 
     it "counts reflect the items and chunks it was built from":
+        # @req REQ-BLINK-PAINT-002
+        # @capture(statistics): item and chunk counts of a 3-item 2-chunk artifact
         step("Verify: counts reflect the items and chunks it was built from")
         val props = PaintChunkProperties.root()
         val artifact = PaintArtifact.create(
@@ -28,6 +67,8 @@ describe "PaintArtifact":
         expect(artifact.chunk_count()).to_equal(2)  # oracle: 2 — named expected value from the requirement
 
     it "item_count and chunk_count are independent counts":
+        # @req REQ-BLINK-PAINT-002
+        # @capture(statistics): item and chunk counts of a 5-item 1-chunk artifact
         step("Verify: item_count and chunk_count are independent counts")
         val props = PaintChunkProperties.root()
         val artifact = PaintArtifact.create(
@@ -38,12 +79,17 @@ describe "PaintArtifact":
 
 describe "PaintChunkProperties":
     it "root properties have all ids 0":
+        # @req REQ-BLINK-PAINT-003
+        # @capture(bit_table): transform, clip and effect ids of root properties
+        step("Build root PaintChunkProperties and read its three ids")
         val props = PaintChunkProperties.root()
-        expect(props.transform_id).to_equal(0)
-        expect(props.clip_id).to_equal(0)
-        expect(props.effect_id).to_equal(0)
+        expect(props.transform_id).to_equal(0)  # oracle: the root node has no transform, so its id is 0
+        expect(props.clip_id).to_equal(0)  # oracle: the root node has no clip, so its id is 0
+        expect(props.effect_id).to_equal(0)  # oracle: the root node has no effect, so its id is 0
 
     it "equals is true only when all three ids match":
+        # @req REQ-BLINK-PAINT-004
+        # @capture(bit_table): equality verdicts for matching, per-field-mutated and root triples
         step("Verify: equals is true only when all three ids match")
         val a = PaintChunkProperties(transform_id: 7, clip_id: 2, effect_id: 3)
         val same = PaintChunkProperties(transform_id: 7, clip_id: 2, effect_id: 3)
@@ -55,6 +101,8 @@ describe "PaintChunkProperties":
 
 describe "PaintChunk":
     it "create stores begin and end indices":
+        # @req REQ-BLINK-PAINT-005
+        # @capture(statistics): begin and end indices of a created chunk
         step("Verify: create stores begin and end indices")
         val props = PaintChunkProperties.root()
         val chunk = PaintChunk.create(begin_index: 4, end_index: 9, properties: props)
@@ -62,6 +110,9 @@ describe "PaintChunk":
         expect(chunk.end_index).to_equal(9)  # oracle: 9 — named expected value from the requirement
 
     it "create stores property triple":
+        # @req REQ-BLINK-PAINT-005
+        # @capture(bit_table): transform, clip and effect ids stored on a created chunk
+        step("Build a chunk with a 1/2/3 property triple and read the ids back")
         val props = PaintChunkProperties(transform_id: 1, clip_id: 2, effect_id: 3)
         val chunk = PaintChunk.create(begin_index: 0, end_index: 1, properties: props)
         expect(chunk.properties.transform_id).to_equal(1)  # oracle: 1 — named expected value from the requirement
@@ -69,12 +120,16 @@ describe "PaintChunk":
         expect(chunk.properties.effect_id).to_equal(3)  # oracle: 3 — named expected value from the requirement
 
     it "size is the half-open span of the covered items":
+        # @req REQ-BLINK-PAINT-006
+        # @capture(statistics): size of chunks spanning 4..9 and 2..3
         step("Verify: size is the half-open span of the covered items")
         val props = PaintChunkProperties.root()
         expect(PaintChunk.create(begin_index: 4, end_index: 9, properties: props).size()).to_equal(5)  # oracle: 5 — named expected value from the requirement
         expect(PaintChunk.create(begin_index: 2, end_index: 3, properties: props).size()).to_equal(1)  # oracle: 1 — named expected value from the requirement
 
     it "is_empty only when begin equals end":
+        # @req REQ-BLINK-PAINT-006
+        # @capture(bit_table): is_empty verdicts for zero-width and non-zero-width chunks
         step("Verify: is_empty only when begin equals end")
         val props = PaintChunkProperties.root()
         expect(PaintChunk.create(begin_index: 3, end_index: 3, properties: props).is_empty()).to_equal(true)

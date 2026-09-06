@@ -2,6 +2,26 @@
 # @feature mcdc_hal_runtime_hardening
 # @req REQ-009 REQ-010 REQ-011 REQ-012 REQ-013 REQ-014 REQ-015 NFR-005 NFR-006 NFR-007 NFR-010
 # @evidence-class source-contract
+"""## Purpose and audience
+Proves the isolated deterministic rt(hal) provider comparison: assurance
+defaults, bounded divergence gates, preferred-provider execution, and receipt
+admission. Audience: engineers changing hal_provider orchestration semantics.
+## Operator workflow
+Run the spec from the repository root with the bootstrap binary; every
+scenario builds its lanes through the hal_provider module directly.
+## Compatibility and limitations
+Scenarios exercise the orchestration model in isolation; they do not execute
+real provider binaries. Requires `std.common.structural.hal_provider` to
+resolve from the project stdlib roots.
+## Verification guidance and troubleshooting
+A failure names the receipt field that diverged (mask, status, or commit
+flag). Re-derive the expected masks from the lane fixtures at the top of the
+file before changing any assertion.
+"""
+# Lifecycle: doc/01_research/domain/mcdc_hal_runtime_hardening.md ;
+# doc/03_plan/agent_tasks/mcdc_hal_runtime_hardening.md ;
+# doc/04_architecture/mcdc_hal_runtime_hardening.md ;
+# doc/05_design/mcdc_hal_runtime_hardening.md
 
 use std.spec.*
 use std.common.structural.hal_provider.*
@@ -26,8 +46,11 @@ fn provider_lane(provider: HalProviderKind, digest: i64,
             digest, 20, 30, 40, 64, 128, 16, 16,
             HalOverflowKindV1.None, -1, 0, 5))
 
+# @manual_section: rt hal provider comparison
 describe "isolated deterministic rt(hal) provider comparison":
     it "should default to critical assurance and the safe compare mode":
+        # @req REQ-009
+        # @capture(statistics): assurance floor and default run mode ordinals
         step("Run the selected assurance mode")
         val operation = provider_operation()
         expect(hal_assurance_to_i64(operation.assurance_floor)).to_equal(HAL_ASSURANCE_CRITICAL)
@@ -35,18 +58,24 @@ describe "isolated deterministic rt(hal) provider comparison":
             hal_run_mode_to_i64(HalRunMode.AlphaCompare))
 
     it "should deterministically compare isolated Pure C and Rust lanes":
+        # @req REQ-010
+        # @capture(bit_table): admitted, difference, and commit mask bits per lane
+        step("Orchestrate three matching isolated lanes")
         val receipt = hal_orchestrate_provider_receipts_v1(
             provider_operation(), provider_request(), HalRunMode.AlphaCompare,
             provider_lane(HalProviderKind.PureSimple, 10),
             provider_lane(HalProviderKind.C, 10),
             provider_lane(HalProviderKind.Rust, 10))
         step("Compare the bounded oracle")
-        expect(receipt.admitted_mask).to_equal(7)
-        expect(receipt.difference_pair_mask).to_equal(0)
+        expect(receipt.admitted_mask).to_equal(7)  # oracle: three isolated lanes all admitted -> mask bits 0..2
+        expect(receipt.difference_pair_mask).to_equal(0)  # oracle: identical digests leave no differing pair
         expect(receipt.commit_allowed).to_be(true)
         expect(receipt.selected_provider).to_equal(HalProviderKind.PureSimple)
 
     it "should stop alpha commit on any normalized difference":
+        # @req REQ-011
+        # @capture(bit_table): difference pair mask for the diverged C lane
+        step("Orchestrate lanes with one diverged digest")
         val receipt = hal_orchestrate_provider_receipts_v1(
             provider_operation(), provider_request(), HalRunMode.AlphaCompare,
             provider_lane(HalProviderKind.PureSimple, 10),
@@ -57,6 +86,9 @@ describe "isolated deterministic rt(hal) provider comparison":
         expect(receipt.commit_allowed).to_be(false)
 
     it "should allow beta preferred commit while retaining bounded divergence":
+        # @req REQ-012
+        # @capture(bit_table): beta-mode commit and selected-provider receipt
+        step("Orchestrate beta compare with the C provider preferred")
         val receipt = hal_orchestrate_provider_receipts_v1(
             provider_operation(HalProviderKind.C), provider_request(),
             HalRunMode.BetaCompare,
@@ -68,17 +100,23 @@ describe "isolated deterministic rt(hal) provider comparison":
         expect(receipt.selected_provider).to_equal(HalProviderKind.C)
 
     it "should execute only the preferred provider in normal mode":
+        # @req REQ-013
+        # @capture(bit_table): expected and received masks with absent lanes
+        step("Orchestrate normal mode with two absent lanes")
         val receipt = hal_orchestrate_provider_receipts_v1(
             provider_operation(HalProviderKind.Rust), provider_request(),
             HalRunMode.NormalPreferred,
             provider_lane(HalProviderKind.PureSimple, 0, false),
             provider_lane(HalProviderKind.C, 0, false),
             provider_lane(HalProviderKind.Rust, 10))
-        expect(receipt.expected_mask).to_equal(4)
-        expect(receipt.received_mask).to_equal(4)
+        expect(receipt.expected_mask).to_equal(4)  # oracle: only the Rust lane is present -> mask bit 2
+        expect(receipt.received_mask).to_equal(4)  # oracle: normal mode dispatches exactly the preferred present lane
         expect(receipt.commit_allowed).to_be(true)
 
     it "should reject unreaped or misplaced provider receipts":
+        # @req REQ-014
+        # @capture(bit_table): rejection mask for the unreaped C lane
+        step("Orchestrate lanes holding one unreaped receipt")
         val receipt = hal_orchestrate_provider_receipts_v1(
             provider_operation(), provider_request(), HalRunMode.AlphaCompare,
             provider_lane(HalProviderKind.C, 10),
@@ -89,6 +127,9 @@ describe "isolated deterministic rt(hal) provider comparison":
         expect(receipt.commit_allowed).to_be(false)
 
     it "should reject post-seal allocation and capacity overflow":
+        # @req REQ-015
+        # @capture(statistics): sealed storage admission and request well-formedness verdicts
+        step("Probe the sealed storage with an oversized request")
         val storage = hal_sealed_storage_v1(128, 128, 16, 1024,
             8, 1024, 1024, 1, true)
         val oversized = hal_provider_request_v1(101, 7, 9, 96, 64, 128, 16)
