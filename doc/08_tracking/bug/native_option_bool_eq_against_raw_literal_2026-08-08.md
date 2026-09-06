@@ -1,6 +1,6 @@
 # Native `Option<bool>` equality against a raw bool literal returns wrong answer
 
-Status: FIXED 2026-09-02 (the residual shape was the IMPLICIT tail return; see the FIXED section at the bottom). Was: open
+Status: open
 Severity: P1 native semantic parity (silent wrong output, no spec can see it)
 Family: same underlying defect class as
 `doc/08_tracking/bug/native_inlined_option_return_representation_mismatch_2026-08-02.md`
@@ -175,81 +175,3 @@ confirmed live" verification methodology left an unguarded
 `eprint("MARKER_RT_IS_NONE_ARM_REACHED")` behind at `expr_dispatch.spl:2239`;
 that stray probe was removed in this lane and is now guarded by
 `test/01_unit/compiler/mir/mir_lowering_no_stray_debug_marker_spec.spl`.
-
----
-
-## FIXED 2026-09-02 — the residual shape was the IMPLICIT tail return
-
-Status: **FIXED**. Host: aarch64-apple-darwin. Compiler under test:
-`src/compiler_rust/target/release/simple` (Rust seed, 2026-09-01 09:24) driving
-the pure-Simple `native_build_worker`, so `src/compiler/50.mir/**.spl` really is
-the code under test on this lane.
-
-The 2026-08-17 "ALREADY-FIXED IN 50.mir BY CONTENT" verdict was right about four
-of five shapes and wrong about the fifth. Measured, interpreter vs native:
-
-| shape | interp | native BEFORE | native AFTER |
-|---|---|---|---|
-| `fn f(v: bool) -> bool?: v` (implicit tail), `f(true) == true` | true | **false** | true |
-| `fn f(v: bool) -> bool?: Some(v)` (explicit return), `== true` | true | true | true |
-| `val c: bool? = Some(true); c == true` | true | true | true |
-| `val d: bool? = nil; d == nil` | true | true | true |
-| `Some(true) == true` (literal) | true | true | true |
-
-`expr_dispatch.spl`'s `bin_is_enum_eq` boxing (:2588-2646) was never the residual
-problem — it works. The residual is upstream of it: the value never became an
-Option handle in the first place. `lower_return_expr`
-(`_MirLoweringExpr/expr_dispatch.spl:1758-1765`) promotes an explicit
-`return v` through `ensure_option_handle` when the declared return type is
-`T?`; `lower_function`'s implicit tail-return arm
-(`_MirLowering/function_lowering.spl:546-579`) did not. The same declared type
-therefore produced two different PHYSICAL representations depending on which
-syntax the author used, and `rt_native_eq` compared a raw 0/1 word against a
-boxed handle.
-
-**Fix:** `src/compiler/50.mir/_MirLowering/function_lowering.spl:550-573` —
-box the tail local through `ensure_option_handle` when the function's declared
-return type is `Optional(_)`.
-
-**Gated on POSITIVE evidence, deliberately.** The first attempt boxed whenever
-the tail was "not known to be Optional". That regressed
-`fn g(flag: bool) -> i64?: if flag: 7 else: nil` — the merged tail local has no
-recorded HIR type and is not in `nil_locals`, so blind boxing turned the None
-word `3` into `Some(3)` and `g(false) ?? -1` printed **3** instead of -1
-(measured A/B, both directions). The shipped gate requires the tail's own
-recorded HIR type to be a scalar (`Bool | Int | Float | Char | Str`); anything
-else is left exactly as before.
-
-**Second defect fixed by the same change.** `fn f(v: f64) -> f64?: v` did not
-merely answer wrongly — it failed the BUILD:
-`error: semantic: panic: compile error: unsupported LLVM value conversion from
-double to ptr`. `ensure_option_handle` bitcasts F64/F32 payloads, so routing
-the implicit tail through it fixes that too.
-
-### Evidence (fail-before / pass-after, both directions run)
-
-- `scripts/check/check-native-option-bool-eq-vs-literal.shs`, extended with six
-  `itail_*` rows (the implicit-tail class: bool/int/text/f64 payloads, plus the
-  merged-nil and merged-some over-broad-fix fences):
-  - fix absent: `ERROR — nothing was checked (native-build did not produce a
-    binary)` exit 2, log naming the double→ptr compile error.
-  - fix present: `PASS — native-build Option<bool>-vs-literal equality: all 13
-    rows correct (hit1-3 fixed, miss1-4 unchanged, itail_* implicit-tail-return
-    class fixed)` exit 0.
-- A 12-row interpreter-vs-native probe (`??`, `unwrap_or`, `if val`, `match`,
-  bool/int/text/f64/merged-if tails) is byte-identical across the two engines
-  after the fix; before it the same program did not compile natively at all.
-- Structural guard in the ordinary suite:
-  `test/01_unit/compiler/mir/option_return_boxing_paths_spec.spl` —
-  `4 examples, 0 failures` with the fix, `4 examples, 2 failures` without it.
-
-### Two fail-open bugs found in this gate and fixed with it
-
-1. `get()` extracted values with `sed -n "s/.*\bKEY=..."`. A leading `\b` does
-   not match a key at the START of a line in BSD sed, so every row printed on a
-   second output line came back EMPTY and was reported as a wrong value. Now
-   splits on whitespace and anchors the whole token.
-2. The `native-build` invocation ran under `set -e` with no `|| true`, so a
-   COMPILE failure aborted the script with exit 1 and an empty log instead of
-   reaching its own `ERROR — nothing was checked` verdict. That is exactly the
-   pre-fix state of this fixture.

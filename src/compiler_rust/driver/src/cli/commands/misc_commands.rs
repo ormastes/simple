@@ -770,10 +770,7 @@ fn bootstrap_stage_output_path(output_dir: &str, name: &str) -> String {
     let mut path = if stage.is_empty() {
         PathBuf::from(output_dir).join(bootstrap_host_triple()).join(base)
     } else {
-        PathBuf::from(output_dir)
-            .join(stage)
-            .join(bootstrap_host_triple())
-            .join(base)
+        PathBuf::from(output_dir).join(stage).join(bootstrap_host_triple()).join(base)
     };
     if cfg!(target_os = "windows") && path.extension().is_none() {
         path.set_extension("exe");

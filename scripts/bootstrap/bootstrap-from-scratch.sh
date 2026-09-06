@@ -3120,10 +3120,6 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
   stage2_capability_bin="${output_dir}/stage2-capability-${PLATFORM}${exe_suffix}"
   stage2_capability_cache="${output_dir}/stage2-capability-cache"
   rm -f "${stage2_capability_bin}"
-  # bootstrap_stage2_capability_log_phantom_2026-08-17: a stale log from a
-  # prior run must never be mistaken for current evidence when this probe is
-  # skipped below (stage2 itself failed / stage2_bin not executable).
-  rm -f "${log_dir}/stage2-capability.log"
   if [ "${stage2_status}" -eq 0 ] && [ -x "${stage2_bin}" ]; then
     set +e
     env SIMPLE_BOOTSTRAP=1 \
@@ -3152,10 +3148,6 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     fi
   fi
   if [ "${stage2_capability_ok}" -ne 1 ]; then
-    if [ ! -e "${log_dir}/stage2-capability.log" ]; then
-      echo "capability build not attempted: stage2 unusable (stage2_status=${stage2_status})" \
-        >"${log_dir}/stage2-capability.log"
-    fi
     echo "  warning: Stage 2 native-build capability failed; using seed for stage 4" >&2
     echo "  warning: see ${log_dir}/stage2-capability.log" >&2
   fi
