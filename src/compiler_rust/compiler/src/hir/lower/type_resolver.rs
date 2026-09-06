@@ -95,9 +95,13 @@ impl Lowerer {
                     continue;
                 }
                 let count = fields.len();
+                // Smallest index wins (memory-safe: see the proof on the
+                // TypeId::ANY branch of `get_field_info`). Count breaks ties
+                // between candidates that agree on the index, which produce
+                // an identical byte offset either way.
                 if best_global
                     .as_ref()
-                    .is_some_and(|(_, _, best_count, _)| count <= *best_count)
+                    .is_some_and(|(best_idx, _, best_count, _)| idx > *best_idx || (idx == *best_idx && count <= *best_count))
                 {
                     continue;
                 }
@@ -646,8 +650,29 @@ impl Lowerer {
     }
 
     pub(super) fn get_field_info(&mut self, struct_ty: TypeId, field: &str) -> LowerResult<(usize, TypeId)> {
-        // Handle built-in ANY type - search all known structs for the field
-        // When ambiguous, prefer the struct with the most fields (best guess)
+        // Handle built-in ANY type - search all known structs for the field.
+        //
+        // The receiver type erased to ANY, so we cannot know which struct this
+        // actually is; every candidate that declares `field` is equally likely.
+        // The choice is therefore between wrong-but-in-bounds and wrong-and-
+        // out-of-bounds, and only one of those is a memory-safety defect.
+        //
+        // Field slots are a uniform 8 bytes (`byte_offset = field_index * 8`,
+        // mir/lower/lowering_expr_struct.rs:328, lowering_stmt.rs:539,
+        // lowering_expr_method.rs:1421), so picking the SMALLEST index among
+        // the candidates is in bounds for every one of them: for any candidate
+        // C that declares `field` at index i_C, we pick i <= i_C < len(C), so
+        // the load at 8*i never leaves C's allocation.
+        //
+        // The previous rule ("prefer the struct with the most fields") has the
+        // opposite property: it picks the LARGEST index, which is out of bounds
+        // for every candidate smaller than the winner. That is the
+        // `stage2_struct_field_offset_model_mismatch_oob_read_2026-08-30`
+        // defect -- a 1-field receiver was read at byte_offset 32.
+        //
+        // Count is retained only as a tie-break between candidates that agree
+        // on the index; those produce an identical byte offset, so the choice
+        // there is behaviour-preserving.
         if struct_ty == TypeId::ANY {
             let mut best: Option<(usize, TypeId, usize)> = None; // (idx, ty, field_count)
             for (_, hir_ty) in self.module.types.iter() {
@@ -655,7 +680,10 @@ impl Lowerer {
                     for (idx, (field_name, field_ty)) in fields.iter().enumerate() {
                         if field_name == field {
                             let count = fields.len();
-                            if best.as_ref().is_none_or(|(_, _, c)| count > *c) {
+                            if best
+                                .as_ref()
+                                .is_none_or(|(i, _, c)| idx < *i || (idx == *i && count > *c))
+                            {
                                 best = Some((idx, *field_ty, count));
                             }
                         }
@@ -706,8 +734,10 @@ impl Lowerer {
 
         if let Some(hir_ty) = self.module.types.get(struct_ty).cloned() {
             match hir_ty {
-                // Any type - search all known structs for the field
-                // When ambiguous, prefer the struct with the most fields
+                // Any type - search all known structs for the field.
+                // Smallest index wins: see the proof in the TypeId::ANY branch
+                // above. Most-fields-wins picked an offset past the end of
+                // every smaller candidate.
                 HirType::Any => {
                     let mut best: Option<(usize, TypeId, usize)> = None;
                     for (_, search_ty) in self.module.types.iter() {
@@ -715,7 +745,10 @@ impl Lowerer {
                             for (idx, (field_name, field_ty)) in fields.iter().enumerate() {
                                 if field_name == field {
                                     let count = fields.len();
-                                    if best.as_ref().is_none_or(|(_, _, c)| count > *c) {
+                                    if best
+                                        .as_ref()
+                                        .is_none_or(|(i, _, c)| idx < *i || (idx == *i && count > *c))
+                                    {
                                         best = Some((idx, *field_ty, count));
                                     }
                                 }
@@ -822,7 +855,12 @@ impl Lowerer {
                             for (idx, (field_name, field_ty)) in search_fields.iter().enumerate() {
                                 if field_name == field {
                                     let count = search_fields.len();
-                                    if best.as_ref().is_none_or(|(_, _, c)| count > *c) {
+                                    // Smallest index wins -- memory-safe, see
+                                    // the proof on the TypeId::ANY branch.
+                                    if best
+                                        .as_ref()
+                                        .is_none_or(|(i, _, c)| idx < *i || (idx == *i && count > *c))
+                                    {
                                         best = Some((idx, *field_ty, count));
                                     }
                                 }
@@ -917,7 +955,12 @@ impl Lowerer {
                                     for (idx, (fname, fty)) in fields.iter().enumerate() {
                                         if fname == field {
                                             let count = fields.len();
-                                            if best.as_ref().is_none_or(|(_, _, c)| count > *c) {
+                                            // Smallest index wins -- memory-safe, see
+                                    // the proof on the TypeId::ANY branch.
+                                    if best
+                                        .as_ref()
+                                        .is_none_or(|(i, _, c)| idx < *i || (idx == *i && count > *c))
+                                    {
                                                 best = Some((idx, *fty, count));
                                             }
                                         }
@@ -927,7 +970,12 @@ impl Lowerer {
                                     for (idx, f) in fields.iter().enumerate() {
                                         if f.name == field {
                                             let count = fields.len();
-                                            if best.as_ref().is_none_or(|(_, _, c)| count > *c) {
+                                            // Smallest index wins -- memory-safe, see
+                                    // the proof on the TypeId::ANY branch.
+                                    if best
+                                        .as_ref()
+                                        .is_none_or(|(i, _, c)| idx < *i || (idx == *i && count > *c))
+                                    {
                                                 best = Some((idx, f.ty, count));
                                             }
                                         }

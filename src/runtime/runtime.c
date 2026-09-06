@@ -47,6 +47,7 @@
 #endif
 #include <signal.h>
 #include <stdatomic.h>
+
 #ifndef _WIN32
 #include <execinfo.h>
 #include <unistd.h>
@@ -108,10 +109,10 @@ static bool spl_debug_mode_enabled = false;
 #define RT_FILE_EXISTS_PROBE_GENERATION_MAX UINT64_C(0x7fffffffffffffff)
 #define RT_FILE_EXISTS_PROBE_TOTAL_MAX    UINT64_C(0x7fffffff)
 
-static atomic_uint_fast64_t rt_file_exists_probe_state = ATOMIC_VAR_INIT(0);
-static atomic_uint_fast64_t rt_file_exists_probe_generation = ATOMIC_VAR_INIT(0);
-static atomic_uint_fast64_t rt_file_exists_probe_total = ATOMIC_VAR_INIT(0);
-static atomic_uint_fast64_t rt_file_exists_probe_failed = ATOMIC_VAR_INIT(0);
+static atomic_uint_fast64_t rt_file_exists_probe_state = 0;
+static atomic_uint_fast64_t rt_file_exists_probe_generation = 0;
+static atomic_uint_fast64_t rt_file_exists_probe_total = 0;
+static atomic_uint_fast64_t rt_file_exists_probe_failed = 0;
 
 /* Reserve one total slot. A failed slot is incremented only after this succeeds,
  * so concurrent records preserve failed <= total <= TOTAL_MAX. */
@@ -533,12 +534,12 @@ int spl_str_cmp(const char* a, const char* b) {
  * audit object is absent these resolve to NULL and the audit is simply
  * inactive, never a link failure. See runtime_simd_utf8.c for the contract. */
 #if defined(__GNUC__) || defined(__clang__)
-extern int64_t rt_text_slice_audit_level(void) __attribute__((weak));
+extern int64_t rt_text_slice_audit_level(void) SPL_WEAK;
 extern int64_t rt_text_slice_audit_note(int site_id, const char* site_name,
                                         int64_t start, int64_t end,
                                         const uint8_t* src, uint64_t src_len,
                                         const uint8_t* out, uint64_t out_len)
-    __attribute__((weak));
+    SPL_WEAK;
 #  define SPL_SLICE_AUDIT_AVAILABLE (rt_text_slice_audit_level && rt_text_slice_audit_note)
 #else
 #  define SPL_SLICE_AUDIT_AVAILABLE 0
@@ -1576,7 +1577,7 @@ static SplRuntimeEnum* spl_enum_from_handle(int64_t handle) {
     return (SplRuntimeEnum*)(intptr_t)handle;
 }
 
-__attribute__((weak))
+SPL_WEAK
 int64_t rt_enum_new(int32_t enum_id, int32_t discriminant, int64_t payload) {
     SplRuntimeEnum* value = (SplRuntimeEnum*)SPL_MALLOC(sizeof(SplRuntimeEnum), "enum");
     if (!value) return 0;
@@ -1586,19 +1587,19 @@ int64_t rt_enum_new(int32_t enum_id, int32_t discriminant, int64_t payload) {
     return (int64_t)(intptr_t)value;
 }
 
-__attribute__((weak))
+SPL_WEAK
 int64_t rt_enum_id(int64_t value) {
     SplRuntimeEnum* enum_value = spl_enum_from_handle(value);
     return enum_value ? enum_value->enum_id : -1;
 }
 
-__attribute__((weak))
+SPL_WEAK
 int64_t rt_enum_discriminant(int64_t value) {
     SplRuntimeEnum* enum_value = spl_enum_from_handle(value);
     return enum_value ? enum_value->discriminant : -1;
 }
 
-__attribute__((weak))
+SPL_WEAK
 int64_t rt_enum_payload(int64_t value) {
     SplRuntimeEnum* enum_value = spl_enum_from_handle(value);
     return enum_value ? enum_value->payload : 0;
@@ -2570,27 +2571,27 @@ int64_t spl_wffi_call_i64_c(void* fptr, int64_t* args, int64_t nargs) {
  * JIT Exec Manager (stubs — core compiler uses tree-walk interpreter)
  * ================================================================ */
 
-__attribute__((weak)) int64_t rt_exec_manager_create(const char* backend) {
+SPL_WEAK int64_t rt_exec_manager_create(const char* backend) {
     (void)backend;
     return 0;
 }
 
-__attribute__((weak)) const char* rt_exec_manager_compile(int64_t handle, const char* mir_data) {
+SPL_WEAK const char* rt_exec_manager_compile(int64_t handle, const char* mir_data) {
     (void)handle; (void)mir_data;
     return "";
 }
 
-__attribute__((weak)) int64_t rt_exec_manager_execute(int64_t handle, const char* name, SplArray* args) {
+SPL_WEAK int64_t rt_exec_manager_execute(int64_t handle, const char* name, SplArray* args) {
     (void)handle; (void)name; (void)args;
     return 0;
 }
 
-__attribute__((weak)) bool rt_exec_manager_has_function(int64_t handle, const char* name) {
+SPL_WEAK bool rt_exec_manager_has_function(int64_t handle, const char* name) {
     (void)handle; (void)name;
     return false;
 }
 
-__attribute__((weak)) void rt_exec_manager_cleanup(int64_t handle) {
+SPL_WEAK void rt_exec_manager_cleanup(int64_t handle) {
     /* Clean up soft JIT temp file if it exists. */
     char path[256];
     snprintf(path, sizeof(path), "tmp/jit/simple_soft_jit_%lld.spl",
