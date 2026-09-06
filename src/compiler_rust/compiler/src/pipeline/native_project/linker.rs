@@ -1656,10 +1656,10 @@ int main(int argc, char** argv) {
         if !exact_stage4 {
             if let Some((runtime_lib, is_native_all)) = selected_runtime.as_ref() {
                 if super::config::is_shared_runtime_library(runtime_lib) {
-                    // Dynamic runtime lane. Simple does not unwind, so nothing
-                    // here needs an unwinder: the shared runtime's own NEEDED
-                    // list is libm/libgcc_s/libc, and no LLVM libunwind is
-                    // involved on either side of the link.
+                    // Dynamic runtime lane. The `-lunwind` entry resolves nothing
+                    // here (libunwind.so.8 defines 0 `_Unwind_*`; libgcc_s.so.1
+                    // defines 18), which is why chasing those symbols was a dead
+                    // end. `omit_unwind` above already drops it on this lane shape.
                     //
                     // `-L<dir> -l<stem>` rather than the bare path: the shared
                     // object carries no SONAME, and with a path argument the

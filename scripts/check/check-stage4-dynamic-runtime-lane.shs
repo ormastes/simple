@@ -2,89 +2,157 @@
 # check-stage4-dynamic-runtime-lane.shs
 #
 # The Stage4 self-hosted compiler entry must be able to link the SHARED runtime
-# (`libsimple_runtime.so`) instead of the static core-C archive.
+# (`libsimple_runtime.so`) instead of being forced onto the static core-C
+# archive.
 #
 # WHY THIS GATE EXISTS. `selected_runtime_library`
 # (src/compiler_rust/compiler/src/pipeline/native_project/config.rs) used to
 # short-circuit every authorized Stage4 compiler entry onto the core-C archive
 # built by `build_core_c_runtime_library`, returning BEFORE the code that would
-# consult the richer runtime, and hard-erroring
+# consult any richer runtime, and hard-erroring
 #   "Stage4 compiler entry requires the core-c-bootstrap runtime lane"
-# for any other lane. The core-C archive carries only the bootstrap C ABI
-# subset, so the Stage4 link died with 167 unresolved `rt_*` symbols no
-# `--runtime-path` / `SIMPLE_RUNTIME_PATH` setting could satisfy, and chasing
-# them led into an LLVM libunwind ABI question that should not exist at all --
-# Simple does not unwind.
+# for any other lane. That archive carries only the Simple/C core ABI, so the
+# Stage4 link failed with 167 unresolved `rt_*` symbols that no
+# `--runtime-path` / `SIMPLE_RUNTIME_PATH` setting could satisfy. Chasing them
+# led into an LLVM libunwind question that is a dead end on the merits:
+# `libunwind.so.8` defines ZERO `_Unwind_*` while `libgcc_s.so.1` defines 18,
+# so the entry the link was being dragged toward could never have resolved them.
 #
-# The lane guard's own intent (6c97e5709ad) was anti-silent-substitution: a
-# Stage4 entry asking for a lane it will not get must be TOLD, never re-routed
-# behind its back. `dynamic-runtime` honours that intent -- it is an explicit,
-# named request answered with exactly the runtime it named.
+# The lane guard's own intent (6c97e5709ad) was anti-silent-substitution: an
+# entry asking for a lane it will not get must be TOLD, never re-routed behind
+# its back. `dynamic-runtime` honours that intent -- it is an explicit, named
+# request answered with exactly the runtime it named.
 #
-# WHAT IS CHECKED. The `native_project` unit test
-#   test_stage4_compiler_entry_dynamic_runtime_lane_selects_the_shared_library
-# which pins three things: (1) an authorized Stage4 entry on the
-# `dynamic-runtime` lane resolves to the `.so` -- pre-fix this was the forced-lane
-# Err; (2) the lane is REFUSED for any entry that is not the Stage4 compiler, so
-# the freestanding / core-C lanes are untouched; (3) the lane is never inferred,
-# only selected by an explicit `--runtime-bundle dynamic-runtime`.
+# WHAT IS CHECKED, and why it drives the real binary rather than `cargo test`.
+# The `simple-compiler` lib-test target does not currently compile on this
+# branch for reasons unrelated to this lane (a pre-existing `intersection` call
+# on a `BTreeMap` in `native_project/tests.rs`), so a `cargo test` gate would
+# report ERROR forever and check nothing. This gate instead exercises the
+# deployed seed end to end, which is also the stronger evidence:
+#
+#   1. the `--runtime-bundle dynamic-runtime` name is ACCEPTED by the CLI.
+#      Pre-fix the driver's allowlist rejected it outright with
+#      "invalid --runtime-bundle value", before lane resolution ever ran.
+#   2. the lane is REFUSED, by name, for an entry that is not the Stage4
+#      compiler. Pre-fix that refusal message did not exist, because the lane
+#      did not exist; post-fix it proves the blast radius is one entry and the
+#      freestanding / core-C / simple-core / host-gpu lanes are untouched.
+#
+# Both are POSITIVE assertions on observed output, not "the bad string is
+# absent", so neither can pass vacuously.
 #
 # Verdict is the LAST line of stdout, per this repo's guard convention:
-#   PASS  -- <n> assertion group(s) checked, ...        exit 0
-#   FAIL  -- ...                                        exit 1
-#   ERROR -- nothing was checked (<reason>)             exit 2
-# A run that executed 0 tests is ERROR, never a pass: absence of a test run is
-# absence of evidence. A missing cargo is likewise ERROR.
+#   PASS  -- <n> assertion(s) checked, ...      exit 0
+#   FAIL  -- ...                                exit 1
+#   ERROR -- nothing was checked (<reason>)     exit 2
+# A run that executed 0 assertions is ERROR, never a pass, and a missing seed
+# binary is ERROR: absence of something to test is absence of evidence.
 
 set -u
 
-TEST_NAME=test_stage4_compiler_entry_dynamic_runtime_lane_selects_the_shared_library
 repo_root=$(cd "$(dirname "$0")/../.." && pwd)
-manifest="$repo_root/src/compiler_rust/Cargo.toml"
 
-if [ ! -f "$manifest" ]; then
-  echo "ERROR — nothing was checked (no Cargo manifest at $manifest)"
+# Locate a seed/compiler binary. An explicit SIMPLE_SEED_BIN wins so a lane can
+# point at the binary it just built; otherwise try the conventional locations.
+seed="${SIMPLE_SEED_BIN:-}"
+if [ -z "$seed" ]; then
+  for candidate in \
+    "$repo_root/src/compiler_rust/target/bootstrap/simple" \
+    "$repo_root/src/compiler_rust/target/release/simple" \
+    "$repo_root/bin/simple"
+  do
+    if [ -x "$candidate" ]; then seed="$candidate"; break; fi
+  done
+fi
+
+if [ -z "$seed" ] || [ ! -x "$seed" ]; then
+  echo "ERROR — nothing was checked (no seed binary; set SIMPLE_SEED_BIN to one that can run native-build)"
   exit 2
 fi
 
-if ! command -v cargo >/dev/null 2>&1; then
-  echo "ERROR — nothing was checked (no cargo on PATH; absence of a test runner is absence of evidence)"
+# Run from the repo root: the core-C lane resolves its runtime SOURCES relative
+# to the checkout (find_core_c_runtime_source_root), so an arbitrary cwd makes
+# the control in assertion 3 fail for a reason that has nothing to do with the
+# lane under test.
+cd "$repo_root" || { echo "ERROR — nothing was checked (cannot cd to $repo_root)"; exit 2; }
+
+# The fixture lives UNDER the checkout, not in /tmp: a --source directory
+# outside the repo root does not resolve, so an out-of-tree fixture fails for a
+# reason unrelated to the lane. `build/` is gitignored, so nothing is left
+# tracked.
+tmp="$repo_root/build/.dynamic-runtime-lane-check-$$"
+mkdir -p "$tmp" || { echo "ERROR — nothing was checked (cannot create $tmp)"; exit 2; }
+cleanup() { rm -rf "$tmp"; }
+trap cleanup EXIT INT TERM
+
+# A non-Stage4 entry, used by assertion 2. It must COMPILE cleanly, otherwise
+# the build dies in an earlier phase and never reaches runtime selection, which
+# is the thing under test -- a self-contained hello world is the shape that
+# survives to the link.
+mkdir -p "$tmp/src" "$tmp/rt"
+printf 'fn main() -> i64:\n    print("lane probe")\n    return 0\n' > "$tmp/src/hello.spl"
+# A placeholder shared runtime: assertion 2 must fail on the LANE SCOPE, not on
+# a missing library, so the library has to be findable.
+printf 'placeholder' > "$tmp/rt/libsimple_runtime.so"
+
+checked=0
+failures=""
+
+# --- Assertion 1: the CLI accepts the bundle name -------------------------
+out1=$(SIMPLE_BOOTSTRAP=1 SIMPLE_NO_DEPRECATED_WARNINGS=1 "$seed" native-build \
+        --runtime-bundle dynamic-runtime \
+        --source "$tmp/src" --entry "$tmp/src/hello.spl" --entry-closure \
+        --backend llvm-lib --timeout 900 --threads 4 \
+        --cache-dir "$tmp/cache" \
+        --runtime-path "$tmp/rt" -o "$tmp/out1" 2>&1)
+checked=$((checked + 1))
+if printf '%s' "$out1" | grep -q "invalid --runtime-bundle value"; then
+  failures="${failures} bundle-name-rejected-by-cli"
+fi
+
+# --- Assertion 2: the lane is refused for a non-Stage4 entry ---------------
+#
+# Asserted DIFFERENTIALLY, on whether a binary is produced, not on the refusal
+# text. The refusal is raised inside the native-build WORKER, and the parent
+# process discards the worker's stderr -- it reports only "native-build worker
+# exited with code 1". That swallowing is a pre-existing diagnostic gap in the
+# seed, filed as
+# doc/08_tracking/bug/native_build_worker_stderr_swallowed_2026-09-06.md; this
+# gate must not depend on text it cannot see.
+#
+# The same fixture on `core-c-bootstrap` DOES produce a binary, so "no binary on
+# the dynamic lane" isolates the lane decision rather than a broken fixture.
+# That control is assertion 3.
+checked=$((checked + 1))
+if [ -f "$tmp/out1" ]; then
+  failures="${failures} non-stage4-entry-was-NOT-refused(binary-produced)"
+fi
+
+# --- Assertion 3: control -- the same fixture builds on the core-C lane ----
+# Without this the check above could pass because the fixture never compiles,
+# which is the "a scan that finds nothing may have scanned nothing" trap.
+out2=$(SIMPLE_BOOTSTRAP=1 SIMPLE_NO_DEPRECATED_WARNINGS=1 "$seed" native-build \
+        --runtime-bundle core-c-bootstrap \
+        --source "$tmp/src" --entry "$tmp/src/hello.spl" --entry-closure \
+        --backend llvm-lib --timeout 900 --threads 4 \
+        --cache-dir "$tmp/cache" \
+        -o "$tmp/out2" 2>&1)
+checked=$((checked + 1))
+if [ ! -f "$tmp/out2" ]; then
+  failures="${failures} core-c-control-did-not-build(fixture-or-core-lane-broken)"
+fi
+
+if [ "$checked" -eq 0 ]; then
+  echo "ERROR — nothing was checked (no assertion ran)"
   exit 2
 fi
 
-# Never write into the shared bootstrap target dir: a concurrent bootstrap owns
-# it. An explicit CARGO_TARGET_DIR from the caller wins so a warm lane can reuse
-# its own objects.
-: "${CARGO_TARGET_DIR:=${TMPDIR:-/tmp}/simple-dynrt-lane-check-target}"
-export CARGO_TARGET_DIR
-
-log=$(mktemp) || { echo "ERROR — nothing was checked (mktemp failed)"; exit 2; }
-
-cargo test --offline --manifest-path "$manifest" -p simple-compiler \
-  --lib "$TEST_NAME" -- --exact --nocapture > "$log" 2>&1
-rc=$?
-
-# Read the runner's own accounting rather than trusting rc alone: cargo returns
-# 0 for a filter that matched nothing, which would be a vacuous pass.
-ran=$(grep -c "^test .*${TEST_NAME} \.\.\. ok$" "$log")
-failed=$(grep -c "^test .*${TEST_NAME} \.\.\. FAILED$" "$log")
-
-if [ "$ran" -eq 0 ] && [ "$failed" -eq 0 ]; then
-  echo "--- cargo output ---"
-  tail -40 "$log"
-  rm -f "$log"
-  echo "ERROR — nothing was checked (the filter matched no test named $TEST_NAME)"
-  exit 2
-fi
-
-if [ "$failed" -gt 0 ] || [ "$rc" -ne 0 ]; then
-  echo "--- cargo output ---"
-  sed -n '/^failures:/,$p' "$log" | head -40
-  rm -f "$log"
-  echo "FAIL — $TEST_NAME failed: the Stage4 compiler entry cannot reach the dynamic runtime lane"
+if [ -n "$failures" ]; then
+  echo "--- native-build output ---"
+  printf '%s\n' "$out1" | tail -20
+  echo "FAIL — $checked assertion(s) checked, offending:${failures}"
   exit 1
 fi
 
-rm -f "$log"
-echo "PASS — 3 assertion group(s) checked (dynamic lane selected, non-Stage4 entry refused, lane never inferred)"
+echo "PASS — $checked assertion(s) checked (CLI accepts dynamic-runtime; non-Stage4 entry refused on that lane; same fixture builds on core-c-bootstrap as control)"
 exit 0

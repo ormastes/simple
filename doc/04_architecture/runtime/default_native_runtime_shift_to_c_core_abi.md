@@ -63,14 +63,44 @@ exactly as before. The closure stays auditable: one named shared object with a
 readable `DT_NEEDED` list. `libsimple_native_all.a` remains barred everywhere
 rule 5 barred it.
 
-**Unwinding.** `linker.rs`'s existing `omit_unwind` already drops the unwind
-library on precisely this lane shape, and the shared runtime's own `NEEDED` list
-is `libm`/`libgcc_s`/`libc`/`ld-linux` with no LLVM `libunwind`. The directive
-and the code agree.
+**Unwinding — corrected 2026-09-06.** An earlier draft of this amendment said the
+shared runtime had "no unwind dependency". That was wrong and is retracted.
+Measured: `libsimple_runtime.so` lists `libgcc_s.so.1` in `DT_NEEDED` and carries
+**12 undefined `_Unwind_*`** symbols. `libgcc_s` IS the unwinder.
+
+What is actually true, and is what the link change rests on, is narrower: the
+`-lunwind` entry resolves nothing. On this host `libunwind.so.8` defines **0**
+`_Unwind_*` while `libgcc_s.so.1` defines **18**, so the LLVM libunwind the
+Stage4 link was being dragged toward could never have satisfied those symbols --
+which is why chasing them was a dead end. `linker.rs`'s existing `omit_unwind`
+already drops that entry on precisely this lane shape. Simple code does not
+unwind; the Rust runtime it links against still carries the personality-routine
+references every Rust cdylib does, and those resolve through `libgcc_s` like any
+other Rust binary on the platform. No mismatched-ABI unwinder is symlinked
+anywhere.
+
+**Is the core-C supplement permanent, or a bridge? Both, in measured
+proportion.** Of the 201 `rt_*` the Stage4 object closure demands that the `.so`
+does not export, only **32** are compiled into the `.so` but bound local -- the
+export defect recorded in
+`doc/08_tracking/bug/cdylib_hides_c_runtime_exports_2026-09-06.md` (rustc passes
+a `--version-script`; there is no `-fvisibility=hidden`). The other **169 are
+absent from the `.so` entirely**: C-only entry points (`rt_close_fd`,
+`rt_cpu_count`, `rt_call_ptr_*`, `rt_iocp_*`, `rt_kqueue_*`, `rt_simd_*`) that
+were never in the Rust runtime and are properly the core-C archive's
+responsibility.
+
+So the supplement is **the permanent design for the 169** and a **bridge for the
+32**. Fixing the version script would let those 32 come from the `.so` instead;
+it would not remove the need for the archive. Do not read the supplement as a
+workaround to be deleted when that bug closes.
 
 **Dependency.** The `$ORIGIN` RUNPATH approach assumes the shared runtime gains a
-`SONAME`; it carries none today, which is why the linker passes `-L`/`-l` rather
-than a bare path. Library packaging (SONAME, versioning, install layout) is owned
-by a separate lane and must land alongside this one.
+`SONAME`. The artifact measured for this lane carries none, which is why the
+linker passes `-L`/`-l` rather than a bare path -- a bare path would record the
+build directory as `DT_NEEDED`. The packaging lane has since landed a real
+`DT_SONAME` (`libsimple_runtime.so.0`) with an install script; once a build picks
+that library up the caveat is discharged, and the `-L`/`-l` form is correct
+either way.
 
 Gate: `scripts/check/check-stage4-dynamic-runtime-lane.shs`.
