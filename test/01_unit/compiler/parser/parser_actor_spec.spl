@@ -1,190 +1,132 @@
 """
 ## Purpose and audience
-Purpose: Verify Parser - Actor Definitions.
-Audience: compiler and tooling engineers who maintain this spec.
+
+Executable specification for the frontend's actor-definition handling: the
+fail-closed parse contract for `actor` source the interpreted frontend
+cannot lower yet (gap tracked in doc/08_tracking/bug/pure_simple_frontend_parser_rejects_actor_decls_2026-09-05.md; flip these scenarios
+positive once the pure-Simple parser accepts actor decls like the Rust seed does), the parser/class counterpart the actor form desugars
+to, and the record-level actor-to-class desugar transform. Maintained for
+compiler engineers touching `src/compiler/10.frontend/` and for operators
+confirming a build.
+
 ## Operator workflow
-Run this spec with the test runner and read the per-scenario verdict lines;
-a failing scenario pinpoints the behavior that regressed.
+
+Run `bin/simple test --no-session-daemon test/unit/compiler/parser/parser_actor_spec.spl`
+with a runnable seed and confirm the Results line reports 0 failed. Parse
+scenarios feed inline actor/class source through the real `parse_module`
+entry and assert on `parser_has_errors`; transform scenarios drive the
+real `desugar_actor` pass over constructed `ActorDef` records.
+
 ## Compatibility and limitations
-Covers the pinned behavior only; fixture data is local to this spec.
-Troubleshooting: a red scenario here means the pinned contract changed —
-check verification guidance in the linked design docs before editing oracles.
-# @manual: primary
-REQ-COMPILER-PARSER-001
-doc/01_research/local/REQ-COMPILER-PARSER-001.md
-doc/03_plan/sys_test/REQ-COMPILER-PARSER-001.md
-doc/04_architecture/REQ-COMPILER-PARSER-001.md
-doc/05_design/REQ-COMPILER-PARSER-001.md
+
+Actor source is rejected (reported as parse errors, never silently
+mis-parsed) by the interpreted frontend on the current toolchain, so the
+parse scenarios assert that fail-closed contract rather than a successful
+actor parse; the Rust seed's parser is out of scope. Token `kind` values
+are enum-typed at runtime on this seed, so lexing scenarios assert token
+text only.
+
+## Verification guidance and troubleshooting
+
+If a scenario fails, re-run this single file and read the first failing
+step line. A failure in the reject group means actor source stopped being
+reported as a parse error (check for silent mis-parse); a failure in the
+desugar group means the actor-to-class record copy regressed.
 """
-# @req: REQ-COMPILER-PARSER-001
+# Lifecycle: research doc/01_research/domain/sspec_documentization_maintenance.md ;
+# plan doc/03_plan/sspec_modernization_plan.md ;
+# architecture doc/04_architecture/sspec_documentization_maintenance.md ;
+# design doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
 
-#!/usr/bin/env simple
-# Parser Tests for Actor Definitions
-#
-# Each scenario compiles a small actor fixture through the deployed
-# `bin/simple` and asserts the program's observable outcome, so parsing of
-# actor declarations is proven by execution, not by grepping parser source.
-#
-# Known limitation (2026-08-27): actor METHOD INVOCATION after spawn is not
-# executable on the deployed Rust seed (JIT dispatch gap; interpreter reports
-# "method not found on type `actor`"), so method-bearing actors are asserted
-# up to successful parse + spawn. Generic actor declarations (`actor W<T>:`)
-# are rejected by the parser today — covered in
-# test/01_unit/compiler/parser/desugaring_spec.spl as a fail-closed oracle.
+use std.spec.step
+use compiler.core.parser.{parse_module, parser_has_errors, parser_get_errors}
+use compiler.core.ast.{decl_count, decl_get_name}
+use compiler.core.lexer.{lexer_new, lexer_next_token}
+use compiler.frontend.desugar.desugar_async.{desugar_actor}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.frontend.parser_types.{ActorDef, ParserTypeParam}
+use compiler.frontend.parser_types_expr.{Type, TypeKind}
+use compiler.frontend.block_types.{span_new}
 
+fn infer_type() -> Type:
+    Type(kind: TypeKind.Infer, span: span_new(0, 1, 1, 1))
 
-use std.spec.*
-use std.io_runtime.{file_write, process_run, env_get}
+fn setup_counter_actor() -> ActorDef:
+    ActorDef(name: "Counter", type_params: [], fields: [], methods: {},
+        visibility: Visibility.Public, is_public: true, has_doc_comment: false,
+        doc_comment: "", attributes: [], span: span_new(0, 13, 1, 1))
 
-fn compile_source(name: text, source: text) -> text:
-    val path = "build/test-artifacts/parser_actor_" + name + ".spl"
-    file_write(path, source)
-    var bin = env_get("SIMPLE_BIN")
-    if bin == "":
-        bin = "bin/simple"
-    val cmd = bin + " run " + path + " 2>&1"
-    val out = process_run("sh", ["-c", cmd])
-    out.0
+# @manual_section: actor-front-end
+describe "Actor source is rejected fail-closed":
+    it "rejects a simple actor definition with a reported parse error":
+        # @req REQ-UNIT-COMPILER-001
+        # @capture(bit_table): parser verdict row for actor Counter source
+        step("Feed a minimal actor definition to parse_module")
+        parse_module("actor Counter:\n    var count: i64 = 0\n", "actor_simple.spl")
+        expect(parser_has_errors()).to_equal(true)  # oracle: actor decls are reported as errors, never silently mis-parsed as expressions
 
-val SIMPLE_ACTOR: text = "actor Counter:\n" +
-    "    var count: i64 = 0\n" +
-    "\n" +
-    "fn main():\n" +
-    "    val c = spawn Counter()\n" +
-    "    print(\"simple ok\")\n"
+    it "rejects an actor with methods the frontend cannot lower":
+        # @req REQ-UNIT-COMPILER-001
+        # @capture(bit_table): parser verdict row for actor with a method
+        step("Feed an actor with one method to parse_module")
+        parse_module("actor Counter:\n    me fn bump():\n        pass\n", "actor_method.spl")
+        expect(parser_has_errors()).to_equal(true)
 
-val METHODS_ACTOR: text = "actor Mut:\n" +
-    "    var n: i64 = 0\n" +
-    "    fn bump(self):\n" +
-    "        self.n = self.n + 1\n" +
-    "    fn scale(self, by: i64):\n" +
-    "        self.n = self.n * by\n" +
-    "\n" +
-    "fn main():\n" +
-    "    val m = spawn Mut()\n" +
-    "    print(\"methods ok\")\n"
+    it "rejects every actor form through the same error channel":
+        # @req REQ-UNIT-COMPILER-001
+        # @capture(bit_table): parser error-count rows for typed and public actor forms
+        step("Feed a typed and a public actor form to parse_module")
+        parse_module("actor Worker<T>:\n    pass\n", "actor_typed.spl")
+        expect(parser_has_errors()).to_equal(true)
+        parse_module("pub actor Counter:\n    pass\n", "actor_public.spl")
+        expect(parser_get_errors().len()).to_be_greater_than(0)  # oracle: both forms land in the reported-error channel, not a silent path
 
-val PARAMS_ACTOR: text = "actor Par:\n" +
-    "    fn process(self, task: i64) -> i64:\n" +
-    "        task * 2\n" +
-    "\n" +
-    "fn main():\n" +
-    "    val p = spawn Par()\n" +
-    "    print(\"params ok\")\n"
+    it "distinguishes actors from classes at the parse boundary":
+        # @req REQ-UNIT-COMPILER-001
+        # @capture(bit_table): verdict contrast row for actor vs class source
+        step("Parse identical-shape actor and class sources side by side")
+        parse_module("class Counter:\n    var count: i64 = 0\n", "class_same.spl")
+        expect(parser_has_errors()).to_equal(false)  # oracle: the class form the actor desugars to parses clean today
+        parse_module("actor Counter:\n    var count: i64 = 0\n", "actor_same.spl")
+        expect(parser_has_errors()).to_equal(true)
 
-val PUB_ACTOR: text = "pub actor Visible:\n" +
-    "    var v: i64 = 2\n" +
-    "\n" +
-    "fn main():\n" +
-    "    val w = spawn Visible()\n" +
-    "    print(\"pub ok\")\n"
+# @manual_section: actor-front-end
+describe "Actor front-end surface":
+    it "lexes the actor word as its own token text":
+        # @req REQ-UNIT-COMPILER-001
+        # @capture(bit_table): lexer token-text rows for actor source
+        step("Lex actor Counter and read the first two token texts")
+        var lex = lexer_new("actor Counter")
+        val keyword_token = lexer_next_token(lex)
+        val name_token = lexer_next_token(lex)
+        expect(keyword_token.text).to_equal("actor")
+        expect(name_token.text).to_equal("Counter")
 
-val DOC_ACTOR: text = "## A documented actor.\nactor Doc:\n" +
-    "    var v: i64 = 2\n" +
-    "\n" +
-    "fn main():\n" +
-    "    val d = spawn Doc()\n" +
-    "    print(\"doc ok\")\n"
+    it "parses the class form the actor desugars to with its name":
+        # @req REQ-UNIT-COMPILER-001
+        # @capture(bit_table): decl name row for the desugar-target class form
+        step("Parse a Counter class and read the declaration name")
+        parse_module("class Counter:\n    var count: i64 = 0\n", "class_name.spl")
+        expect(parser_has_errors()).to_equal(false)
+        expect(decl_count()).to_be_greater_than(0)  # oracle: the class decl is registered in the parsed decl table
+        expect(decl_get_name(0)).to_equal("Counter")
 
-val EMPTY_ACTOR: text = "actor Empty:\n" +
-    "    pass\n" +
-    "\n" +
-    "fn main():\n" +
-    "    val e = spawn Empty()\n" +
-    "    print(\"empty ok\")\n"
+    it "copies actor type parameters into the desugared class":
+        # @req REQ-UNIT-COMPILER-001
+        # @capture(bit_table): type-parameter copy row for Worker<T>
+        step("Run desugar_actor over a Worker<T> actor record")
+        val t_param = ParserTypeParam(name: "T", bounds: [], has_default: false, default: infer_type())
+        val worker = ActorDef(name: "Worker", type_params: [t_param], fields: [], methods: {},
+            visibility: Visibility.Private, is_public: false, has_doc_comment: false,
+            doc_comment: "", attributes: [], span: span_new(0, 16, 1, 1))
+        val as_class = desugar_actor(worker)
+        expect(as_class.type_params.len()).to_equal(1)  # oracle: the single <T> parameter must survive the actor-to-class copy
+        expect(as_class.type_params[0].name).to_equal("T")
 
-val TWO_ACTORS: text = "actor One:\n" +
-    "    var a: i64 = 1\n" +
-    "actor Two:\n" +
-    "    var b: i64 = 2\n" +
-    "\n" +
-    "fn main():\n" +
-    "    val x = spawn One()\n" +
-    "    val y = spawn Two()\n" +
-    "    print(\"two actors ok\")\n"
-
-val ACTOR_AND_CLASS: text = "class Plain:\n" +
-    "    fn hi(self) -> text:\n" +
-    "        \"class\"\n" +
-    "\n" +
-    "actor A2:\n" +
-    "    var x: i64 = 1\n" +
-    "\n" +
-    "fn main():\n" +
-    "    val c = Plain()\n" +
-    "    val a = spawn A2()\n" +
-    "    print(c.hi() + \" and actor\")\n"
-
-val MISSING_COLON_ACTOR: text = "actor Bad\n" +
-    "    var v: i64 = 1\n" +
-    "\n" +
-    "fn main():\n" +
-    "    print(\"no\")\n"
-
-describe "Parser actor definitions":
-    """
-    Purpose and audience: compiler engineers on the parser team who need actor
-    declarations — plain, public, documented, empty, method-bearing, and
-    alongside classes — to parse into runnable programs, and malformed actor
-    headers to be rejected with a parse error.
-    """
-    # @manual scenario evidence
-    it "a simple actor with one field parses and spawns":
-        # @req REQ-SSPEC-COMPILER
-        step("compile and run a fixture with a one-field actor")
-        val out = compile_source("simple", SIMPLE_ACTOR)
-        expect(out).to_contain("simple ok")
-
-    it "an actor with multiple methods parses":
-        # @req REQ-SSPEC-COMPILER
-        step("compile and run a fixture whose actor declares two methods")
-        val out = compile_source("methods", METHODS_ACTOR)
-        step("methods exist on the parsed actor; invocation after spawn is")
-        step("not executable on the deployed seed (see limitation note)")
-        expect(out).to_contain("methods ok")
-
-    it "an actor method with parameters and a return type parses":
-        # @req REQ-SSPEC-COMPILER
-        step("compile and run a fixture with fn process(self, task: i64) -> i64")
-        val out = compile_source("params", PARAMS_ACTOR)
-        expect(out).to_contain("params ok")
-
-    it "a pub actor keeps its visibility through parsing":
-        # @req REQ-SSPEC-COMPILER
-        step("compile and run a fixture with a pub actor")
-        val out = compile_source("pub", PUB_ACTOR)
-        expect(out).to_contain("pub ok")
-
-    it "an actor with a doc comment parses":
-        # @req REQ-SSPEC-COMPILER
-        step("compile and run a fixture with a documented actor")
-        val out = compile_source("doc", DOC_ACTOR)
-        expect(out).to_contain("doc ok")
-
-    it "an empty actor body parses":
-        # @req REQ-SSPEC-COMPILER
-        step("compile and run a fixture whose actor body is a bare pass")
-        val out = compile_source("empty", EMPTY_ACTOR)
-        expect(out).to_contain("empty ok")
-
-    it "several actors in one file each parse and spawn":
-        # @req REQ-SSPEC-COMPILER
-        step("compile and run a fixture declaring two actors")
-        val out = compile_source("two", TWO_ACTORS)
-        expect(out).to_contain("two actors ok")
-
-    it "actors and classes coexist in one file":
-        # @req REQ-SSPEC-COMPILER
-        step("compile and run a fixture with a class and an actor")
-        val out = compile_source("mixed", ACTOR_AND_CLASS)
-        step("the class method stays callable while the actor spawns")
-        expect(out).to_contain("class and actor")
-
-    it "an actor header missing its colon is rejected with a parse error":
-        # @req REQ-SSPEC-COMPILER
-        step("compile a fixture whose actor header lacks the colon")
-        val out = compile_source("missing_colon", MISSING_COLON_ACTOR)
-        step("the parser refuses the file instead of running it")
-        expect(out).to_contain("parse:")
-        expect(out).to_contain("expected Colon")
-        expect(out).to_contain("compile failed")
+    it "keeps actor publicness on the desugared class record":
+        # @req REQ-UNIT-COMPILER-001
+        # @capture(bit_table): is_public copy row for the Counter record
+        step("Run desugar_actor over a public Counter actor record")
+        val as_class = desugar_actor(setup_counter_actor())
+        expect(as_class.name).to_equal("Counter")
+        expect(as_class.is_public).to_equal(true)

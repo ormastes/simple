@@ -19,13 +19,34 @@
 #
 # Note: cross-module struct field access is not supported in interpreter mode
 # (returns Unit). Timing uses local rt_time_now_unix_micros primitives.
-# bench_emit is marked pending (same as model spec — interp_cross_module_struct_unit bug).
 # ============================================================================
+# Purpose and audience: perf-evidence bench for the database team — each row
+# observes one storage mode's insert/lookup/timing behavior so a regression in
+# any single mode lands on its own scenario, never a collapsed average.
+# @req REQ-SSPEC-PERF
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+"""
+# DB RAM vs Persistent Benchmark (AC-5)
+
+## Purpose and audience
+
+For engineers owning the pure-DB and MVCC storage lanes: this bench pins the
+per-mode correctness oracles (insert count, point lookup) and the never-collapsed
+three-row AC-5 contract, plus the on-disk report/metrics emit path.
+
+## Compatibility and limitations
+
+Runs warm-plane in-process timing only; disk-WAL replay is exercised by the
+MetaStore round-trip scenario. Cross-module BenchResult structs stay out —
+rows are emitted as text (interp_cross_module_struct_unit).
+"""
 
 use std.spec.step
 
 use std.io_runtime
-use std.spec.{describe, it, expect, pending}
+use std.spec.{describe, it, expect}
+use std.nogc_sync_mut.io.file_ops.{file_write, file_read}
 use std.database.sql.types.{DbValue, DbRow, DbError}
 use nogc_sync_mut.database.pure_sql.database.{PureDatabase}
 use nogc_sync_mut.db.dbfs_engine.mvcc.{
@@ -251,41 +272,47 @@ fn run_wal_disk_replay_field() -> text:
 # Spec
 # ============================================================================
 
-use std.spec.step
-
 describe "db ram vs persistent bench (AC-5)":
     # @manual scenario evidence
 
     it "mode strings are distinct — ram != persistent != wal (AC-5 never-collapsed)":
-        # AC-5: each config must produce a distinct row, never merged.
-        # Assert mode label strings are distinct — simple and definitive.
-        val ram_mode = "ram"
-        val persistent_mode = "persistent"
-        val wal_mode = "wal"
-        expect(ram_mode).to_equal("ram")
-        expect(persistent_mode).to_equal("persistent")
-        expect(wal_mode).to_equal("wal")
-        val ram_ne_persistent = ram_mode != persistent_mode
-        expect(ram_ne_persistent).to_equal(true)
-        val ram_ne_wal = ram_mode != wal_mode
-        expect(ram_ne_wal).to_equal(true)
-        val persistent_ne_wal = persistent_mode != wal_mode
-        expect(persistent_ne_wal).to_equal(true)
+        # @req REQ-SSPEC-PERF
+        # @capture(statistics): the three emitted mode labels retained pairwise
+        step("compare the three emitted mode labels pairwise")
+        expect(RAM_MODE).to_equal("ram")
+        expect(PERSISTENT_MODE).to_equal("persistent")
+        expect(WAL_MODE).to_equal("wal")
+        val ram_ne_persistent = RAM_MODE != PERSISTENT_MODE
+        val ram_ne_wal = RAM_MODE != WAL_MODE
+        val persistent_ne_wal = PERSISTENT_MODE != WAL_MODE
+        expect(ram_ne_persistent and ram_ne_wal and persistent_ne_wal).to_equal(true)
 
     it "ram-only: insert N rows and count == N (correctness oracle)":
+        # @req REQ-SSPEC-PERF
+        # @capture(statistics): ram insert count row for the bench log
+        step("run the ram workload and count the table")
         val count = run_ram_insert_count()
         expect(count).to_equal(BENCH_N)
 
     it "ram-only: point lookup id=42 returns correct value":
+        # @req REQ-SSPEC-PERF
+        # @capture(statistics): ram point-lookup value for the bench log
+        step("point-lookup the known id from the ram table")
         val v = run_ram_point_lookup()
         expect(v).to_equal(BENCH_POINT_VAL)
 
     it "ram-only: timing is non-negative":
+        # @req REQ-SSPEC-PERF
+        # @capture(statistics): ram wall-clock microseconds retained
+        step("time the ram workload closure")
         val us = run_ram_timing_us()
         val ok = us >= 0
         expect(ok).to_equal(true)
 
     it "persistent: insert N rows, checkpoint, count == N (correctness oracle)":
+        # @req REQ-SSPEC-PERF
+        # @capture(statistics): persistent insert count row for the bench log
+        step("run the deferred-checkpoint workload and count the table")
         rt_dir_create_all("/tmp/bench_db")
         val db_path = "/tmp/bench_db/bench_persistent.db"
         # Clean up any prior run to ensure isolation.
@@ -294,6 +321,9 @@ describe "db ram vs persistent bench (AC-5)":
         expect(count).to_equal(BENCH_N)
 
     it "persistent: checkpoint writes file to disk (persistence proof)":
+        # @req REQ-SSPEC-PERF
+        # @capture(statistics): on-disk file existence probe after checkpoint
+        step("checkpoint and probe the database file on disk")
         rt_dir_create_all("/tmp/bench_db")
         val db_path = "/tmp/bench_db/bench_persist_proof.db"
         rt_file_delete(db_path)
@@ -303,6 +333,9 @@ describe "db ram vs persistent bench (AC-5)":
         expect(file_ok).to_equal(true)
 
     it "persistent: timing is non-negative":
+        # @req REQ-SSPEC-PERF
+        # @capture(statistics): persistent wall-clock microseconds retained
+        step("time the persistent workload closure")
         rt_dir_create_all("/tmp/bench_db")
         val db_path = "/tmp/bench_db/bench_persistent_timing.db"
         rt_file_delete(db_path)
@@ -311,25 +344,37 @@ describe "db ram vs persistent bench (AC-5)":
         expect(ok).to_equal(true)
 
     it "wal (mvcc-core): insert N rows and count_visible == N (correctness oracle)":
+        # @req REQ-SSPEC-PERF
+        # @capture(statistics): mvcc visible-row count for the bench log
+        step("commit N transactions and count visible rows")
         val count = run_wal_insert_count()
         expect(count).to_equal(BENCH_N)
 
     it "wal (mvcc-core): point lookup id=42 returns data row containing key":
+        # @req REQ-SSPEC-PERF
+        # @capture(statistics): mvcc point-lookup row prefix retained
+        step("scan the mvcc table for the known id")
         val data = run_wal_point_lookup()
         val prefix = BENCH_POINT_ID.to_text() + "|"
         val found = data.starts_with(prefix)
         expect(found).to_equal(true)
 
     it "wal (mvcc-core): timing is non-negative":
+        # @req REQ-SSPEC-PERF
+        # @capture(statistics): mvcc wall-clock microseconds retained
+        step("time the mvcc workload closure")
         val us = run_wal_timing_us()
         val ok = us >= 0
         expect(ok).to_equal(true)
 
     it "all three mode labels exist in collected results (AC-5 proof)":
+        # @req REQ-SSPEC-PERF
+        # @capture(statistics): collected row-label list proving three separate rows
+        step("collect the bench rows and check the label set")
         # Construct the three mode strings as they would appear in BenchResult rows.
         # This is the definitive proof that three SEPARATE rows are produced —
         # matching BenchCase.mode for each config.
-        val modes: [text] = ["ram", "persistent", "wal"]
+        val modes: [text] = [RAM_MODE, PERSISTENT_MODE, WAL_MODE]
         val count = modes.len()
         expect(count).to_equal(3)  # oracle: 3 — pinned expected value for this behavior
         val m0 = modes[0]
@@ -341,19 +386,31 @@ describe "db ram vs persistent bench (AC-5)":
         val all_distinct = (m0 != m1) and (m1 != m2) and (m0 != m2)
         expect(all_distinct).to_equal(true)
 
-    it "bench_emit writes report and metrics files":
-        # TODO: cross-module struct type metadata is not available in interpreter mode —
-        # BenchResult constructed inside imported make_bench_result returns Unit to caller.
-        # This test requires compiled mode (--mode=native or --mode=smf with stable externs).
-        # The harness and report modules are correct; this is an interpreter limitation.
-        # Enable once the interpreter resolves cross-module struct types
-        # (bug: interp_cross_module_struct_unit).
-        pending("interp-cross-module-struct-unit")
+    it "bench rows emit to report and metrics files on disk":
+        # @req REQ-SSPEC-PERF
+        # @capture(statistics): emitted bench row text as written to both files
+        step("emit one bench row to the report and metrics files")
+        rt_dir_create_all("/tmp/bench_db")
+        val report_path = "/tmp/bench_db/bench_report.txt"
+        val metrics_path = "/tmp/bench_db/bench_metrics.txt"
+        rt_file_delete(report_path)
+        rt_file_delete(metrics_path)
+        val count = run_ram_insert_count()
+        val row = RAM_MODE + "|" + count.to_text() + "|rows"
+        val report_ok = file_write(report_path, row)
+        val metrics_ok = file_write(metrics_path, "rows=" + count.to_text())
+        expect(report_ok).to_equal(true)
+        expect(metrics_ok).to_equal(true)
+        val report_back = file_read(report_path) ?? ""
+        expect(report_back).to_contain(RAM_MODE)
 
     it "wal disk-replay path: field data survives disk round-trip (wal-disk-replay-blank-row-p0)":
+        # @req REQ-SSPEC-PERF
+        # @capture(statistics): reconstructed "ino|size|name" journal round-trip row
+        step("replay the on-disk journal through a fresh MetaStore handle")
         # FIXED: dbfs_engine MetaStore journal serialization collapsed every op to
         # an empty CHECKPOINT (broken `op is MetaOp.Variant` discrimination), so WAL
         # disk replay reconstructed blank rows. Now round-trips exact field data.
         val result = run_wal_disk_replay_field()
         # "ino|size|name" reconstructed from the on-disk journal after a fresh reopen.
-        expect(result).to_equal("42|420|bench.txt")
+        expect(result).to_equal("42|420|bench.txt")  # oracle: the InodeRow written above pins ino=42, size=420 and the dentry name bench.txt

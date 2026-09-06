@@ -308,18 +308,35 @@ complete; NOT-STARTED = no tree/log evidence. Commit refs are `git log
   `a663c1145b1` (dynsmf); SDN + env config loading: `281d8adde3b`.
 - [x] DONE — optimizer dynload hardening: nil PassKind fails closed
   `25a48297651`; entry_symbol registry routing `e985aceeacf`.
-- [ ] NOT-STARTED — planned `src/lib/common/structural/component/`
-  (`ComponentDescriptorV1`, `resolve_component`) does not exist; the landed
-  implementation lives on the dynsmf path instead. Fold-static-on-full-
-  rebuild (placement=auto) bootstrap proof not evidenced.
+- [x] DONE-DIFFERENTLY — component-descriptor contract now exists at
+  `src/lib/common/structural/component/descriptor.spl` (`ComponentDescriptorV1`
+  :184, `resolve_component` :276, re-exported from `component/__init__.spl:16,20`)
+  and is consumed by the dynsmf path (`src/app/startup/component_resolver.spl:7`,
+  `component_dynsmf_wiring.spl:10`, `dynsmf_component_bridge.spl:15`); spec
+  `test/01_unit/lib/structural/component_resolver_kernel_spec.spl` — verified
+  src/lib/common/structural/component/descriptor.spl:276 `resolve_component`
+  - divergence: planned as a standalone contract module; shipped as the contract
+    module PLUS dynsmf consumers under `src/app/startup/`. Fold-static-on-full-
+    rebuild (placement=auto) bootstrap proof still not asserted by any
+    `scripts/check/*.shs` gate (see remaining item 4).
 
 ### Phase C — dynamic CLI args without core rebuild
 - [x] DONE — SCI option-route records + `--x<ns>-<key>[=<val>]` grammar:
   `131721fb924` (`composition/cli_option_route.spl`).
 - [x] DONE — SDN config-driven `--x` extension-namespace registry:
   `0927c2e6ec7` (`cli_extension_config.spl`).
-- [ ] REMAINING — C4 help/completion generator from SCI + migration report
-  of hardcoded options; zero-rebuild sha256 proof not recorded here.
+- [x] DONE-DIFFERENTLY — C4 help/completion generator + migration report live in
+  `src/app/cli/help_surface_report.spl` over the `CliSurfaceSnapshotV1` registry
+  snapshot (`cli_surface_generated_help_text_v1` :93,
+  `cli_surface_completion_candidates_v1` :143,
+  `cli_surface_migration_report_markdown_v1` :51); spec
+  `test/01_unit/app/cli/help_surface_report_spec.spl` — verified
+  src/app/cli/help_surface_report.spl:93 `cli_surface_generated_help_text_v1`
+  - divergence: planned to generate from SCI option-route records; shipped over
+    the `CliSurfaceSnapshotV1` snapshot (`src/app/cli/help_surface_inventory.spl:35`).
+    Generator + spec exist but are not yet called from the `--help`/completion
+    dispatch path (only caller outside its spec: `src/app/test_audit/aspect_dynload_plan.spl`).
+    Zero-rebuild sha256 proof still not recorded (remaining item 5).
 
 ### Phase D — compiler/loader/interpreter optimization
 - [x] DONE — lazy JIT engine creation `9840ded67e5`; lazy loader services /
@@ -361,6 +378,36 @@ complete; NOT-STARTED = no tree/log evidence. Commit refs are `git log
 - [ ] REMAINING — per-phase before/after snapshot spec with growth band not
   found; snapshots are one baseline, not a bracketing series. Tracked:
   `doc/08_tracking/todo/startup_perf_open_items_2026-08-18.md`.
+  Interface landed 2026-09-05, box deliberately NOT ticked: the gate function
+  `deps_growth_band_verdict(baseline_edges: i64, current_edges: i64,
+  band_pct: f64) -> text` now exists at `src/app/deps/growth_band.spl` and
+  answers `within_band` / `growth_beyond_band` / fail-closed `error:*` (a
+  non-positive baseline can never return a pass). Verdict table verified by a
+  direct driver under `bin/release/aarch64-apple-darwin/simple_seed`
+  (20,392,352 bytes, 2026-07-25 13:12): `(1298,1298,0.15)->within_band`,
+  `(1298,1200,0.15)->within_band`, `(1298,1400,0.15)->within_band` (7.9%),
+  `(1298,1600,0.15)->growth_beyond_band` (23.3%), `(0,1298,0.15)->
+  error:invalid_baseline`, `(1298,-1,0.15)->error:invalid_current`,
+  `(1298,1298,-0.1)->error:invalid_band`; 0.25s wall.
+  The acceptance `it` in
+  `test/03_system/plan_acceptance/startup_perf_plan_spec.spl` is still
+  UNEXECUTED: this spec's own import chain is poisoned for every deployed
+  binary here — `src/app/cli/help_surface_inventory.spl` (unparenthesized
+  multi-line boolean continuation) and `use std.spec.{expect}`, which reaches
+  `src/lib/nogc_sync_mut/io_runtime.spl:178,180` (`@always_inline`,
+  `unsafe(capabilities:)`) via `spec.spl:351-353`. This is NOT "no spec can
+  run here": specs whose imports avoid the poisoned modules do run, and a bare
+  `use std.spec` runs on the interpreter's built-in shims (which silently lack
+  the real module's vacuous-expect guard, so such a green is not a verdict) —
+  see `doc/08_tracking/bug/stale_deployed_binaries_reject_current_language_sspec_scorer_unrunnable_2026-09-05.md`
+  § "Second manifestation". The current CLI-dir-aggregate closure count was
+  likewise NOT re-measured (`deps fast` needs a binary that can parse current
+  source), so no live within-band claim is made for the present tree.
+  Budget, stated for the pending measurement: baseline = **1298** files
+  (CLI-dir-aggregate closure, `doc/10_metrics/startup/coupling_cohesion_baseline_2026-08-17.md`),
+  band = **0.15** (15%), so the admission ceiling is **1492** files; the
+  measurement command is `bin/simple deps fast src/app/cli/__init__.spl`
+  (timeout 120s), pending a binary that can parse current source.
 
 ### Honest remaining list
 1. **Self-hosted deploy as default tooling** — `bin/simple` is still the
@@ -372,9 +419,16 @@ complete; NOT-STARTED = no tree/log evidence. Commit refs are `git log
    first callers landed at `1310d879046` (see Phase D row above).
 3. `test/05_perf/startup/` perf-lane harness + admission discipline
    (dir now seeded; admission reports open — same tracking doc).
-4. Phase B fold-on-full-rebuild bootstrap proof; component-descriptor
-   contract as specced (or plan amendment blessing the dynsmf-path shape).
+4. Phase B fold-on-full-rebuild bootstrap proof (the component-descriptor
+   contract itself now exists — see the Phase B row above).
    Tracked: `doc/08_tracking/todo/startup_perf_open_items_2026-08-18.md`.
-5. Phase C help/completion generation + hardcoded-option migration report.
+5. Phase C zero-rebuild sha256 proof (help/completion generation + migration
+   report now exist — see the Phase C row above).
    Tracked: `doc/08_tracking/todo/startup_perf_open_items_2026-08-18.md`.
 6. Per-phase E re-measure snapshots with a growth-band spec.
+
+## Acceptance
+
+Runnable oracles for the remaining open boxes: `test/03_system/plan_acceptance/startup_perf_plan_spec.spl`
+(tagged `@tag:in-development`; one `it` per open box — see
+`doc/03_plan/agent_tasks/plan_remains_acceptance_2026-09-05.md`).

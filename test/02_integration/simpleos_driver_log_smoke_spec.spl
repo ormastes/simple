@@ -1,23 +1,37 @@
 """
-log-lib-drivers Phase 4 spec — SimpleOS driver pilot smoke.
+## Purpose and audience
 
-Covers AC-4 (driver-level logging routes through unified facade) and
-AC-6d (one driver integration smoke).
+log-lib-drivers Phase 4 spec — SimpleOS driver pilot smoke. Pins the
+source-level logging contract of the pilot `null_block` driver: registration
+must emit through the unified std.log facade (`log_info_subsys`), never raw
+UART. Audience: SimpleOS driver maintainers and the log-lib-drivers phase
+review.
 
-Status: RED PHASE. Pilot driver `null_block.spl` has not been rerouted
-through the facade yet; backend slot table not present yet.
+## Operator workflow
 
-Pilot driver: `src/lib/nogc_sync_mut/driver/null_block_driver.spl` is the
-single driver in the SimpleOS tree today (per Phase 2 audit). Phase 5
-must wire its registration log line through `log_info_subsys(SUBSYS_DRIVER_BLOCK, ...)`.
+Run `simple run test/02_integration/simpleos_driver_log_smoke_spec.spl`.
+Each scenario reads the shipped driver source and asserts the facade
+contract on it; no build or QEMU boot is needed for this layer.
 
-Two-layer test:
-  (a) Hosted-callable layer (this file): exercise the driver register
-      function directly with the facade in-process; assert a log record
-      with subsys=SUBSYS_DRIVER_BLOCK level=INFO appears.
-  (b) Full QEMU smoke: documented as a manual command at the bottom of
-      this file. Phase 7 (verify) runs it as a release-build gate.
+## Compatibility and limitations
+
+Hosted source-contract layer only: it proves the driver's code enters
+std.log, not that a booted kernel prints the line. The full QEMU smoke is
+the manual command at the bottom of this file, run by Phase 7 (verify) as
+a release-build gate. Status note: the pilot driver `null_block.spl` has
+been rerouted through the facade; the backend slot table is a later phase.
+
+## Verification guidance and troubleshooting
+
+A failure names the broken contract clause (facade call missing, raw UART
+emit present, scaffold left behind). Re-check the driver source at
+`src/lib/nogc_sync_mut/driver/null_block_driver.spl` first; a QEMU failure
+after a green run here means the boot path, not the driver, regressed.
 """
+# Lifecycle: research doc/01_research/language/simple_vs_rust_debug_logging_2026-07-28.md ;
+# plan doc/03_plan/os/driver/driver_framework_module_level_sugar.md ;
+# architecture doc/04_architecture/os/driver/driver_architecture.md ;
+# design doc/05_design/os/driver/display/driver_display_acceleration_boundary.md
 
 use std.spec
 use std.io_runtime.{file_read}  # NOTE: never `app.io` — see project memory.
@@ -26,27 +40,37 @@ fn null_block_driver_source() -> text:
     file_read("src/lib/nogc_sync_mut/driver/null_block_driver.spl") ?? ""
 
 describe "SimpleOS driver smoke — null_block emits via facade (AC-4, AC-6d)":
+    # @manual_section: simpleos-driver-log-facade
 
     it "AC-6d: null_block_register routes its registration record through std.log":
-        val source = null_block_driver_source()
-        expect(source.contains("fn register_null_block_driver()")).to_equal(true)
-        expect(source.contains("log_info_subsys(SUBSYS_DRIVER_BLOCK")).to_equal(true)
-        expect(source.contains("null_block: registered")).to_equal(true)
-        expect(source.contains("null_block_make_ops()")).to_equal(true)
+        # @req REQ-SIMPLEOS-DRIVER-LOG-001
+        # @capture(statistics): the four facade-contract clauses found in the shipped driver source
+        step("Load the shipped null_block driver source and probe its registration path")
+        val registration_facade_contract = null_block_driver_source()
+        expect(registration_facade_contract.contains("fn register_null_block_driver()")).to_equal(true)  # oracle: the registration entry point must exist by name in the shipped driver
+        expect(registration_facade_contract.contains("log_info_subsys(SUBSYS_DRIVER_BLOCK")).to_equal(true)  # oracle: AC-4 — the record must enter the facade with the driver subsystem
+        expect(registration_facade_contract.contains("null_block: registered")).to_equal(true)  # oracle: AC-6d — the exact smoke message the QEMU gate greps for
+        expect(registration_facade_contract.contains("null_block_make_ops()")).to_equal(true)  # oracle: ops are built by the factory the register path consumes
 
     it "AC-4: driver does NOT emit via uart_writeln directly (facade only)":
+        # @req REQ-SIMPLEOS-DRIVER-LOG-002
+        # @capture(statistics): absence probes for raw UART emit paths in the driver source
         # The production contract is source-level for this hosted spec:
         # driver logging must enter std.log, not raw UART output.
-        val source = null_block_driver_source()
-        expect(source.contains("log_info_subsys(SUBSYS_DRIVER_BLOCK")).to_equal(true)
-        expect(source.index_of("uart_writeln(")).to_equal(-1)
-        expect(source.index_of("log_raw_println(")).to_equal(-1)
+        step("Scan the driver source for forbidden direct-output calls")
+        val raw_uart_absence_contract = null_block_driver_source()
+        expect(raw_uart_absence_contract.contains("log_info_subsys(SUBSYS_DRIVER_BLOCK")).to_equal(true)  # oracle: the facade path is present, so the absence probes below target a live driver
+        expect(raw_uart_absence_contract.index_of("uart_writeln(")).to_equal(-1)  # oracle: -1 means no direct UART emit bypasses the facade
+        expect(raw_uart_absence_contract.index_of("log_raw_println(")).to_equal(-1)  # oracle: -1 means no raw print bypasses the facade either
 
-    it "does not leave pass_todo in the SimpleOS null_block driver":
-        val source = null_block_driver_source()
-        expect(source.index_of("pass_todo(") ?? -1).to_equal(-1)
-        expect(source).to_contain("fn register_null_block_driver_auto()")
-        expect(source).to_contain("return register_static_driver(m, null_block_make_ops())")
+    it "rejects a driver that leaves pass_todo scaffold in the SimpleOS null_block driver":
+        # @req REQ-SIMPLEOS-DRIVER-LOG-003
+        # @capture(statistics): scaffold-absence probe plus the two auto-registration clauses
+        step("Verify the driver carries its auto-registration body with no scaffold")
+        val scaffold_free_registration_contract = null_block_driver_source()
+        expect(scaffold_free_registration_contract.index_of("pass_todo(") ?? -1).to_equal(-1)  # oracle: -1 means no unimplemented scaffold survives in the shipped driver
+        expect(scaffold_free_registration_contract).to_contain("fn register_null_block_driver_auto()")  # oracle: the auto-registration hook is part of the phase 4 contract
+        expect(scaffold_free_registration_contract).to_contain("return register_static_driver(m, null_block_make_ops())")  # oracle: registration must return the static-driver record built from the ops factory
 
 
 # ----------------------------------------------------------------------------

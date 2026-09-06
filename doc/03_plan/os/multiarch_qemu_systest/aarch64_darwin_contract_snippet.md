@@ -12,6 +12,10 @@ copy-paste ready for the orchestrator's merge step.
 
 ## 1. Insert into `src/os/qemu_systest_contract.spl`
 
+> Refresh 2026-09-05: this section has LANDED — `aarch64_darwin_binary_path` is at
+> `src/os/qemu_systest_contract.spl:398` (`aarch64_darwin_markers` :412,
+> `aarch64_darwin_timeout_ms` :422). Kept as the merge record.
+
 Add the following six functions **after the last existing arch descriptor block**
 (currently after `x86_32_timeout_ms()`), before the `Run helper` section.
 
@@ -88,6 +92,13 @@ stdout for all 5 markers → returns `"pass"`.
 ---
 
 ## 2. Insert into `src/os/port/simpleos_multiplatform_build_part2.spl`
+
+> Refresh 2026-09-05: the platform-target list now lives in
+> `src/os/port/_SimpleosMultiplatformBuild/platform_target_catalog.spl` (the
+> `aarch64-darwin-fs-exec` lane is at :666); `_lane_contract` is
+> `src/os/port/_SimpleosMultiplatformBuild/build_target_contracts.spl:255`,
+> `HostedPayload` :28, `HostedCompileSmoke` :42. The part1/part2 line numbers
+> below are historical.
 
 In `simpleos_platform_targets()`, the list currently ends with the riscv32 target
 followed by a closing `]`. Add the aarch64-darwin target as the **7th element**
@@ -228,3 +239,9 @@ After the orchestrator merges both snippets:
 - [ ] The missing-media classification contains the binary path, not a nil/crash
 
 The spec is **intentionally RED on Linux** — that is the correct honest result.
+
+## Acceptance
+
+Runnable oracles for the remaining open boxes: `test/03_system/plan_acceptance/aarch64_darwin_contract_snippet_spec.spl`
+(tagged `@tag:in-development`; one `it` per open box — see
+`doc/03_plan/agent_tasks/plan_remains_acceptance_2026-09-05.md`).

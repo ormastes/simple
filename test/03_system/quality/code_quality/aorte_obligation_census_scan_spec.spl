@@ -26,6 +26,7 @@ Audience: compiler and tooling engineers who maintain this spec
 
 use std.spec
 use compiler.tools.verify.aorte_obligation_census_scan.{scan_single_file, ObligationSite}
+use compiler.tools.verify.aorte_obligation_census_scan.{scan_file_lines}
 
 fn count_cat(sites: [ObligationSite], category: text, status: text) -> i64:
     var n = 0
@@ -147,3 +148,27 @@ describe "AoRTE obligation census scan":
         val type_src = "fn f() -> [i64]:\n    val out: [i64] = []\n    out\n"
         val type_sites = scan_single_file("fixture/bounds_type.spl", type_src)
         expect(total_cat(type_sites, "bounds")).to_equal(0)  # oracle: value fixed by the spec contract
+
+describe "obligation census reads docstring state from the lexer":
+
+    it "keeps an obligation site that follows a comment mentioning the docstring delimiter":
+        """The per-line parity count flipped on a `#` comment holding `\"\"\"` and
+        dropped the next site as prose; 45 src files carry that shape."""
+        val tq = "\"" + "\"" + "\""
+        val source = "fn foo():\n    # closing marker is " + tq + "\n    val x = 7 / 0\n"
+        val sites = scan_file_lines("probe.spl", source)
+        var found = false
+        for site in sites:
+            if site.line == 3:
+                found = true
+        expect(found).to_equal(true)
+
+    it "still treats a real docstring's interior as prose":
+        """Control: a division written inside a docstring is documentation."""
+        val tq = "\"" + "\"" + "\""
+        val source = "fn foo():\n    " + tq + "\n    rate is 7 / 0 here\n    " + tq + "\n    val y = 1\n"
+        var found = false
+        for site in scan_file_lines("probe.spl", source):
+            if site.line == 3:
+                found = true
+        expect(found).to_equal(false)

@@ -1,14 +1,27 @@
 """
-# Parser Keywords Specification
-
-**Feature IDs:** #PARSER-KW-001 to #PARSER-KW-020
-**Category:** Infrastructure | Parser
-**Status:** Implemented
-
-Tests that all Simple language keywords are correctly recognized and
-parsed in their appropriate contexts.
+## Purpose and audience
+Verifies keyword recognition for the language team: variable keywords
+(val/var), control flow (if/elif/while/for/break/continue/return/match),
+logic operators (and/or/not/in), literals (true/false/nil/self), and function
+forms (fn/nested fn/lambda/higher-order). Scenarios embed each keyword inline,
+so acceptance is proven by this file compiling and each keyword then behaving.
+## Operator workflow
+Run the file with the seed binary:
+src/compiler_rust/target/bootstrap/simple run test/03_system/feature/usage/parser_keywords_spec.spl
+## Compatibility and limitations
+Authored and verified against the 2026-09-05 seed binary; the shared TestPoint
+struct is declared at module level because the self-keyword scenario needs a
+method receiver.
+## Verification guidance and troubleshooting
+A failing scenario names the keyword that broke. If the file fails to load at
+all, a keyword grammar rule stopped parsing and every scenario in this file
+is the reproduction.
 """
-
+# Lifecycle: doc/01_research/domain/parser_framework.md ;
+# doc/03_plan/agent_tasks/parser_framework.md ;
+# doc/04_architecture/parser_framework.md ;
+# doc/05_design/parser_framework.md
+# @manual_section: keyword-parsing
 
 # Module-level test type definitions
 struct TestPoint:
@@ -22,38 +35,37 @@ impl TestPoint:
     fn get_y() -> i64:
         self.y
 
-
-# ============================================================================
-# Test Group 1: Variable Keywords
-# ============================================================================
-
-use std.spec.step
-
 describe "Variable Keyword Parsing":
-    # @manual scenario evidence
     it "val declares immutable variable":
-        val x = 42
-        expect(x).to_equal(42)
+        # @req REQ-PARSER-KW-001
+        # @capture(bit_table): val binding of a computed value
+        step("Bind 6*7 through val and read it back")
+        val x = 6 * 7
+        expect(x).to_equal(42)  # oracle: the binding holds the evaluated 42
 
     it "var declares mutable variable":
+        # @req REQ-PARSER-KW-002
+        # @capture(bit_table): var reassignment result
+        step("Declare var, reassign it, read it back")
         var x = 0
         x = 42
-        expect(x).to_equal(42)
-
-
-# ============================================================================
-# Test Group 2: Control Flow Keywords
-# ============================================================================
+        expect(x).to_equal(42)  # oracle: the reassignment is the observed state
 
 describe "Control Flow Keyword Parsing":
     it "parses if statement":
+        # @req REQ-PARSER-KW-003
+        # @capture(bit_table): if-expression arm selection
+        step("Evaluate an if expression on a true condition")
         val result = if true:
             1
         else:
             0
-        expect(result).to_equal(1)
+        expect(result).to_equal(1)  # oracle: the true arm produces 1
 
     it "parses elif statement":
+        # @req REQ-PARSER-KW-004
+        # @capture(bit_table): elif arm selection
+        step("Evaluate an if/elif chain whose second guard matches")
         val x = 2
         val result = if x == 1:
             "one"
@@ -61,121 +73,160 @@ describe "Control Flow Keyword Parsing":
             "two"
         else:
             "other"
-        expect(result).to_equal("two")
+        expect(result).to_equal("two")  # oracle: the elif guard x==2 selects "two"
 
     it "parses while loop":
+        # @req REQ-PARSER-KW-005
+        # @capture(bit_table): while counter final value
+        step("Count a while loop up to its guard bound")
         var x = 0
         while x < 3:
             x = x + 1
-        expect(x).to_equal(3)
+        expect(x).to_equal(3)  # oracle: three iterations of x = x + 1
 
     it "parses for loop":
+        # @req REQ-PARSER-KW-006
+        # @capture(bit_table): for-loop accumulation result
+        step("Sum a three-element list in a for loop")
         var sum = 0
         for i in [1, 2, 3]:
             sum = sum + i
-        expect(sum).to_equal(6)
+        expect(sum).to_equal(6)  # oracle: 1+2+3 accumulates to 6
 
     it "parses break in loop":
+        # @req REQ-PARSER-KW-007
+        # @capture(bit_table): break exit counter value
+        step("Break a while loop at its fifth iteration")
         var x = 0
         while true:
             x = x + 1
             if x >= 5:
                 break
-        expect(x).to_equal(5)
+        expect(x).to_equal(5)  # oracle: break fires exactly at the fifth increment
 
     it "parses continue in loop":
+        # @req REQ-PARSER-KW-008
+        # @capture(bit_table): continue-skipped accumulation result
+        step("Skip the third element with continue and sum the rest")
         var sum = 0
         for i in [1, 2, 3, 4, 5]:
             if i == 3:
                 continue
             sum = sum + i
-        expect(sum).to_equal(12)
+        expect(sum).to_equal(12)  # oracle: 1+2+4+5 with 3 skipped by continue
 
     it "parses return statement":
+        # @req REQ-PARSER-KW-009
+        # @capture(bit_table): early-return and fall-through results
+        step("Call an early-returning function on both guard paths")
         fn early_return(x: i64) -> i64:
             if x < 0:
                 return 0
             x
-        expect(early_return(-1)).to_equal(0)
-        expect(early_return(5)).to_equal(5)
+        expect(early_return(-1)).to_equal(0)  # oracle: the negative path returns the early 0
+        expect(early_return(5)).to_equal(5)  # oracle: the fall-through path returns the argument
 
     it "parses match expression":
+        # @req REQ-PARSER-KW-010
+        # @capture(bit_table): match arm selection on 42
+        step("Match 42 against its case arm")
         val result = match 42:
             case 0 => "zero"
             case 42 => "forty-two"
             case _ => "other"
-        expect(result).to_equal("forty-two")
-
-
-# ============================================================================
-# Test Group 3: Logic Keywords
-# ============================================================================
+        expect(result).to_equal("forty-two")  # oracle: the matching case arm produces its label
 
 describe "Logic Keyword Parsing":
     it "parses and operator":
-        expect (true and true) == true
-        expect (true and false) == false
-        expect (false and true) == false
+        # @req REQ-PARSER-KW-011
+        # @capture(bit_table): three and-truth combinations
+        step("Evaluate and over true/false operand pairs")
+        expect (true and true) == true  # oracle: conjunction of two truths
+        expect (true and false) == false  # oracle: conjunction with a false operand
+        expect (false and true) == false  # oracle: conjunction with a false operand
 
     it "parses or operator":
-        expect (true or true) == true
-        expect (true or false) == true
-        expect (false or false) == false
+        # @req REQ-PARSER-KW-012
+        # @capture(bit_table): three or-truth combinations
+        step("Evaluate or over true/false operand pairs")
+        expect (true or true) == true  # oracle: disjunction of two truths
+        expect (true or false) == true  # oracle: disjunction with one true operand
+        expect (false or false) == false  # oracle: disjunction of two falsehoods
 
     it "parses not operator":
-        expect (not false) == true
-        expect (not true) == false
+        # @req REQ-PARSER-KW-013
+        # @capture(bit_table): negation of both boolean literals
+        step("Negate both boolean literals")
+        expect (not false) == true  # oracle: negation of false
+        expect (not true) == false  # oracle: negation of true
 
     it "parses in operator":
-        expect 2 in [1, 2, 3]
-        expect not (5 in [1, 2, 3])
-
-
-# ============================================================================
-# Test Group 4: Special Keywords
-# ============================================================================
+        # @req REQ-PARSER-KW-014
+        # @capture(bit_table): membership hit and miss
+        step("Probe membership with one hit and one miss")
+        expect 2 in [1, 2, 3]  # oracle: 2 is a member of the list
+        expect not (5 in [1, 2, 3])  # oracle: 5 is not a member of the list
 
 describe "Special Keyword Parsing":
     it "parses true":
+        # @req REQ-PARSER-KW-015
+        # @capture(bit_table): true literal asserted through a binding
+        step("Bind the true literal and assert it")
         val x = true
-        assert_true(x)
+        assert_true(x)  # oracle: the bound literal is the true keyword
 
     it "parses false":
+        # @req REQ-PARSER-KW-016
+        # @capture(bit_table): false literal negated through a binding
+        step("Bind the false literal and assert its negation")
         val x = false
-        assert_true(not x)
+        assert_true(not x)  # oracle: the bound literal is the false keyword
 
     it "parses nil":
+        # @req REQ-PARSER-KW-017
+        # @capture(bit_table): nil literal equality
+        step("Bind nil and compare it against the nil literal")
         val x = nil
-        expect(x).to_equal(nil)
+        expect(x == nil).to_equal(true)  # oracle: the bound value is the nil keyword
 
     it "parses self in method":
+        # @req REQ-PARSER-KW-018
+        # @capture(bit_table): self-dispatch to both getters
+        step("Call both self-reading getters on TestPoint")
         val p = TestPoint(x: 42, y: 10)
-        expect(p.get_x()).to_equal(42)
-        expect(p.get_y()).to_equal(10)
-
-
-# ============================================================================
-# Test Group 5: Function Keywords
-# ============================================================================
+        expect(p.get_x()).to_equal(42)  # oracle: self.x stores the constructed 42
+        expect(p.get_y()).to_equal(10)  # oracle: self.y stores the constructed 10
 
 describe "Function Keyword Parsing":
     it "parses fn declaration":
+        # @req REQ-PARSER-KW-019
+        # @capture(bit_table): two-parameter fn result
+        step("Declare add(a, b) and call it")
         fn add(a: i64, b: i64) -> i64:
             a + b
-        expect(add(3, 4)).to_equal(7)
+        expect(add(3, 4)).to_equal(7)  # oracle: 3+4 evaluated in the callee
 
     it "parses nested function":
+        # @req REQ-PARSER-KW-020
+        # @capture(bit_table): nested fn closure call result
+        step("Call an outer function that doubles through an inner fn")
         fn outer(x: i64) -> i64:
             fn inner(y: i64) -> i64:
                 y * 2
             inner(x) + 1
-        expect(outer(5)).to_equal(11)
+        expect(outer(5)).to_equal(11)  # oracle: inner doubles 5 then +1
 
     it "parses lambda expression":
+        # @req REQ-PARSER-KW-021
+        # @capture(bit_table): lambda application result
+        step("Apply a doubling lambda to 5")
         val double = \x: x * 2
-        expect(double(5)).to_equal(10)
+        expect(double(5)).to_equal(10)  # oracle: the lambda doubles its argument
 
     it "parses higher-order function":
+        # @req REQ-PARSER-KW-022
+        # @capture(bit_table): higher-order application result
+        step("Pass an increment lambda into apply()")
         fn apply(f: fn(i64) -> i64, x: i64) -> i64:
             f(x)
-        expect(apply(\n: n + 1, 5)).to_equal(6)
+        expect(apply(\n: n + 1, 5)).to_equal(6)  # oracle: the passed lambda increments 5

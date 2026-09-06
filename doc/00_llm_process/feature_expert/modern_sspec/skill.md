@@ -256,3 +256,109 @@ admitted pure-Simple CLI. Do not use the Rust bootstrap seed, a stale binary,
 or a skipped run as PASS evidence. Once a qualified environment exists, run the
 system spec, `spipe-docgen`, and `sspec-maintain` with that same admitted CLI,
 then update the lane state and manual provenance from the retained results.
+
+## Documentization score: the measured 90+ recipe and the seed-lane measurement (2026-09-05)
+
+The scorer (`src/app/sspec_maintain/`) is now documented rule-by-rule, with the
+exact token each `SSDOC-*` rule reads and the aggregate cost of each miss, in
+[`.claude/skills/spipe.md` § "Scoring 90+"](../../../../.claude/skills/spipe.md).
+Read that section before writing or converting any `*_spec.spl`; the scaffold
+`.claude/templates/spipe_template.spl` already carries the score-bearing shape.
+
+- **Two surfaces.** GATE = `analyze_sspec_text` (what `bin/simple test` enforces,
+  min 80 via `src/app/test_runner_new/sspec_score_gate.spl`); SCAN =
+  `analyze_sspec_pair_text` + lifecycle links (what `sspec-maintain scan`
+  reports) — SCAN is 2.5 lower with no `doc/06_spec` mirror (MNT-002). Target SCAN.
+- **Measured worked example:** `build/nb/fixtures/worked_example_spec.spl` (the
+  text in the skill) = GATE 100 / SCAN 97. Calibration fixtures predicted from
+  the source matched to the point (75, 49, 49, 100).
+- **Measurement on a bootstrap-only host:**
+  `sh scripts/check/sspec-score-seed-lane.shs <spec|dir>` — runs the real
+  scorer modules (whitespace/comment-only reshaped copies, proven by residue
+  hash, three named runtime-extern deltas) under the Rust seed. Why nothing
+  else works here:
+  [`doc/08_tracking/bug/phase2_native_build_hello_world_invalid_heap_and_scorer_segv_2026-09-05.md`](../../../08_tracking/bug/phase2_native_build_hello_world_invalid_heap_and_scorer_segv_2026-09-05.md),
+  [`doc/08_tracking/bug/rust_seed_parser_behind_main_grammar_blocks_simple_test_2026-09-05.md`](../../../08_tracking/bug/rust_seed_parser_behind_main_grammar_blocks_simple_test_2026-09-05.md).
+- **Scorer fixes landed the same day** (`source_facts.spl`): ORA-002 no longer
+  exempts `var` (reassigned bindings are excluded instead), a trailing comment
+  no longer hides a tautology, `# evidence(...)` prose no longer counts as a
+  capture (only `# @capture` / `.evidence.sdn` do on comment lines), MNT-009
+  strips sentence punctuation. Record + specs:
+  [`doc/08_tracking/bug/sspec_scorer_loopholes_var_tautology_comment_evidence_2026-09-05.md`](../../../08_tracking/bug/sspec_scorer_loopholes_var_tautology_comment_evidence_2026-09-05.md),
+  `test/01_unit/app/sspec_maintain/scorer_loopholes_spec.spl`,
+  `test/01_unit/app/sspec_maintain/scorer_loopholes_adjacent_spec.spl`.
+- **Not changed, deliberately:** MNT-002 (mirror) and MNT-007 (lifecycle links)
+  together cost at most 3.5 aggregate on SCAN and are true statements about the
+  spec; a 90 is reachable with both outstanding, so neither rule was weakened.
+
+## Training loop + plugin arch (2026-09-05, later session)
+
+- **The checklist, not the model, decides the score.** Controlled: same model
+  (haiku), same low effort, three specs each — old `≥80` checklist gave
+  **84/78/78 (all fail)**; rewritten `≥90` checklist gave **90/95/90 (all pass)**.
+  A second batch on sonnet, including a blocker file, went **49→90** and
+  90/90/90/90 in one iteration each, with the checklist reported sufficient.
+  Checklist: `doc/00_llm_process/spipe/skill.md` § "Modern SSpec Score ≥ 90".
+- **The one rule that decides everything:** clear every finding EXCEPT the five
+  mirror-only IDs (`MNT-002/005/008`, `EVD-002/003`) and you land on exactly 90.
+  `EVD-001` and `MNT-001/003/004/006/007/009` are source-fixable but share a
+  dimension with mirror rules, so workers mistake them for unfixable and stop at
+  84. Worked example: `balance_score_spec.spl` had ZERO NAR/BEH/ORA/TRC/COV
+  findings and still scored 84 (EVD-001 ×3 + MNT-001).
+- **`# @req` placement is worth 38 points.** Above the `it` line → `TRC-003`
+  blocker → 49. Inside the `it` body → 87. Proven with a one-line diff.
+- **Scorer is now plugin architecture.** `dimensions.spl` holds the dimension
+  weights, blocker cap and release target as DATA; `analyzer.spl` holds 24
+  per-rule `_detect_*` functions behind `sspec_source_detectors()` /
+  `sspec_manual_detectors()`; `registry.spl` unions the rule_ids.
+  **Adding a scoring algorithm = one detector fn + one registry row** — no
+  dispatcher and no weight literal to edit. Refactor parity was byte-identical.
+  Bidirectional coverage is pinned by
+  `test/01_unit/app/sspec_maintain/detector_registry_coverage_spec.spl`.
+  **Any new scorer module must also be added to the hardcoded module list in
+  `scripts/check/sspec-score-seed-lane.shs`** — omitting it broke that lane.
+- **Measurement tool:** `sh scripts/check/sspec-train.shs <dir>` scores a tree and
+  prints a **per-rule histogram** (which rule costs the most points), fail-closed
+  (0 specs scanned = exit 2). Use it to find which rule the checklist is still
+  failing to convey — a rule that keeps firing across batches is a checklist
+  defect, not a spec defect.
+- **The MNT-002 "-2.5" figure above understates the real penalty, and that is a
+  filed bug.** `scan` charges MNT-005/MNT-008/EVD-002/EVD-003 even when NO mirror
+  file exists, penalising one absence five times (~7 aggregate points, not 2.5).
+  Root cause: `src/app/sspec_maintain/main.spl` reads the mirror with `file_read`,
+  which swallows a missing-file `Err` into `""`, so the analyzer receives
+  `Some("")` = "stale but present" instead of `None`. The seed lane implements the
+  documented contract and scores the same spec **97**. Filed, with two RED specs,
+  deliberately NOT fixed — a fix shifts every score in the repo:
+  [`doc/08_tracking/bug/sspec_scan_manual_findings_fire_without_mirror_2026-09-05.md`](../../../08_tracking/bug/sspec_scan_manual_findings_fire_without_mirror_2026-09-05.md).
+
+## Known limitation of the current loop (2026-09-05, honest, not hedged)
+
+The training loop above (checklist -> low-effort worker -> `sh
+scripts/check/sspec-train.shs` score -> edit the checklist -> re-score on the
+*same* specs) is the shape flagged as a "wrong flywheel" in
+`doc/01_research/infra/spipe/spipe_skill_foundry_debug_training.md` §30: a loop
+that scores work, edits the guidance from the score, then re-scores with that
+same guidance can raise its own numbers without raising capability.
+
+The honest split, reconstructed from commit timestamps rather than memory — the
+loop did better than a pure flywheel, and worse than a clean experiment:
+
+- **Held-out: 14 of 21 specs.** The checklist was rewritten at 13:50 from
+  round-1 evidence on three files. Round 2 (3 specs), the sonnet batch (4), the
+  blocker batch (3) and the final near-target batch (4) were all scored *after*
+  that, on files the checklist had never been tuned against. All 14 reached
+  >=90. That is genuine transfer evidence.
+- **Same-case: 7 of 21.** The three round-1 leftovers were the exact files whose
+  failure motivated the rewrite. The four-spec batch that stalled at 84/84/84/88
+  triggered the 14:00 ORA-003 edit and was then re-run against it. Those seven
+  only show the checklist can be tuned until a known file passes — the flywheel
+  failure itself — and should not be counted as capability.
+
+So the defensible claim is **14/14 on held-out specs**, not 21/21. Still
+missing: a *standing* held-out partition (the split above is retrospective, not
+enforced), a leak check on the checklist text, and a same-case-exclusion rule
+inside the loop. See `.claude/skills/lib/debug_ladder.md` "Anti-flywheel rules"
+for the three counter-rules (held-out set, no same-case validation, leak
+gate) that a future revision of this loop should apply before trusting its own
+reported gains.

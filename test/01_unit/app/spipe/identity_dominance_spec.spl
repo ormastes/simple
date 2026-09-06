@@ -1,8 +1,27 @@
-# Purpose and audience: executable specification evidence for P4 of the
-# SPipe search-providers slice — exact-identity dominance as a tier OUTSIDE
-# RRF (design §3.5, frozen plan §5.5, hazard §6.11).
-# @req REQ-SSPEC-LIB
-# plan: doc/03_plan/infra/spipe/spipe_search_providers_impl_plan.md
+"""
+## Purpose and audience
+Executable specification evidence for P4 of the SPipe search-providers slice —
+exact-identity dominance as a tier OUTSIDE RRF (design section 3.5, frozen plan
+section 5.5, hazard section 6.11). For engineers who own
+`app.spipe.identity.resolve` / `app.spipe.identity.registry` and anyone
+reviewing whether an exact UID/key/alias match can ever be re-scored by fusion.
+## Operator workflow
+bin/simple test test/01_unit/app/spipe/identity_dominance_spec.spl
+## Compatibility and limitations
+Pure unit-level: builds an in-memory registry and calls `resolve` /
+`search_with_identity_dominance` directly, no provider I/O and no live index.
+## Verification guidance and troubleshooting
+Every scenario asserts on a typed `Result` or a concrete field of the returned
+ranking. A failure here means either identity resolution matched the wrong
+record or the dominance tier let a pinned document leak back into the fused
+hit list — check `resolved_uid`, `pinned_rank`, and that the pinned document id
+is absent from `result.hits`.
+"""
+# Lifecycle: doc/01_research/infra/spipe/spipe_knowledge_compiler.md ;
+# doc/03_plan/infra/spipe/spipe_search_providers_impl_plan.md ;
+# doc/04_architecture/infra/spipe/spipe_knowledge_compiler.md ;
+# doc/05_design/infra/spipe/spipe_knowledge_compiler_search_providers.md
+# @manual_section: identity-dominance
 
 use std.spec
 
@@ -21,20 +40,26 @@ fn ranking(source: FusionSourceV1, ids: [text]) -> SourceRankingV1:
 
 describe "resolve(value) — the identity dominance tier stops before providers/graph/RRF":
     it "returns the one authorized unambiguous match by UID":
+        # @req REQ-SSPEC-LIB-001
+        # @capture(protocol_json): resolved UID, pinned rank, and registry generation
         step("Resolve a value that matches a record's UID directly")
         val registry = registry_of(3, [identity_record("uid-1", "key-1", [], true)])
         val result = resolve(registry, "uid-1").unwrap()
         expect(result.resolved_uid).to_equal("uid-1")
-        expect(result.pinned_rank).to_equal(1)
-        expect(result.registry_generation).to_equal(3)
+        expect(result.pinned_rank).to_equal(1)  # oracle: an unambiguous identity match always pins final rank 1
+        expect(result.registry_generation).to_equal(3)  # oracle: echoes the generation passed into registry_of
 
     it "returns the one authorized unambiguous match by key":
+        # @req REQ-SSPEC-LIB-002
+        # @capture(protocol_json): resolved UID from a key-only match
         step("Resolve a value that matches a record's key, not its UID")
         val registry = registry_of(1, [identity_record("uid-2", "the-key", [], true)])
         val result = resolve(registry, "the-key").unwrap()
         expect(result.resolved_uid).to_equal("uid-2")
 
     it "returns the one authorized unambiguous match by ACCEPTED alias":
+        # @req REQ-SSPEC-LIB-003
+        # @capture(protocol_json): resolved UID plus alias authority/status
         step("Resolve a value that matches only an accepted alias")
         val registry = registry_of(1, [identity_record("uid-3", "key-3", [accepted_alias("nickname", "curator")], true)])
         val result = resolve(registry, "nickname").unwrap()
@@ -43,6 +68,8 @@ describe "resolve(value) — the identity dominance tier stops before providers/
         expect(result.alias_status).to_equal("accepted")
 
     it "returns not_found when no record matches":
+        # @req REQ-SSPEC-LIB-004
+        # @capture(protocol_json): the typed error returned for a non-matching value
         step("Resolve a value with no matching UID, key, or alias")
         val registry = registry_of(1, [identity_record("uid-4", "key-4", [], true)])
         val result = resolve(registry, "nothing-matches-this")
@@ -50,6 +77,8 @@ describe "resolve(value) — the identity dominance tier stops before providers/
         expect(result.unwrap_err()).to_equal(IdentityErrorV1.NotFound)
 
     it "returns typed ambiguous_identity when multiple authorized records match":
+        # @req REQ-SSPEC-LIB-005
+        # @capture(protocol_json): the typed ambiguity error over the shared alias
         step("Register two authorized records sharing the same accepted alias")
         val registry = registry_of(1, [
             identity_record("uid-5", "key-5", [accepted_alias("shared", "team-a")], true),
@@ -60,6 +89,8 @@ describe "resolve(value) — the identity dominance tier stops before providers/
         expect(result.unwrap_err()).to_equal(IdentityErrorV1.AmbiguousIdentity)
 
     it "never counts an unauthorized record toward found or ambiguous":
+        # @req REQ-SSPEC-LIB-006
+        # @capture(protocol_json): the sole resolved UID despite a shared key with an unauthorized record
         step("One authorized and one unauthorized record share the same key")
         val registry = registry_of(1, [
             identity_record("uid-7", "shared-key", [], true),
@@ -70,12 +101,16 @@ describe "resolve(value) — the identity dominance tier stops before providers/
         expect(result.resolved_uid).to_equal("uid-7")
 
     it "does not match a PENDING alias":
+        # @req REQ-SSPEC-LIB-007
+        # @capture(protocol_json): not_found returned for a pending-only alias
         step("Resolve a value that is only a pending (not yet accepted) alias")
         val registry = registry_of(1, [identity_record("uid-9", "key-9", [pending_alias("proposed", "team")], true)])
         val result = resolve(registry, "proposed")
         expect(result.unwrap_err()).to_equal(IdentityErrorV1.NotFound)
 
     it "does not match a REJECTED alias":
+        # @req REQ-SSPEC-LIB-008
+        # @capture(protocol_json): not_found returned for a rejected alias
         step("Resolve a value that is a rejected alias")
         val registry = registry_of(1, [identity_record("uid-10", "key-10", [rejected_alias("stale", "team")], true)])
         val result = resolve(registry, "stale")
@@ -83,6 +118,8 @@ describe "resolve(value) — the identity dominance tier stops before providers/
 
 describe "search(query) — identity dominance pins rank 1 and removes the ID from every source":
     it "pins the exact match at final rank 1 with match_tier=exact_identity and starts fused ranks at 2":
+        # @req REQ-SSPEC-LIB-009
+        # @capture(protocol_json): pinned record plus the fused hit list with its final ranks
         step("Register doc-pinned as an authorized identity and rank it in two sources too")
         val registry = registry_of(1, [identity_record("doc-pinned", "doc-pinned", [], true)])
         val sources = [
@@ -95,15 +132,17 @@ describe "search(query) — identity dominance pins rank 1 and removes the ID fr
         expect(result.identity_ambiguity).to_equal(false)
         val pinned = result.pinned
         expect(pinned.resolved_uid).to_equal("doc-pinned")
-        expect(pinned.pinned_rank).to_equal(1)
+        expect(pinned.pinned_rank).to_equal(1)  # oracle: the identity pin always occupies final rank 1
 
         step("Fused ranks begin at 2, and doc-pinned's ID was removed from every source before fusion")
-        expect(result.hits.len()).to_equal(1)
+        expect(result.hits.len()).to_equal(1)  # oracle: doc-other is the only candidate left after doc-pinned is excised
         expect(result.hits[0].document_id).to_equal("doc-other")
-        expect(result.hits[0].final_rank).to_equal(2)
+        expect(result.hits[0].final_rank).to_equal(2)  # oracle: fused ranks resume at 2 because rank 1 is reserved for the pin
         expect(result.hits[0].match_tier).to_equal(MatchTierV1.Fused)
 
     it "does not pin a guessed artifact on ambiguous identity — plain fused results are returned instead":
+        # @req REQ-SSPEC-LIB-010
+        # @capture(protocol_json): ambiguity flag plus the un-pinned fused hit list
         step("Two authorized records share the same alias used as the query")
         val registry = registry_of(1, [
             identity_record("uid-a", "key-a", [accepted_alias("ambiguous-term", "team-a")], true),
@@ -116,20 +155,24 @@ describe "search(query) — identity dominance pins rank 1 and removes the ID fr
         expect(result.identity_ambiguity).to_equal(true)
         expect(result.pinned == nil).to_equal(true)
         step("Ordinary fused discovery results are still returned, numbered from rank 1")
-        expect(result.hits.len()).to_equal(2)
-        expect(result.hits[0].final_rank).to_equal(1)
+        expect(result.hits.len()).to_equal(2)  # oracle: both lexical candidates survive fusion untouched
+        expect(result.hits[0].final_rank).to_equal(1)  # oracle: with no pin reserving rank 1, fusion starts numbering at 1
         expect(result.hits[0].match_tier).to_equal(MatchTierV1.Fused)
 
     it "runs plain fusion with no ambiguity flag when identity resolves to not_found":
+        # @req REQ-SSPEC-LIB-011
+        # @capture(protocol_json): plain fused hits with identity_ambiguity false
         step("Query a value with no identity match at all")
         val registry = registry_of(1, [])
         val sources = [ranking(FusionSourceV1.Lexical, ["doc-x"])]
         val result = search_with_identity_dominance(registry, "no-such-identity", sources, 60, 1000).unwrap()
         expect(result.identity_ambiguity).to_equal(false)
         expect(result.pinned == nil).to_equal(true)
-        expect(result.hits[0].final_rank).to_equal(1)
+        expect(result.hits[0].final_rank).to_equal(1)  # oracle: no identity resolved, so fusion is unmodified and starts at rank 1
 
     it "the pinned identity never receives an RRF rank, contribution, raw score, or adjusted score":
+        # @req REQ-SSPEC-LIB-012
+        # @capture(protocol_json): every remaining fused document id, proving the pin is excised
         step("Search with an exact identity match present among fused candidates")
         val registry = registry_of(1, [identity_record("doc-pinned-2", "doc-pinned-2", [], true)])
         val sources = [ranking(FusionSourceV1.Lexical, ["doc-pinned-2", "doc-other-2", "doc-other-3"])]
@@ -139,10 +182,12 @@ describe "search(query) — identity dominance pins rank 1 and removes the ID fr
         while i < result.hits.len():
             expect(result.hits[i].document_id).to_start_with("doc-other")
             i = i + 1
-        expect(result.hits.len()).to_equal(2)
+        expect(result.hits.len()).to_equal(2)  # oracle: doc-other-2 and doc-other-3 are the only candidates once doc-pinned-2 is excised
 
-describe "sabotage: exact identity must not be encoded as a score boost (hazard §6.11)":
+describe "sabotage: exact identity must not be encoded as a score boost (hazard section 6.11)":
     it "the pinned artifact's rank is independent of fused scores — even a huge fused raw score cannot displace it":
+        # @req REQ-SSPEC-LIB-013
+        # @capture(protocol_json): pinned record identity plus the top fused hit despite adverse scoring
         step("Give the non-pinned document a very strong multi-source signal")
         val registry = registry_of(1, [identity_record("doc-pinned-3", "doc-pinned-3", [], true)])
         val sources = [
@@ -156,4 +201,4 @@ describe "sabotage: exact identity must not be encoded as a score boost (hazard 
         val pinned3 = result.pinned
         expect(pinned3.resolved_uid).to_equal("doc-pinned-3")
         expect(result.hits[0].document_id).to_equal("doc-strong")
-        expect(result.hits[0].final_rank).to_equal(2)
+        expect(result.hits[0].final_rank).to_equal(2)  # oracle: doc-strong is fused starting at rank 2 since rank 1 is reserved for the identity pin

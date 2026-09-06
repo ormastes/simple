@@ -3,11 +3,15 @@
 Purpose: Pin Array.at behavior and its Pure-Simple native MIR lowering.
 Audience: compiler/runtime engineers maintaining collection method parity.
 """
-# @req: REQ-COMPILER-MIR-001
+# Lifecycle: doc/01_research/compiler/compiler_internals/compiler_module_scoped_hir_lowering.md ;
+# doc/03_plan/compiler/driver/hir_mir_lowering_unstub_project.md ;
+# doc/04_architecture/compiler/array_value_abi_contract.md ;
+# doc/05_design/language/collections/fixed_size_arrays.md
 # @cover src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl
 # Regression: doc/08_tracking/bug/array_at_returns_nil_for_every_index_2026-08-01.md
+# @manual_section: array-at-native-lowering
 
-use std.spec
+use std.spec.*
 use compiler.common.config.{Logger}
 use compiler.frontend.frontend.{parse_full_frontend}
 use compiler.hir.hir_lowering.types.{HirLowering}
@@ -35,28 +39,32 @@ fn lower_function(src: text, target_name: text) -> text:
 
 describe "Array.at executed semantics", tag: ["only-compiled"]:
     it "distinguishes every valid integer boundary from absence":
+        # @req REQ-COMPILER-MIR-001
+        # @capture(statistics): Array.at boundary hits census
         step("Verify first, middle, index/value three, and last Array.at hits")
         # The payload 3 is deliberate: a flat nil sentinel would turn this
         # present value into absence unless the lowering constructs a boxed
         # Option after the bounds decision.
         val values: [i64] = [10, 20, 30, 3, 50]
 
-        expect(values.at(0).unwrap()).to_equal(10)
-        expect(values.at(2).unwrap()).to_equal(30)
-        expect(values.at(3).unwrap()).to_equal(3)
-        expect(values.at(4).unwrap()).to_equal(50)
+        expect(values.at(0).unwrap()).to_equal(10)  # oracle: the first element is 10 in the fixed payload
+        expect(values.at(2).unwrap()).to_equal(30)  # oracle: the middle element is 30 in the fixed payload
+        expect(values.at(3).unwrap()).to_equal(3)  # oracle: payload 3 proves a boxed Option, not a flat nil sentinel
+        expect(values.at(4).unwrap()).to_equal(50)  # oracle: the last element is 50 in the fixed payload
 
     it "returns absence below zero and at or above length":
+        # @capture(statistics): Array.at miss census on four bounds
         step("Verify negative, equal-length, greater-than-length, and empty misses")
         val values: [i64] = [10, 20, 30, 3, 50]
         val empty: [i64] = []
 
-        expect(values.at(-1).is_none()).to_equal(true)
-        expect(values.at(5).is_none()).to_equal(true)
-        expect(values.at(9).is_none()).to_equal(true)
-        expect(empty.at(0).is_none()).to_equal(true)
+        expect(values.at(-1).is_none()).to_equal(true)  # oracle: a negative index is absence, not a wraparound read
+        expect(values.at(5).is_none()).to_equal(true)  # oracle: an index equal to length is absence
+        expect(values.at(9).is_none()).to_equal(true)  # oracle: an index past length is absence
+        expect(empty.at(0).is_none()).to_equal(true)  # oracle: any index into an empty array is absence
 
     it "preserves payload representation for text and bool arrays":
+        # @capture(tui_grid): decoded text and bool payloads per element
         step("Verify Array.at decodes non-integer element types before boxing")
         val words: [text] = ["first", "middle", "last"]
         val flags: [bool] = [true, false]
@@ -64,19 +72,21 @@ describe "Array.at executed semantics", tag: ["only-compiled"]:
         expect(words.at(0).unwrap()).to_equal("first")
         expect(words.at(1).unwrap()).to_equal("middle")
         expect(words.at(2).unwrap()).to_equal("last")
-        expect(words.at(3).is_none()).to_equal(true)
-        expect(flags.at(0).unwrap()).to_equal(true)
-        expect(flags.at(1).unwrap()).to_equal(false)
+        expect(words.at(3).is_none()).to_equal(true)  # oracle: the element-type decode must not change the bounds verdict
+        expect(flags.at(0).unwrap()).to_equal(true)  # oracle: bool payloads decode to their stored value
+        expect(flags.at(1).unwrap()).to_equal(false)  # oracle: bool payloads decode to their stored value
 
     it "leaves the shipped seed text at behavior intact":
+        # @capture(statistics): text receiver stays on its raw accessor
         step("Verify the Array-only change does not steal text at dispatch")
         # The seed's text `.at` remains its existing raw single-character
         # accessor. Pure-Simple native text `.at` is a separate recorded gap
         # and must remain loud until it gets a dedicated text owner.
-        expect("abc".at(1)).to_equal("b")
+        expect("abc".at(1)).to_equal("b")  # oracle: the seed text accessor returns the single character at index 1
 
 describe "Array.at Pure-Simple MIR behavior", tag: ["only-compiled"]:
     it "lowers one evaluated index through signed lower and upper bounds":
+        # @capture(protocol_json): serialized MIR of the bounds-checked pick
         step("Verify the native path evaluates receiver/index once and branches before reading")
         val source = "fn pick(xs: [i64], index: i64) -> i64:\n    xs.at(index) ?? -777\n"
         val mir = lower_function(source, "pick")
@@ -92,10 +102,12 @@ describe "Array.at Pure-Simple MIR behavior", tag: ["only-compiled"]:
         expect(mir).to_contain("\"label\":\"get_some\"")
         expect(mir).to_contain("\"label\":\"get_none\"")
         expect(mir).to_contain("\"label\":\"get_merge\"")
-        expect(mir.split("rt_array_len").len() - 1).to_equal(1)
-        expect(mir.split("rt_array_get").len() - 1).to_equal(1)
+        expect(mir.split("rt_array_len").len() - 1).to_equal(1)  # oracle: the lower bound reads the length exactly once
+        expect(mir.split("rt_array_get").len() - 1).to_equal(1)  # oracle: the element read happens exactly once, on the Some path
 
     it "evaluates side-effecting receiver and index expressions exactly once":
+        # @req REQ-COMPILER-MIR-002
+        # @capture(protocol_json): serialized MIR proving single evaluation
         step("Verify the Array.at fallback reuses its prelowered receiver and one lowered index")
         val source = "fn make_values() -> [i64]:\n" +
             "    [10, 20, 30]\n\n" +
@@ -107,12 +119,13 @@ describe "Array.at Pure-Simple MIR behavior", tag: ["only-compiled"]:
 
         expect(mir.contains("HIR_ERROR:")).to_equal(false)
         expect(mir.contains("MIR_ERROR:")).to_equal(false)
-        expect(mir.split("make_values").len() - 1).to_equal(1)
-        expect(mir.split("choose_index").len() - 1).to_equal(1)
-        expect(mir.split("rt_array_len").len() - 1).to_equal(1)
-        expect(mir.split("rt_array_get").len() - 1).to_equal(1)
+        expect(mir.split("make_values").len() - 1).to_equal(1)  # oracle: the side-effecting receiver call appears exactly once
+        expect(mir.split("choose_index").len() - 1).to_equal(1)  # oracle: the side-effecting index call appears exactly once
+        expect(mir.split("rt_array_len").len() - 1).to_equal(1)  # oracle: the bounds read is not duplicated per branch
+        expect(mir.split("rt_array_get").len() - 1).to_equal(1)  # oracle: the element read is not duplicated per branch
 
     it "selects element-specific decoding before Option construction":
+        # @capture(protocol_json): per-element-type MIR decode ABIs
         step("Verify integer, text, and bool arrays keep distinct payload ABIs")
         val int_mir = lower_function(
             "fn pick_int(xs: [i64], index: i64) -> i64:\n    xs.at(index) ?? -1\n",
@@ -137,6 +150,7 @@ describe "Array.at Pure-Simple MIR behavior", tag: ["only-compiled"]:
         expect(bool_mir).to_contain("\"op\":\"Eq\"")
 
     it "does not steal text or custom at methods":
+        # @capture(protocol_json): text and custom-receiver MIR dispatch pins
         step("Verify the Array-only receiver gate preserves existing dispatch and errors")
         val text_mir = lower_function(
             "fn text_at(value: text, index: i64) -> text:\n    value.at(index)\n",
@@ -160,6 +174,7 @@ describe "Array.at Pure-Simple MIR behavior", tag: ["only-compiled"]:
         expect(custom_mir).to_contain("Cursor::at")
 
     it "keeps wrong arity and non-array unresolved calls loud":
+        # @capture(statistics): unresolved-call error pins for both shapes
         step("Verify the new fallback is exact on both receiver kind and arity")
         val missing_index = lower_function(
             "fn wrong_array(xs: [i64]) -> i64:\n    xs.at()\n",
@@ -176,11 +191,19 @@ describe "Array.at Pure-Simple MIR behavior", tag: ["only-compiled"]:
         expect(unknown_receiver.contains("rt_array_get")).to_equal(false)
 
     it "pins the Array-only source gate in addition to behavior":
+        # @capture(statistics): source-gate contract pins in method_calls_literals
         step("Verify source shape cannot broaden at into a name-only fallback")
         val source = rt_file_read_text("src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl") ?? ""
         val gate = "if (method == \"get\" or method == \"at\") and args.len() == 1:"
+        val pins_receiver_local_gate = source.contains(
+            "if self.local_is_runtime_array(unresolved_receiver_local):")
+        val pins_method_arity_gate = source.contains(gate)
+        val pins_single_element_lower = source.contains(
+            "self.lower_array_first_or_last(receiver, unresolved_receiver_local, false, Some(access_index_local))")
+        val rejects_broader_name_only_gate = source.contains(
+            "if method == \"at\" and args.len() == 1 and resolution_is_unresolved:")
 
-        expect(source).to_contain("if self.local_is_runtime_array(unresolved_receiver_local):")
-        expect(source).to_contain(gate)
-        expect(source).to_contain("self.lower_array_first_or_last(receiver, unresolved_receiver_local, false, Some(access_index_local))")
-        expect(source.contains("if method == \"at\" and args.len() == 1 and resolution_is_unresolved:")).to_equal(false)
+        expect(pins_receiver_local_gate).to_equal(true)  # oracle: the fallback is gated on a runtime-array receiver local, not a name
+        expect(pins_method_arity_gate).to_equal(true)  # oracle: the gate is the exact get-or-at with one-argument shape
+        expect(pins_single_element_lower).to_equal(true)  # oracle: the gate lowers through the single-element helper with the access index
+        expect(rejects_broader_name_only_gate).to_equal(false)  # oracle: the broader name-only gate must never be reintroduced
