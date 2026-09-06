@@ -205,20 +205,77 @@ val _COMMON_KNOWN = ["--json", "--jq", "--no-pager", "--workspace", "--repo", "-
 
 val PR_CREATE_KNOWN = _COMMON_KNOWN + ["--title", "--head", "--base", "--body", "--reviewer"]
 val PR_LIST_KNOWN = _COMMON_KNOWN + ["--state", "--limit"]
-val PR_READ_KNOWN = _COMMON_KNOWN + ["--approve", "--unapprove"]
+val PR_VIEW_KNOWN = _COMMON_KNOWN
+val PR_REVIEW_KNOWN = _COMMON_KNOWN + ["--approve", "--unapprove"]
 val PR_MERGE_KNOWN = _COMMON_KNOWN + ["--squash", "--rebase", "--merge", "--strategy", "--keep-source"]
 val PR_COMMENT_KNOWN = _COMMON_KNOWN + ["--body", "--content", "--inline-path", "--inline-from", "--inline-to"]
 
+# Flags that consume the NEXT argv element as their value. Everything else is
+# boolean. This distinction is load-bearing, not bookkeeping: a pull-request
+# body is passed as a single argv element, and a body that begins with `--`
+# (a markdown horizontal rule, `---`, is entirely ordinary in a PR
+# description) was otherwise scanned as if it were a flag and refused. Knowing
+# which flags take a value is what lets the scanners skip over VALUES instead
+# of inspecting them.
+val VALUE_TAKING_FLAGS = [
+    "--title", "--head", "--base", "--body", "--reviewer", "--state", "--limit",
+    "--strategy", "--content", "--inline-path", "--inline-from", "--inline-to",
+    "--json", "--jq", "--workspace", "--repo", "--backend",
+    "-t", "-H", "-B", "-b", "-r", "-L"
+]
+
+
+fn _takes_value(name: text) -> bool:
+    for f in VALUE_TAKING_FLAGS:
+        if f == name:
+            return true
+    false
+
+
+fn flag_positions(args: [text]) -> [bool]:
+    """Mark which argv elements are FLAG tokens, as opposed to a preceding
+    flag's value or a positional.
+
+    Exists because every naive `arg.starts_with("--")` scan in this file was
+    wrong for the same reason: it inspected values as though they were flags.
+    Measured 2026-09-06 — `gh pr create --body "---\\nfooter"` was refused with
+    "`gh pr create ---` is not translatable", because the body's own first line
+    looked like a flag.
+    """
+    var out: [bool] = []
+    var skip_next = false
+    for arg in args:
+        if skip_next:
+            out = out + [false]
+            skip_next = false
+        else:
+            val is_flag = arg.starts_with("-") and arg.len() > 1
+            out = out + [is_flag]
+            if is_flag and not arg.contains("="):
+                if _takes_value(arg):
+                    skip_next = true
+    out
+
 
 fn _rename_flags(args: [text], renames: [(text, text)]) -> [text]:
-    """Rename flag tokens, leaving values and positionals untouched."""
+    """Rename flag tokens, leaving values and positionals untouched.
+
+    Renames only at FLAG positions. Without that guard a PR body whose text
+    happens to be exactly `--base` would itself be rewritten to `--dest`,
+    corrupting the body — the same value-vs-flag confusion that made
+    first_unknown_flag reject a body starting with `---`.
+    """
+    val positions = flag_positions(args)
     var out: [text] = []
-    for arg in args:
-        var replaced = arg
-        for pair in renames:
-            if arg == pair.0:
-                replaced = pair.1
+    var i: i64 = 0
+    while i < args.len():
+        var replaced = args[i]
+        if positions[i]:
+            for pair in renames:
+                if args[i] == pair.0:
+                    replaced = pair.1
         out = out + [replaced]
+        i = i + 1
     out
 
 
@@ -249,13 +306,20 @@ fn first_unknown_flag(args: [text], known: [text]) -> text:
     the blocklist and the PR body vanished, exit 0. Exactly the silent drop
     the policy was written to prevent.
 
+    Only FLAG positions are inspected — a preceding flag's value is skipped via
+    flag_positions(), so a PR body beginning with `---` is content, not an
+    unrecognised flag.
+
     Known limit, stated rather than papered over: only `--long` forms are
-    checked (plus `--long=value`), because a bare `-x` is ambiguous with a
+    reported (plus `--long=value`), because a bare `-x` is ambiguous with a
     negative-number value. Short forms are covered by listing them in the
     rename tables, which is where they are actually consumed.
     """
-    for arg in args:
-        if arg.starts_with("--"):
+    val positions = flag_positions(args)
+    var i: i64 = 0
+    while i < args.len():
+        val arg = args[i]
+        if positions[i] and arg.starts_with("--"):
             val eq = arg.find("=")
             val name = if eq > 0: arg[0:eq] else: arg
             var found = false
@@ -264,6 +328,7 @@ fn first_unknown_flag(args: [text], known: [text]) -> text:
                     found = true
             if not found:
                 return name
+        i = i + 1
     ""
 
 
@@ -331,7 +396,7 @@ fn gh_pr_to_bb_argv(verb: text, args: [text]) -> (bool, [text], text):
             val bad_view = first_unsupported_flag(args, ["--web", "-w", "--comments"])
             if bad_view != "":
                 return (false, [], unsupported_flag_message(bad_view, "pr view", "bitbucket"))
-            val unknown_view = first_unknown_flag(args, PR_READ_KNOWN)
+            val unknown_view = first_unknown_flag(args, PR_VIEW_KNOWN)
             if unknown_view != "":
                 return (false, [], unknown_flag_message(unknown_view, "pr view", "bitbucket"))
             (true, ["pr", "view"] + args, "")
@@ -383,7 +448,7 @@ fn gh_pr_to_bb_argv(verb: text, args: [text]) -> (bool, [text], text):
             for arg in args:
                 if arg != "--approve" and arg != "-a":
                     review_rest = review_rest + [arg]
-            val unknown_review = first_unknown_flag(review_rest, PR_READ_KNOWN)
+            val unknown_review = first_unknown_flag(review_rest, PR_REVIEW_KNOWN)
             if unknown_review != "":
                 return (false, [], unknown_flag_message(unknown_review, "pr review", "bitbucket"))
             (true, ["approve"] + review_rest, "")

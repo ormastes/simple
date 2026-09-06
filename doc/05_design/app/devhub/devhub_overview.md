@@ -312,7 +312,8 @@ Three constraints shaped the implementation, each verified before it was written
 2. **It must not be slow.** `bin/devhub --version` costs **12.0 s** (measured
    2026-09-06) because the stdlib is read as source per process. So backend
    resolution is duplicated in POSIX sh, and the github case `exec`s the real
-   `gh` without entering Simple at all — measured **0.078 s**, versus 12 s if it
+   `gh` without entering Simple at all — measured **0.138 s** (re-timed after
+   the `$PWD` walk-up landed; 0.078 s before that loop existed), versus 12 s if it
    routed through the interpreter. A wrapper that taxes the common path gets
    uninstalled; this one is free on it. It is also what
    `.claude/rules/code-style.md` asks for ("production wrappers should execute

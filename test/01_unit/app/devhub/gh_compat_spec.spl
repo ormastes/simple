@@ -22,6 +22,7 @@ use app.devhub.gh_compat.{
     bb_pr_to_gh_json,
     first_unsupported_flag,
     first_unknown_flag,
+    flag_positions,
     json_escape
 }
 
@@ -220,6 +221,60 @@ describe "devhub gh compatibility translation":
 
         it "does not mistake a positional argument for a flag":
             expect(gh_pr_to_bb_argv("view", ["42", "--json", "number"]).0).to_equal(true)
+
+    describe "flag values are never mistaken for flags":
+        # A pull-request body is one argv element and is arbitrary text. Every
+        # naive `starts_with("--")` scan in this module was wrong for the same
+        # reason: it inspected VALUES as though they were flags.
+        it "accepts a body that begins with a markdown horizontal rule":
+            # Measured 2026-09-06, before flag_positions existed: this was
+            # refused with "`gh pr create ---` is not translatable". `---` is
+            # entirely ordinary in a PR description.
+            val (ok, argv, err) = gh_pr_to_bb_argv("create", ["--title", "T", "--head", "x", "--body", "---\nfooter"])
+            expect(ok).to_equal(true)
+            expect(err).to_equal("")
+
+        it "does not rewrite a body whose text is itself a flag name":
+            # Without the same guard, `_rename_flags` turned a body of "--base"
+            # into "--dest", corrupting the description.
+            val (ok, argv, err) = gh_pr_to_bb_argv("create", ["--title", "T", "--head", "x", "--body", "--base"])
+            expect(ok).to_equal(true)
+            expect(argv.join("|")).to_equal("pr|create|--title|T|--source|x|--body|--base")
+
+        it "still translates ordinary flags around such a value":
+            val (ok, argv, err) = gh_pr_to_bb_argv("list", ["--state", "open", "--json", "number"])
+            expect(ok).to_equal(true)
+            expect(argv.join("|")).to_equal("pr|list|--state|OPEN|--json|number")
+
+        it "separates view's allowlist from review's":
+            # PR_READ_KNOWN was shared, so `gh pr view 42 --approve` was
+            # accepted and handed to cmd_bb, which ignores it — a silent no-op
+            # on a flag the user clearly meant.
+            expect(gh_pr_to_bb_argv("view", ["42", "--approve"]).0).to_equal(false)
+            expect(gh_pr_to_bb_argv("review", ["42", "--approve"]).0).to_equal(true)
+
+    describe "flag_positions":
+        it "marks flags but not their values":
+            val p = flag_positions(["--title", "T", "--squash", "42"])
+            expect(p[0]).to_equal(true)   # --title is a flag
+            expect(p[1]).to_equal(false)  # T is its value
+            expect(p[2]).to_equal(true)   # --squash is boolean
+            expect(p[3]).to_equal(false)  # 42 is a positional... see below
+
+        it "treats a value that looks like a flag as a value":
+            val p = flag_positions(["--body", "---"])
+            expect(p[0]).to_equal(true)
+            expect(p[1]).to_equal(false)
+
+        it "does not consume a value after a boolean flag":
+            val p = flag_positions(["--squash", "--json"])
+            expect(p[0]).to_equal(true)
+            expect(p[1]).to_equal(true)
+
+        it "treats --flag=value as self-contained":
+            val p = flag_positions(["--state=open", "42"])
+            expect(p[0]).to_equal(true)
+            expect(p[1]).to_equal(false)
 
     describe "first_unknown_flag":
         it "returns the first long flag not in the allowlist":

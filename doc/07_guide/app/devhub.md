@@ -138,7 +138,7 @@ gh pr create --title T --base main --head work/x   # -> devhub, or -> real gh
 Two properties worth knowing:
 
 - **It is free on GitHub.** The shim resolves the backend in POSIX shell
-  (~0.078 s) and, for `github`, `exec`s the real `gh` without entering Simple
+  (~0.14 s) and, for `github`, `exec`s the real `gh` without entering Simple
   at all — so it is byte-identical to not having a shim. Only a non-GitHub
   backend pays the ~12 s interpreter startup, and only because there is real
   translation to do.
