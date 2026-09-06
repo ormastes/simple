@@ -25,6 +25,7 @@ val ENCODE_TABLE = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz01234567
 # ============================================================================
 
 use std.common.encoding.utf8.{char_from_codepoint}
+use std.common.base_encoding.utilities.{base_encoding_bytes_to_text}
 
 fn _decode_char(c: i64) -> i64:
     """Return the 6-bit value for an ASCII base64 character, or 255 if invalid."""
@@ -376,37 +377,58 @@ fn _bytes_to_text(data: [u8]) -> text:
     and the public base64_decode returned an EMPTY string -- silently, with no
     error -- for all input including pure ASCII.
     """
-    # Accumulate into an array and join ONCE at the end (O(n)) instead of
-    # scalar `result = result + c` (O(n^2)) — same fix as the encode side.
-    var parts: [text] = []
+    # Accumulate BYTES and convert ONCE at the end.
+    #
+    # PERF (2026-09-06): this used to accumulate a `[text]` of one-character
+    # strings and `join("")` them. Both halves of that were per-character heap
+    # traffic: `char_from_codepoint` mints a fresh `text` for every byte, and
+    # the join then re-materialised every element. Measured on the codegen
+    # (Cranelift JIT) lane the pair cost ~328 ns/byte, against ~2 ns/byte for
+    # the equivalent `[u8]` loop — this single function, called by every
+    # base64/base64url encode AND decode, was the bulk of the lane's
+    # ~420x-vs-C base64url gap.
+    #
+    # Equivalence: `parts.join("")` is by definition the concatenation of each
+    # part's UTF-8 bytes, so appending those same bytes to a `[u8]` and
+    # converting once yields a byte-identical result. For `b < 0x80` the part
+    # was `char_from_codepoint(b)` -> `char_from_code(b)` -> `table[b:b+1]`,
+    # i.e. exactly the one byte `b` (including b == 0), so the source byte is
+    # pushed verbatim. The multibyte branches keep calling
+    # `char_from_codepoint` and push ITS bytes, so their (deliberately
+    # unvalidated, overlong-folding, surrogate-replacing) behaviour is
+    # preserved exactly rather than reinterpreted. The final conversion goes
+    # through `base_encoding_bytes_to_text`, whose validation pass is a no-op
+    # here because every byte appended above came from a valid `text`.
+    # See doc/08_tracking/bug/codegen_lane_still_slow_base64url_utf8_time_utils_2026-08-18.md
+    var out: [u8] = []
     var i = 0
     val n = data.len()
     while i < n:
         val b = data[i] as i64
         if b < 0x80:
-            parts = parts.push(char_from_codepoint(b))
+            out.push(data[i])
             i = i + 1
         else if b < 0xC0:
-            parts = parts.push("?")
+            out.push(63u8)
             i = i + 1
         else if b < 0xE0:
             if i + 1 < n:
                 val b2 = data[i + 1] as i64
                 val cp = ((b & 0x1F) << 6) | (b2 & 0x3F)
-                parts = parts.push(char_from_codepoint(cp))
+                _push_text_bytes(out, char_from_codepoint(cp))
                 i = i + 2
             else:
-                parts = parts.push("?")
+                out.push(63u8)
                 i = i + 1
         else if b < 0xF0:
             if i + 2 < n:
                 val b2 = data[i + 1] as i64
                 val b3 = data[i + 2] as i64
                 val cp = ((b & 0x0F) << 12) | ((b2 & 0x3F) << 6) | (b3 & 0x3F)
-                parts = parts.push(char_from_codepoint(cp))
+                _push_text_bytes(out, char_from_codepoint(cp))
                 i = i + 3
             else:
-                parts = parts.push("?")
+                out.push(63u8)
                 i = i + 1
         else:
             if i + 3 < n:
@@ -414,9 +436,23 @@ fn _bytes_to_text(data: [u8]) -> text:
                 val b3 = data[i + 2] as i64
                 val b4 = data[i + 3] as i64
                 val cp = ((b & 0x07) << 18) | ((b2 & 0x3F) << 12) | ((b3 & 0x3F) << 6) | (b4 & 0x3F)
-                parts = parts.push(char_from_codepoint(cp))
+                _push_text_bytes(out, char_from_codepoint(cp))
                 i = i + 4
             else:
-                parts = parts.push("?")
+                out.push(63u8)
                 i = i + 1
-    parts.join("")
+    base_encoding_bytes_to_text(out)
+
+fn _push_text_bytes(out: [u8], part: text):
+    """Append `part`'s UTF-8 bytes to `out`.
+
+    Used by `_bytes_to_text` for the multi-byte branches, where the byte
+    sequence to emit is whatever `char_from_codepoint` decided on (it folds
+    overlong forms and replaces surrogates / out-of-range codepoints with
+    U+FFFD), not the raw source bytes."""
+    val pb = part.bytes()
+    val m = pb.len()
+    var k = 0
+    while k < m:
+        out.push(pb[k])
+        k = k + 1
