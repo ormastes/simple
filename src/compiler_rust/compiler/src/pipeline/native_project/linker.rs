@@ -1670,6 +1670,7 @@ int main(int argc, char** argv) {
                             build_core_c_runtime_library(&temp_dir.join("core_c_bootstrap_supplement"))
                                 .ok_or_else(|| "failed to build the core-c-bootstrap runtime supplement".to_string())?;
                         cmd.arg(core_c_runtime);
+                        // TODO: [driver][P2] Establish which runtime actually wins a hosted link: native_all and the core-C supplement both define the ~514 overlapping rt_* symbols counted below and archive order alone decides, but no nm dump over a produced link artifact has ever been inspected -- that dump is the missing evidence, and until it exists the precedence claimed here is asserted, not measured
                         // Archive members resolve at OBJECT granularity, not
                         // symbol granularity: pulling runtime_native.obj to
                         // satisfy rt_iocp_create also drags in every other
