@@ -19,6 +19,7 @@ Maintain process knowledge for the `app` layer: owned source, architecture links
 - [Architecture modules](../../04_architecture/architecture_modules.md)
 - [Design docs](../../05_design/)
 - [Specs](../../06_spec/)
+- [debug_profile feature wiki](../../feature_expert/debug_profile/skill.md) — `src/app/cli_debug/` evidence bundle writer + reader (`simple debug write` / `inspect`); CLI acceptance is hand-verified only, see `todo_db.sdn` row 0
 
 ## Update Rule
 
