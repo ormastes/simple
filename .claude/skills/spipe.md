@@ -274,17 +274,26 @@ it cancels the running gate and re-queues you behind everything else. Get the
 commit message and the rebase right BEFORE the first push; amending a message
 afterwards costs a full queue cycle.
 
-**There is a receipt fast path for the idiom gate, and it does not work yet.**
-`code-idiom-gates` now consults a signed local-CI receipt
-(`simple.local-ci-receipt/v1`) and picks one of three modes: `sanity` (~60 s,
-receipt verify plus the conflict-class guards), `escalate` (sanity set plus only
-the gates whose declared `inputs` intersect a rebase diff) or `full` (everything,
-and every undecidable case). It is fail-closed: an unset `skip_ids` runs every
-gate. **Today every real PR here gets `full`**, for two measured reasons — the
-verifier reads jj `change-id` headers only, and 0 of the last 40 origin/main
-commits and 0 of PR #380's head commits carry one (the `git worktree add
---detach` + `gh pr create` route does not write it); and the receipt has no
-delivery mechanism a PR can use. So the "push ONCE" advice above still governs.
+**There is a receipt fast path for the idiom gate; it works, but nothing is
+admitted yet.** `code-idiom-gates` consults a signed local-CI receipt
+(`simple.local-ci-receipt/v1`) and picks one of FOUR modes: `sanity` (measured
+~8 s — receipt verify plus the conflict-class guards), `escalate` (sanity set
+plus only the gates whose declared `inputs` intersect a rebase diff), `docs`
+(changed paths are entirely documentation; never applies to `.github/**`) or
+`full` (everything, and every undecidable case). It is fail-closed: an unset
+`skip_ids` runs every gate.
+
+Identity binds the jj `change-id` header when present, else `git patch-id
+--stable` for non-merge commits, else unbindable. That fallback matters here:
+0 of the last 40 origin/main commits and 0 of PR #380's head commits carry a
+change-id header, because the `git worktree add --detach` + `gh pr create`
+route does not write one — so a real PR binds by patch-id today.
+
+**What still stops a PR taking the fast path** is not the mechanism but the
+setup: `config/check/ci_receipt_allowed_signers` ships with ZERO keys
+(deliberate, fail-closed), and the signer has no note-emission flag, so
+attaching the receipt to `refs/notes/ci-receipts` is a manual `git notes` step.
+Until a key is added, the "push ONCE" advice above still governs.
 Full details, key onboarding and the verdict-string troubleshooting table:
 [`doc/07_guide/infra/local_ci_receipt/operator_guide.md`](../../doc/07_guide/infra/local_ci_receipt/operator_guide.md).
 
@@ -342,28 +351,6 @@ there — "fails only on mine" is usually "only ran on mine".
 You cannot approve your own PR (`Review Can not approve your own pull
 request`), and `required_approving_review_count` is 0, so approval never
 unblocks anything.
-
-**A clean merge can still be a silent rewind — check before you push.** Four
-PRs on 2026-09-06 carried stale merge snapshots that DELETED landed work while
-merging cleanly: `git merge-tree` reported no conflict, CI was green, and the
-deletions sat in shared append-only meta files the author never opened
-(registries and gate ledgers such as
-`doc/00_llm_process/knowledge_registry.sdn`,
-`doc/00_llm_process/llm_process_manifest.sdn`,
-`config/check/must_check_gates.sdn` — every lane appends a row, and a snapshot
-taken before three other lanes appended theirs removes all three).
-
-```sh
-git diff origin/main..HEAD -- <shared meta file> | grep -c '^-[^-]'   # must be 0
-```
-
-`^-[^-]` skips the `---` header so the count is real removed lines. Non-zero on
-an append-only file means rebase onto `origin/main` and re-apply your row — never
-force the snapshot through. Only valid for genuinely append-only files; where
-lines legitimately change, read the diff instead of counting it. Same family:
-`doc/08_tracking/bug/aspect_dynload_facet_implementation_deleted_by_merge_restore_2026-09-05.md`,
-`.../sffi_authority_group2_stale_snapshot_clobber_2026-09-02.md`. Protocol:
-`.claude/rules/vcs.md` § "Sync must never clobber".
 
 ## Container test runs
 
@@ -598,61 +585,29 @@ measured **100**.
   hash only; after touching `src/app/sspec_maintain/`, delete it or old scores
   are reported.
 
-**Before you file a scorer defect, re-read the two rules above.** The first two
-traps in this list — `# oracle:` that must TRAIL the `expect(` on the SAME line
-(ORA-003), and a `REQ-` id declared outside any `it` body clamping the effective
-score to 49 (TRC-003) — account for most spec failures here, and both were
-reported as scorer bugs by workers on 2026-09-05 and again on 2026-09-06. Both
-reports were FALSE: the scorer was implementing the documented rule, and the
-specs were wrong. Reproduce against `scripts/check/sspec-train.shs` (per-rule
-histogram, so you can see WHICH rule deducted) before writing a bug record; a
-"the scorer is broken" claim from an agent is not evidence.
-
 ### Measuring on this host (no full CLI deployed)
 
 `simple sspec-maintain scan` needs the full pure-Simple CLI, which is not
 deployed here (`bin/simple` and `bin/local/phase2-*/simple` are the bootstrap
-CLI). **Two lanes work (both re-measured 2026-09-05, later session):**
+CLI; `simple_seed run src/app/sspec_maintain/main.spl` dies in the seed's
+parser). The working lane is
 
 ```bash
-# 1. Fresh Sep-5 seed runs the scorer SOURCE directly (~6s/spec). The Jul-era
-#    seeds die in the parser (`variable always_inline not found`); this one does not.
-src/compiler_rust/target/bootstrap/simple run src/app/sspec_maintain/main.spl scan <spec.spl>
-
-# 2. Score check + per-rule point-loss histogram, fail-closed, target 90.
-#    Use this before shipping ANY new spec — two lane specs on 2026-09-05 sat at 81
-#    (EVD-001 x6, ORA-003 x2, MNT-007 x2) until checked.
-sh scripts/check/sspec-train.shs <spec.spl|dir> [...]            # SSPEC_TARGET_SCORE=90
-sh scripts/check/sspec-train.shs --split private_test            # the ONLY reportable training number
-
-# 3. Older lane, still works: reshaped module copies for Jul-era seed grammar.
 sh scripts/check/sspec-score-seed-lane.shs <spec.spl|dir> [...]   # ~60s for 40 specs
 ```
 
-Lane 2's `--split` reads `.spipe/training/splits.sdn` (7 `train` / 14 held-out
-`private_test`) and ERRORs before scoring if the checklist file no longer
-hashes to the frozen `checklist_digest` (stale `.spipe/spipe`? run
-`git submodule update`; edited checklist? re-partition with a NEW held-out set)
-or if a held-out path is cited in the checklist. Design/plan:
-`doc/05_design/infra/sspec/sspec_training_heldout_gate_design.md`,
-`doc/03_plan/infra/sspec/sspec_training_heldout_gate_plan.md`.
-Note lanes 1/2 score a mirror-less spec **90** where lane 3 scores **97**: lane 1/2
-hit the filed mirror double-count
-(`doc/08_tracking/bug/sspec_scan_manual_findings_fire_without_mirror_2026-09-05.md`);
-lane 3 does not. Same source, two ceilings — cite which lane produced a number.
-
-Lane 3 reshapes whitespace-only copies of the five scorer modules for the seed's
+It reshapes whitespace-only copies of the five scorer modules for the seed's
 older grammar, PROVES each copy equals its source modulo whitespace/comments
 (sha1 of the residue; a DIFF is exit 2), substitutes three named deltas the
 seed forces (zero-arg `split()`, `sha256_text`, `file_exists` — all via runtime
 externs, none in the rule logic), and prints per spec `GATE SCORE n` and
 `SCAN SCORE n` plus every finding with its rule id and deduction. Read the
-numbers; the script itself judges no threshold. Still dead (measured
-2026-09-05): `phase2 native-build` fails on a three-line hello world
-(`AOT compile error ... <invalid-heap:...>`, both backends) and exits 139 after
-monomorphize completes on the analyzer entry — records in `doc/08_tracking/bug/`.
-The earlier claim here that the seed `run` lane is dead was true of the Jul-25
-seeds only; see lane 1 above.
+numbers; the script itself judges no threshold. Why the other lanes are dead
+(all measured 2026-09-05): `phase2 native-build` fails on a three-line hello
+world (`AOT compile error ... <invalid-heap:...>`, both backends) and exits 139
+after monomorphize completes on the analyzer entry; the seed's per-spec `run` lane dies on
+`variable always_inline not found` loading `file_ops` — records in
+`doc/08_tracking/bug/`.
 
 ## Typed evidence (Modern SSpec)
 

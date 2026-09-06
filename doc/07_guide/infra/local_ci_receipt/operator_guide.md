@@ -4,13 +4,23 @@
 `Code Idiom & Structural Ratchet Gates` context to take a fast path instead of
 re-running 27 gate scripts on a saturated runner queue.
 
-**Status, measured 2026-09-06 against `origin/main` `4699194f81e`:** the signer,
-the verifier, the allowed-signers trust root and the three-mode decision in
-`repo-hygiene.yml` have all landed. **No real PR in this repo can reach `sanity`
-or `escalate` today.** Two independent gaps block it — receipt delivery
-(§7) and commit identity (§8). Both are stated here rather than hidden, because
-a guide that promises a fast path you cannot reach is worse than no guide. Read
-§7 and §8 before you spend time generating a key.
+**Status, PR #416 branch `ci-receipt-signed-sanity-2026-09-06`:** the signer, the
+verifier, the allowed-signers trust root and the mode decision in
+`repo-hygiene.yml` have all landed, and the path works end to end **locally**.
+Verified on `c70a818a0`, a commit with **no** change-id header: sign exit 0
+binding `patch a251811056b6100759aab75b4863154ba3d3ad3f`, verify exit 0, tamper
+exit 1. Selftests: verifier 25/25, signer 18/18.
+
+Three things you must know before relying on it:
+
+1. **Delivery is a manual step.** CI reads the receipt from a git note on
+   `refs/notes/ci-receipts`, and `sign-local-ci-receipt.shs` has **no
+   note-emission flag** (`git notes` and `--note` occur zero times in it). You
+   attach and push the note yourself — §7. This is the top usability gap.
+2. **`config/check/ci_receipt_allowed_signers` ships with ZERO keys**, so
+   nothing is admitted until a key is deliberately added — §5.
+3. **The fast path has never been exercised on a CI runner.** Every result above
+   is local. Nothing here is runner-proven.
 
 Specification: `doc/05_design/infra/local_ci_receipt/design.md`.
 Order of work and acceptance bars: `doc/03_plan/infra/local_ci_receipt/plan.md`.
@@ -54,6 +64,10 @@ Raising `cancel-in-progress: false` would only pile stale runs onto a saturated
 queue. The only thing that closes the loop is a required-context run short enough
 to finish between two rebases — the ~60 s `sanity` path.
 
+("Unreachable" above describes **the required check as it runs today, without a
+receipt.** It is not a statement about the receipt fast path, which works
+locally; see the Status block.)
+
 ---
 
 ## 2. Trust class — read this before you rely on it
@@ -72,28 +86,35 @@ class rather than raise it.
 What CI still recomputes on the real head **before any row is skipped**:
 
 - the sshsig signature and the allowed-signer check
-- the change-id set and the tree binding
+- the identity set (kind and value) and the tree binding
 - the manifest binding and the manifest↔receipt id-set cross-check
 - the per-row status
-- the conflict-class guards (conflict-tree, conflict-markers, tree-size) — these
-  run in every mode **in which the PR range resolved** (their step carries
-  `if: steps.receipt.outputs.range != ''`, so a `full` decision that returned
-  before the range was computed skips them too; the workflow's own comment
-  overstates this as "every mode"). They matter because a receipt attests the tree
+- the conflict-class guards (conflict-tree, conflict-markers, tree-size) —
+  **blocking in every mode**, gated only on `steps.receipt.outputs.range != ''`,
+  which is set for every `pull_request` event; anything that leaves it empty is
+  `full` by construction, where the gates themselves are the enforcement.
+  Measured on a CI-shaped range: conflict-tree 1 s, conflict-markers 5 s,
+  tree-size 2 s — 8 s, affordable inside the 60 s `sanity` budget. They matter
+  because a receipt attests the tree
   the developer ran gates on while CI tests the **merge** of that head against a
   base that moves every few minutes. `main` was wiped to four files twice in 24 h
   with every other check green.
 
 ---
 
-## 3. The three modes
+## 3. The modes
 
-There is no binary skip. The decision is three-way, made by the
-`Local CI receipt admission` step of `code-idiom-gates`, and it only ever
-*widens* trust — every failure path returns with the mode still `full`.
+There is no binary skip. The decision is made by the `Local CI receipt
+admission` step of `code-idiom-gates`, and it only ever *widens* trust — every
+failure path returns with the mode still `full`.
+
+The workflow's own header comment says "THREE MODES, and only three". **That
+comment is stale: the landed code emits four**, having added `docs`. Read the
+table, not the comment.
 
 | mode | condition | what runs | budget |
 |---|---|---|---|
+| `docs` | receipt verifies **and** every changed path is documentation | the conflict-class floor only | ≤ 60 s |
 | `sanity` | receipt verifies **and** the attested tree is the tree under test | receipt verify + conflict-tree + conflict-markers + tree-size | ≤ 60 s |
 | `escalate` | receipt verifies for the PR head, but the merge CI is testing has a different tree | the sanity set, plus every gate whose declared `inputs` intersect the paths the merge changed. A gate whose `inputs` are `*` (unbounded) **always** runs | bounded by the diff |
 | `full` | everything else, and every undecidable, missing, malformed, unsigned, mismatched or unreadable input | every gate, exactly as before | unchanged |
@@ -257,13 +278,20 @@ sh scripts/check/verify-local-ci-receipt.shs \
 ```
 
 This is the same invocation CI makes, so a local `PASS` is the strongest
-pre-push signal available. Pass the **same** `--rev` and `--changes` CI will:
+pre-push signal available. Pass the **same** `--rev` and `--changes` CI will —
+note CI splits the note back into two temp files and points `--receipt` and
+`--signature` at them:
 
 ```
-sh <base>/scripts/check/verify-local-ci-receipt.shs --root "$PWD" --rev "$HEAD_SHA" \
+sh "$verifier" --root "$PWD" --rev "$HEAD_SHA" \
     --changes "$BASE_SHA..$HEAD_SHA" --tier ci \
-    --receipt doc/08_tracking/check/local_ci_receipt.v1.txt --allowed-signers "$signers"
+    --receipt "$tmp/ci-receipt" --signature "$tmp/ci-receipt.sig" \
+    --allowed-signers "$signers"
 ```
+
+`--rev` is the **PR head, never the merge tip**: a GitHub merge commit has two
+parents and `git patch-id` is undefined for a merge, so binding the tested merge
+would be unbindable by construction.
 
 Note the default `--tier` differs between the two scripts: the signer defaults to
 `push`, the verifier defaults to the receipt's own `tier` field, and CI demands
@@ -271,31 +299,53 @@ Note the default `--tier` differs between the two scripts: the signer defaults t
 
 ---
 
-## 7. Where the receipt goes — and the delivery gap
+## 7. Where the receipt goes — publish it as a git note (manual step)
 
-As landed, `repo-hygiene.yml` reads the receipt as the tracked path
-`doc/08_tracking/check/local_ci_receipt.v1.txt` (plus `.sig`) out of the PR head
-checkout. That means the receipt must be **committed into the tree it attests**,
-and there is no fixed point: writing the receipt changes the tree, which changes
-the `tree` field the receipt binds, which invalidates the signature. The design
-identified this exact circularity (`design.md` §3.1, §6.2) and chose a different
-home:
+CI reads the receipt from **a git note on `refs/notes/ci-receipts`, keyed by the
+PR head sha**. It cannot be a tracked file: the receipt binds `tree`, so
+committing it into that tree changes the tree, and the bound tree could never
+equal the tested one. A note lives outside the commit tree, so attaching one
+perturbs nothing.
 
-> **D2.** Receipt lives in a **git note under `refs/notes/ci-receipts`, keyed by
-> the TREE object**, not by a commit.
+**The signer does not do this for you.** `sign-local-ci-receipt.shs` has no
+note-emission flag — `git notes` and `--note` occur zero times in it. It writes
+`--out FILE` and `<out>.sig`, and stops. **This is the top usability gap in the
+feature.** Until a `--note` flag lands, run these three commands yourself, from
+the repo, after a successful sign:
 
-**That is not implemented.** `git notes` and `ci-receipts` appear zero times in
-`sign-local-ci-receipt.shs`, `verify-local-ci-receipt.shs` and
-`repo-hygiene.yml`, and `doc/08_tracking/check/` contains no receipt file. Until
-the note-based delivery lands, minting and verifying a receipt works end to end
-**locally**, and the CI consumer cannot find one, so every PR lands in `full`.
+```bash
+cat doc/08_tracking/check/local_ci_receipt.v1.txt \
+    doc/08_tracking/check/local_ci_receipt.v1.txt.sig > /tmp/note
+git notes --ref=ci-receipts add -f -F /tmp/note <head-sha>
+git push origin refs/notes/ci-receipts
+```
 
-Do not try to route around this by committing the receipt and re-signing: each
-commit or amend moves the tree again, and adding a commit to the range also
-changes the `--changes` set the verifier compares. `design.md` §6.2 also rejects
-workflow artifacts (attacker-controlled, produced by CI rather than by the
-developer), PR comments (mutable, and Markdown mangles the exact bytes
-`design.md` §4 depends on) and commit trailers.
+Substitute your own `--out` path if you passed one. `<head-sha>` is the PR head
+commit — the same sha CI passes as `--rev`, not the merge tip.
+
+Notes on the mechanics:
+
+- The note body is the concatenation `payload || signature`. CI splits it back
+  apart on the **first line exactly equal to** `-----BEGIN SSH SIGNATURE-----`:
+  everything strictly before is the payload, everything from that line on is the
+  signature. `cat receipt sig` produces exactly that shape; do not reformat it.
+- The note is author-writable, and that is fine. The sshsig signature inside it,
+  checked against the **BASE** allowed-signers file, is what protects the
+  contents.
+- **A missing note is the ordinary case, not an error.** It means the PR carries
+  no receipt, which means `full`. You will see
+  `no refs/notes/ci-receipts on origin: this PR carries no receipt` or
+  `no ci-receipt note on head <sha>`.
+- Re-push the note after **every** rebase or amend: the head sha changes, so the
+  old note no longer keys to anything CI looks up, and the tree changed too, so
+  the old receipt would be `escalate` at best. Re-sign, then re-attach.
+
+`design.md` §6.2 rejects the alternatives for reasons that still hold: a tracked
+file is circular (§3.1); workflow artifacts are produced by CI rather than by the
+developer and are attacker-controlled in the same trust position as the head
+checkout; PR comments are mutable and Markdown mangles the exact bytes
+`design.md` §4 depends on; a commit trailer changes the commit but says nothing
+about the tree.
 
 ---
 
@@ -316,44 +366,50 @@ there too. The default reason, before anything has been proved, is:
 default: nothing has proved a receipt for this head
 ```
 
-### The commit-identity gap — why *your* PR says `full` today
+### Commit identity — two kinds, both supported
 
-Before verifying anything, `decide()` resolves a rebase-stable identity for every
-commit in `BASE..HEAD`, fail-closed at each step:
+Both the signer and the verifier resolve a rebase-stable identity for every
+commit in the `--changes` range, fail-closed at each step:
 
-1. **jj `change-id` header.** jj writes `change-id <id>` into the git commit
-   object header, so plain `git cat-file commit <sha>` reads it and no jj binary
+1. **`change <id>`** — the jj `change-id` header. jj writes it into the git
+   commit object, so plain `git cat-file commit <sha>` reads it and no jj binary
    is needed. It survives rebase, amend and force-push.
-2. **`git patch-id --stable`**, for commits that carry no such header. It hashes
-   the diff, so like a change-id it survives rebase and cherry-pick — and unlike
-   one it is **undefined for a merge commit**, which is therefore unbindable.
-3. Neither ⇒ unbindable ⇒ `full`.
+2. **`patch <id>`** — `git show <sha> | git patch-id --stable`, for **non-merge**
+   commits that carry no such header. A patch-id hashes the diff only, so it too
+   survives rebase and cherry-pick.
+3. Neither ⇒ **unbindable**, and both scripts FAIL. There is no third fallback:
+   inventing one would make an unbindable commit look bound.
 
-The two kinds are never mixed in one set; a PR carrying both is refused
+Why the fallback exists at all: **measured 2026-09-06, 0 of the last 40
+`origin/main` commits and 0 of PR #380's head commits carry a change-id header.**
+Commits reaching GitHub are GitHub merge commits or plain-git commits from this
+repo's `git worktree add --detach` + `gh pr create` landing route, and neither
+writes one. Without the patch-id kind the feature would never engage on a real
+PR. Verified end to end on `c70a818a0`, which has no change-id header: sign
+exit 0 binding `patch a251811056b6100759aab75b4863154ba3d3ad3f`, verify exit 0.
+
+**The kind is part of the signed bytes.** The receipt carries
+`identities: <n>` followed by `identity: <kind> <value>` lines, kind in
+`{change, patch}`, deduplicated and sorted ascending on the whole
+`"<kind> <value>"` string. A `patch` identity therefore **never** satisfies a
+`change` identity, and the same value under a different kind is its own failure:
+
+```
+FAIL — identity KIND mismatch: value(s) <vals> are attested under a different identity kind than the commit(s) under test resolve to; a patch identity never satisfies a change identity
+```
+
+That is deliberate, not an oversight — interchangeable kinds would be a forgery
+surface. Selftest cases (d5), (d6) and (d7) pin the cross-kind and same-value
+rejections; (d3) pins that a patch-id identity signs and verifies with no
+change-id header; (d4) pins that a merge commit is unbindable. The workflow-side
+`decide()` additionally refuses a PR that **mixes** kinds within one range
 (`the PR mixes <a> and <b> commit identities; comparing unlike identities is a
 forgery surface`).
 
-**Measured 2026-09-06: 0 of the last 40 `origin/main` commits and 0 of PR #380's
-head commits carry a change-id header.** Commits reaching GitHub are either
-GitHub merge commits or plain-git commits produced by this repo's documented
-`git worktree add --detach` + `gh pr create` landing route, and neither writes
-one. So today's real PRs resolve as `patch-id`.
-
-**And `verify-local-ci-receipt.shs` reads change-id headers only.** It has no
-patch-id path and deliberately no fallback identity — inventing one would make an
-unbindable commit look bound. A PR whose identity resolved as `patch-id` is
-therefore refused by the verifier with
-
-```
-FAIL — commit(s) carry no jj change-id header and are therefore unbindable: <shas>
-```
-
-and lands in `full`. `repo-hygiene.yml` carries this as an explicit NOTE at the
-same spot. It is fail-closed and correct, and it is also **every real PR in this
-repo today**. Closing it needs a patch-id identity kind in the receipt schema,
-owned by the signer/verifier lane.
-
-Check your own commits before assuming anything:
+What is still genuinely unbindable, and lands in `full`: **merge commits** with
+no change-id header (patch-id is undefined for a merge — rebase instead of
+merging), and commits with an **empty diff** and no header. Check your own
+commits when a verdict surprises you:
 
 ```bash
 for c in $(git rev-list <base>..HEAD); do
@@ -362,9 +418,10 @@ for c in $(git rev-list <base>..HEAD); do
 done
 ```
 
-Any `NO-CHANGE-ID` line means `full`, regardless of your key, your receipt or
-your gate results. Whether your local jj writes the header depends on jj
-configuration; verify with the loop above rather than assuming.
+A `NO-CHANGE-ID` line is **fine** — that commit binds as `patch` instead, as long
+as it is not a merge and its diff is non-empty. Whether your local jj writes the
+header depends on jj configuration; verify with the loop above rather than
+assuming. What you must avoid is a range that mixes the two kinds.
 
 ---
 
@@ -382,11 +439,15 @@ suppress. Read the `reason` in the `LOCAL-CI-RECEIPT MODE:` line and match it:
 | `range holds <n> commit(s) but the PR payload declares <m>` | shallow or rewritten history | push once more so the payload and the range agree; avoid repeated force-pushes |
 | `the PR range is empty; there is nothing to attest` | no commits | nothing to do |
 | `the PR edits check policy (<path>)` | you touched `.github/workflows/`, `scripts/check/`, `scripts/hooks/` or `config/check/` | expected and non-negotiable — split policy edits into their own PR (§5) |
-| `commit <sha> is a merge commit with no change-id header` | merges are unbindable by patch-id | rebase instead of merging |
-| `has neither a jj change-id header nor a stable patch-id: unbindable` | identity gap, §8 | see §8 |
-| `the PR mixes <a> and <b> commit identities` | mixed change-id and patch-id commits | make the whole range one kind |
+| `commit <sha> is a merge commit with no change-id header` | patch-id is undefined for a merge, so it is unbindable | rebase instead of merging |
+| `has neither a jj change-id header nor a stable patch-id: unbindable` | a merge, or a commit with an empty diff | drop the empty commit; rebase away the merge |
+| `the PR mixes <a> and <b> commit identities` | some commits bind as `change`, some as `patch` | make the whole range one kind |
+| `no refs/notes/ci-receipts on origin: this PR carries no receipt` | the notes ref has never been pushed | §7 — attach and push the note |
+| `no ci-receipt note on head <sha>` | no note keyed to **this** head; usually a rebase or amend after publishing | re-sign and re-attach to the new head sha (§7) |
+| `the ci-receipt note on <sha> carries no payload` / `carries no sshsig block` | the note body is not `payload \|\| signature` | rebuild it with `cat receipt sig > /tmp/note` (§7) |
 | `receipt not admitted (verifier exit <n>): <verdict>` | the verifier decided — its verdict is quoted inline | look the verdict up in §10 |
 | `the BASE manifest declares no ci row for job code-idiom-gates` | manifest has no `ci` rows for this job at your base | rebase |
+| `receipt verified but the merge diff could not be computed` / `could not assemble the changed-path set` | `escalate` could not bound itself, so it fell back | re-run the job |
 
 Meanwhile: **push once.** Every force-push cancels the in-flight run and re-queues
 you behind everything else (§1). Get the message and the rebase right before the
@@ -426,7 +487,7 @@ PASS line is the parallel `PASS — <n> row(s) signed, receipt binds tree <sha>
 | `cannot resolve <rev>^{tree} in <root>` | bad `--rev` |
 | `tree <sha> has no config/check/must_check_gates.sdn` | the tree predates the manifest |
 | `revision spec "<spec>" selects no commit` / `cannot enumerate commits for "<spec>"` | bad `--changes` |
-| `no change-id could be read for "<spec>"` | §8 |
+| `no identity could be resolved for "<spec>"` | §8 |
 | `config/check/must_check_gates.sdn at tree <t> declares no row in tier "<tier>"` | wrong `--tier`, or a tree without `ci` rows |
 | `0 row(s) were verified` | vacuous receipt; re-mint |
 | `the mandatory verifier selftest failed; no receipt was examined` | the verifier is broken on this host — do **not** treat as a pass; report it |
@@ -438,10 +499,11 @@ PASS line is the parallel `PASS — <n> row(s) signed, receipt binds tree <sha>
 | `receipt <p> is not canonical: <why>` | the payload is not the fixed field order / sorted set the signer emits. Re-mint; do not hand-edit a receipt |
 | `signature <p> does not cover the bytes of <p> (payload tampered, wrong namespace, or malformed signature)` | the payload changed after signing, or the signature was made under a different sshsig namespace. Note `ssh-keygen -Y verify` exits **255** on tamper, not 1 |
 | `signer identity "<id>" is not an allowed signer for namespace simple-ci-receipt in <p> (or its key does not match the signature)` | key not in the allowlist, missing `namespaces="simple-ci-receipt"`, or `--identity` ≠ the principal line. §5 |
-| `commit(s) carry no jj change-id header and are therefore unbindable: <shas>` | **the common one today.** §8 |
-| `field change_ids: receipt declares <n> change(s) but carries <m>` | corrupt payload; re-mint |
-| `change-id set differs from the receipt (attested <n>, tested <m>); this is different work, not a rebase` | you signed a different commit set. Re-sign with the `--changes` range that matches the PR |
-| `change-ids match but tree differs (attested <a>, tested <b>); rebased since signing` | **the rebase case** — same work, new bytes. This is what `escalate` exists for; re-sign after the rebase to get back to `sanity` |
+| `commit(s) resolve to no rebase-stable identity and are therefore unbindable (no jj change-id header, and no patch-id — a merge commit or an empty diff): <shas>` | a merge, or an empty-diff commit. §8 |
+| `field identities: receipt declares <n> identity(ies) but carries <m>` | corrupt payload; re-mint |
+| `identity KIND mismatch: value(s) <vals> are attested under a different identity kind than the commit(s) under test resolve to; a patch identity never satisfies a change identity` | you signed under one kind and CI resolved the other. Re-sign against the actual PR range. §8 |
+| `identity set differs from the receipt (attested <n>, tested <m>); this is different work, not a rebase` | you signed a different commit set. Re-sign with the `--changes` range that matches the PR |
+| `identities match but tree differs (attested <a>, tested <b>); rebased since signing` | **the rebase case** — same work, new bytes. This is what `escalate` exists for; re-sign and re-attach the note after the rebase to get back to `sanity` |
 | `field manifest_sha: receipt binds <a> but config/check/must_check_gates.sdn at tree <t> is blob <b>` | the manifest moved under you; rebase and re-sign |
 | `field tier: receipt covers tier "<a>" but tier "<b>" was requested` | you signed with the default `--tier push`. Re-sign with `--tier ci` |
 | `manifest row id "<id>" is declared twice` | manifest defect; fix the manifest |
@@ -457,8 +519,11 @@ decide is a FAILURE, never a pass. Absence of evidence is never evidence.**
 
 ## 11. Known limits and future work
 
-- **Delivery is unimplemented** (§7). This is the first thing to close.
-- **Patch-id identity is not in the receipt schema** (§8). This is the second.
+- **Publishing the note is manual** (§7): `sign-local-ci-receipt.shs` has no
+  `--note` flag. This is the top usability gap and the first thing to close.
+- **Never exercised on a CI runner.** Every result in this guide is local. The
+  runner-side path — notes fetch, base-policy materialization, the mode
+  decision — has no observed green run yet.
 - **`escalate` degrades to `full`** when the attested tree cannot be materialized
   on the runner. An optional non-identity `attested_commit` fetch hint would fix
   it; it is not built.
@@ -466,12 +531,11 @@ decide is a FAILURE, never a pass. Absence of evidence is never evidence.**
   a verdict grammar (`check-cpu-hotloop-idiom.shs` prints
   `cpu_lane_hotloop_ok=true`, not a `PASS —` line), so receipt rows key on **exit
   status**, not on parsed output.
-- **The conflict-class guards are advisory in `full` mode only.** They record
-  their verdict rather than failing the job there, because they have never run in
-  a CI context before and a brand-new blocking gate that is wrong about CI-shaped
-  ranges would redden every PR. In `sanity` and `escalate` they are blocking, and
-  they are the only enforcement left. Promote them to blocking in all modes once
-  a run of each has been observed green in CI.
+- **The conflict-class guards are blocking in every mode**, including `full`.
+  They have not yet run in a CI context, so if one turns out to be wrong about
+  CI-shaped ranges it will redden PRs; that risk was accepted deliberately over
+  an advisory tier, because in `sanity` and `docs` they are the only enforcement
+  left.
 - **A pure-Simple twin verifier** over `src/lib/common/crypto/ed25519.spl` is the
   recorded upgrade path, so the check stops depending on OpenSSH being on the
   runner. It is blocked on a full-CLI pure-Simple binary being deployed to CI —
