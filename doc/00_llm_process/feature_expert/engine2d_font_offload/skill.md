@@ -87,3 +87,23 @@ self-identifies in its `--version` banner; the admission gate rejects it.
   site could never have resolved. Route audit concluded the `.initialized` guard
   needs no sibling changes. Lane state:
   `.spipe/restart12_engine2d_font_seed_review/state.md`.
+
+**Instantiation from `engine.spl` is REACHABLE — resolved 2026-09-05.**
+An earlier revision of this file said the opposite; it was wrong and is
+corrected here. `backend_metal_font_spec`'s "wires the typed Metal font backend
+only into native Metal constructors" scenario asserted the literal string
+`metal_backend: metal, w: width`, which appears nowhere in `engine.spl` and
+never did. The spec was stale, not the wiring. The real construction path:
+`create_with_backend_fast`, `create_requested_backend` and
+`create_shared_metal_surface` each call `MetalBackend.create()` and then write
+`metal_backend: Some(metal), opencl_backend: nil,` (three occurrences), and
+`MetalBackend.create()` sets the typed `font: MetalFontBackendState` field
+itself. So the Metal font path is constructed every time a native metal backend
+is created. The `"metal-on-vulkan"` compatibility lane uses `VulkanBackend` and
+never sets `metal_backend`, which is why the spec's second assertion was always
+correct. The stale assertion now names the actual fragment and passes.
+
+What remains unproven is narrower and still true: **no Metal device has
+executed the packed path.** The parity spec proves the packer and the frame
+contract without a device, and this host has no Metal-featured binary. Do not
+read a green parity run as evidence the GPU produced correct pixels.

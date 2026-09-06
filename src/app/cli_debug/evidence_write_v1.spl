@@ -1,0 +1,198 @@
+# Writer for the Debug Evidence Bundle V1 contract.
+#
+# Emits exactly the bundle shape `evidence_inspect_v1.spl` reads:
+# `<root>/manifest.sdn`, `<root>/receipts.sdn`, and the artifacts it names
+# under `<root>/artifacts/`. The contract is
+# `doc/07_guide/app/debug/debug_evidence_bundle_contract.md`.
+#
+# It fails closed: an inexact build id, a missing artifact, a duplicate
+# artifact name, an empty artifact list, or a root that already holds a
+# bundle are all rejected rather than half-written.
+#
+# It never claims capability. Every bundle also carries
+# `<root>/normalized/state_capsule.sdn`, a `StateCapabilityReceiptV1` whose
+# six capabilities are all `Unverified` -- bytes in a bundle are not evidence
+# that the bundle can be analyzed, resumed, or replayed. Only the receipt's
+# identity and the six capability statuses are serialized; every other field
+# of the contract is still empty at write time, so emitting it would state
+# nothing.
+
+# TODO: [debug][P2] system-level acceptance spec for `simple debug write <root> --build-id ... <artifact>...` followed by `simple debug inspect <root>` through the real CLI; AC-4 of .spipe/debug_evidence_bundle_writer_wave2 is verified by hand only
+use std.common.encoding.sha256_contract.{sha256_lower_hex_valid}
+use std.common.debug.contracts_v1.{
+    DebugReceiptV1, DebugRootOperationV1, DebugPerturbationV1,
+}
+use std.common.debug.service_v1.{
+    debug_policy_development_v1,
+    central_debug_service_v1_open, central_debug_service_v1_authorize_at,
+    central_debug_service_v1_record_at, central_debug_service_v1_close,
+}
+use std.common.debug.state.capability_receipt_v1.{
+    CapabilityStatus, StateCapabilityReceiptV1,
+    state_capability_receipt_unverified_v1, state_capability_receipt_validate_v1,
+}
+use std.io_runtime.{
+    file_exists, file_copy, file_write, file_hash_sha256, is_file, mkdir_p,
+    time_now_unix_micros,
+}
+
+pub val DEBUG_EVIDENCE_WRITE_CLAIM_SOURCE_V1: text = "evidence_write_v1"
+
+pub struct DebugEvidenceWriteResultV1:
+    bundle_root: text
+    manifest_digest: text
+    receipt_id: text
+    artifact_count: i64
+
+fn _basename_v1(path: text) -> text:
+    var name = path
+    for part in path.split("/"):
+        if part != "": name = part
+    name
+
+fn _safe_basename_v1(name: text) -> bool:
+    if name == "" or name == "." or name == "..": return false
+    if name.contains("\\") or name.contains("/") or name.contains("\0"): return false
+    if name.contains("\"") or name.contains("\n"): return false
+    true
+
+fn _operation_text_v1(operation: DebugRootOperationV1) -> text:
+    match operation:
+        case DebugRootOperationV1.Inspect: "Inspect"
+        case DebugRootOperationV1.Control: "Control"
+        case DebugRootOperationV1.Domain: "Domain"
+        case DebugRootOperationV1.Observe: "Observe"
+        case DebugRootOperationV1.Evidence: "Evidence"
+
+fn _perturbation_text_v1(perturbation: DebugPerturbationV1) -> text:
+    match perturbation:
+        case DebugPerturbationV1.Passive: "Passive"
+        case DebugPerturbationV1.Cooperative: "Cooperative"
+        case DebugPerturbationV1.Stopping: "Stopping"
+        case DebugPerturbationV1.Mutating: "Mutating"
+
+fn _receipt_sdn_v1(receipt: DebugReceiptV1) -> text:
+    "  - receipt_id: \"" + receipt.receipt_id + "\"\n" +
+        "    session_id: \"" + receipt.session_id + "\"\n" +
+        "    operation: " + _operation_text_v1(receipt.operation) + "\n" +
+        "    perturbation: " + _perturbation_text_v1(receipt.perturbation) + "\n" +
+        "    action: \"" + receipt.action + "\"\n" +
+        "    allowed: " + str(receipt.allowed) + "\n" +
+        "    succeeded: " + str(receipt.succeeded) + "\n" +
+        "    execution_changed: " + str(receipt.execution_changed) + "\n" +
+        "    reason: \"" + receipt.reason + "\"\n" +
+        "    captured_at_ns: " + str(receipt.captured_at_ns) + "\n"
+
+fn _capability_sdn_v1(status: CapabilityStatus) -> text:
+    match status:
+        case CapabilityStatus.Supported: "Supported"
+        case CapabilityStatus.Partial(detail, source): "Partial(\"" + detail + "\", \"" + source + "\")"
+        case CapabilityStatus.Blocked(detail, source): "Blocked(\"" + detail + "\", \"" + source + "\")"
+        case CapabilityStatus.Unavailable(detail): "Unavailable(\"" + detail + "\")"
+        case CapabilityStatus.Prohibited(detail): "Prohibited(\"" + detail + "\")"
+        case CapabilityStatus.Unverified(detail): "Unverified(\"" + detail + "\")"
+
+fn _state_capsule_sdn_v1(receipt: StateCapabilityReceiptV1) -> text:
+    "receipt_version: \"" + receipt.receipt_version + "\"\n" +
+        "artifact_id: \"" + receipt.artifact_id + "\"\n" +
+        "analyze: " + _capability_sdn_v1(receipt.analyze) + "\n" +
+        "resume_forward: " + _capability_sdn_v1(receipt.resume_forward) + "\n" +
+        "exact_replay: " + _capability_sdn_v1(receipt.exact_replay) + "\n" +
+        "reverse_execution: " + _capability_sdn_v1(receipt.reverse_execution) + "\n" +
+        "counterfactual_fork: " + _capability_sdn_v1(receipt.counterfactual_fork) + "\n" +
+        "profile_correlation: " + _capability_sdn_v1(receipt.profile_correlation) + "\n" +
+        "proof_receipts: []\n"
+
+pub fn debug_evidence_state_capsule_sdn_v1(artifact_id: text) -> Result<text, text>:
+    """The all-`Unverified` state capability capsule a written bundle carries.
+    Exposed so a caller can recompute the exact bytes the writer emitted
+    without re-deriving the capsule shape by hand."""
+    val receipt = state_capability_receipt_unverified_v1(artifact_id, DEBUG_EVIDENCE_WRITE_CLAIM_SOURCE_V1)
+    state_capability_receipt_validate_v1(receipt)?
+    Ok(_state_capsule_sdn_v1(receipt))
+
+pub fn write_debug_evidence_bundle_v1(root: text, build_id: text, artifact_paths: [text]) -> Result<DebugEvidenceWriteResultV1, text>:
+    if root.trim() == "": return Err("evidence bundle root is empty")
+    if not build_id.starts_with("sha256:") or not sha256_lower_hex_valid(build_id.substring(7, build_id.len())):
+        return Err("evidence bundle build id must be sha256:<64 lowercase hex>")
+    if artifact_paths.len() == 0:
+        return Err("evidence bundle needs at least one artifact")
+    if file_exists(root + "/manifest.sdn"):
+        return Err("evidence bundle already exists at root: " + root)
+
+    var names: [text] = []
+    for source_path in artifact_paths:
+        if not is_file(source_path):
+            return Err("evidence artifact is not a readable file: " + source_path)
+        val name = _basename_v1(source_path)
+        if not _safe_basename_v1(name):
+            return Err("evidence artifact name is unsafe: " + source_path)
+        for existing in names:
+            if existing == name:
+                return Err("duplicate evidence artifact name: " + name)
+        names.push(name)
+
+    if not mkdir_p(root + "/artifacts"): return Err("cannot create " + root + "/artifacts")
+    if not mkdir_p(root + "/normalized"): return Err("cannot create " + root + "/normalized")
+    var digests: [text] = []
+    var i = 0
+    while i < artifact_paths.len():
+        val destination = root + "/artifacts/" + names[i]
+        if not file_copy(artifact_paths[i], destination):
+            return Err("cannot copy evidence artifact: " + artifact_paths[i])
+        val digest = file_hash_sha256(destination)
+        if not sha256_lower_hex_valid(digest):
+            return Err("cannot digest evidence artifact: " + names[i])
+        digests.push(digest)
+        i = i + 1
+
+    val session_id = central_debug_service_v1_open(build_id, debug_policy_development_v1())?
+    val now_ns = time_now_unix_micros() * 1000
+    val authorization = central_debug_service_v1_authorize_at(
+        session_id, DebugRootOperationV1.Evidence, DebugPerturbationV1.Passive, "write-bundle", now_ns)
+    if not authorization.allowed:
+        central_debug_service_v1_close(session_id)
+        return Err(authorization.reason)
+    val outcome = central_debug_service_v1_record_at(
+        session_id, DebugRootOperationV1.Evidence, DebugPerturbationV1.Passive,
+        "write-bundle", true, false, "", now_ns)
+
+    val receipts_path = root + "/receipts.sdn"
+    val receipts_sdn = "receipts:\n" + _receipt_sdn_v1(authorization) + _receipt_sdn_v1(outcome)
+    if not file_write(receipts_path, receipts_sdn):
+        central_debug_service_v1_close(session_id)
+        return Err("cannot write " + receipts_path)
+    val receipts_digest = file_hash_sha256(receipts_path)
+
+    var manifest = "schema: debug-evidence-bundle-v1\n" +
+        "session_id: \"" + session_id.value + "\"\n" +
+        "build_id: \"" + build_id + "\"\n" +
+        "captured_at_ns: " + str(now_ns) + "\n" +
+        "artifacts:\n"
+    i = 0
+    while i < names.len():
+        manifest = manifest + "  - path: \"artifacts/" + names[i] + "\"\n" +
+            "    digest: \"sha256:" + digests[i] + "\"\n"
+        i = i + 1
+    manifest = manifest + "receipts_digest: \"sha256:" + receipts_digest + "\"\n"
+    val manifest_path = root + "/manifest.sdn"
+    if not file_write(manifest_path, manifest):
+        central_debug_service_v1_close(session_id)
+        return Err("cannot write " + manifest_path)
+    val manifest_digest = "sha256:" + file_hash_sha256(manifest_path)
+
+    val capsule = debug_evidence_state_capsule_sdn_v1(manifest_digest)?
+    if not file_write(root + "/normalized/state_capsule.sdn", capsule):
+        central_debug_service_v1_close(session_id)
+        return Err("cannot write " + root + "/normalized/state_capsule.sdn")
+
+    central_debug_service_v1_close(session_id)?
+    Ok(DebugEvidenceWriteResultV1(
+        bundle_root: root,
+        manifest_digest: manifest_digest,
+        receipt_id: outcome.receipt_id,
+        artifact_count: names.len(),
+    ))
+
+export DebugEvidenceWriteResultV1, DEBUG_EVIDENCE_WRITE_CLAIM_SOURCE_V1
+export debug_evidence_state_capsule_sdn_v1, write_debug_evidence_bundle_v1
