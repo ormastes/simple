@@ -15,6 +15,66 @@ use super::super::super::types::*;
 use super::super::*;
 use super::parse_and_lower;
 
+// ---------------------------------------------------------------------------
+// jit_is_some_is_none_method_dispatch_gap_2026-08-17 (silent-wrong-value shape)
+//
+// `.is_some()` / `.is_none()` on a flat-nullable `T?`
+// (`HirType::Pointer { inner: T }`) was typed ANY. With an ANY result MIR
+// carries no boxing, and the Cranelift arm hands `rt_is_some`'s RAW C bool
+// straight to `rt_println_value`: raw `1` is `0b001` = TAG_HEAP and renders
+// `nil`, raw `0` collides with boxed integer zero and renders `0`. Measured on
+// the JIT lane before the fix: `nil / 0 / 0 / nil` where the interpreter says
+// `true / false / false / true`.
+// ---------------------------------------------------------------------------
+
+/// Type of the tail `return <recv>.<method>()` expression in `fn_name`.
+fn tail_method_call_ty(module: &HirModule, fn_name: &str, method_name: &str) -> Option<TypeId> {
+    let function = module.functions.iter().find(|f| f.name == fn_name)?;
+    function.body.iter().find_map(|stmt| match stmt {
+        HirStmt::Return(Some(expr)) => match &expr.kind {
+            HirExprKind::MethodCall { method, .. } if method == method_name => Some(expr.ty),
+            _ => None,
+        },
+        _ => None,
+    })
+}
+
+#[test]
+fn flat_nullable_presence_predicates_are_bool_not_any() {
+    // `is_ok`/`is_err` are deliberately absent: their receivers are genuine
+    // `Result` ENUMs, handled earlier by `lower_builtin_method_call`, and were
+    // measured correct on both engines before and after this change.
+    for method in ["is_some", "is_none"] {
+        let source = format!(
+            "fn produce() -> i64?:\n    return 7\n\nfn probe() -> bool:\n    val a = produce()\n    return a.{}()\n",
+            method
+        );
+        let module = parse_and_lower(&source).expect("flat-nullable presence predicate must lower");
+        assert_eq!(
+            tail_method_call_ty(&module, "probe", method),
+            Some(TypeId::BOOL),
+            ".{}() on a flat-nullable T? must be typed BOOL; ANY leaves the JIT's raw \
+             rt_is_some result unboxed and it renders as nil/0",
+            method
+        );
+    }
+}
+
+#[test]
+fn presence_predicate_bool_typing_does_not_leak_to_other_receivers() {
+    // A user-declared `is_some` returning something else, on a receiver that is
+    // NOT a flat-nullable pointer, must keep its own type — the rule is gated on
+    // `HirType::Pointer`, which a struct receiver is not.
+    let source = "class Boxy:\n    var n: i64\n\n    fn is_some() -> i64:\n        return 7\n\nfn probe() -> i64:\n    val b = Boxy(n: 1)\n    return b.is_some()\n";
+    let module = parse_and_lower(source).expect("struct receiver must lower");
+    let ty = tail_method_call_ty(&module, "probe", "is_some");
+    assert_ne!(
+        ty,
+        Some(TypeId::BOOL),
+        "a user-declared is_some on a non-nullable receiver must not be forced to BOOL"
+    );
+}
+
 #[test]
 fn unmatched_literal_brace_does_not_consume_later_function_scope() {
     let source = r#"fn open_brace(x: text) -> text:
