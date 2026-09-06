@@ -1,0 +1,98 @@
+"""
+## Purpose and audience
+Acceptance oracles for the open remains of
+doc/03_plan/infra/spipe/spipe_knowledge_compiler_refined_plan.md — Slice 2
+(§9), which is entirely unimplemented as of 2026-09-05. Audience: the agent
+landing S2-W (wiring) and S2-E (the eval harness), and the reviewer who must
+decide whether §9.4's definition of done actually holds.
+## Operator workflow
+bin/simple test test/03_system/plan_acceptance/spipe_knowledge_base_spec.spl
+Every scenario calls the interface the plan promises — the `app.spipe.kb`
+facade — rather than inspecting source text, so a run against a tree where
+Slice 2 has not landed fails on the real symbol, not on prose. This is
+deliberate: the plan's own §9.4 forbids proving reachability by asserting a
+symbol exists in a file.
+## Compatibility and limitations
+Tagged in-development: these pin the promised interface and fail until §9's
+packages land. Unsupported: running under the Rust seed, which is
+bootstrap-only and cannot serve as evidence for these claims.
+## Verification guidance and troubleshooting
+A load failure naming `app.spipe.kb` means S2-W has not landed — that is the
+intended in-development signal, not a harness bug. A failure inside a scenario
+body means the facade exists but its contract drifted from §9.4.
+## Lifecycle
+doc/01_research/infra/spipe/llm_knowledge_tooling_landscape_2026-09-05.md
+doc/03_plan/infra/spipe/spipe_knowledge_compiler_refined_plan.md
+doc/04_architecture/infra/spipe/spipe_knowledge_compiler.md
+doc/05_design/infra/spipe/spipe_knowledge_base_architecture.md
+"""
+# @tag:in-development
+# Tracks: doc/03_plan/infra/spipe/spipe_knowledge_compiler_refined_plan.md §9.4
+# doc-path: doc/03_plan/infra/spipe/spipe_knowledge_compiler_refined_plan.md
+# @manual_section: slice-2 acceptance
+
+use std.spec.{describe, it, expect, step}
+use app.spipe.kb.{
+    kb_units,
+    kb_unit_reachable,
+    kb_search,
+    kb_eval_recall_at_k,
+    kb_citation_verify,
+}
+
+describe "plan: SPipe knowledge base — Slice 2 remains":
+
+    it "every knowledge-compiler unit is reachable through the facade":
+        # @req REQ-SPKB-WIRE-001
+        step("Enumerate the units the facade exposes")
+        val units = kb_units()
+        # @capture(statistics): unit count and per-unit reachability verdict
+        step("Confirm the plan's eleven units are all present")
+        expect(units.len()).to_equal(11)  # oracle: plan §1.5 measures 11 units (main.spl + 10 dirs)
+
+        step("Invoke each unit through the facade rather than asserting its symbol exists")
+        var unreachable = 0
+        for u in units:
+            if not kb_unit_reachable(u):
+                unreachable = unreachable + 1
+        expect(unreachable).to_equal(0)  # oracle: §9.4 DoD-1 admits no unreachable unit
+
+    it "a retrieval query returns ranked hits carrying byte-range citations":
+        # @req REQ-SPKB-RETRIEVE-002
+        step("Search the indexed corpus for a term the plan itself contains")
+        val hits = kb_search("admission verdict", 10)
+        # @capture(statistics): hit count, top score, citation spans
+        step("Confirm the query resolved to at least one hit")
+        expect(hits.len()).to_be_greater_than(0)
+
+        step("Confirm every hit carries a citation that verifies offline by re-hashing")
+        var unverified = 0
+        for h in hits:
+            if not kb_citation_verify(h.citation):
+                unverified = unverified + 1
+        expect(unverified).to_equal(0)  # oracle: §9.2 S2-P requires offline-verifiable citations
+
+    it "the eval harness reports an absolute recall number against its gold set":
+        # @req REQ-SPKB-EVAL-003
+        step("Run the gold query set through the eval harness")
+        val recall = kb_eval_recall_at_k(10)
+        # @capture(statistics): recall@10 in per-mille, gold query count
+        step("Confirm the harness returned a real measurement, not a placeholder")
+        expect(recall).to_be_greater_than(0)  # oracle: §9.4 DoD-3 rejects "a number was produced"
+
+        step("Confirm the value is expressed in per-mille and cannot exceed 1000")
+        expect(recall).to_be_less_than(1001)  # oracle: design §2.5 forbids f64; metrics are per-mille i64
+
+    it "rejects a citation whose source bytes changed after indexing":
+        # @req REQ-SPKB-CITE-004
+        step("Search for a term and take the first citation")
+        val hits = kb_search("admission verdict", 1)
+        expect(hits.len()).to_be_greater_than(0)
+
+        step("Corrupt the citation's recorded content hash so re-hashing must disagree")
+        val tampered = hits[0].citation.with_content_hash("0" * 64)
+        # @capture(statistics): tampered citation span and rejection reason
+        step("Confirm the verifier rejects it rather than trusting the recorded span")
+        expect(kb_citation_verify(tampered)).to_equal(false)
+
+    return ()

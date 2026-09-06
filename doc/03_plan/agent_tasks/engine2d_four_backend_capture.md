@@ -44,3 +44,20 @@ status until implemented.
   unrelated active compiler/parser changes; do not push as verified.
 - [x] GitHub fetched on 2026-07-25 (`main`/`main@origin` at `debc189e0047`).
   Rebase/commit/push intentionally deferred until the focused gate passes.
+
+## Refresh 2026-09-05
+
+The focused contract this plan was waiting on now exists:
+`test/03_system/gui/wm_compare/engine2d_four_backend_capture_spec.spl` (8 `it`s,
+0 `fail(` placeholders) over `src/app/wm_compare/backend_2d_capture_evidence.spl`
+(`backend_2d_validate_capture`, `backend_2d_compare_capture`). A green run of it
+is not recorded on this host, so the open box above stays open; the lane
+directories `/root/vulkan_backend` etc. named in the table were paths on the
+authoring host and do not exist on this one (`ls -d /root/vulkan_backend
+/root/metal_backend` → No such file or directory, 2026-09-05).
+
+## Acceptance
+
+Runnable oracles for the remaining open boxes: `test/03_system/plan_acceptance/engine2d_four_backend_capture_spec.spl`
+(tagged `@tag:in-development`; one `it` per open box — see
+`doc/03_plan/agent_tasks/plan_remains_acceptance_2026-09-05.md`).

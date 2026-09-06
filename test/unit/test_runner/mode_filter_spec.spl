@@ -1,147 +1,135 @@
-# Unit tests for mode-specific test filtering logic
-# Self-contained: re-implements filtering functions to avoid import issues
-# with extern-dependent modules (test_runner_files, test_manifest_scanner)
+"""
+## Purpose and audience
+Pins the mode-annotation contract of the test runner: how `# @mode:` and
+`# @skip_mode:` comments are extracted from a spec file and how the
+extracted tags decide whether a file runs under a given execution mode
+(interpreter, native, smf, all-modes). Written for maintainers of the
+test-runner mode filter and for authors annotating specs with mode gates.
+## Operator workflow
+./src/compiler_rust/target/bootstrap/simple run test/01_unit/test_runner/mode_filter_spec.spl
+## Compatibility and limitations
+Exercises the public std.test_runner.mode_filter surface only; the manifest
+scanner lane that feeds it is covered by the integration suites. A
+bootstrap-only host without the `run` subcommand cannot execute this file.
+## Verification guidance and troubleshooting
+A failure names the exact extraction or matching rule that drifted. Rerun
+the single scenario and compare the observed tag string or verdict with the
+oracle comment on the failing expect line.
+"""
+# Lifecycle: doc/01_research/domain/sspec_documentization_maintenance.md ;
+# doc/03_plan/sspec_modernization_plan.md ;
+# doc/04_architecture/sspec_documentization_maintenance.md ;
+# doc/05_design/app/testing/in_development_tag.md
+# @manual_section: mode-filter
 
-# --- Inline extract_mode_tags (mirrors test_manifest_scanner.extract_mode_tags) ---
-fn _extract_mode_tags(content: text) -> text:
-    var tags: [text] = []
-    val lines = content.split("\n")
-    for line in lines:
-        val trimmed = line.trim()
-        if trimmed.starts_with("# @mode:"):
-            val tag = trimmed[8:].trim()
-            if tag != "":
-                val parts = tag.split(",")
-                for part in parts:
-                    val p = part.trim()
-                    if p != "":
-                        tags.push(p)
-        elif trimmed.starts_with("# skip-marker-removed_mode:"):
-            val tag = trimmed[13:].trim()
-            if tag != "":
-                val parts = tag.split(",")
-                for part in parts:
-                    val p = part.trim()
-                    if p != "":
-                        tags.push("!{p}")
-    tags.join(",")
+use std.test_runner.mode_filter.{extract_mode_tags, file_mode_matches, file_get_mode_tags}
 
-# --- Inline file_mode_matches (mirrors test_runner_files.file_mode_matches) ---
-fn _file_mode_matches(mode_tags: text, mode_name: text) -> bool:
-    if mode_tags == "":
-        return true
-    if mode_name == "all-modes":
-        return true
-    val tags = mode_tags.split(",")
-    var has_positive = false
-    var has_skip = false
-    for tag in tags:
-        val t = tag.trim()
-        if t == "":
-            continue
-        if t.starts_with("!"):
-            val skip_name = t[1:]
-            if skip_name == mode_name:
-                return false
-            has_skip = true
-        else:
-            has_positive = true
-            if t == mode_name:
-                return true
-    if has_skip and not has_positive:
-        return true
-    if has_positive:
-        return false
-    true
+describe "mode-tag extraction":
+    it "returns no tags for a file without annotations":
+        # @req REQ-TR-MODEFILTER-001
+        # @capture(bit_table): tag extraction of an unannotated fixture
+        step("Extract tags from a fixture that carries no mode comments")
+        val unannotated_fixture = "# just a comment\ndescribe \"foo\":\n    it \"runs\":\n        step(\"probe\")\n"
+        expect(extract_mode_tags(unannotated_fixture)).to_equal("")
 
-# --- Inline file_get_mode_tags (mirrors test_runner_files.file_get_mode_tags) ---
-fn _file_get_mode_tags(content: text) -> [text]:
-    val lines = content.split("\n")
-    var tags: [text] = []
-    for line in lines:
-        val trimmed = line.trim()
-        if trimmed.starts_with("# @mode:"):
-            val tag = trimmed[8:].trim()
-            if tag != "":
-                val parts = tag.split(",")
-                for part in parts:
-                    val p = part.trim()
-                    if p != "":
-                        tags.push(p)
-        elif trimmed.starts_with("# skip-marker-removed_mode:"):
-            val tag = trimmed[13:].trim()
-            if tag != "":
-                val parts = tag.split(",")
-                for part in parts:
-                    val p = part.trim()
-                    if p != "":
-                        tags.push("!{p}")
-    tags
+    it "extracts a single mode tag":
+        # @req REQ-TR-MODEFILTER-002
+        # @capture(bit_table): tag extraction of a single-mode fixture
+        step("Extract tags from a fixture annotated for one mode")
+        val single_mode_fixture = "# @mode: interpreter\ndescribe \"foo\":\n    it \"runs\":\n        step(\"probe\")\n"
+        expect(extract_mode_tags(single_mode_fixture)).to_equal("interpreter")
 
-describe "extract_mode_tags":
-    it "returns empty for no annotations":
-        val content = "# just a comment\ndescribe \"foo\":\n    pass_do_nothing\n"
-        expect(_extract_mode_tags(content)).to_equal("")
-
-    it "extracts single mode tag":
-        val content = "# @mode: interpreter\ndescribe \"foo\":\n    pass_do_nothing\n"
-        expect(_extract_mode_tags(content)).to_equal("interpreter")
-
-    it "extracts multi-mode tag":
-        val content = "# @mode: interpreter, native\ndescribe \"foo\":\n    pass_do_nothing\n"
-        expect(_extract_mode_tags(content)).to_equal("interpreter,native")
+    it "extracts a multi-mode tag":
+        # @req REQ-TR-MODEFILTER-003
+        # @capture(bit_table): tag extraction of a two-mode fixture
+        step("Extract tags from a fixture annotated for two modes")
+        val multi_mode_fixture = "# @mode: interpreter, native\ndescribe \"foo\":\n    it \"runs\":\n        step(\"probe\")\n"
+        expect(extract_mode_tags(multi_mode_fixture)).to_equal("interpreter,native")
 
     it "extracts skip_mode as negated":
-        val content = "# skip-marker-removed_mode: native\ndescribe \"foo\":\n    pass_do_nothing\n"
-        expect(_extract_mode_tags(content)).to_equal("!native")
+        # @req REQ-TR-MODEFILTER-004
+        # @capture(bit_table): negated tag extraction for skip_mode
+        step("Extract tags from a fixture that skips one mode")
+        val skip_mode_fixture = "# @skip_mode: native\ndescribe \"foo\":\n    it \"runs\":\n        step(\"probe\")\n"
+        expect(extract_mode_tags(skip_mode_fixture)).to_equal("!native")
 
     it "extracts skip_mode with multiple modes":
-        val content = "# skip-marker-removed_mode: native, smf\ndescribe \"foo\":\n    pass_do_nothing\n"
-        expect(_extract_mode_tags(content)).to_equal("!native,!smf")
+        # @req REQ-TR-MODEFILTER-005
+        # @capture(bit_table): negated tag extraction for two skip modes
+        step("Extract tags from a fixture that skips two modes")
+        val multi_skip_fixture = "# @skip_mode: native, smf\ndescribe \"foo\":\n    it \"runs\":\n        step(\"probe\")\n"
+        expect(extract_mode_tags(multi_skip_fixture)).to_equal("!native,!smf")
 
-describe "file_mode_matches":
-    it "empty tags match everything":
-        expect(_file_mode_matches("", "interpreter")).to_equal(true)
-        expect(_file_mode_matches("", "native")).to_equal(true)
-        expect(_file_mode_matches("", "smf")).to_equal(true)
+describe "mode verdict matching":
+    it "treats untagged files as runnable under every mode":
+        # @req REQ-TR-MODEFILTER-006
+        # @capture(bit_table): default-allow verdicts for an untagged file
+        step("Match an empty tag string against each execution mode")
+        expect(file_mode_matches("", "interpreter")).to_equal(true)
+        expect(file_mode_matches("", "native")).to_equal(true)
+        expect(file_mode_matches("", "smf")).to_equal(true)
 
-    it "AllModes always matches":
-        expect(_file_mode_matches("interpreter", "all-modes")).to_equal(true)
-        expect(_file_mode_matches("!native", "all-modes")).to_equal(true)
+    it "always runs a file under the all-modes selector":
+        # @req REQ-TR-MODEFILTER-007
+        # @capture(bit_table): all-modes override verdicts
+        step("Match positive and skip tags against the all-modes selector")
+        expect(file_mode_matches("interpreter", "all-modes")).to_equal(true)
+        expect(file_mode_matches("!native", "all-modes")).to_equal(true)
 
-    it "positive tag matches correct mode":
-        expect(_file_mode_matches("interpreter", "interpreter")).to_equal(true)
-        expect(_file_mode_matches("interpreter", "native")).to_equal(false)
+    it "matches a positive tag only for its own mode":
+        # @req REQ-TR-MODEFILTER-008
+        # @capture(bit_table): positive-tag verdict for the matching and foreign modes
+        step("Match one positive tag against its own and a foreign mode")
+        expect(file_mode_matches("interpreter", "interpreter")).to_equal(true)
+        expect(file_mode_matches("interpreter", "native")).to_equal(false)
 
-    it "multi-positive tags match any listed mode":
-        expect(_file_mode_matches("interpreter,native", "interpreter")).to_equal(true)
-        expect(_file_mode_matches("interpreter,native", "native")).to_equal(true)
-        expect(_file_mode_matches("interpreter,native", "smf")).to_equal(false)
+    it "matches a multi-positive tag under any listed mode":
+        # @req REQ-TR-MODEFILTER-009
+        # @capture(bit_table): multi-positive verdicts for listed and unlisted modes
+        step("Match a two-mode tag string against listed and unlisted modes")
+        expect(file_mode_matches("interpreter,native", "interpreter")).to_equal(true)
+        expect(file_mode_matches("interpreter,native", "native")).to_equal(true)
+        expect(file_mode_matches("interpreter,native", "smf")).to_equal(false)
 
-    it "skip tag excludes matching mode":
-        expect(_file_mode_matches("!native", "native")).to_equal(false)
-        expect(_file_mode_matches("!native", "interpreter")).to_equal(true)
-        expect(_file_mode_matches("!native", "smf")).to_equal(true)
+    it "rejects a mode named by a skip tag":
+        # @req REQ-TR-MODEFILTER-010
+        # @capture(bit_table): skip-tag exclusion and passthrough verdicts
+        step("Match a skip tag against the excluded and surviving modes")
+        expect(file_mode_matches("!native", "native")).to_equal(false)
+        expect(file_mode_matches("!native", "interpreter")).to_equal(true)
+        expect(file_mode_matches("!native", "smf")).to_equal(true)
 
-    it "multiple skip tags exclude all listed":
-        expect(_file_mode_matches("!native,!smf", "native")).to_equal(false)
-        expect(_file_mode_matches("!native,!smf", "smf")).to_equal(false)
-        expect(_file_mode_matches("!native,!smf", "interpreter")).to_equal(true)
+    it "rejects every mode named by multiple skip tags":
+        # @req REQ-TR-MODEFILTER-011
+        # @capture(bit_table): multi-skip exclusion verdicts across three modes
+        step("Match two skip tags against both excluded and surviving modes")
+        expect(file_mode_matches("!native,!smf", "native")).to_equal(false)
+        expect(file_mode_matches("!native,!smf", "smf")).to_equal(false)
+        expect(file_mode_matches("!native,!smf", "interpreter")).to_equal(true)
 
-describe "file_get_mode_tags":
-    it "returns empty list for no annotations":
-        val content = "# nothing here\n"
-        val tags = _file_get_mode_tags(content)
-        expect(tags.len()).to_equal(0)
+describe "tag list projection":
+    it "returns an empty tag list for a file without annotations":
+        # @req REQ-TR-MODEFILTER-012
+        # @capture(statistics): empty tag-list projection for an unannotated file
+        step("Project the tag list of an unannotated fixture")
+        val unannotated_content = "# nothing here\n"
+        val projected_tags = file_get_mode_tags(unannotated_content)
+        expect(projected_tags.len()).to_equal(0)  # oracle: no annotation comments means an empty tag list
 
-    it "extracts mode tags as list":
-        val content = "# @mode: interpreter\n"
-        val tags = _file_get_mode_tags(content)
-        expect(tags.len()).to_equal(1)
-        expect(tags[0]).to_equal("interpreter")
+    it "projects mode annotations into a positive tag list":
+        # @req REQ-TR-MODEFILTER-013
+        # @capture(statistics): single-tag list projection for one mode annotation
+        step("Project the tag list of a single-mode fixture")
+        val single_mode_content = "# @mode: interpreter\n"
+        val listed_tags = file_get_mode_tags(single_mode_content)
+        expect(listed_tags.len()).to_equal(1)  # oracle: exactly one annotation yields exactly one tag
+        expect(listed_tags[0]).to_equal("interpreter")
 
-    it "extracts skip_mode tags with ! prefix":
-        val content = "# skip-marker-removed_mode: native\n"
-        val tags = _file_get_mode_tags(content)
-        expect(tags.len()).to_equal(1)
-        expect(tags[0]).to_equal("!native")
+    it "projects skip_mode annotations with the ! prefix":
+        # @req REQ-TR-MODEFILTER-014
+        # @capture(statistics): negated tag-list projection for a skip annotation
+        step("Project the tag list of a skip-mode fixture")
+        val skip_mode_content = "# @skip_mode: native\n"
+        val skip_tags = file_get_mode_tags(skip_mode_content)
+        expect(skip_tags.len()).to_equal(1)  # oracle: exactly one skip annotation yields exactly one negated tag
+        expect(skip_tags[0]).to_equal("!native")

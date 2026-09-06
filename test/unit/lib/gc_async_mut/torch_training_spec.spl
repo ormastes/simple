@@ -1,146 +1,144 @@
-# Torch Training Components Tests
-#
-# Tests for loss functions (MSELoss, CrossEntropyLoss),
-# optimizers (SGD, Adam, RMSprop), and utility functions.
-# Note: Tests verify API structure and state, not actual tensor computation
-# (which requires CUDA hardware).
+"""
+## Purpose and audience
+Exercises the torch training stack in `std.gc_async_mut.torch.torch_training` —
+loss criteria, the SGD/Adam/RMSprop optimizers, seed utilities, no_grad, and
+the Sequential container — on the state and contracts that hold without a CUDA
+device. Audience: maintainers of the torch SFFI surface and the ML training
+lanes that consume it.
+## Operator workflow
+Run this file alone with the seed runner:
+`./src/compiler_rust/target/bootstrap/simple run test/unit/lib/gc_async_mut/torch_training_spec.spl`
+## Compatibility and limitations
+The forward-pass SFFI symbols (rt_torch_nn_mse_loss, rt_torch_nn_cross_entropy,
+rt_torch_tensor_randn for Linear init) and rt_torch_stream_create are not
+backed in the current build, so loss/layer forward paths are not asserted
+here. The stream scenario is kept deliberately RED — it asserts the create
+contract the unbacked symbol denies, and stays failing until the runtime
+exposes it. Optimizer step() runs are gradient-free: with no autograd graph
+attached, step updates are no-ops by design and only state transitions
+(timestep, velocity bookkeeping) are asserted.
+## Verification guidance and troubleshooting
+A failure in the optimizer-state scenarios means constructor bookkeeping
+(velocities, moments, timestep) drifted from the create() contracts in
+torch_training.spl; rerun the file alone and compare against
+`src/lib/gc_async_mut/torch/torch_training.spl`. The stream scenario failing
+with `unknown extern function: rt_torch_stream_create` is the known gap, not a
+regression of this file.
+"""
+# Lifecycle: doc/01_research/domain/gpu_dynamic_backend_full_offload.md ;
+# doc/03_plan/agent_tasks/gpu_dynamic_backend_full_offload.md ;
+# doc/04_architecture/gpu_dynamic_backend_full_offload.md ;
+# doc/05_design/gpu_dynamic_backend_full_offload.md
+# @manual_section: torch_training_stack
 
 use std.spec.step
+use std.gc_async_mut.torch.mod.Tensor
+use std.gc_async_mut.torch.torch_training.{SGD, Adam, RMSprop, MSELoss, CrossEntropyLoss, Sequential, Stream, set_seed, manual_seed, no_grad}
 
-describe "Loss Functions":
-    # @manual scenario evidence
-    describe "MSELoss":
-        it "creates MSELoss instance":
-            # MSELoss.create() returns loss function
-            val created = true
-            expect(created).to_equal(true)
+fn _two_zero_params() -> [Tensor]:
+    [Tensor.zeros([3]), Tensor.zeros([4])]
 
-        it "computes loss from pred and target tensors":
-            # forward(pred, target) returns scalar loss tensor
-            # Uses rt_torch_nn_mse_loss FFI
-            val loss_computed = true
-            expect(loss_computed).to_equal(true)
+describe "Loss criteria":
+    it "constructs MSE and cross-entropy criteria for the training loop":
+        # @req REQ-TORCH-TRAIN-001
+        # @capture(statistics): constructed criterion objects retained as evidence
+        step("Construct both loss criteria through their create factories")
+        val mse = MSELoss.create()
+        val ce = CrossEntropyLoss.create()
+        expect(mse).to_be_truthy()  # oracle: create() must yield a usable criterion object
+        expect(ce).to_be_truthy()  # oracle: create() must yield a usable criterion object
 
-    describe "CrossEntropyLoss":
-        it "creates CrossEntropyLoss instance":
-            # CrossEntropyLoss.create() returns loss function
-            val created = true
-            expect(created).to_equal(true)
+describe "SGD optimizer":
+    it "initializes one velocity per parameter":
+        # @req REQ-TORCH-TRAIN-002
+        # @capture(statistics): SGD constructor state retained as evidence
+        step("Create SGD over two parameters with lr 1 and no momentum")
+        val sgd = SGD.create(_two_zero_params(), 1, 0)
+        expect(sgd.velocities.len()).to_equal(2)  # oracle: each parameter gets its own velocity tensor
+        expect(sgd.parameters.len()).to_equal(2)  # oracle: constructor retains every parameter
+        expect(sgd.lr).to_equal(1)  # oracle: learning rate is stored as given
 
-        it "computes cross-entropy from logits and targets":
-            # forward(logits, targets) returns scalar loss
-            # Uses rt_torch_nn_cross_entropy FFI
-            val loss_computed = true
-            expect(loss_computed).to_equal(true)
+    it "runs gradient-free step and zero_grad without disturbing the table":
+        # @req REQ-TORCH-TRAIN-002
+        # @capture(statistics): post-step SGD state retained as evidence
+        step("Step and zero-grad an optimizer whose parameters carry no autograd graph")
+        val sgd = SGD.create(_two_zero_params(), 1, 0)
+        sgd.step()
+        sgd.zero_grad()
+        expect(sgd.velocities.len()).to_equal(2)  # oracle: a gradient-free step leaves velocity bookkeeping intact
 
-describe "Optimizers":
-    describe "SGD":
-        it "creates SGD with parameters and learning rate":
-            # SGD.create(params, lr, momentum) initializes velocities
-            val lr = 0
-            val momentum = 0
-            expect(lr).to_equal(0)  # oracle: expected value 0 is the behavior asserted by this regression spec
+describe "Adam optimizer":
+    it "initializes first and second moments per parameter":
+        # @req REQ-TORCH-TRAIN-002
+        # @capture(statistics): Adam constructor state retained as evidence
+        step("Create Adam over two parameters")
+        val adam = Adam.create(_two_zero_params(), 1, 0, 0)
+        expect(adam.m.len()).to_equal(2)  # oracle: one first-moment tensor per parameter
+        expect(adam.v.len()).to_equal(2)  # oracle: one second-moment tensor per parameter
+        expect(adam.t).to_equal(0)  # oracle: the timestep starts at zero before any step
 
-        it "initializes velocity tensors to zeros":
-            # Each parameter gets a corresponding velocity tensor
-            val num_params = 3
-            val num_velocities = 3
-            expect(num_params).to_equal(num_velocities)
+    it "increments the timestep on every step call":
+        # @req REQ-TORCH-TRAIN-002
+        # @capture(statistics): Adam timestep progression retained as evidence
+        step("Step the optimizer twice and read the timestep")
+        val adam = Adam.create(_two_zero_params(), 1, 0, 0)
+        adam.step()
+        adam.step()
+        expect(adam.t).to_equal(2)  # oracle: step() advances self.t exactly once per call
 
-        it "step updates parameters using gradient":
-            # velocity = momentum * velocity + lr * grad
-            # param = param - velocity
-            val updated = true
-            expect(updated).to_equal(true)
+describe "RMSprop optimizer":
+    it "initializes the running average per parameter":
+        # @req REQ-TORCH-TRAIN-002
+        # @capture(statistics): RMSprop constructor state retained as evidence
+        step("Create RMSprop over two parameters with alpha zero")
+        val opt = RMSprop.create(_two_zero_params(), 1, 0, 0)
+        expect(opt.v.len()).to_equal(2)  # oracle: one running-average tensor per parameter
+        expect(opt.alpha).to_equal(0)  # oracle: smoothing constant is stored as given
 
-        it "zero_grad clears all gradients":
-            val cleared = true
-            expect(cleared).to_equal(true)
+describe "Seed utilities":
+    it "fails closed on set_seed until the runtime exposes manual seeding":
+        # @req REQ-TORCH-TRAIN-003
+        # @capture(statistics): fail-closed seed verdict retained as evidence
+        step("Request a manual seed and check the reported status")
+        expect(set_seed(42)).to_equal("unsupported")  # oracle: no rt_torch_manual_seed SFFI exists, so the helper must not claim reproducibility
 
-    describe "Adam":
-        it "creates Adam with beta1 and beta2":
-            # Adam.create(params, lr, beta1, beta2)
-            val beta1 = 0
-            val beta2 = 0
-            expect(beta1).to_equal(0)  # oracle: expected value 0 is the behavior asserted by this regression spec
+    it "aliases manual_seed to the same fail-closed contract":
+        # @req REQ-TORCH-TRAIN-003
+        # @capture(statistics): alias seed verdict retained as evidence
+        step("Request a seed through the manual_seed alias")
+        expect(manual_seed(123)).to_equal("unsupported")  # oracle: the alias must agree with set_seed, not invent a second behavior
 
-        it "initializes first and second moment estimates":
-            # m (first moment) and v (second moment) per parameter
-            val num_m = 3
-            val num_v = 3
-            expect(num_m).to_equal(num_v)
+    it "runs a callback under no_grad and restores the autograd state":
+        # @req REQ-TORCH-TRAIN-003
+        # @capture(statistics): post-no_grad seed status retained as evidence
+        step("Execute a callback inside the no_grad scope")
+        no_grad(\():
+            set_seed(7)
+        )
+        expect(set_seed(8)).to_equal("unsupported")  # oracle: the no_grad begin/end SFFI pair must leave the runtime responsive after scope exit
 
-        it "increments timestep on each step":
-            # self.t = self.t + 1 at start of step()
-            var t = 0
-            t = t + 1
-            expect(t).to_equal(1)  # oracle: expected value 1 is the behavior asserted by this regression spec
+describe "Sequential container":
+    it "creates an empty container with no layers":
+        # @req REQ-TORCH-TRAIN-004
+        # @capture(statistics): empty-container layer counts retained as evidence
+        step("Create a Sequential container and inspect both layer tables")
+        val seq = Sequential.create()
+        expect(seq.layers_linear.len()).to_equal(0)  # oracle: a fresh container holds no linear layers
+        expect(seq.layers_conv2d.len()).to_equal(0)  # oracle: a fresh container holds no conv layers
 
-        it "applies bias correction":
-            # m_hat = m / (1 - beta1^t)
-            # v_hat = v / (1 - beta2^t)
-            val bias_corrected = true
-            expect(bias_corrected).to_equal(true)
+    it "forwards a tensor unchanged through an empty container":
+        # @req REQ-TORCH-TRAIN-004
+        # @capture(statistics): identity-forward tensor handles retained as evidence
+        step("Forward a tensor through the empty container")
+        val seq = Sequential.create()
+        val x = Tensor.zeros([2])
+        val y = seq.forward(x)
+        expect(y.handle).to_equal(x.handle)  # oracle: with zero layers the forward pass is the identity
 
-    describe "RMSprop":
-        it "creates RMSprop with alpha and eps":
-            # RMSprop.create(params, lr, alpha, eps)
-            val alpha = 0
-            val eps = 0
-            expect(alpha).to_equal(0)  # oracle: expected value 0 is the behavior asserted by this regression spec
-
-        it "tracks running average of squared gradients":
-            # v = alpha * v + (1 - alpha) * grad^2
-            val tracked = true
-            expect(tracked).to_equal(true)
-
-describe "Utility Functions":
-    it "no_grad calls function without gradient tracking":
-        # no_grad(f) calls f() (placeholder implementation)
-        val called = true
-        expect(called).to_equal(true)
-
-    it "set_seed is documented no-op":
-        # No rt_torch_manual_seed FFI available yet
-        val seed = 42
-        expect(seed).to_equal(42)  # oracle: expected value 42 is the behavior asserted by this regression spec
-
-    it "manual_seed aliases set_seed":
-        val seed = 123
-        expect(seed).to_equal(123)  # oracle: expected value 123 is the behavior asserted by this regression spec
-
-describe "Sequential Container":
-    it "creates empty Sequential":
-        # Sequential.create() with empty layer lists
-        val num_linear = 0
-        val num_conv = 0
-        expect(num_linear).to_equal(0)  # oracle: expected value 0 is the behavior asserted by this regression spec
-
-    it "adds Linear layers":
-        var count = 0
-        count = count + 1
-        expect(count).to_equal(1)  # oracle: expected value 1 is the behavior asserted by this regression spec
-
-    it "forward passes through all layers in order":
-        # Linear layers first, then Conv2d layers
-        val order_correct = true
-        expect(order_correct).to_equal(true)
-
-    it "collects parameters from all layers":
-        # parameters() concatenates params from all layers
-        val all_params_count = 4
-        expect(all_params_count).to_be_greater_than(0)
-
-describe "Stream":
-    it "creates CUDA stream for device":
-        # Stream.create(device_id) via rt_torch_stream_create
-        val device_id = 0
-        expect(device_id).to_equal(0)  # oracle: expected value 0 is the behavior asserted by this regression spec
-
-    it "synchronize waits for completion":
-        val synced = true
-        expect(synced).to_equal(true)
-
-    it "query checks completion status":
-        val completed = true
-        expect(completed).to_equal(true)
+describe "CUDA stream":
+    it "creates a stream bound to device 0":
+        # @req REQ-TORCH-TRAIN-004
+        # @capture(statistics): stream creation attempt retained as evidence
+        step("Create a stream for device 0 through the SFFI path")
+        val s = Stream.create(0)
+        expect(s.device_id).to_equal(0)  # oracle: the stream must report the device it was created for

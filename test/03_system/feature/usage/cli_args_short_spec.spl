@@ -3,103 +3,120 @@
 
 **Feature ID:** #CLI-003
 **Category:** Language | CLI
-**Status:** Draft
+**Status:** Implemented
 
-## Overview
+## Purpose and audience
+Purpose: pin short-option behavior — single-dash flags, single-dash value
+options, explicit short overrides, and conflict resolution — through the real
+CLI parser (std.nogc_sync_mut.cli.cli_parser) that the `cli` keyword's
+generated parsers build on, instead of comparing locally constructed
+literals. An empty short must never match, an unknown short must fall through
+to `remaining` without touching defaults, and an explicit uppercase short
+must stay distinct from lowercase.
+Audience: language/CLI engineers who maintain the `cli` keyword and the
+nogc_sync_mut CLI parser.
 
-Tests short name generation and explicit short name overrides for CLI options.
-The cli keyword auto-generates single-character short names from the first
-letter of the option name, with conflict resolution when multiple options
-share the same first letter.
+## Operator workflow
+Run `src/compiler_rust/target/bootstrap/simple run
+test/03_system/feature/usage/cli_args_short_spec.spl` and confirm every
+example passes. Each scenario starts with a Verify step and checks parsed
+values against inline `# oracle:` comments.
 
-## Syntax
+## Compatibility and limitations
+Covers only the parser behaviors asserted below on the current toolchain.
+The `cli:` keyword desugaring that generates these parser calls end to end
+is exercised by the compiler suites, not here.
 
-```simple
-cli:
-    verbose: false                # auto-short: -v
-    output: "out.txt"             # auto-short: -o
-    count: 1, short: "c"         # explicit short: -c
-    color: true, short: "C"      # explicit short: -C (avoids conflict with count)
-```
-
+## Verification guidance and troubleshooting
+On failure, read the first failing Verify step and compare the reported
+parsed value against its inline `# oracle:` comment; re-run this single spec
+before bisecting parser changes.
 """
 
+# Lifecycle: doc/01_research/domain/sspec_documentization_maintenance.md ;
+# plan doc/03_plan/sspec_modernization_plan.md ;
+# architecture doc/04_architecture/sspec_documentization_maintenance.md ;
+# design doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
 
+use std.spec.step
+use std.nogc_sync_mut.cli.cli_parser.{
+    cli_spec, cli_spec_flag, cli_spec_option, parse_cli_args, parsed_flag, parsed_option
+}
 
-# ============================================================================
-# CLI Args Short Names
-# ============================================================================
+# @manual_section: CLI args short names
 
 describe "CLI Args Short Names":
-    # @manual scenario evidence
-    # ## Short Name Generation and Conflict Resolution
-    #
-    # Tests auto-generation of short names and explicit overrides.
+    it "short flag form toggles its long flag":
+        # @req REQ-SSPEC-SYSTEM
+        # @capture(bit_table): verbose flag state before and after -v
+        step("Verify: define verbose with short v and parse only -v")
+        val spec = cli_spec_flag(cli_spec(), "verbose", "v", "verbose output")
+        val quiet = parse_cli_args(spec, [])
+        expect(parsed_flag(quiet, "verbose")).to_equal(false)  # oracle: flag default is false
+        val parsed = parse_cli_args(spec, ["-v"])
+        expect(parsed_flag(parsed, "verbose")).to_equal(true)  # oracle: -v toggles the long flag
 
-    context "auto-generated short names":
-        it "generates short from first letter":
-            # cli:
-            #     verbose: false
-            # cli.parse(["-v"]) should set verbose = true
-            val short_name = "v"
-            expect(short_name).to_equal("v")
+    it "short option form consumes the following value":
+        # @req REQ-SSPEC-SYSTEM
+        # @capture(bit_table): output option default and -o parsed value
+        step("Verify: define output with short o and parse -o file.txt")
+        val spec = cli_spec_option(cli_spec(), "output", "o", "output path", "default.txt", [])
+        val untouched = parse_cli_args(spec, [])
+        expect(parsed_option(untouched, "output")).to_equal("default.txt")  # oracle: default retained
+        val parsed = parse_cli_args(spec, ["-o", "file.txt"])
+        expect(parsed_option(parsed, "output")).to_equal("file.txt")  # oracle: -o consumes next arg
 
-        it "generates short for string option":
-            # cli:
-            #     output: "default.txt"
-            # cli.parse(["-o", "file.txt"]) should set output = "file.txt"
-            val short_name = "o"
-            expect(short_name).to_equal("o")
+    it "short int option parses its numeric value":
+        # @req REQ-SSPEC-SYSTEM
+        # @capture(bit_table): count option default and -c parsed value
+        step("Verify: define count with short c and parse -c 5")
+        val spec = cli_spec_option(cli_spec(), "count", "c", "repeat count", "1", [])
+        val parsed = parse_cli_args(spec, ["-c", "5"])
+        expect(parsed_option(parsed, "count").to_i64()).to_equal(5)  # oracle: -c value round-trips as int
 
-        it "generates short for int option":
-            # cli:
-            #     count: 1
-            # cli.parse(["-c", "5"]) should set count = 5
-            val short_name = "c"
-            expect(short_name).to_equal("c")
+    it "explicit short name routes to its own option":
+        # @req REQ-SSPEC-SYSTEM
+        # @capture(bit_table): threads option parsed through explicit -t
+        step("Verify: define threads with explicit short t and parse -t 8")
+        val spec = cli_spec_option(cli_spec(), "threads", "t", "worker threads", "4", [])
+        val parsed = parse_cli_args(spec, ["-t", "8"])
+        expect(parsed_option(parsed, "threads").to_i64()).to_equal(8)  # oracle: explicit -t overrides default 4
 
-    context "explicit short names":
-        it "uses explicit short name":
-            # cli:
-            #     threads: 4, short: "t"
-            # cli.parse(["-t", "8"]) should set threads = 8
-            val explicit_short = "t"
-            expect(explicit_short).to_equal("t")
+    it "uppercase short name stays distinct from its lowercase form":
+        # @req REQ-SSPEC-SYSTEM
+        # @capture(bit_table): color flag state after -C
+        step("Verify: define color with short C and parse -C")
+        val spec = cli_spec_flag(cli_spec(), "color", "C", "color output")
+        val parsed = parse_cli_args(spec, ["-C"])
+        expect(parsed_flag(parsed, "color")).to_equal(true)  # oracle: uppercase -C toggles color
 
-        it "allows uppercase short name":
-            # cli:
-            #     color: true, short: "C"
-            # cli.parse(["-C"]) should toggle color
-            val explicit_short = "C"
-            expect(explicit_short).to_equal("C")
+    it "conflicting option without a short keeps only its long form":
+        # @req REQ-SSPEC-SYSTEM
+        # @capture(bit_table): count with -c, color with empty short
+        step("Verify: give count short c and color an empty short, then parse -C")
+        val with_count = cli_spec_option(cli_spec(), "count", "c", "repeat count", "1", [])
+        val spec = cli_spec_flag(with_count, "color", "", "color output")
+        val parsed = parse_cli_args(spec, ["-C"])
+        expect(parsed_flag(parsed, "color")).to_equal(false)  # oracle: empty short never matches
+        expect(parsed.remaining.len()).to_equal(1)  # oracle: unmatched -C is preserved as remaining
+        expect(parsed.remaining[0]).to_equal("-C")  # oracle: the exact unmatched token
 
-    context "conflict resolution":
-        it "skips short when conflict exists":
-            # cli:
-            #     count: 1
-            #     color: true
-            # First option gets -c, second has no auto-short (conflict)
-            val first_short = "c"
-            val second_short = ""
-            expect(first_short).to_equal("c")
-            expect(second_short).to_equal("")
+    it "explicit short resolves a first-letter conflict":
+        # @req REQ-SSPEC-SYSTEM
+        # @capture(bit_table): count via -c and color via explicit -C
+        step("Verify: count takes c and color takes explicit C, both parse")
+        val with_count = cli_spec_option(cli_spec(), "count", "c", "repeat count", "1", [])
+        val spec = cli_spec_flag(with_count, "color", "C", "color output")
+        val counted = parse_cli_args(spec, ["-c", "5"])
+        expect(parsed_option(counted, "count").to_i64()).to_equal(5)  # oracle: count keeps short c
+        val colored = parse_cli_args(spec, ["-C"])
+        expect(parsed_flag(colored, "color")).to_equal(true)  # oracle: explicit -C reaches color
 
-        it "resolves conflict with explicit short":
-            # cli:
-            #     count: 1
-            #     color: true, short: "C"
-            # count gets -c, color gets -C (explicit)
-            val count_short = "c"
-            val color_short = "C"
-            expect(count_short).to_equal("c")
-            expect(color_short).to_equal("C")
-
-        it "handles no available short name":
-            # cli:
-            #     alpha: false
-            #     append: true
-            # alpha gets -a, append gets no short (conflict, no explicit)
-            val alpha_short = "a"
-            val append_short = ""
-            expect(alpha_short).to_equal("a")
-            expect(append_short).to_equal("")
+    it "invalid short flag is unknown and leaves every default intact":
+        # @req REQ-SSPEC-SYSTEM
+        # @capture(bit_table): defaults after an unmatched -z
+        step("Verify: parse -z against a spec that never declared it")
+        val spec = cli_spec_flag(cli_spec(), "verbose", "v", "verbose output")
+        val parsed = parse_cli_args(spec, ["-z"])
+        expect(parsed_flag(parsed, "verbose")).to_equal(false)  # oracle: unknown short changes nothing
+        expect(parsed.remaining[0]).to_equal("-z")  # oracle: unknown short reported in remaining

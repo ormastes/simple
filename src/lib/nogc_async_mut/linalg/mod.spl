@@ -1,3 +1,19 @@
+# Layer C aggregator for the scilib BLAS/LAPACK port.
+#
+# PERF-SUGAR-003 workaround (doc/08_tracking/feature/scilib_perf_sugar.md):
+# generic `<T>` dispatch is erased and boxed rather than monomorphised, so a
+# single `fn dot<T>(a: NDArray<T>, b: NDArray<T>) -> T` pays a boxing cost on
+# every element. Every dtype-parametric entry point below is therefore written
+# out per dtype instead — `dot`/`dot_f32`, `axpy`/`axpy_f32` — which is why
+# this file carries apparent duplicates rather than one generic definition.
+# Do not collapse them back into `<T>` forms until that entry is retired.
+#
+# gemv vs gemm operand-swap: `gemv(matrix, vector)` takes the matrix FIRST and
+# returns a vector; `gemm(alpha, a, b, beta, c_in)` takes the scalar first and
+# both operands as matrices. The two argument orders are not interchangeable —
+# passing a gemv-shaped operand pair to gemm silently transposes the intended
+# product. See src/lib/common/science_math/blas.spl for the Layer B statement
+# of the same distinction.
 use std.ndarray.*
 use std.linalg.linalg_core.*
 use std.linalg.torch_ndarray.{TorchNDArray}
@@ -84,7 +100,17 @@ fn try_axpy(alpha: Float64, x: NDArray, y: NDArray) -> Result<NDArray, LinalgErr
             y_values.push(y.get_f64(Index.new(i)))
             i = i + 1
         return Ok(vector_from(simd_axpy_values(alpha, x_values, y_values)?))
-    Ok(x.mul_scalar(alpha).add(y))
+    # Aliasing workaround: the scaled intermediate MUST be bound to a
+    # local before `.add(y)`. Writing the chained form
+    # `Ok(x.mul_scalar(alpha).add(y))` makes the chain alias the `x` PARAMETER
+    # and clobbers the caller's vector in place — axpy(2,[1,2],[3,4]) then
+    # leaves the caller's x as [5,8], so a following dot(x,y) reads 47 instead
+    # of 11. Binding the intermediate detaches it and the caller's x survives.
+    # TODO(scilib): drop this workaround once the chained-method-on-parameter
+    # aliasing defect is fixed in the compiler —
+    # doc/08_tracking/bug/chained_method_on_param_aliases_caller_argument_2026-09-05.md
+    val scaled = x.mul_scalar(alpha)
+    Ok(scaled.add(y))
 
 fn axpy_f32(alpha: Float32, x: NDArray, y: NDArray) -> NDArray:
     match try_axpy_f32(alpha, x, y):
@@ -409,3 +435,334 @@ fn solve(a: NDArray, b: NDArray) -> Result<NDArray, LinalgError>:
         out.push(Float64.new(value))
         i = i + 1
     Ok(make_f64_array(out, Shape.new([Index.new(n)])))
+
+# ============================================================
+# Decomposition results (Layer C — primitive-free carriers)
+# ============================================================
+
+class QrFactorization:
+    q: NDArray
+    r: NDArray
+
+class SymmetricEigen:
+    values: NDArray
+    vectors: NDArray
+
+class SingularValues:
+    u: NDArray
+    s: NDArray
+    vt: NDArray
+
+fn _flat_f64(a: NDArray, rows: i64, cols: i64) -> [f64]:
+    var out: [f64] = []
+    var i = 0
+    while i < rows:
+        var j = 0
+        while j < cols:
+            out.push(a.get_f64_at([Index.new(i), Index.new(j)]).value)
+            j = j + 1
+        i = i + 1
+    out
+
+fn _wrap_matrix(values: [f64], rows: i64, cols: i64) -> NDArray:
+    var out: [Float64] = []
+    var i = 0
+    while i < values.len():
+        out.push(Float64.new(values[i]))
+        i = i + 1
+    make_f64_array(out, Shape.new([Index.new(rows), Index.new(cols)]))
+
+fn _wrap_vector(values: [f64]) -> NDArray:
+    var out: [Float64] = []
+    var i = 0
+    while i < values.len():
+        out.push(Float64.new(values[i]))
+        i = i + 1
+    make_f64_array(out, Shape.new([Index.new(values.len())]))
+
+fn _abs_f64(value: f64) -> f64:
+    if value < 0.0:
+        return 0.0 - value
+    value
+
+# geqrf — Householder QR factorization of a real m x n matrix (m >= n).
+# Returns A = Q * R with Q orthogonal (m x m) and R upper trapezoidal (m x n),
+# the same factorization LAPACK's dgeqrf produces; this returns Q assembled
+# rather than the reflector-and-tau packed form, because Layer C is
+# primitive-free and cannot hand back a raw tau buffer.
+fn geqrf(a: NDArray) -> Result<QrFactorization, LinalgError>:
+    if a.dtype != DType.F64 or a.shape.dims.len() != 2:
+        return Err(LinalgError.DimensionMismatch)
+    val m = a.rows().value
+    val n = a.cols().value
+    if m < n:
+        return Err(LinalgError.DimensionMismatch)
+    var r = _flat_f64(a, m, n)
+    var q: [f64] = []
+    var qi = 0
+    while qi < m * m:
+        q.push(0.0)
+        qi = qi + 1
+    var d = 0
+    while d < m:
+        q[d * m + d] = 1.0
+        d = d + 1
+    var limit = n
+    if m - 1 < limit:
+        limit = m - 1
+    var k = 0
+    while k < limit:
+        var norm_sq = 0.0
+        var i = k
+        while i < m:
+            norm_sq = norm_sq + r[i * n + k] * r[i * n + k]
+            i = i + 1
+        val norm_x = sqrt_f64(norm_sq)
+        if norm_x != 0.0:
+            var alpha = 0.0 - norm_x
+            if r[k * n + k] < 0.0:
+                alpha = norm_x
+            # Householder vector v = x - alpha*e1, stored for rows k..m-1.
+            var v: [f64] = []
+            v.push(r[k * n + k] - alpha)
+            i = k + 1
+            while i < m:
+                v.push(r[i * n + k])
+                i = i + 1
+            var v_norm_sq = 0.0
+            var vi = 0
+            while vi < v.len():
+                v_norm_sq = v_norm_sq + v[vi] * v[vi]
+                vi = vi + 1
+            if v_norm_sq != 0.0:
+                # R <- H * R for the trailing columns
+                var col = k
+                while col < n:
+                    var proj = 0.0
+                    i = k
+                    while i < m:
+                        proj = proj + v[i - k] * r[i * n + col]
+                        i = i + 1
+                    val factor = 2.0 * proj / v_norm_sq
+                    i = k
+                    while i < m:
+                        r[i * n + col] = r[i * n + col] - factor * v[i - k]
+                        i = i + 1
+                    col = col + 1
+                # Q <- Q * H  (so that A = Q R)
+                var row = 0
+                while row < m:
+                    var proj_q = 0.0
+                    i = k
+                    while i < m:
+                        proj_q = proj_q + v[i - k] * q[row * m + i]
+                        i = i + 1
+                    val factor_q = 2.0 * proj_q / v_norm_sq
+                    i = k
+                    while i < m:
+                        q[row * m + i] = q[row * m + i] - factor_q * v[i - k]
+                        i = i + 1
+                    row = row + 1
+        k = k + 1
+    # Zero the sub-diagonal that the reflectors annihilated analytically, so
+    # callers get an exactly upper-trapezoidal R rather than round-off dust.
+    var zr = 1
+    while zr < m:
+        var zc = 0
+        while zc < zr and zc < n:
+            r[zr * n + zc] = 0.0
+            zc = zc + 1
+        zr = zr + 1
+    Ok(QrFactorization(q: _wrap_matrix(q, m, m), r: _wrap_matrix(r, m, n)))
+
+# syevd — eigen-decomposition of a real SYMMETRIC n x n matrix by the cyclic
+# Jacobi method. Eigenvalues come back in ascending order (LAPACK's dsyevd
+# convention) and column j of `vectors` is the eigenvector for `values[j]`.
+# Only the symmetric case is supported; a non-symmetric input is rejected
+# rather than silently symmetrised.
+fn syevd(a: NDArray) -> Result<SymmetricEigen, LinalgError>:
+    if a.dtype != DType.F64 or a.shape.dims.len() != 2:
+        return Err(LinalgError.DimensionMismatch)
+    if a.rows() != a.cols():
+        return Err(LinalgError.DimensionMismatch)
+    val n = a.rows().value
+    var work = _flat_f64(a, n, n)
+    var sr = 0
+    while sr < n:
+        var sc = sr + 1
+        while sc < n:
+            if _abs_f64(work[sr * n + sc] - work[sc * n + sr]) > 0.000000001:
+                return Err(LinalgError.DimensionMismatch)
+            sc = sc + 1
+        sr = sr + 1
+    # NOTE: this accumulator must NOT be called `vec` — `vec[i] = x` parses as
+    # a vector-literal lvalue, not an index assignment, and the module dies at
+    # runtime with "invalid assignment: unsupported assignment target".
+    var basis: [f64] = []
+    var bi = 0
+    while bi < n * n:
+        basis.push(0.0)
+        bi = bi + 1
+    var d = 0
+    while d < n:
+        basis[d * n + d] = 1.0
+        d = d + 1
+    var sweep = 0
+    var converged = false
+    while sweep < 100:
+        var off = 0.0
+        var p = 0
+        while p < n:
+            var q = p + 1
+            while q < n:
+                off = off + work[p * n + q] * work[p * n + q]
+                q = q + 1
+            p = p + 1
+        if off < 0.000000000000000000000001:
+            converged = true
+            sweep = 100
+        else:
+            p = 0
+            while p < n:
+                var q = p + 1
+                while q < n:
+                    val apq = work[p * n + q]
+                    if _abs_f64(apq) > 0.0000000000000001:
+                        val theta = (work[q * n + q] - work[p * n + p]) / (2.0 * apq)
+                        var t = 1.0 / (_abs_f64(theta) + sqrt_f64(theta * theta + 1.0))
+                        if theta < 0.0:
+                            t = 0.0 - t
+                        val c = 1.0 / sqrt_f64(t * t + 1.0)
+                        val s = t * c
+                        # rotate rows/columns p and q of the working matrix
+                        var i = 0
+                        while i < n:
+                            val aip = work[i * n + p]
+                            val aiq = work[i * n + q]
+                            work[i * n + p] = c * aip - s * aiq
+                            work[i * n + q] = s * aip + c * aiq
+                            i = i + 1
+                        i = 0
+                        while i < n:
+                            val api = work[p * n + i]
+                            val aqi = work[q * n + i]
+                            work[p * n + i] = c * api - s * aqi
+                            work[q * n + i] = s * api + c * aqi
+                            i = i + 1
+                        i = 0
+                        while i < n:
+                            val vip = basis[i * n + p]
+                            val viq = basis[i * n + q]
+                            basis[i * n + p] = c * vip - s * viq
+                            basis[i * n + q] = s * vip + c * viq
+                            i = i + 1
+                    q = q + 1
+                p = p + 1
+            sweep = sweep + 1
+    if not converged:
+        # Exhausting the sweep budget is NOT convergence: the two exits used to
+        # be indistinguishable (both left sweep == 100) and would have returned
+        # a plausible-looking Ok built from an unrotated matrix.
+        return Err(LinalgError.NotConverged)
+    var values: [f64] = []
+    var e = 0
+    while e < n:
+        values.push(work[e * n + e])
+        e = e + 1
+    # selection sort into ascending order, carrying the eigenvector columns
+    var outer = 0
+    while outer < n:
+        var best = outer
+        var scan = outer + 1
+        while scan < n:
+            if values[scan] < values[best]:
+                best = scan
+            scan = scan + 1
+        if best != outer:
+            val tmp = values[outer]
+            values[outer] = values[best]
+            values[best] = tmp
+            var row = 0
+            while row < n:
+                val swap_tmp = basis[row * n + outer]
+                basis[row * n + outer] = basis[row * n + best]
+                basis[row * n + best] = swap_tmp
+                row = row + 1
+        outer = outer + 1
+    Ok(SymmetricEigen(values: _wrap_vector(values), vectors: _wrap_matrix(basis, n, n)))
+
+# gesvd — singular value decomposition A = U * diag(S) * Vt for a real m x n
+# matrix with m >= n, obtained from the symmetric eigen-decomposition of
+# A^T A. Singular values are non-negative and returned in DESCENDING order
+# (LAPACK's dgesvd convention).
+#
+# Accuracy note, stated rather than hidden: forming A^T A squares the condition
+# number, so singular values far below sqrt(eps)*sigma_max are not resolved.
+# That is a real limitation of this route, not of the caller's data; a
+# one-sided Jacobi SVD would fix it and is the v1.1 upgrade path.
+fn gesvd(a: NDArray) -> Result<SingularValues, LinalgError>:
+    if a.dtype != DType.F64 or a.shape.dims.len() != 2:
+        return Err(LinalgError.DimensionMismatch)
+    val m = a.rows().value
+    val n = a.cols().value
+    if m < n:
+        return Err(LinalgError.DimensionMismatch)
+    val flat = _flat_f64(a, m, n)
+    var gram: [f64] = []
+    var gi = 0
+    while gi < n * n:
+        gram.push(0.0)
+        gi = gi + 1
+    var i = 0
+    while i < n:
+        var j = 0
+        while j < n:
+            var total = 0.0
+            var k = 0
+            while k < m:
+                total = total + flat[k * n + i] * flat[k * n + j]
+                k = k + 1
+            gram[i * n + j] = total
+            j = j + 1
+        i = i + 1
+    val eigen = syevd(_wrap_matrix(gram, n, n))?
+    # syevd returns ascending eigenvalues; reverse for descending singular values
+    var singular: [f64] = []
+    var vt: [f64] = []
+    var vi2 = 0
+    while vi2 < n * n:
+        vt.push(0.0)
+        vi2 = vi2 + 1
+    var col = 0
+    while col < n:
+        val source = n - 1 - col
+        var eig_value = eigen.values.get_f64(Index.new(source)).value
+        if eig_value < 0.0:
+            # A^T A is positive semi-definite; a small negative value is
+            # round-off, and a singular value is never negative.
+            eig_value = 0.0
+        singular.push(sqrt_f64(eig_value))
+        var row = 0
+        while row < n:
+            vt[col * n + row] = eigen.vectors.get_f64_at([Index.new(row), Index.new(source)]).value
+            row = row + 1
+        col = col + 1
+    var u: [f64] = []
+    var ui = 0
+    while ui < m * n:
+        u.push(0.0)
+        ui = ui + 1
+    col = 0
+    while col < n:
+        if singular[col] > 0.0000000001:
+            var row = 0
+            while row < m:
+                var total = 0.0
+                var k = 0
+                while k < n:
+                    total = total + flat[row * n + k] * vt[col * n + k]
+                    k = k + 1
+                u[row * n + col] = total / singular[col]
+                row = row + 1
+        col = col + 1
+    Ok(SingularValues(u: _wrap_matrix(u, m, n), s: _wrap_vector(singular), vt: _wrap_matrix(vt, n, n)))

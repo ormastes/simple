@@ -57,7 +57,7 @@ FILE.md files) are allowed.
 | `target` | `gc-boundary-check-tests` fixture read by `driver/src/cli/check.rs` |
 | `targets.sdn` | Build target registry read by `src/app/build/targets/targets_cli.spl` |
 | `gh-cli-cache` | Quarantined non-UTF-8 GitHub CLI archive pending independent review and deletion |
-| `release` | Quarantined legacy release binary pending independent review and deletion |
+| `release` | Tracked release version/support policy; generated release binaries remain ignored |
 | `scratch_fx` | Quarantined binary scratch fixtures pending independent review and deletion |
 | `sweep` | Quarantined non-UTF-8 sweep fixture pending independent review and deletion |
 | `tmp5` | Quarantined SCV binary packs pending independent review and deletion |
@@ -85,6 +85,7 @@ self-review policy intentionally rejects non-UTF-8 blob deletion.
 | `tools/FILE.md` | `tools/` directory |
 | `vendor/FILE.md` | `vendor/` directory |
 | `variants/FILE.md` | `variants/` directory |
+| `release/FILE.md` | `release/` tracked policy/configuration authorities |
 
 ## src/
 

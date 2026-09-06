@@ -258,6 +258,77 @@ sh scripts/setup/install-spipe-dev-command.shs --apply
 - [`doc/07_guide/infra/sspec_scenario_manual.md`](../../doc/07_guide/infra/sspec_scenario_manual.md) — SSpec scenario manual, capture, inline/previous scenario, and environmental-test guidance
 - [`doc/07_guide/platform/simpleos/qemu_system_tests.md`](../../doc/07_guide/platform/simpleos/qemu_system_tests.md) — **System tests over QEMU**: per-arch live-boot SSpec specs (`test/03_system/os/qemu/`), `qemu_systest_contract.spl` descriptors, pass/missing-media/boot-fail classification (fail-closed, never `skip()`), and `scripts/check/qemu-storage-audit.shs`
 
+## Landing a PR here (measured 2026-09-06 — read before you push)
+
+`main` is ruleset-protected (`spipe-vcs-v3-main`, `bypass_actors: []`). Direct
+push is rejected; `gh pr merge --admin` is refused for admins too. Two required
+checks: **`Code Idiom & Structural Ratchet Gates`** and **`SPipe Self Review
+Admission`**.
+
+**Push ONCE. Every force-push destroys an in-flight run.** `repo-hygiene.yml`
+(the idiom gate) declares `concurrency: group: ${{ github.workflow }}-${{
+github.ref }}` with `cancel-in-progress: true`, and the repo has **0
+self-hosted runners** with **53 runs queued/in-progress** measured on
+2026-09-06 across the parallel agent sessions. So a re-push does not "retry" —
+it cancels the running gate and re-queues you behind everything else. Get the
+commit message and the rebase right BEFORE the first push; amending a message
+afterwards costs a full queue cycle.
+
+**The admission check has two traps, and the fix for one causes the other.**
+1. `gh pr edit --body-file` with byte-identical content fires no `edited`
+   event, so no check-run is ever created and the PR sits `BLOCKED` forever.
+2. The admission workflow also cancels its own in-flight run on each new
+   event — so "fixing" trap 1 by editing repeatedly kills the very run that
+   would publish the check (3 cancelled runs before this was spotted).
+Fire ONE genuine body change, then wait. Diagnose with
+`gh api repos/<r>/actions/workflows/<id>/runs` and read `event` +
+`conclusion` — the check-runs list shows nothing while the workflow is in fact
+firing correctly, which reads as "never triggered" and is wrong.
+
+On a `pull_request` the admission job is **skipped** (its `if:` is
+`github.event_name == 'workflow_dispatch'`), and GitHub's rollup **accepts a
+skipped required check** — that is how PRs land normally. Dispatching it
+deliberately is the OWNER SELF-ATTESTATION path:
+
+```bash
+gh workflow run review-admission.yml --repo <r> \
+  -f pull_request_number=<n> -f session_id=<session> \
+  -f reviewer_model=<model> -f reviewer_effort=high -f self_attestation=PASS:0:0
+```
+
+`self_attestation` is a claim in the repo owner's name and the workflow's own
+config says it is **not** independent authentication. Never dispatch it without
+the user's explicit instruction, and only when the values are true.
+
+**Emergency bypass — user-authorized only, and always restored.** When a
+required check is stuck in the runner queue rather than failing:
+
+```bash
+gh api repos/<r>/rulesets/<id> > ruleset_ORIGINAL.json          # 1. save
+jq '{bypass_actors:[{actor_id:5,actor_type:"RepositoryRole",bypass_mode:"always"}]}' \
+   ruleset_ORIGINAL.json | gh api -X PUT repos/<r>/rulesets/<id> --input -
+gh pr merge <n> --merge --admin                                  # 2. merge
+jq '{bypass_actors:[]}' ruleset_ORIGINAL.json | gh api -X PUT repos/<r>/rulesets/<id> --input -
+gh api repos/<r>/rulesets/<id> --jq '.bypass_actors|length'      # 3. MUST print 0
+```
+
+This lowers protection for the whole repo, not one PR. Keep the window to a
+single command, verify `bypass_actors=0` afterwards, and record the bypass in
+the PR/commit. Do not use it for a check that is genuinely FAILING.
+
+**Lanes that are red for everyone — never attribute them to your change.**
+`Containerized Tests` (publishes `Unit Test Discovery (Podman)`, `Verify
+Resource Limits`, `render_2d Container Suite`): 12 failures and **zero**
+successes in its last 40 runs, on `main` and unrelated branches alike.
+`publish` and `aot-lane-fences`: both die with `no runnable bin/simple` on a
+fresh runner. None is ruleset-required. Diagnose by diffing your failing set
+against an unrelated open PR **and** checking whether the lane merely *queued*
+there — "fails only on mine" is usually "only ran on mine".
+
+You cannot approve your own PR (`Review Can not approve your own pull
+request`), and `required_approving_review_count` is 0, so approval never
+unblocks anything.
+
 ## Container test runs
 
 **Never `COPY . /opt/simple` (or any whole-repo COPY) into a test-isolation
@@ -325,6 +396,195 @@ and [`manual_examples/`](../../doc/07_guide/app/spipe/manual_examples/)):
 impl plan: [`doc/03_plan/sspec_modernization_plan.md`](../../doc/03_plan/sspec_modernization_plan.md);
 authoritative feature set today:
 [`doc/02_requirements/feature/sspec_scenario_manual.md`](../../doc/02_requirements/feature/sspec_scenario_manual.md).
+
+## Scoring 90+ (modern-sspec documentization score) — MEASURED recipe
+
+The scorer is `src/app/sspec_maintain/` (`source_facts.spl` extracts facts,
+`analyzer.spl` turns them into `SSDOC-*` findings, `rules.spl` fixes each
+finding's deduction, `score.spl` aggregates). It is a **structural, line-based
+heuristic**: every rule below is satisfied by a literal token in a literal
+position. This section is derived from that code (read 2026-09-05, rule
+version `ssdoc-rules/1`), and every number in it was MEASURED with the real
+scorer through the seed lane described at the end — not hand-estimated.
+
+### The arithmetic (budget before you write)
+
+```
+raw       = (narrative*15 + structure*15 + oracle*20 + traceability*15
+             + evidence*15 + coverage*10 + maintainability*10) / 100   # integer division
+effective = 49 if ANY blocker finding (ORA-001, ORA-002, TRC-002, TRC-003) and raw > 49, else raw
+```
+
+Each dimension starts at 100 and loses the finding's deduction (clamped to
+0..100). So one dimension point costs **0.15 aggregate** (narrative, structure,
+traceability, evidence), **0.20** (oracle) or **0.10** (coverage,
+maintainability). A 90 leaves you **10 aggregate points**; a blocker leaves
+you nothing. There are TWO scoring surfaces and they differ:
+
+| surface | function | who runs it | extra rules |
+|---|---|---|---|
+| **GATE** | `analyze_sspec_text` | `bin/simple test` (`src/app/test_runner_new/sspec_score_gate.spl`, default min **80**, `SIMPLE_SSPEC_MIN_SCORE` overrides, `0` disables) | none — source only |
+| **SCAN** | `analyze_sspec_pair_text` + `inspect_sspec_lifecycle_links` | `simple sspec-maintain scan <spec> [--min-score N]` | **MNT-002** (-25 mnt = **-2.5**) when `doc/06_spec/<mirror>.md` is missing/stale; **MNT-009** (-10 mnt = -1 each) per lifecycle path that does not exist; MNT-005/008, EVD-002/003 only when a mirror exists |
+
+Target the SCAN surface: a spec that scores 100 on GATE scores **97** on SCAN
+with no mirror (the mirror needs `spipe-docgen`, which cannot run on a
+bootstrap-only host). Budget accordingly — after MNT-002 you have **7.5**
+points of slack, i.e. at most FOUR of the -10 warnings below, or two EVD-001
+plus one MNT-007.
+
+### Rule-by-rule checklist (what to literally write)
+
+Facts are extracted per LINE after `.trim()`; "inside a scenario" means a line
+indented deeper than its `it "..."` line; a `"""` docstring is skipped
+line-by-line but is still visible to whole-file substring checks.
+
+| rule | costs | fires when (from `source_facts.spl`/`analyzer.spl`) | write this |
+|---|---|---|---|
+| **NAR-001** | -20 nar (-3) | the file lacks (`purpose and audience` or `## purpose`, case-insensitive) **or** has no `"""` anywhere | a top-of-file `"""` docstring whose first heading is `## Purpose and audience` |
+| **NAR-002** | -20 nar (-3) | any of `todo: describe`, `todo: author`, `description of this block`, `lorem ipsum` | never leave scaffold prose |
+| **NAR-003** | -15 nar (-2.25) | the same `#` comment line (>20 chars, containing purpose/audience/`research:`/`plan:`/`architecture:`/`design:`) appears 3+ times verbatim | one header block, not one per scenario |
+| **BEH-001** | -10 str per scenario (-1.5), cap -40 | an `it` body contains no `step("` | ≥1 `step("Imperative sentence")` inside EVERY `it` (also `slow_it`/`ignore_it`) |
+| **BEH-002** | -5 str per scenario (-0.75), cap -30 | name is `works`/`test`/`passes`/`should work`/`should pass`/`can work`/`can pass`, starts with `test `, or contains `is unresolved` | name the product outcome |
+| **ORA-001** | **blocker** | `real_assertion_count == 0` for the file, **or** any scenario has a pending STATEMENT: a line that IS `pass_todo`, `pass_do_nothing`, `pass_dn`, `pending`, `pending(`…, `fail("todo:`…, or a `skip(` call outside a string | a real `expect(...)`/`assert_*`/`check(` in the body; an in-development spec goes RED through a failing real assertion, never through a pending marker |
+| **ORA-002** | **blocker** | a scenario asserts source text (`expect(source.contains(`, `expect(file_read(`…`src/`…, the words `source text oracle`) **or** a tautology: `expect(<numeric literal>)…` or `expect(x).to_equal(<exactly the text x was bound to>)` for a `val` **or `var`** `x` that was not reassigned before the assertion (fixed 2026-09-05: `var` no longer exempts, and a trailing `# comment` no longer hides the match) | assert what the product returned, never what you just typed |
+| **ORA-003** | -10 ora per literal (-2), cap -30 | `expect(x).to_equal(<numeric literal>)` without `# oracle:` or `# explained:` on the SAME line | `expect(n).to_equal(8)  # oracle: plan §2 lists eight groups` (the marker excuses ORA-003 only; it does NOT excuse a tautology) |
+| **TRC-001** | -20 trc (-3) | no `REQ-` and no `@req` anywhere | `# @req REQ-<AREA>-<NNN>` inside each `it` body |
+| **TRC-002** | **blocker** | a line carrying a `REQ-…` id AND the word `planned` or `selected`, whose id is never bound inside an `it` | never write "planned"/"selected" on a REQ line |
+| **TRC-003** | **blocker** | any `REQ-…` token outside a `"""` block (header comments, `@req` above the `it` line, fixture strings) that is not also inside some `it` body | declare REQ ids ONLY inside `it` bodies; a header may name them only inside the `"""` docstring |
+| **EVD-001** | -10 evd per stepped scenario (-1.5), cap -30 | a scenario with a `step(` has no capture line inside its body | inside the body, immediately before the step it documents: `# @capture(<kind>): <what is retained>` (docgen attaches it to the NEXT step — see `spipe_docgen/parser.spl` `pending_capture`), or a real call: `evidence_manifest(`, `compare_evidence(`, `render_manual(`, `capture_*`, `terminal_grid`/`tui_grid`/`gui_image`/`action_trace`/`bit_table`/`binary_layout`, or a `<spec>.evidence.sdn` name. **A `#` comment counts ONLY through `@capture` or `.evidence.sdn`** (fixed 2026-09-05: `# evidence(...)` prose no longer scores) |
+| **COV-001** | -20 cov (-2) | the file says `must reject`/`shall reject`/`invalid input`/`boundary behavior`/`recovery behavior`/`unsupported behavior`/`ambiguity behavior` and NO `it` name contains negative/boundary/reject/invalid/recover/unsupported/ambigu/error | always include one adverse scenario, e.g. `it "rejects a database without a requirements table"` |
+| **MNT-001** | -15 mnt (-1.5) | >1 scenario and no `@manual_section`/`@manual`/`@fold` anywhere | `# @manual_section: <name>` once above the `describe` |
+| **MNT-003** | -10 mnt (-1) | a line starts with `@step ` (bare decorator) | `# @step: Label` |
+| **MNT-004** | -10 mnt (-1) | `@internal`, `@qa-only`, `@execution-only` anywhere | don't |
+| **MNT-006** | -10 mnt (-1) | `before_each` and `setup` both present and no `fn setup` | name the helper `fn setup_<domain>()` |
+| **MNT-007** | -10 mnt (-1) | the file lacks any of the four substrings `doc/01_research/`, `doc/03_plan/`, `doc/04_architecture/`, `doc/05_design/` | a `# Lifecycle:` comment listing one EXISTING file under each — and see MNT-009 |
+| **MNT-009** (scan) | -10 mnt (-1) per path | a `doc/01_research/…`/`03_plan`/`04_architecture`/`05_design` token does not exist on disk (trailing `.`/`,`/`;`/`:`/`)` are stripped since 2026-09-05; a bare directory is ignored) | never fabricate a path; if no research/architecture/design doc exists for the plan, accept the single -1 from MNT-007 |
+| **MNT-002** (scan) | -25 mnt (-2.5) | no current `doc/06_spec/<mirror>.md` | regenerate with `spipe-docgen` when a full CLI exists; otherwise budget for it |
+
+Acceptance-spec shape that keeps ALL of the above (this is the file measured below;
+`# @tag:in-development` stays on line 1 — it is a separate runner mechanism and
+costs nothing):
+
+```simple
+# @tag:in-development
+"""
+## Purpose and audience
+Acceptance oracles for the open remains of doc/03_plan/<plan>.md (<which checkbox>).
+Audience: the operator who closes that checkbox and needs one spec that turns
+RED-to-GREEN when the promised export lands.
+## Operator workflow
+bin/simple test test/03_system/plan_acceptance/<name>_spec.spl
+## Compatibility and limitations
+Tagged in-development: it pins the promised interface and fails until the
+plan checkbox is implemented. Unsupported: running under the Rust seed.
+## Verification guidance and troubleshooting
+The captured `.evidence.sdn` sidecar records every step; a missing
+`<promised symbol>` is the expected RED until the plan lands.
+"""
+# doc-path: doc/03_plan/<plan>.md
+# Lifecycle: doc/01_research/<existing>.md ;
+# doc/04_architecture/<existing>.md ;
+# doc/05_design/<existing>.md
+# @manual_section: plan-acceptance
+
+use std.spec.{describe, it, expect}
+use std.nogc_sync_mut.io.file_ops.{file_read, file_exists}
+use std.nogc_sync_mut.test_runner.req_trace.{generate_req_trace_md}
+
+val req_trace_md_path = "doc/08_tracking/trace/req_trace.md"
+val test_db_path = "doc/08_tracking/test/test_db.sdn"
+
+fn read_or_fail(path: text) -> text:
+    match file_read(path):
+        case Ok(content): content
+        case Err(e): fail("could not read {path}: {e}")
+
+describe "sspec_modernization_plan.md — req_trace.md generation":
+
+    it "`req_trace.md` is regenerated from `test_db.sdn` on every test run":
+        # @req REQ-SSPEC-PLAN-REQTRACE-001
+        step("Read the committed test database that seeds the trace")
+        val db = read_or_fail(test_db_path)
+        step("Generate the requirement trace from it")
+        val rendered = generate_req_trace_md(db)
+        val committed = read_or_fail(req_trace_md_path)
+        # @capture: evidence_manifest("req_trace_generation") -> req_trace_generation_spec.evidence.sdn
+        step("Compare the generated trace with the committed one")
+        expect(rendered).to_equal(committed)
+
+    it "rejects a test database without a `requirements` table instead of writing an empty trace":
+        # @req REQ-SSPEC-PLAN-REQTRACE-002
+        step("Generate the trace from a database that lacks the requirements table")
+        val rendered = generate_req_trace_md("schema: test_db/v1\n")
+        # @capture: evidence_manifest("req_trace_reject_missing_table") -> req_trace_generation_spec.evidence.sdn
+        step("Verify the generator refused rather than emitting an empty document")
+        expect(rendered).to_contain("error: missing requirements table")
+```
+
+**Measured 2026-09-05** (the exact text above, file `build/nb/fixtures/worked_example_spec.spl`):
+`GATE SCORE 100 raw=100 blockers=0` and `SCAN SCORE 97 raw=97 blockers=0`
+(only finding: `SSDOC-MNT-002 -25 mirrored manual is missing`). Command:
+
+```bash
+sh scripts/check/sspec-score-seed-lane.shs build/nb/fixtures/worked_example_spec.spl
+```
+
+Calibration the same run proved (so the lane measures the REAL scorer, not a
+guess): a one-finding-per-rule fixture predicted from the source at 75
+measured **75** with every dimension matching; a four-blocker fixture measured
+**49** (`raw=68`); `var x = 7` / `expect(x).to_equal(7)` measured **49**
+(ORA-002 + ORA-001); the same `var` reassigned in a loop before the assertion
+measured **100**.
+
+### Traps that cost real points (each observed in the 2026-09-05 acceptance batch)
+
+- `# @capture` ABOVE the `it` line (the old template shape) closes the previous
+  scenario and is attributed to nothing — EVD-001 still fires. Put it INSIDE the
+  body.
+- `# @req REQ-X` above the `it` line is a DECLARATION outside any scenario —
+  TRC-003 blocker unless the same id also appears inside a body.
+- `var x = 7` + `expect(x).to_equal(7)  # oracle: ...` — the `# oracle:` marker
+  silences ORA-003 but the line is still an ORA-002 tautology (blocker). Eight
+  such pairs across three specs were written on 2026-09-05 because the scorer
+  then exempted `var` and ignored the trailing comment; both holes are closed
+  and those three specs now measure 49.
+- `# evidence(...)` prose inside the body no longer counts as a capture (specs
+  with an EVD-001 finding went from 8 to 20 of 35 when that closed).
+- A docstring sentence ending `…/plan.md.` used to be a MNT-009 stale-link
+  finding; punctuation is now stripped, but a genuinely wrong path still costs.
+- Any of these anywhere in the file, even in prose: `must reject`, `invalid input`,
+  `boundary behavior` → you now owe an adverse-named scenario (COV-001).
+- Never write a literal `"""` inside a `#` comment: until 2026-09-05 it flipped
+  the scanner's docstring state and hid every later line from the per-line
+  rules (the scaffold template scored 49 that way). Fixed, but a `"""` in a
+  code line or string still toggles it — keep fixture docstrings balanced.
+- The gate's cache (`.simple/cache/sspec-score-gate/`) keys on path + source
+  hash only; after touching `src/app/sspec_maintain/`, delete it or old scores
+  are reported.
+
+### Measuring on this host (no full CLI deployed)
+
+`simple sspec-maintain scan` needs the full pure-Simple CLI, which is not
+deployed here (`bin/simple` and `bin/local/phase2-*/simple` are the bootstrap
+CLI; `simple_seed run src/app/sspec_maintain/main.spl` dies in the seed's
+parser). The working lane is
+
+```bash
+sh scripts/check/sspec-score-seed-lane.shs <spec.spl|dir> [...]   # ~60s for 40 specs
+```
+
+It reshapes whitespace-only copies of the five scorer modules for the seed's
+older grammar, PROVES each copy equals its source modulo whitespace/comments
+(sha1 of the residue; a DIFF is exit 2), substitutes three named deltas the
+seed forces (zero-arg `split()`, `sha256_text`, `file_exists` — all via runtime
+externs, none in the rule logic), and prints per spec `GATE SCORE n` and
+`SCAN SCORE n` plus every finding with its rule id and deduction. Read the
+numbers; the script itself judges no threshold. Why the other lanes are dead
+(all measured 2026-09-05): `phase2 native-build` fails on a three-line hello
+world (`AOT compile error ... <invalid-heap:...>`, both backends) and exits 139
+after monomorphize completes on the analyzer entry; the seed's per-spec `run` lane dies on
+`variable always_inline not found` loading `file_ops` — records in
+`doc/08_tracking/bug/`.
 
 ## Typed evidence (Modern SSpec)
 
