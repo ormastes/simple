@@ -1141,6 +1141,8 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_file_open",
     "rt_file_get_size",
     "rt_file_close",
+    "rt_fd_pread",
+    "rt_fd_pwrite",
     // File I/O operations - path
     "rt_path_basename",
     "rt_path_dirname",

@@ -1431,6 +1431,8 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_file_mode", file_io::rt_file_mode);
     insert_simple!("rt_file_canonicalize", file_io::rt_file_canonicalize);
     insert_simple!("rt_file_close", file_io::rt_file_close);
+    insert_simple!("rt_fd_pread", file_io::rt_fd_pread);
+    insert_simple!("rt_fd_pwrite", file_io::rt_fd_pwrite);
     insert_simple!("rt_file_copy", file_io::rt_file_copy);
     insert_simple!("rt_crc32_text", file_io::rt_crc32_text);
     insert_simple!("rt_file_create_excl", file_io::rt_file_create_excl);

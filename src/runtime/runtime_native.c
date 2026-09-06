@@ -10816,6 +10816,20 @@ static ssize_t rt_file_write_at_fd(int fd, const void* data, size_t size, int64_
 #endif
 }
 
+/* Exact positioned I/O on a caller-owned buffer: bytes transferred, or -errno.
+ * Twin of the Rust seed's rt_fd_pread / rt_fd_pwrite (descriptor.rs). */
+int64_t rt_fd_pread(int32_t fd, uint8_t* buffer, int64_t len, int64_t offset) {
+    if (!buffer || len < 0 || offset < 0) return -EINVAL;
+    ssize_t n = rt_file_read_at_fd(fd, buffer, (size_t)len, offset);
+    return n < 0 ? -(int64_t)(errno ? errno : EIO) : (int64_t)n;
+}
+
+int64_t rt_fd_pwrite(int32_t fd, const uint8_t* buffer, int64_t len, int64_t offset) {
+    if (!buffer || len < 0 || offset < 0) return -EINVAL;
+    ssize_t n = rt_file_write_at_fd(fd, buffer, (size_t)len, offset);
+    return n < 0 ? -(int64_t)(errno ? errno : EIO) : (int64_t)n;
+}
+
 /* SFFI_LEGACY_UNSAFE: mixed static/heap ownership. Kept only for binary
  * compatibility; safe Simple code binds rt_file_read_text_at_checked. */
 const char* rt_file_read_text_at(const char* path_value, int64_t offset, int64_t size) {
