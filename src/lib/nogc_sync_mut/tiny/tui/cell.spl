@@ -1,5 +1,27 @@
 # codex-impl
 
+use std.tiny.common.status.{TinyStatus, TINY_ERR_CAPACITY}
+
+# Backing-store allocation instrumentation.
+#
+# A terminal front end redraws continuously, so the only honest way to claim
+# bounded operation (REQ-UI-SLIM-007) is to count the allocations rather than
+# assume what `push` does. Every construction of a cell backing store bumps
+# this counter; reusing a buffer through `reset` must not. The counter is
+# module state, read and reset through the two free functions below, and it
+# never affects rendering.
+var _tiny_cell_buffer_alloc_count = 0
+
+fn tiny_cell_buffer_alloc_count() -> i32:
+    """Number of cell backing stores allocated since the last reset."""
+    return _tiny_cell_buffer_alloc_count
+
+fn tiny_cell_buffer_alloc_reset() -> i32:
+    """Reset the allocation counter and return the value it had."""
+    val previous = _tiny_cell_buffer_alloc_count
+    _tiny_cell_buffer_alloc_count = 0
+    return previous
+
 class TinyCell:
     glyph: text
     foreground: i32
@@ -9,26 +31,60 @@ class TinyCell:
     static fn blank() -> TinyCell:
         TinyCell(glyph: " ", foreground: 7, background: 0, attributes: 0)
 
+fn _tiny_cell_store(count: i32) -> [TinyCell]:
+    """Allocate one blank-filled backing store of exactly `count` cells."""
+    if count <= 0:
+        return []
+    _tiny_cell_buffer_alloc_count = _tiny_cell_buffer_alloc_count + 1
+    [TinyCell.blank(); count]
+
 class TinyCellBuffer:
     width: i32
     height: i32
     cells: [TinyCell]
 
     static fn create(width: i32, height: i32) -> TinyCellBuffer:
+        """An exact-fit buffer: capacity is the width/height product."""
         val safe_width = if width > 0: width else: 0
         val safe_height = if height > 0: height else: 0
-        var cells: [TinyCell] = []
-        val count = safe_width * safe_height
+        TinyCellBuffer(width: safe_width, height: safe_height, cells: _tiny_cell_store(safe_width * safe_height))
+
+    static fn with_capacity(capacity: i32) -> TinyCellBuffer:
+        """A reusable buffer: fixed capacity, zero logical extent until reset."""
+        val safe_capacity = if capacity > 0: capacity else: 0
+        TinyCellBuffer(width: 0, height: 0, cells: _tiny_cell_store(safe_capacity))
+
+    fn capacity() -> i32:
+        """Cells the backing store holds; fixed for the buffer's lifetime."""
+        self.cells.len()
+
+    me reset(width: i32, height: i32) -> TinyStatus:
+        """Adopt a new logical extent in place, or refuse it as over capacity.
+
+        Never reallocates. A product larger than `capacity()` leaves the
+        buffer's previous contents untouched and returns an explicit
+        `TINY_ERR_CAPACITY` receipt.
+        """
+        val safe_width = if width > 0: width else: 0
+        val safe_height = if height > 0: height else: 0
+        val needed = safe_width * safe_height
+        if needed > self.cells.len():
+            return TinyStatus.error(TINY_ERR_CAPACITY, needed)
+        self.width = safe_width
+        self.height = safe_height
+        val blank = TinyCell.blank()
         var index = 0
-        while index < count:
-            cells = cells.push(TinyCell.blank())
+        while index < needed:
+            self.cells[index] = blank
             index = index + 1
-        TinyCellBuffer(width: safe_width, height: safe_height, cells: cells)
+        TinyStatus.ok()
 
     me clear():
+        val count = self.width * self.height
+        val blank = TinyCell.blank()
         var index = 0
-        while index < self.cells.len():
-            self.cells[index] = TinyCell.blank()
+        while index < count:
+            self.cells[index] = blank
             index = index + 1
 
     me put(x: i32, y: i32, glyph: text, foreground: i32, background: i32, attributes: i32):
