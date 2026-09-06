@@ -7,9 +7,54 @@ views, safe refactors, tree organization, or common-knowledge promotion.
 Canonical operator guide:
 `doc/07_guide/app/spipe/spipe_knowledge_compiler.md`.
 
-Current reachable implementation is a set of **library surfaces without a
-released Knowledge Compiler operator surface**, not the complete Knowledge
-Compiler.  Waves 2--3 provide bounded explicit-input
+## CURRENT STATE (measured 2026-09-05 — read this first)
+
+**The implementation is pure Simple at `src/app/spipe/`, not the JavaScript
+package.** Everything below the "Wave 2--3 (JS-era)" heading describes
+`examples/05_stdlib/spipe`, which is frozen legacy; it is retained for its
+invariants, which still hold, but it is NOT a description of the live tree.
+
+There are **six disjoint SPipe locations**. Know which one you are touching:
+
+| Location | Lines | State |
+|---|---:|---|
+| `src/app/spipe/` — knowledge compiler | 3,952 | 11 units, **2 CLI verbs**, 7 unreachable, 0 CI gates |
+| `src/app/spipe_mcp/main.spl` | 543 | ~33 tools, **runnable but NOT in `.mcp.json`** |
+| `src/lib/nogc_sync_mut/spipe/` | 1,094 | what that server serves — also undeployed |
+| `src/app/spipe_knowledge_provider/` | 9,429 | out-of-process lexical provider; `search/process_adapter.spl` already speaks to it |
+| `examples/05_stdlib/spipe/` (JS) | 8,649 | frozen legacy |
+| `.spipe/spipe` (JS v0.1.0) | — | separate repo, deferred debt |
+
+Load-bearing facts an implementing agent must not rediscover:
+
+- `src/app/spipe/main.spl:114-139` dispatches only `registry`, `admit`, `--help`,
+  `-h`. Seven units are unreachable from any operator surface: balance, refactor,
+  scan, fusion, graph, identity, search. (`model` is reached only for two type
+  definitions at `main.spl:20`.)
+- `main.spl:3-4` claims `scan`/`balance` "do not exist yet". **They do** — that
+  comment is stale.
+- `src/app/spipe_mcp` imports `app.spipe.*` **zero times**, and is itself absent
+  from `.mcp.json` — the deployed servers are `simple-mcp`,
+  `simple-lsp-mcp` and `stitch`. The surface agents actually reach is `simple_ctx_*`.
+- Nothing under `src/app/spipe/` is referenced by `config/check/must_check_gates.sdn`
+  or any `scripts/check/*.shs` gate.
+- **Three BM25 implementations exist.** `common/search`'s `struct InvertedIndex`
+  (`inverted_index.spl:68`) has **zero product consumers**; `index_engine_provider.spl`
+  and `simple_ctx_*` each scan per query; `dbfs_engine/fts`'s `FtsInvertedIndex`
+  is the only wired index (via `app/io/context_ops.spl:475`). Do not add a fourth.
+- `refactor/plan.spl` IS covered — by `refactor_rewrite_spec.spl:26,96`, not by a
+  file of its own. Do not write a duplicate spec.
+- `src/app/llm_process_gen/` already compiles these `skill.md` files — do not
+  write a second skill compiler.
+
+Plan of record: `doc/03_plan/infra/spipe/spipe_knowledge_compiler_refined_plan.md`
+(Revision 3 — §1.5 measured ground truth, §4.1a re-decided waves, §9 Slice 2).
+Architecture: `doc/05_design/infra/spipe/spipe_knowledge_base_architecture.md`.
+Research: `doc/01_research/infra/spipe/llm_knowledge_tooling_landscape_2026-09-05.md`.
+
+## Wave 2--3 (JS-era, SUPERSEDED — invariants below still bind)
+
+Waves 2--3 provide bounded explicit-input
 inventory compilation, immutable records/snapshots, provisional identity,
 opaque durable UID proposals, identity/graph diagnostics, and isolated
 worktree overlays in

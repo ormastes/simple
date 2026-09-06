@@ -1,284 +1,75 @@
-# Performance Tools - Pure Simple Implementation
+# Performance Tools
 
-Complete performance analysis and optimization tools written entirely in Simple.
+CLI entry point for recording, comparing, and explaining per-test performance
+baselines. Pure Simple (`src/app/perf/main.spl`), wired at
+`src/app/cli/dispatch/table.spl` and discoverable via
+`src/app/cli/command_registry.spl` as the `perf` command.
 
-## Overview
-
-This package provides:
-- **Profiler** - Measure execution time of code regions
-- **Benchmark** - Run performance tests and compare results
-- **Optimizer** - Analyze code and suggest optimizations
-
-All tools are implemented in Pure Simple (no Rust modifications needed).
-
-## Quick Start
-
-```bash
-# Analyze code for optimization opportunities
-simple perf optimize src/
-
-# Profile a script
-simple perf profile examples/fibonacci.spl
-
-# Run benchmarks
-simple perf benchmark benchmarks/my_bench.spl
-
-# Compare benchmark results
-simple perf compare current.json baseline.json
-```
-
-## Profiler
-
-Measure execution time of specific code regions.
-
-### Usage
-
-```simple
-import perf.profiler
-
-fn main():
-    profiler.init_profiler()
-
-    # Profile a region
-    profiler.profile_region("computation", \:
-        expensive_calculation()
-    )
-
-    # Print report
-    profiler.print_profile()
-
-    # Save to JSON
-    profiler.save_profile("profile.json")
-
-    # Get optimization suggestions
-    val suggestions = profiler.analyze_hotspots()
-    for sugg in suggestions:
-        print sugg
-```
-
-### Output Example
+## Real subcommands (verified 2026-09-05)
 
 ```
-Performance Profile Report
-============================================================
-
-Total time: 1234 ms
-
-Region                        Count     Avg(µs)     Total(ms)    % Time
---------------------------------------------------------------------------------
-computation                   100       500         50           40%
-database_query                50        300         15           12%
-render                        200       100         20           16%
+Usage: simple perf <record|compare|explain|baseline promote> ...
+  record <test-path> <cohort-id> <duration-ms>
+  compare <test-path> <cohort-id> <candidate-ms> [--confirmed]
+  explain <test-path>
+  baseline promote <test-path> <cohort-id>
 ```
 
-## Benchmark
+- **record** — attach a new duration sample (ms) to a test's baseline history
+  for the given cohort.
+- **compare** — evaluate a candidate duration against the test's
+  `ApprovedBaseline` (`src/lib/common/perf/execution_metrics.spl`) using the
+  anomaly policy (10%/3x-MAD warning, 15%/4x-MAD failure, 5ms absolute floor).
+  `--confirmed` accepts a flagged regression as intentional.
+- **explain** — print the decision status and the samples/thresholds behind
+  it for a test path.
+- **baseline promote** — move a cohort's provisional/suspect baseline to
+  `Approved`.
 
-Run performance tests and track improvements over time.
+All state is read through `RunnerTestDb` /
+`std.test_runner.test_db_compat` — the SAME `doc/08_tracking/test/test_db.sdn`
+the test runner writes, **not** a separate JSON file. This repo uses SDN, not
+JSON/YAML, for all config/data — see `.claude/rules/language.md`.
 
-### Usage
+**Known gap (verified 2026-09-05):** on this host `record`/`explain` both
+fail with `perf-error: could not open or parse doc/08_tracking/test/test_db.sdn
+(existing file is unreadable or migration from
+doc/08_tracking/test/test_db_stable.sdn failed)`. The file's own
+`#sdn-crc32:` header does not match its body's CRC32 (checked directly), so
+this is a genuine stale/corrupt tracked artifact, not a CLI bug. Regenerate
+`test_db.sdn` via a full test run (`bin/simple test`, which is itself
+bootstrap-only on this host — see `.claude/skills/lib/perf_ladder.md`) before
+relying on `perf record`/`compare`/`explain` here.
 
-```simple
-import perf.benchmark
+## Relation to the perf gates
 
-fn main():
-    var suite = benchmark.BenchSuite.create("My Benchmarks")
+`simple perf` is a manual/ad-hoc workflow for one test at a time. The
+automated gates that run on push or on demand are separate and check
+different things — see `.claude/skills/lib/perf_ladder.md` for the full
+symptom -> gate table:
 
-    # Load baseline for comparison
-    suite.load_baseline("baseline.json")
+- `scripts/check/check-perf-regression-tests.shs` — push-tier ADVISORY;
+  pins ~191 named performance-fix mechanisms by exact file:needle match
+  (source text, not measured wall time).
+- `scripts/check/check-startup-perf-budget.shs` — startup wall-time budgets
+  from `test/05_perf/startup/budgets.sdn`.
+- `scripts/check/check-memory-budget.shs` — RSS/memory budgets.
+- `scripts/check/check-lint-cost-budget.shs` — lint wall-time budget.
+- `scripts/check/check-cross-language-perf.shs` — cross-language compute
+  comparisons.
 
-    # Run benchmarks
-    val result = suite.run_bench("array_ops", 1000, \:
-        var arr = []
-        for i in 0..100:
-            arr.push(i)
-    )
-    suite.add_result(result)
+## Files in this directory
 
-    # Print results (with comparison to baseline)
-    print suite.report()
+- `main.spl` — the `perf` CLI entry point described above.
+- `render_adapter.spl` — bridges perf profiling data to the shared
+  `app.ui.render` contract for text/HTML report views; not wired to any
+  `perf` subcommand above.
 
-    # Save results
-    suite.save("current.json")
-```
+## What was here before (removed 2026-09-05)
 
-### Output Example
-
-```
-Benchmark Results: My Benchmarks
-================================================================================
-
-Benchmark                               Avg(µs)     Min(µs)     Max(µs)     Change
-------------------------------------------------------------------------------------------
-array_ops                               125         120         145         ✓ -15% faster
-dict_lookup                             200         195         220         ≈ +2%
-string_concat                           450         440         480         ✗ +20% slower
-```
-
-## Optimizer
-
-Static code analysis with optimization suggestions.
-
-### Usage
-
-```bash
-# Analyze a file
-simple perf optimize src/app/build/main.spl
-
-# Analyze entire directory
-simple perf optimize src/
-```
-
-### Output Example
-
-```
-Code Optimization Report
-================================================================================
-
-Summary:
-  Critical: 2
-  Warnings: 5
-  Info:     8
-
-Critical Issues:
---------------------------------------------------------------------------------
-🔴 src/app/build/main.spl:45 - Triple-nested loop detected (O(n³))
-   → Consider algorithm optimization or data structure change
-
-Warnings:
---------------------------------------------------------------------------------
-⚠️  src/app/build/compiler.spl:23 - Function call in loop condition
-   → Cache .len() result before loop: val n = items.len()
-
-⚠️  src/app/build/formatter.spl:67 - String concatenation in loop
-   → Use list.join() or string builder for better performance
-
-⚠️  src/app/build/utils.spl:120 - Recursive function without memoization
-   → Add @memoize decorator or manual caching for repeated inputs
-```
-
-## Optimization Patterns Detected
-
-1. **Function calls in loop conditions** - Cache results
-2. **String concatenation in loops** - Use join() or builder
-3. **Nested loops** - O(n²) or O(n³) complexity warnings
-4. **Multiple indexing in loops** - Extract to locals
-5. **Recursive functions without memoization** - Add caching
-6. **Large literals in hot paths** - Move to const
-
-## Integration with Development Workflow
-
-### 1. Development Phase
-
-```bash
-# Check code for optimization opportunities
-simple perf optimize src/
-
-# Run benchmarks
-simple build test
-```
-
-### 2. Before Commit
-
-```bash
-# Save baseline
-simple perf benchmark benchmarks/ > baseline.json
-
-# After changes, compare
-simple perf benchmark benchmarks/ > current.json
-simple perf compare current.json baseline.json
-```
-
-### 3. CI/CD Integration
-
-```yaml
-# .github/workflows/performance.yml
-- name: Run benchmarks
-  run: simple perf benchmark benchmarks/ > results.json
-
-- name: Compare with baseline
-  run: simple perf compare results.json baseline.json
-```
-
-## Example: Complete Workflow
-
-```simple
-import perf.profiler
-import perf.benchmark
-
-fn optimize_my_code():
-    # 1. Profile to find hotspots
-    profiler.init_profiler()
-    profiler.profile_region("main_loop", \:
-        my_algorithm()
-    )
-    profiler.print_profile()
-
-    # 2. Benchmark before optimization
-    var suite = benchmark.BenchSuite.create("Algorithm")
-    val before = suite.run_bench("original", 100, \: my_algorithm())
-    suite.add_result(before)
-
-    # 3. Make optimizations based on profiler output
-    # ...
-
-    # 4. Benchmark after optimization
-    val after = suite.run_bench("optimized", 100, \: my_optimized_algorithm())
-    suite.add_result(after)
-
-    # 5. Compare results
-    print suite.report()
-```
-
-## Performance Tips
-
-### DO:
-- ✅ Profile before optimizing
-- ✅ Benchmark to verify improvements
-- ✅ Cache expensive computations
-- ✅ Use appropriate data structures
-- ✅ Minimize allocations in hot paths
-
-### DON'T:
-- ❌ Optimize without measuring
-- ❌ Concatenate strings in loops
-- ❌ Repeat expensive calls
-- ❌ Use O(n²) when O(n) is possible
-- ❌ Ignore the profiler's suggestions
-
-## Architecture
-
-All tools are pure Simple:
-```
-src/app/perf/
-├── profiler.spl     # Time measurement and analysis
-├── benchmark.spl    # Performance testing framework
-├── optimizer.spl    # Static code analysis
-├── main.spl         # CLI interface
-└── README.md        # This file
-```
-
-No Rust modifications required! Performance tools are self-contained.
-
-## SFFI Requirements
-
-These tools use standard SFFI hooks:
-- `rt_time_monotonic_ns()` - High-resolution timer
-- `rt_timestamp_iso8601()` - Timestamp generation
-- `rt_get_args()` - Command-line arguments
-
-All hooks are already available in the standard runtime.
-
-## Future Enhancements
-
-- [ ] Flame graph generation
-- [ ] Memory profiling
-- [ ] CPU cache analysis
-- [ ] Auto-optimization suggestions
-- [ ] JIT compilation hints
-- [ ] Parallel execution profiling
-
-## See Also
-
-- `/examples/perf_demo.spl` - Complete usage examples
-- `/doc/09_report/optimization_progress_2026-02-04.md` - Performance work
-- `/script/profiling/` - Rust-level profiling tools (for runtime optimization)
+This file previously documented `simple perf optimize|profile|benchmark|compare`
+and a `profiler.spl`/`benchmark.spl`/`optimizer.spl` module layout with JSON
+baseline files (`baseline.json`, `current.json`). None of that exists in
+`src/app/perf/` today, and there is no JSON baseline format anywhere in this
+CLI's I/O path. Do not resurrect that API from memory or from an old copy of
+this file — it was fiction.

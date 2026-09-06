@@ -12,7 +12,7 @@ use std.gc_async_mut.io.mod_stub.{env_get}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_paint_tiles.{
     TILE_MARGIN_PX, TileOp, tile_bin_ops, tile_count, tile_grid_make,
     tile_live_set, tile_occluder_slot, tile_op, tile_stats_record,
-    tile_survivors
+    tile_survivors, tile_op_buffer_finish
 }
 use common.ui.draw_ir.{
     DrawIrCommand, DrawIrStyleProp, draw_ir_box_with_style, draw_ir_image_command,
@@ -1244,19 +1244,28 @@ fn _tile_paint_ops(
     clip_cache: PaintClipCache, fbh: i32, has_widget_panel: bool
 ) -> [TileOp]:
     val node_count = nodes.len()
-    var ops: [TileOp] = []
+    if node_count <= 0:
+        return []
+    # Exactly one box and one text slot per node, plus at most one scrollbar.
+    # Indexed stores give this hot path a bounded allocation profile regardless
+    # of the runtime's bare-push growth strategy; tile_op_buffer_finish performs
+    # one final linear trim.
+    var ops: [TileOp] = [_tile_hidden_op(0); node_count * 3]
+    var op_count = 0
     var i = 0
     # cpu-lane-loop-ok: _tile_paint_ops pass 1 of 6: emits box culling ops for normal-flow nodes, mirroring fn paint pass 1's node set so tile bin order equals real paint order. Bound is node_count
     while i < node_count:
         val st = styles[i]
         if not st.position_absolute and not has_relative_paint_root(nodes, styles, i):
-            ops.push(_tile_box_op(nodes, styles, bx, by, bw, bh, clip_cache, fbh, i, has_widget_panel))
+            ops[op_count] = _tile_box_op(nodes, styles, bx, by, bw, bh, clip_cache, fbh, i, has_widget_panel)
+            op_count = op_count + 1
         i = i + 1
     i = 0
     # cpu-lane-loop-ok: _tile_paint_ops pass 2 of 6: box ops for relative-paint-root nodes, mirroring fn paint pass 2. Disjoint from pass 1 and must stay a separate later pass so the bins record the true occlusion order
     while i < node_count:
         if has_relative_paint_root(nodes, styles, i) and not styles[i].position_absolute:
-            ops.push(_tile_box_op(nodes, styles, bx, by, bw, bh, clip_cache, fbh, i, has_widget_panel))
+            ops[op_count] = _tile_box_op(nodes, styles, bx, by, bw, bh, clip_cache, fbh, i, has_widget_panel)
+            op_count = op_count + 1
         i = i + 1
     i = 0
     var positive_z_indices: [i32] = [0; node_count]
@@ -1265,7 +1274,8 @@ fn _tile_paint_ops(
     while i < node_count:
         val st = styles[i]
         if st.position_absolute and st.z_index <= 0:
-            ops.push(_tile_box_op(nodes, styles, bx, by, bw, bh, clip_cache, fbh, i, has_widget_panel))
+            ops[op_count] = _tile_box_op(nodes, styles, bx, by, bw, bh, clip_cache, fbh, i, has_widget_panel)
+            op_count = op_count + 1
         elif st.position_absolute:
             positive_z_indices[positive_z_count] = i
             positive_z_count = positive_z_count + 1
@@ -1275,7 +1285,8 @@ fn _tile_paint_ops(
         var zp = 0
         # cpu-lane-loop-ok: _tile_paint_ops pass 4 of 6: box ops for the z-sorted positive-z absolute nodes; bound is positive_z_count, not node_count
         while zp < positive_z_count:
-            ops.push(_tile_box_op(nodes, styles, bx, by, bw, bh, clip_cache, fbh, sorted_z[zp], has_widget_panel))
+            ops[op_count] = _tile_box_op(nodes, styles, bx, by, bw, bh, clip_cache, fbh, sorted_z[zp], has_widget_panel)
+            op_count = op_count + 1
             zp = zp + 1
     i = 0
     # cpu-lane-loop-ok: _tile_paint_ops pass 5 of 6: scrollbar culling ops for overflow-auto-y scrollports, mirroring fn paint pass 5. Bound is node_count
@@ -1301,14 +1312,16 @@ fn _tile_paint_ops(
                 sx1 = clip.x1
             if sy1 > clip.y1:
                 sy1 = clip.y1
-            ops.push(tile_op(2, i, sx0, sy0, sx1 - sx0, sy1 - sy0, false, false, _tile_style_hash(st), -1))
+            ops[op_count] = tile_op(2, i, sx0, sy0, sx1 - sx0, sy1 - sy0, false, false, _tile_style_hash(st), -1)
+            op_count = op_count + 1
         i = i + 1
     i = 0
     # cpu-lane-loop-ok: _tile_paint_ops pass 6 of 6: one text-phase culling op per node (hidden ops included so op indices stay dense and text is never occlusion-culled). Bound is node_count
     while i < node_count:
-        ops.push(_tile_text_op(nodes, styles, bx, by, bw, bh, clip_cache, fbh, i))
+        ops[op_count] = _tile_text_op(nodes, styles, bx, by, bw, bh, clip_cache, fbh, i)
+        op_count = op_count + 1
         i = i + 1
-    ops
+    tile_op_buffer_finish(ops, op_count)
 
 fn paint_tiled(
     nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [i32],

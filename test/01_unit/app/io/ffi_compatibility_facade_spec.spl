@@ -1,3 +1,38 @@
+"""
+## Purpose and audience
+
+Executable specification for the application I/O FFI compatibility facades:
+each `src/app/io/*_ffi.spl` module must stay a definition-free re-export of
+its canonical std owner, and the typed behavior reached through the app
+imports (graphics, Rapier, HTTP, SQLite, TLS, audio) must match the owner.
+Maintained for app-io maintainers and reviewers of the facade layout.
+
+## Operator workflow
+
+Run `bin/simple test --no-session-daemon test/01_unit/app/io/ffi_compatibility_facade_spec.spl`
+and read the Results line. The facade-layout scenario reads the shipped
+facade files; the remaining scenarios call the facades' re-exported product
+functions and assert on their return values.
+
+## Compatibility and limitations
+
+Covers the eleven app I/O facades on the current toolchain. Source-contract
+scenarios assert shipped-source structure only where the re-export layout
+has no callable seam. TLS and audio paths are exercised in their invalid,
+fail-closed configuration only — no live sockets or audio devices are used.
+
+## Verification guidance and troubleshooting
+
+If the facade-layout scenario fails, someone added a definition to a
+facade; move it to the std owner and re-export instead. If a typed-behavior
+scenario fails, the regression is in the std owner the facade re-exports,
+not in the facade itself.
+"""
+# Lifecycle: research doc/01_research/domain/sspec_documentization_maintenance.md ;
+# plan doc/03_plan/sspec_modernization_plan.md ;
+# architecture doc/04_architecture/sspec_documentization_maintenance.md ;
+# design doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
 use std.spec.*
 use std.io_runtime.{file_read}
 use app.io.graphics2d_ffi.{Bounds, FillRule, fill_rule_to_code, stroke_options_default}
@@ -28,31 +63,45 @@ fn app_io_facade_paths() -> [text]:
         "src/app/io/audio_sffi.spl",
     ]
 
+# @manual_section: io-ffi-facades
 describe "application I/O FFI compatibility facades":
     it "keeps every app facade definition-free and points at the canonical owner":
+        # @req REQ-APP-IO-FFI-FACADE-001
+        # @capture(statistics): definition-free re-export audit rows per facade file
+        step("Read each facade file and audit its re-export layout")
         for path in app_io_facade_paths():
             val source = file_read(path)
             expect(source).to_contain("export use std.nogc_sync_mut.io.")
-            expect(source.contains("extern fn ")).to_equal(false)
-            expect(source.contains("\nfn ")).to_equal(false)
-            expect(source.contains("\nstruct ")).to_equal(false)
-            expect(source.contains("\nenum ")).to_equal(false)
+            val declares_no_extern_fns = source.contains("extern fn ")
+            expect(declares_no_extern_fns).to_equal(false)
+            val declares_no_local_fns = source.contains("\nfn ")
+            expect(declares_no_local_fns).to_equal(false)
+            val declares_no_structs = source.contains("\nstruct ")
+            expect(declares_no_structs).to_equal(false)
+            val declares_no_enums = source.contains("\nenum ")
+            expect(declares_no_enums).to_equal(false)
 
     it "preserves pure graphics and Rapier typed behavior through app imports":
+        # @req REQ-APP-IO-FFI-FACADE-001
+        # @capture(statistics): graphics and vector math result rows through app imports
+        step("Call graphics and Rapier helpers through the app imports")
         val bounds = Bounds(min_x: 2.0, min_y: 4.0, max_x: 10.0, max_y: 16.0)
-        expect(bounds.width()).to_equal(8.0)
-        expect(bounds.height()).to_equal(12.0)
-        expect(fill_rule_to_code(FillRule.EvenOdd)).to_equal(0)
-        expect(stroke_options_default().width).to_equal(1.0)
+        expect(bounds.width()).to_equal(8.0)  # oracle: max_x 10.0 minus min_x 2.0 defines the rectangle width
+        expect(bounds.height()).to_equal(12.0)  # oracle: max_y 16.0 minus min_y 4.0 defines the rectangle height
+        expect(fill_rule_to_code(FillRule.EvenOdd)).to_equal(0)  # oracle: EvenOdd is enum code 0 in the owner's fill-rule encoding
+        expect(stroke_options_default().width).to_equal(1.0)  # oracle: the owner's default stroke width is 1.0
 
         val vector = Vector2(x: 3.0, y: 4.0)
-        expect(vector.length()).to_equal(5.0)
-        expect(vector.dot(Vector2(x: 2.0, y: -1.0))).to_equal(2.0)
-        expect(Rotation2.from_degrees(180.0).to_degrees()).to_equal(180.0)
+        expect(vector.length()).to_equal(5.0)  # oracle: the 3-4 right triangle has hypotenuse 5
+        expect(vector.dot(Vector2(x: 2.0, y: -1.0))).to_equal(2.0)  # oracle: 3*2 + 4*(-1) is the dot product
+        expect(Rotation2.from_degrees(180.0).to_degrees()).to_equal(180.0)  # oracle: a degree round-trip must return the input angle
 
     it "preserves HTTP status helpers and SQLite row access through app imports":
+        # @req REQ-APP-IO-FFI-FACADE-001
+        # @capture(statistics): HTTP classification and SQLite row-read result rows
+        step("Call HTTP helpers and SQLite row accessors through the app imports")
         expect(method_to_string(HttpMethod.PATCH)).to_equal("PATCH")
-        expect(status_to_code(HttpStatus.NotFound)).to_equal(404)
+        expect(status_to_code(HttpStatus.NotFound)).to_equal(404)  # oracle: 404 is the IANA code for Not Found
         expect(code_to_status(503)).to_equal(HttpStatus.ServiceUnavailable)
 
         val ok = HttpResponse(status_code: 204, status: HttpStatus.NoContent,
@@ -70,17 +119,20 @@ describe "application I/O FFI compatibility facades":
 
         val row = SqliteRow(values: ["Ada", "42"], column_names: ["name", "count"])
         expect(sqlite_row_get(row, "name")).to_equal("Ada")
-        expect(sqlite_row_get_int(row, "count")).to_equal(42)
+        expect(sqlite_row_get_int(row, "count")).to_equal(42)  # oracle: the count column holds the integer value 42 in the fixture row
 
     it "preserves fail-closed TLS and audio behavior without crossing the ABI":
+        # @req REQ-APP-IO-FFI-FACADE-001
+        # @capture(statistics): fail-closed TLS and audio result rows on invalid handles
+        step("Call TLS and audio paths with invalid handles and read the verdicts")
         val tls = TlsClientConnection(handle: 0, host: "invalid", port: 443, is_valid: false)
-        expect(tls_write(tls, "payload")).to_equal(0)
+        expect(tls_write(tls, "payload")).to_equal(0)  # oracle: an invalid connection writes zero bytes, the fail-closed contract
         expect(tls_read(tls, 64)).to_equal("")
         expect(tls_close(tls)).to_equal(false)
 
         val source = AudioSource(handle: 0, is_valid: false)
         val playback = audio_play(source)
-        expect(playback.handle).to_equal(0)
+        expect(playback.handle).to_equal(0)  # oracle: playing an invalid source keeps the zero handle instead of allocating one
         expect(playback.is_valid).to_equal(false)
         expect(audio_is_playing(AudioPlayback(handle: 0, is_valid: false))).to_equal(false)
 

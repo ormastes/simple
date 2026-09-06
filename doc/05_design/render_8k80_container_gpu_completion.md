@@ -33,13 +33,16 @@ no software fallback and emits requested/selected backend, device identity,
 readback source and handle, checksum, revision, completion, timings, and RSS.
 It emits `producer_receipt_warmup_count=1` and
 `producer_receipt_sample_count=60`; p50/p95 are calculated over those 60 timed
-changing revisions, never over the warmup.
+changing revisions, never over the warmup. Parse and lower the two immutable
+semantic revisions before timing and report that combined work separately as
+`producer_receipt_preparation_ns`. This keeps the end-to-end preparation cost
+visible while matching the C Vulkan submit-and-fence measurement boundary.
 
 The selected workload is `web-semantic-retained-damage-v1`: a stable full
 background plus one changing semantic element at (128,128), 256x128. Perform a
-full-frame strict Vulkan seed before timing. Each timed revision includes the
-canonical Web layout-to-DrawIR lowering and only the retained-damage submit and
-fence; readback stays outside timing. Accept only when the final retained
+full-frame strict Vulkan seed before timing. Each timed revision selects one
+of the two canonical pre-lowered Web/DrawIR revisions and includes only the
+retained-damage submit and fence; readback stays outside timing. Accept only when the final retained
 device readback equals an independently full-rendered strict Vulkan checksum
 oracle, with stable device/handle, exact submit/fence counts, and no fallback.
 
@@ -82,7 +85,8 @@ The A4/A5 build shares one source-matched native cache across its three native
 entries and retains the semantic-window artifact plus build log/hash in the
 immutable evidence manifest. This reduces repeated compilation only. A4
 separately caches immutable prepared DrawIR planning outside timing; A5
-deliberately keeps semantic layout inside every timed revision. Neither caches
+retains its separately reported semantic preparation cost while timing the
+same GPU boundary as the C comparison. Neither caches
 mutable Engine2D state. The physical wrapper
 executes the cached artifact and validates the separate capture receipt through
 `--validate-physical` before reporting physical readiness.
@@ -95,3 +99,43 @@ binary hash plus the aggregate-bound evidence manifest. On success, copy every
 physical input into a temporary publication, validate those copies, hash them,
 rename the set atomically, make it read-only, and swap the physical `current`
 link atomically.
+
+## C Vulkan parity gate
+
+`scripts/check/check-engine2d-vulkan-c-parity.shs` compares feature receipts
+only after both implementations identify the same workload hash, physical
+device, dimensions, warmup/sample counts, timing scope, and final checksum.
+Both sides must prove known completion, zero mismatches, no fallback, and zero
+timed readback. The C runner must identify a physical discrete or integrated
+adapter. The gate passes only when each p95 is at most 12.5 ms and Simple p95
+is at most twice C p95.
+
+The existing mixed C benchmark is not interchangeable with the semantic A5
+row: its font atlas is synthetic and it has no PATH/EDGE workload. Each feature
+therefore needs matching C and Simple producers using
+`engine2d-vulkan-feature-perf-v1`; missing or drifted receipts fail closed and
+must never be reported as a parity result.
+
+The packed-font C producer deliberately uses a synthetic opaque 16x16 atlas.
+It measures only packed parameter upload plus Vulkan submit/fence throughput;
+it does not claim real-vector-font accuracy. Real-font accuracy remains owned
+by the independent Simple device-readback versus CPU-oracle checksum gate. A
+Simple synthetic packed-font producer must use the identical atlas, placement,
+glyph count, and workload hash before the C receipt is comparable.
+
+Vector-outline rasterization is admitted separately from atlas composition.
+`check-vector-font-raster-c-parity.shs` requires the fresh Chrome differential
+receipt (ten real glyphs, zero bounding-box/ink/density findings), then measures
+94 visible ASCII glyphs from the pinned Noto Sans Mono asset at 24 px in both
+the pure-Simple sfnt rasterizer and the stb C reference. The samples cover
+outline-to-alpha rasterization only, use 31 measured passes, require complete
+nonempty output, and admit Simple only when
+its p95 is at most twice C p95. A bootstrap compiler artifact cannot serve as
+the Simple producer.
+
+The primitive pair fixes four 8K workloads: 1% retained rectangle fill,
+sixteen full-width horizontal lines, the same lines lowered to one-pixel
+rectangle dispatches, and a 1% image copy. Both implementations seed the full
+background before one warmup and 31 samples, batch each feature frame into one
+submission, exclude readback from timing, and run the same exact final-pixel
+oracle. Device name plus driver identity forms the cross-process device hash.

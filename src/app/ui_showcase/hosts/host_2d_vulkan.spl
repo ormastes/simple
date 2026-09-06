@@ -7,7 +7,8 @@
 # text is present) the shared FontRenderer Vulkan receipt.
 
 use common.ui.draw_ir.{
-    DRAW_IR_BACKEND_GPU, DRAW_IR_COMMAND_TEXT, DrawIrComposition
+    DRAW_IR_BACKEND_GPU, DRAW_IR_COMMAND_EDGE, DRAW_IR_COMMAND_PATH,
+    DRAW_IR_COMMAND_TEXT, DrawIrComposition
 }
 use common.ui.draw_ir_v3.{DrawIrV3Scene}
 use common.ui.host_input_event.{HostInputEvent}
@@ -16,7 +17,8 @@ use common.ui.widget.{UIState}
 use gpu.engine2d.engine.{Engine2D}
 use gpu.engine2d.draw_ir_adv.{
     Engine2dDrawIrAdvResult, Engine2dResolvedDrawIrImage,
-    engine2d_draw_ir_adv_strict_vulkan_primitives_with_images
+    engine2d_draw_ir_adv_strict_vulkan_primitives_with_images,
+    engine2d_draw_ir_retained_idle
 }
 use app.ui_showcase.hosts.host_2d.{screen_2d_parse_script}
 use app.ui_showcase.showcase_core.{
@@ -39,6 +41,23 @@ fn _composition_has_text(composition: DrawIrComposition) -> bool:
                 return true
     false
 
+fn _composition_showcase_anchors(composition: DrawIrComposition) -> (i32, i32, i32):
+    """Count feature anchors in the exact composition submitted to Vulkan."""
+    var paths = 0
+    var edges = 0
+    var dialog_titles = 0
+    for batch in composition.batches:
+        for command in batch.commands:
+            if command.? != false:
+                if command.kind == DRAW_IR_COMMAND_PATH:
+                    paths = paths + 1
+                else if command.kind == DRAW_IR_COMMAND_EDGE:
+                    edges = edges + 1
+                else if (command.kind == DRAW_IR_COMMAND_TEXT and
+                         (command.text_value == "Window A" or command.text_value == "Window B")):
+                    dialog_titles = dialog_titles + 1
+    (paths, edges, dialog_titles)
+
 class Screen2dVulkanHost:
     var w: i32
     var h: i32
@@ -48,6 +67,10 @@ class Screen2dVulkanHost:
     var last_pixels: [u32]
     var last_receipt: text
     var last_rejection: text
+    var host_valid: bool
+    var fresh_frames: i64
+    var retained_idle_frames: i64
+    var last_frame_mode: text
 
     static fn open(w: i32, h: i32, script: text) -> Screen2dVulkanHost?:
         if w <= 0 or h <= 0:
@@ -59,7 +82,9 @@ class Screen2dVulkanHost:
         Screen2dVulkanHost(
             w: w, h: h, engine: engine,
             queue: screen_2d_parse_script(script), cursor: 0,
-            last_pixels: [], last_receipt: "", last_rejection: "not-rendered"
+            last_pixels: [], last_receipt: "", last_rejection: "not-rendered",
+            host_valid: true, fresh_frames: 0, retained_idle_frames: 0,
+            last_frame_mode: "not-rendered"
         )
 
     me _reject(reason: text) -> bool:
@@ -96,21 +121,50 @@ class Screen2dVulkanHost:
             not _lower_hex_sha256_valid(result.font_atlas_payload_sha256)):
             return self._reject("fresh-device-font-receipt-rejected")
         self.last_pixels = result.pixels
+        val (path_commands, edge_commands, dialog_titles) =
+            _composition_showcase_anchors(composition)
         self.last_receipt = (
             "renderer=vulkan source={result.readback_source} " +
             "backend_handle={result.backend_handle} device_identity={result.device_identity} " +
             "checksum={result.readback_checksum} rendered={result.rendered_command_count} " +
             "font_target={result.font_execution_target} font_identity={result.font_identity} " +
-            "font_batch={result.font_batch_identity} font_source={result.font_readback_source}"
+            "font_batch={result.font_batch_identity} font_source={result.font_readback_source} " +
+            "font_device_checksum={result.font_device_checksum} " +
+            "font_oracle_checksum={result.font_oracle_checksum} " +
+            "font_nonblank={result.font_readback_nonblank_pixels} " +
+            "font_atlas_sha256={result.font_atlas_payload_sha256} " +
+            "font_parity={result.font_parity} path_commands={path_commands} " +
+            "edge_commands={edge_commands} dialog_titles={dialog_titles}"
         )
         self.last_rejection = ""
+        self.fresh_frames = self.fresh_frames + 1
+        self.last_frame_mode = "fresh-device"
+        true
+
+    me present_retained_idle() -> bool:
+        """Count an unchanged frame without submission or device readback."""
+        if not self.host_valid or self.last_receipt == "" or self.last_pixels.len() == 0:
+            return self._reject("retained-idle-before-fresh-device-frame")
+        val outcome = engine2d_draw_ir_retained_idle(self.engine, false)
+        self.engine = outcome.engine
+        if outcome.unsupported_kinds != "none" or outcome.readback.source != "not_requested":
+            return self._reject("retained-idle-receipt-rejected")
+        self.retained_idle_frames = self.retained_idle_frames + 1
+        self.last_frame_mode = "retained-idle"
         true
 
     me present_composition(composition: DrawIrComposition) -> bool:
+        if not self.host_valid:
+            return self._reject("vulkan-resize-rejected")
         self._accept_fresh_device_result(composition)
 
     me pixels() -> [u32]: self.last_pixels
-    fn device_receipt() -> text: self.last_receipt
+    fn device_receipt() -> text:
+        if self.last_receipt == "":
+            return ""
+        self.last_receipt + " frame_mode={self.last_frame_mode} fresh_frames={self.fresh_frames} " +
+            "retained_idle_frames={self.retained_idle_frames} idle_readback_bytes=0 " +
+            "capture_source=last-fresh-device-readback"
     fn rejection_reason() -> text: self.last_rejection
 
 impl ScreenHost for Screen2dVulkanHost:
@@ -125,6 +179,25 @@ impl ScreenHost for Screen2dVulkanHost:
             return nil
         val event = self.queue[self.cursor]
         self.cursor = self.cursor + 1
+        match event:
+            HostInputEvent.Resize(resize_w, resize_h):
+                if resize_w > 0 and resize_h > 0:
+                    val replacement = Engine2D.create_with_backend_fast(
+                        resize_w, resize_h, "vulkan")
+                    if replacement.backend_name() != "vulkan":
+                        replacement.shutdown()
+                        self.host_valid = false
+                    else:
+                        self.engine.shutdown()
+                        self.engine = replacement
+                        self.w = resize_w
+                        self.h = resize_h
+                        self.last_pixels = []
+                        self.last_receipt = ""
+                        self.last_rejection = "not-rendered-after-resize"
+                        self.last_frame_mode = "not-rendered"
+            _:
+                pass
         event
 
     me shutdown():
@@ -136,6 +209,7 @@ fn showcase_run_with_backend(host: Screen2dVulkanHost, prefix: text,
     """Run the shared showcase reducer while preserving DrawIrComposition."""
     var state: UIState = showcase_build(prefix)
     var frames: i64 = 0
+    var content_dirty = true
     while frames < max_frames:
         val (w, h) = host.size()
         # No engine.clear on Vulkan: a failed clear dispatch flips
@@ -145,13 +219,20 @@ fn showcase_run_with_backend(host: Screen2dVulkanHost, prefix: text,
         # showcase_composition (not bare widget_tree_to_draw_ir): the active
         # screen's custom feature batches ride along on the GPU lane exactly
         # as they do through showcase_scene on the v3 hosts.
-        val composition = showcase_composition(state, w, h, backend)
-        if not host.present_composition(composition):
-            break
+        if content_dirty:
+            val composition = showcase_composition(state, w, h, backend)
+            if not host.present_composition(composition):
+                break
+        else:
+            if not host.present_retained_idle():
+                break
         frames = frames + 1
+        content_dirty = false
         var event = host.poll_input()
         while event != nil:
-            state = showcase_apply(state, event!, w, h)
+            val (event_w, event_h) = host.size()
+            state = showcase_apply(state, event!, event_w, event_h)
+            content_dirty = true
             event = host.poll_input()
     showcase_report(state, host.host_name(), frames)
 

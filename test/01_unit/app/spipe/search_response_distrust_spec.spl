@@ -1,3 +1,27 @@
+"""
+## Purpose and audience
+Specification for response validation against untrusted search providers after handshake,
+ensuring that injected or corrupted provider responses never enter the corpus. For
+engineers implementing provider protocol security.
+
+## Operator workflow
+Run `bin/simple test test/01_unit/app/spipe/search_response_distrust_spec.spl` to verify
+response validation gates all distrust scenarios.
+
+## Compatibility and limitations
+Runs on all platforms. Exercises response payload validation via fault injection.
+
+## Verification guidance and troubleshooting
+A failure indicates incomplete response validation. Each scenario injects a specific
+response anomaly (forged root, skipped rank, duplicated ID, non-monotonic score) and
+must reject it with code "poisoned_response".
+"""
+# Lifecycle: doc/01_research/infra/spipe/ ;
+# doc/03_plan/infra/spipe/ ;
+# doc/04_architecture/app/spipe/ ;
+# doc/05_design/app/spipe/
+# @manual_section: response-validation
+
 use std.spec
 use app.spipe.search.response_validation.{validate_search_page, validate_rank_sequence, validate_score_monotonic, validate_unique_document_ids}
 use lib.common.search.document.{SearchHit}
@@ -13,6 +37,8 @@ fn good_hits() -> [SearchHit]:
 
 describe "P5 response distrust — a provider is untrusted after handshake":
     it "accepts a well-formed page: unique IDs, contiguous ranks, monotonic scores":
+        # @req REQ-SPIPE-SEARCH-001
+        # @capture(bit_table): validation result and page acceptance
         step("A correctly ordered page passes every independent check")
         val page = SearchPageV1.of("root-1", good_hits(), nil, true)
         val result = validate_search_page(page, "root-1")
@@ -21,6 +47,8 @@ describe "P5 response distrust — a provider is untrusted after handshake":
             Err(_): expect(true).to_equal(false)
 
     it "rejects a page whose logical_root does not match the resolved snapshot":
+        # @req REQ-SPIPE-SEARCH-002
+        # @capture(bit_table): poisoned_response error detection
         step("A forged/stale logical root must never be trusted")
         val page = SearchPageV1.of("root-forged", good_hits(), nil, true)
         val result = validate_search_page(page, "root-1")
@@ -29,6 +57,8 @@ describe "P5 response distrust — a provider is untrusted after handshake":
             Ok(_): expect(true).to_equal(false)
 
     it "rejects ranks that skip a value (not contiguous)":
+        # @req REQ-SPIPE-SEARCH-003
+        # @capture(bit_table): contiguity validation and error code
         step("Injected bug: rank sequence 1,3 instead of 1,2")
         val broken = [
             SearchHit.of("doc-a", Score.from_milli(9000), 1),
@@ -40,6 +70,8 @@ describe "P5 response distrust — a provider is untrusted after handshake":
             Ok(_): expect(true).to_equal(false)
 
     it "rejects a duplicated rank":
+        # @req REQ-SPIPE-SEARCH-004
+        # @capture(bit_table): duplicate rank rejection
         step("Injected bug: rank 1 repeated instead of 1,2")
         val broken = [
             SearchHit.of("doc-a", Score.from_milli(9000), 1),
@@ -51,6 +83,8 @@ describe "P5 response distrust — a provider is untrusted after handshake":
             Ok(_): expect(true).to_equal(false)
 
     it "rejects a score that increases at a later (worse) rank":
+        # @req REQ-SPIPE-SEARCH-005
+        # @capture(bit_table): score monotonicity violation detection
         step("Injected bug: rank 2 outscores rank 1")
         val broken = [
             SearchHit.of("doc-a", Score.from_milli(1000), 1),
@@ -62,6 +96,8 @@ describe "P5 response distrust — a provider is untrusted after handshake":
             Ok(_): expect(true).to_equal(false)
 
     it "rejects a duplicated document ID across two ranks":
+        # @req REQ-SPIPE-SEARCH-006
+        # @capture(bit_table): document ID uniqueness validation
         step("Injected bug: same document claimed at rank 1 and rank 2")
         val broken = [
             SearchHit.of("doc-a", Score.from_milli(9000), 1),
@@ -71,5 +107,3 @@ describe "P5 response distrust — a provider is untrusted after handshake":
         match result:
             Err(e): expect(e.code).to_equal("poisoned_response")
             Ok(_): expect(true).to_equal(false)
-
-return ()

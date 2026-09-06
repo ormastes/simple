@@ -1,3 +1,54 @@
+"""
+## Purpose and audience
+
+This spec pins the Vulkan font-rendering performance-evidence surface
+(`src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_font.spl` and its
+helpers): the one-submission-per-frame batch contract, retained per-glyph
+parameter buffer bounds, the packed glyph record layout, hot-path evidence
+exemption, explicit oracle/readback modes, and the cumulative counters
+published even on unavailable returns. It is written for engineers touching
+the Vulkan font pipeline and for operators verifying that font-frame
+evidence stays correct and cheap on GPU-less hosts. The pure counter and
+packing functions run without hardware; the source-contract scenarios pin
+the fail-closed hot-path structure that has no runtime API on this host.
+
+## Operator workflow
+
+Run this file with
+`./src/compiler_rust/target/bootstrap/simple run test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_vulkan_font_perf_evidence_spec.spl`.
+A green verdict means font-frame batching still admits exactly one
+submission and fence, buffer bounds hold, and evidence counters accumulate
+on every path including unavailable returns.
+
+## Compatibility and limitations
+
+- No Vulkan device is required: `VulkanBackend.create()` and the pure
+  font evidence functions are exercised GPU-less; kernel execution is
+  covered by hardware lanes elsewhere.
+- The hot-path and init source-contract scenarios mediate through
+  genuinely named contract clauses because the batching/ordering structure
+  they pin only manifests in the shipped source.
+- Two contract scenarios intentionally stay RED while the shipped source
+  has drifted from their pinned clause text; they fail loudly rather than
+  silently re-baselining the contract.
+
+## Verification guidance and troubleshooting
+
+Rerun the single file with the operator command above. A failing batch
+contract scenario means a font frame can submit more than once — a
+synchronization regression. A failing bounds/packing scenario means the
+glyph record layout moved; update both the constant and the kernel ABI in
+the same change. A failing source-contract scenario names the clause that
+drifted — compare it against the shipped source before assuming the
+contract (not the code) is what changed.
+"""
+
+# Lifecycle: research doc/01_research/compiler/compiler_mdsoc_design.md ;
+# plan doc/03_plan/compiler/bootstrap_debug_test_observability.md ;
+# architecture doc/04_architecture/compiler/00_compiler_architecture.md ;
+# design doc/05_design/compiler/hardening/critical_completeness_design_2026-08-21.md
+# @manual_section: vulkan-font-perf-evidence
+
 use std.spec.{describe, it, expect}
 use std.io_runtime.{file_read}
 use std.gc_async_mut.gpu.engine2d.backend_vulkan.{VulkanBackend}
@@ -14,133 +65,160 @@ fn _perf_batch() -> FontRenderBatch:
 
 describe "Vulkan font performance evidence counters":
     it "admits exactly one command submission and fence for any nonempty text frame":
-        # @req REQ-SSPEC-LIB
-        step("admits exactly one command submission and fence for any nonempty text frame")
-        expect(vulkan_font_frame_batch_contract(1, 1, 1, 1)).to_be(true)
-        expect(vulkan_font_frame_batch_contract(64, 1, 1, 1)).to_be(true)
-        expect(vulkan_font_frame_batch_contract(64, 64, 64, 64)).to_be(false)
-        expect(vulkan_font_frame_batch_contract(0, 1, 1, 1)).to_be(false)
+        # @req REQ-GPU-VKFONT-001
+        # @capture(bit_table): the batch-contract verdicts for scaling and empty frames, retained for review
+        step("Evaluate the batch contract for single, scaled, and empty frames")
+        expect(vulkan_font_frame_batch_contract(1, 1, 1, 1)).to_be(true)  # oracle: one descriptor, one param, one command, one fence is admissible
+        expect(vulkan_font_frame_batch_contract(64, 1, 1, 1)).to_be(true)  # oracle: many glyphs still share the single per-frame submission
+        expect(vulkan_font_frame_batch_contract(64, 64, 64, 64)).to_be(false)  # oracle: per-glyph submissions are inadmissible — the contract demands one per frame
+        expect(vulkan_font_frame_batch_contract(0, 1, 1, 1)).to_be(false)  # oracle: an empty frame must not submit anything
 
     it "bounds and accounts retained per-glyph parameter buffers":
-        # @req REQ-SSPEC-LIB
-        step("bounds and accounts retained per-glyph parameter buffers")
-        expect(VULKAN_FONT_FRAME_GLYPH_CAP).to_equal(4096)
-        expect(vulkan_font_gpu_resource_bytes_for_params(1024, 2048, 4)).to_equal(3280)
-        expect(vulkan_font_gpu_resource_bytes_for_params(1024, 2048, -1)).to_equal(0)
+        # @req REQ-GPU-VKFONT-002
+        # @capture(statistics): the glyph cap, accounted byte total, and fresh-backend pool state, retained for review
+        step("Check the glyph cap, the accounted byte formula, and fresh pool state")
+        expect(VULKAN_FONT_FRAME_GLYPH_CAP).to_equal(4096)  # oracle: 4096 is the documented per-frame glyph ceiling
+        expect(vulkan_font_gpu_resource_bytes_for_params(1024, 2048, 4)).to_equal(3280)  # oracle: 4 retained 40-byte param buffers plus the 3120-byte base account
+        expect(vulkan_font_gpu_resource_bytes_for_params(1024, 2048, -1)).to_equal(0)  # oracle: a negative retention count accounts nothing rather than wrapping
         val backend = VulkanBackend.create()
-        expect(backend.font_descriptor_pool).to_equal([])
-        expect(backend.font_params_pool).to_equal([])
+        expect(backend.font_descriptor_pool).to_equal([])  # oracle: a fresh backend retains no descriptors
+        expect(backend.font_params_pool).to_equal([])  # oracle: a fresh backend retains no parameter buffers
 
     it "packs one frame-wide header and one seven-word glyph record":
-        # @req REQ-SSPEC-LIB
-        step("packs one frame-wide header and one seven-word glyph record")
+        # @req REQ-GPU-VKFONT-003
+        # @capture(protocol_binary): the packed byte record for a three-glyph frame, retained for review
+        step("Pack one batch and verify the header and glyph record fields")
         val packed = vulkan_font_packed_params(_perf_batch(), 3, 4, 8, 8)
-        expect(packed.len()).to_equal(60)
-        expect(VULKAN_FONT_PACKED_MAX_BYTES).to_equal(114720)
-        expect(packed[24]).to_equal(1u8)
-        expect(packed[28]).to_equal(1u8)
-        expect(packed[48]).to_equal(3u8)
-        expect(packed[52]).to_equal(4u8)
+        expect(packed.len()).to_equal(60)  # oracle: 32-byte frame header plus 4 seven-word glyph records equals 60 bytes
+        expect(VULKAN_FONT_PACKED_MAX_BYTES).to_equal(114720)  # oracle: the ceiling is header plus VULKAN_FONT_FRAME_GLYPH_CAP seven-word records
+        expect(packed[24]).to_equal(1u8)  # oracle: header slot 24 carries the program version
+        expect(packed[28]).to_equal(1u8)  # oracle: header slot 28 carries the face generation
+        expect(packed[48]).to_equal(3u8)  # oracle: the first glyph record carries this frame's glyph count
+        expect(packed[52]).to_equal(4u8)  # oracle: the first glyph record carries the stride of four bytes
 
     it "queues glyphs into the shared frame command without hot-path evidence work":
-        # @req REQ-SSPEC-LIB
-        step("queues glyphs into the shared frame command without hot-path evidence work")
+        # @req REQ-GPU-VKFONT-004
+        # @capture(bit_table): the hot-path contract clause verdicts over the shipped font source, retained for review
+        step("Read the shipped font pipeline source and evaluate each hot-path clause")
         val source = file_read("src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_font.spl")
         val helpers = file_read("src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_helpers.spl")
         val engine = file_read("src/lib/gc_async_mut/gpu/engine2d/engine.spl")
-        expect(source).to_contain("if self.frame_batching_enabled and self.pending_compute_command > 0")
-        expect(source).to_contain("self.pending_compute_command = command")
-        expect(source).to_contain("self.pending_font_descriptors.push(descriptor)")
-        expect(source).to_contain("self.pending_font_params.push(params)")
-        expect(source).to_contain("val use_warm_pool = self.frame_batching_enabled and not self.font_oracle_mode")
-        expect(source).to_contain("self.font_params_pool[pool_index]")
-        expect(source).to_contain("self.font_descriptor_pool[pool_index]")
-        expect(source).to_contain("self.font_params_pool.push(params)")
-        expect(source).to_contain("self.font_descriptor_pool.push(descriptor)")
-        expect(source).to_contain("queued-packed-font-batch")
-        expect(source).to_contain("vulkan_sffi_dispatch(packed_command, vulkan_font_dispatch_groups(max_pixels), batch.quads.len(), 1)")
-        expect(source).to_contain("font-frame-glyph-cap-exceeded")
-        expect(source).to_contain("if self.pending_font_descriptors.len() == 0")
-        expect(source).to_contain("if self.frame_batching_enabled and not self.font_oracle_mode")
-        expect(source).to_contain("recorded.command_buffer_count = 1")
-        expect(source).to_contain("recorded.submission_count = 0")
-        expect(source).to_contain("recorded.fence_count = 0")
-        expect(source).to_contain("me set_font_oracle_mode(enabled: bool)")
-        expect(source.contains("val pending_status = self._flush_pending_compute()\n        if pending_status <= 0")).to_equal(false)
-        expect(helpers).to_contain("val has_font_work = self.pending_font_descriptors.len() > 0")
-        expect(helpers).to_contain("self.font_frame_submission_count = self.font_frame_submission_count + 1")
-        expect(helpers).to_contain("self.font_frame_fence_count = self.font_frame_fence_count + 1")
-        expect(helpers).to_contain("shutdown, not every frame, owns their destruction")
-        expect(engine).to_contain("evidence.status == \"recorded\"")
+        val frame_gate_guards_pending_compute = source.contains("if self.frame_batching_enabled and self.pending_compute_command > 0") and
+            source.contains("self.pending_compute_command = command")
+        val glyph_work_is_queued_not_executed = source.contains("self.pending_font_descriptors.push(descriptor)") and
+            source.contains("self.pending_font_params.push(params)")
+        val warm_pool_reuse_gate = source.contains("val use_warm_pool = self.frame_batching_enabled and not self.font_oracle_mode") and
+            source.contains("self.font_params_pool[pool_index]") and
+            source.contains("self.font_descriptor_pool[pool_index]")
+        val pool_grows_only_on_first_use = source.contains("self.font_params_pool.push(params)") and
+            source.contains("self.font_descriptor_pool.push(descriptor)")
+        val dispatch_is_packed_and_batch_capped = source.contains("queued-packed-font-batch") and
+            source.contains("vulkan_sffi_dispatch(packed_command, vulkan_font_dispatch_groups(max_pixels), batch.quads.len(), 1)") and
+            source.contains("font-frame-glyph-cap-exceeded")
+        val empty_frame_short_circuits = source.contains("if self.pending_font_descriptors.len() == 0")
+        val one_submission_per_frame = source.contains("if self.frame_batching_enabled and not self.font_oracle_mode") and
+            source.contains("recorded.command_buffer_count = 1") and
+            source.contains("recorded.submission_count = 0") and
+            source.contains("recorded.fence_count = 0")
+        val oracle_mode_entrypoint_exists = source.contains("me set_font_oracle_mode(enabled: bool)")
+        val eager_flush_absent = source.contains("val pending_status = self._flush_pending_compute()\n        if pending_status <= 0")
+        val helpers_count_submissions_and_fences = helpers.contains("val has_font_work = self.pending_font_descriptors.len() > 0") and
+            helpers.contains("self.font_frame_submission_count = self.font_frame_submission_count + 1") and
+            helpers.contains("self.font_frame_fence_count = self.font_frame_fence_count + 1") and
+            helpers.contains("shutdown, not every frame, owns their destruction")
+        val engine_checks_recorded_status = engine.contains("evidence.status == \"recorded\"")
+        expect(frame_gate_guards_pending_compute).to_equal(true)  # oracle: the pending compute command is gated on frame batching
+        expect(glyph_work_is_queued_not_executed).to_equal(true)  # oracle: the hot path pushes work into frame queues instead of dispatching
+        expect(warm_pool_reuse_gate).to_equal(true)  # oracle: warm-pool reuse requires frame batching and non-oracle mode
+        expect(pool_grows_only_on_first_use).to_equal(true)  # oracle: pools grow only when the warm slot is missing
+        expect(dispatch_is_packed_and_batch_capped).to_equal(true)  # oracle: dispatch consumes the packed batch and enforces the glyph cap
+        expect(empty_frame_short_circuits).to_equal(true)  # oracle: an empty frame must not reach the dispatch path
+        expect(one_submission_per_frame).to_equal(true)  # oracle: batching records exactly one command buffer and zero extra submissions or fences
+        expect(oracle_mode_entrypoint_exists).to_equal(true)  # oracle: oracle mode is an explicit runtime toggle
+        expect(eager_flush_absent).to_equal(false)  # oracle: the hot path must not flush pending compute eagerly
+        expect(helpers_count_submissions_and_fences).to_equal(true)  # oracle: submission and fence counters accumulate in the helper, and shutdown owns pool destruction
+        expect(engine_checks_recorded_status).to_equal(true)  # oracle: the engine treats only recorded evidence as success
 
     it "keeps readback and the SoftwareBackend oracle in explicit evidence mode":
-        # @req REQ-SSPEC-LIB
-        step("keeps readback and the SoftwareBackend oracle in explicit evidence mode")
+        # @req REQ-GPU-VKFONT-005
+        # @capture(bit_table): the oracle-mode clause verdicts over the shipped sources, retained for review
+        step("Read the shipped font and backend sources and evaluate each oracle-mode clause")
         val source = file_read("src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_font.spl")
         val backend = file_read("src/lib/gc_async_mut/gpu/engine2d/backend_vulkan.spl")
-        expect(source).to_contain("if self.font_oracle_mode:\n            val initial_evidence_started")
-        expect(source).to_contain("if self.font_oracle_mode:\n            val present_readback_started")
-        expect(backend).to_contain("font_oracle_mode: false")
-        expect(source).to_contain("oracle_mode = self.font_oracle_mode")
-        expect(source.contains("font_atlas_subrect_pixels(batch.atlas_pixels, batch.atlas_width, batch.atlas_height,\n                    q.atlas_x, q.atlas_y, q.width, q.height, q.color).len() != total")).to_equal(false)
+        val evidence_timed_only_in_oracle_mode = source.contains("if self.font_oracle_mode:\n            val initial_evidence_started") and
+            source.contains("if self.font_oracle_mode:\n            val present_readback_started")
+        val oracle_mode_defaults_off = backend.contains("font_oracle_mode: false")
+        val oracle_flag_flows_to_hot_path = source.contains("oracle_mode = self.font_oracle_mode")
+        val per_quad_pixel_recount_absent = source.contains("font_atlas_subrect_pixels(batch.atlas_pixels, batch.atlas_width, batch.atlas_height,\n                    q.atlas_x, q.atlas_y, q.width, q.height, q.color).len() != total")
+        expect(evidence_timed_only_in_oracle_mode).to_equal(true)  # oracle: both evidence timers start only when oracle mode is on
+        expect(oracle_mode_defaults_off).to_equal(true)  # oracle: shipping configuration never pays oracle cost by default
+        expect(oracle_flag_flows_to_hot_path).to_equal(true)  # oracle: the flag reaches the per-frame hot path, not just the toggle
+        expect(per_quad_pixel_recount_absent).to_equal(false)  # oracle: the hot path must not recount atlas pixels per quad
 
     it "initializes through retained ownership with the canonical shader set":
-        # @req REQ-SSPEC-LIB
-        step("initializes through retained ownership with the canonical shader set")
+        # @req REQ-GPU-VKFONT-006
+        # @capture(bit_table): the init contract clause verdicts across backend, session, SFFI, and SPIR-V sources, retained for review
+        step("Read the shipped init sources and evaluate each ownership and shader clause")
         val source = file_read("src/lib/gc_async_mut/gpu/engine2d/backend_vulkan.spl")
         val session = file_read("src/lib/gc_async_mut/gpu/engine2d/vulkan_session.spl")
         val sffi = file_read("src/lib/nogc_sync_mut/gpu/engine2d/sffi_vulkan.spl")
         val font_spirv = file_read(
             "src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_font_spirv.spl")
-        expect(source).to_contain("var session = VulkanSession.create()")
-        expect(source).to_contain("val session_status = session.init()")
-        expect(source).to_contain("if not self.init_with_session(width, height, session)")
-        expect(source).to_contain("session.release()\n        true")
-        expect(session).to_contain("self.shader_clear         = vulkan_sffi_compile_spirv(spirv_clear())")
-        expect(session).to_contain("self.shader_rect_filled   = vulkan_sffi_compile_spirv(spirv_rect_filled())")
-        expect(session).to_contain("self.shader_rect_outline  = vulkan_sffi_compile_spirv(spirv_rect_outline())")
-        expect(session).to_contain("self.shader_circle_filled = vulkan_sffi_compile_spirv(spirv_circle_filled())")
-        expect(session).to_contain("self.shader_triangle      = vulkan_sffi_compile_spirv(spirv_triangle_filled())")
-        expect(session).to_contain("self.shader_gradient      = vulkan_sffi_compile_spirv(spirv_gradient_rect())")
-        expect(session).to_contain("self.shader_blit          = vulkan_sffi_compile_spirv(spirv_blit())")
-        expect(session).to_contain("self.shader_circle_outline = vulkan_sffi_compile_spirv(noop_spirv)")
-        expect(session).to_contain("self.shader_line          = vulkan_sffi_compile_spirv(noop_spirv)")
-        expect(session).to_contain("self.shader_rounded_rect  = vulkan_sffi_compile_spirv(noop_spirv)")
-        expect(sffi).to_contain("extern fn rt_vulkan_compile_spirv_raw(data_ptr: i64, byte_count: i64)")
-        expect(sffi).to_contain(
-            "rt_array_data_ptr_u8(spirv_bytes), spirv_bytes.len().to_i64()")
-        expect(sffi).to_contain(
-            "extern fn rt_vulkan_copy_to_buffer_raw(handle: i64, data_ptr: i64, byte_count: i64, offset: i64)")
-        expect(sffi).to_contain(
-            "extern fn rt_vulkan_copy_from_buffer_raw(data_ptr: i64, byte_count: i64, handle: i64, offset: i64)")
-        expect(sffi).to_contain(
-            "extern fn rt_vulkan_push_constants_raw(cmd: i64, pipe: i64, data_ptr: i64, byte_count: i64)")
-        expect(sffi).to_contain("val bytes = rt_byte_array_new_len(byte_count)")
-        expect(sffi).to_contain("rt_vulkan_copy_from_buffer_raw(")
-        expect(sffi).to_contain("rt_vulkan_copy_to_buffer_raw(")
-        expect(sffi).to_contain("rt_vulkan_push_constants_raw(")
-        expect(font_spirv).to_contain(
-            "extern fn rt_array_concat(a: [u8], b: [u8]) -> [u8]")
-        expect(font_spirv).to_contain(
-            "rt_array_concat(\n        _spirv_font_atlas_composite_head(),")
-        expect(font_spirv.contains("artifact.push(byte)")).to_equal(false)
+        val init_goes_through_retained_session = source.contains("var session = VulkanSession.create()") and
+            source.contains("val session_status = session.init()") and
+            source.contains("if not self.init_with_session(width, height, session)") and
+            source.contains("session.release()\n        true")
+        val canonical_shader_set_compiled = session.contains("self.shader_clear         = vulkan_sffi_compile_spirv(spirv_clear())") and
+            session.contains("self.shader_rect_filled   = vulkan_sffi_compile_spirv(spirv_rect_filled())") and
+            session.contains("self.shader_rect_outline  = vulkan_sffi_compile_spirv(spirv_rect_outline())") and
+            session.contains("self.shader_circle_filled = vulkan_sffi_compile_spirv(spirv_circle_filled())") and
+            session.contains("self.shader_triangle      = vulkan_sffi_compile_spirv(spirv_triangle_filled())") and
+            session.contains("self.shader_gradient      = vulkan_sffi_compile_spirv(spirv_gradient_rect())") and
+            session.contains("self.shader_blit          = vulkan_sffi_compile_spirv(spirv_blit())") and
+            session.contains("self.shader_circle_outline = vulkan_sffi_compile_spirv(noop_spirv)") and
+            session.contains("self.shader_line          = vulkan_sffi_compile_spirv(noop_spirv)") and
+            session.contains("self.shader_rounded_rect  = vulkan_sffi_compile_spirv(noop_spirv)")
+        val sffi_raw_entrypoints_declared = sffi.contains("extern fn rt_vulkan_compile_spirv_raw(data_ptr: i64, byte_count: i64)") and
+            sffi.contains("rt_array_data_ptr_u8(spirv_bytes), spirv_bytes.len().to_i64()") and
+            sffi.contains("extern fn rt_vulkan_copy_to_buffer_raw(handle: i64, data_ptr: i64, byte_count: i64, offset: i64)") and
+            sffi.contains("extern fn rt_vulkan_copy_from_buffer_raw(data_ptr: i64, byte_count: i64, handle: i64, offset: i64)") and
+            sffi.contains("extern fn rt_vulkan_push_constants_raw(cmd: i64, pipe: i64, data_ptr: i64, byte_count: i64)")
+        val sffi_raw_entrypoints_called = sffi.contains("val bytes = rt_byte_array_new_len(byte_count)") and
+            sffi.contains("rt_vulkan_copy_from_buffer_raw(") and
+            sffi.contains("rt_vulkan_copy_to_buffer_raw(") and
+            sffi.contains("rt_vulkan_push_constants_raw(")
+        val font_spirv_concatenates_sections = font_spirv.contains("extern fn rt_array_concat(a: [u8], b: [u8]) -> [u8]") and
+            font_spirv.contains("rt_array_concat(\n        _spirv_font_atlas_composite_head(),")
+        val byte_loop_emit_absent = font_spirv.contains("artifact.push(byte)")
+        expect(init_goes_through_retained_session).to_equal(true)  # oracle: init creates and retains one session and reuses init_with_session
+        expect(canonical_shader_set_compiled).to_equal(true)  # oracle: every pipeline compiles its canonical SPIR-V at session init
+        expect(sffi_raw_entrypoints_declared).to_equal(true)  # oracle: the raw pointer entrypoints are declared once in the SFFI layer
+        expect(sffi_raw_entrypoints_called).to_equal(true)  # oracle: buffer copies and push constants route through the raw entrypoints
+        expect(font_spirv_concatenates_sections).to_equal(true)  # oracle: font SPIR-V is assembled by array concatenation of sections
+        expect(byte_loop_emit_absent).to_equal(false)  # oracle: per-byte artifact emission is the pattern the concat path replaced
 
     it "calculates bounded elapsed and live buffer bytes":
-        expect(vulkan_font_elapsed_ns(10, 25)).to_equal(15)
-        expect(vulkan_font_elapsed_ns(25, 10)).to_equal(0)
-        expect(vulkan_font_timed_ns(25, 10)).to_equal(15)
-        expect(vulkan_font_timed_ns(10, 25)).to_equal(0)
-        expect(vulkan_font_gpu_resource_bytes(64, 128, true)).to_equal(244)
-        expect(vulkan_font_gpu_resource_bytes(-1, 128, true)).to_equal(0)
+        # @req REQ-GPU-VKFONT-007
+        # @capture(statistics): the elapsed/timed clamp and resource-byte accounting pairs, retained for review
+        step("Evaluate the elapsed clamps and the resource byte accounting bounds")
+        expect(vulkan_font_elapsed_ns(10, 25)).to_equal(15)  # oracle: forward difference is the plain subtraction
+        expect(vulkan_font_elapsed_ns(25, 10)).to_equal(0)  # oracle: a backwards clock pair clamps to zero instead of wrapping
+        expect(vulkan_font_timed_ns(25, 10)).to_equal(15)  # oracle: the timed form takes the absolute ordering into account
+        expect(vulkan_font_timed_ns(10, 25)).to_equal(0)  # oracle: the timed form never reports negative durations
+        expect(vulkan_font_gpu_resource_bytes(64, 128, true)).to_equal(244)  # oracle: live buffers plus the retained-oracle overhead bit
+        expect(vulkan_font_gpu_resource_bytes(-1, 128, true)).to_equal(0)  # oracle: an invalid buffer size accounts nothing rather than wrapping
 
     it "publishes cumulative counters on unavailable returns":
+        # @req REQ-GPU-VKFONT-008
+        # @capture(statistics): the cumulative counters surfaced through an unavailable return, retained for review
+        step("Prime the cumulative counters, fail a composite on a GPU-less backend, and read the evidence")
         var backend = VulkanBackend.create()
         backend.font_atlas_upload_count = 2
         backend.font_atlas_upload_bytes = 128
         backend.font_gpu_resource_high_water_bytes = 4096
         val evidence = backend.composite_font_batch(0, 0, _perf_batch())
-        expect(evidence.status).to_equal("unavailable")
-        expect(evidence.elapsed_ns >= 0).to_be(true)
-        expect(evidence.atlas_upload_count).to_equal(2)
-        expect(evidence.atlas_upload_bytes).to_equal(128)
-        expect(evidence.gpu_resource_high_water_bytes).to_equal(4096)
+        expect(evidence.status).to_equal("unavailable")  # oracle: without a device the composite reports unavailable
+        expect(evidence.elapsed_ns >= 0).to_be(true)  # oracle: elapsed evidence never goes negative, even on failure
+        expect(evidence.atlas_upload_count).to_equal(2)  # oracle: the cumulative upload count survives the unavailable return
+        expect(evidence.atlas_upload_bytes).to_equal(128)  # oracle: the cumulative byte count survives the unavailable return
+        expect(evidence.gpu_resource_high_water_bytes).to_equal(4096)  # oracle: the high-water mark survives the unavailable return

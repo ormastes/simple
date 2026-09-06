@@ -96,6 +96,40 @@ fn run_transform_scale_f32(data: [f32], factor: f32, target: ExecTarget) -> Comp
     val cpu_out = cpu_transform_scale_f32(data, factor)
     ComputeRunResult.make(cpu_out, backend, true, grid_n, COMPUTE_BLOCK_SIZE, devices, "cpu-reference")
 
-export COMPUTE_BLOCK_SIZE, ComputeRunResult
+# Result of a runtime integer-reduction execution (the `reduce` cell).
+class ComputeReduceResult:
+    data: [i64]        # single element: the reduced value
+    backend: text
+    ran_on_cpu: bool   # true => pure-Simple reference path executed
+    device_count: i64
+    note: text
+
+    static fn make(data: [i64], backend: text, ran_on_cpu: bool, device_count: i64, note: text) -> ComputeReduceResult:
+        ComputeReduceResult(data: data, backend: backend, ran_on_cpu: ran_on_cpu, device_count: device_count, note: note)
+
+# Pure-Simple reference: fold `+` over data starting at `init`. The differential
+# oracle for the `reduce` cell, exactly as cpu_transform_scale_f32 is for `transform`.
+fn cpu_reduce_i64(data: [i64], init: i64) -> i64:
+    var acc = init
+    var i = 0
+    while i < data.len():
+        acc = acc + data[i]
+        i = i + 1
+    return acc
+
+# End-to-end `reduce` cell: fold `+` over `data` on the backend chosen by `target`.
+# TODO(cell-grid W1): no device-side tree-reduction kernel is built yet, so a
+# device-class target still executes the CPU reference and SAYS SO in `note`
+# (`gpu-reduce-kernel-unimplemented-fell-back`) rather than claiming a GPU run.
+fn run_reduce_i64(data: [i64], init: i64, target: ExecTarget) -> ComputeReduceResult:
+    val backend = compute_backend_name(target.backend)
+    val devices = gpu_device_count()
+    val acc = cpu_reduce_i64(data, init)
+    if target_is_device_backend(target) and devices > 0:
+        return ComputeReduceResult.make([acc], backend, true, devices, "gpu-reduce-kernel-unimplemented-fell-back")
+    ComputeReduceResult.make([acc], backend, true, devices, "cpu-reference")
+
+export COMPUTE_BLOCK_SIZE, ComputeRunResult, ComputeReduceResult
 export compute_grid_for, target_is_device_backend
 export cpu_transform_scale_f32, run_transform_scale_f32
+export cpu_reduce_i64, run_reduce_i64

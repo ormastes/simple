@@ -1,0 +1,178 @@
+# @gc — module uses GC runtime
+#
+# Native model-format detection for the slang loader.
+#
+# WHY THIS EXISTS
+# ---------------
+# Before this module, `discover_models` recognised exactly one thing: a
+# directory holding a `manifest.sdn` that the A1 loader accepts. Pointed at a
+# real model root — say /home/yoon/dev/model, holding three downloaded
+# HuggingFace models — it returned an EMPTY list and no diagnostic. A caret
+# client could not tell "there are no models here" from "there are three models
+# here that slang does not recognise". Silence by omission is the failure mode
+# this module removes: every directory now comes back either as a recognised
+# model or as an explicitly refused one carrying the reason.
+#
+# DETECTION IS VERIFIED, NOT GUESSED. A `.gguf` suffix is a filename claim; the
+# GGUF magic in the file's first four bytes is evidence. Each probe below reads
+# the smallest range that settles the question — never the file, which for
+# these models is 12 GB a shard.
+
+use std.io_runtime.{file_exists, read_file, dir_list, file_size, is_dir, file_read_text_at}
+use std.gc_async_mut.slang.model_executor.model_loader.manifest.{parse_manifest}
+
+# What kind of artifact a directory holds, and therefore which loader — if any
+# — can consume it.
+enum ModelFormat:
+    SlangPack
+    Gguf
+    Safetensors
+    Unknown
+
+fn model_format_text(f: ModelFormat) -> text:
+    match f:
+        ModelFormat.SlangPack: "slang-pack"
+        ModelFormat.Gguf: "gguf"
+        ModelFormat.Safetensors: "safetensors"
+        ModelFormat.Unknown: "unknown"
+
+# One directory under the model root, described honestly.
+#
+# `runnable` answers only "can this build produce tokens from it", which is a
+# narrower claim than "slang understands the format". A safetensors model is
+# recognised, sized and reported, and is still not runnable here — those two
+# facts are kept in separate fields precisely so neither can be read as the
+# other.
+struct NativeModel:
+    id: text
+    root: text
+    format: text
+    bytes: i64
+    entry_path: text
+    runnable: bool
+    reason: text
+
+fn _join(root: text, name: text) -> text:
+    if root.ends_with("/"):
+        return root + name
+    root + "/" + name
+
+# Total bytes of the regular files directly in `dir`. Used for the memory-fit
+# verdict, so it deliberately counts what would have to be read, not what the
+# directory claims.
+fn dir_byte_size(dir: text) -> i64:
+    var total = 0
+    for name in dir_list(dir):
+        val p = _join(dir, name)
+        if not is_dir(p):
+            total = total + file_size(p)
+    total
+
+# True when `path` starts with the four-byte GGUF magic. The read is 4 bytes at
+# offset 0 — the file may be 12 GB.
+fn has_gguf_magic(path: text) -> bool:
+    (file_read_text_at(path, 0, 4) ?? "") == "GGUF"
+
+# A safetensors file opens with an 8-byte little-endian header length followed
+# by a JSON object, so byte 8 is `{` for every valid file. Reading one byte
+# there distinguishes a real safetensors shard from a file merely named like
+# one.
+fn has_safetensors_header(path: text) -> bool:
+    (file_read_text_at(path, 8, 1) ?? "") == "{"
+
+# The lowest-numbered GGUF shard in `dir`, which is the one a GGUF reader is
+# given (it finds its siblings itself). Empty text when the directory holds no
+# file that actually carries the magic.
+fn gguf_entry_shard(dir: text) -> text:
+    var best = ""
+    for name in dir_list(dir):
+        if name.ends_with(".gguf"):
+            val p = _join(dir, name)
+            if has_gguf_magic(p):
+                if best == "" or name < best:
+                    best = name
+    if best == "":
+        return ""
+    _join(dir, best)
+
+fn _first_safetensors(dir: text) -> text:
+    var best = ""
+    for name in dir_list(dir):
+        if name.ends_with(".safetensors"):
+            if best == "" or name < best:
+                best = name
+    if best == "":
+        return ""
+    _join(dir, best)
+
+fn detect_format(dir: text) -> ModelFormat:
+    val manifest_path = _join(dir, "manifest.sdn")
+    if file_exists(manifest_path):
+        match parse_manifest(read_file(manifest_path)):
+            Err(_):
+                ()
+            Ok(_):
+                return ModelFormat.SlangPack
+    if gguf_entry_shard(dir) != "":
+        return ModelFormat.Gguf
+    val st = _first_safetensors(dir)
+    if st != "" and has_safetensors_header(st):
+        return ModelFormat.Safetensors
+    ModelFormat.Unknown
+
+# Describes one directory. `ggml_available` is passed in rather than probed
+# because whether a backend library is present is the caller's knowledge, not
+# this module's — and a detector that silently reported "not runnable" on a host
+# that simply had not been told where its backend lives would be the same
+# silence-by-omission bug in a new place.
+fn describe_model(dir: text, ggml_available: bool) -> NativeModel:
+    val name = _basename(dir)
+    val fmt = detect_format(dir)
+    val bytes = dir_byte_size(dir)
+    match fmt:
+        ModelFormat.SlangPack:
+            NativeModel(id: name, root: dir, format: "slang-pack", bytes: bytes,
+                entry_path: _join(dir, "manifest.sdn"), runnable: false,
+                reason: "slang pack recognised; slang has no engine of its own yet (master plan A3/A4/A5)")
+        ModelFormat.Gguf:
+            val shard = gguf_entry_shard(dir)
+            if ggml_available:
+                NativeModel(id: name, root: dir, format: "gguf", bytes: bytes,
+                    entry_path: shard, runnable: true, reason: "")
+            else:
+                NativeModel(id: name, root: dir, format: "gguf", bytes: bytes,
+                    entry_path: shard, runnable: false,
+                    reason: "GGUF recognised but no ggml backend library is configured")
+        ModelFormat.Safetensors:
+            NativeModel(id: name, root: dir, format: "safetensors", bytes: bytes,
+                entry_path: _first_safetensors(dir), runnable: false,
+                reason: "safetensors recognised; the ggml backend reads GGUF only, and slang has no native safetensors executor yet")
+        ModelFormat.Unknown:
+            NativeModel(id: name, root: dir, format: "unknown", bytes: bytes,
+                entry_path: "", runnable: false,
+                reason: "no manifest.sdn, no file carrying GGUF magic, and no safetensors header")
+
+fn _basename(path: text) -> text:
+    var trimmed = path
+    if trimmed.ends_with("/"):
+        trimmed = trimmed.slice(0, trimmed.len() - 1)
+    val at = trimmed.rfind("/")
+    if at < 0:
+        return trimmed
+    trimmed.slice(at + 1, trimmed.len())
+
+# Every directory under `model_root`, recognised or refused. Nothing is dropped
+# — that is the whole point.
+fn scan_model_root(model_root: text, ggml_available: bool) -> [NativeModel]:
+    var out: [NativeModel] = []
+    if model_root.trim() == "":
+        return out
+    for name in dir_list(model_root):
+        val p = _join(model_root, name)
+        if is_dir(p):
+            out.push(describe_model(p, ggml_available))
+    out
+
+export ModelFormat, model_format_text, NativeModel
+export dir_byte_size, has_gguf_magic, has_safetensors_header, gguf_entry_shard
+export detect_format, describe_model, scan_model_root
