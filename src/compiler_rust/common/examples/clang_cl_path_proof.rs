@@ -19,9 +19,7 @@ use simple_common::platform::path::to_native_arg;
 use std::process::Command;
 
 fn run(cc: &str, src: &str, obj: &str) -> i32 {
-    let out = Command::new(cc)
-        .args(["/c", src, &format!("/Fo{obj}")])
-        .output();
+    let out = Command::new(cc).args(["/c", src, &format!("/Fo{obj}")]).output();
     match out {
         Ok(o) => {
             let rc = o.status.code().unwrap_or(-1);
@@ -45,7 +43,9 @@ fn obj_size(p: &str) -> String {
 }
 
 fn main() {
-    let dir = std::env::args().nth(1).unwrap_or_else(|| "/d/tmp/pathproof".to_string());
+    let dir = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "/d/tmp/pathproof".to_string());
     let cc = std::env::var("PROOF_CC").unwrap_or_else(|_| "clang-cl".to_string());
 
     // Canonical internal form: MinGW/MSYS style, forward slashes.

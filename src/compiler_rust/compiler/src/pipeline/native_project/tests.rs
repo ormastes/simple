@@ -409,18 +409,15 @@ fn flattened_decl_env_helper_keeps_a_matching_mir_definition_and_call_target() {
     let flattened_ast = crate::pipeline::module_loader::load_module_with_imports(&path, &mut visited)
         .expect("load flattened declaration owner");
     let project_hint = crate::pipeline::native_single_file_project_hint(&path);
-    let flattened_hir = crate::hir::lower_with_context_lenient_and_project_hint(
-        &flattened_ast,
-        &path,
-        project_hint.as_deref(),
-    )
-    .expect("JIT-compatible HIR lower flattened declaration owner");
-    let flattened_mir = lower_to_mir(&flattened_hir)
-        .expect("JIT-compatible MIR lower flattened declaration owner");
+    let flattened_hir =
+        crate::hir::lower_with_context_lenient_and_project_hint(&flattened_ast, &path, project_hint.as_deref())
+            .expect("JIT-compatible HIR lower flattened declaration owner");
+    let flattened_mir = lower_to_mir(&flattened_hir).expect("JIT-compatible MIR lower flattened declaration owner");
     assert!(
-        flattened_mir.functions.iter().any(|function| {
-            function.name == "_sffi_env_get_i64" && !function.blocks.is_empty()
-        }),
+        flattened_mir
+            .functions
+            .iter()
+            .any(|function| { function.name == "_sffi_env_get_i64" && !function.blocks.is_empty() }),
         "flattened JIT MIR must retain the private helper body under its exact spelling"
     );
     let flattened_caller = flattened_mir
@@ -462,15 +459,24 @@ fn probe_private_env_helper() -> i64:
     let mir = lower_to_mir(&hir).expect("MIR lower flattened declaration module");
 
     assert!(
-        mir.functions.iter().any(|function| function.name == "_sffi_env_get_i64" && !function.blocks.is_empty()),
+        mir.functions
+            .iter()
+            .any(|function| function.name == "_sffi_env_get_i64" && !function.blocks.is_empty()),
         "MIR must retain the private helper body under its exact spelling"
     );
-    let caller = mir.functions.iter().find(|function| function.name == "probe_private_env_helper")
+    let caller = mir
+        .functions
+        .iter()
+        .find(|function| function.name == "probe_private_env_helper")
         .expect("private helper caller");
     assert!(
-        caller.blocks.iter().flat_map(|block| &block.instructions).any(|instruction| {
-            matches!(instruction, MirInst::Call { target, .. } if target.name() == "_sffi_env_get_i64")
-        }),
+        caller
+            .blocks
+            .iter()
+            .flat_map(|block| &block.instructions)
+            .any(|instruction| {
+                matches!(instruction, MirInst::Call { target, .. } if target.name() == "_sffi_env_get_i64")
+            }),
         "the caller must target the retained helper by its exact MIR definition name"
     );
     assert!(
@@ -485,8 +491,7 @@ fn probe_private_env_helper() -> i64:
     let mut jit = JitCompiler::new_static().expect("create static JIT");
     jit.compile_module(&mir)
         .expect("private helper must resolve locally while rt_env_get_i64 resolves through runtime provider");
-    let result = unsafe { jit.call_i64_void("probe_private_env_helper") }
-        .expect("call private helper fixture");
+    let result = unsafe { jit.call_i64_void("probe_private_env_helper") }.expect("call private helper fixture");
     assert_eq!(result, 42, "private helper and known-good helper must both execute");
 }
 
@@ -3696,13 +3701,8 @@ fn test_stage4_core_c_argv_capsule_exports_one_initialized_provider_family() {
         .iter()
         .map(|symbol| (*symbol).to_string())
         .collect::<Vec<_>>();
-    let capsule = build_stage4_runtime_capsule_archive(
-        &core,
-        &providers,
-        &requested,
-        &temp.path().join("capsule"),
-    )
-    .unwrap();
+    let capsule =
+        build_stage4_runtime_capsule_archive(&core, &providers, &requested, &temp.path().join("capsule")).unwrap();
 
     let (defined, undefined) = super::tools::archive_global_symbols(&capsule).unwrap();
     assert_eq!(
@@ -4441,8 +4441,11 @@ fn test_bootstrap_mutex_capsule_exports_only_canonical_bootstrap_abi() {
         .into_iter()
         .map(str::to_string)
         .collect::<std::collections::BTreeSet<_>>();
-    assert_eq!(defined.intersection(&secure_staging).count(), 0,
-        "bootstrap supplement must not duplicate the full Rust runtime's secure-staging provider");
+    assert_eq!(
+        defined.intersection(&secure_staging).count(),
+        0,
+        "bootstrap supplement must not duplicate the full Rust runtime's secure-staging provider"
+    );
     // rt_heap_live_bytes / rt_heap_peak_bytes are OWNED by the outer (Rust)
     // runtime. runtime_memtrack.c ships them as WEAK fallbacks (93e0b028ffb), so
     // the capsule may carry them only as weak globals the owner overrides --
@@ -6383,7 +6386,9 @@ fn test_gcc_cpu_dispatch_symbols_are_not_stub_candidates() {
     // Must stay an EXACT match, not a prefix: an unrelated application symbol
     // that merely starts with "__cpu" is a real stub candidate and must not
     // be silently swallowed by this exclusion.
-    assert!(!super::tools::is_compiler_rt_builtin_symbol("__cpu_scaling_governor_get"));
+    assert!(!super::tools::is_compiler_rt_builtin_symbol(
+        "__cpu_scaling_governor_get"
+    ));
 }
 
 #[test]

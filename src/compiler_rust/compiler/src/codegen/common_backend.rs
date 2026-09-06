@@ -2480,11 +2480,9 @@ impl<M: Module> CodegenBackend<M> {
 
         let init_name = module_init_symbol(self.module_prefix.as_deref());
         let module_init_trace_id = if module_init_trace_enabled() {
-            Some(
-                *self.runtime_funcs.get("rt_eprintln_str").ok_or_else(|| {
-                    BackendError::ModuleError("rt_eprintln_str not declared for module-init trace".into())
-                })?,
-            )
+            Some(*self.runtime_funcs.get("rt_eprintln_str").ok_or_else(|| {
+                BackendError::ModuleError("rt_eprintln_str not declared for module-init trace".into())
+            })?)
         } else {
             None
         };

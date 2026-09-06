@@ -213,13 +213,13 @@ fn test_path_typed_string_desugars_to_named_path_constructor() {
 
 #[test]
 fn test_path_suffix_invalid_forms_fail_parsing() {
-    let spaced = parse(r#"let path = "config/app.toml" _path"#)
-        .unwrap_err()
-        .to_string();
+    let spaced = parse(r#"let path = "config/app.toml" _path"#).unwrap_err().to_string();
     assert!(spaced.contains("_path suffix must be adjacent to its string literal"));
 
-    let interpolated = parse(r#"let name = "app"
-let path = "config/{name}"_path"#)
+    let interpolated = parse(
+        r#"let name = "app"
+let path = "config/{name}"_path"#,
+    )
     .unwrap_err()
     .to_string();
     assert!(interpolated.contains("_path does not support interpolated strings"));

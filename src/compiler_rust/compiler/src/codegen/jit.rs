@@ -90,8 +90,7 @@ impl JitCompiler {
 
     /// Compile a MIR module and return function pointers.
     pub fn compile_module(&mut self, mir: &MirModule) -> JitResult<()> {
-        let stage_trace = std::env::var_os("SIMPLE_JIT_STAGE_TRACE")
-            .is_some_and(|value| value != "0");
+        let stage_trace = std::env::var_os("SIMPLE_JIT_STAGE_TRACE").is_some_and(|value| value != "0");
         self.module_global_count = mir.globals.len();
         // Pre-compile guard against the broken JIT lambda/closure ABI.
         //
@@ -498,14 +497,15 @@ impl JitCompiler {
             .iter()
             .flat_map(|function| {
                 function.blocks.iter().flat_map(move |block| {
-                    block.instructions.iter().filter_map(move |instruction| match instruction {
-                        MirInst::Call { target, .. }
-                            if jit_symbol_trace_matches(requested, target.name()) =>
-                        {
-                            Some(format!("{} -> {}", function.name, target.name()))
-                        }
-                        _ => None,
-                    })
+                    block
+                        .instructions
+                        .iter()
+                        .filter_map(move |instruction| match instruction {
+                            MirInst::Call { target, .. } if jit_symbol_trace_matches(requested, target.name()) => {
+                                Some(format!("{} -> {}", function.name, target.name()))
+                            }
+                            _ => None,
+                        })
                 })
             })
             .collect();
@@ -532,8 +532,7 @@ impl JitCompiler {
             .get_functions()
             .filter_map(|(_, declaration)| {
                 let name = declaration.name.as_deref()?;
-                jit_symbol_trace_matches(requested, name)
-                    .then(|| format!("{} linkage={:?}", name, declaration.linkage))
+                jit_symbol_trace_matches(requested, name).then(|| format!("{} linkage={:?}", name, declaration.linkage))
             })
             .collect();
 
@@ -565,21 +564,14 @@ impl JitCompiler {
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
             .is_ok()
         {
-            let stage_trace = std::env::var_os("SIMPLE_JIT_STAGE_TRACE")
-                .is_some_and(|value| value != "0");
+            let stage_trace = std::env::var_os("SIMPLE_JIT_STAGE_TRACE").is_some_and(|value| value != "0");
             if stage_trace {
-                eprintln!(
-                    "[jit-stage] module_init:start globals={}",
-                    self.module_global_count
-                );
+                eprintln!("[jit-stage] module_init:start globals={}", self.module_global_count);
             }
             let init: fn() = std::mem::transmute(ptr);
             init();
             if stage_trace {
-                eprintln!(
-                    "[jit-stage] module_init:done globals={}",
-                    self.module_global_count
-                );
+                eprintln!("[jit-stage] module_init:done globals={}", self.module_global_count);
             }
         }
         Ok(())
@@ -597,8 +589,7 @@ impl JitCompiler {
             .get_function_ptr(name)
             .ok_or_else(|| BackendError::UnknownFunction(name.to_string()))?;
 
-        let stage_trace = std::env::var_os("SIMPLE_JIT_STAGE_TRACE")
-            .is_some_and(|value| value != "0");
+        let stage_trace = std::env::var_os("SIMPLE_JIT_STAGE_TRACE").is_some_and(|value| value != "0");
         if stage_trace {
             eprintln!("[jit-stage] entry_call:start name={name}");
         }
@@ -648,9 +639,7 @@ fn jit_symbol_trace_enabled() -> bool {
 /// actual JIT resolution always uses the exact requested declaration name.
 fn jit_symbol_trace_matches(requested: &str, candidate: &str) -> bool {
     fn bare(name: &str) -> &str {
-        name.rsplit_once("__")
-            .map(|(_, suffix)| suffix)
-            .unwrap_or(name)
+        name.rsplit_once("__").map(|(_, suffix)| suffix).unwrap_or(name)
     }
 
     let requested = bare(requested).trim_start_matches('_');
