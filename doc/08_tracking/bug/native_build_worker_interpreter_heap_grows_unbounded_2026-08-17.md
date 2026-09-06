@@ -473,22 +473,49 @@ gates on a ratio plus an absolute cap. Discrimination is proven, not asserted:
 **No new reclamation point was added to the compiler.** Coverage is
 `80.driver` (2 files) and `10.frontend` (1 file); `20.semantic`, `30.hir`,
 `40.mir`, `50.mir`, `60.opt` and `70.backend` have **zero** transient scopes.
-Adding one there was not done because it **cannot be validated on this tree**:
+Adding one there was not done because it could not be **measured** here. The
+precise blocker, after two corrections to this lane's own first answer:
 
-> `native-build src/app/cli/bootstrap_main.spl` fails with **167 runtime symbols
-> referenced by generated code that have no definition in any linked object,
-> runtime archive, or system library** — `rt_cranelift_*` (79), `rt_math_*` (18),
-> `rt_io_file_*` (12), `rt_simd_*` (22), `rt_file_*`, `rt_mmap`/`rt_munmap`,
-> `rt_exec`, `rt_native_build`, `spl_backend_plugin_run_v1` and others. The
-> linker tolerates undefined symbols, so this would yield a NULL GOT slot per
-> name and SEGV on first call — the same shape as the 2026-08-21
-> `rt_unwrap_or_trap` incident.
+**Correction A — "the self-hosted compiler cannot be built here" was wrong.**
+A first attempt did fail with 167 unresolved runtime symbols (`rt_cranelift_*`
+79, `rt_simd_*` 22, `rt_math_*` 18, `rt_io_file_*` 12, `rt_mmap`/`rt_munmap`,
+`rt_exec`, `rt_native_build`, `spl_backend_plugin_run_v1`, ...), but that used
+the **default runtime archive**. The sanctioned bootstrap path names a bundle
+(`bootstrap-from-scratch.sh:1662`). With it, the build succeeds:
 
-So no self-hosted compiler can be built here, and therefore no scope added to
-MIR/backend could be measured or shown safe. Per this row's own standard — a
-use-after-free in the compiler is worse than the memory — that work is left
-undone rather than landed unvalidated. **It is blocked on the 167-symbol gap,
-not on the reclamation design**, which the numbers above show works.
+```
+native-build --runtime-bundle core-c-bootstrap --backend cranelift \
+  --source src/compiler --source src/app --source src/lib --entry-closure \
+  --mode one-binary --entry src/app/cli/bootstrap_main.spl
+=> Build complete: 834 compiled, 0 cached, 0 failed
+   Binary: 37,759 KB;  501.9s compile + 101.9s link = 603.8s   rc=0
+```
+
+So a self-hosted compiler **does** build on this tree. Any future claim to the
+contrary should be checked against a bundle build before it is believed. (A
+second lane was in fact building stage3 on this box the whole time, which is
+what exposed the error.)
+
+**Correction B — the real blocker is running it, not building it.** The
+resulting binary does not start:
+
+```
+stage1b.bin: error while loading shared libraries:
+  libunwind.so.1: cannot open shared object file
+```
+
+This host has only nongnu `libunwind.so.8` (`/usr/lib/aarch64-linux-gnu`, plus
+snap copies). LLVM's `libunwind.so.1` is a **different library with a different
+ABI**, so symlinking `.so.8` into place would risk a silently wrong unwinder
+inside the compiler. Given this row's own standard — a use-after-free or
+miscompile in the compiler is worse than the memory — that shortcut was refused,
+so the self-hosted compiler could not be executed and no MIR/backend scope could
+be measured or shown safe.
+
+**The blocker is therefore a missing `libunwind.so.1` on this host, not the
+reclamation design** (which the numbers above show works) and not the runtime
+symbol set (which the bundle resolves). Installing LLVM's libunwind, or linking
+the stage binary against the unwinder it actually has, unblocks the measurement.
 
 The safe boundary, when the tree can build one, is the one
 `lower_streaming_surface_source` already demonstrates: begin -> work -> pause ->
