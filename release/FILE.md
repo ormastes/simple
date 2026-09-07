@@ -8,4 +8,5 @@ not repository content.
 | Entry | Description |
 |---|---|
 | `version.sdn` | Canonical product version and compatibility projections |
+| `support.sdn` | Per-channel required release targets, read fail-closed by `simple release support-check` |
 | `FILE.md` | This manifest |
