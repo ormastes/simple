@@ -2794,6 +2794,63 @@ static void rt_simd_aes_unpack(const int64_t* p, uint8_t out[16]) {
     for (i = 0; i < 16; i++) out[i] = (uint8_t)rt_simd_lane_u64(p, i);
 }
 
+/* rt_simd_aes_round_u8x16 / rt_simd_aes_round_last_u8x16 are ALSO defined,
+ * with the exact same (I64,I64)->I64 tagged-pointer ABI and RUNTIME_FUNCS
+ * registration (codegen/runtime_sffi.rs:594-595), in
+ * src/compiler_rust/runtime/src/value/simd_aes_ops.rs as
+ * `#[no_mangle] pub extern "C" fn`s that unpack/pack the same flat Vec16u8
+ * layout used here. Unlike the other 21 symbols in this Stage2 census block
+ * (which are Rust-side dead/wrong-ABI provisional stubs -- see
+ * doc/08_tracking/bug/simple_runtime_cdylib_rt_simd_duplicate_symbol_2026-09-07.md),
+ * the Rust versions of THESE TWO are the tested, actively-registered,
+ * currently-reachable compiled-mode entry points, so deleting them would
+ * silently swap a verified implementation for a newly-added one on any
+ * Rust-linked target. Resolve the link collision the same way
+ * runtime_memtrack.c already resolves rt_heap_live_bytes/rt_heap_peak_bytes
+ * against value::heap: weak here so a link that also carries the Rust
+ * runtime keeps the Rust definition, while the standalone core-C-bootstrap
+ * Stage2 link (which never links the Rust runtime) keeps these as the sole
+ * provider. See build.rs's SIMPLE_RUNTIME_RUST_PROVIDES_AES_ROUND_U8X16
+ * definition for the MSVC/Windows-GNU exception, mirroring the heap-counters
+ * precedent exactly (no weak attribute on MSVC; a GNU-style weak symbol
+ * becomes a dead COFF alias under MinGW --gc-sections). */
+#if defined(SIMPLE_RUNTIME_RUST_PROVIDES_AES_ROUND_U8X16)
+/* Rust's value/simd_aes_ops.rs owns these; defining them here too would be a
+ * duplicate on any link that also carries the Rust runtime. */
+#elif (defined(__GNUC__) || defined(__clang__)) && !defined(_WIN32)
+__attribute__((weak)) int64_t rt_simd_aes_round_u8x16(int64_t state, int64_t key) {
+    const int64_t* ps = rt_simd_vec_payload(state);
+    const int64_t* pk = rt_simd_vec_payload(key);
+    uint8_t s[16], k[16], shifted[16];
+    int64_t out[16];
+    int i;
+    rt_simd_aes_unpack(ps, s);
+    rt_simd_aes_unpack(pk, k);
+    rt_simd_aes_shift_rows(s, shifted);
+    rt_simd_aes_sub_bytes(shifted);
+    rt_simd_aes_mix_columns(shifted);
+    for (i = 0; i < 16; i++) out[i] = (int64_t)(uint64_t)(uint8_t)(shifted[i] ^ k[i]);
+    return rt_simd_result_vec(out, 16);
+}
+
+__attribute__((weak)) int64_t rt_simd_aes_round_last_u8x16(int64_t state, int64_t key) {
+    const int64_t* ps = rt_simd_vec_payload(state);
+    const int64_t* pk = rt_simd_vec_payload(key);
+    uint8_t s[16], k[16], shifted[16];
+    int64_t out[16];
+    int i;
+    rt_simd_aes_unpack(ps, s);
+    rt_simd_aes_unpack(pk, k);
+    rt_simd_aes_shift_rows(s, shifted);
+    rt_simd_aes_sub_bytes(shifted);
+    for (i = 0; i < 16; i++) out[i] = (int64_t)(uint64_t)(uint8_t)(shifted[i] ^ k[i]);
+    return rt_simd_result_vec(out, 16);
+}
+#else
+/* MSVC (no weak attribute) and Windows-GNUC both land here; the
+ * Rust-provider case is already excluded by
+ * SIMPLE_RUNTIME_RUST_PROVIDES_AES_ROUND_U8X16 above, so this branch is only
+ * reached by a standalone (non-Rust-linked) Windows C build. */
 int64_t rt_simd_aes_round_u8x16(int64_t state, int64_t key) {
     const int64_t* ps = rt_simd_vec_payload(state);
     const int64_t* pk = rt_simd_vec_payload(key);
@@ -2822,6 +2879,7 @@ int64_t rt_simd_aes_round_last_u8x16(int64_t state, int64_t key) {
     for (i = 0; i < 16; i++) out[i] = (int64_t)(uint64_t)(uint8_t)(shifted[i] ^ k[i]);
     return rt_simd_result_vec(out, 16);
 }
+#endif
 
 /* ---- u64x2 (Vec2u64): carryless multiply + XOR ---- */
 

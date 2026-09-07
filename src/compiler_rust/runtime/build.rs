@@ -422,6 +422,15 @@ fn compile_c_runtime_sources() {
         // the condition is the OS. Unix GNU and Darwin still take the weak
         // branch and are unaffected.
         build.define("SIMPLE_RUNTIME_RUST_PROVIDES_HEAP_COUNTERS", None);
+        // Same reasoning, same precedent, for rt_simd_aes_round_u8x16 /
+        // rt_simd_aes_round_last_u8x16: runtime_simd_dispatch.c's GNU/Clang
+        // weak definitions already yield to
+        // value/simd_aes_ops.rs's `#[no_mangle]` ones on Unix/Darwin. MSVC
+        // has no weak attribute and Windows-GNU drops a weak COFF alias under
+        // --gc-sections (see runtime_memtrack.c's identical note), so both
+        // Windows ABIs need the C definitions suppressed outright rather than
+        // relying on weak-symbol precedence.
+        build.define("SIMPLE_RUNTIME_RUST_PROVIDES_AES_ROUND_U8X16", None);
     }
     if env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default() != "msvc" {
         build.flag_if_supported("-std=gnu11");
